@@ -628,6 +628,221 @@ pub fn extract_entry_limited(data: &[u8], entry: &ZipEntry, limit: usize) -> Res
 }
 
 // ---------------------------------------------------------------------------
+// Public API — ranged reading (ReadAt)
+// ---------------------------------------------------------------------------
+
+/// A byte source that can be read at arbitrary offsets.
+///
+/// Implemented by the caller, because this crate is `no_std` and has no notion
+/// of a file. The point is that a reader never has to hold the whole archive:
+/// [`parse_at`] reads the central directory from the tail, and
+/// [`extract_entry_at`] reads one member's extent, so peak memory is a member
+/// rather than an archive.
+///
+/// **The error type is yours.** `Self::Error` is whatever your source fails
+/// with, and it is carried out through [`RangedError::Read`] unchanged rather
+/// than flattened into an error of this crate's. That is deliberate: a failed
+/// read and a corrupt archive are different facts, and a caller that reports
+/// "this archive is damaged" because a disk hiccuped has told its user
+/// something false. [`Error`] therefore gains no variant for it — which also
+/// means adding this API breaks no existing exhaustive `match` on [`Error`].
+pub trait ReadAt {
+    /// Whatever reading this source can fail with.
+    type Error;
+
+    /// Read into `buf` starting at `offset`, returning how many bytes were
+    /// read. A return of less than `buf.len()` means end of source, not
+    /// failure — failure is `Err`.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the underlying source fails with.
+    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> core::result::Result<usize, Self::Error>;
+
+    /// Total length of the source in bytes.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the underlying source fails with.
+    fn len(&mut self) -> core::result::Result<u64, Self::Error>;
+
+    /// Whether the source is empty. Provided so `clippy::len_without_is_empty`
+    /// is satisfied honestly rather than suppressed.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the underlying source fails with.
+    fn is_empty(&mut self) -> core::result::Result<bool, Self::Error> {
+        Ok(self.len()? == 0)
+    }
+}
+
+/// What a ranged read can go wrong with: the archive, or the source under it.
+///
+/// Kept separate from [`Error`] so the distinction survives to the caller. An
+/// archive that fails its CRC and a disk that stopped answering are not the
+/// same event, and only the first one means "this file is damaged".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RangedError<E> {
+    /// The archive is malformed, or a member failed its size or CRC check.
+    Zip(Error),
+    /// The source could not be read. Carries the source's own error.
+    Read(E),
+}
+
+impl<E> From<Error> for RangedError<E> {
+    fn from(e: Error) -> Self {
+        Self::Zip(e)
+    }
+}
+
+/// Largest tail this reads while looking for the end-of-central-directory
+/// record. The EOCD is 22 bytes plus a comment of at most 65535, so it cannot
+/// begin earlier than this from the end — the same bound [`find_eocd`] scans.
+const EOCD_SEARCH_MAX: u64 = 22 + 65_535;
+
+/// Read exactly `len` bytes at `offset`, or report a corrupt archive.
+///
+/// A short read here is not a source failure — the source said how long it is,
+/// and a structure pointing past that is the archive lying about itself.
+fn read_exact_at<R: ReadAt>(
+    r: &mut R,
+    offset: u64,
+    len: usize,
+) -> core::result::Result<Vec<u8>, RangedError<R::Error>> {
+    let mut buf = alloc::vec![0u8; len];
+    let got = r.read_at(offset, &mut buf).map_err(RangedError::Read)?;
+    if got != len {
+        return Err(RangedError::Zip(Error::CorruptedData));
+    }
+    Ok(buf)
+}
+
+/// Parse an archive's central directory without holding the archive.
+///
+/// Reads the tail to find the end-of-central-directory record, follows it (and
+/// a ZIP64 locator, if present) to the directory, reads the directory alone,
+/// and walks it with the same [`walk_central_directory`] the whole-archive
+/// [`parse`] uses — so the two cannot disagree about what an entry is.
+///
+/// Four reads at most: the tail, the ZIP64 locator, the ZIP64 end record, and
+/// the directory.
+///
+/// # Errors
+///
+/// - [`RangedError::Read`] if the source fails.
+/// - [`RangedError::Zip`] with [`Error::CorruptedData`] if there is no EOCD, or
+///   a structure points outside the source.
+pub fn parse_at<R: ReadAt>(
+    r: &mut R,
+) -> core::result::Result<Vec<ZipEntry>, RangedError<R::Error>> {
+    let total_len = r.len().map_err(RangedError::Read)?;
+    if total_len < 22 {
+        return Err(RangedError::Zip(Error::CorruptedData));
+    }
+
+    // The tail, bounded by the EOCD's own maximum distance from the end.
+    let tail_len = EOCD_SEARCH_MAX.min(total_len);
+    // `tail_len` is `min(EOCD_SEARCH_MAX, total_len)`, so this cannot underflow;
+    // written saturating anyway, per the workspace's arithmetic lints.
+    let tail_start = total_len.saturating_sub(tail_len);
+    let tail_len_usize = usize::try_from(tail_len).map_err(|_| Error::CorruptedData)?;
+    let tail = read_exact_at(r, tail_start, tail_len_usize)?;
+
+    let eocd_rel = find_eocd(&tail).ok_or(Error::CorruptedData)?;
+    let eocd_rel_u64 = u64::try_from(eocd_rel).map_err(|_| Error::CorruptedData)?;
+    let eocd_abs = tail_start.saturating_add(eocd_rel_u64);
+
+    let mut total_entries = u64::from(le_u16(&tail, eocd_rel.wrapping_add(10)));
+    let mut cd_size = u64::from(le_u32(&tail, eocd_rel.wrapping_add(12)));
+    let mut cd_offset = u64::from(le_u32(&tail, eocd_rel.wrapping_add(16)));
+
+    // The ZIP64 locator sits in the 20 bytes before the EOCD. Read it rather
+    // than assuming the tail reaches back that far: when an archive is barely
+    // larger than its own EOCD, it does not.
+    if let Some(loc_off) = eocd_abs.checked_sub(20) {
+        let loc = read_exact_at(r, loc_off, 20)?;
+        if le_u32(&loc, 0) == ZIP64_LOCATOR_SIG {
+            let z64_off = le_u64(&loc, 8);
+            if z64_off.saturating_add(56) <= total_len {
+                let z64 = read_exact_at(r, z64_off, 56)?;
+                if le_u32(&z64, 0) == ZIP64_EOCD_SIG {
+                    total_entries = le_u64(&z64, 32);
+                    cd_size = le_u64(&z64, 40);
+                    cd_offset = le_u64(&z64, 48);
+                }
+            }
+        }
+    }
+
+    if cd_offset.saturating_add(cd_size) > total_len {
+        return Err(RangedError::Zip(Error::CorruptedData));
+    }
+    // `cd_size` is used here, where the whole-archive path can afford to ignore
+    // it and walk by signature instead: a ranged reader has to know how much to
+    // read before it can read anything.
+    let cd_len = usize::try_from(cd_size).map_err(|_| Error::CorruptedData)?;
+    let cd = read_exact_at(r, cd_offset, cd_len)?;
+
+    Ok(walk_central_directory(&cd, total_entries))
+}
+
+/// Read and decompress one entry, reading only that entry's bytes.
+///
+/// Two reads: the local header, then the member's compressed extent. The
+/// decompression, the declared-size check and the CRC are
+/// [`decompress_checked`], shared with [`extract_entry`], so a member accepted
+/// by one path is accepted by the other.
+///
+/// # Errors
+///
+/// - [`RangedError::Read`] if the source fails.
+/// - [`RangedError::Zip`] as [`extract_entry_limited`], plus
+///   [`Error::CorruptedData`] if the local header is absent or the extent runs
+///   past the end of the source.
+pub fn extract_entry_at<R: ReadAt>(
+    r: &mut R,
+    entry: &ZipEntry,
+) -> core::result::Result<Vec<u8>, RangedError<R::Error>> {
+    extract_entry_at_limited(r, entry, MAX_ENTRY_SIZE)
+}
+
+/// [`extract_entry_at`] with an explicit ceiling on the inflated size.
+///
+/// # Errors
+///
+/// As [`extract_entry_at`].
+pub fn extract_entry_at_limited<R: ReadAt>(
+    r: &mut R,
+    entry: &ZipEntry,
+    limit: usize,
+) -> core::result::Result<Vec<u8>, RangedError<R::Error>> {
+    let total_len = r.len().map_err(RangedError::Read)?;
+    let header = read_exact_at(r, entry.local_header_offset, 30)?;
+    if le_u32(&header, 0) != LOCAL_SIG {
+        return Err(RangedError::Zip(Error::CorruptedData));
+    }
+    // The local header's extra field may be a different length from the central
+    // directory's copy of it, which is why the data offset is computed here and
+    // not taken from the entry.
+    let name_len = u64::from(le_u16(&header, 26));
+    let extra_len = u64::from(le_u16(&header, 28));
+    let data_start = entry
+        .local_header_offset
+        .saturating_add(30)
+        .saturating_add(name_len)
+        .saturating_add(extra_len);
+
+    if data_start.saturating_add(entry.compressed_size) > total_len {
+        return Err(RangedError::Zip(Error::CorruptedData));
+    }
+    let comp_len = usize::try_from(entry.compressed_size).map_err(|_| Error::CorruptedData)?;
+    let raw = read_exact_at(r, data_start, comp_len)?;
+
+    decompress_checked(&raw, entry, limit).map_err(RangedError::Zip)
+}
+
+// ---------------------------------------------------------------------------
 // Public API — create (mkzip)
 // ---------------------------------------------------------------------------
 
@@ -1359,5 +1574,221 @@ mod tests {
             0x0040,
             "the strong-encryption bit is still visible to a caller that cares"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Ranged reading (ReadAt)
+    // -----------------------------------------------------------------------
+
+    /// A `ReadAt` over a `Vec<u8>` that counts its reads and can be told to
+    /// fail, so the tests can check both that the ranged path agrees with the
+    /// slice path and that a source failure stays a source failure.
+    struct SliceSource {
+        bytes: Vec<u8>,
+        reads: usize,
+        bytes_read: u64,
+        fail_after: Option<usize>,
+    }
+
+    /// The error a `SliceSource` fails with. Deliberately a type this crate
+    /// knows nothing about, which is the property under test: the caller's
+    /// error reaches the caller unchanged.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct DiskOnFire(u32);
+
+    impl SliceSource {
+        fn new(bytes: Vec<u8>) -> Self {
+            Self {
+                bytes,
+                reads: 0,
+                bytes_read: 0,
+                fail_after: None,
+            }
+        }
+        fn failing_after(bytes: Vec<u8>, n: usize) -> Self {
+            Self {
+                bytes,
+                reads: 0,
+                bytes_read: 0,
+                fail_after: Some(n),
+            }
+        }
+    }
+
+    impl ReadAt for SliceSource {
+        type Error = DiskOnFire;
+
+        fn read_at(
+            &mut self,
+            offset: u64,
+            buf: &mut [u8],
+        ) -> core::result::Result<usize, DiskOnFire> {
+            if let Some(n) = self.fail_after {
+                if self.reads >= n {
+                    return Err(DiskOnFire(7));
+                }
+            }
+            self.reads += 1;
+            let start = usize::try_from(offset).unwrap_or(usize::MAX);
+            if start >= self.bytes.len() {
+                return Ok(0);
+            }
+            let end = start.saturating_add(buf.len()).min(self.bytes.len());
+            let n = end - start;
+            buf[..n].copy_from_slice(&self.bytes[start..end]);
+            self.bytes_read += n as u64;
+            Ok(n)
+        }
+
+        fn len(&mut self) -> core::result::Result<u64, DiskOnFire> {
+            Ok(self.bytes.len() as u64)
+        }
+    }
+
+    fn three_entry_archive() -> Vec<u8> {
+        create(&[
+            ZipWriteEntry {
+                name: b"a.txt".to_vec(),
+                data: b"hello world".to_vec(),
+                store_only: false,
+                dos_datetime: 0,
+            },
+            ZipWriteEntry {
+                name: b"dir/b.bin".to_vec(),
+                data: vec![0u8; 4096],
+                store_only: false,
+                dos_datetime: 0,
+            },
+            ZipWriteEntry {
+                name: b"c.raw".to_vec(),
+                data: b"stored".to_vec(),
+                store_only: true,
+                dos_datetime: 0,
+            },
+        ])
+    }
+
+    #[test]
+    fn parse_at_agrees_with_parse_entry_for_entry() {
+        let archive = three_entry_archive();
+        let from_slice = parse(&archive).expect("slice parse");
+        let mut src = SliceSource::new(archive);
+        let from_ranged = parse_at(&mut src).expect("ranged parse");
+
+        // Not just the count: every field, in order. The two paths share
+        // walk_central_directory, and this is what says so.
+        assert_eq!(from_ranged.len(), from_slice.len());
+        for (r, s) in from_ranged.iter().zip(from_slice.iter()) {
+            assert_eq!(r.name, s.name);
+            assert_eq!(r.method, s.method);
+            assert_eq!(r.crc32, s.crc32);
+            assert_eq!(r.compressed_size, s.compressed_size);
+            assert_eq!(r.uncompressed_size, s.uncompressed_size);
+            assert_eq!(r.local_header_offset, s.local_header_offset);
+            assert_eq!(r.is_dir, s.is_dir);
+            assert_eq!(r.dos_datetime, s.dos_datetime);
+            assert_eq!(r.flags, s.flags);
+        }
+    }
+
+    #[test]
+    fn extract_entry_at_agrees_with_extract_entry() {
+        let archive = three_entry_archive();
+        let entries = parse(&archive).expect("parse");
+        let mut src = SliceSource::new(archive.clone());
+        for entry in &entries {
+            let ranged = extract_entry_at(&mut src, entry).expect("ranged extract");
+            let sliced = extract_entry(&archive, entry).expect("slice extract");
+            assert_eq!(ranged, sliced, "entry {:?}", entry.name);
+        }
+    }
+
+    #[test]
+    fn parse_at_reads_far_less_than_the_archive() {
+        // The whole point of the API, and the fixture has to earn it. A
+        // three-entry archive of compressible data is *smaller* than the 65 557
+        // byte window the EOCD may hide in, so reading the tail reads the whole
+        // file -- correct behaviour, and it proves nothing. The first version of
+        // this test used one and failed for exactly that reason.
+        //
+        // So: a stored (uncompressed) member large enough that the archive is
+        // several times the search window.
+        let archive = create(&[ZipWriteEntry {
+            name: b"big.raw".to_vec(),
+            data: (0..300_000u32).map(|i| (i % 251) as u8).collect(),
+            store_only: true,
+            dos_datetime: 0,
+        }]);
+        let total = archive.len() as u64;
+        assert!(
+            total > EOCD_SEARCH_MAX * 2,
+            "fixture is {total} bytes, not big enough to show ranging"
+        );
+        let mut src = SliceSource::new(archive);
+        parse_at(&mut src).expect("ranged parse");
+        assert!(
+            src.bytes_read < total,
+            "parse_at read {} of {} bytes — it is not ranging at all",
+            src.bytes_read,
+            total
+        );
+        // And it does it in a handful of reads, not one per entry.
+        assert!(
+            src.reads <= 4,
+            "parse_at took {} reads, expected at most 4",
+            src.reads
+        );
+    }
+
+    #[test]
+    fn a_source_failure_is_not_reported_as_a_corrupt_archive() {
+        // The reason RangedError exists. A disk that stops answering must not
+        // make a sound archive look damaged.
+        let archive = three_entry_archive();
+        let mut src = SliceSource::failing_after(archive, 0);
+        match parse_at(&mut src) {
+            Err(RangedError::Read(DiskOnFire(7))) => {}
+            other => panic!("expected the source's own error back, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_truncated_archive_is_corrupt_not_a_read_failure() {
+        // The converse: the source answered every read honestly, and the
+        // archive is still wrong. That is Zip, not Read.
+        let mut archive = three_entry_archive();
+        archive.truncate(10);
+        let mut src = SliceSource::new(archive);
+        match parse_at(&mut src) {
+            Err(RangedError::Zip(Error::CorruptedData)) => {}
+            other => panic!("expected Zip(CorruptedData), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn extract_entry_at_refuses_an_extent_past_the_end() {
+        let archive = three_entry_archive();
+        let mut entries = parse(&archive).expect("parse");
+        let victim = &mut entries[0];
+        victim.compressed_size = u64::from(u32::MAX);
+        let mut src = SliceSource::new(archive);
+        match extract_entry_at(&mut src, victim) {
+            Err(RangedError::Zip(Error::CorruptedData)) => {}
+            other => panic!("expected Zip(CorruptedData), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn extract_entry_at_still_verifies_the_crc() {
+        // decompress_checked is shared, so this is really asking whether the
+        // ranged path routes through it rather than reimplementing the checks.
+        let archive = three_entry_archive();
+        let mut entries = parse(&archive).expect("parse");
+        entries[0].crc32 ^= 0xFFFF_FFFF;
+        let mut src = SliceSource::new(archive);
+        match extract_entry_at(&mut src, &entries[0]) {
+            Err(RangedError::Zip(Error::CorruptedData)) => {}
+            other => panic!("expected Zip(CorruptedData) from the CRC check, got {other:?}"),
+        }
     }
 }

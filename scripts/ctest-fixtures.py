@@ -806,13 +806,37 @@ def _slateos_sysroot_env() -> str | None:
     return None
 
 
+# Where fastpy is kept. The OS repo moved from `D:/visual studio projects`
+# to `E:` on 2026-09-06; fastpy did not, and the global CLAUDE.md says so
+# explicitly. Tried only after $FASTPY_DIR, $PYTHONPATH and a real sibling.
+PREMIGRATION_FASTPY = Path("D:/visual studio projects/fastpy")
+
+
 def _fastpy_dir() -> Path | None:
     """The fastpy checkout whose `compiler` package each build.py imports.
 
-    Searched, in order: $FASTPY_DIR, anything already on $PYTHONPATH, then a
-    sibling of the repo root named exactly `fastpy`. The sibling lookup is what
-    makes the common case need no configuration at all -- every worktree here
-    (`os`, `os-lane-a/b/c`) sits next to `fastpy` in the same parent directory.
+    Searched, in order: $FASTPY_DIR, anything already on $PYTHONPATH, a
+    sibling of the repo root named exactly `fastpy`, and finally the location
+    fastpy is actually kept in (see `PREMIGRATION_FASTPY` below). The point of
+    everything after the first two is that the common case needs no
+    configuration at all.
+
+    # The sibling lookup stopped working on 2026-09-06 and nobody noticed
+
+    It was written when this repo lived at `D:/visual studio projects/os`,
+    where `fastpy` really was a sibling. The OS moved to `E:` and **fastpy did
+    not** -- the global `CLAUDE.md` records it as still under
+    `D:/visual studio projects`, along with three other projects. So the
+    zero-configuration path has been dead ever since, and every fixture build
+    has silently required `FASTPY_DIR` to be set by hand.
+
+    That is not theoretical. On 2026-09-10 lane A tried to build
+    `services/ctest-hostname` in order to un-red a boot test, got
+    `ModuleNotFoundError: No module named compiler`, and lost the run. The
+    fixture headers say to set `PYTHONPATH` to the `D:` path, so the
+    information was there -- but a build step that works only when the operator
+    remembers a path is a build step that fails the first time somebody else
+    runs it, which is exactly what happened.
 
     The sibling must be named `fastpy`, not merely *contain* a `compiler`
     package. An earlier draft accepted the first sibling that looked importable
@@ -848,7 +872,30 @@ def _fastpy_dir() -> Path | None:
             return Path(entry)
 
     sibling = REPO.parent / "fastpy"
-    return sibling if usable(sibling) else None
+    if usable(sibling):
+        return sibling
+
+    # The pre-migration location, tried last so a real sibling always wins.
+    #
+    # Naming an absolute path in a script is normally a smell. It is the right
+    # answer here because this path is not a guess: the global `CLAUDE.md`
+    # states that `fastpy` (with `Python Agent`, `orchestrator2` and `backup`)
+    # remains under `D:/visual studio projects` after the OS moved to `E:`.
+    # The alternative on offer is what we have had since the migration -- every
+    # lane setting `FASTPY_DIR` by hand, and the build failing for whoever
+    # forgets.
+    #
+    # It ANNOUNCES itself, because the one thing this function must never do is
+    # quietly build against a checkout the caller did not choose. That is the
+    # same reason `_fastpy_before` was rejected as a sibling candidate.
+    if usable(PREMIGRATION_FASTPY):
+        print(
+            f"[ctest] fastpy: using {PREMIGRATION_FASTPY} "
+            f"(no sibling at {sibling})"
+        )
+        return PREMIGRATION_FASTPY
+
+    return None
 
 
 def _build_sysroot() -> bool:

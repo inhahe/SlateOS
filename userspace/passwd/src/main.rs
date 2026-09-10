@@ -59,7 +59,7 @@
 
 use quoting::quoteaf_os;
 use std::env;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::io::{self, BufRead, Write};
 use std::process;
 use userdb::{Aging, Record, UserDb};
@@ -126,6 +126,16 @@ impl Accounts {
     /// The record for `username`, if the account exists.
     fn find(&self, username: &str) -> Option<&Record> {
         self.db.find(username)
+    }
+
+    /// The record whose uid is `uid`, if any.
+    ///
+    /// This is how the caller is identified: `getuid()` supplies a number the
+    /// caller cannot choose, and the database supplies its name. The name must
+    /// not come from the environment, which is the whole of the bug this
+    /// replaces.
+    fn find_uid(&self, uid: u32) -> Option<&Record> {
+        self.db.find_uid(uid)
     }
 
     /// The record for `username`, which `main` has already established exists.
@@ -413,24 +423,12 @@ fn read_password_no_echo(prompt: &str) -> Result<String, String> {
 // spells "this password is expired", so a machine with a confused clock would
 // have had `passwd` silently expire every password it touched.
 
-/// Determine the current user's UID. Reads the `UID` environment variable
-/// (set by the login/init process) or defaults to 0 (root) if unset.
-fn current_uid() -> u32 {
-    env::var("UID")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0)
-}
-
-/// Determine the current user's username from the `USER` environment variable.
-fn current_username() -> Option<String> {
-    env::var("USER").ok()
-}
-
-/// Check whether the current user is root.
-fn is_root() -> bool {
-    current_uid() == 0
-}
+// The caller's identity used to be read here, from `$UID` and `$USER`. Both
+// are set by whoever starts the process, so both were the caller's to choose,
+// and `current_uid` ended in `.unwrap_or(0)` -- root. It now comes from
+// `authlib::identity::caller_uid` (the kernel) plus a lookup in the account
+// database, resolved in `main`. See that function's documentation for why the
+// `unwrap_or(0)` was not a corner case but the normal path.
 
 // ============================================================================
 // Argument parsing
@@ -458,6 +456,68 @@ enum Action {
     SetWarnDays(i64),
     /// Set inactive days (`-i`).
     SetInactiveDays(i64),
+}
+
+/// Why a caller was refused.
+#[derive(Debug, PartialEq, Eq)]
+enum Denied {
+    /// Not root, and the account named is not the caller's own.
+    NotOwnAccount,
+    /// Not root, and the option asked for is an administrator's.
+    NotRoot,
+}
+
+impl Denied {
+    /// The message `main` prints. Kept next to the variant so a new refusal
+    /// cannot be added without one.
+    fn message(&self) -> &'static str {
+        match self {
+            Denied::NotOwnAccount => "only root may change another user's password",
+            Denied::NotRoot => "only root may use this option",
+        }
+    }
+}
+
+/// Whether this caller may perform this action on this account.
+///
+/// # Why this is a function and not three lines in `main`
+///
+/// It *was* three lines in `main`, and they were unreachable for the entire
+/// life of the program. Both were written `if !is_root() && ...`, and
+/// `is_root()` asked the `UID` environment variable with `.unwrap_or(0)` --
+/// which this tree's shell deliberately never exports, so the fallback fired
+/// every time and every caller was root. A check that is always skipped looks
+/// exactly like a check that always passes, and no test could tell the
+/// difference because the decision was not reachable from one.
+///
+/// Now it takes its facts as arguments -- a uid from `getuid()` and a name
+/// resolved from the account database, neither of which the caller chooses --
+/// and returns a value. The tests below are the thing that was missing.
+///
+/// `named_explicitly` is whether the caller wrote an account name at all. With
+/// no name there is no other user to act on, so the request is the caller's own
+/// by construction; `caller_name` is compared only when a name was given.
+fn permission(
+    caller_uid: u32,
+    caller_name: Option<&str>,
+    target: &str,
+    named_explicitly: bool,
+    action: &Action,
+) -> Result<(), Denied> {
+    if caller_uid == 0 {
+        return Ok(());
+    }
+    let changing_own = !named_explicitly || caller_name == Some(target);
+    if !changing_own {
+        return Err(Denied::NotOwnAccount);
+    }
+    // Everything but a plain password change is an administrator's option --
+    // including on one's own account, because `-x`/`-i` set policy and `-l`
+    // locks. shadow-utils refuses these to non-root the same way.
+    if !matches!(action, Action::ChangePassword) {
+        return Err(Denied::NotRoot);
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -940,15 +1000,44 @@ fn main() {
         }
     };
 
-    let caller_uid = current_uid();
+    // The database is read once, here, and handed to whichever command runs.
+    // Reading it inside each command would mean a `-S` that reports one file
+    // and a `-x` that writes another, and — worse — the read-modify-write
+    // sequence that made `find_or_create_shadow` necessary.
+    let mut accounts = match Accounts::load(std::path::Path::new(userdb::DEFAULT_PATH)) {
+        Ok(accounts) => accounts,
+        Err(e) => {
+            eprintln!("passwd: {e}");
+            process::exit(1);
+        }
+    };
+
+    // Who is asking, from the kernel rather than from the environment.
+    //
+    // This was `env::var("UID")...unwrap_or(0)`. The fallback was not a corner
+    // case: `UID` is a shell variable and this tree's shell deliberately does
+    // not export it, so the variable was normally absent, every caller was
+    // root, and both permission checks below were unreachable. See
+    // `authlib::identity::caller_uid`.
+    let Some(caller_uid) = authlib::identity::caller_uid() else {
+        eprintln!("passwd: cannot determine who is running this command");
+        process::exit(1);
+    };
+
+    // And the caller's *name*, resolved from that uid against the database it
+    // was just loaded from. It used to come from `$USER`, which the caller
+    // also chooses -- so `USER=root passwd root` satisfied the "changing your
+    // own password" exemption without being root at all. Two spoofable inputs
+    // guarding one decision.
+    let caller_name = accounts.find_uid(caller_uid).and_then(Record::username);
 
     // Resolve target user.
     let named = match &parsed.target_user {
         Some(name) => name.clone(),
-        None => match current_username() {
+        None => match caller_name.clone() {
             Some(name) => OsString::from(name),
             None => {
-                eprintln!("passwd: cannot determine current user");
+                eprintln!("passwd: uid {caller_uid} has no account in the database");
                 process::exit(1);
             }
         },
@@ -963,18 +1052,6 @@ fn main() {
         process::exit(1);
     };
 
-    // The database is read once, here, and handed to whichever command runs.
-    // Reading it inside each command would mean a `-S` that reports one file
-    // and a `-x` that writes another, and — worse — the read-modify-write
-    // sequence that made `find_or_create_shadow` necessary.
-    let mut accounts = match Accounts::load(std::path::Path::new(userdb::DEFAULT_PATH)) {
-        Ok(accounts) => accounts,
-        Err(e) => {
-            eprintln!("passwd: {e}");
-            process::exit(1);
-        }
-    };
-
     if accounts.find(&target).is_none() {
         eprintln!("passwd: user {} does not exist", quoteaf_os(&target));
         process::exit(1);
@@ -982,17 +1059,18 @@ fn main() {
 
     // Permission check: non-root users can only change their own password
     // (the default ChangePassword action, no flags).
-    let changing_own = parsed.target_user.is_none()
-        || current_username().as_deref().map(OsStr::new) == Some(named.as_os_str());
-
-    if !is_root() && !changing_own {
-        eprintln!("passwd: only root may change another user's password");
-        process::exit(1);
-    }
-
-    // Non-ChangePassword actions require root.
-    if !is_root() && !matches!(parsed.action, Action::ChangePassword) {
-        eprintln!("passwd: only root may use this option");
+    //
+    // Judged against the name the caller's *uid* resolves to, never against
+    // anything the caller supplied. See `permission`, which is where the rule
+    // lives and where it is tested.
+    if let Err(denied) = permission(
+        caller_uid,
+        caller_name.as_deref(),
+        &target,
+        parsed.target_user.is_some(),
+        &parsed.action,
+    ) {
+        eprintln!("passwd: {}", denied.message());
         process::exit(1);
     }
 
@@ -1401,6 +1479,101 @@ mod tests {
     }
 
     // ---- Argument parsing tests ----
+
+    // ---- who may do what ----
+    //
+    // These are the first tests this program has had of its permission rule.
+    // They could not have been written against the old code: the rule lived in
+    // `main`, took its facts from the environment, and exited the process.
+
+    /// Root may act on anyone, with any option.
+    #[test]
+    fn root_may_change_another_users_password() {
+        assert_eq!(
+            permission(0, Some("root"), "alice", true, &Action::ChangePassword),
+            Ok(())
+        );
+        assert_eq!(
+            permission(0, Some("root"), "alice", true, &Action::Lock),
+            Ok(())
+        );
+    }
+
+    /// A user may change their own password, named or not.
+    #[test]
+    fn a_user_may_change_their_own_password() {
+        assert_eq!(
+            permission(1000, Some("alice"), "alice", true, &Action::ChangePassword),
+            Ok(())
+        );
+        // With no name on the command line there is no other account in play.
+        assert_eq!(
+            permission(1000, Some("alice"), "alice", false, &Action::ChangePassword),
+            Ok(())
+        );
+    }
+
+    /// **The refusal that never once fired.** This is the whole bug: `passwd
+    /// root` from an ordinary account was permitted, because `is_root()` read
+    /// an environment variable that is normally absent and defaulted to root.
+    #[test]
+    fn a_user_may_not_change_another_users_password() {
+        assert_eq!(
+            permission(1000, Some("alice"), "root", true, &Action::ChangePassword),
+            Err(Denied::NotOwnAccount)
+        );
+    }
+
+    /// Administrator options are refused even on one's own account.
+    #[test]
+    fn a_user_may_not_use_administrator_options_on_themselves() {
+        for action in [
+            Action::Lock,
+            Action::Unlock,
+            Action::DeletePassword,
+            Action::Expire,
+            Action::SetMaxDays(0),
+            Action::SetInactiveDays(0),
+        ] {
+            assert_eq!(
+                permission(1000, Some("alice"), "alice", true, &action),
+                Err(Denied::NotRoot),
+                "{action:?} is an administrator's option"
+            );
+        }
+    }
+
+    /// A caller whose uid names no account is not thereby everyone.
+    ///
+    /// `caller_name` is `None` when `getuid()` returns a uid the database does
+    /// not have. That must not match any target -- the old code's equivalent
+    /// state was `$USER` being unset, which compared equal to nothing and was
+    /// then overridden by the `unwrap_or(0)` above it anyway.
+    #[test]
+    fn an_unknown_caller_may_not_act_on_a_named_account() {
+        assert_eq!(
+            permission(1000, None, "alice", true, &Action::ChangePassword),
+            Err(Denied::NotOwnAccount)
+        );
+    }
+
+    /// Uid 0 is what grants, not the name. A caller who has *named themselves*
+    /// root without being uid 0 gets nothing.
+    #[test]
+    fn being_called_root_is_not_being_root() {
+        assert_eq!(
+            permission(1000, Some("root"), "alice", true, &Action::ChangePassword),
+            Err(Denied::NotOwnAccount)
+        );
+        assert_eq!(
+            permission(1000, Some("root"), "root", true, &Action::Lock),
+            Err(Denied::NotRoot)
+        );
+    }
+
+    // `OsStr` is a test-only need here: the non-test build carries argument
+    // values as `OsString` throughout and never borrows one.
+    use std::ffi::OsStr;
 
     /// The command line, as `env::args_os` would deliver it.
     fn argv(parts: &[&str]) -> Vec<OsString> {

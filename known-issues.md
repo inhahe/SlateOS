@@ -127305,3 +127305,59 @@ makes the other four a conversion rather than a design.
 refuse if the record cannot name a uid (a session whose owner has no name must
 not start), then `CommandExt::gid` before `CommandExt::uid`. `login` needs its
 exec built first; see `todo.txt`.
+
+
+## TD-B-FIVE-PROGRAMS-STILL-TAKE-THE-CALLERS-IDENTITY-FROM-THE-ENVIRONMENT (lane B, 2026-09-10)
+
+**In short:** several programs work out who is running them by reading an
+environment variable. The environment is set by whoever starts the program, so
+this asks the caller who they are and believes the answer. Three of them fall
+back to *root* when the variable is missing -- and the variable is normally
+missing, so they were not merely spoofable, they were unconditionally root.
+`passwd` was fixed on 2026-09-10; these five were found by the same look.
+
+| Program | Code | Falls back to |
+|---|---|---|
+| `userspace/chage` | `current_uid()` = `env::var("UID")` | **0 (root)**, and there is no other source |
+| `userspace/newgrp` | `get_current_user()` = `env::var("UID")`/`GID` | **0 (root)**, and `$USER` for the name |
+| `userspace/polkit` | `/proc/self/status` first, then `env::var("UID")` | **"0" (root)** if both fail |
+| `userspace/crontab` | `effective_uid()` = `env::var("EUID")` | 1000 -- conservative, but `EUID=0` is still believed |
+| `userspace/doas` | `/proc/self/status` first, then `env::var("UID")` | `u32::MAX` -- the safe direction |
+
+**Why the fallback is the normal path, not a corner case.** `UID` and `EUID`
+are *shell* variables, not exported ones. This tree's own shell is explicit
+about it: "an inherited `UID=...` in the environment neither wins nor becomes
+exported" (`userspace/oils/src/interp.rs`). So a program launched from `osh`
+sees no `UID` at all, the `unwrap_or(0)` fires, and the answer is root every
+single time. **No spoofing was required to get root; spoofing was required to
+get anything else.**
+
+**What it cost in `passwd`, which is why this is filed rather than noted.**
+`is_root()` was `current_uid() == 0`, and it guarded two checks: "only root may
+change another user's password" and "only root may use this option". Both were
+therefore unreachable for the entire life of the program. A check that is
+always skipped is indistinguishable from a check that always passes, and no
+test could tell them apart because the decision was made in `main` from process
+state.
+
+**The fix, done once.** `authlib::identity::caller_uid()` returns
+`Option<u32>` from `getuid(2)` -- the credential the kernel recorded, which the
+process's parent cannot set. `None` means "this build cannot tell" and must
+never be read as root. The caller's *name* is then resolved from that uid
+against the account database, because `$USER` is the same spoofable input
+wearing different clothes: in `passwd`, `USER=root passwd root` satisfied the
+"changing your own password" exemption without being root.
+
+**Converting the remaining five** is mechanical -- swap the helper, thread the
+uid, and where the program has a permission rule, lift it out of `main` into a
+function that returns a value so it can be tested. `passwd` gained six tests
+that way, being the first tests it has ever had of its permission rule.
+
+**`userspace/oils` is not on this list and is the reason the fix was easy.** It
+had already reasoned the whole thing out for its own `$UID`, and reached the
+opposite conclusion: consulting an environment variable "on a system that
+*can* [supply the credential] would let any parent process redefine `$UID` by
+exporting a variable, which is precisely the spoofing bash refuses when it
+ignores an inherited `UID=`". The shell refused what six privileged programs
+accepted. **A correct answer already in the tree does not propagate by
+existing.**

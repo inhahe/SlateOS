@@ -4292,6 +4292,55 @@ check_linux_only_capabilities() {
 
 check_linux_only_capabilities
 
+# A mutator no reachable code can call, i.e. a counter that can only move one way.
+#
+# Sibling of the check above: that one asks which kernel capabilities userspace
+# cannot reach, this one asks which of the kernel's own accounting operations
+# nothing reaches. `zramstat`'s `mem_used` could only rise because `record_discard`
+# was unreachable; `signalq`'s `blocked_mask` could only gain bits because
+# `unblock` was. A counter that cannot fall does not look like a gap -- it looks
+# like data.
+#
+# A ratchet on a count, and a loose one by design: it refuses when the number
+# RISES and only asks to be lowered when it falls. Most of these modules are
+# kernel-side accounting for features other lanes own, so a lane wiring up its own
+# recorder should not have to edit lane A's pin to get a green boot test. The
+# checker's header argues that asymmetry against check-crate-names' stricter one.
+#
+# Wired here because until 2026-09-10 it was `find-unreachable-mutators.py`, it
+# always exited 0, and NOTHING RAN IT -- so the figure it produces sat in
+# known-issues.md going stale for two weeks, which is the whole reason it is now a
+# `check-*` under the wiring ratchet. About 13 s.
+check_unreachable_mutators() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== Unreachable-mutator check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Checking for accounting mutators nothing can reach ==="
+    if run_checker check-unreachable-mutators "$py" \
+            "$PROJECT_ROOT/scripts/check-unreachable-mutators.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  There are more unreachable accounting" >&2
+    echo "mutators than the ceiling in that checker allows, which means a new" >&2
+    echo "one arrived.  Wire it to a caller, or make it private if it is" >&2
+    echo "genuinely internal so it stops counting." >&2
+    echo "" >&2
+    echo "Do NOT raise the ceiling to make this pass: it is a ratchet, and" >&2
+    echo "raising it is the one edit that makes the check mean nothing." >&2
+    exit 1
+}
+
+check_unreachable_mutators
+
 # Keep every path-taking VFS entry point behind the one permission gate.
 #
 # This guards the failure mode that no runtime test can see, because both

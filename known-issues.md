@@ -85073,12 +85073,30 @@ feature. It is that a column which should be able to go *down* can only ever go
 *up*, and a counter that cannot fall does not look like a gap — it looks like
 data.
 
-Measured by `scripts/find-unreachable-mutators.py` (reporting tool, always exits
+Measured by `scripts/check-unreachable-mutators.py` (reporting tool, always exits
 0). **First measurement, 2026-08-26: 520 mutators with no caller outside their
 own module, across 222 modules, out of 1940 mutators in 428 files** -- about 27%.
 
-**Re-measured 2026-09-10: 503 across 219 modules, of 1928 in 430 files.** Down
-17, so the work is moving, and the paragraph below this one was still quoting the
+**Re-measured 2026-09-10: 504 across 219 modules, of 1928 in 430 files.**
+
+**And 504 is not 503 because the tool was undercounting.** Its reachability
+test was the substring `f"{module}::{name}("`, and `a11y` is a suffix of
+`inputa11y` -- a real `inputa11y::set_filter_keys(` call in `kshell.rs`
+contains the substring `a11y::set_filter_keys(`, so `a11y`'s own unreachable
+mutator was read as reachable. There is no `a11y::set_filter_keys` caller
+anywhere. 21 of the 429 module names are suffixes of another module's name
+(42 ordered pairs: `ar` inside `sidebar`/`taskbar`/`tar`, `cache` inside
+`pagecache`/`fscache`, plus `vfs`, `index`, `policy` and others), so the class
+was live in 21 modules and had fired in one. **The August figure of 520 was
+taken with the same bug and is an undercount too.**
+
+It was found by making the tool 5.6x faster -- 70 s to 13 s, by indexing the
+sources once instead of re-scanning every file per mutator -- and then
+checking the answer had not changed. It had, by one, and the one was real. The
+speed was the goal and the bug was the finding; had the count been taken on
+trust because the refactor was "only" a speedup, neither would have surfaced.
+
+Down 16 from August on the corrected basis, so the work is moving, and the paragraph below this one was still quoting the
 August figure two weeks later. That is worth more than the seventeen: this entry
 is about code a tool can see and nothing calls, and its own headline number had
 drifted from the tool that produces it, because the number lives in prose and the
@@ -85174,7 +85192,7 @@ next task; it has not bitten anything yet because nothing has been wired the
 naive way.
 
 **Burn-down log.** Count at the head of this entry is
-`scripts/find-unreachable-mutators.py`'s, not hand arithmetic.
+`scripts/check-unreachable-mutators.py`'s, not hand arithmetic.
 
 | date | module | 520 → | what changed |
 |---|---|---|---|
@@ -85185,7 +85203,7 @@ naive way.
 | 2026-08-30 | `perfmon` | 503 (and 220 → 219 modules, 1941 → 1928 mutators) | category 3, the fourth projection, and the largest single module cleared: **twelve** unreachable mutators, all of them. `/proc/perfmon` printed `CPU samples: 0 / Mem samples: 0 / Disk samples: 0 / Net samples: 0` on every boot for the life of the kernel, and `perfmon cpu` answered "No CPU samples" — while `kstat` had been sampling free frames, heap bytes, pressure, runnable/live task counts and per-CPU utilisation into a 60-entry ring *once a second since boot*. The `pagecache`/`netdev` shape exactly: two halves of one intent, never joined. Rewritten so every history is projected from `kstat::recent()` at read time and the module stores only the two alert thresholds, which are policy rather than measurement. **Both deletion rules from the `irqstat` row applied again, and more widely.** `CpuSample`'s `system_pct`/`user_pct` (the scheduler publishes only `(total, idle)` per CPU), `freq_mhz` and `temp_mc` (no frequency or thermal driver exists), and `process_count`/`thread_count` (no *historical* source) were deleted, as were `MemSample`'s `cached_bytes`/`swap_used_bytes`/`page_faults` and the whole of `DiskSample`/`NetSample` — the latter two because their counters live behind spin locks the timer softirq cannot take, so no sampler can ever fill them. `/proc/perfmon` now ends with a line pointing at `/proc/diskstat` and `/proc/netdev` for the cumulative figures, so the absence is stated rather than silent. **Also removed: two knobs that moved and changed nothing** — `perfmon interval <ms>` and `set_max_samples` stored a value that `get_config()` read back while nothing sampled any faster, because this module had no sampler; a knob that answers "did that work?" with a false yes is worse than a fixed value. Interval and depth are now reported from `kstat::sample_interval_ms()`/`history_depth()` and labelled not-settable. **And the alert model changed shape:** alerts are derived from the newest sample rather than appended per over-threshold sample, so `id`/`dismissed` and `perfmon dismiss` are gone — a CPU pinned at 100% used to accumulate identical rows, and dismissing them made a still-overloaded machine report itself healthy. Two new shell arms, `perfmon cpu-alert <pct>` and `perfmon mem-alert <pct>`, make the surviving setters reachable. Full rationale, including what was argued *against* deleting the fields: `design-decisions.md` §641. |
 
 **A blind spot in the metric, found while writing that row and worth knowing
-before the next module.** `scripts/find-unreachable-mutators.py` decides
+before the next module.** `scripts/check-unreachable-mutators.py` decides
 reachability by searching other files for the literal text `module::name(` — a
 *call*. Passing a mutator as a **function item** to a shared helper
 (`set_threshold(&parts, "cpu", perfmon::set_cpu_alert)`) is a real caller that

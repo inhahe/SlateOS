@@ -54343,7 +54343,7 @@ scan of the projected history, which is now possible and was not before.
 
 ### Effect on the burn-down metric
 
-`scripts/find-unreachable-mutators.py`: **515 → 503** unreachable mutators, 220
+`scripts/check-unreachable-mutators.py`: **515 → 503** unreachable mutators, 220
 → 219 modules, 1941 → 1928 mutators. Read that with the same care the
 `irqstat` row asks for — most of the drop is deletion of functions that should
 not exist, not callers being wired up. Two of the twelve (`set_cpu_alert`,

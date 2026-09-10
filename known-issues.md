@@ -85452,8 +85452,35 @@ working at all.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **81 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **78 of 800 remain**
 
+> **Burn-down log.** 2026-09-10 (forty-sixth batch): **the guessed value was a
+> valid object id, so the command succeeded against something else.** 81 → 78;
+> `cmd_fileshare`, `cmd_secpolicy` and `cmd_authbroker` left the ledger. Pinned by
+> self-test rung 124.
+>
+> The theme is the harm rather than the value. `0` in these spaces is not a
+> placeholder, it is a live object, so the command neither failed nor did nothing:
+>
+> | Command | With an unreadable id it | |
+> |---|---|---|
+> | `share access abc rw` | called `set_share_access(0, ReadWrite)` and printed **`Share #0: Read/Write`** | a write to an object nobody named, reported as success |
+> | `secpolicy label abc user admin` | labelled entity 0; with no id at all it *read* entity 0's label back | |
+> | `authbroker revoke abc` | refused — grant ids start at 1, so the guess hit an `id == 0` sentinel | but printed a usage line, which names the form of the command and not the fault in theirs |
+>
+> `authbroker` is the near-miss and the distinction is worth keeping: **a sentinel
+> that happens to catch a guess is luck rather than a check.** It was never
+> silently wrong, and it could not say what was wrong either.
+>
+> **Method note, after batch 45 got this wrong.** The sites were chosen by asking
+> `check-option-refusal.py` which ledger entries dropped, not by pattern-matching
+> the source. My own regex for "a guessed value" disagrees with the checker's —
+> it matches 14 sites of the shape `parts.get(1).unwrap_or(&"0").parse()` that the
+> ledger does not count, because there the parse *does* refuse and the default
+> serves an absent operand. Those are a real defect and a different one; see
+> `TD-A-AN-ABSENT-OPERAND-DEFAULTS-TO-A-LIVE-OBJECT-ID`. Using the checker as the
+> oracle is what kept this batch's arithmetic right.
+>
 > **Burn-down log.** 2026-09-10 (forty-fifth batch): **the guess was a correct
 > default for an ABSENT operand.** 84 → 81 across 84 → 81 functions;
 > `fswatch read`'s count, `assoc add`'s priority and `ionice set`'s level left
@@ -128873,3 +128900,58 @@ privilege handling, which is exactly the half that must not be approximated.
 this was written — worth reading its commit first, because the lesson there
 was that the *failure* path is where the design decision lives: it now refuses
 rather than running a command outside the constraints it was asked for.
+
+## TD-A-AN-ABSENT-OPERAND-DEFAULTS-TO-A-LIVE-OBJECT-ID (lane A, 2026-09-10) — **open**
+
+**In short:** several shell commands, when given no argument at all, act on object
+number 0 or 1 instead of asking for one. `filevault unlock` with nothing after it
+tries to unlock vault 0 with an empty password. It is a cousin of the §600
+guessed-value backlog and is *not* counted by it, so it needs its own record or it
+will be filed as already-handled.
+
+### The shape
+
+    let id: u32 = match parts.get(1).unwrap_or(&"0").parse() { … };
+
+The `match` refuses an *unreadable* id correctly — that is why
+`check-option-refusal.py` does not count these. What it cannot see is that the
+default `"0"` is supplied for an **absent** operand and then parses perfectly, so
+a missing id becomes a real one.
+
+**31 sites** in `kernel/src/kshell.rs` use exactly this spelling — **14** with the
+default `&"0"` and **17** with `&"1"` — across `share`, `unregister`, `remove`,
+`unbind`, `trigger`, `lock`, `autolock`, `preview` and others.
+
+**None are fixed.** An earlier draft of this entry said two had been "fixed in
+passing" as examples; they had not. The edit that would have done it failed on an
+ambiguous match — that exact block appears 14 times, so the replacement refused
+rather than guessing which one was meant — and the draft was written from the
+intention instead of from the file. Counting the sites afterwards is what caught
+it, and the second count is why the figure above is 31 rather than the 14 first
+recorded: looking for `&"1"` as well as `&"0"` was not part of the original look.
+
+Two examples of the harm, both still live:
+
+* `filevault unlock` — bare, it attempts vault 0 with the empty password that
+  `parts.get(2)` also defaults to;
+* `screensaver preview` — bare, it previews saver 1.
+
+### Why it is worth its own entry
+
+The §600 ledger is a *count of a specific spelling*, and the checker's error
+message is what makes the count trustworthy. This defect passes that checker by
+construction: it refuses the unreadable word, which is what the checker looks for.
+So it will not appear in the burn-down however far that goes, and anyone reading
+"78 of 800 remain" would reasonably assume the class was fully enumerated.
+
+### The fix
+
+Require the operand. `parts.get(1)` returning `None` is *"you did not say"*, and
+the usage line is the answer to it — as distinct from `"you said something I could
+not read"`, which the existing `match` already handles by name. The two fixed
+sites show the shape.
+
+All 31 remain, and they should be done as a sweep with a count pinned somewhere a
+checker reads — the §600 ledger's own mechanism is what makes that backlog
+trustworthy, and this one currently has no equivalent. A partial pass over a
+population nothing counts leaves no marker saying how far it got.

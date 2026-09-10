@@ -23370,6 +23370,74 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         );
     }
 
+    serial_println!(
+        "  kshell::self_test 124: the guessed value was a valid object id, so the \
+         command acted on a real share and a real policy entity that the operator \
+         never named -- and printed a success line about them"
+    );
+    {
+        // Rung 124 -- batch 46 of the §600 burn-down: `cmd_fileshare`,
+        // `cmd_secpolicy`, `cmd_authbroker`. 81 -> 78.
+        //
+        // The theme is the harm rather than the value: `0` here is not a
+        // placeholder, it is a live object. So the command did not fail and did
+        // not do nothing -- it succeeded against something else.
+        //
+        //   * `share access abc rw` called set_share_access(0, ReadWrite) and
+        //     printed "Share #0: Read/Write". A write to an object nobody named,
+        //     reported as success, naming a share the operator never typed.
+        //   * `secpolicy label abc user admin` labelled entity 0; with no id at
+        //     all it read entity 0's label back as though it had been asked for.
+        //   * `authbroker revoke abc` is the near-miss and the distinction is
+        //     worth keeping: grant ids start at 1, so the guess fell into an
+        //     `id == 0` sentinel and the command refused. A sentinel that happens
+        //     to catch a guess is luck rather than a check, and it named nothing
+        //     -- the operator got a usage line, which describes the form of the
+        //     command rather than the fault in theirs.
+        //
+        // Both arms for each, because the half a batch breaks is the working one.
+
+        let out = capture_command("share access abc rw");
+        assert_output_contains(
+            "share access names the unreadable id",
+            &out,
+            b"not a share id: abc",
+        );
+        assert_eq!(last_exit(), 1, "`share access abc rw` errors");
+        assert_output_lacks(
+            "and does not report a share it never touched",
+            &out,
+            b"Share #0",
+        );
+
+        let out = capture_command("secpolicy label abc user");
+        assert_output_contains(
+            "secpolicy label names the unreadable entity id",
+            &out,
+            b"not an entity id: abc",
+        );
+        assert_eq!(last_exit(), 1, "`secpolicy label abc user` errors");
+
+        let out = capture_command("authbroker revoke abc");
+        assert_output_contains(
+            "authbroker revoke names the word instead of printing usage",
+            &out,
+            b"not a grant id: abc",
+        );
+        assert_eq!(last_exit(), 1, "`authbroker revoke abc` errors");
+
+        // The working arm: a well-formed id still reaches the subsystem. `share
+        // access 1 ro` may fail because share 1 does not exist, which is a
+        // different answer from "not a share id" and is the one that proves the
+        // parse still parses.
+        let out = capture_command("share access 1 ro");
+        assert_output_lacks(
+            "a well-formed share id is not rejected as unreadable",
+            &out,
+            b"not a share id",
+        );
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -61993,7 +62061,21 @@ fn cmd_fileshare(args: &str) {
         }
         "access" => {
             if parts.len() >= 3 {
-                let id: u32 = parts[1].parse().unwrap_or(0);
+                // Was `unwrap_or(0)`, and share 0 is a real share. So
+                // `share access abc rw` called set_share_access(0, ReadWrite)
+                // and printed "Share #0: Read/Write" as the confirmation -- a
+                // write to an object the operator never named, reported as
+                // success. The worst shape in this batch, because the output
+                // looks like the command worked and names a share the user did
+                // not type.
+                let id: u32 = match parts[1].parse() {
+                    Ok(v) => v,
+                    Err(_) => {
+                        shell_println!("share access: not a share id: {}", parts[1]);
+                        set_exit(1);
+                        return;
+                    }
+                };
                 let access = match parts[2] {
                     "rw" | "readwrite" => fileshare::ShareAccess::ReadWrite,
                     "full" => fileshare::ShareAccess::FullControl,
@@ -100615,7 +100697,19 @@ fn cmd_secpolicy(args: &str) {
                 return;
             }
             secpolicy::init_defaults();
-            let id = id_str.parse::<u32>().unwrap_or(0);
+            // Entity 0 is a real entity, and both the absent operand (`id_str`
+            // defaults to "0" above) and an unreadable one arrived there. So
+            // `secpolicy label abc user admin` labelled entity 0, and
+            // `secpolicy label` with no id read entity 0's label back as though
+            // it had been asked for.
+            let id = match id_str.parse::<u32>() {
+                Ok(v) => v,
+                Err(_) => {
+                    shell_println!("secpolicy label: not an entity id: {}", id_str);
+                    set_exit(1);
+                    return;
+                }
+            };
             if label.is_empty() {
                 match secpolicy::get_label(id, etype) {
                     Some(l) => shell_println!("Label for {}:{}: {}", etype, id, l),
@@ -101154,10 +101248,29 @@ fn cmd_authbroker(args: &str) {
             }
         }
         "revoke" => {
-            let id_str = parts.get(1).copied().unwrap_or("0");
-            let id = id_str.parse::<u32>().unwrap_or(0);
-            if id == 0 {
+            // The near-miss of this batch, and worth keeping the distinction.
+            // This one was never silently wrong: grant ids start at 1, so the
+            // `unwrap_or(0)` guess fell straight into the `id == 0` sentinel below
+            // and the command refused. What it could not do was say what was
+            // wrong -- `authbroker revoke abc` printed a usage line, which tells
+            // the operator the form of the command and not that their word was
+            // unreadable. A sentinel that happens to catch a guess is luck rather
+            // than a check, and it names nothing.
+            let Some(id_str) = parts.get(1).copied() else {
                 shell_println!("Usage: authbroker revoke <grant_id>");
+                set_exit(1);
+                return;
+            };
+            let id = match id_str.parse::<u32>() {
+                Ok(v) => v,
+                Err(_) => {
+                    shell_println!("authbroker revoke: not a grant id: {}", id_str);
+                    set_exit(1);
+                    return;
+                }
+            };
+            if id == 0 {
+                shell_println!("authbroker revoke: grant ids start at 1");
                 set_exit(1);
                 return;
             }

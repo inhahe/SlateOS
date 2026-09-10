@@ -964,6 +964,108 @@ fn append_central_directory(out: &mut Vec<u8>, dir: &[DirRecord], cd_start: u64)
     write_u16(out, 0); // comment length
 }
 
+/// Append one member's local header and data to `out`, and return the
+/// central-directory record describing it.
+///
+/// `at_offset` is where this header begins in the finished archive. It is a
+/// parameter rather than `out.len()` because a streaming writer counts its own
+/// output and has no buffer to measure -- and because "where this starts" and
+/// "how much exists now" are the two numbers that, conflated during the
+/// previous extraction, made every archive declare a zero-length central
+/// directory while 22 tests stayed green.
+fn append_local_and_data(out: &mut Vec<u8>, at_offset: u64, entry: &ZipWriteEntry) -> DirRecord {
+    let crc32 = if entry.data.is_empty() {
+        0u32
+    } else {
+        crc32::crc32(&entry.data)
+    };
+
+    let (compressed, method) = if entry.store_only || entry.data.is_empty() {
+        (entry.data.clone(), 0u16)
+    } else {
+        let deflated = deflate::deflate(&entry.data);
+        if deflated.len() < entry.data.len() {
+            (deflated, 8u16)
+        } else {
+            (entry.data.clone(), 0u16)
+        }
+    };
+
+    let uncomp_size = entry.data.len() as u64;
+    let comp_size = compressed.len() as u64;
+    let header_offset = at_offset;
+
+    // Determine if ZIP64 extra field is needed for this entry.
+    let need_zip64 =
+        uncomp_size > 0xFFFF_FFFE || comp_size > 0xFFFF_FFFE || header_offset > 0xFFFF_FFFE;
+
+    let (comp32, uncomp32, extra_field) = if need_zip64 {
+        // Use 0xFFFFFFFF sentinel + ZIP64 extra field.
+        let mut extra = Vec::with_capacity(28);
+        write_u16(&mut extra, ZIP64_EXTRA_ID);
+        write_u16(&mut extra, 24); // 3 × 8 bytes
+        write_u64(&mut extra, uncomp_size);
+        write_u64(&mut extra, comp_size);
+        write_u64(&mut extra, header_offset);
+        (0xFFFF_FFFFu32, 0xFFFF_FFFFu32, extra)
+    } else {
+        (comp_size as u32, uncomp_size as u32, Vec::new())
+    };
+
+    // Local file header.
+    write_u32(out, LOCAL_SIG);
+    write_u16(out, if need_zip64 { 45 } else { 20 }); // version needed
+    write_u16(out, 0); // general purpose bit flag
+    write_u16(out, method);
+    // The caller's pair, split back into the two little-endian halves the
+    // format stores: time at +10, date at +12.  `0` -- which is what every
+    // caller passed before `ZipWriteEntry` had this field, and what a
+    // caller with no mtime to offer still passes -- writes both halves
+    // zero, meaning "no modification time recorded".
+    //
+    // This used to write date `0x0021` unconditionally, which looks like an
+    // absent value and is not one -- it is the DOS *minimum* date, year
+    // bits 0 (= 1980), month 1, day 1.  Every member of every archive
+    // SlateOS produced was therefore stamped 1980-01-01 00:00:00, a
+    // timestamp for a file whose time we never looked at.  A reader has no
+    // way to tell that apart from a file genuinely last written on that
+    // day, so it is a fabricated measurement, not a placeholder.
+    //
+    // Zero is the encoding for "none": it is day 0 of month 0, which is not
+    // a representable date, so it cannot be mistaken for one.  A UI can then
+    // render it as unknown rather than as a wrong date.  The cost is stated
+    // in design-decisions.md §618 -- a tool that converts eagerly may show
+    // garbage for it (Python's `zipfile` yields `(1980, 0, 0, 0, 0, 0)`),
+    // which is preferable to minting a time that was never measured.
+    //
+    // Not validated: a pair this crate cannot check is still the caller's
+    // to state.  Encoding one needs a calendar, so refusing a malformed one
+    // would need the same calendar -- see design-decisions.md §621 and
+    // `ZipWriteEntry::dos_datetime`.  The read side does range-check, which
+    // is where a bad pair is actually consumed.
+    write_u16(out, (entry.dos_datetime & 0xFFFF) as u16); // mod time
+    write_u16(out, (entry.dos_datetime >> 16) as u16); // mod date
+    write_u32(out, crc32);
+    write_u32(out, comp32);
+    write_u32(out, uncomp32);
+    write_u16(out, entry.name.len() as u16);
+    write_u16(out, extra_field.len() as u16);
+    out.extend_from_slice(entry.name.as_slice());
+    out.extend_from_slice(&extra_field);
+    out.extend_from_slice(&compressed);
+
+    DirRecord {
+        name: entry.name.clone(),
+        method,
+        crc32,
+        comp_size,
+        uncomp_size,
+        header_offset,
+        need_zip64,
+        dos_datetime: entry.dos_datetime,
+    }
+}
+
 /// Create a ZIP archive in memory from a list of entries.
 ///
 /// Each entry's data is compressed with DEFLATE (method 8) unless the
@@ -980,96 +1082,8 @@ pub fn create(entries: &[ZipWriteEntry]) -> Vec<u8> {
 
     // --- Local file headers + data ---
     for entry in entries {
-        let crc32 = if entry.data.is_empty() {
-            0u32
-        } else {
-            crc32::crc32(&entry.data)
-        };
-
-        let (compressed, method) = if entry.store_only || entry.data.is_empty() {
-            (entry.data.clone(), 0u16)
-        } else {
-            let deflated = deflate::deflate(&entry.data);
-            if deflated.len() < entry.data.len() {
-                (deflated, 8u16)
-            } else {
-                (entry.data.clone(), 0u16)
-            }
-        };
-
-        let uncomp_size = entry.data.len() as u64;
-        let comp_size = compressed.len() as u64;
-        let header_offset = archive.len() as u64;
-
-        // Determine if ZIP64 extra field is needed for this entry.
-        let need_zip64 =
-            uncomp_size > 0xFFFF_FFFE || comp_size > 0xFFFF_FFFE || header_offset > 0xFFFF_FFFE;
-
-        let (comp32, uncomp32, extra_field) = if need_zip64 {
-            // Use 0xFFFFFFFF sentinel + ZIP64 extra field.
-            let mut extra = Vec::with_capacity(28);
-            write_u16(&mut extra, ZIP64_EXTRA_ID);
-            write_u16(&mut extra, 24); // 3 × 8 bytes
-            write_u64(&mut extra, uncomp_size);
-            write_u64(&mut extra, comp_size);
-            write_u64(&mut extra, header_offset);
-            (0xFFFF_FFFFu32, 0xFFFF_FFFFu32, extra)
-        } else {
-            (comp_size as u32, uncomp_size as u32, Vec::new())
-        };
-
-        // Local file header.
-        write_u32(&mut archive, LOCAL_SIG);
-        write_u16(&mut archive, if need_zip64 { 45 } else { 20 }); // version needed
-        write_u16(&mut archive, 0); // general purpose bit flag
-        write_u16(&mut archive, method);
-        // The caller's pair, split back into the two little-endian halves the
-        // format stores: time at +10, date at +12.  `0` -- which is what every
-        // caller passed before `ZipWriteEntry` had this field, and what a
-        // caller with no mtime to offer still passes -- writes both halves
-        // zero, meaning "no modification time recorded".
-        //
-        // This used to write date `0x0021` unconditionally, which looks like an
-        // absent value and is not one -- it is the DOS *minimum* date, year
-        // bits 0 (= 1980), month 1, day 1.  Every member of every archive
-        // SlateOS produced was therefore stamped 1980-01-01 00:00:00, a
-        // timestamp for a file whose time we never looked at.  A reader has no
-        // way to tell that apart from a file genuinely last written on that
-        // day, so it is a fabricated measurement, not a placeholder.
-        //
-        // Zero is the encoding for "none": it is day 0 of month 0, which is not
-        // a representable date, so it cannot be mistaken for one.  A UI can then
-        // render it as unknown rather than as a wrong date.  The cost is stated
-        // in design-decisions.md §618 -- a tool that converts eagerly may show
-        // garbage for it (Python's `zipfile` yields `(1980, 0, 0, 0, 0, 0)`),
-        // which is preferable to minting a time that was never measured.
-        //
-        // Not validated: a pair this crate cannot check is still the caller's
-        // to state.  Encoding one needs a calendar, so refusing a malformed one
-        // would need the same calendar -- see design-decisions.md §621 and
-        // `ZipWriteEntry::dos_datetime`.  The read side does range-check, which
-        // is where a bad pair is actually consumed.
-        write_u16(&mut archive, (entry.dos_datetime & 0xFFFF) as u16); // mod time
-        write_u16(&mut archive, (entry.dos_datetime >> 16) as u16); // mod date
-        write_u32(&mut archive, crc32);
-        write_u32(&mut archive, comp32);
-        write_u32(&mut archive, uncomp32);
-        write_u16(&mut archive, entry.name.len() as u16);
-        write_u16(&mut archive, extra_field.len() as u16);
-        archive.extend_from_slice(entry.name.as_slice());
-        archive.extend_from_slice(&extra_field);
-        archive.extend_from_slice(&compressed);
-
-        directory_entries.push(DirRecord {
-            name: entry.name.clone(),
-            method,
-            crc32,
-            comp_size,
-            uncomp_size,
-            header_offset,
-            need_zip64,
-            dos_datetime: entry.dos_datetime,
-        });
+        let at = archive.len() as u64;
+        directory_entries.push(append_local_and_data(&mut archive, at, entry));
     }
 
     // The trailer is shared with the streaming writer; see

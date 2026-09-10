@@ -80,6 +80,25 @@
  * reddens the run — that is the point — but it does not leave the machine
  * called something else for whatever runs next.
  *
+ * **This has a real cost, and it is worth knowing before you change it.**
+ * Because the name is put back on the *failing* path too, the machine's state
+ * after a red run tells you nothing about which check failed -- the evidence
+ * is destroyed by the same code that protects the next test. Lane A hit this
+ * diagnosing the first execution of this fixture on 2026-09-10: reading the
+ * hostname after the rung showed the original, so the only way forward was to
+ * instrument the syscall itself. That cost about an hour and found a real
+ * kernel-side capability bug (the rung granted `(Process, SET_HOSTNAME)` and
+ * no `File` right, so this fixture's `open` of `/proc/sys/kernel/hostname`
+ * was refused).
+ *
+ * The trade is deliberate and stands: a fixture that can leave a shared
+ * machine misnamed is worse than one that is hard to autopsy, and the exit
+ * codes -- not the surviving state -- are meant to be the diagnostic. That is
+ * also why the codes were split afterwards, so that 22 and 6 distinguish
+ * "the read path is broken" from "the store is" rather than sharing one
+ * number. If you ever find the codes insufficient, add a code; do not remove
+ * the restore.
+ *
  * Exit code 42 == every check passed; anything else identifies the first
  * failing check (see the `return` values below).
  */

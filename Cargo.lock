@@ -3,14 +3,6 @@
 version = 4
 
 [[package]]
-name = "abiword-cli"
-version = "0.1.0"
-
-[[package]]
-name = "accerciser-cli"
-version = "0.1.0"
-
-[[package]]
 name = "acl"
 version = "0.1.0"
 
@@ -19,15 +11,7 @@ name = "acpi"
 version = "0.1.0"
 
 [[package]]
-name = "aerc-cli"
-version = "0.1.0"
-
-[[package]]
 name = "aes"
-version = "0.1.0"
-
-[[package]]
-name = "aircrack-cli"
 version = "0.1.0"
 
 [[package]]
@@ -39,18 +23,6 @@ dependencies = [
  "oswindow",
  "tzrules",
 ]
-
-[[package]]
-name = "alitu-cli"
-version = "0.1.0"
-
-[[package]]
-name = "anki-cli"
-version = "0.1.0"
-
-[[package]]
-name = "anthy-cli"
-version = "0.1.0"
 
 [[package]]
 name = "apparmor"
@@ -103,19 +75,11 @@ name = "at"
 version = "0.1.0"
 
 [[package]]
-name = "atril-cli"
-version = "0.1.0"
-
-[[package]]
 name = "audit"
 version = "0.1.0"
 dependencies = [
  "quoting",
 ]
-
-[[package]]
-name = "auphonic-cli"
-version = "0.1.0"
 
 [[package]]
 name = "authlib"
@@ -141,10 +105,6 @@ version = "0.1.0"
 dependencies = [
  "quoting",
 ]
-
-[[package]]
-name = "avizo-cli"
-version = "0.1.0"
 
 [[package]]
 name = "awk"
@@ -185,10 +145,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "beekeeper-cli"
-version = "0.1.0"
-
-[[package]]
 name = "benchmark"
 version = "0.1.0"
 dependencies = [
@@ -198,10 +154,6 @@ dependencies = [
 
 [[package]]
 name = "bignum"
-version = "0.1.0"
-
-[[package]]
-name = "birdfont-cli"
 version = "0.1.0"
 
 [[package]]
@@ -223,26 +175,6 @@ name = "blockdev"
 version = "0.1.0"
 
 [[package]]
-name = "blueberry-cli"
-version = "0.1.0"
-
-[[package]]
-name = "blueman-cli"
-version = "0.1.0"
-
-[[package]]
-name = "bluetooth-sendto-cli"
-version = "0.1.0"
-
-[[package]]
-name = "bluetuith-cli"
-version = "0.1.0"
-
-[[package]]
-name = "bluez-tools-cli"
-version = "0.1.0"
-
-[[package]]
 name = "bootctl"
 version = "0.1.0"
 dependencies = [
@@ -259,18 +191,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bricscad-cli"
-version = "0.1.0"
-
-[[package]]
-name = "bridge"
-version = "0.1.0"
-
-[[package]]
-name = "brlcad-cli"
-version = "0.1.0"
-
-[[package]]
 name = "bstr"
 version = "1.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -281,15 +201,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "btmgmt-cli"
-version = "0.1.0"
-
-[[package]]
 name = "byteread"
-version = "0.1.0"
-
-[[package]]
-name = "cage-cli"
 version = "0.1.0"
 
 [[package]]
@@ -315,10 +227,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "calligra-cli"
-version = "0.1.0"
-
-[[package]]
 name = "camera"
 version = "0.1.0"
 dependencies = [
@@ -326,10 +234,6 @@ dependencies = [
  "guitk",
  "oswindow",
 ]
-
-[[package]]
-name = "cantor-cli"
-version = "0.1.0"
 
 [[package]]
 name = "capsh"
@@ -340,22 +244,6 @@ dependencies = [
 
 [[package]]
 name = "cargo-bloat"
-version = "0.1.0"
-
-[[package]]
-name = "caribou-cli"
-version = "0.1.0"
-
-[[package]]
-name = "cbor-cli"
-version = "0.1.0"
-
-[[package]]
-name = "ccze-cli"
-version = "0.1.0"
-
-[[package]]
-name = "cemu-cli"
 version = "0.1.0"
 
 [[package]]
@@ -437,17 +325,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "chroot-cli"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
-name = "claws-mail-cli"
-version = "0.1.0"
-
-[[package]]
 name = "clipboard"
 version = "0.1.0"
 
@@ -459,10 +336,6 @@ dependencies = [
  "guitk",
  "oswindow",
 ]
-
-[[package]]
-name = "clonezilla-cli"
-version = "0.1.0"
 
 [[package]]
 name = "cmp"
@@ -532,10 +405,6 @@ dependencies = [
  "guitk",
  "oswindow",
 ]
-
-[[package]]
-name = "contour-cli"
-version = "0.1.0"
 
 [[package]]
 name = "coredumpctl"
@@ -621,10 +490,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "crontab-cli"
-version = "0.1.0"
-
-[[package]]
 name = "crossword"
 version = "0.1.0"
 dependencies = [
@@ -633,22 +498,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "cryptsetup"
-version = "0.1.0"
-dependencies = [
- "embed-manifest",
- "sha2",
-]
-
-[[package]]
 name = "ctags"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
-name = "cups-cli"
 version = "0.1.0"
 dependencies = [
  "quoting",
@@ -667,10 +517,6 @@ version = "0.1.0"
 dependencies = [
  "quoting",
 ]
-
-[[package]]
-name = "dasher-cli"
-version = "0.1.0"
 
 [[package]]
 name = "date"
@@ -700,22 +546,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "dconf-cli"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "dd"
-version = "0.1.0"
-
-[[package]]
-name = "deadd-cli"
-version = "0.1.0"
-
-[[package]]
-name = "deepin-screenshot-cli"
 version = "0.1.0"
 
 [[package]]
@@ -753,10 +584,6 @@ dependencies = [
  "tzrules",
  "yamldoc",
 ]
-
-[[package]]
-name = "desktop-file-utils-cli"
-version = "0.1.0"
 
 [[package]]
 name = "devicemanager"
@@ -822,10 +649,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dino-cli"
-version = "0.1.0"
-
-[[package]]
 name = "diskanalyzer"
 version = "0.1.0"
 dependencies = [
@@ -877,18 +700,7 @@ name = "dmidecode"
 version = "0.1.0"
 
 [[package]]
-name = "dmsetup"
-version = "0.1.0"
-dependencies = [
- "embed-manifest",
-]
-
-[[package]]
 name = "dns"
-version = "0.1.0"
-
-[[package]]
-name = "dnsmasq"
 version = "0.1.0"
 
 [[package]]
@@ -901,10 +713,6 @@ dependencies = [
  "scratchdir",
  "userdb",
 ]
-
-[[package]]
-name = "dotool-cli"
-version = "0.1.0"
 
 [[package]]
 name = "dots"
@@ -921,14 +729,6 @@ dependencies = [
  "quoting",
  "scratchdir",
 ]
-
-[[package]]
-name = "dusty3d-cli"
-version = "0.1.0"
-
-[[package]]
-name = "eagle-cli"
-version = "0.1.0"
 
 [[package]]
 name = "earlyoom"
@@ -974,14 +774,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "electrum-cli"
-version = "0.1.0"
-
-[[package]]
-name = "element-desktop-cli"
-version = "0.1.0"
-
-[[package]]
 name = "email"
 version = "0.1.0"
 dependencies = [
@@ -1020,14 +812,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ethtool"
-version = "0.1.0"
-
-[[package]]
-name = "eww-cli"
-version = "0.1.0"
-
-[[package]]
 name = "expand"
 version = "0.1.0"
 dependencies = [
@@ -1047,22 +831,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "f3d-cli"
-version = "0.1.0"
-
-[[package]]
-name = "fabric-cli"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "fdisk"
-version = "0.1.0"
-
-[[package]]
-name = "fdm-cli"
 version = "0.1.0"
 
 [[package]]
@@ -1130,10 +899,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "flameshot-cli"
-version = "0.1.0"
-
-[[package]]
 name = "flashcards"
 version = "0.1.0"
 dependencies = [
@@ -1164,10 +929,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fnott-cli"
-version = "0.1.0"
-
-[[package]]
 name = "fold"
 version = "0.1.0"
 dependencies = [
@@ -1184,10 +945,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fragments-cli"
-version = "0.1.0"
-
-[[package]]
 name = "free"
 version = "0.1.0"
 dependencies = [
@@ -1202,10 +959,6 @@ dependencies = [
  "oswindow",
  "randrange",
 ]
-
-[[package]]
-name = "freemat-cli"
-version = "0.1.0"
 
 [[package]]
 name = "fsck"
@@ -1244,10 +997,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fuzzel-cli"
-version = "0.1.0"
-
-[[package]]
 name = "fw"
 version = "0.1.0"
 dependencies = [
@@ -1274,10 +1023,6 @@ name = "gdb"
 version = "0.1.0"
 
 [[package]]
-name = "geary-cli"
-version = "0.1.0"
-
-[[package]]
 name = "getent"
 version = "0.1.0"
 
@@ -1300,22 +1045,6 @@ name = "globmatch"
 version = "0.1.0"
 
 [[package]]
-name = "gnome-bluetooth-cli"
-version = "0.1.0"
-
-[[package]]
-name = "gnome-boxes-cli"
-version = "0.1.0"
-
-[[package]]
-name = "gnome-calendar-cli"
-version = "0.1.0"
-
-[[package]]
-name = "gnome-screenshot-cli"
-version = "0.1.0"
-
-[[package]]
 name = "gomoku"
 version = "0.1.0"
 dependencies = [
@@ -1324,29 +1053,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "goverlay-cli"
-version = "0.1.0"
-
-[[package]]
-name = "gradience-cli"
-version = "0.1.0"
-
-[[package]]
 name = "grub2"
 version = "0.1.0"
 dependencies = [
  "procinfo",
- "quoting",
-]
-
-[[package]]
-name = "gscan2pdf-cli"
-version = "0.1.0"
-
-[[package]]
-name = "gsettings-cli"
-version = "0.1.0"
-dependencies = [
  "quoting",
 ]
 
@@ -1397,14 +1107,6 @@ name = "hardlink"
 version = "0.1.0"
 
 [[package]]
-name = "havoc-cli"
-version = "0.1.0"
-
-[[package]]
-name = "hdparm"
-version = "0.1.0"
-
-[[package]]
 name = "head"
 version = "0.1.0"
 dependencies = [
@@ -1421,18 +1123,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "herbe-cli"
-version = "0.1.0"
-
-[[package]]
-name = "heroic-cli"
-version = "0.1.0"
-
-[[package]]
-name = "hexchat-cli"
-version = "0.1.0"
-
-[[package]]
 name = "hexdump"
 version = "0.1.0"
 
@@ -1444,10 +1134,6 @@ dependencies = [
  "guitk",
  "oswindow",
 ]
-
-[[package]]
-name = "higan-cli"
-version = "0.1.0"
 
 [[package]]
 name = "hmac"
@@ -1490,13 +1176,6 @@ name = "hwinfo"
 version = "0.1.0"
 dependencies = [
  "procinfo",
-]
-
-[[package]]
-name = "hyprpaper-cli"
-version = "0.1.0"
-dependencies = [
- "quoting",
 ]
 
 [[package]]
@@ -1612,23 +1291,7 @@ name = "irqbalance"
 version = "0.1.0"
 
 [[package]]
-name = "irqbalance-cli"
-version = "0.1.0"
-
-[[package]]
-name = "itamae-cli"
-version = "0.1.0"
-
-[[package]]
 name = "iw"
-version = "0.1.0"
-
-[[package]]
-name = "iwgtk-cli"
-version = "0.1.0"
-
-[[package]]
-name = "jami-cli"
 version = "0.1.0"
 
 [[package]]
@@ -1654,17 +1317,6 @@ dependencies = [
  "guitk",
  "oswindow",
 ]
-
-[[package]]
-name = "kafka-cli"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
-name = "kalgebra-cli"
-version = "0.1.0"
 
 [[package]]
 name = "kanban"
@@ -1699,10 +1351,6 @@ name = "keylayout"
 version = "0.1.0"
 
 [[package]]
-name = "kgeography-cli"
-version = "0.1.0"
-
-[[package]]
 name = "kill"
 version = "0.1.0"
 dependencies = [
@@ -1711,43 +1359,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "klayout-cli"
-version = "0.1.0"
-
-[[package]]
 name = "klotski"
 version = "0.1.0"
 dependencies = [
  "guitk",
  "oswindow",
 ]
-
-[[package]]
-name = "kstars-cli"
-version = "0.1.0"
-
-[[package]]
-name = "kubectx-cli"
-version = "0.1.0"
-
-[[package]]
-name = "kvantum-cli"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
-name = "labplot-cli"
-version = "0.1.0"
-
-[[package]]
-name = "laptop-mode-cli"
-version = "0.1.0"
-
-[[package]]
-name = "laptop-mode-tools-cli"
-version = "0.1.0"
 
 [[package]]
 name = "last"
@@ -1782,30 +1399,11 @@ name = "lex"
 version = "0.1.0"
 
 [[package]]
-name = "lf-cli"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "libcall"
 version = "0.1.0"
 dependencies = [
  "posix",
 ]
-
-[[package]]
-name = "libnotify-cli"
-version = "0.1.0"
-
-[[package]]
-name = "libpinyin-cli"
-version = "0.1.0"
-
-[[package]]
-name = "libreoffice-cli"
-version = "0.1.0"
 
 [[package]]
 name = "libservicebus"
@@ -1826,10 +1424,6 @@ dependencies = [
  "guitk",
  "oswindow",
 ]
-
-[[package]]
-name = "linux-notification-center-cli"
-version = "0.1.0"
 
 [[package]]
 name = "locale"
@@ -1874,10 +1468,6 @@ name = "log"
 version = "0.4.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "616ec5685824bcc94416c6d4a7a446eea774a31efd7062c8480ba6fd06d7a6e5"
-
-[[package]]
-name = "logfmt-cli"
-version = "0.1.0"
 
 [[package]]
 name = "logger"
@@ -2012,30 +1602,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "luckybackup-cli"
-version = "0.1.0"
-
-[[package]]
-name = "lvm"
-version = "0.1.0"
-
-[[package]]
-name = "lxappearance-cli"
-version = "0.1.0"
-
-[[package]]
-name = "lxpolkit-cli"
-version = "0.1.0"
-
-[[package]]
-name = "lxqt-policykit-cli"
-version = "0.1.0"
-
-[[package]]
-name = "lyx-cli"
-version = "0.1.0"
-
-[[package]]
 name = "m4"
 version = "0.1.0"
 
@@ -2049,20 +1615,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "magnifier-cli"
-version = "0.1.0"
-
-[[package]]
 name = "mahjong"
 version = "0.1.0"
 dependencies = [
  "guitk",
  "oswindow",
 ]
-
-[[package]]
-name = "mailspring-cli"
-version = "0.1.0"
 
 [[package]]
 name = "make"
@@ -2084,10 +1642,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "marble-cli"
-version = "0.1.0"
-
-[[package]]
 name = "markdowneditor"
 version = "0.1.0"
 dependencies = [
@@ -2107,10 +1661,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mate-polkit-cli"
-version = "0.1.0"
-
-[[package]]
 name = "maze"
 version = "0.1.0"
 dependencies = [
@@ -2124,10 +1674,6 @@ version = "0.1.0"
 dependencies = [
  "blockbuf",
 ]
-
-[[package]]
-name = "mdadm"
-version = "0.1.0"
 
 [[package]]
 name = "mediaconvert"
@@ -2166,14 +1712,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mgmt-cli"
-version = "0.1.0"
-
-[[package]]
-name = "microstation-cli"
-version = "0.1.0"
-
-[[package]]
 name = "mindmap"
 version = "0.1.0"
 dependencies = [
@@ -2190,10 +1728,6 @@ dependencies = [
  "oswindow",
  "randrange",
 ]
-
-[[package]]
-name = "minuet-cli"
-version = "0.1.0"
 
 [[package]]
 name = "mixer"
@@ -2219,10 +1753,6 @@ dependencies = [
  "modechange",
  "quoting",
 ]
-
-[[package]]
-name = "mkswap"
-version = "0.1.0"
 
 [[package]]
 name = "mktemp"
@@ -2257,18 +1787,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mozc-cli"
-version = "0.1.0"
-
-[[package]]
-name = "mpvpaper-cli"
-version = "0.1.0"
-
-[[package]]
-name = "multitail-cli"
-version = "0.1.0"
-
-[[package]]
 name = "musicplayer"
 version = "0.1.0"
 dependencies = [
@@ -2296,13 +1814,6 @@ dependencies = [
 [[package]]
 name = "netipc"
 version = "0.1.0"
-
-[[package]]
-name = "netlify-cli"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
 
 [[package]]
 name = "netmanager"
@@ -2344,15 +1855,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "nft"
-version = "0.1.0"
-
-[[package]]
 name = "nftables"
-version = "0.1.0"
-
-[[package]]
-name = "nheko-cli"
 version = "0.1.0"
 
 [[package]]
@@ -2372,10 +1875,6 @@ dependencies = [
 
 [[package]]
 name = "nmap"
-version = "0.1.0"
-
-[[package]]
-name = "nmcli"
 version = "0.1.0"
 
 [[package]]
@@ -2436,23 +1935,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "nwg-panel-cli"
-version = "0.1.0"
-
-[[package]]
 name = "objdump"
-version = "0.1.0"
-
-[[package]]
-name = "obs-wlrobs-cli"
-version = "0.1.0"
-
-[[package]]
-name = "offlineimap-cli"
-version = "0.1.0"
-
-[[package]]
-name = "oguri-cli"
 version = "0.1.0"
 
 [[package]]
@@ -2464,10 +1947,6 @@ dependencies = [
  "ere",
  "tzrules",
 ]
-
-[[package]]
-name = "onlyoffice-cli"
-version = "0.1.0"
 
 [[package]]
 name = "osfont"
@@ -2482,10 +1961,6 @@ dependencies = [
  "guitk",
  "settingsfile",
 ]
-
-[[package]]
-name = "overskride-cli"
-version = "0.1.0"
 
 [[package]]
 name = "pacman"
@@ -2507,10 +1982,6 @@ dependencies = [
  "safeio",
  "scratchdir",
 ]
-
-[[package]]
-name = "pango-cli"
-version = "0.1.0"
 
 [[package]]
 name = "partmanager"
@@ -2553,26 +2024,6 @@ name = "patch"
 version = "0.1.0"
 
 [[package]]
-name = "patoline-cli"
-version = "0.1.0"
-
-[[package]]
-name = "pcb-rnd-cli"
-version = "0.1.0"
-
-[[package]]
-name = "pcbdraw-cli"
-version = "0.1.0"
-
-[[package]]
-name = "pdfseparate-cli"
-version = "0.1.0"
-
-[[package]]
-name = "pdfunite-cli"
-version = "0.1.0"
-
-[[package]]
 name = "pdfviewer"
 version = "0.1.0"
 dependencies = [
@@ -2603,13 +2054,6 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
-]
-
-[[package]]
-name = "pidgin-cli"
-version = "0.1.0"
-dependencies = [
- "quoting",
 ]
 
 [[package]]
@@ -2669,25 +2113,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "polkit-cli"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
-name = "polkit-gnome-cli"
-version = "0.1.0"
-
-[[package]]
-name = "polkit-kde-cli"
-version = "0.1.0"
-
-[[package]]
-name = "pomfort-cli"
-version = "0.1.0"
-
-[[package]]
 name = "pomodoro"
 version = "0.1.0"
 dependencies = [
@@ -2709,17 +2134,6 @@ version = "0.1.0"
 dependencies = [
  "tzrules",
 ]
-
-[[package]]
-name = "power-profiles-cli"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
-name = "power-profiles-daemon-cli"
-version = "0.1.0"
 
 [[package]]
 name = "powerctl"
@@ -2759,10 +2173,6 @@ name = "procinfo"
 version = "0.1.0"
 
 [[package]]
-name = "protonup-cli"
-version = "0.1.0"
-
-[[package]]
 name = "ps"
 version = "0.1.0"
 dependencies = [
@@ -2797,14 +2207,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pyinfra-cli"
-version = "0.1.0"
-
-[[package]]
-name = "qpdfview-cli"
-version = "0.1.0"
-
-[[package]]
 name = "qrcode"
 version = "0.1.0"
 dependencies = [
@@ -2812,22 +2214,6 @@ dependencies = [
  "guitk",
  "oswindow",
 ]
-
-[[package]]
-name = "qt5ct-cli"
-version = "0.1.0"
-
-[[package]]
-name = "qt6ct-cli"
-version = "0.1.0"
-
-[[package]]
-name = "qucs-cli"
-version = "0.1.0"
-
-[[package]]
-name = "quota"
-version = "0.1.0"
 
 [[package]]
 name = "quote"
@@ -2889,10 +2275,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "remmina-cli"
-version = "0.1.0"
-
-[[package]]
 name = "remotedesktop"
 version = "0.1.0"
 dependencies = [
@@ -2923,19 +2305,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "revolt-cli"
-version = "0.1.0"
-
-[[package]]
 name = "rfkill"
 version = "0.1.0"
 dependencies = [
  "quoting",
 ]
-
-[[package]]
-name = "rmp-cli"
-version = "0.1.0"
 
 [[package]]
 name = "route"
@@ -2973,15 +2347,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "sakura-cli"
-version = "0.1.0"
-
-[[package]]
 name = "sanitize"
-version = "0.1.0"
-
-[[package]]
-name = "satty-cli"
 version = "0.1.0"
 
 [[package]]
@@ -2990,14 +2356,6 @@ version = "0.1.0"
 dependencies = [
  "quoting",
 ]
-
-[[package]]
-name = "scilab-cli"
-version = "0.1.0"
-
-[[package]]
-name = "scim-cli"
-version = "0.1.0"
 
 [[package]]
 name = "scp"
@@ -3013,10 +2371,6 @@ version = "0.1.0"
 dependencies = [
  "quoting",
 ]
-
-[[package]]
-name = "screengrab-cli"
-version = "0.1.0"
 
 [[package]]
 name = "screenrecorder"
@@ -3117,10 +2471,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sfwbar-cli"
-version = "0.1.0"
-
-[[package]]
 name = "sha1"
 version = "0.1.0"
 dependencies = [
@@ -3144,23 +2494,7 @@ name = "shell"
 version = "0.1.0"
 
 [[package]]
-name = "shotman-cli"
-version = "0.1.0"
-
-[[package]]
-name = "shotwell-cli"
-version = "0.1.0"
-
-[[package]]
 name = "shuf"
-version = "0.1.0"
-
-[[package]]
-name = "shutter-cli"
-version = "0.1.0"
-
-[[package]]
-name = "signal-desktop-cli"
 version = "0.1.0"
 
 [[package]]
@@ -3169,21 +2503,6 @@ version = "0.1.0"
 dependencies = [
  "guitk",
  "oswindow",
-]
-
-[[package]]
-name = "simplenote-cli"
-version = "0.1.0"
-
-[[package]]
-name = "skanlite-cli"
-version = "0.1.0"
-
-[[package]]
-name = "skopeo"
-version = "0.1.0"
-dependencies = [
- "quoting",
 ]
 
 [[package]]
@@ -3220,10 +2539,6 @@ dependencies = [
  "oswindow",
  "randrange",
 ]
-
-[[package]]
-name = "snap"
-version = "0.1.0"
 
 [[package]]
 name = "snippets"
@@ -3276,14 +2591,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sparrow-cli"
-version = "0.1.0"
-
-[[package]]
-name = "spectacle-cli"
-version = "0.1.0"
-
-[[package]]
 name = "speedtest"
 version = "0.1.0"
 dependencies = [
@@ -3312,10 +2619,6 @@ dependencies = [
  "guitk",
  "oswindow",
 ]
-
-[[package]]
-name = "squeekboard-cli"
-version = "0.1.0"
 
 [[package]]
 name = "ss"
@@ -3379,14 +2682,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "st-cli"
-version = "0.1.0"
-
-[[package]]
-name = "stapler-cli"
-version = "0.1.0"
-
-[[package]]
 name = "startupmanager"
 version = "0.1.0"
 dependencies = [
@@ -3439,13 +2734,6 @@ name = "stty"
 version = "0.1.0"
 
 [[package]]
-name = "stylix-cli"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "su"
 version = "0.1.0"
 dependencies = [
@@ -3481,22 +2769,6 @@ dependencies = [
  "procinfo",
  "quoting",
 ]
-
-[[package]]
-name = "swappy-cli"
-version = "0.1.0"
-
-[[package]]
-name = "swayidle-cli"
-version = "0.1.0"
-
-[[package]]
-name = "swaync-cli"
-version = "0.1.0"
-
-[[package]]
-name = "switchboardlive-cli"
-version = "0.1.0"
 
 [[package]]
 name = "syn"
@@ -3557,19 +2829,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "system-log-viewer-cli"
-version = "0.1.0"
-
-[[package]]
 name = "systemctl"
 version = "0.1.0"
 dependencies = [
  "procinfo",
 ]
-
-[[package]]
-name = "systemd-resolved"
-version = "0.1.0"
 
 [[package]]
 name = "systemrestore"
@@ -3614,15 +2878,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "taskset"
-version = "0.1.0"
-
-[[package]]
 name = "tcpdump"
-version = "0.1.0"
-
-[[package]]
-name = "teams-cli"
 version = "0.1.0"
 
 [[package]]
@@ -3631,10 +2887,6 @@ version = "0.1.0"
 dependencies = [
  "quoting",
 ]
-
-[[package]]
-name = "telegram-desktop-cli"
-version = "0.1.0"
 
 [[package]]
 name = "telnet"
@@ -3677,23 +2929,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "tiled-cli"
-version = "0.1.0"
-
-[[package]]
-name = "timedatectl"
-version = "0.1.0"
-
-[[package]]
 name = "timeout"
 version = "0.1.0"
 dependencies = [
  "quoting",
 ]
-
-[[package]]
-name = "tiramisu-cli"
-version = "0.1.0"
 
 [[package]]
 name = "tmux-app"
@@ -3703,10 +2943,6 @@ dependencies = [
  "guitk",
  "oswindow",
 ]
-
-[[package]]
-name = "tofi-cli"
-version = "0.1.0"
 
 [[package]]
 name = "top"
@@ -3756,26 +2992,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "ttfautohint-cli"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "tuned"
 version = "0.1.0"
 dependencies = [
  "quoting",
 ]
-
-[[package]]
-name = "tuned-cli"
-version = "0.1.0"
-
-[[package]]
-name = "tym-cli"
-version = "0.1.0"
 
 [[package]]
 name = "typingtutor"
@@ -3804,10 +3025,6 @@ dependencies = [
  "procinfo",
  "quoting",
 ]
-
-[[package]]
-name = "uim-cli"
-version = "0.1.0"
 
 [[package]]
 name = "uname"
@@ -3886,13 +3103,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "useradd-cli"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "useradm"
 version = "0.1.0"
 dependencies = [
@@ -3910,14 +3120,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "valentina-cli"
-version = "0.1.0"
-
-[[package]]
-name = "veusz-cli"
-version = "0.1.0"
-
-[[package]]
 name = "vi"
 version = "0.1.0"
 dependencies = [
@@ -3932,18 +3134,6 @@ dependencies = [
  "guitk",
  "oswindow",
 ]
-
-[[package]]
-name = "vinagre-cli"
-version = "0.1.0"
-
-[[package]]
-name = "virt-manager-cli"
-version = "0.1.0"
-
-[[package]]
-name = "virt-viewer-cli"
-version = "0.1.0"
 
 [[package]]
 name = "vkloader"
@@ -3979,32 +3169,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "wasabi-cli"
-version = "0.1.0"
-
-[[package]]
 name = "watch"
 version = "0.1.0"
 dependencies = [
  "libcall",
  "quoting",
 ]
-
-[[package]]
-name = "wayland-info-cli"
-version = "0.1.0"
-
-[[package]]
-name = "wayland-logout-cli"
-version = "0.1.0"
-
-[[package]]
-name = "waypipe-cli"
-version = "0.1.0"
-
-[[package]]
-name = "wbg-cli"
-version = "0.1.0"
 
 [[package]]
 name = "wc"
@@ -4021,10 +3191,6 @@ dependencies = [
  "guitk",
  "oswindow",
 ]
-
-[[package]]
-name = "webots-cli"
-version = "0.1.0"
 
 [[package]]
 name = "wget"
@@ -4058,38 +3224,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "winecfg-cli"
-version = "0.1.0"
-
-[[package]]
-name = "wings3d-cli"
-version = "0.1.0"
-
-[[package]]
 name = "wipefs"
-version = "0.1.0"
-
-[[package]]
-name = "wl-clipboard-cli"
-version = "0.1.0"
-
-[[package]]
-name = "wl-kbptr-cli"
-version = "0.1.0"
-
-[[package]]
-name = "wl-protocols-cli"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
-name = "wlopm-cli"
-version = "0.1.0"
-
-[[package]]
-name = "wofi-cli"
 version = "0.1.0"
 
 [[package]]
@@ -4110,10 +3245,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "workday-cli"
-version = "0.1.0"
-
-[[package]]
 name = "worldclock"
 version = "0.1.0"
 dependencies = [
@@ -4126,32 +3257,6 @@ dependencies = [
 [[package]]
 name = "wpa"
 version = "0.1.0"
-
-[[package]]
-name = "wpaperd-cli"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
-name = "wtype-cli"
-version = "0.1.0"
-
-[[package]]
-name = "wvkbd-cli"
-version = "0.1.0"
-
-[[package]]
-name = "x2go-cli"
-version = "0.1.0"
-
-[[package]]
-name = "x86-energy-perf-cli"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
 
 [[package]]
 name = "xargs"
@@ -4172,59 +3277,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "xdg-dbus-proxy-cli"
-version = "0.1.0"
-
-[[package]]
-name = "xdg-desktop-portal-cli"
-version = "0.1.0"
-
-[[package]]
-name = "xdg-desktop-portal-wlr-cli"
-version = "0.1.0"
-
-[[package]]
-name = "xdg-user-dirs-cli"
-version = "0.1.0"
-
-[[package]]
-name = "xdg-utils-cli"
-version = "0.1.0"
-
-[[package]]
-name = "xfce-polkit-cli"
-version = "0.1.0"
-
-[[package]]
-name = "xmagnify-cli"
-version = "0.1.0"
-
-[[package]]
-name = "xournalpp-cli"
-version = "0.1.0"
-
-[[package]]
-name = "xreader-cli"
-version = "0.1.0"
-
-[[package]]
-name = "xschem-cli"
-version = "0.1.0"
-
-[[package]]
-name = "yacas-cli"
-version = "0.1.0"
-
-[[package]]
 name = "yacc"
 version = "0.1.0"
 dependencies = [
  "quoting",
 ]
-
-[[package]]
-name = "yad-cli"
-version = "0.1.0"
 
 [[package]]
 name = "yahtzee"
@@ -4237,10 +3294,6 @@ dependencies = [
 
 [[package]]
 name = "yamldoc"
-version = "0.1.0"
-
-[[package]]
-name = "yuzu-cli"
 version = "0.1.0"
 
 [[package]]
@@ -4259,7 +3312,3 @@ dependencies = [
  "crc32",
  "deflate",
 ]
-
-[[package]]
-name = "zoom-cli"
-version = "0.1.0"

@@ -56749,3 +56749,57 @@ This is the same defect class the tree is full of -- `head -10` hid an existing
 no coverage existed -- and it is worth writing down because knowing about it
 did not stop me repeating it three times in one session. The fix is mechanical
 (don't pipe a count through head), not attentional.
+
+================================================================================
+JUDGMENT CALL 2026-09-10: userspace/bridge deleted under design-decisions 1006,
+though the audit never flagged it
+================================================================================
+
+**What I decided.** `userspace/bridge` -- 4,255 lines, three tool names
+(`bridge`, `tc`, `ebtables`), 170 tests -- is deleted, on my own judgement,
+extending the operator's 1006 decision to a crate `scripts/audit-cli-fabrication.py`
+did not detect.
+
+**Why it qualifies.** 1006 defines a fabricating crate as one that "performs no
+I/O of any kind and nonetheless states a fact". `bridge` performs no I/O of any
+kind: no `std::fs`, no `std::net`, no `Command`, no `libc`, no `unsafe`, no
+syscall, and an empty `[dependencies]`. It has 96 output calls, every one of
+them from seven `sample_*` functions returning hard-coded bridge ports, FDB and
+MDB entries, VLANs, qdiscs, classes and filters. It meets the definition
+exactly; only the detector missed it.
+
+**Why the detector missed it.** `FACT_PATTERNS` requires a measurement, a
+three-digit count, a `PASS`/`OK`/`found`, or a unit like MB or Hz. `bridge`
+prints interface names and STP states -- facts with no numbers in them. The
+audit's own docstring already says the number is a floor; this is a second
+mechanism by which it is one, distinct from the whole-crate-exoneration
+mechanism `sysstat` demonstrated.
+
+**Worse than showing invented state: accepting mutations.** `bridge link set`
+mutated a local copy of the sample data and returned 0. So
+`bridge link set dev eth0 state forwarding` reported success for a
+configuration change that touched nothing at all.
+
+**Why not make it honest instead, as `systemctl` was?** Because there is
+nothing for it to be honest *about*. `systemctl` was kept because it can still
+read `/proc/servicemgr` and report a true partial fact, so it does real work
+and refuses only what it cannot do. For `bridge` there is no syscall, no procfs
+entry and no service: `SYS_NET_*` covers interfaces, routes, firewall and raw
+sockets, and none of bridge, qdisc, class, filter, FDB, MDB, VLAN or ebtables.
+`kernel/src/net/bridge.rs` exists but is internal to container networking
+(`cnetwork`) and is not exposed to userspace at all. A refusing stub is
+precisely what the operator rejected in 1006.
+
+**Checks run before deleting**, the same three as the 2,285: nothing in any
+Cargo.toml depends on it; the three names appear in no rootfs staging rule and
+in no multicall-alias baseline entry; and the no-I/O property was re-derived
+from the source rather than assumed.
+
+**If it is ever wanted back**, it comes back when the kernel exposes bridge and
+traffic-control state, which is the 1006 rule: a name that could be ported one
+day is added when it is implemented, not before.
+
+**What the operator may want to revisit.** This is one crate's worth of
+judgement applied to a rule the operator wrote for an audited set. If the
+intent was narrower -- delete only what the audit flagged -- this should come
+back.

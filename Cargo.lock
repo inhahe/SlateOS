@@ -3163,6 +3163,7 @@ dependencies = [
  "ere",
  "localtime",
  "modechange",
+ "procinfo",
  "pwdb",
  "quoting",
  "scratchdir",

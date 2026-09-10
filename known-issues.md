@@ -126836,7 +126836,12 @@ just did not use it, which no test could see because none of them crossed a C
 boundary.
 
 
-## TD-B-TEN-PROC-PARSERS-IN-USERSPACE-AND-ONE-CRATE (lane B, 2026-09-10)
+## TD-B-FIFTY-PROC-READERS-DUPLICATE-WHAT-PROCINFO-ALREADY-PARSES (lane B, 2026-09-10)
+
+> **Renamed and corrected 2026-09-10.** This was
+> `TD-B-TEN-PROC-PARSERS-IN-USERSPACE-AND-ONE-CRATE`, and **ten was wrong by a
+> factor of five.** The correction is at the bottom, under "The count was
+> wrong, and how", because the way it was wrong matters more than the number.
 
 **In short:** ten programs in `userspace/` each parse `/proc` themselves. There
 is now one crate that does it properly, and nine of them still do not use it.
@@ -126910,10 +126915,52 @@ why a crate that disclaims formatting owns one formatter: the crate hands out
 **bytes** on purpose, so every caller inherits the same problem, and one
 correct answer is the point.
 
-Remaining: `free`, `coreutils`'s `free`, `earlyoom`, `iostat`, `hwinfo`,
-`lsmem`, `numactl`, `hwclock`. The two `free`s are next and should be compared
-against each other first -- two implementations of one command in one tree is
-the sharpest available test of whether they already disagree.
+**Three down.** `coreutils`'s own `ps` moved on 2026-09-10 -- a reader the
+original list did not contain at all, which is how the miscount came to light.
+It gained two things it could not do for itself: the **real UID** (it was
+`uid: 0` with a comment saying "would need `/proc/<pid>/status`", so `ps -f`
+showed every process as root) and a `comm` that is not UTF-8 (`read_to_string`
+failed and the process was skipped by `continue`).
+
+### The count was wrong, and how
+
+The original entry said **ten** readers. The real numbers, derived rather than
+grepped for:
+
+| | |
+|---|---|
+| files under `userspace/` and `apps/` that open a `/proc` path and do not use `procinfo` | **95** |
+| of those, files opening something `procinfo` already parses | **50** |
+
+Ten came from `grep -rln "/proc/stat\|/proc/meminfo"` -- a command that answers
+*"which files mention these two paths"* -- and the answer was written down as
+*"which files parse `/proc`"*. Every reader that touches only
+`/proc/<pid>/...` was invisible to it, which is most of them, and
+`coreutils`'s `ps` -- one of the two `ps` implementations in this tree -- was
+among the missing.
+
+**This is the same defect the entry is about, one level up.** A number derived
+from a pattern that answered a narrower question than the one being asked, and
+reported at the width of the question. It also travelled: the figure went into
+a reply on lane C's request, so they were told ten as well. That reply is
+corrected.
+
+### What the real number changes
+
+"One program per commit" is a plan for ten. For fifty it is not a plan, and
+saying so is the useful part of the correction. What actually follows:
+
+* **Convert on contact.** A file that is being edited for another reason moves;
+  nobody schedules fifty commits.
+* **The ones worth seeking out** are those whose parsing is *load-bearing and
+  subtle* -- anything reading `/proc/<pid>/stat` (the `comm` field mis-numbers
+  every field after it if split naively) or converting RSS pages (16 KiB here,
+  4 KiB in every published example). `top`, `pgrep`, `pstree`, `w`, `who` and
+  `vmstat` are in that set.
+* **The other 45** mostly open one path for one purpose -- `/proc/self/exe`,
+  `/proc/mounts`, `/proc/net/*` -- and are not duplicating `procinfo` at all.
+  They are in the 95 and not in the 50, and lumping them together is what made
+  the first number meaningless in the other direction.
 
 Remaining: `ps`, `free`, `coreutils`'s `free`, `earlyoom`, `iostat`, `hwinfo`,
 `lsmem`, `numactl`, `hwclock`. `ps` is the one that still carries its own
@@ -126995,3 +127042,45 @@ next to it is worse than one that under-reports consistently.
 asserts the current under-report *and* asserts `busy()` sees all of it, so
 fixing this is a deliberate change with a failing test rather than a silent
 one.
+
+
+## TD-B-THIRTY-NINE-COMMAND-NAMES-ARE-BUILT-BY-TWO-CRATES-EACH (lane B, 2026-09-10)
+
+**In short:** thirty-nine command names are produced by two different crates in
+this tree. `free`, `ps`, `df`, `sed`, `tar`, `wc`, `who`, `uname` and thirty-one
+others each exist twice -- once as `userspace/coreutils/src/bin/<name>.rs` and
+once as `userspace/<name>/`.
+
+**Derived, not listed:** the set of `coreutils` bin targets intersected with the
+`name =` of every other `userspace/*/Cargo.toml`. 84 coreutils binaries, 2762
+other userspace crates, 39 names in both.
+
+**It does not cut one way, which is why this is a question and not a chore.**
+Two measured examples:
+
+* **`free`** -- `coreutils`'s is a 1876-line transcription of procps-ng 4.0.4,
+  measured against the real binary, and its own module doc lists the defects of
+  "the implementation this replaces": invented flags, wrong header widths,
+  `shared` hardcoded to zero, and `used = total - free - buffers - cached`
+  where upstream's is `MemTotal - MemAvailable`. **`userspace/free` still has
+  every one of them**, including that `used`. Here `coreutils` plainly wins.
+* **`ps`** -- `coreutils`'s is 405 lines and supports `-e -f`;
+  `userspace/ps` is 1022 lines with a full column selection. Here the
+  standalone plainly wins.
+
+So the answer is per command, and for some pairs it is "merge", not "pick".
+
+**Nothing collides today**, because `scripts/create-ext4-rootfs.sh` stages
+neither -- no `userspace/` binary reaches `/bin` yet. The collision is latent
+and arrives whole on the day they are staged, which is the worst time to
+discover thirty-nine of them.
+
+**Why this is not a lane-B decision to make alone.** Deleting a working program
+is user-visible, and doing it thirty-nine times on my own judgement is a policy
+rather than a fix. What lane B can do without asking is the evidence: for each
+pair, which is the measured port and which is the invention. `free` and `ps`
+above are two of thirty-nine; the rest are unexamined.
+
+**Related but distinct** from the `/proc` entry above. That one is two parsers
+of one *file*; this is two implementations of one *command*, and a pair can be
+guilty of both -- the two `free`s are.

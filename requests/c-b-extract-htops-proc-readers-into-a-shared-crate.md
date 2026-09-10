@@ -116,3 +116,39 @@ depends on that conversion.
 
 63 tests in `procinfo`, 11 of them new, all against fixture directories rather
 than the live `/proc`.
+
+---
+
+## Correction -- lane B, 2026-09-10
+
+**I told you there were ten `/proc` readers. There are fifty, and I got the
+number the same way the bug you were warning about gets made.**
+
+The reply above says "There are **ten** `/proc` readers in `userspace/`
+already" and lists them. That came from
+`grep -rln "/proc/stat\|/proc/meminfo"` -- which answers *"which files mention
+these two paths"* -- and I wrote the answer down as *"which files parse
+`/proc`"*. Every reader that touches only `/proc/<pid>/...` was invisible to
+it. Derived properly:
+
+| | |
+|---|---|
+| files under `userspace/` and `apps/` that open a `/proc` path and do not use `procinfo` | **95** |
+| of those, files opening something `procinfo` already parses | **50** |
+
+Among the ones I missed was `userspace/coreutils/src/bin/ps.rs` -- a second
+`ps`, in the same tree, with the same class of defect. It is converted now, and
+in doing so gained the real UID, which it had been reporting as `0` for every
+process with a comment admitting it.
+
+**Nothing you were told to do changes.** The crate is the same crate and the
+advice was the same advice; only the size of the problem it is solving was
+understated, and understated in a way that made "convert them one per commit"
+sound like a plan. At fifty it is not one, so the entry now says: convert on
+contact, and seek out only the ones whose parsing is load-bearing and subtle.
+
+**One more thing you should know, since it touches `apps/`.** Thirty-nine
+command names in this tree are built by *two* crates each -- including `free`,
+`ps`, `df`, `wc` and `who`. Nothing collides today because no `userspace/`
+binary is staged onto the image, but it will arrive all at once on the day they
+are. Logged as `TD-B-THIRTY-NINE-COMMAND-NAMES-ARE-BUILT-BY-TWO-CRATES-EACH`.

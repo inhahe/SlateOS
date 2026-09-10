@@ -157,9 +157,16 @@ IO_MARKERS = (
     "OpenOptions",
     "read_to_string",
     "read_dir",
-    "std::net",
+    # NOT `std::net`, which was a marker until 2026-09-10 and exonerated
+    # `ipcalc` for `use std::net::{Ipv4Addr, Ipv6Addr}`. Those are address
+    # *types* -- parsing and arithmetic, no socket anywhere in the crate. The
+    # module is mostly pure data structures; only the four names below open
+    # anything, and all four were already listed, so this is a narrowing with
+    # no loss of coverage.
     "TcpStream",
+    "TcpListener",
     "UdpSocket",
+    "ToSocketAddrs",
     "process::Command",
     "Command::new",
     "libc::",
@@ -244,6 +251,14 @@ FACT_PATTERNS = (
 PURE_ARGV = {
     "echo", "basename", "dirname", "printf", "seq", "yes", "true", "false",
     "expr", "test", "sleep", "arch", "uname-lite", "factor", "shuf-lite",
+    # Subnet arithmetic: given an address and a prefix it computes the
+    # network, broadcast, mask and host range. Every answer is a function of
+    # the arguments and there is nothing on the machine it could consult --
+    # `ipcalc 10.0.0.0/8` is the same on every host in the world. It was
+    # exonerated by `std::net` until that marker was narrowed above, and
+    # belongs here rather than in the deletion set: rule 2 correctly asks the
+    # question, and this is the answer.
+    "ipcalc",
 }
 
 
@@ -359,6 +374,17 @@ def read_baseline() -> set[str] | None:
 # The lookbehind is only for word characters, so `io::stdin` still matches
 # inside `std::io::stdin` (the preceding `:` is not a word character) while
 # `nix::` no longer matches inside `unix::`.
+def _one_marker_re(marker: str) -> re.Pattern[str]:
+    """One marker, boundary-guarded. Cached so `--markers` is not quadratic."""
+    rx = _MARKER_CACHE.get(marker)
+    if rx is None:
+        rx = re.compile(f"(?<![A-Za-z0-9_]){re.escape(marker)}")
+        _MARKER_CACHE[marker] = rx
+    return rx
+
+
+_MARKER_CACHE: dict[str, re.Pattern[str]] = {}
+
 _MARKER_RE = re.compile(
     "|".join(f"(?<![A-Za-z0-9_]){re.escape(m)}" for m in IO_MARKERS)
 )
@@ -512,6 +538,17 @@ def _self_test() -> int:
     expect("argv-only tools are exempt from both rules",
            reason_to_delete(sorted(PURE_ARGV)[0], USAGE), None)
 
+    # `std::net` is mostly types. Importing an address is not opening a
+    # socket, and `ipcalc` did nothing else with it.
+    IPCALC = ('use std::net::Ipv4Addr;\nfn main() { '
+              'println!("Network:   10.0.0.0/8"); }')
+    expect("importing an address type is not networking",
+           has_io_marker(IPCALC), False)
+    expect("...and the socket types still are",
+           has_io_marker("let s = TcpStream::connect(a)?;"), True)
+    expect("...while ipcalc itself is answered by PURE_ARGV, not deletion",
+           reason_to_delete("ipcalc", IPCALC), None)
+
     # Argv parsing is unsafe and is not I/O; inline assembly is I/O.
     ARGV = ('fn main(argc: i32, argv: *const *const u8) -> i32 { '
             'let a = unsafe { core::slice::from_raw_parts(argv, argc as usize) }; '
@@ -581,6 +618,60 @@ def _self_test() -> int:
     return 1 if failures else 0
 
 
+def _marker_report(userspace: Path) -> int:
+    """Which crates does each marker exonerate *by itself*?
+
+    Every marker bug found so far did its damage in exactly one way: a crate
+    whose ONLY marker was the bad one. A marker that is always corroborated by
+    another cannot hurt anyone even if it is wrong, so this report is the
+    audit's own risk surface, smallest-first to read.
+
+    Four were found by running this query by hand on 2026-09-10, which is why
+    it is a flag now rather than a memory:
+
+      `nix::`     matched inside `std::os::unix::ffi::OsStrExt` -- and in
+                  `cargo-bloat` the match was inside a line the crate INVENTS,
+                  so a fabrication exonerated its own author.
+      `unsafe {`  is required to walk argv, so every crate that reads its own
+                  command line was cleared for doing so. Hid four commands.
+      `std::net`  matched `use std::net::Ipv4Addr` -- an address type, not a
+                  socket. Hid `ipcalc`, which is pure argv arithmetic.
+      (`asm!`)    the converse: inline assembly IS the syscall route for a
+                  freestanding binary and was missing, so removing `unsafe {`
+                  alone would have deleted three real programs.
+
+    Read a line as: "if this marker is wrong, these crates are wrongly clean."
+    """
+    sole: dict[str, list[str]] = {}
+    corroborated = set()
+    for crate in sorted(p for p in userspace.iterdir() if p.is_dir()):
+        text = crate_sources(crate)
+        if not text:
+            continue
+        body = strip_tests(text)
+        hit = [m for m in IO_MARKERS if _one_marker_re(m).search(body)]
+        if len(hit) == 1:
+            sole.setdefault(hit[0], []).append(crate.name)
+        corroborated.update(hit)
+
+    print("Markers that are the sole exoneration for some crate.")
+    print("If the marker is wrong, these crates are wrongly clean.\n")
+    for m, names in sorted(sole.items(), key=lambda kv: len(kv[1])):
+        print(f"  {m!r:18s} {len(names):3d}  {', '.join(sorted(names))}")
+    quiet = [m for m in IO_MARKERS if m not in sole]
+    print(f"\nNever a sole exoneration ({len(quiet)}): always corroborated by")
+    print("another marker, so a mistake in one of these costs nothing on its")
+    print("own. They still want checking if they become the only hit.")
+    print("  " + ", ".join(repr(m) for m in quiet))
+    unused = [m for m in IO_MARKERS if m not in corroborated]
+    if unused:
+        print(f"\nMatched no crate at all ({len(unused)}) -- either the tree "
+              f"stopped using them or they never worked:")
+        print("  " + ", ".join(repr(m) for m in unused))
+    sys.stdout.flush()
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--list", action="store_true", help="print every hit")
@@ -589,6 +680,8 @@ def main() -> int:
                     help="verdict against the pinned baseline; 1 if it rose")
     ap.add_argument("--pin", action="store_true",
                     help="rewrite the baseline from the current tree")
+    ap.add_argument("--markers", action="store_true",
+                    help="per-marker: which crates rest on it alone")
     ap.add_argument("--self-test", "--selftest", dest="self_test",
                     action="store_true", help="run this script's own fixtures")
     args = ap.parse_args()
@@ -664,6 +757,9 @@ def main() -> int:
         print(f"audit-cli-fabrication: OK ({len(current)} pinned, "
               f"{total} crate(s) scanned)")
         return 0
+
+    if args.markers:
+        return _marker_report(userspace)
 
     rule1 = sum(1 for w in reasons.values() if w.startswith("states"))
     rule2 = len(reasons) - rule1

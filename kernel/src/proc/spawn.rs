@@ -8987,12 +8987,22 @@ pub fn self_test_cctty() -> KernelResult<()> {
 /// Run `ctest-altstack` in ring 3: the alternate signal stack, end to end.
 ///
 /// Lane B's fixture, requested in
-/// `requests/b-a-honour-sa-onstack-when-building-the-signal-frame.md`. Eleven
-/// checks in three groups: that the reported state walks `SS_DISABLE` -> 0 ->
-/// `SS_ONSTACK` -> 0 as POSIX says; that a handler with `SA_ONSTACK` leaves its
-/// frames inside the registered region; and -- the group that makes the suite
-/// worth running -- that a handler *without* `SA_ONSTACK`, and one with it but
-/// no stack registered, leave their frames somewhere else.
+/// `requests/b-a-honour-sa-onstack-when-building-the-signal-frame.md`. Checks
+/// numbered 1-37, in four groups: that the reported state walks `SS_DISABLE` ->
+/// 0 -> `SS_ONSTACK` -> 0 as POSIX says; that a handler with `SA_ONSTACK`
+/// leaves its frames inside the registered region; -- the group that makes the
+/// suite worth running -- that a handler *without* `SA_ONSTACK`, and one with
+/// it but no stack registered, leave their frames somewhere else; and that a
+/// handler, flag and mask survive a round trip through `sigaction`.
+///
+/// The fourth group is not about alternate stacks at all. It is here because
+/// writing this fixture is what found the bug it checks: our libc's `struct
+/// sigaction` carried the *kernel's* field order, so every `sa_flags` a C
+/// program passed was read out of the freshly-zeroed first word of its
+/// `sa_mask` and silently dropped. Keeping the check beside the feature it was
+/// found by is cheaper than a fixture of its own, and the exit-code hint below
+/// carries the warning that matters -- that the kernel's layout is *correctly*
+/// different and must not be "fixed" to match.
 ///
 /// Those two negatives are the point. Without them the suite passes against an
 /// implementation that switches unconditionally, which is a worse bug than the
@@ -9085,7 +9095,7 @@ pub fn self_test_ctest_altstack() -> KernelResult<()> {
     }
 
     if exit_code != Some(EXPECTED) {
-        // The fixture numbers its checks 1-31 in source order and returns the
+        // The fixture numbers its checks 1-37 in source order and returns the
         // first that failed, so the code localises the failure without needing
         // any output from it. Grouping them is all the kernel can usefully add.
         let hint = match exit_code {
@@ -9107,6 +9117,25 @@ pub fn self_test_ctest_altstack() -> KernelResult<()> {
                  than the one this feature fixes: it relocates every handler in \
                  the process onto one buffer"
             }
+            Some(c) if (32..=37).contains(&c) => {
+                // Not lane A's code, and that is exactly why it gets a hint:
+                // the wrong repair is the attractive one. Someone holding
+                // "sigaction round-trip failed" next to elf.rs sees two structs
+                // that disagree and makes them agree, which breaks the kernel
+                // path silently, in the direction nothing tests.
+                " — the sigaction round-trip failed: a handler, flag or mask \
+                 written through sigaction did not come back from it. That is \
+                 the libc's struct layout, not the alternate stack, and it is \
+                 in this fixture because writing the fixture is what found the \
+                 bug. Do NOT \"fix\" kernel/src/proc/elf.rs to match: the \
+                 userspace struct sigaction (glibc and musl alike: handler 0, \
+                 mask 8, flags 136, restorer 144) and the kernel's \
+                 rt_sigaction struct (handler 0, flags 8, restorer 16, mask \
+                 24) are genuinely different layouts of the same 152 bytes, \
+                 and elf.rs deliberately builds the kernel one. sa_handler is \
+                 at offset 0 in both, which is why handlers worked for months \
+                 while every flag a C program passed was dropped"
+            }
             _ => "",
         };
         serial_println!(
@@ -9122,7 +9151,8 @@ pub fn self_test_ctest_altstack() -> KernelResult<()> {
     serial_println!(
         "[spawn]   alternate signal stack (ring 3, native ABI: sigaltstack's reported state walks \
          SS_DISABLE/0/SS_ONSTACK/0, a handler with SA_ONSTACK runs inside the registered region, \
-         and handlers without it — or with it but no stack — do not): OK"
+         and handlers without it — or with it but no stack — do not; and a \
+         handler, flag and mask survive a round trip through sigaction): OK"
     );
     Ok(())
 }

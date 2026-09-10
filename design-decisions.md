@@ -70617,10 +70617,67 @@ the `regmatch_t` corruption in place. "The C library every port here already
 links against" was the right reason, and it turned out to be load-bearing
 within the hour.
 
-**Against it, honestly:** 28 of 98 is thin coverage on day one, and the ratchet
-freezes the other 51 rather than fixing them. (15 when this paragraph was
-first written; the by-value batch above took it to 28 within the hour, which
-is the ratchet working as intended rather than a correction to it.) The most dangerous names are in
+### Batch three: 28 → 42 types, and the worst one yet
+
+The types real ports touch — sockets, `passwd`/`group`/`shadow`, `statvfs`,
+`rusage`, `epoll_event`. Three more failures.
+
+**`struct addrinfo` had `ai_addr` and `ai_canonname` transposed**, and this one
+is not a glibc/musl divergence: both put `ai_addr` first, and ours put
+`ai_canonname` there. It was simply wrong.
+
+The consequence is the sharpest of any found today. `getaddrinfo` fills a list
+and the caller does the canonical thing:
+
+```c
+for (p = res; p; p = p->ai_next)
+    if (connect(fd, p->ai_addr, p->ai_addrlen) == 0) break;
+```
+
+`p->ai_addr` read the **canonical hostname string pointer** and handed it to
+`connect()` as a `struct sockaddr`, with `ai_addrlen` bytes of a NUL-terminated
+name reinterpreted as an address family and port. Every C program that resolves
+a name and connects to it — which is every network client — was affected.
+
+**`struct rusage` was 144 bytes against musl's 272**, and **`struct statvfs`
+was 88 against 112**. Both for the same reason: a trailing reserved array we
+had left off. Every *named* field was already at the right offset in both,
+which is exactly why neither was ever noticed — `getrusage` and `statvfs` fill
+the caller's object correctly as far as they go and then stop a third of the
+way in, leaving the tail as the caller's allocator left it.
+
+### A fourth kind of bad test: the tautology
+
+§1010 found a test asserting a wrong fact about an external library. This batch
+found a different failure:
+
+```rust
+// Statvfs has 11 u64 fields = 11 * 8 = 88 bytes.
+assert_eq!(mem::size_of::<Statvfs>(), 11 * 8);
+```
+
+That is not a claim about C at all. It restates the declaration it is checking,
+so it passes for any declaration and fails only if `size_of` is broken. **A
+test whose expected value is derived from the thing under test can only ever
+pass**, and it occupies the space where a real check would go — which is worse
+than the space being empty, because the file now looks covered.
+
+The running tally of what tests were doing in place of checking:
+
+| | shape |
+|---|---|
+| §1010, `Sigaction` | a wrong fact about an external library, stated confidently |
+| §1011, `regmatch_t` | a fact about *one* of the two libraries it named |
+| §1011, `Statvfs` | a restatement of our own declaration |
+
+All three read as though the question had been asked. None of them asked it.
+The gate asks it, on every push, against the library we actually link.
+
+**Against it, honestly:** 42 of 98 is coverage of less than half, and the
+ratchet freezes the other 37 rather than fixing them. (This paragraph has
+been rewritten twice in one session — 15, then 28, then 42 — which is the
+ratchet working as intended rather than a correction to it. The number in it
+will keep going stale; the ratchet in the script is the copy that cannot.) The most dangerous names are in
 that frozen set -- `PthreadMutexT`, `PthreadAttrT`, `CpuSetT`, `SemT` are all
 types a C program declares *by value*, where being smaller than musl's means
 our writes land past the caller's own object. The counter-argument is that a

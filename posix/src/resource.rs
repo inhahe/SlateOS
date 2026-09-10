@@ -107,6 +107,15 @@ pub struct Rusage {
     pub ru_nsignals: i64,
     pub ru_nvcsw: i64,
     pub ru_nivcsw: i64,
+    /// musl's trailing `__reserved`, which takes the struct from 144 bytes to
+    /// 272.
+    ///
+    /// Not decoration: `getrusage` and `wait4` write into an object the caller
+    /// declared, and a caller declaring musl's 272-byte one got 144 bytes
+    /// written and 128 left as it found them. The named fields were all at the
+    /// right offsets, which is why nothing looked wrong. Found by
+    /// `scripts/check-libc-abi.py`; `design-decisions.md` 1011.
+    pub __reserved: [i64; 16],
 }
 
 /// Who to query for getrusage.

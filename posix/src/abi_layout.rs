@@ -373,6 +373,189 @@ pub(crate) fn abi_asserts() -> String {
         modtime
     );
 
+    // --- the types real ports touch ------------------------------------------
+    abi!(
+        out,
+        hdrs,
+        crate::epoll::EpollEvent,
+        "struct epoll_event",
+        "sys/epoll.h",
+        events,
+        data
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::linux_time::Itimerval,
+        "struct itimerval",
+        "sys/time.h",
+        it_interval,
+        it_value
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::pwd::Passwd,
+        "struct passwd",
+        "pwd.h",
+        pw_name,
+        pw_passwd,
+        pw_uid,
+        pw_gid,
+        pw_gecos,
+        pw_dir,
+        pw_shell
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::pwd::Group,
+        "struct group",
+        "grp.h",
+        gr_name,
+        gr_passwd,
+        gr_gid,
+        gr_mem
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::resource::Rusage,
+        "struct rusage",
+        "sys/resource.h",
+        ru_utime,
+        ru_stime,
+        ru_maxrss,
+        ru_ixrss,
+        ru_idrss,
+        ru_isrss,
+        ru_minflt,
+        ru_majflt,
+        ru_nswap,
+        ru_inblock,
+        ru_oublock,
+        ru_msgsnd,
+        ru_msgrcv,
+        ru_nsignals,
+        ru_nvcsw,
+        ru_nivcsw
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::shadow::Spwd,
+        "struct spwd",
+        "shadow.h",
+        sp_namp,
+        sp_pwdp,
+        sp_lstchg,
+        sp_min,
+        sp_max,
+        sp_warn,
+        sp_inact,
+        sp_expire,
+        sp_flag
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::socket::Msghdr,
+        "struct msghdr",
+        "sys/socket.h",
+        msg_name,
+        msg_namelen,
+        msg_iov,
+        msg_iovlen,
+        msg_control,
+        msg_controllen,
+        msg_flags
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::socket::SockaddrIn,
+        "struct sockaddr_in",
+        "netinet/in.h",
+        sin_family,
+        sin_port,
+        sin_addr,
+        sin_zero
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::socket::Sockaddr,
+        "struct sockaddr",
+        "sys/socket.h",
+        sa_family,
+        sa_data
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::socket::Addrinfo,
+        "struct addrinfo",
+        "netdb.h",
+        ai_flags,
+        ai_family,
+        ai_socktype,
+        ai_protocol,
+        ai_addrlen,
+        ai_addr,
+        ai_canonname,
+        ai_next
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::socket::IfNameindex,
+        "struct if_nameindex",
+        "net/if.h",
+        if_index,
+        if_name
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::statvfs::Statvfs,
+        "struct statvfs",
+        "sys/statvfs.h",
+        f_bsize,
+        f_frsize,
+        f_blocks,
+        f_bfree,
+        f_bavail,
+        f_files,
+        f_ffree,
+        f_favail,
+        f_fsid,
+        f_flag,
+        f_namemax
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::sysv_sem::Sembuf,
+        "struct sembuf",
+        "sys/sem.h",
+        sem_num,
+        sem_op,
+        sem_flg
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::unistd::Mntent,
+        "struct mntent",
+        "mntent.h",
+        mnt_fsname,
+        mnt_dir,
+        mnt_type,
+        mnt_opts,
+        mnt_freq,
+        mnt_passno
+    );
+
     let mut src = String::new();
     let _ = writeln!(
         src,

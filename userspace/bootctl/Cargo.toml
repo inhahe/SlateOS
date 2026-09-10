@@ -3,6 +3,11 @@ name = "bootctl"
 version = "0.1.0"
 edition = "2024"
 description = "SlateOS bootctl utility"
+[dev-dependencies]
+# The install/remove tests assert on a real directory tree, because what
+# they are pinning is a side effect rather than a message.
+scratchdir = { path = "../scratchdir" }
+
 [dependencies]
 # bootctl names boot entries and the EFI loader paths read out of the ESP,
 # files this tool did not write.

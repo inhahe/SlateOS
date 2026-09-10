@@ -111,32 +111,25 @@ const SEGMENT_SIZE: usize = 65536;
 /// `struct shmid_ds` — shared memory segment data structure.
 #[repr(C)]
 pub struct ShmidDs {
-    /// Owner's UID.
-    pub shm_perm_uid: u32,
-    /// Owner's GID.
-    pub shm_perm_gid: u32,
-    /// Creator's UID.
-    pub shm_perm_cuid: u32,
-    /// Creator's GID.
-    pub shm_perm_cgid: u32,
-    /// Permissions mode.
-    pub shm_perm_mode: u16,
-    /// Padding.
-    pub _pad: u16,
+    /// Permissions, as a nested `struct ipc_perm` — see [`MsqidDs::msg_perm`]
+    /// for why these are no longer flattened.
+    pub shm_perm: crate::linux_ipc::IpcPerm,
     /// Segment size in bytes.
     pub shm_segsz: usize,
-    /// PID of last shmat/shmdt.
-    pub shm_lpid: i32,
-    /// PID of creator.
+    /// Time of the last attach.
+    pub shm_atime: i64,
+    /// Time of the last detach.
+    pub shm_dtime: i64,
+    /// Time of the last change.
+    pub shm_ctime: i64,
+    /// PID of the creator.
     pub shm_cpid: i32,
+    /// PID of the last attach or detach.
+    pub shm_lpid: i32,
     /// Number of current attaches.
     pub shm_nattch: usize,
-    /// Last attach time.
-    pub shm_atime: i64,
-    /// Last detach time.
-    pub shm_dtime: i64,
-    /// Last change time.
-    pub shm_ctime: i64,
+    /// musl's trailing `unsigned long __unused[2]`.
+    __unused: [u64; 2],
 }
 
 // ---------------------------------------------------------------------------
@@ -526,12 +519,14 @@ pub extern "C" fn shmctl(shmid: i32, cmd: i32, buf: *mut ShmidDs) -> i32 {
             // SAFETY: caller contract.
             unsafe {
                 (*buf) = ShmidDs {
-                    shm_perm_uid: 0,
-                    shm_perm_gid: 0,
-                    shm_perm_cuid: 0,
-                    shm_perm_cgid: 0,
-                    shm_perm_mode: (*m).mode,
-                    _pad: 0,
+                    shm_perm: crate::linux_ipc::IpcPerm {
+                        uid: 0,
+                        gid: 0,
+                        cuid: 0,
+                        cgid: 0,
+                        mode: u32::from((*m).mode),
+                        ..crate::linux_ipc::IpcPerm::default()
+                    },
                     shm_segsz: (*m).size,
                     shm_lpid: 0,
                     shm_cpid: 0,
@@ -539,6 +534,7 @@ pub extern "C" fn shmctl(shmid: i32, cmd: i32, buf: *mut ShmidDs) -> i32 {
                     shm_atime: 0,
                     shm_dtime: 0,
                     shm_ctime: 0,
+                    __unused: [0; 2],
                 };
             }
             0
@@ -549,9 +545,9 @@ pub extern "C" fn shmctl(shmid: i32, cmd: i32, buf: *mut ShmidDs) -> i32 {
                 return -1;
             }
             // SAFETY: caller contract.
-            let new_mode = unsafe { (*buf).shm_perm_mode };
+            let new_mode = unsafe { (*buf).shm_perm.mode };
             unsafe {
-                (*m).mode = new_mode;
+                (*m).mode = u16::try_from(new_mode & 0o7777).unwrap_or(0);
             }
             0
         }
@@ -620,12 +616,14 @@ mod tests {
     #[test]
     fn test_shmid_ds_layout() {
         let ds = ShmidDs {
-            shm_perm_uid: 1000,
-            shm_perm_gid: 1000,
-            shm_perm_cuid: 0,
-            shm_perm_cgid: 0,
-            shm_perm_mode: 0o666,
-            _pad: 0,
+            shm_perm: crate::linux_ipc::IpcPerm {
+                uid: 1000,
+                gid: 1000,
+                cuid: 0,
+                cgid: 0,
+                mode: 0o666,
+                ..crate::linux_ipc::IpcPerm::default()
+            },
             shm_segsz: 65536,
             shm_lpid: 42,
             shm_cpid: 1,
@@ -633,10 +631,11 @@ mod tests {
             shm_atime: 1000,
             shm_dtime: 0,
             shm_ctime: 500,
+            __unused: [0; 2],
         };
         assert_eq!(ds.shm_segsz, 65536);
         assert_eq!(ds.shm_nattch, 2);
-        assert_eq!(ds.shm_perm_uid, 1000);
+        assert_eq!(ds.shm_perm.uid, 1000);
     }
 
     // -- shmid encoding --
@@ -850,12 +849,14 @@ mod tests {
             let _ = shmat(id, core::ptr::null(), 0);
             let _ = shmat(id, core::ptr::null(), 0);
             let mut ds = ShmidDs {
-                shm_perm_uid: 0,
-                shm_perm_gid: 0,
-                shm_perm_cuid: 0,
-                shm_perm_cgid: 0,
-                shm_perm_mode: 0,
-                _pad: 0,
+                shm_perm: crate::linux_ipc::IpcPerm {
+                    uid: 0,
+                    gid: 0,
+                    cuid: 0,
+                    cgid: 0,
+                    mode: 0,
+                    ..crate::linux_ipc::IpcPerm::default()
+                },
                 shm_segsz: 0,
                 shm_lpid: 0,
                 shm_cpid: 0,
@@ -863,6 +864,7 @@ mod tests {
                 shm_atime: 0,
                 shm_dtime: 0,
                 shm_ctime: 0,
+                __unused: [0; 2],
             };
             assert_eq!(shmctl(id, IPC_STAT, &raw mut ds), 0);
             assert_eq!(ds.shm_nattch, 3);
@@ -897,12 +899,14 @@ mod tests {
         with_clean(|| {
             let id = shmget(IPC_PRIVATE, 8192, IPC_CREAT | 0o644);
             let mut ds = ShmidDs {
-                shm_perm_uid: 99,
-                shm_perm_gid: 99,
-                shm_perm_cuid: 99,
-                shm_perm_cgid: 99,
-                shm_perm_mode: 0,
-                _pad: 0,
+                shm_perm: crate::linux_ipc::IpcPerm {
+                    uid: 99,
+                    gid: 99,
+                    cuid: 99,
+                    cgid: 99,
+                    mode: 0,
+                    ..crate::linux_ipc::IpcPerm::default()
+                },
                 shm_segsz: 0,
                 shm_lpid: 0,
                 shm_cpid: 0,
@@ -910,10 +914,11 @@ mod tests {
                 shm_atime: 0,
                 shm_dtime: 0,
                 shm_ctime: 0,
+                __unused: [0; 2],
             };
             assert_eq!(shmctl(id, IPC_STAT, &raw mut ds), 0);
             assert_eq!(ds.shm_segsz, 8192);
-            assert_eq!(ds.shm_perm_mode, 0o644);
+            assert_eq!(ds.shm_perm.mode, 0o644);
             assert_eq!(ds.shm_nattch, 0);
         });
     }
@@ -923,12 +928,14 @@ mod tests {
         with_clean(|| {
             let id = shmget(IPC_PRIVATE, 4096, IPC_CREAT | 0o600);
             let mut ds = ShmidDs {
-                shm_perm_uid: 0,
-                shm_perm_gid: 0,
-                shm_perm_cuid: 0,
-                shm_perm_cgid: 0,
-                shm_perm_mode: 0o744,
-                _pad: 0,
+                shm_perm: crate::linux_ipc::IpcPerm {
+                    uid: 0,
+                    gid: 0,
+                    cuid: 0,
+                    cgid: 0,
+                    mode: 0o744,
+                    ..crate::linux_ipc::IpcPerm::default()
+                },
                 shm_segsz: 0,
                 shm_lpid: 0,
                 shm_cpid: 0,
@@ -936,12 +943,13 @@ mod tests {
                 shm_atime: 0,
                 shm_dtime: 0,
                 shm_ctime: 0,
+                __unused: [0; 2],
             };
             assert_eq!(shmctl(id, IPC_SET, &raw mut ds), 0);
             let mut out = ds;
-            out.shm_perm_mode = 0;
+            out.shm_perm.mode = 0;
             assert_eq!(shmctl(id, IPC_STAT, &raw mut out), 0);
-            assert_eq!(out.shm_perm_mode, 0o744);
+            assert_eq!(out.shm_perm.mode, 0o744);
         });
     }
 
@@ -967,12 +975,14 @@ mod tests {
             assert_eq!(shmctl(id, IPC_RMID, core::ptr::null_mut()), 0);
             // The id still resolves (slot in_use, generation unchanged).
             let mut ds = ShmidDs {
-                shm_perm_uid: 0,
-                shm_perm_gid: 0,
-                shm_perm_cuid: 0,
-                shm_perm_cgid: 0,
-                shm_perm_mode: 0,
-                _pad: 0,
+                shm_perm: crate::linux_ipc::IpcPerm {
+                    uid: 0,
+                    gid: 0,
+                    cuid: 0,
+                    cgid: 0,
+                    mode: 0,
+                    ..crate::linux_ipc::IpcPerm::default()
+                },
                 shm_segsz: 0,
                 shm_lpid: 0,
                 shm_cpid: 0,
@@ -980,6 +990,7 @@ mod tests {
                 shm_atime: 0,
                 shm_dtime: 0,
                 shm_ctime: 0,
+                __unused: [0; 2],
             };
             assert_eq!(shmctl(id, IPC_STAT, &raw mut ds), 0);
             assert_eq!(ds.shm_nattch, 1);

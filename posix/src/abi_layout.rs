@@ -726,25 +726,59 @@ pub(crate) fn abi_asserts() -> String {
         ut_addr_v6
     );
 
-    // Size only: ours flattens a nested C struct, so the field *names* do not
-    // correspond even where the bytes do. `msqid_ds` and `shmid_ds` open with a
-    // `struct ipc_perm`, and `timex` embeds a `struct timeval`. Checking the
-    // size is still worth doing -- these are filled in for a caller -- and the
-    // flattening is worth revisiting separately.
+    // The System V IPC trio. These were size-only while ours flattened
+    // `ipc_perm` into `msg_perm_uid` and friends -- names that correspond to
+    // nothing in C. They nest it now, so every field can be checked, which is
+    // the difference between "the bytes add up" and "the fields are where the
+    // caller will look for them".
+    abi!(
+        out,
+        hdrs,
+        crate::linux_ipc::IpcPerm,
+        "struct ipc_perm",
+        "sys/ipc.h",
+        __ipc_perm_key,
+        uid,
+        gid,
+        cuid,
+        cgid,
+        mode,
+        __ipc_perm_seq
+    );
     abi!(
         out,
         hdrs,
         crate::sysv_msg::MsqidDs,
         "struct msqid_ds",
-        "sys/msg.h"
+        "sys/msg.h",
+        msg_perm,
+        msg_stime,
+        msg_rtime,
+        msg_ctime,
+        msg_cbytes,
+        msg_qnum,
+        msg_qbytes,
+        msg_lspid,
+        msg_lrpid
     );
     abi!(
         out,
         hdrs,
         crate::sysv_shm::ShmidDs,
         "struct shmid_ds",
-        "sys/shm.h"
+        "sys/shm.h",
+        shm_perm,
+        shm_segsz,
+        shm_atime,
+        shm_dtime,
+        shm_ctime,
+        shm_cpid,
+        shm_lpid,
+        shm_nattch
     );
+
+    // Size only: ours embeds a `struct timeval` as two flattened fields, so the
+    // names do not correspond even though the bytes may.
     abi!(
         out,
         hdrs,

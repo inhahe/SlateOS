@@ -86,19 +86,12 @@ MUSL_TARGET = "x86_64-linux-musl"
 #
 # Keyed by the C type name as it appears in the assertion message, because that
 # is what the compiler gives back. Every entry must name a known-issues key.
-KNOWN_MISMATCH = {
-    "struct aiocb": "B-AIOCB-FIELD-ORDER-IS-NOT-MUSLS -- ours 136, musl 168. "
-                    "musl: fildes 0, lio_opcode 4, reqprio 8, buf 16, "
-                    "nbytes 24, sigevent 32 (64 bytes), 32 bytes of musl's own "
-                    "state, offset 128, 32 more to 168",
-    "struct msqid_ds": "B-SYSV-IPC-DS-STRUCTS-FLATTEN-IPC-PERM-AND-COME-UP-SHORT "
-                       "-- ours 80, musl 120. musl: msg_perm(48) 0, stime 48, "
-                       "rtime 56, ctime 64, cbytes 72, qnum 80, qbytes 88, "
-                       "lspid 96, lrpid 100, __unused[2] 104",
-    "struct shmid_ds": "B-SYSV-IPC-DS-STRUCTS-FLATTEN-IPC-PERM-AND-COME-UP-SHORT "
-                       "-- ours 72, musl 112. musl: shm_perm(48) 0, segsz 48, "
-                       "atime 56, dtime 64, ctime 72, cpid 80, lpid 84, "
-                       "nattch 88, __unused[2] 96",
+KNOWN_MISMATCH: dict[str, str] = {
+    # Empty, and that is a *state*, not a default: every type this table
+    # has ever held was fixed within a day of being added to it. Add an
+    # entry only with a known-issues key beside it, and delete it the moment
+    # the type passes -- the gate refuses a push that leaves a stale one
+    # here, which is the half of the ratchet that keeps the table honest.
 }
 
 
@@ -366,7 +359,9 @@ def self_test() -> int:
     # has nothing to do with the ratchet.
     victim = next(iter(sorted(BASELINE_UNCOVERED - covered)), None)
     if victim is None:
-        failures.append("every baseline name is now covered; the ratchet cannot be tested")
+        # Not a failure: it means every type that crosses the boundary is
+        # checked, which is the goal. Say so rather than reporting it as one.
+        print("check-libc-abi --self-test: baseline empty; coverage is complete")
     elif check_coverage(BASELINE_UNCOVERED - {victim}) != [victim]:
         failures.append(
             f"removing {victim} from the baseline did not make the ratchet report it"
@@ -374,16 +369,21 @@ def self_test() -> int:
 
     # The known-mismatch matcher, including the prefix hazard that makes it
     # "longest match" rather than "first match".
-    if known_owner("struct aiocb size") != "struct aiocb":
-        failures.append("known_owner did not match a size message")
-    if known_owner("struct aiocb.aio_offset") != "struct aiocb":
-        failures.append("known_owner did not match a field message")
-    if known_owner("struct sigaction size") is not None:
-        failures.append("known_owner claimed a type that is not listed")
+    # Driven from a *probe* table rather than the live one. These fixtures are
+    # about the matcher, not about which types happen to be broken today --
+    # tying them to a live entry meant they failed the moment the table was
+    # emptied, which is the one state it is trying hardest to reach.
     probe = dict(KNOWN_MISMATCH)
     try:
         KNOWN_MISMATCH.clear()
-        KNOWN_MISMATCH.update({"struct stat": "x", "struct statfs": "y"})
+        KNOWN_MISMATCH.update({"struct probe": "p", "struct stat": "x", "struct statfs": "y"})
+        if known_owner("struct probe size") != "struct probe":
+            failures.append("known_owner did not match a size message")
+        if known_owner("struct probe.some_field") != "struct probe":
+            failures.append("known_owner did not match a field message")
+        if known_owner("struct sigaction size") is not None:
+            failures.append("known_owner claimed a type that is not listed")
+        # Longest match, not first: `struct stat` is a prefix of `struct statfs`.
         if known_owner("struct statfs size") != "struct statfs":
             failures.append(
                 "known_owner took the shorter prefix: `struct stat` swallowed "

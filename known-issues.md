@@ -126641,7 +126641,7 @@ asserted `FD_SET_WORDS == 4 // 256 / 64`, restating the derivation under test.
 Both now assert 128 against musl's own number.
 
 
-## B-AIOCB-FIELD-ORDER-IS-NOT-MUSLS (lane B, 2026-09-09) -- KNOWN, unfixed
+## B-AIOCB-FIELD-ORDER-IS-NOT-MUSLS (lane B, 2026-09-09) -- FIXED the same day
 
 **In short:** the structure used to queue an asynchronous read or write has its
 fields in a different order from the C library's, and is smaller.
@@ -126668,9 +126668,16 @@ type -- which is a second change (`Sigevent` itself is only three fields here
 against musl's union). Doing both properly is worth its own commit rather than
 a tail-end of a gate-shrinking one.
 
-**Registered in `scripts/check-libc-abi.py`'s `KNOWN_MISMATCH`,** which reports
-it on every push without refusing, and which **fails** if it ever starts
-passing without the entry being deleted.
+**Fixed** by reordering to musl's, with musl's two runs of private state
+carried as opaque padding so the public fields either side of them are at the
+right offsets. `aio_sigevent` stays an opaque `[u8; 64]` -- the right *size*,
+measured -- rather than a real `Sigevent`, which is a separate improvement.
+
+**The doc comment said "matches the POSIX `struct aiocb` layout".** POSIX
+cannot settle that: it names the members and leaves the order to the
+implementation, so there is no *the* POSIX layout to match, only a particular C
+library's. A claim that cannot be true or false is worse than a wrong one --
+nothing can contradict it.
 
 
 ## B-SYSINFO-IS-112-BYTES-AGAINST-MUSLS-368 (lane B, 2026-09-09) -- FIXED the same day
@@ -126739,7 +126746,7 @@ confident wrong edit.
 **Registered in `KNOWN_MISMATCH`.**
 
 
-## B-SYSV-IPC-DS-STRUCTS-FLATTEN-IPC-PERM-AND-COME-UP-SHORT (lane B, 2026-09-09) -- KNOWN, unfixed
+## B-SYSV-IPC-DS-STRUCTS-FLATTEN-IPC-PERM-AND-COME-UP-SHORT (lane B, 2026-09-09) -- FIXED the same day
 
 **In short:** the two System V IPC status structures inline the permission
 block instead of nesting it, and end up smaller than the C library's.
@@ -126757,4 +126764,19 @@ why the gate checks their size only.
 **The right fix is a real `struct ipc_perm`**, shared by both, which is also
 what makes `msgctl`/`shmctl`'s `IPC_STAT` fill a caller's structure correctly.
 
-**Registered in `KNOWN_MISMATCH`.**
+**Fixed** exactly that way. `linux_ipc::IpcPerm` is the C library's structure
+and sits beside the kernel's `Ipc64Perm` in the same file, deliberately: they
+are the same 48 bytes and differ inside, and keeping them adjacent is what
+stops one type being pressed into both roles -- which is how `sigaction` came
+to carry the kernel's field order under a comment claiming glibc's.
+
+**Both are now checked field by field**, not by size: the flattening was the
+only reason the gate could not name their fields, and with it gone
+`msg_perm`/`shm_perm` and the eight fields after each are asserted against
+musl's own header.
+
+**Worth noting what was already right.** `posix/src/linux_ipc_perm_types.rs`
+has held the correct offsets -- key 0, uid 4 … mode 20, seq 24, size 48 -- the
+whole time. The knowledge was in the tree; the two structures that needed it
+just did not use it, which no test could see because none of them crossed a C
+boundary.

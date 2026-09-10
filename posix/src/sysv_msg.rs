@@ -132,34 +132,31 @@ pub const MSG_COPY: i32 = 0o40000;
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct MsqidDs {
-    /// Owner's UID.
-    pub msg_perm_uid: u32,
-    /// Owner's GID.
-    pub msg_perm_gid: u32,
-    /// Creator's UID.
-    pub msg_perm_cuid: u32,
-    /// Creator's GID.
-    pub msg_perm_cgid: u32,
-    /// Permissions mode.
-    pub msg_perm_mode: u16,
-    /// Padding.
-    pub _pad: u16,
-    /// Number of bytes currently on queue.
-    pub msg_cbytes: usize,
-    /// Number of messages currently on queue.
-    pub msg_qnum: usize,
-    /// Maximum bytes allowed on queue.
-    pub msg_qbytes: usize,
-    /// PID of last msgsnd.
-    pub msg_lspid: i32,
-    /// PID of last msgrcv.
-    pub msg_lrpid: i32,
-    /// Time of last msgsnd.
+    /// Permissions, as a nested `struct ipc_perm` — the C library's layout.
+    ///
+    /// These five values used to be flattened into `msg_perm_uid` and friends,
+    /// which made the structure 80 bytes against musl's 120 and put every
+    /// field after them at the wrong offset. Found by
+    /// `scripts/check-libc-abi.py`; `design-decisions.md` §1011.
+    pub msg_perm: crate::linux_ipc::IpcPerm,
+    /// Time of the last `msgsnd`.
     pub msg_stime: i64,
-    /// Time of last msgrcv.
+    /// Time of the last `msgrcv`.
     pub msg_rtime: i64,
-    /// Time of last change.
+    /// Time of the last change.
     pub msg_ctime: i64,
+    /// Bytes currently queued.
+    pub msg_cbytes: usize,
+    /// Messages currently queued.
+    pub msg_qnum: usize,
+    /// Maximum bytes allowed on the queue.
+    pub msg_qbytes: usize,
+    /// PID of the last sender.
+    pub msg_lspid: i32,
+    /// PID of the last receiver.
+    pub msg_lrpid: i32,
+    /// musl's trailing `unsigned long __unused[2]`.
+    __unused: [u64; 2],
 }
 
 // ---------------------------------------------------------------------------
@@ -652,12 +649,14 @@ pub extern "C" fn msgctl(msqid: i32, cmd: i32, buf: *mut MsqidDs) -> i32 {
             // SAFETY: caller contract.
             unsafe {
                 (*buf) = MsqidDs {
-                    msg_perm_uid: 0,
-                    msg_perm_gid: 0,
-                    msg_perm_cuid: 0,
-                    msg_perm_cgid: 0,
-                    msg_perm_mode: (*q).mode,
-                    _pad: 0,
+                    msg_perm: crate::linux_ipc::IpcPerm {
+                        uid: 0,
+                        gid: 0,
+                        cuid: 0,
+                        cgid: 0,
+                        mode: u32::from((*q).mode),
+                        ..crate::linux_ipc::IpcPerm::default()
+                    },
                     msg_cbytes: (*q).cbytes,
                     msg_qnum: qnum,
                     msg_qbytes: (*q).qbytes,
@@ -666,6 +665,7 @@ pub extern "C" fn msgctl(msqid: i32, cmd: i32, buf: *mut MsqidDs) -> i32 {
                     msg_stime: 0,
                     msg_rtime: 0,
                     msg_ctime: 0,
+                    __unused: [0; 2],
                 };
             }
             0
@@ -676,13 +676,13 @@ pub extern "C" fn msgctl(msqid: i32, cmd: i32, buf: *mut MsqidDs) -> i32 {
                 return -1;
             }
             // SAFETY: caller contract.
-            let new_mode = unsafe { (*buf).msg_perm_mode };
+            let new_mode = unsafe { (*buf).msg_perm.mode };
             let new_qbytes = unsafe { (*buf).msg_qbytes };
             // Cap qbytes at the pool maximum — Linux requires
             // CAP_SYS_RESOURCE to raise it past msgmnb, we just clamp.
             let cap = DEFAULT_QBYTES;
             unsafe {
-                (*q).mode = new_mode;
+                (*q).mode = u16::try_from(new_mode & 0o7777).unwrap_or(0);
                 (*q).qbytes = new_qbytes.min(cap);
             }
             0
@@ -763,12 +763,14 @@ mod tests {
     #[test]
     fn test_msqid_ds_layout() {
         let ds = MsqidDs {
-            msg_perm_uid: 0,
-            msg_perm_gid: 0,
-            msg_perm_cuid: 0,
-            msg_perm_cgid: 0,
-            msg_perm_mode: 0o666,
-            _pad: 0,
+            msg_perm: crate::linux_ipc::IpcPerm {
+                uid: 0,
+                gid: 0,
+                cuid: 0,
+                cgid: 0,
+                mode: 0o666,
+                ..crate::linux_ipc::IpcPerm::default()
+            },
             msg_cbytes: 0,
             msg_qnum: 0,
             msg_qbytes: 16384,
@@ -777,8 +779,9 @@ mod tests {
             msg_stime: 0,
             msg_rtime: 0,
             msg_ctime: 0,
+            __unused: [0; 2],
         };
-        assert_eq!(ds.msg_perm_mode, 0o666);
+        assert_eq!(ds.msg_perm.mode, 0o666);
         assert_eq!(ds.msg_qbytes, 16384);
     }
 
@@ -991,12 +994,14 @@ mod tests {
             let id = msgget(IPC_PRIVATE, IPC_CREAT | 0o600);
             // Shrink qbytes via IPC_SET to force a quick "full".
             let mut ds = MsqidDs {
-                msg_perm_uid: 0,
-                msg_perm_gid: 0,
-                msg_perm_cuid: 0,
-                msg_perm_cgid: 0,
-                msg_perm_mode: 0o600,
-                _pad: 0,
+                msg_perm: crate::linux_ipc::IpcPerm {
+                    uid: 0,
+                    gid: 0,
+                    cuid: 0,
+                    cgid: 0,
+                    mode: 0o600,
+                    ..crate::linux_ipc::IpcPerm::default()
+                },
                 msg_cbytes: 0,
                 msg_qnum: 0,
                 msg_qbytes: 4,
@@ -1005,6 +1010,7 @@ mod tests {
                 msg_stime: 0,
                 msg_rtime: 0,
                 msg_ctime: 0,
+                __unused: [0; 2],
             };
             assert_eq!(msgctl(id, IPC_SET, &raw mut ds), 0);
             let m = make_msg(1, b"hello"); // 5 bytes > 4 byte limit
@@ -1102,12 +1108,14 @@ mod tests {
             let m = make_msg(1, b"xyz");
             assert_eq!(msgsnd(id, m.as_ptr(), 3, 0), 0);
             let mut ds = MsqidDs {
-                msg_perm_uid: 99,
-                msg_perm_gid: 99,
-                msg_perm_cuid: 99,
-                msg_perm_cgid: 99,
-                msg_perm_mode: 0,
-                _pad: 0,
+                msg_perm: crate::linux_ipc::IpcPerm {
+                    uid: 99,
+                    gid: 99,
+                    cuid: 99,
+                    cgid: 99,
+                    mode: 0,
+                    ..crate::linux_ipc::IpcPerm::default()
+                },
                 msg_cbytes: 99,
                 msg_qnum: 99,
                 msg_qbytes: 99,
@@ -1116,9 +1124,10 @@ mod tests {
                 msg_stime: 0,
                 msg_rtime: 0,
                 msg_ctime: 0,
+                __unused: [0; 2],
             };
             assert_eq!(msgctl(id, IPC_STAT, &raw mut ds), 0);
-            assert_eq!(ds.msg_perm_mode, 0o644);
+            assert_eq!(ds.msg_perm.mode, 0o644);
             assert_eq!(ds.msg_qnum, 1);
             assert_eq!(ds.msg_cbytes, 3);
             assert!(ds.msg_qbytes > 0);
@@ -1130,12 +1139,14 @@ mod tests {
         with_clean(|| {
             let id = msgget(IPC_PRIVATE, IPC_CREAT | 0o600);
             let mut ds = MsqidDs {
-                msg_perm_uid: 0,
-                msg_perm_gid: 0,
-                msg_perm_cuid: 0,
-                msg_perm_cgid: 0,
-                msg_perm_mode: 0o644,
-                _pad: 0,
+                msg_perm: crate::linux_ipc::IpcPerm {
+                    uid: 0,
+                    gid: 0,
+                    cuid: 0,
+                    cgid: 0,
+                    mode: 0o644,
+                    ..crate::linux_ipc::IpcPerm::default()
+                },
                 msg_cbytes: 0,
                 msg_qnum: 0,
                 msg_qbytes: 1024,
@@ -1144,14 +1155,15 @@ mod tests {
                 msg_stime: 0,
                 msg_rtime: 0,
                 msg_ctime: 0,
+                __unused: [0; 2],
             };
             assert_eq!(msgctl(id, IPC_SET, &raw mut ds), 0);
             // Confirm via IPC_STAT.
             let mut stat = ds;
-            stat.msg_perm_mode = 0;
+            stat.msg_perm.mode = 0;
             stat.msg_qbytes = 0;
             assert_eq!(msgctl(id, IPC_STAT, &raw mut stat), 0);
-            assert_eq!(stat.msg_perm_mode, 0o644);
+            assert_eq!(stat.msg_perm.mode, 0o644);
             assert_eq!(stat.msg_qbytes, 1024);
         });
     }
@@ -1161,12 +1173,14 @@ mod tests {
         with_clean(|| {
             let id = msgget(IPC_PRIVATE, IPC_CREAT | 0o600);
             let mut ds = MsqidDs {
-                msg_perm_uid: 0,
-                msg_perm_gid: 0,
-                msg_perm_cuid: 0,
-                msg_perm_cgid: 0,
-                msg_perm_mode: 0o600,
-                _pad: 0,
+                msg_perm: crate::linux_ipc::IpcPerm {
+                    uid: 0,
+                    gid: 0,
+                    cuid: 0,
+                    cgid: 0,
+                    mode: 0o600,
+                    ..crate::linux_ipc::IpcPerm::default()
+                },
                 msg_cbytes: 0,
                 msg_qnum: 0,
                 msg_qbytes: usize::MAX,
@@ -1175,6 +1189,7 @@ mod tests {
                 msg_stime: 0,
                 msg_rtime: 0,
                 msg_ctime: 0,
+                __unused: [0; 2],
             };
             assert_eq!(msgctl(id, IPC_SET, &raw mut ds), 0);
             let mut stat = ds;

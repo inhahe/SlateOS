@@ -26,6 +26,47 @@ pub const IPC_64: i32 = 0x100;
 // IpcPerm struct
 // ---------------------------------------------------------------------------
 
+/// The **C library's** `struct ipc_perm`, which is not the kernel's
+/// [`Ipc64Perm`] below it.
+///
+/// # Two structures, one name, and they are both here on purpose
+///
+/// `ipc64_perm` is what the `msgctl`/`shmctl` *syscall* moves; `ipc_perm` is
+/// what a C program declares and reads. They are the same size (48) and differ
+/// inside: the kernel's carries `seq` as an `unsigned short` at 24 with
+/// padding either side, the C library's an `int` at 24. Keeping them adjacent
+/// is deliberate — the alternative is one type serving both roles, which is
+/// how `sigaction` came to have the kernel's field order under a comment
+/// claiming it had glibc's (`design-decisions.md` §1010).
+///
+/// Offsets, measured against musl with `zig cc --target=x86_64-linux-musl`:
+/// key 0, uid 4, gid 8, cuid 12, cgid 16, mode 20, seq 24, size 48. The two
+/// trailing `long`s are musl's `__pad1`/`__pad2` and are not to be read.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct IpcPerm {
+    /// `__ipc_perm_key` — the key the segment or queue was created with.
+    pub __ipc_perm_key: i32,
+    /// Owner UID.
+    pub uid: u32,
+    /// Owner GID.
+    pub gid: u32,
+    /// Creator UID.
+    pub cuid: u32,
+    /// Creator GID.
+    pub cgid: u32,
+    /// Permission bits. `unsigned int` here, not `unsigned short`: `mode_t`.
+    pub mode: u32,
+    /// `__ipc_perm_seq` — the slot's reuse counter.
+    pub __ipc_perm_seq: i32,
+    /// musl's `__pad1`. Public only so that callers in other modules can use
+    /// struct-update syntax; the leading underscores are musl's own way of
+    /// saying it is not to be read.
+    pub __pad1: i64,
+    /// musl's `__pad2`. See [`IpcPerm::__pad1`].
+    pub __pad2: i64,
+}
+
 /// IPC permission structure (matching `struct ipc64_perm`).
 #[repr(C)]
 #[derive(Clone, Copy)]

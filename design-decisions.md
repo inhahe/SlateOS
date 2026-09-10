@@ -70885,8 +70885,48 @@ reports a defect at a location, the unit of reading is the whole declaration,
 not the lines the tool pointed at.** The gate catching it in seconds is the
 argument for the gate; needing it caught is the argument for the rule.
 
-**Against it, honestly:** 62 of 98 are checked, 3 of those are known-bad and
-unfixed, and 17 have still never been looked at. (This paragraph has been
+### KNOWN_MISMATCH is empty again, one tick after it was built
+
+All three remaining types are fixed: `aiocb` reordered to musl's, and the two
+System V status structures given a real nested `ipc_perm`. The table that was
+built to hold defects across ticks held them for one.
+
+That is the argument for the mechanism rather than against it. The alternative
+was to take each failing type back *out* of `abi_layout.rs` until someone got
+to it, which loses the measurement and makes "broken" indistinguishable from
+"never looked at". The table cost about twenty lines and made the difference
+between three recorded defects and three forgotten ones — and its second
+ratchet, the one that refuses a stale entry, is what turned each fix into a
+push that could not silently leave the exemption behind.
+
+The comment left in the empty table says so: **empty is a state, not a
+default.**
+
+### Three things the IPC fix turned up that are not about IPC
+
+**The knowledge was already in the tree.** `posix/src/linux_ipc_perm_types.rs`
+has held the correct `ipc_perm` offsets — key 0, uid 4 … mode 20, seq 24, size
+48 — the whole time, and `linux_ipc.rs` has held a kernel `ipc64_perm`. The two
+structures that needed them simply did not use them. No test could see that,
+because no test crossed a C boundary. A constant that is right and unread is
+worth exactly as much as one that is wrong.
+
+**The two structures now sit in the same file on purpose.** `IpcPerm` (the C
+library's) is declared directly above `Ipc64Perm` (the kernel's). They are the
+same 48 bytes and differ inside — the kernel's carries `seq` as a `short` with
+padding either side, the C library's an `int`. Keeping them adjacent, each
+saying what the other is, is the cheapest available defence against one type
+being pressed into both roles, which is precisely how §1010 happened.
+
+**`aiocb`'s doc claimed something unfalsifiable.** It said it "matches the
+POSIX `struct aiocb` layout". POSIX cannot settle that: it names the members
+and leaves the order to the implementation, so there is no *the* POSIX layout —
+only a particular C library's. A claim that cannot be true or false is worse
+than a wrong one, because nothing can contradict it. It is now stated as
+musl's, with the numbers.
+
+**Against it, honestly:** 63 of 98 are checked and none is known-bad, but 17
+have still never been looked at. (This paragraph has been
 rewritten three times in one session — 15, 28, 42, 62 — which is the ratchet
 working as intended rather than a correction to it. The number in it will keep
 going stale; the two ratchets in the script are the copies that cannot.) The most dangerous names are in

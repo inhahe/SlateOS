@@ -296,7 +296,11 @@ def test_a_repository_with_no_trunk_is_skipped_not_failed():
                               env=_clean_env(), capture_output=True,
                               text=True, check=False)
         out = (proc.stdout or "") + (proc.stderr or "")
-        check("no origin/main and no main is a SKIP", proc.returncode, 0)
+        # 3, not 0, since 2026-09-10: a checker that could not run says so
+        # with its own exit code, and `run_checker` counts it as skipped
+        # rather than as a gate that ran clean. See the "Exit 3" section of
+        # scripts/run-checker.sh.
+        check("no origin/main and no main is a SKIP", proc.returncode, 3)
         check("...and says which refs it looked for",
               "origin/main" in out and "SKIP" in out, True)
 

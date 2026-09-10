@@ -491,7 +491,10 @@ def main() -> int:
                 + " or ".join(TRUNK_CANDIDATES)
                 + " in this worktree, so there is no trunk to compare against."
             )
-            return 0
+            # 3, not 0: nothing was compared, so this is not a clean
+            # verdict -- it is no verdict, and `run_checker` now has a code
+            # that says so and counts it as skipped rather than as run.
+            return 3
         rc, out = _git("merge-base", tip, trunk)
         if rc != 0:
             # Unrelated histories, or a HEAD with no commits. Either way there
@@ -500,7 +503,9 @@ def main() -> int:
                 f"check-requests-not-deleted: SKIP -- no merge base between "
                 f"{tip} and {trunk}."
             )
-            return 0
+            # 3 for the same reason as above. Unrelated histories are not
+            # a violation, but they are not a check either.
+            return 3
         base = out.strip().splitlines()[0]
 
     try:

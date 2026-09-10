@@ -527,16 +527,24 @@ def main() -> int:
         # A checker that died in a way nothing here has a specific reading for
         # is not the operator's defect either, and gets the fallback advice.
         #
-        # This group used to use exit 2 as its "ordinary code". It cannot any
-        # more: 2 is now this tree's declined-verdict code and has an arm of
-        # its own (group 4c), so using it here would have asserted the very
-        # message the new arm replaces. Exit 3 is the replacement precisely
-        # because nothing reads it -- which is what "ordinary" meant all along.
+        # This group has now had to move twice, and the second time is the
+        # reason for the comment. It used exit 2 until 2 became the
+        # declined-verdict code (group 4c). It then used exit 3, chosen
+        # "precisely because nothing reads it" -- and on 2026-09-10 3 became the
+        # self-skip code (group 4d), so that sentence stopped being true and
+        # five assertions here failed. That failure was the suite working: it is
+        # what a contract change to this file is supposed to feel like.
+        #
+        # So 17 is not arbitrary-and-convenient, it is RESERVED. The codes with
+        # a reading are 0, 1, 2, 3, and 124/125/126/127/130 from the launch and
+        # timeout paths; 17 sits in the gap deliberately left alone. If 17 ever
+        # gains a meaning, move this group again and say so here -- the group
+        # only tests anything while its code is one nothing reads.
         print("group 4: a checker that exited in a way nothing reads")
         odd = fake_checker(
             tmp_root,
             "odd",
-            "import sys\nprint('the index is corrupt')\nsys.exit(3)\n",
+            "import sys\nprint('the index is corrupt')\nsys.exit(17)\n",
         )
         r = run(tmp_root, func, odd)
         out = r.stdout + r.stderr
@@ -544,7 +552,7 @@ def main() -> int:
         check("does not return to the gate", "MARKER-RETURNED" not in out)
         check("aborts the run", r.returncode == 1, f"rc={r.returncode}")
         check("says no verdict was reached", "never reached a verdict" in flat)
-        check("reports the exit code it saw", "exited 3" in flat)
+        check("reports the exit code it saw", "exited 17" in flat)
         # The negative half of group 4b's discrimination, and it has to live
         # here rather than there: a patch that printed the launch-failure
         # reading for *every* non-verdict code would satisfy every assertion
@@ -1088,6 +1096,89 @@ def main() -> int:
               out.strip()[-300:])
         check("and names the gate whose call is malformed",
               "no command given for gate 'lonely'" in out, out.strip()[-300:])
+
+        # ------------------------------------------------------------------
+        # Group 10: exit 3, the checker that skipped ITSELF.
+        #
+        # Group 9 covers a skip the CALL SITE allowed. This covers the other
+        # kind, which was invisible until 2026-09-10: a checker that decides
+        # internally it cannot do its job. Those returned 0 and were counted in
+        # `ran:` beside the gates that really ran. `check-libc-abi.py` did it on
+        # every push touching posix/src since gate 16 was written -- the gate
+        # that found five real ABI bugs in its first hour.
+        #
+        # The positive case deliberately passes NO `--may-skip`. That is the
+        # design decision this group pins: the flag exists to disambiguate 2,
+        # which is three outcomes under one code, and 3 is defined to be one. If
+        # someone later requires the flag for 3, this assertion fails and they
+        # have to argue with the reason rather than merely not notice it.
+        print("group 10: a checker that reports it could not run")
+        selfskip = fake_checker(
+            tmp_root,
+            "selfskip",
+            "import sys\n"
+            "print('zig cc not found and FASTPY_ZIG unset -- cannot compare layouts')\n"
+            "sys.exit(3)\n",
+        )
+        r = run(tmp_root, func, selfskip)
+        out = r.stdout + r.stderr
+        flat = flatten(out)
+        check("returns to the gate rather than aborting, with no --may-skip",
+              "MARKER-RETURNED rc=0" in out, out.strip()[-300:])
+        check("says it skipped, in those words", "SKIPPED testgate" in out)
+        check("quotes the reason the checker gave",
+              "zig cc not found" in flat)
+        check("says plainly that this is not a pass",
+              "This is not a pass" in flat)
+        check("sets RUN_CHECKER_SKIPPED so the tally counts it as skipped",
+              "MARKER-SKIPPED=[1]" in out, out.strip()[-300:])
+        check("carries the reason to the caller",
+              "MARKER-REASON=[zig cc not found" in out)
+        # The whole point is that this is NOT reported as having run.
+        check("does not read as a pass",
+              "never reached a verdict" not in flat)
+
+        # The three shapes that look like a self-skip and are not. Each is the
+        # same argument as in group 9: without these, `exit 3` becomes a bypass
+        # rather than a channel.
+        tb3 = fake_checker(
+            tmp_root,
+            "tb3",
+            "import sys\n"
+            "sys.stderr.write('Traceback (most recent call last):\\n  real crash\\n')\n"
+            "sys.exit(3)\n",
+        )
+        r = run(tmp_root, func, tb3)
+        out = r.stdout + r.stderr
+        check("a traceback that exits 3 is a crash, not a skip",
+              "MARKER-RETURNED" not in out and r.returncode == 1,
+              out.strip()[-300:])
+        log.unlink(missing_ok=True)
+
+        usage3 = fake_checker(
+            tmp_root,
+            "usage3",
+            "import sys\n"
+            "print('usage: check-thing.py [-h] [--self-test]')\n"
+            "sys.exit(3)\n",
+        )
+        r = run(tmp_root, func, usage3)
+        out = r.stdout + r.stderr
+        check("a usage banner that exits 3 is a miscall, not a skip",
+              "MARKER-RETURNED" not in out and r.returncode == 1,
+              out.strip()[-300:])
+        log.unlink(missing_ok=True)
+
+        silent3 = fake_checker(tmp_root, "silent3", "import sys\nsys.exit(3)\n")
+        r = run(tmp_root, func, silent3)
+        out = r.stdout + r.stderr
+        check("a silent exit 3 is not a skip -- a skip has to say what it could not do",
+              "MARKER-RETURNED" not in out and r.returncode == 1,
+              out.strip()[-300:])
+        # A no-verdict keeps its log by design, and group 8 asserts that exactly
+        # one kept log exists. Leaving these behind made that group fail -- which
+        # is the suite catching cross-group state, not a flake.
+        log.unlink(missing_ok=True)
 
         # ------------------------------------------------------------------
         # The distinct-label rule group 7 checks is about one invocation

@@ -103,6 +103,53 @@
 # the top of *every* call, including calls without the flag: a stale flag from
 # three gates ago is how a skip gets attributed to the wrong gate.
 #
+# ## Exit 3: the checker skipped *itself*
+#
+# There are two kinds of skip and until 2026-09-10 this file could see one.
+#
+# A skip the **caller** chose is visible already: `note_gate <name> 1` records a
+# gate the hook did not ask — wrong file scope, `ALLOW_*` set — and the tally
+# lists those separately and honestly. A skip the **checker** chose was
+# invisible, because the only thing this function saw was an exit code, and a
+# checker that decided internally it could not do its job returned **0**. That
+# gate then appeared in `ran:` beside the gates that really ran.
+#
+# Measured, not hypothetical, and reported by lane B on 2026-09-10:
+# `check-libc-abi.py` needs `zig cc` to compare our `repr(C)` types against
+# musl's headers, and with no zig on `PATH` and no `FASTPY_ZIG` it printed
+# "SKIPPED the layout check" and exited 0. This machine had neither, so **every
+# push touching `posix/src` since gate 16 was written had it skip** — the gate
+# that found five real ABI bugs in its first hour, including a `struct addrinfo`
+# with `ai_addr` and `ai_canonname` transposed, so `connect()` received the
+# hostname string. It was found by running the checker by hand and reading the
+# first line of its output, which is not something a hook does.
+# `check-cfg-unix.py` has the same shape for an uninstalled target.
+#
+# So: **exit 3 means "I could not run, and here is why".** It is mapped to the
+# skipped list, never the ran list.
+#
+# No `--may-skip` is required, and that asymmetry with exit 2 is deliberate. The
+# flag exists because 2 is three outcomes wearing one code — a legitimate
+# decline, an unmet floor, and argparse's usage error — so the call site has to
+# say which it is willing to accept. 3 is defined to be exactly one outcome, by
+# the only party that can know it: the checker. A flag would add nothing except
+# a reason for the next checker to keep returning 0, which is the behaviour being
+# replaced.
+#
+# The remaining conditions are unchanged and all required: no traceback (a crash
+# that lands on 3 is a crash), no `usage:` banner, and a non-blank first line. A
+# silent exit 3 is indistinguishable from a gate that did nothing, so it aborts.
+#
+# Why an exit code rather than having this function grep for "SKIPPED" in the
+# output: because a checker's output is prose, and a contract expressed as a
+# grep over prose is a contract no reader can see and no checker can be held to.
+# Rewording a sentence would silently change the gate's meaning.
+#
+# **What this does not fix.** It makes a self-skip *visible*; it cannot tell a
+# correct skip from a lazy one. A checker that exits 3 while its prerequisite is
+# present skips just as quietly as before — what changes is that the tally says
+# so, and `0 ran, 15 skipped` is a sentence somebody notices.
+#
 # ## The no-verdict message reads the exit code before advising
 #
 # "No verdict" is one outcome but not one *cause*, and until 2026-09-02 the
@@ -339,6 +386,29 @@ run_checker() {
         # the tool, and one file per skipped gate per run is litter), so the
         # transcript is where the evidence has to live.
         echo "$_rc_prog: SKIPPED $_rc_label -- it declined to answer, and this call site allows that." >&2
+        echo "$_rc_prog:   reason: $_rc_first" >&2
+        echo "$_rc_prog:   nothing was checked here. This is not a pass." >&2
+        return 0
+    fi
+
+    # Exit 3 -- the checker skipped ITSELF. See the header section of the same
+    # name. No `--may-skip` is required and that is the point: the flag exists
+    # to disambiguate 2, which is three outcomes wearing one code, and 3 is
+    # defined to be one.
+    #
+    # The other three conditions still hold. A crash that lands on 3 is a crash,
+    # and a skip that explains nothing is indistinguishable from a gate that did
+    # nothing -- which is the exact shape this code replaces.
+    if [ "$_rc" = "3" ] &&
+       ! grep -q '^Traceback (most recent call last):' "$_rc_log" &&
+       ! grep -q '^usage: ' "$_rc_log" &&
+       [ -n "$_rc_reason" ]; then
+        # shellcheck disable=SC2034  # outward channel; see the top of the function
+        RUN_CHECKER_SKIPPED=1
+        # shellcheck disable=SC2034
+        RUN_CHECKER_SKIP_REASON=$_rc_first
+        rm -f "$_rc_log"
+        echo "$_rc_prog: SKIPPED $_rc_label -- the checker reported that it could not run." >&2
         echo "$_rc_prog:   reason: $_rc_first" >&2
         echo "$_rc_prog:   nothing was checked here. This is not a pass." >&2
         return 0

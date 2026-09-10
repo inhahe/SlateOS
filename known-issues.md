@@ -127741,3 +127741,61 @@ that prints "SKIPPED"/"not installed"/"not found" and then returns 0.
 reasoning, and correct in the same limited way. **A gate that no-ops on a
 missing prerequisite is the single cheapest way for a green tree to be
 unverified**, and it looks identical to a healthy one from the outside.
+
+### Lane A addendum, 2026-09-10 — the mechanism is in, and there was a third checker
+
+**The `run_checker` half you asked lane A for is done.** `scripts/run-checker.sh`
+now reads **exit 3** as "the checker reported it could not run": it is mapped to
+the skipped list, never the ran list, the checker's own first line is quoted as
+the reason, and it returns 0 so every call site keeps the shape it had. Design
+recorded in `design-decisions.md` §926.
+
+No `--may-skip` is required, which is the one place this departs from what you
+proposed. `--may-skip` exists because exit 2 is three outcomes under one code — a
+legitimate decline, an unmet floor, and argparse's usage error — so a call site
+has to say which it accepts. Exit 3 is defined to be one outcome, declared by the
+only party that can know it. Requiring a flag would have left the incentive that
+produced this defect exactly where it was: a checker returns 0 *because 0 is the
+only code that does not stop the run*, and a flag nobody remembers to add changes
+nothing.
+
+The other three conditions are unchanged and all required: no traceback, no
+`usage:` banner, and a non-blank first line. **A silent exit 3 still aborts** — a
+skip that explains nothing is indistinguishable from a gate that did nothing,
+which is the shape being replaced.
+
+**Three checkers converted, not two.** Your closing suggestion — grep for a path
+that prints SKIPPED and then returns 0 — was mechanised as an `ast` walk over
+every `scripts/check-*.py` for a `return 0`/`sys.exit(0)` whose preceding lines
+announce an absence, rather than taking your two examples as the whole set. That
+found a third:
+
+| checker | condition | was | now |
+|---|---|---|---|
+| `check-libc-abi.py` | no `zig` for the musl oracle | 0 | 3 (1 if it already found something — a finding outranks a skip) |
+| `check-cfg-unix.py` | `x86_64-unknown-linux-gnu` absent | 0 | 3 |
+| `check-requests-not-deleted.py` | no trunk ref, or no merge base | 0 | 3 |
+
+The third is the instructive one. Its comment read *"there is nothing to diff, and
+that is not a violation"* — true, and the wrong conclusion. Nothing to diff is not
+a clean verdict; it is no verdict. Under the old contract 0 was the only
+non-aborting code available to say so, so the comment was reasoning correctly from
+a contract that had no word for what it meant.
+
+**One thing you should know about your own fix.** `FASTPY_ZIG` is set as a Windows
+*User* environment variable, and a process started before you set it does not
+inherit it. Lane A's shell still has no `FASTPY_ZIG` and no `zig` on `PATH`, so
+`check-libc-abi.py` is still self-skipping in this session — it now exits 3 and
+says so, which is how it was confirmed end to end. Any agent session older than
+your change is in the same position until it restarts. The variable is
+`D:\utils\zig-x86_64-windows-0.16.0\zig.exe`.
+
+**Not done, and deliberately left to you:** the heading above is yours, so lane A
+has not struck it through. `check-libc-abi.py` is also still wired only in
+pre-push and not in the boot test; widening a gate scoped to `posix/src` is your
+call, not lane A's.
+
+**Also unaddressed, and worth stating so it is not mistaken for covered:** this
+makes a self-skip *visible*, it cannot tell a correct skip from a lazy one. A
+checker that exits 3 while its prerequisite is present skips exactly as quietly as
+before. What changes is that the tally says so.

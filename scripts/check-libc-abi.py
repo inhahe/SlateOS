@@ -534,7 +534,14 @@ def main() -> int:
             "FASTPY_ZIG. This is the same compiler the ctest fixtures need, so a\n"
             "machine that can build the image can run this."
         )
-        return 1 if problems else 0
+        # 3, not 0, when there is nothing else to report: `run_checker` maps 3
+        # to the SKIPPED tally. Returning 0 meant every push touching posix/src
+        # since this gate was written reported it as having RUN -- the gate that
+        # found five real ABI bugs in its first hour, including the transposed
+        # `struct addrinfo` that handed `connect()` a hostname string. A finding
+        # still outranks a skip, so `problems` keeps its 1.
+        # See the "Exit 3" section of scripts/run-checker.sh.
+        return 1 if problems else 3
 
     for msg in stale_no_oracle(zig):
         print(msg)

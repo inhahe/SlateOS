@@ -201,7 +201,11 @@ def main() -> int:
             f"  Install it with `rustup target add {TARGET}`. Until then every\n"
             "  `#[cfg(unix)]` block in this tree is compiled by nothing."
         )
-        return 0
+        # 3, not 0. `run_checker` maps 3 to the SKIPPED tally; 0 put this
+        # gate in `ran:` beside the gates that really ran, so a host without
+        # the target reported a clean cfg(unix) check having compiled nothing.
+        # See the "Exit 3" section of scripts/run-checker.sh.
+        return 3
 
     code, output = check(crates)
     if code != 0:

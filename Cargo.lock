@@ -481,10 +481,6 @@ dependencies = [
 [[package]]
 name = "crond"
 version = "0.1.0"
-
-[[package]]
-name = "crond2"
-version = "0.1.0"
 dependencies = [
  "scratchdir",
 ]

@@ -47639,7 +47639,7 @@ they live outside the `coreutils` crate and cannot depend on it as things stand:
 | `userspace/nc` | `src/main.rs:1351` | same, for `-e` |
 | `userspace/watch` | `src/main.rs:383` | same, via a private `const SHELL` |
 
-**Two call sites that look like this and are not.** `userspace/crond2`
+**Two call sites that look like this and are not.** `userspace/crond`
 (`src/main.rs:1173`) and `userspace/sudo` (`src/main.rs:2808`, `:2817`) also
 spell `.arg("-c")`, but the program they run is the one the *user* chose — the
 crontab's `SHELL=` and the target account's login shell respectively. Running
@@ -63732,7 +63732,7 @@ So the personality is selected by a branch that no invocation can reach.
 | `userspace/cal` | `ncal` |
 | `userspace/blkid` | `findfs` |
 | `userspace/getty` | `mingetty` |
-| `userspace/crond2` | `anacron` |
+| `userspace/crond` | `anacron` |
 | `userspace/xdg` | `mimeopen`, `xdg-mime` |
 | `userspace/ninja` | `samu` |
 
@@ -128882,7 +128882,7 @@ jobs for real:
 |---|---|
 | `userspace/cron` | prints `scheduler ready (simulated)` and exits |
 | `userspace/crond` | real loop: per-minute wake, live crontab reload, `/etc/cron.d`, `@reboot`, `Command::new("/bin/sh")`, exit code and duration logged |
-| `userspace/crond2` | real loop, plus anacron |
+| `userspace/crond` | real loop, plus anacron |
 
 Found by `scripts/multicall-aliases.py` after it was taught to follow the
 argv0 variable — `cron` answers to `crond` **and** `crontab`, shadowing both
@@ -128934,7 +128934,7 @@ it. Eight tests.
 
 **Still open:** `userspace/crond` reads only `/var/spool/cron/root`
 (`DEFAULT_USER`), so no other user's crontab is ever loaded; `cron` and
-`crond2` are untouched duplicates; `anacron` is still simulated in `cron`; and
+`anacron` is still simulated in `cron`; and
 no cron implementation reaches the image.
 
 ---

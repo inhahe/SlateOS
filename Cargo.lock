@@ -321,6 +321,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "civildate"
+version = "0.1.0"
+
+[[package]]
 name = "clipboard"
 version = "0.1.0"
 
@@ -465,6 +469,9 @@ dependencies = [
 [[package]]
 name = "cron"
 version = "0.1.0"
+dependencies = [
+ "civildate",
+]
 
 [[package]]
 name = "crond"

@@ -128754,3 +128754,46 @@ deliberate divergence.
 should install as something that does not promise partitioning, the way
 `login-cli` and `loginmgr` were separated in 4182acf8d after two programs both
 answered to `login`.
+
+## B-CROND-AND-ATD-NEVER-RUN-A-JOB (lane B, 2026-09-10) — open, and labelled
+
+**In short:** `crond` and `atd` print `scheduler ready (simulated)` and exit.
+Neither ever runs a job. Everything around them is real — `crontab` edits real
+crontab files, `at` now spools a real job at a real time, the schedule matching
+and next-run arithmetic are genuine and well tested — but nothing on this
+system ever wakes up and executes what was scheduled.
+
+**They say `(simulated)` in their own output**, which is why this is an entry
+and not a deletion. Under `design-decisions.md` 1006 the test is whether a
+command states a fact it did not measure; a daemon that announces it is
+simulated states no such thing. It is the same call as
+`B-FDISK-CANNOT-PARTITION`: a misleading *name*, not a fabricated *answer*.
+
+### Why it is worth being precise about the split
+
+The crate is 2,873 lines and most of it works. As of today:
+
+| Personality | State |
+|---|---|
+| `crontab` | real — reads, writes and validates crontab files |
+| `at`, `batch` | real — spools a job at a real time, from a real command |
+| `atq`, `atrm` | real — list and remove from the spool |
+| `crond`, `atd` | **print `(simulated)` and exit** |
+
+So the queue is genuine and nothing drains it. A user can schedule a job,
+`atq` will show it correctly, and it will never run. That is arguably a worse
+shape than a fully missing feature, because every visible surface confirms the
+job exists.
+
+### What the fix looks like
+
+A daemon loop: read the spool and the crontabs, compute the next due time with
+the arithmetic already in this crate, sleep until then, fork and exec the
+command with the right user and environment, and record the outcome. The
+scheduling half is done and tested; the missing half is process execution and
+privilege handling, which is exactly the half that must not be approximated.
+
+`cgexec` in `userspace/cgroup` was the same shape and was fixed the same day
+this was written — worth reading its commit first, because the lesson there
+was that the *failure* path is where the design decision lives: it now refuses
+rather than running a command outside the constraints it was asked for.

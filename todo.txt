@@ -55549,12 +55549,36 @@ groupadd/groupdel/groupmod), and read by `pwdb`, `chown`, `chroot` and `id`.
 
 Two consequences, both live today:
 
-1. **Group membership is stored twice.** `/etc/group` has a member list per
-   group; the account record has a `groups` list per user. `Database` in
-   `userspace/useradd/src/main.rs` now changes both together through
+1. **Group membership is stored twice** -- three times, really. `/etc/group`
+   has a member list per group, `/etc/gshadow` repeats it, and the account
+   record has a `groups` list per user. `Database` in
+   `userspace/useradd/src/main.rs` changes all of them together through
    `add_to_group`, `remove_user_from_groups`, `rename_group_everywhere` and
    `forget_group`, so nothing in *this* binary can update one and forget the
-   other. Nothing enforces that for a future writer.
+   other. ~~Nothing enforces that for a future writer.~~
+
+   **Something does now, as of 2026-09-10.** `assert_membership_agrees` in that
+   file's test module states the invariant -- an account is in a group's member
+   list exactly when it names that group, the two files agree about members,
+   and no account names a group that does not exist -- and
+   `every_membership_mutation_leaves_the_three_records_agreeing` asserts it
+   after each of the five mutating operations. A sixth mutator has to keep the
+   copies in step to get through the suite. A companion test builds each shape
+   of drift deliberately and requires the checker to catch it, so the invariant
+   cannot quietly become a decoration.
+
+   **It found one immediately, which is the part worth carrying.**
+   `rename_group_everywhere` renamed the group in `/etc/gshadow` and in every
+   account, and *not* in `/etc/group`. It was not a live bug: `cmd_groupmod`,
+   its only caller, assigned `db.groups[idx].name` itself first, so between the
+   two of them the job got done. But a method named `rename_group_everywhere`
+   reached two of the three places, and calling it alone left an
+   `/etc/gshadow` line for a group `/etc/group` did not have. The crate's own
+   test did call it alone, and passed, because it asserted only the account
+   half -- and its fixture never created the `/etc/gshadow` line the rename
+   would have had to reach, so there was nothing there to miss. Two independent
+   ways for a test to be blind to the thing it is named after. The rename now
+   lives entirely in the method and the caller does none of it.
 
 2. **A save is not atomic across the two stores.** `userdb::UserDb::save`
    stages its three files and renames them together; the group files are a
@@ -55572,6 +55596,15 @@ a decision §353 did not take, so it needs the operator: see
 
 Trigger: do it when something other than `useradd` needs to *write* a group,
 or when the duplicated membership is observed to have drifted.
+
+**Status 2026-09-10: still not fired, and the redesign is still the
+operator's.** Checked rather than assumed: `grep -rln users.yaml` finds only
+readers, and no seed `users.yaml` or `/etc/group` exists in the tree -- the
+account files are created at runtime, so drift cannot be observed statically
+and no second writer exists. What has changed is only consequence 1's *last
+sentence*: the enforcement gap is closed, so the cost of leaving the redesign
+undecided is lower than it was. The `/etc/groups.yaml` question above is
+untouched and stays in `open-questions.md`.
 
 ## login cannot make a user change an expired password (lane B, 2026-09-06)
 

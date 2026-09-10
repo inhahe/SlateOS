@@ -394,10 +394,25 @@ impl Database {
         }
     }
 
-    /// Rename a group wherever it is recorded, including in every account that
-    /// belongs to it. A rename that missed the accounts would leave them
-    /// naming a group that no longer exists.
+    /// Rename a group wherever it is recorded: `/etc/group`, `/etc/gshadow`,
+    /// and every account that belongs to it. A rename that missed the accounts
+    /// would leave them naming a group that no longer exists.
+    ///
+    /// **`/etc/group` is renamed here and not by the caller**, though the
+    /// caller is the one holding the index. It used to be the other way round:
+    /// `cmd_groupmod` assigned `db.groups[idx].name` itself and this method did
+    /// the other two. That worked, because the one caller did both halves --
+    /// and it meant a method called `rename_group_everywhere` renamed the group
+    /// in two of the three places it is written down. Calling it alone produced
+    /// an `/etc/gshadow` line for a group `/etc/group` did not have. The
+    /// crate's own test did exactly that and passed, because it asserted only
+    /// the account half. Whoever writes the second caller should not have to
+    /// know that "everywhere" meant "everywhere except the file the group
+    /// primarily lives in".
     fn rename_group_everywhere(&mut self, old_name: &str, new_name: &str) {
+        if let Some(ge) = self.groups.iter_mut().find(|g| g.name == old_name) {
+            ge.name = new_name.to_string();
+        }
         if let Some(gs) = self.gshadow.iter_mut().find(|g| g.name == old_name) {
             gs.name = new_name.to_string();
         }
@@ -1639,7 +1654,6 @@ fn cmd_groupmod(argv: &[OsString]) -> i32 {
     // the group.
     if let Some(ref new_name) = opts.new_name {
         let old_name = db.groups[group_idx].name.clone();
-        db.groups[group_idx].name = new_name.clone();
         db.rename_group_everywhere(&old_name, new_name);
     }
 
@@ -2614,6 +2628,192 @@ mod tests {
         );
     }
 
+    /// A `/etc/gshadow` line for a group, as `groupadd` writes alongside every
+    /// `/etc/group` entry it creates.
+    fn gshadow_line(name: &str) -> GshadowEntry {
+        GshadowEntry {
+            name: name.to_string(),
+            password: "!".to_string(),
+            admins: String::new(),
+            members: Vec::new(),
+        }
+    }
+
+    /// **Membership is written down in three places and they must agree.**
+    ///
+    /// `/etc/group` lists a group's members, `/etc/gshadow` lists them again,
+    /// and each account record carries its own list of the groups it is in.
+    /// Nothing in the format ties them together, so nothing but code keeps them
+    /// consistent -- and code that is right today is not a guarantee about code
+    /// written tomorrow.
+    ///
+    /// This is the enforcement `todo.txt`'s "/etc/group and /etc/gshadow are
+    /// still hand-written, not generated" entry asked for. That entry's own
+    /// words: `Database` "now changes both together ... so nothing in *this*
+    /// binary can update one and forget the other. **Nothing enforces that for
+    /// a future writer.**" This is what enforces it. It does not touch the
+    /// larger question the same entry raises -- whether the two files should be
+    /// generated from one source -- which is the operator's to answer and sits
+    /// in `open-questions.md`.
+    ///
+    /// It earned its keep immediately: `rename_group_everywhere` renamed two of
+    /// the three.
+    fn assert_membership_agrees(db: &Database, after: &str) {
+        // A gshadow line whose group is absent from `/etc/group` is a group
+        // that half exists -- `getent group` cannot see it, but its password
+        // and administrator list are still on disk under that name.
+        for gs in &db.gshadow {
+            assert!(
+                db.groups.iter().any(|g| g.name == gs.name),
+                "after {after}: /etc/gshadow has a line for `{}`, which /etc/group does not have",
+                gs.name
+            );
+        }
+
+        // Where both files carry the group they must carry the same members.
+        // The converse is not asserted: a group with no gshadow line is legal,
+        // since gshadow is an optional file.
+        for g in &db.groups {
+            if let Some(gs) = db.gshadow.iter().find(|s| s.name == g.name) {
+                assert_eq!(
+                    g.members, gs.members,
+                    "after {after}: `{}` has different members in /etc/group and /etc/gshadow",
+                    g.name
+                );
+            }
+        }
+
+        // The group files and the accounts must agree in *both* directions. One
+        // direction alone passes a rename that updated the accounts and not the
+        // files: every account still names a group, just not one that exists.
+        for rec in db.users.records() {
+            let name = rec.username().expect("every account record has a username");
+            let claimed = rec.groups();
+            for g in &db.groups {
+                let in_file = g.members.contains(&name);
+                let in_account = claimed.contains(&g.name);
+                assert_eq!(
+                    in_file,
+                    in_account,
+                    "after {after}: /etc/group says `{name}` is{} a member of `{}`, the account record says it is{}",
+                    if in_file { "" } else { " not" },
+                    g.name,
+                    if in_account { "" } else { " not" },
+                );
+            }
+            for c in &claimed {
+                assert!(
+                    db.groups.iter().any(|g| g.name == *c),
+                    "after {after}: account `{name}` names group `{c}`, which does not exist"
+                );
+            }
+        }
+    }
+
+    /// Every mutating operation, each followed by the invariant.
+    ///
+    /// The point is the `assert_membership_agrees` after each line, not the
+    /// operations themselves -- those have their own tests. This one exists so
+    /// that a fifth mutator, or a change to one of these four, has to keep the
+    /// three copies in step to get through the suite.
+    #[test]
+    fn every_membership_mutation_leaves_the_three_records_agreeing() {
+        let mut db = db_with_user("alice", 1000);
+        db.users.push(record("bob", 1001, 1001));
+        db.groups.push(group("bob", 1001));
+        db.gshadow.push(gshadow_line("bob"));
+        db.groups.push(group("audio", 100));
+        db.gshadow.push(gshadow_line("audio"));
+        db.groups.push(group("video", 101));
+        db.gshadow.push(gshadow_line("video"));
+        assert_membership_agrees(&db, "the fixture");
+
+        db.add_to_group("alice", "audio");
+        assert_membership_agrees(&db, "add_to_group");
+
+        db.add_to_group("bob", "audio");
+        db.add_to_group("alice", "video");
+        assert_membership_agrees(&db, "three add_to_group calls");
+
+        // Twice, because `add_to_group` guards against duplicates in three
+        // separate places, and a guard missing from one of them shows up here
+        // as a member list longer than the account's.
+        db.add_to_group("alice", "audio");
+        assert_membership_agrees(&db, "a repeated add_to_group");
+
+        db.rename_group_everywhere("audio", "sound");
+        assert_membership_agrees(&db, "rename_group_everywhere");
+        assert!(
+            db.find_group("sound").is_some(),
+            "the rename has to reach /etc/group, not only the accounts"
+        );
+        assert!(db.find_group("audio").is_none(), "the old name has to go");
+
+        db.rename_user_in_groups("alice", "alicia");
+        if let Some(rec) = db.users.find_mut("alice") {
+            rec.set(userdb::field::USERNAME, "alicia");
+        }
+        assert_membership_agrees(&db, "rename_user_in_groups");
+
+        db.remove_user_from_groups("alicia");
+        assert_membership_agrees(&db, "remove_user_from_groups");
+
+        db.forget_group("sound");
+        assert_membership_agrees(&db, "forget_group");
+        assert!(db.find_group("sound").is_none(), "the group has to be gone");
+    }
+
+    /// The checker has to actually catch drift, or the test above is a
+    /// decoration that passes no matter what the mutators do.
+    ///
+    /// One case per direction it checks. **The three panic messages this test
+    /// prints are expected** -- they are the checker working.
+    #[test]
+    fn the_membership_check_catches_each_shape_of_drift() {
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        fn drifted(db: Database) -> bool {
+            catch_unwind(AssertUnwindSafe(|| {
+                assert_membership_agrees(&db, "a deliberate drift");
+            }))
+            .is_err()
+        }
+
+        // `/etc/group` says alice is in `audio`; her account does not.
+        let mut db = db_with_user("alice", 1000);
+        db.groups.push(group("audio", 100));
+        db.gshadow.push(gshadow_line("audio"));
+        db.add_to_group("alice", "audio");
+        if let Some(rec) = db.users.find_mut("alice") {
+            rec.set_groups(&[]);
+        }
+        assert!(
+            drifted(db),
+            "a member in /etc/group whose account does not know it went unnoticed"
+        );
+
+        // A gshadow line for a group `/etc/group` does not have -- the exact
+        // shape a half-done rename leaves behind.
+        let mut db = db_with_user("alice", 1000);
+        db.groups.push(group("audio", 100));
+        db.gshadow.push(gshadow_line("audio"));
+        db.groups.retain(|g| g.name != "audio");
+        assert!(drifted(db), "an orphaned /etc/gshadow line went unnoticed");
+
+        // Both files have the group, with different members.
+        let mut db = db_with_user("alice", 1000);
+        db.groups.push(group("audio", 100));
+        db.gshadow.push(gshadow_line("audio"));
+        db.add_to_group("alice", "audio");
+        for gs in &mut db.gshadow {
+            gs.members.clear();
+        }
+        assert!(
+            drifted(db),
+            "/etc/group and /etc/gshadow disagreeing about members went unnoticed"
+        );
+    }
+
     /// Renaming a group renames it in the accounts that belong to it, not only
     /// in the group files -- otherwise those accounts name a group that no
     /// longer exists.
@@ -2621,6 +2821,10 @@ mod tests {
     fn renaming_a_group_renames_it_in_the_accounts_that_are_in_it() {
         let mut db = db_with_user("alice", 1000);
         db.groups.push(group("audio", 100));
+        // The gshadow line too: without it this fixture exercises two of the
+        // three places a rename has to reach, and a test that never sets up
+        // the third cannot notice a rename that skips it.
+        db.gshadow.push(gshadow_line("audio"));
         db.add_to_group("alice", "audio");
 
         db.rename_group_everywhere("audio", "sound");
@@ -2628,6 +2832,20 @@ mod tests {
         assert_eq!(
             db.find_user("alice").map(userdb::Record::groups),
             Some(vec!["sound".to_string()])
+        );
+        // And in the group files. Asserting only the account half is what let
+        // this method rename two of the three places for as long as it did.
+        assert!(
+            db.find_group("audio").is_none(),
+            "/etc/group kept the old name"
+        );
+        assert_eq!(
+            db.find_group("sound").map(|g| g.members.clone()),
+            Some(vec!["alice".to_string()])
+        );
+        assert!(
+            db.gshadow.iter().any(|g| g.name == "sound"),
+            "/etc/gshadow kept the old name"
         );
     }
 

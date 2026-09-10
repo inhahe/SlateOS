@@ -2132,8 +2132,7 @@ mod tests {
     fn a_row_below_the_header_is_an_open_port() {
         let scratch = scratchdir::ScratchDir::new("aa-some");
         let d = net_dir(scratch.dir(), 42);
-        fs::write(d.join("tcp"), b"  sl  local_address\n   0: 00000000:0016\n")
-            .expect("write");
+        fs::write(d.join("tcp"), b"  sl  local_address\n   0: 00000000:0016\n").expect("write");
         assert_eq!(has_open_ports_under(scratch.dir(), 42).ok(), Some(true));
     }
 
@@ -2144,8 +2143,7 @@ mod tests {
         let scratch = scratchdir::ScratchDir::new("aa-v6");
         let d = net_dir(scratch.dir(), 42);
         fs::write(d.join("tcp"), b"  sl  local_address\n").expect("write");
-        fs::write(d.join("tcp6"), b"  sl  local_address\n   0: ...:0016\n")
-            .expect("write");
+        fs::write(d.join("tcp6"), b"  sl  local_address\n   0: ...:0016\n").expect("write");
         assert_eq!(has_open_ports_under(scratch.dir(), 42).ok(), Some(true));
     }
 

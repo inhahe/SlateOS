@@ -2417,6 +2417,7 @@ dependencies = [
 name = "chage"
 version = "0.1.0"
 dependencies = [
+ "authlib",
  "quoting",
  "scratchdir",
  "userdb",
@@ -3361,6 +3362,10 @@ dependencies = [
 [[package]]
 name = "crontab"
 version = "0.1.0"
+dependencies = [
+ "authlib",
+ "userdb",
+]
 
 [[package]]
 name = "crontab-cli"
@@ -11621,6 +11626,7 @@ dependencies = [
  "authlib",
  "posix",
  "quoting",
+ "userdb",
 ]
 
 [[package]]

@@ -159,6 +159,31 @@ pub fn caller_uid() -> Option<u32> {
     }
 }
 
+/// The caller's real group id, as the kernel reports it.
+///
+/// The companion to [`caller_uid`], with the same contract: `getgid(2)`, and
+/// `None` off unix rather than an invented answer. `sudo` reads both, having
+/// previously taken each from `/proc/self/status` with an environment-variable
+/// fallback.
+#[must_use]
+pub fn caller_gid() -> Option<u32> {
+    #[cfg(unix)]
+    {
+        // SAFETY: `getgid` is the POSIX libc function -- nullary, no failure
+        // mode, returning `gid_t`, a 32-bit unsigned integer here. See
+        // `caller_uid` for why the declaration is local.
+        unsafe extern "C" {
+            fn getgid() -> u32;
+        }
+        // SAFETY: nullary call into libc, as above.
+        Some(unsafe { getgid() })
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

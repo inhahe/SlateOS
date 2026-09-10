@@ -293,35 +293,45 @@ fn validate_crontab(content: &str) -> (Vec<Error>, usize) {
 // User / UID helpers
 // ============================================================================
 
-/// Determine the current username. Checks `$USER`, then `$LOGNAME`, then
-/// falls back to the UID.
-fn current_username() -> String {
-    if let Ok(user) = env::var("USER")
-        && !user.is_empty()
-    {
-        return user;
-    }
-    if let Ok(user) = env::var("LOGNAME")
-        && !user.is_empty()
-    {
-        return user;
-    }
-    // Fallback: use the numeric UID as the "username" so we at least have a
-    // unique spool path. On a real Slate OS system this would call getuid().
-    format!("uid{}", std::process::id())
+/// The caller's username, resolved from their uid.
+///
+/// # Why not `$USER`
+///
+/// This used to prefer `$USER`, then `$LOGNAME`. The username selects the
+/// spool file -- [`crontab_path`] joins it to `SPOOL_DIR` -- so it decides
+/// *whose crontab you are editing*. `USER=root crontab -e` edited root's.
+/// Both variables are set by whoever starts the program.
+///
+/// # And the fallback was a different bug
+///
+/// When neither was set the answer was `format!("uid{}", std::process::id())`
+/// -- the **process id**, not the uid, under a comment reading "use the
+/// numeric UID as the 'username' so we at least have a unique spool path. On a
+/// real Slate OS system this would call getuid()". A pid is unique per
+/// *invocation*, so it was not a stable identity at all: `crontab -e` wrote
+/// `uid4123` and the `crontab -l` that followed read `uid4127` and found
+/// nothing. The comment's own plan -- call `getuid()` -- is now what happens,
+/// and the premise it was waiting on had already arrived.
+///
+/// A uid with no account record still falls back to `uid<N>`, but with the
+/// real uid, which is stable across invocations and is the property the
+/// fallback was reaching for.
+fn current_username() -> Option<String> {
+    let uid = authlib::identity::caller_uid()?;
+    let named = userdb::UserDb::load(userdb::DEFAULT_PATH)
+        .ok()
+        .and_then(|db| db.find_uid(uid).and_then(userdb::Record::username));
+    Some(named.unwrap_or_else(|| format!("uid{uid}")))
 }
 
-/// Determine the current effective UID. Returns 0 for root.
+/// The caller's uid, as the kernel reports it.
 ///
-/// Checks `$EUID` first (set by our shell), then assumes non-root.
-fn effective_uid() -> u32 {
-    if let Ok(val) = env::var("EUID")
-        && let Ok(uid) = val.parse::<u32>()
-    {
-        return uid;
-    }
-    // Conservative default: not root.
-    1000
+/// This used to read `$EUID` and default to 1000. The default was the safe
+/// direction -- "assume not root" -- but the lookup itself was not: `EUID=0`
+/// was believed, and the one caller of this function is the check that only
+/// root may pass `-u` and act on another user's crontab.
+fn effective_uid() -> Option<u32> {
+    authlib::identity::caller_uid()
 }
 
 /// Build the path to a user's crontab file.
@@ -653,7 +663,10 @@ fn parse_args() -> Result<Args, Error> {
 
     if argc < 2 {
         return Ok(Args {
-            username: current_username(),
+            // Help does not touch a spool file, so a caller this build cannot
+            // name still gets the usage text rather than an error about who
+            // they are.
+            username: current_username().unwrap_or_default(),
             explicit_user: false,
             action: Action::Help,
         });
@@ -708,7 +721,15 @@ fn parse_args() -> Result<Args, Error> {
     }
 
     let explicit_user = username.is_some();
-    let username = username.unwrap_or_else(current_username);
+    let username = match username {
+        Some(name) => name,
+        // No `-u`: the crontab is the caller's own, so it has to be named from
+        // the caller's uid. A build that cannot ask the kernel has no business
+        // guessing which spool file to open.
+        None => current_username().ok_or_else(|| {
+            Error::Permission("cannot determine who is running this command".into())
+        })?,
+    };
     let action = action.unwrap_or(Action::Help);
 
     Ok(Args {
@@ -726,7 +747,7 @@ fn run() -> Result<(), Error> {
     let args = parse_args()?;
 
     // If -u was specified, verify we are root.
-    if args.explicit_user && effective_uid() != 0 {
+    if args.explicit_user && effective_uid() != Some(0) {
         return Err(Error::Permission(
             "only root can use -u to manage another user's crontab".into(),
         ));

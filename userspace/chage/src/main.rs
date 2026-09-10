@@ -291,16 +291,26 @@ fn interactive(aging: &Aging) -> Result<Aging, String> {
 // Who is asking
 // ============================================================================
 
-/// The caller's uid, from the environment the login process sets.
-fn current_uid() -> u32 {
-    env::var("UID")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0)
-}
-
-fn current_username() -> Option<String> {
-    env::var("USER").ok()
+/// Whether this caller may run this request.
+///
+/// Root may do anything. Anyone else may *read* their own policy and nothing
+/// else: the policy governs when they will next be made to change their
+/// password, which they are entitled to know.
+///
+/// `caller_name` is the name the caller's uid resolves to in the account
+/// database, not `$USER`. Both of those used to come from the environment,
+/// which is set by whoever starts the program -- so the program asked the
+/// caller who they were and believed the answer. Worse, `current_uid` ended in
+/// `.unwrap_or(0)`, and `UID` is a shell variable this tree's shell never
+/// exports, so the fallback fired on every run and every caller was root. See
+/// `authlib::identity::caller_uid`.
+///
+/// A separate function so that the rule can be reached from a test. The
+/// version this replaces was a condition inside `cmd_chage`, and the one test
+/// that covered its "not your account" arm passed for the wrong reason -- see
+/// `an_ordinary_user_may_not_read_another_accounts_policy` below.
+fn may_run(caller_uid: u32, caller_name: Option<&str>, target: &str, list_only: bool) -> bool {
+    caller_uid == 0 || (list_only && caller_name == Some(target))
 }
 
 // ============================================================================
@@ -495,15 +505,8 @@ fn cmd_chage(argv: &[OsString], path: &Path, caller_uid: u32) -> i32 {
         return 1;
     }
 
-    // Only root may change an aging policy, and only root may read another
-    // account's. A user may read their own: the policy governs when they will
-    // next be made to change their password, which they are entitled to know.
-    let own_account = current_username().as_deref() == Some(username.as_str());
-    if caller_uid != 0 && !(args.list && own_account) {
-        eprintln!("chage: only root may change password aging information");
-        return 1;
-    }
-
+    // The database is loaded before the permission check rather than after,
+    // because identifying the caller now means resolving their uid against it.
     let mut db = match load(path) {
         Ok(db) => db,
         Err(e) => {
@@ -511,6 +514,18 @@ fn cmd_chage(argv: &[OsString], path: &Path, caller_uid: u32) -> i32 {
             return 1;
         }
     };
+
+    // Only root may change an aging policy, and only root may read another
+    // account's. See `may_run`.
+    let caller_name = db.find_uid(caller_uid).and_then(userdb::Record::username);
+    if !may_run(caller_uid, caller_name.as_deref(), &username, args.list) {
+        if args.list {
+            eprintln!("chage: only root may read another account's password aging information");
+        } else {
+            eprintln!("chage: only root may change password aging information");
+        }
+        return 1;
+    }
 
     let Some(record) = db.find(&username) else {
         eprintln!("chage: user {} does not exist", quoteaf_os(&username));
@@ -580,7 +595,11 @@ fn main() {
     // panics on an argument that is not valid UTF-8.
     let argv: Vec<OsString> = env::args_os().skip(1).collect();
     let path = Path::new(userdb::DEFAULT_PATH);
-    process::exit(cmd_chage(&argv, path, current_uid()));
+    let Some(caller_uid) = authlib::identity::caller_uid() else {
+        eprintln!("chage: cannot determine who is running this command");
+        process::exit(1);
+    };
+    process::exit(cmd_chage(&argv, path, caller_uid));
 }
 
 // ============================================================================
@@ -1013,14 +1032,46 @@ mod tests {
         assert_eq!(aging_at(&path).max_days, None);
     }
 
-    /// ...nor read someone else's. `USER` is not set in the test process, so
-    /// no account is the caller's own here.
+    /// ...nor read someone else's.
+    ///
+    /// **This test used to pass for the wrong reason, and its own doc comment
+    /// said so:** "`USER` is not set in the test process, so no account is the
+    /// caller's own here". The fixture's only account is alice, whose uid is
+    /// 1000, and the caller was *also* uid 1000 -- so it was really asserting
+    /// that alice may not read alice's own policy, which is false. It passed
+    /// because the ownership test consulted an environment variable that
+    /// happened to be unset. The caller is now uid 1001, who is genuinely
+    /// somebody else.
     #[test]
     fn an_ordinary_user_may_not_read_another_accounts_policy() {
         let scratch = ScratchDir::new("chage-perm-list");
         let path = scratch_with(&scratch, &Aging::default());
         let args = argv(&["-l", "alice"]);
 
-        assert_eq!(cmd_chage(&args, &path, 1000), 1);
+        assert_eq!(cmd_chage(&args, &path, 1001), 1);
+    }
+
+    /// And the case the test above was accidentally covering: a user *may*
+    /// read their own policy. Nothing asserted this before, so the refusal
+    /// could have applied to everyone and the suite would have been silent.
+    #[test]
+    fn a_user_may_read_their_own_policy() {
+        let scratch = ScratchDir::new("chage-perm-own");
+        let path = scratch_with(&scratch, &Aging::default());
+        let args = argv(&["-l", "alice"]);
+
+        assert_eq!(cmd_chage(&args, &path, 1000), 0);
+    }
+
+    /// The rule itself, without a database in the way.
+    #[test]
+    fn may_run_grants_root_everything_and_others_only_their_own_listing() {
+        assert!(may_run(0, Some("root"), "alice", false));
+        assert!(may_run(0, None, "alice", false));
+        assert!(may_run(1000, Some("alice"), "alice", true));
+        assert!(!may_run(1000, Some("alice"), "alice", false));
+        assert!(!may_run(1000, Some("alice"), "bob", true));
+        // A caller whose uid names no account matches no target.
+        assert!(!may_run(1000, None, "alice", true));
     }
 }

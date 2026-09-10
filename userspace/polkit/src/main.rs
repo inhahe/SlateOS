@@ -210,36 +210,19 @@ fn name_of(record: &Record) -> String {
     record.username().unwrap_or_default()
 }
 
-/// The record's uid, or `u32::MAX` if it has none.
-///
-/// `u32::MAX` is the same value `get_caller_uid` reports for an unidentifiable
-/// caller, and no account is ever created with it, so a record missing its uid
-/// matches no lookup rather than colliding with root at 0.
-fn uid_of(record: &Record) -> u32 {
-    record.uid().unwrap_or(u32::MAX)
-}
-
-/// Get the current user's UID from `/proc/self/status` or the `USER` env var.
-fn get_caller_uid(users: &UserDb) -> u32 {
-    if let Ok(content) = fs::read_to_string("/proc/self/status") {
-        for line in content.lines() {
-            if let Some(rest) = line.strip_prefix("Uid:")
-                && let Some(uid_str) = rest.split_whitespace().next()
-                && let Ok(uid) = uid_str.parse::<u32>()
-            {
-                return uid;
-            }
-        }
-    }
-
-    if let Ok(name) = env::var("USER")
-        && let Some(user) = users.find(&name)
-    {
-        return uid_of(user);
-    }
-
-    u32::MAX
-}
+// The caller's uid used to be read here, from `/proc/self/status` with a
+// fallback to resolving `$USER` against the account database. The fallback was
+// an authorization bypass: `USER` is set by whoever starts the process, and
+// `pkexec` grants uid 0 everything without authenticating
+// ("Root can do anything without authentication", below). So on any system
+// where `/proc/self/status` could not be read -- an unmounted procfs, a
+// restricted namespace -- `USER=root pkexec anything` was root.
+//
+// It is now `authlib::identity::caller_uid()`, which is `getuid(2)`. That is
+// better than the `/proc` read it replaces as well as the fallback it deletes:
+// no file to be missing, no line to be parsed, and no way for a parent process
+// to influence the answer. `uid_of` went with it -- its only caller was the
+// fallback.
 
 // ============================================================================
 // Authentication
@@ -1060,7 +1043,10 @@ fn run_pkexec(args: &[String]) -> i32 {
     let _ = disable_internal;
 
     let users = read_users();
-    let caller_uid = get_caller_uid(&users);
+    let Some(caller_uid) = authlib::identity::caller_uid() else {
+        eprintln!("pkexec: cannot identify calling user");
+        return 127;
+    };
     let caller = users.find_uid(caller_uid).cloned();
 
     // Root can do anything without authentication.
@@ -1184,18 +1170,20 @@ fn exec_command(command_args: &[String], target_user: &str, users: &UserDb) -> i
     }
 }
 
-/// Return the caller's UID as a string for the PKEXEC_UID env var.
+/// The caller's UID as a string, for the `PKEXEC_UID` environment variable.
+///
+/// Real `pkexec` sets this so the launched program can tell who invoked it.
+/// The value must therefore be the truth, and it used to fall back to `$UID`
+/// and then to the literal `"0"` -- so a program launched by an ordinary user
+/// on a system with no readable `/proc` was told it had been launched by root.
+/// Passing on a claim the caller made about themselves is how this whole class
+/// of bug propagates.
+///
+/// An unidentifiable caller yields an empty value rather than a fabricated
+/// one. A program that reads `PKEXEC_UID` and finds it empty has learned
+/// something true.
 fn caller_uid_string() -> String {
-    if let Ok(content) = fs::read_to_string("/proc/self/status") {
-        for line in content.lines() {
-            if let Some(rest) = line.strip_prefix("Uid:")
-                && let Some(uid_str) = rest.split_whitespace().next()
-            {
-                return uid_str.to_string();
-            }
-        }
-    }
-    env::var("UID").unwrap_or_else(|_| "0".to_string())
+    authlib::identity::caller_uid().map_or_else(String::new, |uid| uid.to_string())
 }
 
 fn print_pkexec_usage() {
@@ -1423,7 +1411,13 @@ fn run_pkcheck(args: &[String]) -> i32 {
             u32::MAX
         })
     } else {
-        get_caller_uid(&users)
+        match authlib::identity::caller_uid() {
+            Some(uid) => uid,
+            None => {
+                eprintln!("pkcheck: cannot identify calling subject");
+                return 2;
+            }
+        }
     };
 
     let subject = match users.find_uid(subject_uid) {

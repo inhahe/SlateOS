@@ -2258,37 +2258,30 @@ fn current_hostname() -> String {
     std::env::var("HOSTNAME").unwrap_or_else(|_| "localhost".to_string())
 }
 
-/// The real id of the calling process, read from `/proc/self/status`.
+/// The id a caller this build cannot identify is treated as.
 ///
-/// `field` is `Uid:` or `Gid:`; the first number on that line is the real id.
-/// Falls back to the matching environment variable and then to 1000. The
-/// fallback is deliberately *not* zero: an unknown caller must be treated as
-/// unprivileged, because this value decides whether a password is demanded.
-fn current_id_from_proc(field: &str, env_var: &str) -> u32 {
-    if let Ok(content) = fs::read_to_string("/proc/self/status") {
-        for line in content.lines() {
-            if let Some(rest) = line.strip_prefix(field)
-                && let Some(first) = rest.split_whitespace().next()
-                && let Ok(id) = first.parse::<u32>()
-            {
-                return id;
-            }
-        }
-    }
-    std::env::var(env_var)
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1000)
-}
+/// **Deliberately not zero.** These values decide whether a password is
+/// demanded, so an unknown caller has to be an unprivileged one. Kept as a
+/// named constant rather than a literal in two places because the *reason* is
+/// the important part and a bare `1000` does not carry it.
+const UNKNOWN_CALLER_ID: u32 = 1000;
 
-/// Get the current uid.
+/// The real uid of the calling process.
+///
+/// `getuid(2)`, via `authlib::identity::caller_uid`.
+///
+/// This used to read `/proc/self/status` and fall back to the `UID`
+/// environment variable. The fallback was the caller's to set, and this value
+/// decides whether a password is demanded -- so `UID=0 sudo <command>` on a
+/// system with no readable procfs skipped the prompt. The `getuid` call has no
+/// file to be missing and no input a parent process can supply.
 fn current_uid() -> u32 {
-    current_id_from_proc("Uid:", "UID")
+    authlib::identity::caller_uid().unwrap_or(UNKNOWN_CALLER_ID)
 }
 
-/// Get the current gid.
+/// The real gid of the calling process. See [`current_uid`].
 fn current_gid() -> u32 {
-    current_id_from_proc("Gid:", "GID")
+    authlib::identity::caller_gid().unwrap_or(UNKNOWN_CALLER_ID)
 }
 
 /// Get the current tty name.

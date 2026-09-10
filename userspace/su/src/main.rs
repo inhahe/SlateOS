@@ -299,42 +299,13 @@ fn authenticate(
 // Environment and identity helpers
 // ============================================================================
 
-/// Get the current (calling) user's UID.
-///
-/// Tries /proc/self/status first, then falls back to the USER env var
-/// matched against the user database, then defaults to u32::MAX (nobody).
-fn get_caller_uid(users: &UserDb) -> u32 {
-    // Try /proc/self/status for the real UID.
-    if let Ok(content) = fs::read_to_string("/proc/self/status") {
-        for line in content.lines() {
-            if let Some(rest) = line.strip_prefix("Uid:")
-                && let Some(uid_str) = rest.split_whitespace().next()
-                && let Ok(uid) = uid_str.parse::<u32>()
-            {
-                return uid;
-            }
-        }
-    }
-
-    // Fallback: resolve USER env var against the database.
-    //
-    // `var_os` and an explicit `to_str`, not `var`. A value that is not text
-    // cannot name a user in a YAML file, so the outcome is the same either
-    // way — but `var` reports it as `Err(NotUnicode)`, which an `if let Ok`
-    // silently treats as "unset". The two are different facts, and writing
-    // code that cannot tell them apart is how `sudo` ended up ignoring a set
-    // `EDITOR` (see known-issues.md, TD-B-SUDO-...).
-    if let Some(name) = env::var_os("USER")
-        && let Some(name) = name.to_str()
-        && let Some(user) = users.find(name)
-        && let Some(uid) = user.uid()
-    {
-        return uid;
-    }
-
-    // Unknown caller.
-    u32::MAX
-}
+// The caller's uid used to be worked out here, from `/proc/self/status` with a
+// fallback to resolving `$USER` against the account database. The fallback was
+// a way past the password prompt: `caller_uid == 0` skips authentication
+// entirely (root may become anyone), so on a system where `/proc/self/status`
+// could not be read, `USER=root su alice` became alice without being asked for
+// her password. It is now `authlib::identity::caller_uid()` -- `getuid(2)`,
+// which no parent process can set.
 
 /// Read a password from the terminal without echoing.
 ///
@@ -803,7 +774,10 @@ fn run_su(args: &[OsString]) -> i32 {
     // Authenticate unless the caller is root. The tally is keyed by the
     // account whose password is being guessed — here the *target*, since `su`
     // asks for the password of the user you are becoming.
-    let caller_uid = get_caller_uid(&users);
+    let Some(caller_uid) = authlib::identity::caller_uid() else {
+        eprintln!("su: cannot determine who is running this command");
+        return 1;
+    };
     let mut auth = authlib::Authenticator::new();
     if caller_uid != 0 && !authenticate(&mut auth, target, "Password: ", "su") {
         return 1;

@@ -50,6 +50,8 @@ from __future__ import annotations
 
 import json
 import os
+import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -4049,11 +4051,83 @@ _RD_CLEAN = """fn load(p: &std::path::Path) -> String {
 _RD_BASELINE = "# pinned\n"
 
 
-def _rd_repo(tmp: str, name: str) -> str:
+def _rd_floor() -> tuple[int, int]:
+    """`check-read-defaults`'s inspection floors, read out of its source.
+
+    Read rather than hardcoded so that raising a floor breaks nothing quietly:
+    the fixtures grow with it. Parsed rather than imported because importing
+    the checker would execute its module body inside the harness, and a test
+    harness that runs the thing it is testing at import time has a failure
+    mode nobody enjoys diagnosing.
+    """
+    src = (pathlib.Path(HERE) / "check-read-defaults.py").read_text(
+        encoding="utf-8")
+    out = []
+    for const in ("MIN_FILES", "MIN_READS"):
+        m = re.search("^" + const + r" = (\d+)", src, re.M)
+        if m is None:
+            FATAL(f"gate 15: cannot find {const} in check-read-defaults.py; "
+                  f"the padding below would be sized by a guess")
+        out.append(int(m.group(1)))
+    return out[0], out[1]
+
+
+def _rd_repo(tmp: str, name: str, *, pad: bool = True) -> str:
+    """A fixture repo, padded past the checker's inspection floor by default.
+
+    `check-read-defaults` refuses to answer at all when it has read too few
+    files, on the grounds that a scan which stopped seeing reports every pinned
+    site as gone -- which is a congratulation. That floor is measured against
+    the real tree (422 files), so a two-file fixture trips it, and every
+    gate-15 case would exit 2 for a reason that has nothing to do with --head.
+
+    The padding is clean reads: `fs::read_to_string(p)?` is the correct shape
+    and is not a finding, so it raises both counts without adding a site.
+    """
     root = new_repo(tmp, name, ("check-read-defaults.py",))
     write(root, "scripts/read-defaults-baseline.txt", _RD_BASELINE)
-    write(root, "userspace/w/src/other.rs", "fn f() {}\n")
+    write(root, "userspace/w/src/other.rs", "fn f() {}" + chr(10))
+    if pad:
+        _rd_pad(root)
     return root
+
+
+def _rd_pad(root: str) -> None:
+    """Enough clean reads to clear both floors.
+
+    Separate from `_rd_repo` because the absent-baseline fixture needs the
+    padding and must NOT get a baseline: without this split it declines with
+    "too thin" before it ever reaches the baseline check, and the two
+    declinations -- both exit 2 -- become indistinguishable.
+    """
+    min_files, min_reads = _rd_floor()
+    for i in range(max(min_files, min_reads) + 5):
+        write(root, f"userspace/pad/src/f{i}.rs",
+              "fn g() -> std::io::Result<String> "
+              "{ std::fs::read_to_string(p) }" + chr(10))
+
+
+def case_gate15_a_scan_that_saw_almost_nothing_refuses_to_answer(tmp: str) -> None:
+    """An unpadded repo is below the floor, and must decline rather than pass.
+
+    This is the case the whole floor exists for. Without it the checker reads
+    two files, finds no sites, reports the baseline's entries as no longer
+    present, and exits 0 -- a total failure to look, spelled as the best
+    possible news. Exit 2 and not 1: a floor breach is "no verdict reached",
+    so `run_checker` should abort the build rather than print a finding
+    against anyone's code.
+    """
+    root = _rd_repo(tmp, "g15e", pad=False)
+    write(root, "userspace/w/src/load.rs", _RD_SITE)
+    sha = commit(root)
+
+    rev = run_checker(root, "check-read-defaults.py", "--check", "--head", sha)
+    out = rev.stdout + rev.stderr
+    check("gate 15: a scan below the floor declines", rev.returncode, 2)
+    check("gate 15: ...and says the scan was too thin",
+          "too thin" in out.lower(), True)
+    check("gate 15: ...rather than reporting a clean tree",
+          "none new" in out, False)
 
 
 def case_gate15_a_tidied_worktree_cannot_hide_a_committed_read(tmp: str) -> None:
@@ -4111,12 +4185,21 @@ def case_gate15_an_absent_baseline_is_not_an_empty_one(tmp: str) -> None:
     refused for carrying code that was legal when it was written.
     """
     root = new_repo(tmp, "g15d", ("check-read-defaults.py",))
+    # Padded past the inspection floor but given no baseline: the checker must
+    # get far enough to notice which of the two is missing. An unpadded repo
+    # declines for the other reason first, and both reasons exit 2.
+    _rd_pad(root)
     write(root, "userspace/w/src/load.rs", _RD_SITE)
     sha = commit(root)          # no baseline file at all
 
     rev = run_checker(root, "check-read-defaults.py", "--check", "--head", sha)
-    check("gate 15: a revision with no baseline is not refused",
-          rev.returncode, 2 if rev.returncode == 2 else rev.returncode)
+    # NOT `2 if rev.returncode == 2 else rev.returncode`, which is what stood
+    # here: an expected value computed from the actual one, so the assertion
+    # could not fail whatever the checker did. Exit 2 is the contract -- "no
+    # verdict reached", the same channel as a floor breach, because a revision
+    # carrying no policy is not a revision breaking one.
+    check("gate 15: a revision with no baseline declines rather than refusing",
+          rev.returncode, 2)
     check("gate 15: ...it says the baseline is missing rather than listing sites",
           "no baseline" in (rev.stdout + rev.stderr).lower(), True)
 
@@ -4132,6 +4215,7 @@ CASES = (
     case_gate2_the_hook_allows_a_clean_commit_under_a_dirty_worktree,
     case_gate2_the_hook_judges_a_branch_it_is_not_standing_on,
     case_gate2_an_unopenable_revision_is_not_a_finding,
+    case_gate15_a_scan_that_saw_almost_nothing_refuses_to_answer,
     case_gate15_a_tidied_worktree_cannot_hide_a_committed_read,
     case_gate15_an_uncommitted_read_does_not_block_a_clean_push,
     case_gate15_the_baseline_is_read_from_the_same_tree,

@@ -126979,6 +126979,19 @@ process whose name is not UTF-8 was dropped from the listing entirely -- and
 signalled by name at all. `userspace/top` followed the same day; `userspace/pstree` followed the same
 day, which closes the set.
 
+**Five more programs still read `/proc/<pid>/stat` by hand** -- `kill`, `lsof`,
+`strace`, `sysstat` and `who` -- found by running the grep rather than assuming
+the three were all of them. Seven further hits were `/proc/<pid>/status`, a
+different file: "stat" being a prefix of "status" is a trap for exactly this
+kind of sweep.
+
+**And the running count in this entry is a running count, not a measurement.**
+The 50 above was derived; every figure since has been that number minus one per
+conversion, and nothing re-derived it. What *is* measured, today: **86** files
+under `userspace/` and `apps/` open a `/proc` path without `procinfo`, down
+from the 95 recorded above. The "opens something `procinfo` already parses"
+subset has not been re-derived since, and should be before anyone quotes it.
+
 **`pstree`'s version was the worst of the three.** A tree is assembled by
 matching each process's `ppid` against a parent that has to be present, so one
 process dropped for having an unreadable name took **every descendant with

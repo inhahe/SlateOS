@@ -965,10 +965,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fstrim"
-version = "0.1.0"
-
-[[package]]
 name = "ftp"
 version = "0.1.0"
 dependencies = [
@@ -1284,10 +1280,6 @@ dependencies = [
 
 [[package]]
 name = "irqbalance"
-version = "0.1.0"
-
-[[package]]
-name = "iw"
 version = "0.1.0"
 
 [[package]]
@@ -1759,10 +1751,6 @@ dependencies = [
 
 [[package]]
 name = "modechange"
-version = "0.1.0"
-
-[[package]]
-name = "modprobe"
 version = "0.1.0"
 
 [[package]]
@@ -2522,10 +2510,6 @@ dependencies = [
  "oswindow",
  "randrange",
 ]
-
-[[package]]
-name = "smartctl"
-version = "0.1.0"
 
 [[package]]
 name = "snake"

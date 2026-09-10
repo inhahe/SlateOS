@@ -164,7 +164,31 @@ IO_MARKERS = (
     "Command::new",
     "libc::",
     "nix::",
-    "unsafe {",
+    # `unsafe {` was a marker until 2026-09-10 and was the worst of them.
+    #
+    # A freestanding binary has to walk `argv` -- `slice::from_raw_parts(argv,
+    # argc)` and a null-terminated-string scan per argument -- and both are
+    # unsafe. So every crate that reads its own command line was exonerated
+    # for doing exactly that, which is the one thing the audit is not
+    # interested in: argv is the crate's input, not the world.
+    #
+    # It hid `fstrim`, `iw`, `modprobe` and `smartctl`, whose every unsafe
+    # block is `cstr_to_slice`/`from_raw_parts` and nothing else. fstrim was
+    # the one that gave it away: it carries a section banner reading
+    # "Simulated Filesystem Operations -- in a real OS, these would issue
+    # FITRIM ioctl, BLKDISCARD ioctl, etc. For now, we simulate the logic to
+    # demonstrate output formatting."
+    #
+    # What actually reaches the kernel from a crate with no `libc::` and no
+    # `extern "C" {` block is INLINE ASSEMBLY, which was never a marker:
+    #
+    #     core::arch::asm!("syscall", inlateout("rax") nr => ret, ...)
+    #
+    # `arp`, `traceroute` and `libservicebus` do precisely that and are real.
+    # Dropping `unsafe {` without adding `asm!` in the same change would have
+    # deleted all three -- the `cal` and `earlyoom` mistake a third time, so
+    # the swap is deliberately one edit.
+    "asm!",
     "io::stdin",
     "stdin()",
     "BufReader",
@@ -487,6 +511,22 @@ def _self_test() -> int:
            "states a fact it did not measure")
     expect("argv-only tools are exempt from both rules",
            reason_to_delete(sorted(PURE_ARGV)[0], USAGE), None)
+
+    # Argv parsing is unsafe and is not I/O; inline assembly is I/O.
+    ARGV = ('fn main(argc: i32, argv: *const *const u8) -> i32 { '
+            'let a = unsafe { core::slice::from_raw_parts(argv, argc as usize) }; '
+            'println!("/dev/sda: trimmed 256.0 MiB"); 0 }')
+    expect("walking argv unsafely is not looking at the world",
+           has_io_marker(ARGV), False)
+    expect("...so a tool that only parses argv and reports is caught",
+           reason_to_delete("fstrim", ARGV),
+           "states a fact it did not measure")
+    SYSCALL = ('fn main() { let r: i64; unsafe { core::arch::asm!("syscall", '
+               'inlateout("rax") 39i64 => r); } println!("pid {}", r); }')
+    expect("inline assembly reaches the kernel and does exonerate",
+           has_io_marker(SYSCALL), True)
+    expect("...so arp/traceroute/libservicebus survive the swap",
+           reason_to_delete("arp", SYSCALL), None)
 
     # The marker matcher must not be fooled by a longer identifier that
     # happens to end in a marker -- `cargo-bloat` was exonerated by a

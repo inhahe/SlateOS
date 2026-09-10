@@ -1260,6 +1260,39 @@ impl CpuTimes {
             .saturating_add(self.steal)
     }
 
+    /// The time accumulated between `earlier` and `self`, field by field.
+    ///
+    /// # Why a viewer needs this and not the raw counters
+    ///
+    /// Everything in `/proc/stat` counts **since boot**. Dividing one sample by
+    /// its own total answers "how has this machine spent its life", which after
+    /// a few hours of uptime is a number that barely moves whatever the machine
+    /// is doing. What a viewer wants is the same ratio over the interval
+    /// between two samples, and that needs the subtraction to happen before the
+    /// division.
+    ///
+    /// `saturating_sub` per field rather than an assertion that time only goes
+    /// forwards: a CPU that is taken offline and brought back starts its
+    /// counters again, so `earlier` can legitimately be larger. Saturating
+    /// gives that CPU a zero-length interval for one refresh, which shows as an
+    /// idle bar and corrects itself on the next one. Subtracting with `-` would
+    /// panic in debug and wrap to something enormous in release.
+    #[must_use]
+    pub fn since(&self, earlier: &Self) -> Self {
+        Self {
+            user: self.user.saturating_sub(earlier.user),
+            nice: self.nice.saturating_sub(earlier.nice),
+            system: self.system.saturating_sub(earlier.system),
+            idle: self.idle.saturating_sub(earlier.idle),
+            iowait: self.iowait.saturating_sub(earlier.iowait),
+            irq: self.irq.saturating_sub(earlier.irq),
+            softirq: self.softirq.saturating_sub(earlier.softirq),
+            steal: self.steal.saturating_sub(earlier.steal),
+            guest: self.guest.saturating_sub(earlier.guest),
+            guest_nice: self.guest_nice.saturating_sub(earlier.guest_nice),
+        }
+    }
+
     /// Time not spent idle or waiting for I/O.
     ///
     /// `iowait` counts as not-busy, which is the convention `top` and `htop`

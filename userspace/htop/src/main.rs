@@ -713,6 +713,54 @@ fn read_meminfo() -> MemInfo {
 }
 
 /// Read uptime in seconds from /proc/uptime.
+/// What one CPU's bar shows: the three drawn fractions of the interval.
+///
+/// Fractions of the *interval*, so they sum to at most one. They do not sum to
+/// the busy fraction: `irq`, `softirq` and `steal` are busy time and are not
+/// drawn, so a CPU pegged servicing interrupts reads near zero here. That is
+/// pre-existing and is written down in `known-issues.md` ->
+/// `TD-B-HTOPS-CPU-BAR-PERCENTAGE-OMITS-INTERRUPT-AND-STOLEN-TIME`; it is left
+/// alone here so that this change is only about *which two samples* the bar
+/// divides, not about what counts as busy.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CpuBar {
+    user: f64,
+    system: f64,
+    nice: f64,
+}
+
+impl CpuBar {
+    /// The number printed beside the bar: the sum of what is drawn.
+    ///
+    /// Deliberately the sum of the drawn segments rather than
+    /// [`procinfo::CpuTimes::busy`] -- a percentage that does not match the bar
+    /// next to it is worse than one that under-reports consistently, and the
+    /// under-report has its own entry.
+    fn percent(self) -> f64 {
+        (self.user + self.system + self.nice) * 100.0
+    }
+}
+
+/// The fractions for one refresh interval, or `None` when there is no interval.
+///
+/// A zero-length interval is "no data yet", not "idle": it is what the first
+/// refresh sees, and what a CPU that has just come back online sees for one
+/// frame. Drawing an empty bar for it is right; dividing by it is not, which is
+/// what the previous `total().max(1)` did -- turning a missing measurement into
+/// a confident 0.0%.
+fn cpu_bar_fractions(delta: &procinfo::CpuTimes) -> Option<CpuBar> {
+    let total = delta.total();
+    if total == 0 {
+        return None;
+    }
+    let total = total as f64;
+    Some(CpuBar {
+        user: delta.user as f64 / total,
+        system: delta.system as f64 / total,
+        nice: delta.nice as f64 / total,
+    })
+}
+
 /// Per-CPU times, through [`procinfo`].
 ///
 /// One read of `/proc/stat`, not two: the reader this replaces opened the file
@@ -1115,6 +1163,15 @@ struct App {
     load: (String, String, String),
     /// Number of CPUs.
     num_cpus: usize,
+    /// Per-CPU time accumulated **since the previous refresh**.
+    ///
+    /// Not the counters themselves. `/proc/stat` counts since boot, so a bar
+    /// drawn from the raw sample shows how the machine has spent its life and
+    /// barely moves after a few hours of uptime. This holds the difference
+    /// between the last two samples, which is what the bars are supposed to
+    /// mean. Empty until the second refresh, and the renderer treats a
+    /// zero-length interval as "no data yet" rather than as an idle CPU.
+    cpu_delta: Vec<procinfo::CpuTimes>,
 }
 
 impl App {
@@ -1141,6 +1198,7 @@ impl App {
             uptime: 0,
             load: ("0.00".to_string(), "0.00".to_string(), "0.00".to_string()),
             num_cpus,
+            cpu_delta: Vec::new(),
         }
     }
 
@@ -1178,6 +1236,15 @@ impl App {
         let cpu_delta = current_total.saturating_sub(prev_total);
 
         compute_cpu_usage(&mut procs, &self.prev_ticks, cpu_delta);
+
+        // The per-CPU interval, for the bars. Same two samples the aggregate
+        // above uses; `zip` drops any CPU that appeared or disappeared between
+        // them, which is the honest answer for one refresh.
+        self.cpu_delta = cpu_stats
+            .iter()
+            .zip(self.prev_cpu_stats.iter())
+            .map(|(now, before)| now.since(before))
+            .collect();
 
         // Save for next delta.
         self.prev_ticks = procs.iter().map(|p| (p.pid, p.cpu_ticks)).collect();
@@ -1275,7 +1342,8 @@ impl App {
     }
 
     fn render_header(&self, buf: &mut String) {
-        let cpu_stats = &self.prev_cpu_stats;
+        // The interval, not the counters -- see `App::cpu_delta`.
+        let cpu_stats = &self.cpu_delta;
         let half_cols = self.term_cols / 2;
 
         // Render CPU bars and system info in a two-column layout.
@@ -1289,18 +1357,11 @@ impl App {
             let cpu_label = format!("{:>3}", i);
             let _ = write!(buf, " {BOLD_CYAN}{cpu_label}{RESET}");
 
-            if i < cpu_stats.len() {
-                let stat = &cpu_stats[i];
-                let total = stat.total().max(1) as f64;
-                let user_frac = stat.user as f64 / total;
-                let system_frac = stat.system as f64 / total;
-                let nice_frac = stat.nice as f64 / total;
-
+            if let Some(bar) = cpu_stats.get(i).and_then(cpu_bar_fractions) {
                 // Bar width: half_cols minus label and brackets.
                 let bar_width = half_cols.saturating_sub(8);
-                self.render_cpu_bar(buf, bar_width, user_frac, system_frac, nice_frac);
-
-                let pct = ((stat.user + stat.system + stat.nice) as f64 / total) * 100.0;
+                self.render_cpu_bar(buf, bar_width, bar.user, bar.system, bar.nice);
+                let pct = bar.percent();
                 let _ = write!(buf, " {BOLD_WHITE}{pct:4.1}%{RESET}");
             }
 
@@ -2189,7 +2250,8 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::display_bytes;
+    use super::{cpu_bar_fractions, display_bytes};
+    use procinfo::CpuTimes;
 
     /// The ordinary case costs nothing and changes nothing.
     #[test]
@@ -2240,5 +2302,67 @@ mod tests {
     #[test]
     fn a_truncated_sequence_at_the_end_terminates() {
         assert_eq!(display_bytes(b"ok\xe2\x82"), r"ok\xe2\x82");
+    }
+
+    /// The bars divide the **interval**, which is the whole point of the
+    /// change that introduced this function. A CPU that was 90% idle since
+    /// boot but has been flat out since the last refresh must read ~100%.
+    #[test]
+    fn the_bar_measures_the_interval_it_is_given() {
+        let interval = CpuTimes {
+            user: 90,
+            system: 10,
+            ..CpuTimes::default()
+        };
+        let bar = cpu_bar_fractions(&interval).unwrap();
+        assert!((bar.user - 0.9).abs() < 1e-9);
+        assert!((bar.system - 0.1).abs() < 1e-9);
+        assert!((bar.percent() - 100.0).abs() < 1e-9);
+    }
+
+    /// A zero-length interval has no answer, and `None` is that answer.
+    ///
+    /// The code this replaced divided by `total().max(1)` and printed 0.0%,
+    /// which is a confident claim that the CPU is idle -- said about the first
+    /// refresh, before any measurement exists.
+    #[test]
+    fn a_zero_interval_has_no_reading_rather_than_zero_percent() {
+        assert!(cpu_bar_fractions(&CpuTimes::default()).is_none());
+    }
+
+    /// Idle time is in the denominator and not drawn, so a quiet CPU reads low
+    /// rather than reading nothing.
+    #[test]
+    fn idle_time_lowers_the_reading_without_hiding_it() {
+        let interval = CpuTimes {
+            user: 25,
+            idle: 75,
+            ..CpuTimes::default()
+        };
+        let bar = cpu_bar_fractions(&interval).unwrap();
+        assert!((bar.percent() - 25.0).abs() < 1e-9);
+    }
+
+    /// The known under-report, pinned so that fixing it is a deliberate change
+    /// with a failing test rather than a silent one.
+    ///
+    /// `irq`, `softirq` and `steal` are busy time and are not drawn, so a CPU
+    /// doing nothing but servicing interrupts reads 0%. See
+    /// `known-issues.md` -> TD-B-HTOPS-CPU-BAR-PERCENTAGE-OMITS-INTERRUPT-AND-STOLEN-TIME.
+    #[test]
+    fn interrupt_and_stolen_time_are_not_counted_yet() {
+        let interval = CpuTimes {
+            irq: 50,
+            softirq: 30,
+            steal: 20,
+            ..CpuTimes::default()
+        };
+        let bar = cpu_bar_fractions(&interval).unwrap();
+        assert!(
+            (bar.percent() - 0.0).abs() < 1e-9,
+            "a fully-busy CPU currently reads 0%"
+        );
+        // …while the crate's own definition of busy sees all of it.
+        assert_eq!(interval.busy(), 100);
     }
 }

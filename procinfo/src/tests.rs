@@ -953,3 +953,51 @@ fn procfs_reads_cpu_stats_from_a_fixture() {
     assert_eq!(sched.running, Some(3));
     assert_eq!(sched.blocked, Some(1));
 }
+
+/// The subtraction a viewer needs before it divides.
+#[test]
+fn since_gives_the_interval_not_the_lifetime() {
+    let earlier = CpuTimes {
+        user: 100,
+        idle: 900,
+        ..CpuTimes::default()
+    };
+    let later = CpuTimes {
+        user: 150,
+        idle: 950,
+        ..CpuTimes::default()
+    };
+    let d = later.since(&earlier);
+    assert_eq!(d.user, 50);
+    assert_eq!(d.idle, 50);
+    assert_eq!(d.total(), 100);
+    // The point of doing it at all: the lifetime ratio and the interval ratio
+    // are different numbers, and only the second one moves.
+    assert_eq!(later.user * 100 / later.total(), 13);
+    assert_eq!(d.user * 100 / d.total(), 50);
+}
+
+/// A CPU taken offline and brought back restarts its counters, so `earlier`
+/// can legitimately be the larger sample. That must be a zero-length interval
+/// for one refresh, not a panic and not a wrap to something enormous.
+#[test]
+fn since_saturates_when_a_counter_goes_backwards() {
+    let earlier = CpuTimes {
+        user: 500,
+        idle: 500,
+        ..CpuTimes::default()
+    };
+    let later = CpuTimes {
+        user: 10,
+        idle: 20,
+        ..CpuTimes::default()
+    };
+    let d = later.since(&earlier);
+    assert_eq!(d.user, 0);
+    assert_eq!(d.idle, 0);
+    assert_eq!(
+        d.total(),
+        0,
+        "a zero interval, which a caller must treat as no data"
+    );
+}

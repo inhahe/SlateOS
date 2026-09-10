@@ -126884,7 +126884,7 @@ the debt of ten right answers with nothing keeping them right, not a list of
 bugs.
 
 
-## TD-B-HTOPS-CPU-BARS-SHOW-TIME-SINCE-BOOT-NOT-RECENT-ACTIVITY (lane B, 2026-09-10)
+## TD-B-HTOPS-CPU-BARS-SHOW-TIME-SINCE-BOOT-NOT-RECENT-ACTIVITY (lane B, 2026-09-10) -- FIXED the same day
 
 **In short:** the per-CPU bars along the top of `htop` show how the machine has
 spent its time *since it booted*, not how it is spending it now. After a few
@@ -126913,3 +126913,45 @@ reports it.
 **Deliberately not fixed in the same commit** as the extraction: that commit's
 claim is "behaviour is unchanged except where it was wrong to read", and
 changing what the bars *mean* is a different claim that deserves its own diff.
+
+**Fixed** in that separate diff. `App` keeps a `cpu_delta` -- the per-CPU
+difference between the last two samples, from `procinfo::CpuTimes::since` --
+and the renderer divides that instead of the raw counters.
+
+Two things fell out of doing it:
+
+* **A zero-length interval now has no reading, rather than 0.0%.** The old code
+  divided by `total().max(1)`, so the first refresh -- before any interval
+  exists -- printed a confident "0.0%" for every CPU. It draws nothing now.
+  The same case arises for one frame when a CPU is taken offline and brought
+  back, which is why `since` saturates instead of asserting time runs forwards.
+* **The arithmetic is a pure function with tests.** It was four lines inside a
+  render loop, which is why nobody could have noticed it was dividing the wrong
+  pair of numbers.
+
+
+## TD-B-HTOPS-CPU-BAR-PERCENTAGE-OMITS-INTERRUPT-AND-STOLEN-TIME (lane B, 2026-09-10)
+
+**In short:** a CPU doing nothing but servicing interrupts shows as 0% busy in
+`htop`.
+
+**Where.** `userspace/htop/src/main.rs`, `CpuBar::percent` -- the number beside
+each CPU bar is the sum of the three segments actually drawn (`user`, `system`,
+`nice`) and therefore omits `irq`, `softirq` and `steal`. `procinfo`'s own
+`CpuTimes::busy` counts all of them, so the crate and its caller currently
+disagree about what "busy" means.
+
+**Why it is a percentage and not just a missing colour.** Under QEMU, `steal`
+is the field that is reliably non-zero, and a network- or disk-heavy workload
+puts real time in `softirq`. Both are the machine being unavailable to the user
+and both read as idle.
+
+**The fix is a UI change**, which is why it is separate: the bar needs a fourth
+segment before the number can include a fourth category, or the number stops
+matching the bar beside it -- and a percentage that disagrees with the picture
+next to it is worse than one that under-reports consistently.
+
+**Pinned by a test** (`interrupt_and_stolen_time_are_not_counted_yet`) that
+asserts the current under-report *and* asserts `busy()` sees all of it, so
+fixing this is a deliberate change with a failing test rather than a silent
+one.

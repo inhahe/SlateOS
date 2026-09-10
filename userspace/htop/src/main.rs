@@ -42,6 +42,7 @@ const RED: &str = "\x1b[31m";
 const BLUE: &str = "\x1b[34m";
 const CYAN: &str = "\x1b[36m";
 const YELLOW: &str = "\x1b[33m";
+const MAGENTA: &str = "\x1b[35m";
 const WHITE: &str = "\x1b[37m";
 const BOLD: &str = "\x1b[1m";
 const DIM: &str = "\x1b[2m";
@@ -664,31 +665,57 @@ fn read_file(path: &str) -> Option<String> {
     fs::read_to_string(path).ok().map(|s| s.trim().to_string())
 }
 
-/// What one CPU's bar shows: the three drawn fractions of the interval.
+/// What one CPU's bar shows: the four drawn fractions of the interval.
 ///
-/// Fractions of the *interval*, so they sum to at most one. They do not sum to
-/// the busy fraction: `irq`, `softirq` and `steal` are busy time and are not
-/// drawn, so a CPU pegged servicing interrupts reads near zero here. That is
-/// pre-existing and is written down in `known-issues.md` ->
-/// `TD-B-HTOPS-CPU-BAR-PERCENTAGE-OMITS-INTERRUPT-AND-STOLEN-TIME`; it is left
-/// alone here so that this change is only about *which two samples* the bar
-/// divides, not about what counts as busy.
+/// Fractions of the *interval*, so they sum to at most one, and together they
+/// are the busy fraction -- [`procinfo::CpuTimes::busy`] is
+/// `total - idle - iowait`, which is exactly these four.
+///
+/// # The fourth one, and why it was missing
+///
+/// `overhead` is `irq + softirq + steal`. Until 2026-09-10 the bar drew three
+/// segments and the percentage beside it summed those three, so **a CPU doing
+/// nothing but servicing interrupts read 0% busy**. Under QEMU `steal` is the
+/// field that is reliably non-zero and a network- or disk-heavy workload puts
+/// real time in `softirq`; both are the machine being unavailable to the user,
+/// and both read as idle.
+///
+/// It stayed that way deliberately for a while: the percentage is the sum of
+/// what is *drawn*, and a number that disagrees with the picture beside it is
+/// worse than one that under-reports consistently. So the number could not
+/// grow a fourth category until the bar grew a fourth segment. This is that
+/// change -- both halves at once, which is the only way it is honest.
+///
+/// # Why the three are one segment rather than three
+///
+/// Real `htop` gives `irq`, `softirq` and `steal` separate colours. They are
+/// grouped here because they answer one question -- "how much of this
+/// interval was the CPU busy with something that is not a process?" -- and
+/// because three more segments on a bar that is often twenty characters wide
+/// is three more roundings to zero. If a use appears for telling them apart,
+/// the split is a change to this struct and to `render_cpu_bar`, not to what
+/// counts as busy.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct CpuBar {
     user: f64,
     system: f64,
     nice: f64,
+    /// `irq + softirq + steal`: busy time not attributable to a process.
+    overhead: f64,
 }
 
 impl CpuBar {
     /// The number printed beside the bar: the sum of what is drawn.
     ///
-    /// Deliberately the sum of the drawn segments rather than
-    /// [`procinfo::CpuTimes::busy`] -- a percentage that does not match the bar
-    /// next to it is worse than one that under-reports consistently, and the
-    /// under-report has its own entry.
+    /// Still the sum of the drawn segments and not a second, independent
+    /// definition of "busy" -- that is what keeps the number and the picture
+    /// agreeing. It now *equals* [`procinfo::CpuTimes::busy`] over the same
+    /// interval, and `percent_matches_the_crates_definition_of_busy` asserts
+    /// it does. The two are computed separately on purpose: if either
+    /// definition drifts, that test says so instead of one silently absorbing
+    /// the difference.
     fn percent(self) -> f64 {
-        (self.user + self.system + self.nice) * 100.0
+        (self.user + self.system + self.nice + self.overhead) * 100.0
     }
 }
 
@@ -709,6 +736,14 @@ fn cpu_bar_fractions(delta: &procinfo::CpuTimes) -> Option<CpuBar> {
         user: delta.user as f64 / total,
         system: delta.system as f64 / total,
         nice: delta.nice as f64 / total,
+        // Summed as integers before the division: three separate divisions
+        // would each round, and the bar's own rounding is already the reason
+        // small categories vanish.
+        overhead: delta
+            .irq
+            .saturating_add(delta.softirq)
+            .saturating_add(delta.steal) as f64
+            / total,
     })
 }
 
@@ -1279,7 +1314,7 @@ impl App {
             if let Some(bar) = cpu_stats.get(i).and_then(cpu_bar_fractions) {
                 // Bar width: half_cols minus label and brackets.
                 let bar_width = half_cols.saturating_sub(8);
-                self.render_cpu_bar(buf, bar_width, bar.user, bar.system, bar.nice);
+                Self::render_cpu_bar(buf, bar_width, &bar);
                 let pct = bar.percent();
                 let _ = write!(buf, " {BOLD_WHITE}{pct:4.1}%{RESET}");
             }
@@ -1378,27 +1413,44 @@ impl App {
         lines
     }
 
-    fn render_cpu_bar(&self, buf: &mut String, width: usize, user: f64, system: f64, nice: f64) {
+    /// Draw one CPU's bar.
+    ///
+    /// Takes the [`CpuBar`] rather than its fields: four `f64` arguments in a
+    /// row is a swap waiting to happen, and swapping two of them produces a
+    /// bar that still looks plausible.
+    /// An associated function, not a method: it reads nothing from `self`,
+    /// and taking `&self` would have kept the clamping below unreachable from
+    /// a test without building an `App`.
+    fn render_cpu_bar(buf: &mut String, width: usize, bar: &CpuBar) {
         let _ = write!(buf, "[");
 
-        let user_chars = (user * width as f64).round() as usize;
-        let system_chars = (system * width as f64).round() as usize;
-        let nice_chars = (nice * width as f64).round() as usize;
-        let filled = (user_chars + system_chars + nice_chars).min(width);
+        let chars = |fraction: f64| (fraction * width as f64).round() as usize;
+        let user_chars = chars(bar.user);
+        let system_chars = chars(bar.system);
+        let nice_chars = chars(bar.nice);
+        let overhead_chars = chars(bar.overhead);
+        let filled = (user_chars + system_chars + nice_chars + overhead_chars).min(width);
         let empty = width.saturating_sub(filled);
 
-        // User = green, System = red, Nice = blue.
-        let _ = write!(buf, "{GREEN}");
-        for _ in 0..user_chars.min(width) {
-            let _ = write!(buf, "|");
-        }
-        let _ = write!(buf, "{RED}");
-        for _ in 0..system_chars.min(width.saturating_sub(user_chars)) {
-            let _ = write!(buf, "|");
-        }
-        let _ = write!(buf, "{BLUE}");
-        for _ in 0..nice_chars.min(width.saturating_sub(user_chars + system_chars)) {
-            let _ = write!(buf, "|");
+        // User = green, System = red, Nice = blue, irq/softirq/steal = magenta
+        // (which is what real htop uses for interrupt time).
+        //
+        // Each segment is clamped to what the ones before it left, so the four
+        // together can never write more than `width` cells however they round.
+        let mut used = 0usize;
+        for (colour, want) in [
+            (GREEN, user_chars),
+            (RED, system_chars),
+            (BLUE, nice_chars),
+            (MAGENTA, overhead_chars),
+        ] {
+            let _ = write!(buf, "{colour}");
+            let room = width.saturating_sub(used);
+            let n = want.min(room);
+            for _ in 0..n {
+                let _ = write!(buf, "|");
+            }
+            used = used.saturating_add(n);
         }
         let _ = write!(buf, "{DIM}");
         for _ in 0..empty {
@@ -1677,7 +1729,7 @@ impl App {
         let _ = write!(buf, "{RESET}\r\n\r\n");
 
         let help_lines = [
-            "  CPU bars: user(green) system(red) nice(blue)",
+            "  CPU bars: user(green) system(red) nice(blue) irq/steal(magenta)",
             "  Mem bar:  used(green) buffers(blue) cache(yellow)",
             "  Swap bar: used(red)",
             "",
@@ -2169,7 +2221,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::cpu_bar_fractions;
+    use super::{App, CpuBar, cpu_bar_fractions};
     use procinfo::CpuTimes;
 
     /// The bars divide the **interval**, which is the whole point of the
@@ -2211,26 +2263,114 @@ mod tests {
         assert!((bar.percent() - 25.0).abs() < 1e-9);
     }
 
-    /// The known under-report, pinned so that fixing it is a deliberate change
-    /// with a failing test rather than a silent one.
+    /// **The under-report this test used to pin.**
     ///
-    /// `irq`, `softirq` and `steal` are busy time and are not drawn, so a CPU
-    /// doing nothing but servicing interrupts reads 0%. See
-    /// `known-issues.md` -> TD-B-HTOPS-CPU-BAR-PERCENTAGE-OMITS-INTERRUPT-AND-STOLEN-TIME.
+    /// It read `interrupt_and_stolen_time_are_not_counted_yet` and asserted
+    /// that a CPU doing nothing but servicing interrupts reads **0%** -- the
+    /// real behaviour, deliberately pinned so that fixing it would be a
+    /// change with a failing test rather than a silent one. It failed on
+    /// 2026-09-10, which is what a pinning test is for, and this is its
+    /// inverse.
     #[test]
-    fn interrupt_and_stolen_time_are_not_counted_yet() {
+    fn interrupt_and_stolen_time_are_counted() {
         let interval = CpuTimes {
             irq: 50,
             softirq: 30,
             steal: 20,
             ..CpuTimes::default()
         };
-        let bar = cpu_bar_fractions(&interval).unwrap();
+        let bar = cpu_bar_fractions(&interval).expect("a non-empty interval");
         assert!(
-            (bar.percent() - 0.0).abs() < 1e-9,
-            "a fully-busy CPU currently reads 0%"
+            (bar.percent() - 100.0).abs() < 1e-9,
+            "a CPU spending the whole interval on interrupts and stolen time \
+             must read 100%, not 0%; got {}",
+            bar.percent()
         );
-        // …while the crate's own definition of busy sees all of it.
+        assert!(
+            (bar.overhead - 1.0).abs() < 1e-9,
+            "all of it belongs to the fourth segment"
+        );
         assert_eq!(interval.busy(), 100);
+    }
+
+    /// **The number beside the bar and the crate's own idea of busy must
+    /// agree.**
+    ///
+    /// They are computed separately and on purpose: `percent()` sums the four
+    /// drawn segments, `busy()` is `total - idle - iowait`. Deriving one from
+    /// the other would make them agree by construction and hide a drift --
+    /// if `busy()` ever started counting `iowait`, a derived `percent()` would
+    /// silently follow it and the bar would stop matching the picture. This
+    /// test is what says so instead.
+    #[test]
+    fn percent_matches_the_crates_definition_of_busy() {
+        let interval = CpuTimes {
+            user: 20,
+            nice: 5,
+            system: 10,
+            idle: 40,
+            iowait: 5,
+            irq: 8,
+            softirq: 7,
+            steal: 5,
+            ..CpuTimes::default()
+        };
+        let bar = cpu_bar_fractions(&interval).expect("a non-empty interval");
+        let want = interval.busy() as f64 / interval.total() as f64 * 100.0;
+        assert!(
+            (bar.percent() - want).abs() < 1e-9,
+            "bar says {:.6}%, busy() says {want:.6}%",
+            bar.percent()
+        );
+        // And `iowait` is on neither side: waiting for a disk is not the CPU
+        // being busy, which is the one category this deliberately excludes.
+        assert!(bar.percent() < 100.0);
+    }
+
+    /// **The four segments together never overrun the bar.**
+    ///
+    /// Each fraction is rounded independently, so four of them can each round
+    /// up and ask for more cells than exist -- and a bar that writes past its
+    /// own width corrupts the line beside it, which on this screen is the
+    /// memory gauge. The clamping is a running total rather than four
+    /// independent `min(width)` calls, which is what would let the second
+    /// segment reuse the first's room.
+    #[test]
+    fn the_bar_never_draws_more_cells_than_it_has() {
+        // Every segment 0.3 of a 10-cell bar: 3 cells each, 12 wanted, 10
+        // available.
+        let greedy = CpuBar {
+            user: 0.3,
+            system: 0.3,
+            nice: 0.3,
+            overhead: 0.3,
+        };
+        let mut buf = String::new();
+        App::render_cpu_bar(&mut buf, 10, &greedy);
+
+        let cells = buf.chars().filter(|c| *c == '|' || *c == ' ').count();
+        let filled = buf.chars().filter(|c| *c == '|').count();
+        assert_eq!(filled, 10, "a full bar fills exactly its width");
+        assert_eq!(cells, 10, "bars plus padding is exactly the width");
+        assert!(buf.starts_with('['), "and it is still bracketed");
+        assert!(buf.ends_with(']'));
+    }
+
+    /// A bar with room to spare pads the remainder and still measures its
+    /// width exactly -- the other side of the test above, since a clamp that
+    /// was too eager would show here instead.
+    #[test]
+    fn a_partly_idle_bar_pads_the_rest() {
+        let quiet = CpuBar {
+            user: 0.2,
+            system: 0.1,
+            nice: 0.0,
+            overhead: 0.0,
+        };
+        let mut buf = String::new();
+        App::render_cpu_bar(&mut buf, 10, &quiet);
+
+        assert_eq!(buf.chars().filter(|c| *c == '|').count(), 3);
+        assert_eq!(buf.chars().filter(|c| *c == ' ').count(), 7);
     }
 }

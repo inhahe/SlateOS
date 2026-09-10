@@ -10,42 +10,39 @@
 # too, because that is how a fixed site stays counted.
 #
 # An `allow <function> <literal>` line exempts one (function, default) pair.
-# It exists because this population is not one population. Every default that
-# names an object is 0 or 1 -- `filevault unlock` with no argument unlocks
-# vault 0 -- while every default that names a QUANTITY is larger: a row count,
-# an idle delay in seconds, a percentage, a timeout in milliseconds. Supplying
-# 300 seconds for an omitted `screensaver timeout` is not a guess about what
-# the operator meant; it is the documented default of an optional operand.
+# The criterion is the command's OWN printed synopsis and nothing else: square
+# brackets mean the operand may be omitted, so a default for it is documented
+# behaviour. `sharesheet` prints `history [count]`, so defaulting to 10 rows is
+# correct. Each allow line below quotes the help text that licenses it.
+#
+# Do not bless by magnitude. The first version of this file did -- a default
+# that names an object is 0 or 1, one that names an amount is larger -- and it
+# blessed three defects: screensaver prints `timeout <id> <s>`, sysanimations
+# prints `speed <percent>`, filevault prints `autolock <id> <seconds>`. Angle
+# brackets, all three. The command tells the operator the operand is required,
+# the operator omits it, and the command silently succeeds on a value it chose.
 #
 # So the floor of this ledger is NOT zero, and a reader who drives it to zero
-# deletes working defaults. The allowed lines are the difference, each with the
-# synopsis that makes it optional.
+# deletes three working defaults.
 #
-# A blessing is keyed on the literal, not a line number: line numbers in a
-# 120k-line file move every batch, and the literal is the thing that decides
-# which population a site belongs to. An allow line matching no site in the
-# tree FAILS, for the same reason an over-claiming count does.
-#
-# These lines say nothing about the OTHER defect on the same source line. Each
+# These lines say nothing about the other defect on the same source line. Each
 # allowed site also writes `.parse().unwrap_or(N)`, replacing a word it could
 # not read with a guess -- design-decisions.md 600's shape, counted separately
-# in scripts/option-refusal-ledger.txt, where all six functions already
+# in scripts/option-refusal-ledger.txt, where all three functions already
 # appear. Blessed here means blessed for the absent-operand question only.
 #
-allow cmd_sharesheet 10 # `sharesheet history [count]` -- rows to list, not a target id
-allow cmd_screensaver 300 # `screensaver timeout [secs]` -- an idle delay, not a saver id
-allow cmd_apppermissions 10 # `apppermissions log [count]` -- rows to list, not an app id
-allow cmd_sysanimations 100 # `sysanimations speed [pct]` -- 100 percent means unchanged
-allow cmd_filevault 300 # `filevault autolock [secs]` -- a delay, not a vault id
-allow cmd_udp6 5000 # `udp6 listen [timeout_ms]` -- how long to wait, not a socket id
+allow cmd_sharesheet 10 # its own help prints `history [count]` -- square brackets
+allow cmd_apppermissions 10 # its own help prints `log [count]` -- square brackets
+allow cmd_udp6 5000 # its own help prints `listen <port> [timeout_ms]` -- square
 
 cmd_audioeq 6
-cmd_filevault 3
+cmd_filevault 4
 cmd_gamemode 1
 cmd_kbshortcuts 3
 cmd_mousegestures 1
 cmd_netprofile 5
-cmd_screensaver 4
+cmd_screensaver 5
 cmd_sharesheet 2
 cmd_surroundsound 5
+cmd_sysanimations 1
 cmd_udp6 1

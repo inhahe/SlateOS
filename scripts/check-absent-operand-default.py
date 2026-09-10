@@ -71,14 +71,38 @@ cheapest way to lower the number is to delete the comment. See mask_noncode(),
 whose first draft blanked string bodies too and took the count from 37 to 0 --
 the pattern being measured *is* a string literal.
 
-**Quantities are blessed** by an `allow` line in the ledger. This population is
-not one population: every default that names an object is 0 or 1, and every
-default that names an amount is larger -- a row count, an idle delay, a
-percentage, a timeout. `screensaver timeout` with no argument using 300 seconds
-is the documented value of an optional operand. So the ledger's floor is not
-zero, and a reader who drives it to zero deletes working defaults. Six sites are
-allowed; each also swallows a failed parse, which is a different defect counted
-in `scripts/option-refusal-ledger.txt`, where all six functions already appear.
+**Operands their own help calls optional are blessed** by an `allow` line in the
+ledger. The criterion is the command's printed synopsis, and nothing else: square
+brackets mean the operand may be omitted, so supplying a value for it is the
+documented behaviour rather than a guess. `sharesheet` prints `history [count]`,
+so defaulting to 10 rows is correct and counting it is noise.
+
+That criterion replaced a worse one, and the way it failed is worth keeping. The
+first version blessed by MAGNITUDE -- every default naming an object is 0 or 1,
+every default naming an amount is larger -- which is a true observation about the
+data and the wrong test. Six sites were blessed under it. Three were defects:
+
+    screensaver  prints `timeout <id> <s>`       ... and defaults s to 300
+    sysanimations prints `speed <percent>`       ... and defaults percent to 100
+    filevault    prints `autolock <id> <seconds>` ... and defaults seconds to 300
+
+Angle brackets. The command tells the operator the operand is required, the
+operator omits it, and the command silently succeeds on a value it chose. That is
+the same defect as `filevault unlock` acting on vault 0, only the consequence is
+a wrong duration instead of a wrong object -- and cmd_colortemp's own comment had
+already settled the rule months earlier: "the synopsis says `set <id> <kelvin>`,
+angle brackets, so there is no documented default to fall back to."
+
+The blessing reasons now quote the synopsis, because the three wrong ones were
+justified with a synopsis this author wrote from memory -- `[secs]`, in square
+brackets that appear nowhere in the tree. An exemption argued from invented
+documentation is worse than no exemption, so every `allow` line cites the line of
+help text that licenses it, and that text is in the same file and greppable.
+
+So the ledger's floor is not zero, and a reader who drives it to zero deletes
+three working defaults. Three sites are allowed; each also swallows a failed
+parse, which is a different defect counted in
+`scripts/option-refusal-ledger.txt`, where all three functions already appear.
 
 The ledger, and what fails
 ==========================
@@ -132,26 +156,25 @@ LEDGER_HEADER = (
     "# too, because that is how a fixed site stays counted.\n"
     "#\n"
     "# An `allow <function> <literal>` line exempts one (function, default) pair.\n"
-    "# It exists because this population is not one population. Every default that\n"
-    "# names an object is 0 or 1 -- `filevault unlock` with no argument unlocks\n"
-    "# vault 0 -- while every default that names a QUANTITY is larger: a row count,\n"
-    "# an idle delay in seconds, a percentage, a timeout in milliseconds. Supplying\n"
-    "# 300 seconds for an omitted `screensaver timeout` is not a guess about what\n"
-    "# the operator meant; it is the documented default of an optional operand.\n"
+    "# The criterion is the command's OWN printed synopsis and nothing else: square\n"
+    "# brackets mean the operand may be omitted, so a default for it is documented\n"
+    "# behaviour. `sharesheet` prints `history [count]`, so defaulting to 10 rows is\n"
+    "# correct. Each allow line below quotes the help text that licenses it.\n"
+    "#\n"
+    "# Do not bless by magnitude. The first version of this file did -- a default\n"
+    "# that names an object is 0 or 1, one that names an amount is larger -- and it\n"
+    "# blessed three defects: screensaver prints `timeout <id> <s>`, sysanimations\n"
+    "# prints `speed <percent>`, filevault prints `autolock <id> <seconds>`. Angle\n"
+    "# brackets, all three. The command tells the operator the operand is required,\n"
+    "# the operator omits it, and the command silently succeeds on a value it chose.\n"
     "#\n"
     "# So the floor of this ledger is NOT zero, and a reader who drives it to zero\n"
-    "# deletes working defaults. The allowed lines are the difference, each with the\n"
-    "# synopsis that makes it optional.\n"
+    "# deletes three working defaults.\n"
     "#\n"
-    "# A blessing is keyed on the literal, not a line number: line numbers in a\n"
-    "# 120k-line file move every batch, and the literal is the thing that decides\n"
-    "# which population a site belongs to. An allow line matching no site in the\n"
-    "# tree FAILS, for the same reason an over-claiming count does.\n"
-    "#\n"
-    "# These lines say nothing about the OTHER defect on the same source line. Each\n"
+    "# These lines say nothing about the other defect on the same source line. Each\n"
     "# allowed site also writes `.parse().unwrap_or(N)`, replacing a word it could\n"
     "# not read with a guess -- design-decisions.md 600's shape, counted separately\n"
-    "# in scripts/option-refusal-ledger.txt, where all six functions already\n"
+    "# in scripts/option-refusal-ledger.txt, where all three functions already\n"
     "# appear. Blessed here means blessed for the absent-operand question only.\n"
     "#\n"
 )
@@ -374,7 +397,7 @@ def main() -> int:
 
     if args.list:
         for name, line, dflt in found:
-            mark = "  [allowed: a quantity, not a name]" if (name, dflt) in allowed else ""
+            mark = "  [allowed: its own help prints square brackets]" if (name, dflt) in allowed else ""
             print(
                 f"kernel/src/kshell.rs:{line}: {name} defaults a missing operand "
                 f"to {dflt}{mark}"
@@ -450,7 +473,7 @@ def main() -> int:
 
     print(
         f"check-absent-operand-default: OK ({sum(tally.values())} site(s) across "
-        f"{len(tally)} function(s), all ledgered; {len(allowed)} allowed as quantities)"
+        f"{len(tally)} function(s), all ledgered; {len(allowed)} documented optional)"
     )
     return 0
 

@@ -56840,3 +56840,43 @@ the right one.** The output is well-formed, plausible, and about something
 else. The cheap defence is to make each check fail loudly against a known
 positive first -- run the query against a case you are certain matches, and if
 it does not light up, the query is broken rather than the tree.
+
+### Judgment call (lane A, 2026-09-10): a verb-selector operand its help calls required
+
+68 kshell sites were changed so that an operand the command's own help prints in
+angle brackets is refused when absent, instead of being given an invented value
+(`known-issues.md` → TD-A-KSHELL-PRINTS-AN-OPERAND-AS-REQUIRED-AND-THEN-SUPPLIES-IT).
+
+For most of them the operand names a thing — `<app>`, `<path>`, `<name>` — and
+refusing is plainly right: `apppermissions grant` used to grant the storage
+permission to an application named "app".
+
+About five are different in kind. They select a **verb**, and the value they
+invented was the harmless read-only one:
+
+    recent exclude <add|remove|list>        defaulted to "list"
+    rundialog bookmark <add|rm|list>        defaulted to "list"
+    rundialog path <show|refresh|clear>     defaulted to "show"
+    envvars path <list|append|prepend|rm>   defaulted to "list"
+    container volume <create|ls|rm|...>     defaulted to its listing verb
+
+For these there are two defensible fixes, and they differ in which side of the
+disagreement you believe:
+
+1. **Refuse the operand** (what I did). The help says required, and the help is the
+   contract the user reads.
+2. **Change the help** to `[add|remove|list]`, documenting what the code already
+   does. A bare `recent exclude` listing the exclusions is reasonable CLI design.
+
+I chose (1) uniformly, for a reason that is about the gate rather than about these
+five commands: deciding per-site whether an invented default is "sensible enough to
+document" puts judgment back at the centre of a criterion whose entire value is that
+it has none. The rule "an operand printed in angle brackets must not have a default"
+is decidable from the tree by anyone, and it was adopted precisely after a
+magnitude-based rule — which *did* require judgment — blessed three real defects.
+
+So this is reversible and deliberately so. If the operator prefers (2) for some of
+these, the fix is to edit the help line to square brackets and delete the guard; the
+gate will then agree, because it reads the brackets rather than a list of opinions.
+`speech listen <start|stop>` is **not** a candidate: its invented value was "start",
+which turned the microphone on.

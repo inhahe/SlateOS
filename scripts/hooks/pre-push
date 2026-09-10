@@ -30,6 +30,7 @@
 #      because that gate is then not running at all — argparse exits 2 and
 #      reaches no verdict, or a hand-rolled argv scan ignores the flag and
 #      answers a different question.
+#  20. Refuse to publish a `scripts/*.py` whose own test suite fails.
 #
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented, and it was wrong again the moment gate 13 was written --
@@ -628,8 +629,7 @@ if [ "$skip_readdef" != "1" ]; then
     fi
 fi
 
-# ---------------------------------------------------------------------------
-# A tooling script's own suite, for every scripts/*.py being pushed.
+# Gate 20: a tooling script's own suite, for every scripts/*.py being pushed.
 #
 # 22 scripts have a paired scripts/test-<name>.py. main went red three times on
 # 2026-09-10 because somebody edited one and ran only the checker's
@@ -646,11 +646,20 @@ fi
 # runs none of these.
 # ---------------------------------------------------------------------------
 skip_suites=0
+if [ "${ALLOW_TOOLING_SUITE_FAILURE:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_TOOLING_SUITE_FAILURE=1 set — skipping the tooling-suite gate." >&2
+    skip_suites=1
+fi
+# No `[ -n "${pushed_shas# }" ]` guard, unlike the gates that loop over the
+# shas: `touches` already asks `git rev-list $pushed_shas`, so an empty push
+# makes it false and this gate reports itself skipped. Adding the guard would
+# be a second spelling of the same question, and the suite counts guards
+# against sha-loops to keep that correspondence exact.
 touches scripts/ || skip_suites=1
-[ -n "${pushed_shas# }" ] || skip_suites=1
 note_gate tooling-suites "$skip_suites"
 
 suites_failed=0
+suites_ran=""
 if [ "$skip_suites" != "1" ]; then
     # The same revision range `touches` uses, turned into file names.
     # `git diff` does not understand `--not --remotes`; that is rev-list
@@ -664,10 +673,21 @@ if [ "$skip_suites" != "1" ]; then
         esac
         suite="${repo_root:-.}/scripts/test-$base"
         [ -f "$suite" ] || continue
+        suites_ran="$suites_ran $base"
         if ! run_checker "suite-$base" "$py" "$suite"; then
             suites_failed=1
         fi
     done
+    # Say what was run, or that nothing was. A gate that decided internally it
+    # had nothing to do appears in the `ran:` tally exactly like one that
+    # passed -- lane A's TD-B-A-GATE-THAT-PASSES-BY-SKIPPING-IS-REPORTED-AS-
+    # HAVING-RUN, which landed while this gate was being written and describes
+    # it precisely.
+    if [ -n "$suites_ran" ]; then
+        echo "pre-push: tooling suites run:$suites_ran" >&2
+    else
+        echo "pre-push: no scripts/*.py in this push has a paired test suite" >&2
+    fi
 fi
 
 if [ "$suites_failed" = "1" ]; then
@@ -682,6 +702,10 @@ format, and the advice it prints to whoever it refuses.
 
 Three of 2026-09-10's red builds were exactly this, each found seventeen
 minutes into a boot test by a suite that runs in seconds here.
+
+To push anyway:
+
+    ALLOW_TOOLING_SUITE_FAILURE=1 git push $remote_name ...
 EOF
     fail=1
 fi

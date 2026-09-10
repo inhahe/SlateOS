@@ -1175,8 +1175,122 @@ pub fn self_test() -> KernelResult<()> {
     test_signalfd_waiter_registry()?;
     test_take_all_waiters()?;
     test_siginfo_record()?;
+    test_altstack_placement()?;
 
-    serial_println!("[signal] Signal-shim self-test PASSED (13 tests)");
+    serial_println!("[signal] Signal-shim self-test PASSED (14 tests)");
+    Ok(())
+}
+
+/// Verify the `SA_ONSTACK` frame placement decision: every branch of
+/// [`altstack_top_for`], plus inheritance across `fork` and the clear on `exec`.
+///
+/// Worth the length because the decision is invisible from userspace until it is
+/// wrong, and wrong in two opposite directions. Placing a frame on the alternate
+/// stack when the handler did not ask steals a stack it never offered; *not*
+/// placing it there when the handler did ask is the bug this exists to fix, and
+/// it only shows up when the interrupted stack has already overflowed -- i.e. in
+/// the one situation nobody can debug comfortably.
+fn test_altstack_placement() -> KernelResult<()> {
+    let p = TEST_PID_BASE + 10;
+    const SP: u64 = 0x5000_0000;
+    const SIZE: u64 = 64 * 1024;
+    const TOP: u64 = SP + SIZE;
+    const SIGSEGV: u32 = 11;
+    const SIGUSR1: u32 = 10;
+
+    // Nothing registered: always the interrupted stack.
+    check(
+        altstack_top_for(p, SIGSEGV, 0x7fff_0000).is_none(),
+        "no alternate stack registered -> interrupted stack",
+    )?;
+
+    // Registered, but this signal's handler never asked for it. Using it here
+    // would hand a handler a stack it did not request.
+    set_altstack(p, SP, SIZE, 1 << (SIGUSR1 - 1));
+    check(
+        altstack_top_for(p, SIGSEGV, 0x7fff_0000).is_none(),
+        "SA_ONSTACK clear for this signal -> interrupted stack",
+    )?;
+    check(
+        altstack_top_for(p, SIGUSR1, 0x7fff_0000) == Some(TOP),
+        "SA_ONSTACK set for this signal -> top of the alternate stack",
+    )?;
+
+    // The frame grows down from one past the end, not from the base.
+    set_altstack(p, SP, SIZE, 1 << (SIGSEGV - 1));
+    check(
+        altstack_top_for(p, SIGSEGV, 0x7fff_0000) == Some(TOP),
+        "top is sp + size",
+    )?;
+
+    // The load-bearing refusal: a signal arriving while a handler is already
+    // running on the alternate stack must not restart at the top, or it
+    // overwrites the frames of the handler it interrupted.
+    check(
+        altstack_top_for(p, SIGSEGV, SP).is_none(),
+        "already at the base of the alternate stack -> refuse",
+    )?;
+    check(
+        altstack_top_for(p, SIGSEGV, SP + SIZE / 2).is_none(),
+        "already inside the alternate stack -> refuse",
+    )?;
+    check(
+        altstack_top_for(p, SIGSEGV, TOP - 1).is_none(),
+        "last byte of the alternate stack is inside it -> refuse",
+    )?;
+    // One past the end is *not* inside: that is the first address a frame built
+    // at the top occupies, so treating it as inside would refuse the very case
+    // this feature serves.
+    check(
+        altstack_top_for(p, SIGSEGV, TOP) == Some(TOP),
+        "one past the end is outside -> place the frame",
+    )?;
+    check(
+        altstack_top_for(p, SIGSEGV, SP - 1) == Some(TOP),
+        "one below the base is outside -> place the frame",
+    )?;
+
+    // size == 0 unregisters, even with the mask still set.
+    set_altstack(p, SP, 0, 1 << (SIGSEGV - 1));
+    check(
+        altstack_top_for(p, SIGSEGV, 0x7fff_0000).is_none(),
+        "size 0 unregisters",
+    )?;
+
+    // Signal 0 and out-of-range numbers are refused rather than shifting by a
+    // bogus amount.
+    set_altstack(p, SP, SIZE, u64::MAX);
+    check(
+        altstack_top_for(p, 0, 0x7fff_0000).is_none(),
+        "signal 0 is not a signal",
+    )?;
+    check(
+        altstack_top_for(p, NSIG + 1, 0x7fff_0000).is_none(),
+        "signal above NSIG is refused",
+    )?;
+
+    // fork inherits both, per sigaltstack(2).
+    let child = TEST_PID_BASE + 11;
+    set_altstack(p, SP, SIZE, 1 << (SIGSEGV - 1));
+    inherit_for_fork(p, child);
+    check(
+        altstack_top_for(child, SIGSEGV, 0x7fff_0000) == Some(TOP),
+        "fork inherits the alternate stack and the mask",
+    )?;
+
+    // exec clears them: the address named a buffer in an address space that no
+    // longer exists, so keeping it would put the next frame in a dead program.
+    on_exec(child);
+    check(
+        altstack_top_for(child, SIGSEGV, 0x7fff_0000).is_none(),
+        "exec clears the alternate stack",
+    )?;
+
+    // Leave no state behind for the next test.
+    set_altstack(p, 0, 0, 0);
+    set_altstack(child, 0, 0, 0);
+
+    serial_println!("[signal]   SA_ONSTACK frame placement: OK");
     Ok(())
 }
 

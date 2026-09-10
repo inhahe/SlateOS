@@ -18,35 +18,24 @@ const VERSION: &str = "0.1.0";
 
 // ============================================================================
 // Date calculations
+//
+// The calendar arithmetic itself -- leap years, month lengths, weekdays, and
+// the conversion from a Unix timestamp -- lives in the shared `civildate`
+// crate. It was extracted from this file on 2026-09-10, when six copies of it
+// existed across the three lanes. `cal`'s Zeller's-congruence weekday survives
+// there as an independent test oracle: the two implementations share no code,
+// and `agrees_with_zeller_across_four_centuries` compares them over every day
+// from 1800 to 2200.
+//
+// The move fixed a bug this file had. `unix_to_date` counted years forward
+// from 1970 and then months forward from January, so a negative timestamp
+// exited both loops immediately: `unix_to_date(-1)` was (1970, 1, 0) rather
+// than (1969, 12, 31). `cal 12 1969` did not reach it -- the argument path
+// builds the date directly -- but `cal` with a system clock set before 1970
+// did.
 // ============================================================================
 
-fn is_leap_year(year: i32) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
-}
-
-fn days_in_month(year: i32, month: u32) -> u32 {
-    match month {
-        1 => 31,
-        2 => {
-            if is_leap_year(year) {
-                29
-            } else {
-                28
-            }
-        }
-        3 => 31,
-        4 => 30,
-        5 => 31,
-        6 => 30,
-        7 => 31,
-        8 => 31,
-        9 => 30,
-        10 => 31,
-        11 => 30,
-        12 => 31,
-        _ => 0,
-    }
-}
+use civildate::{day_of_week, days_in_month, unix_to_date};
 
 fn month_name(month: u32) -> &'static str {
     match month {
@@ -64,25 +53,6 @@ fn month_name(month: u32) -> &'static str {
         12 => "December",
         _ => "Unknown",
     }
-}
-
-/// Day of week using Zeller's congruence.
-/// Returns 0=Sunday, 1=Monday, ..., 6=Saturday.
-fn day_of_week(year: i32, month: u32, day: u32) -> u32 {
-    let mut y = year;
-    let mut m = month as i32;
-    if m < 3 {
-        m += 12;
-        y -= 1;
-    }
-    let q = day as i32;
-    let k = y % 100;
-    let j = y / 100;
-    let h = (q + (13 * (m + 1)) / 5 + k + k / 4 + j / 4 - 2 * j) % 7;
-    let h = ((h + 7) % 7) as u32;
-    // h: 0=Saturday, 1=Sunday, 2=Monday, ...
-    // Convert to 0=Sunday.
-    (h + 6) % 7
 }
 
 /// Today, as the system reckons it, or `None` if the clock cannot be read.
@@ -167,42 +137,6 @@ fn resolve_period(
 /// way `cal` does not know which month was meant.
 #[derive(Debug, PartialEq, Eq)]
 struct NoClock;
-
-fn unix_to_date(timestamp: i64) -> (i32, u32, u32) {
-    // Days since 1970-01-01.
-    let mut days = (timestamp / 86400) as i32;
-    if timestamp < 0 {
-        days -= 1;
-    }
-
-    // Compute year.
-    let mut year = 1970;
-    loop {
-        let days_in_year = if is_leap_year(year) { 366 } else { 365 };
-        if days < days_in_year {
-            break;
-        }
-        days -= days_in_year;
-        year += 1;
-    }
-
-    // Compute month.
-    let mut month = 1u32;
-    loop {
-        let dim = days_in_month(year, month) as i32;
-        if days < dim {
-            break;
-        }
-        days -= dim;
-        month += 1;
-        if month > 12 {
-            break;
-        }
-    }
-
-    let day = (days + 1) as u32;
-    (year, month, day)
-}
 
 fn day_of_year(year: i32, month: u32, day: u32) -> u32 {
     let mut doy = 0;
@@ -607,6 +541,12 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Not in the top-level import: the binary itself never calls this one --
+    // only `days_in_month`, now in `civildate`, ever did. Importing it up
+    // there would be an unused import in the bin target while being needed
+    // here, which is what `--all-targets` reports as one warning and four
+    // errors at once.
+    use civildate::is_leap_year;
 
     #[test]
     fn test_is_leap_year() {

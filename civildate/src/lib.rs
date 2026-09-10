@@ -264,6 +264,55 @@ mod tests {
         }
     }
 
+    /// Zeller's congruence, kept as an INDEPENDENT ORACLE rather than as the
+    /// implementation.
+    ///
+    /// This is the algorithm `userspace/cal` used before it moved onto this
+    /// crate. It is retained here, in the tests only, because the two share no
+    /// code and no intermediate: Zeller works in months shifted so that March
+    /// is the first, and [`day_of_week`] goes through a day count from the
+    /// epoch. An error in either shows up as a disagreement.
+    ///
+    /// That is the same reason `ctest-hostname` check 6 insists the write path
+    /// and the read path of the hostname must not share an implementation. A
+    /// round trip through one piece of code is evidence about that code and
+    /// reads exactly like evidence about the answer.
+    fn zeller(year: i32, month: u32, day: u32) -> u32 {
+        let mut y = year;
+        let mut m = month as i32;
+        if m < 3 {
+            m += 12;
+            y -= 1;
+        }
+        let q = day as i32;
+        let k = y % 100;
+        let j = y / 100;
+        let h = (q + (13 * (m + 1)) / 5 + k + k / 4 + j / 4 - 2 * j) % 7;
+        let h = ((h + 7) % 7) as u32;
+        // Zeller: 0 = Saturday. Shift to 0 = Sunday.
+        (h + 6) % 7
+    }
+
+    #[test]
+    fn agrees_with_zeller_across_four_centuries() {
+        // Every day from 1800-01-01 to 2200-01-01: ~146,000 comparisons
+        // between two algorithms that share nothing.
+        let mut d = days_from_civil(1800, 1, 1);
+        let end = days_from_civil(2200, 1, 1);
+        let mut checked = 0u32;
+        while d < end {
+            let (y, m, dd) = civil_from_days(d);
+            assert_eq!(
+                day_of_week(y, m, dd),
+                zeller(y, m, dd),
+                "weekday disagreement at {y}-{m:02}-{dd:02}"
+            );
+            checked += 1;
+            d += 1;
+        }
+        assert!(checked > 140_000, "only {checked} days compared");
+    }
+
     #[test]
     fn leap_years_follow_the_gregorian_rule() {
         assert!(is_leap_year(2024));

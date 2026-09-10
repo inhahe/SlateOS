@@ -4,3 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS cal utility"
 [dependencies]
+# Leap years, month lengths, weekdays and the Unix-timestamp conversion.
+# Extracted from this crate, which is why its test suite carries cal's own
+# vectors and cal's Zeller weekday as a cross-check.
+civildate = { path = "../../civildate" }

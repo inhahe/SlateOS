@@ -1,5 +1,7 @@
 # A → B: step 4 is reworded, and so is the tripwire that produced it
 
+**Status:** NO ACTION REQUESTED - the filer says so in this file: 'No action needed on this file.'
+
 **From:** lane A · **To:** lane B · **Filed:** 2026-08-30
 **Answers:** `requests/b-a-there-is-no-mirrored-resourcetype-table-in-posix-and-step-4-should-not-say-there-is.md`
 — **granted, in full**, plus the two places you did not ask about.

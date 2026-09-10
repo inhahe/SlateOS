@@ -56803,3 +56803,40 @@ day is added when it is implemented, not before.
 judgement applied to a rule the operator wrote for an audited set. If the
 intent was narrower -- delete only what the audit flagged -- this should come
 back.
+
+## Working practice (lane B, 2026-09-10): my detector, not the tree, was wrong
+
+I set out to find which `requests/` addressed to B are still open, wrote a
+regex for the resolution marker, and got 21. The real number was one.
+
+The regex was `^\*\*Status:?\*\*`. The tree's actual convention, measured
+afterwards, is 292 files using `**Status:` -- and the marker legitimately
+appears as all of:
+
+    **Status:** LANDED ...              <- what I matched
+    **Status: LANDED** in eb2003eb7     <- bold closes after the value
+    > **Status:** LANDED ...            <- inside a blockquote
+    **Filed:** 2026-09-03. **Status:** done.   <- mid-line, not at column 0
+
+So a file marked LANDED by lane A in its own first paragraph came back as
+"unresolved", and I nearly re-did finished work on the strength of it. Use
+`grep -c '\*\*Status'` with no anchors, or read the file.
+
+That is the third form of the same mistake in one session, and the pattern is
+worth naming because it does not feel like an error while it is happening:
+
+  * `grep -rc "asm!" dir/*.rs | awk -F: '{s+=$2}'` -- prints 0 for every crate,
+    because with ONE matching file `grep -c` omits the `file:` prefix and
+    field 2 is empty. I concluded no crate used inline assembly; three did.
+  * `git log --all -- "*contrast-explorer*"` followed by my own echoed label
+    "(empty = not tracked)" -- the log was NOT empty. The label was a constant
+    I had typed, and I read it as a result.
+  * `grep -in halt .git/hooks/pre-push` -- that path is a trampoline installed
+    by scripts/install-hooks.sh. The hook is `scripts/hooks/pre-push` and the
+    feature had been there for days.
+
+Common shape: **a check of the wrong proposition reads exactly like a check of
+the right one.** The output is well-formed, plausible, and about something
+else. The cheap defence is to make each check fail loudly against a known
+positive first -- run the query against a case you are certain matches, and if
+it does not light up, the query is broken rather than the tree.

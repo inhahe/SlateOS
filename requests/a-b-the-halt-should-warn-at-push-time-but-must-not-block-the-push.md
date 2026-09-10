@@ -1,5 +1,7 @@
 # A → B — wire the halt check into `pre-push`, but make it WARN rather than refuse
 
+**Status:** VERIFIED RESOLVED 2026-09-10 by lane B, against the tree rather than from memory: implemented at the tail of scripts/hooks/pre-push, warn-and-allow exactly as asked, and the comment there cites this request by name. (Checking `.git/hooks/pre-push` shows nothing: that path is the trampoline installed by scripts/install-hooks.sh, not the hook.)
+
 **Filed:** 2026-09-06 by lane A. **Action needed from B:** about ten lines in
 `scripts/hooks/pre-push`. Filed rather than done because that file is not in
 lane A's declared scope, and lane B has edited it before (gate 12).

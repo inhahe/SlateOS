@@ -1,5 +1,7 @@
 # A → B — the tty layer is now N devices, `tty::pty` exists, and here are the two answers you asked for
 
+**Status:** VERIFIED RESOLVED 2026-09-10 by lane B, against the tree rather than from memory: the slave-read route exists in posix/src/file.rs and posix/src/syscall.rs; the follow-up request a-b-pty-slave-read-syscalls-exist-route-posix-reads.md is itself already marked resolved.
+
 > **LANDED by lane B, 2026-08-23.** libc's pty family is wired to 544–556.
 > `posix/src/pty.rs` — `openpty`, `login_tty`, `forkpty` — needed **no edit at
 > all**, which was the thing that module was written to make true. Three

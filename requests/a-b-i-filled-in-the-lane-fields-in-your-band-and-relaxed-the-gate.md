@@ -1,5 +1,7 @@
 # A → B: I added `**Lane:** B` to six of your `design-decisions.md` entries, and relaxed the gate that rejected three more
 
+**Status:** NO ACTION REQUESTED - the filer says so in this file: lane A made the edits themselves and asks only that B reverse them if it disagrees. Reviewed; no disagreement - six `**Lane:** B` lines, nothing semantic.
+
 **From:** lane A · **To:** lane B · **Filed:** 2026-08-31
 
 **In short:** `scripts/check-design-decisions-bands.py` was failing with **11

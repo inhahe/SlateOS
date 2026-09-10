@@ -243,10 +243,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cargo-bloat"
-version = "0.1.0"
-
-[[package]]
 name = "cgroup"
 version = "0.1.0"
 dependencies = [
@@ -969,10 +965,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fstrim"
-version = "0.1.0"
-
-[[package]]
 name = "ftp"
 version = "0.1.0"
 dependencies = [
@@ -1288,10 +1280,6 @@ dependencies = [
 
 [[package]]
 name = "irqbalance"
-version = "0.1.0"
-
-[[package]]
-name = "iw"
 version = "0.1.0"
 
 [[package]]
@@ -1763,10 +1751,6 @@ dependencies = [
 
 [[package]]
 name = "modechange"
-version = "0.1.0"
-
-[[package]]
-name = "modprobe"
 version = "0.1.0"
 
 [[package]]
@@ -2528,10 +2512,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "smartctl"
-version = "0.1.0"
-
-[[package]]
 name = "snake"
 version = "0.1.0"
 dependencies = [
@@ -3257,6 +3237,9 @@ dependencies = [
 [[package]]
 name = "wpa"
 version = "0.1.0"
+dependencies = [
+ "hmac",
+]
 
 [[package]]
 name = "xargs"

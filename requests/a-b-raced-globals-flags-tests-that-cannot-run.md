@@ -1,5 +1,7 @@
 # A → B — reply on `net::raw`: the race is real as written, but those tests never run, and that is the bigger finding
 
+**Status:** NO ACTION REQUESTED - the filer says so in this file: it is a reply on net::raw, not an ask.
+
 > **LANDED by lane B, 2026-08-22** in `47757fc51`. The checker no longer races
 > crates that have no test target — but it *reports* them rather than skipping
 > them silently, which is a third option neither of your two suggestions covered

@@ -1147,6 +1147,16 @@ pub struct ProcessStat {
     /// and the next one in pages, which is the kind of thing this crate exists
     /// to stop each caller rediscovering.
     pub vsize_bytes: u64,
+    /// The CPU this process last ran on -- `stat`'s field 39, index 36 here.
+    ///
+    /// `Option`, unlike the fields above, because it is the **last** field
+    /// anything reads and the parse deliberately accepts a line that stops
+    /// short: a kernel that exports fewer fields should not blank the process
+    /// table. Zero is a real CPU number, so "the line was too short" needs its
+    /// own value rather than being folded into it -- which is what
+    /// `userspace/sysstat`'s copy did with `.unwrap_or(0)`, reporting every
+    /// process as running on CPU 0.
+    pub processor: Option<u32>,
     /// Resident set size, in **pages**. See [`ProcessStat::rss_kib`].
     pub rss_pages: u64,
     /// Start time, in ticks **after boot** -- not a wall-clock instant.
@@ -1211,6 +1221,10 @@ impl ProcessStat {
             // A process always has at least the one thread running it, so zero
             // here means "the kernel did not say", not "no threads".
             num_threads: fields.get(17).and_then(|f| parse_u64(f)).unwrap_or(1),
+            processor: fields
+                .get(36)
+                .and_then(|f| parse_u64(f))
+                .and_then(|v| u32::try_from(v).ok()),
             starttime_ticks: at(19),
             vsize_bytes: at(20),
             rss_pages: at(21),

@@ -667,28 +667,25 @@ fn read_proc_tty(pid: u32) -> Option<String> {
     path_str.strip_prefix("/dev/").map(|s| s.to_string())
 }
 
-/// Read brief process info from /proc/<pid>/stat:
-/// Returns (user_time + sys_time in centiseconds, command name).
+/// CPU time in ticks and the command name, through [`procinfo`].
+///
+/// `who -u` prints both against each login. Reading `/proc/<pid>/stat` with
+/// `read_to_string` *fails* on a name that is not UTF-8, and the `.ok()` made
+/// that a `None` -- which dropped the **idle time and the PID column for that
+/// login**, not just its command name. The numbers were readable all along;
+/// they were on the same line as a name that would not decode.
+///
+/// The name is escaped here rather than at the call sites: there are two, and
+/// one of them discards it.
 fn read_proc_stat_brief(pid: u32) -> Option<(u64, String)> {
-    let content = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-
-    // Format: pid (comm) state ppid pgrp session tty_nr ... utime stime ...
-    // The comm field is in parentheses and may contain spaces, so find the
-    // last ')' to locate the end of the command name.
-    let comm_start = content.find('(')?;
-    let comm_end = content.rfind(')')?;
-    let comm = content.get(comm_start + 1..comm_end)?.to_string();
-
-    // Fields after ')' are space-separated; field index 0 after ')' is state.
-    let after_comm = content.get(comm_end + 2..)?;
-    let fields: Vec<&str> = after_comm.split_whitespace().collect();
-
-    // utime is field index 11 (0-indexed after the ')' delimiter),
-    // stime is field index 12.
-    let utime: u64 = fields.get(11)?.parse().ok()?;
-    let stime: u64 = fields.get(12)?.parse().ok()?;
-
-    Some((utime.saturating_add(stime), comm))
+    let stat = procinfo::ProcFs::new()
+        .process_stat(u64::from(pid))
+        .ok()
+        .flatten()?;
+    Some((
+        stat.utime_ticks.saturating_add(stat.stime_ticks),
+        quoting::escape_unprintable(&stat.comm),
+    ))
 }
 
 // ============================================================================

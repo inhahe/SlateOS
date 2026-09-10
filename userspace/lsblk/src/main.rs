@@ -190,26 +190,40 @@ fn read_bool(path: &str) -> bool {
 
 /// Parse /proc/mounts and build a map of device path -> mount point.
 /// Entries look like: `/dev/sda1 /mnt ext4 rw,relatime 0 0`
+/// `/proc/mounts`, through [`procinfo`].
+///
+/// The kernel escapes space, tab, newline and backslash in the device and
+/// mount-point fields as `\040`, `\011`, `\012` and `\134`, so a filesystem
+/// mounted at `/mnt/my backup` is written `/mnt/my\040backup`. Splitting on
+/// whitespace and keeping the fields verbatim therefore reported a mount point
+/// that matches nothing a user can type. And reading the file as text fails
+/// *entirely* when any single line holds a byte that is not UTF-8, so one
+/// awkward mount hid every mount.
+///
+/// Escaped for display on the way out rather than carried as bytes: a space is
+/// printable and survives untouched, so paths a user can type read exactly as
+/// before, while a byte they cannot type shows as an octal escape instead of
+/// taking the whole table with it.
 fn parse_mounts() -> HashMap<String, String> {
-    let mut mounts = HashMap::new();
-
-    let content = match read_file("/proc/mounts") {
-        Some(c) => c,
-        None => return mounts,
+    let mounts = match procinfo::ProcFs::new().mounts() {
+        Ok(Some(m)) => m,
+        Ok(None) | Err(_) => return HashMap::new(),
     };
-
-    for line in content.lines() {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 2 {
-            let dev = parts[0];
-            let mount = parts[1];
-            // Strip "/dev/" prefix to get the kernel name.
-            let name = dev.strip_prefix("/dev/").unwrap_or(dev);
-            mounts.insert(name.to_string(), mount.to_string());
-        }
-    }
-
     mounts
+        .iter()
+        .map(|m| {
+            // Strip "/dev/" to get the kernel name, over bytes: the prefix is
+            // ASCII but the rest of the name need not be.
+            let name = m
+                .device
+                .strip_prefix(b"/dev/".as_slice())
+                .unwrap_or(&m.device);
+            (
+                quoting::escape_unprintable(name),
+                quoting::escape_unprintable(&m.mount_point),
+            )
+        })
+        .collect()
 }
 
 // ============================================================================

@@ -379,23 +379,50 @@ fn read_fstab() -> Vec<FstabEntry> {
 // /proc/mounts helpers
 // ============================================================================
 
-/// Return true if `device` is currently mounted (appears in /proc/mounts).
+/// Is `device` currently mounted?
+///
+/// # This is a safety check, so it fails **closed**
+///
+/// The caller is about to write to the device. "I could not tell" must
+/// therefore mean "assume it is mounted and refuse", not "go ahead" -- and the
+/// code this replaces did the opposite in two separate ways.
+///
+/// **`fs::read_to_string("/proc/mounts")` fails outright** when any mount's
+/// device or mount point holds a byte that is not UTF-8, which this
+/// filesystem allows everywhere but `/` and NUL. The `Err(_) => return false`
+/// then reported **every** device as unmounted -- not merely the offending
+/// one -- so a single oddly-named mount anywhere on the system was enough to
+/// let this program write over a live filesystem.
+///
+/// **And `split_whitespace` is the wrong split for this file.** The kernel
+/// escapes space, tab, newline and backslash in the device and mount-point
+/// fields as `\040`, `\011`, `\012` and `\134`, so `/dev/my disk` appears
+/// as `/dev/my\040disk` and never equalled the path the caller passed.
+/// `procinfo::Mount` undoes that; its module doc names the escaping as one of
+/// the three reasons the crate exists.
+///
+/// Comparison is over bytes because the caller's argument came from `argv`,
+/// which is bytes, and the kernel's answer is bytes.
 fn is_mounted(device: &str) -> bool {
-    let content = match fs::read_to_string("/proc/mounts") {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-    let dev = device.strip_prefix("/dev/").unwrap_or(device);
-    for line in content.lines() {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if let Some(mount_dev) = parts.first() {
-            let md = mount_dev.strip_prefix("/dev/").unwrap_or(mount_dev);
-            if md == dev {
-                return true;
-            }
-        }
+    is_mounted_in(&procinfo::ProcFs::new(), device)
+}
+
+/// [`is_mounted`] against a given `/proc`, so the check that stands between
+/// this program and a live filesystem can be reached from a test.
+fn is_mounted_in(proc: &procinfo::ProcFs, device: &str) -> bool {
+    let wanted = device.strip_prefix("/dev/").unwrap_or(device).as_bytes();
+    match proc.mounts() {
+        Ok(Some(mounts)) => mounts.iter().any(|m| {
+            let listed = m
+                .device
+                .strip_prefix(b"/dev/".as_slice())
+                .unwrap_or(&m.device);
+            listed == wanted
+        }),
+        // No `/proc/mounts` at all, or it could not be read. Neither is a
+        // statement that the device is free.
+        Ok(None) | Err(_) => true,
     }
-    false
 }
 
 /// Try to detect the filesystem type of `device` from /proc/mounts or sysfs.
@@ -854,6 +881,100 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+
+    // ---- the mounted check ----
+    //
+    // This is the check that stands between `fsck` and a live filesystem, and
+    // it was unreachable from a test: it read `/proc/mounts` directly. It takes
+    // a `procinfo::ProcFs` now, which `ProcFs::at` can point at a fixture.
+
+    use scratchdir::ScratchDir;
+
+    /// A `/proc` fixture whose `mounts` holds exactly `content`.
+    fn proc_with_mounts(scratch: &ScratchDir, content: &[u8]) -> procinfo::ProcFs {
+        let root = scratch.path("proc");
+        std::fs::create_dir_all(&root).expect("create fixture /proc");
+        std::fs::write(root.join("mounts"), content).expect("write fixture mounts");
+        procinfo::ProcFs::at(root)
+    }
+
+    #[test]
+    fn a_mounted_device_is_found() {
+        let scratch = ScratchDir::new("fsck-mounted");
+        let proc = proc_with_mounts(
+            &scratch,
+            b"/dev/sda1 / ext4 rw,relatime 0 0\n/dev/sdb2 /home ext4 rw 0 0\n",
+        );
+        assert!(is_mounted_in(&proc, "/dev/sda1"));
+    }
+
+    #[test]
+    fn an_unmounted_device_is_not_found() {
+        let scratch = ScratchDir::new("fsck-unmounted");
+        let proc = proc_with_mounts(&scratch, b"/dev/sda1 / ext4 rw,relatime 0 0\n");
+        assert!(!is_mounted_in(&proc, "/dev/sdz9"));
+    }
+
+    /// **The kernel escapes a space as `\\040`.**
+    ///
+    /// `/dev/my disk` appears in the file as `/dev/my\\040disk`, so the
+    /// `split_whitespace` comparison this replaces read the device as
+    /// `/dev/my\\040disk` -- which never equalled the argument the caller
+    /// passed, and so reported a mounted device as free.
+    #[test]
+    fn a_device_whose_name_contains_a_space_is_found() {
+        let scratch = ScratchDir::new("fsck-escaped");
+        let proc = proc_with_mounts(&scratch, b"/dev/my\\040disk /mnt ext4 rw 0 0\n");
+        assert!(
+            is_mounted_in(&proc, "/dev/my disk"),
+            "the escaped form in the file names the same device as the argument"
+        );
+    }
+
+    /// **One mount with a byte that is not UTF-8 used to hide every other
+    /// mount.**
+    ///
+    /// `read_to_string` fails for the whole file, and the old
+    /// `Err(_) => return false` then reported *every* device as unmounted --
+    /// so a single oddly-named mount anywhere on the system was enough to let
+    /// this program write over a live filesystem.
+    #[test]
+    fn a_mount_that_is_not_utf8_does_not_hide_the_others() {
+        let scratch = ScratchDir::new("fsck-nonutf8");
+        let proc = proc_with_mounts(
+            &scratch,
+            b"/dev/od\xffd /mnt/odd ext4 rw 0 0\n/dev/sda1 / ext4 rw 0 0\n",
+        );
+        assert!(
+            is_mounted_in(&proc, "/dev/sda1"),
+            "the readable lines must still be read"
+        );
+        // Naming the odd device *itself* is a separate limitation, and not
+        // this function's: the argument arrives through `env::args()`, which
+        // panics on an argument that is not UTF-8, so such a device cannot be
+        // passed to this program at all. `&str` here could not express it
+        // either -- `"\u{ff}"` is two bytes of UTF-8, and the file holds one.
+        // Tracked as B-COREUTILS-PANIC-ON-A-NON-UTF-8-ARGUMENT; pinned here so
+        // the difference is not later mistaken for a parsing failure.
+        assert!(
+            !is_mounted_in(&proc, "/dev/od\u{ff}d"),
+            "two bytes of UTF-8 are not the one byte in the file"
+        );
+    }
+
+    /// **No `/proc/mounts` means "assume mounted", not "assume free".**
+    ///
+    /// The caller is about to write to the device, so "I could not tell" has
+    /// to refuse. The code this replaces returned `false` here.
+    #[test]
+    fn an_unreadable_proc_mounts_fails_closed() {
+        let scratch = ScratchDir::new("fsck-noproc");
+        let proc = procinfo::ProcFs::at(scratch.path("nonexistent-proc"));
+        assert!(
+            is_mounted_in(&proc, "/dev/sdz9"),
+            "a safety check that cannot tell must not answer `free`"
+        );
+    }
     use super::*;
 
     fn args(parts: &[&str]) -> Vec<String> {

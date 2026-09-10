@@ -176,33 +176,43 @@ fn parse_mountinfo_line(line: &str) -> Option<MountEntry> {
     })
 }
 
-/// Fallback: parse /proc/mounts (simpler format).
+/// Fallback: `/proc/mounts`, when `/proc/self/mountinfo` is unavailable.
+///
+/// The kernel escapes space, tab, newline and backslash in the device and
+/// mount-point fields as `\040`, `\011`, `\012` and `\134`, so a filesystem
+/// mounted at `/mnt/my backup` is written `/mnt/my\040backup`. Splitting on
+/// whitespace and keeping the fields verbatim therefore reported a mount point
+/// that matches nothing a user can type. And reading the file as text fails
+/// *entirely* when any single line holds a byte that is not UTF-8, so one
+/// awkward mount hid every mount.
+///
+/// Escaped for display on the way out rather than carried as bytes: a space is
+/// printable and survives untouched, so paths a user can type read exactly as
+/// before, while a byte they cannot type shows as an octal escape instead of
+/// taking the whole table with it.
 fn parse_proc_mounts() -> Vec<MountEntry> {
-    let content = match read_file(PROC_MOUNTS) {
-        Some(c) => c,
-        None => return Vec::new(),
+    let mounts = match procinfo::ProcFs::new().mounts() {
+        Ok(Some(m)) => m,
+        Ok(None) | Err(_) => return Vec::new(),
     };
-
-    let mut entries = Vec::new();
-    let mut id = 1u32;
-    for line in content.lines() {
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        if fields.len() >= 4 {
-            entries.push(MountEntry {
+    mounts
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            let id = u32::try_from(i.saturating_add(1)).unwrap_or(u32::MAX);
+            MountEntry {
                 mount_id: id,
                 parent_id: if id > 1 { 1 } else { 0 },
-                source: fields[0].to_string(),
-                target: fields[1].to_string(),
-                fstype: fields[2].to_string(),
-                options: fields[3].to_string(),
+                source: quoting::escape_unprintable(&m.device),
+                target: quoting::escape_unprintable(&m.mount_point),
+                fstype: quoting::escape_unprintable(&m.fstype),
+                options: quoting::escape_unprintable(&m.options),
                 maj_min: String::new(),
                 fs_root: "/".to_string(),
                 optional: String::new(),
-            });
-            id += 1;
-        }
-    }
-    entries
+            }
+        })
+        .collect()
 }
 
 fn parse_fstab() -> Vec<FstabEntry> {

@@ -4,3 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS filesystem check and repair utility"
 [dependencies]
+procinfo = { path = "../../procinfo" }
+
+[dev-dependencies]
+scratchdir = { path = "../scratchdir" }

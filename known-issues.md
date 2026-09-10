@@ -126979,17 +126979,37 @@ process whose name is not UTF-8 was dropped from the listing entirely -- and
 signalled by name at all. `userspace/top` followed the same day; `userspace/pstree` followed the same
 day, which closes the set.
 
-**Five more programs still read `/proc/<pid>/stat` by hand** -- `kill`, `lsof`,
-`strace`, `sysstat` and `who` -- found by running the grep rather than assuming
-the three were all of them. Seven further hits were `/proc/<pid>/status`, a
+~~**Five more programs still read `/proc/<pid>/stat` by hand** -- `kill`,
+`lsof`, `strace`, `sysstat` and `who`~~ -- found by running the grep rather than
+assuming the three were all of them. **All converted 2026-09-10, and it was four,
+not five.**
+
+`strace` was on that list wrongly: its only reference to `/proc/<pid>/stat` is
+`fs::metadata(&path).is_err()`, an existence check that never opens the file.
+The grep that produced the list of five answered "which files mention this
+path"; it was read as "which files parse it". The *same* narrowing that
+produced the original "ten readers" figure this entry corrects, two paragraphs
+up, made by the person who wrote that correction.
+
+**Derived, not decremented:** no file under `userspace/` or `apps/` hand-parses
+`/proc/<pid>/stat` any more -- checked by looking for the `find('(')`/`rfind(')')`
+pair rather than for the path.
+
+`kill`'s was the same shape as `pgrep`'s: `killall <name>` could not see a
+process whose name is not UTF-8, so it could not be killed by name. `who -u`
+lost the **idle time and PID columns** for such a login, not just the command
+name -- those numbers were readable all along, on the same line as a name that
+would not decode. `lsof` dropped the process *and every open file it held*,
+which is the one thing `lsof` exists to report. Seven further hits were `/proc/<pid>/status`, a
 different file: "stat" being a prefix of "status" is a trap for exactly this
 kind of sweep.
 
 **And the running count in this entry is a running count, not a measurement.**
 The 50 above was derived; every figure since has been that number minus one per
-conversion, and nothing re-derived it. What *is* measured, today: **86** files
-under `userspace/` and `apps/` open a `/proc` path without `procinfo`, down
-from the 95 recorded above. The "opens something `procinfo` already parses"
+conversion, and nothing re-derived it. What *is* measured, and re-measured each time
+it is quoted: **82** files under `userspace/` and `apps/` open a `/proc` path
+without `procinfo`, down from the 95 recorded above (86 and 83 earlier the same
+day). The "opens something `procinfo` already parses"
 subset has not been re-derived since, and should be before anyone quotes it.
 
 **`pstree`'s version was the worst of the three.** A tree is assembled by
@@ -127799,3 +127819,107 @@ call, not lane A's.
 makes a self-skip *visible*, it cannot tell a correct skip from a lazy one. A
 checker that exits 3 while its prerequisite is present skips exactly as quietly as
 before. What changes is that the tally says so.
+
+## TD-B-SEVEN-PROGRAMS-STILL-MISREAD-PROC-MOUNTS (lane B, 2026-09-10)
+
+**In short:** `/proc/mounts` escapes a space in a device or mount-point name as
+`\040`, and ten programs parse the file by hand. Nine of the ten do not undo
+that escaping, so a device or mount point whose name contains a space does not
+match the name the user typed. Worse, all ten read the file with
+`read_to_string`, which **fails outright** if any single line holds a byte that
+is not UTF-8 -- taking every other line with it.
+
+`mkfs` and `fsck` were fixed on 2026-09-10 because in those two the failure had
+teeth; the remaining seven are listed below.
+
+**Why `mkfs` and `fsck` came first.** Both call `is_mounted(device)` to decide
+whether it is safe to write to a device, and both were written
+
+```rust
+let content = match fs::read_to_string("/proc/mounts") {
+    Ok(c) => c,
+    Err(_) => return false,          // "not mounted"
+};
+```
+
+So **one mount anywhere on the system with a non-UTF-8 path made every device
+report as unmounted**, and `mkfs` would go on to format a live filesystem. The
+error path answered the safety question in the dangerous direction: "I could
+not read the file" became "nothing is mounted". Both now answer `true` when
+they cannot tell, which is the only defensible default for a check that guards
+a destructive write.
+
+**The escaping half bit the same two functions.** They compared
+`split_whitespace`'s first field against the caller's argument, so a device
+called `/dev/my disk` -- listed as `/dev/my\040disk` -- never matched, and a
+mounted device reported as free. `procinfo::Mount` undoes the escaping; the
+crate's module doc names it as one of the three reasons the crate exists.
+
+**Still to convert** (`/proc/mounts` by hand, no unescaping, `read_to_string`):
+
+| Program | What it uses the file for |
+|---|---|
+| ~~`userspace/df`~~ | ~~which filesystem a path is on, and its usage~~ -- **done 2026-09-10** |
+| ~~`userspace/mount`~~ | ~~whether a target is already mounted~~ -- **done 2026-09-10** |
+| ~~`userspace/findmnt`~~ | ~~the whole of its output~~ -- **done 2026-09-10** |
+| ~~`userspace/lsblk`~~ | ~~mount points beside each block device~~ -- **done 2026-09-10** |
+| `userspace/eject` | whether the device must be unmounted first |
+| `userspace/grub2` | locating the boot filesystem |
+| `userspace/udisks` | mount state per device |
+
+**`df` and `mount` keep `String` fields and escape at the boundary** rather
+than carrying bytes through their table-formatting code. That is deliberate and
+worth stating, because it looks like a half-measure: a space is *printable*, so
+`escape_unprintable` leaves it alone and a path a user can type compares
+exactly as it did before. Only a byte they could not have typed is escaped --
+and the alternative for such a byte was taking the whole table down with it.
+
+`userspace/diskutil` already unescapes and is the exception; it still reads the
+file as text, so it keeps the whole-file failure.
+
+**A related limitation, pinned rather than fixed.** A device whose *name* is
+not UTF-8 cannot be named on the command line at all: `mkfs` and `fsck` read
+argv through `env::args()`, which panics on such an argument. That is
+B-COREUTILS-PANIC-ON-A-NON-UTF-8-ARGUMENT, not this entry, and the tests say so
+where a reader would otherwise take it for a parsing failure.
+
+
+## TD-B-SURVEY-FOR-GUARDS-THAT-FAIL-OPEN (lane B, 2026-09-10)
+
+**In short:** after fixing `mkfs`/`fsck`, I ran the check I had just told the
+other two lanes to run: grep this lane for a guard that answers "safe to
+proceed" when it could not tell. One more turned up, in the package manager,
+and it destroyed user data rather than a filesystem.
+
+**Method, so it can be repeated.** 134 sites in lane B match
+`Err(_) => return false`, `Err(_) => false` or `unwrap_or(false)`. Most are
+harmless -- a shell option that defaults to off, a "is this a symlink" that
+falls back to no. What narrows it is asking **which way `false` points**: a
+guard is dangerous when `false` means *go ahead*. Deriving the set that way --
+every `-> bool` function containing a fail-open arm, then reading the names --
+gave 165 functions, of which all but a handful were `userspace/oils` shell-option
+accessors.
+
+**What it found: `userspace/pkg`'s `is_user_modified`.** It guarded
+`deploy_config`, which overwrites a config file on upgrade unless the user has
+edited it. It returned `false` -- "not modified", therefore overwrite -- in two
+cases where it had no idea:
+
+* the file could not be **read**, though the caller had already established it
+  exists, so the failure is a permission problem, an I/O error or a race; and
+* the installed version had **no recorded checksum**, which is the state of any
+  package installed by an older `pkg` or any database that lost the field.
+
+The second is the one that would have been met in practice: on such a system
+*every* user-edited config was silently replaced on the next upgrade, with the
+notice that exists for exactly that case never printed.
+
+Renamed to `must_preserve`, because the question the caller asks is "may I
+overwrite this?" and the old name answered a different one. Both arms now
+preserve, which costs a `.pkg-new` file and a notice when the file really was
+untouched -- `rpm`'s `.rpmnew` bargain. Four tests, where there were none.
+
+**What it did not find**, which is worth recording so nobody repeats the sweep:
+no guard named `is_mounted`, `is_busy`, `is_in_use`, `is_locked`, `is_readonly`,
+`is_running`, `is_active`, `in_use`, `is_protected`, `is_immutable` or
+`is_open` fails open anywhere in lane B. The two that did are fixed.

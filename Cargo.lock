@@ -3916,7 +3916,9 @@ dependencies = [
 name = "df"
 version = "0.1.0"
 dependencies = [
+ "procinfo",
  "quoting",
+ "scratchdir",
 ]
 
 [[package]]
@@ -5333,6 +5335,10 @@ dependencies = [
 [[package]]
 name = "findmnt"
 version = "0.1.0"
+dependencies = [
+ "procinfo",
+ "quoting",
+]
 
 [[package]]
 name = "fio"
@@ -5866,6 +5872,10 @@ dependencies = [
 [[package]]
 name = "fsck"
 version = "0.1.0"
+dependencies = [
+ "procinfo",
+ "scratchdir",
+]
 
 [[package]]
 name = "fscrypt"
@@ -8628,6 +8638,7 @@ dependencies = [
 name = "kill"
 version = "0.1.0"
 dependencies = [
+ "procinfo",
  "quoting",
 ]
 
@@ -9685,6 +9696,10 @@ dependencies = [
 [[package]]
 name = "lsblk"
 version = "0.1.0"
+dependencies = [
+ "procinfo",
+ "quoting",
+]
 
 [[package]]
 name = "lsblk-cli"
@@ -9719,6 +9734,10 @@ version = "0.1.0"
 [[package]]
 name = "lsof"
 version = "0.1.0"
+dependencies = [
+ "procinfo",
+ "quoting",
+]
 
 [[package]]
 name = "lspci"
@@ -10858,7 +10877,9 @@ dependencies = [
 name = "mkfs"
 version = "0.1.0"
 dependencies = [
+ "procinfo",
  "quoting",
+ "scratchdir",
 ]
 
 [[package]]
@@ -11094,6 +11115,11 @@ dependencies = [
 [[package]]
 name = "mount"
 version = "0.1.0"
+dependencies = [
+ "procinfo",
+ "quoting",
+ "scratchdir",
+]
 
 [[package]]
 name = "mousetweaks-cli"
@@ -13491,6 +13517,7 @@ version = "0.1.0"
 dependencies = [
  "httpclient",
  "quoting",
+ "scratchdir",
  "sha2",
 ]
 
@@ -17589,6 +17616,10 @@ dependencies = [
 [[package]]
 name = "sysstat"
 version = "0.1.0"
+dependencies = [
+ "procinfo",
+ "quoting",
+]
 
 [[package]]
 name = "sysstat-cli"
@@ -19639,6 +19670,10 @@ dependencies = [
 [[package]]
 name = "who"
 version = "0.1.0"
+dependencies = [
+ "procinfo",
+ "quoting",
+]
 
 [[package]]
 name = "whois"

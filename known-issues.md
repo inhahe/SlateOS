@@ -128579,7 +128579,7 @@ available to them: **do not report that something is scheduled when nothing
 can run it.** Reaching the fallback is fine; claiming the orderly path
 succeeded is not.
 
-## A-SYSFS-KEEPS-A-THIRD-HOSTNAME-THAT-NOTHING-ELSE-READS (found by lane B, 2026-09-10; `kernel/**`, lane A owns the fix)
+## A-SYSFS-KEEPS-A-THIRD-HOSTNAME-THAT-NOTHING-ELSE-READS (found by lane B, 2026-09-10; `kernel/**`, lane A owns the fix) — **fixed 2026-09-10; there were FOUR stores, not three** (see the resolution note at the end of this file)
 
 **In short:** the system has two hostnames. Writing `/sys/kernel/hostname`
 changes one of them; every program that asks the system its name reads the
@@ -129549,3 +129549,113 @@ populations is an artifact of this matcher not recognising the
 `match parts.get(n).unwrap_or(&"0").parse()` form rather than a real property. Two
 ledgers counting one family is the double-count this lane warned lane B about the
 same afternoon. Not built yet; the analysis above is the specification.
+
+### Resolution of A-SYSFS-KEEPS-A-THIRD-HOSTNAME-THAT-NOTHING-ELSE-READS (lane A, 2026-09-10)
+
+Fixed, and the count in the title was low. There were **four** stores for the
+hostname, not three, and the fourth was the only one that accepted a write from the
+operator and confirmed it.
+
+| store | who read it | state |
+|---|---|---|
+| `fs::nameservice` | `/proc/sys/kernel/hostname`, `uname(2)`, `gethostname`, kshell | the one store, kept |
+| posix process-local buffer | `gethostname`/`uname -n` inside one program | removed by lane B (`15c50477f`, `49b051aeb`) |
+| `fs::sysfs` static | `/sys/kernel/hostname`, **and `vmguest` → the hypervisor** | removed |
+| `fs::netsettings` field | a `/proc` netsettings file, and the kshell command that wrote it | removed |
+
+Two things about the fourth are worth keeping.
+
+**It confirmed a rename that never happened.** `netsettings::set_hostname` returned
+`()`, so it could not fail, and the kshell command printed `Hostname set to myhost`
+unconditionally while writing a field nothing else read. The command that read the
+name back read the same dead field, so the lie was self-consistent from inside. That
+is the shape lane B described for the posix buffer the same morning: a program could
+set the name, read it back, get its own value, and conclude the system was renamed.
+
+**The two copies had different lifecycles, which is why a second copy is never merely
+redundant.** `init_defaults` seeded the netsettings hostname to `"mintos"` and
+`clear_all` blanked it. Had the fix simply forwarded both to the one store, every
+network-settings initialisation would have renamed the machine and every clear would
+have un-named it. A duplicate is not just a value that can disagree; it is a value
+with its own rules about when to change.
+
+How it was found is the part worth repeating. After removing the sysfs static I swept
+the kernel for anything still expecting `"mintos"` — purely to check I had not broken
+another assertion — and the sweep returned `assert_eq!(hostname(), "mintos")` in a
+module I had no reason to open. A defensive check for my own breakage found an
+unrelated defect, which is the argument for scoping such a sweep wider than the
+change that prompted it.
+
+Three round-trip self-tests have now been replaced for the same reason in two days:
+this module's, sysfs's, and lane B's `test_setdomainname_roundtrip`. Each set a value
+through one door, read it back through the same door, and asserted they matched —
+which is evidence about the buffer and reads exactly like evidence about the system.
+All three now assert that the write ARRIVED at the single store.
+
+One bound, too: `crate::uname::NODENAME_MAX` (64) replaces `fs::nameservice`'s 253 and
+`SYS_HOSTNAME_SET`'s 64, which disagreed — a 100-byte name was settable through one
+door, refused at another, and unreportable by `gethostname` once stored.
+
+## TD-A-45-CALL-SITES-STILL-READ-A-FAILED-STAT-AS-ABSENCE (lane A, 2026-09-10) — **open**, 45 sites
+
+**In short:** the kernel has a helper that answers "does this file exist?", and it
+answers "no" both when the file really is missing and when the check itself failed —
+for instance because permission was refused. Anything deciding what to do next gets
+told "not there" when the truth is "could not tell". One such decision, which layer
+of a stacked filesystem serves a file, has been fixed; 45 other places that use the
+same helper have not been examined.
+
+### What the helper does
+
+`Vfs::exists` is `stat(path).is_ok()`, and `stat` passes through
+`check_path_access` and `resolve_mount`, so `PermissionDenied`, `InvalidArgument`,
+`InternalError` and symlink-loop errors all reach the caller as `false`.
+`Vfs::is_directory` flattens the same way with `.unwrap_or(false)`.
+
+`Vfs::exists_or_err` now exists beside it and returns `Ok(false)` only for
+`NotFound`. The rule for choosing: if a `false` answer lets the caller *proceed*,
+the call must be `exists_or_err`.
+
+### What is fixed, and what is not
+
+Fixed: `fs::overlay::which_layer`, where a non-NotFound stat failure on the upper
+layer became `Layer::Lower` and served the base image's older content with no error.
+
+Not examined: **37 `Vfs::exists` and 10 `Vfs::is_directory` call sites.** They are
+recorded rather than converted blind, because most are the harmless use — *is there
+a config file to read?* — and converting those would force callers to handle errors
+that cannot arise there, which adds noise and hides the sites that matter.
+
+The audit question per site is not "does it use `exists`" but **"if this returns
+false because the check failed, does the caller go on to do something it would not
+otherwise have done?"** Creating, overwriting, unmounting, freeing and choosing a
+layer are yes. Reporting, listing and displaying are no.
+
+### Severity: latent, and why that is still worth an entry
+
+`check_path_access` returns `Ok` early when no file tags and no ACLs are configured,
+and bypasses entirely for kernel tasks and pid 0. So today the reachable failures are
+the resolve-level ones — a symlink loop, a path under no mount — which are possible
+but exotic. It becomes live the moment ACLs or file tags are configured, a feature
+that exists in this tree and is merely unused.
+
+That is the argument for not waiting: a fail-open guard whose precondition is a
+feature nobody has switched on is found by the person switching it on, and they will
+be looking at the feature, not at this.
+
+### Provenance
+
+Lane B asked every lane to grep its own tree for the shape after `userspace/mkfs`
+and `userspace/fsck` were found calling `is_mounted`, which returned `false` when
+`/proc/mounts` could not be read — one non-UTF-8 mount name made every device look
+unmounted, and `mkfs` would go on to format a live filesystem. Their general form:
+*for any check guarding a destructive or privileged action, the error path must not
+answer in the permissive direction.* Their remedy was `optionalfile::read_or_empty`;
+`exists_or_err` is the same remedy one subsystem over.
+
+Scoping note, because a naive grep here returns mostly noise: `kernel/src` holds 44
+`.unwrap_or(false)` and 143 `.unwrap_or_default()`, almost all harmless. What decides
+is the direction the name implies — `is_mounted() == false` means "go ahead", while
+`is_allowed() == false` means "deny" and is safe. Filtering to bool functions whose
+*false* answer is permissive (mounted, busy, locked, in_use, protected, exists, …)
+returned exactly one, which is the one fixed above.

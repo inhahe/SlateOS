@@ -268,6 +268,22 @@ def parse_bands(lines):
     return bands, errors
 
 
+def insertion_line(lines, headings, heading):
+    """The line a NEW entry should be inserted after, given the one before it.
+
+    Not `heading.lineno`, which is where the named section STARTS. This advice
+    used to point at the heading, and following it literally puts the new entry
+    between that heading and its body -- which is how section 928 lost its
+    `**Lane:**` field on 2026-09-10, reported by this same checker one run later.
+    A gate whose instructions produce the violation it checks for is worse than
+    one that gives no instructions, because the reader trusts it.
+
+    Returns the last line of the section, which is its trailing `---` where the
+    file's convention holds.
+    """
+    later = [h.lineno for h in headings if h.lineno > heading.lineno]
+    return (min(later) - 1) if later else len(lines)
+
 def parse_headings(lines):
     """Return ``(headings, errors)`` for every ``##`` line in the document."""
     headings = []
@@ -631,9 +647,10 @@ def check(lines, baseline):
                 anchor = max(prior, key=lambda h: h.lineno)
                 info.append(
                     f"{band.label:<10} {owner}  empty; first entry is "
-                    f"{band.lo}, insert after line {anchor.lineno} "
-                    f"(section {anchor.number}, the last of this lane's "
-                    f"previous band)"
+                    f"{band.lo}, insert after line "
+                    f"{insertion_line(lines, headings, anchor)} "
+                    f"(the END of section {anchor.number}, the last of this "
+                    f"lane's previous band -- not its heading)"
                 )
             else:
                 info.append(
@@ -649,8 +666,9 @@ def check(lines, baseline):
         pct = 100 * spent // size
         info.append(
             f"{band.label:<10} {owner}  {len(seq):>3} entries, next is "
-            f"{last.number + 1}, insert after line {last.lineno} "
-            f"({pct}% spent)"
+            f"{last.number + 1}, insert after line "
+            f"{insertion_line(lines, headings, last)} "
+            f"(the END of section {last.number}, not its heading; {pct}% spent)"
         )
         if pct >= OCCUPANCY_WARN:
             warnings.append(

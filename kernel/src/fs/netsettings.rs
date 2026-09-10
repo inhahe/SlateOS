@@ -247,7 +247,6 @@ struct State {
     scanned_wifi: Vec<WifiNetwork>,
     saved_networks: Vec<SavedNetwork>,
     router: RouterInfo,
-    hostname: String,
     changes: u64,
 }
 
@@ -269,7 +268,6 @@ impl State {
                 external_ipv4: String::new(),
                 external_ipv6: String::new(),
             },
-            hostname: String::new(),
             changes: 0,
         }
     }
@@ -658,16 +656,27 @@ pub fn router_info() -> RouterInfo {
     STATE.lock().router.clone()
 }
 
-/// Set hostname.
-pub fn set_hostname(name: &str) {
-    let mut state = STATE.lock();
-    state.hostname = String::from(name);
-    state.changes += 1;
+/// Set the system hostname.
+///
+/// Forwards to `fs::nameservice`, the one store. Until 2026-09-10 this wrote a
+/// `hostname` field in this module's own STATE, which nothing outside this file
+/// read -- so `netsettings hostname myhost` answered "Hostname set to myhost" and
+/// `hostname`, `uname -n`, `gethostname` and /proc/sys/kernel/hostname all went on
+/// reporting the old name. The command that reads it back read the same dead
+/// field, so the lie was self-consistent, which is what let it survive.
+///
+/// It now returns a Result, because the one store has a length bound
+/// (`crate::uname::NODENAME_MAX`) and the caller used to claim success
+/// unconditionally.
+pub fn set_hostname(name: &str) -> KernelResult<()> {
+    crate::fs::nameservice::set_hostname(name)?;
+    STATE.lock().changes += 1;
+    Ok(())
 }
 
-/// Get hostname.
+/// Get the system hostname.  Read from `fs::nameservice`, not stored here.
 pub fn hostname() -> String {
-    STATE.lock().hostname.clone()
+    crate::fs::nameservice::get_hostname()
 }
 
 // ---------------------------------------------------------------------------
@@ -679,7 +688,9 @@ pub fn hostname() -> String {
 /// Seeds ONLY facts that are true by construction rather than observed:
 ///   - the loopback interface `lo` — 127.0.0.1 / ::1 are RFC constants that
 ///     exist on every networked system, not measured hardware state, and
-///   - the default hostname (a configuration default).
+///   - and nothing else.  It used to seed a hostname; that was a fourth copy of
+///     a value `fs::nameservice` owns, and seeding it here would have renamed
+///     the machine every time network settings were initialised.
 ///
 /// It deliberately does NOT seed eth0/wlan0 with assigned IP addresses, MAC
 /// addresses, link-up state, link speeds, or DNS servers; nor a reachable
@@ -738,9 +749,6 @@ pub fn init_defaults() {
         external_ipv6: String::new(),
     };
 
-    // Hostname is a configuration default, not observed data.
-    state.hostname = String::from("mintos");
-
     // No phantom Wi-Fi scan results: scans come from wifi_scan() / real radios.
     state.scanned_wifi.clear();
     state.saved_networks.clear();
@@ -780,7 +788,6 @@ pub fn clear_all() {
         external_ipv4: String::new(),
         external_ipv6: String::new(),
     };
-    state.hostname = String::new();
     state.changes = 0;
     OP_COUNT.store(0, Ordering::Relaxed);
 }
@@ -890,8 +897,21 @@ fn self_test_inner() -> KernelResult<()> {
 
     // Test 10: hostname.
     serial_println!("netsettings::self_test 10: hostname");
-    set_hostname("myhost");
-    assert_eq!(hostname(), "myhost");
+    // Not a round trip. `set_hostname` then `hostname()` was one, and both ends
+    // were this module's own dead field, so it passed while the rest of the system
+    // reported something else. What matters is that the write reached the ONE
+    // store, so this asks fs::nameservice directly.
+    let original = crate::fs::nameservice::get_hostname();
+    set_hostname("myhost")?;
+    let seen_here = hostname();
+    let seen_there = crate::fs::nameservice::get_hostname();
+    let restored = crate::fs::nameservice::set_hostname(&original);
+    assert_eq!(seen_here, "myhost");
+    assert_eq!(
+        seen_there, "myhost",
+        "netsettings::set_hostname did not reach fs::nameservice"
+    );
+    restored?;
 
     // Test 11: init_defaults seeds only honest, non-fabricated defaults —
     // just the loopback interface and a hostname, with no phantom eth0/wlan0,
@@ -904,7 +924,10 @@ fn self_test_inner() -> KernelResult<()> {
     assert_eq!(ifaces[0].iface_type, InterfaceType::Loopback);
     assert!(!router_info().reachable);
     assert!(wifi_scan().is_empty());
-    assert_eq!(hostname(), "mintos");
+    // init_defaults deliberately no longer seeds a hostname, so what this
+    // asserts is that the module agrees with the store rather than holding a
+    // default of its own.
+    assert_eq!(hostname(), crate::fs::nameservice::get_hostname());
 
     clear_all();
     serial_println!("netsettings::self_test: all 11 tests passed");

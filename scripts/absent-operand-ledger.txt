@@ -41,19 +41,14 @@ allow cmd_sharesheet 10 # its own help prints `history [count]` -- square bracke
 allow cmd_apppermissions 10 # its own help prints `log [count]` -- square brackets
 allow cmd_udp6 5000 # its own help prints `listen <port> [timeout_ms]` -- square
 
-cmd_audioeq 6
-cmd_filevault 4
-cmd_gamemode 1
-cmd_kbshortcuts 3
-cmd_mousegestures 1
+cmd_audioeq 2
+cmd_filevault 1
+cmd_kbshortcuts 1
 cmd_netdiag 3
-cmd_netprofile 5
 cmd_peninput 1
-cmd_screensaver 5
-cmd_sharesheet 2
-cmd_surroundsound 5
+cmd_screensaver 1
+cmd_sharesheet 1
 cmd_sysanimations 1
-cmd_udp6 1
 cmd_vmfrag 1
 cmd_volumeosd 1
 cmd_wintiling 1

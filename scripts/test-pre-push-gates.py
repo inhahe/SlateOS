@@ -300,9 +300,15 @@ def test_every_tree_reading_gate_tells_its_checker_which_tree(text):
                      m is not None, True):
             continue
         var = m.group(1)
+        # Both spellings, because the hook uses both: 17 invocations say
+        # --selftest and 8 say --self-test, and every checker's parser accepts
+        # either (`ap.add_argument("--self-test", "--selftest", ...)`). Matching
+        # only the one spelling made this test demand `--head "$sha"` on a
+        # SELF-TEST invocation, which judges fixtures rather than a tree and must
+        # not be told which tree to judge. It reddened main for all three lanes.
         calls = [ln for ln in code.splitlines()
                  if "run_checker" in ln and f'"${var}"' in ln
-                 and "--selftest" not in ln]
+                 and not re.search(r"--self-?test", ln)]
         if not check(f"{label}: the checker is invoked through run_checker",
                      len(calls) > 0, True):
             continue

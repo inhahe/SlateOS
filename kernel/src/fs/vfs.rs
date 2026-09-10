@@ -5079,9 +5079,41 @@ impl Vfs {
     /// Check if a path exists (file, directory, or symlink).
     ///
     /// Follows symlinks.  Returns `false` for broken symlinks.
+    ///
+    /// **Returns `false` for every failure, not just absence.** `stat` goes through
+    /// [`check_path_access`] and `resolve_mount`, so it can answer
+    /// `PermissionDenied`, `InvalidArgument`, `InternalError` or a symlink-loop
+    /// error, and all of them arrive here as "not there".
+    ///
+    /// That is fine for the common use -- *is there a config file to read?* -- and
+    /// wrong for anything that DECIDES on the answer. Use
+    /// [`exists_or_err`](Self::exists_or_err) when a false answer would let the
+    /// caller proceed, because "I could not tell" and "it is not there" must not
+    /// be the same value at a point like that.
     pub fn exists(path: impl AsRef<Path>) -> bool {
         let path = path.as_ref();
         Self::stat(path).is_ok()
+    }
+
+    /// Whether a path exists, distinguishing absence from failure.
+    ///
+    /// `Ok(false)` only for [`KernelError::NotFound`]; every other error is
+    /// returned. This is the form to use where the answer guards a decision --
+    /// which layer of an overlay serves a file, whether it is safe to create
+    /// something, whether a resource is still in use.
+    ///
+    /// Lane B found the same shape in `userspace/mkfs`: `is_mounted` returned
+    /// `false` when it could not read `/proc/mounts`, so one unreadable line made
+    /// every device look free and `mkfs` would format a live filesystem. The
+    /// general rule is theirs: for any check guarding a destructive or privileged
+    /// action, the error path must not answer in the permissive direction.
+    pub fn exists_or_err(path: impl AsRef<Path>) -> KernelResult<bool> {
+        let path = path.as_ref();
+        match Self::stat(path) {
+            Ok(_) => Ok(true),
+            Err(KernelError::NotFound) => Ok(false),
+            Err(e) => Err(e),
+        }
     }
 
     /// Check if a path exists and is a directory.

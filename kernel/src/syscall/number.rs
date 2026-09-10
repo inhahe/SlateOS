@@ -5281,6 +5281,52 @@ pub const SYS_ITIMER_SET: u64 = 1069;
 /// Chosen number 1070, next free slot after 1069.
 pub const SYS_ITIMER_GET: u64 = 1070;
 
+/// `SYS_SIGNAL_ALTSTACK` -- tell the kernel where this process's alternate
+/// signal stack is, and which signals may use it.
+///
+/// `(sp, size, onstack_mask) -> 0`
+///
+/// `sp`/`size` are the registered alternate stack; `size == 0` unregisters.
+/// `onstack_mask` has bit `n-1` set for each signal whose handler was installed
+/// with `SA_ONSTACK`.
+///
+/// **Why the mask is here, and not read from userspace.** The kernel builds
+/// signal frames and has never recorded `sa_flags` -- those live in libc. So it
+/// cannot tell, on its own, whether the signal it is about to deliver asked for
+/// the alternate stack, and either default is wrong: always using it steals the
+/// stack from handlers that never asked, never using it leaves `SA_ONSTACK`
+/// unimplemented. Reporting the mask is the smallest thing that lets the kernel
+/// decide correctly.
+///
+/// **Why a syscall rather than a pointer the kernel reads at delivery.** The
+/// case an alternate stack exists to serve is a *stack overflow*. A kernel that
+/// had to read a userspace descriptor while building a signal frame for a fault
+/// would be performing the same kind of access that just faulted, at the one
+/// moment it cannot afford to. Lane B made this argument when filing the
+/// request and it is the right one.
+///
+/// Both values are reported together because libc holds both -- the stack from
+/// `sigaltstack`, the mask from `sigaction` -- and a kernel holding one without
+/// the other can decide nothing.
+///
+/// Inherited across `fork` and cleared by `execve`, matching `sigaltstack(2)`.
+/// The clear is not tidiness: after `execve` the address named a buffer in an
+/// address space that no longer exists, so keeping it would put the next signal
+/// frame somewhere belonging to a dead program.
+///
+/// # Errors
+///
+/// - [`KernelError::InvalidArgument`] -- `size` is non-zero but smaller than a
+///   signal frame can use, or `sp + size` overflows.
+/// - [`KernelError::NoSuchProcess`] -- the caller has no owning process.
+///
+/// No capability is required: the stack belongs to the calling process.
+///
+/// See `requests/b-a-honour-sa-onstack-when-building-the-signal-frame.md`.
+///
+/// Chosen number 1071, next free slot after 1070.
+pub const SYS_SIGNAL_ALTSTACK: u64 = 1071;
+
 // ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------

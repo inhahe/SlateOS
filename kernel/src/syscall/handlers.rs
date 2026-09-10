@@ -6957,6 +6957,36 @@ pub fn sys_signal_register(args: &super::dispatch::SyscallArgs) -> super::dispat
     SyscallResult::ok(0)
 }
 
+/// `SYS_SIGNAL_ALTSTACK` (1071) -- record the alternate signal stack and the set
+/// of signals permitted to use it.
+///
+/// See [`crate::syscall::number::SYS_SIGNAL_ALTSTACK`] for why the kernel holds
+/// this rather than reading libc's copy when a signal arrives.
+pub fn sys_signal_altstack(args: &SyscallArgs) -> SyscallResult {
+    use crate::proc::thread;
+
+    let sp = args.arg0;
+    let size = args.arg1;
+    let onstack_mask = args.arg2;
+
+    // A frame needs room for the SignalContext, its 16-byte alignment slack and
+    // the fake return slot. Anything smaller is a stack the kernel could not
+    // build a frame on, and accepting it would mean discovering that during
+    // delivery -- i.e. during a fault -- instead of here.
+    let minimum = crate::proc::signal::SIGNAL_CONTEXT_SIZE as u64 + 32;
+    if size != 0 && (size < minimum || sp.checked_add(size).is_none()) {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    let task_id = sched::current_task_id();
+    let Some(pid) = thread::owner_process(task_id) else {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    };
+
+    crate::proc::signal::set_altstack(pid, sp, size, onstack_mask);
+    SyscallResult::ok(0)
+}
+
 /// `SYS_SIGNAL_SEND` — post a signal to a target process.
 ///
 /// `arg0`: target PID. `arg1`: signal number (1..=NSIG).
@@ -7742,7 +7772,20 @@ pub fn deliver_pending_signal(frame: &mut super::entry::SyscallFrame, ret_val: i
     //   new_rsp = sp                   (RSP%16 == 8 at handler entry,
     //                                   matching the SysV call convention)
     let ctx_size = SIGNAL_CONTEXT_SIZE as u64;
-    let ctx_addr = (frame.user_rsp.wrapping_sub(ctx_size)) & !0xFu64;
+    // Where the frame grows down from. Normally the interrupted stack -- but if
+    // this signal's handler asked for SA_ONSTACK, the top of the alternate stack
+    // instead, because the case that feature exists to serve is the interrupted
+    // stack having just overflowed. Writing the context there is the store that
+    // faults, inside the kernel, before the trampoline exists to run and long
+    // before any libc code could switch away: that is the whole gap lane B
+    // reported in
+    // requests/b-a-honour-sa-onstack-when-building-the-signal-frame.md.
+    //
+    // Everything after this line is unchanged, including the alignment contract
+    // and the validate_user_write below, which now checks the alternate stack
+    // when that is where the frame is going.
+    let frame_base = signal::altstack_top_for(pid, sig, frame.user_rsp).unwrap_or(frame.user_rsp);
+    let ctx_addr = (frame_base.wrapping_sub(ctx_size)) & !0xFu64;
     let new_rsp = ctx_addr.wrapping_sub(8);
 
     // Validate the whole region [new_rsp, ctx_addr + ctx_size) is a

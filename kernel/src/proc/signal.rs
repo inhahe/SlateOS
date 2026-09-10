@@ -343,6 +343,25 @@ struct SignalState {
     /// restores it — or by the no-handler tail of `deliver_linux_signal`,
     /// which restores it directly. `None` means no restore is pending.
     saved_sigmask: Option<u64>,
+    /// Base and length of the process's alternate signal stack, as last
+    /// reported by `SYS_SIGNAL_ALTSTACK`. `(0, 0)` means none is registered.
+    ///
+    /// The kernel holds this rather than reading libc's copy at delivery time,
+    /// because the case an alternate stack exists to serve is a *stack
+    /// overflow*: reading userspace memory while building a signal frame for a
+    /// fault is the same recursion the feature is meant to escape.
+    altstack_sp: u64,
+    altstack_size: u64,
+    /// Signals whose handler asked for `SA_ONSTACK`: bit `n-1` set means
+    /// signal `n` wants the alternate stack.
+    ///
+    /// Here because **the kernel cannot see `sa_flags`**. They live in libc and
+    /// nothing in this module has ever recorded them, so without the mask the
+    /// kernel would know the stack but not which signals may use it -- and
+    /// either guess breaks POSIX: always using it steals the stack from
+    /// handlers that never asked, never using it leaves the feature
+    /// unimplemented.
+    onstack_mask: u64,
 }
 
 impl Default for SignalState {
@@ -353,6 +372,9 @@ impl Default for SignalState {
             trampoline: 0,
             infos: [None; NSIG as usize],
             saved_sigmask: None,
+            altstack_sp: 0,
+            altstack_size: 0,
+            onstack_mask: 0,
         }
     }
 }
@@ -559,6 +581,58 @@ pub fn register_trampoline(pid: ProcessId, addr: u64) {
     });
 }
 
+/// Record a process's alternate signal stack and the set of signals allowed to
+/// use it.
+///
+/// Both arrive together because libc holds both and they must not drift: the
+/// stack comes from `sigaltstack`, the mask from `sigaction`, and a kernel
+/// holding one without the other can decide nothing. `size == 0` unregisters.
+pub fn set_altstack(pid: ProcessId, sp: u64, size: u64, onstack_mask: u64) {
+    with_states(|states| {
+        let st = states.entry(pid).or_default();
+        st.altstack_sp = sp;
+        st.altstack_size = size;
+        st.onstack_mask = onstack_mask;
+    });
+}
+
+/// Where `sig`'s signal frame should be built, if it belongs on the alternate
+/// stack.
+///
+/// Returns the address one past the top of the alternate stack -- the base a
+/// frame grows down from -- or `None` to use the interrupted stack.
+///
+/// `None` in three cases, and the third is not an optimisation:
+///
+/// * the handler did not ask (`SA_ONSTACK` clear for this signal);
+/// * no stack is registered;
+/// * `current_rsp` is **already inside** the alternate stack. A signal arriving
+///   while a handler is already running there must not restart at the top, or it
+///   overwrites the frames of the handler it interrupted. libc's
+///   `altstack_entry` refuses for the same reason, and the two have to agree or
+///   one of them is wrong.
+#[must_use]
+pub fn altstack_top_for(pid: ProcessId, sig: u32, current_rsp: u64) -> Option<u64> {
+    // Takes the signal number in the width the delivery path already has it
+    // (`take_deliverable` yields `u32`), so the range check happens here rather
+    // than being lost in a cast at the call site.
+    if sig == 0 || sig > NSIG {
+        return None;
+    }
+    let bit = 1u64 << (sig - 1);
+    with_states(|states| {
+        let st = states.get(&pid)?;
+        if st.onstack_mask & bit == 0 || st.altstack_size == 0 {
+            return None;
+        }
+        let top = st.altstack_sp.checked_add(st.altstack_size)?;
+        if current_rsp >= st.altstack_sp && current_rsp < top {
+            return None;
+        }
+        Some(top)
+    })
+}
+
 /// Get the registered trampoline address for a process, if any.
 #[must_use]
 pub fn trampoline(pid: ProcessId) -> Option<u64> {
@@ -607,6 +681,18 @@ pub fn on_exec(pid: ProcessId) {
             state.trampoline = 0;
             // Blocked mask is also reset on exec per POSIX.
             state.blocked = 0;
+            // An alternate signal stack is NOT preserved across execve (see
+            // sigaltstack(2)), and here it must not be: the address named a
+            // buffer in the old image's address space, which has just been
+            // discarded. Keeping it would mean building the next signal frame
+            // at an address belonging to a program that no longer exists --
+            // strictly worse than having no alternate stack, because the fault
+            // would land in the new image's delivery path rather than being a
+            // missing feature. The mask goes with it, since the new image's
+            // handlers have not asked for anything yet.
+            state.altstack_sp = 0;
+            state.altstack_size = 0;
+            state.onstack_mask = 0;
         }
     });
 }
@@ -625,9 +711,16 @@ pub fn on_exec(pid: ProcessId) {
 /// there should be none, but this is idempotent).
 pub fn inherit_for_fork(parent: ProcessId, child: ProcessId) {
     with_states(|states| {
-        let (blocked, trampoline) = states
-            .get(&parent)
-            .map_or((0, 0), |s| (s.blocked, s.trampoline));
+        let (blocked, trampoline, alt_sp, alt_size, onstack) =
+            states.get(&parent).map_or((0, 0, 0, 0, 0), |s| {
+                (
+                    s.blocked,
+                    s.trampoline,
+                    s.altstack_sp,
+                    s.altstack_size,
+                    s.onstack_mask,
+                )
+            });
         // If the child somehow already had pending signals recorded, drop
         // them from the global counter before overwriting.
         if let Some(existing) = states.get(&child) {
@@ -647,6 +740,15 @@ pub fn inherit_for_fork(parent: ProcessId, child: ProcessId) {
                 infos: [None; NSIG as usize],
                 // No sigsuspend in flight in a freshly-forked child.
                 saved_sigmask: None,
+                // Inherited, per sigaltstack(2): "a child created via fork(2)
+                // inherits a copy of its parent's alternate signal stack
+                // settings". The child's CoW-copied stack lives at the same
+                // user address, exactly as the trampoline does above. (Not
+                // preserved across execve -- see the exec path, which clears
+                // them.)
+                altstack_sp: alt_sp,
+                altstack_size: alt_size,
+                onstack_mask: onstack,
             },
         );
     });

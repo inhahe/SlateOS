@@ -1033,6 +1033,12 @@ pub extern "C" fn issetugid() -> i32 {
 /// Maximum hostname length (references limits::HOST_NAME_MAX).
 const HOST_NAME_MAX: usize = crate::limits::HOST_NAME_MAX as usize;
 
+// Host build only. On the target the hostname and the NIS domain live in the
+// kernel and libc caches neither: `sethostname`/`setdomainname` are syscalls
+// and `current_hostname`/`current_domain` read procfs. A libc-side copy would
+// be a second source for a value that has one, which is the defect
+// `services/ctest-hostname` checks 7 and 8 exist to catch.
+#[cfg(not(target_os = "none"))]
 process_global! {
     /// Hostname buffer (including null terminator space).
     ///
@@ -1212,11 +1218,39 @@ pub(crate) fn set_stored_hostname_for_test(name: &[u8]) {
 ///
 /// `/proc/sys/kernel/domainname` is served by the same procfs node list as
 /// `hostname`, and the kernel's own procfs self-test asserts both exist.
-fn current_domain(out: &mut [u8]) -> usize {
+/// The system's NIS domain name, or `None` if it cannot be read.
+///
+/// The companion to [`current_hostname`], and it had the same defect in a
+/// milder form. It fell back to a process-local buffer holding `"(none)"`.
+///
+/// `"(none)"` is not a fabrication the way `"localhost"` was -- it is what
+/// Linux itself reports for an unset NIS domain, and no machine is called
+/// `(none)`. What it still did was conflate two different facts: **"this
+/// system has no domain name"** and **"the read failed"**. Those want
+/// different answers, and `services/ctest-hostname`'s check 17 inherits the
+/// distinction directly -- it fires when the domain does not read back, and
+/// with the fallback in place that included a `/proc` read that never
+/// happened.
+///
+/// So the target arm reads one source and reports a failure as one, exactly as
+/// `current_hostname` now does. A genuinely unset domain still reads back as
+/// `(none)`, because that is what the kernel's node contains.
+#[cfg(target_os = "none")]
+fn current_domain(out: &mut [u8]) -> Option<usize> {
+    read_kernel_name(b"/proc/sys/kernel/domainname\0", out)
+}
+
+/// The system's NIS domain name, or `None` if it cannot be read.
+///
+/// The host build has no `/proc`, so it answers from the process-local buffer.
+/// A simulation, like [`current_hostname`]'s host arm, and the reason the
+/// buffer still defaults to `"(none)"`.
+#[cfg(not(target_os = "none"))]
+fn current_domain(out: &mut [u8]) -> Option<usize> {
     if let Some(n) = read_kernel_name(b"/proc/sys/kernel/domainname\0", out) {
-        return n;
+        return Some(n);
     }
-    stored_domain(out)
+    Some(stored_domain(out))
 }
 
 /// Overwrite the stored domain name. **Tests only.** See
@@ -1239,6 +1273,8 @@ pub(crate) fn set_stored_domain_for_test(name: &[u8]) {
 }
 
 /// The stored domain buffer, which is the fallback for [`current_domain`].
+/// Only the host build consults this; see [`stored_hostname`].
+#[cfg(not(target_os = "none"))]
 fn stored_domain(out: &mut [u8]) -> usize {
     // SAFETY: single-address-space, and this is a read.
     let (src_ptr, src_len) = unsafe { (domain_buf_ptr().cast_const(), *domain_len_ptr()) };
@@ -1299,6 +1335,12 @@ pub(crate) fn copy_hostname(out: &mut [u8]) -> usize {
     current_hostname(out).unwrap_or(0)
 }
 
+// Host build only. On the target the hostname and the NIS domain live in the
+// kernel and libc caches neither: `sethostname`/`setdomainname` are syscalls
+// and `current_hostname`/`current_domain` read procfs. A libc-side copy would
+// be a second source for a value that has one, which is the defect
+// `services/ctest-hostname` checks 7 and 8 exist to catch.
+#[cfg(not(target_os = "none"))]
 process_global! {
     /// Domain name buffer (including null terminator space).
     ///
@@ -1328,25 +1370,19 @@ process_global! {
 /// falls back to it for the `domainname` field when the kernel's
 /// `/proc/sys/kernel/domainname` cannot be read, so `uname()` and
 /// `getdomainname()` agree rather than reporting two different names.
+///
+/// # It did not do that
+///
+/// It read the process-local buffer directly and never consulted `/proc` at
+/// all, while `getdomainname` reads `current_domain`. So the doc above
+/// described the property it was written to provide, the code provided a
+/// different one, and the two calls could report different names -- which is
+/// the disagreement the doc says it prevents. Now it goes through
+/// `current_domain` like its caller does, and `0` when that cannot be read,
+/// for the same reason `copy_hostname` returns `0`: `uname` has no error
+/// channel for a single field.
 pub(crate) fn copy_domainname(out: &mut [u8]) -> usize {
-    // SAFETY: Single-address-space, no concurrent writes during the read.
-    // Same access pattern as `getdomainname()` below.
-    let (src_ptr, src_len) = unsafe { (domain_buf_ptr().cast_const(), *domain_len_ptr()) };
-    let n = core::cmp::min(out.len(), src_len);
-    let mut i = 0;
-    while i < n {
-        // SAFETY: i < src_len <= HOST_NAME_MAX, the domain buffer is at least
-        // HOST_NAME_MAX + 1 bytes, and out[i] is in-bounds because
-        // i < n <= out.len().
-        unsafe {
-            let b = *src_ptr.cast::<u8>().add(i);
-            if let Some(slot) = out.get_mut(i) {
-                *slot = b;
-            }
-        }
-        i = i.wrapping_add(1);
-    }
-    n
+    current_domain(out).unwrap_or(0)
 }
 
 /// Get the hostname.
@@ -1452,7 +1488,14 @@ pub extern "C" fn gethostname(name: *mut u8, len: usize) -> i32 {
 pub extern "C" fn getdomainname(name: *mut u8, len: usize) -> i32 {
     // The *system's* domain name. See `current_domain`.
     let mut domain = [0u8; HOST_NAME_MAX + 1];
-    let dlen = current_domain(&mut domain);
+    let Some(dlen) = current_domain(&mut domain) else {
+        // The one source could not be read. Reporting `(none)` here would say
+        // "this system has no domain name", which is a different fact and one
+        // this call has no evidence for. `EIO` for the same reason as
+        // `gethostname`: the node is one this kernel always serves.
+        errno::set_errno(errno::EIO);
+        return -1;
+    };
     let needed = dlen.wrapping_add(1); // +null
     if len < needed {
         errno::set_errno(errno::EINVAL);
@@ -2208,24 +2251,28 @@ pub extern "C" fn gethostid() -> i64 {
         return stored;
     }
 
-    // Derive from hostname.
-    // SAFETY: same argument as above for the hostname storage — both halves
-    // come from `process_global!`, so they share one scope and one lifetime.
-    let (src_ptr, src_len) = unsafe { (hostname_buf_ptr().cast_const(), *hostname_len_ptr()) };
+    // Derive from the hostname -- the SYSTEM's, through `current_hostname`.
+    //
+    // This read the process-local buffer directly, and that buffer is
+    // initialised to "localhost" and, since `sethostname` became a syscall,
+    // is never written on the target at all. So `gethostid()` returned
+    // `fnv1a32("localhost")` on every SlateOS machine: a host *identifier*
+    // that identifies nothing, identical across every installation. The
+    // comment two lines below even names the constant it always produced --
+    // `fnv1a32("localhost") = 0xc2e09d09` -- as an example of sign extension,
+    // without anyone noticing it was also the only value the function could
+    // return.
+    //
+    // The doc above says this seeds `tar`'s archive UUID. Identical seeds
+    // across machines is the one property a UUID seed must not have.
+    //
+    // A hostname that cannot be read leaves the id at 0, which `sethostid`
+    // already treats as "unset" -- the branch above returns early only for a
+    // non-zero stored value. Zero is the honest answer for "this host has no
+    // identifier", and is what glibc reports on a system with no
+    // `/etc/hostid` and no hostname.
     let mut tmp = [0u8; HOST_NAME_MAX];
-    let n = core::cmp::min(src_len, tmp.len());
-    let mut i = 0;
-    while i < n {
-        // SAFETY: i < n <= src_len <= HOST_NAME_MAX, the source buffer is
-        // HOST_NAME_MAX + 1 bytes, and tmp has HOST_NAME_MAX bytes.
-        unsafe {
-            let b = *src_ptr.cast::<u8>().add(i);
-            if let Some(slot) = tmp.get_mut(i) {
-                *slot = b;
-            }
-        }
-        i = i.wrapping_add(1);
-    }
+    let n = current_hostname(&mut tmp).unwrap_or(0);
 
     let h = fnv1a32(tmp.get(..n).unwrap_or(&[]));
     // Sign-extend through i32 → i64 so a value with the high bit set

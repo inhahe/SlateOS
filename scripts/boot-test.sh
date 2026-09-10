@@ -3736,6 +3736,20 @@ check_gates_are_wired
 # because it is a statement about the two hundred gates below it. Learning that
 # one of them could not be reached is worth most when it is learned first.
 check_gate_call_sites() {
+    # Each gate function in this file resolves its own interpreter; there is no
+    # file-scope `$py`, and this script runs under `set -u`, so referring to one
+    # aborts the run at the first gate that tries. Modelled on
+    # `check_gates_are_wired` directly above.
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== gate-call-site check: skipped (no python) ===" >&2
+        return 0
+    fi
+
     if ! run_checker check-gate-call-sites-selftest "$py" \
             "$PROJECT_ROOT/scripts/check-gate-call-sites.py" --self-test; then
         echo "" >&2

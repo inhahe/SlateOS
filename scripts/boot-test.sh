@@ -4142,6 +4142,75 @@ check_user_access_sites() {
 
 check_user_access_sites
 
+# A capability the Linux ABI table can reach and no native syscall can.
+#
+# Three times the kernel had the implementation and only the Linux-compatibility
+# table could reach it: `setgroups` reported success and changed nothing, the pty
+# slave read read the console and hung this boot test for two hours, and `alarm`
+# armed nothing while proc/itimer.rs sat there working. All three were found by
+# tripping over a *userspace symptom*, and lane B's point when they asked lane A
+# for this (notice 2026-09-09) is why it is a gate: the libc side looks finished
+# in all three, so nothing invites suspicion. The asymmetry is invisible from
+# either side alone and mechanical from here.
+#
+# A ratchet, not a gate: fourteen modules are Linux-only today and thirteen are
+# deliberate -- `ipc::epoll` has no native number on purpose, because this system
+# uses channels. It fails when the set *changes*, in either direction, so a
+# baseline nobody prunes cannot rot into a description of a tree that moved on.
+#
+# Costs about three seconds: it reads three files and matches text. It is here
+# rather than in the push hook because the failure it catches is not urgent --
+# nothing goes red, a capability quietly becomes unreachable from native code --
+# and the boot test is where "never merge a red tree" is actually enforced.
+check_linux_only_capabilities() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== Linux-only-capability check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    if ! run_checker check-linux-only-capabilities-selftest "$py" \
+            "$PROJECT_ROOT/scripts/check-linux-only-capabilities.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The Linux-only-capability analyser" >&2
+        echo "fails its own cases.  Its calibration is seven syscalls that DO" >&2
+        echo "have wired native numbers and must therefore be absent from its" >&2
+        echo "report; every wrong version of this check produced a long," >&2
+        echo "authoritative-looking list, and that calibration is the only" >&2
+        echo "thing that told them apart from the right one." >&2
+        return 1
+    fi
+
+    echo "=== Checking for capabilities only the Linux ABI can reach ==="
+    if run_checker check-linux-only-capabilities "$py" \
+            "$PROJECT_ROOT/scripts/check-linux-only-capabilities.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  The set of kernel modules reachable from" >&2
+    echo "the Linux ABI table but from no native syscall has changed.  Each" >&2
+    echo "line above is one of:" >&2
+    echo "" >&2
+    echo "  * a module that became Linux-only and is not baselined -- decide" >&2
+    echo "    whether native code should be able to ask for it.  If yes, give" >&2
+    echo "    it a syscall number; if no, baseline it with the reason." >&2
+    echo "  * a baselined module native code now reaches -- prune the entry," >&2
+    echo "    because an exemption list nobody prunes stops describing the" >&2
+    echo "    tree it exempts." >&2
+    echo "" >&2
+    echo "A new entry is a question, not a verdict: that checker's header says" >&2
+    echo "what it cannot see (trait objects, function pointers, macros, and" >&2
+    echo "callers that are not syscalls at all)." >&2
+    exit 1
+}
+
+check_linux_only_capabilities
+
 # Keep every path-taking VFS entry point behind the one permission gate.
 #
 # This guards the failure mode that no runtime test can see, because both

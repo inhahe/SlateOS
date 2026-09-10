@@ -128350,3 +128350,58 @@ decision to make from inside `loginctl`:
 
 Either way `su` must stop being a session registry of its own. Until then the
 two lists drift, and each is right about a different half of the machine.
+
+## B-CRYPTSETUP-SAYS-THE-DISK-IS-ENCRYPTED-AND-WRITES-NOTHING (lane B, 2026-09-10) — open
+
+**In short:** `cryptsetup luksFormat /dev/sda1` prints
+`LUKS2 formatted successfully on /dev/sda1.` and exits 0. It has not written
+anything to the device. A user who runs it believes their disk is encrypted;
+their data is in plaintext.
+
+### The evidence
+
+`userspace/cryptsetup` contains **no I/O of any kind** — no `std::fs`, no
+`std::net`, no `Command`, no `libc`, no `unsafe`, no syscall — across 251
+output calls. `cmd_luks_format` builds a `LuksHeader` from the command-line
+options, calls `header.serialize()`, prints the size and the UUID, and then
+prints the success line. `serialized` is never written anywhere.
+
+It also prints the real warning first:
+
+    WARNING!
+    ========
+    This will overwrite data on /dev/sda1 irrevocably.
+
+so the output is indistinguishable from a real run, including the part that
+tells the user to be careful.
+
+`cmd_luks_open` is the same shape: it prompts `Enter passphrase for <device>:`
+and then computes `pbkdf2_sha256(b"passphrase", b"salt", 1000, 32)` — a
+hard-coded passphrase and a hard-coded salt — under a comment reading
+`// Simulate key derivation`.
+
+### Why nothing caught it
+
+`scripts/audit-cli-fabrication.py` does not flag it, and the reason is its
+second blind spot: `FACT_PATTERNS` requires a measurement, a three-digit
+count, a `PASS`/`OK`/`found`, or a unit like MB or Hz. *"LUKS2 formatted
+successfully"* contains none of those. The same blind spot hid
+`userspace/bridge`, deleted the same day.
+
+It is one of **225** userspace crates with no I/O marker anywhere that the
+audit does not flag. `mdadm`, `nmcli`, `dmsetup`, `nft` and `systemd-resolved`
+are in the same set and have not been examined individually.
+
+### What the fix is
+
+Under `design-decisions.md` 1006 this is deleted, not stubbed: it performs no
+I/O and states a fact, which is the definition, and a refusing stub is what
+the operator rejected. That has not been done yet because the whole 225 wants
+deriving mechanically rather than picking by hand — the audit needs a second
+rule for the no-I/O-at-all shape, and that rule must exclude library crates
+(`charwidth`, `bignum`, `ere`, `modechange` are in the set and are not
+commands).
+
+**Until then this entry is the record.** Of everything found in a day of
+deleting fabrications, this is the one where believing the output has a
+physical consequence.

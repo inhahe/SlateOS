@@ -15294,6 +15294,57 @@ pub fn self_test() -> KernelResult<()> {
 
     let mut fs = ProcFs::new();
 
+    // `/proc/sys/kernel/hostname` reports what `fs::nameservice` holds.
+    //
+    // Added 2026-09-10, after `services/ctest-hostname` returned 6 on its first
+    // run — "sethostname reported success and gethostname does not report the
+    // new name". Instrumentation in `sys_hostname_set` proved the kernel store
+    // was correct (`stored 14 byte(s) "ctest-hostname"; host now
+    // "ctest-hostname"`), so the value was right and something between the store
+    // and the caller was not. This is the half of that path that lives in ring 0,
+    // and it was untested: the existing procfs self-test checks the *directory
+    // entry* for `hostname` exists, which says nothing about what reading it
+    // returns.
+    //
+    // It is the same invariant `ctest-hostname`'s check 7 asserts from ring 3 —
+    // that the setter and the file agree — but placed where libc, `/etc/hostname`
+    // and a ring-3 `open` cannot be mistaken for the cause. A failure here is the
+    // kernel's; a pass here moves the search into userspace.
+    //
+    // Restores the original name on every exit path, including the failures: this
+    // runs during boot, and a self-test that renames the machine and leaves it
+    // renamed has changed the state every later rung observes.
+    {
+        let original = crate::fs::nameservice::get_hostname();
+        const PROBE: &str = "procfs-selftest-host";
+
+        let verdict = (|| -> KernelResult<()> {
+            crate::fs::nameservice::set_hostname(PROBE)?;
+            let data = fs.read_file(Path::new("/sys/kernel/hostname"))?;
+            let text = core::str::from_utf8(&data).map_err(|_| KernelError::InternalError)?;
+            // `gen_sys` appends a newline, as Linux does for this file.
+            let reported = text.trim_end_matches(['\n', '\r']);
+            if reported != PROBE {
+                serial_println!(
+                    "[procfs]   FAIL: set the hostname to {:?} and \
+                     /proc/sys/kernel/hostname reports {:?}. The setter and the \
+                     file are two publishers of one value and they disagree",
+                    PROBE,
+                    reported
+                );
+                return Err(KernelError::InternalError);
+            }
+            Ok(())
+        })();
+
+        // Unconditional, before judging, so a failure cannot leave the machine
+        // called `procfs-selftest-host` for the rest of the boot.
+        let restored = crate::fs::nameservice::set_hostname(&original);
+        verdict?;
+        restored?;
+        serial_println!("[procfs]   /proc/sys/kernel/hostname agrees with fs::nameservice: OK");
+    }
+
     // Test root readdir — should have root files + at least 1 PID directory.
     let entries = fs.readdir(Path::new("/"))?;
     let min_expected = ROOT_FILES.len();

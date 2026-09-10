@@ -9214,7 +9214,34 @@ pub fn self_test_ctest_hostname() -> KernelResult<()> {
     // only place in the tree that grants it. Remove this and the syscalls become
     // unreachable again -- not broken, unreachable, which reads the same from
     // userspace and is why §927 lists the accept path as untested.
-    let caps = [(ResourceType::Process, 0u64, Rights::SET_HOSTNAME)];
+    // Two rights, and the second one is the bug this rung shipped with.
+    //
+    // `(Process, SET_HOSTNAME)` is what the syscalls gate on, and it was the
+    // only thing granted at first. The fixture then returned 6 -- "sethostname
+    // reported success and gethostname does not report the new name" -- which
+    // reads as a kernel defect and was not one. Instrumentation showed the store
+    // was correct (`stored 14 byte(s) "ctest-hostname"; host now
+    // "ctest-hostname"`).
+    //
+    // `sys_fs_open` calls `require_cap_type(File, READ)`, so with no File right
+    // the fixture's `open("/proc/sys/kernel/hostname")` was refused. libc's
+    // `current_hostname` then fell through /proc, then `/etc/hostname` (not
+    // staged), to the process-local buffer -- which still holds `localhost` and
+    // is the very fallback the original defect was made of. So `gethostname`
+    // answered `localhost` before and after the set, and the fixture correctly
+    // reported that the name had not changed.
+    //
+    // READ and not READ|WRITE: the fixture opens two procfs files and writes
+    // nothing, and a capability granted wider than the holder needs is the habit
+    // that makes `Rights::ALL` grants look reasonable
+    // (known-issues.md -> TD-A-A-NEW-RIGHT-IS-GRANTED-BEFORE-ANYONE-DECIDES-WHO-HOLDS-IT).
+    //
+    // `resource_id` 0 is class-wide, which is what the check reads:
+    // `has_capability_type` takes no id at all.
+    let caps = [
+        (ResourceType::File, 0u64, Rights::READ),
+        (ResourceType::Process, 0u64, Rights::SET_HOSTNAME),
+    ];
 
     let argv: &[&[u8]] = &[b"ctest-hostname"];
     let envp: &[&[u8]] = &[];

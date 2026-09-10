@@ -127084,3 +127084,82 @@ above are two of thirty-nine; the rest are unexamined.
 **Related but distinct** from the `/proc` entry above. That one is two parsers
 of one *file*; this is two implementations of one *command*, and a pair can be
 guilty of both -- the two `free`s are.
+
+### The evidence, gathered 2026-09-10
+
+The entry above said lane B could supply the evidence without deciding
+anything. Here it is. Four signals per side, all mechanical: lines, `#[test]`
+count, **fidelity markers** (mentions of `GNU coreutils`, `procps-ng`,
+`util-linux`, "measured against", "transcription", "byte-exact", "upstream"),
+and stub markers.
+
+The fidelity count is the one that separates the groups, and it separates them
+sharply: on the `coreutils` side it runs to 76 (`df`), 71 (`free`), 69 (`sed`),
+67 (`cal`); on the standalone side it is **0 for every one of the 39**. A file
+that cites upstream seventy times was written against upstream.
+
+Classified by a stated rule -- `coreutils` fidelity >= 10 means it is the
+measured port; otherwise a standalone more than 1.5x longer *and* with more
+tests means it is the substantial one; otherwise it needs a human reading.
+
+| | count | commands |
+|---|---|---|
+| `coreutils` is the measured port | **27** | cal, chown, cmp, comm, cut, dd, df, du, expand, fold, free, head, join, nl, paste, sed, seq, split, stat, strings, tar, tee, tr, tsort, uniq, wc, xargs |
+| the standalone is the substantial one | **6** | date, logger, patch, sha256sum, uptime, who |
+| needs reading | **6** | diff, env, hostname, kill, ps, uname |
+
+Two spot-checks, because a rule that classifies without being checked is a
+different kind of guess:
+
+* `coreutils`'s `date` opens *"No timezone support yet -- always UTC"* against a
+  standalone with strftime, RFC 5322/3339, ISO 8601 and parsing. Group 2 is
+  right.
+* `coreutils`'s `stat` is a real port, but the standalone is **larger** (2840
+  against 2118) with twice the tests. Group 1's rule fires on the fidelity
+  markers and the evidence is genuinely mixed. Which turned up the complication
+  below.
+
+### Eleven of the thirty-nine are not pairs
+
+**`userspace/stat` is one binary that answers to six names** -- `stat`, `ln`,
+`mkfifo`, `readlink`, `realpath`, `touch` -- dispatched on `argv[0]`. Eleven of
+the thirty-nine standalone crates do this. "Retire the standalone" is therefore
+not a per-command decision for those eleven; it removes whatever else rides
+along.
+
+Checked rather than assumed: all five of `stat`'s riders **do** have
+`coreutils` counterparts, so that one is safe. One command is not:
+
+> **`ncal` exists only inside `userspace/cal`.** `coreutils/src/bin/cal.rs`
+> does not contain the string at all. Retiring `userspace/cal` deletes `ncal`
+> from the system.
+
+That is the whole of the loss across the eleven, and it is one command -- which
+is worth knowing precisely, because "some of them provide other commands too"
+would have been enough to stall the decision indefinitely.
+
+### One thing this exercise found about lane B's own recent work
+
+`userspace/ps` had **zero tests** -- verified by running them, not by counting
+`#[test]`. It was converted to `procinfo` two ticks ago and no test was added,
+while `coreutils`'s `ps` was converted the next tick *and* given four. Same
+lane, same week, same kind of change, two standards.
+
+**Given eight**, since the gap was mine and closing it does not prejudge which
+`ps` survives. One of the eight is not an assertion about `ps` at all but about
+the pair:
+
+> **The two `ps` implementations render the same `tty_nr` differently.**
+> `userspace/ps` prints `tty{n}` from the raw number; `coreutils/src/bin/ps.rs`
+> prints `pts/{n & 0xff}`. For `tty_nr = 34816` they print `tty34816` and
+> `pts/0`. Neither is obviously right -- 34816 is `(136 << 8) | 0`, so `pts/0`
+> reads a real Linux device number correctly and `tty34816` names a device that
+> does not exist -- but they are two answers to one question, measured, in one
+> tree. It is the concrete form of everything above.
+
+### What is still not decided, and by whom
+
+Nothing above chooses. The 27 in group 1 look like deletions and the 6 in
+group 2 look like the reverse, but *acting* on 39 commands is a user-visible
+policy and stays the operator's. What has changed is that it can now be decided
+from a table instead of from thirty-nine readings.

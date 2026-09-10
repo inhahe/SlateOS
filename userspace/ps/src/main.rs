@@ -1020,3 +1020,136 @@ fn main() {
         }
     }
 }
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::{
+        ProcessInfo, TICKS_PER_SEC, cpu_percent, format_size, format_start_time, format_time,
+        format_tty, mem_percent, state_description,
+    };
+
+    fn proc_with(utime: u64, stime: u64, starttime: u64, rss: u64) -> ProcessInfo {
+        ProcessInfo {
+            pid: 1,
+            name: "t".to_string(),
+            state: 'S',
+            state_long: "sleeping".to_string(),
+            ppid: 0,
+            pgrp: 0,
+            session: 0,
+            tty: 0,
+            utime,
+            stime,
+            priority: 20,
+            nice: 0,
+            threads: 1,
+            starttime,
+            vsize: 0,
+            rss,
+            uid: 0,
+            gid: 0,
+            groups: Vec::new(),
+            vm_size_kb: 0,
+            vm_rss_kb: 0,
+        }
+    }
+
+    /// The unit boundaries, which are where a size formatter goes wrong.
+    #[test]
+    fn size_switches_units_at_the_right_place() {
+        assert_eq!(format_size(0), "0 KiB");
+        assert_eq!(format_size(1023), "1023 KiB");
+        assert_eq!(format_size(1024), "1.0 MiB");
+        assert_eq!(format_size(1_048_575), "1024.0 MiB");
+        assert_eq!(format_size(1_048_576), "1.0 GiB");
+    }
+
+    /// Ticks, not seconds, and hours do not wrap at a day: a process can run
+    /// for a week, and `01:00:00` after 25 hours would be a lie.
+    #[test]
+    fn time_is_ticks_and_hours_accumulate() {
+        assert_eq!(format_time(0), "00:00:00");
+        assert_eq!(format_time(TICKS_PER_SEC), "00:00:01");
+        assert_eq!(format_time(3661 * TICKS_PER_SEC), "01:01:01");
+        assert_eq!(format_time(25 * 3600 * TICKS_PER_SEC), "25:00:00");
+    }
+
+    /// **This program and `coreutils`'s `ps` render the same `tty_nr`
+    /// differently**, and this test exists to say so rather than to bless it.
+    ///
+    /// Here a tty is `tty{n}` from the raw number; `coreutils/src/bin/ps.rs`
+    /// renders `pts/{n & 0xff}`, taking the low byte as a minor. For
+    /// `tty_nr = 34816` the two commands print `tty34816` and `pts/0`.
+    ///
+    /// Neither is obviously right -- 34816 is `(136 << 8) | 0`, so `pts/0` is
+    /// the better reading of a real Linux device number and `tty34816` is not
+    /// a device that exists. It is recorded as a measured disagreement between
+    /// two implementations of one command, which is the concrete form of
+    /// `known-issues.md` ->
+    /// `TD-B-THIRTY-NINE-COMMAND-NAMES-ARE-BUILT-BY-TWO-CRATES-EACH`.
+    #[test]
+    fn tty_rendering_differs_from_the_other_ps() {
+        assert_eq!(format_tty(0), "?");
+        assert_eq!(format_tty(-1), "?", "a negative tty_nr is also no terminal");
+        assert_eq!(format_tty(34816), "tty34816");
+        // The other implementation's answer for the same input, for the record.
+        assert_ne!(format_tty(34816), format!("pts/{}", 34816 & 0xff));
+    }
+
+    /// Both percentages divide, so both need a zero guard, and both have one.
+    #[test]
+    fn percentages_do_not_divide_by_zero() {
+        // Elapsed is zero when a process started this very tick.
+        assert!((cpu_percent(&proc_with(10, 10, 100, 0), 100) - 0.0).abs() < 1e-9);
+        // …and a machine reporting no memory at all.
+        assert!((mem_percent(&proc_with(0, 0, 0, 10), 0) - 0.0).abs() < 1e-9);
+    }
+
+    /// RSS is in pages and the conversion is the crate's, not a local 4 KiB.
+    #[test]
+    fn memory_percent_converts_pages_at_the_page_size() {
+        // 100 pages of 16 KiB = 1600 KiB, against a 3200 KiB machine.
+        let pct = mem_percent(&proc_with(0, 0, 0, 100), 3200);
+        assert!((pct - 50.0).abs() < 1e-9, "got {pct}");
+    }
+
+    /// CPU% here is cumulative over the process's life, which its own doc
+    /// says. Pinned so that anyone changing it to an interval measure has to
+    /// change a test that states the old meaning.
+    #[test]
+    fn cpu_percent_is_lifetime_not_recent() {
+        // Half of the elapsed ticks spent on CPU.
+        let p = proc_with(50, 50, 0, 0);
+        assert!((cpu_percent(&p, 200) - 50.0).abs() < 1e-9);
+    }
+
+    /// **A known defect, pinned rather than fixed.** `starttime` is ticks
+    /// *since boot*, so this renders "hours and minutes after boot", not the
+    /// wall-clock time real `ps` shows in its `START` column. Turning it into
+    /// a clock time needs the boot instant, which is `/proc/uptime` and the
+    /// current time -- two more readings, and a change to what the column
+    /// means. See `known-issues.md`.
+    #[test]
+    fn start_time_is_since_boot_not_a_clock_time() {
+        assert_eq!(format_start_time(0), "00:00");
+        // A process that started 90 minutes after boot, on a machine that has
+        // been up for days, still shows 01:30.
+        assert_eq!(format_start_time(90 * 60 * TICKS_PER_SEC), "01:30");
+    }
+
+    /// The state letters a viewer has to know, including the two that are easy
+    /// to omit: `I` (idle kernel thread) and `t` (tracing stop).
+    #[test]
+    fn every_state_letter_has_a_description() {
+        for c in ['R', 'S', 'D', 'Z', 'T', 'I'] {
+            let d = state_description(c);
+            assert!(!d.is_empty(), "{c} has no description");
+            assert_ne!(d, "unknown", "{c} should be known");
+        }
+    }
+}

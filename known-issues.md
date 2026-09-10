@@ -128070,3 +128070,50 @@ untouched -- `rpm`'s `.rpmnew` bargain. Four tests, where there were none.
 no guard named `is_mounted`, `is_busy`, `is_in_use`, `is_locked`, `is_readonly`,
 `is_running`, `is_active`, `in_use`, `is_protected`, `is_immutable` or
 `is_open` fails open anywhere in lane B. The two that did are fixed.
+
+## B: `org.slateos.ServiceManager` has two clients and no provider
+
+`userspace/powerctl` (`SERVICE_MANAGER_NAME`, main.rs:98) and
+`userspace/service` (main.rs:79) both open a channel to the well-known name
+`org.slateos.ServiceManager`. **Nothing anywhere registers that name.** A
+tree-wide search for the string finds exactly those two call sites, both
+clients. `init/servicebus` registers activation entries for
+`org.slateos.compositor`, `.audio.mixer`, `.network.manager` and
+`.power.manager`, pointing at `/usr/lib/slateos/*` exec paths -- a different
+naming scheme, and none of them this one.
+
+So every IPC call either tool makes fails at `SYS_CHANNEL_OPEN`. What that
+means per caller:
+
+* **`powerctl shutdown|reboot|suspend|hibernate`** -- `orderly_shutdown`
+  returns `false` and the direct-syscall fallback runs. This is the reason the
+  sync defect fixed alongside this entry mattered as much as it did: the
+  "fallback" is not a rare path taken when the service manager is wedged, it
+  is the *only* path, on every invocation.
+* **`powerctl schedule N shutdown`** -- nothing arms a timer, and nothing in
+  the system ever reads `/run/powerctl/scheduled` except `powerctl status`.
+  The scheduled shutdown never happens. Before this change the command printed
+  "Scheduled shutdown in N minutes." and "Run 'powerctl cancel' to abort."
+  *before* attempting the notification, then demoted the failure to a trailing
+  `note:` -- so the case where the machine certainly will not shut down was
+  presented as success with a footnote. It now reports the failure and exits
+  non-zero, and `powerctl status` distinguishes pending from overdue from
+  unknown-clock rather than printing nothing for the latter two.
+* **`userspace/service`** -- not yet audited at this depth. Its
+  `send_service_command` does return `Err` on connect failure, so it is at
+  least capable of reporting the truth; whether every caller does is the open
+  part.
+
+**What the proper fix is, and why it is not done here.** Something must
+provide the name. That is a power/service manager daemon under `services/`,
+which is lane B's, but there is **no roadmap item for one** -- writing it
+would be inventing an unspecified subsystem, and the kernel already has
+`fs/servicemgr.rs` and `svcstart.rs` doing service orchestration on lane A's
+side, so the right answer may be that these tools should talk to *that*
+rather than to a userspace daemon that has never existed. That is a design
+question, not an implementation one.
+
+Until it is answered, the rule these tools now follow is the only one
+available to them: **do not report that something is scheduled when nothing
+can run it.** Reaching the fallback is fine; claiming the orderly path
+succeeded is not.

@@ -25,12 +25,50 @@ global.window = { addEventListener() {}, matchMedia: () => ({ matches: false, ad
 const probe = script + `
   globalThis.__probe = [];
   for (const k of Object.keys(PRESETS)) {
-    cur = { ...PRESETS[k] };
+    cur = withLadder(PRESETS[k]);
     render();
     const h = document.getElementById('fp').innerHTML;
     globalThis.__probe.push([k, h.length, h.includes('$' + '{'), h.includes('undefined'), h]);
   }
-  cur = { ...PRESETS.cur }; render();
+
+  // The bug this file exists to catch from now on: editing a pane must reach
+  // every example, not just the preview at the top. Change one rung to a
+  // colour that appears nowhere else and look for it downstream.
+  cur = withLadder(PRESETS.cur);
+  render();
+  const before = { fp: document.getElementById('fp').innerHTML,
+                   uc: document.getElementById('uc').innerHTML,
+                   al: document.getElementById('allsurf').innerHTML };
+  const MARK = '#ff00ff';
+  globalThis.__pane = {};
+  for (const k of LKEYS) {
+    cur = withLadder(PRESETS.cur);
+    cur.ladder[k] = MARK;
+    render();
+    globalThis.__pane[k] = {
+      fp: document.getElementById('fp').innerHTML.includes(MARK),
+      uc: document.getElementById('uc').innerHTML.includes(MARK),
+      al: document.getElementById('allsurf').innerHTML.includes(MARK),
+    };
+  }
+  // And a text colour must too -- that half already worked, so this is a
+  // regression guard rather than a fix.
+  cur = withLadder(PRESETS.cur);
+  cur.main = MARK;
+  render();
+  globalThis.__ink = document.getElementById('fp').innerHTML.includes(MARK);
+
+  // Labels on and off.
+  cur = withLadder(PRESETS.cur);
+  showTags = true;  render();
+  globalThis.__tagsOn = document.getElementById('fp').innerHTML;
+  globalThis.__ucTagsOn = document.getElementById('uc').innerHTML;
+  showTags = false; render();
+  globalThis.__tagsOff = document.getElementById('fp').innerHTML;
+  globalThis.__ucTagsOff = document.getElementById('uc').innerHTML;
+
+  showTags = true;
+  cur = withLadder(PRESETS.cur); render();
 `;
 try {
   new Function(probe)();
@@ -77,6 +115,35 @@ for (const k of ['op1', 'op2', 'op3']) {
   const differs = byKey[k] && byKey.cur && byKey[k] !== byKey.cur;
   console.log((differs ? 'ok    ' : 'FAIL  ') + k + ' changes the windows vs the shipped ladder');
   if (!differs) bad++;
+}
+for (const k of ['mantle', 'crust', 's0', 's1', 's2']) {
+  const r = (global.__pane || {})[k] || {};
+  const ok = r.fp && r.al;
+  console.log((ok ? 'ok    ' : 'FAIL  ') + 'pane ' + k + ' reaches the examples' +
+              (ok ? '' : ' (windows:' + !!r.fp + ' strip:' + !!r.al + ')'));
+  if (!ok) bad++;
+}
+console.log((global.__ink ? 'ok    ' : 'FAIL  ') + 'a text colour reaches the examples');
+if (!global.__ink) bad++;
+{
+  const on = global.__tagsOn || '', off = global.__tagsOff || '';
+  const onHas = (on.match(/class="tag"/g) || []).length;
+  const offHas = (off.match(/class="tag"/g) || []).length;
+  const namesShown = ['mantle', 'crust', 'surface0', 'surface1', 'surface2'].every(n => on.includes(n));
+  console.log((onHas > 10 ? 'ok    ' : 'FAIL  ') + 'shade labels appear when on (' + onHas + ' chips)');
+  console.log((offHas === 0 ? 'ok    ' : 'FAIL  ') + 'shade labels disappear when off');
+  console.log((namesShown ? 'ok    ' : 'FAIL  ') + 'every pane name is named somewhere in the windows');
+  if (!(onHas > 10)) bad++;
+  if (offHas !== 0) bad++;
+  if (!namesShown) bad++;
+}
+{
+  const on = (global.__ucTagsOn || '').match(/class="tag"/g) || [];
+  const off = (global.__ucTagsOff || '').match(/class="tag"/g) || [];
+  const ok = on.length > 5 && off.length === 0;
+  console.log((ok ? 'ok    ' : 'FAIL  ') + 'use-case strip is labelled too (' + on.length + ' on, ' +
+              off.length + ' off)');
+  if (!ok) bad++;
 }
 console.log('populated ids: ' + Object.keys(store).filter(k => store[k].innerHTML).join(', '));
 process.exit(bad ? 1 : 0);

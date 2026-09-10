@@ -36,8 +36,9 @@
   .win .menu { position:absolute; border-radius:8px; padding:4px; width:154px; z-index:5;
                box-shadow:0 10px 26px rgba(0,0,0,.20); }
   .win .mi { padding:6px 9px; border-radius:5px; }
-  .win .tag { position:absolute; font:10px ui-monospace,Consolas,monospace; color:#8a8f9c;
-              background:rgba(255,255,255,.82); border-radius:3px; padding:0 3px; pointer-events:none; }
+  .tag { display:inline-block; font:9.5px ui-monospace,Consolas,monospace; color:#1c1c1c;
+         background:rgba(255,255,255,.72); border:1px solid rgba(0,0,0,.22); border-radius:3px;
+         padding:0 3px; margin-left:6px; vertical-align:middle; white-space:nowrap; }
   .presets { display:flex; gap:6px; margin-bottom:14px; flex-wrap:wrap; }
   .presets button { flex:1 1 auto; padding:7px 10px; border:1px solid #d3d7e0; background:#f3f4f7; border-radius:7px; cursor:pointer; font:inherit; font-size:13px; }
   .presets button.on { background:#1d62ec; border-color:#1d62ec; color:#fff; font-weight:600; }
@@ -95,7 +96,18 @@
     <div class="row"><label>Secondary (subtext1)</label><input type="color" id="c_sec1"><input type="text" id="t_sec1"></div>
     <div class="row"><label>Accent text</label><input type="color" id="c_acc"><input type="text" id="t_acc"></div>
     <div class="row"><label>Page (unshaded)</label><input type="color" id="c_page"><input type="text" id="t_page"></div>
-    <div class="row"><label>Card (shaded)</label><input type="color" id="c_card"><input type="text" id="t_card"></div>
+    <div class="row"><label>Card being measured</label><input type="color" id="c_card"><input type="text" id="t_card"></div>
+    <p class="note" style="margin-top:6px">Feeds the preview at the top and the contrast table &mdash; it is
+       &ldquo;the card this question is about&rdquo;, which is not always the ordinary one (preset 3 measures the
+       <em>deepest</em> card). The examples are drawn from the five panes below.</p>
+
+    <h2 style="margin-top:14px">Panes &mdash; every example is drawn from these</h2>
+    <div class="row"><label>mantle &mdash; menus, title bars</label><input type="color" id="c_L_mantle"><input type="text" id="t_L_mantle"></div>
+    <div class="row"><label>crust &mdash; sidebars</label><input type="color" id="c_L_crust"><input type="text" id="t_L_crust"></div>
+    <div class="row"><label>surface0 &mdash; the ordinary card</label><input type="color" id="c_L_s0"><input type="text" id="t_L_s0"></div>
+    <div class="row"><label>surface1 &mdash; selected row</label><input type="color" id="c_L_s1"><input type="text" id="t_L_s1"></div>
+    <div class="row"><label>surface2 &mdash; deepest / control chrome</label><input type="color" id="c_L_s2"><input type="text" id="t_L_s2"></div>
+    <div class="row" style="margin-top:8px"><label><input type="checkbox" id="lbl_on" checked> Label which pane each element uses</label><span></span><span></span></div>
 
     <h2 style="margin-top:14px">Card shade</h2>
     <div class="swatchrow" id="shades"></div>
@@ -279,7 +291,19 @@ const SHIPPED_LADDER = { mantle:'#E6E9EF', crust:'#DCE0E8', s0:'#CCD0DA', s1:'#B
 
 const $ = id => document.getElementById(id);
 const KEYS = ['main','sec','sec1','acc','page','card'];
-let cur = { ...PRESETS.cur };
+// The five panes, in ladder order. Kept separate from KEYS because they live on
+// `cur.ladder` rather than on `cur` -- and because until 2026-09-09 they were
+// not editable at all, which is the bug this fixes: the examples read the
+// ladder, the only card control wrote `cur.card`, and the two never met, so
+// changing a colour moved the preview at the top and nothing else.
+const LKEYS = ['mantle','crust','s0','s1','s2'];
+// Every preset gets a ladder, whether it declared one or not. Presets `cur`,
+// `a` and `b` did not, and used to fall through to SHIPPED_LADDER at each read
+// site -- which is exactly what made them un-editable.
+const withLadder = pre => ({ ...pre, ladder: { ...(pre.ladder || SHIPPED_LADDER) } });
+let cur = withLadder(PRESETS.cur);
+// Whether to chip each element with the pane it is drawn from.
+let showTags = true;
 
 // --- WCAG contrast ---------------------------------------------------------------------------
 const srgb = c => { c /= 255; return c <= 0.03928 ? c/12.92 : Math.pow((c+0.055)/1.055, 2.4); };
@@ -313,7 +337,7 @@ const badge = (r, lim) => r >= 7 && lim === 4.5
 // apart structurally and the only difference the eye sees is the one under
 // discussion.
 function renderFullPages() {
-  const L = (cur.ladder || SHIPPED_LADDER);
+  const L = cur.ladder;
   const ink = cur.main, dim = cur.sec1, acc = cur.acc, page = cur.page;
   const esc = t => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;');
 
@@ -326,16 +350,25 @@ function renderFullPages() {
 
   const T1 = `color:${ink}`, T2 = `color:${dim}`, TA = `color:${acc}`;
 
+  // A chip naming the pane an element is drawn from. In the bordered column the
+  // fill is gone, so it names the border instead -- which is the honest answer
+  // to "which shade is this" on that side.
+  const tag = n => showTags ? `<span class="tag">${n}</span>` : '';
+  const tagF = (b, n, edge) => showTags
+    ? `<span class="tag">${b ? 'border ' + (edge || 'surface2') : n}</span>` : '';
+
   // --- 1. Settings: sidebar + rows. Where surface0 mostly lives. ---
   const settings = b => `
     <div class="win" style="background:${page}">
       <div class="tb" style="${b ? `background:${page};` : `background:${L.mantle};`}
-           border-bottom:1px solid ${L.s1};${T1}">Settings</div>
+           border-bottom:1px solid ${L.s1};${T1}">Settings${tag(b ? 'base' : 'mantle')}</div>
       <div class="bd">
         <div class="side" style="${b ? `background:${page};border-right:1px solid ${L.s2};`
                                      : `background:${L.crust};`}">
+          ${tag(b ? 'base' : 'crust')}
           ${['System', 'Network', 'Personalisation', 'Accounts'].map((n, i) =>
-            `<div class="nav" style="${i === 1 ? surf(b, L.s1, acc) : ''}${i === 1 ? T1 : T2}">${n}</div>`
+            `<div class="nav" style="${i === 1 ? surf(b, L.s1, acc) : ''}${i === 1 ? T1 : T2}">${n}` +
+            `${i === 1 ? tagF(b, 'surface1', 'accent') : ''}</div>`
           ).join('')}
         </div>
         <div class="cnt">
@@ -343,7 +376,7 @@ function renderFullPages() {
           <div class="r" style="${surf(b, L.s0)}">
             <div class="g"><div style="${T1}">Home network</div>
               <div class="t2s" style="${T2}">Connected &middot; 5 GHz &middot; strong</div></div>
-            <div style="${TA}">Disconnect</div>
+            <div style="${TA}">Disconnect</div>${tagF(b, 'surface0')}
           </div>
           <div class="r" style="${surf(b, L.s0)}">
             <div class="g"><div style="${T1}">Guest</div>
@@ -356,7 +389,7 @@ function renderFullPages() {
           </div>
           <div class="r" style="${surf(b, L.s0)}">
             <div class="g"><div style="${T1}">Metered connection</div></div>
-            <div class="sw" style="background:${L.s2}"><i style="left:2px"></i></div>
+            <div class="sw" style="background:${L.s2}"><i style="left:2px"></i></div>${tag('surface2')}
           </div>
           <div style="margin-top:11px">
             <span class="btn" style="background:${acc};color:${page}">Save</span>
@@ -370,12 +403,14 @@ function renderFullPages() {
   const files = b => `
     <div class="win" style="background:${page}">
       <div class="tb" style="${b ? `background:${page};` : `background:${L.mantle};`}
-           border-bottom:1px solid ${L.s1};${T1}">Documents</div>
+           border-bottom:1px solid ${L.s1};${T1}">Documents${tag(b ? 'base' : 'mantle')}</div>
       <div class="bd">
         <div class="side" style="${b ? `background:${page};border-right:1px solid ${L.s2};`
                                      : `background:${L.crust};`}">
+          ${tag(b ? 'base' : 'crust')}
           ${['Home', 'Documents', 'Pictures', 'Downloads'].map((n, i) =>
-            `<div class="nav" style="${i === 1 ? surf(b, L.s1, acc) : ''}${i === 1 ? T1 : T2}">${n}</div>`
+            `<div class="nav" style="${i === 1 ? surf(b, L.s1, acc) : ''}${i === 1 ? T1 : T2}">${n}` +
+            `${i === 1 ? tagF(b, 'surface1', 'accent') : ''}</div>`
           ).join('')}
         </div>
         <div class="cnt" style="position:relative">
@@ -383,6 +418,7 @@ function renderFullPages() {
             `<div class="r" style="${i === 2 ? surf(b, L.s1, acc) : surf(b, L.s0)}">
                <div class="g" style="${T1}">${esc(n)}</div>
                <div class="t2s" style="${T2}">${['12 KB', '48 KB', '3 KB', '21 KB', '1.4 MB'][i]}</div>
+               ${i === 0 ? tagF(b, 'surface0') : i === 2 ? tagF(b, 'surface1', 'accent') : ''}
              </div>`).join('')}
           <!-- The menu panel is p.base, the same colour as the page behind
                it, told apart by its border and shadow alone. Not a choice made
@@ -392,8 +428,9 @@ function renderFullPages() {
                literal, and a stray one ends the string.) -->
           <div class="menu" style="left:74px;top:64px;background:${page};
                border:1px solid ${b ? L.s2 : L.s1};">
+            ${tag('base')}
             <div class="mi" style="${T1}">Open</div>
-            <div class="mi" style="${surf(b, L.s0, acc)}${T1}">Rename</div>
+            <div class="mi" style="${surf(b, L.s0, acc)}${T1}">Rename${tagF(b, 'surface0', 'accent')}</div>
             <div class="mi" style="${T1}">Duplicate</div>
             <div class="mi" style="${T1}">Delete</div>
           </div>
@@ -405,9 +442,10 @@ function renderFullPages() {
   const dialog = b => `
     <div class="win" style="background:${L.s2}">
       <div style="padding:26px 20px">
+        ${tag('surface2 — the window behind')}
         <div style="${b ? `background:${page};border:1px solid ${L.s2};` : `background:${L.mantle};`}
              border-radius:9px;padding:14px 15px;box-shadow:0 10px 26px rgba(0,0,0,.22)">
-          <div style="font-weight:600;margin-bottom:5px;${T1}">Discard changes?</div>
+          <div style="font-weight:600;margin-bottom:5px;${T1}">Discard changes?${tag(b ? 'base' : 'mantle')}</div>
           <div class="t2s" style="margin-bottom:12px;${T2}">
             design.txt has unsaved edits. Closing now loses them.</div>
           <div style="text-align:right">
@@ -417,7 +455,7 @@ function renderFullPages() {
         </div>
         <div style="${b ? `background:${page};border:1px solid ${L.s2};` : `background:${L.mantle};`}
              border-radius:9px;padding:11px 13px;margin-top:13px;box-shadow:0 6px 16px rgba(0,0,0,.16)">
-          <div style="font-weight:600;${T1}">Backup finished</div>
+          <div style="font-weight:600;${T1}">Backup finished${tag(b ? 'base' : 'mantle')}</div>
           <div class="t2s" style="${T2}">4,812 files &middot; 2.1 GB &middot; 3 min 14 s</div>
           <div class="t2s" style="margin-top:5px;${TA}">Show report</div>
         </div>
@@ -458,7 +496,7 @@ function renderFullPages() {
 }
 
 function renderUseCases() {
-  const L = (cur.ladder || SHIPPED_LADDER);
+  const L = cur.ladder;
   const ink = cur.main, dim = cur.sec1, acc = cur.acc;
   const esc = t => t.replace(/&/g,'&amp;').replace(/</g,'&lt;');
 
@@ -470,26 +508,35 @@ function renderUseCases() {
     `<div style="flex:1"><div class="t1" style="color:${ink}">${esc(title)}</div>` +
     `<div class="t2" style="color:${dim}">${esc(sub)}</div></div>${extra||''}</div>`;
 
+  // Same chip as the whole-window examples, so the two sections can be read
+  // against each other and against the strip at the top. Declared before `sw`,
+  // which uses it: it only works after the fact either way, because `sw` is not
+  // called until later, but relying on that is a trap for the next edit.
+  const tg = n => showTags ? `<span class="tag">${n}</span>` : '';
+
   const sw = on => `<div class="sw" style="background:${on ? acc : L.s2}">` +
-                   `<i style="${on ? 'right:2px' : 'left:2px'}"></i></div>`;
+                   `<i style="${on ? 'right:2px' : 'left:2px'}"></i></div>` +
+                   (on ? '' : tg('surface2'));
 
   const examples = [
     { name: 'Settings list &mdash; a row, and the selected row',
-      shaded: row('Display', 'Resolution, scale, night light', L.s0, null) +
-              row('Sound', 'Output device, volume, per-app mixing', L.s1, null) +
-              row('Network', 'Wi-Fi, Ethernet, VPN', L.s0, null),
-      bordered: row('Display', 'Resolution, scale, night light', null, L.s2) +
-                row('Sound', 'Output device, volume, per-app mixing', null, acc) +
-                row('Network', 'Wi-Fi, Ethernet, VPN', null, L.s2),
+      shaded: row('Display', 'Resolution, scale, night light', L.s0, null, tg('surface0')) +
+              row('Sound', 'Output device, volume, per-app mixing', L.s1, null, tg('surface1')) +
+              row('Network', 'Wi-Fi, Ethernet, VPN', L.s0, null, tg('surface0')),
+      bordered: row('Display', 'Resolution, scale, night light', null, L.s2, tg('border surface2')) +
+                row('Sound', 'Output device, volume, per-app mixing', null, acc, tg('border accent')) +
+                row('Network', 'Wi-Fi, Ethernet, VPN', null, L.s2, tg('border surface2')),
       note: 'The selected row is the only place the desktop really stacks one shade on another. ' +
             'With borders it becomes an accent outline, which is stronger and does not need a second shade.' },
 
     { name: 'Context menu &mdash; already bordered today',
       shaded: `<div style="background:${cur.page};border:1px solid ${L.s1};border-radius:8px;padding:5px">` +
-              row('Open', '', null, null) + row('Rename', '', L.s0, null) + row('Delete', '', null, null) +
+              row('Open', '', null, null, tg('base')) + row('Rename', '', L.s0, null, tg('surface0')) +
+              row('Delete', '', null, null) +
               `</div>`,
       bordered: `<div style="background:${cur.page};border:1px solid ${L.s2};border-radius:8px;padding:5px">` +
-                row('Open', '', null, null) + row('Rename', '', null, acc) + row('Delete', '', null, null) +
+                row('Open', '', null, null, tg('base')) + row('Rename', '', null, acc, tg('border accent')) +
+                row('Delete', '', null, null) +
                 `</div>`,
       note: 'This one is already a border in the shipped code, and more completely than it looks: the menu ' +
             'panel is <code>base</code> &mdash; the same colour as the page behind it &mdash; told apart by its ' +
@@ -497,10 +544,10 @@ function renderUseCases() {
             'So a menu barely changes between the two columns.' },
 
     { name: 'Toggle row &mdash; where surface2 actually lives',
-      shaded: row('Night light', 'Warmer colours after sunset', L.s0, null, sw(true)) +
-              row('Automatic brightness', 'Adjust to ambient light', L.s0, null, sw(false)),
-      bordered: row('Night light', 'Warmer colours after sunset', null, L.s2, sw(true)) +
-                row('Automatic brightness', 'Adjust to ambient light', null, L.s2, sw(false)),
+      shaded: row('Night light', 'Warmer colours after sunset', L.s0, null, tg('surface0') + sw(true)) +
+              row('Automatic brightness', 'Adjust to ambient light', L.s0, null, tg('surface0') + sw(false)),
+      bordered: row('Night light', 'Warmer colours after sunset', null, L.s2, tg('border surface2') + sw(true)) +
+                row('Automatic brightness', 'Adjust to ambient light', null, L.s2, tg('border surface2') + sw(false)),
       note: 'The off switch track is surface2. It is chrome inside a control, not a card &mdash; so it ' +
             'survives whichever way the card question goes, and needs a shade either way.' },
   ];
@@ -521,7 +568,7 @@ function renderUseCases() {
 }
 
 function renderAllSurfaces() {
-  const L = (cur.ladder || SHIPPED_LADDER);
+  const L = cur.ladder;
   const surfaces = [
     ['page (unshaded)',    cur.page, ''],
     ['mantle  (353 uses)', L.mantle, 'one step off the page — menus, title bars'],
@@ -573,6 +620,10 @@ function renderAllSurfaces() {
 
 function render() {
   for (const k of KEYS) { $('c_'+k).value = cur[k]; $('t_'+k).value = cur[k].toUpperCase(); }
+  for (const k of LKEYS) {
+    $('c_L_'+k).value = cur.ladder[k];
+    $('t_L_'+k).value = cur.ladder[k].toUpperCase();
+  }
   $('stage').style.background = cur.page;
   $('card').style.background  = cur.card;
   for (const [el, col] of [['pg_main','main'],['pg_sec','sec'],['pg_sec1','sec1'],['pg_acc','acc'],
@@ -616,11 +667,21 @@ for (const k of KEYS) {
     render();
   });
 }
+for (const k of LKEYS) {
+  $('c_L_'+k).addEventListener('input', e => { cur.ladder[k] = e.target.value; render(); });
+  $('t_L_'+k).addEventListener('change', e => {
+    const v = e.target.value.trim().replace(/^#?/, '#');
+    if (/^#[0-9a-fA-F]{6}$/.test(v)) { cur.ladder[k] = v; }
+    render();
+  });
+}
+$('lbl_on').addEventListener('change', e => { showTags = e.target.checked; render(); });
+
 document.querySelectorAll('.presets button').forEach(b =>
   b.addEventListener('click', () => {
     document.querySelectorAll('.presets button').forEach(x => x.classList.remove('on'));
     b.classList.add('on');
-    cur = { ...PRESETS[b.dataset.p] };
+    cur = withLadder(PRESETS[b.dataset.p]);
     render();
   }));
 

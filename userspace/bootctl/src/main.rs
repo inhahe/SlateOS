@@ -365,47 +365,98 @@ fn cmd_set_timeout(esp: &Path, timeout: &str) -> i32 {
     }
 }
 
+/// Refusing, and -- the important half -- WITHOUT CREATING THE DIRECTORIES.
+///
+/// This used to run
+///
+///     let _ = fs::create_dir_all(&target);                    // EFI/systemd
+///     let _ = fs::create_dir_all(esp.join("loader/entries"));
+///     eprintln!("bootctl: would copy systemd-bootx64.efi ...");
+///     eprintln!("bootctl: would set EFI boot variable");
+///     println!("bootctl: installed to {}", esp.display());
+///     0
+///
+/// so it created real directories on the ESP, copied no bootloader, set no EFI
+/// variable, and told stdout the install had happened. The hedges went to
+/// stderr, which a pipeline discards.
+///
+/// # Why the directories are the worst part
+///
+/// `cmd_update`'s precondition is `target.parent().exists()`. The fake install
+/// satisfied it. So after `bootctl install`, `bootctl update` found what it
+/// was looking for and reported "updated boot loader" for a bootloader that
+/// was never there. The side effect made the claim SELF-CONSISTENT: every
+/// later question this program asked about its own work got the answer the
+/// first lie had arranged. Removing the mkdir is what stops that, and is why
+/// this refusal has to happen before any filesystem call rather than after.
+///
+/// (`cmd_is_installed` was never fooled, because it looks for the .efi FILE
+/// rather than the directory -- which is the same distinction, drawn correctly
+/// eight lines away.)
+///
+/// # Why it cannot simply be implemented
+///
+/// Two things are missing and neither is a line of code. There is no
+/// `systemd-bootx64.efi` in this tree to copy: **SlateOS boots with Limine**,
+/// so this command manages a bootloader the OS does not use. And setting an
+/// EFI boot variable needs firmware variable access, which nothing here has.
+/// `design-decisions.md` 1019.
 fn cmd_install(esp: &Path) -> i32 {
-    let target = esp.join("EFI/systemd");
-    let _ = fs::create_dir_all(&target);
-    let _ = fs::create_dir_all(esp.join("loader/entries"));
-
     eprintln!(
-        "bootctl: would copy systemd-bootx64.efi to {}",
-        target.display()
+        "bootctl: cannot install a boot loader to {}: there is no \
+         systemd-bootx64.efi in this system and no way to set an EFI variable",
+        esp.display()
     );
-    eprintln!("bootctl: would set EFI boot variable");
-    println!("bootctl: installed to {}", esp.display());
-    0
+    eprintln!("bootctl: SlateOS boots with Limine; see limine/BOOTX64.EFI");
+    eprintln!("bootctl: nothing was written, and no directories were created");
+    1
 }
 
+/// The precondition now asks about the FILE, not its directory.
+///
+/// It used to test `target.parent().exists()`, which the old `cmd_install`
+/// created, so an install that copied nothing left `update` reporting success.
+/// Testing for the loader itself makes the check about the thing the command
+/// is named for.
 fn cmd_update(esp: &Path) -> i32 {
     let target = esp.join("EFI/systemd/systemd-bootx64.efi");
-    if !target.parent().map(|p| p.exists()).unwrap_or(false) {
-        eprintln!("bootctl: boot loader not installed");
+    if !target.exists() {
+        eprintln!("bootctl: boot loader not installed at {}", target.display());
         return 1;
     }
-    eprintln!("bootctl: would update systemd-bootx64.efi");
-    println!("bootctl: updated boot loader on {}", esp.display());
-    0
+    eprintln!(
+        "bootctl: cannot update {}: there is no replacement image to copy",
+        target.display()
+    );
+    1
 }
 
+/// Refuses rather than half-removing.
+///
+/// It used to print "removed boot loader from /boot" on stdout while deleting
+/// nothing. Removing a boot loader is the operation where a partial result is
+/// least acceptable -- an ESP with some of its files gone and a caller told
+/// the job finished is a machine that fails to boot at the next power cycle
+/// with no warning at this one.
 fn cmd_remove(esp: &Path) -> i32 {
     let target = esp.join("EFI/systemd");
-    if target.exists() {
-        eprintln!("bootctl: would remove {}", target.display());
-        println!("bootctl: removed boot loader from {}", esp.display());
-    } else {
-        eprintln!("bootctl: boot loader not installed");
+    if !target.exists() {
+        eprintln!("bootctl: boot loader not installed at {}", target.display());
         return 1;
     }
-    0
+    eprintln!(
+        "bootctl: refusing to remove {}: this build cannot clear the matching \
+         EFI boot variable, and deleting the files alone would leave the \
+         firmware pointing at a loader that is gone",
+        target.display()
+    );
+    1
 }
 
 fn cmd_reboot_to_firmware() -> i32 {
-    eprintln!("bootctl: would set OsIndications EFI variable for firmware setup");
-    eprintln!("bootctl: system would reboot to firmware setup");
-    0
+    eprintln!("bootctl: cannot request a firmware-setup reboot: setting the");
+    eprintln!("bootctl: OsIndications EFI variable needs firmware variable access");
+    1
 }
 
 fn cmd_is_installed(esp: &Path) -> i32 {
@@ -540,6 +591,73 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `install` must not touch the ESP at all.
+    ///
+    /// This is the regression that matters, and it is about a SIDE EFFECT
+    /// rather than a message. The old `cmd_install` created `EFI/systemd` and
+    /// `loader/entries` before announcing an install it had not performed --
+    /// and `cmd_update`'s precondition was `target.parent().exists()`, which
+    /// those directories satisfied. So the first false claim arranged the
+    /// evidence for the second: after `bootctl install`, `bootctl update`
+    /// found what it was looking for and reported success for a boot loader
+    /// that had never been copied.
+    ///
+    /// Asserting the refusal alone would not catch a reintroduced `mkdir`, so
+    /// the assertion is on the directory tree.
+    #[test]
+    fn install_refuses_without_creating_anything_on_the_esp() {
+        let scratch = scratchdir::ScratchDir::new("bootctl-install");
+        let esp = scratch.dir();
+
+        assert_eq!(cmd_install(esp), 1, "install must refuse");
+
+        assert!(
+            !esp.join("EFI/systemd").exists(),
+            "install created EFI/systemd -- the directory that made `update` agree"
+        );
+        assert!(
+            !esp.join("loader/entries").exists(),
+            "install created loader/entries"
+        );
+        assert!(
+            fs::read_dir(esp).map(|d| d.count()).unwrap_or(0) == 0,
+            "install left something behind on the ESP"
+        );
+    }
+
+    /// `update` asks about the loader file, not its parent directory.
+    ///
+    /// An empty `EFI/systemd` is what a half-done install leaves behind, and
+    /// it used to be enough to make `update` report success.
+    #[test]
+    fn update_is_not_satisfied_by_an_empty_directory() {
+        let scratch = scratchdir::ScratchDir::new("bootctl-update");
+        let esp = scratch.dir();
+        fs::create_dir_all(esp.join("EFI/systemd")).expect("create the empty dir");
+
+        assert_eq!(
+            cmd_update(esp),
+            1,
+            "an empty EFI/systemd is not an installed boot loader"
+        );
+    }
+
+    /// `remove` refuses rather than deleting part of a boot loader.
+    #[test]
+    fn remove_refuses_and_leaves_the_files_alone() {
+        let scratch = scratchdir::ScratchDir::new("bootctl-remove");
+        let esp = scratch.dir();
+        let dir = esp.join("EFI/systemd");
+        fs::create_dir_all(&dir).expect("create");
+        fs::write(dir.join("systemd-bootx64.efi"), b"not really a loader").expect("write");
+
+        assert_eq!(cmd_remove(esp), 1, "remove must refuse");
+        assert!(
+            dir.join("systemd-bootx64.efi").exists(),
+            "remove deleted the loader it said it would not touch"
+        );
+    }
 
     #[test]
     fn test_default_loader_config() {

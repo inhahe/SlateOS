@@ -202,7 +202,57 @@ impl Rights {
     // --- Convenience combinations ---
 
     /// All rights.
+    ///
+    /// **Every bit, including ones that do not exist yet**, and that is why it
+    /// must not be used at a *grant* site. See [`INIT_PROCESS`](Self::INIT_PROCESS).
     pub const ALL: Self = Self(u64::MAX);
+
+    /// What the init process is granted on [`ResourceType::Process`].
+    ///
+    /// **Enumerated, not `ALL`, and the distinction is the whole point.** A
+    /// wildcard grant cannot tell "every right that exists" from "every right
+    /// that will ever exist", so with `ALL` here the decision about who holds a
+    /// new privilege is taken by whoever declares the constant — silently, and
+    /// usually without noticing.
+    ///
+    /// That is not hypothetical. On 2026-09-10 lane A added
+    /// [`SET_HOSTNAME`](Self::SET_HOSTNAME) to gate renaming the machine,
+    /// recorded in `design-decisions.md` §927 that nothing held it yet, and
+    /// process 1 held it the instant the bit existed — because `ALL` is
+    /// `u64::MAX` and `pcb::has_capability_type` consults no resource id, so a
+    /// class-wide grant satisfies any query. `fork` then clones the table, so the
+    /// holder set was init plus every descendant nothing had narrowed. The entry
+    /// claimed a privileged write was unreachable while PID 1 could perform it.
+    /// See `known-issues.md` →
+    /// `TD-A-A-NEW-RIGHT-IS-GRANTED-BEFORE-ANYONE-DECIDES-WHO-HOLDS-IT`.
+    ///
+    /// **Adding a right to this list is a deliberate line of code.** That is the
+    /// only property being bought here: the next `SET_HOSTNAME` does not reach
+    /// init until somebody writes it down. It buys nothing else — init still
+    /// holds everything listed, so this changes no behaviour today.
+    ///
+    /// Note what it does *not* do. It is not a narrowing of init's authority and
+    /// should not be read as one; the grant is still class-wide
+    /// (`resource_id == 0`) because a token nobody holds is indistinguishable
+    /// from leaving the operation denied, which is the reasoning recorded at the
+    /// grant site itself. Narrowing *that* is a separate and much larger change.
+    pub const INIT_PROCESS: Self = Self(
+        Self::READ.0
+            | Self::WRITE.0
+            | Self::EXECUTE.0
+            | Self::CREATE.0
+            | Self::DELETE.0
+            | Self::METADATA.0
+            | Self::TRANSFER.0
+            | Self::DUPLICATE.0
+            | Self::WAIT.0
+            | Self::SIGNAL.0
+            | Self::IO_REALTIME.0
+            | Self::DEBUG.0
+            | Self::SET_CREDENTIALS.0
+            | Self::MEMORY_LOCK.0
+            | Self::SET_HOSTNAME.0,
+    );
 
     /// No rights.
     #[allow(dead_code)] // public API; convenience constant for capability creation
@@ -313,6 +363,40 @@ const _: () = {
         }
         i += 1;
     }
+};
+
+/// Adding a right must force a decision about whether init gets it.
+///
+/// [`Rights::INIT_PROCESS`] exists so that a new right does not reach the root
+/// process by accident, and an enumeration on its own does not achieve that: a
+/// new bit added to [`Rights::DISTINCT`] and forgotten here is simply *not*
+/// granted, silently, which is the opposite failure and just as quiet.
+///
+/// So the count is pinned. Adding a right breaks this build, and clearing it
+/// takes reading the two lines below and deciding — which is the whole
+/// mechanism. `design-decisions.md` §928.
+const _: () = {
+    assert!(
+        Rights::DISTINCT.len() == 15,
+        "a right was added or removed. Decide whether the init process should \
+         hold it: add it to Rights::INIT_PROCESS if so, leave it out if not, \
+         and then bump this count. Do not bump the count alone — that is the \
+         decision this assertion exists to make someone take."
+    );
+
+    // And no bit in the init grant may be one that is not a declared right.
+    // `INIT_PROCESS` is written by hand, so a typo could set a bit that means
+    // nothing today and something unintended the day it is declared.
+    let mut declared: u64 = 0;
+    let mut i = 0;
+    while i < Rights::DISTINCT.len() {
+        declared |= Rights::DISTINCT[i].0;
+        i += 1;
+    }
+    assert!(
+        Rights::INIT_PROCESS.0 & !declared == 0,
+        "Rights::INIT_PROCESS sets a bit that is not a declared right"
+    );
 };
 
 impl core::ops::BitOr for Rights {

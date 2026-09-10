@@ -128290,7 +128290,26 @@ bytes, the way `sysfs.rs`'s `version`/`ostype`/`osrelease` tests already do
 after the 2026-08-22 fix in that same file -- the pattern is present two
 hundred lines above the bug.
 
-## TD-A-A-NEW-RIGHT-IS-GRANTED-BEFORE-ANYONE-DECIDES-WHO-HOLDS-IT (lane A, 2026-09-10) — **open**
+## TD-A-A-NEW-RIGHT-IS-GRANTED-BEFORE-ANYONE-DECIDES-WHO-HOLDS-IT (lane A, 2026-09-10)
+
+**Status: FIXED the same day for the `Process` grant, which is the one that
+bit. `design-decisions.md` §928.** `Rights::INIT_PROCESS` enumerates the fifteen
+declared rights and is used at `main.rs`'s init grant instead of `Rights::ALL`,
+and the count of declared rights is pinned in a `const` assertion so that adding
+a right **fails to compile** until someone decides whether init gets it.
+
+The enumeration alone would not have been enough: a bit added to `DISTINCT` and
+forgotten in `INIT_PROCESS` is silently *not* granted, which is the opposite
+failure and just as quiet. The pin is what makes the decision compulsory.
+Verified by planting a sixteenth right — `cargo check` exits 101 with the
+message — and by confirming the tree builds clean again after removing it.
+
+**Still open, deliberately: the `File` and `Socket` init grants still use
+`Rights::ALL`.** The same argument applies and the same remedy would work. They
+were left because a new right is far more likely to be process-scoped, and
+changing three grants in one boot test makes a moved verdict harder to
+attribute. Whoever takes them should reuse the `INIT_PROCESS` shape rather than
+inventing a second one.
 
 **In short:** the kernel hands out permissions as tokens, and the most privileged
 process is given "all of them" as a wildcard rather than as a list. So the moment

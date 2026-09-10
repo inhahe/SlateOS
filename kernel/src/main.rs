@@ -9539,7 +9539,14 @@ extern "C" fn kernel_main() -> ! {
         // Network: full access (connect, bind, send, recv).
         (cap::ResourceType::Socket, 0, cap::Rights::ALL),
         // Process management: spawn and manage children.
-        (cap::ResourceType::Process, 0, cap::Rights::ALL),
+        // `INIT_PROCESS`, not `ALL`: a wildcard grant cannot tell "every right
+        // that exists" from "every right that will ever exist", so with `ALL`
+        // here the next right added to the enum reaches init before anyone
+        // decides it should. That happened on 2026-09-10 with SET_HOSTNAME --
+        // see `cap::Rights::INIT_PROCESS` for the account, and
+        // design-decisions.md 928. Same rights as before; the difference is
+        // that adding one is now a line somebody has to write.
+        (cap::ResourceType::Process, 0, cap::Rights::INIT_PROCESS),
         // The three objects §312's capability projection derives the
         // remaining privileged POSIX operations from (§269 — *the capability
         // types*, not the hrtimer §269 — for the object design, §350 for the

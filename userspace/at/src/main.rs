@@ -994,6 +994,13 @@ enum InvokedAs {
     Atq,
     Atrm,
     Batch,
+    /// The daemon that runs what the others spooled.
+    ///
+    /// It lives in this crate because this crate owns the spool format. A
+    /// drain living elsewhere would be a second reader of a format with one
+    /// writer, which is how `crond`'s /etc/cron.d parser came to disagree with
+    /// the files it was reading.
+    Atd,
 }
 
 /// Parsed command-line arguments.
@@ -1022,6 +1029,9 @@ enum Action {
     Batch,
     /// Show help.
     Help,
+    /// Run the daemon. `true` drains once and returns, for tests and for a
+    /// caller that wants a single sweep rather than a resident process.
+    Daemon(bool),
 }
 
 /// Detect how the binary was invoked by examining argv[0].
@@ -1035,6 +1045,7 @@ fn detect_invocation(argv0: &str) -> InvokedAs {
         "atq" => InvokedAs::Atq,
         "atrm" => InvokedAs::Atrm,
         "batch" => InvokedAs::Batch,
+        "atd" => InvokedAs::Atd,
         _ => InvokedAs::At,
     }
 }
@@ -1053,6 +1064,16 @@ fn parse_args() -> Result<Args, Error> {
     let mut json = false;
 
     match invoked {
+        InvokedAs::Atd => {
+            // atd [--once]
+            let once = argv[1..].iter().any(|a| a == "--once");
+            return Ok(Args {
+                action: Action::Daemon(once),
+                queue,
+                mail,
+                json,
+            });
+        }
         InvokedAs::Atq => {
             // atq [--json]
             for arg in &argv[1..] {
@@ -1278,6 +1299,131 @@ fn print_usage() {
 // Entry point
 // ============================================================================
 
+// ============================================================================
+// atd -- the daemon that runs what `at` spooled
+// ============================================================================
+
+/// How often the daemon looks at the spool.
+///
+/// at(1) resolves to the minute, so a shorter period buys nothing and a longer
+/// one makes a job late by up to its own length.
+const ATD_POLL_SECS: u64 = 60;
+
+/// Whether a job submitted by `want` may be run by a process that is
+/// `running_as`.
+///
+/// # Why a job can be refused rather than run
+///
+/// A job records the user who submitted it, and this daemon cannot change
+/// user: there is no `setuid`, `setgid` or `setgroups` in this crate or in any
+/// of the other four cron crates. Running one user's job as another gives it
+/// authority its submitter never had -- and if this daemon runs as root, that
+/// is every authority on the machine.
+///
+/// `design-decisions.md` 1019: ask what the caller loses if we proceed. Here
+/// they lose the containment implied by having submitted the job as
+/// themselves, so it is the refuse case. `crond` and `crond2` were given the
+/// same rule the same day, deliberately worded alike.
+///
+/// # The unknown case fails closed
+///
+/// If we cannot tell who we are, we cannot tell whether we are the submitter.
+/// "I do not know" must not be worth the same as "yes".
+fn atd_may_run(want: &str, running_as: Option<&str>) -> Result<(), String> {
+    match running_as {
+        Some(me) if me == want => Ok(()),
+        Some(me) => Err(format!(
+            "submitted by {want:?}, atd is running as {me:?}, and it cannot \
+             change user -- running the job would give it authority its \
+             submitter did not have"
+        )),
+        None => Err(format!(
+            "submitted by {want:?} and the current user is unknown, so it \
+             cannot be confirmed -- refusing rather than guessing"
+        )),
+    }
+}
+
+/// The jobs whose time has come, oldest first.
+///
+/// Split out so the selection can be tested without a clock, a spool or a
+/// shell. Ordering matters: two jobs due in the same tick should run in the
+/// order they were scheduled for, and `at` guarantees no more than that.
+fn atd_due(jobs: &[Job], now: i64) -> Vec<&Job> {
+    let mut due: Vec<&Job> = jobs.iter().filter(|j| j.epoch <= now).collect();
+    due.sort_by_key(|j| (j.epoch, j.id));
+    due
+}
+
+/// Run one job, and say whether its spool file should now be removed.
+///
+/// `false` for a refusal, which is the one case that must NOT delete: the user
+/// was told the job was scheduled, and discarding it because we could not run
+/// it destroys their work to tidy up after our own limitation. It stays in the
+/// spool where `atq` shows it and `atrm` can remove it.
+fn atd_run_one(job: &Job, running_as: Option<&str>) -> bool {
+    if let Err(why) = atd_may_run(&job.user, running_as) {
+        eprintln!("atd: REFUSING job {}: {why}", job.id);
+        return false;
+    }
+
+    eprintln!("atd: running job {} for {}", job.id, job.user);
+    let status = process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(&job.commands)
+        .status();
+
+    match status {
+        Ok(st) => {
+            eprintln!("atd: job {} exited {}", job.id, st.code().unwrap_or(-1));
+            // Removed whatever the exit status: at(1) runs a job once. A job
+            // that failed has still run, and keeping it would run it again
+            // every minute forever.
+            true
+        }
+        Err(e) => {
+            // The shell could not be started at all, so the job did NOT run.
+            // Keeping it is right for the same reason a refusal keeps it.
+            eprintln!("atd: job {} could not be started: {e}", job.id);
+            false
+        }
+    }
+}
+
+/// The daemon loop.
+fn cmd_atd(once: bool) -> Result<(), Error> {
+    ensure_spool_dir()?;
+    let me = current_username();
+    let me = if me.is_empty() { None } else { Some(me) };
+    eprintln!(
+        "atd: watching {SPOOL_DIR} every {ATD_POLL_SECS}s as {}",
+        me.as_deref().unwrap_or("<unknown user>")
+    );
+
+    loop {
+        let now = get_current_time().map_err(Error::Io)?;
+        let jobs = read_all_jobs()?;
+        for job in atd_due(&jobs, now) {
+            if atd_run_one(job, me.as_deref()) {
+                let path = Path::new(SPOOL_DIR).join(job_filename(job.queue, job.id));
+                if let Err(e) = fs::remove_file(&path) {
+                    // Named rather than swallowed: a job that ran and whose
+                    // file survives will run again next tick.
+                    eprintln!(
+                        "atd: job {} ran but {} remains: {e}",
+                        job.id,
+                        path.display()
+                    );
+                }
+            }
+        }
+        if once {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_secs(ATD_POLL_SECS));
+    }
+}
+
 fn run() -> Result<(), Error> {
     let args = parse_args()?;
     let username = current_username();
@@ -1287,6 +1433,7 @@ fn run() -> Result<(), Error> {
             print_usage();
             Ok(())
         }
+        Action::Daemon(once) => cmd_atd(once),
         Action::List => cmd_list(args.json),
         Action::Remove(id) => cmd_remove(id),
         Action::Cat(id) => cmd_cat(id),
@@ -1872,6 +2019,83 @@ mod tests {
     #[test]
     fn detect_invocation_batch() {
         assert_eq!(detect_invocation("batch"), InvokedAs::Batch);
+        assert_eq!(detect_invocation("atd"), InvokedAs::Atd);
+        assert_eq!(detect_invocation("/usr/sbin/atd"), InvokedAs::Atd);
+    }
+
+    // ---- atd: the spool now has a drain ----------------------------------
+
+    fn job(id: u32, epoch: i64, user: &str) -> Job {
+        Job {
+            id,
+            queue: 'a',
+            epoch,
+            user: user.to_string(),
+            created: 0,
+            commands: "/bin/true".to_string(),
+        }
+    }
+
+    #[test]
+    fn atd_runs_only_jobs_whose_time_has_come() {
+        let jobs = vec![job(1, 100, "u"), job(2, 200, "u"), job(3, 300, "u")];
+        let due = atd_due(&jobs, 200);
+        assert_eq!(due.iter().map(|j| j.id).collect::<Vec<_>>(), vec![1, 2]);
+    }
+
+    #[test]
+    fn atd_runs_a_job_due_exactly_now() {
+        // `<=`, not `<`. A job scheduled for 12:00 that waits until 12:01
+        // because the comparison excluded its own second is a minute late for
+        // no reason anybody could find in the output.
+        let jobs = vec![job(1, 500, "u")];
+        assert_eq!(atd_due(&jobs, 500).len(), 1);
+    }
+
+    #[test]
+    fn atd_runs_due_jobs_in_scheduled_order() {
+        let jobs = vec![job(9, 300, "u"), job(4, 100, "u"), job(7, 200, "u")];
+        let due = atd_due(&jobs, 999);
+        assert_eq!(due.iter().map(|j| j.id).collect::<Vec<_>>(), vec![4, 7, 9]);
+    }
+
+    #[test]
+    fn atd_leaves_the_future_alone() {
+        let jobs = vec![job(1, 1_000, "u")];
+        assert!(atd_due(&jobs, 999).is_empty());
+    }
+
+    #[test]
+    fn atd_refuses_a_job_submitted_by_another_user() {
+        let err = atd_may_run("alice", Some("root")).expect_err("must refuse");
+        assert!(err.contains("alice"), "message names neither user: {err}");
+        assert!(err.contains("root"), "message names neither user: {err}");
+    }
+
+    #[test]
+    fn atd_runs_a_job_submitted_by_us() {
+        assert!(atd_may_run("alice", Some("alice")).is_ok());
+    }
+
+    #[test]
+    fn atd_refuses_when_it_cannot_tell_who_it_is() {
+        // The arm that matters. If this returns Ok, every queued job runs as
+        // whoever started the daemon, which for a system daemon is root.
+        let err = atd_may_run("alice", None).expect_err("unknown must refuse");
+        assert!(err.contains("unknown"), "unhelpful message: {err}");
+    }
+
+    #[test]
+    fn a_refused_job_is_kept_not_discarded() {
+        // The one case that must not delete. The user was told the job was
+        // scheduled; throwing it away because we could not run it destroys
+        // their work to tidy up after our own limitation. It stays in the
+        // spool where atq shows it and atrm can remove it.
+        assert!(!atd_run_one(&job(1, 0, "alice"), Some("root")));
+    }
+
+    #[test]
+    fn batch_is_detected_by_path_too() {
         assert_eq!(detect_invocation("/usr/bin/batch"), InvokedAs::Batch);
     }
 }

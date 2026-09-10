@@ -297,6 +297,14 @@ struct CronJob {
     command: String,
     /// Whether this is a @reboot job.
     at_reboot: bool,
+    /// The user a *system* crontab line says the job runs as.
+    ///
+    /// `None` for a user crontab under `/var/spool/cron/<user>`, where the
+    /// owner is a property of the FILE and every line in it inherits that.
+    /// `Some` for `/etc/cron.d`, whose sixth field is a username -- which is
+    /// the whole difference between the two formats and the reason one parser
+    /// cannot read both.
+    user: Option<String>,
 }
 
 impl CronJob {
@@ -343,6 +351,65 @@ impl CronJob {
             weekday,
             command,
             at_reboot: false,
+            user: None,
+        })
+    }
+
+    /// Parse an `/etc/cron.d` line, whose sixth field is a **username**.
+    ///
+    /// The format differs from a user crontab by exactly one column, which is
+    /// why reading one with the other's parser fails silently rather than
+    /// loudly: every field still parses, the schedule is still right, and the
+    /// only casualty is that the username is swallowed into the command. That
+    /// is what this crate did until 2026-09-10 --
+    ///
+    ///     0 3 * * * backup /usr/bin/rsync -a /home /mnt/backup
+    ///
+    /// ran `/bin/sh -c "backup /usr/bin/rsync -a /home /mnt/backup"`, so the
+    /// USER NAME was executed as the program and the intended command became
+    /// its first argument.
+    fn parse_system(line: &str) -> Result<Self, String> {
+        let trimmed = line.trim();
+
+        // `@reboot user command` -- the keyword forms take the user field too.
+        if trimmed.starts_with('@') {
+            let parts: Vec<&str> = trimmed.splitn(3, char::is_whitespace).collect();
+            if parts.len() < 3 {
+                return Err("need @keyword user command".to_string());
+            }
+            let mut job = Self::parse_special(&format!("{} {}", parts[0], parts[2]))?;
+            job.user = Some(parts[1].to_string());
+            job.raw_line = line.to_string();
+            return Ok(job);
+        }
+
+        let parts: Vec<&str> = trimmed.splitn(7, char::is_whitespace).collect();
+        if parts.len() < 7 {
+            return Err("need 5 schedule fields + user + command".to_string());
+        }
+
+        // A username, not a command fragment. Rejecting an implausible one here
+        // is the difference between this parser and the one it replaces: the
+        // old one accepted anything because it never looked at the column.
+        let user = parts[5];
+        if user.is_empty()
+            || !user
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' || c == '$')
+        {
+            return Err(format!("field 6 is a user name, and {user:?} is not one"));
+        }
+
+        Ok(CronJob {
+            raw_line: line.to_string(),
+            minute: CronField::parse(parts[0], 0, 59)?,
+            hour: CronField::parse(parts[1], 0, 23)?,
+            day: CronField::parse(parts[2], 1, 31)?,
+            month: CronField::parse(parts[3], 1, 12)?,
+            weekday: CronField::parse(parts[4], 0, 6)?,
+            command: parts[6].to_string(),
+            at_reboot: false,
+            user: Some(user.to_string()),
         })
     }
 
@@ -416,6 +483,7 @@ impl CronJob {
             weekday,
             command,
             at_reboot,
+            user: None,
         })
     }
 
@@ -533,7 +601,76 @@ fn read_log(max_entries: usize) -> Vec<String> {
 // Job execution
 // ============================================================================
 
+/// The user this process is running as, or `None` if it cannot be determined.
+///
+/// `None` is a real answer and must stay distinguishable from a name: it is
+/// the input to [`may_run`]'s fail-closed arm. Returning a plausible default
+/// here -- `"root"` is the tempting one -- would make every cron.d job run,
+/// which is exactly the outcome the check exists to prevent.
+fn current_user() -> Option<String> {
+    for key in ["USER", "LOGNAME"] {
+        // An empty USER is not a name; treating it as one would let a
+        // stripped environment satisfy the check that a job's user matches.
+        if let Ok(v) = std::env::var(key)
+            && !v.is_empty()
+        {
+            return Some(v);
+        }
+    }
+    None
+}
+
+/// Whether `job` may be executed by a process running as `running_as`.
+///
+/// # Why a job can be refused rather than run
+///
+/// This daemon cannot change user. An `/etc/cron.d` line that names a user is
+/// stating a limit on the job -- "this runs as `backup`, with `backup`'s
+/// access and no more" -- and running it as root instead hands it every
+/// authority its author withheld. `design-decisions.md` 1019 puts the test as:
+/// what does the caller lose if we proceed? Here they lose the containment
+/// they asked for, so the answer is to refuse, the same call `cgexec` makes
+/// when it cannot place a process in the cgroup it was given.
+///
+/// A user crontab (`user: None`) is not refused: there the owner is a property
+/// of the spool file, and this daemon reads exactly one of them.
+///
+/// # The unknown case fails closed
+///
+/// If `running_as` is `None` we cannot tell whether we are the declared user.
+/// "I do not know" and "yes" must not be the same value for a check that
+/// decides whether to run somebody else's command.
+fn may_run(job: &CronJob, running_as: Option<&str>) -> Result<(), String> {
+    let Some(want) = job.user.as_deref() else {
+        return Ok(());
+    };
+    match running_as {
+        Some(me) if me == want => Ok(()),
+        Some(me) => Err(format!(
+            "declared user {want:?}, running as {me:?}, and crond cannot \
+             change user -- running it anyway would give the job authority \
+             its crontab withheld"
+        )),
+        None => Err(format!(
+            "declared user {want:?} and the current user is unknown, so it \
+             cannot be confirmed -- refusing rather than guessing"
+        )),
+    }
+}
+
 fn execute_job(job: &CronJob) -> LogEntry {
+    if let Err(why) = may_run(job, current_user().as_deref()) {
+        eprintln!("crond: REFUSING {}: {why}", job.command);
+        return LogEntry {
+            timestamp: now_secs(),
+            command: job.command.clone(),
+            // Not 0. A refused job did not succeed, and a log a user reads to
+            // find out whether their backup ran must not say that it did.
+            exit_code: -1,
+            duration_ms: 0,
+        };
+    }
+
     let start = now_secs();
     let start_instant = std::time::Instant::now();
 
@@ -651,8 +788,12 @@ fn load_system_jobs() -> Vec<CronJob> {
                 if trimmed.is_empty() || trimmed.starts_with('#') {
                     continue;
                 }
-                if let Ok(job) = CronJob::parse(trimmed) {
-                    jobs.push(job);
+                match CronJob::parse_system(trimmed) {
+                    Ok(job) => jobs.push(job),
+                    // Named, not swallowed. A malformed system line used to be
+                    // indistinguishable from an absent one because `parse`
+                    // could not fail on the shape that was actually wrong.
+                    Err(e) => eprintln!("crond: {}: skipping unparsable line: {e}", path.display()),
                 }
             }
         }
@@ -965,5 +1106,115 @@ fn main() {
             eprintln!("Run 'crond help' for usage.");
             process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sys(line: &str) -> CronJob {
+        CronJob::parse_system(line).expect("should parse as a system line")
+    }
+
+    // ---- the bug this file was opened for ---------------------------------
+
+    #[test]
+    fn a_system_line_does_not_execute_its_user_field_as_the_program() {
+        // Read with the user-crontab grammar this became
+        //   command = "backup /usr/bin/rsync -a /home /mnt/backup"
+        // and crond ran /bin/sh -c on it, so `backup` was the program.
+        let job = sys("0 3 * * * backup /usr/bin/rsync -a /home /mnt/backup");
+        assert_eq!(job.user.as_deref(), Some("backup"));
+        assert_eq!(job.command, "/usr/bin/rsync -a /home /mnt/backup");
+        assert!(!job.command.starts_with("backup"));
+    }
+
+    #[test]
+    fn the_old_parser_still_reads_a_user_crontab_line_as_five_fields() {
+        // The two grammars differ by one column, so the five-field parser must
+        // NOT start eating the command's first word.
+        let job =
+            CronJob::parse("0 3 * * * /usr/bin/rsync -a /home /mnt").expect("user crontab line");
+        assert_eq!(job.user, None);
+        assert_eq!(job.command, "/usr/bin/rsync -a /home /mnt");
+    }
+
+    #[test]
+    fn the_five_field_parser_misreads_a_system_line_which_is_why_both_exist() {
+        // The counterpart to the test above, pinning the DEFECT rather than the
+        // fix. `parse` does not fail on a cron.d line -- every field is valid
+        // and the schedule is right -- it just silently absorbs the user name
+        // into the command. That is why `load_system_jobs` calling `parse` was
+        // invisible for as long as it was: there was no error to see.
+        let job = CronJob::parse("0 3 * * * backup /usr/bin/rsync -a /home")
+            .expect("it parses, and that is the problem");
+        assert_eq!(job.command, "backup /usr/bin/rsync -a /home");
+        assert_eq!(job.user, None);
+    }
+
+    #[test]
+    fn a_system_reboot_line_carries_its_user_too() {
+        let job = sys("@reboot www-data /usr/bin/warm-cache");
+        assert_eq!(job.user.as_deref(), Some("www-data"));
+        assert_eq!(job.command, "/usr/bin/warm-cache");
+        assert!(job.at_reboot);
+    }
+
+    #[test]
+    fn a_system_line_with_no_user_field_is_refused_not_reinterpreted() {
+        // Five fields and a bare command: valid as a USER crontab, meaningless
+        // in cron.d. Accepting it would silently run the command as root.
+        assert!(CronJob::parse_system("0 3 * * * /usr/bin/rsync").is_err());
+    }
+
+    #[test]
+    fn field_six_must_look_like_a_user_name() {
+        let e = CronJob::parse_system("0 3 * * * /usr/bin/rsync -a /home /mnt")
+            .expect_err("a path is not a user name");
+        assert!(e.contains("user name"), "unhelpful message: {e}");
+    }
+
+    #[test]
+    fn the_schedule_still_parses_alongside_the_user() {
+        let job = sys("30 2 1 1 0 backup /bin/true");
+        assert!(job.minute.matches(30));
+        assert!(!job.minute.matches(31));
+        assert!(job.hour.matches(2));
+        assert_eq!(job.user.as_deref(), Some("backup"));
+    }
+
+    // ---- the refusal ------------------------------------------------------
+
+    #[test]
+    fn a_job_declared_for_another_user_is_refused() {
+        let job = sys("0 3 * * * backup /bin/true");
+        let err = may_run(&job, Some("root")).expect_err("must refuse");
+        assert!(err.contains("backup"), "message names neither user: {err}");
+        assert!(err.contains("root"), "message names neither user: {err}");
+    }
+
+    #[test]
+    fn a_job_declared_for_us_runs() {
+        let job = sys("0 3 * * * backup /bin/true");
+        assert!(may_run(&job, Some("backup")).is_ok());
+    }
+
+    #[test]
+    fn a_user_crontab_job_is_not_refused() {
+        // No user field: the spool file's name is the authority, not the line.
+        let job = CronJob::parse("0 3 * * * /bin/true").expect("user line");
+        assert!(may_run(&job, Some("anyone")).is_ok());
+        assert!(may_run(&job, None).is_ok());
+    }
+
+    #[test]
+    fn an_unknown_current_user_refuses_rather_than_assuming() {
+        // The arm that matters: "I cannot tell who I am" must not be worth the
+        // same as "I am the right user". If this ever returns Ok, every cron.d
+        // job runs as whoever started the daemon.
+        let job = sys("0 3 * * * backup /bin/true");
+        let err = may_run(&job, None).expect_err("unknown user must refuse");
+        assert!(err.contains("unknown"), "unhelpful message: {err}");
     }
 }

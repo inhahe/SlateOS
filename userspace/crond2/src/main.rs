@@ -53,6 +53,15 @@ const USER_CRONTAB_DIR: &str = "/var/spool/cron/crontabs";
 /// System-wide crontab.
 const SYSTEM_CRONTAB: &str = "/etc/crontab";
 
+/// Drop-in directory for system crontab fragments.
+///
+/// Same six-field grammar as `/etc/crontab` -- schedule, then a user, then the
+/// command -- which is why it goes through `load_system_crontab` rather than
+/// getting a parser of its own. `userspace/crond` gave it one and read it with
+/// the five-field user-crontab grammar, so the user name was executed as the
+/// program.
+const SYSTEM_CRON_DIR: &str = "/etc/cron.d";
+
 /// Anacron configuration file.
 const ANACRONTAB_PATH: &str = "/etc/anacrontab";
 
@@ -1161,8 +1170,74 @@ fn log_msg(level: u32, msg: &str) {
 // Job execution
 // ============================================================================
 
+/// The user this process is running as, or `None` if it cannot be determined.
+///
+/// `None` is a real answer and is the input to [`may_run_as`]'s fail-closed
+/// arm. A plausible default here -- `"root"` being the tempting one -- would
+/// let every job run, which is precisely what the check exists to stop.
+fn current_user() -> Option<String> {
+    for key in ["USER", "LOGNAME"] {
+        // An empty USER is not a name; accepting one would let a stripped
+        // environment satisfy the comparison below.
+        if let Ok(v) = std::env::var(key)
+            && !v.is_empty()
+        {
+            return Some(v);
+        }
+    }
+    None
+}
+
+/// Whether a job declared for `want` may be run by a process that is
+/// `running_as`.
+///
+/// # Why this refuses instead of running the job as root
+///
+/// This daemon cannot change user: there is no `setuid`, `setgid` or
+/// `setgroups` anywhere in it, or in any of the other four cron crates. A
+/// crontab that names a user is stating a LIMIT on the job -- "this runs as
+/// `backup`, with `backup`'s access and no more" -- so running it as root
+/// instead hands it every authority its author withheld.
+/// `design-decisions.md` 1019 puts the test as: what does the caller lose if
+/// we proceed? The containment they asked for. `cgexec` makes the same call
+/// when it cannot place a process in the cgroup it was given.
+///
+/// # What made this urgent rather than theoretical
+///
+/// `execute_command` did not merely ignore the user. It set `USER`, `LOGNAME`
+/// and `HOME=/home/<user>` in the child, and logged `(<user>) CMD (...)` --
+/// real cron's own syslog format. So the job's environment claimed an identity
+/// the process did not have, and the log recorded it as fact. Every visible
+/// surface agreed and all of them were wrong.
+///
+/// # The unknown case fails closed
+///
+/// If we cannot tell who we are, we cannot tell whether we are the declared
+/// user. "I do not know" must not be worth the same as "yes".
+fn may_run_as(want: &str, running_as: Option<&str>) -> Result<(), String> {
+    match running_as {
+        Some(me) if me == want => Ok(()),
+        Some(me) => Err(format!(
+            "declared user {want:?}, running as {me:?}, and crond2 cannot \
+             change user -- running it would give the job authority its \
+             crontab withheld, and log it as {want:?}"
+        )),
+        None => Err(format!(
+            "declared user {want:?} and the current user is unknown, so it \
+             cannot be confirmed -- refusing rather than guessing"
+        )),
+    }
+}
+
 /// Execute a cron command with the given environment.
 fn execute_command(command: &str, user: &str, env_vars: &HashMap<String, String>) {
+    if let Err(why) = may_run_as(user, current_user().as_deref()) {
+        // Logged at level 0 so it is visible at any verbosity: a job that did
+        // not run is not a detail. Deliberately NOT in the `(user) CMD (...)`
+        // format, which asserts that a job ran as that user.
+        log_msg(0, &format!("REFUSED ({user}) CMD ({command}): {why}"));
+        return;
+    }
     log_msg(1, &format!("({user}) CMD ({command})"));
 
     let shell = env_vars
@@ -1251,6 +1326,18 @@ fn send_mail(user: &str, command: &str, body: &str) {
 // Crond main loop
 // ============================================================================
 
+/// Whether a `/etc/cron.d` entry name is one cron should read.
+///
+/// run-parts' rule: no dot anywhere in the name. It exists because package
+/// managers leave `job.rpmsave`, `job.dpkg-old` and editors leave `job.bak`
+/// beside the file they replaced, and reading both means running the
+/// superseded schedule alongside the current one -- silently, since both parse
+/// fine. Also skips names starting with `.`, which the dot rule already covers
+/// but which is worth being explicit about.
+fn cron_d_name_is_usable(name: &str) -> bool {
+    !name.is_empty() && !name.contains('.')
+}
+
 /// Load all crontab files and return a combined table.
 fn load_all_crontabs() -> CronTab {
     let mut tab = CronTab::new();
@@ -1262,6 +1349,32 @@ fn load_all_crontabs() -> CronTab {
         tab.load_system_crontab(sys_path);
     }
 
+    // Load /etc/cron.d fragments. Same grammar as /etc/crontab, so the same
+    // loader: a second parser for one format is how the two implementations of
+    // this daemon came to disagree about which column held the user.
+    if let Ok(entries) = fs::read_dir(SYSTEM_CRON_DIR) {
+        for entry in entries {
+            let Ok(entry) = entry else { continue };
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                log_msg(
+                    0,
+                    &format!("skipping {}: its name is not valid UTF-8", path.display()),
+                );
+                continue;
+            };
+            if !cron_d_name_is_usable(&name) {
+                log_msg(2, &format!("skipping {name}: run-parts naming rule"));
+                continue;
+            }
+            log_msg(2, &format!("loading /etc/cron.d/{name}"));
+            tab.load_system_crontab(&path);
+        }
+    }
+
     // Load per-user crontabs.
     let spool = Path::new(USER_CRONTAB_DIR);
     if let Ok(entries) = fs::read_dir(spool) {
@@ -1269,7 +1382,25 @@ fn load_all_crontabs() -> CronTab {
             let Ok(entry) = entry else { continue };
             let path = entry.path();
             if path.is_file() {
-                let user = entry.file_name().to_string_lossy().to_string();
+                // NOT to_string_lossy. This file name IS the user name,
+                // our paths allow every byte but `/` and NUL, and a lossy
+                // conversion turns an unrepresentable one into U+FFFD -- a
+                // name that matches no real user, which `may_run_as` then
+                // refuses for a reason nothing in the log explains.
+                // CLAUDE.md item 7. A crontab whose owner we cannot name is a
+                // crontab we cannot make an authority decision about.
+                let Some(user) = entry.file_name().to_str().map(str::to_owned) else {
+                    log_msg(
+                        0,
+                        &format!(
+                            "skipping {}: the file name is the user name and this \
+                         one is not valid UTF-8, so its jobs cannot be \
+                         attributed to anybody",
+                            path.display()
+                        ),
+                    );
+                    continue;
+                };
                 log_msg(2, &format!("loading crontab for user {user}"));
                 tab.load_user_crontab(&path, &user);
             }
@@ -1632,6 +1763,69 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- /etc/cron.d ------------------------------------------------------
+
+    #[test]
+    fn cron_d_reads_a_plain_fragment_name() {
+        assert!(cron_d_name_is_usable("backup"));
+        assert!(cron_d_name_is_usable("logrotate-daily"));
+        assert!(cron_d_name_is_usable("e2scrub_all"));
+    }
+
+    #[test]
+    fn cron_d_skips_what_a_package_manager_left_behind() {
+        // The reason the rule exists. Both files parse, both schedules are
+        // valid, and reading both runs the superseded job beside the current
+        // one with nothing to indicate it.
+        assert!(!cron_d_name_is_usable("backup.rpmsave"));
+        assert!(!cron_d_name_is_usable("backup.dpkg-old"));
+        assert!(!cron_d_name_is_usable("backup.bak"));
+        assert!(!cron_d_name_is_usable(".hidden"));
+        assert!(!cron_d_name_is_usable(""));
+    }
+
+    #[test]
+    fn a_cron_d_line_is_read_with_the_user_column() {
+        // The same grammar as /etc/crontab, which is why cron.d goes through
+        // load_system_crontab. userspace/crond gave cron.d its own parser,
+        // read it with the five-field user-crontab grammar, and executed the
+        // user name as the program.
+        let (user, cmd) = extract_user_from_system_line("0 3 * * * backup /usr/bin/rsync -a /home");
+        assert_eq!(user, "backup");
+        assert_eq!(cmd, "/usr/bin/rsync -a /home");
+    }
+
+    // ---- the declared user is a limit, not a label ------------------------
+
+    #[test]
+    fn a_job_declared_for_another_user_is_refused() {
+        let err = may_run_as("backup", Some("root")).expect_err("must refuse");
+        assert!(err.contains("backup"), "message names neither user: {err}");
+        assert!(err.contains("root"), "message names neither user: {err}");
+    }
+
+    #[test]
+    fn a_job_declared_for_us_runs() {
+        assert!(may_run_as("backup", Some("backup")).is_ok());
+    }
+
+    #[test]
+    fn an_unknown_current_user_refuses_rather_than_assuming() {
+        // The arm that matters. If this ever returns Ok, every crontab entry
+        // runs as whoever started the daemon while the log names someone else.
+        let err = may_run_as("backup", None).expect_err("unknown must refuse");
+        assert!(err.contains("unknown"), "unhelpful message: {err}");
+    }
+
+    #[test]
+    fn root_is_not_special_cased() {
+        // A tempting shortcut is "root may run anything", which is true of a
+        // daemon that can drop privileges and false of this one. Running a
+        // backup job as root IS the defect, so root must be refused like any
+        // other mismatch until this crate can actually change user.
+        assert!(may_run_as("backup", Some("root")).is_err());
+    }
     // Fixed names under the system temp directory raced between
     // concurrent test binaries; see scratchdir's module docs.
     use scratchdir::ScratchDir;

@@ -128872,7 +128872,75 @@ answered to `login`.
 
 ## B-CROND-AND-ATD-NEVER-RUN-A-JOB (lane B, 2026-09-10) — open, and labelled
 
-**In short:** `crond` and `atd` print `scheduler ready (simulated)` and exit.
+**CORRECTED 2026-09-10, the same day it was written: the headline claim is
+false.** "Nothing on this system ever wakes up and executes what was scheduled"
+was true of `userspace/cron`, the crate I had open, and I wrote it about the
+system. There are **three** `crond` implementations and two of them execute
+jobs for real:
+
+| Crate | `crond` behaviour |
+|---|---|
+| `userspace/cron` | prints `scheduler ready (simulated)` and exits |
+| `userspace/crond` | real loop: per-minute wake, live crontab reload, `/etc/cron.d`, `@reboot`, `Command::new("/bin/sh")`, exit code and duration logged |
+| `userspace/crond2` | real loop, plus anacron |
+
+Found by `scripts/multicall-aliases.py` after it was taught to follow the
+argv0 variable — `cron` answers to `crond` **and** `crontab`, shadowing both
+standalone crates, which is the `udisks`/`umount` shape: which implementation a
+user gets is decided by whichever binary lands at `/sbin/crond`, and one of
+them does nothing. Latent only because the rootfs stages nothing from
+`userspace/` — it installs `services/fastpy-*` binaries and nothing else — so
+no user can reach any of this today. That is also why "a user can schedule a
+job and watch it never run" describes a system state that does not exist.
+
+The generalisation was the error, not the observation. I read one crate and
+reported a property of the tree, which is the same move as grepping for an
+identifier and reporting a fact about the store.
+
+**What was actually broken, and is now fixed** (`userspace/crond`): `/etc/cron.d`
+files use a **six**-field grammar — `min hour day month weekday USER command` —
+and `load_system_jobs` parsed them with `CronJob::parse`, the five-field user
+crontab grammar. So `0 3 * * * backup /usr/bin/rsync -a /home /mnt` became
+`command = "backup /usr/bin/rsync -a /home /mnt"`, and the daemon ran
+`/bin/sh -c` on it: **the user name was executed as the program** and the real
+command became its first argument. It parsed without error, because every field
+was valid and only the column count was wrong.
+
+`CronJob::parse_system` now reads the user field, `may_run` refuses a job whose
+declared user is not the one we are running as — the daemon has no user
+switching, so running a `backup` job as root would hand it authority its author
+withheld, which is `design-decisions.md` 1019's refuse case and `cgexec`'s
+precedent — and an undeterminable current user refuses rather than assuming.
+Eleven tests, the crate's first.
+
+**`at` now has a drain, 2026-09-10.** The other half of this entry WAS true
+and is fixed. `at` spooled a job, printed at(1)'s own wording -- `job 3 at
+2026-09-11 03:00` -- and `atq` listed it as pending, while every file in the
+tree naming the at spool (`userspace/at` and `userspace/cron`, and no others)
+contained zero `Command::new`, `execve` or `posix_spawn` in live code. The
+queue was genuine and nothing on the system could ever drain it.
+
+`userspace/at` now answers to `atd`: a per-minute sweep of `/var/spool/at` that
+runs every job whose time has come, in scheduled order, and removes its spool
+file. It lives in that crate because that crate owns the spool format — a drain
+living elsewhere is a second reader of a format with one writer, which is
+exactly how `crond`'s `/etc/cron.d` parser came to disagree with the files it
+read. `cron`'s simulated `atd` personality is deleted (92 lines).
+
+A refused job is **kept**, not discarded: the user was told it was scheduled,
+and dropping it because the daemon could not run it destroys their work to tidy
+up after our own limitation. `atq` still shows it and `atrm` can still remove
+it. Eight tests.
+
+**Still open:** `userspace/crond` reads only `/var/spool/cron/root`
+(`DEFAULT_USER`), so no other user's crontab is ever loaded; `cron` and
+`crond2` are untouched duplicates; `anacron` is still simulated in `cron`; and
+no cron implementation reaches the image.
+
+---
+
+**Original entry, as written:** `crond` and `atd` print
+`scheduler ready (simulated)` and exit.
 Neither ever runs a job. Everything around them is real — `crontab` edits real
 crontab files, `at` now spools a real job at a real time, the schedule matching
 and next-run arithmetic are genuine and well tested — but nothing on this
@@ -128973,6 +129041,31 @@ be reached, and the two implementations can drift apart with nothing noticing.
 | `userspace/pv` | `fuser` | `userspace/fuser` |
 | `userspace/sysstat` | `iostat` | `userspace/iostat` |
 | `userspace/who` | `w` | `userspace/w` |
+| `userspace/cron` | `crond` | `userspace/crond` |
+| `userspace/cron` | `crontab` | `userspace/crontab` |
+
+**Eight, not six, as of 2026-09-10 — and the name of this entry is now wrong.**
+Kept anyway, because the ID is cited from `design-decisions.md` and from the
+baseline file, and a dangling reference costs more than a stale numeral. The
+two extra were not newly written: `scripts/multicall-aliases.py` matched the
+dispatch comparison only against twelve enumerated variable names, and
+`userspace/cron` calls its lowercased `argv0` `lower`, so **nine** of its
+personalities were invisible to the gate for as long as the gate existed. It
+follows the assignment chain now.
+
+**`cron:crond` is the dangerous one, and it is the `udisks`/`umount` shape
+exactly.** `userspace/cron`'s `crond` personality prints
+`crond: scheduler ready (simulated)` and exits; `userspace/crond` has a real
+loop that `Command::new("/bin/sh")`s the job. Two implementations of one daemon
+name, one of which does nothing, and which one a user would get is decided by
+whichever binary lands at `/sbin/crond`. Neither is installed today — the
+rootfs stages only `services/fastpy-*` binaries — so this is latent rather than
+live, which is the only reason it is an entry and not an incident.
+
+**Still not counted: `cron` also answers to `at`**, because `at` is its
+`else` branch and has no string literal to match. A default personality is
+invisible to this technique, and `userspace/at` exists. That is a known blind
+spot, written down here because the gate cannot report it.
 
 ### Why this is now pinned rather than left as a printout
 

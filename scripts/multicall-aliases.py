@@ -179,8 +179,17 @@ _EXTRACTS_NAME = re.compile(
 # names are enumerated rather than left open because `x == "…"` matches far too
 # much; a dispatch that invents a sixth name for the variable is a false
 # negative, which is the safe direction.
+# `=> Personality::X`, and also `=> Some(Personality::X)` / `=> Ok(...)`. The
+# wrapper is not cosmetic: `userspace/cron`'s dispatch returns Option so that an
+# unimplemented name cannot fall through to `at`, and when that change was made
+# this regex stopped matching, silently taking SEVEN personalities and TWO
+# shadowing pairs out of the count. It was caught only because the expected
+# number had been predicted before the run -- "6 shadowing, down from 8" reads
+# as progress otherwise, which is the failure this gate exists to detect,
+# committed by the gate itself.
 _CHAIN = re.compile(
-    r'((?:"[a-z][a-z0-9_.+-]{0,20}"\s*\|\s*)*"[a-z][a-z0-9_.+-]{0,20}")\s*=>\s*Personality::'
+    r'((?:"[a-z][a-z0-9_.+-]{0,20}"\s*\|\s*)*"[a-z][a-z0-9_.+-]{0,20}")'
+    r'\s*=>\s*(?:Some\(|Ok\()?Personality::'
 )
 _LITERAL = re.compile(r'"([a-z][a-z0-9_.+-]{0,20})"')
 _NAMEVAR = (
@@ -189,6 +198,19 @@ _NAMEVAR = (
 )
 _COMPARE = re.compile(rf'(?:{_NAMEVAR})\s*==\s*"([a-z][a-z0-9_.+-]{{0,20}})"')
 _TESTS = re.compile(r"^#\[cfg\(test\)\]", re.MULTILINE)
+# `let <ident> = <rest-of-line>` and `<ident>: &str` (a function parameter).
+# Used to FOLLOW the invocation name through rebindings rather than guess what
+# it is called -- see `name_vars`.
+_LET = re.compile(r"\blet\s+(?:mut\s+)?([a-z_][a-z0-9_]*)\s*(?::[^=]*)?=\s*(.*)")
+_PARAM = re.compile(r"\b([a-z_][a-z0-9_]*)\s*:\s*&\s*(?:str|String|OsStr)\b")
+# A function header, used to keep the taint from leaking between functions that
+# happen to reuse an identifier. `cron` calls the lowercased argv0 `lower` in
+# `detect_personality` and the lowercased TIMESPEC `lower` in at(1)'s time
+# parser, so a whole-file taint reports `noon`, `midnight` and `teatime` as
+# personalities.
+_FN = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:const\s+)?"
+                 r"(?:unsafe\s+)?(?:extern\s+\"[^\"]*\"\s+)?fn\b",
+                 re.MULTILINE)
 
 # Strings that match the dispatch shape but are not tool names. Each carries the
 # reason, because an unexplained ignore list is indistinguishable from a list of
@@ -211,6 +233,70 @@ IGNORE: dict[str, str] = {
 }
 
 
+def functions(text: str) -> list[str]:
+    """`text` split at function headers.
+
+    Crude -- it does not brace-match, so a chunk runs to the next `fn` and a
+    nested function ends its parent early. That is fine for this use: both
+    errors make a chunk SMALLER, and a smaller chunk can only lose a dispatch
+    (a false negative in one crate) rather than invent one, whereas the
+    whole-file version was inventing them.
+    """
+    starts = [m.start() for m in _FN.finditer(text)]
+    if not starts:
+        return [text]
+    return [text[a:b] for a, b in zip(starts, starts[1:] + [len(text)])]
+
+
+def name_vars(text: str) -> set[str]:
+    """Every variable that holds this program's own invocation name.
+
+    `_NAMEVAR` lists twelve spellings and its comment called a thirteenth "a
+    false negative, which is the safe direction". It is not: `userspace/cron`
+    calls the variable `lower`, so nine personalities -- three of them
+    shadowing a standalone crate of the same name -- were invisible to this
+    gate for as long as it has existed.
+
+    A name is not a fact about a program; the assignment chain is. So seed from
+    the extraction calls (and from the conventional spellings, which are still
+    good evidence when they appear as a function parameter) and then propagate
+    forward through `let` bindings:
+
+        let name = argv0.rsplit(['/', '.'])...   # argv0 is seeded -> name
+        let name = name.strip_suffix(".exe")...  # name -> name
+        let lower = name.to_ascii_lowercase();   # name -> lower
+
+    Forward-only and line-based, which is enough for the shape this is looking
+    for: a handful of rebindings between the extraction and the comparison. It
+    over-approximates -- a `let` whose right-hand side merely MENTIONS a tainted
+    variable is treated as carrying it -- and that is the direction to err in,
+    because the cost of a false positive here is a name reported as reachable
+    that is not, while a false negative is a shadowing pair nobody sees.
+    """
+    seeded = set(_NAMEVAR.split("|"))
+    tracked = {v for v in seeded if re.search(rf"\b{v}\b", text)}
+    # A function parameter is a binding too: `fn f(argv0: &str)` is where
+    # `cron`'s chain starts, and there is no `let` for it.
+    tracked |= {m for m in _PARAM.findall(text) if m in seeded}
+
+    # Iterate to a fixed point: a later binding can feed an earlier-declared
+    # one in a different function, and one pass would miss the transitive step.
+    for _ in range(8):
+        before = len(tracked)
+        for line in text.splitlines():
+            m = _LET.match(line.strip())
+            if m is None:
+                continue
+            lhs, rhs = m.group(1), m.group(2)
+            if _EXTRACTS_NAME.search(rhs) or any(
+                re.search(rf"\b{re.escape(v)}\b", rhs) for v in tracked
+            ):
+                tracked.add(lhs)
+        if len(tracked) == before:
+            break
+    return tracked
+
+
 def invocation_aliases(text: str, crate: str) -> set[str]:
     """Names this source dispatches on, other than the crate's own."""
     if (m := _TESTS.search(text)) is not None:
@@ -228,7 +314,140 @@ def invocation_aliases(text: str, crate: str) -> set[str]:
     # invocation name this matches ordinary string handling across the tree.
     if _EXTRACTS_NAME.search(text):
         names |= set(_COMPARE.findall(text))
+        # ...and the same comparison against any variable the name actually
+        # flows into, which is how `cron`'s `lower == "crond"` is reached --
+        # but ONE FUNCTION AT A TIME, or an identifier reused elsewhere in the
+        # file for something else drags its own string comparisons in with it.
+        for chunk in functions(text):
+            for var in name_vars(chunk):
+                names |= set(
+                    re.findall(
+                        rf'{re.escape(var)}\s*==\s*"([a-z][a-z0-9_.+-]{{0,20}})"',
+                        chunk)
+                )
     return {n for n in names if n != crate and n not in IGNORE}
+
+
+def _self_test() -> int:
+    """Fixtures for `invocation_aliases`, all of them cases that occurred.
+
+    The gate's whole claim is a COUNT -- "N personalities, M shadowing" -- and a
+    count is the one output where a detector that stopped seeing and a tree that
+    got better are spelled identically. So these pin exact sets, not "at least".
+    """
+    failures = 0
+
+    def expect(label: str, got: object, want: object) -> None:
+        nonlocal failures
+        ok = got == want
+        failures += not ok
+        print(f"  {'ok  ' if ok else 'FAIL'}  {label}")
+        if not ok:
+            print(f"          got  {got!r}")
+            print(f"          want {want!r}")
+
+    # THE CASE THIS WAS WRITTEN FOR. Three rebindings between the parameter and
+    # the comparison, and the final variable is called `lower`, which no
+    # enumeration of conventional names would have contained.
+    cron = """
+fn detect_personality(argv0: &str) -> Personality {
+    let name = argv0.rsplit(['/']).next().unwrap_or(argv0);
+    let name = name.strip_suffix(".exe").unwrap_or(name);
+    let lower = name.to_ascii_lowercase();
+    if lower == "crond" { Personality::Crond }
+    else if lower == "crontab" { Personality::Crontab }
+    else { Personality::At }
+}
+fn main() { let args: Vec<String> = std::env::args().collect();
+            let argv0 = args.first().map(|s| s.as_str()).unwrap_or("at"); }
+"""
+    expect("a name reached through three rebindings is still the name",
+           invocation_aliases(cron, "cron"), {"crond", "crontab"})
+
+    # THE REUSE. Same identifier, different function, different value. A
+    # whole-file taint reported noon/midnight/teatime as personalities of
+    # `cron`, which is a check of the wrong proposition: "is this identifier
+    # ever the program name" instead of "is it the program name here".
+    reuse = cron + """
+fn parse_timespec(spec: &str) -> Option<u64> {
+    let lower = spec.to_ascii_lowercase();
+    if lower == "noon" { return Some(43200); }
+    if lower == "midnight" { return Some(0); }
+    if lower == "teatime" { return Some(57600); }
+    None
+}
+"""
+    expect("an identifier reused in another function does not leak the taint",
+           invocation_aliases(reuse, "cron"), {"crond", "crontab"})
+
+    # A CONFIG VALUE. `value` is not the program name however tainted the file
+    # is elsewhere; it is the right-hand side of a settings line.
+    cfg = cron + """
+fn apply(&mut self, key: &str, value: &str) {
+    if key == "use-ipv4" { self.use_ipv4 = value == "yes"; }
+}
+"""
+    expect("a config boolean is not a personality",
+           invocation_aliases(cfg, "cron"), {"crond", "crontab"})
+
+    # A SUBCOMMAND. Argument dispatch, not invocation-name dispatch: `avahi
+    # service ...` is one program with a verb, not two programs sharing a
+    # binary, and only the latter can be shadowed by another crate.
+    subcmd = cron + """
+fn run(all: &[String]) -> i32 {
+    let has_service = all.iter().any(|a| a == "service");
+    if has_service { 0 } else { 1 }
+}
+"""
+    expect("a subcommand is not a personality",
+           invocation_aliases(subcmd, "cron"), {"crond", "crontab"})
+
+    # THE WRAPPED ARM. `=> Some(Personality::X)` is what a dispatch returning
+    # Option looks like, and `cron` became one so that an unimplemented name
+    # could not fall through to `at`. The unwrapped regex stopped matching and
+    # the personality count silently dropped by seven.
+    wrapped = """
+fn detect_personality(argv0: &str) -> Option<Personality> {
+    let lower = argv0.to_ascii_lowercase();
+    match lower.as_str() {
+        "crontab" => Some(Personality::Crontab),
+        "atq" | "atrm" => Some(Personality::Atq),
+        _ => None,
+    }
+}
+"""
+    expect("an arm wrapped in Some() is still a dispatch arm",
+           invocation_aliases(wrapped, "cron"), {"crontab", "atq", "atrm"})
+
+    # NO REGRESSION on the two shapes that already worked.
+    enum_arm = """
+fn p(argv0: &str) -> Personality {
+    match argv0 { "mke2fs" | "mkfs.ext4" => Personality::Mke2fs, _ => Personality::Mkfs }
+}
+"""
+    expect("the enum-arm shape still resolves every spelling in the arm",
+           invocation_aliases(enum_arm, "mkfs"), {"mke2fs", "mkfs.ext4"})
+
+    plain = """
+fn main() { let basename = std::env::args().next().unwrap();
+            if basename == "tail" { tail() } }
+"""
+    expect("the conventional variable name still works with no chain",
+           invocation_aliases(plain, "head"), {"tail"})
+
+    # The corroboration rule: without evidence the file reads its own argv[0],
+    # `x == "ls"` is ordinary string handling and must not count.
+    bare = 'fn f(s: &str) -> bool { let lower = s.to_lowercase(); lower == "ls" }'
+    expect("a comparison with no argv[0] extraction anywhere is ignored",
+           invocation_aliases(bare, "whatever"), set())
+
+    # A crate never shadows itself.
+    expect("a crate answering to its own name reports nothing",
+           invocation_aliases(cron, "crond"), {"crontab"})
+
+    print(f"multicall-aliases: self-test "
+          f"{'FAILED' if failures else 'passed'} ({failures} failure(s))")
+    return 1 if failures else 0
 
 
 def staged_aliases(tree: gittree.Tree) -> set[str]:
@@ -312,6 +531,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--check", action="store_true",
                     help="exit 1 on an unreachable alias not in the baseline")
+    ap.add_argument("--self-test", "--selftest", dest="self_test",
+                    action="store_true", help="run this script's own fixtures")
     ap.add_argument("--update-baseline", action="store_true",
                     help="rewrite the baseline from what is found now")
     ap.add_argument(
@@ -322,6 +543,13 @@ def main() -> int:
              "uncommitted one block a push of unrelated clean commits.",
     )
     args = ap.parse_args()
+
+    # Ahead of everything else, and taking no tree: the fixtures are string
+    # literals in this file, so the self-test answers the same in a checkout
+    # with no history. --check passing means nothing unless this passed first.
+    if args.self_test:
+        return _self_test()
+
     check = args.check
     update = args.update_baseline
 
@@ -380,6 +608,29 @@ def main() -> int:
             "# Remove a line by deleting the shadowing branch -- the name belongs to",
             "# whichever program performs the operation. Do NOT add one to turn a red",
             "# --check green.",
+            "#",
+            "# THE ONE TEST FOR WHETHER A GROWTH IS LEGITIMATE: the added alias must",
+            "# be REACHABLE IN A REVISION THAT PREDATES THE COMMIT ADDING IT. Two",
+            "# ways that happens, and neither is a new defect:",
+            "#",
+            "#   the detector learned to see it -- 2026-09-10, cron:crond and",
+            "#       cron:crontab, when it stopped guessing the name of the variable",
+            "#       holding argv0 and started following the assignment chain.",
+            "#",
+            "#   the source made it explicit -- 2026-09-10, cron:at, when the",
+            "#       dispatch stopped falling through to `at` in a default arm that",
+            "#       carried no string literal. The crate always answered to `at`;",
+            "#       there was simply nothing for a gate to match on.",
+            "#",
+            "# A line added with neither -- no detector change, no source change, the",
+            "# alias genuinely new -- is somebody turning a red gate green.",
+            "#",
+            "# This paragraph lives in scripts/multicall-aliases.py, not here.",
+            "# An earlier copy was written directly into this file and the next",
+            "# --update-baseline deleted it, silently, because the header is",
+            "# regenerated wholesale. Policy written into a generated file is one",
+            "# regeneration from being lost, and nothing reports the loss: the gate",
+            "# stays green, the entries stay right, and only the reasoning goes.",
             "",
         ]
         shadow_body += sorted(f"{c}:{a}" for c, a, _ in shadowed)

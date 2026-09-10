@@ -329,12 +329,49 @@ BASELINE_HEADER = """\
 # public items which no other file in the repository names.  57 of them, 113k
 # lines, were found the day this file was created; the list is a debt ledger,
 # not an allow-list, and the only edit it should ever receive is a deletion.
+# {remaining} remain.  Paid off so far: apps/explorer's columns.rs, thumbs.rs and
+# dropzone.rs — 5,611 lines between them — wired into the app that declared
+# them; then the desktop shell's focus_assist.rs, hotkeys.rs, osd.rs,
+# run_dialog.rs and window_rules.rs together with gui/toolkit's modal.rs; and
+# then net80211/src/supplicant.rs, which net80211/src/assoc.rs now drives;
+# and then the desktop shell's taskbar_autohide.rs, which `ShellSession` now
+# drives from the user's `taskbar_autohide` setting (design-decisions 813).
+# And widgets.rs, which the desktop's new right-click menu adds panels to and
+# the background surface draws.
+#
+# Those six are worth a note, because `--check` had been printing "reached
+# now, drop from the baseline" for all six for some time before anyone acted
+# on it.  A ratchet only ratchets when someone runs it and tightens it: the
+# stale direction is the *generous* one, and `--check` exits 0 there, because
+# a baseline listing a module that is no longer an island pins nothing that is
+# wrong.  It just quietly stops describing the tree, and the count in this
+# header — the number anyone actually quotes — drifts away from the truth.
 #
 # `--check` fails on a module that is an island and is NOT listed here.  That
 # is the whole point: the count may fall, never rise.  A new module lands
 # wired up or it does not land.  When you connect one, delete its line
 # (`--pin` rewrites the file, but read the diff -- a --pin that ADDS a line is
 # the failure this gate exists to prevent, committed by hand).
+#
+# One line was ADDED once, which the header above says should never happen,
+# and it has since been paid off — the note is kept because the reasoning
+# recurs.  net80211/src/supplicant.rs was pinned as the first of the four
+# benign cases in the scanner's own docstring, "the consumer is outside this
+# tree": its callers were a wireless driver (lane A) and the supplicant binary
+# (lane B), and neither existed nor was lane C's to write.  The right answer
+# turned out not to be waiting for them.  net80211/src/assoc.rs is the outer
+# half of the same state machine — the frame ordering, written against a
+# `Transceiver` trait and a mock radio — and it lives in this crate precisely
+# so that the loop is not duplicated once per driver.  Writing the caller is
+# what paid the line off; pinning it was what let it sit unwritten.
+#
+# THIS HEADER LIVES IN scripts/scan-orphan-modules.py, NOT HERE.  `--pin`
+# rewrites this file from that constant, so anything added directly to the
+# generated file is deleted by the next run -- silently, because the gate
+# stays green and the entries stay correct while only the reasoning goes.
+# Three blocks above were lost that way on 2026-09-10 and restored from git.
+# The prose naming specific modules is hand-maintained; only the count is
+# filled in at write time.
 #
 # Being on this list is not absolution.  See known-issues.md ->
 # TD-C-THE-SHELL-DRAWS-FOUR-OF-ITS-FIFTY-SEVEN-MODULES, and note that the
@@ -605,7 +642,11 @@ def main():
         # Windows worktree would commit the exact corruption
         # `scripts/check-eol.py` refuses builds over -- and that gate reads this
         # file. See `known-issues.md` -> `TD-B-SIX-TRACKED-FILES-HELD-CRLF-...`.
-        BASELINE.write_text(BASELINE_HEADER + body + "\n", encoding="utf-8", newline="")
+        BASELINE.write_text(
+            BASELINE_HEADER.format(remaining=len(hard_paths)) + body + "\n",
+            encoding="utf-8",
+            newline="",
+        )
         print(f"pinned {len(hard_paths)} island(s) to {BASELINE.as_posix()}")
         return 0
 

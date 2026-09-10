@@ -28,11 +28,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Personality {
-    Crond,
     Crontab,
     Anacron,
     At,
-    Atd,
     Batch,
     Atq,
     Atrm,
@@ -41,11 +39,9 @@ enum Personality {
 impl Personality {
     fn name(self) -> &'static str {
         match self {
-            Self::Crond => "crond",
             Self::Crontab => "crontab",
             Self::Anacron => "anacron",
             Self::At => "at",
-            Self::Atd => "atd",
             Self::Batch => "batch",
             Self::Atq => "atq",
             Self::Atrm => "atrm",
@@ -53,28 +49,47 @@ impl Personality {
     }
 }
 
-fn detect_personality(argv0: &str) -> Personality {
+/// The personality named by `argv0`, or `None` if this binary has none.
+///
+/// `None` is not a failure to look; it is the answer for a name this program
+/// does not implement. It must stay distinguishable from a personality,
+/// because the previous version returned `Personality::At` for anything
+/// unrecognised and a mistyped or unimplemented name became the `at` command.
+fn detect_personality(argv0: &str) -> Option<Personality> {
     let name = argv0.rsplit(['/', '\\']).next().unwrap_or(argv0);
     let name = name.strip_suffix(".exe").unwrap_or(name);
     let lower = name.to_ascii_lowercase();
 
-    if lower == "crond" || lower == "cron" {
-        Personality::Crond
-    } else if lower == "crontab" {
-        Personality::Crontab
-    } else if lower == "anacron" {
-        Personality::Anacron
-    } else if lower == "atd" {
-        Personality::Atd
-    } else if lower == "batch" {
-        Personality::Batch
-    } else if lower == "atq" {
-        Personality::Atq
-    } else if lower == "atrm" {
-        Personality::Atrm
-    } else {
-        // Default: "at"
-        Personality::At
+    match lower.as_str() {
+        "crontab" => Some(Personality::Crontab),
+        "anacron" => Some(Personality::Anacron),
+        "batch" => Some(Personality::Batch),
+        "atq" => Some(Personality::Atq),
+        "atrm" => Some(Personality::Atrm),
+        "at" => Some(Personality::At),
+        // NOT a silent fall-through to `at`, which is what stood here.
+        //
+        // Two things were wrong with that. A name this binary does not
+        // implement -- `crond`, since its personality was deleted, or a plain
+        // typo -- quietly became a different program, which is the worst
+        // available outcome for a multicall binary. And because the default
+        // arm carried no string literal, `scripts/multicall-aliases.py` could
+        // not see that this crate answers to `at` at all, so its shadowing of
+        // `userspace/at` stayed invisible even after the detector learned to
+        // follow the argv0 variable through its rebindings.
+        //
+        // A `match` rather than the `if` chain it replaces, so that every name
+        // this binary answers to is a literal the gate can find.
+        //
+        // That sentence was FALSE when it was first written here. The rewrite
+        // wrapped each arm as `=> Some(Personality::X)`, and the gate's regex
+        // required `=> Personality::` with nothing between, so converting the
+        // chain took seven personalities and two shadowing pairs out of its
+        // count in the same commit that claimed to make them visible. It was
+        // caught only because the number had been predicted beforehand: 6
+        // shadowing, down from 8, reads as progress. The regex accepts a
+        // `Some(`/`Ok(` wrapper now, and a fixture pins it.
+        _ => None,
     }
 }
 
@@ -1133,130 +1148,6 @@ fn user_crontab_path(user: &str) -> PathBuf {
 // crond personality
 // ---------------------------------------------------------------------------
 
-fn run_crond(args: &[String]) -> i32 {
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-
-    let mut foreground = false;
-    let mut loglevel = 1u32;
-
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--foreground" | "-f" => foreground = true,
-            "--loglevel" | "-l" => {
-                i += 1;
-                if let Some(val) = args.get(i) {
-                    loglevel = val.parse().unwrap_or(1);
-                }
-            }
-            "--help" | "-h" => {
-                let _ = writeln!(
-                    out,
-                    "Usage: crond [--foreground] [--loglevel LEVEL]\n\n\
-                     Cron daemon: reads and schedules crontab jobs.\n\n\
-                     Options:\n  \
-                       --foreground, -f   Run in foreground\n  \
-                       --loglevel, -l N   Set log level (0=quiet, 8=debug)"
-                );
-                return 0;
-            }
-            _ => {
-                let _ = writeln!(out, "crond: unknown option '{}'", args[i]);
-                return 1;
-            }
-        }
-        i += 1;
-    }
-
-    if loglevel > 0 {
-        let _ = writeln!(
-            out,
-            "crond: starting (foreground={foreground}, loglevel={loglevel})"
-        );
-    }
-
-    // Load system crontab
-    let mut all_entries: Vec<CrontabEntry> = Vec::new();
-
-    match fs::read_to_string(SYSTEM_CRONTAB) {
-        Ok(content) => match parse_crontab(&content, true) {
-            Ok(ctab) => {
-                if loglevel >= 2 {
-                    let _ = writeln!(
-                        out,
-                        "crond: loaded {} entries from {}",
-                        ctab.entries.len(),
-                        SYSTEM_CRONTAB
-                    );
-                }
-                all_entries.extend(ctab.entries);
-            }
-            Err(e) => {
-                let _ = writeln!(out, "crond: error parsing {SYSTEM_CRONTAB}: {e}");
-            }
-        },
-        Err(e) => {
-            if loglevel >= 3 {
-                let _ = writeln!(out, "crond: cannot read {SYSTEM_CRONTAB}: {e}");
-            }
-        }
-    }
-
-    // Load per-user crontabs
-    if let Ok(entries) = fs::read_dir(CRONTAB_SPOOL_DIR) {
-        for entry in entries.flatten() {
-            let user = entry.file_name().to_string_lossy().to_string();
-            if let Ok(content) = fs::read_to_string(entry.path()) {
-                match parse_crontab(&content, false) {
-                    Ok(mut ctab) => {
-                        for e in &mut ctab.entries {
-                            e.user = Some(user.clone());
-                        }
-                        if loglevel >= 2 {
-                            let _ = writeln!(
-                                out,
-                                "crond: loaded {} entries for user '{user}'",
-                                ctab.entries.len()
-                            );
-                        }
-                        all_entries.extend(ctab.entries);
-                    }
-                    Err(e) => {
-                        let _ = writeln!(out, "crond: error in crontab for '{user}': {e}");
-                    }
-                }
-            }
-        }
-    }
-
-    // Handle @reboot entries
-    for entry in &all_entries {
-        if entry.is_reboot {
-            let user_str = entry.user.as_deref().unwrap_or("root");
-            if loglevel >= 1 {
-                let _ = writeln!(
-                    out,
-                    "crond: @reboot: running '{}' as {user_str}",
-                    entry.command
-                );
-            }
-        }
-    }
-
-    let _ = writeln!(
-        out,
-        "crond: loaded {} total cron entries, entering scheduler loop",
-        all_entries.len()
-    );
-
-    // In a real OS, this would enter an infinite loop checking the current
-    // time against schedules. We print a summary and exit for testability.
-    let _ = writeln!(out, "crond: scheduler ready (simulated)");
-
-    0
-}
-
 // ---------------------------------------------------------------------------
 // crontab personality
 // ---------------------------------------------------------------------------
@@ -1805,98 +1696,6 @@ fn remove_at_jobs(ids: &[String], out: &mut io::StdoutLock<'_>) -> i32 {
 // atd personality
 // ---------------------------------------------------------------------------
 
-fn run_atd(args: &[String]) -> i32 {
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-
-    let mut batch_threshold = 1.5f64;
-
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "-l" => {
-                i += 1;
-                if let Some(val) = args.get(i) {
-                    batch_threshold = val.parse().unwrap_or(1.5);
-                }
-            }
-            "--help" | "-h" => {
-                let _ = writeln!(
-                    out,
-                    "Usage: atd [-l load_threshold]\n\n\
-                     At daemon: processes pending one-time jobs.\n\n\
-                     Options:\n  \
-                       -l THRESHOLD  Load average threshold for batch jobs (default: 1.5)"
-                );
-                return 0;
-            }
-            _ => {
-                let _ = writeln!(out, "atd: unknown option '{}'", args[i]);
-                return 1;
-            }
-        }
-        i += 1;
-    }
-
-    let _ = writeln!(out, "atd: starting (batch_threshold={batch_threshold})");
-
-    // Scan spool directory
-    let spool = Path::new(AT_SPOOL_DIR);
-    let entries = match fs::read_dir(spool) {
-        Ok(e) => e,
-        Err(e) => {
-            let _ = writeln!(out, "atd: cannot read {AT_SPOOL_DIR}: {e}");
-            return 1;
-        }
-    };
-
-    let mut pending = 0u32;
-    let mut batch_pending = 0u32;
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if let Ok(content) = fs::read_to_string(&path)
-            && let Ok(job) = AtJob::deserialize(&content)
-        {
-            if job.queue == 'b' {
-                batch_pending += 1;
-                let _ = writeln!(
-                    out,
-                    "atd: batch job {} for user '{}' at {:04}-{:02}-{:02} {:02}:{:02}",
-                    job.id,
-                    job.user,
-                    job.time.year,
-                    job.time.month,
-                    job.time.day,
-                    job.time.hour,
-                    job.time.minute,
-                );
-            } else {
-                pending += 1;
-                let _ = writeln!(
-                    out,
-                    "atd: job {} for user '{}' at {:04}-{:02}-{:02} {:02}:{:02}",
-                    job.id,
-                    job.user,
-                    job.time.year,
-                    job.time.month,
-                    job.time.day,
-                    job.time.hour,
-                    job.time.minute,
-                );
-            }
-        }
-    }
-
-    let _ = writeln!(
-        out,
-        "atd: {pending} pending jobs, {batch_pending} batch jobs"
-    );
-    let _ = writeln!(out, "atd: scheduler ready (simulated)");
-
-    0
-}
-
 // ---------------------------------------------------------------------------
 // batch personality (wrapper for at with queue 'b')
 // ---------------------------------------------------------------------------
@@ -1913,16 +1712,21 @@ fn run_batch(args: &[String]) -> i32 {
 fn main() {
     let args: Vec<String> = env::args().collect();
     let argv0 = args.first().map(|s| s.as_str()).unwrap_or("at");
-    let personality = detect_personality(argv0);
+    let Some(personality) = detect_personality(argv0) else {
+        eprintln!(
+            "{argv0}: this binary does not implement that command.\n\
+             It answers to: crontab, at, batch, atq, atrm, anacron.\n\
+             The cron daemon is a separate program -- see userspace/crond."
+        );
+        std::process::exit(2);
+    };
     let rest = if args.len() > 1 { &args[1..] } else { &[] };
     let rest_vec: Vec<String> = rest.to_vec();
 
     let exit_code = match personality {
-        Personality::Crond => run_crond(&rest_vec),
         Personality::Crontab => run_crontab(&rest_vec),
         Personality::Anacron => run_anacron(&rest_vec),
         Personality::At => run_at(&rest_vec, Personality::At),
-        Personality::Atd => run_atd(&rest_vec),
         Personality::Batch => run_batch(&rest_vec),
         Personality::Atq => run_at(&rest_vec, Personality::Atq),
         Personality::Atrm => run_at(&rest_vec, Personality::Atrm),
@@ -1945,58 +1749,71 @@ mod tests {
 
     #[test]
     fn test_detect_crond() {
-        assert_eq!(detect_personality("crond"), Personality::Crond);
-        assert_eq!(detect_personality("/usr/sbin/crond"), Personality::Crond);
-        assert_eq!(detect_personality("crond.exe"), Personality::Crond);
-        assert_eq!(detect_personality("C:\\bin\\crond.exe"), Personality::Crond);
-        assert_eq!(detect_personality("cron"), Personality::Crond);
+        // The daemon personality was deleted: it printed "running <cmd> as
+        // <user>" without running anything, and two crates -- userspace/crond
+        // and userspace/crond2 -- implement the daemon for real. `None` rather
+        // than a personality, so the name cannot quietly become `at`.
+        assert_eq!(detect_personality("crond"), None);
+        assert_eq!(detect_personality("/usr/sbin/crond"), None);
+        assert_eq!(detect_personality("crond.exe"), None);
+        assert_eq!(detect_personality("C:\\bin\\crond.exe"), None);
+        assert_eq!(detect_personality("cron"), None);
     }
 
     #[test]
     fn test_detect_crontab() {
-        assert_eq!(detect_personality("crontab"), Personality::Crontab);
-        assert_eq!(detect_personality("/usr/bin/crontab"), Personality::Crontab);
+        assert_eq!(detect_personality("crontab"), Some(Personality::Crontab));
+        assert_eq!(
+            detect_personality("/usr/bin/crontab"),
+            Some(Personality::Crontab)
+        );
     }
 
     #[test]
     fn test_detect_anacron() {
-        assert_eq!(detect_personality("anacron"), Personality::Anacron);
+        assert_eq!(detect_personality("anacron"), Some(Personality::Anacron));
     }
 
     #[test]
     fn test_detect_at() {
-        assert_eq!(detect_personality("at"), Personality::At);
-        assert_eq!(detect_personality("/usr/bin/at"), Personality::At);
-        assert_eq!(detect_personality("anything_else"), Personality::At);
+        assert_eq!(detect_personality("at"), Some(Personality::At));
+        assert_eq!(detect_personality("/usr/bin/at"), Some(Personality::At));
+        // Was `Personality::At`, which pinned the defect as correct: any
+        // unrecognised name became the `at` command. An unimplemented name is
+        // now an answer, not a redirection.
+        assert_eq!(detect_personality("anything_else"), None);
     }
 
     #[test]
     fn test_detect_atd() {
-        assert_eq!(detect_personality("atd"), Personality::Atd);
+        // Deleted 2026-09-10: it printed "atd: scheduler ready (simulated)"
+        // and exited, and `userspace/at` now answers to `atd` with a real
+        // drain -- a per-minute sweep of /var/spool/at that execs the job and
+        // removes it. Two implementations of one daemon name, one of which
+        // does nothing, is the udisks/umount shape.
+        assert_eq!(detect_personality("atd"), None);
     }
 
     #[test]
     fn test_detect_batch() {
-        assert_eq!(detect_personality("batch"), Personality::Batch);
+        assert_eq!(detect_personality("batch"), Some(Personality::Batch));
     }
 
     #[test]
     fn test_detect_atq() {
-        assert_eq!(detect_personality("atq"), Personality::Atq);
+        assert_eq!(detect_personality("atq"), Some(Personality::Atq));
     }
 
     #[test]
     fn test_detect_atrm() {
-        assert_eq!(detect_personality("atrm"), Personality::Atrm);
+        assert_eq!(detect_personality("atrm"), Some(Personality::Atrm));
     }
 
     #[test]
     fn test_personality_names() {
-        assert_eq!(Personality::Crond.name(), "crond");
         assert_eq!(Personality::Crontab.name(), "crontab");
         assert_eq!(Personality::Anacron.name(), "anacron");
         assert_eq!(Personality::At.name(), "at");
-        assert_eq!(Personality::Atd.name(), "atd");
         assert_eq!(Personality::Batch.name(), "batch");
         assert_eq!(Personality::Atq.name(), "atq");
         assert_eq!(Personality::Atrm.name(), "atrm");

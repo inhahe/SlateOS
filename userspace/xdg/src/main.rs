@@ -925,14 +925,63 @@ fn shell_split(input: &str) -> Vec<String> {
 // ============================================================================
 
 /// Set the default handler for a MIME type in the user's mimeapps.list.
+/// The current contents of a file that is about to be rewritten from them.
+///
+/// Three outcomes, and conflating any two of them loses data:
+///
+/// * the file is there and readable -- its text
+/// * the file does not exist -- empty, and rewriting it is creation
+/// * anything else -- an error, because "we could not read it" is NOT "there
+///   is nothing in it", and the caller is about to replace the file with
+///   whatever it parsed
+///
+/// Not-valid-UTF-8 is refused rather than converted: the rewrite works in
+/// text, so accepting it would drop those bytes on the next write.
+///
+/// The same decision appears in `userspace/sudo`'s visudo and
+/// `userspace/xdg`'s mimeapps.list handling. If a fourth caller turns up it
+/// wants a crate of its own -- ideally with the atomic-write half too, since
+/// all three currently `fs::write` in place and would lose the file to a crash
+/// mid-write.
+fn contents_before_rewrite(path: &Path) -> io::Result<String> {
+    match fs::read(path) {
+        Ok(bytes) => String::from_utf8(bytes).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "the file holds bytes that are not valid UTF-8; refusing to \
+                 rewrite it, because doing so would drop them",
+            )
+        }),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(String::new()),
+        Err(e) => Err(e),
+    }
+}
+
 fn set_default_handler(mime: &str, desktop_id: &str) -> io::Result<()> {
     let home = home_dir();
     let config_dir = home.join(".config");
     fs::create_dir_all(&config_dir)?;
     let path = config_dir.join("mimeapps.list");
 
-    // Load existing contents or start fresh.
-    let existing = fs::read_to_string(&path).unwrap_or_default();
+    // Load existing contents, or start fresh ONLY when there is genuinely
+    // nothing there.
+    //
+    // This was `read_to_string(&path).unwrap_or_default()`, and everything
+    // below rebuilds the file from what it parsed and then writes it back with
+    // `fs::write`. So a read that failed produced an empty `existing`, an
+    // empty `sections`, and a mimeapps.list containing NOTHING BUT THE NEW
+    // ASSOCIATION -- every other default handler the user had set, silently
+    // gone.
+    //
+    // `read_to_string` also fails for the whole file if any single byte is not
+    // valid UTF-8, which needs no unusual permissions to arrange: a desktop
+    // file name written in the user's locale encoding is enough.
+    //
+    // `NotFound` is the one failure that really does mean "start fresh".
+    // Everything else is "we could not read it", which is not the same as
+    // "there is nothing in it" -- lane A's rule from mkfs/fsck's is_mounted,
+    // and the same defect visudo had over /etc/sudoers.
+    let existing = contents_before_rewrite(&path)?;
     let sections = parse_ini(&existing);
 
     let mut out = String::new();
@@ -1497,6 +1546,63 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_existing_file_reads_back_as_itself() {
+        let scratch = scratchdir::ScratchDir::new("rewrite-read");
+        let p = scratch.path("f");
+        fs::write(&p, b"KEY=\"value\"\n").expect("write");
+        assert_eq!(
+            contents_before_rewrite(&p).expect("should read"),
+            "KEY=\"value\"\n"
+        );
+    }
+
+    /// The one failure that legitimately means "empty": there is no file yet,
+    /// and the rewrite is creating it.
+    #[test]
+    fn a_missing_file_is_empty_rather_than_an_error() {
+        let scratch = scratchdir::ScratchDir::new("rewrite-absent");
+        assert_eq!(
+            contents_before_rewrite(&scratch.path("nope"))
+                .ok()
+                .as_deref(),
+            Some("")
+        );
+    }
+
+    /// THE CASE THIS EXISTS FOR. The caller rebuilds the file from what it
+    /// read, so an unreadable file read as empty means the rewrite DELETES
+    /// everything that was in it.
+    ///
+    /// A directory where the file belongs gives a non-NotFound read error on
+    /// every platform, without touching permissions.
+    #[test]
+    fn an_unreadable_file_is_an_error_and_not_an_empty_rewrite() {
+        let scratch = scratchdir::ScratchDir::new("rewrite-blocked");
+        let p = scratch.path("f");
+        fs::create_dir(&p).expect("a directory where the file goes");
+        let got = contents_before_rewrite(&p);
+        assert!(
+            got.is_err(),
+            "an unreadable file must not rewrite as empty: {:?}",
+            got.err()
+        );
+    }
+
+    /// One byte is enough, and it needs no unusual permissions -- which is
+    /// what made `read_to_string(..).unwrap_or_default()` reachable in
+    /// ordinary use.
+    #[test]
+    fn a_single_non_utf8_byte_is_refused_rather_than_dropped() {
+        let scratch = scratchdir::ScratchDir::new("rewrite-bytes");
+        let p = scratch.path("f");
+        fs::write(&p, b"NAME=\"Jos\xe9\"\nOTHER=\"keep\"\n").expect("write");
+        assert!(
+            contents_before_rewrite(&p).is_err(),
+            "one latin-1 byte must not cost the whole file"
+        );
+    }
 
     // --- Personality detection ---
 

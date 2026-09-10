@@ -1154,6 +1154,9 @@ version = "0.1.0"
 [[package]]
 name = "hostnamectl"
 version = "0.1.0"
+dependencies = [
+ "scratchdir",
+]
 
 [[package]]
 name = "htop"
@@ -3270,6 +3273,7 @@ name = "xdg"
 version = "0.1.0"
 dependencies = [
  "quoting",
+ "scratchdir",
 ]
 
 [[package]]

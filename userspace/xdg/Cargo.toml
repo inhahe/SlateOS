@@ -3,6 +3,10 @@ name = "xdg"
 version = "0.1.0"
 edition = "2024"
 description = "SlateOS xdg-open/xdg-mime/mimeopen - file association tools"
+[dev-dependencies]
+# `contents_before_rewrite`'s three outcomes each need a real file.
+scratchdir = { path = "../scratchdir" }
+
 [dependencies]
 # One rendering of untrusted text inside a diagnostic. The file or URL
 # xdg-open is handed, the MIME type looked up for it and the handler program

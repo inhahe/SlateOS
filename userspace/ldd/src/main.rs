@@ -1091,8 +1091,6 @@ struct DepEntry {
     name: String,
     /// How it was resolved.
     resolution: LibResolution,
-    /// Simulated load address (for display only; not a real mmap).
-    load_addr: u64,
 }
 
 // ============================================================================
@@ -1144,20 +1142,6 @@ fn extract_interpreter(elf: &Elf) -> Option<PathBuf> {
     None
 }
 
-/// Simple pseudo-random load address generator for display purposes.
-/// Real addresses come from the dynamic linker at runtime; we simulate them.
-fn fake_load_addr(seed: u64) -> u64 {
-    // Produce an address in the range typical for shared libraries on x86-64:
-    // between 0x00007f0000000000 and 0x00007fffffffffff, page-aligned.
-    let base: u64 = 0x0000_7f00_0000_0000;
-    let range: u64 = 0x0000_00ff_ffff_f000;
-    // Simple LCG: multiply by a prime, mask to range.
-    let v = seed
-        .wrapping_mul(0x9e37_79b9_7f4a_7c15)
-        .wrapping_add(0x6c62_272e_07bb_0142);
-    base + (v & range)
-}
-
 /// Recursively resolve all dependencies of `elf`, breadth-first.
 /// `seen` tracks library names already visited to break cycles.
 fn resolve_deps(
@@ -1167,7 +1151,6 @@ fn resolve_deps(
     entries: &mut Vec<DepEntry>,
     verbose: bool,
     out: &mut impl Write,
-    depth: u32,
 ) -> io::Result<()> {
     let dyn_entries_opt = match elf.parse_dynamic() {
         Ok(v) => v,
@@ -1190,7 +1173,6 @@ fn resolve_deps(
     // Build effective search path for this level's binary.
     let effective_search = SearchPaths::new(rpath, runpath, search.ld_library_path.clone());
 
-    let mut addr_seed = 0xdead_beef_u64.wrapping_add(depth as u64 * 0x1000);
 
     for libname in &needed {
         if seen.contains(libname) {
@@ -1205,10 +1187,6 @@ fn resolve_deps(
         }
         seen.insert(libname.clone());
 
-        addr_seed = addr_seed
-            .wrapping_mul(0x5851_f42d_4c95_7f2d)
-            .wrapping_add(0x1405_7b7e_f767_814f);
-        let load_addr = fake_load_addr(addr_seed);
 
         let resolution = match effective_search.resolve(libname) {
             Some(p) => LibResolution::Found(p.clone()),
@@ -1224,7 +1202,6 @@ fn resolve_deps(
         entries.push(DepEntry {
             name: libname.clone(),
             resolution,
-            load_addr,
         });
 
         // Recurse into the found library.
@@ -1238,7 +1215,6 @@ fn resolve_deps(
                         entries,
                         verbose,
                         out,
-                        depth + 1,
                     )?;
                 }
                 Err(e) => {
@@ -1261,17 +1237,30 @@ fn resolve_deps(
 // Display helpers
 // ============================================================================
 
-/// Format a load address as `(0x...)`.
-fn fmt_addr(addr: u64) -> String {
-    format!("(0x{addr:016x})")
-}
+// `fmt_addr` is gone, and with it the parenthesised address after each
+// library.
+//
+// GNU `ldd` prints `libc.so.6 => /lib/libc.so.6 (0x00007f8b8c000000)`, and the
+// address is real: it obtains it by actually running the dynamic loader with
+// `LD_TRACE_LOADED_OBJECTS=1`, so the number is where that library was mapped
+// in that run. This `ldd` does not load anything. It reads `DT_NEEDED` out of
+// the ELF and searches the library path, which is genuine work and is what the
+// `=>` half reports -- but it has no loader and therefore no address.
+//
+// Until 2026-09-10 it printed one anyway, from `fake_load_addr`: a 64-bit LCG
+// masked into the range x86-64 usually maps shared libraries into, seeded from
+// a counter. The output was formatted identically to the real thing, so
+// nothing distinguished an invented address from a measured one -- and the
+// plausible range is what made it convincing rather than obviously wrong.
+//
+// Omitting it is the honest form. Consumers that parse `ldd` split on `=>` and
+// take the path, which is unaffected.
 
 /// Print the dependency list in standard ldd format.
 fn print_deps(
     out: &mut impl Write,
     entries: &[DepEntry],
     interp: Option<&Path>,
-    interp_addr: u64,
 ) -> io::Result<()> {
     // The interpreter is typically shown first.
     // Mimic: linux-vdso.so.1 (0x...) at the top, then the libs, then ld.so at bottom.
@@ -1280,13 +1269,7 @@ fn print_deps(
     for entry in entries {
         match &entry.resolution {
             LibResolution::Found(path) => {
-                writeln!(
-                    out,
-                    "\t{} => {} {}",
-                    entry.name,
-                    path.display(),
-                    fmt_addr(entry.load_addr)
-                )?;
+                writeln!(out, "\t{} => {}", entry.name, path.display())?;
             }
             LibResolution::NotFound => {
                 writeln!(out, "\t{} => not found", entry.name)?;
@@ -1296,7 +1279,7 @@ fn print_deps(
 
     // Print interpreter (ld.so) at the bottom if present.
     if let Some(interp_path) = interp {
-        writeln!(out, "\t{} {}", interp_path.display(), fmt_addr(interp_addr))?;
+        writeln!(out, "\t{}", interp_path.display())?;
     }
 
     Ok(())
@@ -1597,13 +1580,8 @@ fn process_file(
     let mut all_entries: Vec<DepEntry> = Vec::new();
 
     // Seed: assign load addresses for direct deps.
-    let mut addr_seed: u64 = 0x1234_5678_9abc_def0;
 
     for libname in &direct_needed {
-        addr_seed = addr_seed
-            .wrapping_mul(0x5851_f42d_4c95_7f2d)
-            .wrapping_add(0x1405_7b7e_f767_814f);
-        let load_addr = fake_load_addr(addr_seed);
         let resolution = match search.resolve(libname) {
             Some(p) => LibResolution::Found(p.clone()),
             None => LibResolution::NotFound,
@@ -1616,7 +1594,6 @@ fn process_file(
         all_entries.push(DepEntry {
             name: libname.clone(),
             resolution,
-            load_addr,
         });
         if let Some(dep_path) = dep_path {
             match Elf::load(&dep_path) {
@@ -1628,7 +1605,6 @@ fn process_file(
                         &mut all_entries,
                         opts.verbose,
                         out,
-                        1,
                     )?;
                 }
                 Err(e) if opts.verbose => {
@@ -1645,9 +1621,7 @@ fn process_file(
 
     // Interpreter.
     let interp = extract_interpreter(&elf);
-    let interp_addr = fake_load_addr(0xdead_c0de_feed_face);
-
-    print_deps(out, &all_entries, interp.as_deref(), interp_addr)?;
+    print_deps(out, &all_entries, interp.as_deref())?;
 
     // Verbose: version information.
     if opts.verbose
@@ -2063,25 +2037,6 @@ mod tests {
         let dynstr = elf.dynstr(Some(&dyn_entries));
         let needed = collect_needed(&elf, dynstr, &dyn_entries);
         assert_eq!(needed, libs);
-    }
-
-    #[test]
-    fn test_fake_load_addr_range() {
-        // Addresses should fall in the 0x7f....... range typical for shared libs.
-        for seed in [0u64, 1, 0xdead_beef, u64::MAX] {
-            let addr = fake_load_addr(seed);
-            assert!(addr >= 0x0000_7f00_0000_0000, "addr too low: {addr:#x}");
-            assert!(addr < 0x0001_0000_0000_0000, "addr too high: {addr:#x}");
-        }
-    }
-
-    #[test]
-    fn test_fake_load_addr_page_aligned() {
-        // Generated addresses must be page-aligned (low 12 bits = 0).
-        for seed in [42u64, 1337, 0xffff_ffff] {
-            let addr = fake_load_addr(seed);
-            assert_eq!(addr & 0xfff, 0, "addr {addr:#x} not page-aligned");
-        }
     }
 
     #[test]

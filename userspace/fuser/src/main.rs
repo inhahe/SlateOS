@@ -121,6 +121,106 @@ fn path_matches(link_target: &Path, search_path: &Path) -> bool {
     link_target == search_path || link_target.starts_with(search_path)
 }
 
+/// The signal number `spec` names, or `None` if it names nothing.
+///
+/// Accepts what `fuser -s` accepts: a decimal number, a bare name (`TERM`), or
+/// a prefixed one (`SIGTERM`), case-insensitively. Numbers outside 1..=64 are
+/// rejected rather than passed through -- `kill(pid, 0)` is a permission probe
+/// that kills nothing, and silently turning a typo into one would report
+/// success for a process still running.
+fn signal_number(spec: &str) -> Option<i32> {
+    let spec = spec.trim();
+    if let Ok(n) = spec.parse::<i32>() {
+        return if (1..=64).contains(&n) { Some(n) } else { None };
+    }
+    let name = spec.strip_prefix("SIG").unwrap_or(spec).to_ascii_uppercase();
+    let name = name.strip_prefix("SIG").unwrap_or(&name);
+    Some(match name {
+        "HUP" => 1,
+        "INT" => 2,
+        "QUIT" => 3,
+        "ILL" => 4,
+        "TRAP" => 5,
+        "ABRT" | "IOT" => 6,
+        "BUS" => 7,
+        "FPE" => 8,
+        "KILL" => 9,
+        "USR1" => 10,
+        "SEGV" => 11,
+        "USR2" => 12,
+        "PIPE" => 13,
+        "ALRM" => 14,
+        "TERM" => 15,
+        "STKFLT" => 16,
+        "CHLD" | "CLD" => 17,
+        "CONT" => 18,
+        "STOP" => 19,
+        "TSTP" => 20,
+        "TTIN" => 21,
+        "TTOU" => 22,
+        "URG" => 23,
+        "XCPU" => 24,
+        "XFSZ" => 25,
+        "VTALRM" => 26,
+        "PROF" => 27,
+        "WINCH" => 28,
+        "IO" | "POLL" => 29,
+        "PWR" => 30,
+        "SYS" => 31,
+        _ => return None,
+    })
+}
+
+/// Send `sig` to `pid`.
+///
+/// # Why `kill(2)` and not `SYS_PROCESS_KILL`
+///
+/// The tree has two ways to end a process and they are not interchangeable.
+/// The native `SYS_PROCESS_KILL` (506) takes a PID and an **exit code**, and
+/// `userspace/kill` and `userspace/pgrep` use it with the shell's 128+signal
+/// convention -- 143 for TERM, 137 for KILL. `fuser` is a Linux-compatible
+/// tool whose `-s` argument is a **signal**, so it goes through `kill(2)`,
+/// which takes the signal number the user actually named and lets the libc
+/// decide how that maps. `posix/src/signal.rs` exports it as a C symbol on
+/// this target and routes it to `SYS_SIGNAL_SEND`.
+///
+/// Until 2026-09-10 this printed `fuser: would send KILL to pid 1234` and
+/// returned 0. With `-i` that was worse than a plain no-op: the program asked
+/// "Kill process 1234? (y/N)", waited for the answer, and then did nothing
+/// with it -- so a user who typed `y` was told the thing they had just
+/// authorised had happened.
+#[cfg(unix)]
+fn send_signal(pid: u32, sig: i32) -> Result<(), io::Error> {
+    // SAFETY: `kill` takes two integers by value and returns one. There are no
+    // pointers, no lifetimes and no allocation; the only failure mode is the
+    // documented -1 with errno set, which is read immediately below.
+    unsafe extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+    let target = i32::try_from(pid).map_err(|_| {
+        io::Error::new(io::ErrorKind::InvalidInput, "pid does not fit in pid_t")
+    })?;
+    // SAFETY: as above.
+    if unsafe { kill(target, sig) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+/// The development host has no `kill(2)`.
+///
+/// Refusing is the only honest option and matches `design-decisions.md` 1019:
+/// the caller asked for a process to be ended, and reporting success without
+/// ending it is the failure this whole change exists to remove.
+#[cfg(not(unix))]
+fn send_signal(_pid: u32, _sig: i32) -> Result<(), io::Error> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "this host has no kill(2)",
+    ))
+}
+
 fn find_processes_for_path(search_path: &str) -> FuserResult {
     let search = PathBuf::from(search_path);
     let canonical = fs::canonicalize(&search).unwrap_or_else(|_| search.clone());
@@ -611,6 +711,9 @@ fn fuser_main(args: &[String]) -> i32 {
     }
 
     let mut found_any = false;
+    // A signal that could not be delivered is a failure of the whole run, and
+    // the exit status is the only part of it a script reads.
+    let mut kill_failed = false;
 
     for path in &paths {
         let result = find_processes_for_path(path);
@@ -620,6 +723,10 @@ fn fuser_main(args: &[String]) -> i32 {
             print_fuser_result(&result, verbose);
 
             if let Some(ref signal) = kill_signal {
+                let Some(signum) = signal_number(signal) else {
+                    eprintln!("fuser: unknown signal {}", quoteaf_os(signal));
+                    return 1;
+                };
                 for proc_match in &result.processes {
                     if interactive {
                         eprint!(
@@ -633,13 +740,25 @@ fn fuser_main(args: &[String]) -> i32 {
                             continue;
                         }
                     }
-                    eprintln!("fuser: would send {} to pid {}", signal, proc_match.pid);
+                    if let Err(e) = send_signal(proc_match.pid, signum) {
+                        eprintln!(
+                            "fuser: cannot send {signal} to pid {}: {e}",
+                            proc_match.pid
+                        );
+                        kill_failed = true;
+                    }
                 }
             }
         }
     }
 
-    if found_any { 0 } else { 1 }
+    if kill_failed {
+        1
+    } else if found_any {
+        0
+    } else {
+        1
+    }
 }
 
 // ============================================================================
@@ -680,6 +799,45 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signal_names_are_accepted_in_every_spelling() {
+        assert_eq!(signal_number("TERM"), Some(15));
+        assert_eq!(signal_number("SIGTERM"), Some(15));
+        assert_eq!(signal_number("sigterm"), Some(15));
+        assert_eq!(signal_number(" KILL "), Some(9));
+        assert_eq!(signal_number("HUP"), Some(1));
+        // Two names for one number, both real.
+        assert_eq!(signal_number("ABRT"), signal_number("IOT"));
+        assert_eq!(signal_number("CHLD"), signal_number("CLD"));
+    }
+
+    #[test]
+    fn numeric_specs_are_accepted_within_range() {
+        assert_eq!(signal_number("9"), Some(9));
+        assert_eq!(signal_number("1"), Some(1));
+        assert_eq!(signal_number("64"), Some(64));
+    }
+
+    /// `0` is the case that matters and it is REFUSED.
+    ///
+    /// `kill(pid, 0)` is a permission-and-existence probe that kills nothing.
+    /// Accepting it here would let `fuser -k -s 0` report success for every
+    /// process it "killed", all of which would still be running -- the exact
+    /// shape of defect this crate was fixed to stop having.
+    #[test]
+    fn signal_zero_is_refused_because_it_kills_nothing() {
+        assert_eq!(signal_number("0"), None);
+    }
+
+    #[test]
+    fn nonsense_is_refused_rather_than_guessed() {
+        assert_eq!(signal_number("65"), None);
+        assert_eq!(signal_number("-1"), None);
+        assert_eq!(signal_number("TERMINATE"), None);
+        assert_eq!(signal_number(""), None);
+        assert_eq!(signal_number("SIG"), None);
+    }
 
     #[test]
     fn test_access_type_flags() {

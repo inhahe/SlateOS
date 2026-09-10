@@ -2017,9 +2017,19 @@ impl App {
         let pid = display[self.cursor].0.pid;
         let name = display[self.cursor].0.name.clone();
 
-        // SAFETY: SYS_PROCESS_KILL takes the target PID and exit code.
-        // We pass exit code 9 (SIGKILL equivalent) and 0 for unused arg3.
-        let ret = unsafe { syscall3(SYS_PROCESS_KILL, u64::from(pid), 9, 0) };
+        // SAFETY: SYS_PROCESS_KILL takes the target PID and an exit code, and
+        // 0 for the unused arg3. No pointers cross the boundary.
+        //
+        // 137, NOT 9. The second argument is an exit *code*, not a signal
+        // number, and the tree's convention for "killed by signal N" is the
+        // shell's 128+N -- `userspace/kill` uses 143/137/129/130 for
+        // TERM/KILL/HUP/INT and `userspace/pgrep` matches it. This line passed
+        // 9 under a comment reading "exit code 9 (SIGKILL equivalent)", which
+        // is where the confusion is visible: 9 is SIGKILL's *signal* number,
+        // and as an exit code it is indistinguishable from a program that
+        // exited normally with status 9. Three copies of this call site, and
+        // this was the one that diverged.
+        let ret = unsafe { syscall3(SYS_PROCESS_KILL, u64::from(pid), 137, 0) };
 
         if ret >= 0 {
             self.status_msg = format!("Killed PID {pid} ({name})");

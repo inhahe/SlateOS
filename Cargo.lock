@@ -17429,6 +17429,7 @@ dependencies = [
 name = "swapon"
 version = "0.1.0"
 dependencies = [
+ "posix",
  "quoting",
 ]
 

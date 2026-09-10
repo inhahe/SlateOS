@@ -169,43 +169,61 @@ struct DateTime {
     second: u32, // 0-59
 }
 
-/// Days in each month for a non-leap year (index 0 unused, 1=Jan..12=Dec).
-const DAYS_IN_MONTH: [u32; 13] = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-
 const WEEKDAY_ABBR: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 const MONTH_ABBR: [&str; 13] = [
     "", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
 
-/// True if `year` is a Gregorian leap year.
+/// Whether `year` is a leap year.
+///
+/// Delegates to `civildate`. Kept as a wrapper rather than deleted because
+/// four tests call it -- and clippy reported it "never used" from the non-test
+/// build, which is exactly the reading that would have removed it and broken
+/// them. `--all-targets` and a plain build disagree about dead code, and the
+/// plain build is the one that sounds authoritative.
+/// Only the tests call this now, and `#[cfg(test)]` says so rather than
+/// `#[allow(dead_code)]` -- the first is a fact about who uses it, the second
+/// is a request to stop being told.
+#[cfg(test)]
 fn is_leap_year(year: i64) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+    i32::try_from(year).is_ok_and(civildate::is_leap_year)
 }
 
-/// Days in a given month.
+/// Days in a given month, or 0 for a month outside 1..=12.
+///
+/// Delegates to `civildate`, which answers with a `match` rather than by
+/// indexing a table. The version here read `DAYS_IN_MONTH[month as usize]`
+/// behind a range guard -- correct, but one of two copies of the same table in
+/// this tree, and the copy without the guard is right below.
 fn days_in_month(year: i64, month: u32) -> u32 {
-    if month == 2 && is_leap_year(year) {
-        29
-    } else if (1..=12).contains(&month) {
-        DAYS_IN_MONTH[month as usize]
-    } else {
-        0
-    }
+    let Ok(y) = i32::try_from(year) else {
+        // Not a truncating cast. A year outside `i32` is not a date, and
+        // `as i32` would silently answer about a different year entirely --
+        // 4_294_967_298 would become 2. 0 is what this function already
+        // returns for an impossible month.
+        return 0;
+    };
+    civildate::days_in_month(y, month)
 }
 
 /// Day of week: 0=Mon, 1=Tue, ..., 6=Sun (ISO 8601).
+///
+/// # What this replaced, and the bug in it
+///
+/// Sakamoto's algorithm over a twelve-element table, indexed as
+/// `T[(m - 1) as usize]` with NO range guard. For `month == 0` that is
+/// `(-1) as usize`, which wraps to `usize::MAX` and panics -- and month is
+/// `u32` straight off a parsed timespec, so the guard was the caller's job and
+/// no caller did it. `days_in_month` immediately above DID guard its range,
+/// which is what makes this the kind of defect a reader skims past.
+///
+/// `civildate::day_of_week` computes from the day count and indexes nothing.
 fn day_of_week(year: i64, month: u32, day: u32) -> u32 {
-    // Tomohiko Sakamoto's algorithm. Gives 0=Sunday so we convert.
-    static T: [i64; 12] = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
-    let mut y = year;
-    if month < 3 {
-        y -= 1;
-    }
-    let m = month as i64;
-    let d = day as i64;
-    let dow = ((y + y / 4 - y / 100 + y / 400 + T[(m - 1) as usize] + d) % 7 + 7) % 7;
-    // Sakamoto: 0=Sun,1=Mon..6=Sat -> ISO: 0=Mon..6=Sun
-    ((dow + 6) % 7) as u32
+    let Ok(y) = i32::try_from(year) else {
+        return 0;
+    };
+    // `civildate` counts 0=Sunday; this returns ISO, 0=Monday.
+    (civildate::day_of_week(y, month, day) + 6) % 7
 }
 
 /// Convert Unix epoch seconds to broken-down DateTime.
@@ -1478,8 +1496,48 @@ fn main() {
 // ============================================================================
 
 #[cfg(test)]
+// Panicking on bad data is what a test is for; CLAUDE.md allows these
+// inside `#[cfg(test)]` and requires them everywhere else.
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn day_of_week_survives_a_month_outside_the_calendar() {
+        // The version this replaced indexed `T[(m - 1) as usize]` with no
+        // range guard, so month 0 became `(-1) as usize` -- usize::MAX -- and
+        // panicked. `month` is a u32 straight off a parsed timespec, so the
+        // guard was the caller's job and no caller did it. The function
+        // immediately above it DID guard its range, which is what makes this
+        // the kind of defect a reader skims past.
+        //
+        // Found by `clippy::indexing_slicing`, which this crate was not
+        // subject to until today: it is one of the 134 that inherited neither
+        // `[workspace.lints]` nor the inner attribute.
+        for m in [0_u32, 13, 99, u32::MAX] {
+            let _ = day_of_week(2026, m, 1);
+        }
+        for m in [0_u32, 13, 99, u32::MAX] {
+            assert_eq!(days_in_month(2026, m), 0);
+        }
+    }
+
+    #[test]
+    fn day_of_week_still_agrees_with_the_calendar() {
+        // 2026-09-10 is a Thursday; ISO counts Monday as 0, so Thursday is 3.
+        assert_eq!(day_of_week(2026, 9, 10), 3);
+        // 1970-01-01 was a Thursday.
+        assert_eq!(day_of_week(1970, 1, 1), 3);
+        // A year outside i32 is not a date; answering 0 beats answering about
+        // a different year, which `as i32` would have done silently.
+        assert_eq!(day_of_week(i64::MAX, 9, 10), 0);
+    }
 
     // -- Calendar math tests --
 

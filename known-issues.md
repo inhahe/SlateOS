@@ -128252,6 +128252,160 @@ B-COREUTILS-PANIC-ON-A-NON-UTF-8-ARGUMENT, not this entry, and the tests say so
 where a reader would otherwise take it for a parsing failure.
 
 
+## TD-B-HALF-THE-TREE-IS-NOT-SUBJECT-TO-THE-LINT-POLICY (lane B, 2026-09-10) — ratcheted, 134 open
+
+**In short:** CLAUDE.md requires `#![deny(clippy::all, clippy::pedantic)]` in
+every crate plus five defensive lints in non-test code. **134 of 256 crates**
+under `userspace/`, `services/` and `init/` are subject to none of it. For
+those, `clippy::all` is *warn* rather than *deny*, `pedantic` is off entirely,
+and `unwrap_used`, `expect_used`, `panic`, `indexing_slicing` and
+`arithmetic_side_effects` are all off — so "clippy clean" means something much
+weaker for half the tree than the other half, and nothing in the build says
+which kind of clean you got.
+
+**Including crates I reported clean today.** `crond`, `crontab`, `cpio` and
+`at` are all on the list. Those reports were true and much less informative
+than they sounded.
+
+**How it was found, which is the repeatable part.** Not by looking for it. Gate
+12 compiles the unix-gated half of a changed crate by building for linux; it
+had been running `cargo test`, needing a cross-linker this host lacks, so it
+had never compiled anything. Fixing that produced a sweep of all 57 crates with
+a unix arm — all clean — whose output carried, crate after crate:
+
+    warning: missing `[lints]` to inherit `[workspace.lints]`
+
+The compile was the question. This was the answer to a larger one nobody had
+asked. Third time this week the useful finding came from a check aimed
+elsewhere.
+
+**Why a ratchet and not a fix.** Adding `[lints] workspace = true` to one
+2,700-line crate (`userspace/crond`) produced **147 warnings**: 68 unwraps, 42
+arithmetic side-effects, 33 indexing and slicing panics. Across 134 crates that
+is a programme, not a commit. `scripts/check-workspace-lints.py` with
+`scripts/workspace-lints-baseline.txt` records who is exempt today and refuses
+a *new* one; pre-push gate 21 runs it per pushed sha.
+
+**Proven able to refuse before it was wired**, by stripping `[lints]` from
+`userspace/ar` and confirming `--check` exits 1, then restoring and confirming
+0 and a clean tree. A ratchet that has never been observed to refuse is
+indistinguishable from one with nothing to say.
+
+**The work, when someone does it:** pick a crate, add the two lines, fix what
+it reports. The count may only fall.
+
+**A worked example, with the real number.** `userspace/at` (1,900 lines) was
+put through it on 2026-09-10. With the test module exempted the way the covered
+crates do it — `#[cfg(test)] #[allow(clippy::unwrap_used, ...)]` — the
+NON-TEST count was **102**: 55 arithmetic side-effects, 44 indexing/slicing
+panics, 3 others. Spread across the file, not concentrated, so there is no
+cheap subset. Budget accordingly: this is a crate-sized job each, not a sweep.
+
+The enablement was then reverted and `at` stays on this list, because 99
+visible warnings on one crate while 133 are silent is noise without a plan.
+What was kept is what the lints *found*: `day_of_week` indexed
+`T[(m - 1) as usize]` with no range guard, so month 0 became `usize::MAX` and
+panicked — and `month` is a `u32` straight off a parsed timespec. Both calendar
+helpers now delegate to `civildate`, which computes rather than indexes.
+
+**The lints are an instrument, and using one without keeping it installed is a
+legitimate outcome.** The panic was the deliverable.
+
+## ~~TD-B-THE-UNIX-HALF-GATE-CANNOT-LINK-ON-THIS-HOST~~ (lane B, 2026-09-10) — FIXED the same day
+
+**Fixed by `--no-test`.** The gate asks whether the *other* arm COMPILES.
+Running the linux tests additionally requires a `cc` for
+`x86_64-unknown-linux-gnu` to link with — which this machine lacks — and then
+requires **executing a linux binary on Windows**, which is not possible at all.
+So compile-only is not a weakening; it is the only thing this gate could ever
+have meant here. `scripts/coreutils-check.sh --only linux --no-test` reports
+`clean (linux half checked)` for `userspace/udevd`, and the udevd symlink arm
+that this entry was blocking is restored.
+
+**And a correction to this entry, which was on `main`.** It said the fix "is a
+change to raise rather than make" because `scripts/coreutils-check.sh` is
+"shared with the boot test". It is not: `scripts/boot-test.sh` references it
+**zero** times. Its only readers are the push hook, two gate-wiring checkers,
+and its own test suite — all lane B's. I asserted a lane boundary I had not
+checked and used it to defer a fix I could have made immediately. Thirteenth
+adjacent claim of the day and the first where the consequence was inaction
+rather than a wrong number.
+
+**Also fixed:** the refusal text's "Reproduce and iterate with" command omitted
+`--no-test`, so following the hook's own instructions no longer reproduced what
+the hook ran. That is the same shape as lane A's design-decisions-bands advice
+pointing at a heading instead of a section end — a gate whose instructions do
+not lead to the state it checked.
+
+### Original entry
+
+
+
+**In short:** pre-push gate 12 compiles the unix half of a changed crate by
+building it for `x86_64-unknown-linux-gnu`. That target has no linker on this
+machine — `error: linker \`cc\` not found` — so the gate fails whenever it has
+something to check, and passes only when it has nothing.
+
+**Found by adding a unix-gated arm to `userspace/udevd`**, which had none. The
+crate became the gate's subject for the first time and the push was refused
+with "udevd does not compile, or does not pass its tests". It compiles; it
+cannot be linked here.
+
+**Why this is worse than a broken gate.** The gate derives its scope from the
+files a push changes, so it only builds a crate when that crate's unix arm was
+touched. A gate that fails exactly when it has work and passes the rest of the
+time is indistinguishable, from the tally, from a gate that is doing its job —
+until somebody edits one of the arms it exists to protect. The corollary is
+that **no unix-gated arm under `userspace/` has been compiled on this host**,
+which is the thing gate 12 was written to guarantee.
+
+**What it blocks right now.** `userspace/udevd` should create a real symlink for
+`/dev/disk/by-uuid/<uuid>` rather than nothing; `posix::file::symlink` exists
+and `userspace/backup` already has the pattern. The arm was written and
+reverted rather than shipped behind a gate that would refuse it for an
+unrelated reason. The decoy it replaced — a text file containing `-> sda1` — is
+gone regardless, because a missing link is a visible failure and a text file
+pretending to be one is not.
+
+**The fix is a cross-linker**, not a code change: either a `cc` for
+`x86_64-unknown-linux-gnu` on PATH, or teaching the gate to use a check-only
+build where linking is not what it is verifying. The second is cheaper and
+`cargo check` would answer the question the gate actually asks — does the other
+arm compile — but `scripts/coreutils-check.sh` is shared with the boot test, so
+that is a change to raise rather than make.
+
+## TD-B-WPA-STATE-MACHINE-IS-AN-ISLAND (lane B, 2026-09-10) — open, offered to lane C
+
+**In short:** `userspace/wpa`'s WPA state machine — `SupplicantState`,
+`WpaState`, the BSS table and the association transitions, about 500 lines with
+21 tests — is now defined and never called. Deleting the two personalities that
+fabricated results left it with no production consumer. It is correct code with
+nowhere to run.
+
+**Why it was not deleted with them.** The personalities went under
+`design-decisions.md` 1006: `wpa_supplicant` printed "initialized successfully"
+having opened no socket, and `wpa_cli` answered `status`, `scan` and
+`scan_results` from a fresh in-process state object, so it reported no networks
+in range having never looked. Both stated facts nothing measured. The state
+machine states nothing — it is the one part of that crate that was honest, and
+1006 is about commands that lie, not about code with no caller.
+
+**Where it belongs.** `net80211` has a `Transceiver` trait, an association
+state machine in `assoc.rs`, and a supplicant in `supplicant.rs` — lane C's
+tree, and the place a real one has to live, because it is where the radio is.
+This is a second implementation of the same thing on the wrong side of the lane
+boundary. Offered to lane C in
+`requests/b-c-wpa-state-machine-and-its-tests-are-yours-if-you-want-them.md`.
+
+**If lane C declines**, delete it. An island with a rejected offer is debt with
+a decision behind it, which is the difference between this entry and a pile of
+unreachable code nobody has looked at.
+
+**Not caught by `scripts/scan-orphan-modules.py`**, which scans lane C's roots
+only — the ledger is about `apps/`, `gui/` and `net*/`. Worth knowing that lane
+B has no equivalent gate, so this was found by reading rather than by a check,
+and a second one would not be reported.
+
 ## TD-B-QUOTE-NAMES-COUNTED-ONE-OF-TWO-SPELLINGS (lane B, 2026-09-10) — fixed
 
 **In short:** `scripts/quote-names.py` flags `eprintln!("prog: {path}: {e}")`

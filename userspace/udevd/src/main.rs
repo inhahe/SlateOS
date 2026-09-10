@@ -1282,17 +1282,32 @@ fn apply_device_node(event: &DeviceEvent, rule_result: &RuleResult, log_level: L
                 let _ = fs::create_dir_all(parent);
             }
 
-            // In a real implementation, we would call mknod here. For now,
-            // write a marker file since we may not have the mknod syscall
-            // available in all test environments.
-            let node_info = format!(
-                "{}:{} {} {}\n",
-                event.major,
-                event.minor,
-                rule_result.mode.as_deref().unwrap_or("0660"),
-                event.subsystem,
-            );
-            let _ = fs::write(&dev_path, &node_info);
+            // NO NODE IS CREATED, and nothing is written in its place.
+            //
+            // This used to write a regular file containing "8:0 0660 block",
+            // on the grounds that "we may not have the mknod syscall available
+            // in all test environments". Checked: `posix::stat::mknod`
+            // validates its arguments and returns ENOSYS -- this kernel has no
+            // mknod at all, so the node cannot be made in any environment.
+            //
+            // A text file at /dev/sda is worse than no file. `mkfs /dev/sda`
+            // formats fourteen bytes of text and reports success; /dev/null
+            // ACCUMULATES what is written to it instead of discarding it; and
+            // nothing downstream can tell a regular file from a block device
+            // without stat, which no caller does. An absent node is an obvious
+            // failure. A node that is secretly a text file is a silent one,
+            // and it fails somewhere else, later, to somebody who did not
+            // write this line.
+            //
+            // 1019: what does the caller lose if we proceed? The distinction
+            // between a device and a file, undetectably. So we refuse.
+            if !nodes_unsupported_reported(log_level) {
+                eprintln!(
+                    "udevd: cannot create {dev_path} ({}:{}): this kernel has \
+                     no mknod, so no device node is created for any device",
+                    event.major, event.minor
+                );
+            }
 
             // Apply permissions.
             if let Some(ref mode) = rule_result.mode
@@ -1347,9 +1362,51 @@ fn create_dev_symlink(link: &str, target_name: &str, log_level: LogLevel) {
     // Remove existing link first.
     let _ = fs::remove_file(&link_path);
 
-    // Write a symlink marker (actual symlink creation would use the symlink
-    // syscall; for now we write a text marker for portability).
-    let _ = fs::write(&link_path, format!("-> {target_name}\n"));
+    // A REAL symlink. This used to create a regular file containing
+    // "-> sda1", justified as portability -- but `posix::file::symlink` exists
+    // and `userspace/backup` already has this exact pattern, so the
+    // portability problem was solved in this tree and this did not use the
+    // solution. A text file at /dev/disk/by-uuid/<uuid> resolves to nothing:
+    // every caller that follows the link gets its contents instead.
+    //
+    // This arm was written, reverted, and restored within the hour. Adding the
+    // first unix-gated arm to this crate brought it into pre-push gate 12,
+    // which compiled the other half by BUILDING AND TESTING for
+    // x86_64-unknown-linux-gnu -- and this host has no `cc` to link with, nor
+    // any way to execute a linux binary. The gate now compiles that arm
+    // without linking, which is the question it was always asking.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        if let Err(e) = symlink(target_name, &link_path) {
+            eprintln!("udevd: symlink {link_path} -> {target_name}: {e}");
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        // The development host. Saying so beats writing a decoy the host would
+        // then treat as an ordinary file.
+        if log_level >= LogLevel::Debug {
+            eprintln!(
+                "udevd: not creating {link_path} -> {target_name}: symlinks                  are unavailable on this build host"
+            );
+        }
+    }
+}
+
+/// Whether the "no mknod" message has already been printed.
+///
+/// Once per run, not once per device: a machine with forty block devices
+/// would otherwise print forty identical lines and bury everything else udevd
+/// has to say. The fact is about the kernel, not about any one device.
+fn nodes_unsupported_reported(log_level: LogLevel) -> bool {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static REPORTED: AtomicBool = AtomicBool::new(false);
+    // At Debug the operator asked for every device, so never suppress.
+    if log_level >= LogLevel::Debug {
+        return false;
+    }
+    REPORTED.swap(true, Ordering::Relaxed)
 }
 
 // ============================================================================

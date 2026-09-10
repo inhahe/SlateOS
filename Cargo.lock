@@ -74,6 +74,9 @@ dependencies = [
 [[package]]
 name = "at"
 version = "0.1.0"
+dependencies = [
+ "civildate",
+]
 
 [[package]]
 name = "audit"

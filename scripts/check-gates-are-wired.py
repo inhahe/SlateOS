@@ -363,6 +363,27 @@ def analyse(path: Path) -> tuple[set[str], set[str], list[str]]:
             runs.update(scripts)
             continue
 
+        # A call site that runs a FAMILY of scripts chosen at run time cannot
+        # resolve to one path, and refusing the build over that is method 5's
+        # mistake from the docstring above. Each such shape is named here with
+        # what it runs and why it cannot be written literally -- an unexplained
+        # exemption is indistinguishable from a defect somebody wanted to stop
+        # seeing.
+        #
+        # Deliberately NOT resolved by turning the variable into a wildcard and
+        # globbing: that would credit every matching script as "run" on the
+        # strength of a name, which is the over-count this checker exists to
+        # prevent. These are credited as run only because the loop above them
+        # is bounded by `[ -f "$suite" ] || continue`, so the family is exactly
+        # the test-*.py that exist.
+        if "$suite" in line and "suite-$base" in line:
+            # pre-push gate 20: for each scripts/<name>.py in the push, run
+            # scripts/test-<name>.py if it exists. 22 of the 150 scripts have
+            # one; which of them run depends on the push, so no literal path
+            # can appear here.
+            runs.update(q.name for q in path.parent.glob("test-*.py"))
+            continue
+
         unresolved.append(f"{path.name}: cannot tell what this runs: "
                           f"{line.strip()[:110]}")
 

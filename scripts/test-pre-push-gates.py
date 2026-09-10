@@ -58,6 +58,9 @@ NUMBER_WORDS = {
     "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
     "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16,
     "seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20,
+    "twenty-one": 21, "twenty-two": 22, "twenty-three": 23, "twenty-four": 24,
+    "twenty-five": 25, "twenty-six": 26, "twenty-seven": 27,
+    "twenty-eight": 28, "twenty-nine": 29, "thirty": 30,
 }
 
 # `^#   4. ...` -- an entry in the header's numbered list.
@@ -130,7 +133,13 @@ def test_the_hook_exists_and_is_a_shell_script(text):
 
 def test_the_header_count_matches_the_numbered_list(text):
     """The rot that prompted this file: "Seven gates" over eight of them."""
-    m = re.search(r"^# (\w+) gates at the push boundary", text, re.MULTILINE)
+    # `[\w-]`, not `\w`: English writes "twenty-one" with a hyphen, and a
+    # pattern that cannot match one reports "the header states a count" as
+    # FALSE rather than reporting a wrong count -- so the twenty-first gate
+    # looked like a hook with no header at all. Lane A hit the identical defect
+    # in an alias pattern of theirs the same morning; a character class is a
+    # claim about the language, and `\w` claims English has no hyphens.
+    m = re.search(r"^# ([\w-]+) gates at the push boundary", text, re.MULTILINE)
     if not check("the header states a count", m is not None, True):
         return
     word = m.group(1).lower()

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Nineteen gates at the push boundary. Any one of them aborts the push.
+# Twenty-one gates at the push boundary. Any one of them aborts the push.
 #
 #   1. Refuse to publish the operator's private files (`todo2.txt`).
 #   2. Refuse to publish a command name that nothing can produce an executable
@@ -30,6 +30,9 @@
 #      because that gate is then not running at all — argparse exits 2 and
 #      reaches no verdict, or a hand-rolled argv scan ignores the flag and
 #      answers a different question.
+#  20. Refuse to publish a `scripts/*.py` whose own test suite fails.
+#  21. Refuse to publish a crate that is not subject to the workspace's
+#      own lint policy.
 #
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented, and it was wrong again the moment gate 13 was written --
@@ -626,6 +629,174 @@ if [ "$skip_readdef" != "1" ]; then
             fi
         done
     fi
+fi
+
+# Gate 20: a tooling script's own suite, for every scripts/*.py being pushed.
+#
+# 22 scripts have a paired scripts/test-<name>.py. main went red three times on
+# 2026-09-10 because somebody edited one and ran only the checker's
+# `--selftest` -- once me, twice lane A. Both are worth running and they answer
+# DIFFERENT questions: `--selftest` asks whether the checker's rule still holds
+# against fixtures it carries, and `test-<name>.py` asks whether the script
+# still behaves -- its exit codes, its output format, the advice it prints.
+# Lane A's failure was in advice text, which no fixture of the checker's own
+# could have seen: the advice said "insert after line <heading>", so following
+# it produced the violation the checker then reported.
+#
+# Targeted, not blanket. All 35 suites take over ten minutes, and a gate that
+# adds ten minutes to every push is a gate that gets bypassed. An ordinary push
+# runs none of these.
+# ---------------------------------------------------------------------------
+skip_suites=0
+if [ "${ALLOW_TOOLING_SUITE_FAILURE:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_TOOLING_SUITE_FAILURE=1 set — skipping the tooling-suite gate." >&2
+    skip_suites=1
+fi
+# No `[ -n "${pushed_shas# }" ]` guard, unlike the gates that loop over the
+# shas: `touches` already asks `git rev-list $pushed_shas`, so an empty push
+# makes it false and this gate reports itself skipped. Adding the guard would
+# be a second spelling of the same question, and the suite counts guards
+# against sha-loops to keep that correspondence exact.
+touches scripts/ || skip_suites=1
+note_gate tooling-suites "$skip_suites"
+
+suites_failed=0
+suites_ran=""
+if [ "$skip_suites" != "1" ]; then
+    # The same revision range `touches` uses, turned into file names.
+    # `git diff` does not understand `--not --remotes`; that is rev-list
+    # syntax, so the commits are listed first and then asked for their paths.
+    # shellcheck disable=SC2086
+    changed_scripts=$(git rev-list $pushed_shas --not --remotes="$remote_name"                           2>/dev/null                       | xargs -r git diff-tree --no-commit-id --name-only -r                           2>/dev/null                       | grep -E '^scripts/[^/]+\.py$' | sort -u)
+    for f in $changed_scripts; do
+        base=$(basename "$f")
+        case "$base" in
+            test-*) continue ;;   # a suite is not its own subject
+        esac
+        suite="${repo_root:-.}/scripts/test-$base"
+        [ -f "$suite" ] || continue
+        suites_ran="$suites_ran $base"
+        if ! run_checker "suite-$base" "$py" "$suite"; then
+            suites_failed=1
+        fi
+    done
+    # Say what was run, or that nothing was. A gate that decided internally it
+    # had nothing to do appears in the `ran:` tally exactly like one that
+    # passed -- lane A's TD-B-A-GATE-THAT-PASSES-BY-SKIPPING-IS-REPORTED-AS-
+    # HAVING-RUN, which landed while this gate was being written and describes
+    # it precisely.
+    if [ -n "$suites_ran" ]; then
+        echo "pre-push: tooling suites run:$suites_ran" >&2
+    else
+        echo "pre-push: no scripts/*.py in this push has a paired test suite" >&2
+    fi
+fi
+
+# Gate 21: every crate is subject to `[workspace.lints]`.
+#
+# CLAUDE.md requires `#![deny(clippy::all, clippy::pedantic)]` in every crate
+# plus five defensive lints in non-test code -- unwrap_used, expect_used,
+# panic, indexing_slicing, arithmetic_side_effects. The workspace declares all
+# of it. A crate is only SUBJECT to it if its manifest says `[lints] workspace
+# = true` or its source carries the inner attribute.
+#
+# On 2026-09-10, 134 of 256 crates under userspace/, services/ and init/ had
+# neither. For those, clippy::all is `warn` rather than `deny`, pedantic is
+# off, and all five defensive lints are off -- so "clippy clean" meant
+# something much weaker for half the tree than for the other half, and nothing
+# in the build said which kind of clean you had.
+#
+# Found sideways. Fixing gate 12 to compile the unix half without linking
+# produced a sweep of all 57 crates with a unix arm, and its output carried
+# `warning: missing [lints] to inherit [workspace.lints]` for crate after
+# crate. The compile was the question; this was the answer to a bigger one.
+#
+# A ratchet, not a fix: adding the lints to one 2,700-line crate produced 147
+# warnings. The baseline records who is exempt today and the list may only
+# shrink.
+skip_wslints=0
+if [ "${ALLOW_UNLINTED_CRATE:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_UNLINTED_CRATE=1 set — skipping the workspace-lints gate." >&2
+    skip_wslints=1
+fi
+wslints="${repo_root:-.}/scripts/check-workspace-lints.py"
+[ -f "$wslints" ] || skip_wslints=1
+# The baseline is in scope for the reason every ratchet's is: hand-editing the
+# waiver list is the one way to defeat this without the bypass, so the push
+# that carries the edit must re-verify it.
+touches userspace/ services/ init/ \
+        scripts/check-workspace-lints.py scripts/workspace-lints-baseline.txt \
+        || skip_wslints=1
+# Nothing being published is nothing to judge -- and this is what stops the
+# --head loop below degrading to zero runs after note_gate has already recorded
+# the gate as having run.
+[ -n "${pushed_shas# }" ] || skip_wslints=1
+note_gate workspace-lints "$skip_wslints"
+
+wslints_failed=0
+if [ "$skip_wslints" != "1" ]; then
+    # The checker before its verdict: its whole output is a COUNT, the one
+    # shape where a scanner that stopped scanning and a tree that improved
+    # print the same thing. No --head; the fixtures are string literals.
+    if ! run_checker workspace-lints-selftest "$py" "$wslints" --selftest; then
+        echo "pre-push: check-workspace-lints.py FAILED ITS OWN SELF-TEST — its count is not trustworthy." >&2
+        wslints_failed=1
+    else
+        for sha in $pushed_shas; do
+            if ! run_checker "workspace-lints-$sha" "$py" "$wslints" \
+                             --check --head "$sha"; then
+                wslints_failed=1
+            fi
+        done
+    fi
+fi
+
+if [ "$wslints_failed" = "1" ]; then
+    cat >&2 <<EOF
+
+pre-push: REFUSING to push — a crate is not subject to the workspace's lint
+policy.
+
+For a crate without \`[lints] workspace = true\`, \`clippy::all\` is *warn*
+rather than *deny*, \`pedantic\` is off entirely, and all five of CLAUDE.md's
+defensive lints — unwrap_used, expect_used, panic, indexing_slicing,
+arithmetic_side_effects — are off. Running clippy on it and seeing nothing
+means much less than it does elsewhere in this tree, and nothing else says so.
+
+Add to the crate's Cargo.toml:
+
+    [lints]
+    workspace = true
+
+Do NOT add a line to scripts/workspace-lints-baseline.txt instead. That list
+records the 134 crates that were already like this when the gate was written;
+a NEW one arriving unlinted is the thing this gate exists to stop.
+
+To push anyway:
+
+    ALLOW_UNLINTED_CRATE=1 git push \$remote_name ...
+EOF
+    fail=1
+fi
+
+if [ "$suites_failed" = "1" ]; then
+    cat >&2 <<EOF
+
+pre-push: REFUSING to push — a tooling script's own test suite fails.
+
+The script's `--selftest` passing does not cover this. That asks whether the
+checker's RULE still holds against fixtures the checker carries; the suite
+above asks whether the SCRIPT still behaves — its exit codes, its output
+format, and the advice it prints to whoever it refuses.
+
+Three of 2026-09-10's red builds were exactly this, each found seventeen
+minutes into a boot test by a suite that runs in seconds here.
+
+To push anyway:
+
+    ALLOW_TOOLING_SUITE_FAILURE=1 git push $remote_name ...
+EOF
+    fail=1
 fi
 
 if [ "$readdef_failed" = "1" ]; then
@@ -2290,8 +2461,19 @@ if [ "$skip_unixhalf" != "1" ]; then
     # uninstalled. Usage errors here exit 64, not 2, so a future renamed flag
     # cannot be read as that decline; see the script's "## Exit codes".
     # shellcheck disable=SC2086
+    # `--no-test` is not a weakening; it is the only thing this gate could
+    # ever have meant on this host. The question it asks is whether the OTHER
+    # arm COMPILES. Running the linux tests additionally needs a `cc` for
+    # x86_64-unknown-linux-gnu to link with, which this machine lacks, and
+    # then needs to EXECUTE a linux binary on Windows, which is not possible
+    # at all. Without this flag the gate failed with "linker `cc` not found"
+    # the first time it had a crate to check -- and because it takes its
+    # scope from the files a push changes, it failed exactly when it had work
+    # and passed the rest of the time, which from the tally is
+    # indistinguishable from a gate doing its job. See known-issues
+    # TD-B-THE-UNIX-HALF-GATE-CANNOT-LINK-ON-THIS-HOST.
     if ! run_checker --may-skip coreutils-unix-half \
-                     bash "$cucheck" --only linux $_uh_scope; then
+                     bash "$cucheck" --only linux --no-test $_uh_scope; then
         unixhalf_failed=1
     fi
     # run_checker returns 0 for an allowed skip, so the gate has to correct its
@@ -2324,13 +2506,13 @@ The crates named are the ones this push changed that contain a
 platform-conditional arm at all. A crate you edited and do not see there has
 none, so compiling it for Linux would have compiled the same source twice.
 
-Reproduce and iterate with:
+Reproduce exactly what the gate ran:
 
-    bash scripts/coreutils-check.sh --only linux $_uh_scope
+    bash scripts/coreutils-check.sh --only linux --no-test $_uh_scope
 
 and narrow it while fixing:
 
-    bash scripts/coreutils-check.sh --only linux --no-test $_uh_scope
+    bash scripts/coreutils-check.sh --only linux --no-test --no-clippy $_uh_scope
     bash scripts/coreutils-check.sh --only linux --no-clippy $_uh_scope -- chown
 
 Full output is kept at the path named above.

@@ -57,6 +57,13 @@ That is a statement about damage, not about correctness, and for a while it
 was doing duty as both. Reading the *wrong* repository breaks nothing and
 reports nothing -- so both git calls below select their repository through
 `gitenv.clean_env()`, not by `cwd` alone. See the comment on that import.
+
+
+When you edit this file, `scripts/test-gittree.py` runs at push time: the
+pre-push hook runs the paired suite of every `scripts/*.py` being pushed.
+That gate exists because three of 2026-09-10's red builds were a tooling
+script edited with only its `--selftest` run, each found seventeen minutes
+into a boot test by a suite that takes seconds.
 """
 
 from __future__ import annotations

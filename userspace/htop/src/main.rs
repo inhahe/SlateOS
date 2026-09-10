@@ -784,56 +784,6 @@ fn uid_to_user(uid: u32) -> String {
     uid.to_string()
 }
 
-/// Bytes from `/proc` rendered for a terminal.
-///
-/// A command name and its arguments are **bytes** -- they come from `argv`,
-/// and our filesystem allows every byte but `/` and NUL. This program has to
-/// put them on a screen, so something has to happen to a byte that is not
-/// valid UTF-8.
-///
-/// What used to happen is that the whole process disappeared: the reader went
-/// through `read_to_string`, which fails on such a name, and `read_process`
-/// returned `None`. A process viewer that hides exactly the processes with
-/// unusual names is worse than one that renders them oddly.
-///
-/// `\xNN` per invalid byte, not `from_utf8_lossy`: `CLAUDE.md` self-review
-/// item 7 forbids the lossy conversion because U+FFFD is silent -- it does not
-/// say a byte was lost, and two different names can become the same string.
-/// This is explicit and does not collide.
-fn display_bytes(raw: &[u8]) -> String {
-    match core::str::from_utf8(raw) {
-        Ok(text) => text.to_string(),
-        Err(_) => {
-            let mut out = String::with_capacity(raw.len());
-            let mut rest = raw;
-            loop {
-                match core::str::from_utf8(rest) {
-                    Ok(text) => {
-                        out.push_str(text);
-                        return out;
-                    }
-                    Err(e) => {
-                        let good = e.valid_up_to();
-                        if let Some(text) =
-                            rest.get(..good).and_then(|b| core::str::from_utf8(b).ok())
-                        {
-                            out.push_str(text);
-                        }
-                        let bad = e.error_len().unwrap_or(1);
-                        for b in rest.get(good..good.saturating_add(bad)).unwrap_or_default() {
-                            out.push_str(&format!("\\x{b:02x}"));
-                        }
-                        let Some(next) = rest.get(good.saturating_add(bad)..) else {
-                            return out;
-                        };
-                        rest = next;
-                    }
-                }
-            }
-        }
-    }
-}
-
 /// Read information about a single process, through [`procinfo`].
 ///
 /// The parsing this used to do itself now lives in `procinfo`, so that
@@ -844,7 +794,7 @@ fn display_bytes(raw: &[u8]) -> String {
 fn read_process(procfs: &procinfo::ProcFs, pid: u32, mem_total_kb: u64) -> Option<ProcessInfo> {
     let stat = procfs.process_stat(u64::from(pid)).ok()??;
 
-    let name = display_bytes(&stat.comm);
+    let name = procinfo::display_bytes(&stat.comm);
     let rss_kb = stat.rss_kib();
     let cpu_ticks = stat.cpu_ticks();
 
@@ -867,9 +817,10 @@ fn read_process(procfs: &procinfo::ProcFs, pid: u32, mem_total_kb: u64) -> Optio
     };
 
     let uid = procfs
-        .process_uid(u64::from(pid))
+        .process_status(u64::from(pid))
         .ok()
         .flatten()
+        .and_then(|st| st.uid)
         .unwrap_or(0);
 
     let shr_kb = procfs
@@ -891,7 +842,7 @@ fn read_process(procfs: &procinfo::ProcFs, pid: u32, mem_total_kb: u64) -> Optio
             || format!("[{name}]"),
             |args| {
                 args.iter()
-                    .map(|a| display_bytes(a))
+                    .map(|a| procinfo::display_bytes(a))
                     .collect::<Vec<_>>()
                     .join(" ")
             },
@@ -2218,59 +2169,8 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{cpu_bar_fractions, display_bytes};
+    use super::cpu_bar_fractions;
     use procinfo::CpuTimes;
-
-    /// The ordinary case costs nothing and changes nothing.
-    #[test]
-    fn valid_utf8_passes_through_unchanged() {
-        assert_eq!(display_bytes(b"bash"), "bash");
-        assert_eq!(display_bytes("na\u{ef}ve".as_bytes()), "na\u{ef}ve");
-        assert_eq!(display_bytes(b""), "");
-    }
-
-    /// An invalid byte is shown, not swallowed. This is the case that used to
-    /// remove the whole process from the list: the old reader went through
-    /// `read_to_string`, which fails, and `read_process` returned `None`.
-    #[test]
-    fn an_invalid_byte_is_shown_as_hex() {
-        assert_eq!(display_bytes(b"od\xffd"), r"od\xffd");
-        assert_eq!(display_bytes(b"\xc3"), r"\xc3");
-    }
-
-    /// The valid parts either side of a bad byte survive intact.
-    #[test]
-    fn text_around_an_invalid_byte_is_kept() {
-        assert_eq!(display_bytes(b"a\xffb\xfec"), r"a\xffb\xfec");
-        // `\xc3\xa9` is a valid `é`; the `\xff` after it is not.
-        assert_eq!(display_bytes(b"\xc3\xa9\xff"), "\u{e9}\\xff");
-    }
-
-    /// The reason this is not `from_utf8_lossy`: that maps every invalid byte
-    /// to U+FFFD, so two different names become the same string and a viewer
-    /// cannot tell one process from another. `CLAUDE.md` self-review item 7
-    /// calls the lossy conversion silent data corruption; here it would be
-    /// corruption of the very thing the user is reading.
-    ///
-    /// The second assertion is the one that makes the point: it shows the
-    /// alternative really does collide, rather than asserting that ours does
-    /// not and leaving the comparison to the reader.
-    #[test]
-    fn two_different_invalid_names_do_not_collide() {
-        assert_ne!(display_bytes(b"x\xff"), display_bytes(b"x\xfe"));
-        assert_eq!(
-            String::from_utf8_lossy(b"x\xff"),
-            String::from_utf8_lossy(b"x\xfe"),
-            "if this ever fails, from_utf8_lossy has changed and this test's premise with it"
-        );
-    }
-
-    /// A truncated multi-byte sequence at the very end has no continuation to
-    /// consume, which is the loop's one exit that is not `Ok`.
-    #[test]
-    fn a_truncated_sequence_at_the_end_terminates() {
-        assert_eq!(display_bytes(b"ok\xe2\x82"), r"ok\xe2\x82");
-    }
 
     /// The bars divide the **interval**, which is the whole point of the
     /// change that introduced this function. A CPU that was 90% idle since

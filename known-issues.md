@@ -126884,10 +126884,36 @@ Two things the crate had to grow to absorb it, both worth having anyway:
   person. Neither is wrong and every program that computed it privately picked
   one silently -- which is the whole shape of this entry.
 
-Remaining: `ps`, `free`, `coreutils`'s `free`, `earlyoom`, `iostat`, `hwinfo`,
-`lsmem`, `numactl`, `hwclock`. `ps` is next: it is the only one that still
-carries its own `const PAGE_SIZE_KB: u64 = 16;`, and it reads the same
-`/proc/<pid>/stat` fields the crate now parses.
+**Two down, eight to go.** `ps` moved on 2026-09-10 and, like `htop`, no
+longer opens anything under `/proc`. **No program in the tree now carries a
+private `PAGE_SIZE_KB`.**
+
+The crate grew three more things to absorb it:
+
+* four more `/proc/<pid>/stat` fields -- `pgrp`, `session`, `tty_nr`,
+  `starttime_ticks`;
+* `ProcessStatus`, which **replaced** the `status_uid` free function rather
+  than joining it. `ps` needs the GID, the supplementary groups and the `Vm*`
+  figures from the same file, and a `status_gid`/`status_groups`/… beside
+  `status_uid` would have been four scans of one file and four places to
+  disagree about what `Uid:`'s four columns mean;
+* `display_bytes`, moved out of `htop`. That one is the lesson of this tick:
+  see below.
+
+**`ps` was one edit away from a fourth private answer to the same question.**
+Converted mechanically, its `comm` came out as `String::from_utf8_lossy`, which
+`CLAUDE.md` item 7 forbids and which `htop` had already been given a correct
+answer for a tick earlier. Two callers, two different renderings of the same
+bytes, one day apart -- inside the crate that exists to stop exactly that.
+`display_bytes` now lives in `procinfo` with its five tests, and its doc says
+why a crate that disclaims formatting owns one formatter: the crate hands out
+**bytes** on purpose, so every caller inherits the same problem, and one
+correct answer is the point.
+
+Remaining: `free`, `coreutils`'s `free`, `earlyoom`, `iostat`, `hwinfo`,
+`lsmem`, `numactl`, `hwclock`. The two `free`s are next and should be compared
+against each other first -- two implementations of one command in one tree is
+the sharpest available test of whether they already disagree.
 
 Remaining: `ps`, `free`, `coreutils`'s `free`, `earlyoom`, `iostat`, `hwinfo`,
 `lsmem`, `numactl`, `hwclock`. `ps` is the one that still carries its own

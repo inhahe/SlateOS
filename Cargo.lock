@@ -14096,6 +14096,9 @@ dependencies = [
 [[package]]
 name = "ps"
 version = "0.1.0"
+dependencies = [
+ "procinfo",
+]
 
 [[package]]
 name = "ps2pdf-cli"

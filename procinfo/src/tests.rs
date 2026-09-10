@@ -680,6 +680,10 @@ fn process_stat_reads_the_fields_proc5_numbers() {
     assert_eq!(st.comm, b"bash");
     assert_eq!(st.state, b'R');
     assert_eq!(st.ppid, 1);
+    assert_eq!(st.pgrp, 42);
+    assert_eq!(st.session, 42);
+    assert_eq!(st.tty_nr, 0);
+    assert_eq!(st.starttime_ticks, 99);
     assert_eq!(st.utime_ticks, 1234);
     assert_eq!(st.stime_ticks, 567);
     assert_eq!(st.priority, 20);
@@ -764,14 +768,41 @@ fn statm_reads_three_page_counts() {
     assert!(ProcessStatm::parse(b"1 2").is_none());
 }
 
-/// `Uid:` carries four values and the real UID is the first. Taking a
-/// different one is a one-character change at a call site and a security
-/// question, which is why the choice is made here once.
+/// `Uid:` and `Gid:` each carry four values -- real, effective, saved-set,
+/// filesystem -- and the real one is the first. Taking a different one is a
+/// one-character change at a call site and a security question, which is why
+/// the choice is made in the crate once.
 #[test]
-fn status_uid_takes_the_real_uid_of_four() {
-    let content = b"Name:\tbash\nUid:\t1000\t1001\t1002\t1003\nGid:\t100\n";
-    assert_eq!(status_uid(content), Some(1000));
-    assert_eq!(status_uid(b"Name:\tbash\n"), None);
+fn status_takes_the_real_id_of_four() {
+    let content = b"Name:\tbash\n\
+Uid:\t1000\t1001\t1002\t1003\n\
+Gid:\t100\t101\t102\t103\n\
+Groups:\t4 24 27\n\
+VmSize:\t  4096 kB\n\
+VmRSS:\t   512 kB\n";
+    let st = ProcessStatus::parse(content);
+    assert_eq!(st.uid, Some(1000), "real, not effective");
+    assert_eq!(st.gid, Some(100), "real, not effective");
+    assert_eq!(st.groups, vec![4, 24, 27]);
+    assert_eq!(st.vm_size_kib, Some(4096));
+    assert_eq!(st.vm_rss_kib, Some(512));
+}
+
+/// A kernel thread has no address space, so `VmSize`/`VmRSS` are absent -- and
+/// absent is not zero. It may also genuinely have no supplementary groups,
+/// which is an empty list rather than a missing one.
+#[test]
+fn a_status_without_vm_fields_reports_none_not_zero() {
+    let st = ProcessStatus::parse(b"Name:\tkthreadd\nUid:\t0\t0\t0\t0\n");
+    assert_eq!(st.uid, Some(0));
+    assert_eq!(st.vm_size_kib, None);
+    assert_eq!(st.vm_rss_kib, None);
+    assert!(st.groups.is_empty());
+
+    // …and a status with nothing in it reports nothing, not zeros.
+    let empty = ProcessStatus::parse(b"");
+    assert_eq!(empty.uid, None);
+    assert_eq!(empty.gid, None);
 }
 
 /// NUL-separated, NUL-terminated, and not text.
@@ -803,7 +834,7 @@ fn procfs_reads_one_process() {
     let st = procfs.process_stat(42).unwrap().unwrap();
     assert_eq!(st.comm, b"bash");
     assert_eq!(procfs.process_statm(42).unwrap().unwrap().shared_pages, 100);
-    assert_eq!(procfs.process_uid(42).unwrap(), Some(1000));
+    assert_eq!(procfs.process_status(42).unwrap().unwrap().uid, Some(1000));
     assert_eq!(
         procfs.process_cmdline(42).unwrap().unwrap(),
         vec![b"/bin/bash".to_vec(), b"-i".to_vec()]
@@ -819,7 +850,7 @@ fn a_vanished_process_is_not_an_error() {
     let procfs = fx.procfs();
     assert_eq!(procfs.process_stat(999).unwrap(), None);
     assert_eq!(procfs.process_statm(999).unwrap(), None);
-    assert_eq!(procfs.process_uid(999).unwrap(), None);
+    assert_eq!(procfs.process_status(999).unwrap(), None);
     assert_eq!(procfs.process_cmdline(999).unwrap(), None);
 }
 
@@ -1043,4 +1074,59 @@ fn used_excluding_cache_needs_every_figure() {
     let m = MemInfo::parse(b"MemTotal: 8000 kB\nMemFree: 1000 kB\nBuffers: 500 kB\n");
     assert_eq!(m.used_kib(), Some(7000), "the simple figure still works");
     assert_eq!(m.used_excluding_cache_kib(), None, "Cached is missing");
+}
+
+// ---------------------------------------------------------------------------
+// Showing bytes to a person
+// ---------------------------------------------------------------------------
+
+/// The ordinary case costs nothing and changes nothing.
+#[test]
+fn valid_utf8_passes_through_unchanged() {
+    assert_eq!(display_bytes(b"bash"), "bash");
+    assert_eq!(display_bytes("na\u{ef}ve".as_bytes()), "na\u{ef}ve");
+    assert_eq!(display_bytes(b""), "");
+}
+
+/// An invalid byte is shown, not swallowed. This is the case that used to
+/// remove the whole process from the list: the old reader went through
+/// `read_to_string`, which fails, and `read_process` returned `None`.
+#[test]
+fn an_invalid_byte_is_shown_as_hex() {
+    assert_eq!(display_bytes(b"od\xffd"), r"od\xffd");
+    assert_eq!(display_bytes(b"\xc3"), r"\xc3");
+}
+
+/// The valid parts either side of a bad byte survive intact.
+#[test]
+fn text_around_an_invalid_byte_is_kept() {
+    assert_eq!(display_bytes(b"a\xffb\xfec"), r"a\xffb\xfec");
+    // `\xc3\xa9` is a valid `é`; the `\xff` after it is not.
+    assert_eq!(display_bytes(b"\xc3\xa9\xff"), "\u{e9}\\xff");
+}
+
+/// The reason this is not `from_utf8_lossy`: that maps every invalid byte
+/// to U+FFFD, so two different names become the same string and a viewer
+/// cannot tell one process from another. `CLAUDE.md` self-review item 7
+/// calls the lossy conversion silent data corruption; here it would be
+/// corruption of the very thing the user is reading.
+///
+/// The second assertion is the one that makes the point: it shows the
+/// alternative really does collide, rather than asserting that ours does
+/// not and leaving the comparison to the reader.
+#[test]
+fn two_different_invalid_names_do_not_collide() {
+    assert_ne!(display_bytes(b"x\xff"), display_bytes(b"x\xfe"));
+    assert_eq!(
+        String::from_utf8_lossy(b"x\xff"),
+        String::from_utf8_lossy(b"x\xfe"),
+        "if this ever fails, from_utf8_lossy has changed and this test's premise with it"
+    );
+}
+
+/// A truncated multi-byte sequence at the very end has no continuation to
+/// consume, which is the loop's one exit that is not `Ok`.
+#[test]
+fn a_truncated_sequence_at_the_end_terminates() {
+    assert_eq!(display_bytes(b"ok\xe2\x82"), r"ok\xe2\x82");
 }

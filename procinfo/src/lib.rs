@@ -57,6 +57,7 @@
 //! real thing is a reader whose error handling is never exercised, and error
 //! handling is most of what item 1 above is about.
 
+use std::fmt::Write as _;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -985,15 +986,15 @@ impl ProcFs {
             .and_then(|c| ProcessStatm::parse(&c)))
     }
 
-    /// The real UID from `/proc/<pid>/status`.
+    /// `/proc/<pid>/status`, parsed.
     ///
     /// # Errors
     ///
     /// As [`ProcFs::process_stat`].
-    pub fn process_uid(&self, pid: u64) -> io::Result<Option<u32>> {
+    pub fn process_status(&self, pid: u64) -> io::Result<Option<ProcessStatus>> {
         Ok(self
             .read_optional(&format!("{pid}/status"))?
-            .and_then(|c| status_uid(&c)))
+            .map(|c| ProcessStatus::parse(&c)))
     }
 
     /// `/proc/<pid>/cmdline`, split into arguments.
@@ -1051,6 +1052,15 @@ pub struct ProcessStat {
     pub state: u8,
     /// Parent process ID.
     pub ppid: u64,
+    /// Process group ID.
+    pub pgrp: u64,
+    /// Session ID.
+    pub session: u64,
+    /// Controlling terminal, as the kernel's packed device number.
+    ///
+    /// Zero means no controlling terminal. Decoding it into `tty7` or
+    /// `pts/3` is a presentation question and deliberately not answered here.
+    pub tty_nr: i64,
     /// User-mode time in ticks.
     pub utime_ticks: u64,
     /// Kernel-mode time in ticks.
@@ -1067,6 +1077,12 @@ pub struct ProcessStat {
     pub vsize_bytes: u64,
     /// Resident set size, in **pages**. See [`ProcessStat::rss_kib`].
     pub rss_pages: u64,
+    /// Start time, in ticks **after boot** -- not a wall-clock instant.
+    ///
+    /// Turning it into one needs `/proc/uptime` and the current time, which is
+    /// two more readings and therefore the caller's job. See
+    /// [`Uptime`].
+    pub starttime_ticks: u64,
 }
 
 impl ProcessStat {
@@ -1113,6 +1129,9 @@ impl ProcessStat {
                 .and_then(|f| f.first().copied())
                 .unwrap_or(b'?'),
             ppid: at(1),
+            pgrp: at(2),
+            session: at(3),
+            tty_nr: at_i(4),
             utime_ticks: at(11),
             stime_ticks: at(12),
             priority: at_i(15),
@@ -1120,6 +1139,7 @@ impl ProcessStat {
             // A process always has at least the one thread running it, so zero
             // here means "the kernel did not say", not "no threads".
             num_threads: fields.get(17).and_then(|f| parse_u64(f)).unwrap_or(1),
+            starttime_ticks: at(19),
             vsize_bytes: at(20),
             rss_pages: at(21),
         })
@@ -1177,16 +1197,60 @@ impl ProcessStatm {
     }
 }
 
-/// The real UID from `/proc/<pid>/status`'s `Uid:` line.
+/// The fields of `/proc/<pid>/status` that anything here reads.
 ///
-/// That line carries four values -- real, effective, saved-set and filesystem
-/// -- and this returns the first. A caller wanting the effective UID wants a
-/// different function, not a different index at the call site.
-#[must_use]
-pub fn status_uid(content: &[u8]) -> Option<u32> {
-    let value = key_value(content, "Uid")?;
-    let first = split_ws(&value).first().copied()?.to_vec();
-    parse_u64(&first).and_then(|v| u32::try_from(v).ok())
+/// # One reader, not one per field
+///
+/// This began as a `status_uid(content)` free function, which is the right
+/// shape for exactly one caller and the wrong one for two: `ps` wants the GID,
+/// the supplementary groups and the `Vm*` figures from the same file, and
+/// adding a `status_gid`, `status_groups`, … beside it would be four scans of
+/// one file and four places to disagree about what `Uid:`'s four columns mean.
+/// Parsing the file once into a struct is the same choice this whole crate is.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProcessStatus {
+    /// The **real** UID -- the first of the four on the `Uid:` line, which
+    /// carries real, effective, saved-set and filesystem in that order.
+    ///
+    /// A caller wanting the effective UID wants another field here, not a
+    /// different index at the call site.
+    pub uid: Option<u32>,
+    /// The real GID, from `Gid:`, on the same four-column rule.
+    pub gid: Option<u32>,
+    /// Supplementary groups, from `Groups:`. Empty is a real answer: a process
+    /// may genuinely have none.
+    pub groups: Vec<u32>,
+    /// `VmSize` in KiB. Absent for a kernel thread, which has no address
+    /// space -- which is why this is an `Option` and not a zero.
+    pub vm_size_kib: Option<u64>,
+    /// `VmRSS` in KiB. Absent for the same reason.
+    pub vm_rss_kib: Option<u64>,
+}
+
+impl ProcessStatus {
+    /// Parse `/proc/<pid>/status`.
+    #[must_use]
+    pub fn parse(content: &[u8]) -> Self {
+        let first_id = |key: &str| -> Option<u32> {
+            let value = key_value(content, key)?;
+            let first = split_ws(&value).first().copied()?.to_vec();
+            parse_u64(&first).and_then(|v| u32::try_from(v).ok())
+        };
+        let groups = key_value(content, "Groups").map_or_else(Vec::new, |value| {
+            split_ws(&value)
+                .iter()
+                .filter_map(|f| parse_u64(f))
+                .filter_map(|v| u32::try_from(v).ok())
+                .collect()
+        });
+        Self {
+            uid: first_id("Uid"),
+            gid: first_id("Gid"),
+            groups,
+            vm_size_kib: key_value(content, "VmSize").and_then(|v| parse_kib(&v)),
+            vm_rss_kib: key_value(content, "VmRSS").and_then(|v| parse_kib(&v)),
+        }
+    }
 }
 
 /// `/proc/<pid>/cmdline` split into its arguments.
@@ -1392,6 +1456,71 @@ impl CpuStats {
             self.total.into_iter().collect()
         } else {
             self.per_cpu.clone()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Showing bytes to a person
+// ---------------------------------------------------------------------------
+
+/// Bytes from `/proc` rendered for a terminal.
+///
+/// # Why a display helper is in a crate that says it does not format
+///
+/// This crate's header says it deals in facts and leaves presentation alone,
+/// and that is still the rule. This is the one exception, and it earns its
+/// place by being the direct consequence of the rule rather than a breach of
+/// it: the crate returns **bytes** for command names and arguments, precisely
+/// because forcing them through UTF-8 would be wrong, and so every caller
+/// inherits the same problem of putting one on a screen. Two callers solved it
+/// two different ways within a day of each other -- `htop` with this function
+/// and `ps` with `from_utf8_lossy` -- which is the duplication this crate
+/// exists to end, one level up.
+///
+/// # `\xNN`, not `from_utf8_lossy`
+///
+/// `CLAUDE.md` self-review item 7 forbids the lossy conversion as silent data
+/// corruption. Here the corruption would be of the thing the user is reading:
+/// U+FFFD maps every invalid byte to the same character, so two different
+/// process names become the same string and a viewer cannot tell one from the
+/// other. This is explicit and does not collide.
+///
+/// The alternative that is worse than either is what `htop` did before it had
+/// this: read through `read_to_string`, fail, and drop the process from the
+/// list. A viewer that hides exactly the processes with unusual names is worse
+/// than one that renders them oddly.
+#[must_use]
+pub fn display_bytes(raw: &[u8]) -> String {
+    match core::str::from_utf8(raw) {
+        Ok(text) => text.to_string(),
+        Err(_) => {
+            let mut out = String::with_capacity(raw.len());
+            let mut rest = raw;
+            loop {
+                match core::str::from_utf8(rest) {
+                    Ok(text) => {
+                        out.push_str(text);
+                        return out;
+                    }
+                    Err(e) => {
+                        let good = e.valid_up_to();
+                        if let Some(text) =
+                            rest.get(..good).and_then(|b| core::str::from_utf8(b).ok())
+                        {
+                            out.push_str(text);
+                        }
+                        let bad = e.error_len().unwrap_or(1);
+                        for b in rest.get(good..good.saturating_add(bad)).unwrap_or_default() {
+                            let _ = write!(out, "\\x{b:02x}");
+                        }
+                        let Some(next) = rest.get(good.saturating_add(bad)..) else {
+                            return out;
+                        };
+                        rest = next;
+                    }
+                }
+            }
         }
     }
 }

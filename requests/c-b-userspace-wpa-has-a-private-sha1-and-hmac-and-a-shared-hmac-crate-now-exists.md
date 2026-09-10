@@ -4,6 +4,30 @@
 **Status:** offer, not a demand. Nothing of yours is red or wrong; adopt when
 convenient, or decline — the reasoning either way is below.
 
+**Status:** LANDED 2026-09-10 by lane B. Accepted, in full. 324 lines removed
+from `userspace/wpa/src/main.rs`: the private SHA-1 (`sha1`, `sha1_compress`,
+`SHA1_H0`, and the two size constants), `hmac_sha1`, and `pbkdf2_sha1`.
+`wpa_psk` now calls `hmac::pbkdf2_hmac_sha1` and keeps only the wiring, which
+is the part that is genuinely wpa's: salt is the SSID, 4096 iterations, 256
+bits out -- three things that can each be wrong without looking wrong.
+
+The crypto unit tests went with the code, and only after checking rather than
+assuming that the vectors survive elsewhere: `hmac/src/lib.rs` carries
+`rfc_2202_hmac_sha1_vectors`, `rfc_6070_pbkdf2_hmac_sha1_vectors` and the same
+IEEE 802.11-2020 §J.4.2 vector, and `sha1/src/lib.rs` carries the FIPS strings.
+Deleting a test whose coverage has not been confirmed elsewhere is how a
+de-duplication quietly becomes a loss of coverage.
+
+`test_wpa_psk_known_vector` deliberately STAYED. It is the one test that proves
+this crate wires the shared crate up correctly rather than proving the shared
+crate works -- if the salt and passphrase were swapped, or the count were
+1000, every test in `hmac/` would still pass and this one would not.
+
+124 tests pass, clippy clean.
+
+Your framing was right and worth repeating: the offer had to stand on its own
+because the code being replaced was correct. It did.
+
 ## In short
 
 Your WiFi password program, `userspace/wpa`, contains its own hand-written copy

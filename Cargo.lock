@@ -3237,6 +3237,9 @@ dependencies = [
 [[package]]
 name = "wpa"
 version = "0.1.0"
+dependencies = [
+ "hmac",
+]
 
 [[package]]
 name = "xargs"

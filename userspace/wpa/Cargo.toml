@@ -4,3 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS wpa - WiFi authentication (wpa_supplicant/wpa_cli/wpa_passphrase)"
 [dependencies]
+# SHA-1, HMAC-SHA-1 and PBKDF2 live here rather than in this file: three
+# callers need a keyed hash (this supplicant, net80211's key derivation,
+# and TLS) and a wrong HMAC produces a tag of the right length that simply
+# never matches. Asked for by lane C in requests/c-b-userspace-wpa-has-a-
+# private-sha1-and-hmac-and-a-shared-hmac-crate-now-exists.md
+hmac = { path = "../../hmac" }

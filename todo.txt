@@ -54892,7 +54892,7 @@ TRIGGER
   `FileSystem::extents` work first; do not wire discard to the existing
   callers on the assumption they pass device offsets.
 
-## A process started with a closed standard descriptor has no protection (lane B, 2026-08-24)
+## ~~A process started with a closed standard descriptor has no protection~~ (lane B, 2026-08-24) -- FIXED 2026-09-10
 
 Found while explaining why `tee out <&-` differs from GNU: it differs because
 Rust's std reopens any closed standard descriptor onto /dev/null before main is
@@ -54916,7 +54916,35 @@ entry point, check descriptors 0, 1 and 2 and open /dev/null (read-only for 0,
 write-only for 1 and 2) for any that is absent.  Doing it in the child rather
 than in the parent's spawn arguments is what makes it unconditional -- a parent
 that deliberately closes a descriptor should not be able to opt the child out
-of it.  See known-issues.md -> "`tee` was five options short ..." for the
+of it.
+
+**Done, exactly there**: `sanitize_standard_fds` in `posix/src/crt.rs`, called
+from `__libc_start_main` immediately after `retrieve_initial_fds` and before
+anything can open a file. That is in the child, before `main`, so a parent
+cannot opt out of it -- and every program linked against our libc gets it,
+which is every program in the tree.
+
+Two details the entry did not anticipate, both from our libc keeping its own
+descriptor table rather than deferring to the kernel:
+
+* **"Is it open" is a question for `fdtable`, not `fcntl`.** `fdtable::get_fd`
+  answers it directly; going through `fcntl(F_GETFD)` would have asked a layer
+  that does not own the answer.
+* **It must run *after* `retrieve_initial_fds`**, because that call is what
+  decides what the table contains. Checking first would inspect the table the
+  process is about to replace.
+
+`/dev/null` unopenable leaves the descriptor closed rather than pointed
+somewhere arbitrary -- the pre-existing behaviour, so nothing is made worse,
+and inventing a destination is the bug this prevents.
+
+Three tests, on the fallback table rather than the syscall loop: that 0 is
+read-only and 1 and 2 write-only (a read-only descriptor 1 turns "printed into
+your file" into "mysteriously failed" -- better, still wrong), and that the
+repair order is **ascending**. The order is load-bearing: `open` returns the
+lowest free descriptor, so working downward would hand descriptor 0's
+`/dev/null` to descriptor 1, which is the substitution the whole function
+exists to prevent, made by the function itself.  See known-issues.md -> "`tee` was five options short ..." for the
 measurement that turned this up (`tee /proc/self/fd/0 <&-` reads the
 descriptor table from inside the process and is the direct test).
 

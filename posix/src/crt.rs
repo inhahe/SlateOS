@@ -373,6 +373,86 @@ static mut INIT_FDS_BUF: [crate::spawn::FdMapEntry; MAX_INIT_FDS] = [crate::spaw
 ///
 /// Writes to static `INIT_FDS_BUF` and to the fd table.  Must be
 /// called from single-threaded context.
+/// Which descriptor gets which kind of `/dev/null`, in the order they are
+/// repaired.
+///
+/// **The order is load-bearing**, not cosmetic. `open` hands out the lowest
+/// free descriptor, so repairing 0 before 1 before 2 makes each `open` land on
+/// the descriptor it is meant for without a `dup2`. Working downward would
+/// give descriptor 0's `/dev/null` to descriptor 1. The loop does not *rely*
+/// on it -- it checks and `dup2`s if the number differs -- but the ordering is
+/// what makes the common case one syscall instead of three.
+///
+/// **The flags are load-bearing too.** A read-only descriptor 1 makes every
+/// `write` fail with `EBADF`, and a write-only descriptor 0 makes every `read`
+/// fail the same way; either turns "the program printed into your file" into
+/// "the program mysteriously failed", which is better but still wrong.
+#[cfg_attr(not(target_os = "none"), allow(dead_code))]
+const STD_FD_FALLBACKS: [(i32, i32); 3] = [
+    (0, crate::fcntl::O_RDONLY),
+    (1, crate::fcntl::O_WRONLY),
+    (2, crate::fcntl::O_WRONLY),
+];
+
+/// Open `/dev/null` onto any of descriptors 0, 1 and 2 that is missing.
+///
+/// # The attack this closes
+///
+/// If descriptor 1 is closed when a program starts, the *first file it opens*
+/// becomes descriptor 1 -- and therefore becomes its standard output.
+/// Everything the program subsequently prints, including diagnostics and
+/// anything it happens to echo, is written into that file, silently, and
+/// whatever the file was for is corrupted. The same trick on descriptor 0
+/// makes an output file double as the program's input.
+///
+/// This is a well-known privilege-escalation shape against setuid binaries,
+/// and it is why glibc does this for setuid programs and Rust's `std` does it
+/// for every program. SlateOS had no equivalent: a search of `posix/` and the
+/// userspace runtime found no `sanitize_standard_fds`, no sweep of 0/1/2, and
+/// no `/dev/null` fallback anywhere in the spawn path.
+///
+/// # Why here
+///
+/// In the child, before `main`, so that a parent which deliberately closed a
+/// descriptor cannot opt its child out of the protection. Immediately after
+/// [`retrieve_initial_fds`], because that is the call that decides what the
+/// descriptor table contains -- checking before it would inspect the wrong
+/// table.
+///
+/// # When it cannot help
+///
+/// If `/dev/null` cannot be opened the descriptor is left closed rather than
+/// pointed somewhere arbitrary. That is the pre-existing behaviour, so nothing
+/// is made worse, and the alternative -- inventing a destination -- is the bug
+/// this function exists to prevent.
+///
+/// Found while explaining why `tee out <&-` differs from GNU; see `todo.txt`
+/// and `known-issues.md`. `tee /proc/self/fd/0 <&-` reads the descriptor table
+/// from inside the process and is the direct test.
+#[cfg(target_os = "none")]
+unsafe fn sanitize_standard_fds() {
+    for (fd, flags) in STD_FD_FALLBACKS {
+        if crate::fdtable::get_fd(fd).is_some() {
+            continue;
+        }
+        // SAFETY: a NUL-terminated literal, and `open` copies what it needs.
+        let got = crate::file::open(c"/dev/null".as_ptr().cast::<u8>(), flags, 0);
+        if got < 0 {
+            // No `/dev/null` on this system. Leaving the descriptor closed is
+            // what happened before this function existed.
+            continue;
+        }
+        if got != fd {
+            let _ = crate::file::dup2(got, fd);
+            let _ = crate::file::close(got);
+        }
+    }
+    // `open` may have set `errno` on a system with no `/dev/null`. Nothing has
+    // run yet that could legitimately have left a value there, so clearing it
+    // keeps the startup path from handing `main` a stale one.
+    crate::errno::set_errno(0);
+}
+
 unsafe fn retrieve_initial_fds() {
     use crate::fdtable;
     use crate::spawn::handle_type_to_kind_for;
@@ -631,6 +711,16 @@ pub unsafe extern "C" fn __libc_start_main(
     // doesn't use fds but sets the pattern for startup order).
     unsafe {
         retrieve_initial_fds();
+    }
+
+    // Immediately after, and before anything can open a file: a program whose
+    // descriptor 1 is closed would otherwise have its first `open` *become*
+    // its standard output. See `sanitize_standard_fds`.
+    #[cfg(target_os = "none")]
+    // SAFETY: startup path, single-threaded, and the descriptor table has just
+    // been established by the call above.
+    unsafe {
+        sanitize_standard_fds();
     }
 
     // Try to retrieve args from the kernel.  The parent may have
@@ -1496,6 +1586,54 @@ pub extern "C" fn gnu_dev_makedev(major: u32, minor: u32) -> u64 {
 
 #[cfg(test)]
 mod tests {
+
+    // -- the standard-descriptor fallback table --
+
+    /// Descriptor 0 read-only, 1 and 2 write-only.
+    ///
+    /// Not a formality. A read-only descriptor 1 makes every `write` fail with
+    /// `EBADF` and a write-only descriptor 0 makes every `read` fail the same
+    /// way, which turns "the program printed into your file" into "the program
+    /// mysteriously failed" -- better, and still wrong.
+    #[test]
+    fn the_null_fallbacks_open_in_the_right_direction() {
+        use super::STD_FD_FALLBACKS;
+        assert_eq!(STD_FD_FALLBACKS[0], (0, crate::fcntl::O_RDONLY));
+        assert_eq!(STD_FD_FALLBACKS[1], (1, crate::fcntl::O_WRONLY));
+        assert_eq!(STD_FD_FALLBACKS[2], (2, crate::fcntl::O_WRONLY));
+        assert_ne!(
+            crate::fcntl::O_RDONLY,
+            crate::fcntl::O_WRONLY,
+            "if these were equal the test above would prove nothing"
+        );
+    }
+
+    /// **Ascending, and that is load-bearing.**
+    ///
+    /// `open` returns the lowest free descriptor, so repairing 0 before 1
+    /// before 2 lands each `open` on the descriptor it is meant for. Working
+    /// downward would hand descriptor 0's `/dev/null` to descriptor 1 -- which
+    /// is the very substitution this whole function exists to prevent, made by
+    /// the function itself.
+    #[test]
+    fn the_null_fallbacks_are_repaired_in_ascending_order() {
+        use super::STD_FD_FALLBACKS;
+        let fds: Vec<i32> = STD_FD_FALLBACKS.iter().map(|(fd, _)| *fd).collect();
+        assert_eq!(fds, vec![0, 1, 2]);
+        assert!(
+            fds.windows(2).all(|w| w[0] < w[1]),
+            "the order is what makes the common case one syscall instead of three"
+        );
+    }
+
+    /// All three, and only those three. A fourth entry would be repairing a
+    /// descriptor the standard says nothing about; a missing one leaves the
+    /// hole open.
+    #[test]
+    fn exactly_the_three_standard_descriptors_are_covered() {
+        use super::STD_FD_FALLBACKS;
+        assert_eq!(STD_FD_FALLBACKS.len(), 3);
+    }
     use super::*;
 
     // -- Constants --

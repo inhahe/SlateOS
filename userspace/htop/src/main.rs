@@ -571,30 +571,11 @@ struct ProcessInfo {
     time_str: String,
 }
 
-/// Memory information from /proc/meminfo.
-#[derive(Default)]
-struct MemInfo {
-    total_kb: u64,
-    free_kb: u64,
-    available_kb: u64,
-    buffers_kb: u64,
-    cached_kb: u64,
-    swap_total_kb: u64,
-    swap_free_kb: u64,
-}
-
-impl MemInfo {
-    fn used_kb(&self) -> u64 {
-        self.total_kb
-            .saturating_sub(self.free_kb)
-            .saturating_sub(self.buffers_kb)
-            .saturating_sub(self.cached_kb)
-    }
-
-    fn swap_used_kb(&self) -> u64 {
-        self.swap_total_kb.saturating_sub(self.swap_free_kb)
-    }
-}
+// `MemInfo` used to be declared here, with `u64` fields that were zero
+// both when the kernel did not export a figure and when the figure was
+// genuinely zero. It is `procinfo::MemInfo` now, whose fields are
+// `Option<u64>` for that reason; this program unwraps to 0 at each use,
+// which is what it always did -- but the unwrap is now visible.
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SortField {
@@ -670,49 +651,19 @@ struct Config {
 }
 
 // ============================================================================
-// /proc readers
+// System readers -- thin wrappers over `procinfo`, plus /etc/passwd
 // ============================================================================
 
+/// Read a small text file, trimmed.
+///
+/// The only caller left is [`uid_to_user`], which reads `/etc/passwd`.
+/// Everything under `/proc` goes through [`procinfo`] now, which reads
+/// bytes rather than a `String` -- the distinction that stopped this
+/// program silently dropping processes whose names are not UTF-8.
 fn read_file(path: &str) -> Option<String> {
     fs::read_to_string(path).ok().map(|s| s.trim().to_string())
 }
 
-fn parse_kb_value(s: &str) -> u64 {
-    s.trim()
-        .trim_end_matches(" kB")
-        .trim_end_matches(" KB")
-        .trim()
-        .parse()
-        .unwrap_or(0)
-}
-
-fn get_meminfo_value(content: &str, key: &str) -> u64 {
-    for line in content.lines() {
-        if let Some((k, v)) = line.split_once(':')
-            && k.trim() == key
-        {
-            return parse_kb_value(v);
-        }
-    }
-    0
-}
-
-/// Read /proc/meminfo.
-fn read_meminfo() -> MemInfo {
-    let mut mem = MemInfo::default();
-    if let Some(content) = read_file("/proc/meminfo") {
-        mem.total_kb = get_meminfo_value(&content, "MemTotal");
-        mem.free_kb = get_meminfo_value(&content, "MemFree");
-        mem.available_kb = get_meminfo_value(&content, "MemAvailable");
-        mem.buffers_kb = get_meminfo_value(&content, "Buffers");
-        mem.cached_kb = get_meminfo_value(&content, "Cached");
-        mem.swap_total_kb = get_meminfo_value(&content, "SwapTotal");
-        mem.swap_free_kb = get_meminfo_value(&content, "SwapFree");
-    }
-    mem
-}
-
-/// Read uptime in seconds from /proc/uptime.
 /// What one CPU's bar shows: the three drawn fractions of the interval.
 ///
 /// Fractions of the *interval*, so they sum to at most one. They do not sum to
@@ -761,6 +712,46 @@ fn cpu_bar_fractions(delta: &procinfo::CpuTimes) -> Option<CpuBar> {
     })
 }
 
+/// Memory and swap, through [`procinfo`].
+fn read_meminfo() -> procinfo::MemInfo {
+    procinfo::ProcFs::new()
+        .memory()
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+}
+
+/// Uptime in whole seconds, through [`procinfo`].
+fn read_uptime() -> u64 {
+    procinfo::ProcFs::new()
+        .uptime()
+        .ok()
+        .flatten()
+        .map_or(0, |u| u.up.as_secs())
+}
+
+/// The three load averages, formatted for the header.
+///
+/// `procinfo` parses these as `f64`; the two decimal places are this program's
+/// choice about how to show them, which is why the formatting is here and the
+/// parsing is not.
+fn read_loadavg() -> (String, String, String) {
+    procinfo::ProcFs::new()
+        .load_average()
+        .ok()
+        .flatten()
+        .map_or_else(
+            || ("0.00".to_string(), "0.00".to_string(), "0.00".to_string()),
+            |l| {
+                (
+                    format!("{:.2}", l.one),
+                    format!("{:.2}", l.five),
+                    format!("{:.2}", l.fifteen),
+                )
+            },
+        )
+}
+
 /// Per-CPU times, through [`procinfo`].
 ///
 /// One read of `/proc/stat`, not two: the reader this replaces opened the file
@@ -773,29 +764,6 @@ fn read_cpu_times() -> Vec<procinfo::CpuTimes> {
         .flatten()
         .map(|s| s.per_cpu_or_total())
         .unwrap_or_default()
-}
-
-fn read_uptime() -> u64 {
-    read_file("/proc/uptime")
-        .and_then(|s| s.split_whitespace().next().map(|v| v.to_string()))
-        .and_then(|s| s.parse::<f64>().ok())
-        .map(|f| f as u64)
-        .unwrap_or(0)
-}
-
-/// Read load average from /proc/loadavg.
-fn read_loadavg() -> (String, String, String) {
-    if let Some(content) = read_file("/proc/loadavg") {
-        let parts: Vec<&str> = content.split_whitespace().collect();
-        if parts.len() >= 3 {
-            return (
-                parts[0].to_string(),
-                parts[1].to_string(),
-                parts[2].to_string(),
-            );
-        }
-    }
-    ("0.00".to_string(), "0.00".to_string(), "0.00".to_string())
 }
 
 /// Resolve a UID to a username via /etc/passwd.  Falls back to the numeric UID.
@@ -1144,7 +1112,7 @@ struct App {
     /// Per-CPU stats (previous snapshot).
     prev_cpu_stats: Vec<procinfo::CpuTimes>,
     /// Memory info.
-    mem: MemInfo,
+    mem: procinfo::MemInfo,
     /// Cursor position in the process list (0-based).
     cursor: usize,
     /// Scroll offset (first visible process index).
@@ -1188,7 +1156,7 @@ impl App {
             prev_ticks: Vec::new(),
             prev_cpu_total: 0,
             prev_cpu_stats: cpu_stats,
-            mem: MemInfo::default(),
+            mem: procinfo::MemInfo::default(),
             cursor: 0,
             scroll: 0,
             filter: String::new(),
@@ -1228,7 +1196,7 @@ impl App {
         let cpu_stats = read_cpu_times();
         self.num_cpus = cpu_stats.len().max(1);
 
-        let mut procs = read_all_processes(self.mem.total_kb);
+        let mut procs = read_all_processes(self.mem.total_kib.unwrap_or(0));
 
         // Compute aggregate CPU delta for per-process CPU%.
         let current_total: u64 = cpu_stats.iter().map(|c| c.total()).sum();
@@ -1398,16 +1366,16 @@ impl App {
             let mut s = String::new();
             let _ = write!(s, "{BOLD_CYAN}Mem{RESET}");
             let bar_width = half_cols.saturating_sub(20);
-            let total = self.mem.total_kb.max(1) as f64;
-            let used_frac = self.mem.used_kb() as f64 / total;
-            let buf_frac = self.mem.buffers_kb as f64 / total;
-            let cache_frac = self.mem.cached_kb as f64 / total;
+            let total = self.mem.total_kib.unwrap_or(0).max(1) as f64;
+            let used_frac = self.mem.used_excluding_cache_kib().unwrap_or(0) as f64 / total;
+            let buf_frac = self.mem.buffers_kib.unwrap_or(0) as f64 / total;
+            let cache_frac = self.mem.cached_kib.unwrap_or(0) as f64 / total;
             self.render_mem_bar_into(&mut s, bar_width, used_frac, buf_frac, cache_frac);
             let _ = write!(
                 s,
                 " {}/{}",
-                format_mib(self.mem.used_kb()),
-                format_mib(self.mem.total_kb)
+                format_mib(self.mem.used_excluding_cache_kib().unwrap_or(0)),
+                format_mib(self.mem.total_kib.unwrap_or(0))
             );
             lines.push(s);
         }
@@ -1417,14 +1385,14 @@ impl App {
             let mut s = String::new();
             let _ = write!(s, "{BOLD_CYAN}Swp{RESET}");
             let bar_width = half_cols.saturating_sub(20);
-            let total = self.mem.swap_total_kb.max(1) as f64;
-            let used_frac = self.mem.swap_used_kb() as f64 / total;
+            let total = self.mem.swap_total_kib.unwrap_or(0).max(1) as f64;
+            let used_frac = self.mem.swap_used_kib().unwrap_or(0) as f64 / total;
             self.render_swap_bar_into(&mut s, bar_width, used_frac);
             let _ = write!(
                 s,
                 " {}/{}",
-                format_mib(self.mem.swap_used_kb()),
-                format_mib(self.mem.swap_total_kb)
+                format_mib(self.mem.swap_used_kib().unwrap_or(0)),
+                format_mib(self.mem.swap_total_kib.unwrap_or(0))
             );
             lines.push(s);
         }

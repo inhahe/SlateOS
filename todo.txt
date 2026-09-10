@@ -56170,3 +56170,35 @@ musl because they are the *kernel* wire format (`KERNEL_NCCS = 19` in
 `ioctl.rs` is the honest example). The macro needs an explicit "kernel format,
 not libc" opt-out, and the opt-out should name the translation function that
 converts between them -- otherwise the gate teaches people to add exemptions.
+
+## Standing rule: a scripted deletion must start at the doc comment (lane B, 2026-09-10)
+
+**Three times in three ticks** I deleted a Rust function with a Python regex
+anchored on `fn name(`, which leaves the `///` block above it behind. A doc
+comment with nothing to document does not become an error: doc comments
+*concatenate*, so it silently becomes the first line of whatever item follows.
+
+The three, all in `userspace/htop/src/main.rs`, all absorbed by the same
+unlucky neighbour:
+
+    /// Read per-CPU stats from /proc/stat.      -> caught by clippy
+    /// Read uptime in seconds from /proc/uptime. -> not caught
+    /// Read /proc/meminfo.                       -> not caught
+
+Only the first was caught, and only because a blank line happened to follow it
+(`clippy::empty_line_after_doc_comment`). When the orphan is directly adjacent
+to the next item's doc comment there is **no** lint, no warning, and no test
+that can see it -- the code compiles and the rendered documentation simply
+carries a sentence about a function that no longer exists.
+
+**The rule:** when removing an item with a pattern, anchor the pattern at the
+start of its documentation, not at its `fn`/`struct` keyword. In practice that
+means the regex begins `(?:///[^\n]*\n)*` or the literal first doc line.
+
+**Not made into a gate**, deliberately. It is a mistake one author makes with
+one tool, the fix is a habit rather than a policy, and a checker for
+"documentation that describes the wrong item" cannot be written without
+understanding the prose. If it happens a fourth time, the proportionate gate is
+a *diff-shape* check -- a hunk that deletes a `fn` line while keeping the `///`
+line directly above it -- and this entry is the evidence that it would be worth
+building.

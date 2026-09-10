@@ -1001,3 +1001,46 @@ fn since_saturates_when_a_counter_goes_backwards() {
         "a zero interval, which a caller must treat as no data"
     );
 }
+
+/// Swap, and the two different "used" figures.
+#[test]
+fn meminfo_reads_swap_and_both_used_figures() {
+    let content = b"MemTotal:       8000 kB\n\
+MemFree:        1000 kB\n\
+MemAvailable:   5000 kB\n\
+Buffers:         500 kB\n\
+Cached:         2500 kB\n\
+SwapTotal:      4000 kB\n\
+SwapFree:       3000 kB\n";
+    let m = MemInfo::parse(content);
+    assert_eq!(m.swap_total_kib, Some(4000));
+    assert_eq!(m.swap_free_kib, Some(3000));
+    assert_eq!(m.swap_used_kib(), Some(1000));
+    // The kernel's figure: everything that is not free.
+    assert_eq!(m.used_kib(), Some(7000));
+    // The one a person is shown: cache and buffers are reclaimable, so a
+    // machine holding 2.5 MiB of cache is not short of memory.
+    assert_eq!(m.used_excluding_cache_kib(), Some(4000));
+}
+
+/// A machine with no swap and a kernel that does not export swap at all are
+/// different answers.
+#[test]
+fn no_swap_and_no_swap_field_are_distinguishable() {
+    let none = MemInfo::parse(b"MemTotal: 8000 kB\n");
+    assert_eq!(none.swap_total_kib, None);
+    assert_eq!(none.swap_used_kib(), None);
+
+    let zero = MemInfo::parse(b"SwapTotal: 0 kB\nSwapFree: 0 kB\n");
+    assert_eq!(zero.swap_total_kib, Some(0));
+    assert_eq!(zero.swap_used_kib(), Some(0));
+}
+
+/// Every figure must be present, because a used-memory number derived from a
+/// missing one is not worth showing.
+#[test]
+fn used_excluding_cache_needs_every_figure() {
+    let m = MemInfo::parse(b"MemTotal: 8000 kB\nMemFree: 1000 kB\nBuffers: 500 kB\n");
+    assert_eq!(m.used_kib(), Some(7000), "the simple figure still works");
+    assert_eq!(m.used_excluding_cache_kib(), None, "Cached is missing");
+}

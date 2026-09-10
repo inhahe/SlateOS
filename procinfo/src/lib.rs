@@ -335,6 +335,10 @@ pub struct MemInfo {
     pub buffers_kib: Option<u64>,
     /// `Cached`.
     pub cached_kib: Option<u64>,
+    /// `SwapTotal`.
+    pub swap_total_kib: Option<u64>,
+    /// `SwapFree`.
+    pub swap_free_kib: Option<u64>,
 }
 
 impl MemInfo {
@@ -354,6 +358,8 @@ impl MemInfo {
             available_kib: field("MemAvailable"),
             buffers_kib: field("Buffers"),
             cached_kib: field("Cached"),
+            swap_total_kib: field("SwapTotal"),
+            swap_free_kib: field("SwapFree"),
         }
     }
 
@@ -367,6 +373,45 @@ impl MemInfo {
     pub fn used_kib(&self) -> Option<u64> {
         let total = self.total_kib?;
         let free = self.free_kib?;
+        Some(total.saturating_sub(free))
+    }
+
+    /// Memory in use **excluding** what the kernel can reclaim: total minus
+    /// free, buffers and page cache.
+    ///
+    /// # Two "used" figures, and why both are here
+    ///
+    /// [`MemInfo::used_kib`] is `total - free`, which counts the page cache as
+    /// used -- true of the kernel's bookkeeping and misleading to a person,
+    /// because a machine with 30 GiB of cache is not short of memory. This is
+    /// the figure `htop` and `free` put in front of a user.
+    ///
+    /// Neither is wrong; they answer different questions, and the reason they
+    /// are two named methods rather than one is that every program that
+    /// computed this for itself picked one silently. `None` unless every
+    /// figure it needs was present, for [`MemInfo::used_kib`]'s reason: a
+    /// number derived from a missing total is not worth showing.
+    #[must_use]
+    pub fn used_excluding_cache_kib(&self) -> Option<u64> {
+        let total = self.total_kib?;
+        let free = self.free_kib?;
+        Some(
+            total
+                .saturating_sub(free)
+                .saturating_sub(self.buffers_kib?)
+                .saturating_sub(self.cached_kib?),
+        )
+    }
+
+    /// Swap in use: total minus free.
+    ///
+    /// `None` unless both were present. A machine with no swap reports
+    /// `SwapTotal: 0`, which is `Some(0)` -- distinct from a kernel that does
+    /// not export the field at all.
+    #[must_use]
+    pub fn swap_used_kib(&self) -> Option<u64> {
+        let total = self.swap_total_kib?;
+        let free = self.swap_free_kib?;
         Some(total.saturating_sub(free))
     }
 

@@ -126868,12 +126868,26 @@ uptime, cpuinfo, mounts and the per-process family. Not one change: each
 program has its own output format and its own idea of which fields it needs,
 and the useful unit is one program per commit.
 
-**One down, nine to go.** `htop` moved on 2026-09-10 -- its per-process
-reading, which is where the crate's per-process half came from, and then its
-CPU reading. Its private `PAGE_SIZE_KB` and its own `CpuStat` are gone with
-them. What `htop` still parses itself is `/proc/meminfo`, `/proc/uptime` and
-`/proc/loadavg`, for all three of which the crate already has a type; moving
-them is mechanical and is the small remainder of this program's share.
+**One down, nine to go.** `htop` moved completely on 2026-09-10, in three
+steps: per-process reading (where the crate's per-process half came from), then
+CPU, then memory, uptime and load. Its private `PAGE_SIZE_KB`, its `CpuStat`
+and its `MemInfo` are gone with them. **`htop` no longer opens anything under
+`/proc`** -- its one remaining `read_file` reads `/etc/passwd`.
+
+Two things the crate had to grow to absorb it, both worth having anyway:
+
+* `CpuTimes::since`, the subtraction a viewer needs before it divides. Its
+  first consumer was htop's bar fix; `apps/procexplorer` needs the same.
+* `MemInfo`'s swap fields, and a **second** used-memory figure.
+  `used_kib` is `total - free`, the kernel's bookkeeping; `used_excluding_cache_kib`
+  subtracts buffers and cache, which is the number `htop` and `free` show a
+  person. Neither is wrong and every program that computed it privately picked
+  one silently -- which is the whole shape of this entry.
+
+Remaining: `ps`, `free`, `coreutils`'s `free`, `earlyoom`, `iostat`, `hwinfo`,
+`lsmem`, `numactl`, `hwclock`. `ps` is next: it is the only one that still
+carries its own `const PAGE_SIZE_KB: u64 = 16;`, and it reads the same
+`/proc/<pid>/stat` fields the crate now parses.
 
 Remaining: `ps`, `free`, `coreutils`'s `free`, `earlyoom`, `iostat`, `hwinfo`,
 `lsmem`, `numactl`, `hwclock`. `ps` is the one that still carries its own

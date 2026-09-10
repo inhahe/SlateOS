@@ -718,8 +718,15 @@ struct UnitEntry {
     description: &'static str,
 }
 
-/// Return a set of simulated units representing a typical booted system.
-/// Simulated unit file entries for list-unit-files.
+/// A unit-file entry as `list-unit-files` would print one.
+///
+/// The line above this used to read "Return a set of simulated units
+/// representing a typical booted system" -- the doc comment of
+/// `simulated_units`, left behind when that function was deleted, so it
+/// silently became the documentation for this struct. A deletion that removes
+/// a definition and leaves its doc comment does not fail to compile; it
+/// reattaches, and the next reader is told this type does something it does
+/// not.
 struct UnitFileEntry {
     name: &'static str,
     state: EnableState,

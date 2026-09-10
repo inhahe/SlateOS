@@ -54,6 +54,7 @@ import os
 import re
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gittree  # noqa: E402
@@ -62,6 +63,37 @@ ROOT = Path(__file__).resolve().parent.parent
 # Repo-relative and `/`-separated: the only spelling `gittree.Tree` accepts.
 BASELINE_REL = "scripts/read-defaults-baseline.txt"
 BASELINE = Path(__file__).resolve().parent / "read-defaults-baseline.txt"
+
+# ---------------------------------------------------------------------------
+# Floors on what was INSPECTED, not on what was found.
+#
+# The healthy state of this gate is "no new sites", and every number in that
+# sentence counts something that is WRONG. So a scan that reads no files at all
+# reports zero found, which passes -- and worse, reports all 17 pinned entries
+# as `fixed:`, which is a congratulation. A total failure to look was spelled
+# as the best possible news.
+#
+# That is lane A's §3 finding about `check-selftest-reinit.py`, arriving here
+# by two routes on the same day: their request said the detect/refuse pair can
+# pass while DISCOVER has silently failed, and lane A independently sent word
+# that over-masking took their own absent-operand count from 37 to 0 with the
+# gate still green. Both are this shape.
+#
+# Two floors, because there are two independent ways to stop seeing:
+#
+#   MIN_FILES  the walk stopped finding files -- `files_under` changed, the
+#              prefix was renamed, `.rs` stopped matching.
+#   MIN_READS  the walk still finds files but `strip_noise` blanked their
+#              contents, so there is nothing left to match. This is the one
+#              lane A hit; a file count alone cannot see it.
+#
+# Measured on main at a1228a0fa: 422 files, 398 live `read_to_string`.
+# The floors sit near a third of that, well under ordinary attrition -- 225
+# crates were deleted from this lane in the past week and the count must
+# survive more of that -- but far above the zero-or-near-zero that every
+# failure above produces.
+MIN_FILES = 150
+MIN_READS = 120
 
 # A complete char literal: `'x'`, `'\n'`, `'\''`, `'\u{1F600}'`. Deliberately
 # NOT a lifetime -- `'a` has no closing quote and must pass through untouched.
@@ -157,7 +189,29 @@ def strip_noise(src: str) -> str:
     return "".join(out)
 
 
-def survey(tree: gittree.Tree) -> list[str]:
+class Scan(NamedTuple):
+    """What was found, and -- separately -- how much was looked at.
+
+    The two must be reported apart. `found` shrinking is the goal; `files` or
+    `reads` shrinking is a broken scan wearing the goal's clothes.
+    """
+
+    found: list[str]
+    files: int
+    reads: int
+
+
+def scan_is_too_thin(scan: Scan) -> bool:
+    """Did we look at enough to be entitled to an opinion?
+
+    Split out of `main` so the self-test can drive both directions. A floor
+    that has never been observed to refuse is the same kind of claim as a gate
+    nothing runs: it looks exactly like a floor that has nothing to say.
+    """
+    return scan.files < MIN_FILES or scan.reads < MIN_READS
+
+
+def survey(tree: gittree.Tree) -> Scan:
     """`<crate>: <call>` for every live occurrence.
 
     Keyed on the call text rather than a line number, because a line number
@@ -179,15 +233,22 @@ def survey(tree: gittree.Tree) -> list[str]:
     A `#2` suffix keeps them distinct.
     """
     found: list[str] = []
+    files = 0
+    reads = 0
     for rel in sorted(tree.files_under("userspace")):
         if not rel.endswith(".rs"):
             continue
         src = tree.read_text(rel)
         if src is None:
             continue
+        files += 1
         crate = rel.split("/")[1]
         original = src.split("#[cfg(test)]")[0]
         body = strip_noise(original)
+        # Counted AFTER stripping, so a `strip_noise` that blanks too much
+        # drives this to zero and trips MIN_READS. Counting before would make
+        # the floor blind to precisely the failure it exists to catch.
+        reads += body.count("read_to_string")
         seen: dict[str, int] = {}
         for m in PATTERN.finditer(body):
             call = " ".join(original[m.start() : m.end()].split())
@@ -196,7 +257,7 @@ def survey(tree: gittree.Tree) -> list[str]:
             if seen[key] > 1:
                 key = f"{key}  #{seen[key]}"
             found.append(key)
-    return sorted(found)
+    return Scan(sorted(found), files, reads)
 
 
 def read_baseline(tree: gittree.Tree) -> set[str] | None:
@@ -239,6 +300,24 @@ HEADER = """\
 #     python scripts/check-read-defaults.py --update-baseline
 #
 """
+
+
+class _FakeTree:
+    """The two methods `survey` uses, backed by a dict.
+
+    A real `gittree` needs a git repository; these fixtures need to run
+    anywhere, including in a checkout with no history, which is the point of
+    running the self-test before the check.
+    """
+
+    def __init__(self, files: dict[str, str]) -> None:
+        self._files = files
+
+    def files_under(self, prefix: str):
+        return [r for r in self._files if r.startswith(prefix + "/")]
+
+    def read_text(self, rel: str):
+        return self._files.get(rel)
 
 
 def _self_test() -> int:
@@ -308,6 +387,71 @@ def _self_test() -> int:
         expect(f"length preserved: {probe!r}",
                len(strip_noise(probe)), len(probe))
 
+
+    # -----------------------------------------------------------------------
+    # `survey` itself. Everything above this line feeds `strip_noise` a string;
+    # nothing above it proves the scan can still FIND anything. These pin exact
+    # non-zero counts, because "reported nothing" and "found nothing" print the
+    # same way and only a fixture that must yield a specific number can tell
+    # them apart. Lane A's suggestion, 2026-09-10.
+    # -----------------------------------------------------------------------
+    site = "fs::read_to_string(p).unwrap_or_default()"
+
+    tree = _FakeTree({
+        # two crates, three sites, plus decoys that must NOT count
+        "userspace/alpha/src/main.rs":
+            "fn a() { let x = " + site + "; }" + chr(10)
+            + "fn b() { let y = " + site + "; }" + chr(10),
+        "userspace/beta/src/lib.rs":
+            "fn c() { let z = " + site + "; }" + chr(10),
+        # an epitaph: the pattern quoted in a comment where a site was FIXED.
+        # Lane A's checker scored one of these as a live site, so its ledger
+        # could never reach zero while the explanation existed and the cheapest
+        # way to lower the number was to delete the record.
+        "userspace/gamma/src/main.rs":
+            "// was " + site + " before optionalfile" + chr(10)
+            + "fn d() { optionalfile::read_or_empty(p); }" + chr(10),
+        # below #[cfg(test)] is not live code
+        "userspace/delta/src/main.rs":
+            "fn e() {}" + chr(10) + "#[cfg(test)]" + chr(10)
+            + "mod t { fn f() { let q = " + site + "; } }" + chr(10),
+        # not Rust, and not under a crate we scan
+        "userspace/alpha/README.md": "read_to_string(p).unwrap_or_default()",
+    })
+    scan = survey(tree)
+
+    expect("survey finds EXACTLY the three live sites", len(scan.found), 3)
+    expect("...attributed to the right crates",
+           sorted({f.split(":")[0] for f in scan.found}), ["alpha", "beta"])
+    expect("...a quoted site in a comment is not one",
+           any(f.startswith("gamma") for f in scan.found), False)
+    expect("...nor is one below #[cfg(test)]",
+           any(f.startswith("delta") for f in scan.found), False)
+    expect("...two identical calls in one crate stay distinct",
+           sum(1 for f in scan.found if f.startswith("alpha")), 2)
+    expect("...and the second is numbered",
+           any(f.endswith("#2") for f in scan.found), True)
+    expect("only .rs files are read", scan.files, 4)
+    # Three, not four: `gamma`'s is inside a comment and `delta`'s is below
+    # `#[cfg(test)]`, and BOTH are removed before the count. That is the right
+    # population for a floor -- it must measure the live text the pattern
+    # actually searches, or it would stay comfortable while the searchable code
+    # went to nothing. (Written as 4 on the first attempt; this fixture caught
+    # it, which is the argument for the fixture.)
+    expect("the read_to_string population counts live code only -- not "
+           "comments, not test modules",
+           scan.reads, 3)
+
+    # The floors, both directions. A floor never observed to refuse is a claim
+    # with no evidence behind it.
+    expect("a full scan is not too thin",
+           scan_is_too_thin(Scan([], MIN_FILES, MIN_READS)), False)
+    expect("a scan that read almost no files is refused",
+           scan_is_too_thin(Scan([], MIN_FILES - 1, MIN_READS)), True)
+    expect("a scan whose files survived but whose CONTENT was blanked "
+           "is refused too",
+           scan_is_too_thin(Scan([], MIN_FILES, MIN_READS - 1)), True)
+
     print(f"check-read-defaults: self-test "
           f"{'FAILED' if failures else 'passed'} ({failures} failure(s))")
     return 1 if failures else 0
@@ -338,8 +482,38 @@ def main() -> int:
         return 2
 
     with tree:
-        found = survey(tree)
+        scan = survey(tree)
         pinned = read_baseline(tree)
+    found = scan.found
+
+    # Before any verdict: did we actually look? A floor breach is not a finding
+    # against anyone's code, it is "no verdict reached" -- so it exits 2 and
+    # `run_checker` aborts the build in the same words as a crashed checker,
+    # which is right because it is the same event. That is lane A's §4 in
+    # `requests/a-b-wiring-check-selftest-reinit-and-a-correction-it-runs-nowhere.md`,
+    # and I agree with it.
+    if scan_is_too_thin(scan):
+        for line in [
+            "check-read-defaults: REFUSING TO ANSWER -- the scan is too thin "
+            "to mean anything.",
+            f"  .rs files read  {scan.files:>5}  (floor {MIN_FILES})",
+            f"  read_to_string  {scan.reads:>5}  (floor {MIN_READS})",
+            "",
+            "This is not a clean tree. It is a scan that stopped seeing.",
+            "A file count that collapsed means the walk broke. A read count "
+            "that collapsed",
+            "while the file count held means `strip_noise` blanked the code it "
+            "was meant to",
+            "preserve -- the failure lane A hit the same day, which took their "
+            "absent-operand",
+            "count from 37 to 0 with the gate still green.",
+            "",
+            "Either way every pinned site would report as no longer present, "
+            "so a total",
+            "failure to look would arrive spelled as the best possible news.",
+        ]:
+            print(line, file=sys.stderr)
+        return 2
 
     if args.update:
         BASELINE.write_text(
@@ -353,6 +527,8 @@ def main() -> int:
         return 0
 
     if not args.check:
+        print(f"inspected {scan.files} .rs file(s) under userspace/, "
+              f"{scan.reads} live read_to_string call(s)")
         print(f"{len(found)} read_to_string(..).unwrap_or_default() site(s):\n")
         for f in found:
             print(f"  {f}")
@@ -367,8 +543,6 @@ def main() -> int:
     new = sorted(current - pinned)
     gone = sorted(pinned - current)
 
-    for f in gone:
-        print(f"fixed: {f} -- run --update-baseline to drop the line")
     if new:
         print(
             f"\n{len(new)} NEW read_to_string(..).unwrap_or_default():\n"
@@ -387,8 +561,42 @@ def main() -> int:
         sys.stdout.flush()
         return 1
 
-    print(f"ok -- {len(current)} pinned site(s), none new"
-          + (f" ({len(gone)} fixed)" if gone else ""))
+    # A pin that matches nothing is not harmless bookkeeping. The key is
+    # `<crate>: <call text>`, so an exemption left behind after its site was
+    # fixed is INHERITED by the next identical call written in that crate: the
+    # new defect arrives pre-forgiven and this gate stays green. Lane A named
+    # the same hazard in their absent-operand ledger on the same day -- "a
+    # blessing matching no site fails too, or a fixed site stays exempt and the
+    # next real one inherits the exemption".
+    #
+    # Refusing here is safe in a way it would not be for a shared checker.
+    # `userspace/**` is lane B's tree, so a stale pin can only ever be produced
+    # by the lane that owns the baseline; no other lane's push can be reddened
+    # by it, and the remedy is one command inside the commit that caused it.
+    if gone:
+        print("", file=sys.stderr)
+        print(f"{len(gone)} pinned site(s) NO LONGER EXIST:", file=sys.stderr)
+        print("", file=sys.stderr)
+        for f in gone:
+            print(f"  {f}", file=sys.stderr)
+        for line in [
+            "",
+            "If you fixed them, run --update-baseline in the SAME commit. An "
+            "exemption that",
+            "outlives its site forgives the next identical call written in "
+            "that crate.",
+            "",
+            "If you did NOT fix them, the scan stopped finding them and the "
+            "floors above were",
+            "too generous to notice. That is the more urgent reading of these "
+            "lines.",
+        ]:
+            print(line, file=sys.stderr)
+        sys.stdout.flush()
+        return 1
+
+    print(f"ok -- {len(current)} pinned site(s), none new; inspected "
+          f"{scan.files} file(s), {scan.reads} live read_to_string")
     return 0
 
 

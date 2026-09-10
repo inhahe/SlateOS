@@ -128224,6 +128224,18 @@ silently.
 grepping for the literal path in files that do not use `procinfo`. 72 files
 still open some other `/proc` path without it, down from 95.
 
+**If you re-verify this, grep for bare `procinfo`, not for a method name.**
+Re-checking the closure later the same day with `procinfo::(Mount|mounts)`
+reported five programs as unconverted -- `coreutils/df`, `diskutil`, `findmnt`,
+`lsblk`, `sysinfo` -- and all five were false positives. The call is
+`procinfo::ProcFs::new().mounts()`, which contains `procinfo::ProcFs` and not
+`procinfo::mounts`; `sysinfo` imports through a braced `use procinfo::{Mount,
+...}`, which contains `procinfo::{Mount` and not `procinfo::Mount`; and
+`coreutils/df`'s only hit is a comment, since it reads the mount table through
+a syscall rather than the file. A regex written around one spelling of an API
+answers a narrower question than the one being asked, and its answer is a list
+of names that looks exactly like a real finding.
+
 **`grub2`'s was the one with consequences.** It picks the device carrying a
 path by longest-prefix match over mount points, so an escaped mount point --
 `/mnt/my backup`, which no real path starts with -- simply never matched,

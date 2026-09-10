@@ -1485,6 +1485,9 @@ dependencies = [
 [[package]]
 name = "hwinfo"
 version = "0.1.0"
+dependencies = [
+ "procinfo",
+]
 
 [[package]]
 name = "hyprpaper-cli"
@@ -1971,6 +1974,9 @@ version = "0.1.0"
 [[package]]
 name = "lsmem"
 version = "0.1.0"
+dependencies = [
+ "procinfo",
+]
 
 [[package]]
 name = "lsmod"
@@ -2422,6 +2428,9 @@ version = "0.1.0"
 [[package]]
 name = "numactl"
 version = "0.1.0"
+dependencies = [
+ "procinfo",
+]
 
 [[package]]
 name = "nwg-panel-cli"

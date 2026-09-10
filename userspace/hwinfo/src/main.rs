@@ -131,16 +131,27 @@ fn probe_memory() -> Vec<HwDevice> {
     let mut dev = HwDevice::new("memory");
     dev.description = "System Memory".to_string();
 
-    let meminfo = fs::read_to_string("/proc/meminfo").unwrap_or_default();
-    for line in meminfo.lines() {
-        if let Some((key, value)) = line.split_once(':') {
-            let key = key.trim();
-            let value = value.trim();
-            dev.properties.insert(key.to_string(), value.to_string());
+    // Through `procinfo`'s shared key/value reader rather than a local
+    // `split_once(':')`. The parse is the same shape; what differs is the
+    // failure mode. This read `/proc/meminfo` with `read_to_string`, so a
+    // single byte that is not UTF-8 anywhere in the file made the whole read
+    // fail, `unwrap_or_default()` turned that into an empty string, and hwinfo
+    // reported a machine with no memory properties at all. `read_optional`
+    // hands over bytes and `parse_key_values` works on them, so one bad key is
+    // one skipped key.
+    let raw = procinfo::ProcFs::new()
+        .read_optional("meminfo")
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    for kv in procinfo::parse_key_values(&raw) {
+        let (Some(key), Some(value)) = (kv.key_str(), kv.value_str()) else {
+            continue;
+        };
+        dev.properties.insert(key.to_string(), value.to_string());
 
-            if key == "MemTotal" {
-                dev.model = format!("RAM: {value}");
-            }
+        if key == "MemTotal" {
+            dev.model = format!("RAM: {value}");
         }
     }
 

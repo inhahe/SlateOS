@@ -79601,6 +79601,23 @@ quietly changed.
 
 ## TD-A-BOOT-HISTORY-IS-A-TRACKED-FILE-EVERY-BOOT-DIRTIES (lane A, 2026-08-24) — **open**
 
+**Still open 2026-09-10, with fresh first-hand evidence of the smaller cost.**
+In one session lane A ran five boot tests and had to make *two separate commits*
+whose entire content was `bench/boot-history.jsonl` -- one of them literally
+titled "bench: boot-history row from the run that validated 1072/1073" -- plus
+a third where the ledger rode along inside an unrelated kernel commit because it
+was dirty when that commit was made. None of those is the data-loss hazard this
+entry was filed for; they are the everyday version of it, and they are why the
+hazard keeps being reachable: the file's normal state is dirty, so clearing it
+never looks destructive, and committing it is a chore that attaches itself to
+whatever commit happens to be next.
+
+The first proposed fix below -- have `boot-test.sh` commit the row itself, as its
+own single-file commit -- removes all three. Noting also that the harness already
+works around the symptom: `boot-test.sh` excludes this path from its own
+dirty-tree check (`':(exclude)bench/boot-history.jsonl'`), which keeps the run
+from complaining but leaves every other git command exposed.
+
 `bench/boot-history.jsonl` is committed to git *and* appended to by every run of
 `scripts/boot-test.sh`. So a boot always leaves the worktree dirty in a tracked
 file that all three lanes write, and the record of a run exists only in the

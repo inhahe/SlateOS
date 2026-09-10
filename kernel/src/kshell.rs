@@ -81637,7 +81637,12 @@ fn cmd_sharesheet(args: &str) {
             }
         }
         "unregister" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"0").parse() {
+            if parts.len() < 2 {
+                shell_println!("Usage: sharesheet unregister <id>");
+                set_exit(1);
+                return;
+            }
+            let id: u32 = match parts.get(1).unwrap_or(&"").parse() {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid target ID");
@@ -82185,7 +82190,12 @@ fn cmd_surroundsound(args: &str) {
             }
         }
         "layout" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+            if parts.len() < 3 {
+                shell_println!("Usage: surroundsound layout <id> <layout>");
+                set_exit(1);
+                return;
+            }
+            let id: u32 = match parts.get(1).unwrap_or(&"").parse() {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid config ID");
@@ -82210,7 +82220,12 @@ fn cmd_surroundsound(args: &str) {
             }
         }
         "calibrate" | "cal" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+            if parts.len() < 5 {
+                shell_println!("Usage: surroundsound calibrate <id> <ch> <trim> <dist>");
+                set_exit(1);
+                return;
+            }
+            let id: u32 = match parts.get(1).unwrap_or(&"").parse() {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid config ID");
@@ -82258,7 +82273,12 @@ fn cmd_surroundsound(args: &str) {
             }
         }
         "virtual" | "vs" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+            if parts.len() < 2 {
+                shell_println!("Usage: surroundsound virtual <id> [on|off]");
+                set_exit(1);
+                return;
+            }
+            let id: u32 = match parts.get(1).unwrap_or(&"").parse() {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid config ID");
@@ -82280,7 +82300,12 @@ fn cmd_surroundsound(args: &str) {
             }
         }
         "crossover" | "xo" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+            if parts.len() < 3 {
+                shell_println!("Usage: surroundsound crossover <id> <hz>");
+                set_exit(1);
+                return;
+            }
+            let id: u32 = match parts.get(1).unwrap_or(&"").parse() {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid config ID");
@@ -82302,7 +82327,12 @@ fn cmd_surroundsound(args: &str) {
             }
         }
         "remove" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"0").parse() {
+            if parts.len() < 2 {
+                shell_println!("Usage: surroundsound remove <id>");
+                set_exit(1);
+                return;
+            }
+            let id: u32 = match parts.get(1).unwrap_or(&"").parse() {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid config ID");
@@ -82382,7 +82412,12 @@ fn cmd_audioeq(args: &str) {
             }
         }
         "preset" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+            if parts.len() < 3 {
+                shell_println!("Usage: audioeq preset <id> <name>");
+                set_exit(1);
+                return;
+            }
+            let id: u32 = match parts.get(1).unwrap_or(&"").parse() {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid config ID");
@@ -82411,7 +82446,12 @@ fn cmd_audioeq(args: &str) {
             }
         }
         "band" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+            if parts.len() < 4 {
+                shell_println!("Usage: audioeq band <id> <n> <cb>");
+                set_exit(1);
+                return;
+            }
+            let id: u32 = match parts.get(1).unwrap_or(&"").parse() {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid config ID");
@@ -82436,7 +82476,12 @@ fn cmd_audioeq(args: &str) {
             }
         }
         "preamp" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+            if parts.len() < 3 {
+                shell_println!("Usage: audioeq preamp <id> <cb>");
+                set_exit(1);
+                return;
+            }
+            let id: u32 = match parts.get(1).unwrap_or(&"").parse() {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid config ID");
@@ -82506,7 +82551,12 @@ fn cmd_audioeq(args: &str) {
             }
         }
         "remove" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"0").parse() {
+            if parts.len() < 2 {
+                shell_println!("Usage: audioeq remove <id>");
+                set_exit(1);
+                return;
+            }
+            let id: u32 = match parts.get(1).unwrap_or(&"").parse() {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid config ID");
@@ -82598,7 +82648,12 @@ fn cmd_screensaver(args: &str) {
             }
         },
         "preview" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+            if parts.len() < 2 {
+                shell_println!("Usage: screensaver preview <id>");
+                set_exit(1);
+                return;
+            }
+            let id: u32 = match parts.get(1).unwrap_or(&"").parse() {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid saver ID");
@@ -82615,7 +82670,12 @@ fn cmd_screensaver(args: &str) {
             }
         }
         "set" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+            if parts.len() < 2 {
+                shell_println!("Usage: screensaver set <id>");
+                set_exit(1);
+                return;
+            }
+            let id: u32 = match parts.get(1).unwrap_or(&"").parse() {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid saver ID");
@@ -82632,7 +82692,12 @@ fn cmd_screensaver(args: &str) {
             }
         }
         "timeout" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+            if parts.len() < 3 {
+                shell_println!("Usage: screensaver timeout <id> <s>");
+                set_exit(1);
+                return;
+            }
+            let id: u32 = match parts.get(1).unwrap_or(&"").parse() {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid saver ID");
@@ -82650,7 +82715,12 @@ fn cmd_screensaver(args: &str) {
             }
         }
         "password" | "pw" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+            if parts.len() < 2 {
+                shell_println!("Usage: screensaver password <id> [on|off]");
+                set_exit(1);
+                return;
+            }
+            let id: u32 = match parts.get(1).unwrap_or(&"").parse() {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid saver ID");
@@ -83055,7 +83125,12 @@ fn cmd_gamemode(args: &str) {
             }
         }
         "unregister" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"0").parse() {
+            if parts.len() < 2 {
+                shell_println!("Usage: gamemode unregister <id>");
+                set_exit(1);
+                return;
+            }
+            let id: u32 = match parts.get(1).unwrap_or(&"").parse() {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid game ID");
@@ -83374,7 +83449,12 @@ fn cmd_netprofile(args: &str) {
             }
         }
         "apply" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+            if parts.len() < 2 {
+                shell_println!("Usage: netprofile apply <id>");
+                set_exit(1);
+                return;
+            }
+            let id: u32 = match parts.get(1).unwrap_or(&"").parse() {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid profile ID");
@@ -83391,7 +83471,12 @@ fn cmd_netprofile(args: &str) {
             }
         }
         "type" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+            if parts.len() < 3 {
+                shell_println!("Usage: netprofile type <id> <type>");
+                set_exit(1);
+                return;
+            }
+            let id: u32 = match parts.get(1).unwrap_or(&"").parse() {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid profile ID");
@@ -83415,7 +83500,12 @@ fn cmd_netprofile(args: &str) {
             }
         }
         "metered" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+            if parts.len() < 2 {
+                shell_println!("Usage: netprofile metered <id> [on|off]");
+                set_exit(1);
+                return;
+            }
+            let id: u32 = match parts.get(1).unwrap_or(&"").parse() {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid profile ID");
@@ -83433,7 +83523,12 @@ fn cmd_netprofile(args: &str) {
             }
         }
         "vpn" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+            if parts.len() < 3 {
+                shell_println!("Usage: netprofile vpn <id> <name>");
+                set_exit(1);
+                return;
+            }
+            let id: u32 = match parts.get(1).unwrap_or(&"").parse() {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid profile ID");
@@ -83453,7 +83548,12 @@ fn cmd_netprofile(args: &str) {
             }
         }
         "remove" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"0").parse() {
+            if parts.len() < 2 {
+                shell_println!("Usage: netprofile remove <id>");
+                set_exit(1);
+                return;
+            }
+            let id: u32 = match parts.get(1).unwrap_or(&"").parse() {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid profile ID");
@@ -83742,7 +83842,12 @@ fn cmd_kbshortcuts(args: &str) {
             }
         }
         "unbind" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"0").parse() {
+            if parts.len() < 2 {
+                shell_println!("Usage: kbshortcuts unbind <id>");
+                set_exit(1);
+                return;
+            }
+            let id: u32 = match parts.get(1).unwrap_or(&"").parse() {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid shortcut ID");
@@ -83759,7 +83864,12 @@ fn cmd_kbshortcuts(args: &str) {
             }
         }
         "trigger" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"0").parse() {
+            if parts.len() < 2 {
+                shell_println!("Usage: kbshortcuts trigger <id>");
+                set_exit(1);
+                return;
+            }
+            let id: u32 = match parts.get(1).unwrap_or(&"").parse() {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid shortcut ID");
@@ -84161,7 +84271,12 @@ fn cmd_filevault(args: &str) {
             }
         }
         "unlock" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"0").parse() {
+            if parts.len() < 3 {
+                shell_println!("Usage: filevault unlock <id> <password>");
+                set_exit(1);
+                return;
+            }
+            let id: u32 = match parts.get(1).unwrap_or(&"").parse() {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid vault ID");
@@ -84179,7 +84294,12 @@ fn cmd_filevault(args: &str) {
             }
         }
         "lock" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"0").parse() {
+            if parts.len() < 2 {
+                shell_println!("Usage: filevault lock <id>");
+                set_exit(1);
+                return;
+            }
+            let id: u32 = match parts.get(1).unwrap_or(&"").parse() {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid vault ID");
@@ -84196,7 +84316,12 @@ fn cmd_filevault(args: &str) {
             }
         }
         "autolock" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"0").parse() {
+            if parts.len() < 3 {
+                shell_println!("Usage: filevault autolock <id> <seconds>");
+                set_exit(1);
+                return;
+            }
+            let id: u32 = match parts.get(1).unwrap_or(&"").parse() {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid vault ID");
@@ -84325,7 +84450,12 @@ fn cmd_mousegestures(args: &str) {
             }
         }
         "unbind" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"0").parse() {
+            if parts.len() < 2 {
+                shell_println!("Usage: mousegestures unbind <id>");
+                set_exit(1);
+                return;
+            }
+            let id: u32 = match parts.get(1).unwrap_or(&"").parse() {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid binding ID");
@@ -116966,7 +117096,12 @@ fn cmd_udp6(args: &str) {
             }
         }
         "listen" | "l" => {
-            let port: u16 = match parts.get(1).unwrap_or(&"0").parse() {
+            if parts.len() < 2 {
+                shell_println!("Usage: udp6 listen <port> [timeout_ms]");
+                set_exit(1);
+                return;
+            }
+            let port: u16 = match parts.get(1).unwrap_or(&"").parse() {
                 Ok(p) if p > 0 => p,
                 _ => {
                     shell_println!("Usage: udp6 listen <port> [timeout_ms]");

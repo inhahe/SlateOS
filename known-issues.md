@@ -85476,11 +85476,24 @@ working at all.
 > guessing inside the same command is the clearest evidence available that this
 > was an oversight rather than a policy.
 >
-> **On the count.** The ledger is a number, not a list: §600 states the rule and
-> nothing enumerates the remaining sites. So 84 → 81 assumes these three were
-> among the counted 84, which is consistent with their being textbook instances
-> of the class but cannot be verified from here. Whoever next re-derives the
-> population should treat the number as approximate in that direction.
+> **On the count — and a correction to what this log first said.** It claimed the
+> ledger was "a number, not a list" and that 84 → 81 could not be verified. That
+> is false. `scripts/option-refusal-ledger.txt` enumerates all of it, one line per
+> enclosing function with a count, and `scripts/check-option-refusal.py` enforces
+> it in both directions: a new guessed-value site in an unlisted function fails,
+> and an entry claiming MORE sites than exist is *also* reported, because that
+> means the site was fixed and the count was not lowered.
+>
+> Which is exactly what happened here. This batch was committed without touching
+> the ledger, and the boot test refused in 116 s with
+> `cmd_assoc: 1 fewer than expected`, and the same for `cmd_fswatch` and
+> `cmd_ionice`. The three entries are now removed and the gate reports
+> **81 guessed-value sites across 81 functions**, which is the count in this
+> heading rather than an assumption behind it.
+>
+> The hedge was worse than the arithmetic it was protecting: it asserted that
+> something could not be verified without looking for the thing that verifies it,
+> and the verifier is named in the error message the gate prints.
 >
 > **Burn-down log.** 2026-08-30 (forty-fourth batch): **the guesses whose value
 > was the widest one its space has.** 91 → 84 across 91 → 84 functions;

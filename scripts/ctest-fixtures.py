@@ -1065,6 +1065,24 @@ def cmd_build(only: str | None, force: bool = False) -> int:
     return rc
 
 
+# Every fixture that *should* produce a staged artifact. A recipe is the
+# tracked thing; the ELF beside it is a build output and is gitignored.
+RECIPE_GLOBS = (
+    "services/ctest-*/build.py",
+    "services/fastpy-*/build.py",
+)
+
+
+def _unbuilt_recipes() -> list[str]:
+    """Fixture directories holding a recipe and no `.elf`, repo-relative."""
+    out: list[str] = []
+    for pattern in RECIPE_GLOBS:
+        for recipe in sorted(REPO.glob(pattern)):
+            if not any(recipe.parent.glob("*.elf")):
+                out.append(recipe.parent.relative_to(REPO).as_posix())
+    return sorted(set(out))
+
+
 def _staged_artifacts() -> list[Path]:
     """Every locally built file the rootfs stages, sorted, repo-relative order."""
     found: list[Path] = []
@@ -1138,7 +1156,39 @@ def cmd_image_check() -> int:
         print("[ctest]        binaries that are no longer the ones you built. Repack it:")
         print("[ctest]          wsl -d Ubuntu -- bash scripts/create-ext4-rootfs.sh")
         return 1
-    print(f"[ctest] ok {ROOTFS.name} ({len(actual)} staged artifacts match the tree)")
+    # The comparison above comes back clean for a fixture that was never built,
+    # and that is not a corner case -- it happened on 2026-09-10 and cost a boot
+    # test its meaning.
+    #
+    # `recorded` is what the image holds; `actual` is what the tree has built.
+    # A recipe whose ELF does not exist is in NEITHER, so the two agree, this
+    # check passes, and the rootfs is not rebuilt. The kernel rung for that
+    # fixture then reports `SKIP: <name> -- prerequisite missing` and the run
+    # goes green. Lane A's boot test said "ok rootfs.ext4 (78 staged artifacts
+    # match the tree)", which was true, and said nothing about the 79th that
+    # should have existed: services/ctest-hostname had landed on main as source
+    # and had never been built anywhere.
+    #
+    # `create-ext4-rootfs.sh` already refuses a missing fixture ELF, loudly and
+    # by name. It simply never ran, because this check said the image was fine.
+    # So the hole is here: a set difference cannot see a thing absent from both
+    # of its sets.
+    unbuilt = _unbuilt_recipes()
+    if unbuilt:
+        print(f"[ctest] ERROR: {ROOTFS.name} cannot hold every fixture this tree defines.")
+        for name in unbuilt:
+            print(f"[ctest]          {name}: has a build.py and no .elf")
+        print("[ctest]        The image was packed before these existed, so their")
+        print("[ctest]        kernel rungs will report SKIP and the run will pass")
+        print("[ctest]        without having tested them. Build them and repack:")
+        print("[ctest]          PYTHONPATH=<fastpy> python <dir>/build.py")
+        print("[ctest]          wsl -d Ubuntu -- bash scripts/create-ext4-rootfs.sh")
+        return 1
+
+    print(
+        f"[ctest] ok {ROOTFS.name} ({len(actual)} staged artifacts match the tree, "
+        f"every fixture recipe has one)"
+    )
     return 0
 
 

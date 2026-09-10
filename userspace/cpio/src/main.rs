@@ -20,6 +20,7 @@
 //! boundary). The archive is terminated by a trailer entry whose filename is
 //! `TRAILER!!!`.
 
+use quoting::quotef_os;
 use std::env;
 use std::fs::{self, File, Metadata};
 use std::io::{self, BufRead, Read, Write};
@@ -1083,7 +1084,7 @@ fn copy_in(opts: &Options) -> Result<(), String> {
                     let _ = target;
                     eprintln!(
                         "cpio: {}: symlink extraction not supported on this platform",
-                        dest.display()
+                        quotef_os(dest)
                     );
                 }
             }
@@ -1214,7 +1215,7 @@ fn pass_through(opts: &Options) -> Result<(), String> {
                         let _ = target;
                         eprintln!(
                             "cpio: {}: symlink copy not supported on this platform",
-                            dest.display()
+                            quotef_os(dest)
                         );
                     }
                 }

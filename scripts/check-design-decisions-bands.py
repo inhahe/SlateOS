@@ -915,7 +915,7 @@ def main(argv=None):
         help="read the document AND the baseline out of commit REV instead of "
              "the working tree (what the push hook passes)",
     )
-    ap.add_argument("--selftest", action="store_true",
+    ap.add_argument("--selftest", "--self-test", action="store_true",
                     help="prove the --head seam against a scratch repo")
     args = ap.parse_args(argv)
 

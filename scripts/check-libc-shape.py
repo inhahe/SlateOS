@@ -914,6 +914,21 @@ def main(argv: list[str] | None = None) -> int:
                         help="print the member each strict family resolved to")
     parser.add_argument("--ignore-age", action="store_true",
                         help="grade the archive even if posix/ is newer than it")
+    # Declared even though `__main__` intercepts it before this parser runs.
+    #
+    # Without the declaration the flag is accepted and documented NOWHERE: it
+    # does not appear in --help, and any tool reading this parser to learn the
+    # interface -- `scripts/check-gate-call-sites.py` does exactly that --
+    # sees a call site passing a flag the script does not declare. The two
+    # mechanisms disagreeing about what this program accepts is the defect;
+    # which of them wins is not.
+    #
+    # It also protects against the tidy-up: a future reader deleting the
+    # `__main__` scan on the grounds that argparse handles flags would, without
+    # this line, silently remove the self-test entrypoint and leave a gate
+    # whose fixtures nothing runs.
+    parser.add_argument("--selftest", "--self-test", action="store_true",
+                        help="run this script's own fixtures (handled in __main__)")
     args = parser.parse_args(argv)
 
     if args.archive:

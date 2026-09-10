@@ -1285,9 +1285,28 @@ fn run_setcap(args: &[String]) -> i32 {
     };
 
     let path = Path::new(file);
-    if !path.exists() {
-        eprintln!("setcap: {}: No such file", file);
-        return 1;
+    // `Path::exists` answers false for a path it could not STAT, not only for
+    // one that is absent -- a directory component we cannot search reads
+    // exactly like a missing file. Reporting "No such file" for that sends the
+    // user to look for a typo when the problem is a permission on the way in.
+    //
+    // `try_exists` keeps the two apart: Ok(false) is genuinely absent, Err is
+    // "could not tell". Lane A hit the same collapse in `Vfs::exists`
+    // (`stat().is_ok()`), where PermissionDenied arriving as "does not exist"
+    // made `which_layer` serve the older content of a file with no error.
+    match path.try_exists() {
+        Ok(true) => {}
+        Ok(false) => {
+            eprintln!("setcap: {}: No such file or directory", quoteaf_os(file));
+            return 1;
+        }
+        Err(e) => {
+            eprintln!(
+                "setcap: {}: cannot determine whether it exists: {e}",
+                quoteaf_os(file)
+            );
+            return 1;
+        }
     }
 
     // Read existing caps, apply spec, write back.

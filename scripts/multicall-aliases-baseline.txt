@@ -12,11 +12,10 @@ ar:ranlib
 ar:strip
 blkid:findfs
 cal:ncal
-cron:anacron
 cron:atq
 cron:atrm
 cron:batch
-crond2:anacron
+crond:anacron
 getty:mingetty
 hexdump:xxd
 kill:killall

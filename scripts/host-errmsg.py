@@ -684,14 +684,14 @@ def selftest() -> int:
 
 def main() -> int:
     argv = sys.argv[1:]
-    if "--selftest" in argv:
+    if {"--selftest", "--self-test"} & set(argv):
         return selftest()
 
     ap = argparse.ArgumentParser(add_help=True)
     ap.add_argument("--check", action="store_true")
     ap.add_argument("--list", dest="listing", action="store_true")
     ap.add_argument("--write-baseline", dest="write", action="store_true")
-    ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--selftest", "--self-test", action="store_true")
     ap.add_argument("--head", metavar="REV",
                     help="judge this revision instead of the working tree")
     args = ap.parse_args(argv)

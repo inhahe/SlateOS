@@ -79,6 +79,7 @@ version = "0.1.0"
 name = "audit"
 version = "0.1.0"
 dependencies = [
+ "optionalfile",
  "quoting",
 ]
 
@@ -439,6 +440,7 @@ name = "cpio"
 version = "0.1.0"
 dependencies = [
  "modechange",
+ "quoting",
 ]
 
 [[package]]
@@ -480,10 +482,6 @@ dependencies = [
 
 [[package]]
 name = "crond"
-version = "0.1.0"
-
-[[package]]
-name = "crond2"
 version = "0.1.0"
 dependencies = [
  "scratchdir",
@@ -1629,6 +1627,9 @@ dependencies = [
 [[package]]
 name = "make"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "man"
@@ -2371,6 +2372,9 @@ dependencies = [
 [[package]]
 name = "scp"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "scratchdir"

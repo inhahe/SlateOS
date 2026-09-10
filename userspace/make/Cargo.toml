@@ -4,3 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS make - build automation tool"
 [dependencies]
+# Diagnostics name files, and a file name reaches stderr with whatever
+# bytes it holds -- a newline in one forges a log line. See
+# `userspace/quoting`.
+quoting = { path = "../quoting" }

@@ -909,7 +909,7 @@ def main() -> int:
     )
     ap.add_argument("bins", nargs="*", metavar="BIN",
                     help="check only these utilities (default: all of them)")
-    ap.add_argument("--selftest", action="store_true",
+    ap.add_argument("--selftest", "--self-test", action="store_true",
                     help="check the checker against recorded GNU behaviour")
     ap.add_argument(
         "--head", default=None,

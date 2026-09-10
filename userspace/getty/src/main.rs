@@ -769,7 +769,7 @@ fn exec_login(program: &Path, args: &[String]) -> i32 {
         Err(e) => e,
     };
 
-    eprintln!("getty: {}: {err}", program.display());
+    eprintln!("getty: {}: {err}", quoteaf_os(program));
     // The shell convention callers already expect: 127 for a login program
     // that is not there, 126 for one that is but cannot be run.
     if err.kind() == io::ErrorKind::NotFound {

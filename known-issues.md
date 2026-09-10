@@ -47639,7 +47639,7 @@ they live outside the `coreutils` crate and cannot depend on it as things stand:
 | `userspace/nc` | `src/main.rs:1351` | same, for `-e` |
 | `userspace/watch` | `src/main.rs:383` | same, via a private `const SHELL` |
 
-**Two call sites that look like this and are not.** `userspace/crond2`
+**Two call sites that look like this and are not.** `userspace/crond`
 (`src/main.rs:1173`) and `userspace/sudo` (`src/main.rs:2808`, `:2817`) also
 spell `.arg("-c")`, but the program they run is the one the *user* chose — the
 crontab's `SHELL=` and the target account's login shell respectively. Running
@@ -63732,7 +63732,7 @@ So the personality is selected by a branch that no invocation can reach.
 | `userspace/cal` | `ncal` |
 | `userspace/blkid` | `findfs` |
 | `userspace/getty` | `mingetty` |
-| `userspace/crond2` | `anacron` |
+| `userspace/crond` | `anacron` |
 | `userspace/xdg` | `mimeopen`, `xdg-mime` |
 | `userspace/ninja` | `samu` |
 
@@ -128252,6 +128252,92 @@ B-COREUTILS-PANIC-ON-A-NON-UTF-8-ARGUMENT, not this entry, and the tests say so
 where a reader would otherwise take it for a parsing failure.
 
 
+## TD-B-QUOTE-NAMES-COUNTED-ONE-OF-TWO-SPELLINGS (lane B, 2026-09-10) — fixed
+
+**In short:** `scripts/quote-names.py` flags `eprintln!("prog: {path}: {e}")`
+and did not flag `eprintln!("prog: {}: {e}", path.display())` — the same
+defect, the older spelling. Seven sites were in the tree while the baseline
+read "0 sites in 0 files". Detector extended, all seven fixed, baseline still
+zero and now means it.
+
+**How it surfaced.** Not from the gate. A one-line fix in `setcap` replaced a
+positional diagnostic with an inline capture, and the gate refused the push —
+correctly. The line it *replaced* had been there all along and had always
+passed. A gate rejecting a change while accepting its predecessor is the
+cheapest possible signal that its rule is narrower than its subject, and it is
+only visible when you touch the line.
+
+**A correction to my own commit message.** `f14def32b` said 224 sites across 43
+files. That number came from grepping for any unquoted `.display()` inside any
+diagnostic macro. The gate's proposition is narrower — `prog: <name>: <rest>` —
+and it does not cover the broader class in the **inline** spelling either. So:
+
+| Population | Size | Covered? |
+|---|---|---|
+| `prog: {name}: …`, inline | — | yes, always |
+| `prog: {}: …`, positional | **7** | no, until now — the actual gap |
+| any `.display()` in any diagnostic | ~224 | no, in either spelling; never in scope |
+
+The gap was real and is seven. The 224 is a different, larger population this
+gate has never claimed. Stating it as the gap overstated the finding, in a
+commit message that is on `main`, which is why the correction is here rather
+than only in a later message.
+
+**Fixed:** `cpio` (2), `scp` (2), `getty`, `make`, `pkg` — `quotef_os` /
+`quoteaf_os`, and the `quoting` dependency added to the three crates lacking
+it. Eight new self-test fixtures, including an escaped quote inside the format
+string, because reading the argument list from *inside* the literal is the
+mirror image of the `strip_noise` bug that hit `check-read-defaults.py` twice
+this week.
+
+**Still uncovered, deliberately:** the ~224. Widening the detector to every
+`.display()` in every diagnostic is a different decision with a much larger
+burn-down, and it should be taken as one rather than smuggled in behind a
+seven-site fix.
+
+## TD-B-EXISTS-COLLAPSES-UNREADABLE-INTO-ABSENT (lane B, 2026-09-10) — swept, one fixed, rest verified benign
+
+**In short:** `Path::exists()` answers `false` for a path it could not *stat*,
+not only for one that is absent — a directory component you cannot search reads
+exactly like a missing file. Lane B uses it **130 times** and `try_exists()`,
+the API that keeps the two apart, **zero times**. Swept for the dangerous
+shape; one diagnostic was wrong and no data-loss case exists.
+
+**Why it was swept.** Lane A found the same collapse in the kernel:
+`Vfs::exists` is `stat().is_ok()`, and `stat` passes the VFS permission gate,
+so `PermissionDenied` reached callers as "the path does not exist".
+`fs::overlay::which_layer` used it to decide **which layer serves a file**, so
+an unstattable upper file became `Layer::Lower` and the caller got the base
+image's older content with no error. Their fix is `Vfs::exists_or_err`, which
+is `optionalfile::read_or_empty` one subsystem over.
+
+**The filter, which is lane A's and better than the one I used before.** Do not
+grep for the idiom — 130 sites, almost all harmless. Ask **which way `false`
+points**: `is_mounted() == false` means *go ahead*, `is_allowed() == false`
+means *deny* and is safe. Mechanically, that is `if !x.exists()` with a write,
+create, remove, copy or rename in the following few lines.
+
+Six matched. Each was read, and the verdicts are the point:
+
+| Site | `false` leads to | Verdict |
+|---|---|---|
+| `backup:833` | `create_dir_all` on a dir that exists | no-op; `create_dir_all` succeeds on an existing directory |
+| `backup:1178` | refuse to delete, exit 1 | **fail-closed** — an unreadable manifest declines the `remove_dir_all` |
+| `bootctl:423` | refuse to update, exit 1 | fail-closed |
+| `capsh:1288` | refuse, exit 1 | fail-closed, but said **"No such file"** — fixed |
+| `cpio:1125` | create with `-d`, else refuse | fail-closed without `-d`, explicit with it |
+| `pkg:710` | rewrite a content-addressed blob | byte-identical by construction; the path is its SHA-256 |
+
+**Fixed:** `setcap` now uses `try_exists()` — `Ok(false)` is absent, `Err` is
+"could not tell", and each says so. Reporting "No such file" for a permission
+error sends the user hunting a typo that is not there.
+
+**Not fixed, deliberately:** the other 129 sites. A rewrite would be churn
+against a real risk of introducing errors, and the sweep found the dangerous
+direction is not represented. What matters is the *rule*, which is recorded
+here: an `exists()` whose `false` licenses a write, a delete or a privilege is
+the shape to fix; one whose `false` causes a refusal is already safe.
+
 ## TD-B-SURVEY-FOR-GUARDS-THAT-FAIL-OPEN (lane B, 2026-09-10)
 
 **In short:** after fixing `mkfs`/`fsck`, I ran the check I had just told the
@@ -128882,7 +128968,7 @@ jobs for real:
 |---|---|
 | `userspace/cron` | prints `scheduler ready (simulated)` and exits |
 | `userspace/crond` | real loop: per-minute wake, live crontab reload, `/etc/cron.d`, `@reboot`, `Command::new("/bin/sh")`, exit code and duration logged |
-| `userspace/crond2` | real loop, plus anacron |
+| `userspace/crond` | real loop, plus anacron |
 
 Found by `scripts/multicall-aliases.py` after it was taught to follow the
 argv0 variable — `cron` answers to `crond` **and** `crontab`, shadowing both
@@ -128934,7 +129020,7 @@ it. Eight tests.
 
 **Still open:** `userspace/crond` reads only `/var/spool/cron/root`
 (`DEFAULT_USER`), so no other user's crontab is ever loaded; `cron` and
-`crond2` are untouched duplicates; `anacron` is still simulated in `cron`; and
+`anacron` is still simulated in `cron`; and
 no cron implementation reaches the image.
 
 ---

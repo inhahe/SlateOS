@@ -447,6 +447,7 @@ def main() -> int:
     )
     ap.add_argument(
         "--selftest",
+        "--self-test",
         action="store_true",
         help="build a throwaway repository and verify this gate still detects a "
              "deletion, ignores a rename, and honours the allowlist",

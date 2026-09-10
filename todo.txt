@@ -4630,7 +4630,7 @@
 ##       was mis-treated as "no args" (kept quoting on) instead of disabling quoting.
 ##     - du (human_readable/si_readable): whole-number special case printed "1K" where GNU
 ##       prints "1.0K". Removed special case; now <10 → one decimal, >=10 → zero decimals.
-##     - crond2 (next_match_after): after zeroing seconds the computed time could fall BEFORE
+##     - crond (next_match_after): after zeroing seconds the computed time could fall BEFORE
 ##       `from` (same-minute truncation). Added a guard advancing to the next minute when so.
 ##     - dc (number scanner): hex digits A-F were not accepted as a number start nor inside the
 ##       number loop (used is_ascii_uppercase wrongly). Added 'A'..='F' to start arm and inner

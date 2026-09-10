@@ -146,6 +146,69 @@ def bare_interpolated_name(line: str) -> str | None:
     return ident
 
 
+def _format_string_end(after_open_quote: str) -> int:
+    """Index just past the closing quote of a Rust string literal.
+
+    Written out rather than `find('"')` because a format string may contain an
+    escaped quote, and stopping at it puts the argument scan inside the
+    literal. `strip_noise` in `check-read-defaults.py` had the mirror-image bug
+    twice this week; it is not a hypothetical class.
+    """
+    i = 0
+    n = len(after_open_quote)
+    while i < n:
+        c = after_open_quote[i]
+        if c == chr(92):          # backslash: skip whatever it escapes
+            i += 2
+            continue
+        if c == '"':
+            return i + 1
+        i += 1
+    return -1
+
+
+def positional_name_arg(line: str) -> str | None:
+    """The positional twin of [`bare_interpolated_name`].
+
+    Matches `eprintln!("prog: {}: ...", <path>.display())` -- the same
+    diagnostic, the same defect, the older spelling. Returns the argument text
+    so the report can show which name reaches the message.
+
+    Deliberately requires `.display()`. A bare identifier in a `{}` could be an
+    integer, an enum or a count, and flagging those would make this gate cry
+    wolf; `.display()` exists on `Path` and `PathBuf` and nothing else here, so
+    it identifies a file name rather than guessing at one.
+    """
+    m = re.search(r'eprintln!\(\s*"', line)
+    if m is None:
+        return None
+    after = line[m.end():]
+    prog, sep, tail = after.partition(": {}")
+    if not sep:
+        return None
+    # Same program-prefix rule as the inline shape: lowercase, digits and
+    # underscore. It is what keeps this off prose and off `{}` in the middle of
+    # a sentence.
+    if not prog or not all(c.islower() or c.isdigit() or c == "_" for c in prog):
+        return None
+    if not tail.startswith(": "):
+        return None
+    end = _format_string_end(tail)
+    if end < 0:
+        return None
+    args = tail[end:]
+    am = re.match(r"\s*,\s*(?P<arg>[A-Za-z_][\w.]*(?:\([^()]*\))?\.display\(\))", args)
+    if am is None:
+        return None
+    arg = am.group("arg")
+    # Already routed through the quoting helpers.
+    if "quote" in arg:
+        return None
+    if arg.split(".")[0] in NOT_A_NAME:
+        return None
+    return arg
+
+
 def quotes_around_placeholder(fmt: str) -> bool:
     """Do hand-written single quotes wrap an actual format *placeholder*?
 
@@ -339,6 +402,12 @@ def violations(text: str) -> list[tuple[int, str, str]]:
         ident = bare_interpolated_name(line)
         if ident is not None:
             out.append((first, f"{{{ident}}} unquoted", line.strip()))
+        elif (arg := positional_name_arg(line)) is not None:
+            # The same defect, written `{}` with the name in the argument list
+            # instead of captured inline. Invisible to this gate until
+            # 2026-09-10, which is why its baseline read zero while 224 of
+            # these were in the tree.
+            out.append((first, f"{arg} unquoted (positional)", line.strip()))
         elif hand_written_quotes(line):
             out.append((first, "hand-written quotes", line.strip()))
     return out
@@ -833,6 +902,35 @@ def selftest() -> int:
             failures.append(f"{label}: {want_in!r} not in {joined!r}")
 
     # 1. The base case, in the exact shape the recorded sites are written in.
+    # -- the positional spelling of the same defect ------------------------
+    #
+    # Invisible to this gate until 2026-09-10. It was found because a one-line
+    # fix replacing `{}` + argument with an inline `{file}` capture was REFUSED
+    # by the gate, while the line it replaced had always passed. Seven sites
+    # were in the tree; the burn-down that reported "0 remain" had been
+    # counting one of the two ways to write it.
+    expect("positional", 'eprintln!("cut: {}: {e}", path.display());', 1)
+    expect("positional-verb-tail",
+           'eprintln!("scp: {}: cannot read symlink: {e}", p.display());', 1)
+    # Already routed through the helpers: the whole point, not a violation.
+    expect("positional-quoted", 'eprintln!("cut: {}: {e}", quotef_os(path));', 0)
+    expect("positional-quoted-a", 'eprintln!("cut: {}: {e}", quoteaf_os(path));', 0)
+    # `.display()` is what identifies a file name. Without that qualifier this
+    # would flag every integer and enum in a `{}`, and a gate that cries wolf
+    # gets switched off.
+    expect("positional-not-a-path", 'eprintln!("cut: {}: {e}", n);', 0)
+    expect("positional-count", 'println!("copied {} files", count);', 0)
+    # The program-prefix rule keeps it off prose, exactly as for the inline
+    # shape.
+    expect("positional-prose",
+           'eprintln!("Some prose: {}: here", path.display());', 0)
+    # An escaped quote inside the format string must not end the scan early --
+    # if it does, the argument list is read from inside the literal. The
+    # mirror-image bug hit `strip_noise` in check-read-defaults.py twice this
+    # week, so it is pinned rather than trusted.
+    expect("positional-escaped-quote",
+           r'eprintln!("cut: {}: said \"no\"", path.display());', 1)
+
     expect("bare", 'eprintln!("cut: {path}: {e}");', 1)
     expect("bare-nested-prog", 'eprintln!("tar_x: {name}: {e}");', 1)
     expect("digit-in-prog", 'eprintln!("b2sum: {f}: {e}");', 1)

@@ -29,7 +29,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Personality {
     Crontab,
-    Anacron,
     At,
     Batch,
     Atq,
@@ -40,7 +39,6 @@ impl Personality {
     fn name(self) -> &'static str {
         match self {
             Self::Crontab => "crontab",
-            Self::Anacron => "anacron",
             Self::At => "at",
             Self::Batch => "batch",
             Self::Atq => "atq",
@@ -62,7 +60,6 @@ fn detect_personality(argv0: &str) -> Option<Personality> {
 
     match lower.as_str() {
         "crontab" => Some(Personality::Crontab),
-        "anacron" => Some(Personality::Anacron),
         "batch" => Some(Personality::Batch),
         "atq" => Some(Personality::Atq),
         "atrm" => Some(Personality::Atrm),
@@ -699,91 +696,6 @@ fn strip_quotes(s: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Anacron configuration
-// ---------------------------------------------------------------------------
-
-#[derive(Clone, Debug)]
-struct AnacronEntry {
-    period_days: u32,
-    delay_minutes: u32,
-    job_id: String,
-    command: String,
-}
-
-#[derive(Clone, Debug)]
-struct AnacronConfig {
-    entries: Vec<AnacronEntry>,
-    env_vars: Vec<CrontabEnvVar>,
-}
-
-fn parse_anacrontab(content: &str) -> Result<AnacronConfig, CronError> {
-    let mut entries = Vec::new();
-    let mut env_vars = Vec::new();
-
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-
-        // Environment variable
-        if let Some(eq_pos) = line.find('=') {
-            let key_part = &line[..eq_pos];
-            if !key_part.is_empty()
-                && key_part
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
-            {
-                let value = line[eq_pos + 1..].trim().to_string();
-                let value = strip_quotes(&value);
-                env_vars.push(CrontabEnvVar {
-                    key: key_part.to_string(),
-                    value,
-                });
-                continue;
-            }
-        }
-
-        // period delay job-id command
-        let parts: Vec<&str> = line.splitn(4, char::is_whitespace).collect();
-        if parts.len() < 4 {
-            return Err(CronError::InvalidLine(line.to_string()));
-        }
-
-        let period_days = if parts[0].starts_with('@') {
-            match parts[0].to_ascii_lowercase().as_str() {
-                "@daily" => 1,
-                "@weekly" => 7,
-                "@monthly" => 30,
-                "@yearly" | "@annually" => 365,
-                _ => {
-                    return Err(CronError::InvalidSpecial(parts[0].to_string()));
-                }
-            }
-        } else {
-            parts[0].parse::<u32>().map_err(|_| CronError::ParseInt {
-                field: "period",
-                value: parts[0].to_string(),
-            })?
-        };
-
-        let delay_minutes = parts[1].parse::<u32>().map_err(|_| CronError::ParseInt {
-            field: "delay",
-            value: parts[1].to_string(),
-        })?;
-
-        entries.push(AnacronEntry {
-            period_days,
-            delay_minutes,
-            job_id: parts[2].to_string(),
-            command: parts[3].to_string(),
-        });
-    }
-
-    Ok(AnacronConfig { entries, env_vars })
-}
-
-// ---------------------------------------------------------------------------
 // At job representation
 // ---------------------------------------------------------------------------
 
@@ -1213,6 +1125,17 @@ fn run_crontab(args: &[String]) -> i32 {
                     let _ = write!(out, "{content}");
                     0
                 }
+                // NotFound is the only failure that means "no crontab".
+                // Anything else -- a permission on the way in, a bad byte, a
+                // directory where a file should be -- is us being unable to
+                // tell, and reporting it as an absent crontab sends the user
+                // to write a new one over whatever is actually there. Real
+                // crontab(1) says "no crontab for <user>" for the absent case
+                // and that wording is kept for it.
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    let _ = writeln!(out, "crontab: cannot read the crontab for {user}: {e}");
+                    1
+                }
                 Err(_) => {
                     let _ = writeln!(out, "no crontab for {user}");
                     1
@@ -1316,122 +1239,6 @@ enum CrontabAction {
 // ---------------------------------------------------------------------------
 // anacron personality
 // ---------------------------------------------------------------------------
-
-fn run_anacron(args: &[String]) -> i32 {
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-
-    let mut force = false;
-    let mut update_only = false;
-    let mut serialize = false;
-    let mut run_now = false;
-    let mut test_config = false;
-
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "-f" => force = true,
-            "-u" => update_only = true,
-            "-s" => serialize = true,
-            "-n" => run_now = true,
-            "-T" => test_config = true,
-            "--help" | "-h" => {
-                let _ = writeln!(
-                    out,
-                    "Usage: anacron [-f] [-u] [-s] [-n] [-T]\n\n\
-                     Run periodic jobs that missed their schedule.\n\n\
-                     Options:\n  \
-                       -f   Force: run all jobs regardless of timestamps\n  \
-                       -u   Only update timestamps, don't run jobs\n  \
-                       -s   Serialize: run jobs one at a time\n  \
-                       -n   Run now: ignore delays\n  \
-                       -T   Test configuration and exit"
-                );
-                return 0;
-            }
-            _ => {
-                let _ = writeln!(out, "anacron: unknown option '{}'", args[i]);
-                return 1;
-            }
-        }
-        i += 1;
-    }
-
-    // Load anacrontab
-    let content = match fs::read_to_string(ANACRONTAB) {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = writeln!(out, "anacron: cannot read {ANACRONTAB}: {e}");
-            return 1;
-        }
-    };
-
-    let config = match parse_anacrontab(&content) {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = writeln!(out, "anacron: error in {ANACRONTAB}: {e}");
-            return 1;
-        }
-    };
-
-    if test_config {
-        let _ = writeln!(
-            out,
-            "anacron: configuration OK ({} jobs defined)",
-            config.entries.len()
-        );
-        return 0;
-    }
-
-    // Process each job
-    let _ = fs::create_dir_all(ANACRON_SPOOL_DIR);
-
-    for entry in &config.entries {
-        let timestamp_file = PathBuf::from(ANACRON_SPOOL_DIR).join(&entry.job_id);
-
-        let needs_run = if force {
-            true
-        } else {
-            // Check last-run timestamp
-            match fs::read_to_string(&timestamp_file) {
-                Ok(ts) => {
-                    // Timestamp file contains YYYYMMDD
-                    let _ = ts.trim();
-                    // In a real implementation we'd compare dates.
-                    // Here we simulate: always needs run if timestamp is old.
-                    true
-                }
-                Err(_) => true, // Never run before
-            }
-        };
-
-        if needs_run {
-            if update_only {
-                let _ = writeln!(out, "anacron: updating timestamp for '{}'", entry.job_id);
-                let _ = fs::write(&timestamp_file, "20260520\n");
-            } else {
-                let delay_msg = if run_now {
-                    "no delay".to_string()
-                } else if serialize {
-                    format!("delay {}m (serialized)", entry.delay_minutes)
-                } else {
-                    format!("delay {}m", entry.delay_minutes)
-                };
-                let _ = writeln!(
-                    out,
-                    "anacron: job '{}' (period={}d, {delay_msg}): {}",
-                    entry.job_id, entry.period_days, entry.command
-                );
-                // Update timestamp
-                let _ = fs::write(&timestamp_file, "20260520\n");
-            }
-        } else {
-            let _ = writeln!(out, "anacron: job '{}' not due yet", entry.job_id);
-        }
-    }
-
-    0
-}
 
 // ---------------------------------------------------------------------------
 // at personality
@@ -1715,7 +1522,7 @@ fn main() {
     let Some(personality) = detect_personality(argv0) else {
         eprintln!(
             "{argv0}: this binary does not implement that command.\n\
-             It answers to: crontab, at, batch, atq, atrm, anacron.\n\
+             It answers to: crontab, at, batch, atq, atrm.\n\
              The cron daemon is a separate program -- see userspace/crond."
         );
         std::process::exit(2);
@@ -1725,7 +1532,6 @@ fn main() {
 
     let exit_code = match personality {
         Personality::Crontab => run_crontab(&rest_vec),
-        Personality::Anacron => run_anacron(&rest_vec),
         Personality::At => run_at(&rest_vec, Personality::At),
         Personality::Batch => run_batch(&rest_vec),
         Personality::Atq => run_at(&rest_vec, Personality::Atq),
@@ -1751,7 +1557,7 @@ mod tests {
     fn test_detect_crond() {
         // The daemon personality was deleted: it printed "running <cmd> as
         // <user>" without running anything, and two crates -- userspace/crond
-        // and userspace/crond2 -- implement the daemon for real. `None` rather
+        // -- userspace/crond -- implements the daemon for real. `None` rather
         // than a personality, so the name cannot quietly become `at`.
         assert_eq!(detect_personality("crond"), None);
         assert_eq!(detect_personality("/usr/sbin/crond"), None);
@@ -1771,7 +1577,12 @@ mod tests {
 
     #[test]
     fn test_detect_anacron() {
-        assert_eq!(detect_personality("anacron"), Some(Personality::Anacron));
+        // Deleted 2026-09-10, the third and last simulated personality. It
+        // printed "updating timestamp for '<job>'" and wrote the literal
+        // "20260520", so the value it announced updating was a constant and
+        // the due-check it fed could not change its answer. `userspace/crond`
+        // carries real anacron, against a real spool.
+        assert_eq!(detect_personality("anacron"), None);
     }
 
     #[test]
@@ -1812,7 +1623,6 @@ mod tests {
     #[test]
     fn test_personality_names() {
         assert_eq!(Personality::Crontab.name(), "crontab");
-        assert_eq!(Personality::Anacron.name(), "anacron");
         assert_eq!(Personality::At.name(), "at");
         assert_eq!(Personality::Batch.name(), "batch");
         assert_eq!(Personality::Atq.name(), "atq");
@@ -2265,45 +2075,6 @@ mod tests {
     // -----------------------------------------------------------------------
     // Anacrontab parsing
     // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_parse_anacrontab_basic() {
-        let content = "# anacrontab\n\
-                        SHELL=/bin/sh\n\
-                        1\t5\tcron.daily\trun-parts /etc/cron.daily\n\
-                        7\t10\tcron.weekly\trun-parts /etc/cron.weekly\n";
-        let config = parse_anacrontab(content).unwrap();
-        assert_eq!(config.entries.len(), 2);
-        assert_eq!(config.entries[0].period_days, 1);
-        assert_eq!(config.entries[0].delay_minutes, 5);
-        assert_eq!(config.entries[0].job_id, "cron.daily");
-        assert_eq!(config.entries[1].period_days, 7);
-    }
-
-    #[test]
-    fn test_parse_anacrontab_special_periods() {
-        let content = "@daily\t5\tdaily_job\t/usr/bin/daily\n\
-                        @weekly\t10\tweekly_job\t/usr/bin/weekly\n\
-                        @monthly\t15\tmonthly_job\t/usr/bin/monthly\n";
-        let config = parse_anacrontab(content).unwrap();
-        assert_eq!(config.entries[0].period_days, 1);
-        assert_eq!(config.entries[1].period_days, 7);
-        assert_eq!(config.entries[2].period_days, 30);
-    }
-
-    #[test]
-    fn test_parse_anacrontab_env_vars() {
-        let content = "SHELL=/bin/bash\nPATH=/usr/bin\n1 0 test /bin/true\n";
-        let config = parse_anacrontab(content).unwrap();
-        assert_eq!(config.env_vars.len(), 2);
-        assert_eq!(config.env_vars[0].key, "SHELL");
-    }
-
-    #[test]
-    fn test_parse_anacrontab_invalid() {
-        let content = "bad line\n";
-        assert!(parse_anacrontab(content).is_err());
-    }
 
     // -----------------------------------------------------------------------
     // At time parsing

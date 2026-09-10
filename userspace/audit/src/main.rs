@@ -571,25 +571,25 @@ fn days_to_ymd(days: u64) -> (u64, u64, u64) {
 /// "today", "now", "yesterday", "this-week", "this-month".
 fn parse_time_spec(s: &str) -> Option<f64> {
     match s {
-        "now" => Some(simulated_now()),
+        "now" => Some(current_time()),
         "today" => {
-            let now = simulated_now() as u64;
+            let now = current_time() as u64;
             let day_start = (now / 86400) * 86400;
             Some(day_start as f64)
         }
         "yesterday" => {
-            let now = simulated_now() as u64;
+            let now = current_time() as u64;
             let day_start = (now / 86400) * 86400;
             Some((day_start - 86400) as f64)
         }
         "this-week" => {
-            let now = simulated_now() as u64;
+            let now = current_time() as u64;
             let day_start = (now / 86400) * 86400;
             // Approximate: go back up to 7 days
             Some((day_start - 7 * 86400) as f64)
         }
         "this-month" => {
-            let now = simulated_now() as u64;
+            let now = current_time() as u64;
             let day_start = (now / 86400) * 86400;
             Some((day_start - 30 * 86400) as f64)
         }
@@ -658,17 +658,67 @@ fn ymd_to_days(year: u64, month: u64, day: u64) -> Option<u64> {
     }
 }
 
-/// Return simulated "now" timestamp (epoch seconds).
-fn simulated_now() -> f64 {
-    // In a real OS this would use the system clock.
-    // For simulation, use a fixed reference or env var.
-    if let Ok(v) = env::var("AUDIT_SIMULATED_NOW")
-        && let Ok(t) = v.parse::<f64>()
+/// `SYS_CLOCK_REALTIME`: no arguments, returns nanoseconds since the
+/// epoch in rax. Same number and same contract as `at`, `date`, `hwclock`
+/// and `ntpd`, which were compared before this was copied.
+#[cfg(target_vendor = "slateos")]
+const SYS_CLOCK_REALTIME: u64 = 14;
+
+/// The kernel's realtime clock, as epoch seconds with fractional part.
+///
+/// # Why this is not a detail
+///
+/// This used to return a constant -- 1_735_689_600.0, 2025-01-01 -- and
+/// `write_audit_event` derives the record's SERIAL from it as well as its
+/// timestamp. Every record on the system therefore claimed the same instant
+/// and the same serial, and in auditd's `msg=audit(<time>:<serial>)` format
+/// the serial is what makes an event unique and orderable. So the log could
+/// not distinguish two events, order them, or say when either happened, while
+/// looking exactly like a log that could.
+///
+/// There was also an `AUDIT_SIMULATED_NOW` environment override. It is gone
+/// rather than kept as a test seam: anything that lets the environment decide
+/// what time an audit record claims is a forgery vector, and an audit tool is
+/// the last program that should have one.
+///
+/// # Falling back
+///
+/// A clock that cannot be read returns 0.0 rather than a plausible time. A
+/// record dated the epoch is visibly wrong and invites investigation; one
+/// dated "now-ish" is indistinguishable from a true record and would be
+/// believed. This is the same choice as refusing rather than guessing that
+/// `crond` and `atd` make about a job's user.
+fn current_time() -> f64 {
+    #[cfg(target_vendor = "slateos")]
     {
-        return t;
+        let ret: i64;
+        // SAFETY: SYS_CLOCK_REALTIME takes no arguments and writes nothing to
+        // userspace; it only reads the kernel clock into rax. rcx/r11 are
+        // clobbered by the SYSCALL instruction.
+        unsafe {
+            core::arch::asm!(
+                "syscall",
+                in("rax") SYS_CLOCK_REALTIME,
+                lateout("rax") ret,
+                lateout("rcx") _,
+                lateout("r11") _,
+                options(nostack, nomem),
+            );
+        }
+        if ret < 0 {
+            return 0.0;
+        }
+        return ret as f64 / 1_000_000_000.0;
     }
-    // Default: 2025-01-01 00:00:00 UTC = 1735689600
-    1_735_689_600.0
+
+    #[cfg(not(target_vendor = "slateos"))]
+    {
+        match std::time::SystemTime::now().duration_since(std::time::SystemTime::UNIX_EPOCH) {
+            Ok(d) => d.as_secs_f64(),
+            // Before the epoch, or an unreadable clock. Not a guess.
+            Err(_) => 0.0,
+        }
+    }
 }
 
 // ============================================================================
@@ -1694,8 +1744,19 @@ fn print_aureport_help() {
 fn run_auditctl(args: &[String]) -> i32 {
     let mut store = RuleStore::new();
 
-    // Try to load existing rules from a state file (simulated).
-    load_rule_store(&mut store);
+    // REFUSING is the point. The save below rewrites this file, so proceeding
+    // with an empty store after a failed read destroys every rule the system
+    // had -- and `auditctl -l`, which changes nothing, would do it. What the
+    // caller loses if we proceed is their whole audit policy, which is
+    // design-decisions 1019's refuse case.
+    if let Err(e) = load_rule_store(&mut store) {
+        eprintln!("auditctl: cannot read the audit rule store: {e}");
+        eprintln!(
+            "auditctl: refusing to continue -- the next save would replace \
+             the rules that could not be read with an empty set"
+        );
+        return 1;
+    }
 
     let result = process_auditctl_args(args, &mut store);
 
@@ -2021,12 +2082,40 @@ fn print_auditctl_help() {
 }
 
 /// Load rule store from a simulated state file.
-fn load_rule_store(store: &mut RuleStore) {
+/// Load the saved rules, or say why not.
+///
+/// # Absent and unreadable are different answers
+///
+/// A store that does not exist means there are no rules yet, and an empty
+/// `RuleStore` is the right answer. A store that cannot be READ means we do
+/// not know what the rules are -- and this used to be spelled the same way,
+/// `Err(_) => return`, leaving the store empty.
+///
+/// That mattered because [`run_auditctl`] saves the store afterwards. An
+/// unreadable rule file was therefore OVERWRITTEN with an empty one by any
+/// invocation, including a read-only `auditctl -l`, which then reported no
+/// rules -- a statement that was true of the file by the time anybody read it.
+/// It is `visudo` opening an empty editor over `/etc/sudoers`, one subsystem
+/// over, and `optionalfile::read_or_empty` exists because of that one.
+///
+/// Reading bytes rather than text is deliberate too: `read_to_string` fails
+/// for the whole file on a single byte that is not UTF-8, so one stray byte
+/// anywhere in the store used to empty all of it.
+fn load_rule_store(store: &mut RuleStore) -> std::io::Result<()> {
     let state_path = audit_state_path();
-    let content = match fs::read_to_string(&state_path) {
-        Ok(c) => c,
-        Err(_) => return,
-    };
+    let raw = optionalfile::read_bytes_or_empty(&state_path)?;
+    let content = String::from_utf8(raw).map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                // The path is deliberately absent: the caller supplies it, and a
+                // file name interpolated into a message is the defect
+                // `scripts/quote-names.py` exists to catch.
+                "the audit rule store is not valid UTF-8, from byte {}",
+                e.utf8_error().valid_up_to()
+            ),
+        )
+    })?;
 
     for line in content.lines() {
         let line = line.trim();
@@ -2055,6 +2144,7 @@ fn load_rule_store(store: &mut RuleStore) {
             }
         }
     }
+    Ok(())
 }
 
 /// Save rule store to a simulated state file.
@@ -2188,7 +2278,7 @@ fn run_auditd(args: &[String]) -> i32 {
 }
 
 fn write_audit_event(log_file: &str, msg_type: MessageType, fields: &[(&str, &str)]) {
-    let now = simulated_now();
+    let now = current_time();
     let serial = (now * 1000.0) as u64 % 1_000_000;
     let mut line = format!("type={} msg=audit({:.3}:{}):", msg_type, now, serial);
     for (k, v) in fields {
@@ -2336,6 +2426,50 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- the rule store: absent and unreadable are different answers ------
+
+    #[test]
+    fn an_absent_rule_store_is_no_rules_not_an_error() {
+        // The legitimate empty case. A system that has never had a rule set
+        // must not make auditctl refuse.
+        let dir = std::env::temp_dir().join(format!(
+            "audit-store-absent-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = fs::create_dir_all(&dir);
+        // SAFETY: single-threaded test; the variable is read by
+        // `audit_state_path` on this thread only.
+        unsafe { env::set_var("AUDIT_STATE_FILE", dir.join("nope.state")) };
+        let mut store = RuleStore::new();
+        assert!(load_rule_store(&mut store).is_ok());
+        assert!(store.rules.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_store_that_is_not_utf8_is_an_error_not_an_empty_rule_set() {
+        // The defect this replaced. `read_to_string` fails for the WHOLE file
+        // on one byte that is not UTF-8, the old code turned that into
+        // `return`, and `run_auditctl` then SAVED the empty store back over
+        // it -- so a single stray byte destroyed every audit rule, and
+        // `auditctl -l` was enough to do it.
+        let dir = std::env::temp_dir().join(format!(
+            "audit-store-badutf8-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("rules.state");
+        fs::write(&path, b"rule=-w /etc/passwd\nrule=\xff\xfe bad\n").unwrap();
+        // SAFETY: single-threaded test, as above.
+        unsafe { env::set_var("AUDIT_STATE_FILE", &path) };
+        let mut store = RuleStore::new();
+        let err = load_rule_store(&mut store).expect_err("must not read as empty");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     // -----------------------------------------------------------------------
     // MessageType tests
@@ -3028,7 +3162,7 @@ mod tests {
 
     #[test]
     fn test_parse_time_spec_now() {
-        // Uses simulated_now(), default 1735689600.0
+        // Uses current_time(), default 1735689600.0
         let t = parse_time_spec("now").unwrap();
         assert!(t > 0.0);
     }

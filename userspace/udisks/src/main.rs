@@ -16,6 +16,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process;
 
+/// The single line every declining subcommand ends with.
+///
+/// One recognisable sentence rather than six differently-worded ones, because
+/// the thing a reader needs to take away is identical in every case: the
+/// command did not do what it is named for, and is saying so rather than
+/// printing a success line. `design-decisions.md` 1019.
+const REFUSE: &str = "udisksctl: refusing to report a change it did not make";
+
 const VERSION: &str = "0.1.0";
 
 // ============================================================================
@@ -61,14 +69,6 @@ struct _LoopDevice {
     _size_limit: u64,
     _read_only: bool,
     _autoclear: bool,
-}
-
-#[derive(Clone, Debug)]
-struct MountEntry {
-    _device: String,
-    mountpoint: String,
-    fstype: String,
-    _options: String,
 }
 
 // ============================================================================
@@ -227,26 +227,35 @@ fn mount_table() -> Vec<procinfo::Mount> {
         .unwrap_or_default()
 }
 
-fn find_mountpoints(device: &str) -> Vec<String> {
-    let canonical = fs::canonicalize(device).unwrap_or_else(|_| PathBuf::from(device));
-    let canonical_str = canonical.to_string_lossy();
-
-    mount_table()
-        .iter()
-        .filter(|m| m.device == device.as_bytes() || m.device == canonical_str.as_bytes())
-        .map(|m| quoting::escape_unprintable(&m.mount_point))
-        .collect()
+/// The device path as bytes, without forcing UTF-8 through it.
+///
+/// `to_string_lossy` was here until 2026-09-10, and is wrong for the reason
+/// CLAUDE.md item 7 gives: this OS allows every byte but `/` and NUL in a
+/// path, so a device whose name is not UTF-8 became replacement characters and
+/// then failed to equal its own entry in the mount table. The symptom would
+/// have been `udisksctl unmount -b <device>` answering "is not mounted" about
+/// a device that plainly was.
+#[cfg(unix)]
+fn path_bytes(p: &Path) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt as _;
+    p.as_os_str().as_bytes().to_vec()
 }
 
-fn read_mounts() -> Vec<MountEntry> {
+/// The development host has no byte view of a path. It is not the platform
+/// this ships on; the arm exists so the crate builds and its tests run here.
+#[cfg(not(unix))]
+fn path_bytes(p: &Path) -> Vec<u8> {
+    p.to_string_lossy().into_owned().into_bytes()
+}
+
+fn find_mountpoints(device: &str) -> Vec<String> {
+    let canonical = fs::canonicalize(device).unwrap_or_else(|_| PathBuf::from(device));
+    let canonical_bytes = path_bytes(&canonical);
+
     mount_table()
         .iter()
-        .map(|m| MountEntry {
-            _device: quoting::escape_unprintable(&m.device),
-            mountpoint: quoting::escape_unprintable(&m.mount_point),
-            fstype: quoting::escape_unprintable(&m.fstype),
-            _options: quoting::escape_unprintable(&m.options),
-        })
+        .filter(|m| m.device == device.as_bytes() || m.device == canonical_bytes.as_slice())
+        .map(|m| quoting::escape_unprintable(&m.mount_point))
         .collect()
 }
 
@@ -446,16 +455,26 @@ fn cmd_mount(args: &[String]) -> i32 {
     let base_name = strip_dev(&device);
     let mount_point = format!("/media/$USER/{base_name}");
 
+    // The hedge used to be on stderr and the claim on stdout:
+    //
+    //     eprintln!("udisksctl: would mount {} at {} ...");
+    //     println!("Mounted {} at {mount_point}.", device);
+    //     0
+    //
+    // so a script reading stdout was told the mount had happened, while the
+    // "would" went to the stream a pipeline discards. The mount point was
+    // `/media/$USER/<name>` with `$USER` never expanded, so the sentence named
+    // a directory that could not exist under any user.
     eprintln!(
-        "udisksctl: would mount {} at {} (type={}, options={})",
+        "udisksctl: cannot mount {} (type={}, options={}): this build has no \
+         udisks mount backend",
         device,
-        mount_point,
         fstype.as_deref().unwrap_or("auto"),
         options.as_deref().unwrap_or("defaults")
     );
-    println!("Mounted {} at {mount_point}.", device);
-
-    0
+    eprintln!("udisksctl: use `mount {} {}` -- that one performs the mount", device, mount_point);
+    eprintln!("{REFUSE}");
+    1
 }
 
 fn cmd_unmount(args: &[String]) -> i32 {
@@ -475,11 +494,11 @@ fn cmd_unmount(args: &[String]) -> i32 {
     }
 
     for mp in &mountpoints {
-        eprintln!("udisksctl: would unmount {mp}");
+        eprintln!("udisksctl: cannot unmount {mp}: this build has no udisks unmount backend");
+        eprintln!("udisksctl: use `umount {mp}` -- that one performs the unmount");
     }
-    println!("Unmounted {}.", device);
-
-    0
+    eprintln!("{REFUSE}");
+    1
 }
 
 fn cmd_poweroff(args: &[String]) -> i32 {
@@ -492,9 +511,9 @@ fn cmd_poweroff(args: &[String]) -> i32 {
         }
     };
 
-    eprintln!("udisksctl: would power off {device}");
-    println!("Powered off {device}.");
-    0
+    eprintln!("udisksctl: cannot power off {device}: no block-device power control");
+    eprintln!("{REFUSE}");
+    1
 }
 
 fn cmd_smart(args: &[String]) -> i32 {
@@ -539,10 +558,14 @@ fn cmd_dump() -> i32 {
 }
 
 fn cmd_monitor() -> i32 {
-    println!("Monitoring UDisks2 events...");
-    println!("(Press Ctrl+C to stop)");
-    eprintln!("udisksctl: would monitor D-Bus for device events");
-    0
+    // The two stdout lines used to say "Monitoring UDisks2 events..." and
+    // "(Press Ctrl+C to stop)" before returning immediately. Both are false in
+    // the same breath: nothing is monitored, and Ctrl+C has nothing to
+    // interrupt because the program has already exited. A user watching for
+    // events would have sat in front of a finished process.
+    eprintln!("udisksctl: cannot monitor device events: there is no bus to watch");
+    eprintln!("{REFUSE}");
+    1
 }
 
 fn cmd_loop_setup(args: &[String]) -> i32 {
@@ -558,11 +581,15 @@ fn cmd_loop_setup(args: &[String]) -> i32 {
     let read_only = args.iter().any(|a| a == "--read-only" || a == "-r");
 
     eprintln!(
-        "udisksctl: would set up loop device for {} (read_only={})",
+        "udisksctl: cannot set up a loop device for {} (read_only={}): \
+         this build has no loop-device backend",
         file, read_only
     );
-    println!("Mapped file {file} as /dev/loop0.");
-    0
+    // The old success line named /dev/loop0 unconditionally -- an invented
+    // device, and the same one every time, so two files would have been
+    // reported as mapped to it.
+    eprintln!("{REFUSE}");
+    1
 }
 
 fn cmd_loop_delete(args: &[String]) -> i32 {
@@ -575,9 +602,9 @@ fn cmd_loop_delete(args: &[String]) -> i32 {
         }
     };
 
-    eprintln!("udisksctl: would delete loop device {device}");
-    println!("Deleted loop device {device}.");
-    0
+    eprintln!("udisksctl: cannot delete loop device {device}: no loop-device backend");
+    eprintln!("{REFUSE}");
+    1
 }
 
 // ============================================================================
@@ -647,73 +674,10 @@ fn udisksd_main(args: &[String]) -> i32 {
         "udisksd: starting (debug={}, replace={})",
         !no_debug, replace
     );
-    eprintln!("udisksd: would register on D-Bus as org.freedesktop.UDisks2");
-    eprintln!("udisksd: daemon would enter main loop (simulated, exiting)");
-
-    0
-}
-
-// ============================================================================
-// umount personality
-// ============================================================================
-
-fn umount_main(args: &[String]) -> i32 {
-    let mut targets: Vec<String> = Vec::new();
-    let mut _force = false;
-    let mut _lazy = false;
-    let mut all = false;
-
-    for arg in args {
-        match arg.as_str() {
-            "-f" | "--force" => _force = true,
-            "-l" | "--lazy" => _lazy = true,
-            "-a" | "--all" => all = true,
-            "--help" | "-h" => {
-                println!("Usage: umount [options] <target> ...");
-                println!();
-                println!("Unmount filesystems.");
-                println!();
-                println!("Options:");
-                println!("  -f, --force  Force unmount");
-                println!("  -l, --lazy   Lazy unmount");
-                println!("  -a, --all    Unmount all");
-                println!("  -h, --help   Display this help");
-                println!("  --version    Display version");
-                return 0;
-            }
-            "--version" => {
-                println!("umount (Slate OS) {VERSION}");
-                return 0;
-            }
-            s if !s.starts_with('-') => {
-                targets.push(s.to_string());
-            }
-            _ => {}
-        }
-    }
-
-    if all {
-        let mounts = read_mounts();
-        for mount in &mounts {
-            // Skip virtual filesystems.
-            if ["proc", "sysfs", "devtmpfs", "tmpfs", "devpts"].contains(&mount.fstype.as_str()) {
-                continue;
-            }
-            eprintln!("umount: would unmount {}", mount.mountpoint);
-        }
-        return 0;
-    }
-
-    if targets.is_empty() {
-        eprintln!("umount: no target specified");
-        return 1;
-    }
-
-    for target in &targets {
-        eprintln!("umount: would unmount {target}");
-    }
-
-    0
+    eprintln!("udisksd: cannot register on D-Bus as org.freedesktop.UDisks2");
+    eprintln!("udisksd: there is no bus connection in this build, so no client");
+    eprintln!("udisksd: could ever reach this daemon. Exiting rather than idling.");
+    1
 }
 
 // ============================================================================
@@ -741,7 +705,14 @@ fn main() {
 
     let exit_code = match prog_name.as_str() {
         "udisksd" => udisksd_main(&rest),
-        "umount" => umount_main(&rest),
+        // NOT "umount". `userspace/mount` answers to that name and actually
+        // unmounts -- SYS_FS_MOUNT/SYS_FS_UNMOUNT on target, and an honest
+        // Err off it. This crate carried a second `umount` that read the real
+        // mount table and then printed "would unmount" for each entry, so
+        // which of the two a user got was decided by whichever binary the
+        // rootfs installed at /bin/umount. That is the collision 4182acf8d
+        // untangled for `login` and `loginmgr`, with the same consequence:
+        // a packaging accident deciding whether a core command works.
         _ => udisksctl_main(&rest),
     };
 
@@ -832,12 +803,6 @@ mod tests {
     }
 
     #[test]
-    fn test_read_mounts() {
-        // Should not panic.
-        let _mounts = read_mounts();
-    }
-
-    #[test]
     fn test_block_device_fields() {
         let dev = BlockDevice {
             device: "/dev/sda".to_string(),
@@ -876,14 +841,4 @@ mod tests {
         assert_eq!(part.label, "EFI");
     }
 
-    #[test]
-    fn test_mount_entry() {
-        let entry = MountEntry {
-            _device: "/dev/sda1".to_string(),
-            mountpoint: "/boot".to_string(),
-            fstype: "vfat".to_string(),
-            _options: "rw,relatime".to_string(),
-        };
-        assert_eq!(entry.fstype, "vfat");
-    }
 }

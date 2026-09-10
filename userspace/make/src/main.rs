@@ -6,6 +6,7 @@
 //! automatic variables, conditional directives, include directives, and the
 //! standard command-line options.
 
+use quoting::quotef_os;
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
@@ -1244,7 +1245,7 @@ fn main() {
 
     let mut included = HashSet::new();
     if let Err(e) = parse_makefile(&mf_path, &mut db, &mut included, &overrides) {
-        eprintln!("make: {}: {}", mf_path.display(), e);
+        eprintln!("make: {}: {}", quotef_os(mf_path), e);
         process::exit(2);
     }
 

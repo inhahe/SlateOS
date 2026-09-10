@@ -43,6 +43,7 @@
 #![deny(clippy::all)]
 #![allow(clippy::module_name_repetitions)]
 
+use quoting::quotef_os;
 use std::env;
 use std::fs::{self, File, Metadata};
 use std::io::{Read, Write};
@@ -888,7 +889,7 @@ fn copy_directory(
                     }
                 }
                 Err(e) => {
-                    eprintln!("scp: {}: cannot read symlink: {e}", entry_path.display());
+                    eprintln!("scp: {}: cannot read symlink: {e}", quotef_os(&entry_path));
                     stats.errors = stats.errors.saturating_add(1);
                 }
             }
@@ -1074,7 +1075,7 @@ fn execute_transfer(config: &Config) -> Result<TransferStats, ScpError> {
         let src_path = PathBuf::from(&src_str);
 
         if !src_path.exists() {
-            eprintln!("scp: {}: No such file or directory", src_path.display());
+            eprintln!("scp: {}: No such file or directory", quotef_os(&src_path));
             stats.errors = stats.errors.saturating_add(1);
             continue;
         }

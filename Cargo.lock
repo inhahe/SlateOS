@@ -439,6 +439,7 @@ name = "cpio"
 version = "0.1.0"
 dependencies = [
  "modechange",
+ "quoting",
 ]
 
 [[package]]
@@ -1625,6 +1626,9 @@ dependencies = [
 [[package]]
 name = "make"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "man"
@@ -2367,6 +2371,9 @@ dependencies = [
 [[package]]
 name = "scp"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "scratchdir"

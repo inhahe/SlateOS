@@ -3813,7 +3813,7 @@ fn cmd_install_local(db: &PackageDb, paths: &[PathBuf]) {
                 parsed.push((path.clone(), manifest, files));
             }
             Err(e) => {
-                eprintln!("pkg: {}: {e}", path.display());
+                eprintln!("pkg: {}: {e}", quotef_os(path));
                 process::exit(1);
             }
         }

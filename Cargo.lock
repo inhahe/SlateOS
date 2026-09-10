@@ -3916,7 +3916,9 @@ dependencies = [
 name = "df"
 version = "0.1.0"
 dependencies = [
+ "procinfo",
  "quoting",
+ "scratchdir",
 ]
 
 [[package]]
@@ -11105,6 +11107,11 @@ dependencies = [
 [[package]]
 name = "mount"
 version = "0.1.0"
+dependencies = [
+ "procinfo",
+ "quoting",
+ "scratchdir",
+]
 
 [[package]]
 name = "mousetweaks-cli"

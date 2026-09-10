@@ -201,35 +201,53 @@ fn is_pseudo_fs(fstype: &str) -> bool {
     PSEUDO_FS.iter().any(|&p| p.eq_ignore_ascii_case(fstype))
 }
 
-/// Parse `/proc/mounts` into a list of mount entries.
+/// `/proc/mounts`, through [`procinfo`].
+///
+/// # Two things the hand-parser got wrong
+///
+/// **The kernel escapes whitespace.** Space, tab, newline and backslash in the
+/// device and mount-point fields are written `\040`, `\011`, `\012` and
+/// `\134`, so `/mnt/my backup` appears as `/mnt/my\040backup`. Splitting on
+/// whitespace and taking the fields verbatim therefore produced a mount point
+/// that matched nothing a user could type. `procinfo::Mount` undoes it; the
+/// crate's module doc names the escaping as one of the three reasons it
+/// exists.
+///
+/// **`read_to_string` fails for the whole file** when any single line holds a
+/// byte that is not UTF-8 -- which this filesystem allows in every path
+/// component. One oddly-named mount therefore hid *every* mount, not merely
+/// its own.
+///
+/// The fields are escaped for display on the way out rather than carried as
+/// bytes: a space is printable and survives untouched, so paths a user can
+/// type compare exactly as before, while a byte they cannot type shows as
+/// `\xNN` instead of taking the rest of the table with it.
 fn read_mounts() -> Vec<MountEntry> {
-    let contents = match fs::read_to_string("/proc/mounts") {
-        Ok(c) => c,
+    read_mounts_in(&procinfo::ProcFs::new())
+}
+
+/// [`read_mounts`] against a given `/proc`, so the parsing can be reached from
+/// a test.
+fn read_mounts_in(proc: &procinfo::ProcFs) -> Vec<MountEntry> {
+    match proc.mounts() {
+        Ok(Some(mounts)) => mounts
+            .iter()
+            .map(|m| MountEntry {
+                device: quoting::escape_unprintable(&m.device),
+                mountpoint: quoting::escape_unprintable(&m.mount_point),
+                fstype: quoting::escape_unprintable(&m.fstype),
+                options: quoting::escape_unprintable(&m.options),
+            })
+            .collect(),
+        Ok(None) => {
+            eprintln!("df: cannot read /proc/mounts: no such file");
+            Vec::new()
+        }
         Err(e) => {
             eprintln!("df: cannot read /proc/mounts: {e}");
-            return Vec::new();
+            Vec::new()
         }
-    };
-
-    let mut entries = Vec::new();
-    for line in contents.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        // Format: device mountpoint fstype options dump pass
-        let fields: Vec<&str> = line.splitn(6, ' ').collect();
-        if fields.len() < 4 {
-            continue;
-        }
-        entries.push(MountEntry {
-            device: fields[0].to_string(),
-            mountpoint: fields[1].to_string(),
-            fstype: fields[2].to_string(),
-            options: fields[3].to_string(),
-        });
     }
-    entries
 }
 
 // ============================================================================
@@ -1049,6 +1067,83 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+
+    // ---- reading /proc/mounts ----
+
+    use scratchdir::ScratchDir;
+
+    fn proc_with_mounts(scratch: &ScratchDir, content: &[u8]) -> procinfo::ProcFs {
+        let root = scratch.path("proc");
+        std::fs::create_dir_all(&root).expect("create fixture /proc");
+        std::fs::write(root.join("mounts"), content).expect("write fixture mounts");
+        procinfo::ProcFs::at(root)
+    }
+
+    /// **A mount point containing a space arrives as a space.**
+    ///
+    /// The kernel writes it as `\040`. The hand-parser this replaces split on
+    /// whitespace and kept the field verbatim, so `df` showed a mount point
+    /// spelled `/mnt/my\040backup` -- which matches nothing a user can type,
+    /// and is not what is mounted.
+    #[test]
+    fn an_escaped_space_in_a_mount_point_is_unescaped() {
+        let scratch = ScratchDir::new("df-escape");
+        let proc = proc_with_mounts(
+            &scratch,
+            b"/dev/sda1 /mnt/my\\040backup ext4 rw,relatime 0 0\n",
+        );
+        let mounts = read_mounts_in(&proc);
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].mountpoint, "/mnt/my backup");
+    }
+
+    /// **One mount with a byte that is not UTF-8 used to hide every mount.**
+    ///
+    /// `read_to_string` fails for the whole file, so the entire table came
+    /// back empty -- `df` reported no filesystems at all rather than one
+    /// awkward one.
+    #[test]
+    fn a_mount_that_is_not_utf8_does_not_hide_the_others() {
+        let scratch = ScratchDir::new("df-nonutf8");
+        let proc = proc_with_mounts(
+            &scratch,
+            b"/dev/odd /mnt/od\xffd ext4 rw 0 0\n/dev/sda1 / ext4 rw 0 0\n",
+        );
+        let mounts = read_mounts_in(&proc);
+        assert_eq!(mounts.len(), 2, "both lines are still lines");
+        assert!(
+            mounts.iter().any(|m| m.mountpoint == "/"),
+            "the readable mount must still be listed"
+        );
+        // `\377`, not `\xff`: `quoting::escape_unprintable` uses *octal*
+        // escapes, which is what GNU's own quoting does and what the rest of
+        // this tree's diagnostics already print.
+        assert!(
+            mounts.iter().any(|m| m.mountpoint.contains("\\377")),
+            "and the odd one shows its byte escaped rather than vanishing"
+        );
+    }
+
+    /// A missing `/proc/mounts` is an empty table, not a panic.
+    #[test]
+    fn a_missing_proc_mounts_is_empty() {
+        let scratch = ScratchDir::new("df-missing");
+        let proc = procinfo::ProcFs::at(scratch.path("nonexistent"));
+        assert!(read_mounts_in(&proc).is_empty());
+    }
+
+    /// The ordinary case still parses every field.
+    #[test]
+    fn an_ordinary_line_parses_all_four_fields() {
+        let scratch = ScratchDir::new("df-ordinary");
+        let proc = proc_with_mounts(&scratch, b"/dev/sda1 / ext4 rw,relatime 0 0\n");
+        let mounts = read_mounts_in(&proc);
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].device, "/dev/sda1");
+        assert_eq!(mounts[0].mountpoint, "/");
+        assert_eq!(mounts[0].fstype, "ext4");
+        assert_eq!(mounts[0].options, "rw,relatime");
+    }
     use super::*;
 
     fn mount(device: &str, mountpoint: &str, fstype: &str) -> MountEntry {

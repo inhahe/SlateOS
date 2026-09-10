@@ -127802,13 +127802,20 @@ crate's module doc names it as one of the three reasons the crate exists.
 
 | Program | What it uses the file for |
 |---|---|
-| `userspace/df` | which filesystem a path is on, and its usage |
-| `userspace/mount` | whether a target is already mounted, and `-a` bookkeeping |
+| ~~`userspace/df`~~ | ~~which filesystem a path is on, and its usage~~ -- **done 2026-09-10** |
+| ~~`userspace/mount`~~ | ~~whether a target is already mounted~~ -- **done 2026-09-10** |
 | `userspace/findmnt` | the whole of its output |
 | `userspace/lsblk` | mount points beside each block device |
 | `userspace/eject` | whether the device must be unmounted first |
 | `userspace/grub2` | locating the boot filesystem |
 | `userspace/udisks` | mount state per device |
+
+**`df` and `mount` keep `String` fields and escape at the boundary** rather
+than carrying bytes through their table-formatting code. That is deliberate and
+worth stating, because it looks like a half-measure: a space is *printable*, so
+`escape_unprintable` leaves it alone and a path a user can type compares
+exactly as it did before. Only a byte they could not have typed is escaped --
+and the alternative for such a byte was taking the whole table down with it.
 
 `userspace/diskutil` already unescapes and is the exception; it still reads the
 file as text, so it keeps the whole-file failure.

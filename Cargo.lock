@@ -13286,6 +13286,10 @@ dependencies = [
 [[package]]
 name = "pgrep"
 version = "0.1.0"
+dependencies = [
+ "procinfo",
+ "quoting",
+]
 
 [[package]]
 name = "phaser-cli"

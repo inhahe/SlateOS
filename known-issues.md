@@ -126972,6 +126972,13 @@ delta and the context-switch delta would have described different instants.
 each opened `/proc/stat` for `btime` alone, and `hwclock` hand-parsed
 `/proc/uptime` beside it, so converting the two removed three parsers.
 
+**46 with `userspace/pgrep`**, which was the one worth seeking out rather than
+taking on contact: it read `/proc/<pid>/stat` through `read_to_string`, so a
+process whose name is not UTF-8 was dropped from the listing entirely -- and
+`pgrep` and `pkill` are the same binary, so such a process could not be
+signalled by name at all. `userspace/top` and `userspace/pstree` have the
+identical defect and are next.
+
 They also showed why "each program has its own copy" is not a neutral
 arrangement even when every copy works. `uptime` stripped `"btime "` with the
 trailing space; `hwclock` stripped `"btime"` without it, so a line named

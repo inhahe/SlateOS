@@ -56394,3 +56394,24 @@ reaches it, and that run is the slowest thing we have.
 the three dispatch self-tests that previously never ran, the whitespace repair,
 and the refreshed release baseline). All are pushed to `origin/lane-a` and
 compile clean; only publication to `main` waits.
+
+
+## pgrep requires a pattern, and procps does not (lane B, 2026-09-10)
+
+`pgrep -P 1`, `pgrep -u root` and `pgrep -t tty1` are all valid invocations of
+procps' `pgrep`: the selectors stand on their own and list every process
+matching them. This implementation answers `no pattern specified` and exits
+non-zero, so the selector-only forms cannot be used at all -- including
+`pkill -u <user>`, which is the ordinary way to end a user's session.
+
+Found on 2026-09-10 while writing a test for something else: the test wanted a
+process selected by `-P` alone, and could not have one.
+
+**The fix** is in `parse_args`: the "no pattern specified" error should fire
+only when *no* selector was given either. `process_matches` already returns
+`true` from its pattern stage when `opts.pattern` is `None`, so the matching
+side needs nothing -- it is the argument check alone that refuses.
+
+**Not done in the same commit** because that commit is about `/proc` bytes and
+this is a change to which command lines are accepted, which is worth its own
+before/after. It is small.

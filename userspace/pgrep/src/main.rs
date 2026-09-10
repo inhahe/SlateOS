@@ -455,10 +455,26 @@ fn continue_process(pid: u64) -> Result<(), String> {
 /// Per-process information scraped from /proc/<pid>/.
 struct ProcessInfo {
     pid: u32,
-    /// Process name from /proc/<pid>/stat (field inside parentheses).
-    name: String,
-    /// Full command line from /proc/<pid>/cmdline.
-    cmdline: String,
+    /// Process name from `/proc/<pid>/stat`, **as bytes**.
+    ///
+    /// Not a `String`. A command name comes from `argv[0]`, which is bytes,
+    /// and this filesystem allows every byte but `/` and NUL. Reading it
+    /// through `read_to_string` made a process whose name is not UTF-8
+    /// disappear from `pgrep` entirely -- and therefore from `pkill`, so such
+    /// a process could not be signalled by name at all. It also took the
+    /// process's `pid`, `ppid`, `pgrp` and `tty` with it, none of which have
+    /// anything to do with the name: they are plain digits on the same line.
+    name: Vec<u8>,
+    /// Full command line from `/proc/<pid>/cmdline`, **as bytes**.
+    ///
+    /// This was built with `bytes.iter().map(|&b| b as char)`, which is a
+    /// *Latin-1* reinterpretation: byte `0xE9` became `U+00E9`, two bytes of
+    /// UTF-8. So `pgrep -f` compared a Latin-1 rendering of the command line
+    /// against a UTF-8 pattern from `argv` -- a command line holding a real
+    /// UTF-8 `é` did **not** match a pattern `é`, and one holding the single
+    /// byte `0xE9` did. Bytes on both sides is the only arrangement in which
+    /// the question has one answer.
+    cmdline: Vec<u8>,
     /// Parent PID.
     ppid: u32,
     /// Process group.
@@ -478,77 +494,40 @@ fn read_file(path: &str) -> Option<String> {
     fs::read_to_string(path).ok().map(|s| s.trim().to_string())
 }
 
-/// Read information about a single process from /proc/<pid>/.
+/// Read information about a single process, through [`procinfo`].
+///
+/// Everything here used to be parsed in this file: the `(comm)` field by
+/// hand, the four columns of `Uid:` by index, and the command line by
+/// transcoding each byte to a `char`. See [`ProcessInfo`] for what each of
+/// those cost.
 fn read_process_info(pid: u32) -> Option<ProcessInfo> {
-    let stat_path = format!("/proc/{pid}/stat");
-    let stat_content = read_file(&stat_path)?;
-
-    // Format: <pid> (<name>) <state> <ppid> <pgrp> <session> <tty> ...
-    // The name may contain spaces and parentheses.
-    let comm_start = stat_content.find('(')?;
-    let comm_end = stat_content.rfind(')')?;
-    let name = stat_content.get(comm_start + 1..comm_end)?.to_string();
-    let rest = stat_content.get(comm_end + 2..)?;
-    let fields: Vec<&str> = rest.split_whitespace().collect();
-
-    if fields.len() < 20 {
-        return None;
-    }
-
-    let ppid: u32 = fields.get(1)?.parse().unwrap_or(0);
-    let pgrp: u32 = fields.get(2)?.parse().unwrap_or(0);
-    let tty: i32 = fields.get(4)?.parse().unwrap_or(0);
-    let starttime: u64 = fields.get(19)?.parse().unwrap_or(0);
-
-    // Read UIDs from /proc/<pid>/status.
-    let mut ruid = 0u32;
-    let mut euid = 0u32;
-    if let Some(status_content) = read_file(&format!("/proc/{pid}/status")) {
-        for line in status_content.lines() {
-            if let Some(val) = line.strip_prefix("Uid:") {
-                let parts: Vec<&str> = val.split_whitespace().collect();
-                // Format: real effective saved fs
-                if let Some(r) = parts.first() {
-                    ruid = r.parse().unwrap_or(0);
-                }
-                if let Some(e) = parts.get(1) {
-                    euid = e.parse().unwrap_or(0);
-                }
-                break;
-            }
-        }
-    }
-
-    // Read /proc/<pid>/cmdline (NUL-separated arguments).
-    let cmdline = read_cmdline(pid);
+    let proc = procinfo::ProcFs::new();
+    let stat = proc.process_stat(u64::from(pid)).ok().flatten()?;
+    // Absent `/proc/<pid>/status` is not fatal: the process exists -- its
+    // `stat` was just read -- and every selector but `-u`/`-U` still applies
+    // to it. Dropping it here would repeat the mistake this function fixes.
+    let status = proc
+        .process_status(u64::from(pid))
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let cmdline = proc
+        .process_cmdline(u64::from(pid))
+        .ok()
+        .flatten()
+        .map_or_else(Vec::new, |args| args.join(&b' '));
 
     Some(ProcessInfo {
         pid,
-        name,
+        name: stat.comm,
         cmdline,
-        ppid,
-        pgrp,
-        tty,
-        starttime,
-        ruid,
-        euid,
+        ppid: u32::try_from(stat.ppid).unwrap_or(0),
+        pgrp: u32::try_from(stat.pgrp).unwrap_or(0),
+        tty: i32::try_from(stat.tty_nr).unwrap_or(0),
+        starttime: stat.starttime_ticks,
+        ruid: status.uid.unwrap_or(0),
+        euid: status.euid.unwrap_or(0),
     })
-}
-
-/// Read /proc/<pid>/cmdline and return it with NUL bytes replaced by spaces.
-fn read_cmdline(pid: u32) -> String {
-    let path = format!("/proc/{pid}/cmdline");
-    match fs::read(&path) {
-        Ok(bytes) => {
-            // Replace NUL separators with spaces; trim trailing.
-            let s: String = bytes
-                .iter()
-                .map(|&b| if b == 0 { ' ' } else { b as char })
-                .collect();
-            s.trim().to_string()
-        }
-        Err(_) => String::new(),
-    }
 }
 
 /// Enumerate all process PIDs from /proc.
@@ -623,7 +602,20 @@ struct CompiledPattern {
 }
 
 /// Compile a regex pattern string into a `CompiledPattern`.
-fn compile_pattern(pattern: &str) -> Result<CompiledPattern, String> {
+/// Compile a pattern.
+///
+/// `&[u8]`, and that is not a tidy-up. This function used to take `&str` and
+/// [`split_alternatives`] rebuilt it with `push(b as char)` -- a *Latin-1*
+/// re-encoding, so every pattern byte above `0x7F` became two bytes before
+/// reaching `Token::Literal`. The command-line side did exactly the same thing
+/// in `read_cmdline`, so the two cancelled and matching was byte-exact **by
+/// accident**.
+///
+/// That matters more than either bug alone: fixing only the data side, which
+/// is the obvious half, silently breaks every non-ASCII pattern -- the two
+/// tests below caught precisely that. **A pair of compensating defects reads
+/// as correct until someone corrects one of them.**
+fn compile_pattern(pattern: &[u8]) -> Result<CompiledPattern, String> {
     let mut branches = Vec::new();
     // Split on unescaped, un-bracketed `|`.
     let raw_branches = split_alternatives(pattern);
@@ -639,10 +631,10 @@ fn compile_pattern(pattern: &str) -> Result<CompiledPattern, String> {
 
 /// Split a pattern on top-level `|` characters, respecting `\|` escapes
 /// and `[...]` brackets.
-fn split_alternatives(pattern: &str) -> Vec<String> {
-    let bytes = pattern.as_bytes();
+fn split_alternatives(pattern: &[u8]) -> Vec<Vec<u8>> {
+    let bytes = pattern;
     let mut parts = Vec::new();
-    let mut current = String::new();
+    let mut current: Vec<u8> = Vec::new();
     let mut i = 0;
     let mut in_bracket = false;
 
@@ -650,20 +642,20 @@ fn split_alternatives(pattern: &str) -> Vec<String> {
         let b = bytes[i];
         if b == b'\\' && i + 1 < bytes.len() {
             // Escaped character -- consume both bytes.
-            current.push(b as char);
-            current.push(bytes[i + 1] as char);
+            current.push(b);
+            current.push(bytes[i + 1]);
             i += 2;
             continue;
         }
         if b == b'[' && !in_bracket {
             in_bracket = true;
-            current.push(b as char);
+            current.push(b);
             i += 1;
             continue;
         }
         if b == b']' && in_bracket {
             in_bracket = false;
-            current.push(b as char);
+            current.push(b);
             i += 1;
             continue;
         }
@@ -673,7 +665,7 @@ fn split_alternatives(pattern: &str) -> Vec<String> {
             i += 1;
             continue;
         }
-        current.push(b as char);
+        current.push(b);
         i += 1;
     }
     parts.push(current);
@@ -681,8 +673,8 @@ fn split_alternatives(pattern: &str) -> Vec<String> {
 }
 
 /// Compile a single branch (no top-level `|`).
-fn compile_branch(branch: &str) -> Result<PatternBranch, String> {
-    let bytes = branch.as_bytes();
+fn compile_branch(branch: &[u8]) -> Result<PatternBranch, String> {
+    let bytes = branch;
     let mut elements: PatternBranch = Vec::new();
     let mut i = 0;
 
@@ -950,8 +942,14 @@ fn match_branch(
 
 /// Test whether `text` matches the compiled pattern (substring search --
 /// the pattern does not have to match the entire text unless anchored).
-fn pattern_matches(pattern: &CompiledPattern, text: &str) -> bool {
-    let text_bytes = text.as_bytes();
+/// Match `text` against a compiled pattern.
+///
+/// `&[u8]`, because the engine below has always been byte-oriented --
+/// `Token::Literal(u8)`, `token_matches(_, byte: u8)` -- and this function's
+/// first act was `text.as_bytes()`. The `&str` in its signature was the only
+/// thing forcing its callers to hold text they do not have.
+fn pattern_matches(pattern: &CompiledPattern, text: &[u8]) -> bool {
+    let text_bytes = text;
     for branch in &pattern.branches {
         // Check if the branch is fully anchored at start.
         let anchored_start = branch
@@ -1341,7 +1339,7 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
         opts.pattern_str.clone()
     };
 
-    let mut compiled = compile_pattern(&pattern_to_compile)?;
+    let mut compiled = compile_pattern(pattern_to_compile.as_bytes())?;
     if opts.ignore_case {
         lower_pattern(&mut compiled);
     }
@@ -1429,8 +1427,12 @@ fn process_matches(proc_info: &ProcessInfo, opts: &Options, my_pid: u32) -> bool
         &proc_info.name
     };
 
+    // ASCII-only case folding, which is what it was before: `to_lowercase`
+    // on a Latin-1 transcoding folded exactly the ASCII range and nothing
+    // else, because every non-ASCII byte had become a `char` whose lowercase
+    // is itself. Doing it over bytes keeps that and makes it visible.
     let text_to_match = if opts.ignore_case {
-        text.to_lowercase()
+        text.to_ascii_lowercase()
     } else {
         text.clone()
     };
@@ -1603,9 +1605,9 @@ fn main() {
                 let mut output_parts: Vec<String> = Vec::new();
                 for p in &matches {
                     let entry = if opts.list_full {
-                        format!("{} {}", p.pid, p.cmdline)
+                        format!("{} {}", p.pid, quoting::escape_unprintable(&p.cmdline))
                     } else if opts.list_name {
-                        format!("{} {}", p.pid, p.name)
+                        format!("{} {}", p.pid, quoting::escape_unprintable(&p.name))
                     } else {
                         format!("{}", p.pid)
                     };
@@ -1622,7 +1624,11 @@ fn main() {
                 match send_signal(pid, opts.signal) {
                     Ok(()) => {
                         if opts.echo {
-                            println!("{} killed (pid {})", p.name, p.pid);
+                            println!(
+                                "{} killed (pid {})",
+                                quoting::escape_unprintable(&p.name),
+                                p.pid
+                            );
                         }
                     }
                     Err(e) => {
@@ -1651,195 +1657,195 @@ mod tests {
 
     #[test]
     fn test_literal_match() {
-        let p = compile_pattern("hello").unwrap();
-        assert!(pattern_matches(&p, "hello"));
-        assert!(pattern_matches(&p, "say hello world"));
-        assert!(!pattern_matches(&p, "HELLO"));
-        assert!(!pattern_matches(&p, "hell"));
+        let p = compile_pattern(b"hello").unwrap();
+        assert!(pattern_matches(&p, b"hello"));
+        assert!(pattern_matches(&p, b"say hello world"));
+        assert!(!pattern_matches(&p, b"HELLO"));
+        assert!(!pattern_matches(&p, b"hell"));
     }
 
     #[test]
     fn test_dot_matches_any_char() {
-        let p = compile_pattern("h.llo").unwrap();
-        assert!(pattern_matches(&p, "hello"));
-        assert!(pattern_matches(&p, "hallo"));
-        assert!(pattern_matches(&p, "hxllo"));
-        assert!(!pattern_matches(&p, "hllo"));
+        let p = compile_pattern(b"h.llo").unwrap();
+        assert!(pattern_matches(&p, b"hello"));
+        assert!(pattern_matches(&p, b"hallo"));
+        assert!(pattern_matches(&p, b"hxllo"));
+        assert!(!pattern_matches(&p, b"hllo"));
     }
 
     #[test]
     fn test_star_zero_or_more() {
-        let p = compile_pattern("he*llo").unwrap();
-        assert!(pattern_matches(&p, "hllo"));
-        assert!(pattern_matches(&p, "hello"));
-        assert!(pattern_matches(&p, "heeello"));
+        let p = compile_pattern(b"he*llo").unwrap();
+        assert!(pattern_matches(&p, b"hllo"));
+        assert!(pattern_matches(&p, b"hello"));
+        assert!(pattern_matches(&p, b"heeello"));
     }
 
     #[test]
     fn test_plus_one_or_more() {
-        let p = compile_pattern("he+llo").unwrap();
-        assert!(!pattern_matches(&p, "hllo"));
-        assert!(pattern_matches(&p, "hello"));
-        assert!(pattern_matches(&p, "heeello"));
+        let p = compile_pattern(b"he+llo").unwrap();
+        assert!(!pattern_matches(&p, b"hllo"));
+        assert!(pattern_matches(&p, b"hello"));
+        assert!(pattern_matches(&p, b"heeello"));
     }
 
     #[test]
     fn test_question_zero_or_one() {
-        let p = compile_pattern("he?llo").unwrap();
-        assert!(pattern_matches(&p, "hllo"));
-        assert!(pattern_matches(&p, "hello"));
-        assert!(!pattern_matches(&p, "heeello"));
+        let p = compile_pattern(b"he?llo").unwrap();
+        assert!(pattern_matches(&p, b"hllo"));
+        assert!(pattern_matches(&p, b"hello"));
+        assert!(!pattern_matches(&p, b"heeello"));
     }
 
     #[test]
     fn test_dot_star_matches_anything() {
-        let p = compile_pattern("a.*b").unwrap();
-        assert!(pattern_matches(&p, "ab"));
-        assert!(pattern_matches(&p, "axyzb"));
-        assert!(pattern_matches(&p, "a_long_string_b"));
-        assert!(!pattern_matches(&p, "ba"));
+        let p = compile_pattern(b"a.*b").unwrap();
+        assert!(pattern_matches(&p, b"ab"));
+        assert!(pattern_matches(&p, b"axyzb"));
+        assert!(pattern_matches(&p, b"a_long_string_b"));
+        assert!(!pattern_matches(&p, b"ba"));
     }
 
     #[test]
     fn test_start_anchor() {
-        let p = compile_pattern("^hello").unwrap();
-        assert!(pattern_matches(&p, "hello world"));
-        assert!(!pattern_matches(&p, "say hello"));
+        let p = compile_pattern(b"^hello").unwrap();
+        assert!(pattern_matches(&p, b"hello world"));
+        assert!(!pattern_matches(&p, b"say hello"));
     }
 
     #[test]
     fn test_end_anchor() {
-        let p = compile_pattern("world$").unwrap();
-        assert!(pattern_matches(&p, "hello world"));
-        assert!(!pattern_matches(&p, "world hello"));
+        let p = compile_pattern(b"world$").unwrap();
+        assert!(pattern_matches(&p, b"hello world"));
+        assert!(!pattern_matches(&p, b"world hello"));
     }
 
     #[test]
     fn test_both_anchors() {
-        let p = compile_pattern("^exact$").unwrap();
-        assert!(pattern_matches(&p, "exact"));
-        assert!(!pattern_matches(&p, "exactx"));
-        assert!(!pattern_matches(&p, "xexact"));
+        let p = compile_pattern(b"^exact$").unwrap();
+        assert!(pattern_matches(&p, b"exact"));
+        assert!(!pattern_matches(&p, b"exactx"));
+        assert!(!pattern_matches(&p, b"xexact"));
     }
 
     #[test]
     fn test_character_class_basic() {
-        let p = compile_pattern("[abc]").unwrap();
-        assert!(pattern_matches(&p, "a"));
-        assert!(pattern_matches(&p, "b"));
-        assert!(pattern_matches(&p, "c"));
-        assert!(!pattern_matches(&p, "d"));
+        let p = compile_pattern(b"[abc]").unwrap();
+        assert!(pattern_matches(&p, b"a"));
+        assert!(pattern_matches(&p, b"b"));
+        assert!(pattern_matches(&p, b"c"));
+        assert!(!pattern_matches(&p, b"d"));
     }
 
     #[test]
     fn test_character_class_range() {
-        let p = compile_pattern("[a-z]").unwrap();
-        assert!(pattern_matches(&p, "m"));
-        assert!(pattern_matches(&p, "a"));
-        assert!(pattern_matches(&p, "z"));
-        assert!(!pattern_matches(&p, "A"));
-        assert!(!pattern_matches(&p, "5"));
+        let p = compile_pattern(b"[a-z]").unwrap();
+        assert!(pattern_matches(&p, b"m"));
+        assert!(pattern_matches(&p, b"a"));
+        assert!(pattern_matches(&p, b"z"));
+        assert!(!pattern_matches(&p, b"A"));
+        assert!(!pattern_matches(&p, b"5"));
     }
 
     #[test]
     fn test_character_class_negated() {
-        let p = compile_pattern("[^0-9]").unwrap();
-        assert!(pattern_matches(&p, "a"));
-        assert!(!pattern_matches(&p, "5"));
-        assert!(pattern_matches(&p, "x5")); // has a non-digit
+        let p = compile_pattern(b"[^0-9]").unwrap();
+        assert!(pattern_matches(&p, b"a"));
+        assert!(!pattern_matches(&p, b"5"));
+        assert!(pattern_matches(&p, b"x5")); // has a non-digit
     }
 
     #[test]
     fn test_character_class_with_quantifier() {
-        let p = compile_pattern("[0-9]+").unwrap();
-        assert!(pattern_matches(&p, "123"));
-        assert!(pattern_matches(&p, "abc123def"));
-        assert!(!pattern_matches(&p, "abc"));
+        let p = compile_pattern(b"[0-9]+").unwrap();
+        assert!(pattern_matches(&p, b"123"));
+        assert!(pattern_matches(&p, b"abc123def"));
+        assert!(!pattern_matches(&p, b"abc"));
     }
 
     #[test]
     fn test_alternation_basic() {
-        let p = compile_pattern("cat|dog").unwrap();
-        assert!(pattern_matches(&p, "cat"));
-        assert!(pattern_matches(&p, "dog"));
-        assert!(!pattern_matches(&p, "fish"));
+        let p = compile_pattern(b"cat|dog").unwrap();
+        assert!(pattern_matches(&p, b"cat"));
+        assert!(pattern_matches(&p, b"dog"));
+        assert!(!pattern_matches(&p, b"fish"));
     }
 
     #[test]
     fn test_alternation_multiple() {
-        let p = compile_pattern("a|b|c|d").unwrap();
-        assert!(pattern_matches(&p, "a"));
-        assert!(pattern_matches(&p, "d"));
-        assert!(!pattern_matches(&p, "e"));
+        let p = compile_pattern(b"a|b|c|d").unwrap();
+        assert!(pattern_matches(&p, b"a"));
+        assert!(pattern_matches(&p, b"d"));
+        assert!(!pattern_matches(&p, b"e"));
     }
 
     #[test]
     fn test_escape_special() {
-        let p = compile_pattern(r"hello\.world").unwrap();
-        assert!(pattern_matches(&p, "hello.world"));
-        assert!(!pattern_matches(&p, "helloxworld"));
+        let p = compile_pattern(br"hello\.world").unwrap();
+        assert!(pattern_matches(&p, b"hello.world"));
+        assert!(!pattern_matches(&p, b"helloxworld"));
     }
 
     #[test]
     fn test_escape_star() {
-        let p = compile_pattern(r"a\*b").unwrap();
-        assert!(pattern_matches(&p, "a*b"));
-        assert!(!pattern_matches(&p, "ab"));
-        assert!(!pattern_matches(&p, "aab"));
+        let p = compile_pattern(br"a\*b").unwrap();
+        assert!(pattern_matches(&p, b"a*b"));
+        assert!(!pattern_matches(&p, b"ab"));
+        assert!(!pattern_matches(&p, b"aab"));
     }
 
     #[test]
     fn test_complex_pattern() {
-        let p = compile_pattern("^[a-z]+_[0-9]+$").unwrap();
-        assert!(pattern_matches(&p, "proc_123"));
-        assert!(pattern_matches(&p, "a_0"));
-        assert!(!pattern_matches(&p, "Proc_123"));
-        assert!(!pattern_matches(&p, "proc_"));
-        assert!(!pattern_matches(&p, "_123"));
+        let p = compile_pattern(b"^[a-z]+_[0-9]+$").unwrap();
+        assert!(pattern_matches(&p, b"proc_123"));
+        assert!(pattern_matches(&p, b"a_0"));
+        assert!(!pattern_matches(&p, b"Proc_123"));
+        assert!(!pattern_matches(&p, b"proc_"));
+        assert!(!pattern_matches(&p, b"_123"));
     }
 
     #[test]
     fn test_dot_plus() {
-        let p = compile_pattern(".+").unwrap();
-        assert!(pattern_matches(&p, "anything"));
-        assert!(pattern_matches(&p, "x"));
-        assert!(!pattern_matches(&p, ""));
+        let p = compile_pattern(b".+").unwrap();
+        assert!(pattern_matches(&p, b"anything"));
+        assert!(pattern_matches(&p, b"x"));
+        assert!(!pattern_matches(&p, b""));
     }
 
     #[test]
     fn test_empty_pattern() {
-        let p = compile_pattern("").unwrap();
-        assert!(pattern_matches(&p, "anything"));
-        assert!(pattern_matches(&p, ""));
+        let p = compile_pattern(b"").unwrap();
+        assert!(pattern_matches(&p, b"anything"));
+        assert!(pattern_matches(&p, b""));
     }
 
     #[test]
     fn test_pattern_substring() {
-        let p = compile_pattern("ssh").unwrap();
-        assert!(pattern_matches(&p, "sshd"));
-        assert!(pattern_matches(&p, "openssh-server"));
-        assert!(!pattern_matches(&p, "bash"));
+        let p = compile_pattern(b"ssh").unwrap();
+        assert!(pattern_matches(&p, b"sshd"));
+        assert!(pattern_matches(&p, b"openssh-server"));
+        assert!(!pattern_matches(&p, b"bash"));
     }
 
     // ---- Case-insensitive matching ----
 
     #[test]
     fn test_case_insensitive() {
-        let mut p = compile_pattern("hello").unwrap();
+        let mut p = compile_pattern(b"hello").unwrap();
         lower_pattern(&mut p);
-        assert!(pattern_matches(&p, "hello"));
-        assert!(pattern_matches(&p, "hello")); // already lower
+        assert!(pattern_matches(&p, b"hello"));
+        assert!(pattern_matches(&p, b"hello")); // already lower
         // For case-insensitive, caller lowers the text:
-        assert!(pattern_matches(&p, "hello"));
+        assert!(pattern_matches(&p, b"hello"));
     }
 
     #[test]
     fn test_case_insensitive_class() {
-        let mut p = compile_pattern("[A-Z]").unwrap();
+        let mut p = compile_pattern(b"[A-Z]").unwrap();
         lower_pattern(&mut p);
         // After lowering, [A-Z] becomes [a-z].
-        assert!(pattern_matches(&p, "m"));
-        assert!(pattern_matches(&p, "a"));
+        assert!(pattern_matches(&p, b"m"));
+        assert!(pattern_matches(&p, b"a"));
     }
 
     // ---- Mode detection ----
@@ -2038,11 +2044,12 @@ mod tests {
 
     // ---- Process matching logic ----
 
-    fn make_proc(pid: u32, name: &str, cmdline: &str) -> ProcessInfo {
+    /// `&[u8]`, so a fixture can hold a name this program must not drop.
+    fn make_proc(pid: u32, name: &[u8], cmdline: &[u8]) -> ProcessInfo {
         ProcessInfo {
             pid,
-            name: name.to_string(),
-            cmdline: cmdline.to_string(),
+            name: name.to_vec(),
+            cmdline: cmdline.to_vec(),
             ppid: 1,
             pgrp: 1,
             tty: 0,
@@ -2052,9 +2059,88 @@ mod tests {
         }
     }
 
+    /// **A process whose name is not UTF-8 must still be findable.**
+    ///
+    /// This is the bug the conversion to bytes fixed, and it was not cosmetic:
+    /// `read_to_string` on `/proc/<pid>/stat` *fails* for such a name, the
+    /// `.ok()` turned that into `None`, and the whole process vanished from
+    /// `pgrep` -- and therefore from `pkill`, which is the same binary. A
+    /// process could decline to be signalled by name by having a name that is
+    /// not text.
+    ///
+    /// It also took the process's pid, ppid, pgrp and tty with it, none of
+    /// which have anything to do with the name: they are plain digits further
+    /// along the same line.
+    #[test]
+    fn a_name_that_is_not_utf8_is_still_matched() {
+        let proc_info = make_proc(10, b"ser\xffver", b"/usr/bin/ser\xffver");
+        let args = vec!["pgrep".to_string(), "ser".to_string()];
+        let opts = parse_args(&args).unwrap();
+        assert!(
+            process_matches(&proc_info, &opts, 999),
+            "the ASCII part of a non-UTF-8 name still matches an ASCII pattern"
+        );
+    }
+
+    /// And its numeric fields still decide -- the ones the old reader threw
+    /// away along with the name, though none of them has anything to do with
+    /// it. `ppid`, `pgrp` and `tty` are plain digits further along the same
+    /// line that `read_to_string` refused to read.
+    ///
+    /// The pattern is `.`, which matches any single byte, so what this test
+    /// varies is only the `-P` value.
+    #[test]
+    fn a_name_that_is_not_utf8_does_not_hide_the_numeric_fields() {
+        let proc_info = make_proc(10, b"\xff\xfe\xfd", b"");
+        let matches_with_ppid = |ppid: &str| {
+            let args = vec![
+                "pgrep".to_string(),
+                "-P".to_string(),
+                ppid.to_string(),
+                ".".to_string(),
+            ];
+            let opts = parse_args(&args).expect("a pattern is given");
+            process_matches(&proc_info, &opts, 999)
+        };
+        assert!(matches_with_ppid("1"), "the fixture's ppid is 1");
+        assert!(!matches_with_ppid("2"), "and the filter really is applied");
+    }
+
+    /// **A real UTF-8 `é` in a command line now matches a pattern `é`.**
+    ///
+    /// It did not before. `read_cmdline` mapped each byte to a `char`, so the
+    /// two bytes `C3 A9` became the two characters `Ã` and `©`, which encode
+    /// back to four bytes -- and the two-byte pattern was not a substring of
+    /// them.
+    #[test]
+    fn a_utf8_command_line_matches_a_utf8_pattern() {
+        let proc_info = make_proc(10, b"srv", "srv --name=café".as_bytes());
+        let args = vec!["pgrep".to_string(), "-f".to_string(), "café".to_string()];
+        let opts = parse_args(&args).unwrap();
+        assert!(process_matches(&proc_info, &opts, 999));
+    }
+
+    /// **And a lone `0xE9` no longer matches it.**
+    ///
+    /// The other half of the same defect, and the direction that produced
+    /// *false* matches: `0xE9` is `é` in Latin-1, so the old transcoding made
+    /// one byte compare equal to a two-byte UTF-8 pattern. `pkill -f` acting
+    /// on that is a signal sent to a process that does not match what was
+    /// asked for.
+    #[test]
+    fn a_latin1_byte_does_not_match_a_utf8_pattern() {
+        let proc_info = make_proc(10, b"srv", b"srv --name=caf\xe9");
+        let args = vec!["pgrep".to_string(), "-f".to_string(), "café".to_string()];
+        let opts = parse_args(&args).unwrap();
+        assert!(
+            !process_matches(&proc_info, &opts, 999),
+            "one byte is not the two-byte UTF-8 encoding of the same character"
+        );
+    }
+
     #[test]
     fn test_match_by_name() {
-        let proc_info = make_proc(10, "sshd", "/usr/sbin/sshd -D");
+        let proc_info = make_proc(10, b"sshd", b"/usr/sbin/sshd -D");
         let args = vec!["pgrep".to_string(), "ssh".to_string()];
         let opts = parse_args(&args).unwrap();
         assert!(process_matches(&proc_info, &opts, 999));
@@ -2062,7 +2148,7 @@ mod tests {
 
     #[test]
     fn test_match_full_cmdline() {
-        let proc_info = make_proc(10, "python3", "python3 /opt/server.py --port 8080");
+        let proc_info = make_proc(10, b"python3", b"python3 /opt/server.py --port 8080");
         let args = vec![
             "pgrep".to_string(),
             "-f".to_string(),
@@ -2074,7 +2160,7 @@ mod tests {
 
     #[test]
     fn test_match_full_cmdline_no_match_in_name() {
-        let proc_info = make_proc(10, "python3", "python3 /opt/server.py");
+        let proc_info = make_proc(10, b"python3", b"python3 /opt/server.py");
         let args = vec!["pgrep".to_string(), "server".to_string()];
         let opts = parse_args(&args).unwrap();
         // Without -f, matches only against name "python3".
@@ -2083,29 +2169,29 @@ mod tests {
 
     #[test]
     fn test_match_exact() {
-        let proc_info = make_proc(10, "ssh", "ssh user@host");
+        let proc_info = make_proc(10, b"ssh", b"ssh user@host");
         let args = vec!["pgrep".to_string(), "-x".to_string(), "ssh".to_string()];
         let opts = parse_args(&args).unwrap();
         assert!(process_matches(&proc_info, &opts, 999));
 
-        let proc_sshd = make_proc(11, "sshd", "/usr/sbin/sshd");
+        let proc_sshd = make_proc(11, b"sshd", b"/usr/sbin/sshd");
         assert!(!process_matches(&proc_sshd, &opts, 999));
     }
 
     #[test]
     fn test_match_inverse() {
-        let proc_info = make_proc(10, "bash", "bash");
+        let proc_info = make_proc(10, b"bash", b"bash");
         let args = vec!["pgrep".to_string(), "-v".to_string(), "ssh".to_string()];
         let opts = parse_args(&args).unwrap();
         assert!(process_matches(&proc_info, &opts, 999));
 
-        let proc_ssh = make_proc(11, "sshd", "sshd");
+        let proc_ssh = make_proc(11, b"sshd", b"sshd");
         assert!(!process_matches(&proc_ssh, &opts, 999));
     }
 
     #[test]
     fn test_match_excludes_self() {
-        let proc_info = make_proc(999, "pgrep", "pgrep ssh");
+        let proc_info = make_proc(999, b"pgrep", b"pgrep ssh");
         let args = vec!["pgrep".to_string(), "pgrep".to_string()];
         let opts = parse_args(&args).unwrap();
         // my_pid = 999 should be excluded.
@@ -2114,7 +2200,7 @@ mod tests {
 
     #[test]
     fn test_match_parent_filter() {
-        let mut proc_info = make_proc(10, "worker", "worker");
+        let mut proc_info = make_proc(10, b"worker", b"worker");
         proc_info.ppid = 42;
         let args = vec![
             "pgrep".to_string(),
@@ -2131,7 +2217,7 @@ mod tests {
 
     #[test]
     fn test_match_euid_filter() {
-        let mut proc_info = make_proc(10, "daemon", "daemon");
+        let mut proc_info = make_proc(10, b"daemon", b"daemon");
         proc_info.euid = 0;
         let args = vec![
             "pgrep".to_string(),
@@ -2148,7 +2234,7 @@ mod tests {
 
     #[test]
     fn test_match_ruid_filter() {
-        let mut proc_info = make_proc(10, "app", "app");
+        let mut proc_info = make_proc(10, b"app", b"app");
         proc_info.ruid = 500;
         let args = vec![
             "pgrep".to_string(),
@@ -2165,7 +2251,7 @@ mod tests {
 
     #[test]
     fn test_match_pgrp_filter() {
-        let mut proc_info = make_proc(10, "job", "job");
+        let mut proc_info = make_proc(10, b"job", b"job");
         proc_info.pgrp = 77;
         let args = vec![
             "pgrep".to_string(),
@@ -2182,7 +2268,7 @@ mod tests {
 
     #[test]
     fn test_match_tty_filter() {
-        let mut proc_info = make_proc(10, "shell", "shell");
+        let mut proc_info = make_proc(10, b"shell", b"shell");
         proc_info.tty = 3;
         let args = vec![
             "pgrep".to_string(),
@@ -2201,9 +2287,9 @@ mod tests {
 
     #[test]
     fn test_match_alternation() {
-        let proc_a = make_proc(10, "httpd", "httpd -DFOREGROUND");
-        let proc_b = make_proc(11, "nginx", "nginx: master");
-        let proc_c = make_proc(12, "bash", "bash");
+        let proc_a = make_proc(10, b"httpd", b"httpd -DFOREGROUND");
+        let proc_b = make_proc(11, b"nginx", b"nginx: master");
+        let proc_c = make_proc(12, b"bash", b"bash");
 
         let args = vec!["pgrep".to_string(), "httpd|nginx".to_string()];
         let opts = parse_args(&args).unwrap();
@@ -2261,25 +2347,40 @@ mod tests {
 
     #[test]
     fn test_split_alternatives_basic() {
-        let parts = split_alternatives("a|b|c");
-        assert_eq!(parts, vec!["a", "b", "c"]);
+        let parts = split_alternatives(b"a|b|c");
+        assert_eq!(parts, vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
     }
 
     #[test]
     fn test_split_alternatives_escaped_pipe() {
-        let parts = split_alternatives(r"a\|b|c");
-        assert_eq!(parts, vec![r"a\|b", "c"]);
+        let parts = split_alternatives(br"a\|b|c");
+        assert_eq!(parts, vec![br"a\|b".to_vec(), b"c".to_vec()]);
     }
 
     #[test]
     fn test_split_alternatives_brackets() {
-        let parts = split_alternatives("[a|b]|c");
-        assert_eq!(parts, vec!["[a|b]", "c"]);
+        let parts = split_alternatives(b"[a|b]|c");
+        assert_eq!(parts, vec![b"[a|b]".to_vec(), b"c".to_vec()]);
     }
 
     #[test]
     fn test_split_no_alternatives() {
-        let parts = split_alternatives("hello");
-        assert_eq!(parts, vec!["hello"]);
+        let parts = split_alternatives(b"hello");
+        assert_eq!(parts, vec![b"hello".to_vec()]);
+    }
+
+    /// A pattern byte above `0x7F` reaches the engine unchanged.
+    ///
+    /// It did not before: this function rebuilt the pattern with
+    /// `push(b as char)`, so `0xC3 0xA9` -- the UTF-8 `é` a user actually
+    /// types -- became four bytes. The command-line side did the same thing,
+    /// so the two cancelled and nobody noticed. See [`compile_pattern`].
+    #[test]
+    fn split_alternatives_does_not_re_encode_high_bytes() {
+        assert_eq!(
+            split_alternatives("café".as_bytes()),
+            vec!["café".as_bytes().to_vec()],
+            "the pattern must reach the matcher as the bytes the user typed"
+        );
     }
 }

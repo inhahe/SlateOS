@@ -129639,6 +129639,21 @@ be reached, and the two implementations can drift apart with nothing noticing.
 | `userspace/pv` | `fuser` | `userspace/fuser` |
 | `userspace/sysstat` | `iostat` | `userspace/iostat` |
 | `userspace/who` | `w` | `userspace/w` |
+
+**A second `who` existed and it was the thin one — deleted 2026-09-10.**
+`coreutils/src/bin/who.rs` was 359 lines with 17 tests against
+`userspace/who`'s 1,691 and 53, and it **ignored its arguments entirely**
+while documenting `Usage: who [-a]`. So `who -a` silently behaved like `who`.
+
+That is the case this entry warned about — "if the shadowing implementation is
+the better one, the fix is to make *it* the producer and delete the other" —
+arriving from an unexpected direction. `head:tail` resolved the opposite way
+the same day: there the shadowing crate was the thin one and coreutils had
+both. **The rule is not "prefer coreutils" or "prefer the standalone"; it is
+read both.**
+
+The `who:w` row is unaffected: `userspace/who` still answers to `w`, and
+`userspace/w` still provides it. Seven pairs remain.
 | `userspace/cron` | `crond` | `userspace/crond` |
 | `userspace/cron` | `crontab` | `userspace/crontab` |
 

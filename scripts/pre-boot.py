@@ -389,14 +389,16 @@ def main() -> int:
         failures += verdict == "fail"
         skipped += verdict == "skip"
 
-    # The scan-*.py gates are not check-*.py, so the glob above misses them --
-    # which is exactly the kind of gap this script exists to close.  Each also
-    # takes a bespoke flag, which is the reason they cannot simply be renamed
-    # into the glob: the glob runs a script bare, and both of these do something
-    # else when run bare (a full report rather than a verdict).
+    # The scan-*.py and audit-*.py gates are not check-*.py, so the glob above
+    # misses them -- which is exactly the kind of gap this script exists to
+    # close.  Each also takes a bespoke flag, which is the reason they cannot
+    # simply be renamed into the glob: the glob runs a script bare, and each of
+    # these does something else when run bare (a full report rather than a
+    # verdict).
     for name, flag, why in (
         ("scan-unwrap.py", "--summary", "unwrap/expect in kernel production paths"),
         ("scan-orphan-modules.py", "--check", "newly unreachable library modules"),
+        ("audit-cli-fabrication.py", "--check", "commands that state facts they did not measure"),
     ):
         scan = SCRIPTS / name
         if not scan.is_file():

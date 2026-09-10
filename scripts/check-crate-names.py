@@ -47,7 +47,12 @@ are recorded in `KNOWN_COLLISIONS` below, because they are another lane's to
 rename and a gate that refuses every lane's push over pre-existing state is a
 gate that gets bypassed. The list may only shrink -- resolving one and leaving
 it listed is also a failure, so it cannot rot into a list of things that used
-to be true. It has shrunk once already, on the day it was written.
+to be true. It has shrunk twice: once on the day it was written, and again on 2026-09-10,
+when `userspace/tmux` -- the crate whose *package* was named `tmux` -- was
+deleted under design-decisions 1006. The directory name `apps/tmux` is no
+longer any other crate's package name, so there is nothing left to collide
+with. (`apps/tmux` is still reached as `-p tmux-app`; `-p tmux` now reaches
+nothing at all, which is not a collision.)
 
 Usage
 -----
@@ -86,8 +91,6 @@ KNOWN_COLLISIONS: dict[str, str] = {
     "apps/indexer": "indexer-app",
     # `-p sysinfo` reaches the `sysinfo` crate.
     "apps/sysinfo": "sysinfo-app",
-    # `-p tmux` reaches the `tmux` crate.
-    "apps/tmux": "tmux-app",
 }
 
 

@@ -1,12 +1,21 @@
 // Slate OS acpi — power management information
 //
-// Multi-personality binary:
-//   acpi    — show battery/AC/thermal/cooling status
-//   acpid   — ACPI event daemon (simplified)
-//
 // Usage:
 //   acpi [OPTIONS]
-//   acpid [OPTIONS]
+//
+// This answered to `acpid` as a second personality until 2026-09-10. That
+// personality printed "starting ACPI event daemon", the socket and log paths it
+// would have used, and "waiting for events...", having opened none of them, and
+// exited 0. design-decisions.md 1006 (Decided by: Operator) deletes commands
+// that report success for work they never did, and `userspace/acpid` -- the
+// crate that produced the binary -- went with the other 2,284. Removing the
+// personality is the other half of that: a name nothing can run is still a
+// claim while a program answers to it.
+//
+// If a real ACPI event daemon is written, it gets its own crate. One
+// executable answering to several tool names has to hold the union of all
+// their capabilities, which is the least-privilege problem this OS exists to
+// avoid (coreutils-canonical-answer.md).
 
 #![cfg_attr(not(test), no_main)]
 // BatteryInfo::capacity_now and ::current_now are part of the
@@ -19,28 +28,7 @@
 #[cfg(not(test))]
 use std::env;
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
-
-// ---------------------------------------------------------------------------
-// Personality detection
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Personality {
-    Acpi,
-    Acpid,
-}
-
-fn detect_personality(argv0: &str) -> Personality {
-    let base = argv0.rsplit('/').next().unwrap_or(argv0);
-    let base = base.rsplit('\\').next().unwrap_or(base);
-    let lower = base.to_ascii_lowercase();
-    let lower = lower.strip_suffix(".exe").unwrap_or(&lower);
-    match lower {
-        "acpid" => Personality::Acpid,
-        _ => Personality::Acpi,
-    }
-}
+use std::path::Path;
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -137,9 +125,8 @@ struct CoolingDevice {
 // Configuration
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct Config {
-    personality: Personality,
     show_battery: bool,
     show_ac: bool,
     show_thermal: bool,
@@ -148,91 +135,37 @@ struct Config {
     verbose: bool,
     fahrenheit: bool,
     show_details: bool,
-    // acpid
-    foreground: bool,
-    log_file: Option<PathBuf>,
-    socket_file: Option<PathBuf>,
     show_help: bool,
     show_version: bool,
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            personality: Personality::Acpi,
-            show_battery: false,
-            show_ac: false,
-            show_thermal: false,
-            show_cooling: false,
-            show_everything: false,
-            verbose: false,
-            fahrenheit: false,
-            show_details: false,
-            foreground: false,
-            log_file: None,
-            socket_file: None,
-            show_help: false,
-            show_version: false,
-        }
-    }
-}
-
 fn parse_args(args: &[String]) -> Result<Config, String> {
-    let personality = args
-        .first()
-        .map(|a| detect_personality(a))
-        .unwrap_or(Personality::Acpi);
-
-    let mut cfg = Config {
-        personality,
-        ..Default::default()
-    };
+    let mut cfg = Config::default();
 
     let mut i = 1;
     while i < args.len() {
         let arg = &args[i];
-        match personality {
-            Personality::Acpi => match arg.as_str() {
-                "-b" | "--battery" => cfg.show_battery = true,
-                "-a" | "--ac-adapter" => cfg.show_ac = true,
-                "-t" | "--thermal" => cfg.show_thermal = true,
-                "-c" | "--cooling" => cfg.show_cooling = true,
-                "-V" | "--everything" => cfg.show_everything = true,
-                "-v" => cfg.verbose = true,
-                "-f" | "--fahrenheit" => cfg.fahrenheit = true,
-                "-i" | "--details" => cfg.show_details = true,
-                "-h" | "--help" => cfg.show_help = true,
-                "--version" => cfg.show_version = true,
-                other if other.starts_with('-') => {
-                    return Err(format!("acpi: unknown option: {other}"));
-                }
-                _ => {}
-            },
-            Personality::Acpid => match arg.as_str() {
-                "-f" | "--foreground" => cfg.foreground = true,
-                "-l" | "--logevents" => {}
-                "-L" | "--logfile" => {
-                    i += 1;
-                    cfg.log_file = args.get(i).map(PathBuf::from);
-                }
-                "-s" | "--socketfile" => {
-                    i += 1;
-                    cfg.socket_file = args.get(i).map(PathBuf::from);
-                }
-                "-h" | "--help" => cfg.show_help = true,
-                "--version" => cfg.show_version = true,
-                other if other.starts_with('-') => {
-                    return Err(format!("acpid: unknown option: {other}"));
-                }
-                _ => {}
-            },
+        match arg.as_str() {
+            "-b" | "--battery" => cfg.show_battery = true,
+            "-a" | "--ac-adapter" => cfg.show_ac = true,
+            "-t" | "--thermal" => cfg.show_thermal = true,
+            "-c" | "--cooling" => cfg.show_cooling = true,
+            "-V" | "--everything" => cfg.show_everything = true,
+            "-v" => cfg.verbose = true,
+            "-f" | "--fahrenheit" => cfg.fahrenheit = true,
+            "-i" | "--details" => cfg.show_details = true,
+            "-h" | "--help" => cfg.show_help = true,
+            "--version" => cfg.show_version = true,
+            other if other.starts_with('-') => {
+                return Err(format!("acpi: unknown option: {other}"));
+            }
+            _ => {}
         }
         i += 1;
     }
 
     // Default for acpi: show battery if nothing else specified
-    if personality == Personality::Acpi
-        && !cfg.show_battery
+    if !cfg.show_battery
         && !cfg.show_ac
         && !cfg.show_thermal
         && !cfg.show_cooling
@@ -599,82 +532,30 @@ fn run_acpi(cfg: &Config, writer: &mut dyn Write) -> io::Result<()> {
     Ok(())
 }
 
-fn run_acpid(cfg: &Config, writer: &mut dyn Write) -> io::Result<()> {
-    writeln!(writer, "acpid: starting ACPI event daemon")?;
-
-    let socket = cfg
-        .socket_file
-        .as_deref()
-        .unwrap_or(Path::new("/var/run/acpid.socket"));
-    let log = cfg
-        .log_file
-        .as_deref()
-        .unwrap_or(Path::new("/var/log/acpid"));
-
-    writeln!(writer, "acpid: socket {}", socket.display())?;
-    writeln!(writer, "acpid: logfile {}", log.display())?;
-
-    if cfg.foreground {
-        writeln!(writer, "acpid: running in foreground")?;
-    } else {
-        writeln!(writer, "acpid: would daemonize")?;
-    }
-
-    // In a real system, we'd:
-    // 1. Open /proc/acpi/event or netlink socket
-    // 2. Listen for ACPI events
-    // 3. Run handler scripts from /etc/acpi/events/
-    // 4. Forward events to clients connected to the socket
-
-    writeln!(writer, "acpid: waiting for events...")?;
-
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
 // Help / version
 // ---------------------------------------------------------------------------
 
-fn print_help(personality: Personality) {
-    match personality {
-        Personality::Acpi => {
-            println!("Usage: acpi [OPTIONS]");
-            println!();
-            println!("Show battery, AC adapter, thermal, and cooling device status.");
-            println!();
-            println!("Options:");
-            println!("  -b, --battery      Show battery information");
-            println!("  -a, --ac-adapter   Show AC adapter information");
-            println!("  -t, --thermal      Show thermal zone information");
-            println!("  -c, --cooling      Show cooling device information");
-            println!("  -V, --everything   Show all device categories");
-            println!("  -v                 Show additional details");
-            println!("  -f, --fahrenheit   Use Fahrenheit instead of Celsius");
-            println!("  -i, --details      Show detailed battery information");
-            println!("  -h, --help         Show this help");
-            println!("  --version          Show version");
-        }
-        Personality::Acpid => {
-            println!("Usage: acpid [OPTIONS]");
-            println!();
-            println!("ACPI event daemon.");
-            println!();
-            println!("Options:");
-            println!("  -f, --foreground   Run in foreground (don't daemonize)");
-            println!("  -L, --logfile <f>  Log file path");
-            println!("  -s, --socketfile <f> Socket file path");
-            println!("  -h, --help         Show this help");
-            println!("  --version          Show version");
-        }
-    }
+fn print_help() {
+    println!("Usage: acpi [OPTIONS]");
+    println!();
+    println!("Show battery, AC adapter, thermal, and cooling device status.");
+    println!();
+    println!("Options:");
+    println!("  -b, --battery      Show battery information");
+    println!("  -a, --ac-adapter   Show AC adapter information");
+    println!("  -t, --thermal      Show thermal zone information");
+    println!("  -c, --cooling      Show cooling device information");
+    println!("  -V, --everything   Show all device categories");
+    println!("  -v                 Show additional details");
+    println!("  -f, --fahrenheit   Use Fahrenheit instead of Celsius");
+    println!("  -i, --details      Show detailed battery information");
+    println!("  -h, --help         Show this help");
+    println!("  --version          Show version");
 }
 
-fn print_version(personality: Personality) {
-    let name = match personality {
-        Personality::Acpi => "acpi",
-        Personality::Acpid => "acpid",
-    };
-    println!("{name} (Slate OS) 0.1.0");
+fn print_version() {
+    println!("acpi (Slate OS) 0.1.0");
 }
 
 // ---------------------------------------------------------------------------
@@ -695,31 +576,22 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     };
 
     if cfg.show_help {
-        print_help(cfg.personality);
+        print_help();
         return 0;
     }
 
     if cfg.show_version {
-        print_version(cfg.personality);
+        print_version();
         return 0;
     }
 
     let stdout = io::stdout();
     let mut writer = stdout.lock();
 
-    let result = match cfg.personality {
-        Personality::Acpi => run_acpi(&cfg, &mut writer),
-        Personality::Acpid => run_acpid(&cfg, &mut writer),
-    };
-
-    match result {
+    match run_acpi(&cfg, &mut writer) {
         Ok(()) => 0,
         Err(e) => {
-            let name = match cfg.personality {
-                Personality::Acpi => "acpi",
-                Personality::Acpid => "acpid",
-            };
-            eprintln!("{name}: {e}");
+            eprintln!("acpi: {e}");
             1
         }
     }
@@ -733,15 +605,37 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
 mod tests {
     use super::*;
 
+    /// The `acpid` personality is gone, and its options went with it.
+    ///
+    /// Replaces `test_detect_personality_acpi`/`_acpid`, which asserted that
+    /// argv[0] selected between two behaviours. There is one behaviour now, so
+    /// what is worth pinning is that the daemon's flags are no longer accepted
+    /// -- an option that is silently ignored would leave `acpid -f` looking
+    /// like it had started something.
     #[test]
-    fn test_detect_personality_acpi() {
-        assert_eq!(detect_personality("acpi"), Personality::Acpi);
-        assert_eq!(detect_personality("/usr/bin/acpi"), Personality::Acpi);
+    fn the_acpi_daemon_options_are_no_longer_accepted() {
+        for flag in [
+            "--foreground",
+            "-l",
+            "--logevents",
+            "--logfile",
+            "--socketfile",
+        ] {
+            let args = vec!["acpi".to_string(), flag.to_string()];
+            assert!(
+                parse_args(&args).is_err(),
+                "{flag} was accepted, so the daemon personality is not fully gone"
+            );
+        }
     }
 
+    /// argv[0] no longer selects anything.
     #[test]
-    fn test_detect_personality_acpid() {
-        assert_eq!(detect_personality("acpid"), Personality::Acpid);
+    fn the_program_behaves_the_same_whatever_it_is_invoked_as() {
+        let as_acpi = parse_args(&["acpi".to_string()]).unwrap();
+        let as_acpid = parse_args(&["/usr/bin/acpid".to_string()]).unwrap();
+        assert_eq!(as_acpi.show_battery, as_acpid.show_battery);
+        assert_eq!(as_acpi.show_help, as_acpid.show_help);
     }
 
     #[test]
@@ -802,30 +696,10 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_args_acpid_foreground() {
-        let args = vec!["acpid".to_string(), "-f".to_string()];
-        let cfg = parse_args(&args).unwrap();
-        assert!(cfg.foreground);
-    }
-
-    #[test]
-    fn test_parse_args_acpid_logfile() {
-        let args = vec![
-            "acpid".to_string(),
-            "-L".to_string(),
-            "/tmp/acpi.log".to_string(),
-        ];
-        let cfg = parse_args(&args).unwrap();
-        assert_eq!(cfg.log_file, Some(PathBuf::from("/tmp/acpi.log")));
-    }
-
-    #[test]
     fn test_parse_args_help() {
-        for name in &["acpi", "acpid"] {
-            let args = vec![name.to_string(), "--help".to_string()];
-            let cfg = parse_args(&args).unwrap();
-            assert!(cfg.show_help);
-        }
+        let args = vec!["acpi".to_string(), "--help".to_string()];
+        let cfg = parse_args(&args).unwrap();
+        assert!(cfg.show_help);
     }
 
     #[test]
@@ -913,19 +787,6 @@ mod tests {
         };
         let mut buf = Vec::new();
         run_acpi(&cfg, &mut buf).unwrap();
-    }
-
-    #[test]
-    fn test_run_acpid() {
-        let cfg = Config {
-            personality: Personality::Acpid,
-            foreground: true,
-            ..Default::default()
-        };
-        let mut buf = Vec::new();
-        run_acpid(&cfg, &mut buf).unwrap();
-        let output = String::from_utf8(buf).unwrap();
-        assert!(output.contains("acpid"));
     }
 
     #[test]

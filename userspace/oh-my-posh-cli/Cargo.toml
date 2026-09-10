@@ -1,9 +1,0 @@
-[package]
-name = "oh-my-posh-cli"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-notimpl = { path = "../notimpl" }
-# The font name it installs and the rejected command name are argv words.
-quoting = { path = "../quoting" }

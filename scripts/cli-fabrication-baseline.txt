@@ -1,0 +1,15 @@
+# Commands pinned by scripts/audit-cli-fabrication.py --check.
+#
+# design-decisions.md 1006 (Decided by: Operator): a command that does not work
+# is deleted, not kept as a refusing stub. 2,285 were deleted on 2026-09-10 and
+# this file is the ratchet that stops a bulk generation putting them back.
+#
+# It is EMPTY, and that is the pinned state. Every name added here is a command
+# that states a fact it did not measure -- so an entry is a defect being
+# tolerated, not a rule being configured.
+#
+# The list may only SHRINK. A name pinned here that no longer fabricates is
+# also a failure: it means the fix landed and the pin outlived it, which is how
+# a baseline rots into a permission slip. Re-pin with:
+#
+#     python scripts/audit-cli-fabrication.py --pin

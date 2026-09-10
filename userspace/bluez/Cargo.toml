@@ -1,9 +1,0 @@
-[package]
-name = "bluez"
-version = "0.1.0"
-edition = "2024"
-[dependencies]
-notimpl = { path = "../notimpl" }
-# bluez names Bluetooth devices, and a device name is broadcast by the
-# remote device itself -- a word from an unpaired stranger in radio range.
-quoting = { path = "../quoting" }

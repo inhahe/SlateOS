@@ -46,6 +46,28 @@ pub const SYS_GETRANDOM: u64 = 90;
 /// the kernel reads at delivery time.
 pub const SYS_SIGNAL_ALTSTACK: u64 = 1071;
 
+/// `(ptr, len) -> 0`. Set the system hostname; `len == 0` clears it. Bounded
+/// at 64 bytes, Linux's `__NEW_UTS_LEN`, which is narrower than
+/// `nameservice`'s own 253 so that a name a native caller can set is always
+/// one a Linux-ABI caller can set too.
+///
+/// Gated on `Rights::SET_HOSTNAME`, a capability of its own rather than
+/// `uid == 0`: the Linux-ABI handler would read uid from the caller's
+/// credentials, which is ambient authority, and `known-issues.md` ->
+/// `A-SET-CREDENTIALS-IS-GATED-ONLY-IN-USERSPACE` records what that costs
+/// here. The capability is checked BEFORE the length, so an unprivileged
+/// caller cannot learn which lengths are accepted for a call it may not make.
+///
+/// There is deliberately no matching *getter*. `/proc/sys/kernel/hostname`
+/// already serves reads, and a second read path would give one value two
+/// sources that can disagree -- which is the exact defect this pair was
+/// requested to remove.
+pub const SYS_HOSTNAME_SET: u64 = 1072;
+
+/// `(ptr, len) -> 0`. Set the NIS domain name. Same capability, same bound and
+/// the same errors as [`SYS_HOSTNAME_SET`].
+pub const SYS_DOMAINNAME_SET: u64 = 1073;
+
 // Console I/O
 pub const SYS_CONSOLE_WRITE: u64 = 100;
 pub const SYS_CONSOLE_READ_CHAR: u64 = 101;

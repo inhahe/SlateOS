@@ -28,7 +28,7 @@ use std::time::Duration;
 // Log levels
 // ============================================================================
 
-#[derive(Clone, Copy, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
 #[repr(u8)]
 enum LogLevel {
     Emergency = 0,
@@ -197,9 +197,38 @@ fn extract_json_number(json: &str, key: &str) -> Option<u64> {
 // ============================================================================
 
 /// Read kernel messages from available sources.
+/// The kernel's own log ring, through the only interface that reaches it.
+///
+/// `klogctl(SYSLOG_ACTION_READ_ALL)` is what `dmesg` uses on Linux, and what
+/// `posix` wires to `SYS_LOG_READ` (102). It does not consume the ring, so
+/// running `dmesg` twice shows the same messages twice rather than nothing the
+/// second time.
+///
+/// This replaces reading `/proc/kmsg`, which **this kernel does not serve**:
+/// there is no `kmsg` entry anywhere in `kernel/src/fs/procfs.rs`, so the open
+/// failed, `dmesg` fell through to `/var/log/kernel` and `/var/log/syslog`, and
+/// the tool for reading kernel messages never read the kernel's messages. The
+/// file fallbacks below are kept because they are legitimate on a
+/// syslogd-managed system -- they were just never the primary source.
+fn read_kernel_ring() -> Option<String> {
+    // The ring's own capacity, so a large log is not truncated and a small one
+    // does not cost a megabyte. If the kernel will not say, take Linux's usual
+    // default rather than guessing small.
+    let size = libcall::klog_size().unwrap_or(1 << 17).clamp(4096, 1 << 22);
+    let mut buf = vec![0u8; size];
+    let n = libcall::klog_read_all(&mut buf).ok()?;
+    buf.truncate(n);
+    // Deliberately not lossy. Kernel log text is ASCII in practice, and if it
+    // ever is not, the right answer is to fall through to the file sources
+    // rather than to hand the parser replacement characters that were never in
+    // the log. `read_file` below has always had exactly this property, via
+    // `read_to_string`.
+    String::from_utf8(buf).ok()
+}
+
 fn read_kernel_messages() -> Vec<KernelMessage> {
-    // Try /proc/kmsg first (live kernel ring buffer).
-    if let Some(content) = read_file("/proc/kmsg") {
+    // The live kernel ring, which is the point of the tool.
+    if let Some(content) = read_kernel_ring() {
         return content.lines().filter_map(parse_kmsg_line).collect();
     }
 
@@ -476,11 +505,25 @@ fn main() {
 
     // Clear ring buffer if requested.
     if config.clear {
-        // Attempt to truncate /proc/kmsg (kernel honors this as a clear).
-        if fs::write("/proc/kmsg", "").is_ok() {
-            eprintln!("(ring buffer cleared)");
-        } else {
-            eprintln!("(could not clear ring buffer — permission denied?)");
+        // `klogctl(SYSLOG_ACTION_CLEAR)`, which is how Linux clears the ring.
+        //
+        // This wrote an empty string to /proc/kmsg under a comment saying "the
+        // kernel honors this as a clear". It does not, and neither does Linux;
+        // and procfs here serves no `kmsg` entry at all, so the write could
+        // only ever fail. What it printed then was the giveaway: "(could not
+        // clear ring buffer — permission denied?)", with a question mark,
+        // guessing at a reason for a failure it had not asked about. EPERM is
+        // now reported because the kernel said EPERM, which for this action it
+        // genuinely does without CAP_SYSLOG.
+        match libcall::klog_clear() {
+            Ok(()) => eprintln!("(ring buffer cleared)"),
+            Err(libcall::EPERM) => {
+                eprintln!("dmesg: cannot clear the ring buffer: not permitted (needs CAP_SYSLOG)");
+            }
+            Err(libcall::ENOSYS) => {
+                eprintln!("dmesg: cannot clear the ring buffer: not implemented on this kernel");
+            }
+            Err(e) => eprintln!("dmesg: cannot clear the ring buffer: errno {e}"),
         }
     }
 
@@ -512,5 +555,112 @@ fn main() {
                 last_count = new_messages.len();
             }
         }
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The structured `kmsg` format: `<level>,seq,timestamp,facility;message`.
+    #[test]
+    fn a_structured_kmsg_line_parses_into_its_four_parts() {
+        let m = parse_kmsg_line("3,42,1234567,kernel;disk failure").unwrap();
+        assert_eq!(m.level, LogLevel::Error);
+        assert_eq!(m.timestamp_us, 1_234_567);
+        assert_eq!(m.facility, "kernel");
+        assert_eq!(m.message, "disk failure");
+    }
+
+    /// Every Linux log level maps to its own name, and nothing above 7 is
+    /// silently promoted into a more serious one.
+    #[test]
+    fn every_syslog_level_maps_to_its_own_severity() {
+        let cases = [
+            (0, LogLevel::Emergency),
+            (1, LogLevel::Alert),
+            (2, LogLevel::Critical),
+            (3, LogLevel::Error),
+            (4, LogLevel::Warning),
+            (5, LogLevel::Notice),
+            (6, LogLevel::Info),
+            (7, LogLevel::Debug),
+        ];
+        for (n, want) in cases {
+            let line = format!("{n},1,0,kernel;x");
+            assert_eq!(parse_kmsg_line(&line).unwrap().level, want, "level {n}");
+        }
+    }
+
+    /// A message with a semicolon in it keeps all of it.
+    ///
+    /// `split_once` rather than `split`, which matters because kernel messages
+    /// contain semicolons -- a device path, an option list -- and splitting on
+    /// every one would truncate the message at the first.
+    #[test]
+    fn a_semicolon_inside_the_message_is_not_a_separator() {
+        let m = parse_kmsg_line("6,1,0,kernel;opts: a=1; b=2; c=3").unwrap();
+        assert_eq!(m.message, "opts: a=1; b=2; c=3");
+    }
+
+    /// Anything that is not the structured format is still shown, not dropped.
+    #[test]
+    fn plain_text_falls_back_rather_than_vanishing() {
+        let m = parse_kmsg_line("just some text").unwrap();
+        assert_eq!(m.message, "just some text");
+        assert_eq!(m.level, LogLevel::Info);
+        assert_eq!(m.timestamp_us, 0);
+    }
+
+    /// Blank lines are not messages.
+    #[test]
+    fn an_empty_line_is_not_a_message() {
+        assert!(parse_kmsg_line("").is_none());
+        assert!(parse_kmsg_line("   ").is_none());
+    }
+
+    /// A prefix with too few fields is treated as plain text rather than
+    /// half-parsed.
+    #[test]
+    fn a_short_prefix_is_plain_text_not_a_partial_parse() {
+        let m = parse_kmsg_line("6,1;hello").unwrap();
+        assert_eq!(m.message, "6,1;hello");
+        assert_eq!(m.timestamp_us, 0);
+    }
+
+    #[test]
+    fn json_escaping_covers_the_characters_that_would_break_a_parser() {
+        assert_eq!(json_escape("a\"b"), "a\\\"b");
+        assert_eq!(json_escape("a\\b"), "a\\\\b");
+        assert_eq!(json_escape("a\nb"), "a\\nb");
+        assert_eq!(json_escape("plain"), "plain");
+    }
+
+    #[test]
+    fn extracting_json_fields_finds_them_and_says_so_when_it_cannot() {
+        let line = r#"{"msg":"hello","ts":12345}"#;
+        assert_eq!(extract_json_string(line, "msg").as_deref(), Some("hello"));
+        assert_eq!(extract_json_number(line, "ts"), Some(12345));
+        assert_eq!(extract_json_string(line, "absent"), None);
+        assert_eq!(extract_json_number(line, "absent"), None);
+    }
+
+    /// The host has no Slate kernel, so the ring read declines and the file
+    /// fallbacks are what run.
+    ///
+    /// This is the property the 2026-09-10 change turns on: reading used to go
+    /// to `/proc/kmsg`, which this kernel serves no entry for, so the primary
+    /// source silently never worked and the fallbacks were doing all the work.
+    /// Now the primary source is `klogctl`, and on a host without one the
+    /// decline is explicit rather than a failed open.
+    #[cfg(not(unix))]
+    #[test]
+    fn the_host_has_no_kernel_ring_to_read() {
+        assert!(read_kernel_ring().is_none());
+        assert_eq!(libcall::klog_clear(), Err(libcall::ENOSYS));
     }
 }

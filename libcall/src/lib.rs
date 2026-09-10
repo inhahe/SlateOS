@@ -94,6 +94,16 @@ pub const SWAP_FLAG_DISCARD: i32 = 0x1_0000;
 /// The bits of a `swapon` flag word that hold the priority.
 pub const SWAP_FLAG_PRIO_MASK: i32 = 0x7FFF;
 
+/// `klogctl`: read everything currently in the ring, without consuming it.
+/// Needs no capability -- the ring is readable by anyone under Linux's default
+/// `dmesg_restrict=0`.
+pub const SYSLOG_ACTION_READ_ALL: i32 = 3;
+/// `klogctl`: advance the clear floor past everything currently buffered.
+/// Needs `CAP_SYSLOG`.
+pub const SYSLOG_ACTION_CLEAR: i32 = 5;
+/// `klogctl`: the ring's total capacity in bytes.
+pub const SYSLOG_ACTION_SIZE_BUFFER: i32 = 10;
+
 // ---------------------------------------------------------------------------
 // The symbols themselves
 // ---------------------------------------------------------------------------
@@ -112,6 +122,7 @@ mod sys {
         pub fn swapoff(path: *const u8) -> i32;
         pub fn sethostname(name: *const u8, len: usize) -> i32;
         pub fn setdomainname(name: *const u8, len: usize) -> i32;
+        pub fn klogctl(cmd: i32, buf: *mut u8, len: i32) -> i32;
         pub fn __errno_location() -> *mut i32;
     }
 }
@@ -251,6 +262,83 @@ pub fn setdomainname(_name: &[u8]) -> Result<(), i32> {
     Err(ENOSYS)
 }
 
+/// How many bytes the kernel log ring can hold.
+///
+/// # Errors
+///
+/// The `errno` set by `klogctl(2)`.
+#[cfg(unix)]
+pub fn klog_size() -> Result<usize, i32> {
+    // SAFETY: SIZE_BUFFER reads no user memory, so a null pointer and a zero
+    // length are what the call expects.
+    let rc = unsafe { sys::klogctl(SYSLOG_ACTION_SIZE_BUFFER, core::ptr::null_mut(), 0) };
+    usize::try_from(rc).map_err(|_| last_errno())
+}
+
+/// How many bytes the kernel log ring can hold.
+///
+/// # Errors
+///
+/// Always [`ENOSYS`]: the host has no Slate kernel and no ring to size.
+#[cfg(not(unix))]
+pub fn klog_size() -> Result<usize, i32> {
+    Err(ENOSYS)
+}
+
+/// Copy everything currently in the kernel log ring into `buf`.
+///
+/// Returns the number of bytes written. Does **not** consume the ring: this is
+/// `SYSLOG_ACTION_READ_ALL`, the action `dmesg` uses, so running it twice gives
+/// the same messages twice rather than nothing the second time.
+///
+/// # Errors
+///
+/// The `errno` set by `klogctl(2)`.
+#[cfg(unix)]
+pub fn klog_read_all(buf: &mut [u8]) -> Result<usize, i32> {
+    let Ok(len) = i32::try_from(buf.len()) else {
+        return Err(EINVAL);
+    };
+    // SAFETY: the pointer and length handed over are exactly `buf`'s own, so
+    // the library writes only within it.
+    let rc = unsafe { sys::klogctl(SYSLOG_ACTION_READ_ALL, buf.as_mut_ptr(), len) };
+    usize::try_from(rc).map_err(|_| last_errno())
+}
+
+/// Copy everything currently in the kernel log ring into `buf`.
+///
+/// # Errors
+///
+/// Always [`ENOSYS`]: the host has no Slate kernel and no ring to read.
+#[cfg(not(unix))]
+pub fn klog_read_all(_buf: &mut [u8]) -> Result<usize, i32> {
+    Err(ENOSYS)
+}
+
+/// Discard everything currently in the kernel log ring.
+///
+/// # Errors
+///
+/// The `errno` set by `klogctl(2)` -- in particular `EPERM` without
+/// `CAP_SYSLOG`, which is the common case and worth reporting as itself rather
+/// than guessed at.
+#[cfg(unix)]
+pub fn klog_clear() -> Result<(), i32> {
+    // SAFETY: CLEAR reads no user memory; null and zero are what it expects.
+    let rc = unsafe { sys::klogctl(SYSLOG_ACTION_CLEAR, core::ptr::null_mut(), 0) };
+    if rc >= 0 { Ok(()) } else { Err(last_errno()) }
+}
+
+/// Discard everything currently in the kernel log ring.
+///
+/// # Errors
+///
+/// Always [`ENOSYS`]: the host has no Slate kernel and no ring to clear.
+#[cfg(not(unix))]
+pub fn klog_clear() -> Result<(), i32> {
+    Err(ENOSYS)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,6 +359,15 @@ mod tests {
         assert_eq!(SWAP_FLAG_PREFER, posix::unistd::SWAP_FLAG_PREFER);
         assert_eq!(SWAP_FLAG_DISCARD, posix::unistd::SWAP_FLAG_DISCARD);
         assert_eq!(SWAP_FLAG_PRIO_MASK, posix::unistd::SWAP_FLAG_PRIO_MASK);
+        assert_eq!(
+            SYSLOG_ACTION_READ_ALL,
+            posix::unistd::SYSLOG_ACTION_READ_ALL
+        );
+        assert_eq!(SYSLOG_ACTION_CLEAR, posix::unistd::SYSLOG_ACTION_CLEAR);
+        assert_eq!(
+            SYSLOG_ACTION_SIZE_BUFFER,
+            posix::unistd::SYSLOG_ACTION_SIZE_BUFFER
+        );
     }
 
     /// The priority mask and the prefer bit do not overlap.
@@ -298,6 +395,9 @@ mod tests {
         assert_eq!(swapoff(path), Err(ENOSYS));
         assert_eq!(sethostname(b"host"), Err(ENOSYS));
         assert_eq!(setdomainname(b"domain"), Err(ENOSYS));
+        assert_eq!(klog_size(), Err(ENOSYS));
+        assert_eq!(klog_read_all(&mut [0u8; 8]), Err(ENOSYS));
+        assert_eq!(klog_clear(), Err(ENOSYS));
         // `sync` has no failure to report on either arm; calling it here
         // asserts only that the host arm exists and does not panic.
         sync();

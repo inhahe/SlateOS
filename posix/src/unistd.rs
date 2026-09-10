@@ -1431,12 +1431,15 @@ pub extern "C" fn getdomainname(name: *mut u8, len: usize) -> i32 {
 
 /// Set the domain name of the host.
 ///
-/// Every argument check below is real and runs in Linux's own order, and then
-/// the call returns `ENOSYS`: there is no native syscall number for the domain
-/// name, exactly as for [`sethostname`]. It used to store `name[..len]` in a
-/// process-local buffer and return `0`, which `getdomainname` then read back —
-/// so a program could set the domain name, read it, get its own value and
-/// conclude the system had one.
+/// Issues `SYS_DOMAINNAME_SET` (1073), which the kernel documents as taking
+/// the same capability, the same 64-byte bound and the same errors as
+/// [`sethostname`]. `len == 0` clears the name.
+///
+/// It used to store `name[..len]` in a process-local buffer and return `0`,
+/// which `getdomainname` then read back — so a program could set the domain
+/// name, read it, get its own value and conclude the system had one. It kept
+/// that defect a commit longer than `sethostname` did, under a commit message
+/// claiming both were fixed.
 ///
 /// Errors (Linux-matching priority order — `kernel/sys.c::sys_setdomainname`
 /// performs the cap check at the top, before argument validation):
@@ -1445,44 +1448,11 @@ pub extern "C" fn getdomainname(name: *mut u8, len: usize) -> i32 {
 /// 2. `len > HOST_NAME_MAX`          → `EINVAL`
 /// 3. `name == NULL` when `len > 0`  → `EFAULT`
 ///
-/// 4. otherwise                      → `ENOSYS`
-///
-/// `len == 0` with a NULL pointer passes the checks (matching Linux's
-/// `copy_from_user(_, NULL, 0)` short-circuit) and then fails on `ENOSYS`
-/// like any other call.
+/// `len == 0` with a NULL pointer is accepted and clears the name, matching
+/// Linux's `copy_from_user(_, NULL, 0)` short-circuit.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setdomainname(name: *const u8, len: usize) -> i32 {
-    // 1. CAP_SYS_ADMIN check first (Phase 167).  The comment that
-    //    previously said "we're single-user so any process can set
-    //    the domain name" predates the cred model — now that
-    //    capabilities exist, Linux's sys_setdomainname ordering
-    //    applies.
-    if !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_ADMIN) {
-        errno::set_errno(errno::EPERM);
-        return -1;
-    }
-    if len > HOST_NAME_MAX {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-    if len > 0 && name.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
-
-    // And here it stops, for the same reason `sethostname` does: there is no
-    // native syscall number for the domain name, so there is nowhere to put
-    // it. See that function and
-    // `requests/b-a-no-native-syscall-reports-the-hostname.md`.
-    //
-    // This used to write a process-local buffer and return 0, and
-    // `getdomainname` read that same buffer -- so a program could set the
-    // domain name, read it back, get its own value and conclude the system had
-    // one. The capability check above still runs first: unprivileged is
-    // permanent, unimplemented is not.
-    let _ = (name, len);
-    errno::set_errno(errno::ENOSYS);
-    -1
+    set_uts_name(crate::syscall::SYS_DOMAINNAME_SET, name, len)
 }
 
 /// Get the maximum number of open file descriptors.
@@ -2008,79 +1978,112 @@ pub extern "C" fn sync() {
     }
 }
 
-/// Set the system hostname — or rather, refuse to, for now.
+/// Ask the kernel to store a UTS name, and translate its answer to `errno`.
 ///
-/// Every argument check below is real and runs in Linux's own order, and then
-/// the call returns `ENOSYS`: there is no native syscall number for the
-/// hostname yet, so there is nowhere to put the name. See the body for the
-/// full reasoning and `requests/b-a-no-native-syscall-reports-the-hostname.md`
-/// for the request; when the number lands this becomes a syscall.
+/// Shared by [`sethostname`] and [`setdomainname`], which the kernel documents
+/// as taking the same capability, the same 64-byte bound and the same errors.
+/// Two copies of that contract would be two places for it to drift.
 ///
-/// **This doc comment described the old behaviour for one commit longer than
-/// the code did**, which is worth leaving a mark about. It said "stores the
-/// hostname in a process-local static buffer, retrieved via `gethostname()`" —
-/// a true description of the defect that was removed, sitting above the fix,
-/// where the next reader would have believed it over the code. Changing a
-/// body and leaving its doc is the same failure as a test that certifies a
-/// bug: both are statements that outlived the thing they describe.
+/// # Why the kernel does the checking
 ///
-/// Errors (Linux-matching priority order — `kernel/sys.c::sys_sethostname`
-/// checks the cap first, then the length, then the user pointer):
+/// This used to validate the capability and the length in *userspace* and then
+/// return `ENOSYS`, because there was nowhere to put the name. Now that
+/// `SYS_HOSTNAME_SET` exists, doing that would be worse than redundant:
 ///
-/// 1. `!CAP_SYS_ADMIN`              → `EPERM`   (Phase 167)
-/// 2. `len > HOST_NAME_MAX`          → `EINVAL`
-/// 3. `name == NULL` when `len > 0`  → `EFAULT`
-/// 4. otherwise                      → `ENOSYS`
+/// - The kernel gates on `Rights::SET_HOSTNAME`, which is deliberately
+///   **narrower** than `CAP_SYS_ADMIN`. A userspace `CAP_SYS_ADMIN` gate would
+///   refuse a caller that holds exactly the right the kernel asks for.
+/// - The kernel checks the capability *before* the length, so an unprivileged
+///   caller cannot learn which lengths are accepted. A userspace length check
+///   running first would leak precisely that, and it is the property lane A
+///   built `test_dispatch_uts_name` to pin.
 ///
-/// `len == 0` with a NULL pointer passes the checks (matching Linux's
-/// `copy_from_user(_, NULL, 0)` short-circuit) and then fails on `ENOSYS`
-/// like any other call — it is no longer the one form that succeeds.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn sethostname(name: *const u8, len: usize) -> i32 {
-    // 1. CAP_SYS_ADMIN check first (Phase 167) — Linux's
-    //    sys_sethostname checks ns_capable(uts_ns->user_ns,
-    //    CAP_SYS_ADMIN) at the top of the syscall prologue,
-    //    before any argument validation.
+/// So on the target this passes the arguments through and reports what the
+/// kernel says. `PermissionDenied` becomes `EPERM` rather than the `EACCES`
+/// that [`errno::errno_for`] would give it, because `EPERM` is what Linux's
+/// `sethostname(2)` documents for a capability failure and what a ported
+/// program tests for.
+#[cfg(target_os = "none")]
+fn set_uts_name(nr: u64, name: *const u8, len: usize) -> i32 {
+    let rc = syscall2(nr, name as u64, len as u64);
+    if rc >= 0 {
+        return 0;
+    }
+    let e = match rc {
+        errno::native::PERMISSION_DENIED | errno::native::INVALID_CAPABILITY => errno::EPERM,
+        errno::native::INVALID_ARGUMENT => errno::EINVAL,
+        errno::native::INVALID_ADDRESS => errno::EFAULT,
+        other => errno::errno_for(other),
+    };
+    errno::set_errno(e);
+    -1
+}
+
+/// The host has no kernel to hold a hostname, so this reproduces the order the
+/// kernel documents and then reports `ENOSYS`.
+///
+/// **It is a simulation, and the tests that exercise it are tests of the
+/// simulation.** That is worth saying plainly, because this module has already
+/// shipped one round trip through a process-local buffer that read exactly
+/// like evidence about the system. What tests the real path is
+/// `services/ctest-hostname`, which runs in ring 3 on the real kernel holding
+/// the real capability, sets a name and reads it back through `gethostname`,
+/// `/proc/sys/kernel/hostname` and `uname` to check all three agree.
+#[cfg(not(target_os = "none"))]
+fn set_uts_name(_nr: u64, name: *const u8, len: usize) -> i32 {
     if !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_ADMIN) {
         errno::set_errno(errno::EPERM);
         return -1;
     }
-    // 2. Length sanity (matches Linux's `len < 0 || len >
-    //    __NEW_UTS_LEN` check; our `usize` parameter already
-    //    excludes negative values).
     if len > HOST_NAME_MAX {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    // 3. Empty copy never dereferences the pointer — Linux's
-    //    copy_from_user(_, NULL, 0) returns 0 so sethostname(NULL, 0)
-    //    succeeds.  We mirror that and only EFAULT on len > 0.
     if len > 0 && name.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
-
-    // 4. And here it stops, because there is nowhere to put it.
-    //
-    // This used to write a process-local buffer and return 0. `gethostname`
-    // read that same buffer, so a program could set the hostname, read it
-    // back, get its own value and conclude it had worked -- while no other
-    // process on the system, and not the kernel, had heard anything. A
-    // self-consistent lie, which is a worse failure than `setgroups`'
-    // `ENOSYS`: that one at least tells the caller.
-    //
-    // There is no native syscall number for the hostname. The kernel holds it
-    // in `fs::nameservice`, reachable only from the Linux-ABI table. Requested
-    // in `requests/b-a-no-native-syscall-reports-the-hostname.md`; when the
-    // number exists this becomes a syscall and the `ENOSYS` goes away.
-    //
-    // The capability check above still runs first, and deliberately: an
-    // unprivileged caller must learn it is unprivileged, which is true and
-    // will stay true, rather than that the call is unimplemented, which is
-    // temporary.
-    let _ = (name, len);
     errno::set_errno(errno::ENOSYS);
     -1
+}
+
+/// Set the system hostname.
+///
+/// Issues `SYS_HOSTNAME_SET` (1072), which stores the name in the kernel's
+/// `fs::nameservice` — the same place `/proc/sys/kernel/hostname`, `uname` and
+/// [`gethostname`] all read from, so there is one value with one source.
+/// `len == 0` clears the name.
+///
+/// # Errors, in the kernel's order
+///
+/// 1. no `Rights::SET_HOSTNAME`     → `EPERM`
+/// 2. `len > 64` (`__NEW_UTS_LEN`)  → `EINVAL`
+/// 3. bad user pointer              → `EFAULT`
+///
+/// The capability is checked **first**, so an unprivileged caller cannot learn
+/// which lengths are accepted for a call it may not make. That ordering is the
+/// kernel's and is pinned by its own `test_dispatch_uts_name`; this function
+/// does not re-implement it, because a userspace gate on `CAP_SYS_ADMIN` would
+/// refuse a caller holding exactly the narrower right the kernel asks for. See
+/// [`set_uts_name`].
+///
+/// The bound is 64 rather than `nameservice`'s own 253, so a name a native
+/// caller can set is always one a Linux-ABI caller can set too. `HOST_NAME_MAX`
+/// here is 255 and is *not* the limit for this call.
+///
+/// # History, because two versions of this doc were wrong before this one
+///
+/// It first said "stores the hostname in a process-local static buffer,
+/// retrieved via `gethostname()`" — true of a defect that had already been
+/// removed, sitting above the fix. Then it said the call returns `ENOSYS`
+/// because there was no syscall number, which was true for three days and
+/// stopped being true when 1072 landed. Both were statements that outlived
+/// what they described, which is the same failure as a test that certifies a
+/// bug. This note stays only until someone has reason to doubt the paragraph
+/// above it.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn sethostname(name: *const u8, len: usize) -> i32 {
+    set_uts_name(crate::syscall::SYS_HOSTNAME_SET, name, len)
 }
 
 // ---------------------------------------------------------------------------
@@ -5647,18 +5650,26 @@ mod tests {
         }
     }
 
-    /// **`sethostname` does not set the hostname, and now says so.**
+    /// On the **host**, where there is no kernel, `sethostname` reports
+    /// `ENOSYS` rather than pretending.
     ///
-    /// This test read `test_sethostname_roundtrip` and asserted that setting
-    /// the hostname and reading it back agreed. It did agree -- both ends were
-    /// the same process-local buffer, which nothing outside the process could
-    /// see and the kernel never heard about. The round trip was the evidence
-    /// that it worked, and it was the bug.
+    /// Read the name of this test carefully against what it proves. It is a
+    /// test of `set_uts_name`'s host arm, and it says nothing whatever about
+    /// whether setting a hostname works -- on the target that call is
+    /// `SYS_HOSTNAME_SET` and reaches the kernel. What tests *that* is
+    /// `services/ctest-hostname`, in ring 3, on a real kernel, holding the
+    /// real capability.
     ///
-    /// There is no native syscall number for the hostname; see
-    /// `requests/b-a-no-native-syscall-reports-the-hostname.md`.
+    /// The distinction is the whole history of this function. It began as
+    /// `test_sethostname_roundtrip`, which set the hostname and read it back
+    /// and found they agreed -- because both ends were the same
+    /// process-local buffer that nothing outside the process could see and
+    /// the kernel never heard of. The round trip was the evidence that it
+    /// worked, and it was the bug. A test that exercises a simulation and a
+    /// test that exercises the system are indistinguishable from the test's
+    /// own output, so the only defence is to say which one this is.
     #[test]
-    fn test_sethostname_reports_that_it_cannot() {
+    fn the_host_arm_of_sethostname_reports_enosys() {
         errno::set_errno(0);
         let new_name = b"test-host";
         assert_eq!(sethostname(new_name.as_ptr(), new_name.len()), -1);
@@ -5707,15 +5718,15 @@ mod tests {
         assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
-    /// **`setdomainname` does not set the domain name, and now says so.**
+    /// The same for `setdomainname`, and it is the same simulation.
     ///
-    /// The mirror of `test_sethostname_reports_that_it_cannot`, and it
-    /// survived a commit longer: the change that fixed `sethostname` said in
-    /// its message that it had fixed this one too, and had not. The round trip
-    /// agreed because both ends were the same process-local buffer, which is
-    /// what made it look like evidence.
+    /// The mirror of `the_host_arm_of_sethostname_reports_enosys`, and it
+    /// survived a commit longer than its twin: the change that fixed
+    /// `sethostname` said in its message that it had fixed this one too, and
+    /// had not. Its round trip agreed because both ends were the same
+    /// process-local buffer, which is what made it look like evidence.
     #[test]
-    fn test_setdomainname_reports_that_it_cannot() {
+    fn the_host_arm_of_setdomainname_reports_enosys() {
         errno::set_errno(0);
         let new_domain = b"example.com";
         assert_eq!(setdomainname(new_domain.as_ptr(), new_domain.len()), -1);

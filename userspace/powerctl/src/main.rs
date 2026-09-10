@@ -428,17 +428,40 @@ fn orderly_shutdown(action: &str) -> bool {
 /// has been available the whole time.
 ///
 /// Through `libcall` rather than `posix` directly, and the difference is not
-/// cosmetic: `posix` as a Rust dependency compiles a *second* copy of the libc
-/// with every syscall stubbed to `-ENOSYS`, so `posix::unistd::sync()` -- what
-/// this called for its first hours -- would have flushed nothing, exactly like
-/// the two invented writes it replaced. See `design-decisions.md` 768.
+/// cosmetic. **For its first two hours this function called
+/// `posix::unistd::sync()` as a Rust path, and that flushed exactly as much as
+/// the two invented writes it replaced: nothing.** The commit that made the
+/// change said it had closed a data-loss path. It had not; `libcall` did,
+/// later the same morning.
+///
+/// The reason is worth stating precisely, because the general rule
+/// (`design-decisions.md` 768: the `posix` rlib is a second libc with its
+/// syscalls stubbed to `-ENOSYS`) is *milder* than what happens here.
+/// `posix::unistd::sync` is `pub extern "C" fn sync()` whose entire body is
+/// one block gated `#[cfg(target_os = "none")]`. A SlateOS program is built
+/// for `target_os = "linux"`, so the rlib copy is **an empty function**. Not a
+/// stub that returns `-ENOSYS`, which a caller could at least test for -- a
+/// `void` function with no statements in it. There is no error, no return
+/// value, and nothing to check.
+///
+/// Found by lane A, from the source and the `cfg` rather than by running it,
+/// while looking at *why* the gate count had moved instead of reporting that
+/// it had. The same reading applies to every `pub extern "C"` entry point in
+/// `posix` whose body is gated that way; the gate
+/// `scripts/check-one-libc-per-process.py` now refuses the Rust path to all of
+/// them, which is what makes this unrepeatable rather than merely known.
 ///
 /// # There is nothing to check
 ///
 /// `sync(2)` returns `void`: POSIX defines it as scheduling the writes, with
 /// no failure to report. So this function cannot tell its callers whether the
-/// flush reached the platter, and neither could the code it replaces -- the
-/// difference is that this one actually asks the kernel.
+/// flush reached the platter, and neither could either of the two things it
+/// replaced -- the difference is that this one actually asks the kernel.
+///
+/// That property is why both earlier versions survived review. A call that
+/// cannot report failure looks identical whether it works or not, so the only
+/// way to know is to read what is on the other side of it. Twice, nobody
+/// did.
 ///
 /// Not called from [`direct_suspend`], deliberately: suspend keeps RAM powered
 /// and the buffers with it, so there is nothing to flush and a needless full

@@ -9,8 +9,10 @@
 #![deny(clippy::all)]
 
 use std::env;
+use std::ffi::OsString;
 use std::io::{self, Write};
 use std::process;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const VERSION: &str = "0.1.0";
 
@@ -83,19 +85,88 @@ fn day_of_week(year: i32, month: u32, day: u32) -> u32 {
     (h + 6) % 7
 }
 
-/// Get current date from the system (year, month, day).
-fn current_date() -> (i32, u32, u32) {
-    // Try reading from system.
-    // On Slate OS this would use the kernel clock; for now use a reasonable default.
-    // We'll try to parse /proc/driver/rtc or use std::time.
-    use std::time::{SystemTime, UNIX_EPOCH};
-    if let Ok(dur) = SystemTime::now().duration_since(UNIX_EPOCH) {
-        let secs = dur.as_secs() as i64;
-        let (year, month, day) = unix_to_date(secs);
-        return (year, month, day);
-    }
-    (2025, 1, 1) // fallback
+/// Today, as the system reckons it, or `None` if the clock cannot be read.
+///
+/// `SystemTime::now()` *is* the kernel clock on this target -- there is no
+/// second, more direct route to try, and the comment here used to say
+/// otherwise ("on Slate OS this would use the kernel clock; for now use a
+/// reasonable default", plus a note about parsing `/proc/driver/rtc").
+///
+/// The `None` is the point. This returned `(2025, 1, 1)` when the clock could
+/// not be read, so `cal` printed a calendar for January 2025 with the 1st
+/// highlighted as today and exited 0. No caller could tell that from a correct
+/// answer. A wrong date stated confidently is the same defect as the 2,285
+/// commands `design-decisions.md` 1006 deleted, in a program worth keeping.
+fn current_date() -> Option<(i32, u32, u32)> {
+    let dur = SystemTime::now().duration_since(UNIX_EPOCH).ok()?;
+    let secs = i64::try_from(dur.as_secs()).ok()?;
+    Some(unix_to_date(secs))
 }
+
+/// Which month `cal` should print, given its positional arguments.
+///
+/// Takes `OsStr` rather than `str` because argv is OS-boundary data and this
+/// OS allows any byte but `/` and NUL in it. Nothing here needs the argument
+/// to *be* text -- it needs it to be a number -- so a value that does not
+/// decode simply fails to parse, which is already an error this function
+/// reports. `cal` used to read argv as `String` and panicked with a Rust
+/// backtrace before its first statement on anything else.
+///
+/// Split out of `main` so the clock-less paths can be tested. The rule is that
+/// **only the arguments you did not supply need a clock**: `cal 9 2026` names
+/// a month outright and works with no clock at all, while bare `cal` and
+/// `cal 9` mean "of this year", which is a question only the system can
+/// answer.
+///
+/// Returns the year, the month, and whether a full year was asked for.
+fn resolve_period(
+    positional: &[OsString],
+    full_year: bool,
+    today: Option<(i32, u32, u32)>,
+) -> Result<(i32, u32, bool), NoClock> {
+    let year_of = |t: Option<(i32, u32, u32)>| t.map(|(y, _, _)| y).ok_or(NoClock);
+    let month_of = |t: Option<(i32, u32, u32)>| t.map(|(_, m, _)| m).ok_or(NoClock);
+
+    match positional.len() {
+        0 => Ok((year_of(today)?, month_of(today)?, full_year)),
+        1 => {
+            let Ok(val) = positional[0].to_str().unwrap_or("").parse::<i32>() else {
+                // Not a number at all: the old code fell back to the current
+                // year and printed *something*. Refusing is the honest answer,
+                // and it does not depend on the clock.
+                return Err(NoClock);
+            };
+            if (1..=12).contains(&val) && !full_year {
+                // A month of the current year -- which needs the clock.
+                Ok((
+                    year_of(today)?,
+                    u32::try_from(val).map_err(|_| NoClock)?,
+                    false,
+                ))
+            } else {
+                Ok((val, 1, true))
+            }
+        }
+        _ => {
+            let month = positional[0]
+                .to_str()
+                .unwrap_or("")
+                .parse::<u32>()
+                .map_err(|_| NoClock)?;
+            let year = positional[1]
+                .to_str()
+                .unwrap_or("")
+                .parse::<i32>()
+                .map_err(|_| NoClock)?;
+            Ok((year, month, full_year))
+        }
+    }
+}
+
+/// The clock could not be read, or an argument could not be parsed -- either
+/// way `cal` does not know which month was meant.
+#[derive(Debug, PartialEq, Eq)]
+struct NoClock;
 
 fn unix_to_date(timestamp: i64) -> (i32, u32, u32) {
     // Days since 1970-01-01.
@@ -161,8 +232,6 @@ fn iso_week_number(year: i32, month: u32, day: u32) -> u32 {
 // ============================================================================
 
 struct CalOpts {
-    year: Option<i32>,
-    month: Option<u32>,
     three_month: bool,
     full_year: bool,
     monday_first: bool,
@@ -279,13 +348,14 @@ fn print_single_month(
     year: i32,
     month: u32,
     opts: &CalOpts,
-    today: (i32, u32, u32),
+    today: Option<(i32, u32, u32)>,
 ) {
-    let highlight = if opts.highlight_today && year == today.0 && month == today.1 {
-        Some(today.2)
-    } else {
-        None
-    };
+    let highlight =
+        if opts.highlight_today && today.is_some_and(|(ty, tm, _)| year == ty && month == tm) {
+            today.map(|(_, _, td)| td)
+        } else {
+            None
+        };
     let lines = render_month(
         year,
         month,
@@ -304,7 +374,7 @@ fn print_three_months(
     year: i32,
     center_month: u32,
     opts: &CalOpts,
-    today: (i32, u32, u32),
+    today: Option<(i32, u32, u32)>,
 ) {
     let mut months = Vec::new();
     for delta in [-1i32, 0, 1] {
@@ -318,11 +388,12 @@ fn print_three_months(
             m -= 12;
             y += 1;
         }
-        let highlight = if opts.highlight_today && y == today.0 && m as u32 == today.1 {
-            Some(today.2)
-        } else {
-            None
-        };
+        let highlight =
+            if opts.highlight_today && today.is_some_and(|(ty, tm, _)| y == ty && m as u32 == tm) {
+                today.map(|(_, _, td)| td)
+            } else {
+                None
+            };
         months.push(render_month(
             y,
             m as u32,
@@ -353,7 +424,7 @@ fn print_full_year(
     out: &mut io::StdoutLock<'_>,
     year: i32,
     opts: &CalOpts,
-    today: (i32, u32, u32),
+    today: Option<(i32, u32, u32)>,
 ) {
     // Year header.
     let title = format!("{year}");
@@ -370,8 +441,10 @@ fn print_full_year(
         for c in 0..cols {
             let m = month + c;
             if m <= 12 {
-                let highlight = if opts.highlight_today && year == today.0 && m == today.1 {
-                    Some(today.2)
+                let highlight = if opts.highlight_today
+                    && today.is_some_and(|(ty, tm, _)| year == ty && m == tm)
+                {
+                    today.map(|(_, _, td)| td)
                 } else {
                     None
                 };
@@ -410,32 +483,32 @@ fn print_full_year(
 // ============================================================================
 
 fn main() {
-    // Not implemented: everything below reports work this crate cannot do.
-    // Fail rather than mislead a caller. Delete this line when it is real.
-    notimpl::guard(env!("CARGO_PKG_NAME"));
-    let args: Vec<String> = env::args().collect();
+    let args: Vec<OsString> = env::args_os().collect();
 
-    let prog_name = {
-        let s = args.first().map(|s| s.as_str()).unwrap_or("cal");
-        let bytes = s.as_bytes();
-        let mut last_sep = 0;
-        for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' {
-                last_sep = i + 1;
+    // argv[0] is only ever compared against "ncal", so a name that does not
+    // decode is simply not that name. `to_str()` says so exactly; a lossy
+    // conversion would answer the same question by corrupting the input first.
+    let prog_name = args
+        .first()
+        .and_then(|s| s.to_str())
+        .map(|s| {
+            let bytes = s.as_bytes();
+            let mut last_sep = 0;
+            for (i, &b) in bytes.iter().enumerate() {
+                if b == b'/' || b == b'\\' {
+                    last_sep = i + 1;
+                }
             }
-        }
-        let base = &s[last_sep..];
-        let base = base.strip_suffix(".exe").unwrap_or(base);
-        base.to_string()
-    };
+            let base = &s[last_sep..];
+            base.strip_suffix(".exe").unwrap_or(base).to_string()
+        })
+        .unwrap_or_else(|| "cal".to_string());
 
     let monday_default = prog_name == "ncal";
 
-    let rest: Vec<String> = args.into_iter().skip(1).collect();
+    let rest: Vec<OsString> = args.into_iter().skip(1).collect();
 
     let mut opts = CalOpts {
-        year: None,
-        month: None,
         three_month: false,
         full_year: false,
         monday_first: monday_default,
@@ -445,10 +518,10 @@ fn main() {
         columns: 3,
     };
 
-    let mut positional: Vec<String> = Vec::new();
+    let mut positional: Vec<OsString> = Vec::new();
     let mut i = 0;
     while i < rest.len() {
-        match rest[i].as_str() {
+        match rest[i].to_str().unwrap_or("\u{fffd}") {
             "-h" | "--help" => {
                 println!("Usage: cal [options] [[month] year]");
                 println!("       ncal [options] [[month] year]");
@@ -484,11 +557,15 @@ fn main() {
             "-c" | "--columns" => {
                 i += 1;
                 if i < rest.len() {
-                    opts.columns = rest[i].parse().unwrap_or(3);
+                    opts.columns = rest[i].to_str().unwrap_or("").parse().unwrap_or(3);
                 }
             }
             s if !s.starts_with('-') => {
-                positional.push(s.to_string());
+                // Push the original OS string, not the decoded `s` -- `s` is a
+                // replacement character when the argument did not decode, and
+                // the point is to carry the caller's bytes through.
+                positional.push(rest[i].clone());
+                let _ = s;
             }
             _ => {}
         }
@@ -497,32 +574,19 @@ fn main() {
 
     let today = current_date();
 
-    // Parse positional arguments.
-    match positional.len() {
-        0 => {
-            opts.year = Some(today.0);
-            if !opts.full_year {
-                opts.month = Some(today.1);
+    let (year, month, full_year) = match resolve_period(&positional, opts.full_year, today) {
+        Ok(v) => v,
+        Err(NoClock) => {
+            // The one thing not to do here is print a calendar anyway.
+            eprintln!("cal: cannot tell which month you mean");
+            if today.is_none() {
+                eprintln!("cal: the system clock could not be read, so there is no \"this month\"");
             }
+            eprintln!("cal: name it explicitly, e.g. `cal 9 2026`, or `cal 2026` for the year");
+            process::exit(1);
         }
-        1 => {
-            let val: i32 = positional[0].parse().unwrap_or(today.0);
-            if (1..=12).contains(&val) && !opts.full_year {
-                opts.month = Some(val as u32);
-                opts.year = Some(today.0);
-            } else {
-                opts.year = Some(val);
-                opts.full_year = true;
-            }
-        }
-        _ => {
-            opts.month = positional[0].parse::<u32>().ok();
-            opts.year = positional[1].parse::<i32>().ok();
-        }
-    }
-
-    let year = opts.year.unwrap_or(today.0);
-    let month = opts.month.unwrap_or(today.1);
+    };
+    opts.full_year = full_year;
 
     let stdout = io::stdout();
     let mut out = stdout.lock();
@@ -689,10 +753,134 @@ mod tests {
 
     #[test]
     fn test_current_date() {
-        let (y, m, d) = current_date();
+        // The host has a clock, so this must succeed there. On a machine
+        // without one it returns None, which is the whole point of the type.
+        let (y, m, d) = current_date().expect("the host has a clock");
         assert!(y >= 2024);
         assert!((1..=12).contains(&m));
         assert!((1..=31).contains(&d));
+    }
+
+    /// `unix_to_date` against dates computed elsewhere.
+    ///
+    /// The guard came off this program on 2026-09-10, so its arithmetic is now
+    /// load-bearing rather than decorative. Leap years and leap *days* are
+    /// where a hand-rolled civil-date conversion goes wrong, so both centuries
+    /// rules are here: 2000 was a leap year (divisible by 400) and 1900 was
+    /// not, though only the first is reachable from a Unix timestamp.
+    #[test]
+    fn unix_to_date_agrees_with_known_dates() {
+        assert_eq!(unix_to_date(0), (1970, 1, 1));
+        assert_eq!(unix_to_date(86_399), (1970, 1, 1)); // one second to midnight
+        assert_eq!(unix_to_date(86_400), (1970, 1, 2));
+        assert_eq!(unix_to_date(951_782_400), (2000, 2, 29)); // the 400-year rule
+        assert_eq!(unix_to_date(951_868_800), (2000, 3, 1));
+        assert_eq!(unix_to_date(1_709_164_800), (2024, 2, 29));
+        assert_eq!(unix_to_date(1_767_225_600), (2026, 1, 1));
+        assert_eq!(unix_to_date(1_756_684_800), (2025, 9, 1));
+    }
+
+    /// A year and month given outright need no clock.
+    #[test]
+    fn an_explicit_month_works_without_a_clock() {
+        let args = vec![OsString::from("9"), OsString::from("2026")];
+        assert_eq!(resolve_period(&args, false, None), Ok((2026, 9, false)));
+    }
+
+    /// A year given outright needs no clock either.
+    #[test]
+    fn an_explicit_year_works_without_a_clock() {
+        let args = vec![OsString::from("2026")];
+        assert_eq!(resolve_period(&args, false, None), Ok((2026, 1, true)));
+    }
+
+    /// Everything that means "of this year" needs one, and says so.
+    ///
+    /// This is the case the change exists for. `current_date` used to answer
+    /// `(2025, 1, 1)` when it could not read the clock, so bare `cal` printed
+    /// January 2025 with the 1st highlighted as today and exited 0 -- a
+    /// confident wrong answer, indistinguishable from a right one.
+    #[test]
+    fn a_month_of_this_year_refuses_without_a_clock() {
+        assert_eq!(resolve_period(&[], false, None), Err(NoClock));
+        assert_eq!(
+            resolve_period(&[OsString::from("9")], false, None),
+            Err(NoClock)
+        );
+    }
+
+    /// ...and the same arguments succeed once there is one.
+    #[test]
+    fn the_same_arguments_succeed_with_a_clock() {
+        let today = Some((2026, 9, 10));
+        assert_eq!(resolve_period(&[], false, today), Ok((2026, 9, false)));
+        assert_eq!(
+            resolve_period(&[OsString::from("9")], false, today),
+            Ok((2026, 9, false))
+        );
+        // A number outside 1..=12 is a year, not a month, clock or no clock.
+        assert_eq!(
+            resolve_period(&[OsString::from("2026")], false, today),
+            Ok((2026, 1, true))
+        );
+    }
+
+    /// An argument that is not valid text at all is refused, not fatal.
+    ///
+    /// This is what the `argv-utf8` gate refuses, and `cal` walked straight
+    /// into it the moment the `notimpl` guard came off: reading argv as
+    /// `String` panics with a Rust backtrace *before the program's first
+    /// statement* on a byte sequence that is not UTF-8, and a path on this OS
+    /// may contain any byte but `/` and NUL. Nothing in `cal` needs its
+    /// argument to be text -- it needs it to be a number -- so the undecodable
+    /// case is just another thing that does not parse.
+    #[test]
+    fn an_argument_that_is_not_utf8_is_refused_rather_than_fatal() {
+        let bad = non_utf8_osstring();
+        assert!(bad.to_str().is_none(), "fixture must not be valid UTF-8");
+        let today = Some((2026, 9, 10));
+        assert_eq!(
+            resolve_period(std::slice::from_ref(&bad), false, today),
+            Err(NoClock)
+        );
+        assert_eq!(
+            resolve_period(&[bad, OsString::from("2026")], false, today),
+            Err(NoClock)
+        );
+    }
+
+    /// An `OsString` the platform accepts and `str` cannot represent.
+    #[cfg(windows)]
+    fn non_utf8_osstring() -> OsString {
+        use std::os::windows::ffi::OsStringExt;
+        // A lone high surrogate: legal in a Windows path, not encodable as
+        // UTF-8, so `to_str()` returns None.
+        OsString::from_wide(&[0xD800])
+    }
+
+    #[cfg(unix)]
+    fn non_utf8_osstring() -> OsString {
+        use std::os::unix::ffi::OsStringExt;
+        // 0xFF cannot begin a UTF-8 sequence, and is a legal byte in a path
+        // here -- which is the case this whole conversion exists for.
+        OsString::from_vec(vec![0xFF])
+    }
+
+    /// An argument that is not a number is refused rather than guessed at.
+    ///
+    /// It used to `parse().unwrap_or(today.0)`, so `cal banana` printed the
+    /// current year's calendar and exited 0.
+    #[test]
+    fn a_nonsense_argument_is_refused_not_guessed() {
+        let today = Some((2026, 9, 10));
+        assert_eq!(
+            resolve_period(&[OsString::from("banana")], false, today),
+            Err(NoClock)
+        );
+        assert_eq!(
+            resolve_period(&[OsString::from("x"), OsString::from("2026")], false, today),
+            Err(NoClock)
+        );
     }
 
     #[test]

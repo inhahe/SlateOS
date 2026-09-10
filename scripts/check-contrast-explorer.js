@@ -51,8 +51,12 @@ const checks = [
   ['no literal "undefined" leaked into markup', !fp.includes('undefined')],
   ['legend explains the rungs', note.includes('crust') && note.includes('surface0')],
   ['use-case strip still renders', (store['uc'] ? store['uc'].innerHTML.length : 0) > 500],
-  ['surface strip still renders', (store['surfaces'] ? store['surfaces'].innerHTML.length : 0) > 200
-    || (store['allsurf'] ? store['allsurf'].innerHTML.length : 0) > 200],
+  // Named exactly, not with a fallback between two candidate ids. A check that
+  // accepts either would keep passing if the element it is really guarding were
+  // renamed, which is the one thing it exists to notice.
+  ['surface strip still renders', (store['allsurf'] ? store['allsurf'].innerHTML.length : 0) > 200],
+  ['contrast table still renders', (store['tbl'] ? store['tbl'].innerHTML.length : 0) > 200],
+  ['ink-vs-ink table still renders', (store['sep'] ? store['sep'].innerHTML.length : 0) > 200],
 ];
 let bad = 0;
 for (const [what, ok] of checks) {

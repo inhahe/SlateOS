@@ -155,15 +155,21 @@ fn parse_procs_field(field: &str) -> (u32, u32) {
 // Boot time from /proc/stat
 // ============================================================================
 
-/// Read boot time (seconds since epoch) from the `btime` line in `/proc/stat`.
+/// Boot time (seconds since the epoch), through [`procinfo`].
+///
+/// This was nine lines of `strip_prefix("btime ")` over `/proc/stat` -- one of
+/// three copies in this tree, each written slightly differently. `hwclock`'s
+/// stripped `"btime"` without the trailing space, so a line named `btimefoo`
+/// would have matched it and not this one. Neither was wrong in practice and
+/// that is the point: two spellings of one rule, and nothing to make them
+/// disagree loudly enough to notice.
 fn read_btime() -> Option<u64> {
-    let content = read_file("/proc/stat")?;
-    for line in content.lines() {
-        if let Some(rest) = line.strip_prefix("btime ") {
-            return rest.trim().parse().ok();
-        }
-    }
-    None
+    procinfo::ProcFs::new()
+        .stat()
+        .ok()
+        .flatten()?
+        .counters
+        .boot_time
 }
 
 // ============================================================================

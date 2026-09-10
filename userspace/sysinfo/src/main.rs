@@ -51,7 +51,7 @@ use std::fs;
 use std::io::{self, Write as _};
 use std::process::ExitCode;
 
-use procinfo::{CpuInfo, LoadAvg, MemInfo, Mount, NetDevice, ProcFs, SchedCounters, Uptime};
+use procinfo::{CpuInfo, LoadAvg, MemInfo, Mount, NetDevice, ProcFs, StatCounters, Uptime};
 
 // ============================================================================
 // Output primitives
@@ -481,12 +481,12 @@ fn show_process(proc: &ProcFs, status: &mut Status) {
         print_load(&load);
     }
 
-    if let Some(counters) = status.take("/proc/stat", proc.sched_counters()) {
+    if let Some(counters) = status.take("/proc/stat", proc.stat_counters()) {
         print_sched(&counters);
     }
 }
 
-fn print_sched(counters: &SchedCounters) {
+fn print_sched(counters: &StatCounters) {
     // `Running` here is the kernel's `procs_running`, which counts tasks on a
     // run queue -- not the same number as the process count above, which
     // counts every task that exists. The old output labelled both "Running:",

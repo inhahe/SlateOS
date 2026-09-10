@@ -423,7 +423,7 @@ fn mounts_tolerate_a_trailing_newline_and_blank_lines() {
 }
 
 // ---------------------------------------------------------------------------
-// LoadAvg / Uptime / SchedCounters / NetDevice
+// LoadAvg / Uptime / StatCounters / NetDevice
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -477,20 +477,51 @@ fn uptime_refuses_values_duration_would_panic_on() {
     assert!(Uptime::parse(b"\n").is_none());
 }
 
+/// Every non-CPU line of `/proc/stat`, in one pass.
+///
+/// This fixture already carried `intr 100` and `ctxt 5000` when the struct read
+/// neither -- the test asserted three fields and the data for five was sitting
+/// in front of it. Worth noticing: a fixture containing a field nothing reads
+/// looks exactly like a fixture whose field is checked.
 #[test]
-fn sched_counters_read_the_three_lines_that_matter() {
-    let stat = SchedCounters::parse(
-        b"cpu  1 2 3 4 5\nintr 100\nctxt 5000\nprocesses 1234\nprocs_running 3\nprocs_blocked 1\n",
+fn stat_counters_read_every_non_cpu_line() {
+    let stat = StatCounters::parse(
+        b"cpu  1 2 3 4 5\nintr 100\nctxt 5000\nbtime 1757000000\nprocesses 1234\nprocs_running 3\nprocs_blocked 1\n",
     );
     assert_eq!(stat.running, Some(3));
     assert_eq!(stat.blocked, Some(1));
     assert_eq!(stat.forks, Some(1234));
+    assert_eq!(stat.context_switches, Some(5000));
+    assert_eq!(stat.interrupts, Some(100));
+    assert_eq!(stat.boot_time, Some(1_757_000_000));
+}
+
+/// **`intr` is a total followed by one count per IRQ**, and only the total is
+/// wanted.
+///
+/// A real machine's `intr` line has hundreds of fields. A reader that summed
+/// the line, or took the last field, would report a number that is not the
+/// interrupt count and would drift as IRQs are registered -- and on a quiet
+/// machine the difference is small enough to look plausible.
+#[test]
+fn stat_counters_take_only_the_total_from_the_intr_line() {
+    let stat = StatCounters::parse(b"intr 987 12 0 0 44 0 0 7 0 0 0 3\n");
+    assert_eq!(stat.interrupts, Some(987));
+}
+
+/// A `btime` of zero is a value, not an absence -- the epoch is a real answer
+/// for a machine whose clock was never set, and an `unwrap_or_default` on the
+/// other side would make the two indistinguishable.
+#[test]
+fn stat_counters_keep_a_zero_apart_from_a_missing_line() {
+    assert_eq!(StatCounters::parse(b"btime 0\n").boot_time, Some(0));
+    assert_eq!(StatCounters::parse(b"cpu 1\n").boot_time, None);
 }
 
 #[test]
-fn sched_counters_absent_lines_stay_none() {
-    let stat = SchedCounters::parse(b"cpu  1 2 3 4 5\n");
-    assert_eq!(stat, SchedCounters::default());
+fn stat_counters_absent_lines_stay_none() {
+    let stat = StatCounters::parse(b"cpu  1 2 3 4 5\n");
+    assert_eq!(stat, StatCounters::default());
 }
 
 const NETDEV: &[u8] = b"\
@@ -586,7 +617,7 @@ fn collectors_parse_what_the_fixture_holds() {
     assert_eq!(proc.mounts().unwrap().unwrap().len(), 4);
     assert_eq!(proc.load_average().unwrap().unwrap().last_pid, Some(8123));
     assert_eq!(proc.uptime().unwrap().unwrap().dhms(), (1, 2, 3, 4));
-    assert_eq!(proc.sched_counters().unwrap().unwrap().running, Some(3));
+    assert_eq!(proc.stat_counters().unwrap().unwrap().running, Some(3));
     assert_eq!(proc.net_devices().unwrap().unwrap().len(), 2);
     assert_eq!(proc.version().unwrap(), Some(b"SlateOS 0.1.0".to_vec()));
     assert_eq!(
@@ -908,6 +939,55 @@ fn cpu_stats_reads_the_aggregate_and_each_cpu() {
 /// large — and SlateOS develops under QEMU, where `steal` is exactly the field
 /// that is non-zero. Including `guest` double-counts, because Linux already
 /// counts it inside `user`.
+/// `since` already had tests -- for an interval, and for a counter going
+/// backwards. Neither looked at `guest` or `guest_nice`, because
+/// [`CpuTimes::total`] deliberately leaves those two out, so nothing that
+/// checks a total can notice them being dropped.
+///
+/// This is what would break silently: a caller that later starts reporting
+/// guest time would get a delta that had been zero all along, and zero is a
+/// plausible number for guest time on hardware.
+#[test]
+fn since_subtracts_the_two_fields_total_ignores() {
+    let prev = CpuTimes {
+        user: 100,
+        nice: 10,
+        system: 30,
+        idle: 800,
+        iowait: 20,
+        irq: 5,
+        softirq: 3,
+        steal: 2,
+        guest: 11,
+        guest_nice: 4,
+    };
+    let cur = CpuTimes {
+        user: 200,
+        nice: 15,
+        system: 50,
+        idle: 900,
+        iowait: 25,
+        irq: 7,
+        softirq: 4,
+        steal: 3,
+        guest: 13,
+        guest_nice: 9,
+    };
+    let d = cur.since(&prev);
+    assert_eq!(d.user, 100);
+    assert_eq!(d.nice, 5);
+    assert_eq!(d.system, 20);
+    assert_eq!(d.idle, 100);
+    assert_eq!(d.iowait, 5);
+    assert_eq!(d.irq, 2);
+    assert_eq!(d.softirq, 1);
+    assert_eq!(d.steal, 1);
+    // `total()` leaves these two out; `since()` must not, or a caller that
+    // later starts counting guest time gets a delta that was silently zero.
+    assert_eq!(d.guest, 2);
+    assert_eq!(d.guest_nice, 5);
+}
+
 #[test]
 fn total_includes_steal_and_excludes_guest() {
     let t = CpuStats::parse(STAT).total.unwrap();
@@ -980,7 +1060,7 @@ fn procfs_reads_cpu_stats_from_a_fixture() {
     assert!(st.total.is_some());
     // …and the scheduler counters in the same file still parse, since both
     // readers see every line.
-    let sched = SchedCounters::parse(STAT);
+    let sched = StatCounters::parse(STAT);
     assert_eq!(sched.running, Some(3));
     assert_eq!(sched.blocked, Some(1));
 }

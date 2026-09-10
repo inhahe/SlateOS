@@ -107,21 +107,15 @@ struct MemInfo {
     inactive: u64,
 }
 
-/// Snapshot of /proc/stat CPU times (in ticks).
-struct CpuTimes {
-    user: u64,
-    nice: u64,
-    system: u64,
-    idle: u64,
-    iowait: u64,
-    irq: u64,
-    softirq: u64,
-    steal: u64,
-}
+// The private `CpuTimes` that stood here parsed `/proc/stat`'s `cpu ` line by
+// field index, beside a `read_stat` that parsed the rest of the same file by
+// prefix. Both are `procinfo`'s now: this program was one of the readers that
+// crate exists to remove, and it had the whole shape of the problem in one
+// file -- its own struct, its own parser, its own `cpu_total` and `cpu_delta`.
 
 /// Snapshot of /proc/stat system counters.
 struct StatInfo {
-    cpu: CpuTimes,
+    cpu: procinfo::CpuTimes,
     interrupts: u64,
     context_switches: u64,
     boot_time: u64,
@@ -224,68 +218,29 @@ fn read_meminfo() -> Option<MemInfo> {
     })
 }
 
-/// Parse the first `cpu` line from `/proc/stat` plus system counters.
+/// `/proc/stat`, through [`procinfo`].
+///
+/// **One read, not two.** `procinfo` exposes the CPU lines and the other
+/// counters separately, and calling both would sample the file twice per
+/// interval -- so the CPU delta and the context-switch delta would describe
+/// different instants. `ProcFs::stat` returns both halves from a single read
+/// for that reason.
+///
+/// An absent line becomes `0` here rather than staying `Option`, because every
+/// one of these is printed as a column of digits and `vmstat` has always
+/// printed `0` for a counter the kernel did not publish. The distinction
+/// survives one layer up, in `procinfo`, for callers that need it.
 fn read_stat() -> Option<StatInfo> {
-    let content = read_file("/proc/stat")?;
-    let mut cpu = CpuTimes {
-        user: 0,
-        nice: 0,
-        system: 0,
-        idle: 0,
-        iowait: 0,
-        irq: 0,
-        softirq: 0,
-        steal: 0,
-    };
-    let mut interrupts: u64 = 0;
-    let mut context_switches: u64 = 0;
-    let mut boot_time: u64 = 0;
-    let mut processes: u64 = 0;
-    let mut procs_running: u64 = 0;
-    let mut procs_blocked: u64 = 0;
-
-    for line in content.lines() {
-        if line.starts_with("cpu ") {
-            // "cpu  user nice system idle iowait irq softirq steal guest guest_nice"
-            let fields: Vec<&str> = line.split_whitespace().collect();
-            cpu.user = fields.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-            cpu.nice = fields.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
-            cpu.system = fields.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
-            cpu.idle = fields.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
-            cpu.iowait = fields.get(5).and_then(|s| s.parse().ok()).unwrap_or(0);
-            cpu.irq = fields.get(6).and_then(|s| s.parse().ok()).unwrap_or(0);
-            cpu.softirq = fields.get(7).and_then(|s| s.parse().ok()).unwrap_or(0);
-            cpu.steal = fields.get(8).and_then(|s| s.parse().ok()).unwrap_or(0);
-        } else if line.starts_with("intr ") {
-            // Total interrupt count is the first number after "intr".
-            let fields: Vec<&str> = line.split_whitespace().collect();
-            interrupts = fields.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-        } else if line.starts_with("ctxt ") {
-            let fields: Vec<&str> = line.split_whitespace().collect();
-            context_switches = fields.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-        } else if line.starts_with("btime ") {
-            let fields: Vec<&str> = line.split_whitespace().collect();
-            boot_time = fields.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-        } else if line.starts_with("processes ") {
-            let fields: Vec<&str> = line.split_whitespace().collect();
-            processes = fields.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-        } else if line.starts_with("procs_running ") {
-            let fields: Vec<&str> = line.split_whitespace().collect();
-            procs_running = fields.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-        } else if line.starts_with("procs_blocked ") {
-            let fields: Vec<&str> = line.split_whitespace().collect();
-            procs_blocked = fields.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-        }
-    }
-
+    let stat = procinfo::ProcFs::new().stat().ok().flatten()?;
+    let counters = stat.counters;
     Some(StatInfo {
-        cpu,
-        interrupts,
-        context_switches,
-        boot_time,
-        processes,
-        procs_running,
-        procs_blocked,
+        cpu: stat.cpu.total?,
+        interrupts: counters.interrupts.unwrap_or(0),
+        context_switches: counters.context_switches.unwrap_or(0),
+        boot_time: counters.boot_time.unwrap_or(0),
+        processes: counters.forks.unwrap_or(0),
+        procs_running: counters.running.unwrap_or(0),
+        procs_blocked: counters.blocked.unwrap_or(0),
     })
 }
 
@@ -376,35 +331,14 @@ fn convert_kib(kib: u64, unit: DisplayUnit) -> u64 {
 // CPU time helpers
 // ============================================================================
 
-/// Total CPU ticks across all fields.
-fn cpu_total(c: &CpuTimes) -> u64 {
-    c.user
-        .saturating_add(c.nice)
-        .saturating_add(c.system)
-        .saturating_add(c.idle)
-        .saturating_add(c.iowait)
-        .saturating_add(c.irq)
-        .saturating_add(c.softirq)
-        .saturating_add(c.steal)
-}
-
-/// Compute CPU delta between two snapshots.
-fn cpu_delta(cur: &CpuTimes, prev: &CpuTimes) -> CpuTimes {
-    CpuTimes {
-        user: cur.user.saturating_sub(prev.user),
-        nice: cur.nice.saturating_sub(prev.nice),
-        system: cur.system.saturating_sub(prev.system),
-        idle: cur.idle.saturating_sub(prev.idle),
-        iowait: cur.iowait.saturating_sub(prev.iowait),
-        irq: cur.irq.saturating_sub(prev.irq),
-        softirq: cur.softirq.saturating_sub(prev.softirq),
-        steal: cur.steal.saturating_sub(prev.steal),
-    }
-}
+// `cpu_total` and `cpu_delta` stood here. They are `procinfo::CpuTimes::total`
+// and `::since`, field for field -- including the choice to leave `guest` and
+// `guest_nice` out of the total, which this copy made by never parsing them
+// and the shared one makes deliberately.
 
 /// Convert CPU times to percentage values. Returns (us, sy, id, wa, st).
-fn cpu_percentages(delta: &CpuTimes) -> (u64, u64, u64, u64, u64) {
-    let total = cpu_total(delta);
+fn cpu_percentages(delta: &procinfo::CpuTimes) -> (u64, u64, u64, u64, u64) {
+    let total = delta.total();
     if total == 0 {
         return (0, 0, 100, 0, 0);
     }
@@ -652,20 +586,12 @@ fn print_row(cur: &Snapshot, prev: Option<&Snapshot>, interval: u64, config: &Co
 
     // CPU percentages.
     let delta_cpu = match prev {
-        Some(p) => cpu_delta(&cur.stat.cpu, &p.stat.cpu),
-        None => {
-            // Since-boot: use absolute totals.
-            CpuTimes {
-                user: cur.stat.cpu.user,
-                nice: cur.stat.cpu.nice,
-                system: cur.stat.cpu.system,
-                idle: cur.stat.cpu.idle,
-                iowait: cur.stat.cpu.iowait,
-                irq: cur.stat.cpu.irq,
-                softirq: cur.stat.cpu.softirq,
-                steal: cur.stat.cpu.steal,
-            }
-        }
+        Some(p) => cur.stat.cpu.since(&p.stat.cpu),
+        // The first row is since-boot, so the absolute totals *are* the
+        // interval. One `Copy` says that; the copy this replaces restated all
+        // eight fields by hand, which is eight chances to miss one -- and it
+        // had already missed `guest` and `guest_nice` by never parsing them.
+        None => cur.stat.cpu,
     };
     let (us, sy, id, wa, st) = cpu_percentages(&delta_cpu);
 
@@ -1560,57 +1486,20 @@ pgmajfault 500
 
     // -- CPU calculations --
 
-    #[test]
-    fn test_cpu_total() {
-        let c = CpuTimes {
-            user: 100,
-            nice: 10,
-            system: 30,
-            idle: 800,
-            iowait: 20,
-            irq: 5,
-            softirq: 3,
-            steal: 2,
-        };
-        assert_eq!(cpu_total(&c), 970);
-    }
-
-    #[test]
-    fn test_cpu_delta() {
-        let prev = CpuTimes {
-            user: 100,
-            nice: 10,
-            system: 30,
-            idle: 800,
-            iowait: 20,
-            irq: 5,
-            softirq: 3,
-            steal: 2,
-        };
-        let cur = CpuTimes {
-            user: 200,
-            nice: 15,
-            system: 50,
-            idle: 900,
-            iowait: 25,
-            irq: 7,
-            softirq: 4,
-            steal: 3,
-        };
-        let d = cpu_delta(&cur, &prev);
-        assert_eq!(d.user, 100);
-        assert_eq!(d.nice, 5);
-        assert_eq!(d.system, 20);
-        assert_eq!(d.idle, 100);
-        assert_eq!(d.iowait, 5);
-        assert_eq!(d.irq, 2);
-        assert_eq!(d.softirq, 1);
-        assert_eq!(d.steal, 1);
-    }
+    // `test_cpu_total` and `test_cpu_delta` stood here. Their subjects are
+    // `procinfo::CpuTimes::total` and `::since` now, and both are already
+    // tested there -- better, in the `since` case, since `procinfo`'s version
+    // also covers a counter going backwards when a CPU is taken offline, which
+    // this copy did not.
+    //
+    // What did *not* exist there was coverage of `guest`/`guest_nice` in
+    // `since`, which `total()` deliberately ignores -- so no test that checks
+    // a total can notice those two being dropped. Added in `procinfo` as part
+    // of this conversion.
 
     #[test]
     fn test_cpu_percentages_typical() {
-        let delta = CpuTimes {
+        let delta = procinfo::CpuTimes {
             user: 50,
             nice: 0,
             system: 10,
@@ -1619,6 +1508,7 @@ pgmajfault 500
             irq: 2,
             softirq: 1,
             steal: 2,
+            ..procinfo::CpuTimes::default()
         };
         let (us, sy, id, wa, st) = cpu_percentages(&delta);
         // us = (50+0)*100/1000 = 5
@@ -1635,7 +1525,7 @@ pgmajfault 500
 
     #[test]
     fn test_cpu_percentages_zero_total() {
-        let delta = CpuTimes {
+        let delta = procinfo::CpuTimes {
             user: 0,
             nice: 0,
             system: 0,
@@ -1644,6 +1534,7 @@ pgmajfault 500
             irq: 0,
             softirq: 0,
             steal: 0,
+            ..procinfo::CpuTimes::default()
         };
         let (us, sy, id, wa, st) = cpu_percentages(&delta);
         assert_eq!(us, 0);
@@ -1655,7 +1546,7 @@ pgmajfault 500
 
     #[test]
     fn test_cpu_percentages_sum_to_100() {
-        let delta = CpuTimes {
+        let delta = procinfo::CpuTimes {
             user: 333,
             nice: 0,
             system: 333,
@@ -1664,6 +1555,7 @@ pgmajfault 500
             irq: 0,
             softirq: 0,
             steal: 334,
+            ..procinfo::CpuTimes::default()
         };
         let (us, sy, id, wa, st) = cpu_percentages(&delta);
         assert_eq!(us + sy + id + wa + st, 100);

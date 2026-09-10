@@ -535,30 +535,29 @@ fn read_system_time() -> Result<u64, String> {
 
     // Fallback: derive from boot time + uptime if the wall clock is not yet
     // initialised (kernel returns EINVAL until timekeeping is up).
-    let uptime_content =
-        fs::read_to_string("/proc/uptime").map_err(|e| format!("/proc/uptime: {e}"))?;
-    let uptime_secs_str = uptime_content
-        .trim()
-        .split(|c: char| c.is_whitespace() || c == '.')
-        .next()
-        .ok_or("empty /proc/uptime")?;
-    let uptime_secs: u64 = uptime_secs_str
-        .parse()
-        .map_err(|e| format!("/proc/uptime parse: {e}"))?;
-
-    // Try to find boot time from /proc/stat (btime field).
-    let stat_content = fs::read_to_string("/proc/stat").map_err(|e| format!("/proc/stat: {e}"))?;
-    for line in stat_content.lines() {
-        if let Some(rest) = line.strip_prefix("btime") {
-            let btime: u64 = rest
-                .trim()
-                .parse()
-                .map_err(|e| format!("btime parse: {e}"))?;
-            return Ok(btime.saturating_add(uptime_secs));
-        }
-    }
-
-    Err("could not determine system time: clock_realtime failed and no btime in /proc/stat".into())
+    //
+    // Both halves come from `procinfo` now. They were hand-parsed here: the
+    // uptime by splitting on whitespace-or-dot and taking the first field, and
+    // the boot time by `strip_prefix("btime")` -- without the trailing space,
+    // so a line named `btimefoo` would have matched. `userspace/uptime`'s copy
+    // of the same rule used `"btime "` and would not have. Two spellings of one
+    // rule, neither wrong in practice, with nothing to make them disagree
+    // loudly enough for anyone to notice.
+    let proc = procinfo::ProcFs::new();
+    let uptime_secs = proc
+        .uptime()
+        .map_err(|e| format!("/proc/uptime: {e}"))?
+        .ok_or("no /proc/uptime")?
+        .up
+        .as_secs();
+    let btime = proc
+        .stat()
+        .map_err(|e| format!("/proc/stat: {e}"))?
+        .and_then(|stat| stat.counters.boot_time)
+        .ok_or(
+            "could not determine system time: clock_realtime failed and no btime in /proc/stat",
+        )?;
+    Ok(btime.saturating_add(uptime_secs))
 }
 
 /// Set the system clock to a given Unix timestamp via `SYS_CLOCK_SETTIME`.

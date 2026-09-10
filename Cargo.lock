@@ -7505,6 +7505,7 @@ dependencies = [
 name = "hwclock"
 version = "0.1.0"
 dependencies = [
+ "procinfo",
  "quoting",
  "tzrules",
 ]
@@ -18786,6 +18787,9 @@ dependencies = [
 [[package]]
 name = "uptime"
 version = "0.1.0"
+dependencies = [
+ "procinfo",
+]
 
 [[package]]
 name = "uptime-kuma-cli"
@@ -19248,6 +19252,7 @@ dependencies = [
 name = "vmstat"
 version = "0.1.0"
 dependencies = [
+ "procinfo",
  "quoting",
 ]
 

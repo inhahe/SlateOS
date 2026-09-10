@@ -648,14 +648,33 @@ fn ntp_query(server: &str) -> Result<u64, String> {
 // ---------------------------------------------------------------------------
 // Weekday helper (for display)
 // ---------------------------------------------------------------------------
-
-/// Compute the day-of-week for a date using Tomohiko Sakamoto's algorithm.
-/// Returns 0=Sunday, 1=Monday, ... 6=Saturday.
+/// Day of week, 0 = Sunday.
+///
+/// # What this replaced
+///
+/// Sakamoto's algorithm, whose index WAS guarded --
+/// `(month as usize).saturating_sub(1).min(11)` -- and whose year was not:
+///
+///     let y = if month < 3 { year - 1 } else { year };
+///
+/// `year` is a `u32` parsed straight from `--date "YYYY-MM-DD HH:MM:SS"` with
+/// no lower bound, so `hwclock --set --date "0000-01-01 00:00:00"` reaches
+/// this with `year == 0` and `month == 1`, and `0u32 - 1` panics in a debug
+/// build and wraps to 4_294_967_295 in a release one. Confirmed by planting
+/// `day_of_week(0, 1, 1)` in the test module: "attempt to subtract with
+/// overflow".
+///
+/// The careful guard one line below the unguarded subtraction is what makes
+/// this worth writing down: whoever wrote it was thinking about bounds, and
+/// still the arithmetic that ran FIRST was the one that overflowed.
 fn day_of_week(year: u32, month: u32, day: u32) -> u32 {
-    static T: [u32; 12] = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
-    let y = if month < 3 { year - 1 } else { year };
-    let idx = (month as usize).saturating_sub(1).min(11);
-    (y + y / 4 - y / 100 + y / 400 + T[idx] + day) % 7
+    let Ok(y) = i32::try_from(year) else {
+        // A year beyond i32 is not a date. Answering 0 beats `as i32`, which
+        // would answer confidently about a different year.
+        return 0;
+    };
+    // `civildate` counts 0 = Sunday, which is this function's convention too.
+    civildate::day_of_week(y, month, day)
 }
 
 /// Short English weekday name.
@@ -1338,6 +1357,14 @@ mod tests {
     #[test]
     fn test_day_of_week_known() {
         // 2026-05-17 is a Sunday.
+        // Year 0 reaches this from `--date "0000-01-01 00:00:00"`, which
+        // parses with no lower bound. The version this replaced computed
+        // `year - 1` on a u32 first and panicked.
+        assert_eq!(day_of_week(0, 1, 1), 6);
+        for m in [0_u32, 13, 99, u32::MAX] {
+            let _ = day_of_week(2026, m, 1);
+        }
+        assert_eq!(day_of_week(u32::MAX, 1, 1), 0);
         assert_eq!(day_of_week(2026, 5, 17), 0);
         // 2024-01-01 is a Monday.
         assert_eq!(day_of_week(2024, 1, 1), 1);

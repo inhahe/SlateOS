@@ -137,13 +137,51 @@ impl Rights {
     /// `CAP_IPC_LOCK`).
     pub const MEMORY_LOCK: Self = Self(1 << 19);
 
+    /// May change the system's host name or domain name.
+    ///
+    /// Required by `SYS_HOSTNAME_SET` and `SYS_DOMAINNAME_SET`, which are the
+    /// kernel primitives behind POSIX `sethostname`/`setdomainname`.
+    ///
+    /// Its own bit, for the reason [`SET_CREDENTIALS`](Self::SET_CREDENTIALS),
+    /// [`DEBUG`](Self::DEBUG) and [`MEMORY_LOCK`](Self::MEMORY_LOCK) have
+    /// theirs: a bit that means two things is a bit that gets granted for one
+    /// of them. The nearest existing candidate was `WRITE` on the process, and
+    /// folding it in would mean that granting "may write its own limit table"
+    /// silently also granted "may rename the machine every other process on it
+    /// reports". Linux separates these too -- `CAP_SYS_ADMIN` rather than any
+    /// file or process right -- and ported software drops them separately.
+    ///
+    /// **It is deliberately narrower than `CAP_SYS_ADMIN`.** Linux's
+    /// `CAP_SYS_ADMIN` is the catch-all that grants several dozen unrelated
+    /// privileges, which is a design its own documentation calls a mistake. A
+    /// bit here means one thing, so lane B's projection of `CAP_SYS_ADMIN` onto
+    /// it is one-way: holding this does not imply anything else Linux bundles
+    /// into that capability.
+    ///
+    /// **Why a right and not a uid check.** The Linux-ABI handler for
+    /// `sethostname` gates on `uid == 0` read from the caller's credentials,
+    /// which is ambient authority -- permission you get by *being* someone
+    /// rather than by holding a token. CLAUDE.md's architectural rules forbid
+    /// that, and `known-issues.md` ->
+    /// `A-SET-CREDENTIALS-IS-GATED-ONLY-IN-USERSPACE` is what it costs: the
+    /// kernel primitive behind `setuid` once had no check at all because the
+    /// policy was held in a userspace wrapper, so any ring-3 process could
+    /// become uid 0 by issuing the syscall directly. A wrapper is a
+    /// convenience, not a gate.
+    ///
+    /// A caller without this right gets `PermissionDenied`, which is
+    /// permanent and distinguishable from `NoSuchSyscall` -- the distinction
+    /// lane B asked for when they requested the pair, so that an unprivileged
+    /// caller learns it is unprivileged rather than that the call is missing.
+    pub const SET_HOSTNAME: Self = Self(1 << 20);
+
     /// Every distinct right, in declaration order.
     ///
     /// Exists so that [`the aliasing assertion below`](self) can be stated
     /// once over the whole set rather than pairwise by hand. Convenience
     /// *combinations* (`ALL`, `READ_ONLY`, …) are deliberately absent — they
     /// are unions of these and would defeat the check.
-    const DISTINCT: [Self; 14] = [
+    const DISTINCT: [Self; 15] = [
         Self::READ,
         Self::WRITE,
         Self::EXECUTE,
@@ -158,6 +196,7 @@ impl Rights {
         Self::DEBUG,
         Self::SET_CREDENTIALS,
         Self::MEMORY_LOCK,
+        Self::SET_HOSTNAME,
     ];
 
     // --- Convenience combinations ---
@@ -308,6 +347,7 @@ impl core::fmt::Display for Rights {
             (Self::DEBUG, "debug"),
             (Self::SET_CREDENTIALS, "setcred"),
             (Self::MEMORY_LOCK, "mlock"),
+            (Self::SET_HOSTNAME, "sethost"),
         ];
 
         for (flag, name) in &flags {

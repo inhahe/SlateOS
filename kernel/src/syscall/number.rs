@@ -5327,6 +5327,53 @@ pub const SYS_ITIMER_GET: u64 = 1070;
 /// Chosen number 1071, next free slot after 1070.
 pub const SYS_SIGNAL_ALTSTACK: u64 = 1071;
 
+/// Set the system's host name: `hostname_set(ptr, len) -> 0`.
+///
+/// The kernel primitive behind POSIX `sethostname`. `ptr`/`len` name a UTF-8
+/// byte string in the caller's address space; `len` 0 clears the name.
+///
+/// **Why this exists, which is the part worth reading.** Until 2026-09-10 our
+/// libc's `sethostname` wrote a `static mut` in the *calling program's own*
+/// address space and returned 0, and `gethostname` read the same buffer back.
+/// A program could rename the machine, read the new name, and be told it had
+/// worked -- with nothing outside that one process changed. A self-consistent
+/// lie is harder to find than an honest refusal, which is why it survived from
+/// 2026-08-22. `fs::nameservice::set_hostname` was there the whole time and
+/// only the Linux-ABI table could reach it; this is the fourth instance of that
+/// shape, found by `scripts/check-linux-only-capabilities.py` rather than by
+/// tripping over a symptom. See `requests/b-a-no-native-syscall-reports-the-hostname.md`.
+///
+/// # Errors
+///
+/// - [`KernelError::PermissionDenied`] -- the caller does not hold
+///   `(Process, SET_HOSTNAME)`. Deliberately distinct from `NoSuchSyscall`: an
+///   unprivileged caller should learn that it is unprivileged, which is
+///   permanent, rather than that the call is unimplemented, which is not.
+/// - [`KernelError::InvalidArgument`] -- `len` exceeds 64, or the bytes are not
+///   valid UTF-8.
+/// - [`KernelError::InvalidAddress`] -- `ptr` is not readable for `len` bytes,
+///   or is null with a non-zero `len`.
+/// - [`KernelError::NoSuchProcess`] -- the caller has no owning process.
+///
+/// **No getter is paired with this, deliberately.** `/proc/sys/kernel/hostname`
+/// already serves reads, and it is what `osh` fills `$HOSTNAME` from and what
+/// `sysctl` maps `kernel.hostname` onto. A second read path would give one
+/// value two sources that can disagree -- which is the exact shape of the
+/// defect this syscall exists to fix. Lane B proposed the asymmetry and lane A
+/// agreed rather than adding a getter for symmetry.
+///
+/// Chosen number 1072, next free slot after 1071.
+pub const SYS_HOSTNAME_SET: u64 = 1072;
+
+/// Set the system's NIS/YP domain name: `domainname_set(ptr, len) -> 0`.
+///
+/// The kernel primitive behind POSIX `setdomainname`. Same arguments, same
+/// capability and the same errors as [`SYS_HOSTNAME_SET`]; see that constant
+/// for why the pair exists and why neither has a getter.
+///
+/// Chosen number 1073, next free slot after 1072.
+pub const SYS_DOMAINNAME_SET: u64 = 1073;
+
 // ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------

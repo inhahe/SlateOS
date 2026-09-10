@@ -84,8 +84,14 @@ pub const ENOENT: i32 = 2;
 pub const EFAULT: i32 = 14;
 /// Invalid argument.
 pub const EINVAL: i32 = 22;
+/// File name too long -- from `gethostname` when the buffer is too small.
+pub const ENAMETOOLONG: i32 = 36;
 /// Function not implemented.
 pub const ENOSYS: i32 = 38;
+
+/// The longest hostname the kernel will store, not counting the NUL.
+/// A buffer of `HOST_NAME_MAX + 1` always suffices for [`hostname_into`].
+pub const HOST_NAME_MAX: usize = 255;
 
 /// `swapon`: use the priority in the low bits rather than an automatic one.
 pub const SWAP_FLAG_PREFER: i32 = 0x8000;
@@ -122,6 +128,7 @@ mod sys {
         pub fn swapoff(path: *const u8) -> i32;
         pub fn sethostname(name: *const u8, len: usize) -> i32;
         pub fn setdomainname(name: *const u8, len: usize) -> i32;
+        pub fn gethostname(name: *mut u8, len: usize) -> i32;
         pub fn klogctl(cmd: i32, buf: *mut u8, len: i32) -> i32;
         pub fn __errno_location() -> *mut i32;
     }
@@ -262,6 +269,55 @@ pub fn setdomainname(_name: &[u8]) -> Result<(), i32> {
     Err(ENOSYS)
 }
 
+/// This machine's name, written into `buf`, returning its length in bytes.
+///
+/// Takes a caller buffer rather than returning an owned one because this crate
+/// is `no_std`; `[0u8; HOST_NAME_MAX + 1]` always fits.
+///
+/// # Why go through libc rather than reading the file
+///
+/// Nine programs in `userspace/` read `/proc/sys/kernel/hostname` themselves,
+/// and when the read fails they disagree about what to say: two print
+/// `slateos`, one `localhost`, two `unknown`, two an empty string, one `null`.
+/// Three of those are inventions -- a plausible machine name stated by a
+/// program that does not know the machine's name, which is the shape
+/// `design-decisions.md` 1006 deleted 2,285 commands for.
+///
+/// `gethostname(3)` is the POSIX accessor, it reads the same
+/// `/proc/sys/kernel/hostname` that `uname`'s `nodename` reads, and it reports
+/// failure instead of choosing a name. One accessor is also one place to get
+/// the trailing newline and the truncation rule right.
+///
+/// # Errors
+///
+/// The `errno` set by `gethostname(2)`: [`ENAMETOOLONG`] if `buf` is shorter
+/// than the name plus its NUL, `EFAULT` for a null pointer.
+#[cfg(unix)]
+pub fn hostname_into(buf: &mut [u8]) -> Result<usize, i32> {
+    if buf.is_empty() {
+        return Err(ENAMETOOLONG);
+    }
+    // SAFETY: the pointer and length handed over are exactly `buf`'s own, so
+    // the library writes only within it and NUL-terminates inside it.
+    let rc = unsafe { sys::gethostname(buf.as_mut_ptr(), buf.len()) };
+    if rc != 0 {
+        return Err(last_errno());
+    }
+    // `gethostname` NUL-terminates on success; the name is what precedes it.
+    Ok(buf.iter().position(|&b| b == 0).unwrap_or(buf.len()))
+}
+
+/// This machine's name, written into `buf`, returning its length in bytes.
+///
+/// # Errors
+///
+/// Always [`ENOSYS`]: the host build has no Slate kernel to ask, and guessing
+/// a name here would be the defect this function exists to remove.
+#[cfg(not(unix))]
+pub fn hostname_into(_buf: &mut [u8]) -> Result<usize, i32> {
+    Err(ENOSYS)
+}
+
 /// How many bytes the kernel log ring can hold.
 ///
 /// # Errors
@@ -356,6 +412,11 @@ mod tests {
         assert_eq!(EFAULT, posix::errno::EFAULT);
         assert_eq!(EINVAL, posix::errno::EINVAL);
         assert_eq!(ENOSYS, posix::errno::ENOSYS);
+        assert_eq!(ENAMETOOLONG, posix::errno::ENAMETOOLONG);
+        assert_eq!(
+            usize::try_from(posix::limits::HOST_NAME_MAX).ok(),
+            Some(HOST_NAME_MAX)
+        );
         assert_eq!(SWAP_FLAG_PREFER, posix::unistd::SWAP_FLAG_PREFER);
         assert_eq!(SWAP_FLAG_DISCARD, posix::unistd::SWAP_FLAG_DISCARD);
         assert_eq!(SWAP_FLAG_PRIO_MASK, posix::unistd::SWAP_FLAG_PRIO_MASK);
@@ -382,6 +443,18 @@ mod tests {
         assert_eq!(SWAP_FLAG_DISCARD & SWAP_FLAG_PREFER, 0);
     }
 
+    /// An empty buffer cannot hold a name and says so rather than reporting a
+    /// zero-length hostname.
+    ///
+    /// Checked on both arms, because a zero-length answer and a refusal are
+    /// exactly the two things a caller must not confuse -- an empty hostname
+    /// is what several of the programs this replaces printed when they did not
+    /// know one.
+    #[test]
+    fn an_empty_buffer_is_a_refusal_not_an_empty_hostname() {
+        assert!(hostname_into(&mut []).is_err());
+    }
+
     /// On a host, every fallible call declines rather than pretending.
     ///
     /// Asserted as a property of the whole surface rather than one call, so a
@@ -395,6 +468,7 @@ mod tests {
         assert_eq!(swapoff(path), Err(ENOSYS));
         assert_eq!(sethostname(b"host"), Err(ENOSYS));
         assert_eq!(setdomainname(b"domain"), Err(ENOSYS));
+        assert_eq!(hostname_into(&mut [0u8; HOST_NAME_MAX + 1]), Err(ENOSYS));
         assert_eq!(klog_size(), Err(ENOSYS));
         assert_eq!(klog_read_all(&mut [0u8; 8]), Err(ENOSYS));
         assert_eq!(klog_clear(), Err(ENOSYS));

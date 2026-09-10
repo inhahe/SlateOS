@@ -827,9 +827,23 @@ fn fallback_tape_stats() -> Vec<TapeStat> {
 // ---------------------------------------------------------------------------
 
 fn print_system_header(out: &mut impl Write, tool: &str) {
-    let hostname = read_file_lines("/proc/sys/kernel/hostname")
-        .and_then(|l| l.first().cloned())
-        .unwrap_or_else(|| "slateos".to_string());
+    // `sar`'s report header names the machine the figures came from, so a
+    // wrong name here misattributes a whole report. This used to fall back to
+    // the literal "slateos" -- a plausible machine name printed by a program
+    // that did not know the machine's name. `(unknown)` cannot be mistaken for
+    // one. Through `libcall` because `gethostname` is an `extern "C"` entry
+    // point and the `posix` rlib's copy never reaches the kernel
+    // (`design-decisions.md` 768).
+    let hostname = {
+        let mut buf = [0u8; libcall::HOST_NAME_MAX + 1];
+        libcall::hostname_into(&mut buf)
+            .ok()
+            .and_then(|n| buf.get(..n).map(<[u8]>::to_vec))
+            .and_then(|b| String::from_utf8(b).ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "(unknown)".to_string())
+    };
     let release = read_file_lines("/proc/sys/kernel/osrelease")
         .and_then(|l| l.first().cloned())
         .unwrap_or_else(|| "0.1.0".to_string());

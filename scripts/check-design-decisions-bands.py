@@ -988,12 +988,33 @@ def main(argv=None):
             print(f"  {line}")
     for warn in warnings:
         print(f"  WARN  {warn}")
+
+    # Flush before writing to stderr, so that piped output arrives in the order
+    # it is written here.
+    #
+    # Without this the two streams race, and not evenly: when stdout is a pipe
+    # it is block-buffered while stderr is not, so `2>&1 | tail` puts the ERROR
+    # lines and the FAILED line *above* the band summary, while a passing run
+    # -- which writes nothing to stderr -- ends with the OK line. The status
+    # line therefore moved depending on the outcome, and `tail -1` showed a
+    # band line on failure and "OK" on success.
+    #
+    # That is not hypothetical: on 2026-09-10 lane B read `tail -1` of a
+    # failing run, saw a band line, took it for success, and committed an entry
+    # that had been inserted between section 1017's heading and its body. The
+    # push hook caught it, which is the gate working -- but the gate had
+    # already said so once and its own output ordering hid it. A checker whose
+    # verdict is not the last thing it prints is one whose verdict can be
+    # missed.
+    sys.stdout.flush()
+
     for err in errors:
         print(f"  ERROR {err}", file=sys.stderr)
 
     if errors:
         print(f"check-design-decisions-bands: FAILED ({len(errors)} violation"
               f"{'s' if len(errors) != 1 else ''})", file=sys.stderr)
+        sys.stderr.flush()
         return 1
     print(f"check-design-decisions-bands: OK "
           f"({len(warnings)} warning{'s' if len(warnings) != 1 else ''})")

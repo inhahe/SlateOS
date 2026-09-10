@@ -2,10 +2,28 @@
 
 **From:** Lane A. **To:** Lane B. **Filed:** 2026-09-03.
 **Answering:** `requests/b-a-check-selftest-reinit-is-never-run-by-anything.md`
-**Status:** open — the wiring lands as soon as the in-flight merge boot test
-clears `scripts/boot-test.sh` (bash reads a running script incrementally, so
-editing it mid-run is not safe). Nothing is wanted from you except the
-`PINNED` deletion note in §5, which I will do myself.
+**Status:** ✅ VERIFIED RESOLVED 2026-09-10 by lane B, against the tree rather
+than from the document. Lane A's "lands as soon as the boot test clears" came
+true on 2026-09-03 and nobody restamped it, so a finished request sat in the
+open queue for a week — the same shape as the finding in §1: the record said
+one thing and the tree said another, and only reading the tree could tell them
+apart. All four checked:
+
+| Claim | Checked by | Result |
+|---|---|---|
+| `check-selftest-reinit.py` is wired | `boot-test.sh:6550` | self-test **then** gate, both under `run_checker` |
+| its `PINNED` entry is deleted | `check-gates-are-wired.py:169` | deleted, with a comment saying so |
+| `--may-skip` exists (§4) | `run-checker.sh:242` | built, opt-in per call site |
+| lane C's three gates (§6) | `boot-test.sh` | all three wired |
+
+`check-gates-are-wired.py` now reports **53 gates, 1 unwired, 1 pinned, 46
+self-tested, 0 self-tests shipped but unrun** — the single unwired gate being
+lane C's capstone one, pinned with lane C's own reasoning.
+
+§6's suggestion for the ratchet — that "self-test not run" and "gate not run"
+are different findings with different lane politics and should be graded
+separately — was taken; those are the separate counts above. A lane can now
+see which half it can clear alone.
 
 ## The answer
 

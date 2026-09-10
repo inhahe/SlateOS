@@ -2,6 +2,11 @@
 name = "apparmor"
 version = "0.1.0"
 edition = "2024"
+[dev-dependencies]
+# has_open_ports has three outcomes -- some, none, cannot-say -- and none
+# of them is reachable against a hard-coded /proc.
+scratchdir = { path = "../scratchdir" }
+
 [dependencies]
 # One rendering of untrusted text inside a diagnostic. Profile names, the
 # policy files this parser is pointed at and the binary paths `aa-genprof`

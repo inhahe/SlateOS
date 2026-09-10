@@ -1657,8 +1657,24 @@ fn cmd_unconfined(args: &[String]) -> i32 {
 
     for proc in &processes {
         if proc.profile.is_none() {
-            if show_all || has_open_ports(proc.pid) {
-                unconfined.push(proc);
+            match has_open_ports(proc.pid) {
+                Ok(true) => unconfined.push(proc),
+                Ok(false) => {
+                    if show_all {
+                        unconfined.push(proc);
+                    }
+                }
+                // Cannot tell. Listing it is the safe direction for an audit:
+                // a false entry costs the reader a moment, a missing one costs
+                // them the finding.
+                Err(e) => {
+                    eprintln!(
+                        "aa-unconfined: cannot tell whether pid {} ({}) holds \
+                         open ports: {e}; listing it rather than omitting it",
+                        proc.pid, proc.name
+                    );
+                    unconfined.push(proc);
+                }
             }
         } else if with_paranoid && proc.mode == ProfileMode::Complain {
             complain_procs.push(proc);
@@ -1703,23 +1719,74 @@ fn cmd_unconfined(args: &[String]) -> i32 {
     0
 }
 
-/// Check if a process has open network ports (simplified check).
-fn has_open_ports(pid: u32) -> bool {
-    // Check /proc/<pid>/net/tcp and /proc/<pid>/net/tcp6
-    let tcp_path = format!("{}/{}/net/tcp", PROC_DIR, pid);
-    let tcp6_path = format!("{}/{}/net/tcp6", PROC_DIR, pid);
+/// Does `pid` hold an open network socket?
+///
+/// `Ok(false)` means we looked and found none. **`Err` means we could not
+/// tell**, and the caller must not read that as "none".
+///
+/// # Why the distinction is the whole point
+///
+/// This was
+///
+///     match fs::read_to_string(path) {
+///         Ok(content) => content.lines().count() > 1,
+///         Err(_) => false,
+///     }
+///
+/// so a file that could not be read answered "no open ports", and
+/// `aa-unconfined` -- whose entire job is listing unconfined processes that
+/// hold network sockets -- silently omitted that process from its report. An
+/// audit that under-reports is worse than one that fails: the operator reads
+/// the short list as "nothing unconfined is listening".
+///
+/// That is lane A's general form, from `mkfs`/`fsck`'s `is_mounted`: for a
+/// check that guards a decision, "I do not know" and "it is safe" must not be
+/// the same value.
+///
+/// # `NotFound` is an answer, not a failure
+///
+/// A process that exited between the scan and this read, or a kernel exposing
+/// no per-pid network table, genuinely has nothing to report -- lumping that
+/// in with `EACCES` would make every run of this tool on a normal system
+/// print warnings it cannot act on. Only errors that mean *we were prevented
+/// from looking* become `Err`.
+///
+/// Reads bytes rather than `String`: a single non-UTF-8 byte would otherwise
+/// fail the whole file, which is the same defect one layer down.
+fn has_open_ports(pid: u32) -> io::Result<bool> {
+    has_open_ports_under(Path::new(PROC_DIR), pid)
+}
 
-    let check = |path: &str| -> bool {
-        match fs::read_to_string(path) {
-            Ok(content) => {
-                // More than just the header line means open sockets
-                content.lines().count() > 1
+/// The body of [`has_open_ports`], taking the procfs root so it is testable.
+///
+/// The three outcomes -- some, none, and cannot-say -- are the entire point of
+/// the function, and none of them can be exercised against a hard-coded
+/// `/proc`.
+fn has_open_ports_under(proc_dir: &Path, pid: u32) -> io::Result<bool> {
+    let mut blocked: Option<io::Error> = None;
+
+    for leaf in ["tcp", "tcp6"] {
+        let path = proc_dir.join(pid.to_string()).join("net").join(leaf);
+        match fs::read(&path) {
+            // More than the header line means at least one socket. Counting
+            // newlines rather than `lines()` keeps this on bytes.
+            Ok(bytes) => {
+                if bytes.iter().filter(|&&b| b == b'\n').count() > 1 {
+                    return Ok(true);
+                }
             }
-            Err(_) => false,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => blocked = Some(e),
         }
-    };
+    }
 
-    check(&tcp_path) || check(&tcp6_path)
+    // A socket found in either table wins above; we only reach here having
+    // seen none, so an unreadable table is the difference between "none" and
+    // "cannot say".
+    match blocked {
+        Some(e) => Err(e),
+        None => Ok(false),
+    }
 }
 
 /// Binary-profile cache configuration parsed from the parser CLI flags
@@ -2044,6 +2111,84 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build `<root>/<pid>/net/` and return it.
+    fn net_dir(root: &Path, pid: u32) -> PathBuf {
+        let d = root.join(pid.to_string()).join("net");
+        fs::create_dir_all(&d).expect("create net dir");
+        d
+    }
+
+    #[test]
+    fn a_table_with_only_a_header_is_no_open_ports() {
+        let scratch = scratchdir::ScratchDir::new("aa-none");
+        let d = net_dir(scratch.dir(), 42);
+        fs::write(d.join("tcp"), b"  sl  local_address rem_address\n").expect("write");
+        fs::write(d.join("tcp6"), b"  sl  local_address rem_address\n").expect("write");
+        assert_eq!(has_open_ports_under(scratch.dir(), 42).ok(), Some(false));
+    }
+
+    #[test]
+    fn a_row_below_the_header_is_an_open_port() {
+        let scratch = scratchdir::ScratchDir::new("aa-some");
+        let d = net_dir(scratch.dir(), 42);
+        fs::write(d.join("tcp"), b"  sl  local_address\n   0: 00000000:0016\n")
+            .expect("write");
+        assert_eq!(has_open_ports_under(scratch.dir(), 42).ok(), Some(true));
+    }
+
+    /// A socket in the v6 table alone still counts -- the v4 table being empty
+    /// must not end the search.
+    #[test]
+    fn the_second_table_is_still_consulted() {
+        let scratch = scratchdir::ScratchDir::new("aa-v6");
+        let d = net_dir(scratch.dir(), 42);
+        fs::write(d.join("tcp"), b"  sl  local_address\n").expect("write");
+        fs::write(d.join("tcp6"), b"  sl  local_address\n   0: ...:0016\n")
+            .expect("write");
+        assert_eq!(has_open_ports_under(scratch.dir(), 42).ok(), Some(true));
+    }
+
+    /// A process that has gone, or a kernel with no per-pid network table, is
+    /// an ANSWER: there is nothing to report. It must not become a warning on
+    /// every run.
+    #[test]
+    fn a_missing_table_is_none_rather_than_unknown() {
+        let scratch = scratchdir::ScratchDir::new("aa-gone");
+        assert_eq!(has_open_ports_under(scratch.dir(), 9999).ok(), Some(false));
+    }
+
+    /// THE CASE THIS CHANGE EXISTS FOR. A table we were prevented from reading
+    /// is not "no open ports" -- it is "cannot say", and `aa-unconfined` lists
+    /// the process rather than omitting it.
+    ///
+    /// A directory standing where the file should be produces a read error
+    /// that is not `NotFound`, on every platform, without needing to
+    /// manipulate permissions.
+    #[test]
+    fn an_unreadable_table_is_an_error_and_not_a_quiet_no() {
+        let scratch = scratchdir::ScratchDir::new("aa-blocked");
+        let d = net_dir(scratch.dir(), 42);
+        fs::create_dir(d.join("tcp")).expect("a directory where the file goes");
+        fs::write(d.join("tcp6"), b"  sl  local_address\n").expect("write");
+
+        let got = has_open_ports_under(scratch.dir(), 42);
+        assert!(
+            got.is_err(),
+            "an unreadable table must not read as 'no open ports': {got:?}"
+        );
+    }
+
+    /// ...but a socket found elsewhere still wins over an unreadable table:
+    /// we know the answer, so there is nothing to be unsure about.
+    #[test]
+    fn a_found_socket_outranks_an_unreadable_table() {
+        let scratch = scratchdir::ScratchDir::new("aa-mixed");
+        let d = net_dir(scratch.dir(), 42);
+        fs::create_dir(d.join("tcp")).expect("a directory where the file goes");
+        fs::write(d.join("tcp6"), b"  sl  local\n   0: ...:0016\n").expect("write");
+        assert_eq!(has_open_ports_under(scratch.dir(), 42).ok(), Some(true));
+    }
 
     // ---- ProfileMode tests ----
 

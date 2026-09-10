@@ -4073,6 +4073,7 @@ dependencies = [
 name = "diskutil"
 version = "0.1.0"
 dependencies = [
+ "procinfo",
  "quoting",
 ]
 
@@ -4575,6 +4576,7 @@ name = "earlyoom"
 version = "0.1.0"
 dependencies = [
  "notimpl",
+ "procinfo",
  "quoting",
 ]
 
@@ -4695,6 +4697,7 @@ dependencies = [
 name = "eject"
 version = "0.1.0"
 dependencies = [
+ "procinfo",
  "quoting",
 ]
 
@@ -6913,6 +6916,10 @@ dependencies = [
 [[package]]
 name = "grub2"
 version = "0.1.0"
+dependencies = [
+ "procinfo",
+ "quoting",
+]
 
 [[package]]
 name = "grype-cli"
@@ -18660,6 +18667,7 @@ dependencies = [
 name = "udisks"
 version = "0.1.0"
 dependencies = [
+ "procinfo",
  "quoting",
 ]
 

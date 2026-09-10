@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS eject utility"
 [dependencies]
+procinfo = { path = "../../procinfo" }
 # The device path is an argv word, and the unknown-option message echoes the
 # offending argument itself.
 quoting = { path = "../quoting" }

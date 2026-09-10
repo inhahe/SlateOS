@@ -1206,24 +1206,31 @@ fn resolve_device(path: &str) -> String {
         return path.to_string();
     }
 
-    // Try to read /proc/mounts for mountpoint resolution.
-    if let Ok(mounts) = fs::read_to_string("/proc/mounts") {
-        let mut best_match = String::new();
-        let mut best_len = 0;
-        for line in mounts.lines() {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 2 {
-                let mount_dev = parts[0];
-                let mount_point = parts[1];
-                if path.starts_with(mount_point) && mount_point.len() > best_len {
-                    best_match = mount_dev.to_string();
-                    best_len = mount_point.len();
-                }
-            }
+    // Longest matching mount point wins: `/boot/efi` must beat `/` for a path
+    // under it. **This is why the escaping mattered here more than most.** The
+    // kernel writes a mount point containing a space as `/mnt/my\040backup`,
+    // which no real path starts with -- so that mount simply never matched,
+    // the next-longest did, and the bootloader was told the wrong device with
+    // no indication anything had gone wrong. `procinfo::Mount` unescapes.
+    //
+    // It also reads the file as bytes: `read_to_string` fails for the whole
+    // file when any line holds a byte that is not UTF-8, and the `if let Ok`
+    // here quietly fell through to "return the path as-is".
+    let mut best_match = Vec::new();
+    let mut best_len = 0usize;
+    for m in procinfo::ProcFs::new()
+        .mounts()
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+    {
+        if path.as_bytes().starts_with(&m.mount_point) && m.mount_point.len() > best_len {
+            best_len = m.mount_point.len();
+            best_match = m.device.clone();
         }
-        if !best_match.is_empty() {
-            return best_match;
-        }
+    }
+    if !best_match.is_empty() {
+        return quoting::escape_unprintable(&best_match);
     }
 
     // Fallback: return path as-is.
@@ -1243,14 +1250,17 @@ fn probe_fs_type(device: &str) -> String {
         }
     }
 
-    // Try reading /proc/mounts for the filesystem type.
-    if let Ok(mounts) = fs::read_to_string("/proc/mounts") {
-        for line in mounts.lines() {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 3 && parts[0] == device {
-                return parts[2].to_string();
-            }
-        }
+    // The filesystem type this device is mounted with. Same file, same two
+    // defects; see `resolve_device` above.
+    if let Some(m) = procinfo::ProcFs::new()
+        .mounts()
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+        .iter()
+        .find(|m| m.device == device.as_bytes())
+    {
+        return quoting::escape_unprintable(&m.fstype);
     }
 
     "ext2".to_string()

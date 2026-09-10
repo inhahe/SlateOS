@@ -210,36 +210,44 @@ fn read_sys(path: &Path) -> String {
         .to_string()
 }
 
+/// The mount table, through [`procinfo`].
+///
+/// Two defects in the hand-parser this replaces. The kernel escapes space,
+/// tab, newline and backslash in the device and mount-point fields as `\040`,
+/// `\011`, `\012` and `\134`, so a mount point containing a space never
+/// matched a path the caller held. And reading the file as text fails
+/// *entirely* when any single line holds a byte that is not UTF-8, so one
+/// awkward mount hid every mount -- and `unwrap_or_default()` turned that into
+/// an empty table rather than an error.
+fn mount_table() -> Vec<procinfo::Mount> {
+    procinfo::ProcFs::new()
+        .mounts()
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+}
+
 fn find_mountpoints(device: &str) -> Vec<String> {
-    let mut mounts = Vec::new();
-    let content = fs::read_to_string("/proc/mounts").unwrap_or_default();
     let canonical = fs::canonicalize(device).unwrap_or_else(|_| PathBuf::from(device));
     let canonical_str = canonical.to_string_lossy();
 
-    for line in content.lines() {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 2 && (parts[0] == device || parts[0] == canonical_str.as_ref()) {
-            mounts.push(parts[1].to_string());
-        }
-    }
-    mounts
+    mount_table()
+        .iter()
+        .filter(|m| m.device == device.as_bytes() || m.device == canonical_str.as_bytes())
+        .map(|m| quoting::escape_unprintable(&m.mount_point))
+        .collect()
 }
 
 fn read_mounts() -> Vec<MountEntry> {
-    let mut entries = Vec::new();
-    let content = fs::read_to_string("/proc/mounts").unwrap_or_default();
-    for line in content.lines() {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 4 {
-            entries.push(MountEntry {
-                _device: parts[0].to_string(),
-                mountpoint: parts[1].to_string(),
-                fstype: parts[2].to_string(),
-                _options: parts[3].to_string(),
-            });
-        }
-    }
-    entries
+    mount_table()
+        .iter()
+        .map(|m| MountEntry {
+            _device: quoting::escape_unprintable(&m.device),
+            mountpoint: quoting::escape_unprintable(&m.mount_point),
+            fstype: quoting::escape_unprintable(&m.fstype),
+            _options: quoting::escape_unprintable(&m.options),
+        })
+        .collect()
 }
 
 // ============================================================================

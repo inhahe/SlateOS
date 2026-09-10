@@ -85,30 +85,40 @@ fn resolve_device(name: &str) -> String {
     format!("/dev/{name}")
 }
 
+/// The mount table, through [`procinfo`].
+///
+/// Two defects in the hand-parser this replaces. The kernel escapes space,
+/// tab, newline and backslash in the device and mount-point fields as `\040`,
+/// `\011`, `\012` and `\134`, so a mount point containing a space never
+/// matched a path the caller held. And reading the file as text fails
+/// *entirely* when any single line holds a byte that is not UTF-8, so one
+/// awkward mount hid every mount -- and `unwrap_or_default()` turned that into
+/// an empty table rather than an error.
+fn mount_table() -> Vec<procinfo::Mount> {
+    procinfo::ProcFs::new()
+        .mounts()
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+}
+
 fn find_device_for_mountpoint(mountpoint: &str) -> Option<String> {
-    let mounts = fs::read_to_string("/proc/mounts").unwrap_or_default();
-    for line in mounts.lines() {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 2 && parts[1] == mountpoint {
-            return Some(parts[0].to_string());
-        }
-    }
-    None
+    mount_table()
+        .iter()
+        .find(|m| m.mount_point == mountpoint.as_bytes())
+        .map(|m| quoting::escape_unprintable(&m.device))
 }
 
 fn find_mountpoint_for_device(device: &str) -> Option<String> {
-    let mounts = fs::read_to_string("/proc/mounts").unwrap_or_default();
-    // Also check the canonical path of the device.
+    // The canonical path too: `/dev/cdrom` is usually a symlink to `/dev/sr0`,
+    // and `/proc/mounts` names whichever the mount was made with.
     let canonical = fs::canonicalize(device).unwrap_or_else(|_| std::path::PathBuf::from(device));
     let canonical_str = canonical.to_string_lossy();
 
-    for line in mounts.lines() {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 2 && (parts[0] == device || parts[0] == canonical_str.as_ref()) {
-            return Some(parts[1].to_string());
-        }
-    }
-    None
+    mount_table()
+        .iter()
+        .find(|m| m.device == device.as_bytes() || m.device == canonical_str.as_bytes())
+        .map(|m| quoting::escape_unprintable(&m.mount_point))
 }
 
 // ============================================================================

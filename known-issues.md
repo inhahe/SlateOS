@@ -65212,7 +65212,7 @@ that could have caught this.
 
 ---
 
-## B-POSIX-HOSTNAME-IS-PROCESS-LOCAL (lane B, 2026-08-22) — OPEN
+## B-POSIX-HOSTNAME-IS-PROCESS-LOCAL (lane B, 2026-08-22) — READ SIDE FIXED 2026-09-10; write side needs a syscall
 
 **In short:** `gethostname()` and `sethostname()` — the two C functions any
 program uses to ask or set what this machine is called — do not actually talk
@@ -65268,6 +65268,58 @@ currently broken by it — but they are the obvious thing for a ported C program
 to call, and it would get `localhost` with no indication anything was amiss.
 
 ---
+
+
+### Fixed on the read side — 2026-09-10
+
+`gethostname`, `getdomainname` and `uname`'s `nodename` now read
+`/proc/sys/kernel/hostname`, then `/etc/hostname`, then the stored buffer.
+That is the same pair in the same order the rest of the tree already uses:
+`osh` fills `$HOSTNAME` from exactly it, `dhcpcd` writes both when a lease
+supplies a name, and `sysctl` maps `kernel.hostname` onto the first. Matching
+the existing order was the point -- a libc that agreed with the kernel but not
+with the shell would have replaced one disagreement with another.
+
+**`sethostname` and `setdomainname` return `ENOSYS` now instead of `0`.** They
+wrote a process-local buffer that `gethostname` then read back, so a program
+could set the hostname, read it, get its own value and conclude it had worked.
+That is worse than `setgroups`' honest refusal in the one way that matters:
+
+| | `setgroups` | `sethostname` (before) |
+|---|---|---|
+| what it did | nothing | nothing observable |
+| what it returned | `-1`, `ENOSYS` | **`0`** |
+| what the caller learned | the truth | that it had worked |
+
+The `CAP_SYS_ADMIN` check still runs **first**, deliberately: an unprivileged
+caller should learn it is unprivileged, which is permanent, rather than that
+the call is unimplemented, which is not.
+
+### Why the write side is still open
+
+**There is no native syscall number for the hostname at all.** The kernel holds
+it in `fs::nameservice`, reachable only from the Linux-ABI table. Established
+by lane A's audit of handlers reachable from that table and from no native
+number (notice of 2026-09-10T07:09:56Z) -- `fs::nameservice` was the single
+module that survived their triage of fourteen -- and confirmed by grepping
+`kernel/src/syscall/number.rs`, whose only `DOMAIN` matches are the unrelated
+`SYS_DMA_DOMAIN_*`.
+
+Requested as `requests/b-a-no-native-syscall-reports-the-hostname.md`. When the
+number exists, `sethostname` becomes a syscall and the `ENOSYS` goes away.
+
+### Four tests were asserting the bug
+
+`test_sethostname_roundtrip` set the hostname, read it back, and asserted they
+agreed. They did agree -- both ends were the same buffer -- so the round trip
+was the *evidence that it worked*, and it was the defect. Likewise
+`uname_nodename_tracks_sethostname`, and two `phase167` tests asserting the
+write landed. All four now assert the refusal.
+
+`sethostname` no longer being a way to change the hostname does take away the
+only means of *varying* it, which `gethostid` needs -- it hashes the name.
+That is what `set_stored_hostname_for_test` is for: a test seam is the honest
+place for it, and a public function that half-works is not.
 
 ## B-COREUTILS-PANIC-ON-A-NON-UTF-8-ARGUMENT (lane B, 2026-08-22) — OPEN
 
@@ -127889,7 +127941,7 @@ makes a self-skip *visible*, it cannot tell a correct skip from a lazy one. A
 checker that exits 3 while its prerequisite is present skips exactly as quietly as
 before. What changes is that the tally says so.
 
-## TD-B-SEVEN-PROGRAMS-STILL-MISREAD-PROC-MOUNTS (lane B, 2026-09-10)
+## ~~TD-B-SEVEN-PROGRAMS-STILL-MISREAD-PROC-MOUNTS~~ (lane B, 2026-09-10) -- CLOSED the same day
 
 **In short:** `/proc/mounts` escapes a space in a device or mount-point name as
 `\040`, and ten programs parse the file by hand. Nine of the ten do not undo
@@ -127932,9 +127984,9 @@ crate's module doc names it as one of the three reasons the crate exists.
 | ~~`userspace/mount`~~ | ~~whether a target is already mounted~~ -- **done 2026-09-10** |
 | ~~`userspace/findmnt`~~ | ~~the whole of its output~~ -- **done 2026-09-10** |
 | ~~`userspace/lsblk`~~ | ~~mount points beside each block device~~ -- **done 2026-09-10** |
-| `userspace/eject` | whether the device must be unmounted first |
-| `userspace/grub2` | locating the boot filesystem |
-| `userspace/udisks` | mount state per device |
+| ~~`userspace/eject`~~ | ~~whether the device must be unmounted first~~ -- **done** |
+| ~~`userspace/grub2`~~ | ~~locating the boot filesystem~~ -- **done** |
+| ~~`userspace/udisks`~~ | ~~mount state per device~~ -- **done** |
 
 **`df` and `mount` keep `String` fields and escape at the boundary** rather
 than carrying bytes through their table-formatting code. That is deliberate and
@@ -127943,8 +127995,26 @@ worth stating, because it looks like a half-measure: a space is *printable*, so
 exactly as it did before. Only a byte they could not have typed is escaped --
 and the alternative for such a byte was taking the whole table down with it.
 
-`userspace/diskutil` already unescapes and is the exception; it still reads the
-file as text, so it keeps the whole-file failure.
+`userspace/diskutil` already unescaped and was the exception; it is converted
+too, because **undoing the escaping was only half the problem**. It still read
+the file with `read_to_string`, so one awkward mount left it showing no mount
+points at all and the careful unescaping never ran. Half a correct parser is
+not a correct parser, and the half that was missing was the one that fails
+silently.
+
+**Closed 2026-09-10, derived rather than decremented:** no file under
+`userspace/` or `apps/` parses `/proc/mounts` by hand any more -- checked by
+grepping for the literal path in files that do not use `procinfo`. 72 files
+still open some other `/proc` path without it, down from 95.
+
+**`grub2`'s was the one with consequences.** It picks the device carrying a
+path by longest-prefix match over mount points, so an escaped mount point --
+`/mnt/my backup`, which no real path starts with -- simply never matched,
+the next-longest won, and the bootloader was told the wrong device with
+nothing to indicate it. `eject` and `udisks` used `unwrap_or_default()`, so
+their whole-file failure produced an empty mount table rather than an error:
+"nothing is mounted". In `eject` that is inert today only because its unmount
+is still a `would call umount(...)` stub.
 
 **A related limitation, pinned rather than fixed.** A device whose *name* is
 not UTF-8 cannot be named on the command line at all: `mkfs` and `fsck` read

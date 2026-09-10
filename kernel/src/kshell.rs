@@ -56072,8 +56072,17 @@ fn cmd_netsettings(args: &str) {
                 if parts.len() < 2 {
                     shell_println!("Hostname: {}", netsettings::hostname());
                 } else {
-                    netsettings::set_hostname(parts[1]);
-                    shell_println!("Hostname set to {}", parts[1]);
+                    // Reports the failure rather than claiming success. This
+                    // printed the confirmation unconditionally while writing a
+                    // field nothing else read, so the machine was never renamed
+                    // and the operator was told it had been.
+                    match netsettings::set_hostname(parts[1]) {
+                        Ok(()) => shell_println!("Hostname set to {}", parts[1]),
+                        Err(e) => {
+                            shell_println!("Error: {:?}", e);
+                            set_exit(1);
+                        }
+                    }
                 }
             }
             case(&parts);

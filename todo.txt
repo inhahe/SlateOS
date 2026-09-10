@@ -56415,3 +56415,62 @@ side needs nothing -- it is the argument check alone that refuses.
 **Not done in the same commit** because that commit is about `/proc` bytes and
 this is a change to which command lines are accepted, which is worth its own
 before/after. It is small.
+
+## [A] Make the Linux-ABI-only capability report a ratchet (2026-09-10)
+
+Lane B asked for "a list of handlers reachable from the Linux-ABI table but
+from no native number" after their third instance of one shape: the kernel had
+the implementation and only the Linux table could reach it, so native libc
+reported success and did nothing (setgroups), read the console (pty slave
+read), or armed nothing (alarm).
+
+First pass is WRITTEN AND CALIBRATED but NOT IN THE TREE: the script is at
+E:/tmp/linux-only-capabilities.py. It is deliberately not under scripts/ yet,
+because an unwired scripts/check-*.py trips check-gates-are-wired.py.
+
+Method: collect the kernel modules each table's handlers reach -- native from
+`handlers[SYS_X as usize] = Some(handlers::sys_y)` in dispatch.rs, Linux from
+`nr::FOO => sys_bar` in linux.rs -- resolving `use` aliases so a bare
+`futex::futex_wait()` is counted, then difference at MODULE granularity.
+
+Calibrated against seven cases it must stay clean on: SETGROUPS, SETITIMER,
+GETITIMER, ALARM, PTY_SLAVE_READ, FUTEX, FUTEX_REQUEUE. Keep that check in the
+script. Two earlier versions failed it and both looked authoritative:
+
+  * function granularity reported SETITIMER and ALARM, because linux's handler
+    calls proc::itimer::timeval_to_ns and the native ABI deliberately takes
+    nanoseconds in registers (design-decisions 925). It was flagging ABI-shape
+    helpers as missing capabilities.
+  * full transitive closure over local calls reported 238 capabilities with
+    LANDLOCK_RESTRICT_SELF in nearly every line -- everything reachable from
+    everything.
+
+WHAT IS LEFT: turn it into a ratchet like check-gates-are-wired.py -- baseline
+the 13 deliberate entries with a reason each, fail only when the set grows.
+A one-off list does not stop instance five. The 13 and why they are deliberate:
+
+  PIDFD_GETFD touching drm::card_fd, evdev_fd, ipc::alsa_pcm, ipc::epoll,
+  ipc::eventfd, ipc::inotify, ipc::pipe, ipc::signalfd -- ONE polymorphic
+  syscall that dups an fd of any type, so it reaches every fd module's dup.
+  Zero native SYS_*PIDFD* constants.
+  ipc::memfd, ipc::epoll, ipc::inotify, ipc::signalfd, ipc::eventfd -- zero
+  native constants each; Linux-flavoured fd types, we use channels.
+  net::socket, net::netstack_client -- 46 native net handlers exist and reach
+  other modules; linux.rs carries its own BSD-sockets shim over the same
+  stack. Architectural.
+  mm::page_table via GETRUSAGE/VMSPLICE -- plumbing, not a capability.
+  proc::thread_clone via RSEQ/GET_ROBUST_LIST/PRCTL -- Linux-specific.
+
+THE ONE REAL FINDING, already sent to lane B as a question: fs::nameservice.
+There is no native syscall for the hostname or domain name at all -- verified
+by grepping number.rs directly, not by the analysis; the only matches are
+SYS_DMA_DOMAIN_CREATE/DESTROY, unrelated. SETHOSTNAME, SETDOMAINNAME and UNAME
+reach fs::nameservice and nothing native does. Whether that is a bug depends
+on something only lane B can answer: whether our libc's gethostname goes
+through a native number or the Linux table.
+
+Known limits to state in the script's docstring (they are there already):
+Rust is not parsed, so a capability reached through a trait object, a function
+pointer or a macro is invisible; a name in a comment is counted; and "no
+native handler calls it" is not "no native caller exists", since the scheduler
+and interrupt paths call subsystems with no syscall involved.

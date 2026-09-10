@@ -128339,7 +128339,7 @@ available to them: **do not report that something is scheduled when nothing
 can run it.** Reaching the fallback is fine; claiming the orderly path
 succeeded is not.
 
-## A-SYSFS-KEEPS-A-THIRD-HOSTNAME-THAT-NOTHING-ELSE-READS (found by lane B, 2026-09-10; `kernel/**`, lane A owns the fix)
+## A-SYSFS-KEEPS-A-THIRD-HOSTNAME-THAT-NOTHING-ELSE-READS (found by lane B, 2026-09-10; `kernel/**`, lane A owns the fix) — **fixed 2026-09-10; there were FOUR stores, not three** (see the resolution note at the end of this file)
 
 **In short:** the system has two hostnames. Writing `/sys/kernel/hostname`
 changes one of them; every program that asks the system its name reads the
@@ -129309,3 +129309,49 @@ populations is an artifact of this matcher not recognising the
 `match parts.get(n).unwrap_or(&"0").parse()` form rather than a real property. Two
 ledgers counting one family is the double-count this lane warned lane B about the
 same afternoon. Not built yet; the analysis above is the specification.
+
+### Resolution of A-SYSFS-KEEPS-A-THIRD-HOSTNAME-THAT-NOTHING-ELSE-READS (lane A, 2026-09-10)
+
+Fixed, and the count in the title was low. There were **four** stores for the
+hostname, not three, and the fourth was the only one that accepted a write from the
+operator and confirmed it.
+
+| store | who read it | state |
+|---|---|---|
+| `fs::nameservice` | `/proc/sys/kernel/hostname`, `uname(2)`, `gethostname`, kshell | the one store, kept |
+| posix process-local buffer | `gethostname`/`uname -n` inside one program | removed by lane B (`15c50477f`, `49b051aeb`) |
+| `fs::sysfs` static | `/sys/kernel/hostname`, **and `vmguest` → the hypervisor** | removed |
+| `fs::netsettings` field | a `/proc` netsettings file, and the kshell command that wrote it | removed |
+
+Two things about the fourth are worth keeping.
+
+**It confirmed a rename that never happened.** `netsettings::set_hostname` returned
+`()`, so it could not fail, and the kshell command printed `Hostname set to myhost`
+unconditionally while writing a field nothing else read. The command that read the
+name back read the same dead field, so the lie was self-consistent from inside. That
+is the shape lane B described for the posix buffer the same morning: a program could
+set the name, read it back, get its own value, and conclude the system was renamed.
+
+**The two copies had different lifecycles, which is why a second copy is never merely
+redundant.** `init_defaults` seeded the netsettings hostname to `"mintos"` and
+`clear_all` blanked it. Had the fix simply forwarded both to the one store, every
+network-settings initialisation would have renamed the machine and every clear would
+have un-named it. A duplicate is not just a value that can disagree; it is a value
+with its own rules about when to change.
+
+How it was found is the part worth repeating. After removing the sysfs static I swept
+the kernel for anything still expecting `"mintos"` — purely to check I had not broken
+another assertion — and the sweep returned `assert_eq!(hostname(), "mintos")` in a
+module I had no reason to open. A defensive check for my own breakage found an
+unrelated defect, which is the argument for scoping such a sweep wider than the
+change that prompted it.
+
+Three round-trip self-tests have now been replaced for the same reason in two days:
+this module's, sysfs's, and lane B's `test_setdomainname_roundtrip`. Each set a value
+through one door, read it back through the same door, and asserted they matched —
+which is evidence about the buffer and reads exactly like evidence about the system.
+All three now assert that the write ARRIVED at the single store.
+
+One bound, too: `crate::uname::NODENAME_MAX` (64) replaces `fs::nameservice`'s 253 and
+`SYS_HOSTNAME_SET`'s 64, which disagreed — a 100-byte name was settable through one
+door, refused at another, and unreportable by `gethostname` once stored.

@@ -1322,7 +1322,7 @@ const ATD_POLL_SECS: u64 = 60;
 ///
 /// `design-decisions.md` 1019: ask what the caller loses if we proceed. Here
 /// they lose the containment implied by having submitted the job as
-/// themselves, so it is the refuse case. `crond` and `crond2` were given the
+/// themselves, so it is the refuse case. `crond` was given the
 /// same rule the same day, deliberately worded alike.
 ///
 /// # The unknown case fails closed

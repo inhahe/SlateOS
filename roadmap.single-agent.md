@@ -1644,7 +1644,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] nproc/arch/pathchk/logname/users/tty: simple system info (CPU count, architecture, path validation, login/tty)
   - [x] getopt/cksum/sync/printenv: shell scripting helpers (enhanced getopt, POSIX CRC, filesystem sync, env display)
   - [x] dc: desk calculator (reverse Polish notation, registers, conditionals, base conversion, modular exponentiation)
-  - [x] crond2: cron daemon with anacron (crontab scheduling, catch-up missed jobs, idle delay, daemon mode, mail notifications)
+  - [x] crond: cron daemon with anacron (crontab scheduling, catch-up missed jobs, idle delay, daemon mode, mail notifications)
   - [x] ntpd: NTP time synchronization (NTP v4 packet format, drift correction, stratum hierarchy, poll intervals, jitter detection)
   - [x] sshd: SSH server daemon (key exchange, user auth, channel multiplexing, PTY support, session management, debug logging)
   - [x] dhcpcd: DHCP client daemon (DHCP v4 discover/offer/request/ack, lease management, renewal timers, interface config)

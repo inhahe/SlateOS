@@ -1751,7 +1751,7 @@ mod tests {
     fn test_detect_crond() {
         // The daemon personality was deleted: it printed "running <cmd> as
         // <user>" without running anything, and two crates -- userspace/crond
-        // and userspace/crond2 -- implement the daemon for real. `None` rather
+        // -- userspace/crond -- implements the daemon for real. `None` rather
         // than a personality, so the name cannot quietly become `at`.
         assert_eq!(detect_personality("crond"), None);
         assert_eq!(detect_personality("/usr/sbin/crond"), None);

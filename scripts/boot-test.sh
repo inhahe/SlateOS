@@ -5209,7 +5209,12 @@ check_lane_c_gui_gates() {
     # therefore addresses a different crate, in a different lane -- and says
     # nothing about it.  On 2026-09-04 `cargo test -p sysinfo` reported
     # "0 passed; ok" about userspace/sysinfo while apps/sysinfo had 62 tests.
-    if ! run_checker check-crate-names-selftest "$py"         "$PROJECT_ROOT/scripts/check-crate-names.py" --self-test; then
+    #
+    # Pass no roots.  The script walks the whole workspace itself (2955 crates)
+    # and names the roots nowhere, so a root given here is rejected by argparse
+    # rather than narrowing anything: see below.
+    if ! run_checker check-crate-names-selftest "$py" \
+        "$PROJECT_ROOT/scripts/check-crate-names.py" --self-test; then
         echo "" >&2
         echo "ERROR: refusing to build.  scripts/check-crate-names.py no longer" >&2
         echo "agrees with its own cases, so its verdict on the tree means" >&2
@@ -5217,7 +5222,8 @@ check_lane_c_gui_gates() {
         return 1
     fi
 
-    if ! run_checker check-crate-names "$py"         "$PROJECT_ROOT/scripts/check-crate-names.py" apps userspace; then
+    if ! run_checker check-crate-names "$py" \
+        "$PROJECT_ROOT/scripts/check-crate-names.py"; then
         echo "" >&2
         echo "ERROR: refusing to build.  A crate's package name no longer" >&2
         echo "matches its directory, and is not recorded in that script's" >&2

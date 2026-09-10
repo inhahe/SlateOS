@@ -1279,16 +1279,90 @@ mod tests {
 
     #[test]
     fn precedence_is_awks_and_not_cs() {
-        // These are the four that catch a hand-rolled parser out.
-        let cases = [
-            "BEGIN { print 2 ^ 3 ^ 2 }", // right-assoc
-            "BEGIN { print -2 ^ 2 }",    // -(2^2)
-            "BEGIN { print $NF - 1 }",   // ($NF) - 1
-            "BEGIN { print 1 \" \" 2 }", // concatenation
-        ];
-        for c in cases {
-            let _ = ok(c);
-        }
+        // WHAT THIS USED TO DO, AND WHY IT WAS WORTH REWRITING.
+        //
+        // It parsed the same four programs and then wrote `let _ = ok(c);`,
+        // discarding every result. `ok` panics if a program fails to parse, so
+        // the test did check that these four *parse* -- but its name claims
+        // something else entirely, and the comment above the cases said "the
+        // four that catch a hand-rolled parser out". A parser that read `^` as
+        // left-associative, or bound unary minus tighter than `^`, or applied
+        // `$` to the whole of `NF - 1`, would have produced a perfectly valid
+        // tree for all four and passed. The one property named in the test was
+        // the one property not checked.
+        //
+        // Each case below is written so the WRONG tree is a different shape,
+        // not merely a different value, so the assertion cannot be satisfied
+        // by an accident of evaluation order.
+
+        // `2 ^ 3 ^ 2` is 2^(3^2) = 512 in awk, not (2^3)^2 = 64. Right-
+        // associative, which is the opposite of every other binary operator
+        // here and the reason `^` is worth its own case.
+        let Expr::Bin(BinOp::Pow, lhs, rhs) = print_arg("2 ^ 3 ^ 2") else {
+            panic!("`2 ^ 3 ^ 2` did not parse as a power at the top");
+        };
+        assert!(
+            matches!(*lhs, Expr::Num(n) if (n - 2.0).abs() < f64::EPSILON),
+            "left operand should be the bare 2, so the nesting is on the right"
+        );
+        assert!(
+            matches!(&*rhs, Expr::Bin(BinOp::Pow, _, _)),
+            "`^` must be right-associative: 2^(3^2), not (2^3)^2"
+        );
+
+        // `-2 ^ 2` is -(2^2) = -4, not (-2)^2 = 4: `^` binds tighter than
+        // unary minus, which is the case C gets the other way round.
+        let neg = print_arg("-2 ^ 2");
+        let Expr::Neg(inner) = neg else {
+            panic!("`-2 ^ 2` should negate a power, not raise a negative");
+        };
+        assert!(
+            matches!(&*inner, Expr::Bin(BinOp::Pow, _, _)),
+            "`^` binds tighter than unary minus: -(2^2), not (-2)^2"
+        );
+
+        // `$NF - 1` is ($NF) - 1, not $(NF - 1). Getting this wrong reads the
+        // second-to-last field instead of subtracting from the last one, and
+        // both are valid programs -- which is exactly why it needs a shape
+        // assertion rather than a parse check.
+        let Expr::Bin(BinOp::Sub, lhs, _) = print_arg("$NF - 1") else {
+            panic!("`$NF - 1` should subtract at the top, not index a field");
+        };
+        assert!(
+            matches!(*lhs, Expr::Get(Lvalue::Field(_))),
+            "`$` binds tighter than `-`: ($NF) - 1, not $(NF - 1)"
+        );
+
+        // Concatenation is an operator with no symbol, and it binds looser
+        // than arithmetic. `1 " " 2` is three operands joined, not a number.
+        assert!(
+            matches!(print_arg(r#"1 " " 2"#), Expr::Concat(_, _)),
+            "adjacent expressions concatenate"
+        );
+    }
+
+    /// The single expression of `BEGIN { print <src> }`.
+    ///
+    /// Precedence is a claim about the *shape* of the tree, so the tests above
+    /// need the tree rather than a yes/no on parsing. Every failure here is a
+    /// panic naming the program, because a test that cannot reach its subject
+    /// has not passed.
+    fn print_arg(src: &str) -> Expr {
+        // A `BEGIN` block lands in `program.begin`, not in `program.rules` --
+        // the first draft of this helper looked in `rules` and reported "no
+        // rule parsed", which reads like a parser failure and was a navigation
+        // mistake in the test.
+        let program = ok(&format!("BEGIN {{ print {src} }}"));
+        let stmt = program
+            .begin
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| panic!("no BEGIN statement parsed from {src:?}"));
+        let Stmt::Print(mut args, _) = stmt else {
+            panic!("{src:?} did not parse as a print");
+        };
+        assert_eq!(args.len(), 1, "{src:?} should print exactly one expression");
+        args.pop().unwrap_or_else(|| unreachable!())
     }
 
     #[test]

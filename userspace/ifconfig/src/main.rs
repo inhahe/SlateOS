@@ -1229,7 +1229,10 @@ mod tests {
         // comment claiming it verified "output".
         let out = render_interface(&iface);
 
-        assert!(out.starts_with("lo: flags="), "name and flags lead: {out:?}");
+        assert!(
+            out.starts_with("lo: flags="),
+            "name and flags lead: {out:?}"
+        );
         assert!(out.contains("<UP,LOOPBACK,RUNNING>"), "flag names: {out:?}");
         assert!(out.contains("mtu 65536"), "mtu: {out:?}");
         assert!(
@@ -1241,7 +1244,10 @@ mod tests {
         // interface prints `loop`, never an `ether` line. Getting it wrong
         // would print `ether 00:00:00:00:00:00`, which real ifconfig does not.
         assert!(out.contains("loop  txqueuelen 1000"), "loop line: {out:?}");
-        assert!(!out.contains("ether"), "loopback has no ether line: {out:?}");
+        assert!(
+            !out.contains("ether"),
+            "loopback has no ether line: {out:?}"
+        );
 
         // An empty broadcast is omitted rather than printed empty.
         assert!(!out.contains("broadcast"), "no broadcast on lo: {out:?}");
@@ -1277,7 +1283,10 @@ mod tests {
         let out = render_interface(&iface);
 
         assert!(out.starts_with("eth0: flags="), "name leads: {out:?}");
-        assert!(out.contains("<UP,BROADCAST,RUNNING,MULTICAST>"), "flags: {out:?}");
+        assert!(
+            out.contains("<UP,BROADCAST,RUNNING,MULTICAST>"),
+            "flags: {out:?}"
+        );
         assert!(out.contains("mtu 1500"), "mtu: {out:?}");
 
         // The branch: a real MAC prints `ether`, and never the `loop` line.
@@ -1295,8 +1304,14 @@ mod tests {
 
         // Counters are the caller's numbers, not the byte-formatted ones: both
         // appear, and the raw value comes first.
-        assert!(out.contains("RX packets 1234  bytes 567890 ("), "rx: {out:?}");
-        assert!(out.contains("TX packets 567  bytes 123456 ("), "tx: {out:?}");
+        assert!(
+            out.contains("RX packets 1234  bytes 567890 ("),
+            "rx: {out:?}"
+        );
+        assert!(
+            out.contains("TX packets 567  bytes 123456 ("),
+            "tx: {out:?}"
+        );
 
         assert!(out.ends_with("\n\n"), "one blank line separates interfaces");
     }

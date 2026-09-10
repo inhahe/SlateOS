@@ -472,7 +472,10 @@ fn cmd_mount(args: &[String]) -> i32 {
         fstype.as_deref().unwrap_or("auto"),
         options.as_deref().unwrap_or("defaults")
     );
-    eprintln!("udisksctl: use `mount {} {}` -- that one performs the mount", device, mount_point);
+    eprintln!(
+        "udisksctl: use `mount {} {}` -- that one performs the mount",
+        device, mount_point
+    );
     eprintln!("{REFUSE}");
     1
 }
@@ -840,5 +843,4 @@ mod tests {
         assert_eq!(part.number, 1);
         assert_eq!(part.label, "EFI");
     }
-
 }

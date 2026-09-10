@@ -1078,9 +1078,7 @@ fn run_capsh(args: &[String]) -> i32 {
             eprintln!("capsh: capability changes are not applied on this system");
             eprintln!("capsh: the requested state, had it been applied, would be:");
             state.print();
-            eprintln!(
-                "capsh: refusing to exec {cmd_args:?} with unchanged capabilities"
-            );
+            eprintln!("capsh: refusing to exec {cmd_args:?} with unchanged capabilities");
             return 1;
         } else {
             eprintln!("capsh: unknown option {}", quoteaf_os(arg));

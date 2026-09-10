@@ -1173,7 +1173,6 @@ fn resolve_deps(
     // Build effective search path for this level's binary.
     let effective_search = SearchPaths::new(rpath, runpath, search.ld_library_path.clone());
 
-
     for libname in &needed {
         if seen.contains(libname) {
             // Already resolved — do not re-process (handles circular deps).
@@ -1186,7 +1185,6 @@ fn resolve_deps(
             continue;
         }
         seen.insert(libname.clone());
-
 
         let resolution = match effective_search.resolve(libname) {
             Some(p) => LibResolution::Found(p.clone()),
@@ -1208,14 +1206,7 @@ fn resolve_deps(
         if let Some(dep_path) = path_for_recurse {
             match Elf::load(&dep_path) {
                 Ok(dep_elf) => {
-                    resolve_deps(
-                        &dep_elf,
-                        &effective_search,
-                        seen,
-                        entries,
-                        verbose,
-                        out,
-                    )?;
+                    resolve_deps(&dep_elf, &effective_search, seen, entries, verbose, out)?;
                 }
                 Err(e) => {
                     if verbose {
@@ -1257,11 +1248,7 @@ fn resolve_deps(
 // take the path, which is unaffected.
 
 /// Print the dependency list in standard ldd format.
-fn print_deps(
-    out: &mut impl Write,
-    entries: &[DepEntry],
-    interp: Option<&Path>,
-) -> io::Result<()> {
+fn print_deps(out: &mut impl Write, entries: &[DepEntry], interp: Option<&Path>) -> io::Result<()> {
     // The interpreter is typically shown first.
     // Mimic: linux-vdso.so.1 (0x...) at the top, then the libs, then ld.so at bottom.
     // We approximate by showing the interpreter last, after the libs.

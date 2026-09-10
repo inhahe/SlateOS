@@ -1172,13 +1172,13 @@ def survey(
 
 
 def main() -> int:
-    if "--selftest" in sys.argv[1:]:
+    if {"--selftest", "--self-test"} & set(sys.argv[1:]):
         return selftest()
     ap = argparse.ArgumentParser(add_help=True, description=__doc__.split("\n")[0])
     ap.add_argument("--check", action="store_true")
     ap.add_argument("--write-baseline", action="store_true", dest="write")
     ap.add_argument("--all", action="store_true", dest="show_all")
-    ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--selftest", "--self-test", action="store_true")
     ap.add_argument("--head", metavar="REV",
                     help="judge this revision instead of the working tree")
     args = ap.parse_args()

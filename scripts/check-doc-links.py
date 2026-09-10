@@ -1350,7 +1350,7 @@ def main() -> int:
     ap.add_argument("--check", action="store_true",
                     help="accepted and ignored: failing on a dead link is the "
                          "default, and was not always (see main)")
-    ap.add_argument("--selftest", action="store_true", help="verify the checker itself")
+    ap.add_argument("--selftest", "--self-test", action="store_true", help="verify the checker itself")
     ap.add_argument("--list", action="store_true", help="print findings and exit 0")
     ap.add_argument(
         "paths",

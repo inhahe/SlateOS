@@ -437,7 +437,16 @@ if [ "$skip_alias" != "1" ]; then
     # its whole output is a COUNT, the one shape where a detector that stopped
     # seeing and a tree that got better read identically. No --head: the
     # fixtures are string literals in the script and touch no tree.
-    if ! run_checker multicall-aliases-selftest "$py" "$checker" --self-test; then
+    # `--selftest`, not `--self-test`, and the spelling is load-bearing.
+    # Measured 2026-09-10: all sixteen checkers this hook runs accept
+    # `--selftest`; SEVEN reject `--self-test` -- argv-utf8,
+    # check-design-decisions-bands, check-doc-links, check-requests-not-deleted,
+    # getopt-ambiguity-check, host-errmsg and raced-globals. (They now accept
+    # both, but the hook stays on the one spelling that never needed the fix.)
+    # A `--self-test` call here also reddened main for all three lanes, because
+    # test-pre-push-gates.py exempted self-test calls from its --head rule by
+    # matching the string `--selftest`.
+    if ! run_checker multicall-aliases-selftest "$py" "$checker" --selftest; then
         echo "pre-push: multicall-aliases.py FAILED ITS OWN SELF-TEST — its alias count is not trustworthy." >&2
         alias_failed=1
     fi
@@ -606,7 +615,7 @@ if [ "$skip_readdef" != "1" ]; then
     # and both times the broken version still produced a plausible list and
     # still passed --check. No --head: the fixtures are string literals inside
     # the script and touch no tree.
-    if ! run_checker read-defaults-selftest "$py" "$readdef" --self-test; then
+    if ! run_checker read-defaults-selftest "$py" "$readdef" --selftest; then
         echo "pre-push: check-read-defaults.py FAILED ITS OWN SELF-TEST — its --check result is not trustworthy." >&2
         readdef_failed=1
     else
@@ -2659,7 +2668,7 @@ touches posix/src/ scripts/check-libc-abi.py || skip_abi=1
 note_gate libc-abi "$skip_abi"
 
 if [ "$skip_abi" != "1" ]; then
-    if ! run_checker libc-abi-selftest "$py" "$abicheck" --self-test; then
+    if ! run_checker libc-abi-selftest "$py" "$abicheck" --selftest; then
         echo "pre-push: check-libc-abi.py FAILED ITS OWN SELF-TEST — its verdict is not trustworthy." >&2
         skip_abi=refused
     fi
@@ -2735,7 +2744,7 @@ touches '*.rs' scripts/check-cfg-unix.py || skip_cfgunix=1
 note_gate cfg-unix "$skip_cfgunix"
 
 if [ "$skip_cfgunix" != "1" ]; then
-    if ! run_checker cfg-unix-selftest "$py" "$cfgunix" --self-test; then
+    if ! run_checker cfg-unix-selftest "$py" "$cfgunix" --selftest; then
         echo "pre-push: check-cfg-unix.py FAILED ITS OWN SELF-TEST — its verdict is not trustworthy." >&2
         skip_cfgunix=refused
     fi
@@ -2815,7 +2824,7 @@ fi
 note_gate crate-names "$skip_cratenames"
 
 if [ "$skip_cratenames" != "1" ]; then
-    if ! run_checker crate-names-selftest "$py" "$cratenames" --self-test; then
+    if ! run_checker crate-names-selftest "$py" "$cratenames" --selftest; then
         echo "pre-push: check-crate-names.py FAILED ITS OWN SELF-TEST — its verdict is not trustworthy." >&2
         skip_cratenames=refused
     fi
@@ -2888,7 +2897,7 @@ fi
 note_gate gate-call-sites "$skip_gatesites"
 
 if [ "$skip_gatesites" != "1" ]; then
-    if ! run_checker gate-call-sites-selftest "$py" "$gatesites" --self-test; then
+    if ! run_checker gate-call-sites-selftest "$py" "$gatesites" --selftest; then
         echo "pre-push: check-gate-call-sites.py FAILED ITS OWN SELF-TEST — its verdict is not trustworthy." >&2
         skip_gatesites=refused
     fi

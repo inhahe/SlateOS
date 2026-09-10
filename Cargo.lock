@@ -3924,6 +3924,9 @@ dependencies = [
 [[package]]
 name = "dhcpcd"
 version = "0.1.0"
+dependencies = [
+ "posix",
+]
 
 [[package]]
 name = "diagram"

@@ -365,8 +365,17 @@ pub fn which_layer(id: OverlayId, rel_path: impl AsRef<Path>) -> KernelResult<La
         )
     };
 
-    let in_upper = Vfs::exists(&upper_full);
-    let in_lower = lower_full.is_some_and(|lower| Vfs::exists(&lower));
+    // `exists_or_err`, not `exists`: a stat failure here must not be read as
+    // absence. `exists` answers false for PermissionDenied and for a symlink loop
+    // as readily as for a missing file, and this function's answer decides WHICH
+    // LAYER serves the path -- so an unreadable upper file became `Layer::Lower`
+    // and the caller was served the base image's older content with no error at
+    // all. Stale data presented as current is worse than a failed read.
+    let in_upper = Vfs::exists_or_err(&upper_full)?;
+    let in_lower = match lower_full {
+        Some(lower) => Vfs::exists_or_err(&lower)?,
+        None => false,
+    };
 
     Ok(match (in_upper, in_lower) {
         (true, true) => Layer::Both,

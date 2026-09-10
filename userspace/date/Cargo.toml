@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS date and time utility"
 [dependencies]
+# Calendar arithmetic that computes rather than indexes: the local
+# `day_of_week` panicked for month 0. See `civildate`.
+civildate = { path = "../../civildate" }
 # date names the format string and the input date it failed to parse, both
 # from the command line.
 quoting = { path = "../quoting" }

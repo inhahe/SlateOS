@@ -327,6 +327,13 @@ def main() -> int:
         BASELINE.write_text(
             BASELINE_HEADER + "".join(f"{n}\n" for n in fabricating),
             encoding="utf-8",
+            # newline="" added by lane A 2026-09-10 to un-red main:
+            # scripts/check-text-mode-writes.py refuses a text-mode write that
+            # does not say what it wants line endings to be, and it runs before
+            # the build, so every lane's boot test stopped here. Without it this
+            # baseline would be written CRLF on Windows while git reported the
+            # file clean against an `eol=lf` attribute.
+            newline="",
         )
         print(f"audit-cli-fabrication: pinned {len(fabricating)} name(s) "
               f"in {BASELINE.relative_to(ROOT)}")

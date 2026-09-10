@@ -79,6 +79,57 @@ to the original list just as much -- any single I/O call anywhere in a crate
 exonerates every invented answer beside it, so this number has always been a
 floor.
 
+## The second rule, added 2026-09-10 after the first deletion
+
+Everything above tests the *wording* of what a crate prints, and wording is
+the wrong place to look for the worst cases.
+
+  `cryptsetup luksFormat` printed `LUKS2 formatted successfully on /dev/sda1.`
+  and exited 0 having written nothing to the device. There is no number in
+  that sentence, no unit, no `PASS` -- so `FACT_PATTERNS` read it as harmless.
+  It printed the genuine warning first (`This will overwrite data on /dev/sda1
+  irrevocably`), which made its output indistinguishable from a real run down
+  to the part that tells the user to be careful.
+
+So the second rule ignores wording entirely and asks a structural question: a
+crate that **builds a binary**, is **not a pure-argv tool**, and holds **no
+call that could look at anything outside its own arguments** can only print
+what was compiled into it. That is not a claim about what it says; it is a
+claim about what it could possibly know.
+
+The three clauses are all load-bearing:
+
+  * *builds a binary* excludes libraries, where doing no I/O is unremarkable
+    rather than a defect (`charwidth`, `bignum`, `ere`, `modechange`,
+    `notimpl` are all in the tree and all fine).
+  * *not pure-argv* is `PURE_ARGV`, where "does no I/O" is the specification
+    (`echo`, `basename`, `seq`).
+  * *no I/O marker* is the same crude enumeration used above, with the same
+    known limits.
+
+`FACT_PATTERNS` anchors every pattern on `println!("`, so rule 1 is blind to
+a crate that prints through `writeln!`, `write!`, or a byte-slice helper --
+which is not a hypothetical: the deleted `cryptsetup` made all 251 of its
+output calls through `writeln!(out, ...)` and `hdparm` used
+`print_out(b"...")`. Neither could have been caught by rule 1 whatever its
+wording, and "successfully" is in `FACT_PATTERNS` already. Rule 2 covers that
+gap for crates that do no I/O, which is the only place it could be covered
+cheaply; for a crate that does real I/O and fabricates beside it, the macro
+blindness still applies and `ALSO_FABRICATING` remains the only remedy.
+
+**The two rules are reported separately and should stay separate**, because
+they justify deletion under different halves of 1006. Rule 1 is *fabricating*
+-- it states a fact it did not measure. Rule 2 is *inert* -- it may state no
+fact at all and still be a command that does not work, which 1006 deletes just
+the same. A crate whose entire behaviour is printing its own usage text is
+inert, not fabricating, and blurring the two would make the audit's output a
+worse description of what it found.
+
+220 crates were deleted by rule 2 on 2026-09-10, after checking the set three
+independent ways (dependencies, a wider net than `IO_MARKERS`, and reverse
+dependencies) -- see the commit and `known-issues.md`. The warning above still
+applies in full: do not delete straight from `--list`.
+
 Usage:  python scripts/audit-cli-fabrication.py [--list] [--limit N]
 """
 
@@ -269,6 +320,50 @@ def read_baseline() -> set[str] | None:
     return names
 
 
+def builds_binary(body: str) -> bool:
+    """Does this crate produce a command, as opposed to a library?
+
+    Text-only so that `--self-test` can exercise the rule on synthetic sources
+    with no directory behind them. `main` overrides it with the real answer
+    from the manifest, because a `fn main` inside a doc example would fool
+    this and a `[[bin]]` target with a non-default path would be missed by it.
+    """
+    return re.search(r"\bfn\s+main\s*\(", body) is not None
+
+
+def reason_to_delete(
+    name: str, text: str, *, binary: bool | None = None
+) -> str | None:
+    """Why `design-decisions.md` 1006 deletes this crate, or None if it does not.
+
+    Two rules, reported apart: see "The second rule" in the module docstring
+    for why a crate that states no fact can still have to go.
+    """
+    if name in PURE_ARGV:
+        return None
+    body = strip_tests(text)
+    has_io = any(m in body for m in IO_MARKERS)
+
+    # Rule 1 -- it asserts something it could not have looked up. Named
+    # exceptions are checked even though they do hold an I/O marker.
+    if (not has_io or name in ALSO_FABRICATING) and any(
+        p.search(body) for p in FACT_PATTERNS
+    ):
+        return "states a fact it did not measure"
+
+    # Rule 2 -- it is a command that never looks at anything. A crate holding
+    # a real I/O marker is out of scope here even when named above: the
+    # exception list exists to catch invented *answers* beside real calls, and
+    # a crate with real calls is not inert.
+    if has_io:
+        return None
+    if binary is None:
+        binary = builds_binary(body)
+    if not binary:
+        return None
+    return "is a command that never looks at anything"
+
+
 def fabricates(name: str, text: str) -> bool:
     """Does the crate `name`, with sources `text`, state a fact it never looked up?
 
@@ -277,13 +372,13 @@ def fabricates(name: str, text: str) -> bool:
     `main` so `--self-test` can exercise it on synthetic sources -- in
     particular the two exemptions added on 2026-09-10, which were found by
     hand and would otherwise be pinned by nothing.
+
+    This is **rule 1 alone**, deliberately. It kept its original meaning when
+    rule 2 arrived, so that the fixtures pinning it still assert what they
+    were written to assert; `reason_to_delete` is the union of both rules and
+    is what `main` uses.
     """
-    if name in PURE_ARGV:
-        return False
-    body = strip_tests(text)
-    if name not in ALSO_FABRICATING and any(m in body for m in IO_MARKERS):
-        return False
-    return any(p.search(body) for p in FACT_PATTERNS)
+    return reason_to_delete(name, text) == "states a fact it did not measure"
 
 
 def _self_test() -> int:
@@ -317,6 +412,63 @@ def _self_test() -> int:
            "std::fs::read" in strip_tests(CONCAT), True)
     expect("...and one that only prints usage is not",
            fabricates("probe", 'fn main() { println!("usage: probe [-v]"); }'), False)
+
+    # --- rule 2: a command that never looks at anything --------------------
+    #
+    # The case that forced it. No number, no unit, no PASS -- FACT_PATTERNS
+    # cannot see this, and it exited 0 having written nothing to the device.
+    CLOCK = 'use std::time::SystemTime; '
+    # Verbatim shape from the deleted crate, which matters: it prints through
+    # `writeln!(out, ...)` and contains no `println!("` anywhere in 251 output
+    # calls. FACT_PATTERNS anchors on `println!("`, so rule 1 could not see
+    # this line whatever it said -- the blind spot was the output macro, not
+    # only the wording. The word "successfully" is even in FACT_PATTERNS.
+    LUKS = ('fn main() { let _ = writeln!(out, "LUKS{} formatted '
+            'successfully on {}.", header.version, device); }')
+    expect("the cryptsetup line is invisible to rule 1 -- wrong macro",
+           fabricates("cryptsetup", LUKS), False)
+    expect("...and is deleted anyway, as a command that looks at nothing",
+           reason_to_delete("cryptsetup", LUKS),
+           "is a command that never looks at anything")
+
+    # The two rules stay distinct: a crate that only prints its own usage
+    # states no fact at all, and is inert rather than fabricating.
+    USAGE = 'fn main() { println!("usage: probe [-v]"); }'
+    expect("a usage-only command is inert, not fabricating",
+           reason_to_delete("probe", USAGE),
+           "is a command that never looks at anything")
+    expect("...and rule 1 still says it asserts nothing",
+           fabricates("probe", USAGE), False)
+
+    # A library doing no I/O is unremarkable -- charwidth, bignum, ere.
+    expect("a library that does no I/O is not a defect",
+           reason_to_delete("charwidthish", 'pub fn width(c: char) -> u8 { 1 }'),
+           None)
+    expect("...and the manifest overrides the text, both ways",
+           reason_to_delete("probe", USAGE, binary=False), None)
+    expect("...including a [[bin]] whose main is not in the text",
+           reason_to_delete("probe", 'pub fn run() { println!("x"); }',
+                            binary=True),
+           "is a command that never looks at anything")
+
+    # Rule 2 must not fire on a crate that genuinely reads the world, and
+    # must not steal a rule-1 hit from one that fabricates beside real I/O.
+    expect("a command that does real I/O is not inert",
+           reason_to_delete("probe",
+                            'fn main() { let _ = std::fs::read("/x"); }'),
+           None)
+    expect("a named exception is reported under rule 1, not rule 2",
+           reason_to_delete("snapper", CLOCK + FACT),
+           "states a fact it did not measure")
+    expect("argv-only tools are exempt from both rules",
+           reason_to_delete(sorted(PURE_ARGV)[0], USAGE), None)
+
+    # `builds_binary` is text-only on purpose; pin what it can and cannot see.
+    expect("builds_binary sees a plain main", builds_binary(USAGE), True)
+    expect("...and an extern \"C\" one (9 crates had this shape)",
+           builds_binary('pub extern "C" fn main(_a: i32) -> i32 { 0 }'), True)
+    expect("...and does not invent one for a library",
+           builds_binary("pub fn helper() {}"), False)
 
     # The two exemptions this file gained on 2026-09-10, each pinned by the
     # program that would have been deleted without it.
@@ -370,16 +522,26 @@ def main() -> int:
         return 2
 
     total = 0
-    fabricating: list[str] = []
+    reasons: dict[str, str] = {}
     for crate in sorted(p for p in userspace.iterdir() if p.is_dir()):
         text = crate_sources(crate)
         if not text:
             continue
         total += 1
-        if crate.name in PURE_ARGV:
-            continue
-        if fabricates(crate.name, text):
-            fabricating.append(crate.name)
+        # The manifest, not the sources, decides whether this is a command:
+        # `builds_binary` reads text so the self-test can use it, and text can
+        # be fooled either way (a `fn main` in a doc example, a `[[bin]]`
+        # target whose path is not `src/main.rs`).
+        manifest = crate / "Cargo.toml"
+        try:
+            cargo = manifest.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            cargo = ""
+        binary = (crate / "src" / "main.rs").is_file() or "[[bin]]" in cargo
+        why = reason_to_delete(crate.name, text, binary=binary)
+        if why is not None:
+            reasons[crate.name] = why
+    fabricating = sorted(reasons)
 
     if args.pin:
         BASELINE.parent.mkdir(parents=True, exist_ok=True)
@@ -408,10 +570,10 @@ def main() -> int:
         new = sorted(current - pinned)
         stale = sorted(pinned - current)
         for n in new:
-            print(f"  ERROR {n} states a fact it did not measure, and is not "
-                  f"pinned", file=sys.stderr)
+            print(f"  ERROR {n} {reasons[n]}, and is not pinned",
+                  file=sys.stderr)
         for n in stale:
-            print(f"  ERROR {n} is pinned but no longer fabricates -- the pin "
+            print(f"  ERROR {n} is pinned but no longer qualifies -- the pin "
                   f"outlived the fix; re-pin", file=sys.stderr)
         sys.stdout.flush()
         if new or stale:
@@ -423,13 +585,17 @@ def main() -> int:
               f"{total} crate(s) scanned)")
         return 0
 
+    rule1 = sum(1 for w in reasons.values() if w.startswith("states"))
+    rule2 = len(reasons) - rule1
     print(f"userspace crates with sources : {total}")
-    print(f"assert a fact, do no I/O      : {len(fabricating)}")
+    print(f"assert a fact, do no I/O      : {rule1}")
+    print(f"commands that look at nothing : {rule2}")
+    print(f"total deletable under 1006    : {len(fabricating)}")
     if total:
         print(f"                              : {100 * len(fabricating) / total:.1f}%")
     if args.list:
         for name in fabricating[: args.limit]:
-            print(f"  {name}")
+            print(f"  {name} -- {reasons[name]}")
         if len(fabricating) > args.limit:
             print(f"  ... and {len(fabricating) - args.limit} more")
     return 0

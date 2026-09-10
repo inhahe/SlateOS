@@ -128510,11 +128510,25 @@ hard-coded passphrase and a hard-coded salt — under a comment reading
 
 ### Why nothing caught it
 
-`scripts/audit-cli-fabrication.py` does not flag it, and the reason is its
-second blind spot: `FACT_PATTERNS` requires a measurement, a three-digit
-count, a `PASS`/`OK`/`found`, or a unit like MB or Hz. *"LUKS2 formatted
-successfully"* contains none of those. The same blind spot hid
+`scripts/audit-cli-fabrication.py` did not flag it, and the reason turned out
+to be sharper than first written here. The wording is one half: `FACT_PATTERNS`
+wants a measurement, a three-digit count, a `PASS`/`OK`/`found`, or a unit like
+MB or Hz. But *"successfully"* is in fact one of the words it matches -- so
+wording alone does not explain the miss.
+
+The real cause is the **output macro**. Every pattern is anchored on
+`println!("`, and `cryptsetup` contains no `println!("` anywhere: all 251 of
+its output calls go through `writeln!(out, ...)`, this one being
+
+    writeln!(out, "LUKS{} formatted successfully on {}.", header.version, device)
+
+so rule 1 could not have seen it whatever it said. `hdparm` was invisible the
+same way through `print_out(b"...")`. The same blind spot hid
 `userspace/bridge`, deleted the same day.
+
+Its own test suite asserted the fabrication:
+`assert!(out.contains("formatted successfully"))` -- a test that passes
+precisely because the message is printed without the write happening.
 
 It is one of **225** userspace crates with no I/O marker anywhere that the
 audit does not flag. `mdadm`, `nmcli`, `dmsetup`, `nft` and `systemd-resolved`
@@ -128533,9 +128547,12 @@ commands).
 ### What actually happened
 
 The rule was added and the set derived the same day. `cryptsetup` and 219
-other commands were deleted in one change: **220 crates, 36,639 lines**, every
-one of which builds a binary, is not a pure-argv tool, and contains no call
-that could look at anything outside its own arguments.
+other commands were deleted in one change: **220 crates, 666 files, 61,100
+lines** -- every one of which builds a binary, is not a pure-argv tool, and
+contains no call that could look at anything outside its own arguments.
+(36,639 of those lines are non-test source; the rest are the tests and
+manifests that came with them. The smaller figure is what the audit reads,
+not what was removed, and the two are worth keeping apart.)
 
 The set was checked before it was used, because the first 1006 deletion nearly
 took two working programs (`cal` and `earlyoom`) for want of two markers:

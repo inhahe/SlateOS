@@ -85096,6 +85096,43 @@ checking the answer had not changed. It had, by one, and the one was real. The
 speed was the goal and the bug was the finding; had the count been taken on
 trust because the refactor was "only" a speedup, neither would have surfaced.
 
+### Who can actually feed these, measured 2026-09-10
+
+504 is not one backlog, it is two, and only one of them is lane A's. Split by the
+verb in the name, which says who observes the event:
+
+| verb | count | natural writer |
+|---|---|---|
+| `set_*` | 273 | a userspace settings program -- another lane's |
+| `record_*` | **105** | **the kernel itself, today** |
+| `remove_*` / `add_*` / `register_*` / `unregister_*` / `clear_*` / `create_*` | 118 | mixed; mostly inventory a userspace enumerator owns |
+
+**501 of the 504 sit in modules the shell reads**, so these are not dead internal
+code -- they are 218 tables a user can display whose values can only move one
+way. And **no module is wholly unreferenced** (checked: 0 of 429), so the gap is
+always the specific operation, never the whole table.
+
+The 105 `record_*` are the lane A burn-down, because the kernel is the only thing
+that knows when the event happened. They are spread over 64 modules; the ones
+with the most, all of them counters a system monitor displays and all currently
+zero for the life of a boot:
+
+| module | unreachable `record_*` |
+|---|---|
+| `diskio` | `record_read`, `record_read_error`, `record_write`, `record_write_error` |
+| `dmastat` | `record_fault`, `record_map`, `record_transfer`, `record_unmap` |
+| `netdev` | `record_drop`, `record_error`, `record_rx`, `record_tx` |
+| `numastat` | `record_access`, `record_local_alloc`, `record_migration`, `record_remote_alloc` |
+| `pagecache` | `record_eviction`, `record_hit`, `record_miss`, `record_readahead` |
+| `tlbstat` | `record_flush`, `record_hit`, `record_miss`, `record_shootdown` |
+| `cpucache` | `record_eviction`, `record_hit`, `record_miss` |
+| `cpustat` | `record_context_switch`, `record_interrupt`, `record_time` |
+
+This is what turns "504 mutators" from an unbounded commitment into a bounded
+one: **105 for lane A, and the first eight modules above are 30 of them.** The
+other 399 need a writer in a lane that owns the feature, and filing them as lane
+A work would be recording them against whoever cannot fix them.
+
 Down 16 from August on the corrected basis, so the work is moving, and the paragraph below this one was still quoting the
 August figure two weeks later. That is worth more than the seventeen: this entry
 is about code a tool can see and nothing calls, and its own headline number had

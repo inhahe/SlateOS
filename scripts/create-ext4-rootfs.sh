@@ -1837,6 +1837,17 @@ if [ -n "${FASTPY_DIR:-}" ] && [ -f "$FASTPY_DIR/compiler/__init__.py" ]; then
     _fastpy_root="$FASTPY_DIR"
 elif [ -f "$(dirname "$ROOT_DIR")/fastpy/compiler/__init__.py" ]; then
     _fastpy_root="$(dirname "$ROOT_DIR")/fastpy"
+# The pre-migration location, tried last so a real sibling always wins.
+#
+# This repo moved from `D:/visual studio projects/os` to `E:` on 2026-09-06 and
+# fastpy did not -- the global CLAUDE.md records it, with three other projects,
+# as still living under `D:/visual studio projects`. The sibling test above has
+# therefore been false ever since, and this gate has been printing "no fastpy
+# checkout found" on every run: it could not tell a fixture built by a stale
+# compiler from a current one, which is the entire thing it exists to check.
+elif [ -f "/d/visual studio projects/fastpy/compiler/__init__.py" ]; then
+    _fastpy_root="/d/visual studio projects/fastpy"
+    echo "[rootfs] fastpy: using $_fastpy_root (no sibling of $ROOT_DIR)"
 fi
 if [ -n "$_fastpy_root" ]; then
     FASTPY_NEWEST="$(find "$_fastpy_root/compiler" -name '*.py' -type f -printf '%T@ %p\n' 2>/dev/null \

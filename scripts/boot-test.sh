@@ -2923,6 +2923,87 @@ record_boot_outcome() {
     fi
 
     "$py" "$SCRIPT_DIR/boot-history.py" "${args[@]}" || true
+    commit_boot_history
+}
+
+# Commit the ledger row this run just appended, as its own one-file commit.
+#
+# `bench/boot-history.jsonl` is tracked AND appended to by every run, so the
+# worktree's normal state is dirty in a file all three lanes write, and the only
+# copy of a run's row lives in the working tree until somebody remembers. That is
+# structurally exposed to ordinary git hygiene: on 2026-08-24 a
+# `git checkout -- bench/boot-history.jsonl`, run to clear the dirty file before a
+# merge, deleted two unrecorded boots including the passing one that had just
+# turned the tree green. Nothing warned, because dirty is what that file always
+# looks like. See known-issues.md -> TD-A-BOOT-HISTORY-IS-A-TRACKED-FILE-EVERY-BOOT-DIRTIES.
+#
+# The everyday cost is smaller and constant: in one session on 2026-09-10 this
+# produced two commits whose entire content was this file, plus a third where it
+# rode along inside an unrelated kernel commit because it happened to be dirty.
+#
+# The ledger is append-only and one row per run, so these commits never conflict
+# textually -- the same property that makes the shared docs' append convention
+# merge cleanly.
+#
+# Four refusals, because a harness that commits on its own must be harder to
+# surprise than one that does not:
+#
+#   1. Not a git worktree -- nothing to commit to.
+#   2. A merge, rebase, cherry-pick or bisect in progress. Committing then would
+#      conclude somebody else's operation, which is far worse than a dirty file.
+#   3. The file is not actually modified -- say nothing rather than make an empty
+#      commit.
+#   4. `git commit` fails for any reason. Bookkeeping must never fail a boot
+#      test, so this reports and returns 0 -- but it reports, because a silent
+#      failure here restores exactly the hazard being removed.
+#
+# Path-limited on purpose: `git commit -- <path>` commits that path alone and
+# ignores the index, so a run started with other work staged cannot have it
+# swept into a ledger commit.
+commit_boot_history() {
+    local ledger="bench/boot-history.jsonl"
+    # `--absolute-git-dir`, not `--git-dir`: the latter answers `.git`, relative
+    # to PROJECT_ROOT, and the `-e` tests below run from wherever the harness
+    # happens to be. With the relative form every marker test silently failed,
+    # so a mid-merge run fell through to git's own refusal and reported
+    # "could not commit" instead of naming the merge -- a true refusal with a
+    # misleading reason, which is the failure mode this whole function is about.
+    local gitdir
+    gitdir="$(cd "$PROJECT_ROOT" && git rev-parse --absolute-git-dir 2>/dev/null)" || return 0
+    [ -n "$gitdir" ] || return 0
+
+    local common
+    common="$(cd "$PROJECT_ROOT" && git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" ||
+        common="$gitdir"
+    for marker in MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD BISECT_LOG rebase-merge rebase-apply; do
+        if [ -e "$gitdir/$marker" ] || [ -e "$common/$marker" ]; then
+            echo "[history] not committing $ledger: $marker is present, so a git" >&2
+            echo "[history] operation is in progress and this commit would join it." >&2
+            echo "[history] The row is appended and in the working tree; commit it" >&2
+            echo "[history] yourself once that finishes, and do not clear it." >&2
+            return 0
+        fi
+    done
+
+    if (cd "$PROJECT_ROOT" && git diff --quiet -- "$ledger" 2>/dev/null); then
+        return 0
+    fi
+
+    local sha branch
+    sha="$(cd "$PROJECT_ROOT" && git rev-parse --short HEAD 2>/dev/null)" || sha="unknown"
+    branch="$(cd "$PROJECT_ROOT" && git rev-parse --abbrev-ref HEAD 2>/dev/null)" || branch="unknown"
+
+    if (cd "$PROJECT_ROOT" && git commit --quiet \
+            -m "bench: boot-history row for $sha on $branch" \
+            -- "$ledger" 2>/dev/null); then
+        echo "[history] recorded $ledger as its own commit; worktree is clean again."
+    else
+        echo "[history] WARNING: could not commit $ledger. The row is appended and" >&2
+        echo "[history] lives only in the working tree -- commit it, and do NOT run" >&2
+        echo "[history] git checkout/restore/stash against it. That is how two boots" >&2
+        echo "[history] were lost on 2026-08-24." >&2
+    fi
+    return 0
 }
 
 # Everything that must happen on the way out, once, however we leave.

@@ -128479,7 +128479,7 @@ decision to make from inside `loginctl`:
 Either way `su` must stop being a session registry of its own. Until then the
 two lists drift, and each is right about a different half of the machine.
 
-## B-CRYPTSETUP-SAYS-THE-DISK-IS-ENCRYPTED-AND-WRITES-NOTHING (lane B, 2026-09-10) — open
+## B-CRYPTSETUP-SAYS-THE-DISK-IS-ENCRYPTED-AND-WRITES-NOTHING (lane B, 2026-09-10) — RESOLVED by deletion, same day
 
 **In short:** `cryptsetup luksFormat /dev/sda1` prints
 `LUKS2 formatted successfully on /dev/sda1.` and exits 0. It has not written
@@ -128530,6 +128530,39 @@ rule for the no-I/O-at-all shape, and that rule must exclude library crates
 (`charwidth`, `bignum`, `ere`, `modechange` are in the set and are not
 commands).
 
-**Until then this entry is the record.** Of everything found in a day of
-deleting fabrications, this is the one where believing the output has a
-physical consequence.
+### What actually happened
+
+The rule was added and the set derived the same day. `cryptsetup` and 219
+other commands were deleted in one change: **220 crates, 36,639 lines**, every
+one of which builds a binary, is not a pure-argv tool, and contains no call
+that could look at anything outside its own arguments.
+
+The set was checked before it was used, because the first 1006 deletion nearly
+took two working programs (`cal` and `earlyoom`) for want of two markers:
+
+* **Dependencies.** Across all 220 there are exactly two declared dependencies,
+  `quoting` (20 crates) and `sha2` (1). Neither reads the world, so no crate
+  in the set reaches it through another.
+* **A wider net than `IO_MARKERS`.** Zero hits for `env::var` unprefixed,
+  `current_dir`/`current_exe`, `asm!`, `include_str!`, or a `::`-path into any
+  workspace crate. The only `extern "C"` occurrences -- 9 of them -- are
+  `pub extern "C" fn main(_argc, _argv)`, an *exported entry point* whose argv
+  parameters are underscore-ignored, not a libc declaration.
+* **Reverse dependencies.** Nothing outside the set names any of them in code:
+  no `apps/*` manifest, no `init/`, no rootfs script. The only references were
+  prose, plus 220 lines in `scripts/argv-utf8-baseline.txt` -- one per crate,
+  pruned in the same commit, since a pin naming a crate that is gone is a gate
+  failure in its own right.
+
+`hdparm` is the case worth remembering beside `cryptsetup`: 582 lines that
+print ` Model Number:       Slate OS Virtual Disk`, ` Serial Number:
+VD00000001` and `  Queue depth: 32` without ever opening a device. It does not
+merely fail to identify the drive; it answers as though it had.
+
+The remaining `notimpl`, `modechange`, `ere`, `charwidth` and `bignum` are
+libraries, not commands, and are excluded by the rule's third clause -- "does
+no I/O" is unremarkable in a library.
+
+Recorded here rather than folded into the commit because the entry's original
+point stands: of everything found in a day of deleting fabrications, this is
+the one where believing the output has a physical consequence.

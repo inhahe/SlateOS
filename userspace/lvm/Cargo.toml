@@ -1,6 +1,0 @@
-[package]
-name = "lvm"
-version = "0.1.0"
-edition = "2024"
-description = "SlateOS lvm - logical volume management (pvcreate/vgcreate/lvcreate/pvs/vgs/lvs)"
-[dependencies]

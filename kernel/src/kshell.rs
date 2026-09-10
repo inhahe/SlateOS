@@ -7761,7 +7761,7 @@ fn dispatch(line: &str) {
         "disk" | "blkinfo" => cmd_disk(),
         "blkread" => cmd_blkread(args),
         "ls" | "dir" => cmd_ls(args),
-        "cat" | "type" => cmd_cat(args),
+        "cat" => cmd_cat(args),
         "write" => cmd_write(args),
         "rm" | "del" => cmd_rm(args),
         "mkdir" => cmd_mkdir(args),
@@ -8340,7 +8340,7 @@ fn dispatch(line: &str) {
         "let" => cmd_let(args),
         "trap" => cmd_trap(args),
         "command" => cmd_command(args),
-        "which" | "typeof" => cmd_type(args),
+        "which" | "type" | "typeof" => cmd_type(args),
         "return" => {
             // `return [N]` — set exit status and signal function return.
             if !args.is_empty() {
@@ -57553,7 +57553,7 @@ fn cmd_sysdiag(args: &str) {
                     set_exit(1);
                 }
             } else {
-                shell_println!("Usage: diag category <name>");
+                shell_println!("Usage: sysdiag category <name>");
                 shell_println!("Categories: network, storage, memory, services, boot, security");
                 set_exit(1);
             }
@@ -58899,7 +58899,7 @@ fn cmd_bluetooth(args: &str) {
                     }
                 }
             } else {
-                shell_println!("Usage: bt pair <address> <name> [type]");
+                shell_println!("Usage: bluetooth pair <address> <name> [type]");
                 shell_println!(
                     "Types: headphones, speaker, headset, keyboard, mouse, gamepad, phone, computer, printer, other"
                 );
@@ -58916,7 +58916,7 @@ fn cmd_bluetooth(args: &str) {
                     }
                 }
             } else {
-                shell_println!("Usage: bt unpair <address>");
+                shell_println!("Usage: bluetooth unpair <address>");
                 set_exit(1);
             }
         }
@@ -58930,7 +58930,7 @@ fn cmd_bluetooth(args: &str) {
                     }
                 }
             } else {
-                shell_println!("Usage: bt connect <address>");
+                shell_println!("Usage: bluetooth connect <address>");
                 set_exit(1);
             }
         }
@@ -58944,7 +58944,7 @@ fn cmd_bluetooth(args: &str) {
                     }
                 }
             } else {
-                shell_println!("Usage: bt disconnect <address>");
+                shell_println!("Usage: bluetooth disconnect <address>");
                 set_exit(1);
             }
         }
@@ -58959,7 +58959,7 @@ fn cmd_bluetooth(args: &str) {
                     }
                 }
             } else {
-                shell_println!("Usage: bt trust <address> [on|off]");
+                shell_println!("Usage: bluetooth trust <address> [on|off]");
                 set_exit(1);
             }
         }
@@ -58974,7 +58974,7 @@ fn cmd_bluetooth(args: &str) {
                     }
                 }
             } else {
-                shell_println!("Usage: bt block <address> [on|off]");
+                shell_println!("Usage: bluetooth block <address> [on|off]");
                 set_exit(1);
             }
         }
@@ -59006,7 +59006,7 @@ fn cmd_bluetooth(args: &str) {
                     }
                 }
             } else {
-                shell_println!("Usage: bt info <address>");
+                shell_println!("Usage: bluetooth info <address>");
                 set_exit(1);
             }
         }
@@ -59021,7 +59021,7 @@ fn cmd_bluetooth(args: &str) {
                     }
                 }
             } else {
-                shell_println!("Usage: bt name <adapter name>");
+                shell_println!("Usage: bluetooth name <adapter name>");
                 set_exit(1);
             }
         }
@@ -59056,7 +59056,7 @@ fn cmd_bluetooth(args: &str) {
                     }
                 }
             } else {
-                shell_println!("Usage: bt addscan <addr> <name> [type] [rssi]");
+                shell_println!("Usage: bluetooth addscan <addr> <name> [type] [rssi]");
                 set_exit(1);
             }
         }
@@ -71876,7 +71876,7 @@ fn cmd_netsyslog(args: &str) {
             // syslog forward <ip> [port]
             let ip_str = parts.get(1).copied().unwrap_or("");
             if ip_str.is_empty() {
-                shell_println!("Usage: syslog forward <ip> [port]");
+                shell_println!("Usage: netsyslog forward <ip> [port]");
                 set_exit(1);
                 return;
             }
@@ -71945,7 +71945,7 @@ fn cmd_netsyslog(args: &str) {
             // syslog send <message>
             let message = parts.get(1..).map(|p| p.join(" ")).unwrap_or_default();
             if message.is_empty() {
-                shell_println!("Usage: syslog send <message>");
+                shell_println!("Usage: netsyslog send <message>");
                 set_exit(1);
                 return;
             }
@@ -87826,7 +87826,7 @@ fn cmd_uicolorscheme(args: &str) {
                     }
                 }
             } else {
-                shell_println!("Usage: colorscheme set <id>");
+                shell_println!("Usage: uischeme set <id>");
                 set_exit(1);
             }
         }
@@ -87854,7 +87854,7 @@ fn cmd_uicolorscheme(args: &str) {
                     }
                 }
             } else {
-                shell_println!("Usage: colorscheme accent <#hex>");
+                shell_println!("Usage: uischeme accent <#hex>");
                 set_exit(1);
             }
         }
@@ -87870,7 +87870,7 @@ fn cmd_uicolorscheme(args: &str) {
                     }
                 }
             } else {
-                shell_println!("Usage: colorscheme color <role> <#hex>");
+                shell_println!("Usage: uischeme color <role> <#hex>");
                 shell_println!("  Roles: background, surface, primary, secondary, accent,");
                 shell_println!("         text, textsec, border, error, warning, success, link");
                 set_exit(1);
@@ -87885,7 +87885,7 @@ fn cmd_uicolorscheme(args: &str) {
                     set_exit(1);
                 }
             } else {
-                shell_println!("Usage: colorscheme get <role>");
+                shell_println!("Usage: uischeme get <role>");
                 set_exit(1);
             }
         }
@@ -87901,7 +87901,7 @@ fn cmd_uicolorscheme(args: &str) {
             shell_println!("Color scheme subsystem initialised.");
         }
         _ => {
-            shell_println!("Usage: colorscheme <subcommand>");
+            shell_println!("Usage: uischeme <subcommand>");
             shell_println!("  show / active         Show active scheme");
             shell_println!("  list                  List all schemes");
             shell_println!("  set <id>              Set active scheme");
@@ -98147,7 +98147,7 @@ fn cmd_cfreq(args: &str) {
             shell_println!("  Ops:              {}", ops);
         }
         _ => {
-            shell_println!("Usage: cpufreq [list|governor|boost|stats]");
+            shell_println!("Usage: cfreq [list|governor|boost|stats]");
             set_exit(1);
         }
     }
@@ -98246,7 +98246,7 @@ fn cmd_therm(args: &str) {
                     set_exit(1);
                 }
             } else {
-                shell_println!("Usage: thermal fan <id> <duty%>");
+                shell_println!("Usage: therm fan <id> <duty%>");
                 set_exit(1);
             }
         }
@@ -98260,7 +98260,7 @@ fn cmd_therm(args: &str) {
             shell_println!("  Ops:             {}", ops);
         }
         _ => {
-            shell_println!("Usage: thermal [zones|fans|fan|stats]");
+            shell_println!("Usage: therm [zones|fans|fan|stats]");
             set_exit(1);
         }
     }
@@ -116637,7 +116637,7 @@ fn cmd_usb(args: &str) {
             );
         }
         _ => {
-            shell_println!("Usage: usb [status|ports|devices|hid|rescan]");
+            shell_println!("Usage: usbdev [status|ports|devices|hid|rescan]");
             shell_println!("  status  - Show USB controller status");
             shell_println!("  ports   - List USB ports and connection status");
             shell_println!("  devices - List enumerated USB devices");
@@ -118364,7 +118364,7 @@ fn cmd_wget(args: &str) {
 
 fn cmd_dns(args: &str) {
     if args.is_empty() {
-        shell_println!("Usage: dns <domain-name>");
+        shell_println!("Usage: nslookup <domain-name>");
         shell_println!("       dns -6 <domain-name>   (AAAA / IPv6)");
         shell_println!("  e.g., dns example.com");
         set_exit(1);
@@ -118375,7 +118375,7 @@ fn cmd_dns(args: &str) {
     let (query_ipv6, name) = if args.starts_with("-6 ") || args.starts_with("-6\t") {
         (true, args[3..].trim())
     } else if args == "-6" {
-        shell_println!("Usage: dns -6 <domain-name>");
+        shell_println!("Usage: nslookup -6 <domain-name>");
         set_exit(1);
         return;
     } else {
@@ -118383,7 +118383,7 @@ fn cmd_dns(args: &str) {
     };
 
     if name.is_empty() {
-        shell_println!("Usage: dns <domain-name>");
+        shell_println!("Usage: nslookup <domain-name>");
         set_exit(1);
         return;
     }

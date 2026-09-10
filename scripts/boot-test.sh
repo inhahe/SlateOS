@@ -4467,6 +4467,53 @@ check_read_defaults() {
 
 check_read_defaults
 
+# A usage line that names a word running a different command.
+#
+# cmd_bluetooth printed `Usage: bt pair <address>` nine times, and `bt` runs
+# cmd_backtrace. So the operator who typed what they were told got a stack trace
+# from an unrelated subsystem -- which is worse than a name that does not exist,
+# because a nonexistent name errors and a wrong one answers.
+#
+# Decidable with no judgment: one side is the printed string, the other is the
+# `"word" => cmd_foo(args)` arm, both in kshell.rs. The gate has no opinion about
+# which name ought to be canonical, only that the help and the dispatch table
+# agree. No baseline: the tree is at zero and this is where it stays.
+check_usage_names() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== Usage-name check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    if ! run_checker check-usage-names-selftest "$py" \
+            "$PROJECT_ROOT/scripts/check-usage-names-reach-the-command.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  check-usage-names-reach-the-command.py" >&2
+        echo "fails its own cases, so its verdict on the tree means nothing." >&2
+        return 1
+    fi
+
+    echo "=== Checking that a usage line names a command it can reach ==="
+    if run_checker check-usage-names "$py" \
+            "$PROJECT_ROOT/scripts/check-usage-names-reach-the-command.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  A command prints a usage line naming a word" >&2
+    echo "that dispatches somewhere else.  Fix the HELP to print a word that" >&2
+    echo "reaches this command, or fix the DISPATCH so the printed word arrives" >&2
+    echo "here.  The shell builtin type was the second kind: it printed" >&2
+    echo "Usage: type while the word type was an alias of cat." >&2
+    exit 1
+}
+
+check_usage_names
+
 # Keep every path-taking VFS entry point behind the one permission gate.
 #
 # This guards the failure mode that no runtime test can see, because both

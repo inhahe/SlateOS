@@ -56144,3 +56144,37 @@ four, and the difference is a claim I did not check.
 **Still true, and small:** C-Q10's entry does not say the operator answered it.
 That is a documentation gap in lane C's own entry, not a dropped request, and it
 is theirs to judge. Nothing is blocked on it.
+
+
+## main is red at the cfg(unix) gate on a one-word lint in net/httpclient (lane A, 2026-09-09)
+
+**Not lane A's to fix** -- `net/**` is on lane A's never-writes list. Notice
+sent to lane C; recorded here because it blocks every lane, not just them.
+
+    net/httpclient/src/lib.rs:22:53
+    error: item in documentation is missing backticks
+
+`clippy::doc_markdown` on **DynDNS** in the module doc ("the DynDNS updater in
+`apps/settings/src/remote.rs`"). Wrapping the word in backticks clears it.
+
+**Why it stops everyone.** The lint is deny-level for the shipping target, so
+`boot-test.sh`'s "every `#[cfg(unix)]` arm compiles and lints" gate refuses the
+build -- before the kernel is built and long before QEMU. Every lane's boot test
+halts there, so until it is fixed nobody can produce the green run that CLAUDE.md
+requires before merging to `main`. Verified present on `origin/main` with
+`git show origin/main:net/httpclient/src/lib.rs`, so it is not a merge artifact
+of mine.
+
+**Why it surfaced now rather than when it landed, which is the more useful
+part.** `doc_markdown` is not `cfg`-dependent, so nothing about unix made this
+appear. The cfg(unix) workspace clippy is simply **the only thing in this tree
+that lints `net/httpclient` at all** -- the kernel clippy gate is `-p kernel`,
+and the pre-push compiler gate is scoped to coreutils. That is the same shape as
+lane B's note the same day that "`cargo clippy` without `--all-targets` had been
+hiding warnings": a crate nothing lints drifts until the one comprehensive run
+reaches it, and that run is the slowest thing we have.
+
+**Blocked behind it:** lane A's 11 commits (the native interval-timer syscalls,
+the three dispatch self-tests that previously never ran, the whitespace repair,
+and the refreshed release baseline). All are pushed to `origin/lane-a` and
+compile clean; only publication to `main` waits.

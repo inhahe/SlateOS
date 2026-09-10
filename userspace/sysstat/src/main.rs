@@ -556,38 +556,37 @@ struct ProcessStat {
     _num_threads: u64,
     vsize_kb: u64,
     rss_pages: u64,
-    cpu_num: u32,
+    /// The CPU this process last ran on, or `None` when the kernel's `stat`
+    /// line stopped before field 39. Zero is a real CPU, so it cannot double
+    /// as "unknown".
+    cpu_num: Option<u32>,
     read_bytes: u64,
     write_bytes: u64,
 }
 
+/// `/proc/<pid>/stat` for `pidstat`, through [`procinfo`].
+///
+/// Read as bytes: `read_file_lines` went through `read_to_string`, which
+/// *fails* on a name that is not UTF-8, so such a process was absent from
+/// `pidstat` output entirely -- CPU time, memory and I/O with it.
+///
+/// **`cpu_num` is now honest about not knowing.** It was
+/// `parts.get(36)...unwrap_or(0)`, and `stat`'s field 39 is the last one
+/// anything reads, so on a kernel exporting a shorter line every process was
+/// reported as running on CPU 0 -- a plausible number, uniformly wrong, and
+/// indistinguishable from the truth on a single-CPU machine.
 fn parse_proc_stat(pid: u64) -> Option<ProcessStat> {
-    let stat_path = format!("/proc/{}/stat", pid);
-    let lines = read_file_lines(&stat_path)?;
-    let line = lines.first()?;
-    // The comm field is in parentheses, which may contain spaces.
-    let open = line.find('(')?;
-    let close = line.rfind(')')?;
-    let comm = line[open + 1..close].to_string();
-    let rest = &line[close + 2..];
-    let parts: Vec<&str> = rest.split_whitespace().collect();
-    if parts.len() < 20 {
-        return None;
-    }
+    let stat = procinfo::ProcFs::new().process_stat(pid).ok().flatten()?;
     Some(ProcessStat {
         pid,
-        comm,
-        _state: parts.first()?.chars().next().unwrap_or('S'),
-        utime: parts.get(11).and_then(|s| s.parse().ok()).unwrap_or(0),
-        stime: parts.get(12).and_then(|s| s.parse().ok()).unwrap_or(0),
-        _num_threads: parts.get(17).and_then(|s| s.parse().ok()).unwrap_or(1),
-        vsize_kb: parts
-            .get(20)
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(0)
-            / 1024,
-        rss_pages: parts.get(21).and_then(|s| s.parse().ok()).unwrap_or(0),
-        cpu_num: parts.get(36).and_then(|s| s.parse().ok()).unwrap_or(0),
+        comm: quoting::escape_unprintable(&stat.comm),
+        _state: char::from(stat.state),
+        utime: stat.utime_ticks,
+        stime: stat.stime_ticks,
+        _num_threads: stat.num_threads,
+        vsize_kb: stat.vsize_bytes / 1024,
+        rss_pages: stat.rss_pages,
+        cpu_num: stat.processor,
         read_bytes: 0,
         write_bytes: 0,
     })
@@ -660,7 +659,7 @@ fn fallback_process_stats() -> Vec<ProcessStat> {
             _num_threads: 1,
             vsize_kb: 4096,
             rss_pages: 256,
-            cpu_num: 0,
+            cpu_num: Some(0),
             read_bytes: 1024000,
             write_bytes: 512000,
         },
@@ -673,7 +672,7 @@ fn fallback_process_stats() -> Vec<ProcessStat> {
             _num_threads: 4,
             vsize_kb: 8192,
             rss_pages: 512,
-            cpu_num: 1,
+            cpu_num: Some(1),
             read_bytes: 2048000,
             write_bytes: 1024000,
         },
@@ -686,7 +685,7 @@ fn fallback_process_stats() -> Vec<ProcessStat> {
             _num_threads: 1,
             vsize_kb: 16384,
             rss_pages: 1024,
-            cpu_num: 0,
+            cpu_num: Some(0),
             read_bytes: 512000,
             write_bytes: 256000,
         },
@@ -1686,7 +1685,19 @@ fn print_pidstat_cpu_row(
     let _ = writeln!(
         out,
         "{:<12} {:>8} {:>8.2} {:>8.2} {:>8.2} {:>8.2} {:>5} {:>6} {:<16}",
-        ts, curr.pid, usr_pct, sys_pct, 0.00, total_pct, curr.cpu_num, tid_col, curr.comm
+        ts,
+        curr.pid,
+        usr_pct,
+        sys_pct,
+        0.00,
+        total_pct,
+        // `-` rather than `0` when the kernel's `stat` line stopped before the
+        // CPU field. Printing 0 there is a claim about which CPU ran the
+        // process, and it is the claim the old `.unwrap_or(0)` made silently.
+        curr.cpu_num
+            .map_or_else(|| "-".to_string(), |c| c.to_string()),
+        tid_col,
+        curr.comm
     );
 }
 

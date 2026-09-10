@@ -989,6 +989,54 @@ fn since_subtracts_the_two_fields_total_ignores() {
 }
 
 #[test]
+fn processor_is_none_when_the_line_stops_before_it() {
+    // `stat`'s field 39 is index 36 after the comm, and the parse deliberately
+    // accepts a line that stops earlier -- a kernel exporting fewer fields
+    // should not blank the process table. So "the line was too short" needs a
+    // value of its own: **zero is a real CPU number**.
+    //
+    // `userspace/sysstat` folded the two together with `.unwrap_or(0)` and
+    // reported every process as running on CPU 0 -- plausible, uniformly
+    // wrong, and indistinguishable from the truth on a single-CPU machine.
+    let stat = ProcessStat::parse(&numbered_stat_line(21, None)).expect("a short but valid line");
+    assert_eq!(stat.pid, 7);
+    assert_eq!(stat.processor, None, "the field is absent, not zero");
+}
+
+/// And a line that carries it reports it -- including a genuine CPU 0, which
+/// is the value the absent case must not be confused with.
+#[test]
+fn processor_reports_the_cpu_including_zero() {
+    let three = ProcessStat::parse(&numbered_stat_line(36, Some(3))).expect("a full line");
+    assert_eq!(three.processor, Some(3));
+
+    let zero = ProcessStat::parse(&numbered_stat_line(36, Some(0))).expect("a full line");
+    assert_eq!(
+        zero.processor,
+        Some(0),
+        "CPU 0 is a real answer and must not read as absent"
+    );
+}
+
+/// A synthetic `/proc/<pid>/stat` line with `fields` numeric fields after the
+/// comm, and `processor` written into index 36 when one is given.
+///
+/// Separate from [`stat_line`] above, which is a fixed realistic line: this one
+/// varies its *length*, which is the property under test. That line stops at
+/// index 31, so `processor` is `None` for it too -- correctly.
+fn numbered_stat_line(fields: usize, processor: Option<u32>) -> Vec<u8> {
+    let mut line = b"7 (probe) S".to_vec();
+    for i in 1..=fields {
+        let value = match processor {
+            Some(p) if i == 36 => u64::from(p),
+            _ => i as u64,
+        };
+        line.extend_from_slice(format!(" {value}").as_bytes());
+    }
+    line
+}
+
+#[test]
 fn total_includes_steal_and_excludes_guest() {
     let t = CpuStats::parse(STAT).total.unwrap();
     assert_eq!(t.total(), 100 + 20 + 30 + 400 + 5 + 6 + 7 + 8);

@@ -126981,8 +126981,19 @@ day, which closes the set.
 
 ~~**Five more programs still read `/proc/<pid>/stat` by hand** -- `kill`,
 `lsof`, `strace`, `sysstat` and `who`~~ -- found by running the grep rather than
-assuming the three were all of them. **`kill`, `lsof` and `who` converted
-2026-09-10; `strace` and `sysstat` remain.**
+assuming the three were all of them. **All converted 2026-09-10, and it was four,
+not five.**
+
+`strace` was on that list wrongly: its only reference to `/proc/<pid>/stat` is
+`fs::metadata(&path).is_err()`, an existence check that never opens the file.
+The grep that produced the list of five answered "which files mention this
+path"; it was read as "which files parse it". The *same* narrowing that
+produced the original "ten readers" figure this entry corrects, two paragraphs
+up, made by the person who wrote that correction.
+
+**Derived, not decremented:** no file under `userspace/` or `apps/` hand-parses
+`/proc/<pid>/stat` any more -- checked by looking for the `find('(')`/`rfind(')')`
+pair rather than for the path.
 
 `kill`'s was the same shape as `pgrep`'s: `killall <name>` could not see a
 process whose name is not UTF-8, so it could not be killed by name. `who -u`
@@ -126996,8 +127007,9 @@ kind of sweep.
 **And the running count in this entry is a running count, not a measurement.**
 The 50 above was derived; every figure since has been that number minus one per
 conversion, and nothing re-derived it. What *is* measured, and re-measured each time
-it is quoted: **83** files under `userspace/` and `apps/` open a `/proc` path
-without `procinfo`, down from the 95 recorded above (86 earlier the same day). The "opens something `procinfo` already parses"
+it is quoted: **82** files under `userspace/` and `apps/` open a `/proc` path
+without `procinfo`, down from the 95 recorded above (86 and 83 earlier the same
+day). The "opens something `procinfo` already parses"
 subset has not been re-derived since, and should be before anyone quotes it.
 
 **`pstree`'s version was the worst of the three.** A tree is assembled by

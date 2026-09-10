@@ -3,6 +3,10 @@ name = "plymouth"
 version = "0.1.0"
 edition = "2024"
 description = "SlateOS plymouth utility"
+[dev-dependencies]
+# The stale-pidfile tests need a real file at a path of their own.
+scratchdir = { path = "../scratchdir" }
+
 [dependencies]
 # plymouth names the boot theme it loaded, a string read out of a config
 # file on disk rather than one it chose.

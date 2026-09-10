@@ -25,7 +25,6 @@ const VERSION: &str = "0.1.0";
 
 const PLYMOUTH_CONF: &str = "/etc/plymouth/plymouthd.conf";
 const THEMES_DIR: &str = "/usr/share/plymouth/themes";
-const RUN_DIR: &str = "/run/plymouth";
 const PID_FILE: &str = "/run/plymouth/pid";
 
 #[derive(Clone, Debug)]
@@ -272,20 +271,20 @@ fn plymouth_main(args: &[String]) -> i32 {
                 }
             }
             "--quit" => {
-                eprintln!("plymouth: would send quit to daemon");
-                return 0;
+                eprintln!("plymouth: cannot send quit to a daemon: none is running");
+                return 1;
             }
             "--show-splash" => {
-                eprintln!("plymouth: would show splash");
-                return 0;
+                eprintln!("plymouth: cannot show the splash on a daemon: none is running");
+                return 1;
             }
             "--hide-splash" => {
-                eprintln!("plymouth: would hide splash");
-                return 0;
+                eprintln!("plymouth: cannot hide the splash on a daemon: none is running");
+                return 1;
             }
             "--wait" => {
-                eprintln!("plymouth: would wait for daemon");
-                return 0;
+                eprintln!("plymouth: cannot wait for a daemon: none is running");
+                return 1;
             }
             s if s.starts_with("--update=") => {
                 let text = s.strip_prefix("--update=").unwrap_or("");
@@ -344,8 +343,61 @@ fn plymouth_main(args: &[String]) -> i32 {
     0
 }
 
+/// Is a plymouth daemon actually running?
+///
+/// This was `Path::new(PID_FILE).exists()`, which is the classic stale-pidfile
+/// defect: a daemon that crashed, was killed, or exited without unlinking its
+/// file leaves `plymouth --ping` answering "daemon is running" for as long as
+/// the file survives -- which on `/run` is until the next boot. The file says
+/// a daemon *once started*, and the question asked is whether one is *there
+/// now*.
+///
+/// It reads the pid and asks the kernel. `kill(pid, 0)` sends no signal; it
+/// performs the permission-and-existence check and nothing else, which is
+/// exactly this question. `posix/src/signal.rs` exports it and routes it to
+/// `SYS_SIGNAL_SEND`.
 fn is_daemon_running() -> bool {
-    Path::new(PID_FILE).exists()
+    daemon_running_from(Path::new(PID_FILE))
+}
+
+/// The body of [`is_daemon_running`], taking the path so it can be tested.
+///
+/// The stale-pidfile case is the whole point of this function, and it cannot
+/// be exercised against a hard-coded `/run/plymouth/pid`.
+fn daemon_running_from(pid_file: &Path) -> bool {
+    let Ok(text) = fs::read_to_string(pid_file) else {
+        return false;
+    };
+    let Ok(pid) = text.trim().parse::<i32>() else {
+        // A pid file we cannot parse is not evidence of a running daemon. It
+        // is evidence of a corrupt file, and answering "yes" to that would be
+        // the same mistake in a smaller place.
+        return false;
+    };
+    if pid <= 0 {
+        return false;
+    }
+    process_exists(pid)
+}
+
+/// Does process `pid` exist and are we permitted to signal it?
+#[cfg(unix)]
+fn process_exists(pid: i32) -> bool {
+    // SAFETY: `kill` takes two integers by value and returns one. Signal 0
+    // delivers nothing -- it is defined as the existence-and-permission probe.
+    unsafe extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+    // SAFETY: as above.
+    unsafe { kill(pid, 0) == 0 }
+}
+
+/// The development host has no `kill(2)`. Reporting "not running" is the
+/// answer that cannot invent a daemon; the alternative would have `--ping`
+/// claim one on a machine that has never run this program.
+#[cfg(not(unix))]
+fn process_exists(_pid: i32) -> bool {
+    false
 }
 
 // ============================================================================
@@ -422,21 +474,23 @@ fn plymouthd_main(args: &[String]) -> i32 {
     );
     eprintln!("plymouthd: no_daemon={no_daemon}, attach={attach_to_session}");
 
-    // Create run directory.
-    let _ = fs::create_dir_all(RUN_DIR);
-
-    // Write PID file.
-    let pid = std::process::id();
-    if let Err(e) = fs::write(PID_FILE, format!("{pid}\n")) {
-        eprintln!("plymouthd: cannot write PID file: {e}");
-    }
-
-    eprintln!("plymouthd: daemon would enter main loop (simulated, exiting)");
-
-    // Clean up.
-    let _ = fs::remove_file(PID_FILE);
-
-    0
+    // NO PID FILE, AND NO RUN DIRECTORY.
+    //
+    // This used to `create_dir_all(RUN_DIR)`, write its own pid to
+    // `/run/plymouth/pid`, announce "daemon would enter main loop (simulated,
+    // exiting)", and unlink the file on the way out. The unlink made it mostly
+    // harmless -- but only mostly: `let _ =` discarded its failure, and a
+    // plymouthd killed between the write and the unlink leaves a pid file that
+    // `--ping` used to read as a running daemon.
+    //
+    // That is `bootctl`'s shape, fixed in the same session: a command that
+    // cannot do its job should not leave behind the artefact by which its job
+    // is later recognised. Writing a pid file is a claim that a process is
+    // there to receive signals, and there is not one.
+    eprintln!("plymouthd: cannot start: this build has no splash renderer, so a");
+    eprintln!("plymouthd: daemon would have nothing to draw on and no client");
+    eprintln!("plymouthd: could reach it. Exiting rather than idling.");
+    1
 }
 
 // ============================================================================
@@ -558,6 +612,64 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A pid file naming a process that is not there is not a running daemon.
+    ///
+    /// `is_daemon_running` was `Path::new(PID_FILE).exists()`, so any pid file
+    /// left by a daemon that crashed or was killed made `plymouth --ping`
+    /// answer "daemon is running" until the next boot cleared `/run`. The file
+    /// records that a daemon once STARTED; the question is whether one is
+    /// there NOW.
+    ///
+    /// 0x7FFF_FFFE is used rather than a small number because a low pid is
+    /// likely to be a real process on any host this runs on, which would make
+    /// the test pass for the wrong reason.
+    #[test]
+    fn a_pid_file_naming_a_dead_process_is_not_a_running_daemon() {
+        let scratch = scratchdir::ScratchDir::new("plymouth-stale");
+        let pid_file = scratch.path("pid");
+        fs::write(&pid_file, "2147483646\n").expect("write pid file");
+        assert!(
+            !daemon_running_from(&pid_file),
+            "a pid file alone must not count as a running daemon"
+        );
+    }
+
+    #[test]
+    fn a_missing_pid_file_is_not_a_running_daemon() {
+        let scratch = scratchdir::ScratchDir::new("plymouth-missing");
+        assert!(!daemon_running_from(&scratch.path("pid")));
+    }
+
+    /// Garbage is evidence of a corrupt file, not of a daemon.
+    #[test]
+    fn an_unparsable_pid_file_is_not_a_running_daemon() {
+        let scratch = scratchdir::ScratchDir::new("plymouth-garbage");
+        for content in ["", "   ", "not a number", "12x", "-1", "0"] {
+            let pid_file = scratch.path("pid");
+            fs::write(&pid_file, content).expect("write");
+            assert!(
+                !daemon_running_from(&pid_file),
+                "{content:?} should not read as a running daemon"
+            );
+        }
+    }
+
+    /// The other direction, so the function is not merely always-false: our
+    /// own pid IS alive. Only on unix, where `kill(2)` exists -- the host arm
+    /// answers false by construction and this would assert the opposite.
+    #[cfg(unix)]
+    #[test]
+    fn a_pid_file_naming_a_live_process_is_a_running_daemon() {
+        let scratch = scratchdir::ScratchDir::new("plymouth-live");
+        let pid_file = scratch.path("pid");
+        fs::write(&pid_file, format!("{}\n", std::process::id())).expect("write");
+        assert!(
+            daemon_running_from(&pid_file),
+            "our own pid is alive, so this must be true -- otherwise the test \
+             above passes for the wrong reason"
+        );
+    }
 
     #[test]
     fn test_default_config() {

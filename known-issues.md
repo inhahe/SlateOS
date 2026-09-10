@@ -85112,26 +85112,46 @@ code -- they are 218 tables a user can display whose values can only move one
 way. And **no module is wholly unreferenced** (checked: 0 of 429), so the gap is
 always the specific operation, never the whole table.
 
-The 105 `record_*` are the lane A burn-down, because the kernel is the only thing
-that knows when the event happened. They are spread over 64 modules; the ones
-with the most, all of them counters a system monitor displays and all currently
-zero for the life of a boot:
+The 105 `record_*` are where a lane A burn-down *could* be, because the kernel is
+the only thing that knows when the event happened. But a count is not a work
+list, and the first version of this section said it was:
+
+**Corrected the same hour.** Of the 64 modules, **4 (10 functions) document their
+own `record_*` as deliberately uncalled**, and two of them -- `netdev` and
+`pagecache` -- were named as top targets in the table this replaces.
+`pagecache`'s module header argues the case at length and is right: it
+**projects** `mm::page_cache::stats()` into a synthetic row at read time, and
+does *not* call `record_hit` on the fast path because that would take its spin
+lock and do a per-device string compare inside a page-cache lookup -- an
+operation whose entire purpose is to be faster than touching the disk. Its
+`record_*` exist for a future per-device source and for the self-test. Wiring
+them would have added a second copy of a number the kernel already keeps, which
+is the two-sources-that-can-disagree defect this file is full of.
+
+The four so documented: `cloudsync`, `mobilelink`, `netdev`, `pagecache`.
+
+That leaves **95 functions in 60 modules whose headers say nothing** -- and
+"undocumented" is not "a defect" either. Each still needs reading before it is
+work. What the split buys is that the reading is bounded and ordered, not that
+the answer is known:
 
 | module | unreachable `record_*` |
 |---|---|
 | `diskio` | `record_read`, `record_read_error`, `record_write`, `record_write_error` |
 | `dmastat` | `record_fault`, `record_map`, `record_transfer`, `record_unmap` |
-| `netdev` | `record_drop`, `record_error`, `record_rx`, `record_tx` |
 | `numastat` | `record_access`, `record_local_alloc`, `record_migration`, `record_remote_alloc` |
-| `pagecache` | `record_eviction`, `record_hit`, `record_miss`, `record_readahead` |
 | `tlbstat` | `record_flush`, `record_hit`, `record_miss`, `record_shootdown` |
 | `cpucache` | `record_eviction`, `record_hit`, `record_miss` |
 | `cpustat` | `record_context_switch`, `record_interrupt`, `record_time` |
+| `pagestat` | `record_alloc`, `record_free`, `record_reclaim` |
+| `schedclass` | `record_migration`, `record_slice`, `record_switch` |
 
-This is what turns "504 mutators" from an unbounded commitment into a bounded
-one: **105 for lane A, and the first eight modules above are 30 of them.** The
-other 399 need a writer in a lane that owns the feature, and filing them as lane
-A work would be recording them against whoever cannot fix them.
+**The lesson is the one this whole entry is about, turned on its author.** A tool
+counted 504 things; I sorted them by verb, published eight modules as targets,
+and two of the eight had headers explaining why they are correct -- one of them
+in twenty lines with a performance argument. A mechanical measurement presented
+as a work list is the same error as a counter that can only go up: it reads like
+data.
 
 Down 16 from August on the corrected basis, so the work is moving, and the paragraph below this one was still quoting the
 August figure two weeks later. That is worth more than the seventeen: this entry

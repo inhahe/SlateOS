@@ -12,8 +12,14 @@ ar:ranlib
 ar:strip
 blkid:findfs
 cal:ncal
+cron:anacron
+cron:atd
+cron:atq
+cron:atrm
+cron:batch
 crond2:anacron
 getty:mingetty
+hexdump:xxd
 kill:killall
 last:lastb
 last:lastlog
@@ -54,3 +60,4 @@ w:finger
 w:pinky
 xdg:mimeopen
 xdg:xdg-mime
+zip:unzip

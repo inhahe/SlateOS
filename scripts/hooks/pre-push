@@ -431,6 +431,19 @@ note_gate unreachable-command "$skip_alias"
 
 alias_failed=0
 if [ "$skip_alias" != "1" ]; then
+    # The detector before its verdict. It follows the invocation name forward
+    # through `let` bindings now instead of matching twelve enumerated variable
+    # spellings, which is a real analysis where a lookup table used to be -- and
+    # its whole output is a COUNT, the one shape where a detector that stopped
+    # seeing and a tree that got better read identically. No --head: the
+    # fixtures are string literals in the script and touch no tree.
+    if ! run_checker multicall-aliases-selftest "$py" "$checker" --self-test; then
+        echo "pre-push: multicall-aliases.py FAILED ITS OWN SELF-TEST — its alias count is not trustworthy." >&2
+        alias_failed=1
+    fi
+fi
+
+if [ "$skip_alias" != "1" ] && [ "$alias_failed" != "1" ]; then
     # One run per ref being pushed. Unlike gate 9 this asks a question about a
     # *state* rather than a diff, so only each ref's tip matters — and in the
     # ordinary single-branch push that is exactly one run, at the same cost as

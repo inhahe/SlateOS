@@ -128973,6 +128973,31 @@ be reached, and the two implementations can drift apart with nothing noticing.
 | `userspace/pv` | `fuser` | `userspace/fuser` |
 | `userspace/sysstat` | `iostat` | `userspace/iostat` |
 | `userspace/who` | `w` | `userspace/w` |
+| `userspace/cron` | `crond` | `userspace/crond` |
+| `userspace/cron` | `crontab` | `userspace/crontab` |
+
+**Eight, not six, as of 2026-09-10 — and the name of this entry is now wrong.**
+Kept anyway, because the ID is cited from `design-decisions.md` and from the
+baseline file, and a dangling reference costs more than a stale numeral. The
+two extra were not newly written: `scripts/multicall-aliases.py` matched the
+dispatch comparison only against twelve enumerated variable names, and
+`userspace/cron` calls its lowercased `argv0` `lower`, so **nine** of its
+personalities were invisible to the gate for as long as the gate existed. It
+follows the assignment chain now.
+
+**`cron:crond` is the dangerous one, and it is the `udisks`/`umount` shape
+exactly.** `userspace/cron`'s `crond` personality prints
+`crond: scheduler ready (simulated)` and exits; `userspace/crond` has a real
+loop that `Command::new("/bin/sh")`s the job. Two implementations of one daemon
+name, one of which does nothing, and which one a user would get is decided by
+whichever binary lands at `/sbin/crond`. Neither is installed today — the
+rootfs stages only `services/fastpy-*` binaries — so this is latent rather than
+live, which is the only reason it is an entry and not an incident.
+
+**Still not counted: `cron` also answers to `at`**, because `at` is its
+`else` branch and has no string literal to match. A default personality is
+invisible to this technique, and `userspace/at` exists. That is a known blind
+spot, written down here because the gate cannot report it.
 
 ### Why this is now pinned rather than left as a printout
 

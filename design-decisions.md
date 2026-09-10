@@ -70468,3 +70468,112 @@ image, all of which are rebuilt from source by the same build that produces the
 libc, and none of which could have been relying on the old behaviour -- because
 the old behaviour was that their flags were discarded. The fixtures were
 relinked in the same commit.
+
+## 1011. The ABI gate: Rust supplies the numbers, musl is the oracle, and the list of what to check is derived
+
+**Date:** 2026-09-09
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** yesterday's bug was a structure whose fields our C library put in
+the wrong order. Fixing that one structure by hand was not a response to it,
+because nothing would catch the next one. This is a check that compares *every*
+such structure against the real C library's own header files, automatically, at
+push time -- and that notices when a new structure appears without being
+checked.
+
+### Three programs and no third copy
+
+| | who says it |
+|---|---|
+| the numbers | Rust: `size_of` and `offset_of!`, emitted by `posix::abi_layout`, never typed by a person |
+| the truth | musl: `zig cc --target=x86_64-linux-musl` compiles the emitted `_Static_assert`s against its own headers |
+| what to check | derived: every `#[repr(C)] pub struct` that is also a pointer parameter of an exported `extern "C" fn` |
+
+That third row is the one that took the thinking. A gate whose coverage is a
+hand-kept list is a second list to rot, and `todo.txt`'s own sketch of this
+warned about exactly that. So `scripts/check-libc-abi.py` parses the sources
+for both halves -- the set of `#[repr(C)]` struct names, and the set of types
+appearing as pointer parameters of exported functions -- and takes the
+intersection. **The intersection is what makes it useful**: the parameter set
+alone also catches `WcharT`, `TimeT`, `GidT` and friends, which are typedefs
+with no layout to get wrong. Neither half is written down anywhere, so neither
+can go stale.
+
+There are 98 pointer-parameter types and 15 are checked today, so the gate
+carries a `BASELINE_UNCOVERED` ratchet: it may shrink, never grow. A type that
+starts crossing the boundary tomorrow is refused until it has an entry.
+
+### Why the oracle is musl and not a table of numbers
+
+Both alternatives were available. A table of expected offsets would be a third
+copy, and a wrong one is exactly what caused §1010 -- the test that certified
+the bug *was* such a table. Compiling against the real headers has no such
+failure mode: the numbers cannot be stale, because they are not stored.
+
+musl specifically, rather than glibc, because it is the C library every port in
+this tree already links against. That makes it the right oracle rather than
+merely an available one -- if our `struct stat` disagreed with glibc but agreed
+with musl, the ports would still work and the gate should not fire.
+
+### It found something on its first run, and it was mine
+
+`struct utsname`'s last field. glibc declares `__domainname` and `#define`s the
+short name; musl declares `domainname` directly under `_GNU_SOURCE`. I had
+written the glibc spelling into the table. The gate refused it in sixteen
+seconds.
+
+A small thing, and worth recording because it is the shape of what this catches:
+a plausible belief about a header, held confidently, wrong for the library we
+actually use.
+
+### The failure that would have made the gate a liar
+
+`zig cc -fsyntax-only` does not work. It injects its own `-c`, warns that the
+`-c` is unused, and then fails with `error: FileNotFound` looking for an output
+it was told not to produce.
+
+**That failure only appears when the clang stage succeeds.** So the sequence
+was: a run with a real error reported the real error and looked fine; the run
+after I fixed the error reported `FileNotFound` -- a checker that says "problem"
+exactly when there is none. If that had shipped, the gate would have been a
+permanent red that everybody learned to bypass, which is worse than no gate at
+all. It compiles to a throwaway object file instead.
+
+Caught only because the gate was run *after* a clean fix as well as before one.
+Running a checker against a known-good input is as necessary as running it
+against a known-bad one, and it is the half that gets skipped.
+
+### The self-test asserts the failure path, not just the pass
+
+Per the tree's gate rule, `--self-test` covers both directions of both checks:
+
+* a true assertion is not reported as failing;
+* **the exact §1010 defect is reported** -- it feeds
+  `offsetof(struct sigaction, sa_flags) == 8`, the old wrong value, and fails
+  if the gate stays quiet;
+* a compile error is not reported as a pass;
+* with the live baseline the ratchet reports nothing, and with one name removed
+  from the baseline it reports exactly that name.
+
+The last pair is what proves the ratchet would notice a type someone adds
+tomorrow. A ratchet whose failure has never run is a ratchet nobody knows the
+sign of.
+
+### Cost, and where it is paid
+
+The gate runs `cargo test -p posix --lib` to get the numbers, so it is minutes
+on a cold target directory rather than seconds. It is therefore scoped to
+pushes that touch `posix/src/` or the checker itself -- the only pushes that
+can change either the layouts or the verdict. Without zig it says so by name
+and still runs the coverage ratchet, rather than passing silently.
+
+**Against it, honestly:** 15 of 98 is thin coverage on day one, and the ratchet
+freezes the other 83 rather than fixing them. The most dangerous names are in
+that frozen set -- `PthreadMutexT`, `PthreadAttrT`, `CpuSetT`, `SemT` are all
+types a C program declares *by value*, where being smaller than musl's means
+our writes land past the caller's own object. The counter-argument is that a
+ratchet at 15 is strictly better than the nothing that existed yesterday, and
+the frozen set is now written down in one place with a note on which entries
+are the scary ones -- which is what makes shrinking it a task somebody can pick
+up rather than an audit somebody has to invent.

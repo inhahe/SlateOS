@@ -56107,7 +56107,25 @@ sentence "clippy is clean" makes, which is this project's recurring failure
 shape -- a command that answered a narrower question than the one being asked,
 reported at the width of the question.
 
-## Next: a gate that checks every C-ABI struct against musl automatically (lane B, 2026-09-09)
+## ~~Next: a gate that checks every C-ABI struct against musl automatically~~ (lane B, 2026-09-09) -- BUILT the same day
+
+**Built as `scripts/check-libc-abi.py`, pre-push gate 16, design-decisions.md 1011.** 15 of the 98 boundary types are checked; the
+other 83 are frozen by a ratchet that may shrink and never grow. Shrinking
+it is one `abi!` line per type in `posix/src/abi_layout.rs` and one name
+removed from `BASELINE_UNCOVERED`. **Start with the by-value types** --
+`PthreadMutexT`, `PthreadAttrT`, `CpuSetT`, `SemT`, `RegexT` -- because a C
+program declares those on its own stack, so ours being smaller than musl's
+means our writes land past the caller's object. The original sketch is
+below; it survived contact, with one change noted after it.
+
+**What changed from the sketch:** the macro lives in a `#[cfg(test)]`
+module and emits C on stdout between markers rather than writing a file,
+so the script and the test share no path. And `-fsyntax-only` had to be
+abandoned -- `zig cc` injects its own `-c`, then fails looking for an
+output it was told not to produce, and *only when the compile otherwise
+succeeds*. See 1011.
+
+The sketch as written, for the record:
 
 **Why.** `Sigaction` carried the kernel's field order under a comment claiming
 it was glibc's, for months, because both layouts are 152 bytes and the one

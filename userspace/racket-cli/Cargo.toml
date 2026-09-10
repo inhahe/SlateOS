@@ -1,9 +1,0 @@
-[package]
-name = "racket-cli"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-notimpl = { path = "../notimpl" }
-# The `raco pkg` action and the top-level raco subcommand are argv words.
-quoting = { path = "../quoting" }

@@ -78,6 +78,14 @@ members = [
     # `yamldoc`; needs no `alloc` and issues no syscall, which is what lets the
     # bare-metal `no_main` services share it with the `std` daemons.
     "monoclock",
+    # Shared no_std civil-date arithmetic. Six copies of "seconds since 1970
+    # to a calendar date" existed across the three lanes (cal, gui/toolkit, and
+    # the archivemanager/backup/rssreader/taskscheduler apps), plus two more of
+    # days_in_month and day_of_week in lane B alone. Same rationale as
+    # monoclock next door: a small calculation several programs need, that each
+    # gets slightly differently, whose errors are quiet -- a wrong civil date
+    # does not crash, it prints a plausible day.
+    "civildate",
     # Shared no_std SHA-256. Twenty-six files in this tree had grown their own
     # copy — the same round constants, the same eight initial words, the same
     # message schedule, pasted twenty-six times across all three lanes. Every

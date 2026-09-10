@@ -1,0 +1,18 @@
+[package]
+name = "civildate"
+version = "0.1.0"
+edition = "2024"
+description = "Civil dates from a Unix timestamp: the calendar half of telling the time."
+
+[lib]
+path = "src/lib.rs"
+
+# Dependency-free and `no_std` for the same reason `monoclock` is: the
+# bare-metal `no_main` programs need the same arithmetic as the `std` ones, and
+# every item here is integer maths over values the caller supplies. It
+# deliberately does not read the clock -- see the module docs for why the
+# boundary is at "what the number means" rather than "where it came from".
+[dependencies]
+
+[lints]
+workspace = true

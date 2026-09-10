@@ -431,29 +431,67 @@ fn cmd_cgexec(args: &[String]) {
         process::exit(1);
     }
 
-    // Move current process to the cgroup.
+    // Join the cgroup BEFORE running anything, and treat a failure as fatal.
+    //
+    // This used to warn and continue, under a comment reading "Continue anyway
+    // -- on non-cgroup systems, simulate execution." That is the wrong shape
+    // for this particular command: the caller did not ask for the command to
+    // run, they asked for it to run *under these limits*. Running it without
+    // them is not a weaker version of the request, it is a different and
+    // unconstrained one -- and the caller who wrote `cgexec -g memory:capped`
+    // is precisely the one who cannot afford that.
     let procs_path = cgroup_path(&group).join("cgroup.procs");
     let pid = process::id();
-
     if let Err(e) = fs::write(&procs_path, pid.to_string()) {
-        eprintln!("cgexec: failed to join cgroup {group}: {e}");
-        // Continue anyway — on non-cgroup systems, simulate execution.
+        eprintln!("cgexec: cannot join cgroup {group}: {e}");
+        eprintln!("cgexec: refusing to run the command outside the cgroup it asked for");
+        process::exit(1);
     }
 
     if sticky {
-        eprintln!("cgexec: sticky mode enabled for {group}");
+        // `--sticky` asks that membership survive the exec below. Under
+        // cgroups v2 that is already the case -- membership is a property of
+        // the process and is not reset by execve -- so the flag is accepted
+        // and is a no-op. Saying so beats accepting it silently, which would
+        // leave a caller unable to tell it had been honoured.
+        eprintln!("cgexec: --sticky is the default under cgroups v2; membership survives exec");
     }
 
-    eprintln!("cgexec: would execute {:?} in cgroup {group}", cmd_args);
-    // On a real system, we would exec the command here.
-    // For now, just print what would happen.
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-    let _ = writeln!(
-        out,
-        "cgexec: [simulated] running '{}' in cgroup '{group}'",
-        cmd_args.join(" ")
-    );
+    // Now become the command. `exec` rather than spawn-and-wait so the command
+    // inherits this process's cgroup membership directly and the caller's
+    // shell sees the command's own exit status and signal disposition rather
+    // than a copy relayed through us.
+    let Some((prog, rest)) = cmd_args.split_first() else {
+        eprintln!("cgexec: no command specified");
+        process::exit(1);
+    };
+    let mut cmd = process::Command::new(prog);
+    cmd.args(rest);
+
+    // Exit codes follow the shell convention that callers already expect:
+    // 127 for a command that is not there, 126 for one that is but cannot be
+    // run. Reaching either line means the exec failed, because a successful
+    // exec does not return.
+    #[cfg(unix)]
+    let err = {
+        use std::os::unix::process::CommandExt as _;
+        cmd.exec()
+    };
+    #[cfg(not(unix))]
+    let err = match cmd.status() {
+        // The development host has no `exec`. Relaying the status is not
+        // identical -- a signalled child cannot be reported faithfully this
+        // way -- but it is the honest approximation, and this arm does not
+        // ship.
+        Ok(st) => process::exit(st.code().unwrap_or(1)),
+        Err(e) => e,
+    };
+    eprintln!("cgexec: {}: {err}", quotef_os(prog));
+    process::exit(if err.kind() == io::ErrorKind::NotFound {
+        127
+    } else {
+        126
+    });
 }
 
 // ============================================================================

@@ -17,9 +17,10 @@ use std::collections::BTreeMap;
 use std::env;
 use std::fmt;
 use std::fs;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read as _, Write};
 use std::path::{Path, PathBuf};
 use std::process;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 // ---------------------------------------------------------------------------
 // Personality detection
@@ -146,6 +147,32 @@ struct DateTime {
 }
 
 impl DateTime {
+    /// Now, as the system reckons it, or `None` if the clock cannot be read.
+    ///
+    /// The `None` is the point, and it is why this is not a `Default`. `at`
+    /// used to open with
+    ///
+    ///     let now = DateTime::new(2026, 5, 20, 10, 0); // Simulated "now"
+    ///
+    /// so every relative time was computed against a fixed instant: `at now +
+    /// 1 hour` scheduled for 2026-05-20 11:00 whatever the date really was,
+    /// wrote a real spool file, and printed a confident confirmation of the
+    /// wrong time. That is `cal`'s January-2025 defect in a program that
+    /// persists its answer to disk.
+    fn now() -> Option<Self> {
+        let secs = SystemTime::now().duration_since(UNIX_EPOCH).ok()?;
+        let secs = i64::try_from(secs.as_secs()).ok()?;
+        let c = civildate::unix_to_datetime(secs);
+        Some(Self {
+            year: u32::try_from(c.year).ok()?,
+            month: c.month,
+            day: c.day,
+            hour: c.hour,
+            minute: c.minute,
+            weekday: c.weekday,
+        })
+    }
+
     fn new(year: u32, month: u32, day: u32, hour: u32, minute: u32) -> Self {
         let weekday = day_of_week(year, month, day);
         Self {
@@ -1598,7 +1625,14 @@ fn run_at(args: &[String], personality: Personality) -> i32 {
     }
 
     let time_spec = time_parts.join(" ");
-    let now = DateTime::new(2026, 5, 20, 10, 0); // Simulated "now" for deterministic behavior
+    let Some(now) = DateTime::now() else {
+        let _ = writeln!(out, "at: cannot read the system clock");
+        let _ = writeln!(
+            out,
+            "at: refusing to schedule against a time it would have to invent"
+        );
+        return 1;
+    };
 
     let scheduled_time = match parse_at_time(&time_spec, &now) {
         Ok(t) => t,
@@ -1618,8 +1652,20 @@ fn run_at(args: &[String], personality: Personality) -> i32 {
             }
         }
     } else {
-        let _ = writeln!(out, "at: reading commands from stdin (simulated)");
-        "echo 'scheduled job'\n".to_string()
+        // Read the command the caller actually typed. This used to announce
+        // "reading commands from stdin (simulated)" and then substitute the
+        // literal `echo 'scheduled job'`, so `at` spooled a job nobody had
+        // written -- and spooled it for real, with `fs::write` below.
+        let mut buf = String::new();
+        if let Err(e) = io::stdin().read_to_string(&mut buf) {
+            let _ = writeln!(out, "at: cannot read the job from standard input: {e}");
+            return 1;
+        }
+        if buf.trim().is_empty() {
+            let _ = writeln!(out, "at: no commands on standard input; nothing scheduled");
+            return 1;
+        }
+        buf
     };
 
     let spool = Path::new(AT_SPOOL_DIR);

@@ -207,6 +207,9 @@ version = "0.1.0"
 [[package]]
 name = "cal"
 version = "0.1.0"
+dependencies = [
+ "civildate",
+]
 
 [[package]]
 name = "calculator"
@@ -319,6 +322,10 @@ dependencies = [
  "scratchdir",
  "userdb",
 ]
+
+[[package]]
+name = "civildate"
+version = "0.1.0"
 
 [[package]]
 name = "clipboard"
@@ -465,6 +472,9 @@ dependencies = [
 [[package]]
 name = "cron"
 version = "0.1.0"
+dependencies = [
+ "civildate",
+]
 
 [[package]]
 name = "crond"

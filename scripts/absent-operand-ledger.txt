@@ -41,7 +41,6 @@ allow cmd_sharesheet 10 # its own help prints `history [count]` -- square bracke
 allow cmd_apppermissions 10 # its own help prints `log [count]` -- square brackets
 allow cmd_udp6 5000 # its own help prints `listen <port> [timeout_ms]` -- square
 
-cmd_apppermissions 5
 cmd_appsandbox 1
 cmd_audioeq 7
 cmd_bpfstat 1

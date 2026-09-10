@@ -83415,14 +83415,26 @@ fn cmd_apppermissions(args: &str) {
             shell_println!("App permissions initialized");
         }
         "check" => {
-            let app = parts.get(1).copied().unwrap_or("app");
-            let perm = parse_perm(parts.get(2).copied().unwrap_or("storage"));
+            let app = parts.get(1).copied().unwrap_or("");
+            let perm_arg = parts.get(2).copied().unwrap_or("");
+            if app.is_empty() || perm_arg.is_empty() {
+                shell_println!("Usage: apppermissions check <app> <perm>");
+                set_exit(1);
+                return;
+            }
+            let perm = parse_perm(perm_arg);
             let d = apppermissions::check(app, perm);
             shell_println!("{} → {}: {}", app, perm.label(), d.label());
         }
         "grant" => {
-            let app = parts.get(1).copied().unwrap_or("app");
-            let perm = parse_perm(parts.get(2).copied().unwrap_or("storage"));
+            let app = parts.get(1).copied().unwrap_or("");
+            let perm_arg = parts.get(2).copied().unwrap_or("");
+            if app.is_empty() || perm_arg.is_empty() {
+                shell_println!("Usage: apppermissions grant <app> <perm>");
+                set_exit(1);
+                return;
+            }
+            let perm = parse_perm(perm_arg);
             match apppermissions::grant(app, perm) {
                 Ok(()) => shell_println!("Granted {} to {}", perm.label(), app),
                 Err(e) => {
@@ -83432,8 +83444,14 @@ fn cmd_apppermissions(args: &str) {
             }
         }
         "deny" => {
-            let app = parts.get(1).copied().unwrap_or("app");
-            let perm = parse_perm(parts.get(2).copied().unwrap_or("storage"));
+            let app = parts.get(1).copied().unwrap_or("");
+            let perm_arg = parts.get(2).copied().unwrap_or("");
+            if app.is_empty() || perm_arg.is_empty() {
+                shell_println!("Usage: apppermissions deny <app> <perm>");
+                set_exit(1);
+                return;
+            }
+            let perm = parse_perm(perm_arg);
             match apppermissions::deny(app, perm) {
                 Ok(()) => shell_println!("Denied {} to {}", perm.label(), app),
                 Err(e) => {
@@ -83443,7 +83461,12 @@ fn cmd_apppermissions(args: &str) {
             }
         }
         "revoke" => {
-            let app = parts.get(1).copied().unwrap_or("app");
+            let app = parts.get(1).copied().unwrap_or("");
+            if app.is_empty() {
+                shell_println!("Usage: apppermissions revoke <app>");
+                set_exit(1);
+                return;
+            }
             match apppermissions::revoke_all(app) {
                 Ok(n) => shell_println!("Revoked {} permissions from {}", n, app),
                 Err(e) => {
@@ -83453,7 +83476,12 @@ fn cmd_apppermissions(args: &str) {
             }
         }
         "app" => {
-            let app = parts.get(1).copied().unwrap_or("app");
+            let app = parts.get(1).copied().unwrap_or("");
+            if app.is_empty() {
+                shell_println!("Usage: apppermissions app <app>");
+                set_exit(1);
+                return;
+            }
             let perms = apppermissions::list_app_permissions(app);
             if perms.is_empty() {
                 shell_println!("No permissions for {}", app);
@@ -83469,7 +83497,13 @@ fn cmd_apppermissions(args: &str) {
             }
         }
         "perm" => {
-            let perm = parse_perm(parts.get(1).copied().unwrap_or("camera"));
+            let perm_arg = parts.get(1).copied().unwrap_or("");
+            if perm_arg.is_empty() {
+                shell_println!("Usage: apppermissions perm <perm>");
+                set_exit(1);
+                return;
+            }
+            let perm = parse_perm(perm_arg);
             let apps = apppermissions::list_by_permission(perm);
             if apps.is_empty() {
                 shell_println!("No apps with {} permission", perm.label());

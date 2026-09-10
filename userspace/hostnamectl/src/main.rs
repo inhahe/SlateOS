@@ -14,6 +14,7 @@
 use std::env;
 use std::fs;
 use std::io::{self, Write};
+use std::path::Path;
 use std::process;
 
 // ============================================================================
@@ -298,8 +299,21 @@ fn set_hostname(name: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// Set one `KEY="value"` line in `/etc/machine-info`, keeping the others.
+///
+/// # Why the read is not `unwrap_or_default`
+///
+/// This rewrites the whole file from what it read. So when the read was
+/// `read_to_string(ETC_MACHINE_INFO).unwrap_or_default()`, a failure produced
+/// empty content and the file came back holding ONLY the field just set --
+/// `PRETTY_HOSTNAME`, `ICON_NAME`, `CHASSIS`, `DEPLOYMENT` and `LOCATION` all
+/// dropped by a command that named one of them.
+///
+/// `NotFound` is the one failure that means "start fresh"; everything else
+/// means we could not read it, which is not the same thing. Same defect as
+/// visudo's over /etc/sudoers and xdg's over mimeapps.list.
 fn set_machine_info_field(key: &str, value: &str) -> io::Result<()> {
-    let content = fs::read_to_string(ETC_MACHINE_INFO).unwrap_or_default();
+    let content = optionalfile::read_or_empty(Path::new(ETC_MACHINE_INFO))?;
     let mut lines: Vec<String> = Vec::new();
     let mut found = false;
 

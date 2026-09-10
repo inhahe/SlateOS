@@ -931,8 +931,25 @@ fn set_default_handler(mime: &str, desktop_id: &str) -> io::Result<()> {
     fs::create_dir_all(&config_dir)?;
     let path = config_dir.join("mimeapps.list");
 
-    // Load existing contents or start fresh.
-    let existing = fs::read_to_string(&path).unwrap_or_default();
+    // Load existing contents, or start fresh ONLY when there is genuinely
+    // nothing there.
+    //
+    // This was `read_to_string(&path).unwrap_or_default()`, and everything
+    // below rebuilds the file from what it parsed and then writes it back with
+    // `fs::write`. So a read that failed produced an empty `existing`, an
+    // empty `sections`, and a mimeapps.list containing NOTHING BUT THE NEW
+    // ASSOCIATION -- every other default handler the user had set, silently
+    // gone.
+    //
+    // `read_to_string` also fails for the whole file if any single byte is not
+    // valid UTF-8, which needs no unusual permissions to arrange: a desktop
+    // file name written in the user's locale encoding is enough.
+    //
+    // `NotFound` is the one failure that really does mean "start fresh".
+    // Everything else is "we could not read it", which is not the same as
+    // "there is nothing in it" -- lane A's rule from mkfs/fsck's is_mounted,
+    // and the same defect visudo had over /etc/sudoers.
+    let existing = optionalfile::read_or_empty(&path)?;
     let sections = parse_ini(&existing);
 
     let mut out = String::new();

@@ -1558,7 +1558,23 @@ fn timestamp_path(username: &str) -> PathBuf {
     PathBuf::from(TIMESTAMP_DIR).join(username)
 }
 
-/// Check if a valid timestamp exists (credential cache).
+/// Is there a valid cached credential for `username`?
+///
+/// # Every failure answers `false`, and that is the safe direction
+///
+/// `false` means "ask for the password". So an unreadable timestamp file, an
+/// unparsable one, and a missing one all lead to a prompt, which is the
+/// outcome that cannot let anybody through. This is the opposite direction
+/// from `mkfs`/`fsck`'s old `is_mounted`, and for the opposite reason: there,
+/// `false` meant "safe to write" and a failed read waved a destructive
+/// operation through; here `false` costs the user one password entry.
+///
+/// **Do not "improve" this by returning `true` when the file cannot be read.**
+/// That would hand out a cached authentication on the strength of a failed
+/// read, which is the whole thing a credential cache must not do. Checked on
+/// 2026-09-10 during a sweep for predicates that answer `false` on failure --
+/// this one is correct as written and is noted so the next sweep does not have
+/// to re-derive it.
 fn check_timestamp(username: &str, timeout: u64) -> bool {
     let path = timestamp_path(username);
     match fs::read_to_string(&path) {
@@ -3365,9 +3381,20 @@ fn run_visudo(args: &[OsString]) -> i32 {
         }
     };
 
-    // Read current content.
-    let original_content = fs::read_to_string(file_path).unwrap_or_default();
-
+    // Read current content. See `starting_buffer` for why a failed read is
+    // not an empty buffer.
+    let original_content = match optionalfile::read_or_empty(file_path) {
+        Ok(text) => text,
+        Err(why) => {
+            eprintln!("visudo: {}: {why}", quoteaf_os(&opts.file));
+            eprintln!(
+                "visudo: refusing to open an editor -- saving would replace \
+                 the file's contents with whatever you typed"
+            );
+            release_lock(&lock_path);
+            return 1;
+        }
+    };
     // Create temp file.
     let temp_path = PathBuf::from(format!("/tmp/visudo-{}", std::process::id()));
     if let Err(e) = fs::write(&temp_path, &original_content) {

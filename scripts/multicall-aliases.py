@@ -122,12 +122,46 @@ SHADOW_BASELINE_REL = "scripts/multicall-shadowed-baseline.txt"
 SHADOW_BASELINE = Path(__file__).resolve().parent / "multicall-shadowed-baseline.txt"
 
 
-def read_shadow_baseline() -> set[str]:
-    """The pinned shadowing set, empty if the file is absent."""
-    if not SHADOW_BASELINE.is_file():
-        return set()
+def read_shadow_baseline(tree: gittree.Tree) -> set[str] | None:
+    """The pinned shadowing set, empty if the file is absent.
+
+    # Reads the REVISION, not the disk
+
+    Takes the tree for the same reason [`read_baseline`] does, and the first
+    version of this function did not -- it called `SHADOW_BASELINE.read_text()`
+    and broke every lane's boot test.
+
+    `scripts/test-checkers-honour-head.py` gate 2 is what caught it: the
+    fixture commits four aliases with a producer of each recognised kind, then
+    DELETES them from the disk, and asserts the commit still passes when read
+    with `--head`. A checker that consults the working tree answers about
+    whatever is lying around rather than about the commit being pushed, which
+    is the whole property that test exists to hold -- and the property the
+    gate needs, because `--head` is how the pre-push hook judges the commits it
+    is about to send rather than the tree they were tidied in afterwards.
+
+    (`--update-baseline` still writes to disk, which is correct: writing is a
+    disk operation and has no revision to speak of.)
+    """
+    text = tree.read_text(SHADOW_BASELINE_REL)
+    if text is None:
+        # ABSENT, which is not the same as EMPTY, and the difference decides
+        # whether this gate can judge the revision at all.
+        #
+        # An empty baseline means "no shadowing is permitted here" and every
+        # shadowed alias is a new one. An ABSENT baseline means the revision
+        # has no shadowing policy -- it predates this ratchet, or it is a
+        # synthetic fixture -- and judging it against a file it does not carry
+        # is judging it by a rule it never had.
+        #
+        # Returning an empty set for both is what broke every lane's boot test:
+        # `test-checkers-honour-head.py` builds a repo whose four aliases each
+        # HAVE a producer, which is the definition of shadowed, and that
+        # fixture has no baseline. Every one of the four read as new and the
+        # commit was refused.
+        return None
     out = set()
-    for line in SHADOW_BASELINE.read_text(encoding="utf-8").splitlines():
+    for line in text.splitlines():
         line = line.split("#", 1)[0].strip()
         if line:
             out.add(line)
@@ -302,6 +336,12 @@ def main() -> int:
     with tree:
         rows = survey(tree)
         baseline = read_baseline(tree)
+        # Read here, not at the point of use: `tree` is closed by the end of
+        # this block, and a closed tree answers `None` for every path -- which
+        # reads as "the baseline is empty", so every pinned entry would look
+        # new. That is the same defect as reading the disk, one step further
+        # along: an answer about something other than the revision.
+        shadow_pinned = read_shadow_baseline(tree)
     unreachable = {f"{c}:{a}" for c, a, p in rows if not p}
     shadowed = [(c, a, p) for c, a, p in rows if p]
 
@@ -371,9 +411,11 @@ def main() -> int:
         return 0
 
     shadow_now = {f"{c}:{a}" for c, a, _ in shadowed}
-    shadow_pinned = read_shadow_baseline()
-    shadow_new = sorted(shadow_now - shadow_pinned)
-    shadow_gone = sorted(shadow_pinned - shadow_now)
+    # `None` means the revision carries no shadow baseline, so there is no
+    # policy here to enforce. Skipping is the only honest answer; failing would
+    # judge the commit by a rule it does not contain.
+    shadow_new = sorted(shadow_now - shadow_pinned) if shadow_pinned is not None else []
+    shadow_gone = sorted(shadow_pinned - shadow_now) if shadow_pinned is not None else []
     for name in shadow_gone:
         print(f"unshadowed: {name} -- run --update-baseline to drop the line")
     if shadow_new:

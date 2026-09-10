@@ -1,0 +1,32 @@
+# `read_to_string(...).unwrap_or_default()` sites pinned by
+# `scripts/check-read-defaults.py --check`.
+#
+# Each line is a read whose failure is indistinguishable from an empty file.
+# THIS FILE SHOULD ONLY EVER SHRINK. The fix is `optionalfile::read_or_empty`,
+# which separates "absent" from "could not read"; adding a line here to turn a
+# red --check green is the defect itself.
+#
+# The entries below are the ones that survived inspection on 2026-09-10 -- all
+# of them report or display, none rewrites the file it read. The four that DID
+# rewrite (sudo/visudo, xdg, hostnamectl, ntpd) are fixed and are not here.
+# Being pinned means "known and not destructive", not "correct".
+#
+#     python scripts/check-read-defaults.py --update-baseline
+#
+eject: fs::read_to_string(format!("{sys_path}/device/model")) .unwrap_or_default()
+eject: fs::read_to_string(format!("{sys_path}/device/vendor")) .unwrap_or_default()
+eject: fs::read_to_string(format!("{sys_path}/removable")) .unwrap_or_default()
+fuser: fs::read_to_string("/etc/passwd").unwrap_or_default()
+fuser: fs::read_to_string(format!("/proc/{pid}/comm")) .unwrap_or_default()
+fuser: fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default()
+fuser: fs::read_to_string(net_file).unwrap_or_default()
+hwinfo: fs::read_to_string("/proc/cpuinfo").unwrap_or_default()
+hwinfo: fs::read_to_string(path) .unwrap_or_default()
+netstat: fs::read_to_string(format!("/proc/{pid}/comm")) .unwrap_or_default()
+newgrp: fs::read_to_string("/etc/group").unwrap_or_default()
+newgrp: fs::read_to_string("/etc/gshadow").unwrap_or_default()
+pkg: fs::read_to_string(path) .unwrap_or_default()
+tuned: fs::read_to_string(ACTIVE_PROFILE) .unwrap_or_default()
+udisks: fs::read_to_string(path) .unwrap_or_default()
+upower: fs::read_to_string(p) .unwrap_or_default()
+who: fs::read_to_string(entry.path()).unwrap_or_default()

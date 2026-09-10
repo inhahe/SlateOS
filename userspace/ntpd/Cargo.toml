@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS ntpd/ntpdate - NTP time synchronization"
 [dependencies]
+# Reading a file whose absence is normal but whose unreadability is not;
+# see that crate's docs for the four programs that each wrote it wrong.
+optionalfile = { path = "../../optionalfile" }

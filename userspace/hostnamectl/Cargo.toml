@@ -3,4 +3,11 @@ name = "hostnamectl"
 version = "0.1.0"
 edition = "2024"
 description = "SlateOS hostnamectl utility"
+[dev-dependencies]
+# `contents_before_rewrite`'s three outcomes each need a real file.
+scratchdir = { path = "../scratchdir" }
+
 [dependencies]
+# Reading a file whose absence is normal but whose unreadability is not;
+# see that crate's docs for the four programs that each wrote it wrong.
+optionalfile = { path = "../../optionalfile" }

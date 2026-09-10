@@ -1,0 +1,20 @@
+[package]
+name = "optionalfile"
+version = "0.1.0"
+edition = "2024"
+description = "Reading a file whose absence is normal but whose unreadability is not."
+
+[lib]
+path = "src/lib.rs"
+
+# Needs `std` for `fs`, so unlike `monoclock` and `civildate` this is not
+# `no_std`. It is otherwise dependency-free: the whole crate is one decision
+# about which `io::ErrorKind` means "there is nothing there".
+[dependencies]
+
+[dev-dependencies]
+# The three outcomes each need a real file at a path of their own.
+scratchdir = { path = "../userspace/scratchdir" }
+
+[lints]
+workspace = true

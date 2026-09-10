@@ -420,6 +420,26 @@ pub fn source_is_dst_backup(
     let mut would_be = target_raw.into_owned();
     would_be.extend_from_slice(suffix);
     let would_be = PathBuf::from(os_from_bytes(&would_be));
+    // `Err(_) => false` FAILS OPEN, and it stays that way on purpose.
+    //
+    // `true` here makes the caller refuse ("backing up %s might destroy
+    // source;  %s not moved"), so answering `false` when the stat failed for a
+    // reason other than "not found" lets a move proceed that we could not
+    // prove is safe. In every other program in this tree that would be the
+    // defect -- lane A's rule from `is_mounted` is that "I do not know" must
+    // not equal "it is safe".
+    //
+    // It is not the defect here, because this crate's contract is byte
+    // compatibility with GNU and upstream's `fstatat (…, 0)` failure falls
+    // through to exactly this answer. `scripts/mv-diff.sh` compares stderr
+    // byte for byte, so refusing where GNU proceeds would be a visible
+    // divergence -- and a silent one in the other direction, since the user
+    // would get a refusal no GNU system produces.
+    //
+    // The reachable failure is `NotFound`, which genuinely means the backup
+    // does not exist yet and so cannot be the source. Anything else needs a
+    // directory we can traverse but not stat within, which is rare. Recorded
+    // on 2026-09-10 after a sweep flagged it, so the next sweep can stop here.
     match fs::metadata(&would_be) {
         Ok(m) => file_id(&would_be, &m) == file_id(src, src_meta),
         Err(_) => false,

@@ -70,6 +70,37 @@ END = "===ABI-C-END==="
 
 MUSL_TARGET = "x86_64-linux-musl"
 
+# C types we have measured, found wrong, and not yet fixed.
+#
+# **This is the state the baseline below could not express.** `BASELINE_UNCOVERED`
+# means "nobody has looked"; this means "somebody looked, it is broken, and here
+# is where it is written down". Conflating the two loses the finding: a type
+# taken out of `abi_layout.rs` because it fails is indistinguishable from one
+# that was never added, and the measurement is thrown away.
+#
+# It is a **two-way** ratchet, which is the part that matters. A failure naming
+# one of these is reported and does not refuse the push. A type in here that
+# produces **no** failure is a *hard* error -- it means somebody fixed it and
+# did not delete the line, and an exemption for a defect that no longer exists
+# is how an exemption list starts covering real ones.
+#
+# Keyed by the C type name as it appears in the assertion message, because that
+# is what the compiler gives back. Every entry must name a known-issues key.
+KNOWN_MISMATCH = {
+    "struct aiocb": "B-AIOCB-FIELD-ORDER-IS-NOT-MUSLS -- musl is 136 bytes and "
+                    "orders the fields fildes/lio_opcode/reqprio/buf/nbytes/"
+                    "sigevent/offset; ours is 168 and starts fildes/offset/buf",
+    "struct sysinfo": "B-SYSINFO-IS-368-BYTES-AGAINST-MUSLS-112 -- every counter "
+                      "widened to u64 where musl uses long plus a __f pad",
+    "struct utmpx": "B-UTMPX-IS-400-BYTES-AGAINST-MUSLS-384 -- ut_tv lands at 344 "
+                    "rather than 340, so everything after it is shifted",
+    "struct msqid_ds": "B-SYSV-IPC-DS-STRUCTS-FLATTEN-IPC-PERM-AND-COME-UP-SHORT "
+                       "-- 80 against musl's 120",
+    "struct shmid_ds": "B-SYSV-IPC-DS-STRUCTS-FLATTEN-IPC-PERM-AND-COME-UP-SHORT "
+                       "-- 72 against musl's 112",
+}
+
+
 # Types that cross the C boundary and are **not** checked yet.  A ratchet: this
 # list may shrink and may never grow.  Removing a name means adding an `abi!`
 # line in `posix/src/abi_layout.rs`, which is one line plus its field list.
@@ -87,43 +118,23 @@ MUSL_TARGET = "x86_64-linux-musl"
 #     `CpuSetT`, `SemT`) -- **the highest stakes in the list**, because being
 #     smaller than musl's means our writes land past the caller's object.
 BASELINE_UNCOVERED = {
-    "Aiocb",
     "CapEntryInfo",
     "CapUserData",
     "CapUserHeader",
     "CloneArgs",
     "Dbm",
-    "DlInfo",
-    "FdSet",
     "FileHandle",
     "Fts",
     "FtsEnt",
-    "GlobT",
-    "Hostent",
-    "Ifaddrs",
     "IoEvent",
     "IoUringParams",
     "Iocb",
     "LandlockRulesetAttr",
-    "MbstateT",
-    "MqAttr",
-    "MsqidDs",
     "OpenHow",
-    "Option",
     "PerfEventAttr",
-    "PosixSpawnFileActionsT",
-    "PosixSpawnattrT",
-    "ShmidDs",
-    "Sigevent",
-    "SiginfoT",
-    "Statfs",
     "Statx",
     "SysctlArgs",
-    "Sysinfo",
-    "Timex",
-    "Utmpx",
     "VaList",
-    "WordexpT",
 }
 
 
@@ -166,10 +177,24 @@ def emit_c() -> str:
     return body.replace("\r\n", "\n").lstrip("\n")
 
 
-ASSERT_MSG_RE = re.compile(r'static_assert failed[^"]*"([^"]*)"')
+# clang prints the message *bare* after the requirement, with no quotes:
+#
+#   error: static assertion failed due to requirement 'sizeof(x) == 8': x size
+#   error: static assertion failed: x size
+#
+# The first pattern this file carried expected `"..."` and therefore never
+# matched anything, so every assertion failure fell through to the
+# "(compile error, not an assertion)" branch and arrived as one opaque blob.
+# It still *refused*, which is why it looked like it worked -- the classifier
+# was wrong and the verdict was right, which is the hardest kind of wrong to
+# notice. `--self-test` now pins the parse against a real clang line.
+ASSERT_MSG_RE = re.compile(
+    r"static assertion failed(?: due to requirement '.*?')?:\s*(.+?)\s*$",
+    re.M,
+)
 
 
-def compile_c(zig: str, src: str) -> list[str]:
+def compile_c(zig: str, src: str) -> tuple[list[str], str | None]:
     """Compile `src` against musl; return the failed assertions' messages.
 
     `-c` to an object in the temp directory, not `-fsyntax-only`.  A
@@ -193,14 +218,19 @@ def compile_c(zig: str, src: str) -> list[str]:
             check=False,
         )
         if proc.returncode == 0:
-            return []
+            return [], None
         msgs = ASSERT_MSG_RE.findall(proc.stderr)
-        if msgs:
-            return msgs
-        # Not an assertion failure: a missing header, an unknown field name, a
-        # zig that cannot run.  Report it whole rather than as "0 failures",
-        # which would read as a pass.
-        return [f"(compile error, not an assertion)\n{proc.stderr.strip()}"]
+        # Anything that is not an assertion -- a missing header, an unknown
+        # field name, a zig that cannot run -- is reported separately and
+        # *whole*, because it means the translation unit did not reach a
+        # verdict on the assertions after it. Telling the two apart is what
+        # lets `main` know whether "this type produced no failure" means
+        # "it passes" or "we never got that far".
+        n_err = proc.stderr.count("error:")
+        other = None
+        if n_err > len(msgs):
+            other = proc.stderr.strip()
+        return msgs, other
 
 
 COVERED_RE = re.compile(r"abi!\(\s*out,\s*hdrs,\s*crate::[\w:]*?(\w+)\s*,")
@@ -241,6 +271,22 @@ def boundary_types() -> set[str]:
     return structs & params
 
 
+def known_owner(msg: str) -> str | None:
+    """Which `KNOWN_MISMATCH` entry, if any, owns this failure message.
+
+    The assertion messages `abi_layout` emits open with the C type name --
+    `"struct aiocb size"`, `"struct aiocb.aio_offset"` -- so the longest
+    matching prefix is the owner. Longest, not first: `"struct stat"` is a
+    prefix of `"struct statfs"`, and a shorter entry must not swallow a longer
+    type's failures.
+    """
+    best: str | None = None
+    for ty in KNOWN_MISMATCH:
+        if msg.startswith(ty) and (best is None or len(ty) > len(best)):
+            best = ty
+    return best
+
+
 def check_coverage(baseline: set[str] | None = None) -> list[str]:
     """Ratchet: a boundary type that is neither checked nor in the baseline.
 
@@ -268,23 +314,32 @@ def self_test() -> int:
             "#include <signal.h>\n#include <stddef.h>\n"
             "_Static_assert(offsetof(struct sigaction, sa_mask) == 8, \"good\");\n"
         )
-        if compile_c(zig, good):
-            failures.append("a TRUE assertion was reported as failing")
+        got, other = compile_c(zig, good)
+        if got or other:
+            failures.append(f"a TRUE assertion was reported as failing: {got!r} {other!r}")
 
         bad = (
             "#include <signal.h>\n#include <stddef.h>\n"
             "_Static_assert(offsetof(struct sigaction, sa_flags) == 8, "
             "\"the 1010 bug\");\n"
         )
-        got = compile_c(zig, bad)
-        if not any("the 1010 bug" in g for g in got):
+        got, other = compile_c(zig, bad)
+        # Exact, not `in`: the message must arrive *parsed*, on its own. The
+        # first version of this file matched on a quoted form clang does not
+        # print, so every failure fell through as one opaque blob -- and an
+        # `in` test against the whole stderr would have passed anyway. That is
+        # the bug this line exists to stop coming back.
+        if got != ["the 1010 bug"]:
             failures.append(
-                "the exact defect this gate was written for was NOT reported: "
-                f"{got!r}"
+                "the 1010 defect was not parsed out as its own message: "
+                f"{got!r} (other={other!r})"
             )
+        if other is not None:
+            failures.append(f"an assertion failure was also reported as a compile error: {other!r}")
 
         broken = "#include <no_such_header_xyzzy.h>\n"
-        if not compile_c(zig, broken):
+        got, other = compile_c(zig, broken)
+        if other is None:
             failures.append("a compile error was reported as a pass")
 
     covered = covered_types()
@@ -302,13 +357,40 @@ def self_test() -> int:
     # what proves the gate would notice a type someone adds tomorrow.
     if check_coverage():
         failures.append(f"the live baseline is already out of date: {check_coverage()}")
-    victim = next(iter(sorted(BASELINE_UNCOVERED)), None)
+    # The victim must be a name the ratchet would actually report -- one that
+    # is in the baseline *and* not covered. Taking the first name in the
+    # baseline is not enough: a name can be in both once its `abi!` line is
+    # added and the baseline has not been regenerated, and then removing it
+    # from the baseline changes nothing and this test fails for a reason that
+    # has nothing to do with the ratchet.
+    victim = next(iter(sorted(BASELINE_UNCOVERED - covered)), None)
     if victim is None:
-        failures.append("BASELINE_UNCOVERED is empty; the ratchet cannot be tested")
+        failures.append("every baseline name is now covered; the ratchet cannot be tested")
     elif check_coverage(BASELINE_UNCOVERED - {victim}) != [victim]:
         failures.append(
             f"removing {victim} from the baseline did not make the ratchet report it"
         )
+
+    # The known-mismatch matcher, including the prefix hazard that makes it
+    # "longest match" rather than "first match".
+    if known_owner("struct aiocb size") != "struct aiocb":
+        failures.append("known_owner did not match a size message")
+    if known_owner("struct aiocb.aio_offset") != "struct aiocb":
+        failures.append("known_owner did not match a field message")
+    if known_owner("struct sigaction size") is not None:
+        failures.append("known_owner claimed a type that is not listed")
+    probe = dict(KNOWN_MISMATCH)
+    try:
+        KNOWN_MISMATCH.clear()
+        KNOWN_MISMATCH.update({"struct stat": "x", "struct statfs": "y"})
+        if known_owner("struct statfs size") != "struct statfs":
+            failures.append(
+                "known_owner took the shorter prefix: `struct stat` swallowed "
+                "`struct statfs`"
+            )
+    finally:
+        KNOWN_MISMATCH.clear()
+        KNOWN_MISMATCH.update(probe)
 
     for f in failures:
         print(f"check-libc-abi --self-test: FAIL: {f}")
@@ -356,17 +438,59 @@ def main() -> int:
         )
         return 1 if problems else 0
 
-    failed = compile_c(zig, emit_c())
+    failed, other = compile_c(zig, emit_c())
+    known_seen: set[str] = set()
     for msg in failed:
-        print(f"check-libc-abi: LAYOUT MISMATCH: {msg}")
-    problems += len(failed)
+        owner = known_owner(msg)
+        if owner is None:
+            print(f"check-libc-abi: LAYOUT MISMATCH: {msg}")
+            problems += 1
+        else:
+            known_seen.add(owner)
+            print(f"check-libc-abi: known mismatch, not refusing: {msg}")
+
+    if other is not None:
+        print(f"check-libc-abi: the C did not compile:\n{other}")
+        problems += 1
+        print(
+            "\ncheck-libc-abi: skipping the known-mismatch sweep -- a translation\n"
+            "unit that did not compile reached no verdict on the assertions after\n"
+            "the error, so 'this type produced no failure' would mean nothing."
+        )
+    else:
+        # The other direction, and the reason this is a ratchet rather than a
+        # list of excuses: an exemption for a defect that no longer exists is
+        # how an exemption list starts covering real ones.
+        for ty, why in sorted(KNOWN_MISMATCH.items()):
+            if ty not in known_seen:
+                print(
+                    f"check-libc-abi: `{ty}` is listed as a KNOWN_MISMATCH and "
+                    f"now passes.\n  Delete its entry from KNOWN_MISMATCH in "
+                    f"this file. It was recorded as:\n  {why}"
+                )
+                problems += 1
+
+    if known_seen:
+        print(
+            f"\ncheck-libc-abi: {len(known_seen)} type(s) are known-bad and "
+            "recorded in known-issues.md; they do not refuse the push."
+        )
 
     if problems:
         print(f"\ncheck-libc-abi: {problems} problem(s). See design-decisions.md 1010.")
         return 1
 
     n = len(covered_types())
-    print(f"check-libc-abi: OK ({n} types checked against musl, 0 mismatches)")
+    if known_seen:
+        # Not "0 mismatches": there are five, they are written down, and a
+        # summary line that says zero while the lines above it say otherwise
+        # trains the reader to stop reading the lines above it.
+        print(
+            f"check-libc-abi: OK ({n} types checked against musl; "
+            f"{len(known_seen)} known-bad and recorded, 0 new)"
+        )
+    else:
+        print(f"check-libc-abi: OK ({n} types checked against musl, 0 mismatches)")
     return 0
 
 

@@ -126608,3 +126608,128 @@ reads, and left the tail as the caller's allocator had it.
 `size_of::<Statvfs>() == 11 * 8`, restating the declaration it was checking. A
 test whose expected value comes from the thing under test passes for any
 declaration -- and occupies the place a real check would go.
+
+
+## B-FD-SET-WAS-A-QUARTER-OF-THE-CALLERS-OBJECT (lane B, 2026-09-09) -- FIXED the same day
+
+**In short:** the set of file descriptors a program hands to `select()` is 128
+bytes in C and was 32 bytes to us, so every `select()` read and wrote the front
+quarter of the caller's own variable and left the rest as it found it.
+
+**Where.** `posix/src/poll.rs`, `struct FdSet`.
+
+**Cause, and it is instructive.** `FD_SET_WORDS` was derived from `FD_SETSIZE`,
+which is 256 here because `fdtable::MAX_FDS` is 256. That reasoning is correct
+about *this system's fd limit* and wrong about *the C library's structure* --
+two facts that happen to be the same number in glibc and musl (1024 both ways)
+and are not the same fact. A C caller writes `fd_set r;` on its stack and gets
+128 bytes whatever our fdtable can hold.
+
+**Effect.** `select()`'s write-back covered 32 of 128 bytes, so a caller reusing
+a set across calls kept stale bits in the 96 bytes we never touched. No fd at or
+above 256 can exist here, so nothing could read a *wrong* bit -- but nothing
+guaranteed that either, and any C program that memsets its own set and then
+inspects it after `select` was reading three quarters uninitialised.
+
+**Fixed** by splitting the two facts: `FD_SET_BITS` (1024, the ABI) sizes the
+structure and `FD_SETSIZE` (256, the policy) still bounds `FD_SET`/`FD_ISSET`.
+Found by `scripts/check-libc-abi.py`.
+
+**Two tests could not have caught it.** One asserted
+`size_of::<FdSet>() > 0`, true of every struct that has ever existed; the other
+asserted `FD_SET_WORDS == 4 // 256 / 64`, restating the derivation under test.
+Both now assert 128 against musl's own number.
+
+
+## B-AIOCB-FIELD-ORDER-IS-NOT-MUSLS (lane B, 2026-09-09) -- KNOWN, unfixed
+
+**In short:** the structure used to queue an asynchronous read or write has its
+fields in a different order from the C library's, and is the wrong size.
+
+| | ours | musl |
+|---|---|---|
+| `sizeof(struct aiocb)` | 168 | 136 |
+| `aio_offset` | 8 | 128 |
+| `aio_reqprio` | 32 | 8 |
+| `aio_sigevent` | 36 | 32 |
+| `aio_lio_opcode` | 100 | 4 |
+
+musl orders it `aio_fildes, aio_lio_opcode, aio_reqprio, aio_buf, aio_nbytes,
+aio_sigevent, …, aio_offset`; ours opens `aio_fildes, aio_offset, aio_buf`.
+`aio_sigevent` is also an opaque `[u8; 64]` placeholder here rather than a real
+`struct sigevent`.
+
+**Where.** `posix/src/aio.rs`.
+
+**Why it is recorded rather than fixed today.** Nothing in the tree calls the
+POSIX aio family, and the fix is a reorder plus giving `aio_sigevent` a real
+type -- which is a second change (`Sigevent` itself is only three fields here
+against musl's union). Doing both properly is worth its own commit rather than
+a tail-end of a gate-shrinking one.
+
+**Registered in `scripts/check-libc-abi.py`'s `KNOWN_MISMATCH`,** which reports
+it on every push without refusing, and which **fails** if it ever starts
+passing without the entry being deleted.
+
+
+## B-SYSINFO-IS-368-BYTES-AGAINST-MUSLS-112 (lane B, 2026-09-09) -- KNOWN, unfixed
+
+**In short:** the structure `sysinfo()` fills in is more than three times the
+size of the C library's, so a caller's 112-byte variable is written 368 bytes
+of data -- **256 bytes past the end of it**.
+
+**Where.** `posix/src/unistd.rs`, `struct Sysinfo`.
+
+**This is the one entry here that can corrupt a caller's stack**, which is why
+it is the first of the three to fix. Every counter was widened to `u64` where
+musl uses `unsigned long` for some and `unsigned short`/`unsigned int` for
+`procs` and `mem_unit`, and musl's trailing `char __f[]` pad is absent.
+
+**Why it is recorded rather than fixed today.** Same reason as the others --
+scope -- but with a shorter fuse: it should be fixed before anything calls
+`sysinfo()` from C. Nothing does today.
+
+**Registered in `KNOWN_MISMATCH`.**
+
+
+## B-UTMPX-IS-400-BYTES-AGAINST-MUSLS-384 (lane B, 2026-09-09) -- KNOWN, unfixed
+
+**In short:** the login-record structure is 16 bytes larger than the C
+library's and its last three fields are at the wrong offsets, so `who`, `last`
+and anything reading `/var/run/utmp` through the C API sees the time and
+address fields shifted.
+
+| | ours | musl |
+|---|---|---|
+| `sizeof(struct utmpx)` | 400 | 384 |
+| `ut_tv` | 344 | 340 |
+| `ut_addr_v6` | 360 | 348 |
+
+Everything up to and including `ut_session` is at the correct offset, so the
+type, pid, line, id, user and host all read correctly -- which is why nothing
+noticed.
+
+**Where.** `posix/src/utmpx.rs`.
+
+**Registered in `KNOWN_MISMATCH`.**
+
+
+## B-SYSV-IPC-DS-STRUCTS-FLATTEN-IPC-PERM-AND-COME-UP-SHORT (lane B, 2026-09-09) -- KNOWN, unfixed
+
+**In short:** the two System V IPC status structures inline the permission
+block instead of nesting it, and end up smaller than the C library's.
+
+| | ours | musl |
+|---|---|---|
+| `struct msqid_ds` | 80 | 120 |
+| `struct shmid_ds` | 72 | 112 |
+
+**Where.** `posix/src/sysv_msg.rs` and `posix/src/sysv_shm.rs`. Both open with
+`msg_perm_uid`/`shm_perm_uid` and friends where C has a nested
+`struct ipc_perm`, so the field *names* do not correspond either -- which is
+why the gate checks their size only.
+
+**The right fix is a real `struct ipc_perm`**, shared by both, which is also
+what makes `msgctl`/`shmctl`'s `IPC_STAT` fill a caller's structure correctly.
+
+**Registered in `KNOWN_MISMATCH`.**

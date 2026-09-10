@@ -556,6 +556,203 @@ pub(crate) fn abi_asserts() -> String {
         mnt_passno
     );
 
+    // --- more by-value types, and the rest of the ordinary libc surface -----
+    //
+    // The opaque ones carry no field list on purpose: musl declares them as
+    // unions of anonymous arrays, so size and alignment are the whole contract
+    // and naming an internal field would be asserting something musl does not
+    // promise.
+    abi!(out, hdrs, crate::poll::FdSet, "fd_set", "sys/select.h");
+    abi!(out, hdrs, crate::signal::SiginfoT, "siginfo_t", "signal.h");
+    abi!(out, hdrs, crate::glob::GlobT, "glob_t", "glob.h");
+    abi!(
+        out,
+        hdrs,
+        crate::wordexp::WordexpT,
+        "wordexp_t",
+        "wordexp.h"
+    );
+    abi!(out, hdrs, crate::uchar::MbstateT, "mbstate_t", "wchar.h");
+    abi!(
+        out,
+        hdrs,
+        crate::spawn::PosixSpawnattrT,
+        "posix_spawnattr_t",
+        "spawn.h"
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::spawn::PosixSpawnFileActionsT,
+        "posix_spawn_file_actions_t",
+        "spawn.h"
+    );
+
+    abi!(
+        out,
+        hdrs,
+        crate::aio::Aiocb,
+        "struct aiocb",
+        "aio.h",
+        aio_fildes,
+        aio_offset,
+        aio_buf,
+        aio_nbytes,
+        aio_reqprio,
+        aio_sigevent,
+        aio_lio_opcode
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::dlfcn::DlInfo,
+        "Dl_info",
+        "dlfcn.h",
+        dli_fname,
+        dli_fbase,
+        dli_sname,
+        dli_saddr
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::getopt::Option,
+        "struct option",
+        "getopt.h",
+        name,
+        has_arg,
+        flag,
+        val
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::mqueue::MqAttr,
+        "struct mq_attr",
+        "mqueue.h",
+        mq_flags,
+        mq_maxmsg,
+        mq_msgsize,
+        mq_curmsgs
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::socket::Hostent,
+        "struct hostent",
+        "netdb.h",
+        h_name,
+        h_aliases,
+        h_addrtype,
+        h_length,
+        h_addr_list
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::socket::Ifaddrs,
+        "struct ifaddrs",
+        "ifaddrs.h",
+        ifa_next,
+        ifa_name,
+        ifa_flags,
+        ifa_addr,
+        ifa_netmask,
+        ifa_broadaddr,
+        ifa_data
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::statvfs::Statfs,
+        "struct statfs",
+        "sys/vfs.h",
+        f_type,
+        f_bsize,
+        f_blocks,
+        f_bfree,
+        f_bavail,
+        f_files,
+        f_ffree,
+        f_fsid,
+        f_namelen,
+        f_frsize,
+        f_flags
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::time::Sigevent,
+        "struct sigevent",
+        "signal.h",
+        sigev_value,
+        sigev_signo,
+        sigev_notify
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::unistd::Sysinfo,
+        "struct sysinfo",
+        "sys/sysinfo.h",
+        uptime,
+        loads,
+        totalram,
+        freeram,
+        sharedram,
+        bufferram,
+        totalswap,
+        freeswap,
+        procs,
+        totalhigh,
+        freehigh,
+        mem_unit
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::utmpx::Utmpx,
+        "struct utmpx",
+        "utmpx.h",
+        ut_type,
+        ut_pid,
+        ut_line,
+        ut_id,
+        ut_user,
+        ut_host,
+        ut_exit,
+        ut_session,
+        ut_tv,
+        ut_addr_v6
+    );
+
+    // Size only: ours flattens a nested C struct, so the field *names* do not
+    // correspond even where the bytes do. `msqid_ds` and `shmid_ds` open with a
+    // `struct ipc_perm`, and `timex` embeds a `struct timeval`. Checking the
+    // size is still worth doing -- these are filled in for a caller -- and the
+    // flattening is worth revisiting separately.
+    abi!(
+        out,
+        hdrs,
+        crate::sysv_msg::MsqidDs,
+        "struct msqid_ds",
+        "sys/msg.h"
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::sysv_shm::ShmidDs,
+        "struct shmid_ds",
+        "sys/shm.h"
+    );
+    abi!(
+        out,
+        hdrs,
+        crate::sys_timex::Timex,
+        "struct timex",
+        "sys/timex.h"
+    );
+
     let mut src = String::new();
     let _ = writeln!(
         src,

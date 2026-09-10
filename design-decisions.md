@@ -70764,11 +70764,77 @@ The running tally of what tests were doing in place of checking:
 All three read as though the question had been asked. None of them asked it.
 The gate asks it, on every push, against the library we actually link.
 
-**Against it, honestly:** 42 of 98 is coverage of less than half, and the
-ratchet freezes the other 37 rather than fixing them. (This paragraph has
-been rewritten twice in one session — 15, then 28, then 42 — which is the
-ratchet working as intended rather than a correction to it. The number in it
-will keep going stale; the ratchet in the script is the copy that cannot.) The most dangerous names are in
+### Batch four: 42 → 62 types, and the third state the ratchet was missing
+
+`BASELINE_UNCOVERED` says "nobody has looked". Batch four needed a state it
+could not express: **somebody looked, it is broken, and here is where it is
+written down.** Taking a failing type back *out* of `abi_layout.rs` makes it
+indistinguishable from one that was never added, and throws the measurement
+away.
+
+So the gate gained `KNOWN_MISMATCH`, a **two-way** ratchet. A failure naming a
+listed type is reported and does not refuse the push. A listed type that
+produces **no** failure is a hard error — it means somebody fixed it and left
+the exemption behind, and an exemption for a defect that no longer exists is
+how an exemption list starts covering real ones. Every entry must name a
+`known-issues.md` key.
+
+Five types are in it: `aiocb` (wrong field order *and* size), `sysinfo` (368
+against 112 — the only one here that writes past a caller's object), `utmpx`
+(400 against 384, last three fields shifted), and the two System V IPC status
+structures, which flatten `ipc_perm` and come up short.
+
+**Fixed rather than listed: `fd_set`.** 32 bytes against the C library's 128,
+so every `select()` read and wrote the front quarter of the caller's own
+variable. The cause is worth keeping: `FD_SET_WORDS` was derived from
+`FD_SETSIZE`, which is 256 here because `fdtable::MAX_FDS` is. That reasoning is
+right about *this system's fd limit* and wrong about *the C library's
+structure* — two facts that are the same number in glibc and musl and are not
+the same fact. They are now `FD_SET_BITS` (1024, the ABI) and `FD_SETSIZE`
+(256, the policy).
+
+### The checker's own classifier was wrong the whole time
+
+Worth its own section because of how it hid.
+
+`compile_c` split clang's output into "assertion failures" and "everything
+else" with a regex expecting the message in **quotes**. clang prints it bare:
+
+```text
+error: static assertion failed due to requirement 'sizeof(x) == 8': x size
+```
+
+So the regex never matched, and every assertion failure since the gate was
+written had been falling through to the "(compile error, not an assertion)"
+branch — arriving as one opaque blob with a problem count of 1 regardless of
+how many assertions had failed.
+
+**The verdict was right and the classification was wrong**, which is the
+hardest kind of wrong to notice: the gate refused exactly when it should, so
+every run looked correct. It surfaced only when `KNOWN_MISMATCH` needed to ask
+*which* type a failure belonged to, and got "none of them" for all of them —
+which then reported all five known-bad types as fixed.
+
+Two things came out of it, and the second matters more than the first:
+
+* the parse is now pinned by a self-test that asserts the extracted message
+  **exactly** — `got == ["the 1010 bug"]`, not `"the 1010 bug" in stderr`. The
+  weaker form passes against the raw blob, so it would have certified the bug,
+  which is the same shape as everything else in §1010 and §1011;
+* a translation unit that fails to *compile* now suppresses the "this type
+  produced no failure, so it must be fixed" sweep, because a unit that stopped
+  early reached no verdict on the assertions after the error. Without that,
+  one missing header silently declares every known mismatch repaired.
+
+The summary line was also saying "0 mismatches" while the lines above it listed
+five. A summary that contradicts its own detail trains the reader to skip the
+detail.
+
+**Against it, honestly:** 62 of 98 are checked, 5 of those are known-bad and
+unfixed, and 17 have still never been looked at. (This paragraph has been
+rewritten three times in one session — 15, 28, 42, 62 — which is the ratchet
+working as intended rather than a correction to it. The number in it will keep
+going stale; the two ratchets in the script are the copies that cannot.) The most dangerous names are in
 that frozen set -- `PthreadMutexT`, `PthreadAttrT`, `CpuSetT`, `SemT` are all
 types a C program declares *by value*, where being smaller than musl's means
 our writes land past the caller's own object. The counter-argument is that a

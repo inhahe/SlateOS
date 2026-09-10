@@ -14,7 +14,6 @@ use std::process;
 // ── Constants ──────────────────────────────────────────────────────────
 
 const _EARLYOOM_CONF: &str = "/etc/default/earlyoom";
-const _PROC_MEMINFO: &str = "/proc/meminfo";
 const _PROC_DIR: &str = "/proc";
 
 // ── Data structures ────────────────────────────────────────────────────

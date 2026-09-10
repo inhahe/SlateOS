@@ -9,10 +9,6 @@
 //! and swap configuration.
 
 #![deny(clippy::all)]
-// MemInfo::sreclaimable and FstabEntry::{mountpoint, options} mirror the
-// /proc/meminfo and /etc/fstab field vocabulary the real swapon must
-// consume. Dead-code lint cannot see across that future boundary.
-#![allow(dead_code)]
 
 use quoting::quotef_os;
 use std::env;
@@ -26,7 +22,6 @@ use std::process;
 
 const VERSION: &str = "0.1.0";
 const PROC_SWAPS: &str = "/proc/swaps";
-const PROC_MEMINFO: &str = "/proc/meminfo";
 const FSTAB_PATH: &str = "/etc/fstab";
 
 // ============================================================================
@@ -53,14 +48,21 @@ struct MemInfo {
     swap_total: u64,
     swap_free: u64,
     shmem: u64,
+    /// Mirrors the `/proc/meminfo` vocabulary the real `swapon` must consume;
+    /// parsed and carried, not yet displayed.
+    #[allow(dead_code)]
     sreclaimable: u64,
 }
 
 /// Fstab entry.
 struct FstabEntry {
     device: String,
+    /// Mirrors the `/etc/fstab` field vocabulary; parsed, not yet used.
+    #[allow(dead_code)]
     mountpoint: String,
     fstype: String,
+    /// Mirrors the `/etc/fstab` field vocabulary; parsed, not yet used.
+    #[allow(dead_code)]
     options: String,
     _dump: u32,
     _pass: u32,

@@ -186,9 +186,54 @@ def crate_sources(crate: Path) -> str:
 
 
 def strip_tests(text: str) -> str:
-    """Drop `#[cfg(test)]` modules -- a test fixture is not a claim."""
-    idx = text.find("#[cfg(test)]")
-    return text if idx < 0 else text[:idx]
+    """Drop every `#[cfg(test)]` module -- a test fixture is not a claim.
+
+    # Why this is brace-matched rather than a truncation
+
+    It used to be `text.find("#[cfg(test)]")` followed by `text[:idx]`, which
+    is correct for one file whose tests sit at the bottom and **wrong for
+    every multi-file crate**, because `crate_sources` concatenates all of
+    `src/**/*.rs` before this runs. The first test module in the
+    alphabetically-first file therefore discarded every later file.
+
+    That skewed the audit in both directions at once, which is why it went
+    unnoticed:
+
+    * I/O markers in a later file were invisible, so a crate that genuinely
+      reads the world could be reported as doing no I/O -- a FALSE POSITIVE,
+      and this instrument's output was used to delete 2,285 crates.
+    * `FACT_PATTERNS` in a later file were equally invisible, so a crate that
+      does fabricate could be missed -- a false negative.
+
+    `userspace/oils`, a shell with dozens of modules, measured as having no
+    I/O of any kind.
+    """
+    out = []
+    i = 0
+    while True:
+        idx = text.find("#[cfg(test)]", i)
+        if idx < 0:
+            out.append(text[i:])
+            return "".join(out)
+        out.append(text[i:idx])
+        # Find the `{` that opens the item this attribute decorates, then
+        # match to its close. An attribute on a non-block item (rare here)
+        # leaves nothing to skip, so fall back to dropping the attribute only.
+        brace = text.find("{", idx)
+        semi = text.find(";", idx)
+        if brace < 0 or (0 <= semi < brace):
+            i = idx + len("#[cfg(test)]")
+            continue
+        depth, j = 0, brace
+        while j < len(text):
+            if text[j] == "{":
+                depth += 1
+            elif text[j] == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        i = j + 1
 
 
 BASELINE = ROOT / "scripts" / "cli-fabrication-baseline.txt"
@@ -256,6 +301,20 @@ def _self_test() -> int:
 
     expect("a crate that asserts a fact and touches nothing is flagged",
            fabricates("probe", FACT), True)
+
+    # The multi-file bug: `crate_sources` concatenates every .rs file, so a
+    # test module in an early file used to discard all the later ones.
+    CONCAT = (
+        "mod a {\n#[cfg(test)]\nmod tests { fn t() {} }\n}\n"
+        + 'fn later() { std::fs::read("/x"); }\n'
+        + FACT
+    )
+    expect("I/O in a file after the first test module is still seen",
+           fabricates("probe", CONCAT), False)
+    expect("...and the test module itself is still dropped",
+           "#[cfg(test)]" in strip_tests(CONCAT), False)
+    expect("...while the code after it survives",
+           "std::fs::read" in strip_tests(CONCAT), True)
     expect("...and one that only prints usage is not",
            fabricates("probe", 'fn main() { println!("usage: probe [-v]"); }'), False)
 

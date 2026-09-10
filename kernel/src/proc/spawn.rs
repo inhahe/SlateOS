@@ -9186,13 +9186,13 @@ pub fn self_test_ctest_altstack() -> KernelResult<()> {
 /// test the moment `services/ctest-hostname/` appears. Landing the rung first is
 /// what unblocks them.
 ///
-/// **No exit-code hints, on purpose.** The fixture's numbering is lane B's to
-/// choose and it does not exist yet; inventing ranges here would produce hints
-/// that are wrong from the first commit. The altstack rung shipped hints for
-/// checks "1-31" against a fixture that already had 37, and a stale hint is
-/// worse than none because it misdirects confidently. What the rung can say
-/// without guessing is the three failure classes lane B named, and where the
-/// authoritative mapping lives.
+/// **The exit-code hints are read from the fixture's source, not from a
+/// description of it.** They were deliberately absent while the fixture did not
+/// exist -- inventing ranges would have produced hints wrong from the first
+/// commit, which is what the altstack rung did when it shipped hints for checks
+/// "1-31" against a fixture that already had 37. Lane B landed
+/// `services/ctest-hostname/main.c` and the ranges below are its own group
+/// comments, 1-21. If the two ever disagree, the source is right.
 pub fn self_test_ctest_hostname() -> KernelResult<()> {
     use crate::cap::{ResourceType, Rights};
 
@@ -9266,14 +9266,68 @@ pub fn self_test_ctest_hostname() -> KernelResult<()> {
     }
 
     if exit_code != Some(EXPECTED) {
+        // Taken from services/ctest-hostname/main.c, not from a description of
+        // it. The altstack rung shipped hints for "checks 1-31" against a fixture
+        // that already had 37 because they were written from a summary, and a
+        // stale hint misdirects confidently. These are the fixture's own group
+        // comments; if they and the source ever disagree, the source is right.
+        let hint = match exit_code {
+            Some(1 | 2) => {
+                " — gethostname itself failed or returned an empty name, before \
+                 anything was set. This is libc's read path, which needs no \
+                 kernel change and was working before 1072 existed: suspect \
+                 /proc/sys/kernel/hostname, not the syscall"
+            }
+            Some(3) => {
+                " — ENOSYS from sethostname: libc is not wired to SYS_HOSTNAME_SET \
+                 (1072). The kernel side is fine and this is lane B's half"
+            }
+            Some(4) => {
+                " — EPERM: the (Process, SET_HOSTNAME) grant in the caps array \
+                 above did not reach the process. That grant is THIS function's \
+                 and nothing else in the tree issues it, so the fault is here"
+            }
+            Some(5) => {
+                " — sethostname failed with neither ENOSYS nor EPERM. An errno \
+                 the fixture did not expect; the kernel returns InvalidArgument \
+                 for a bad length and InvalidAddress for an unreadable pointer"
+            }
+            Some(6) => {
+                " — the call reported success and the name did not change. This \
+                 is the accepted-and-dropped case, and it is the single reason \
+                 this fixture exists: every gate in the kernel can be satisfied \
+                 by a handler that validates its arguments and then does nothing"
+            }
+            Some(7 | 8) => {
+                " — the name was set but a SECOND source disagrees: 7 is \
+                 /proc/sys/kernel/hostname, 8 is uname's nodename. One value with \
+                 two readers that differ is the exact defect 1072 was added to \
+                 end, now in the opposite direction"
+            }
+            Some(9..=11) => {
+                " — the 64-byte bound: 9 means an over-long name was ACCEPTED, 10 \
+                 that it was refused with the wrong errno (EINVAL expected), 11 \
+                 that it was refused but the stored name changed anyway. 11 is the \
+                 worst: it means the length check runs after the store"
+            }
+            Some(12) => {
+                " — the fixture could not put the machine's original name back. \
+                 The checks passed; the cleanup did not, so the running system is \
+                 left called \"ctest-hostname\""
+            }
+            Some(13..=21) => {
+                " — the domain half, same shape as 1-12 for the host name: 13 \
+                 getdomainname baseline, 14-16 the three refusals (ENOSYS / EPERM \
+                 / other) from SYS_DOMAINNAME_SET (1073), 17-18 the two readers \
+                 disagreeing, 19-20 the bound, 21 the restore"
+            }
+            _ => "",
+        };
         serial_println!(
             "[spawn]   FAIL: ctest-hostname (ring 3) — reached Zombie but exit code was {:?}, \
-             expected {}. Three things fail differently here and the fixture's own source is the \
-             authoritative mapping (services/ctest-hostname/main.c): a REFUSAL means this rung's \
-             (Process, SET_HOSTNAME) grant did not arrive, so check the caps array above; ENOSYS \
-             means libc is still not wired to 1072/1073; and a read-back that succeeded but \
-             returned the OLD name means the kernel accepted the call and dropped it, which is the \
-             one failure the gate cannot catch and this fixture exists for",
+             expected {}{hint}. The fixture numbers its checks 1-21 in source order and returns \
+             the first that failed; services/ctest-hostname/main.c carries a comment above each \
+             group saying what it means",
             exit_code,
             EXPECTED
         );

@@ -636,44 +636,63 @@ fn format_bytes(bytes: u64) -> String {
 ///         RX errors 0  dropped 0  overruns 0  frame 0
 ///         TX errors 0  dropped 0  overruns 0  carrier 0  collisions 0
 /// ```
-fn print_interface(iface: &InterfaceInfo) {
+/// Render one interface exactly as `ifconfig` prints it.
+///
+/// Split out of `print_interface` on 2026-09-10 so the format can be asserted.
+/// It was `println!` throughout, so the only test of it built a 21-field
+/// `InterfaceInfo`, called the printer, and checked nothing -- under a comment
+/// reading "Verify it doesn't panic and produces output", of which only the
+/// first half was true.
+///
+/// The format is the interface here in the other sense: `ifconfig` output is
+/// parsed by scripts and read by people who know what the real one looks like,
+/// so a column that moves is a defect even when every character in it is
+/// individually right.
+fn render_interface(iface: &InterfaceInfo) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+
     // Line 1: name, flags, mtu.
     let flag_str = flags_to_string(iface.flags);
-    println!(
+    let _ = writeln!(
+        out,
         "{}: flags={}<{}>  mtu {}",
         iface.name, iface.flags, flag_str, iface.mtu
     );
 
     // Line 2: inet address / netmask / broadcast (if present).
     if !iface.ip_addr.is_empty() {
-        let mut line = format!("        inet {}", iface.ip_addr);
+        let _ = write!(out, "        inet {}", iface.ip_addr);
         if !iface.netmask.is_empty() {
-            line.push_str(&format!("  netmask {}", iface.netmask));
+            let _ = write!(out, "  netmask {}", iface.netmask);
         }
         if !iface.broadcast.is_empty() {
-            line.push_str(&format!("  broadcast {}", iface.broadcast));
+            let _ = write!(out, "  broadcast {}", iface.broadcast);
         }
-        println!("{line}");
+        out.push('\n');
     }
 
     // Line 3: ether / txqueuelen.
     if !iface.mac.is_empty() && iface.mac != "00:00:00:00:00:00" {
-        println!(
+        let _ = writeln!(
+            out,
             "        ether {}  txqueuelen {}",
             iface.mac, iface.tx_queuelen
         );
     } else if iface.flags & iff::LOOPBACK != 0 {
-        println!("        loop  txqueuelen {}", iface.tx_queuelen);
+        let _ = writeln!(out, "        loop  txqueuelen {}", iface.tx_queuelen);
     }
 
     // Line 4-5: RX/TX packet and byte counters.
-    println!(
+    let _ = writeln!(
+        out,
         "        RX packets {}  bytes {} ({})",
         iface.rx_packets,
         iface.rx_bytes,
         format_bytes(iface.rx_bytes)
     );
-    println!(
+    let _ = writeln!(
+        out,
         "        TX packets {}  bytes {} ({})",
         iface.tx_packets,
         iface.tx_bytes,
@@ -681,17 +700,24 @@ fn print_interface(iface: &InterfaceInfo) {
     );
 
     // Line 6-7: RX/TX error counters.
-    println!(
+    let _ = writeln!(
+        out,
         "        RX errors {}  dropped {}  overruns {}  frame {}",
         iface.rx_errors, iface.rx_dropped, iface.rx_overruns, iface.rx_frame
     );
-    println!(
+    let _ = writeln!(
+        out,
         "        TX errors {}  dropped {}  overruns {}  carrier {}  collisions {}",
         iface.tx_errors, iface.tx_dropped, iface.tx_overruns, iface.tx_carrier, iface.tx_collisions
     );
 
     // Blank line between interfaces.
-    println!();
+    out.push('\n');
+    out
+}
+
+fn print_interface(iface: &InterfaceInfo) {
+    print!("{}", render_interface(iface));
 }
 
 /// Print a short one-line-per-interface table (`ifconfig -s`).
@@ -1196,8 +1222,31 @@ mod tests {
             tx_carrier: 0,
             tx_collisions: 0,
         };
-        // Just verify it runs without panic.
-        print_interface(&iface);
+        // What this asserts is the BRANCHES, not the whole text. Every line
+        // that can vary does so on a condition, and pinning the exact rendering
+        // of the invariant parts would break on a spacing change that harms
+        // nobody. The old body called the printer and checked nothing, under a
+        // comment claiming it verified "output".
+        let out = render_interface(&iface);
+
+        assert!(out.starts_with("lo: flags="), "name and flags lead: {out:?}");
+        assert!(out.contains("<UP,LOOPBACK,RUNNING>"), "flag names: {out:?}");
+        assert!(out.contains("mtu 65536"), "mtu: {out:?}");
+        assert!(
+            out.contains("inet 127.0.0.1  netmask 255.0.0.0"),
+            "address and mask on one line: {out:?}"
+        );
+
+        // The branch this case exists for: an all-zero MAC on a LOOPBACK
+        // interface prints `loop`, never an `ether` line. Getting it wrong
+        // would print `ether 00:00:00:00:00:00`, which real ifconfig does not.
+        assert!(out.contains("loop  txqueuelen 1000"), "loop line: {out:?}");
+        assert!(!out.contains("ether"), "loopback has no ether line: {out:?}");
+
+        // An empty broadcast is omitted rather than printed empty.
+        assert!(!out.contains("broadcast"), "no broadcast on lo: {out:?}");
+
+        assert!(out.ends_with("\n\n"), "one blank line separates interfaces");
     }
 
     #[test]
@@ -1225,7 +1274,31 @@ mod tests {
             tx_carrier: 0,
             tx_collisions: 0,
         };
-        print_interface(&iface);
+        let out = render_interface(&iface);
+
+        assert!(out.starts_with("eth0: flags="), "name leads: {out:?}");
+        assert!(out.contains("<UP,BROADCAST,RUNNING,MULTICAST>"), "flags: {out:?}");
+        assert!(out.contains("mtu 1500"), "mtu: {out:?}");
+
+        // The branch: a real MAC prints `ether`, and never the `loop` line.
+        assert!(
+            out.contains("ether 52:54:00:12:34:56  txqueuelen 1000"),
+            "ether line: {out:?}"
+        );
+        assert!(!out.contains("loop  txqueuelen"), "not a loopback: {out:?}");
+
+        // A non-empty broadcast joins the inet line rather than starting its own.
+        assert!(
+            out.contains("inet 10.0.2.15  netmask 255.255.255.0  broadcast 10.0.2.255"),
+            "inet, netmask and broadcast share a line: {out:?}"
+        );
+
+        // Counters are the caller's numbers, not the byte-formatted ones: both
+        // appear, and the raw value comes first.
+        assert!(out.contains("RX packets 1234  bytes 567890 ("), "rx: {out:?}");
+        assert!(out.contains("TX packets 567  bytes 123456 ("), "tx: {out:?}");
+
+        assert!(out.ends_with("\n\n"), "one blank line separates interfaces");
     }
 
     // --- Short table printing ---

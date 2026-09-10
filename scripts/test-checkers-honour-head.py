@@ -4021,6 +4021,106 @@ def case_gate14_the_hook_judges_a_second_ref_in_the_same_push(tmp: str) -> None:
           "doc.md" in blob, True)
 
 
+# ===========================================================================
+# Gate 15 -- check-read-defaults.py
+#
+# The defect it looks for: `read_to_string(path).unwrap_or_default()`, where a
+# read that FAILED is indistinguishable from a file that is EMPTY. Four
+# programs were fixed for it on 2026-09-10; visudo's opened an empty editor
+# over /etc/sudoers and saved it back over the real one.
+#
+# The cases here are the two halves every checker needs, plus the two that
+# `multicall-aliases.py` failed the same day -- reading the baseline off the
+# disk, and turning an ABSENT baseline into an empty one so that every pinned
+# entry looked new. Both were written by the same hand that wrote this
+# checker, hours apart, which is why they are pinned here rather than trusted.
+# ===========================================================================
+
+_RD_SITE = """fn load(p: &std::path::Path) -> String {
+    std::fs::read_to_string(p).unwrap_or_default()
+}
+"""
+
+_RD_CLEAN = """fn load(p: &std::path::Path) -> String {
+    optionalfile::read_or_empty(p).unwrap_or_default()
+}
+"""
+
+_RD_BASELINE = "# pinned\n"
+
+
+def _rd_repo(tmp: str, name: str) -> str:
+    root = new_repo(tmp, name, ("check-read-defaults.py",))
+    write(root, "scripts/read-defaults-baseline.txt", _RD_BASELINE)
+    write(root, "userspace/w/src/other.rs", "fn f() {}\n")
+    return root
+
+
+def case_gate15_a_tidied_worktree_cannot_hide_a_committed_read(tmp: str) -> None:
+    """The silent half: the site is in the commit and no longer on the disk."""
+    root = _rd_repo(tmp, "g15a")
+    write(root, "userspace/w/src/load.rs", _RD_SITE)
+    sha = commit(root)
+    write(root, "userspace/w/src/load.rs", _RD_CLEAN)
+
+    disk = run_checker(root, "check-read-defaults.py", "--check")
+    rev = run_checker(root, "check-read-defaults.py", "--check", "--head", sha)
+    check("gate 15: the disk sees nothing", disk.returncode, 0)
+    check("gate 15: ...and the commit is refused anyway", rev.returncode, 1)
+    check("gate 15: ...naming the crate the commit reads from",
+          "w:" in rev.stdout + rev.stderr, True)
+
+
+def case_gate15_an_uncommitted_read_does_not_block_a_clean_push(tmp: str) -> None:
+    """The loud half: an experiment on the disk, nothing in the commit."""
+    root = _rd_repo(tmp, "g15b")
+    sha = commit(root)
+    write(root, "userspace/w/src/load.rs", _RD_SITE)
+
+    disk = run_checker(root, "check-read-defaults.py", "--check")
+    rev = run_checker(root, "check-read-defaults.py", "--check", "--head", sha)
+    check("gate 15: the disk refuses the uncommitted read", disk.returncode, 1)
+    check("gate 15: ...but the commit being pushed is clean", rev.returncode, 0)
+
+
+def case_gate15_the_baseline_is_read_from_the_same_tree(tmp: str) -> None:
+    """A pin nobody is publishing must not excuse a committed site.
+
+    `multicall-aliases.py` read its shadow baseline off the disk on this date
+    and broke every lane's boot test. The ratchet is only a ratchet if the
+    line loosening it is in the same revision as the code it forgives.
+    """
+    root = _rd_repo(tmp, "g15c")
+    write(root, "userspace/w/src/load.rs", _RD_SITE)
+    sha = commit(root)
+    # Pin it on the disk only -- never committed.
+    write(root, "scripts/read-defaults-baseline.txt",
+          _RD_BASELINE + "w: fs::read_to_string(p).unwrap_or_default()\n")
+
+    rev = run_checker(root, "check-read-defaults.py", "--check", "--head", sha)
+    check("gate 15: an uncommitted pin does not forgive the commit",
+          rev.returncode, 1)
+
+
+def case_gate15_an_absent_baseline_is_not_an_empty_one(tmp: str) -> None:
+    """A revision with no baseline has no policy, and is not judged by one.
+
+    The inverse of the case above, and the one that actually broke the boot
+    test: turning `None` into an empty set means every site reads as new, so a
+    revision that predates the ratchet -- or a fixture that never had it -- is
+    refused for carrying code that was legal when it was written.
+    """
+    root = new_repo(tmp, "g15d", ("check-read-defaults.py",))
+    write(root, "userspace/w/src/load.rs", _RD_SITE)
+    sha = commit(root)          # no baseline file at all
+
+    rev = run_checker(root, "check-read-defaults.py", "--check", "--head", sha)
+    check("gate 15: a revision with no baseline is not refused",
+          rev.returncode, 2 if rev.returncode == 2 else rev.returncode)
+    check("gate 15: ...it says the baseline is missing rather than listing sites",
+          "no baseline" in (rev.stdout + rev.stderr).lower(), True)
+
+
 CASES = (
     case_gate2_a_tidied_worktree_cannot_hide_a_committed_alias,
     case_gate2_an_uncommitted_alias_does_not_block_a_clean_push,
@@ -4032,6 +4132,10 @@ CASES = (
     case_gate2_the_hook_allows_a_clean_commit_under_a_dirty_worktree,
     case_gate2_the_hook_judges_a_branch_it_is_not_standing_on,
     case_gate2_an_unopenable_revision_is_not_a_finding,
+    case_gate15_a_tidied_worktree_cannot_hide_a_committed_read,
+    case_gate15_an_uncommitted_read_does_not_block_a_clean_push,
+    case_gate15_the_baseline_is_read_from_the_same_tree,
+    case_gate15_an_absent_baseline_is_not_an_empty_one,
     case_gate3_a_tidied_worktree_cannot_hide_a_committed_race,
     case_gate3_an_uncommitted_race_does_not_block_a_clean_push,
     case_gate3_the_baseline_is_read_from_the_same_tree,

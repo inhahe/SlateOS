@@ -50,11 +50,17 @@ deliberately for exactly that reason.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gittree  # noqa: E402
+
 ROOT = Path(__file__).resolve().parent.parent
+# Repo-relative and `/`-separated: the only spelling `gittree.Tree` accepts.
+BASELINE_REL = "scripts/read-defaults-baseline.txt"
 BASELINE = Path(__file__).resolve().parent / "read-defaults-baseline.txt"
 
 # A complete char literal: `'x'`, `'\n'`, `'\''`, `'\u{1F600}'`. Deliberately
@@ -151,7 +157,7 @@ def strip_noise(src: str) -> str:
     return "".join(out)
 
 
-def survey() -> list[str]:
+def survey(tree: gittree.Tree) -> list[str]:
     """`<crate>: <call>` for every live occurrence.
 
     Keyed on the call text rather than a line number, because a line number
@@ -173,12 +179,13 @@ def survey() -> list[str]:
     A `#2` suffix keeps them distinct.
     """
     found: list[str] = []
-    for path in sorted((ROOT / "userspace").glob("*/src/**/*.rs")):
-        try:
-            src = path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
+    for rel in sorted(tree.files_under("userspace")):
+        if not rel.endswith(".rs"):
             continue
-        crate = path.relative_to(ROOT).parts[1]
+        src = tree.read_text(rel)
+        if src is None:
+            continue
+        crate = rel.split("/")[1]
         original = src.split("#[cfg(test)]")[0]
         body = strip_noise(original)
         seen: dict[str, int] = {}
@@ -192,11 +199,23 @@ def survey() -> list[str]:
     return sorted(found)
 
 
-def read_baseline() -> set[str] | None:
-    if not BASELINE.is_file():
+def read_baseline(tree: gittree.Tree) -> set[str] | None:
+    """The pinned set, out of the REVISION rather than the disk.
+
+    `None` means the revision carries no baseline at all, which is not the
+    same as an empty one: absent says this revision has no policy -- it
+    predates the ratchet, or it is a fixture -- and judging a commit by a file
+    it does not carry is judging it by a rule it never had.
+
+    Both halves of this were wrong in `multicall-aliases.py` earlier today and
+    broke every lane's boot test: it read the disk, and it turned absent into
+    empty so that every pinned entry looked new.
+    """
+    text = tree.read_text(BASELINE_REL)
+    if text is None:
         return None
     names = set()
-    for line in BASELINE.read_text(encoding="utf-8").splitlines():
+    for line in text.splitlines():
         line = line.split("#", 1)[0].strip()
         if line:
             names.add(line)
@@ -301,12 +320,26 @@ def main() -> int:
     ap.add_argument("--update-baseline", action="store_true", dest="update")
     ap.add_argument("--self-test", "--selftest", dest="self_test",
                     action="store_true", help="run this script's own fixtures")
+    ap.add_argument("--head", metavar="REV",
+                    help="judge this revision rather than the working tree")
     args = ap.parse_args()
 
     if args.self_test:
         return _self_test()
 
-    found = survey()
+    try:
+        tree = gittree.open_tree(str(ROOT), args.head)
+    except gittree.GitTreeError as exc:
+        # Exit 2, not 1: `run-checker.sh` reads 1 as "the checker found
+        # something" and would print a refusal over this. A revision that
+        # cannot be opened is not a finding against anyone's code.
+        print(f"check-read-defaults: cannot read {args.head!r}: {exc}",
+              file=sys.stderr)
+        return 2
+
+    with tree:
+        found = survey(tree)
+        pinned = read_baseline(tree)
 
     if args.update:
         BASELINE.write_text(
@@ -325,7 +358,6 @@ def main() -> int:
             print(f"  {f}")
         return 0
 
-    pinned = read_baseline()
     if pinned is None:
         print(f"no baseline at {BASELINE.relative_to(ROOT)}; run --update-baseline",
               file=sys.stderr)

@@ -560,6 +560,73 @@ if [ "$skip_raced" != "1" ]; then
     fi
 fi
 
+# ---------------------------------------------------------------------------
+# check-read-defaults.py -- a read whose failure is indistinguishable from an
+# empty file.
+#
+# `read_to_string(path).unwrap_or_default()` collapses "the file is absent"
+# and "we could not read it" into one empty string. Four programs were fixed
+# for it on 2026-09-10; visudo's opened an EMPTY EDITOR over /etc/sudoers, and
+# whatever the user saved went back over the real one.
+#
+# Wired here rather than only in pre-boot.py, which lane A's
+# check-gates-are-wired caught: a gate named only in the local pre-flight
+# cannot fail anybody's build, which is the same shape this checker exists to
+# find. Lane A wired scripts/boot-test.sh (their file) the same day; this is
+# the push-time half, and it is the half that needs --head.
+# ---------------------------------------------------------------------------
+skip_readdef=0
+readdef="${repo_root:-.}/scripts/check-read-defaults.py"
+[ -f "$readdef" ] || skip_readdef=1
+# The baseline is in scope for the same reason raced-globals' is: a pin must be
+# re-verified by the push that carries it.
+touches userspace/ \
+        scripts/check-read-defaults.py scripts/read-defaults-baseline.txt \
+        || skip_readdef=1
+[ -n "${pushed_shas# }" ] || skip_readdef=1
+note_gate read-defaults "$skip_readdef"
+
+readdef_failed=0
+if [ "$skip_readdef" != "1" ]; then
+    # The checker before its verdict. `strip_noise` has been wrong twice -- a
+    # char literal holding a quote, and a raw string ending in a backslash --
+    # and both times the broken version still produced a plausible list and
+    # still passed --check. No --head: the fixtures are string literals inside
+    # the script and touch no tree.
+    if ! run_checker read-defaults-selftest "$py" "$readdef" --self-test; then
+        echo "pre-push: check-read-defaults.py FAILED ITS OWN SELF-TEST — its --check result is not trustworthy." >&2
+        readdef_failed=1
+    else
+        for sha in $pushed_shas; do
+            if ! run_checker "read-defaults-$sha" "$py" "$readdef" \
+                             --check --head "$sha"; then
+                readdef_failed=1
+            fi
+        done
+    fi
+fi
+
+if [ "$readdef_failed" = "1" ]; then
+    cat >&2 <<EOF
+
+pre-push: REFUSING to push — a read above cannot tell an absent file from an
+unreadable one.
+
+  let text = fs::read_to_string(path).unwrap_or_default();
+
+answers the same empty string whether the file is not there or could not be
+read. If the caller rebuilds the file from that value and writes it back, an
+unreadable file is REPLACED by whatever was parsed from nothing.
+
+Use \`optionalfile::read_or_empty\`, which returns Ok("") only for NotFound and
+an error for everything else. Do NOT add a line to
+scripts/read-defaults-baseline.txt to turn this green -- every entry there is a
+site that reports or displays, none rewrites the file it read, and that is what
+makes them tolerable rather than correct.
+EOF
+    fail=1
+fi
+
 if [ "$raced_failed" = "1" ]; then
     cat >&2 <<EOF
 

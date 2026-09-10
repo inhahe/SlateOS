@@ -107,6 +107,19 @@ pub fn init() {
     let tsc_now = bench::rdtsc();
     let dt = rtc::read_datetime();
 
+    // Announced here rather than inside the conversion, because this is the call
+    // that read the hardware and so the only one that knows the value is real. The
+    // conversion clamps silently and is exercised with deliberate rubbish by
+    // `self_test`; warning from there printed five lines per boot about a clock
+    // that was fine.
+    if !(1..=12).contains(&dt.month) {
+        crate::serial_println!(
+            "[timekeeping] WARNING: RTC reported month {}; the boot wall-clock is \
+             wrong. See rtc::self_test, which reports the same reading.",
+            dt.month
+        );
+    }
+
     // Convert DateTime to Unix epoch seconds.
     let epoch_secs = datetime_to_epoch(&dt);
     // Convert to nanoseconds.
@@ -388,15 +401,17 @@ fn datetime_to_epoch(dt: &rtc::DateTime) -> u64 {
     // and was already total: `month.clamp(1, 12)`, `wrapping_*` throughout, and no
     // table to index. Two implementations of one calendar, and only one of them
     // could be reached with a month of 14.
+    // Silent here, and loud in `init`. The first version announced the clamp from
+    // inside this function, which read as the honest choice -- a silent clamp makes
+    // every timestamp for the boot wrong with nothing saying so. Then `self_test`
+    // below exercised months 0, 13, 14, 20 and 255 with literals, and every boot
+    // printed five lines reading "The boot wall-clock is wrong" when it was not.
+    //
+    // A warning that fires five times per boot on purpose is one nobody reads, and
+    // it made the genuine case indistinguishable from the test. The announcement
+    // belongs to the caller that read the HARDWARE and therefore knows the value is
+    // real; the arithmetic just has to be total.
     let month = dt.month.clamp(1, 12);
-    if month != dt.month {
-        crate::serial_println!(
-            "[timekeeping] WARNING: RTC reported month {}; clamped to {}. The boot \
-             wall-clock is wrong -- see rtc::self_test.",
-            dt.month,
-            month
-        );
-    }
 
     // Full months in the current year.
     for m in 1..month {

@@ -392,9 +392,11 @@ impl CronJob {
         // is the difference between this parser and the one it replaces: the
         // old one accepted anything because it never looked at the column.
         let user = parts[5];
-        if user.is_empty() || !user.chars().all(|c| {
-            c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' || c == '$'
-        }) {
+        if user.is_empty()
+            || !user
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' || c == '$')
+        {
             return Err(format!("field 6 is a user name, and {user:?} is not one"));
         }
 
@@ -791,10 +793,7 @@ fn load_system_jobs() -> Vec<CronJob> {
                     // Named, not swallowed. A malformed system line used to be
                     // indistinguishable from an absent one because `parse`
                     // could not fail on the shape that was actually wrong.
-                    Err(e) => eprintln!(
-                        "crond: {}: skipping unparsable line: {e}",
-                        path.display()
-                    ),
+                    Err(e) => eprintln!("crond: {}: skipping unparsable line: {e}", path.display()),
                 }
             }
         }
@@ -1135,8 +1134,8 @@ mod tests {
     fn the_old_parser_still_reads_a_user_crontab_line_as_five_fields() {
         // The two grammars differ by one column, so the five-field parser must
         // NOT start eating the command's first word.
-        let job = CronJob::parse("0 3 * * * /usr/bin/rsync -a /home /mnt")
-            .expect("user crontab line");
+        let job =
+            CronJob::parse("0 3 * * * /usr/bin/rsync -a /home /mnt").expect("user crontab line");
         assert_eq!(job.user, None);
         assert_eq!(job.command, "/usr/bin/rsync -a /home /mnt");
     }

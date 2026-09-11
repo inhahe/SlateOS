@@ -106,6 +106,33 @@ So the safeguard I announced was not the one I applied, which is worse than the
 first error, and the correction belongs here rather than in a commit message
 nobody will grep.
 
+## TD-B-CRONTAB-SIGNALS-A-RELOAD-NOBODY-LISTENS-FOR (lane B, 2026-09-11)
+
+**In short:** `crontab` writes a file at `/run/crond/reload` after editing a
+crontab, meaning "daemon, re-read the spool". `crond` has no reload watcher —
+the string `/run/crond/reload` appears nowhere in it. The write goes to a path
+nothing reads.
+
+**Why it is harmless today, which is why it is here and not fixed.** `crond`
+calls `load_all_crontabs()` on every iteration of its main loop, so an edited
+crontab is picked up on the next tick regardless. The signal is redundant
+machinery, not a broken path: removing it changes nothing observable, and
+implementing a watcher would only shorten a delay that is already bounded by
+the loop period.
+
+**The proper fix is one of two, and they point opposite ways.** Either delete
+the write in `userspace/crontab` (`RELOAD_SIGNAL_PATH`, and the function that
+writes it), because a signal nobody reads is a claim the program does not
+honour — §1006's reasoning applied to a side effect rather than a command. Or
+have `crond` check for the file and reload early, if the tick latency ever
+matters. Deleting is the better default: the machinery has never worked, so
+nothing can be relying on it.
+
+**Found** while tracing where `crontab` writes, which is how the spool-path
+divergence next to it turned up — `crontab` wrote `/var/spool/cron/alice`
+while both daemons read `/var/spool/cron/crontabs/alice`, so jobs never ran.
+That one is fixed (`cronspool`, 2026-09-11).
+
 ## TD-B-FTP-ECHOES-THE-PASSWORD-IT-ASKS-FOR (lane B, 2026-09-10) -- FIXED 2026-09-11
 
 **FIXED,** and it was three programs rather than one. `userspace/passwd`

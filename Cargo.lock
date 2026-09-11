@@ -358,13 +358,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cmp"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "colorpicker"
 version = "0.1.0"
 dependencies = [

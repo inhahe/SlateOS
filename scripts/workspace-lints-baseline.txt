@@ -37,7 +37,6 @@ userspace/blkid
 userspace/chown
 userspace/chpasswd
 userspace/chroot
-userspace/cmp
 userspace/column
 userspace/cpio
 userspace/crond

@@ -64783,6 +64783,25 @@ lint programme above is still worth doing; it is not a substitute for a
 differential, and two of its three crates so far were duplicates that a
 differential then deleted.
 
+**25 -> 24 (2026-09-11): `cmp`, which names the wrong file as truncated.**
+`DIFF_PKG=cmp bash scripts/cmp-diff.sh`:
+
+**coreutils 141 passed, 0 differed. The standalone 54 passed, 87 differed.**
+
+| | cases | defect |
+|---|---|---|
+| **the EOF message names the wrong file** | ⊂61 | `cmp a short`, where `short` is the shorter file: GNU says `EOF on short after byte 4, line 1`; the standalone says `EOF on **a** after byte 4, in line 2`. It names the file that did *not* end, and gets the line number wrong. The whole content of that diagnostic is *which* file ran out, and it is the opposite of the truth. |
+| message shape | 61 | the above, plus `in line N` for GNU's `line N` throughout. |
+| option unrecognised | 13 | `-c` (`--print-chars`) and long-option abbreviations like `--verb`. |
+| refuses what GNU accepts | 7 | `-i 1T` (a size suffix on `--ignore-initial`); and a repeated `-n 3 -n 10`, where GNU takes the last and exits 0 while the standalone reports a difference. |
+| `(os error 2)` | 6 | |
+| accepts what GNU refuses | 1 | `-i 9223372036854775808` overflows silently and exits 0; GNU refuses it as an invalid value. |
+
+*Harness note:* the standalone run reported `2 NO LONGER differ (update the
+harness)`. Those two expected-difference entries are correct for the surviving
+coreutils half and were deliberately left alone — the harness documents the
+program the tree ships, not the one being deleted.
+
 **26 -> 25 (2026-09-11): `tsort`, which splits tokens on a carriage
 return.** `DIFF_PKG=tsort bash scripts/tsort-diff.sh`:
 
@@ -64791,7 +64810,10 @@ return.** `DIFF_PKG=tsort bash scripts/tsort-diff.sh`:
 | | cases | defect |
 |---|---|---|
 | loop diagnostic shape | 39 | GNU prints a header naming the file and then one line per node — `tsort: cyc2.txt: input contains a loop:` / `tsort: a` / `tsort: b`. The standalone prints a full sentence per node (`tsort: a: input contains a loop`) and **never names the file**, so with several operands you cannot tell which one has the cycle. |
-| **`` splits a token** | **5** | on `ab x`, GNU reads two tokens (`ab` and `x`) and succeeds; the standalone splits at the CR, counts three, and refuses with `input contains an odd number of tokens`. Legitimate input rejected — and a CRLF file is the ordinary way to meet a CR. |
+| **`
+` splits a token** | **5** | on `a
+b x`, GNU reads two tokens (`a
+b` and `x`) and succeeds; the standalone splits at the CR, counts three, and refuses with `input contains an odd number of tokens`. Legitimate input rejected — and a CRLF file is the ordinary way to meet a CR. |
 | accepts what GNU refuses | 3 | `tsort -h` prints a usage message and exits 0; GNU rejects `-h` as an invalid option. An accidental `-h` therefore looks like a successful sort that produced no edges. |
 | `(os error 2)` | 3 | including `tsort ''`, where GNU quotes the empty operand (`tsort: '': No such file…`) and the standalone renders it as nothing at all: `tsort: : No such file or directory (os error 2)`. |
 | **refuses non-UTF-8** | 2 | fifth consecutive standalone. |

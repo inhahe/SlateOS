@@ -12,8 +12,8 @@ mod snapshots;
 
 use appearance::Palette;
 use appearance::{
-    AccentColor, AnimationSpeed, AppearanceFile, ColorFilter, HighContrastScheme, ThemeMode,
-    TransparencyLevel,
+    AccentColor, AnimationSpeed, AppearanceFile, ColorFilter, HighContrastScheme, Surface,
+    SurfaceStyle, ThemeMode, TransparencyLevel,
 };
 #[allow(unused_imports)]
 use guitk::color::Color;
@@ -1962,10 +1962,132 @@ enum ToggleId {
 }
 
 /// A row of small selectable buttons — see [`render_pill_row`].
+/// The two surface styles, in the order the settings pill shows them.
+///
+/// A named constant rather than a `SurfaceStyle::ALL` in `appearance`, because
+/// the *order* is a presentation decision belonging to this page: borders
+/// first because it is the default.
+const SURFACE_STYLES: [SurfaceStyle; 2] = [SurfaceStyle::Borders, SurfaceStyle::Cards];
+
+/// What each style is called in the interface.
+///
+/// "Outlined"/"Filled" rather than "Borders"/"Cards": the user is choosing what
+/// they will see, not naming an internal enum, and the visible difference is
+/// whether a box has an outline or a fill.
+const fn surface_style_label(style: SurfaceStyle) -> &'static str {
+    match style {
+        SurfaceStyle::Borders => "Outlined",
+        SurfaceStyle::Cards => "Filled",
+    }
+}
+
+/// How wide the theme preview is drawn.
+const PREVIEW_WIDTH: f32 = 260.0;
+/// How tall the theme preview is drawn.
+const PREVIEW_HEIGHT: f32 = 176.0;
+
+/// A miniature window showing what the current theme and colours actually do.
+///
+/// Drawn through `Palette::draw_surface` and the palette's own roles, never
+/// from literals — so it cannot show one thing while the desktop does another,
+/// which is the only failure mode a preview really has. If this looks wrong,
+/// the theme *is* wrong.
+///
+/// Deliberately contains one of each thing the decision touches: a plain row, a
+/// selected row, a switch in each position, all three text roles, and a link.
+/// The link is underlined here for the same reason it is underlined everywhere
+/// (§832) — colour alone is not a sufficient mark.
+fn render_theme_preview(
+    tree: &mut RenderTree,
+    pal: &Palette,
+    style: SurfaceStyle,
+    x: f32,
+    y: f32,
+    width: f32,
+) {
+    const ROW_H: f32 = 30.0;
+    const PAD: f32 = 9.0;
+    let inner = width - PAD * 2.0;
+
+    // The page the miniature sits on.
+    tree.push(RenderCommand::FillRect {
+        x,
+        y,
+        width,
+        height: PREVIEW_HEIGHT,
+        color: pal.base,
+        corner_radii: CornerRadii::all(7.0),
+    });
+
+    let mut ry = y + PAD;
+
+    // A section heading, in main text: since §830 a heading is *not* the
+    // secondary colour, which is the distinction this line exists to show.
+    tree.text(x + PAD, ry, "Wi-Fi", pal.text, 10.0);
+    ry += 15.0;
+
+    // An ordinary row, then a selected one, then a control.
+    for (label, sub, what) in [
+        ("Home network", "Connected", Surface::Card),
+        ("Guest", "Saved", Surface::Selected),
+    ] {
+        pal.draw_surface(tree, x + PAD, ry, inner, ROW_H, 5.0, what, style);
+        tree.text(x + PAD + 8.0, ry + 5.0, label, pal.text, 11.0);
+        tree.text(x + PAD + 8.0, ry + 17.0, sub, pal.subtext0, 9.5);
+        ry += ROW_H + 5.0;
+    }
+
+    // A switch. Its track is `ControlTrack`, which stays filled in both themes
+    // — the one place the two themes agree, and worth seeing.
+    pal.draw_surface(tree, x + PAD, ry, inner, ROW_H, 5.0, Surface::Card, style);
+    tree.text(
+        x + PAD + 8.0,
+        ry + 9.0,
+        "Connect automatically",
+        pal.text,
+        11.0,
+    );
+    let track_x = x + width - PAD - 34.0;
+    pal.draw_surface(
+        tree,
+        track_x,
+        ry + 7.0,
+        28.0,
+        15.0,
+        7.5,
+        Surface::ControlTrack,
+        style,
+    );
+    tree.push(RenderCommand::FillRect {
+        x: track_x + 15.0,
+        y: ry + 9.0,
+        width: 11.0,
+        height: 11.0,
+        color: pal.accent,
+        corner_radii: CornerRadii::all(5.5),
+    });
+    ry += ROW_H + 6.0;
+
+    // A caption and a link, adjacent and in their own colours, because telling
+    // those two apart is what §832 settled.
+    tree.text(x + PAD, ry, "Visible to the operator.", pal.subtext0, 9.5);
+    let link_x = x + PAD + 124.0;
+    tree.text(link_x, ry, "Learn more", pal.link, 9.5);
+    tree.push(RenderCommand::FillRect {
+        x: link_x,
+        y: ry + 11.0,
+        width: 48.0,
+        height: 1.0,
+        color: pal.link,
+        corner_radii: CornerRadii::ZERO,
+    });
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PillId {
     Transparency,
     AnimationSpeed,
+    SurfaceStyle,
 }
 
 /// A one-of-many choice laid out as something other than a pill row: a grid of
@@ -3053,6 +3175,35 @@ impl SettingsState {
 
     fn build_themes_page<S: PageSink>(&self, s: &mut S) {
         let pal = &self.palette();
+
+        // First on the page, and above Theme Mode, because it is the larger
+        // choice: mode decides whether the desktop is light or dark, this
+        // decides how every box on it is told apart from its background.
+        s.section("Surface Style");
+        let style = self.appearance.settings.surface_style;
+        let styles: Vec<(&str, bool)> = SURFACE_STYLES
+            .iter()
+            .map(|st| (surface_style_label(*st), *st == style))
+            .collect();
+        s.pill_row("Boxes are", PillId::SurfaceStyle, &styles);
+        s.note(
+            match style {
+                SurfaceStyle::Borders => {
+                    "Outlined. A selected thing is outlined in the accent colour,                      which means the same everywhere it appears."
+                }
+                SurfaceStyle::Cards => {
+                    "Filled with a shade. Note that some text does not reach the                      4.5:1 contrast floor on the darker cards."
+                }
+            },
+            30.0,
+        );
+
+        let preview_pal = *pal;
+        s.draw(move |tree, x, y| {
+            render_theme_preview(tree, &preview_pal, style, x, y, PREVIEW_WIDTH);
+        });
+        s.advance(PREVIEW_HEIGHT + 10.0);
+
         s.section("Theme Mode");
 
         let selected = self.appearance.settings.theme_mode;
@@ -4590,6 +4741,11 @@ impl SettingsState {
             RowHit::Pill(PillId::AnimationSpeed, idx) => {
                 if let Some(speed) = AnimationSpeed::ALL.get(idx) {
                     self.appearance.settings.animation_speed = *speed;
+                }
+            }
+            RowHit::Pill(crate::PillId::SurfaceStyle, idx) => {
+                if let Some(style) = SURFACE_STYLES.get(idx) {
+                    self.appearance.settings.surface_style = *style;
                 }
             }
             RowHit::Select(SelectId::ThemeMode, idx) => {
@@ -8815,6 +8971,145 @@ mod against_the_real_compositor {
         }
         let snap = desktop.until("the window to be reclaimed", |s| s.windows == 0);
         assert_eq!(snap.clients, 0, "the connection was dropped too");
+    }
+
+    /// Choosing a surface style on the Themes page changes the setting.
+    #[test]
+    fn the_surface_style_pill_changes_the_setting() {
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::Themes;
+        assert_eq!(
+            state.appearance.settings.surface_style,
+            crate::SurfaceStyle::Borders,
+            "borders is the default"
+        );
+        state.apply_row_hit(RowHit::Pill(crate::PillId::SurfaceStyle, 1), 0.0);
+        assert_eq!(
+            state.appearance.settings.surface_style,
+            crate::SurfaceStyle::Cards
+        );
+        state.apply_row_hit(RowHit::Pill(crate::PillId::SurfaceStyle, 0), 0.0);
+        assert_eq!(
+            state.appearance.settings.surface_style,
+            crate::SurfaceStyle::Borders
+        );
+    }
+
+    /// An index the pill does not have leaves the setting alone rather than
+    /// panicking -- the hit could arrive from a stale layout.
+    #[test]
+    fn an_out_of_range_surface_pill_is_ignored() {
+        let mut state = SettingsState::new();
+        state.apply_row_hit(RowHit::Pill(crate::PillId::SurfaceStyle, 99), 0.0);
+        assert_eq!(
+            state.appearance.settings.surface_style,
+            crate::SurfaceStyle::Borders
+        );
+    }
+
+    /// The preview shows the theme it is previewing.
+    ///
+    /// The only failure mode a preview really has is looking like one thing
+    /// while the desktop does another, so this asserts the two themes produce
+    /// *different* drawing, and specifically that the bordered one strokes and
+    /// the filled one does not.
+    #[test]
+    fn the_preview_follows_the_style_it_is_showing() {
+        use guitk::render::{RenderCommand, RenderTree};
+
+        let pal = crate::Palette::for_mode(true);
+        let count = |style| {
+            let mut tree = RenderTree::new();
+            crate::render_theme_preview(&mut tree, &pal, style, 0.0, 0.0, crate::PREVIEW_WIDTH);
+            let strokes = tree
+                .commands
+                .iter()
+                .filter(|c| matches!(c, RenderCommand::StrokeRect { .. }))
+                .count();
+            (strokes, tree.commands.len())
+        };
+        let (bordered_strokes, bordered_total) = count(crate::SurfaceStyle::Borders);
+        let (filled_strokes, filled_total) = count(crate::SurfaceStyle::Cards);
+
+        assert!(
+            bordered_strokes >= 2,
+            "the bordered preview drew {bordered_strokes} outlines; it has at least a row and a              selected row"
+        );
+        assert_eq!(
+            filled_strokes, 0,
+            "the filled preview should not be stroking anything"
+        );
+        assert!(
+            bordered_total > 0 && filled_total > 0,
+            "both previews must draw something"
+        );
+    }
+
+    /// The Themes *page* hands the preview the user's actual setting.
+    ///
+    /// The test above proves the preview honours the style it is given; it
+    /// cannot see whether the page gives it the right one. Hardcoding a style
+    /// at the call site passes that test and fails this one, which is exactly
+    /// the mistake worth guarding -- a preview showing a theme you have not
+    /// chosen is worse than no preview.
+    #[test]
+    fn the_themes_page_previews_the_style_actually_selected() {
+        use guitk::render::{RenderCommand, RenderTree};
+
+        let strokes_for = |style| {
+            let mut state = SettingsState::new();
+            state.current_page = SettingsPage::Themes;
+            state.appearance.settings.surface_style = style;
+            let mut tree = RenderTree::new();
+            state.render_current_page(&mut tree, 0.0, 0.0);
+            tree.commands
+                .iter()
+                .filter(|c| matches!(c, RenderCommand::StrokeRect { .. }))
+                .count()
+        };
+        let bordered = strokes_for(crate::SurfaceStyle::Borders);
+        let filled = strokes_for(crate::SurfaceStyle::Cards);
+        assert!(
+            bordered > filled,
+            "the page drew {bordered} outlines under Borders and {filled} under Cards; it is not              passing the setting through to the preview"
+        );
+    }
+
+    /// The preview draws a link, underlined, and a caption in a different
+    /// colour -- the distinction §832 settled, which is only worth having if it
+    /// is visible in the thing the user looks at while choosing.
+    #[test]
+    fn the_preview_distinguishes_a_link_from_a_caption() {
+        use guitk::render::{RenderCommand, RenderTree};
+
+        let pal = crate::Palette::for_mode(true);
+        let mut tree = RenderTree::new();
+        crate::render_theme_preview(
+            &mut tree,
+            &pal,
+            crate::SurfaceStyle::Borders,
+            0.0,
+            0.0,
+            crate::PREVIEW_WIDTH,
+        );
+
+        let colours: Vec<guitk::color::Color> = tree
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { color, .. } => Some(*color),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            colours.contains(&pal.link),
+            "no link-coloured text in the preview"
+        );
+        assert!(colours.contains(&pal.subtext0), "no caption in the preview");
+        assert_ne!(
+            pal.link, pal.subtext0,
+            "link and caption must not be the same colour -- that is what §832 fixed"
+        );
     }
 
     /// The Dynamic DNS page draws what the kernel reports, and says so plainly

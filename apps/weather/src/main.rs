@@ -3716,6 +3716,34 @@ mod tests {
         }
     }
 
+    /// The alert card's rectangle, however the theme drew it.
+    ///
+    /// Filled under Cards, outlined under Borders, and the outline reports a
+    /// rectangle half a line smaller than the one asked for -- `logical_rect`
+    /// undoes that. The 10px corner is what tells an alert card from the
+    /// full-width title strip above it, which is also a card and also wide;
+    /// colour used to make that distinction and cannot any more, because under
+    /// Borders every card is the same outline.
+    fn alert_card(app: &WeatherApp, pal: &Palette) -> Option<(f32, f32)> {
+        app.render_commands().into_iter().find_map(|c| {
+            let (_, y, w, h) = appearance::logical_rect(&c)?;
+            let (paints_a_card, radius) = match &c {
+                RenderCommand::FillRect {
+                    color,
+                    corner_radii,
+                    ..
+                } => (*color == pal.surface0, corner_radii.top_left),
+                RenderCommand::StrokeRect {
+                    color,
+                    corner_radii,
+                    ..
+                } => (*color == pal.border, corner_radii.top_left),
+                _ => (false, 0.0),
+            };
+            (paints_a_card && w > 400.0 && (radius - 10.0).abs() < 0.01).then_some((y, h))
+        })
+    }
+
     #[test]
     fn an_alert_card_grows_to_hold_its_description() {
         let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
@@ -3734,19 +3762,9 @@ mod tests {
         let long = app_with_alert(&"Secure loose objects outdoors. ".repeat(40));
 
         let card_height = |app: &WeatherApp| -> f32 {
-            // The card background is the widest fill in the alerts view.
-            app.render_commands()
-                .into_iter()
-                .find_map(|c| match c {
-                    RenderCommand::FillRect {
-                        width,
-                        height,
-                        color,
-                        ..
-                    } if color == pal.surface0 && width > 400.0 => Some(height),
-                    _ => None,
-                })
+            alert_card(app, &pal)
                 .expect("the alerts view drew no card")
+                .1
         };
 
         // The floor covers two lines, so growth is only observable past it.
@@ -3767,16 +3785,9 @@ mod tests {
             .iter()
             .map(|(y, _)| y + ALERT_BODY_LINE_HEIGHT)
             .fold(f32::MIN, f32::max);
-        let card_top = long
-            .render_commands()
-            .into_iter()
-            .find_map(|c| match c {
-                RenderCommand::FillRect {
-                    y, width, color, ..
-                } if color == pal.surface0 && width > 400.0 => Some(y),
-                _ => None,
-            })
-            .expect("the alerts view drew no card");
+        let card_top = alert_card(&long, &pal)
+            .expect("the alerts view drew no card")
+            .0;
         assert!(
             body_bottom <= card_top + long_h,
             "the description ends at {body_bottom}, past the bottom of its card"

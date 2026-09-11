@@ -4,3 +4,5 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS mesg - control/send terminal messages (mesg/write/talk)"
 [dependencies]
+userdb = { path = "../userdb" }
+authlib = { path = "../authlib" }

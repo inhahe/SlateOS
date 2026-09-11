@@ -341,7 +341,24 @@ and listing the security-relevant crates by name is an enumeration that misses
 the next crate by construction, which is the defect shape this tree keeps
 finding.
 
-## TD-B-SUDOS-AUDIT-LOG-RECORDS-THE-TTY-THE-CALLER-NAMED (lane B, 2026-09-11)
+## TD-B-SUDOS-AUDIT-LOG-RECORDS-THE-TTY-THE-CALLER-NAMED (lane B, 2026-09-11) -- FIXED 2026-09-11
+
+**FIXED** with `ttyname(0)`, which is what the entry named as the proper
+fix and what real sudo uses. The bytes are not put through UTF-8: the old
+comment's argument for `var_os` over `var` survives the change, because a
+tty name is a path under `/dev` and this OS allows any byte but `/` and
+NUL in one.
+
+One thing the entry did not anticipate: `ttyname` returning null means
+*descriptor 0 is not a terminal*, which is a real answer and a different
+one from *there is a terminal and I could not name it*. The record says
+`none` for the first rather than reusing `unknown` for both.
+
+**Found again by the gate built for this family the previous tick**
+(`check-env-identity`, gate 23). It was in the baseline as a known site,
+and fixing it turned the pin stale, which is the ratchet working in the
+direction it is meant to move.
+
 
 **In short:** `sudo`'s audit log has a `TTY=` field, and the value comes from
 the caller's `$TTY` environment variable. A user can therefore choose what

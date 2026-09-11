@@ -9,3 +9,10 @@ description = "SlateOS rsync - file synchronization (rsync/scp)"
 # so a private implementation decides whether two files count as identical.
 [dependencies]
 sha2 = { path = "../../sha2" }
+
+# A path put straight into a diagnostic hands it control of stderr: a name
+# containing a newline forges a line of rsync's own output. `Path::display()`
+# is lossy besides -- it renders bytes that are not UTF-8 as U+FFFD, so the
+# name in the message is not the name on disk and cannot be matched against
+# it. See `userspace/quoting`.
+quoting = { path = "../quoting" }

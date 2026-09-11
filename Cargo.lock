@@ -2389,6 +2389,7 @@ dependencies = [
 name = "rsync"
 version = "0.1.0"
 dependencies = [
+ "quoting",
  "sha2",
 ]
 

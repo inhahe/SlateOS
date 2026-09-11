@@ -117,6 +117,27 @@ def strip_noise(text: str) -> str:
     Without this the gate fires on its own documentation: several `Cargo.toml`
     comments and doc comments in `ssh`/`ssh-keygen` name `posix::random`
     precisely to explain why it must not be called.
+
+    # Not `rustlex.strip_noise`, and do not "consolidate" it into that
+
+    They are both correct and they disagree on purpose. This one blanks the
+    CONTENTS of a literal and keeps its quotes -- `"none"` becomes `"    "` --
+    while `rustlex.strip_noise` blanks the quotes too. Measured over
+    posix/ and userspace/, the two outputs differ in 1,158 of 2,724 files for
+    that reason alone.
+
+    `_EXTERN_FN` above depends on the quotes surviving: it matches
+    `extern " "`, because after this function runs that is what `extern "C"`
+    looks like. Point it at rustlex's output and every `extern "C"` body stops
+    being found, which un-exempts all 23 of `crypt`'s errno writes and turns
+    them into violations -- the regression the comment beside `_EXTERN_FN`
+    records having already happened once.
+
+    Checked 2026-09-11 against the four string-boundary bugs rustlex pins in
+    its own self-test -- a char literal holding a double quote, a raw string,
+    an escaped quote, a byte-char literal -- and this passes all four with
+    length preserved. It is not a stale copy carrying fixed bugs; it is a
+    different convention with a caller that needs it.
     """
     out: list[str] = []
     i, n = 0, len(text)

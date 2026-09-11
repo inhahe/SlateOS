@@ -1,0 +1,10 @@
+[package]
+name = "ttyidle"
+version = "0.1.0"
+edition = "2024"
+description = "SlateOS: how long a terminal has been idle, or that we cannot tell"
+
+[dependencies]
+
+[lints]
+workspace = true

@@ -3002,6 +3002,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "ttyidle"
+version = "0.1.0"
+
+[[package]]
 name = "tuned"
 version = "0.1.0"
 dependencies = [
@@ -3176,6 +3180,7 @@ dependencies = [
 name = "w"
 version = "0.1.0"
 dependencies = [
+ "ttyidle",
  "utmpfile",
 ]
 
@@ -3233,6 +3238,7 @@ dependencies = [
  "authlib",
  "procinfo",
  "quoting",
+ "ttyidle",
  "utmpfile",
 ]
 

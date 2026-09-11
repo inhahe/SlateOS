@@ -232,7 +232,15 @@ fn format_time_short(epoch_secs: u64) -> String {
 ///
 /// Convention: "." means active (< 60 seconds idle), then "MM:SS" or
 /// "HH:MMm" or "Xdays" for longer durations.
-fn format_idle(idle_secs: u64) -> String {
+fn format_idle(idle_secs: Option<u64>) -> String {
+    // `None` is "we could not find out", and it now has its own glyph. It used
+    // to arrive here as 0 -- from a device that does not exist, an unreadable
+    // mtime, or a tty name utmp never supplied -- and print as ".", which in
+    // this column means ACTIVE RIGHT NOW. The most reassuring of the four
+    // possible meanings was the one every unknown got.
+    let Some(idle_secs) = idle_secs else {
+        return "?".to_string();
+    };
     if idle_secs < 60 {
         return ".".to_string();
     }
@@ -454,8 +462,9 @@ struct LoadAvgInfo {
 
 /// Per-user process info for `w` display.
 struct UserProcessInfo {
-    /// Idle time in seconds (from terminal device mtime).
-    idle_secs: u64,
+    /// Idle time in seconds, or `None` when the terminal could not be
+    /// stat'd. See `ttyidle` for why the two are not the same value.
+    idle_secs: Option<u64>,
     /// Total CPU time for all processes on this tty (in hundredths of a second).
     jcpu: u64,
     /// CPU time for the current foreground process (in hundredths of a second).
@@ -502,44 +511,6 @@ fn format_uptime_for_w(total_secs: f64) -> String {
     }
 }
 
-/// Get idle time for a terminal device by comparing its mtime to now.
-fn get_tty_idle(tty: &[u8], now: u64) -> u64 {
-    if tty.is_empty() || tty == b"?" {
-        return 0;
-    }
-    // A terminal we cannot name cannot be stat'd, so its idle time is not
-    // something we know. Zero is what this already returns for every other
-    // "cannot tell" -- a missing device, an unreadable mtime -- so a tty whose
-    // name is not UTF-8 joins them rather than getting a guessed path.
-    let Ok(tty) = str::from_utf8(tty) else {
-        return 0;
-    };
-    // Try /dev/<tty> path.
-    let dev_path = if tty.starts_with('/') {
-        tty.to_string()
-    } else {
-        format!("/dev/{tty}")
-    };
-
-    let metadata = match fs::metadata(&dev_path) {
-        Ok(m) => m,
-        Err(_) => return 0,
-    };
-
-    let mtime = metadata
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-
-    if mtime == 0 || now < mtime {
-        0
-    } else {
-        now - mtime
-    }
-}
-
 /// Check if a terminal is writable (for message status).
 ///
 /// Returns '+' if writable by group/others, '-' if not, '?' if unknown.
@@ -580,7 +551,7 @@ fn get_mesg_status(tty: &[u8]) -> char {
 /// Scans /proc to find processes on the given tty and computes JCPU, PCPU,
 /// and the WHAT field.
 fn get_user_process_info(tty: &[u8], pid: i32, now: u64) -> UserProcessInfo {
-    let idle_secs = get_tty_idle(tty, now);
+    let idle_secs = ttyidle::idle_secs(tty, now);
     let mut jcpu: u64 = 0;
     let mut pcpu: u64 = 0;
     let mut what = String::from("-");
@@ -853,7 +824,7 @@ fn print_short_inner(
 fn print_record_mesg(record: &SessionRecord, now: u64) {
     let time_str = format_datetime(record.login_time);
     let mesg = get_mesg_status(&record.tty);
-    let idle = format_idle(get_tty_idle(&record.tty, now));
+    let idle = format_idle(ttyidle::idle_secs(&record.tty, now));
     let comment: Vec<u8> = if record.host.is_empty() {
         Vec::new()
     } else {
@@ -878,7 +849,7 @@ fn print_record_mesg(record: &SessionRecord, now: u64) {
 /// Print a record with idle time.
 fn print_record_idle(record: &SessionRecord, now: u64) {
     let time_str = format_datetime(record.login_time);
-    let idle = format_idle(get_tty_idle(&record.tty, now));
+    let idle = format_idle(ttyidle::idle_secs(&record.tty, now));
     let comment: Vec<u8> = if record.host.is_empty() {
         Vec::new()
     } else {
@@ -905,7 +876,7 @@ fn print_record_all(record: &SessionRecord, _opts: &Options, now: u64) {
     let time_str = format_datetime(record.login_time);
     let tname = type_name(record.record_type);
     let idle = if record.record_type == USER_PROCESS {
-        format_idle(get_tty_idle(&record.tty, now))
+        format_idle(ttyidle::idle_secs(&record.tty, now))
     } else {
         String::new()
     };
@@ -1102,10 +1073,13 @@ fn print_json(records: &[&SessionRecord], opts: &Options) {
 
     for (i, record) in records.iter().enumerate() {
         let comma = if i + 1 < records.len() { "," } else { "" };
+        // JSON gets a number or `null`, not a zero standing in for both.
+        // A consumer can test for null; it cannot tell a real 0 from a
+        // fabricated one.
         let idle = if opts.show_idle || opts.w_mode {
-            get_tty_idle(&record.tty, now)
+            ttyidle::idle_secs(&record.tty, now)
         } else {
-            0
+            None
         };
         let mesg = if opts.show_mesg {
             format!("{}", get_mesg_status(&record.tty))
@@ -1126,7 +1100,12 @@ fn print_json(records: &[&SessionRecord], opts: &Options) {
         println!("      \"type\": \"{}\",", type_name(record.record_type));
 
         if opts.show_idle || opts.w_mode {
-            println!("      \"idle_seconds\": {idle},");
+            // `null`, not 0: JSON has a word for "not known" and using it
+            // is the whole point of the Option above.
+            match idle {
+                Some(secs) => println!("      \"idle_seconds\": {secs},"),
+                None => println!("      \"idle_seconds\": null,"),
+            }
         }
         if opts.show_mesg {
             println!("      \"mesg\": \"{}\",", json_escape(&mesg));
@@ -1426,28 +1405,32 @@ mod tests {
 
     #[test]
     fn test_format_idle_active() {
-        assert_eq!(format_idle(0), ".");
-        assert_eq!(format_idle(30), ".");
-        assert_eq!(format_idle(59), ".");
+        // `None` is not `Some(0)`: the first means we could not find out and
+        // the second means the terminal was touched this second. They printed
+        // the same "." until ttyidle split them.
+        assert_eq!(format_idle(None), "?");
+        assert_eq!(format_idle(Some(0)), ".");
+        assert_eq!(format_idle(Some(30)), ".");
+        assert_eq!(format_idle(Some(59)), ".");
     }
 
     #[test]
     fn test_format_idle_minutes() {
-        assert_eq!(format_idle(60), " 1:00");
-        assert_eq!(format_idle(90), " 1:30");
-        assert_eq!(format_idle(3599), "59:59");
+        assert_eq!(format_idle(Some(60)), " 1:00");
+        assert_eq!(format_idle(Some(90)), " 1:30");
+        assert_eq!(format_idle(Some(3599)), "59:59");
     }
 
     #[test]
     fn test_format_idle_hours() {
-        assert_eq!(format_idle(3600), " 1:00m");
-        assert_eq!(format_idle(7200), " 2:00m");
+        assert_eq!(format_idle(Some(3600)), " 1:00m");
+        assert_eq!(format_idle(Some(7200)), " 2:00m");
     }
 
     #[test]
     fn test_format_idle_days() {
-        assert_eq!(format_idle(86400), "1days");
-        assert_eq!(format_idle(172800), "2days");
+        assert_eq!(format_idle(Some(86400)), "1days");
+        assert_eq!(format_idle(Some(172800)), "2days");
     }
 
     // --- CPU time formatting ---

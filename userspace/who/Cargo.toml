@@ -5,6 +5,7 @@ edition = "2024"
 description = "SlateOS logged-in users display"
 [dependencies]
 utmpfile = { path = "../../utmpfile" }
+ttyidle = { path = "../../ttyidle" }
 authlib = { path = "../authlib" }
 procinfo = { path = "../../procinfo" }
 quoting = { path = "../quoting" }

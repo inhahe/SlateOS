@@ -58,7 +58,12 @@ struct UtmpEntry {
     host: Vec<u8>,
     login_time: u64,
     pid: u32,
-    idle_secs: u64,
+    /// Seconds since the terminal was last written to, or `None` when that
+    /// could not be found out. THIS WAS `u64` AND ALWAYS ZERO -- set where the
+    /// entry is built and assigned nowhere else -- which `format_idle` renders
+    /// as "  .  ", meaning active right now. Every user, always, including one
+    /// away for three hours.
+    idle_secs: Option<u64>,
     what: Vec<u8>,
 }
 
@@ -216,17 +221,21 @@ fn read_utmp_entries() -> Vec<UtmpEntry> {
     let Ok(data) = std::fs::read("/var/run/utmp") else {
         return Vec::new();
     };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
 
     utmpfile::parse(&data)
         .into_iter()
         .filter(utmpfile::Record::is_user_session)
         .map(|r| UtmpEntry {
+            // Measured before `tty` is moved into the struct.
+            idle_secs: ttyidle::idle_secs(&r.tty, now),
             user: r.user,
             tty: r.tty,
             host: r.host,
             login_time: r.login_time,
             pid: u32::try_from(r.pid).unwrap_or(0),
-            idle_secs: 0,
             // utmp has no WHAT field; real `w` derives it from the session
             // leader's /proc/PID/cmdline. This has always printed "-" -- the
             // text parse that would have filled it never matched a line -- so
@@ -432,7 +441,12 @@ fn get_current_time() -> String {
     "00:00:00".to_string()
 }
 
-fn format_idle(secs: u64) -> String {
+fn format_idle(secs: Option<u64>) -> String {
+    // "?" for not-known, which used to be indistinguishable from "  .  " --
+    // this column's word for active right now.
+    let Some(secs) = secs else {
+        return "  ?  ".to_string();
+    };
     if secs == 0 {
         return "  .  ".to_string();
     }
@@ -1051,29 +1065,34 @@ mod tests {
 
     #[test]
     fn test_format_idle_zero() {
-        assert_eq!(format_idle(0), "  .  ");
+        // The distinction this column never made: "?" is we could not find
+        // out, "." is the terminal was touched this second. Every user got
+        // "." before, because idle_secs was the literal 0 and nothing ever
+        // measured it.
+        assert_eq!(format_idle(None), "  ?  ");
+        assert_eq!(format_idle(Some(0)), "  .  ");
     }
 
     #[test]
     fn test_format_idle_seconds() {
-        assert_eq!(format_idle(30), " 30s ");
+        assert_eq!(format_idle(Some(30)), " 30s ");
     }
 
     #[test]
     fn test_format_idle_minutes() {
-        let result = format_idle(300); // 5 minutes
+        let result = format_idle(Some(300)); // 5 minutes
         assert!(result.contains("5:"));
     }
 
     #[test]
     fn test_format_idle_hours() {
-        let result = format_idle(7200); // 2 hours
+        let result = format_idle(Some(7200)); // 2 hours
         assert!(result.contains("2:"));
     }
 
     #[test]
     fn test_format_idle_days() {
-        let result = format_idle(172800); // 2 days
+        let result = format_idle(Some(172800)); // 2 days
         assert!(result.contains("days"));
     }
 

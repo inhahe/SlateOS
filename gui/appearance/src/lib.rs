@@ -259,6 +259,9 @@ pub const LIGHT_BORDER: Color = LIGHT_TEXT;
 // formats waiting to disagree about how a name is spelled.
 use settingsfile::yaml_enum;
 
+pub mod surface;
+pub use surface::{Surface, SurfacePaint};
+
 // ============================================================================
 // Theme mode
 // ============================================================================
@@ -1084,6 +1087,9 @@ impl TaskbarStyle {
 pub struct AppearanceSettings {
     /// Light/dark/system theme mode.
     pub theme_mode: ThemeMode,
+    /// Whether boxes are outlined or filled. See [`SurfaceStyle`]; defaults to
+    /// [`SurfaceStyle::Borders`] (§829), with `Cards` the optional theme.
+    pub surface_style: SurfaceStyle,
     /// The colour-vision filter applied to the whole screen.
     ///
     /// Unlike every other field here this one is not consumed by the palette:
@@ -1144,6 +1150,10 @@ impl Default for AppearanceSettings {
     fn default() -> Self {
         Self {
             theme_mode: ThemeMode::Dark,
+            // Borders, per §829. The `Default` impl is what a machine with no
+            // configuration file gets, so this is where "the default theme" is
+            // actually decided.
+            surface_style: SurfaceStyle::Borders,
             color_filter: ColorFilter::None,
             high_contrast: None,
             accent_color: AccentColor::Blue,
@@ -2046,6 +2056,23 @@ const SHADOW: Color = Color::rgba(0, 0, 0, 40);
 // The spellings below are the on-disk format for `appearance.yaml`. Adding a
 // variant is free; renaming one is a breaking change to every user's file.
 yaml_enum!(ThemeMode { Dark => "dark", Light => "light", System => "system" });
+
+/// How a box is told apart from what is behind it. See [`surface`].
+///
+/// `Borders` is the default as of §829. `Cards` is the arrangement that shipped
+/// before it, kept because the operator asked for it to remain available -- and
+/// because keeping it is what forced the decision into one place instead of
+/// leaving 790 draw sites each making it again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SurfaceStyle {
+    /// Boxes are outlined. The default.
+    #[default]
+    Borders,
+    /// Boxes are filled from the surface ladder. The optional theme.
+    Cards,
+}
+
+yaml_enum!(SurfaceStyle { Borders => "borders", Cards => "cards" });
 yaml_enum!(AccentColor {
     Blue => "blue",
     Lavender => "lavender",
@@ -2174,6 +2201,11 @@ impl AppearanceSettings {
             doc.get_str(&["theme", "mode"])
                 .and_then(|v| ThemeMode::from_yaml_name(&v))
         );
+        read_into!(
+            s.surface_style,
+            doc.get_str(&["theme", "surface_style"])
+                .and_then(|v| SurfaceStyle::from_yaml_name(&v))
+        );
         // Absent and "off" both mean no high contrast, and an unrecognised
         // name does too. A scheme this build does not know is not a reason to
         // refuse to draw, and falling back to the ordinary theme is the safe
@@ -2281,6 +2313,7 @@ impl AppearanceSettings {
     /// comment, blank line and unrelated key in it exactly as it was.
     pub fn write_into(&self, doc: &mut Document) {
         doc.set_str(&["theme", "mode"], self.theme_mode.yaml_name());
+        doc.set_str(&["theme", "surface_style"], self.surface_style.yaml_name());
         doc.set_str(&["theme", "color_filter"], self.color_filter.yaml_name());
         doc.set_str(
             &["theme", "high_contrast"],
@@ -2656,6 +2689,9 @@ mod tests {
     fn all_non_default() -> AppearanceSettings {
         AppearanceSettings {
             theme_mode: ThemeMode::Light,
+            // Non-default, which is this helper's whole contract: the
+            // round-trip test must not be able to pass on a field it forgot.
+            surface_style: SurfaceStyle::Cards,
             color_filter: ColorFilter::Tritanopia,
             high_contrast: Some(HighContrastScheme::YellowOnBlack),
             accent_color: AccentColor::Custom,

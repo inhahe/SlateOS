@@ -131588,6 +131588,60 @@ is 4.8× over budget" invites a reading of path resolution being slow, and
 components — is the only thing that contradicts it. The two numbers are only useful
 together.
 
+### The loop closes: a budget went from failing to passing, and `over_target` moved
+
+`sched::task_count` replaced five `task_list().len()` calls. Measured on the fourth
+unperturbed WHPX run (`c1c9352e6`) against the median of the three before it:
+
+| benchmark | before | after | change | budget | then → now |
+|---|---|---|---|---|---|
+| `dashboard_api_status` | 59 068 | **16 549** | **−72.0%** | 10 000 | 5.91× over → 1.65× over |
+| `dashboard_api_health` | 59 135 | **15 561** | **−73.7%** | 15 000 | 3.94× over → 1.04× over |
+| `dashboard_api_metrics` | 77 623 | **34 831** | **−55.1%** | 55 000 | 1.41× over → **PASS** |
+| `vfs_stat_root` (control) | 893 | 896 | +0.3% | 700 | unchanged |
+
+**`over_target` went 10 → 9.** That is the first time in this entry's history that a
+budget has moved from failing to passing because of a deliberate change — the thing
+the entry opened by saying the budgets had never done.
+
+Three reasons to believe it rather than just like it: the changes are 10–14× the
+measured noise floor (p90 of run-to-run movement is 1.052×, so ~5% is the threshold of
+meaning); `vfs_stat_root` sat still at +0.3%, so this is not a global shift in the
+run; and all three movers are exactly the three endpoints that called
+`task_list().len()`, while the control did not.
+
+### And the prediction made before the change held
+
+The commit that made this change said plainly what it would *not* achieve: that
+`dashboard_api_status` could not meet its 10 µs budget under WHPX whatever happened,
+because `api_status` reads the HPET once and one HPET read costs ~13.5 µs on that
+accelerator — more than the entire budget.
+
+After the change: 16 549 ns measured, of which `hpet_read` is 13 484 ns. **81% of
+what remains is the timer read.** The actual work is now about 3 065 ns against a
+10 000 ns budget — comfortably inside it — and the benchmark still reports OVER,
+because the surface charges 13.5 µs for a clock.
+
+So `dashboard_api_status` has **changed class**. It was compute-bound (6.5× faster
+under WHPX than TCG) and is now timer-dominated, which makes WHPX the wrong surface
+for it and TCG the right one. That is the per-benchmark-surface point from earlier in
+this entry arriving as a concrete instance rather than an argument: a benchmark's
+class is not a fixed property, and optimising the code is one of the things that
+changes it.
+
+The practical consequence is small and specific: measure the two remaining OVER
+endpoints under TCG before concluding anything further about them, since under WHPX
+their budgets are now mostly measuring Hyper-V.
+
+### What the cost actually was
+
+Five callers wanted a count and the only available route built a `Vec<TaskInfo>` —
+one allocation plus roughly 70 bytes copied per task, under the scheduler lock —
+then discarded it. Removing that was worth 55–74% of three endpoints' total cost,
+which says the allocation and copy dominated them. It also shortens the window the
+scheduler lock is held on every procfs and dashboard read, which no benchmark here
+measures and which matters more on a contended machine than the numbers above.
+
 ## TD-A-REQUEST-STATUS-HAS-NO-CHECKED-SHAPE-SO-EVERY-READER-COUNTS-DIFFERENTLY (lane A, 2026-09-11) — **open**
 
 **In short:** the `requests/` dropbox is how the three lanes hand work to each other,

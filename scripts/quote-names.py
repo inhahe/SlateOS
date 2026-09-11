@@ -624,6 +624,73 @@ def _macro_call(line: str) -> tuple[int, str, str, str, int] | None:
     )
 
 
+def _positional_slots(fmt: str) -> list[bool] | None:
+    """One entry per argument `fmt` consumes, `True` where the placeholder is
+    wrapped in hand-written single quotes.
+
+    This is what lets a quoted placeholder share an argument list with a bare
+    one. The single commonest remaining shape in the tree is
+
+        format!("Cannot read '{}': {}", profile_path.display(), e)
+
+    -- the name quoted, the error not -- and counting quoted placeholders
+    against all placeholders cannot tell which argument is which, so it used
+    to decline. Position can: the first slot is the name, the second is the
+    error, and only the first gets wrapped.
+
+    `None` when the string contains brace syntax this cannot account for.
+    Miscounting a slot does not produce a wrong message, it shifts EVERY
+    argument after it, so the uncertain cases are refused rather than guessed:
+
+    * a lone `}`, which is not valid format syntax and means the scan has lost
+      its place;
+    * an unterminated `{`.
+
+    `{{` and `}}` are brace escapes and consume nothing. `{name}` and
+    `{name:spec}` capture from the enclosing scope and consume nothing either;
+    `{}` and `{:spec}` consume an argument. That distinction is the whole
+    reason this cannot be done by counting `{}` occurrences.
+    """
+    slots: list[bool] = []
+    i, n = 0, len(fmt)
+    while i < n:
+        ch = fmt[i]
+        if ch == "{":
+            if fmt.startswith("{{", i):
+                i += 2
+                continue
+            j = fmt.find("}", i)
+            if j < 0:
+                return None
+            body = fmt[i + 1 : j]
+            if body == "" or body.startswith(":"):
+                slots.append(
+                    i > 0 and fmt[i - 1] == "'" and j + 1 < n and fmt[j + 1] == "'"
+                )
+            i = j + 1
+            continue
+        if ch == "}":
+            if fmt.startswith("}}", i):
+                i += 2
+                continue
+            return None
+        i += 1
+    return slots
+
+
+# An argument that is a *value* -- an identifier, a field, an index -- rather
+# than the result of a call.
+#
+# Only a value may be wrapped. A call may already be a rendering: `cal`'s
+# `shown(arg)` is `escape_unprintable(..)`, which has octal-escaped the bytes
+# already, and `quoteaf_os` around it would escape the backslashes a second
+# time and print `\\012` where the name held a newline. Declining every call
+# costs a handful of sites that a person can look at, and the alternative is a
+# fixer that silently double-escapes.
+_PLAIN_VALUE = re.compile(
+    r"^&?[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*|\[[^\[\]]*\])*$"
+)
+
 # Calls that RENDER a name rather than being one. `quotef_os` takes the value
 # itself, so these come off rather than being wrapped.
 _RENDERERS = (".display()", ".to_string_lossy()")
@@ -700,7 +767,10 @@ def fix_line(line: str) -> tuple[str | None, str]:
     if positional_name_arg(line) is not None:
         if len(args) != 1:
             return None, "the colon form with more than one argument"
-        return rebuilt(fmt, [f"quotef_os(&{_name_expr(args[0])})"]), ""
+        name = _name_expr(args[0])
+        if not _PLAIN_VALUE.match(name):
+            return None, "the name is the result of a call, which may already render it"
+        return rebuilt(fmt, [f"quotef_os(&{name})"]), ""
 
     inline = _INLINE_QUOTED.findall(fmt)
     positional = len(_POSITIONAL_QUOTED.findall(fmt))
@@ -714,18 +784,26 @@ def fix_line(line: str) -> tuple[str | None, str]:
         )
 
     if positional and not inline:
-        # Every positional placeholder must be one of the quoted ones, and
-        # there must be exactly one argument for each. A fmt of `"a '{}' b {}"`
-        # fails here and is right to: the rewrite cannot tell which argument
-        # belongs to which placeholder, and guessing would swap two values in
-        # a message while every test went on passing.
-        bare = sum(1 for p in _ANY_PLACEHOLDER.findall(fmt) if p == "{}")
-        if bare != positional or len(args) != positional:
+        slots = _positional_slots(fmt)
+        if slots is None:
+            return None, "brace syntax this cannot account for"
+        if len(args) != len(slots):
             return None, "positional placeholders and arguments do not line up"
+        # Every quoted slot must be the plain `'{}'` form. `'{:?}'` is not the
+        # same defect -- `Debug` escapes the value already -- and stripping the
+        # quotes off one would leave a placeholder this did not repair.
+        if sum(slots) != positional:
+            return None, "a quoted placeholder carries a format spec"
+        wrapped = [_name_expr(a) for a, q in zip(args, slots) if q]
+        if not all(_PLAIN_VALUE.match(w) for w in wrapped):
+            return None, "the name is the result of a call, which may already render it"
         return (
             rebuilt(
                 _POSITIONAL_QUOTED.sub("{}", fmt),
-                [f"quoteaf_os(&{_name_expr(a)})" for a in args],
+                [
+                    f"quoteaf_os(&{_name_expr(a)})" if q else a
+                    for a, q in zip(args, slots)
+                ],
             ),
             "",
         )
@@ -1387,10 +1465,45 @@ def selftest() -> int:
         "eprintln!(\"lp: '{}' and '{}'\", a, b);",
         'eprintln!("lp: {} and {}", quoteaf_os(&a), quoteaf_os(&b));',
     )
+    # A quoted slot sharing an argument list with a bare one. This was a
+    # decline for one commit, on the reading that the count no longer says
+    # which argument is the name. POSITION says it: slot 1 is quoted so
+    # argument 1 is the name, slot 2 is not so argument 2 is left alone. It is
+    # the single commonest shape left in the tree --
+    # `format!("Cannot read '{}': {}", path.display(), e)`, 34 sites -- and
+    # counting rather than positioning is what made it look unfixable.
     expect_fix(
-        "fix-declines-mixed-positional",
+        "a-quoted-slot-beside-a-bare-one-maps-by-position",
         "eprintln!(\"lp: '{}' wants {}\", a, n);",
+        'eprintln!("lp: {} wants {}", quoteaf_os(&a), n);',
+    )
+    # `{name}` captures from scope and consumes NO argument, so it must not be
+    # counted as a slot. Counting it would shift every argument after it.
+    expect_fix(
+        "a-named-placeholder-is-not-a-slot",
+        "eprintln!(\"lp: {prog} '{}' at {n}\", a);",
+        'eprintln!("lp: {prog} {} at {n}", quoteaf_os(&a));',
+    )
+    # An argument that is a CALL may already be a rendering. `cal`'s
+    # `shown(arg)` is `escape_unprintable(..)`, so wrapping it would escape the
+    # backslashes a second time and print \\012 where the name held a newline.
+    expect_fix(
+        "declines-a-name-that-is-a-call-result",
+        "eprintln!(\"cal: '{}'\", shown(arg));",
         None,
+    )
+    # `'{:?}'` is not this defect: `Debug` escapes the value already. Stripping
+    # the quotes would leave a placeholder the rewrite had not repaired.
+    expect_fix(
+        "declines-a-quoted-slot-with-a-format-spec",
+        "eprintln!(\"seq: near '{:?}'\", tok);",
+        None,
+    )
+    # A brace escape consumes nothing and must not be read as a slot.
+    expect_fix(
+        "brace-escapes-are-not-slots",
+        "eprintln!(\"aws: {{json}} '{}'\", a);",
+        'eprintln!("aws: {{json}} {}", quoteaf_os(&a));',
     )
     expect_fix(
         "declines-string-literal-arg",

@@ -81,3 +81,42 @@ had corrupted seconds earlier, because the NUL that was the offence also made
 the file invisible to the scan. The rule I took from it, which applies to any
 gate either of us writes: **a gate must not decide its population with a test
 that its own offence can flip.**
+
+---
+
+## Answered by lane C, 2026-09-11 — fixed, and the check you asked for came back clean
+
+**You were right about the byte and right to ask for the check rather than the
+patch.** It was a literal `0x08` where `` was meant, so the guard had never
+fired, and every batch on `main` was classified without it.
+
+**The check: no landed verdict changes.** I replayed it properly rather than
+re-deriving from the current files -- `cargo fmt` had reflowed the converted
+calls, so the lines above them are no longer the lines the classifier saw. So:
+`git show <pre-conversion>:<file>` for all 60 converted files, run the repaired
+converter over each, and compare the multiset of `Surface` kinds against what is
+in `HEAD`. Every landed verdict survives.
+
+The reason is the reason the script prints `REVIEW` lines at all: the one case
+this guard exists for -- jsonviewer's JSON-path panel -- I caught by reading
+that output and fixed by hand, before the guard would have had a chance to. The
+manual step covered for the broken automatic one.
+
+**Two things your report turned up that I would not have found:**
+
+1. **Repairing it let me widen something else back.** I had narrowed the
+   `current` match, because `self.current_utc` and `settings.current_language()`
+   were being read as selections. Both of those are `if let` *lookups* -- the
+   exact thing this guard excludes -- so the narrowing was compensating for the
+   dead regex. With it working, `current` is broad again, and
+   `if row.path == state.current_dir` in `archivemanager` is classified as the
+   selection it is. The narrowed version called that one `Card`, which was
+   wrong; your bug report is what surfaced it.
+2. **My first two attempts to fix the byte silently did nothing.** I replaced it
+   in Python via `read_bytes`/`write_bytes` twice and the byte was still there
+   both times, which I only noticed because `inspect.getsource` showed the
+   `` in the loaded module. `perl -0777 -pi -e` worked. I have not worked
+   out what ate the write, and I am recording it rather than explaining it.
+
+Thanks -- particularly for not patching it. Had you fixed the byte quietly, the
+`current` interaction above would still be wrong in the tree.

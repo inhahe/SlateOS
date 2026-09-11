@@ -29,6 +29,10 @@
   .uc .sw { width:34px; height:18px; border-radius:9px; position:relative; flex:0 0 auto; }
   .uc .sw i { position:absolute; top:2px; width:14px; height:14px; border-radius:50%; background:#fff; }
   .fp { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+  .q3 { display:grid; grid-template-columns:1fr 1fr 1fr; gap:14px; align-items:start; }
+  .q3 h3 { font-size:12px; text-transform:uppercase; letter-spacing:.04em; color:#666; margin:0 0 6px;
+           font-weight:600; }
+  .qtab { padding:4px 10px; border-radius:5px 5px 0 0; font-size:11px; }
   .fp h3 { font-size:12px; text-transform:uppercase; letter-spacing:.04em; color:#666; margin:0 0 6px; font-weight:600; }
   .win { border-radius:9px; overflow:hidden; border:1px solid #c9ccd4; box-shadow:0 6px 18px rgba(0,0,0,.10);
          position:relative; font-size:12px; }
@@ -221,6 +225,25 @@
          knowing: the fills that are genuinely <b>control chrome</b> (a switch track, a scrollbar, a progress
          groove) stay fills in <em>both</em> themes and must be classified out by hand rather than swept, and the
          shade ladder cannot be deleted, only stop being the default.</p>
+    </div>
+
+    <div class="panel" style="margin-top:18px">
+      <h2>C&#8209;Q13 &mdash; what does &ldquo;selected&rdquo; look like?</h2>
+      <p class="note" style="margin-top:0">Three places a thing can be selected, drawn together because the
+         question is whether they should agree: a <b>tab</b>, a <b>sidebar entry</b> and a <b>row in a list</b>.
+         Each window below is identical except for the rule being applied. <b>This is the one that is not safe to
+         leave</b> &mdash; every application already follows the new theme, and the shell around them cannot be
+         converted until this is answered, so it keeps its filled boxes meanwhile.</p>
+      <div class="q3" id="q13"></div>
+    </div>
+
+    <div class="panel" style="margin-top:18px">
+      <h2>C&#8209;Q14 &mdash; what happens to a toolbar or a status bar?</h2>
+      <p class="note" style="margin-top:0">A strip that runs the full width of a window has no obvious bordered
+         form: a box around it looks like a box, and nothing at all loses the separation. 211 draw sites are
+         waiting on this, and they are currently left <em>filled</em> &mdash; so <b>doing nothing chooses B</b>,
+         and today&rsquo;s appearance is what you keep.</p>
+      <div class="q3" id="q14"></div>
     </div>
 
     <div class="panel" style="margin-top:18px">
@@ -468,6 +491,107 @@ const badge = (r, lim) => r >= 7 && lim === 4.5
 // `b` true means "borders instead of fills" -- so the two columns cannot drift
 // apart structurally and the only difference the eye sees is the one under
 // discussion.
+// The two open questions, drawn. Each option is the *same* window rendered
+// under a different rule, so the only difference on screen is the thing being
+// decided. Everything comes from the live controls above.
+function renderOptions() {
+  const L = cur.ladder;
+  const ink = cur.main, dim = cur.sec1, acc = cur.acc, page = cur.page, bord = cur.bord;
+  const T1 = `color:${ink}`, T2 = `color:${dim}`;
+
+  // --- C-Q13: what does "selected" look like? ----------------------------------------
+  //
+  // Three places a thing can be selected, drawn together because the question
+  // is whether they should agree: a sidebar entry, a row in a list, and a tab.
+  // `mark` is the whole difference between the options.
+  const q13 = mark => {
+    const nav = (n, i) => {
+      const m = i === 1 ? mark('nav') : 'border:1px solid transparent;';
+      return `<div class="nav" style="${m}${i === 1 ? T1 : T2}">${n}</div>`;
+    };
+    const row = (n, sub, i) => {
+      const m = i === 1 ? mark('row') : `border:1px solid ${bord};`;
+      return `<div class="r" style="background:transparent;${m}">
+                <div class="g"><div style="${T1}">${n}</div>
+                <div class="t2s" style="${T2}">${sub}</div></div></div>`;
+    };
+    const tab = (n, i) => {
+      const m = i === 0 ? mark('tab') : 'border:1px solid transparent;';
+      return `<div class="qtab" style="${m}${i === 0 ? T1 : T2}">${n}</div>`;
+    };
+    return `
+      <div class="win" style="background:${page}">
+        <div class="tb" style="background:${page};border-bottom:1px solid ${L.s1};${T1}">Files</div>
+        <div style="display:flex;gap:4px;padding:5px 7px 0">
+          ${['Recent', 'Starred', 'Shared'].map(tab).join('')}
+        </div>
+        <div class="bd" style="min-height:150px">
+          <div class="side" style="background:${page};border-right:1px solid ${bord}">
+            ${['Home', 'Documents', 'Pictures'].map(nav).join('')}
+          </div>
+          <div class="cnt">
+            ${row('design.txt', '12 KB', 0)}
+            ${row('roadmap.md', '48 KB', 1)}
+            ${row('notes.md', '3 KB', 2)}
+          </div>
+        </div>
+      </div>`;
+  };
+
+  const Q13 = [
+    ['A &mdash; everything selected takes the accent',
+     () => `border:2px solid ${acc};`,
+     'Selection looks the same wherever it is. This is the property that made borders ' +
+     'worth choosing: under fills it was impossible, because selected was a shade relative ' +
+     'to whatever sat underneath.'],
+    ['B &mdash; accent only for &ldquo;where you are&rdquo;',
+     what => what === 'tab' ? `border:2px solid ${acc};` : `border:2px solid ${ink};`,
+     'The shell&rsquo;s existing rule, kept. The tab you are on is accented; a selected row is ' +
+     'a heavier black outline. Two weights of black now have to be told apart.'],
+    ['C &mdash; lists take the accent, chrome does not',
+     what => what === 'row' ? `border:2px solid ${acc};` : `border:2px solid ${ink};`,
+     'A middle course, and the one closest to today. But it is the relative rule again: ' +
+     'you must know which kind of container you are in to know what selected looks like.'],
+  ];
+
+  // --- C-Q14: what happens to a full-width strip? ------------------------------------
+  const q14 = (strip, note) => `
+    <div class="win" style="background:${page}">
+      <div style="${strip('top')};padding:6px 9px;${T1};font-weight:600;font-size:11px">
+        File &nbsp; Edit &nbsp; View
+      </div>
+      <div style="padding:9px;min-height:96px">
+        <div class="r" style="background:transparent;border:1px solid ${bord};">
+          <div class="g"><div style="${T1}">A row of content</div>
+          <div class="t2s" style="${T2}">so the strip has something to be distinct from</div></div>
+        </div>
+      </div>
+      <div style="${strip('bottom')};padding:5px 9px;${T2};font-size:10.5px">Ready</div>
+    </div>`;
+
+  const Q14 = [
+    ['A &mdash; a line along one edge',
+     edge => `background:${page};border-${edge === 'top' ? 'bottom' : 'top'}:1px solid ${bord}`,
+     'What most desktops do, and the least heavy. Costs a third way of drawing a surface: ' +
+     '<code>Surface</code> grows a member and the decision point grows an arm.'],
+    ['B &mdash; leave them filled',
+     () => `background:${L.mantle}`,
+     'Today&rsquo;s appearance, made permanent. Free, and defensible &mdash; window chrome is ' +
+     'arguably a different material from content. Chosen by default if nothing is decided.'],
+    ['C &mdash; outline them like everything else',
+     () => `background:${page};border:1px solid ${bord}`,
+     'Consistent, no new concept. But a box around a full-width strip reads as a box that ' +
+     'failed to fit, which is why almost nothing does it.'],
+  ];
+
+  $('q13').innerHTML = Q13.map(([name, mark, note]) =>
+    `<div><h3>${name}</h3>${q13(mark)}<p class="note" style="margin-top:7px">${note}</p></div>`
+  ).join('');
+  $('q14').innerHTML = Q14.map(([name, strip, note]) =>
+    `<div><h3>${name}</h3>${q14(strip)}<p class="note" style="margin-top:7px">${note}</p></div>`
+  ).join('');
+}
+
 function renderFullPages() {
   const L = cur.ladder;
   const ink = cur.main, dim = cur.sec1, acc = cur.acc, page = cur.page, off = cur.ovl;
@@ -805,6 +929,7 @@ function render() {
   renderAllSurfaces();
   renderUseCases();
   renderFullPages();
+  renderOptions();
 
   // The plan's role table, driven from the live controls so it cannot drift
   // from what the rest of the page is showing.

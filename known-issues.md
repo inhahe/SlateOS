@@ -117553,6 +117553,56 @@ survived being written into a decision record as a "yes". Every gate added from
 here is a coin flip on whether it grades anything, resolved only if someone
 happens to break its subject and look.
 
+### 2026-09-11 — one gate moved from 2 to 3, and the sweep to do the rest was abandoned on a false premise
+
+**`scripts/check-selftest-reach.py` now has a case of the second kind**: it reads the
+real `kernel/src/sockact.rs`, requires the gate to be quiet on it, injects one
+destructive reach into its self-test body in memory, and requires exactly that
+finding back. Verified it can refuse — a copy with its scope test short-circuited
+fails its own suite, exit 1, with the mutation case among the failures. Resolved
+script-relative rather than CWD-relative, and checked by running it from `/tmp`,
+because a case that *fails* when it cannot find its subject must not hang on an
+ambient assumption.
+
+**Then I tried to do the remaining ones in a sweep, and the measurement that was
+going to drive it was wrong.** Recording it because the wrong number was plausible
+and the work it implied was several hours:
+
+| pass | instrument | answer |
+|---|---|---|
+| 1 | gate mentions a real tree path anywhere | 26 of 30 "have" one |
+| 2 | Python `ast`: does a function named `self_test*` read a file? | only **2** of 28 |
+| 3 | read one gate the entry says it fixed | **pass 2 is wrong** |
+
+`check-shellquote-vs-bash.py` is one of the two gates this entry reports fixing, and
+pass 2 calls it synthetic-only. It is not. Line 66 is
+
+    RUST = pathlib.Path(__file__).resolve().parent.parent / "kernel" / "src" / "shellquote.rs"
+
+— a module-level tether to the real file — and its assertion lives in
+`assert_port_matches_rust(src=None)`, which takes an optional override *so that it
+can also be fed synthetic source*. A scan for file reads inside functions named
+`self_test*` sees neither.
+
+**And the deeper reason the sweep was the wrong idea.** That gate's own docstring
+says where its tether actually is:
+
+> `shellquote.rs::self_test()` runs those rungs at boot, and the mutation above
+> fails the rung at `shellquote.rs:568`.
+
+For a gate that cross-checks a kernel module, **the kernel's own boot self-test is
+the tether** — not a Python case inside the gate. So "add a mutation case to each of
+the 26" was not a backlog; it was a plan built on a number produced by an instrument
+that could not see either of the two shapes the tree actually uses.
+
+The figure in this entry — *2 of 37 have a case that mutates their actual subject* —
+was produced by reading the gates. That is still what it takes, and it is why no
+number here should be re-derived by grep. Whoever picks this up should read each
+gate and ask **where is this gate's tether to the thing it grades?**, accepting three
+legitimate answers: a case of its own, a module-level read of the real file, or a
+rung in the kernel that fails when the code is broken. Only a gate with none of the
+three is a finding.
+
 ## TD-A-A-KILLED-BOOT-TEST-LEAVES-NO-TRACE-WHERE-ANYONE-LOOKS-FOR-ONE (lane A, 2026-09-03)
 
 **In short:** if `run-timeout.py` kills a boot test for exceeding its budget,

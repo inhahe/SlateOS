@@ -39,7 +39,7 @@ blanking them would take its count to zero with its gate green -- which is
 exactly how lane A's `mask_noncode` lost 37 findings. A masker that cannot be
 asked to spare literals invites its callers to write their own.
 
-It does **not** understand nested block comments (`/* /* */ */`), which Rust
+It DOES understand nested block comments (`/* /* */ */`), which Rust
 allows and which nothing in this tree uses. If that changes, this is the place
 to fix it once.
 """
@@ -93,33 +93,50 @@ def strip_noise(src: str, keep_literals: bool = False) -> str:
                 out[i] = " "
                 i += 1
         elif c == "/" and i + 1 < n and src[i + 1] == "*":
-            while i < n and not src.startswith("*/", i):
+            # Rust block comments NEST, so a depth counter rather than a scan for
+            # the first `*/`. Without this, `/* outer /* inner */ still out */`
+            # ended at the inner close and the tail was read as code.
+            depth = 0
+            while i < n:
+                if src.startswith("/*", i):
+                    depth += 1
+                    for k in range(i, min(i + 2, n)):
+                        out[k] = " "
+                    i += 2
+                    continue
+                if src.startswith("*/", i):
+                    depth -= 1
+                    for k in range(i, min(i + 2, n)):
+                        out[k] = " "
+                    i += 2
+                    if depth == 0:
+                        break
+                    continue
                 if src[i] != "\n":
                     out[i] = " "
                 i += 1
-            for k in range(i, min(i + 2, n)):
-                out[k] = " "
-            i += 2
-        elif (not keep_literals) and (c in "rb") and (_m := _RAW_OPEN.match(src, i)):
+        elif (c in "rb") and (_m := _RAW_OPEN.match(src, i)):
             close = '"' + "#" * len(_m.group(1))
             end = src.find(close, _m.end())
             end = n if end < 0 else end + len(close)
-            for k in range(i, end):
-                if src[k] != "\n":
-                    out[k] = " "
+            if not keep_literals:
+                for k in range(i, end):
+                    if src[k] != "\n":
+                        out[k] = " "
             i = end
-        elif (not keep_literals) and c == "'":
+        elif c == "'":
             # A CHAR LITERAL, not a lifetime. `'a` / `'static` fall through to
             # the catch-all below and are left alone; only a complete literal
             # is blanked, so `find('\"')` cannot open a string.
             m = _CHAR_LITERAL.match(src, i)
             if m:
-                for k in range(i, m.end()):
-                    out[k] = " "
+                if not keep_literals:
+                    for k in range(i, m.end()):
+                        out[k] = " "
                 i = m.end()
             else:
                 i += 1
-        elif (not keep_literals) and c == '"':
+        elif c == '"':
             j = i + 1
             while j < n:
                 if src[j] == "\\":
@@ -129,9 +146,10 @@ def strip_noise(src: str, keep_literals: bool = False) -> str:
                     j += 1
                     break
                 j += 1
-            for k in range(i, min(j, n)):
-                if src[k] != "\n":
-                    out[k] = " "
+            if not keep_literals:
+                for k in range(i, min(j, n)):
+                    if src[k] != "\n":
+                        out[k] = " "
             i = j
         else:
             i += 1

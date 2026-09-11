@@ -10,7 +10,7 @@ kernel/src/main.rs	03	lane A's file. Line 2614, a comment quoting
 #   requests/b-a-a-raw-control-byte-is-sitting-in-a-comment-in-main-rs.md
 #   on 2026-09-11; remove this entry when lane A lands the fix.
 gui/appearance/convert-fills.py	08	lane C's file. Line 90, a guard regex
-#   `if\s+let` whose  became a raw backspace, so the pattern asks for a
+#   matching an `if let` line whose word-boundary escape became a raw backspace, so it asks for a
 #   literal backspace in Rust source and the guard CAN NEVER FIRE. Filed as
 #   requests/b-c-a-dead-regex-in-convert-fills-py-line-90.md on 2026-09-11;
 #   remove this entry when lane C lands the fix.

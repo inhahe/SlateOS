@@ -64783,6 +64783,22 @@ lint programme above is still worth doing; it is not a substitute for a
 differential, and two of its three crates so far were duplicates that a
 differential then deleted.
 
+**28 -> 27 (2026-09-11): `wc`, which does not align its columns.**
+`DIFF_PKG=wc bash scripts/wc-diff.sh`:
+
+**coreutils 116 passed, 0 differed. The standalone 43 passed, 73 differed.**
+
+| | cases | defect |
+|---|---|---|
+| **no column alignment** | **34** | GNU right-aligns every count in a fixed-width field — `      2       3       6`. The standalone prints `2 3 6`. That is `wc`'s entire output format, it is wrong on every single invocation, and it is invisible to any comparison that normalises whitespace. |
+| long-option abbreviation | 24 | `wc --lin` and `wc --w` are `unrecognized option`; GNU accepts any unambiguous prefix. |
+| `(os error 21)`, and a row that vanishes | 11 | `wc adir` — GNU prints the diagnostic **and** a `0 0 0 adir` row, and still prints a `total` line for the other operands. The standalone prints the diagnostic only, so the failed file disappears from the table and the total silently omits it. |
+| accepts what GNU refuses | 3 | a zero-length name in `--files0-from` (`invalid zero-length file name`), and `--files0-from` combined with a file operand (`file operands cannot be combined with --files0-from`). |
+| missing second line | 1 | `Try 'wc --help' for more information.` |
+
+The alignment family is the one to note: 34 cases where both sides exit 0, the
+numbers are identical, and the bytes are not. `wc` output is read in columns.
+
 **29 -> 28 (2026-09-11): `join`, and all three "close" pairs have now come
 apart.** `DIFF_PKG=join bash scripts/join-diff.sh`, subject confirmed by
 `--version`:

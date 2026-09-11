@@ -221,7 +221,6 @@ userspace/vi/src/main.rs:to_str-unwrap
 userspace/vmstat/src/main.rs:argv-as-string
 userspace/wall/src/main.rs:argv-as-string
 userspace/watch/src/main.rs:argv-as-string
-userspace/wc/src/main.rs:argv-as-string
 userspace/wget/src/main.rs:argv-as-string
 userspace/who/src/main.rs:argv-as-string
 userspace/whois/src/main.rs:argv-as-string

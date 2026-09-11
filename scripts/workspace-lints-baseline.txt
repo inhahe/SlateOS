@@ -135,7 +135,6 @@ userspace/vi
 userspace/vmstat
 userspace/wall
 userspace/watch
-userspace/wc
 userspace/who
 userspace/xargs
 userspace/xdg

@@ -6548,11 +6548,43 @@ fn bench_vfs_write_breakdown() {
         let _ = core::hint::black_box(crate::fs::intercept::pre_write(&resolved));
     });
 
+    // The tail of `write_file_resolved`, which the first run showed holds 99% of
+    // the cost. Every one of these is per-write and independent of the byte count,
+    // which is why a 256-byte and a 16 KiB write cost nearly the same.
+    let quota_only = run("vfs_write_breakdown_quota", 200, || {
+        // No black_box: these return unit, and clippy denies passing one to a
+        // function. They all mutate global state, so the call cannot be elided.
+        crate::fs::quota::charge_bytes(0, 0, 256);
+    });
+    let notify_only = run("vfs_write_breakdown_notify", 200, || {
+        crate::fs::notify::emit_modified(&resolved);
+    });
+    let index_only = run("vfs_write_breakdown_index", 200, || {
+        crate::fs::index::on_file_changed(&resolved);
+    });
+    let journal_only = run("vfs_write_breakdown_journal", 200, || {
+        crate::fs::journal::record(crate::fs::journal::JournalEventType::Modified, &resolved);
+    });
+    let audit_only = run("vfs_write_breakdown_audit", 200, || {
+        crate::fs::audit::log_ok(crate::fs::audit::AuditOp::Write, 0, &resolved);
+    });
+
     let named = ns_only
         .min_ns
         .saturating_add(access_only.min_ns)
         .saturating_add(intercept_only.min_ns);
-    let remainder = resolved_only.min_ns.saturating_sub(named);
+    let tail = quota_only
+        .min_ns
+        .saturating_add(notify_only.min_ns)
+        .saturating_add(index_only.min_ns)
+        .saturating_add(journal_only.min_ns)
+        .saturating_add(audit_only.min_ns);
+    // What is left is `invalidate_negative_prefix` -- a private method, so not
+    // separately measurable -- plus memfs's own write. Nothing else.
+    let remainder = resolved_only
+        .min_ns
+        .saturating_sub(named)
+        .saturating_sub(tail);
 
     serial_println!(
         "[bench]   vfs_write_breakdown: full {}ns, resolved {}ns (resolve {}ns), \
@@ -6567,9 +6599,20 @@ fn bench_vfs_write_breakdown() {
         remainder,
     );
     serial_println!(
-        "[bench]   vfs_write_breakdown: the remainder is the quota check and charge, \
-         the auto-version probe, memfs's own write and the page-cache \
-         invalidation -- three of which were ruled out by reading",
+        "[bench]   vfs_write_breakdown tail: quota {}ns + notify {}ns + index {}ns \
+         + journal {}ns + audit {}ns = {}ns",
+        quota_only.min_ns,
+        notify_only.min_ns,
+        index_only.min_ns,
+        journal_only.min_ns,
+        audit_only.min_ns,
+        tail,
+    );
+    serial_println!(
+        "[bench]   vfs_write_breakdown: remainder {}ns is invalidate_negative_prefix \
+         (a scan of all 1024 dcache entries, each holding two PathBufs) plus \
+         memfs's own write -- nothing else is left",
+        remainder,
     );
 
     track("vfs_write_breakdown_full", &full);
@@ -6577,6 +6620,11 @@ fn bench_vfs_write_breakdown() {
     track("vfs_write_breakdown_ns", &ns_only);
     track("vfs_write_breakdown_access", &access_only);
     track("vfs_write_breakdown_intercept", &intercept_only);
+    track("vfs_write_breakdown_quota", &quota_only);
+    track("vfs_write_breakdown_notify", &notify_only);
+    track("vfs_write_breakdown_index", &index_only);
+    track("vfs_write_breakdown_journal", &journal_only);
+    track("vfs_write_breakdown_audit", &audit_only);
 
     let _ = Vfs::remove(PATH);
 }

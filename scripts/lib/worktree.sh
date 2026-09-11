@@ -322,33 +322,57 @@ slate_ensure_zig() {
     echo "worktree.sh: zig $SLATE_ZIG_VERSION ready at $SLATE_ZIG" >&2
 }
 
-# Resolve $SLATE_BASH_TARBALL, downloading the pinned GNU bash source if this
-# machine has not got it yet. Same shape as slate_ensure_zig, deliberately: a
-# per-worktree copy first (that is how the spike was originally provisioned, and
-# an existing checkout should not re-download), then the shared cache, then the
-# network — and the hash is checked before anything reads the archive, because
-# what comes out of it is compiled into a binary we ship.
-slate_ensure_bash_src() {
-    # A hand-placed copy in this worktree's build/spike/. Accepted only if it
-    # hashes to the pin: the zig branch learned that accepting a local copy
-    # unconditionally reintroduces the very hole the pin exists to close. There
-    # is no `--version` shortcut for a tarball, so the hash is the whole test.
-    local local_tar="$SLATE_SPIKE/bash-$SLATE_BASH_VERSION.tar.gz"
-    if [ -f "$local_tar" ]; then
-        local local_got
-        local_got="$(sha256sum "$local_tar" | cut -d' ' -f1)"
-        if [ "$local_got" = "$SLATE_BASH_SHA256" ]; then
-            SLATE_BASH_TARBALL="$local_tar"
+# Resolve the pinned source tarball for a port, downloading it if this machine
+# has not got it yet. Prints the path on **stdout**; every message goes to
+# stderr, which is what lets the callers below capture it.
+#
+#   slate_ensure_src <label> <version> <sha256> <url> [candidate dir...]
+#
+# WHY THIS IS ONE FUNCTION AND WAS FOUR. There was a `slate_ensure_<pkg>_src`
+# per port — bash, pkgconf, make, coreutils — and after renaming the package out
+# of them they were 92%, 97% and 66% identical to one another. That is the shape
+# this tree keeps finding: an enumeration that needs one entry per instance
+# misses the next one by construction, and the miss is silent. The fifth port is
+# cmake, and a fifth copy is how a fifth copy comes to lack the `--fail` that
+# the pkgconf copy originally lacked — which is exactly how a 404 body once
+# became a permanent "cached tarball" here.
+#
+# The rules each copy was carrying separately, now carried once. Each is one
+# some copy had already got wrong:
+#
+#   * A candidate already on disk is accepted ONLY if it hashes to the pin.
+#     There is no `--version` shortcut for a tarball; the hash is the whole
+#     test.
+#   * A candidate that does not hash is IGNORED, never deleted. It may be the
+#     evidence of the truncated download the pin exists to catch, and removing
+#     it would erase the only copy of the bad bytes.
+#   * The download goes to `.part` and is renamed only on success, and `--fail`
+#     makes curl treat an HTTP error as a failure rather than a body.
+#
+# `scripts/test-worktree.sh` pins all of those, plus the one the refactor itself
+# introduced: stdout carries the path and nothing else, so a single `echo`
+# missing its `>&2` would put prose into a filename.
+slate_ensure_src() {
+    local label="$1" ver="$2" want="$3" url="$4"
+    shift 4
+    local name="${url##*/}"
+    local cand got
+
+    for cand in "$@"; do
+        cand="$cand/$name"
+        [ -f "$cand" ] || continue
+        got="$(sha256sum "$cand" | cut -d' ' -f1)"
+        if [ "$got" = "$want" ]; then
+            printf '%s\n' "$cand"
             return 0
         fi
-        echo "worktree.sh: ignoring $local_tar — sha256 $local_got, pin is $SLATE_BASH_SHA256" >&2
-    fi
+        echo "worktree.sh: ignoring $cand — sha256 $got, pin is $want" >&2
+    done
 
-    local tarball="$SLATE_ZIG_CACHE/bash-$SLATE_BASH_VERSION.tar.gz"
-    local url="https://ftp.gnu.org/gnu/bash/bash-$SLATE_BASH_VERSION.tar.gz"
+    local tarball="$SLATE_ZIG_CACHE/$name"
     mkdir -p "$SLATE_ZIG_CACHE" || return 1
     if [ ! -f "$tarball" ]; then
-        echo "worktree.sh: bash $SLATE_BASH_VERSION source not found; fetching to $SLATE_ZIG_CACHE" >&2
+        echo "worktree.sh: $label $ver source not found; fetching to $SLATE_ZIG_CACHE" >&2
         curl -sSL --fail --max-time 900 -o "$tarball.part" "$url" || {
             echo "worktree.sh: download failed: $url" >&2
             rm -f "$tarball.part"
@@ -357,18 +381,28 @@ slate_ensure_bash_src() {
         mv "$tarball.part" "$tarball"
     fi
 
-    local got
     got="$(sha256sum "$tarball" | cut -d' ' -f1)"
-    if [ "$got" != "$SLATE_BASH_SHA256" ]; then
-        echo "worktree.sh: bash tarball sha256 mismatch — refusing to extract." >&2
-        echo "             expected $SLATE_BASH_SHA256" >&2
+    if [ "$got" != "$want" ]; then
+        echo "worktree.sh: $label tarball sha256 mismatch — refusing to extract." >&2
+        echo "             expected $want" >&2
         echo "             got      $got" >&2
         echo "             ($tarball — delete it to retry the download)" >&2
         return 1
     fi
+    printf '%s\n' "$tarball"
+}
 
-    # shellcheck disable=SC2034  # the caller's, not ours; see SLATE_SYSROOT above
-    SLATE_BASH_TARBALL="$tarball"
+# Resolve $SLATE_BASH_TARBALL, downloading the pinned GNU bash source if this
+# machine has not got it yet. Same shape as slate_ensure_zig, deliberately: a
+# per-worktree copy first (that is how the spike was originally provisioned, and
+# an existing checkout should not re-download), then the shared cache, then the
+# network — and the hash is checked before anything reads the archive, because
+# what comes out of it is compiled into a binary we ship.
+slate_ensure_bash_src() {
+    SLATE_BASH_TARBALL="$(slate_ensure_src bash "$SLATE_BASH_VERSION" \
+        "$SLATE_BASH_SHA256" \
+        "https://ftp.gnu.org/gnu/bash/bash-$SLATE_BASH_VERSION.tar.gz" \
+        "$SLATE_SPIKE")" || return 1
 }
 
 # Resolve $SLATE_PKGCONF_TARBALL, downloading the pinned pkgconf source if this
@@ -383,44 +417,10 @@ slate_ensure_bash_src() {
 # of the truncated download this pin exists to catch, and silently removing it
 # would erase the only copy of the bad bytes.
 slate_ensure_pkgconf_src() {
-    local name="pkgconf-$SLATE_PKGCONF_VERSION.tar.xz"
-    local cand got
-    for cand in "$SLATE_WORK/pkgconf-spike/$name" "/tmp/pkgconf-spike-$SLATE_LANE/$name" "$SLATE_SPIKE/$name"; do
-        [ -f "$cand" ] || continue
-        got="$(sha256sum "$cand" | cut -d' ' -f1)"
-        if [ "$got" = "$SLATE_PKGCONF_SHA256" ]; then
-            SLATE_PKGCONF_TARBALL="$cand"
-            return 0
-        fi
-        echo "worktree.sh: ignoring $cand — sha256 $got, pin is $SLATE_PKGCONF_SHA256" >&2
-    done
-
-    local tarball="$SLATE_ZIG_CACHE/$name"
-    local url="https://distfiles.ariadne.space/pkgconf/$name"
-    mkdir -p "$SLATE_ZIG_CACHE" || return 1
-    if [ ! -f "$tarball" ]; then
-        echo "worktree.sh: pkgconf $SLATE_PKGCONF_VERSION source not found; fetching to $SLATE_ZIG_CACHE" >&2
-        # --fail so an error page is never mistaken for the archive, and .part so
-        # a cut connection cannot leave a file that later runs treat as cached.
-        curl -sSL --fail --max-time 900 -o "$tarball.part" "$url" || {
-            echo "worktree.sh: download failed: $url" >&2
-            rm -f "$tarball.part"
-            return 1
-        }
-        mv "$tarball.part" "$tarball"
-    fi
-
-    got="$(sha256sum "$tarball" | cut -d' ' -f1)"
-    if [ "$got" != "$SLATE_PKGCONF_SHA256" ]; then
-        echo "worktree.sh: pkgconf tarball sha256 mismatch — refusing to extract." >&2
-        echo "             expected $SLATE_PKGCONF_SHA256" >&2
-        echo "             got      $got" >&2
-        echo "             ($tarball — delete it to retry the download)" >&2
-        return 1
-    fi
-
-    # shellcheck disable=SC2034  # the caller's, not ours; see SLATE_SYSROOT above
-    SLATE_PKGCONF_TARBALL="$tarball"
+    SLATE_PKGCONF_TARBALL="$(slate_ensure_src pkgconf "$SLATE_PKGCONF_VERSION" \
+        "$SLATE_PKGCONF_SHA256" \
+        "https://distfiles.ariadne.space/pkgconf/pkgconf-$SLATE_PKGCONF_VERSION.tar.xz" \
+        "$SLATE_WORK/pkgconf-spike" "/tmp/pkgconf-spike-$SLATE_LANE" "$SLATE_SPIKE")" || return 1
 }
 
 # Resolve $SLATE_MAKE_TARBALL, downloading the pinned GNU make source if this
@@ -430,42 +430,10 @@ slate_ensure_pkgconf_src() {
 # "ensure make(1) is installed", which is a different and much more plausible
 # thing for a caller to want.
 slate_ensure_make_src() {
-    local name="make-$SLATE_MAKE_VERSION.tar.gz"
-    local cand got
-    for cand in "$SLATE_WORK/make-spike/$name" "/tmp/make-spike-$SLATE_LANE/$name" "$SLATE_SPIKE/$name"; do
-        [ -f "$cand" ] || continue
-        got="$(sha256sum "$cand" | cut -d' ' -f1)"
-        if [ "$got" = "$SLATE_MAKE_SHA256" ]; then
-            SLATE_MAKE_TARBALL="$cand"
-            return 0
-        fi
-        echo "worktree.sh: ignoring $cand — sha256 $got, pin is $SLATE_MAKE_SHA256" >&2
-    done
-
-    local tarball="$SLATE_ZIG_CACHE/$name"
-    local url="https://ftp.gnu.org/gnu/make/$name"
-    mkdir -p "$SLATE_ZIG_CACHE" || return 1
-    if [ ! -f "$tarball" ]; then
-        echo "worktree.sh: make $SLATE_MAKE_VERSION source not found; fetching to $SLATE_ZIG_CACHE" >&2
-        curl -sSL --fail --max-time 900 -o "$tarball.part" "$url" || {
-            echo "worktree.sh: download failed: $url" >&2
-            rm -f "$tarball.part"
-            return 1
-        }
-        mv "$tarball.part" "$tarball"
-    fi
-
-    got="$(sha256sum "$tarball" | cut -d' ' -f1)"
-    if [ "$got" != "$SLATE_MAKE_SHA256" ]; then
-        echo "worktree.sh: make tarball sha256 mismatch — refusing to extract." >&2
-        echo "             expected $SLATE_MAKE_SHA256" >&2
-        echo "             got      $got" >&2
-        echo "             ($tarball — delete it to retry the download)" >&2
-        return 1
-    fi
-
-    # shellcheck disable=SC2034  # the caller's, not ours; see SLATE_SYSROOT above
-    SLATE_MAKE_TARBALL="$tarball"
+    SLATE_MAKE_TARBALL="$(slate_ensure_src make "$SLATE_MAKE_VERSION" \
+        "$SLATE_MAKE_SHA256" \
+        "https://ftp.gnu.org/gnu/make/make-$SLATE_MAKE_VERSION.tar.gz" \
+        "$SLATE_WORK/make-spike" "/tmp/make-spike-$SLATE_LANE" "$SLATE_SPIKE")" || return 1
 }
 
 # The coreutils counterpart of slate_ensure_make_src, and deliberately the same
@@ -475,42 +443,10 @@ slate_ensure_make_src() {
 # the two details the pkgconf fetch originally lacked, which is how a 404 body
 # once became a permanent "cached tarball".
 slate_ensure_coreutils_src() {
-    local name="coreutils-$SLATE_COREUTILS_VERSION.tar.xz"
-    local cand got
-    for cand in "$SLATE_WORK/coreutils-spike/$name" "/tmp/coreutils-spike-$SLATE_LANE/$name" "$SLATE_SPIKE/$name"; do
-        [ -f "$cand" ] || continue
-        got="$(sha256sum "$cand" | cut -d' ' -f1)"
-        if [ "$got" = "$SLATE_COREUTILS_SHA256" ]; then
-            SLATE_COREUTILS_TARBALL="$cand"
-            return 0
-        fi
-        echo "worktree.sh: ignoring $cand — sha256 $got, pin is $SLATE_COREUTILS_SHA256" >&2
-    done
-
-    local tarball="$SLATE_ZIG_CACHE/$name"
-    local url="https://ftp.gnu.org/gnu/coreutils/$name"
-    mkdir -p "$SLATE_ZIG_CACHE" || return 1
-    if [ ! -f "$tarball" ]; then
-        echo "worktree.sh: coreutils $SLATE_COREUTILS_VERSION source not found; fetching to $SLATE_ZIG_CACHE" >&2
-        curl -sSL --fail --max-time 900 -o "$tarball.part" "$url" || {
-            echo "worktree.sh: download failed: $url" >&2
-            rm -f "$tarball.part"
-            return 1
-        }
-        mv "$tarball.part" "$tarball"
-    fi
-
-    got="$(sha256sum "$tarball" | cut -d' ' -f1)"
-    if [ "$got" != "$SLATE_COREUTILS_SHA256" ]; then
-        echo "worktree.sh: coreutils tarball sha256 mismatch — refusing to extract." >&2
-        echo "             expected $SLATE_COREUTILS_SHA256" >&2
-        echo "             got      $got" >&2
-        echo "             ($tarball — delete it to retry the download)" >&2
-        return 1
-    fi
-
-    # shellcheck disable=SC2034  # the caller's, not ours; see SLATE_SYSROOT above
-    SLATE_COREUTILS_TARBALL="$tarball"
+    SLATE_COREUTILS_TARBALL="$(slate_ensure_src coreutils "$SLATE_COREUTILS_VERSION" \
+        "$SLATE_COREUTILS_SHA256" \
+        "https://ftp.gnu.org/gnu/coreutils/coreutils-$SLATE_COREUTILS_VERSION.tar.xz" \
+        "$SLATE_WORK/coreutils-spike" "/tmp/coreutils-spike-$SLATE_LANE" "$SLATE_SPIKE")" || return 1
 }
 
 slate_make_zig_wrappers() {

@@ -9348,7 +9348,35 @@ pub fn self_test_ctest_hostname() -> KernelResult<()> {
                  / other) from SYS_DOMAINNAME_SET (1073), 17-18 the two readers \
                  disagreeing, 19-20 the bound, 21 the restore"
             }
-            _ => "",
+            // NOT IN THE LEGEND, said out loud rather than left empty.
+            //
+            // lane B's main.c uses 1..=21 contiguously plus 42, extracted
+            // programmatically rather than typed from memory. So a code outside that
+            // set is not a hostname verdict at all: the fixture died in a way it did
+            // not choose, before reaching any check that names itself.
+            //
+            // This arm used to be `_ => ""`, which is worse than no legend at all: an
+            // empty hint reads as "this code is expected and there is nothing to say
+            // about it", and sends the reader into the hostname chain after a fault
+            // that is not there. lane B's ctest-pty legend gained exactly this arm
+            // (code 51) on 2026-09-10, for a reason they put better than I would: an
+            // exhaustive legend and a legend with a hole in it look identical until
+            // the hole is hit.
+            Some(_) => {
+                " — this code is NOT in the fixture's legend (1-21, plus 42 for full \
+                 success), so it is not a hostname verdict. The fixture died in a way \
+                 it did not choose: a crash, or a failure before main. Read the serial \
+                 log above this line for a page fault, a missing symbol or a rejected \
+                 ELF rather than anything about hostnames"
+            }
+            // No code at all is a third thing again: the process never reached exit, so
+            // it was killed or was still running when the rung gave up. Neither is a
+            // legend entry, and neither is about hostnames.
+            None => {
+                " — the fixture reported NO exit code, so it did not exit: killed, or \
+                 still running when the rung gave up. Check for a hang or a fault above \
+                 rather than reading the hostname chain"
+            }
         };
         serial_println!(
             "[spawn]   FAIL: ctest-hostname (ring 3) — reached Zombie but exit code was {:?}, \

@@ -971,13 +971,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fold"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "fontmanager"
 version = "0.1.0"
 dependencies = [

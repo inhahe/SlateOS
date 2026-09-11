@@ -142,6 +142,24 @@ def _load_check_eol():
 # 1% leaves two orders of magnitude of headroom on both sides.
 BINARY_CONTROL_FRACTION = 0.01
 
+# ...but a fraction alone is wrong for SHORT files, and the refusal probe is
+# what proved it. A sixteen-byte fixture holding one NUL is 6.25% control bytes,
+# so the fraction called it binary and the gate reported "clean -- 1 text
+# file(s)" on the commit that had just added it. Any short file -- a one-line
+# `.txt`, a tiny config, a fixture -- would have been invisible for exactly the
+# reason it needed checking.
+#
+# So a file is binary only if it has MANY control bytes *and* a high proportion
+# of them. Real data has thousands; corrupted text has one to ten. A small blob
+# that falls between gets called text, reported, and can be baselined -- a false
+# positive, which is the direction a gate should fail in.
+#
+# Worth recording how this was missed the first time: the self-test fixture for
+# "a source file with one NUL is still text" was a 430-byte file, comfortably
+# under the fraction. The test passed because the fixture was too big to expose
+# the bug, which is its own lesson about choosing fixture sizes.
+BINARY_MIN_CONTROL = 32
+
 
 def is_binary(data: bytes) -> bool:
     """Whether these bytes are data rather than text that may be corrupted.
@@ -153,7 +171,10 @@ def is_binary(data: bytes) -> bool:
     self-test is what noticed.
 
     Two questions instead, neither of which a handful of stray bytes can move:
-    does it decode as UTF-8, and is it *mostly* control bytes.
+    does it decode as UTF-8, and does it hold MANY control bytes AND a high
+    proportion of them. The "many" half is not redundant -- see
+    `BINARY_MIN_CONTROL`, where a sixteen-byte fixture with one NUL was called
+    binary by the proportion alone and skipped.
     """
     if not data:
         return False
@@ -162,7 +183,7 @@ def is_binary(data: bytes) -> bool:
     except UnicodeDecodeError:
         return True
     ctrl = sum(1 for b in data if (b < 0x20 and b not in ALLOWED) or b == 0x7F)
-    return ctrl > len(data) * BINARY_CONTROL_FRACTION
+    return ctrl >= BINARY_MIN_CONTROL and ctrl > len(data) * BINARY_CONTROL_FRACTION
 
 
 def offences(data: bytes) -> list[tuple[int, int]]:
@@ -509,7 +530,19 @@ def self_test() -> int:
          is_binary(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + bytes(range(256))))
     case("bytes that are not UTF-8 are binary", is_binary(b"\xff\xfe\x00\x41"))
     case("mostly-control is binary even when it decodes",
-         is_binary(bytes(10) + b"ab"))
+         is_binary(bytes(200) + b"ab"))
+    # The case the probe had to find for me. The `src` fixture above is 430
+    # bytes, comfortably under the 1% fraction, so it passed against a
+    # fraction-only classifier that failed every SHORT file. The fixture was too
+    # big to expose the bug it was written to cover.
+    probe = b"a probe: b" + bytes([34, 104, 105, 0, 34]) + b"\n"
+    case("a 16-byte file with one NUL is text, not binary", not is_binary(probe))
+    case("...and its NUL is found",
+         offences(probe) == [(probe.index(b"\x00"), 0x00)])
+    case("a one-byte file that IS a NUL is text, and reported",
+         not is_binary(bytes(1)) and offences(bytes(1)) == [(0, 0x00)])
+    case("a short file of pure control bytes is still text (too few to be data)",
+         not is_binary(bytes(8)))
     case("plain prose is text", not is_binary("hello — world\n".encode()))
 
     # -- the baseline reader --

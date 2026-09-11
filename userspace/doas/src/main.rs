@@ -167,42 +167,55 @@ struct GroupEntry {
     members: Vec<String>,
 }
 
-/// Parse `/etc/group` and return all entries.
-fn read_group_entries() -> Vec<GroupEntry> {
-    let content = match fs::read_to_string("/etc/group") {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
+/// Parse `/etc/group`, or `None` if it cannot be read.
+///
+/// **`None` is not an empty group file.** It was: an unreadable `/etc/group`
+/// returned `Vec::new()`, so every `:group` identity matched nobody. For a
+/// `permit :wheel` rule that fails closed and is merely unhelpful. For a
+/// `deny :wheel` rule it fails OPEN -- the deny stops applying, and the caller
+/// falls through to whatever permit rule comes after it.
+///
+/// One `Err(_)` arm therefore inverted the meaning of half the rule language,
+/// in the direction that grants. That is the shape lane A named on 2026-09-11
+/// after finding it in `mkfs` and `fsck`: for a check guarding a privileged
+/// action, "I do not know" and "it is safe" must not be the same value.
+fn read_group_entries() -> Option<Vec<GroupEntry>> {
+    let content = fs::read_to_string("/etc/group").ok()?;
 
-    content
-        .lines()
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .filter_map(|line| {
-            let fields: Vec<&str> = line.split(':').collect();
-            let [name, _passwd, gid, members, ..] = fields.as_slice() else {
-                return None;
-            };
-            let gid = gid.parse().ok()?;
-            let members = members
-                .split(',')
-                .map(|m| m.trim().to_string())
-                .filter(|m| !m.is_empty())
-                .collect();
-            Some(GroupEntry {
-                name: (*name).to_string(),
-                gid,
-                members,
+    Some(
+        content
+            .lines()
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .filter_map(|line| {
+                let fields: Vec<&str> = line.split(':').collect();
+                let [name, _passwd, gid, members, ..] = fields.as_slice() else {
+                    return None;
+                };
+                let gid = gid.parse().ok()?;
+                let members = members
+                    .split(',')
+                    .map(|m| m.trim().to_string())
+                    .filter(|m| !m.is_empty())
+                    .collect();
+                Some(GroupEntry {
+                    name: (*name).to_string(),
+                    gid,
+                    members,
+                })
             })
-        })
-        .collect()
+            .collect(),
+    )
 }
 
-/// Check whether a user is a member of the named group.
-fn user_in_group(username: &str, group_name: &str) -> bool {
-    let groups = read_group_entries();
-    groups
-        .iter()
-        .any(|g| g.name == group_name && g.members.iter().any(|m| m == username))
+/// Whether a user is in the named group, or `None` if the group file cannot
+/// be read and the question therefore has no answer.
+fn user_in_group(username: &str, group_name: &str) -> Option<bool> {
+    let groups = read_group_entries()?;
+    Some(
+        groups
+            .iter()
+            .any(|g| g.name == group_name && g.members.iter().any(|m| m == username)),
+    )
 }
 
 // ============================================================================
@@ -256,6 +269,18 @@ enum MatchResult {
     Deny,
     /// No rule matched.
     NoMatch,
+    /// A `deny` rule's identity could not be evaluated -- `/etc/group` is
+    /// unreadable, so `:group` membership has no answer.
+    ///
+    /// Distinct from `NoMatch` on purpose. "This rule does not apply to you"
+    /// lets evaluation continue; "I cannot tell whether this rule applies"
+    /// must not, when the rule is a `deny` -- continuing past it is how an
+    /// unreadable group file used to turn every `deny :group` into a no-op
+    /// and hand the caller to whatever `permit` came next.
+    ///
+    /// An unevaluable `permit` does not produce this: skipping one only
+    /// withholds a grant, which is the safe direction.
+    Unknown,
 }
 
 // ============================================================================
@@ -552,8 +577,30 @@ fn evaluate_rules(
     command_args: &[OsString],
 ) -> MatchResult {
     for rule in rules {
-        if !identity_matches(&rule.identity, caller_name) {
-            continue;
+        match identity_matches(&rule.identity, caller_name) {
+            Some(true) => {}
+            Some(false) => continue,
+            // AN UNEVALUABLE RULE IS SKIPPED OR FATAL DEPENDING ON WHICH WAY
+            // IT POINTS, and the asymmetry is the whole point.
+            //
+            // A `permit` we cannot evaluate is skipped. The worst that does is
+            // withhold a grant, which is the safe direction and is what an
+            // unreadable group file should cost: `permit :wheel` stops working
+            // until the file is readable again.
+            //
+            // A `deny` we cannot evaluate is fatal. Skipping it would let the
+            // caller fall through to a later `permit` -- so the one arm that
+            // exists to STOP somebody would be the one an unreadable file
+            // silently removed. That is the inversion this whole change is
+            // about, and it only ever bites the deny half.
+            //
+            // Written the blunt way first, aborting on either kind; the test
+            // suite caught it, because `sample_rules` opens with
+            // `permit nopass :wheel` and every case then reported Unknown.
+            None => match rule.action {
+                RuleAction::Permit => continue,
+                RuleAction::Deny => return MatchResult::Unknown,
+            },
         }
 
         if let Some(ref target) = rule.target
@@ -605,11 +652,11 @@ fn evaluate_rules(
 /// - A bare name (e.g., `alice`) matches the username directly.
 /// - A `:group` form (e.g., `:wheel`) matches if the caller is a member of
 ///   that group.
-fn identity_matches(identity: &str, caller_name: &str) -> bool {
+fn identity_matches(identity: &str, caller_name: &str) -> Option<bool> {
     if let Some(group_name) = identity.strip_prefix(':') {
         user_in_group(caller_name, group_name)
     } else {
-        identity == caller_name
+        Some(identity == caller_name)
     }
 }
 
@@ -1089,6 +1136,10 @@ fn main() {
         MatchResult::Permit(opts) => opts,
         MatchResult::Deny => {
             eprintln!("doas: operation not permitted");
+            process::exit(1);
+        }
+        MatchResult::Unknown => {
+            eprintln!("doas: cannot read /etc/group, so a rule naming a group cannot be evaluated");
             process::exit(1);
         }
         MatchResult::NoMatch => {
@@ -1734,6 +1785,49 @@ mod tests {
         }
     }
 
+    /// The asymmetry, stated as the property rather than trusted to a comment.
+    ///
+    /// On this build host `/etc/group` does not exist, so every `:group`
+    /// identity is unevaluable -- which makes it the right place to pin what
+    /// happens then.
+    #[test]
+    fn an_unevaluable_permit_is_skipped_and_an_unevaluable_deny_is_fatal() {
+        let group_file_readable = std::fs::read_to_string("/etc/group").is_ok();
+        if group_file_readable {
+            // On a host that HAS the file the premise does not hold and the
+            // case cannot be exercised; say so rather than pass vacuously.
+            return;
+        }
+
+        // A permit naming a group is skipped, so a later plain-name rule is
+        // still reached.
+        let rules = parse_config(
+            "permit :wheel
+permit alice
+",
+        )
+        .expect("valid");
+        assert_eq!(
+            evaluate_rules(&rules, "alice", "root", None, &[]),
+            MatchResult::Permit(RuleOptions::default()),
+            "an unevaluable permit must not stop the rules after it"
+        );
+
+        // A deny naming a group is NOT skipped: the permit after it must not
+        // be reached, because the deny might have been the one that applied.
+        let rules = parse_config(
+            "deny :wheel
+permit alice
+",
+        )
+        .expect("valid");
+        assert_eq!(
+            evaluate_rules(&rules, "alice", "root", None, &[]),
+            MatchResult::Unknown,
+            "an unevaluable deny must stop evaluation, not be skipped"
+        );
+    }
+
     #[test]
     fn match_deny_bob() {
         let rules = sample_rules();
@@ -2188,12 +2282,15 @@ mod tests {
     #[test]
     fn identity_user_match() {
         // For non-group identities, identity_matches is a string comparison.
-        assert!(identity_matches("alice", "alice"));
+        assert_eq!(identity_matches("alice", "alice"), Some(true));
     }
 
     #[test]
     fn identity_user_mismatch() {
-        assert!(!identity_matches("bob", "alice"));
+        assert_eq!(identity_matches("bob", "alice"), Some(false));
+        // A name that is not a group needs no group file, so the answer is
+        // never `None` for this form -- which is what keeps an unreadable
+        // /etc/group from disabling plain username rules too.
     }
 
     // Group matching requires /etc/group, tested in integration tests.

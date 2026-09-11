@@ -38,9 +38,34 @@ freely. See `roadmap.md` → "Three-Agent Parallel Execution" rule 3, and
 
 ## TD-B-DIFF-HARNESSES-HAVE-NO-PER-CASE-BOUND-AND-ORPHAN-ACROSS-WSL (lane B, 2026-09-11)
 
-**What.** None of the 50-odd `scripts/<name>-diff.sh` harnesses bounds an
+**What.** 28 of the 59 `scripts/<name>-diff.sh` harnesses do not bound an
 individual case. One subject that does not terminate stops the whole run, and
 the processes survive every kill available from the Windows side.
+
+**CORRECTION (2026-09-11, same day).** This entry first said *none* of the
+harnesses bounds a case. That was asserted without measuring and is false:
+**31 of 59 already do**, through a pattern this tree established long ago --
+`DIFF_NEED=timeout` in the header, and `timeout -k 2 30` inside the harness's
+own `run_side`. `tsort-diff.sh` even explains why it bounds the *reference*
+too: "a harness that only bounded our side would hang on the day the reference
+was the buggy one."
+
+The wrong premise was the expensive part, not the wrong sentence. It led to
+the elaborate fix proposed below -- wrapping `diff-wsl.sh`'s `$bindir`
+symlinks -- together with a real trap in it. All of that was designing a
+solution to a problem already solved 31 times a few files away. **The actual
+fix is to copy the existing pattern into the 28 that lack it**, which needs no
+shared machinery touched and carries none of that risk.
+
+The 28 without a bound: `all`, `awk`, `calc`, `cat`, `csplit`, `cut`, `df`,
+`du`, `ed`, `expr`, `extfloat`, `find`, `head`, `interleave`, `ls`, `more`,
+`nl`, `od`, `sed`, `sh`, `sort`, `split`, `tar`, `test`, `tr`, `uniq`, `wc`,
+`xargs`. Several of those are interpreters (`awk`, `ed`, `sh`, `expr`, `calc`)
+where a non-terminating program is not an exotic input but a normal one.
+
+*What made me assert it: I grepped `diff-wsl.sh` for `timeout`, found none,
+and concluded the family had no bound. The bound is in the harnesses, not the
+library. Absence of evidence where I chose to look.*
 
 **How it showed up.** `DIFF_PKG=awk bash scripts/awk-diff.sh` reached
 
@@ -72,7 +97,12 @@ the real work running. **A process-tree killer does not cross the WSL
 boundary** — worth knowing for any tooling here that shells into WSL, not just
 these harnesses.
 
-**The proper fix.** A bound on the far side of the boundary, where the processes
+**The fix, superseded — see the correction above.** Copy the existing
+`DIFF_NEED=timeout` + `timeout -k 2 30` pattern into the 28 harnesses that lack
+it. What follows was written before I measured, and is kept only because the
+argv[0] trap in it is real and would bite anyone who tried the clever version:
+
+**The superseded idea.** A bound on the far side of the boundary, where the processes
 actually are: each case invoked under `timeout` inside WSL. The clean place is
 `diff-wsl.sh`'s `$bindir` construction — four `ln -s` calls that build
 `$bindir/{ours,gnu}/NAME` — since every harness reaches its subject through
@@ -64871,6 +64901,23 @@ number is different** — not by a constant factor either: 12→16, 24→48,
 3036→4112. Both exit 0. `du` prints nothing but sizes and paths, so a `du` that
 gets the sizes wrong and drops a directory has no correct output left; there is
 nothing else in it to be right about.
+
+**18 -> 17 (2026-09-11): `sed`, which cannot parse a bracket expression.**
+`DIFF_PKG=sed bash scripts/sed-diff.sh`:
+
+**coreutils 449 passed, 0 differed. The standalone 103 passed, 346 differed.**
+
+| | cases | defect |
+|---|---|---|
+| **a delimiter inside `[...]`** | ⊂135 | `sed 's/[/]/:/g'` — the classic way to replace a slash — is `unterminated character class`. A `/` inside a bracket expression is not a delimiter, and getting that wrong breaks every expression that matches a path. `s/[^/]*$/LAST/` fails the same way. |
+| refuses what GNU accepts | 135 | the above, plus `y/ab/XY/`, where the escapes are never decoded so the two halves are measured as 8 against 2 and rejected for unequal length. |
+| **empty-match replacement** | ⊂68 | `s/a*/-/g` on `foo bar` gives `--------` — **the line replaced wholesale** — where GNU interleaves. Identical to the `gsub` defect in the standalone `awk` retired an hour earlier, which is some evidence about where both came from. |
+| **the Nth-match flag** | ⊂68 | `s/o/0/2g` replaces from the *first* match; the `2` means start at the second. |
+| exits 0 where GNU refuses | 51 | `sed 's/a'` — an unterminated `s` command — **runs**, and deletes the `a`. So does a trailing backslash, and `\c` recursive escaping. |
+| wrong exit status | ⊂80 | GNU distinguishes 1 (usage), 2 (cannot read an input), 4 (cannot open a script or `w` target). The standalone answers 1 for all of them, so a caller cannot tell a bad script from a missing file. `2q5` — quit with status 5 — is `expected command`. |
+| **stops at the first missing file** | ⊂10 | `sed s/a/A/ abc.txt nosuch.txt def.txt` prints `abc`'s output and stops; GNU reports the missing file and **still processes `def.txt`**. Operands after a bad one are silently dropped. |
+| `w` unimplemented | ⊂80 | `sed -n w FILE` is `unknown command: 'w'`. |
+| refuses non-UTF-8 | 2 | |
 
 **19 -> 18 (2026-09-11): `awk`, which never finishes.**
 `DIFF_PKG=awk bash scripts/awk-diff.sh`. **coreutils: 171 passed, 0 differed,

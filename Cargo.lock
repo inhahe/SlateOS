@@ -2425,13 +2425,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sed"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "selinux"
 version = "0.1.0"
 dependencies = [

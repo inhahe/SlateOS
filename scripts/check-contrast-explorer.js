@@ -69,6 +69,18 @@ const probe = script + `
     sep: document.getElementById('sep').innerHTML.includes('overlay0'),
     strip: document.getElementById('allsurf').innerHTML.includes(MARK),
   };
+  // The border role must reach the examples: in the border theme it carries the
+  // structure the fills used to, so it is the single most load-bearing value.
+  cur = withLadder(PRESETS.brd);
+  cur.bord = MARK;
+  render();
+  globalThis.__bord = document.getElementById('fp').innerHTML.includes(MARK);
+
+  // The decided preset must exist and must be flat -- nothing shaded.
+  const b = PRESETS.brd;
+  globalThis.__brd = !!b && b.main === '#000000' && b.sec1 === b.acc &&
+                     b.ladder.s0 === b.ladder.s1;
+
   // The pane-vs-pane table must exist and must react to a pane change.
   cur = withLadder(PRESETS.cur); render();
   const psBefore = document.getElementById('panesep').innerHTML;
@@ -102,8 +114,11 @@ const note = store['fp_note'] ? store['fp_note'].innerHTML : '';
 const checks = [
   ['full-page section rendered', fp.length > 2000],
   ['three windows, drawn twice each', (fp.match(/class="win"/g) || []).length === 6],
-  ['shaded column present', fp.includes('shaded (today)')],
-  ['bordered column present', fp.includes('with borders')],
+  ['bordered column present', fp.includes('borders (the default)')],
+  ['cards column present', fp.includes('cards (optional theme)')],
+  // Borders are the decision as of 2026-09-11, so they lead. If the columns
+  // ever swap back, the page is showing the optional theme as the primary one.
+  ['borders lead the cards', fp.indexOf('borders (the default)') < fp.indexOf('cards (optional theme)')],
   ['a context menu is drawn', fp.includes('class="menu"')],
   ['no unresolved template literal', !fp.includes('${')],
   ['no literal "undefined" leaked into markup', !fp.includes('undefined')],
@@ -178,5 +193,9 @@ if (!global.__ink) bad++;
               ps.rows + ' rows, reacts:' + !!ps.reacts + ')');
   if (!psOk) bad++;
 }
+console.log((global.__bord ? 'ok    ' : 'FAIL  ') + 'the border colour reaches the examples');
+if (!global.__bord) bad++;
+console.log((global.__brd ? 'ok    ' : 'FAIL  ') + 'the decided preset is present and flat');
+if (!global.__brd) bad++;
 console.log('populated ids: ' + Object.keys(store).filter(k => store[k].innerHTML).join(', '));
 process.exit(bad ? 1 : 0);

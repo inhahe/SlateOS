@@ -364,74 +364,6 @@ Nothing is blocked and nothing degrades. The two dialects are documented in
 a recorded decision rather than an accident. The only ongoing cost is that a user
 who learns one pattern language may assume the other works the same way.
 
-## C-Q10 — [C] Light-theme text was too faint on shaded cards. **The inks are decided and shipped (§826); what remains is whether cards should be shaded at all.** — Status: OPEN (narrowed)
-
-**In short:** the original question — the smaller grey text and the accent text
-being too faint to read on a shaded box, in about 850 places — **is answered.**
-The operator supplied colours on 2026-09-09, they are in use, and a test
-enforces them. Recorded as `design-decisions.md` §826.
-
-What is still open is a different and larger question the answer raised, and it
-is recorded here rather than as a new entry because it is the same decision seen
-further along.
-
-### Settled, 2026-09-09 — do not re-litigate
-
-| role | now |
-|---|---|
-| main text | `#000000` |
-| secondary text | `#373739` |
-| default accent | `#0036A3` |
-| page | `#EFF1F5` (unchanged) |
-
-Every ink clears the 4.5 floor on every surface in the theme, and the
-hierarchy between them survives — which the option this file previously
-recommended would have destroyed. Full reasoning in §826.
-
-### Still open — shaded cards, or borders?
-
-The operator also gave `#A0AECA` for "Card (shaded)", and it is **not applied**,
-because the theme has five shaded surfaces in use and the palette names one.
-While looking at how it should map, the operator raised the better question:
-whether cards should be shaded at all, or delineated by nested borders.
-
-**Grepping what the three shades are actually used for changed the shape of
-this.** They are not three depths of card:
-
-| shade | uses | what it really is |
-|---|---|---|
-| `surface0` | 1012 | the row/card **fill** — hovered row, selected row, panel background |
-| `surface1` | 542 | mostly a **border already** — menu edge, popup edge, header separator, badge outline |
-| `surface2` | 159 | almost entirely **control chrome** — the track of an off switch, a close button at rest |
-
-So nothing in the desktop nests a card three deep; the deepest real stack is
-*page → row → selected row*, and one of the three shades is already doing the
-border job. **And a border needs no contrast against the ink, because no text
-sits on it** — so the problem this question is about disappears entirely for
-anything drawn that way. It is the fills that constrain the palette, and there
-are fewer of those than the shade count suggests.
-
-**To look at before deciding:** `scripts/contrast-explorer.html` — open it in a
-browser. It renders all five surfaces with live ratios, the three ladder
-options as editable presets, and three real compositions taken from the code
-(a settings list, a context menu, a toggle row) drawn twice: shaded as today,
-and with borders doing the work.
-
-*What changes:* whether `surface1`/`surface2` remain fills at all, or become
-outline-only, and whether `#A0AECA` lands on one card, all of them, or the
-deepest.
-
-**One option is already ruled out by measurement**, so it is not on the table:
-re-deriving the ladder *downward* from `#A0AECA` cannot work. `#A0AECA` is
-exactly the darkest card these inks survive — one step to `#9CAAC6` puts the
-accent at 4.37 — so a descending ladder has no room. If the ladder is kept, the
-operator's colour has to be the *deepest* card with the shallower ones mixed
-toward the page.
-
-**If this is never answered:** nothing degrades. The inks are fixed and guarded,
-so the accessibility defect is closed; what is left is a visual-design choice
-about how cards are delineated, and today's shading continues to work.
-
 ## C-Q11: Should something build every crate before a merge? (raised by lane C, 2026-09-06)
 
 **In short:** The lock screen — the program that asks for your password when
@@ -1476,6 +1408,27 @@ answered question left in the body is pure cost — and, being older, it sorts
   and updated as a `pkg/` package.
 
 ## Resolved — lane C
+
+- **Should cards be shaded at all, and what colour?** (C-Q10) — answered
+  2026-09-11. **Borders, with shaded cards kept as an optional theme.** The
+  operator also specified the colours: black border and black headings,
+  off-white background, and one blue-green doing three jobs — selected border,
+  secondary text, and a switch that is on. Written up as `design-decisions.md`
+  §829, with the heading/description split as §830.
+
+  Two consequences the answer forced, both recorded in §829 because they change
+  the palette beyond what was asked: the blue-green **replaces** the blue accent
+  rather than joining it (every blue-green that clears 4.5 lands 1.19–1.74 from
+  `#0036A3`, which is not a second colour), and `subtext0` takes the same value
+  as `subtext1` (they were 1.10 apart — one colour — but `subtext0` has 1,087
+  uses to `subtext1`'s 161, so it is the one to revisit if they should differ).
+
+  **Still open, and deliberately not closed with it:** how to colour the card
+  theme so every combination clears 4.5. The operator's own words — "I guess we
+  still have to figure out how to color them". Scoped down from "the default
+  look" to "an optional theme", which lowers the urgency without removing it.
+  Tracked as `TD-C-THIRTEEN-LIGHT-ACCENTS-STILL-FAIL-ON-CARDS` and revisited
+  when the border conversion is done.
 
 - C-Q1 Should normalization consult font coverage? — resolved 2026-08-15
   (§428): **no** — normalization stays font-blind, and the font-fitting stage

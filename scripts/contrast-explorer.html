@@ -99,12 +99,21 @@
       <button data-p="op3">3 &mdash; deepest card, ladder ascends</button>
     </div>
 
+    <h2>Decided &mdash; 2026-09-11</h2>
+    <div class="presets">
+      <button data-p="brd">Borders (the default)</button>
+    </div>
+    <p class="note" style="margin-top:6px">Borders are the decision; the shaded cards stay as an
+       optional theme, which is why both columns are still drawn below. In this preset the panes are
+       deliberately all one colour &mdash; nothing is shaded, so the ladder has nothing to say.</p>
+
     <h2>Colours</h2>
     <div class="row"><label>Main text</label><input type="color" id="c_main"><input type="text" id="t_main"></div>
     <div class="row"><label>Secondary (subtext0)</label><input type="color" id="c_sec"><input type="text" id="t_sec"></div>
     <div class="row"><label>Secondary (subtext1)</label><input type="color" id="c_sec1"><input type="text" id="t_sec1"></div>
     <div class="row"><label>Accent text</label><input type="color" id="c_acc"><input type="text" id="t_acc"></div>
     <div class="row"><label>Disabled / hint (overlay0)</label><input type="color" id="c_ovl"><input type="text" id="t_ovl"></div>
+    <div class="row"><label>Border (unselected)</label><input type="color" id="c_bord"><input type="text" id="t_bord"></div>
     <div class="row"><label>Page (unshaded)</label><input type="color" id="c_page"><input type="text" id="t_page"></div>
     <div class="row"><label>Card being measured</label><input type="color" id="c_card"><input type="text" id="t_card"></div>
     <p class="note" style="margin-top:6px">Feeds the preview at the top and the contrast table &mdash; it is
@@ -263,6 +272,32 @@ const PRESETS = {
   //     alone; it only helps main text.
   b:   { main:'#4C4F69', sec:'#686B80', sec1:'#5C5F77', acc:'#1D62EC', page:'#EFF1F5', card:'#E6E9EF' },
 
+  // ---- DECIDED 2026-09-11: borders are the default, cards become an optional theme ------------
+  //
+  // Operator's specification, verbatim: default border black, background white or off-white,
+  // selected border a blue-green "not too bright", subtext1 the same colour as the selected
+  // border, toggle-on the same colour again.
+  //
+  // Two things follow from that spec rather than being chosen freely:
+  //
+  //   * The blue-green REPLACES the blue accent, it does not join it. Selected-border,
+  //     toggle-on and subtext1 are precisely the accent's roles, and every blue-green that
+  //     clears 4.5 lands 1.19-1.74 from #0036A3 -- at or below the 1.30 this page calls
+  //     "barely distinct". Keeping both would have put two indistinguishable blues in one
+  //     palette.
+  //   * subtext0 gets the same value as subtext1. They were 1.10 apart in the shipped
+  //     palette, which is "one colour" by this page's own reading, so there was never a
+  //     second grey to preserve. Flagged rather than assumed -- subtext0 has 1087 uses to
+  //     subtext1's 161, so if these should differ, subtext0 is the one that matters.
+  //
+  // #0F6E63 is the pick: 6.12 on white, 5.41 on the off-white page, and 3.43 from black --
+  // the widest separation from main text among the candidates that stayed dark enough to
+  // read as "not too bright".
+  brd: { main:'#000000', sec:'#0F6E63', sec1:'#0F6E63', acc:'#0F6E63', ovl:'#9CA0B0',
+         page:'#EFF1F5', card:'#EFF1F5',
+         ladder: { mantle:'#EFF1F5', crust:'#EFF1F5', s0:'#EFF1F5', s1:'#EFF1F5', s2:'#CCD0DA' },
+         borders: true },
+
   // ---- the operator's palette, 2026-09-09 (answers C-Q10) -------------------------------------
   //
   //   Main text  #000000   Secondary text  #373739   Accent text  #0036A3
@@ -309,12 +344,16 @@ const PRESETS = {
 const SHIPPED_LADDER = { mantle:'#E6E9EF', crust:'#DCE0E8', s0:'#CCD0DA', s1:'#BCC0CC', s2:'#ACB0BE' };
 
 const $ = id => document.getElementById(id);
-const KEYS = ['main','sec','sec1','acc','ovl','page','card'];
+const KEYS = ['main','sec','sec1','acc','ovl','bord','page','card'];
 // overlay0 was missing from this tool entirely until 2026-09-09, though the
 // palette declares it and the tree uses it 829 times -- more than surface1.
 // Its absence is why the ink tables looked easier to satisfy than the real
 // palette is. Presets that predate it inherit the shipped value.
-const INK_DEFAULTS = { ovl: '#9CA0B0' };
+// `bord` is the default (unselected) border. It is a role of its own rather
+// than surface2 borrowed: once borders carry the structure, the line is doing
+// the job the fill used to, and it has to be settable independently of the
+// shade ladder -- which in the border theme is flat.
+const INK_DEFAULTS = { ovl: '#9CA0B0', bord: '#000000' };
 // The five panes, in ladder order. Kept separate from KEYS because they live on
 // `cur.ladder` rather than on `cur` -- and because until 2026-09-09 they were
 // not editable at all, which is the bug this fixes: the examples read the
@@ -369,7 +408,7 @@ function renderFullPages() {
   // outline colour -- the selected row uses the accent rather than a shade,
   // because with no fill available it is the only thing left to select with.
   const surf = (b, shade, edge) => b
-    ? `background:transparent;border:1px solid ${edge || L.s2};`
+    ? `background:transparent;border:1px solid ${edge || cur.bord};`
     : `background:${shade};border:1px solid transparent;`;
 
   const T1 = `color:${ink}`, T2 = `color:${dim}`, TA = `color:${acc}`;
@@ -391,12 +430,12 @@ function renderFullPages() {
                                      : `background:${L.crust};`}">
           ${tag(b ? 'base' : 'crust')}
           ${['System', 'Network', 'Personalisation', 'Accounts'].map((n, i) =>
-            `<div class="nav" style="${i === 1 ? surf(b, L.s1, acc) : ''}${i === 1 ? T1 : T2}">${n}` +
+            `<div class="nav" style="${i === 1 ? surf(b, L.s1, acc) : ''}${T1}">${n}` +
             `${i === 1 ? tagF(b, 'surface1', 'accent') : ''}</div>`
           ).join('')}
         </div>
         <div class="cnt">
-          <div class="sec" style="${T2}">Wi-Fi</div>
+          <div class="sec" style="${T1}">Wi-Fi</div>
           <div class="r" style="${surf(b, L.s0)}">
             <div class="g"><div style="${T1}">Home network</div>
               <div class="t2s" style="${T2}">Connected &middot; 5 GHz &middot; strong</div></div>
@@ -407,7 +446,7 @@ function renderFullPages() {
               <div class="t2s" style="${T2}">Saved network</div></div>
             <div style="color:${off}">Forget</div>${tag('overlay0')}
           </div>
-          <div class="sec" style="${T2}">Options</div>
+          <div class="sec" style="${T1}">Options</div>
           <div class="r" style="${surf(b, L.s0)}">
             <div class="g"><div style="${T1}">Connect automatically</div></div>
             <div class="sw" style="background:${acc}"><i style="right:2px"></i></div>
@@ -434,7 +473,7 @@ function renderFullPages() {
                                      : `background:${L.crust};`}">
           ${tag(b ? 'base' : 'crust')}
           ${['Home', 'Documents', 'Pictures', 'Downloads'].map((n, i) =>
-            `<div class="nav" style="${i === 1 ? surf(b, L.s1, acc) : ''}${i === 1 ? T1 : T2}">${n}` +
+            `<div class="nav" style="${i === 1 ? surf(b, L.s1, acc) : ''}${T1}">${n}` +
             `${i === 1 ? tagF(b, 'surface1', 'accent') : ''}</div>`
           ).join('')}
         </div>
@@ -493,8 +532,8 @@ function renderFullPages() {
     ['A dialog and a notification, over a window', dialog],
   ];
   $('fp').innerHTML = shots.map(([name, make]) =>
-    `<div><h3>${name} &mdash; shaded (today)</h3>${make(false)}</div>` +
-    `<div><h3>&hellip; the same, with borders</h3>${make(true)}</div>`
+    `<div><h3>${name} &mdash; borders (the default)</h3>${make(true)}</div>` +
+    `<div><h3>&hellip; the same, cards (optional theme)</h3>${make(false)}</div>`
   ).join('');
 
   $('fp_note').innerHTML =

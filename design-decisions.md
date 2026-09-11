@@ -72063,3 +72063,100 @@ kernel has a capability system and `capsh --drop all` is named in
 they do in the meantime, and the answer is "refuse audibly" rather than
 "pretend" or "vanish".
 
+## 829. Borders carry the structure; shaded cards become an optional theme
+
+**Date:** 2026-09-11
+**Lane:** C
+**Decided by:** Operator (Claude built the comparison page and laid out the options; the operator chose borders and specified the colours)
+
+**In short:** boxes on screen were told apart by filling them with slightly
+different greys. They will now be told apart by drawing a line around them
+instead, on a plain background. The grey-filled look stays available as a theme
+someone can switch on. The operator also fixed the colours: black lines and
+black headings, a muted blue-green for secondary text, for the line around the
+selected thing, and for a switch that is on.
+
+**The specification, as given**
+
+| role | value |
+|---|---|
+| border, unselected | black |
+| background | white or off-white |
+| border, selected | a blue-green, "not too bright" |
+| secondary text (`subtext1`) | the same blue-green |
+| toggle switch, on | the same blue-green |
+
+**Two things follow from that spec rather than being chosen freely, and both
+are recorded because they change the palette beyond what was asked.**
+
+1. **The blue-green replaces the blue accent; it does not join it.**
+   Selected-border, toggle-on and secondary-text *are* the accent's roles. Every
+   blue-green dark enough to clear 4.5 : 1 lands **1.19–1.74** from the existing
+   `#0036A3` — at or below the 1.30 that reads as "barely distinct". Keeping
+   both would have put two indistinguishable blues in one palette, which is the
+   §826 flattening again in a different pair.
+2. **`subtext0` takes the same value as `subtext1`.** They were **1.10** apart
+   in the shipped palette — "one colour" by the measure the explorer uses — so
+   there was no second grey to preserve. Worth flagging rather than burying:
+   `subtext0` has **1,087** uses to `subtext1`'s **161**, so if these two should
+   in fact differ, `subtext0` is the one that carries the weight.
+
+**The blue-green is `#0F6E63`** — 6.12 : 1 on white, 5.41 on the off-white page,
+and 3.43 from black. Among the candidates that stayed dark enough to read as
+"not too bright" it has the widest separation from main text, which is what
+keeps a caption from reading as a heading. The operator can retune it live; the
+explorer now carries it as the `Borders (the default)` preset.
+
+**Why this is the right shape, beyond being what was asked.** The operator's
+mother supplied the argument without meaning to. She wanted the selected menu
+item and the selected settings row to match, and under shaded cards they cannot:
+selection there is a *step*, not a colour — a thing lifts one rung above
+whatever it sits on, and those two sit on different things. Making them match
+means `surface0 = surface1`, which erases the distinction between a selected
+settings row and an unselected one. **A border does not have that problem**: an
+outline means "selected" and means it identically everywhere, because it does
+not depend on what is underneath. That is a property shades cannot be given.
+
+**What this costs, honestly.** Up to 1,713 draw sites currently pick a fill.
+The conversion is mechanical but wide, and the shaded theme has to keep working
+throughout, which means the ladder cannot simply be deleted.
+
+**What is still open.** The card theme's contrast. The operator's own words:
+"I guess we still have to figure out how to color them so that contrast is
+always >= 4.50." That is unchanged by this decision and is now scoped to an
+optional theme rather than the default, which lowers its urgency without
+removing it. `TD-C-THIRTEEN-LIGHT-ACCENTS-STILL-FAIL-ON-CARDS` is part of the
+same problem.
+
+**Supersedes** the open half of §826. The inks chosen there were chosen against
+a shaded background; `main` survives unchanged at `#000000`, `page` survives at
+`#EFF1F5`, and the accent and secondary roles are replaced by the above.
+
+## 830. Headings take main text; only descriptions take the secondary colour
+
+**Date:** 2026-09-11
+**Lane:** C
+**Decided by:** Operator
+
+**In short:** in the mock-ups, the sidebar entries ("System", "Personalisation")
+and the section headings ("Wi-Fi", "Options") were drawn in the same colour as
+the small print underneath each row. The operator asked for those to split:
+headings and sidebar entries in black, descriptions in the blue-green.
+
+**Why it matters more than it looks.** It is what makes the palette's text
+roles *legible as a hierarchy* rather than merely distinct as values. Before the
+split there were two ink colours doing three jobs — heading, title and
+description all reading at one weight in the sidebar and section rows — and the
+only thing separating a heading from a caption was type size. After it, colour
+and size agree instead of one carrying the whole load.
+
+It also uses the separation the new palette actually has. Black to `#0F6E63` is
+**3.43**, comfortably past "distinct"; the pair it replaces (`subtext0` to
+`subtext1`) was **1.10**, which is one colour. The hierarchy the old palette
+could not express is now expressible, so expressing it costs nothing.
+
+**Open, and flagged rather than assumed:** with the accent and `subtext1` now
+the same value, a link and a caption are the same colour. In a bordered design
+that is defensible — selection and state are carried by the outline, not by ink
+— but "Disconnect" and "Connected, 5 GHz, strong" sitting in one row at one
+colour is the case to look at first if it reads wrong.

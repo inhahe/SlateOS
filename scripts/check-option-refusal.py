@@ -91,6 +91,8 @@ import pathlib
 import re
 import sys
 
+import selftestflag
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from rust_scopes import scope_stack_per_line, classify  # noqa: E402
 import srcload  # noqa: E402
@@ -491,7 +493,7 @@ def self_test() -> int:
 
 
 def main(argv: list[str]) -> int:
-    if "--self-test" in argv:
+    if selftestflag.wants_selftest(argv):
         return self_test()
     text = PATH.read_text(encoding="utf-8", errors="replace")
     # Three views of one file, identically numbered because `strip_noise`

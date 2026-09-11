@@ -1,0 +1,11 @@
+[package]
+name = "finger"
+version = "0.1.0"
+edition = "2024"
+description = "SlateOS finger - user information lookup, and pinky"
+[dependencies]
+utmpfile = { path = "../../utmpfile" }
+ttyidle = { path = "../../ttyidle" }
+
+[lints]
+workspace = true

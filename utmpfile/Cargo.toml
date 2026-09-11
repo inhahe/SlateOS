@@ -1,0 +1,10 @@
+[package]
+name = "utmpfile"
+version = "0.1.0"
+edition = "2024"
+description = "SlateOS: the binary /var/run/utmp record layout, parsed once"
+
+[dependencies]
+
+[lints]
+workspace = true

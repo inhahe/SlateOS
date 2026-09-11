@@ -5,3 +5,4 @@ edition = "2024"
 description = "SlateOS system uptime display"
 [dependencies]
 procinfo = { path = "../../procinfo" }
+utmpfile = { path = "../../utmpfile" }

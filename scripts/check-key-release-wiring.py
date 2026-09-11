@@ -68,6 +68,8 @@ import pathlib
 import re
 import sys
 
+import selftestflag
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 from rustscan import production_only  # noqa: E402
@@ -264,7 +266,7 @@ def self_test() -> int:
 
 
 def main(argv: list[str]) -> int:
-    if "--self-test" in argv:
+    if selftestflag.wants_selftest(argv):
         return self_test()
     verbose = "-v" in argv or "--verbose" in argv
 

@@ -392,8 +392,26 @@ def _self_test() -> int:
     return 0
 
 
+# BOTH SPELLINGS, AND NOTHING ELSE ACCEPTED SILENTLY.
+#
+# This took only `--self-test`, so `--selftest` fell through to the library
+# notice below and EXITED 0. Lane A spent five minutes believing this file was
+# clean while the boot test's log said otherwise -- the command reported
+# success because it had not run anything, which is indistinguishable from
+# having run and passed.
+#
+# A flag nobody recognises is now an error. The bare no-argument notice stays,
+# because "I was run with no arguments" really is the library case.
+_SELFTEST_SPELLINGS = ("--self-test", "--selftest", "--self_test")
+
 if __name__ == "__main__":
-    if "--self-test" in sys.argv:
+    _unknown = [a for a in sys.argv[1:]
+                if a.startswith("-") and a not in _SELFTEST_SPELLINGS]
+    if _unknown:
+        print(f"rustscan.py: unrecognised option {_unknown[0]!r}; "
+              f"the only option is --self-test.", file=sys.stderr)
+        sys.exit(2)
+    if any(a in _SELFTEST_SPELLINGS for a in sys.argv[1:]):
         sys.exit(_self_test())
     print(__doc__)
     print("This is a library. Run it with --self-test to check it.")

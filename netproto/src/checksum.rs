@@ -18,6 +18,15 @@ pub fn internet(data: &[u8]) -> u16 {
 /// Fold a running 32-bit accumulator's carries into 16 bits and return the
 /// one's complement. Use with [`accumulate`] to checksum non-contiguous
 /// regions (e.g. a pseudo-header followed by a payload).
+// `#[inline]` here is load-bearing, not decoration. The workspace sets
+// `lto = false`, so without it a non-generic `pub fn` cannot be inlined into
+// another crate -- and the kernel's packet path calls these per packet. Lane A
+// measured what that costs when the loop lands somewhere it cannot be inlined
+// from: seven duplicated copies of it each won or lost the unrolling lottery
+// independently, and the resulting 34% gap between the v4 and v6 checksums was
+// misread for a while as IPv4's pseudo-header being dearer. Do not remove these
+// as noise.
+#[inline]
 #[must_use]
 pub fn fold(mut sum: u32) -> u16 {
     while (sum >> 16) != 0 {
@@ -28,6 +37,7 @@ pub fn fold(mut sum: u32) -> u16 {
 
 /// Add `data` (as big-endian 16-bit words) into a running accumulator without
 /// folding. Feed the final accumulator to [`fold`].
+#[inline]
 #[must_use]
 pub fn accumulate(mut sum: u32, data: &[u8]) -> u32 {
     let mut i = 0;

@@ -184,6 +184,60 @@ static void on_sigint(int sig)
 
 /* ---------------------------------------------------------------------- */
 
+/* The child's own verdict, if it has one, else `alive`.
+ *
+ * WHY THE EARLY CHECKS NEED THIS. Lane A's run died at startup: the child went
+ * zombie BEFORE the parent wrote 0x03, so the write failed against a slave
+ * whose last reader was gone and the fixture returned 44 -- "the parent could
+ * not write to the master". True, and useless. A failed master write with a
+ * DEAD child says nothing about the master; a failed master write with a LIVE
+ * child is a real pty finding. Those were one number.
+ *
+ * So before reporting its own failure, the parent asks the child. If the child
+ * has exited, the child's status is the answer, under the same legend the
+ * handler check uses -- the fault is identical and only the place the parent
+ * noticed it differs. If the child is still running, the caller's own code
+ * stands, and now it means what it says.
+ *
+ * This is the split of 47 applied one check earlier, which is what lane A
+ * asked for after watching 44 and 47 trade places when the yield changed the
+ * timing without changing the cause. Neither number was ever about the pty.
+ */
+static int child_verdict(pid_t kid, int alive)
+{
+    int status = 0;
+    for (long i = 0; i < SPIN; i++) {
+        pid_t w = waitpid(kid, &status, WNOHANG);
+        if (w == kid) {
+            if (!WIFEXITED(status)) {
+                return 46;
+            }
+            switch (WEXITSTATUS(status)) {
+            case 70:
+                return 48;
+            case 71:
+                return 49;
+            case 72:
+                return 50;
+            case 78:
+                return 47;
+            case 77:
+                /* The handler ran, so the ^C WAS delivered -- and the parent
+                 * still failed. Nothing about the child explains that, so the
+                 * parent's own code stands. */
+                return alive;
+            default:
+                return 51;
+            }
+        }
+        if (w < 0) {
+            return alive; /* cannot reap it; there is nothing to add */
+        }
+        sched_yield();
+    }
+    return alive; /* still running: the caller's fault is the real one */
+}
+
 int main(void)
 {
     int m = -1, s = -1;
@@ -390,11 +444,14 @@ int main(void)
              * never delivered the child's readiness byte.  The rule the
              * numbering has to satisfy is only that no check is numbered
              * 42; 43-47 above it are fine. */
-            return 43;
+            return child_verdict(kid, 43);
         }
     }
     if (write(fm, "\003", 1) != 1) {
-        return 44;
+        /* 44 NOW MEANS WHAT IT SAYS: the master write failed with the
+         * child still ALIVE. If the child is already gone, its status is
+         * the real verdict and 44 would be the pty reporting on a corpse. */
+        return child_verdict(kid, 44);
     }
 
     {
@@ -414,11 +471,46 @@ int main(void)
         if (!WIFEXITED(status)) {
             return 46;
         }
-        if (WEXITSTATUS(status) != 77) {
-            /* 78 == the handler never ran, which is the interesting
-             * failure: the line discipline did not turn 0x03 into a
-             * SIGINT that crossed into the child. */
+        /* ONE CODE PER CHILD STATUS.  This returned 47 for every status
+         * that was not 77, which collapsed a fault in the kernel's signal
+         * delivery with three faults in this fixture's own setup -- and
+         * the exit code is the only thing anybody can read here, since
+         * the child's status dies with the child and a ring-3 process's
+         * exit code is not logged.  So 47 meant "the ^C did not become a
+         * SIGINT" and also "isatty said no" and also "signal() refused"
+         * and also "the readiness byte did not go out", and no run could
+         * tell which, or even which lane owned it.
+         *
+         * The fixture's own failures are 48-50 and belong to whoever
+         * changes this file.  47 keeps its documented meaning and now has
+         * only that meaning.
+         *
+         *   47  child exited 78: the handler never ran.  The line
+         *       discipline did not turn 0x03 into a SIGINT that crossed
+         *       into the child.  THE INTERESTING ONE.
+         *   48  child exited 70: its fd 0 was not a tty, so login_tty did
+         *       not give it a controlling terminal.  Nothing about the
+         *       signal path was exercised.
+         *   49  child exited 71: signal() refused SIGINT.
+         *   50  child exited 72: the child could not write its readiness
+         *       byte, so the parent's ^C was never synchronised.
+         *   51  any other status: the child died in a way it did not
+         *       choose, since every path it takes ends in one of the
+         *       above.  That is a crash or a startup failure before main,
+         *       not a pty result. */
+        switch (WEXITSTATUS(status)) {
+        case 77:
+            break; /* the handler ran; this is the pass */
+        case 78:
             return 47;
+        case 70:
+            return 48;
+        case 71:
+            return 49;
+        case 72:
+            return 50;
+        default:
+            return 51;
         }
     }
 

@@ -273,11 +273,28 @@ def report(repo: pathlib.Path, verbose: bool = False) -> int:
             # want them), but a flag that appears nowhere in the source is
             # certainly being dropped on the floor.
             handrolled += 1
+            # A script that delegates to `selftestflag.wants_selftest` accepts
+            # every spelling of the self-test flag without containing any of
+            # them literally. Searching the source for the flag text is
+            # otherwise exactly right, and was until 2026-09-10, when sixteen
+            # scripts moved to the helper and this check reported all of them
+            # as dropping a flag they had just started accepting MORE of.
+            #
+            # The indirection is the point of the helper, so the gate has to
+            # know the one name it hides behind. If a second such helper ever
+            # appears, it belongs in this tuple rather than in a looser match.
+            delegates_selftest = "wants_selftest(" in src
             for tok in tokens:
                 if not tok.startswith("-") or tok == "-":
                     continue
                 name = tok.partition("=")[0]
                 if name in src:
+                    continue
+                if delegates_selftest and name in (
+                    "--self-test",
+                    "--selftest",
+                    "--self_test",
+                ):
                     continue
                 print(f"{caller}: gate {label} -> scripts/{script}")
                 print(

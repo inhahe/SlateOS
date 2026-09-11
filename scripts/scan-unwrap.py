@@ -400,7 +400,7 @@ def main() -> int:
     ap.add_argument("paths", nargs="*", default=None)
     ap.add_argument("--summary", action="store_true", help="per-file counts only")
     ap.add_argument("--show-skipped", action="store_true", help="explain filtering")
-    ap.add_argument("--self-test", action="store_true",
+    ap.add_argument("--self-test", "--selftest", "--self_test", dest="self_test", action="store_true",
                     help="grade this gate against a mutated copy of its real subject")
     args = ap.parse_args()
 

@@ -604,7 +604,7 @@ def main() -> int:
     ap.add_argument("--all", action="store_true",
                     help="survey every tracked *.py in the tree, not just "
                          "scripts/ -- reports, does not grade")
-    ap.add_argument("--self-test", action="store_true",
+    ap.add_argument("--self-test", "--selftest", "--self_test", dest="self_test", action="store_true",
                     help="grade the gate, not the tree")
     args = ap.parse_args()
 

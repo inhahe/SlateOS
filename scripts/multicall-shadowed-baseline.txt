@@ -39,6 +39,3 @@
 chown:chmod
 cron:at
 cron:crontab
-pv:fuser
-sysstat:iostat
-who:w

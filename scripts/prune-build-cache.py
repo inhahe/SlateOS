@@ -760,7 +760,7 @@ def main(argv=None):
     ap.add_argument("--yes", action="store_true", help="Actually delete (default: dry run).")
     ap.add_argument("--verbose", action="store_true", help="Name every skip and leak.")
     ap.add_argument(
-        "--self-test",
+        "--self-test", "--selftest",
         action="store_true",
         help="Check the classification and pairing against a synthetic target/ "
         "tree and exit. Touches nothing real.",

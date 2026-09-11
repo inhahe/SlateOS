@@ -328,25 +328,57 @@ fn find_processes_for_path(search_path: &str) -> FuserResult {
 // Network socket matching
 // ============================================================================
 
-#[derive(Clone, Debug)]
-struct _SocketInfo {
-    protocol: String,
-    local_port: u16,
-    pid: u32,
-    command: String,
+/// The socket inodes in a `/proc/net/{tcp,udp}` table bound to `port`.
+///
+/// Split out from the scan because it is the only part of a port lookup that
+/// can be tested off a real `/proc`: everything else needs live processes.
+///
+/// The table's columns are fixed -- field 1 is `hex_ip:hex_port`, field 9 is
+/// the inode -- and a short line is skipped rather than indexed into, since
+/// the header and any future trailing column must not panic here.
+fn inodes_bound_to(table: &str, port: u16) -> Vec<&str> {
+    let mut inodes = Vec::new();
+    for line in table.lines().skip(1) {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 10 {
+            continue;
+        }
+        // Local address is field 1, format: hex_ip:hex_port
+        let Some(local) = parts.get(1) else { continue };
+        if let Some(port_hex) = local.split(':').nth(1)
+            && let Ok(local_port) = u16::from_str_radix(port_hex, 16)
+            && local_port == port
+            && let Some(inode) = parts.get(9)
+        {
+            inodes.push(*inode);
+        }
+    }
+    inodes
 }
 
-fn _find_processes_for_port(port: u16, protocol: &str) -> Vec<ProcessMatch> {
+/// The processes holding a socket bound to `port` on `protocol`.
+///
+/// # Why this returns a `Result`
+///
+/// It read `/proc/net/tcp` with `.unwrap_or_default()` until this commit, so an
+/// unreadable table became an empty one and the caller reported "no process
+/// found" -- indistinguishable from a genuinely free port. For a value that
+/// decides whether a port is in use, "I cannot tell" and "nothing is there"
+/// must not be the same answer. That was survivable only because nothing
+/// called this function; wiring `-n` up is what makes it reachable, so the fix
+/// is part of the wiring rather than a tidy-up after it.
+fn find_processes_for_port(port: u16, protocol: &str) -> Result<Vec<ProcessMatch>, String> {
     // Parse /proc/net/tcp, /proc/net/udp, etc.
     let net_file = match protocol {
         "tcp" => "/proc/net/tcp",
         "tcp6" => "/proc/net/tcp6",
         "udp" => "/proc/net/udp",
         "udp6" => "/proc/net/udp6",
-        _ => return Vec::new(),
+        other => return Err(format!("unknown namespace '{other}'")),
     };
 
-    let content = fs::read_to_string(net_file).unwrap_or_default();
+    let content =
+        fs::read_to_string(net_file).map_err(|e| format!("cannot read {net_file}: {e}"))?;
     let mut inode_pids: HashMap<String, (u32, String)> = HashMap::new();
 
     // First pass: map inodes to PIDs by scanning /proc/*/fd.
@@ -370,31 +402,19 @@ fn _find_processes_for_port(port: u16, protocol: &str) -> Vec<ProcessMatch> {
     let mut matches = Vec::new();
 
     // Second pass: find sockets matching the port.
-    for line in content.lines().skip(1) {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 10 {
-            continue;
-        }
-        // Local address is field 1, format: hex_ip:hex_port
-        let local_addr = parts[1];
-        if let Some(port_hex) = local_addr.split(':').nth(1)
-            && let Ok(local_port) = u16::from_str_radix(port_hex, 16)
-            && local_port == port
-        {
-            let inode = parts[9];
-            if let Some((pid, comm)) = inode_pids.get(inode) {
-                matches.push(ProcessMatch {
-                    pid: *pid,
-                    uid: read_proc_uid(*pid),
-                    command: comm.clone(),
-                    access: AccessType::Open,
-                    _fd: None,
-                });
-            }
+    for inode in inodes_bound_to(&content, port) {
+        if let Some((pid, comm)) = inode_pids.get(inode) {
+            matches.push(ProcessMatch {
+                pid: *pid,
+                uid: read_proc_uid(*pid),
+                command: comm.clone(),
+                access: AccessType::Open,
+                _fd: None,
+            });
         }
     }
 
-    matches
+    Ok(matches)
 }
 
 // ============================================================================
@@ -651,13 +671,15 @@ fn fuser_main(args: &[String]) -> i32 {
     let mut verbose = false;
     let mut kill_signal: Option<String> = None;
     let mut interactive = false;
-    let mut _namespace = "file"; // file, tcp, udp
+    let mut show_all = false;
+    let mut namespace = "file"; // file, tcp, udp
 
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "-v" | "--verbose" => verbose = true,
             "-i" | "--interactive" => interactive = true,
+            "-a" | "--all" => show_all = true,
             "-k" | "--kill" => {
                 // Default to SIGKILL.
                 kill_signal = Some("KILL".to_string());
@@ -665,7 +687,7 @@ fn fuser_main(args: &[String]) -> i32 {
             "-n" | "--namespace" => {
                 i += 1;
                 if i < args.len() {
-                    _namespace = match args[i].as_str() {
+                    namespace = match args[i].as_str() {
                         "tcp" => "tcp",
                         "udp" => "udp",
                         _ => "file",
@@ -688,6 +710,7 @@ fn fuser_main(args: &[String]) -> i32 {
                 println!("  -k, --kill         Kill processes");
                 println!("  -s, --signal SIG   Signal to send (default: KILL)");
                 println!("  -i, --interactive  Confirm before killing");
+                println!("  -a, --all          Show targets with no processes too");
                 println!("  -n, --namespace NS Namespace: file, tcp, udp");
                 println!("  -h, --help         Display this help");
                 println!("  --version          Display version");
@@ -718,9 +741,38 @@ fn fuser_main(args: &[String]) -> i32 {
     let mut kill_failed = false;
 
     for path in &paths {
-        let result = find_processes_for_path(path);
+        let processes = if namespace == "file" {
+            find_processes_for_path(path).processes
+        } else {
+            // In a port namespace the operand is a port, not a path. Refusing
+            // here rather than falling back to a file search is the point: a
+            // fallback would search for a FILE named "80" and report nothing,
+            // which reads exactly like "port 80 is free".
+            let Ok(port) = path.parse::<u16>() else {
+                eprintln!("fuser: {} is not a port number", quoteaf_os(path));
+                return 1;
+            };
+            match find_processes_for_port(port, namespace) {
+                Ok(found) => found,
+                Err(e) => {
+                    eprintln!("fuser: {e}");
+                    return 1;
+                }
+            }
+        };
+        let result = FuserResult {
+            path: path.clone(),
+            processes,
+        };
 
-        if !result.processes.is_empty() {
+        // -a reports a target that nothing is using. The non-verbose format
+        // already writes "path:" before the PID list, so an empty list prints
+        // the bare name, which is what real fuser -a does.
+        if result.processes.is_empty() {
+            if show_all {
+                print_fuser_result(&result, verbose);
+            }
+        } else {
             found_any = true;
             print_fuser_result(&result, verbose);
 
@@ -921,5 +973,67 @@ mod tests {
         };
         assert_eq!(entry.pid, 1234);
         assert_eq!(entry.command, "bash");
+    }
+
+    // -- port lookup ---------------------------------------------------------
+
+    /// Two rows from a real `/proc/net/tcp`: sshd on 22 (0016) and a listener
+    /// on 80 (0050), plus the header every such table carries.
+    const NET_TCP: &str = concat!(
+        "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+",
+        "   0: 00000000:0016 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 10501 1 ffff 100 0 0 10 0
+",
+        "   1: 0100007F:0050 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 27183 1 ffff 100 0 0 10 0
+",
+    );
+
+    #[test]
+    fn a_bound_port_yields_its_socket_inode() {
+        assert_eq!(inodes_bound_to(NET_TCP, 22), vec!["10501"]);
+        assert_eq!(inodes_bound_to(NET_TCP, 80), vec!["27183"]);
+    }
+
+    #[test]
+    fn an_unbound_port_yields_nothing() {
+        assert!(inodes_bound_to(NET_TCP, 443).is_empty());
+    }
+
+    #[test]
+    fn the_header_row_is_not_read_as_a_socket() {
+        // "local_address" has no colon-separated hex port; parsing it as one
+        // would put a garbage inode in front of the fd scan.
+        assert!(inodes_bound_to(NET_TCP, 0).is_empty());
+    }
+
+    #[test]
+    fn a_short_or_empty_table_is_skipped_rather_than_indexed() {
+        // A truncated read must not panic: this ran under `unwrap_or_default`
+        // until now, so malformed input was the expected case, not the odd one.
+        assert!(inodes_bound_to("", 80).is_empty());
+        assert!(
+            inodes_bound_to(
+                "header only
+",
+                80
+            )
+            .is_empty()
+        );
+        assert!(
+            inodes_bound_to(
+                "hdr
+   0: 0100007F:0050 00000000:0000
+",
+                80
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn an_unknown_namespace_is_an_error_not_an_empty_result() {
+        // It returned Vec::new() for an unknown protocol, which the caller
+        // would have printed as "no process is using that port".
+        assert!(find_processes_for_port(80, "sctp").is_err());
     }
 }

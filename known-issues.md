@@ -36,6 +36,78 @@ freely. See `roadmap.md` → "Three-Agent Parallel Execution" rule 3, and
 
 ---
 
+## TD-B-WHO-S-W-MODE-CANNOT-BE-REACHED-BY-ANY-INVOCATION (lane B, 2026-09-10)
+
+**In short:** `who` contains a complete `w` — the header line with uptime and
+load averages, the USER/TTY/FROM/LOGIN@/IDLE/JCPU/PCPU/WHAT columns, and the
+per-process CPU accounting behind them. None of it can run. The mode is turned
+on in exactly one place, by checking whether the program was invoked under the
+name `w`, and nothing installs it under that name.
+
+**How it got here, which is not a mistake anybody made.** `w` was provided by
+`userspace/w` until today, so the name had a producer and the alias ledger was
+satisfied. Removing that crate's `w` personality (it printed a fixed `-` for
+WHAT and a fabricated idle time for everyone, where `who` measures both) left
+`who` as the only implementation — and revealed that the only way to reach it
+was a name nothing produces.
+
+**Why it is not being fixed by staging.** `scripts/create-ext4-rootfs.sh`
+stages seven C test programs and NO userspace Rust crate at all. All 51
+entries in `multicall-aliases-baseline.txt` are unreachable for the same
+reason. Staging `who` alone would be deciding what ships, which is a separate
+decision affecting 474 other crates equally.
+
+**Why not a flag instead.** `-w` is GNU `who`'s documented synonym for `-T`
+(message status), so taking it would break a compatibility this crate is
+otherwise careful about. Inventing `--activity` or similar is a user-visible
+naming choice rather than a repair.
+
+**The proper fix** is whichever of these the rootfs question settles: stage
+`who` under both names once userspace crates are staged at all, or give `w` a
+long option of its own if the operator would rather not have argv[0]-dependent
+behaviour. Until then the code is correct, tested (the print path has unit
+tests) and unreachable, which is worth knowing before someone deletes it as
+dead.
+
+## TD-B-A-SCRIPT-MAY-STILL-SILENTLY-IGNORE-AN-UNRECOGNISED-OPTION (lane B, 2026-09-10)
+
+**In short:** Gate 22 now guarantees that `--selftest` and `--self-test` both
+reach a script's self-test. It does NOT guarantee that a script refuses an
+option it does not recognise. A mistyped flag can still be dropped on the floor
+while the script runs its default action and exits 0.
+
+**Why it is the same defect one size up.** The sixteen scripts fixed today were
+an instance, not the category. The category is: an unrecognised option falls
+through to the default action, which succeeds, so the command reports success
+having done something other than what was asked. The next one will not be a
+spelling of self-test -- it will be `--dry-run` on a script that only knows
+`--dry`, and that run will do the real thing and say it went fine.
+
+**Why gate 22 does not cover it.** Detecting "falls through to the default
+action" statically means understanding each script's argument handling. A gate
+that can only be approximated is one that gets argued with, and then bypassed.
+Running all 58 scripts twice and diffing -- which is how today's instances were
+actually confirmed, and how four false findings were caught -- takes minutes,
+against under a second for the static check.
+
+**The proper fix.** `selftestflag.unknown_options(argv, known=(...))` exists for
+exactly this and is one line per script:
+
+    unknown = selftestflag.unknown_options(sys.argv[1:], known=("--check",))
+    if unknown:
+        print(f"{NAME}: unrecognised option {unknown[0]!r}", file=sys.stderr)
+        return 2
+
+Three scripts use it today -- rustscan, check-recursive-locks and
+check-selftest-flag-spellings. Converting the rest is mechanical but needs each
+script's real option list, which is why it is not a sweep. **Trigger to do it:
+the first time an unrecognised option is observed being ignored by any script
+other than the ones already fixed.** Until then this is a known gap with a
+named tool, not an open question.
+
+Argparse-based scripts are already immune: argparse exits 2 on an unknown
+option. The exposure is the ~74 scripts that parse `sys.argv` by hand.
+
 ## `cargo test -p indexer` tests lane B's crate, not lane C's (lane C)
 
 **Status: OPEN 2026-08-15** (lane C, needs a cross-lane decision). Four crates
@@ -129667,9 +129739,9 @@ be reached, and the two implementations can drift apart with nothing noticing.
 | `userspace/chown` | `chmod` | coreutils bin |
 | ~~`userspace/chpasswd`~~ | ~~`passwd`~~ | ~~`userspace/passwd`~~ — **alias removed 2026-09-10** |
 | ~~`userspace/head`~~ | ~~`tail`~~ | ~~coreutils bin~~ — **crate deleted 2026-09-10** |
-| `userspace/pv` | `fuser` | `userspace/fuser` |
-| `userspace/sysstat` | `iostat` | `userspace/iostat` |
-| `userspace/who` | `w` | `userspace/w` |
+| ~~`userspace/pv`~~ | ~~`fuser`~~ | ~~`userspace/fuser`~~ — **alias removed 2026-09-10**, after `-n` was made real in the producer |
+| ~~`userspace/sysstat`~~ | ~~`iostat`~~ | ~~`userspace/iostat`~~ — **alias removed 2026-09-10**; `userspace/iostat` has the features and now has the tests |
+| ~~`userspace/who`~~ | ~~`w`~~ | ~~`userspace/w`~~ — **alias removed 2026-09-10**; `userspace/w` is now `userspace/finger` and `who` owns `w` |
 
 **`chpasswd:passwd` is RESOLVED 2026-09-10** — 404 lines removed, chpasswd is
 713 lines and does one thing. The account below is the scoping that made the

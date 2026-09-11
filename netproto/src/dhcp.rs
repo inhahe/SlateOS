@@ -89,7 +89,13 @@ impl<'a> Message<'a> {
         let xid = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]);
         let yiaddr = [buf[16], buf[17], buf[18], buf[19]];
         let siaddr = [buf[20], buf[21], buf[22], buf[23]];
-        Some(Message { op, xid, yiaddr, siaddr, buf })
+        Some(Message {
+            op,
+            xid,
+            yiaddr,
+            siaddr,
+            buf,
+        })
     }
 
     /// Look up option `code`, returning its value bytes. Walks the TLV option
@@ -221,8 +227,7 @@ fn finish(out: &mut [u8], pos: usize) -> Option<usize> {
 }
 
 /// The parameter-request list a typical client asks for.
-const PARAM_REQUEST_LIST: [u8; 4] =
-    [OPT_SUBNET_MASK, OPT_ROUTER, OPT_DNS, OPT_LEASE_TIME];
+const PARAM_REQUEST_LIST: [u8; 4] = [OPT_SUBNET_MASK, OPT_ROUTER, OPT_DNS, OPT_LEASE_TIME];
 
 /// Build a DHCPDISCOVER for MAC `chaddr` with transaction id `xid`, writing
 /// into `out`. Returns the message length. The broadcast flag is set so the

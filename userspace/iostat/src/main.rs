@@ -223,14 +223,18 @@ fn parse_cpu_line(rest: &str) -> Option<CpuStats> {
         .split_whitespace()
         .filter_map(|s| s.parse().ok())
         .collect();
-    if vals.len() < 4 {
+    // A slice pattern rather than `len() < 4` followed by four indexes. The
+    // check and the indexing were correct together, but only together -- the
+    // pattern makes the requirement part of the match instead of something a
+    // later edit has to remember.
+    let [user, nice, system, idle, ..] = vals.as_slice() else {
         return None;
-    }
+    };
     Some(CpuStats {
-        user: vals[0],
-        nice: vals[1],
-        system: vals[2],
-        idle: vals[3],
+        user: *user,
+        nice: *nice,
+        system: *system,
+        idle: *idle,
         iowait: vals.get(4).copied().unwrap_or(0),
         irq: vals.get(5).copied().unwrap_or(0),
         softirq: vals.get(6).copied().unwrap_or(0),
@@ -289,18 +293,23 @@ fn read_disk_stats() -> Vec<DiskStats> {
 
     for line in content.lines() {
         let fields: Vec<&str> = line.split_whitespace().collect();
-        if fields.len() < 14 {
+        let [major_s, minor_s, name_s, rest @ ..] = fields.as_slice() else {
+            continue;
+        };
+        // 14 is the classic /proc/diskstats width; kernels since 4.18 append
+        // more columns, so this is a minimum rather than an equality.
+        if rest.len() < 11 {
             continue;
         }
-        let major: u32 = match fields[0].parse() {
+        let major: u32 = match major_s.parse() {
             Ok(v) => v,
             Err(_) => continue,
         };
-        let minor: u32 = match fields[1].parse() {
+        let minor: u32 = match minor_s.parse() {
             Ok(v) => v,
             Err(_) => continue,
         };
-        let name = fields[2].to_string();
+        let name = (*name_s).to_string();
         let sector_size = read_sector_size(&name);
 
         let parse_u64 =
@@ -359,24 +368,42 @@ fn compute_basic(
         ),
     };
 
-    let tps = (d_rd_ios + d_wr_ios) as f64 / interval;
-    let read_bytes = d_rd_sectors * current.sector_size;
-    let write_bytes = d_wr_sectors * current.sector_size;
+    // `iostat 0` reaches here with interval 0, and dividing by it printed
+    // `inf` in a column of measurements. `compute_extended` has guarded this
+    // since it was written (`if interval_ms > 0.0`); this half never did, so
+    // the same run reported infinite tps beside finite %util.
+    let ops = d_rd_ios.saturating_add(d_wr_ios);
+    let tps = if interval > 0.0 {
+        ops as f64 / interval
+    } else {
+        0.0
+    };
+    let read_bytes = d_rd_sectors.saturating_mul(current.sector_size);
+    let write_bytes = d_wr_sectors.saturating_mul(current.sector_size);
+
+    // Same guard for the byte rates, which divide by the same interval.
+    let per_sec = |bytes: u64, scale: f64| {
+        if interval > 0.0 {
+            bytes as f64 / scale / interval
+        } else {
+            0.0
+        }
+    };
 
     let (read_rate, write_rate, read_total, write_total) = match unit {
         DisplayUnit::MegaBytes => (
-            read_bytes as f64 / 1_048_576.0 / interval,
-            write_bytes as f64 / 1_048_576.0 / interval,
-            current.rd_sectors * current.sector_size / 1_048_576,
-            current.wr_sectors * current.sector_size / 1_048_576,
+            per_sec(read_bytes, 1_048_576.0),
+            per_sec(write_bytes, 1_048_576.0),
+            current.rd_sectors.saturating_mul(current.sector_size) / 1_048_576,
+            current.wr_sectors.saturating_mul(current.sector_size) / 1_048_576,
         ),
         // KB and Human both use KB for the rate column; Human formatting
         // is applied at display time for totals.
         _ => (
-            read_bytes as f64 / 1024.0 / interval,
-            write_bytes as f64 / 1024.0 / interval,
-            current.rd_sectors * current.sector_size / 1024,
-            current.wr_sectors * current.sector_size / 1024,
+            per_sec(read_bytes, 1024.0),
+            per_sec(write_bytes, 1024.0),
+            current.rd_sectors.saturating_mul(current.sector_size) / 1024,
+            current.wr_sectors.saturating_mul(current.sector_size) / 1024,
         ),
     };
 
@@ -435,12 +462,14 @@ fn compute_extended(current: &DiskStats, prev: Option<&DiskStats>, interval: f64
     let rrqm_per_s = d_rd_merges as f64 / interval;
     let wrqm_per_s = d_wr_merges as f64 / interval;
 
-    let r_mb_per_s = (d_rd_sectors * current.sector_size) as f64 / 1_048_576.0 / interval;
-    let w_mb_per_s = (d_wr_sectors * current.sector_size) as f64 / 1_048_576.0 / interval;
+    let r_mb_per_s =
+        (d_rd_sectors.saturating_mul(current.sector_size)) as f64 / 1_048_576.0 / interval;
+    let w_mb_per_s =
+        (d_wr_sectors.saturating_mul(current.sector_size)) as f64 / 1_048_576.0 / interval;
 
     // Merge percentages: what fraction of I/Os were merged.
-    let total_rd = d_rd_ios + d_rd_merges;
-    let total_wr = d_wr_ios + d_wr_merges;
+    let total_rd = d_rd_ios.saturating_add(d_rd_merges);
+    let total_wr = d_wr_ios.saturating_add(d_wr_merges);
     let pct_rrqm = if total_rd > 0 {
         d_rd_merges as f64 / total_rd as f64 * 100.0
     } else {
@@ -474,18 +503,18 @@ fn compute_extended(current: &DiskStats, prev: Option<&DiskStats>, interval: f64
 
     // Average request sizes in KB.
     let rareq_sz = if d_rd_ios > 0 {
-        (d_rd_sectors * current.sector_size) as f64 / 1024.0 / d_rd_ios as f64
+        (d_rd_sectors.saturating_mul(current.sector_size)) as f64 / 1024.0 / d_rd_ios as f64
     } else {
         0.0
     };
     let wareq_sz = if d_wr_ios > 0 {
-        (d_wr_sectors * current.sector_size) as f64 / 1024.0 / d_wr_ios as f64
+        (d_wr_sectors.saturating_mul(current.sector_size)) as f64 / 1024.0 / d_wr_ios as f64
     } else {
         0.0
     };
 
     // Average service time (approximate: total busy / total completed I/Os).
-    let total_ios = d_rd_ios + d_wr_ios;
+    let total_ios = d_rd_ios.saturating_add(d_wr_ios);
     let svctm = if total_ios > 0 {
         d_io_ticks as f64 / total_ios as f64
     } else {
@@ -535,8 +564,19 @@ fn format_human(kb: u64) -> String {
 }
 
 /// Print the CPU statistics header and values.
-fn print_cpu(pct: &CpuPct) {
+fn print_cpu(pct: Option<&CpuPct>) {
     println!("avg-cpu:  %user   %nice %system %iowait  %steal   %idle");
+    let Some(pct) = pct else {
+        // Six question marks rather than six zeroes. A row of 0.00 is what an
+        // idle machine looks like; this is what an unreadable /proc/stat looks
+        // like, and they were the same output until now.
+        println!(
+            "       {:>7} {:>7} {:>7} {:>7} {:>7} {:>7}",
+            "?", "?", "?", "?", "?", "?"
+        );
+        println!();
+        return;
+    };
     println!(
         "       {:>7.2} {:>7.2} {:>7.2} {:>7.2} {:>7.2} {:>7.2}",
         pct.user, pct.nice, pct.system, pct.iowait, pct.steal, pct.idle,
@@ -776,7 +816,10 @@ fn read_uptime_secs() -> f64 {
 /// Generate and display one report (one "snapshot").
 fn display_report(
     config: &Config,
-    current_cpu: &CpuStats,
+    // `None` when `/proc/stat` could not be read. It is NOT a zeroed
+    // `CpuStats`: that prints as 0.00 in every column, which is a claim that
+    // the machine is idle rather than an admission that nothing was measured.
+    current_cpu: Option<&CpuStats>,
     prev_cpu: &CpuStats,
     current_disks: &[DiskStats],
     prev_disks: &[DiskStats],
@@ -784,10 +827,12 @@ fn display_report(
 ) {
     maybe_print_timestamp(config);
 
-    // CPU section.
-    let cpu_delta = current_cpu.delta(prev_cpu);
-    let cpu_total_delta = cpu_delta.total();
-    let cpu_pct = cpu_delta.percentages(cpu_total_delta);
+    // CPU section. `None` propagates to the printer, which says so.
+    let cpu_pct = current_cpu.map(|c| {
+        let d = c.delta(prev_cpu);
+        let total = d.total();
+        d.percentages(total)
+    });
 
     let show_cpu = !config.disk_only;
     let show_disk = !config.cpu_only;
@@ -820,7 +865,7 @@ fn display_report(
         }
         print_json_report(
             config,
-            if show_cpu { Some(&cpu_pct) } else { None },
+            if show_cpu { cpu_pct.as_ref() } else { None },
             &basics,
             &extended_stats,
         );
@@ -829,7 +874,7 @@ fn display_report(
 
     // Plain text output.
     if show_cpu {
-        print_cpu(&cpu_pct);
+        print_cpu(cpu_pct.as_ref());
     }
 
     if show_disk {
@@ -863,13 +908,13 @@ fn run(config: &Config) {
     let mut prev_cpu = CpuStats::default();
     let prev_disks_empty: Vec<DiskStats> = Vec::new();
 
-    let current_cpu = read_cpu_stats().unwrap_or_default();
+    let current_cpu = read_cpu_stats();
     let all_disks = read_disk_stats();
     let filtered = filter_devices(&all_disks, config);
 
     display_report(
         config,
-        &current_cpu,
+        current_cpu.as_ref(),
         &prev_cpu,
         &filtered,
         &prev_disks_empty,
@@ -882,7 +927,19 @@ fn run(config: &Config) {
         None => return,
     };
 
-    prev_cpu = current_cpu;
+    // Only advance the baseline on a successful read. A failed one must not
+
+    // destroy the last known sample -- the next good read then deltas against
+
+    // it, which understates the rate over the skipped interval but is far
+
+    // better than deltaing against zeroes, which would report the whole
+
+    // counter as if it happened in one interval.
+
+    if let Some(c) = current_cpu {
+        prev_cpu = c;
+    }
     let mut prev_disks = all_disks;
     let mut iteration = 1u32;
 
@@ -896,22 +953,34 @@ fn run(config: &Config) {
 
         std::thread::sleep(std::time::Duration::from_secs_f64(interval));
 
-        let current_cpu = read_cpu_stats().unwrap_or_default();
+        let current_cpu = read_cpu_stats();
         let all_disks = read_disk_stats();
         let filtered = filter_devices(&all_disks, config);
 
         display_report(
             config,
-            &current_cpu,
+            current_cpu.as_ref(),
             &prev_cpu,
             &filtered,
             &prev_disks,
             interval,
         );
 
-        prev_cpu = current_cpu;
+        // Only advance the baseline on a successful read. A failed one must not
+
+        // destroy the last known sample -- the next good read then deltas against
+
+        // it, which understates the rate over the skipped interval but is far
+
+        // better than deltaing against zeroes, which would report the whole
+
+        // counter as if it happened in one interval.
+
+        if let Some(c) = current_cpu {
+            prev_cpu = c;
+        }
         prev_disks = all_disks;
-        iteration += 1;
+        iteration = iteration.saturating_add(1);
     }
 }
 
@@ -972,9 +1041,12 @@ fn main() {
     // Collect positional arguments (interval, count) separately.
     let mut positionals: Vec<String> = Vec::new();
 
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
+    // An iterator rather than an index: `args[i]` can panic and `i += 1`
+    // can overflow, and the options that consume a following argument need
+    // a cursor, which `Iterator::next` is.
+    let mut it = args.iter().skip(1);
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
             "-c" => config.cpu_only = true,
             "-d" => config.disk_only = true,
             "-x" | "--extended" => config.extended = true,
@@ -990,12 +1062,11 @@ fn main() {
                 process::exit(0);
             }
             "-p" => {
-                i += 1;
-                if i >= args.len() {
+                let Some(value) = it.next() else {
                     eprintln!("error: -p requires a device name");
                     process::exit(1);
-                }
-                config.filter_devices.push(args[i].clone());
+                };
+                config.filter_devices.push(value.clone());
             }
             other => {
                 // Might be a positional (interval or count).
@@ -1007,7 +1078,6 @@ fn main() {
                 positionals.push(other.to_string());
             }
         }
-        i += 1;
     }
 
     // Parse positional arguments: [interval [count]].
@@ -1037,4 +1107,183 @@ fn main() {
     }
 
     run(&config);
+}
+
+#[cfg(test)]
+// A test that unwraps is asserting the call succeeded, and a panic names the
+// line. CLAUDE.md allows these in test modules.
+//
+// `float_cmp` is allowed here and the reason is specific rather than general:
+// every expected value in these tests is exactly representable. 15/2 is 7.5;
+// 200 sectors * 512 / 1024 is 100; 2048 * 512 / 1048576 is 1. The divisors are
+// powers of two and the numerators are small integers, so the arithmetic is
+// exact and `assert_eq!` is the right assertion. Replacing them with an
+// epsilon comparison would weaken a test that currently pins the exact value a
+// wrong unit conversion would change.
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
+mod tests {
+    use super::*;
+
+    fn disk(name: &str, rd_ios: u64, rd_sectors: u64, wr_ios: u64, wr_sectors: u64) -> DiskStats {
+        DiskStats {
+            name: name.to_string(),
+            major: 8,
+            minor: 0,
+            rd_ios,
+            rd_merges: 0,
+            rd_sectors,
+            rd_ticks: 0,
+            wr_ios,
+            wr_merges: 0,
+            wr_sectors,
+            wr_ticks: 0,
+            io_cur: 0,
+            io_ticks: 0,
+            io_aveq: 0,
+            sector_size: 512,
+        }
+    }
+
+    // -- /proc/stat parsing ---------------------------------------------------
+
+    #[test]
+    fn a_cpu_line_parses_into_its_counters() {
+        let got = parse_cpu_line("100 20 30 400 5 0 1 0 0 0").unwrap();
+        assert_eq!(got.user, 100);
+        assert_eq!(got.nice, 20);
+        assert_eq!(got.system, 30);
+        assert_eq!(got.idle, 400);
+        assert_eq!(got.iowait, 5);
+        assert_eq!(got.total(), 556);
+    }
+
+    #[test]
+    fn a_short_cpu_line_is_refused_rather_than_padded() {
+        // A truncated /proc/stat read must not become a machine that was 100%
+        // idle; the caller has a chain of sources and None lets it say so.
+        assert!(parse_cpu_line("1 2 3").is_none());
+        assert!(parse_cpu_line("").is_none());
+    }
+
+    #[test]
+    fn percentages_of_an_empty_interval_do_not_divide_by_zero() {
+        // Two samples taken within the same tick: the delta is all zeros and
+        // so is its total. Built as a real delta rather than by passing a
+        // total that disagrees with the fields -- the caller always passes
+        // `delta.total()`, so a mismatched pair cannot occur and asserting on
+        // one would test a state the program cannot reach. My first version of
+        // this test did exactly that and "failed" against correct code.
+        let same = parse_cpu_line("7 7 7 7 7 7 7 7 7 7").unwrap();
+        let d = same.delta(&same);
+        assert_eq!(d.total(), 0);
+        let p = d.percentages(d.total());
+        assert_eq!(p.user, 0.0, "no time passed, so no percentage is knowable");
+        assert_eq!(p.idle, 0.0);
+        assert!(p.system.is_finite(), "and it must not be NaN either");
+    }
+
+    #[test]
+    fn a_counter_that_went_backwards_saturates_rather_than_wrapping() {
+        // /proc counters reset when a device is re-enumerated. Wrapping would
+        // turn a reset into billions of operations per second.
+        let now = parse_cpu_line("10 10 10 10 10 10 10 10 10 10").unwrap();
+        let before = parse_cpu_line("99 99 99 99 99 99 99 99 99 99").unwrap();
+        let d = now.delta(&before);
+        assert_eq!(d.user, 0);
+        assert_eq!(d.idle, 0);
+    }
+
+    // -- device classification ------------------------------------------------
+
+    #[test]
+    fn partitions_are_told_from_whole_devices() {
+        assert!(is_partition("sda1"));
+        assert!(is_partition("nvme0n1p1"));
+        assert!(!is_partition("sda"));
+        // `loop0` and `dm-0` end in digits and are not partitions of anything.
+        assert!(!is_partition("loop0"));
+        assert!(!is_partition("dm-0"));
+    }
+
+    #[test]
+    fn a_device_with_no_traffic_is_idle() {
+        assert!(disk("sda", 0, 0, 0, 0).is_idle());
+        assert!(!disk("sda", 1, 0, 0, 0).is_idle());
+        assert!(!disk("sda", 0, 0, 1, 0).is_idle());
+    }
+
+    // -- the rate arithmetic --------------------------------------------------
+
+    #[test]
+    fn the_first_report_is_totals_since_boot() {
+        // With no previous sample, iostat reports cumulative counters over the
+        // time since boot -- so the delta is the whole counter.
+        let b = compute_basic(
+            &disk("sda", 100, 200, 50, 100),
+            None,
+            1.0,
+            DisplayUnit::KiloBytes,
+        );
+        assert_eq!(b.tps, 150.0);
+        // 200 sectors * 512 bytes / 1024 = 100 kB
+        assert_eq!(b.read_rate, 100.0);
+        assert_eq!(b.write_rate, 50.0);
+    }
+
+    #[test]
+    fn a_later_report_is_the_delta_over_the_interval() {
+        let prev = disk("sda", 100, 200, 50, 100);
+        let curr = disk("sda", 110, 400, 55, 200);
+        let b = compute_basic(&curr, Some(&prev), 2.0, DisplayUnit::KiloBytes);
+        // 15 operations over 2 seconds
+        assert_eq!(b.tps, 7.5);
+        // 200 sectors * 512 / 1024 = 100 kB over 2 seconds
+        assert_eq!(b.read_rate, 50.0);
+    }
+
+    #[test]
+    fn megabytes_and_kilobytes_differ_by_exactly_1024() {
+        let d = disk("sda", 0, 2048, 0, 0);
+        let kb = compute_basic(&d, None, 1.0, DisplayUnit::KiloBytes);
+        let mb = compute_basic(&d, None, 1.0, DisplayUnit::MegaBytes);
+        assert_eq!(kb.read_rate, 1024.0);
+        assert_eq!(mb.read_rate, 1.0);
+    }
+
+    #[test]
+    fn a_device_counter_reset_does_not_become_a_huge_rate() {
+        // The device was re-enumerated and its counters restarted. Saturating
+        // gives 0; wrapping would report 18 quintillion operations.
+        let prev = disk("sda", 9_000, 9_000, 9_000, 9_000);
+        let curr = disk("sda", 5, 5, 5, 5);
+        let b = compute_basic(&curr, Some(&prev), 1.0, DisplayUnit::KiloBytes);
+        assert_eq!(b.tps, 0.0);
+        assert_eq!(b.read_rate, 0.0);
+    }
+
+    #[test]
+    fn a_zero_interval_does_not_report_infinity() {
+        // `iostat 0` is accepted by the argument parser. Dividing by it gave
+        // `inf`, which prints as "inf" in a column of measurements.
+        // `compute_extended` already guarded this; `compute_basic` did not.
+        let b = compute_basic(
+            &disk("sda", 10, 10, 10, 10),
+            None,
+            0.0,
+            DisplayUnit::KiloBytes,
+        );
+        assert!(b.tps.is_finite(), "tps was {}", b.tps);
+        assert!(b.read_rate.is_finite());
+        assert!(b.write_rate.is_finite());
+    }
+
+    // -- display --------------------------------------------------------------
+
+    #[test]
+    fn human_units_switch_at_the_right_thresholds() {
+        assert_eq!(format_human(0), "0K");
+        assert_eq!(format_human(1023), "1023K");
+        assert_eq!(format_human(1024), "1.0M");
+        assert_eq!(format_human(1_048_576), "1.0G");
+    }
 }

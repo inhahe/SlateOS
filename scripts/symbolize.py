@@ -469,7 +469,7 @@ def main() -> int:
         help="with --log, annotate data symbols too, not only functions",
     )
     ap.add_argument(
-        "--self-test",
+        "--self-test", "--selftest",
         action="store_true",
         help="check the lookup against the chosen ELF and exit (0 = all good)",
     )

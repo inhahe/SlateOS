@@ -791,7 +791,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="check shell command-substitution callees")
     ap.add_argument("--list", action="store_true",
                     help="print every name that had to be asked of bash")
-    ap.add_argument("--self-test", action="store_true",
+    ap.add_argument("--self-test", "--selftest", "--self_test", dest="self_test", action="store_true",
                     help="grade the gate against real files, not the tree")
     args = ap.parse_args()
 

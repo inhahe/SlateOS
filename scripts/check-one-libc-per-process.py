@@ -78,6 +78,8 @@ from __future__ import annotations
 
 import re
 import sys
+
+import selftestflag
 from pathlib import Path
 
 # Modules of `posix` a foreign crate may name, and why each is safe.
@@ -637,7 +639,7 @@ def _self_test() -> int:
 
 def main(argv: list[str]) -> int:
     args = [a for a in argv[1:] if not a.startswith("--")]
-    if "--self-test" in argv:
+    if selftestflag.wants_selftest(argv):
         print("check-one-libc-per-process --self-test")
         code = _self_test()
         print("PASSED" if code == 0 else "FAILED")

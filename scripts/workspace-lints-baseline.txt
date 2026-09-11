@@ -72,7 +72,6 @@ userspace/hwclock
 userspace/iconv
 userspace/indexer
 userspace/install
-userspace/iostat
 userspace/ip
 userspace/join
 userspace/journalctl
@@ -146,7 +145,6 @@ userspace/uniq
 userspace/uptime
 userspace/vi
 userspace/vmstat
-userspace/w
 userspace/wall
 userspace/watch
 userspace/wc

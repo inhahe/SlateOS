@@ -31,6 +31,7 @@
 
 use std::env;
 use std::fs;
+use std::io::{self, Write};
 use std::process;
 use std::time::SystemTime;
 
@@ -38,32 +39,13 @@ use std::time::SystemTime;
 // Constants
 // ============================================================================
 
-/// Standard Linux utmp record size for x86_64.
-const UTMP_RECORD_SIZE: usize = 384;
-
-/// Utmp field offsets and sizes (Linux x86_64 layout).
-const UT_TYPE_OFFSET: usize = 0;
-const UT_PID_OFFSET: usize = 4;
-const UT_LINE_OFFSET: usize = 8;
-const UT_LINE_SIZE: usize = 32;
-const UT_ID_OFFSET: usize = 40;
-const UT_ID_SIZE: usize = 4;
-const UT_USER_OFFSET: usize = 44;
-const UT_USER_SIZE: usize = 32;
-const UT_HOST_OFFSET: usize = 76;
-const UT_HOST_SIZE: usize = 256;
-const UT_TV_SEC_OFFSET: usize = 340;
-
-/// Utmp record type constants.
-const EMPTY: i32 = 0;
-const RUN_LVL: i32 = 1;
-const BOOT_TIME: i32 = 2;
-const NEW_TIME: i32 = 3;
-const OLD_TIME: i32 = 4;
-const INIT_PROCESS: i32 = 5;
-const LOGIN_PROCESS: i32 = 6;
-const USER_PROCESS: i32 = 7;
-const DEAD_PROCESS: i32 = 8;
+// The record layout, the ut_type values and the parser all live in
+// `utmpfile` now. They were stated here, again in `uptime`, and a third
+// time -- wrongly, as colon-separated text -- in `w`.
+use utmpfile::{
+    BOOT_TIME, DEAD_PROCESS, EMPTY, INIT_PROCESS, LOGIN_PROCESS, NEW_TIME, OLD_TIME, RUN_LVL,
+    USER_PROCESS,
+};
 
 // ============================================================================
 // Data structures
@@ -73,18 +55,21 @@ const DEAD_PROCESS: i32 = 8;
 struct SessionRecord {
     /// Record type (maps to utmp ut_type values).
     record_type: i32,
-    /// Username.
-    user: String,
+    /// Username. NOT necessarily UTF-8: our names allow every byte except
+    /// `/` and NUL, and this was decoded with `from_utf8_lossy` until now --
+    /// which maps two names differing outside UTF-8 onto one string, so
+    /// anything comparing or counting by name saw one person.
+    user: Vec<u8>,
     /// Terminal line (e.g. "tty1", "pts/0").
-    tty: String,
+    tty: Vec<u8>,
     /// Remote host or empty.
-    host: String,
+    host: Vec<u8>,
     /// Process ID associated with this session.
     pid: i32,
     /// Login time as Unix epoch seconds.
     login_time: u64,
     /// utmp id field (4 bytes, for display in --all mode).
-    id: String,
+    id: Vec<u8>,
 }
 
 /// What the user asked us to do.
@@ -247,7 +232,15 @@ fn format_time_short(epoch_secs: u64) -> String {
 ///
 /// Convention: "." means active (< 60 seconds idle), then "MM:SS" or
 /// "HH:MMm" or "Xdays" for longer durations.
-fn format_idle(idle_secs: u64) -> String {
+fn format_idle(idle_secs: Option<u64>) -> String {
+    // `None` is "we could not find out", and it now has its own glyph. It used
+    // to arrive here as 0 -- from a device that does not exist, an unreadable
+    // mtime, or a tty name utmp never supplied -- and print as ".", which in
+    // this column means ACTIVE RIGHT NOW. The most reassuring of the four
+    // possible meanings was the one every unknown got.
+    let Some(idle_secs) = idle_secs else {
+        return "?".to_string();
+    };
     if idle_secs < 60 {
         return ".".to_string();
     }
@@ -276,84 +269,55 @@ fn format_cpu_time(hundredths: u64) -> String {
 // Data source: /var/run/utmp (binary utmp records)
 // ============================================================================
 
-/// Extract a nul-terminated string from a byte slice.
-fn extract_string(data: &[u8], offset: usize, max_len: usize) -> Option<String> {
-    let end = offset.checked_add(max_len)?;
-    let slice = data.get(offset..end)?;
-    // Find the first nul byte; the string is everything before it.
-    let nul_pos = slice.iter().position(|&b| b == 0).unwrap_or(max_len);
-    let text_slice = slice.get(..nul_pos)?;
-    Some(String::from_utf8_lossy(text_slice).into_owned())
-}
-
-/// Read an i32 (little-endian) from a byte slice at the given offset.
-fn read_i32_le(data: &[u8], offset: usize) -> Option<i32> {
-    let end = offset.checked_add(4)?;
-    let bytes = data.get(offset..end)?;
-    Some(i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
-}
-
-/// Read a utmp file and parse every record in it.
-///
-/// This is only the I/O half; the parsing lives in [`parse_utmp`] so that the
-/// record-decoding rules can be tested against byte buffers directly. Reading
-/// a real path is not a usable way to test them: `who`'s target is a Unix
-/// system, but its tests run on the build host, where a path like `/dev/null`
-/// is not the null device at all — on Windows it resolves against the current
-/// drive, and a stray `D:\dev\null` left behind by a misdirected shell
-/// redirect is an ordinary file whose contents will parse. See the
-/// `test_parse_utmp_*` tests.
-fn read_utmp(path: &str) -> Option<Vec<SessionRecord>> {
-    parse_utmp(&fs::read(path).ok()?)
-}
-
-/// Decode a utmp byte image into records, or `None` if it holds no whole one.
-///
-/// Trailing bytes that do not make up a complete `UTMP_RECORD_SIZE` record are
-/// ignored, matching the way a utmp file torn by a concurrent write is read.
-fn parse_utmp(data: &[u8]) -> Option<Vec<SessionRecord>> {
-    if data.len() < UTMP_RECORD_SIZE {
-        return None;
-    }
-
-    let mut records = Vec::new();
-    let mut offset = 0;
-
-    while offset + UTMP_RECORD_SIZE <= data.len() {
-        let record_type = read_i32_le(data, offset + UT_TYPE_OFFSET)?;
-        let pid = read_i32_le(data, offset + UT_PID_OFFSET)?;
-        let tty = extract_string(data, offset + UT_LINE_OFFSET, UT_LINE_SIZE)?;
-        let id = extract_string(data, offset + UT_ID_OFFSET, UT_ID_SIZE)?;
-        let user = extract_string(data, offset + UT_USER_OFFSET, UT_USER_SIZE)?;
-        let host = extract_string(data, offset + UT_HOST_OFFSET, UT_HOST_SIZE)?;
-        let tv_sec = read_i32_le(data, offset + UT_TV_SEC_OFFSET)?;
-
-        // tv_sec is signed but represents a positive epoch timestamp.
-        let login_time = if tv_sec >= 0 { tv_sec as u64 } else { 0 };
-
-        records.push(SessionRecord {
-            record_type,
-            user,
-            tty,
-            host,
-            pid,
-            login_time,
-            id,
-        });
-
-        offset += UTMP_RECORD_SIZE;
-    }
-
-    if records.is_empty() {
-        None
-    } else {
-        Some(records)
-    }
-}
-
 // ============================================================================
 // Data source: /run/sessions/ (Slate OS native)
 // ============================================================================
+
+/// Write `bytes` cut to `width` and padded with spaces to `width`.
+///
+/// The `{:<12}` formatting this replaces needs a `str`, which is why every
+/// field used to be decoded with `from_utf8_lossy` on the way out of utmp.
+/// Padding counts BYTES, as the C tools do: a column is a column of the file.
+fn write_col(out: &mut impl Write, bytes: &[u8], width: usize) -> io::Result<()> {
+    let shown = bytes.get(..width).unwrap_or(bytes);
+    out.write_all(shown)?;
+    for _ in shown.len()..width {
+        out.write_all(b" ")?;
+    }
+    Ok(())
+}
+
+/// Write `bytes` with no padding.
+fn write_raw(out: &mut impl Write, bytes: &[u8]) -> io::Result<()> {
+    out.write_all(bytes)
+}
+
+/// Read a utmp file and decode every record in it.
+///
+/// `None` means there is no usable session list here -- the file is missing,
+/// unreadable, or holds no whole record. The caller tries the next source in
+/// its chain for all three, so they are the same answer to the question it is
+/// asking.
+fn read_utmp(path: &str) -> Option<Vec<SessionRecord>> {
+    let records = utmpfile::parse(&fs::read(path).ok()?);
+    if records.is_empty() {
+        return None;
+    }
+    Some(
+        records
+            .into_iter()
+            .map(|r| SessionRecord {
+                record_type: r.record_type,
+                user: r.user,
+                tty: r.tty,
+                host: r.host,
+                pid: r.pid,
+                login_time: r.login_time,
+                id: r.id,
+            })
+            .collect(),
+    )
+}
 
 /// Parse session files from /run/sessions/.
 ///
@@ -368,26 +332,35 @@ fn read_sessions_dir(path: &str) -> Option<Vec<SessionRecord>> {
             Ok(e) => e,
             Err(_) => continue,
         };
-        let session_id = entry.file_name().to_string_lossy().into_owned();
-        let content = match fs::read_to_string(entry.path()) {
+        // A FILENAME, so bytes. `to_string_lossy` on a path is the same
+        // defect as on a username: two sessions whose ids differ outside
+        // UTF-8 would become one id.
+        let session_id = entry.file_name().as_encoded_bytes().to_vec();
+        let content = match fs::read(entry.path()) {
             Ok(c) => c,
             Err(_) => continue,
         };
 
-        let mut user = String::new();
-        let mut tty = String::new();
-        let mut host = String::new();
+        let mut user = Vec::new();
+        let mut tty = Vec::new();
+        let mut host = Vec::new();
         let mut login_time: u64 = 0;
 
-        for line in content.lines() {
-            if let Some(val) = line.strip_prefix("user=") {
-                user = val.to_string();
-            } else if let Some(val) = line.strip_prefix("tty=") {
-                tty = val.to_string();
-            } else if let Some(val) = line.strip_prefix("host=") {
-                host = val.to_string();
-            } else if let Some(val) = line.strip_prefix("time=") {
-                login_time = val.parse().unwrap_or(0);
+        for line in content.split(|&b| b == b'\n') {
+            let line = line.strip_suffix(b"\r").unwrap_or(line);
+            if let Some(val) = line.strip_prefix(b"user=") {
+                user = val.to_vec();
+            } else if let Some(val) = line.strip_prefix(b"tty=") {
+                tty = val.to_vec();
+            } else if let Some(val) = line.strip_prefix(b"host=") {
+                host = val.to_vec();
+            } else if let Some(val) = line.strip_prefix(b"time=") {
+                // A timestamp is a number, so it must be text to mean
+                // anything; a non-numeric one is 0, as before.
+                login_time = str::from_utf8(val)
+                    .ok()
+                    .and_then(|t| t.trim().parse().ok())
+                    .unwrap_or(0);
             }
         }
 
@@ -427,18 +400,21 @@ fn read_users_dir(path: &str) -> Option<Vec<SessionRecord>> {
             Ok(e) => e,
             Err(_) => continue,
         };
-        let user = entry.file_name().to_string_lossy().into_owned();
+        // The filename is the username, so it is bytes for the same reason
+        // ut_user is: two users whose names differ only outside UTF-8 would
+        // have been decoded into one.
+        let user = entry.file_name().as_encoded_bytes().to_vec();
         let content = fs::read_to_string(entry.path()).unwrap_or_default();
         let login_time: u64 = content.trim().parse().unwrap_or(0);
 
         records.push(SessionRecord {
             record_type: USER_PROCESS,
             user,
-            tty: "?".to_string(),
-            host: String::new(),
+            tty: b"?".to_vec(),
+            host: Vec::new(),
             pid: 0,
             login_time,
-            id: String::new(),
+            id: Vec::new(),
         });
     }
 
@@ -486,8 +462,9 @@ struct LoadAvgInfo {
 
 /// Per-user process info for `w` display.
 struct UserProcessInfo {
-    /// Idle time in seconds (from terminal device mtime).
-    idle_secs: u64,
+    /// Idle time in seconds, or `None` when the terminal could not be
+    /// stat'd. See `ttyidle` for why the two are not the same value.
+    idle_secs: Option<u64>,
     /// Total CPU time for all processes on this tty (in hundredths of a second).
     jcpu: u64,
     /// CPU time for the current foreground process (in hundredths of a second).
@@ -534,44 +511,18 @@ fn format_uptime_for_w(total_secs: f64) -> String {
     }
 }
 
-/// Get idle time for a terminal device by comparing its mtime to now.
-fn get_tty_idle(tty: &str, now: u64) -> u64 {
-    if tty.is_empty() || tty == "?" {
-        return 0;
-    }
-    // Try /dev/<tty> path.
-    let dev_path = if tty.starts_with('/') {
-        tty.to_string()
-    } else {
-        format!("/dev/{tty}")
-    };
-
-    let metadata = match fs::metadata(&dev_path) {
-        Ok(m) => m,
-        Err(_) => return 0,
-    };
-
-    let mtime = metadata
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-
-    if mtime == 0 || now < mtime {
-        0
-    } else {
-        now - mtime
-    }
-}
-
 /// Check if a terminal is writable (for message status).
 ///
 /// Returns '+' if writable by group/others, '-' if not, '?' if unknown.
-fn get_mesg_status(tty: &str) -> char {
-    if tty.is_empty() || tty == "?" {
+fn get_mesg_status(tty: &[u8]) -> char {
+    if tty.is_empty() || tty == b"?" {
         return '?';
     }
+    // '?' is this function's existing word for "cannot tell", so a tty whose
+    // name will not make a path gets it too.
+    let Ok(tty) = str::from_utf8(tty) else {
+        return '?';
+    };
     let dev_path = if tty.starts_with('/') {
         tty.to_string()
     } else {
@@ -599,8 +550,8 @@ fn get_mesg_status(tty: &str) -> char {
 ///
 /// Scans /proc to find processes on the given tty and computes JCPU, PCPU,
 /// and the WHAT field.
-fn get_user_process_info(tty: &str, pid: i32, now: u64) -> UserProcessInfo {
-    let idle_secs = get_tty_idle(tty, now);
+fn get_user_process_info(tty: &[u8], pid: i32, now: u64) -> UserProcessInfo {
+    let idle_secs = ttyidle::idle_secs(tty, now);
     let mut jcpu: u64 = 0;
     let mut pcpu: u64 = 0;
     let mut what = String::from("-");
@@ -637,7 +588,7 @@ fn get_user_process_info(tty: &str, pid: i32, now: u64) -> UserProcessInfo {
 
             // Check if this process is on the same tty.
             if let Some(proc_tty) = read_proc_tty(proc_pid)
-                && proc_tty == tty
+                && proc_tty.as_bytes() == tty
                 && let Some((cpu_time, _cmd)) = read_proc_stat_brief(proc_pid)
             {
                 total_cpu = total_cpu.saturating_add(cpu_time);
@@ -733,18 +684,27 @@ fn filter_records<'a>(records: &'a [SessionRecord], opts: &Options) -> Vec<&'a S
 }
 
 /// Get the current user's login name.
-fn get_current_user() -> String {
-    // Try USER env var, then LOGNAME, then read /proc/self/status for uid
-    // and resolve via /etc/passwd.
-    if let Ok(user) = env::var("USER")
-        && !user.is_empty()
-    {
-        return user;
-    }
-    if let Ok(user) = env::var("LOGNAME")
-        && !user.is_empty()
-    {
-        return user;
+/// Who is running this, for `who am i`.
+///
+/// THIS ASKED THE ENVIRONMENT FIRST. It tried `$USER`, then `$LOGNAME`, and
+/// only then the real uid -- so `USER=root who am i` printed root's session,
+/// and the caller sets both of those variables. The unspoofable source was
+/// already in the function, three lines further down, as the third choice.
+///
+/// That is the defect closed in six programs this morning
+/// (TD-B-FIVE-PROGRAMS-STILL-TAKE-THE-CALLERS-IDENTITY-FROM-THE-ENVIRONMENT),
+/// and it survived that sweep because `who` only *displays* -- it gates
+/// nothing on the answer. It still tells the user a falsehood about their own
+/// session, and `who am i` is precisely the question "who does the system
+/// think I am".
+///
+/// `authlib::identity::caller_uid` is `getuid(2)`: the credential the kernel
+/// recorded at spawn, which a parent cannot set. `None` off unix, where
+/// /proc/self/status is the remaining real source; "unknown" if neither
+/// answers, because not knowing is a fact and $USER is not evidence of it.
+fn get_current_user() -> Vec<u8> {
+    if let Some(uid) = authlib::identity::caller_uid() {
+        return uid_to_name(uid).into_bytes();
     }
     // Try to read UID from /proc/self/status and map to username.
     if let Ok(content) = fs::read_to_string("/proc/self/status") {
@@ -752,11 +712,11 @@ fn get_current_user() -> String {
             if let Some(rest) = line.strip_prefix("Uid:") {
                 let uid_str = rest.split_whitespace().next().unwrap_or("0");
                 let uid: u32 = uid_str.parse().unwrap_or(0);
-                return uid_to_name(uid);
+                return uid_to_name(uid).into_bytes();
             }
         }
     }
-    "unknown".to_string()
+    b"unknown".to_vec()
 }
 
 /// Map a UID to a username by scanning /etc/passwd.
@@ -776,15 +736,17 @@ fn uid_to_name(uid: u32) -> String {
 }
 
 /// Get the current user's terminal.
-fn get_current_tty() -> String {
-    // Try /proc/self/fd/0 symlink.
+fn get_current_tty() -> Vec<u8> {
+    // Try /proc/self/fd/0 symlink. The link target is a PATH, so its bytes are
+    // taken directly rather than through `to_string_lossy` -- a tty whose name
+    // is not UTF-8 would otherwise compare equal to any other such tty.
     if let Ok(link) = fs::read_link("/proc/self/fd/0") {
-        let path_str = link.to_string_lossy();
-        if let Some(tty) = path_str.strip_prefix("/dev/") {
-            return tty.to_string();
+        let raw = link.as_os_str().as_encoded_bytes();
+        if let Some(tty) = raw.strip_prefix(b"/dev/") {
+            return tty.to_vec();
         }
     }
-    "?".to_string()
+    b"?".to_vec()
 }
 
 // ============================================================================
@@ -832,45 +794,81 @@ fn print_who(records: &[&SessionRecord], opts: &Options) {
 /// Print a record in short format: NAME  LINE  TIME  (HOST)
 fn print_record_short(record: &SessionRecord) {
     let time_str = format_datetime(record.login_time);
-    if record.host.is_empty() {
-        println!("{:<12} {:<12} {}", record.user, record.tty, time_str);
-    } else {
-        println!(
-            "{:<12} {:<12} {} ({})",
-            record.user, record.tty, time_str, record.host
-        );
+    let out = io::stdout();
+    let mut out = out.lock();
+    // Written rather than formatted because the fields are bytes. Same widths
+    // and separators as the `{:<12} {:<12}` this replaces. Errors are dropped
+    // for the same reason `println!` drops them: a closed stdout is not this
+    // function's business, and the caller has no channel to report it on.
+    let _ = print_short_inner(&mut out, record, &time_str);
+}
+
+fn print_short_inner(
+    out: &mut impl Write,
+    record: &SessionRecord,
+    time_str: &str,
+) -> io::Result<()> {
+    write_col(out, &record.user, 12)?;
+    out.write_all(b" ")?;
+    write_col(out, &record.tty, 12)?;
+    write!(out, " {time_str}")?;
+    if !record.host.is_empty() {
+        out.write_all(b" (")?;
+        write_raw(out, &record.host)?;
+        out.write_all(b")")?;
     }
+    writeln!(out)
 }
 
 /// Print a record with message status.
 fn print_record_mesg(record: &SessionRecord, now: u64) {
     let time_str = format_datetime(record.login_time);
     let mesg = get_mesg_status(&record.tty);
-    let idle = format_idle(get_tty_idle(&record.tty, now));
-    let comment = if record.host.is_empty() {
-        String::new()
+    let idle = format_idle(ttyidle::idle_secs(&record.tty, now));
+    let comment: Vec<u8> = if record.host.is_empty() {
+        Vec::new()
     } else {
-        format!("({})", record.host)
+        let mut c = Vec::with_capacity(record.host.len() + 2);
+        c.push(b'(');
+        c.extend_from_slice(&record.host);
+        c.push(b')');
+        c
     };
-    println!(
-        "{:<12} {} {:<12} {:<16} {:>8}   {}",
-        record.user, mesg, record.tty, time_str, idle, comment
-    );
+    let out = io::stdout();
+    let mut out = out.lock();
+    let _ = (|| -> io::Result<()> {
+        write_col(&mut out, &record.user, 12)?;
+        write!(out, " {mesg} ")?;
+        write_col(&mut out, &record.tty, 12)?;
+        write!(out, " {time_str:<16} {idle:>8}   ")?;
+        write_raw(&mut out, &comment)?;
+        writeln!(out)
+    })();
 }
 
 /// Print a record with idle time.
 fn print_record_idle(record: &SessionRecord, now: u64) {
     let time_str = format_datetime(record.login_time);
-    let idle = format_idle(get_tty_idle(&record.tty, now));
-    let comment = if record.host.is_empty() {
-        String::new()
+    let idle = format_idle(ttyidle::idle_secs(&record.tty, now));
+    let comment: Vec<u8> = if record.host.is_empty() {
+        Vec::new()
     } else {
-        format!("({})", record.host)
+        let mut c = Vec::with_capacity(record.host.len() + 2);
+        c.push(b'(');
+        c.extend_from_slice(&record.host);
+        c.push(b')');
+        c
     };
-    println!(
-        "{:<12} {:<12} {:<16} {:>8}   {}",
-        record.user, record.tty, time_str, idle, comment
-    );
+    let out = io::stdout();
+    let mut out = out.lock();
+    let _ = (|| -> io::Result<()> {
+        write_col(&mut out, &record.user, 12)?;
+        out.write_all(b" ")?;
+        write_col(&mut out, &record.tty, 12)?;
+        write!(out, " {time_str:<16} {idle:>8}   ")?;
+        write_raw(&mut out, &comment)?;
+        writeln!(out)
+    })();
 }
 
 /// Print a record in full --all format with type, id, pid.
@@ -878,14 +876,18 @@ fn print_record_all(record: &SessionRecord, _opts: &Options, now: u64) {
     let time_str = format_datetime(record.login_time);
     let tname = type_name(record.record_type);
     let idle = if record.record_type == USER_PROCESS {
-        format_idle(get_tty_idle(&record.tty, now))
+        format_idle(ttyidle::idle_secs(&record.tty, now))
     } else {
         String::new()
     };
-    let comment = if record.host.is_empty() {
-        String::new()
+    let comment: Vec<u8> = if record.host.is_empty() {
+        Vec::new()
     } else {
-        format!("({})", record.host)
+        let mut c = Vec::with_capacity(record.host.len() + 2);
+        c.push(b'(');
+        c.extend_from_slice(&record.host);
+        c.push(b')');
+        c
     };
     let pid_str = if record.pid != 0 {
         format!("{}", record.pid)
@@ -893,10 +895,18 @@ fn print_record_all(record: &SessionRecord, _opts: &Options, now: u64) {
         String::new()
     };
 
-    println!(
-        "{:<12} {:<9} {:<12} {:<4} {:<16} {:>6} {:>8} {}",
-        record.user, tname, record.tty, record.id, time_str, pid_str, idle, comment
-    );
+    let out = io::stdout();
+    let mut out = out.lock();
+    let _ = (|| -> io::Result<()> {
+        write_col(&mut out, &record.user, 12)?;
+        write!(out, " {tname:<9} ")?;
+        write_col(&mut out, &record.tty, 12)?;
+        out.write_all(b" ")?;
+        write_col(&mut out, &record.id, 4)?;
+        write!(out, " {time_str:<16} {pid_str:>6} {idle:>8} ")?;
+        write_raw(&mut out, &comment)?;
+        writeln!(out)
+    })();
 }
 
 // ============================================================================
@@ -905,9 +915,18 @@ fn print_record_all(record: &SessionRecord, _opts: &Options, now: u64) {
 
 /// Print users in quick/count format: names on one line, then count.
 fn print_count(records: &[&SessionRecord]) {
-    let names: Vec<&str> = records.iter().map(|r| r.user.as_str()).collect();
-    println!("{}", names.join(" "));
-    println!("# users={}", records.len());
+    let out = io::stdout();
+    let mut out = out.lock();
+    let _ = (|| -> io::Result<()> {
+        for (i, r) in records.iter().enumerate() {
+            if i > 0 {
+                out.write_all(b" ")?;
+            }
+            write_raw(&mut out, &r.user)?;
+        }
+        writeln!(out)?;
+        writeln!(out, "# users={}", records.len())
+    })();
 }
 
 // ============================================================================
@@ -948,8 +967,8 @@ fn print_w(records: &[&SessionRecord]) {
     for record in records {
         let proc_info = get_user_process_info(&record.tty, record.pid, now);
         let login_at = format_time_short(record.login_time);
-        let from = if record.host.is_empty() {
-            "-".to_string()
+        let from: Vec<u8> = if record.host.is_empty() {
+            b"-".to_vec()
         } else {
             record.host.clone()
         };
@@ -957,10 +976,21 @@ fn print_w(records: &[&SessionRecord]) {
         let jcpu_str = format_cpu_time(proc_info.jcpu);
         let pcpu_str = format_cpu_time(proc_info.pcpu);
 
-        println!(
-            "{:<8} {:<8} {:<16} {:<8} {:>6} {:>6} {:>6} {}",
-            record.user, record.tty, from, login_at, idle_str, jcpu_str, pcpu_str, proc_info.what
-        );
+        let out = io::stdout();
+        let mut out = out.lock();
+        let _ = (|| -> io::Result<()> {
+            write_col(&mut out, &record.user, 8)?;
+            out.write_all(b" ")?;
+            write_col(&mut out, &record.tty, 8)?;
+            out.write_all(b" ")?;
+            write_col(&mut out, &from, 16)?;
+            write!(
+                out,
+                " {login_at:<8} {idle_str:>6} {jcpu_str:>6} {pcpu_str:>6} {}",
+                proc_info.what
+            )?;
+            writeln!(out)
+        })();
     }
 }
 
@@ -969,6 +999,47 @@ fn print_w(records: &[&SessionRecord]) {
 // ============================================================================
 
 /// Escape a string for JSON output.
+/// Escape a byte field for a JSON string.
+///
+/// JSON IS TEXT AND CANNOT HOLD ARBITRARY BYTES, which is a real limit rather
+/// than an inconvenience: a username here may contain any byte except `/` and
+/// NUL. So there are two cases and both are lossless.
+///
+/// Valid UTF-8 goes through [`json_escape`] exactly as before, so ordinary
+/// output is byte-for-byte unchanged. Anything else is emitted one `\\u00XX` per
+/// byte -- the Latin-1 reading of each byte -- which is valid JSON, reversible
+/// by a consumer that knows the rule, and stated here so one can.
+///
+/// The alternative was `from_utf8_lossy`, which turns every bad byte into
+/// U+FFFD and makes two different users identical in the output. A consumer
+/// cannot undo that, and cannot even detect it.
+fn json_escape_bytes(bytes: &[u8]) -> String {
+    match str::from_utf8(bytes) {
+        Ok(text) => json_escape(text),
+        Err(_) => {
+            // ASCII keeps its ordinary escaping so the name stays readable;
+            // only the bytes that cannot be text become escapes. The first
+            // version escaped every byte, which turned "cafe" into twenty hex
+            // characters for the sake of one bad byte at the end.
+            let mut out = String::with_capacity(bytes.len() * 6);
+            for &b in bytes {
+                match b {
+                    b'"' => out.push_str("\\\""),
+                    b'\\' => out.push_str("\\\\"),
+                    b'\n' => out.push_str("\\n"),
+                    b'\r' => out.push_str("\\r"),
+                    b'\t' => out.push_str("\\t"),
+                    0x20..=0x7e => out.push(b as char),
+                    _ => {
+                        let _ = std::fmt::Write::write_fmt(&mut out, format_args!("\\u{b:04x}"));
+                    }
+                }
+            }
+            out
+        }
+    }
+}
+
 fn json_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
@@ -1002,10 +1073,13 @@ fn print_json(records: &[&SessionRecord], opts: &Options) {
 
     for (i, record) in records.iter().enumerate() {
         let comma = if i + 1 < records.len() { "," } else { "" };
+        // JSON gets a number or `null`, not a zero standing in for both.
+        // A consumer can test for null; it cannot tell a real 0 from a
+        // fabricated one.
         let idle = if opts.show_idle || opts.w_mode {
-            get_tty_idle(&record.tty, now)
+            ttyidle::idle_secs(&record.tty, now)
         } else {
-            0
+            None
         };
         let mesg = if opts.show_mesg {
             format!("{}", get_mesg_status(&record.tty))
@@ -1014,9 +1088,9 @@ fn print_json(records: &[&SessionRecord], opts: &Options) {
         };
 
         println!("    {{");
-        println!("      \"user\": \"{}\",", json_escape(&record.user));
-        println!("      \"tty\": \"{}\",", json_escape(&record.tty));
-        println!("      \"host\": \"{}\",", json_escape(&record.host));
+        println!("      \"user\": \"{}\",", json_escape_bytes(&record.user));
+        println!("      \"tty\": \"{}\",", json_escape_bytes(&record.tty));
+        println!("      \"host\": \"{}\",", json_escape_bytes(&record.host));
         println!("      \"login_time\": {},", record.login_time);
         println!(
             "      \"login_time_formatted\": \"{}\",",
@@ -1026,14 +1100,19 @@ fn print_json(records: &[&SessionRecord], opts: &Options) {
         println!("      \"type\": \"{}\",", type_name(record.record_type));
 
         if opts.show_idle || opts.w_mode {
-            println!("      \"idle_seconds\": {idle},");
+            // `null`, not 0: JSON has a word for "not known" and using it
+            // is the whole point of the Option above.
+            match idle {
+                Some(secs) => println!("      \"idle_seconds\": {secs},"),
+                None => println!("      \"idle_seconds\": null,"),
+            }
         }
         if opts.show_mesg {
             println!("      \"mesg\": \"{}\",", json_escape(&mesg));
         }
 
         // The last field must not have a trailing comma.
-        println!("      \"id\": \"{}\"", json_escape(&record.id));
+        println!("      \"id\": \"{}\"", json_escape_bytes(&record.id));
         println!("    }}{comma}");
     }
 
@@ -1168,19 +1247,20 @@ fn run() -> i32 {
             .filter(|r| {
                 r.record_type == USER_PROCESS
                     && r.user == current_user
-                    && (r.tty == current_tty || current_tty == "?")
+                    && (r.tty == current_tty || current_tty == b"?")
             })
             .collect();
 
         if my_records.is_empty() {
-            // Synthesise a record from environment info.
-            let now = current_epoch_secs();
-            println!(
-                "{:<12} {:<12} {}",
-                current_user,
-                current_tty,
-                format_datetime(now)
-            );
+            // NOTHING. This printed a synthesised row -- the caller's name,
+            // their tty, and `format_datetime(now)` as the login time, which
+            // is a time they did not log in at. `who am i` asks which utmp
+            // record is yours, and when none is, the answer is that there
+            // isn't one. GNU who prints nothing here for the same reason.
+            //
+            // The row was doubly wrong before this commit, because the name in
+            // it came from $USER: `USER=root who am i` printed a root session
+            // that has never existed, at a login time of now.
         } else if opts.json {
             print_json(&my_records, &opts);
         } else {
@@ -1325,28 +1405,32 @@ mod tests {
 
     #[test]
     fn test_format_idle_active() {
-        assert_eq!(format_idle(0), ".");
-        assert_eq!(format_idle(30), ".");
-        assert_eq!(format_idle(59), ".");
+        // `None` is not `Some(0)`: the first means we could not find out and
+        // the second means the terminal was touched this second. They printed
+        // the same "." until ttyidle split them.
+        assert_eq!(format_idle(None), "?");
+        assert_eq!(format_idle(Some(0)), ".");
+        assert_eq!(format_idle(Some(30)), ".");
+        assert_eq!(format_idle(Some(59)), ".");
     }
 
     #[test]
     fn test_format_idle_minutes() {
-        assert_eq!(format_idle(60), " 1:00");
-        assert_eq!(format_idle(90), " 1:30");
-        assert_eq!(format_idle(3599), "59:59");
+        assert_eq!(format_idle(Some(60)), " 1:00");
+        assert_eq!(format_idle(Some(90)), " 1:30");
+        assert_eq!(format_idle(Some(3599)), "59:59");
     }
 
     #[test]
     fn test_format_idle_hours() {
-        assert_eq!(format_idle(3600), " 1:00m");
-        assert_eq!(format_idle(7200), " 2:00m");
+        assert_eq!(format_idle(Some(3600)), " 1:00m");
+        assert_eq!(format_idle(Some(7200)), " 2:00m");
     }
 
     #[test]
     fn test_format_idle_days() {
-        assert_eq!(format_idle(86400), "1days");
-        assert_eq!(format_idle(172800), "2days");
+        assert_eq!(format_idle(Some(86400)), "1days");
+        assert_eq!(format_idle(Some(172800)), "2days");
     }
 
     // --- CPU time formatting ---
@@ -1378,58 +1462,6 @@ mod tests {
     // --- String extraction from bytes ---
 
     #[test]
-    fn test_extract_string_normal() {
-        let data = b"hello\0world";
-        assert_eq!(extract_string(data, 0, 11), Some("hello".to_string()));
-    }
-
-    #[test]
-    fn test_extract_string_no_nul() {
-        let data = b"hello";
-        assert_eq!(extract_string(data, 0, 5), Some("hello".to_string()));
-    }
-
-    #[test]
-    fn test_extract_string_empty() {
-        let data = b"\0rest";
-        assert_eq!(extract_string(data, 0, 4), Some(String::new()));
-    }
-
-    #[test]
-    fn test_extract_string_offset() {
-        let data = b"XXXXhello\0";
-        assert_eq!(extract_string(data, 4, 6), Some("hello".to_string()));
-    }
-
-    #[test]
-    fn test_extract_string_out_of_bounds() {
-        let data = b"hi";
-        assert_eq!(extract_string(data, 0, 10), None);
-    }
-
-    // --- i32 reading ---
-
-    #[test]
-    fn test_read_i32_le() {
-        let data: &[u8] = &[0x07, 0x00, 0x00, 0x00];
-        assert_eq!(read_i32_le(data, 0), Some(7));
-    }
-
-    #[test]
-    fn test_read_i32_le_negative() {
-        let data: &[u8] = &[0xFF, 0xFF, 0xFF, 0xFF];
-        assert_eq!(read_i32_le(data, 0), Some(-1));
-    }
-
-    #[test]
-    fn test_read_i32_le_out_of_bounds() {
-        let data: &[u8] = &[0x01, 0x02];
-        assert_eq!(read_i32_le(data, 0), None);
-    }
-
-    // --- Type name ---
-
-    #[test]
     fn test_type_name() {
         assert_eq!(type_name(EMPTY), "EMPTY");
         assert_eq!(type_name(BOOT_TIME), "BOOT_TIME");
@@ -1439,17 +1471,75 @@ mod tests {
         assert_eq!(type_name(99), "UNKNOWN");
     }
 
+    // --- Bytes survive the whole path ---
+
+    #[test]
+    fn a_column_pads_and_truncates_without_decoding() {
+        let mut out = Vec::new();
+        write_col(&mut out, b"ab", 5).unwrap();
+        assert_eq!(out, b"ab   ");
+
+        let mut out = Vec::new();
+        write_col(&mut out, b"abcdefgh", 3).unwrap();
+        assert_eq!(
+            out, b"abc",
+            "an over-long name is cut, not left to shove the row"
+        );
+    }
+
+    #[test]
+    fn a_non_utf8_username_reaches_the_column_intact() {
+        // THE POINT OF THE CONVERSION. Every field used to be decoded with
+        // String::from_utf8_lossy on the way out of utmp, so 0xE9 became
+        // U+FFFD -- and two users differing only in such a byte printed
+        // identically and compared equal.
+        let mut out = Vec::new();
+        write_col(&mut out, b"caf\xe9", 6).unwrap();
+        assert_eq!(out, b"caf\xe9  ");
+    }
+
+    #[test]
+    fn two_usernames_differing_outside_utf8_stay_distinct() {
+        let mut a = make_record(USER_PROCESS, "x", "tty1");
+        let mut b = make_record(USER_PROCESS, "x", "tty1");
+        a.user = b"caf\xfe".to_vec();
+        b.user = b"caf\xe9".to_vec();
+        assert_ne!(a.user, b.user);
+        // And the decoded forms are equal, which is the bug this replaced.
+        assert_eq!(
+            String::from_utf8_lossy(&a.user),
+            String::from_utf8_lossy(&b.user)
+        );
+    }
+
+    #[test]
+    fn json_keeps_valid_utf8_verbatim_and_escapes_the_rest() {
+        // JSON is text and cannot hold arbitrary bytes. Valid UTF-8 goes
+        // through unchanged, so ordinary output is byte-for-byte as before;
+        // anything else becomes one \u00XX escape per byte, which is valid
+        // JSON and reversible -- unlike from_utf8_lossy, which a consumer can
+        // neither undo nor detect.
+        assert_eq!(json_escape_bytes(b"alice"), "alice");
+        assert_eq!(json_escape_bytes("caf\u{e9}".as_bytes()), "caf\u{e9}");
+        assert_eq!(json_escape_bytes(b"caf\xe9"), "caf\\u00e9");
+        assert_ne!(
+            json_escape_bytes(b"caf\xe9"),
+            json_escape_bytes(b"caf\xfe"),
+            "two names must not collapse into one JSON string"
+        );
+    }
+
     // --- Record filtering ---
 
     fn make_record(record_type: i32, user: &str, tty: &str) -> SessionRecord {
         SessionRecord {
             record_type,
-            user: user.to_string(),
-            tty: tty.to_string(),
-            host: String::new(),
+            user: user.as_bytes().to_vec(),
+            tty: tty.as_bytes().to_vec(),
+            host: Vec::new(),
             pid: 0,
             login_time: 0,
-            id: String::new(),
+            id: Vec::new(),
         }
     }
 
@@ -1464,8 +1554,8 @@ mod tests {
         let opts = Options::new();
         let filtered = filter_records(&records, &opts);
         assert_eq!(filtered.len(), 2);
-        assert_eq!(filtered[0].user, "alice");
-        assert_eq!(filtered[1].user, "carol");
+        assert_eq!(filtered[0].user, b"alice");
+        assert_eq!(filtered[1].user, b"carol");
     }
 
     #[test]
@@ -1505,7 +1595,7 @@ mod tests {
         opts.show_dead = true;
         let filtered = filter_records(&records, &opts);
         assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0].user, "bob");
+        assert_eq!(filtered[0].user, b"bob");
     }
 
     #[test]
@@ -1598,34 +1688,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_utmp_too_small() {
-        // Anything shorter than one whole record decodes to nothing. Checked
-        // against buffers rather than a file: this test used to read
-        // "/dev/null" and assert the read failed, which is only true on a
-        // Unix host. On Windows that path resolves against the current drive,
-        // and a stray 640-byte `D:\dev\null` (a shell redirect that landed in
-        // a real file) made it decode one garbage record and fail the suite.
-        assert!(parse_utmp(&[]).is_none());
-        assert!(parse_utmp(&[0u8; UTMP_RECORD_SIZE - 1]).is_none());
-    }
-
-    #[test]
-    fn test_parse_utmp_exact_and_partial_records() {
-        // Exactly one record decodes to exactly one record...
-        let one = parse_utmp(&[0u8; UTMP_RECORD_SIZE]).expect("one whole record");
-        assert_eq!(one.len(), 1);
-
-        // ...and a trailing partial record is ignored rather than rounding up
-        // or reading past the end.
-        let one_and_a_bit =
-            parse_utmp(&[0u8; UTMP_RECORD_SIZE + UTMP_RECORD_SIZE / 2]).expect("one whole record");
-        assert_eq!(one_and_a_bit.len(), 1);
-
-        let two = parse_utmp(&[0u8; UTMP_RECORD_SIZE * 2]).expect("two whole records");
-        assert_eq!(two.len(), 2);
-    }
-
-    #[test]
     fn test_read_utmp_missing_file_is_none() {
         // The I/O half: an unreadable path yields None rather than panicking.
         assert!(read_utmp("/nonexistent/dir/utmp").is_none());
@@ -1674,8 +1736,8 @@ mod tests {
 
     #[test]
     fn test_get_mesg_status_empty() {
-        assert_eq!(get_mesg_status(""), '?');
-        assert_eq!(get_mesg_status("?"), '?');
+        assert_eq!(get_mesg_status(b""), '?');
+        assert_eq!(get_mesg_status(b"?"), '?');
     }
 
     // --- load_records fallback ---

@@ -4,3 +4,5 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS hexadecimal file dumper"
 [dependencies]
+# File names come from argv and format strings come from -e.
+quoting = { path = "../quoting" }

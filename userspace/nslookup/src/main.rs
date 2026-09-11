@@ -17,6 +17,7 @@
 //! nslookup -reverse <ip>                Reverse DNS lookup (PTR)
 //! ```
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs;
 use std::net::UdpSocket;
@@ -159,7 +160,10 @@ fn reverse_name(ip: &str) -> Result<String, String> {
         return Ok(name);
     }
 
-    Err(format!("'{ip}' is not a valid IPv4 or IPv6 address"))
+    Err(format!(
+        "{} is not a valid IPv4 or IPv6 address",
+        quoteaf_os(ip)
+    ))
 }
 
 // ============================================================================
@@ -616,17 +620,17 @@ fn parse_args() -> Result<Args, String> {
             reverse = true;
         } else if let Some(stripped) = arg.strip_prefix("-type=") {
             qtype = parse_record_type(stripped)
-                .ok_or_else(|| format!("unknown record type: '{stripped}'"))?;
+                .ok_or_else(|| format!("unknown record type: {}", quoteaf_os(stripped)))?;
         } else if arg == "-type" {
             // Handle `-type AAAA` (space-separated) form.
             i += 1;
             let val = argv
                 .get(i)
                 .ok_or_else(|| "-type requires a value".to_string())?;
-            qtype =
-                parse_record_type(val).ok_or_else(|| format!("unknown record type: '{val}'"))?;
+            qtype = parse_record_type(val)
+                .ok_or_else(|| format!("unknown record type: {}", quoteaf_os(val)))?;
         } else if arg.starts_with('-') {
-            return Err(format!("unknown option: '{arg}'"));
+            return Err(format!("unknown option: {}", quoteaf_os(arg)));
         } else {
             positionals.push(arg.clone());
         }

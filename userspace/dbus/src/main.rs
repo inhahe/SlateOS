@@ -21,6 +21,7 @@
 #![cfg_attr(not(test), no_main)]
 #![allow(clippy::needless_range_loop, clippy::vec_init_then_push)]
 
+use quoting::quoteaf_os;
 use std::collections::HashMap;
 #[cfg(not(test))]
 use std::env;
@@ -1320,7 +1321,10 @@ pub fn validate_member_name(name: &str) -> Result<(), DbusError> {
             return Err(DbusError::InvalidMember("cannot start with digit".into()));
         }
         if !c.is_ascii_alphanumeric() && c != '_' {
-            return Err(DbusError::InvalidMember(format!("invalid character '{c}'")));
+            return Err(DbusError::InvalidMember(format!(
+                "invalid character {}",
+                quoteaf_os(c.to_string())
+            )));
         }
     }
     Ok(())
@@ -2117,7 +2121,7 @@ impl BusDaemon {
                         serial,
                         msg.serial,
                         "org.freedesktop.DBus.Error.NameHasNoOwner",
-                        &format!("name '{name}' has no owner"),
+                        &format!("name {} has no owner", quoteaf_os(name)),
                     ));
                 }
             }
@@ -2259,7 +2263,7 @@ impl BusDaemon {
                         serial,
                         msg.serial,
                         "org.freedesktop.DBus.Error.NameHasNoOwner",
-                        &format!("name '{name}' not found"),
+                        &format!("name {} not found", quoteaf_os(name)),
                     ));
                 }
             }

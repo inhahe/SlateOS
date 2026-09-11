@@ -14,6 +14,7 @@
 //! dd if=input of=output bs=1K conv=swab,sync status=progress
 //! ```
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -102,10 +103,10 @@ fn parse_size(s: &str) -> Result<u64, String> {
         if let Some(mult) = multiplier {
             let n: u64 = num_part
                 .parse()
-                .map_err(|_| format!("invalid number: '{num_part}'"))?;
+                .map_err(|_| format!("invalid number: {}", quoteaf_os(num_part)))?;
             return n
                 .checked_mul(mult)
-                .ok_or_else(|| format!("size overflow: '{s}'"));
+                .ok_or_else(|| format!("size overflow: {}", quoteaf_os(s)));
         }
     }
 
@@ -125,16 +126,16 @@ fn parse_size(s: &str) -> Result<u64, String> {
             let num_part = &s[..s.len() - 1];
             let n: u64 = num_part
                 .parse()
-                .map_err(|_| format!("invalid number: '{num_part}'"))?;
+                .map_err(|_| format!("invalid number: {}", quoteaf_os(num_part)))?;
             return n
                 .checked_mul(mult)
-                .ok_or_else(|| format!("size overflow: '{s}'"));
+                .ok_or_else(|| format!("size overflow: {}", quoteaf_os(s)));
         }
     }
 
     // No suffix -- plain number.
     s.parse::<u64>()
-        .map_err(|_| format!("invalid number: '{s}'"))
+        .map_err(|_| format!("invalid number: {}", quoteaf_os(s)))
 }
 
 // ============================================================================
@@ -166,7 +167,7 @@ fn parse_conv(s: &str) -> Result<ConvFlags, String> {
             "fsync" => flags.fsync = true,
             "swab" => flags.swab = true,
             "" => {} // trailing comma or double comma -- ignore
-            other => return Err(format!("unknown conversion: '{other}'")),
+            other => return Err(format!("unknown conversion: {}", quoteaf_os(other))),
         }
     }
     if flags.ucase && flags.lcase {
@@ -196,7 +197,7 @@ fn parse_status(s: &str) -> Result<StatusLevel, String> {
         "none" => Ok(StatusLevel::None),
         "noxfer" => Ok(StatusLevel::Noxfer),
         "progress" => Ok(StatusLevel::Progress),
-        other => Err(format!("unknown status level: '{other}'")),
+        other => Err(format!("unknown status level: {}", quoteaf_os(other))),
     }
 }
 
@@ -270,7 +271,10 @@ fn parse_args() -> Result<Options, String> {
         }
 
         let Some((key, value)) = arg.split_once('=') else {
-            return Err(format!("invalid operand: '{arg}' (expected key=value)"));
+            return Err(format!(
+                "invalid operand: {} (expected key=value)",
+                quoteaf_os(arg)
+            ));
         };
 
         match key {
@@ -573,7 +577,8 @@ fn run() -> Result<(), String> {
     // --- Open input ---
     let mut input = match &opts.input_file {
         Some(path) => {
-            let f = File::open(path).map_err(|e| format!("failed to open '{}': {}", path, e))?;
+            let f = File::open(path)
+                .map_err(|e| format!("failed to open {}: {}", quoteaf_os(path), e))?;
             Input::File(f)
         }
         None => Input::Stdin(io::stdin()),
@@ -589,7 +594,7 @@ fn run() -> Result<(), String> {
             }
             let f = open_opts
                 .open(path)
-                .map_err(|e| format!("failed to open '{}': {}", path, e))?;
+                .map_err(|e| format!("failed to open {}: {}", quoteaf_os(path), e))?;
             Output::File(f)
         }
         None => Output::Stdout(io::stdout()),

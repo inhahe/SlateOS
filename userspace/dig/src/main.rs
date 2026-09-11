@@ -27,6 +27,7 @@
 #![cfg_attr(not(test), warn(clippy::panic))]
 #![cfg_attr(not(test), warn(clippy::indexing_slicing))]
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs;
 use std::process;
@@ -464,9 +465,12 @@ fn reverse_name_v4(ip_str: &str) -> Result<String, DigError> {
     }
     // Validate each octet.
     for part in &parts {
-        let _: u8 = part
-            .parse()
-            .map_err(|_| DigError::Usage(format!("'{ip_str}' is not a valid IPv4 address")))?;
+        let _: u8 = part.parse().map_err(|_| {
+            DigError::Usage(format!(
+                "{} is not a valid IPv4 address",
+                quoteaf_os(ip_str)
+            ))
+        })?;
     }
     Ok(format!(
         "{}.{}.{}.{}.in-addr.arpa",
@@ -1500,7 +1504,10 @@ fn parse_args() -> Result<DigArgs, DigError> {
             }
         } else if arg.starts_with('-') {
             // Unknown dash option.
-            return Err(DigError::Usage(format!("unknown option: '{arg}'")));
+            return Err(DigError::Usage(format!(
+                "unknown option: {}",
+                quoteaf_os(arg)
+            )));
         } else {
             // Positional: could be name or type.
             if parse_record_type(arg).is_some() && name.is_some() {
@@ -1513,10 +1520,16 @@ fn parse_args() -> Result<DigArgs, DigError> {
                 if let Some(t) = parse_record_type(arg) {
                     qtype = Some(t);
                 } else {
-                    return Err(DigError::Usage(format!("unexpected argument: '{arg}'")));
+                    return Err(DigError::Usage(format!(
+                        "unexpected argument: {}",
+                        quoteaf_os(arg)
+                    )));
                 }
             } else {
-                return Err(DigError::Usage(format!("unexpected argument: '{arg}'")));
+                return Err(DigError::Usage(format!(
+                    "unexpected argument: {}",
+                    quoteaf_os(arg)
+                )));
             }
         }
     }

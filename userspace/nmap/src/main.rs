@@ -27,6 +27,7 @@
 // (unwrap_used, expect_used, panic, indexing_slicing, arithmetic_side_effects)
 // already set to warn at workspace scope — see the root Cargo.toml.
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs::File;
 use std::io::Write;
@@ -1332,7 +1333,10 @@ fn main() {
         match File::create(path) {
             Ok(f) => Some(f),
             Err(e) => {
-                eprint_str(&format!("nmap: cannot open output file '{path}': {e}\n"));
+                eprint_str(&format!(
+                    "nmap: cannot open output file {}: {e}\n",
+                    quoteaf_os(path)
+                ));
                 exit(1);
             }
         }

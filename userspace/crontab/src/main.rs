@@ -43,6 +43,7 @@
 //! Comment lines (starting with `#`), blank lines, and environment variable
 //! assignments (`KEY=VALUE`) are preserved verbatim.
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, Read, Write};
@@ -171,7 +172,7 @@ fn validate_special(line: &str) -> Result<LineKind, String> {
     match keyword {
         "@reboot" | "@hourly" | "@daily" | "@midnight" | "@weekly" | "@monthly" | "@yearly"
         | "@annually" => {}
-        other => return Err(format!("unknown special keyword '{other}'")),
+        other => return Err(format!("unknown special keyword {}", quoteaf_os(other))),
     }
 
     if parts.len() < 2 || parts[1].trim().is_empty() {
@@ -227,7 +228,7 @@ fn validate_field_atom(atom: &str, min: u32, max: u32, name: &str) -> Result<(),
     if let Some((base_part, step_str)) = atom.split_once('/') {
         let step: u32 = step_str
             .parse()
-            .map_err(|_| format!("{name}: invalid step value '{step_str}'"))?;
+            .map_err(|_| format!("{name}: invalid step value {}", quoteaf_os(step_str)))?;
         if step == 0 {
             return Err(format!("{name}: step value must not be 0"));
         }
@@ -275,7 +276,7 @@ fn validate_field_atom(atom: &str, min: u32, max: u32, name: &str) -> Result<(),
 /// Parse a numeric value from a cron field token.
 fn parse_bound(s: &str, name: &str) -> Result<u32, String> {
     s.parse::<u32>()
-        .map_err(|_| format!("{name}: expected a number, got '{s}'"))
+        .map_err(|_| format!("{name}: expected a number, got {}", quoteaf_os(s)))
 }
 
 /// Check that a value falls within the allowed range for this field.
@@ -434,7 +435,10 @@ fn cmd_edit(username: &str) -> Result<(), Error> {
             }
             Err(e) => {
                 let _ = fs::remove_file(&tmp_path);
-                return Err(Error::Io(format!("cannot run editor '{editor}': {e}")));
+                return Err(Error::Io(format!(
+                    "cannot run editor {}: {e}",
+                    quoteaf_os(&editor)
+                )));
             }
             Ok(_) => {} // success — continue to validation
         }
@@ -532,7 +536,7 @@ fn cmd_install(username: &str, source: &str) -> Result<(), Error> {
         buf
     } else {
         fs::read_to_string(source)
-            .map_err(|e| Error::Io(format!("cannot read '{}': {e}", source)))?
+            .map_err(|e| Error::Io(format!("cannot read {}: {e}", quoteaf_os(source))))?
     };
 
     // Validate before installing.
@@ -568,7 +572,7 @@ fn cmd_validate(source: &str) -> Result<(), Error> {
         buf
     } else {
         fs::read_to_string(source)
-            .map_err(|e| Error::Io(format!("cannot read '{}': {e}", source)))?
+            .map_err(|e| Error::Io(format!("cannot read {}: {e}", quoteaf_os(source))))?
     };
 
     let (errors, entry_count) = validate_crontab(&content);

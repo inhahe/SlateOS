@@ -14,6 +14,7 @@
 //! echo binary_data | strings
 //! ```
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs::File;
 use std::io::{self, BufWriter, Read, Write};
@@ -269,7 +270,10 @@ fn parse_radix(s: &str) -> Result<RadixFormat, String> {
         "d" => Ok(RadixFormat::Decimal),
         "o" => Ok(RadixFormat::Octal),
         "x" => Ok(RadixFormat::Hex),
-        _ => Err(format!("invalid radix format '{s}': expected d, o, or x")),
+        _ => Err(format!(
+            "invalid radix format {}: expected d, o, or x",
+            quoteaf_os(s)
+        )),
     }
 }
 

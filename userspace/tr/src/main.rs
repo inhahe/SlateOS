@@ -4,6 +4,7 @@
 //! result to stdout. Operates on raw bytes, so it handles binary data and
 //! arbitrary encodings correctly.
 
+use quoting::quoteaf_os;
 use std::env;
 use std::io::{self, Read, Write};
 use std::process;
@@ -317,7 +318,10 @@ fn expand_posix_class(name: &[u8], out: &mut Vec<u8>) {
         _ => {
             // Unknown class name -- emit as literal for robustness.
             let name_str = String::from_utf8_lossy(name);
-            die(&format!("invalid character class '{name_str}'"));
+            die(&format!(
+                "invalid character class {}",
+                quoteaf_os(&*name_str)
+            ));
         }
     }
 }

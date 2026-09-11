@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS network utility (netcat)"
 [dependencies]
+# Host names and port strings come from argv, and banner text comes off the
+# socket.
+quoting = { path = "../quoting" }
 
 # Inherit the workspace lint configuration. This crate had none at all: it was
 # not in the `[lints] workspace = true` set and set no `#![deny]`/`#![warn]` of

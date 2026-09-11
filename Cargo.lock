@@ -64,6 +64,9 @@ dependencies = [
 [[package]]
 name = "arp"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "asteroids"
@@ -81,6 +84,7 @@ dependencies = [
  "authlib",
  "civildate",
  "cronspool",
+ "quoting",
  "userdb",
 ]
 
@@ -113,6 +117,9 @@ dependencies = [
 [[package]]
 name = "awk"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "backup"
@@ -319,6 +326,7 @@ name = "chpasswd"
 version = "0.1.0"
 dependencies = [
  "posix",
+ "quoting",
 ]
 
 [[package]]
@@ -497,6 +505,7 @@ version = "0.1.0"
 dependencies = [
  "authlib",
  "cronspool",
+ "quoting",
  "userdb",
 ]
 
@@ -540,6 +549,9 @@ dependencies = [
 [[package]]
 name = "dbus"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "dbviewer"
@@ -560,6 +572,9 @@ dependencies = [
 [[package]]
 name = "dd"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "deflate"
@@ -619,6 +634,7 @@ name = "dhcpcd"
 version = "0.1.0"
 dependencies = [
  "libcall",
+ "quoting",
 ]
 
 [[package]]
@@ -657,6 +673,7 @@ dependencies = [
 name = "dig"
 version = "0.1.0"
 dependencies = [
+ "quoting",
  "randrange",
 ]
 
@@ -1007,6 +1024,7 @@ version = "0.1.0"
 dependencies = [
  "authlib",
  "posix",
+ "quoting",
  "scratchdir",
  "userdb",
 ]
@@ -1140,6 +1158,9 @@ dependencies = [
 [[package]]
 name = "hexdump"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "hexeditor"
@@ -1167,6 +1188,7 @@ name = "hostnamectl"
 version = "0.1.0"
 dependencies = [
  "optionalfile",
+ "quoting",
  "scratchdir",
 ]
 
@@ -1202,6 +1224,9 @@ dependencies = [
 [[package]]
 name = "iconv"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "ifconfig"
@@ -1246,6 +1271,7 @@ name = "inetd"
 version = "0.1.0"
 dependencies = [
  "monoclock",
+ "quoting",
 ]
 
 [[package]]
@@ -1328,6 +1354,9 @@ version = "0.1.0"
 [[package]]
 name = "jq"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "jsonviewer"
@@ -1426,6 +1455,9 @@ version = "0.1.0"
 [[package]]
 name = "lex"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "libcall"
@@ -1844,6 +1876,9 @@ version = "0.1.0"
 [[package]]
 name = "nc"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "net80211"
@@ -1926,6 +1961,9 @@ dependencies = [
 [[package]]
 name = "nmap"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "nologin"
@@ -1964,6 +2002,9 @@ version = "0.1.0"
 [[package]]
 name = "nproc"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "nsenter"
@@ -1972,6 +2013,9 @@ version = "0.1.0"
 [[package]]
 name = "nslookup"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "ntpd"
@@ -2129,6 +2173,9 @@ dependencies = [
 [[package]]
 name = "ping"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "pipes"
@@ -2467,6 +2514,9 @@ dependencies = [
 [[package]]
 name = "sed"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "selinux"
@@ -2569,6 +2619,9 @@ version = "0.1.0"
 [[package]]
 name = "shuf"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "simon"
@@ -2799,10 +2852,16 @@ dependencies = [
 [[package]]
 name = "strings"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "stty"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "su"
@@ -2964,6 +3023,9 @@ dependencies = [
 [[package]]
 name = "telnet"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "terminal"
@@ -3055,10 +3117,16 @@ dependencies = [
 [[package]]
 name = "tr"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "traceroute"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "tsort"
@@ -3180,6 +3248,7 @@ dependencies = [
 name = "useradd"
 version = "0.1.0"
 dependencies = [
+ "quoting",
  "scratchdir",
  "userdb",
 ]
@@ -3209,6 +3278,7 @@ version = "0.1.0"
 name = "vi"
 version = "0.1.0"
 dependencies = [
+ "quoting",
  "scratchdir",
 ]
 

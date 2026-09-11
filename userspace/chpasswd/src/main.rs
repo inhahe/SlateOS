@@ -16,6 +16,8 @@ use std::ffi::OsString;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
+use quoting::quoteaf_os;
+
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
@@ -264,7 +266,10 @@ fn update_password(
     }
 
     if !found {
-        return Err(format!("user '{username}' not found in shadow file"));
+        return Err(format!(
+            "user {} not found in shadow file",
+            quoteaf_os(username)
+        ));
     }
 
     write_shadow_file(shadow_path, &entries)

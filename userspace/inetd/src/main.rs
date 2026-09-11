@@ -66,6 +66,7 @@
 // window was written `60_000` against a reading in nanoseconds, so the window
 // was sixty *microseconds* and no configured `MaxRate` was ever exceeded.
 use monoclock::{Elapsed, Instant};
+use quoting::quoteaf_os;
 use std::collections::HashMap;
 #[cfg(not(test))]
 use std::env;
@@ -1086,14 +1087,14 @@ fn parse_config_line(
     let socket_type = match fields[1] {
         "stream" => SocketType::Stream,
         "dgram" => SocketType::Dgram,
-        other => return Err(format!("unknown socket type '{other}'")),
+        other => return Err(format!("unknown socket type {}", quoteaf_os(other))),
     };
     let protocol = match fields[2] {
         "tcp" => Protocol::Tcp,
         "udp" => Protocol::Udp,
         "tcp6" => Protocol::Tcp6,
         "udp6" => Protocol::Udp6,
-        other => return Err(format!("unknown protocol '{other}'")),
+        other => return Err(format!("unknown protocol {}", quoteaf_os(other))),
     };
 
     // Validate socket_type/protocol consistency.
@@ -1105,7 +1106,10 @@ fn parse_config_line(
             ));
         }
         (SocketType::Dgram, true) => {
-            return Err(format!("dgram socket with TCP protocol '{}'", protocol));
+            return Err(format!(
+                "dgram socket with TCP protocol {}",
+                quoteaf_os(protocol.to_string())
+            ));
         }
         _ => {}
     }
@@ -1122,7 +1126,7 @@ fn parse_config_line(
     } else if wait_field == "wait" || wait_field.starts_with("wait.") {
         (WaitMode::Wait, None)
     } else {
-        return Err(format!("unknown wait mode '{wait_field}'"));
+        return Err(format!("unknown wait mode {}", quoteaf_os(wait_field)));
     };
 
     let user = fields[4].to_string();
@@ -1134,7 +1138,7 @@ fn parse_config_line(
     };
 
     let port = service_to_port(service_name)
-        .ok_or_else(|| format!("unknown service name '{service_name}'"))?;
+        .ok_or_else(|| format!("unknown service name {}", quoteaf_os(service_name)))?;
 
     let builtin = if program == "internal" {
         resolve_builtin(service_name)
@@ -1144,7 +1148,10 @@ fn parse_config_line(
 
     // If the program is "internal" but we have no builtin handler, reject it.
     if program == "internal" && builtin.is_none() {
-        return Err(format!("no built-in handler for service '{service_name}'"));
+        return Err(format!(
+            "no built-in handler for service {}",
+            quoteaf_os(service_name)
+        ));
     }
 
     Ok(ServiceEntry {

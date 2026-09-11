@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS ICMP ping utility"
 [dependencies]
+# The host name comes from argv and the reverse name comes from the
+# resolver.
+quoting = { path = "../quoting" }

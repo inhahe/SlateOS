@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS vi text editor"
 [dependencies]
+# File names come from argv and from ex commands typed in the editor.
+quoting = { path = "../quoting" }
 
 [dev-dependencies]
 scratchdir = { path = "../scratchdir" }

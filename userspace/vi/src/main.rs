@@ -21,6 +21,7 @@
 #![allow(clippy::cast_sign_loss)]
 #![allow(clippy::cast_possible_wrap)]
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs;
 use std::io::{self, Read, Write};
@@ -472,7 +473,7 @@ impl Editor {
                 self.filename = Some(path.to_owned());
                 Ok(())
             }
-            Err(e) => Err(format!("Cannot open '{}': {}", path, e)),
+            Err(e) => Err(format!("Cannot open {}: {}", quoteaf_os(path), e)),
         }
     }
 
@@ -486,7 +487,7 @@ impl Editor {
         }
         content.push('\n');
         fs::write(path, content.as_bytes())
-            .map_err(|e| format!("Cannot write '{}': {}", path, e))?;
+            .map_err(|e| format!("Cannot write {}: {}", quoteaf_os(path), e))?;
         self.modified = false;
         self.filename = Some(path.to_owned());
         Ok(())

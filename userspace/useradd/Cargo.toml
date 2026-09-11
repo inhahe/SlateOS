@@ -3,6 +3,9 @@ name = "useradd"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
+# Account names, group names, shells and home directories all come from
+# argv.
+quoting = { path = "../quoting" }
 # The account store. `design-decisions.md` §353 settles that `/etc/users.yaml`
 # is the truth and `/etc/passwd` and `/etc/shadow` are generated from it. This
 # binary used to write both flat files by hand, which meant an account it

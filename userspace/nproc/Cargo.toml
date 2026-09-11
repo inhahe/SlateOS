@@ -4,3 +4,5 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS nproc/arch/pathchk/logname/users/tty - simple system info tools"
 [dependencies]
+# Option words come from argv.
+quoting = { path = "../quoting" }

@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS ARP table management"
 [dependencies]
+# Host names and interface names come from argv and from /proc/net/arp,
+# which is parsed as text.
+quoting = { path = "../quoting" }

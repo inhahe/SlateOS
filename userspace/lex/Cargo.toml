@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS lex - lexical analyzer generator (lex/flex)"
 [dependencies]
+# Pattern text and file names come from the scanner specification being
+# compiled.
+quoting = { path = "../quoting" }

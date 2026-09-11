@@ -4,3 +4,5 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS network traceroute utility"
 [dependencies]
+# The host name comes from argv and each hop's name comes from the resolver.
+quoting = { path = "../quoting" }

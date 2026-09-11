@@ -128007,6 +128007,61 @@ used *only* in exempt positions, which is the property that actually matters.
 **Also found in the same survey:** `overlay1` and `overlay2` are declared and
 used **zero** times anywhere in `gui` or `apps`. They are dead palette rungs.
 
+## TD-C-THE-COMPOSITOR-FRAME-BUDGET-HAS-NO-INSTRUMENT
+
+**Date:** 2026-09-11. **Lane:** C. Found by lane A while checking whether the
+border conversion cost anything.
+
+**In short:** `performance-targets.md` says a full desktop must be composited in
+under 2 ms at 4K, or the machine misses a 144 Hz refresh. Nothing measures
+whether it does. The compositor times its own frames and the only thing anyone
+asserts about that number is that it is greater than zero.
+
+**The two halves, because they are different problems:**
+
+1. **No benchmark series.** The suite records 108 series — 35 of them `vfs`,
+   then crypto, net, http, ipc, sched, page, heap and a handful of others — and
+   **none** matching compositor, gui, draw, render, frame, blit, paint or
+   surface. There is no `benches/` directory under `gui/` and no criterion
+   dependency in any gui crate. Lane A checked this against the last
+   Hyper-V/WHPX record rather than inferring it.
+2. **The runtime measurement exists and is unchecked.** `gui/compositor/src/lib.rs`
+   records `last_frame_time_us` every frame. `grep` finds exactly one assertion
+   on it, at `lib.rs:9766`: `> 0`, with the message "the frame took no
+   measurable time, so it did no work". That is a test that the clock runs, not
+   that the budget is met. **This is the sharper half of the finding** — the
+   instrument is already there and nobody reads it.
+
+**What it means for the border conversion.** 436 draw sites moved from a fill to
+a stroke through a different render path, and the tree would report the same
+thing — silence — whether that cost nothing or ten times. Two things are now
+pinned in `gui/appearance/src/surface.rs` so at least the question is answerable
+without a benchmark:
+`neither_theme_asks_the_compositor_for_more_work_than_the_other` (every
+`Surface` kind emits the same command count in both themes, so the conversion
+adds no commands) and
+`an_outline_touches_far_fewer_pixels_than_the_fill_it_replaces` (a 100×40 box is
+4,000 pixels filled and 276 outlined). Those bound the risk; they do not measure
+the frame.
+
+**Proper fix, and it is split across two lanes.** The harness is lane A's
+(`bench/**` and the boot test) and they have offered to build that half. What a
+meaningful compositor benchmark *composites* is a design question in this
+subsystem and is mine: a plausible fixture is a full desktop at 4K — taskbar,
+two overlapping windows with real content, a menu open — composed repeatedly,
+reported as a series so `history.jsonl` can show drift. Neither half is useful
+alone.
+
+**Cheaper interim step, entirely in this lane:** raise that `> 0` assertion to a
+real bound in a controlled case. It will not be 2 ms at 4K on a developer
+machine under emulation — lane A measured run-to-run noise at a median 1.10x
+with a p90 of 1.75x, so a tight bound would be flaky — but an order-of-magnitude
+ceiling would catch a disaster, which is more than zero catches.
+
+**If never fixed:** the one performance target this subsystem has, stated with a
+number and a reason, remains unmeasured. Any change to the render path is
+unfalsifiable, and the next one will not have someone asking the question.
+
 ## TD-C-THE-SHELL-NEEDS-CONVERTING-BY-HAND-NOT-BY-SWEEP
 
 **Date:** 2026-09-11. **Lane:** C.

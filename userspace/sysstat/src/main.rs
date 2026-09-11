@@ -32,7 +32,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Personality {
     Sar,
-    Iostat,
     Mpstat,
     Pidstat,
     Cifsiostat,
@@ -43,7 +42,6 @@ impl fmt::Display for Personality {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Sar => write!(f, "sar"),
-            Self::Iostat => write!(f, "iostat"),
             Self::Mpstat => write!(f, "mpstat"),
             Self::Pidstat => write!(f, "pidstat"),
             Self::Cifsiostat => write!(f, "cifsiostat"),
@@ -63,7 +61,6 @@ fn detect_personality(argv0: &str) -> Personality {
     let base = &argv0[last_sep..];
     let base = base.strip_suffix(".exe").unwrap_or(base);
     match base {
-        "iostat" => Personality::Iostat,
         "mpstat" => Personality::Mpstat,
         "pidstat" => Personality::Pidstat,
         "cifsiostat" => Personality::Cifsiostat,
@@ -319,15 +316,15 @@ fn read_meminfo() -> MemInfo {
 struct DiskStat {
     name: String,
     reads_completed: u64,
-    reads_merged: u64,
+    _reads_merged: u64,
     sectors_read: u64,
     _read_time_ms: u64,
     writes_completed: u64,
-    writes_merged: u64,
+    _writes_merged: u64,
     sectors_written: u64,
     _write_time_ms: u64,
     _io_in_progress: u64,
-    io_time_ms: u64,
+    _io_time_ms: u64,
     weighted_io_time_ms: u64,
 }
 
@@ -339,15 +336,15 @@ fn parse_diskstat_line(line: &str) -> Option<DiskStat> {
     Some(DiskStat {
         name: parts.get(2)?.to_string(),
         reads_completed: parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0),
-        reads_merged: parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(0),
+        _reads_merged: parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(0),
         sectors_read: parts.get(5).and_then(|s| s.parse().ok()).unwrap_or(0),
         _read_time_ms: parts.get(6).and_then(|s| s.parse().ok()).unwrap_or(0),
         writes_completed: parts.get(7).and_then(|s| s.parse().ok()).unwrap_or(0),
-        writes_merged: parts.get(8).and_then(|s| s.parse().ok()).unwrap_or(0),
+        _writes_merged: parts.get(8).and_then(|s| s.parse().ok()).unwrap_or(0),
         sectors_written: parts.get(9).and_then(|s| s.parse().ok()).unwrap_or(0),
         _write_time_ms: parts.get(10).and_then(|s| s.parse().ok()).unwrap_or(0),
         _io_in_progress: parts.get(11).and_then(|s| s.parse().ok()).unwrap_or(0),
-        io_time_ms: parts.get(12).and_then(|s| s.parse().ok()).unwrap_or(0),
+        _io_time_ms: parts.get(12).and_then(|s| s.parse().ok()).unwrap_or(0),
         weighted_io_time_ms: parts.get(13).and_then(|s| s.parse().ok()).unwrap_or(0),
     })
 }
@@ -1093,231 +1090,6 @@ fn run_sar(args: &[String], out: &mut impl Write) {
 // IOSTAT
 // ---------------------------------------------------------------------------
 
-struct IostatOptions {
-    cpu_only: bool,
-    device_only: bool,
-    extended: bool,
-    unit_kb: bool,
-    unit_mb: bool,
-    per_partition: bool,
-    _lvm_names: bool,
-    interval: u64,
-    count: Option<u64>,
-}
-
-fn parse_iostat_args(args: &[String]) -> IostatOptions {
-    let mut opts = IostatOptions {
-        cpu_only: false,
-        device_only: false,
-        extended: false,
-        unit_kb: false,
-        unit_mb: false,
-        per_partition: false,
-        _lvm_names: false,
-        interval: 1,
-        count: Some(1),
-    };
-
-    if has_flag(args, "-c") {
-        opts.cpu_only = true;
-    }
-    if has_flag(args, "-d") {
-        opts.device_only = true;
-    }
-    if has_flag(args, "-x") {
-        opts.extended = true;
-    }
-    if has_flag(args, "-k") {
-        opts.unit_kb = true;
-    }
-    if has_flag(args, "-m") {
-        opts.unit_mb = true;
-    }
-    if has_flag(args, "-p") {
-        opts.per_partition = true;
-    }
-    if has_flag(args, "-N") {
-        opts._lvm_names = true;
-    }
-
-    // Default to kB if nothing specified
-    if !opts.unit_mb {
-        opts.unit_kb = true;
-    }
-
-    let (interval, count) = parse_interval_count(args);
-    opts.interval = interval;
-    opts.count = count;
-
-    opts
-}
-
-fn print_iostat_cpu(out: &mut impl Write, prev: &[CpuStat], curr: &[CpuStat]) {
-    let _ = writeln!(
-        out,
-        "avg-cpu:  %user   %nice %system %iowait  %steal   %idle"
-    );
-    if let (Some(p), Some(c)) = (prev.first(), curr.first()) {
-        let u = compute_cpu_usage(p, c);
-        let _ = writeln!(
-            out,
-            "         {:>6.2}  {:>6.2}  {:>6.2}  {:>6.2}  {:>6.2}  {:>6.2}",
-            u.usr, u.nice, u.sys, u.iowait, u.steal, u.idle
-        );
-    }
-    let _ = writeln!(out);
-}
-
-fn print_iostat_device_header(out: &mut impl Write, extended: bool, unit: &str) {
-    if extended {
-        let _ = writeln!(
-            out,
-            "{:<12} {:>8} {:>12} {:>12} {:>12} {:>12} {:>8} {:>8} {:>8} {:>8} {:>8}",
-            "Device",
-            "r/s",
-            format!("r{}/s", unit),
-            "w/s",
-            format!("w{}/s", unit),
-            "d/s",
-            "rrqm/s",
-            "wrqm/s",
-            "avgrq-sz",
-            "avgqu-sz",
-            "%util"
-        );
-    } else {
-        let _ = writeln!(
-            out,
-            "{:<12} {:>8} {:>12} {:>12} {:>12} {:>12}",
-            "Device",
-            "tps",
-            format!("{}_read/s", unit),
-            format!("{}_wrtn/s", unit),
-            format!("{}_read", unit),
-            format!("{}_wrtn", unit)
-        );
-    }
-}
-
-fn print_iostat_device_row(
-    out: &mut impl Write,
-    prev: &DiskStat,
-    curr: &DiskStat,
-    interval: f64,
-    extended: bool,
-    divisor: f64,
-) {
-    let rs = (curr.reads_completed.saturating_sub(prev.reads_completed)) as f64 / interval;
-    let ws = (curr.writes_completed.saturating_sub(prev.writes_completed)) as f64 / interval;
-    let tps = rs + ws;
-    let read_sectors = curr.sectors_read.saturating_sub(prev.sectors_read);
-    let write_sectors = curr.sectors_written.saturating_sub(prev.sectors_written);
-    let read_per_s = (read_sectors as f64 * 512.0 / divisor) / interval;
-    let write_per_s = (write_sectors as f64 * 512.0 / divisor) / interval;
-    let total_read = curr.sectors_read as f64 * 512.0 / divisor;
-    let total_write = curr.sectors_written as f64 * 512.0 / divisor;
-
-    if extended {
-        let rrqm = (curr.reads_merged.saturating_sub(prev.reads_merged)) as f64 / interval;
-        let wrqm = (curr.writes_merged.saturating_sub(prev.writes_merged)) as f64 / interval;
-        let total_ios = (curr.reads_completed.saturating_sub(prev.reads_completed))
-            + (curr.writes_completed.saturating_sub(prev.writes_completed));
-        let avgrq = if total_ios > 0 {
-            (read_sectors + write_sectors) as f64 / total_ios as f64
-        } else {
-            0.0
-        };
-        let avgqu = (curr
-            .weighted_io_time_ms
-            .saturating_sub(prev.weighted_io_time_ms)) as f64
-            / 1000.0
-            / interval;
-        let io_time_delta = curr.io_time_ms.saturating_sub(prev.io_time_ms);
-        let util = (io_time_delta as f64 / (interval * 1000.0)) * 100.0;
-        let _ = writeln!(
-            out,
-            "{:<12} {:>8.2} {:>12.2} {:>12.2} {:>12.2} {:>12.2} {:>8.2} {:>8.2} {:>8.2} {:>8.2} {:>8.2}",
-            curr.name, rs, read_per_s, ws, write_per_s, 0.00, rrqm, wrqm, avgrq, avgqu, util
-        );
-    } else {
-        let _ = writeln!(
-            out,
-            "{:<12} {:>8.2} {:>12.2} {:>12.2} {:>12.0} {:>12.0}",
-            curr.name, tps, read_per_s, write_per_s, total_read, total_write
-        );
-    }
-}
-
-fn is_whole_device(name: &str) -> bool {
-    // Whole devices don't end in a digit (e.g., sda, nvme0n1, but not sda1, nvme0n1p1)
-    // This is a heuristic: if a name ends with a digit but contains 'p' before it
-    // for nvme, it's still a whole device.
-    if name.starts_with("loop") || name.starts_with("ram") {
-        return false;
-    }
-    // For names like sda, sdb: whole device if no trailing digit
-    // For names like nvme0n1: whole device, nvme0n1p1: partition
-    if name.contains("nvme") || name.contains("mmc") {
-        !name.contains('p') || name.ends_with(|c: char| !c.is_ascii_digit())
-    } else {
-        name.ends_with(|c: char| !c.is_ascii_digit())
-    }
-}
-
-fn run_iostat(args: &[String], out: &mut impl Write) {
-    let opts = parse_iostat_args(args);
-    print_system_header(out, "iostat");
-    let _ = writeln!(out);
-
-    let divisor = if opts.unit_mb { 1048576.0 } else { 1024.0 };
-    let unit = if opts.unit_mb { "MB" } else { "kB" };
-
-    let mut prev_cpu = read_cpu_stats();
-    let mut prev_disk = read_diskstats();
-    let mut iteration = 0u64;
-
-    loop {
-        if let Some(count) = opts.count
-            && iteration >= count
-        {
-            break;
-        }
-
-        if iteration > 0 {
-            thread::sleep(Duration::from_secs(opts.interval));
-        }
-
-        let interval_secs = if iteration == 0 {
-            1.0
-        } else {
-            opts.interval as f64
-        };
-
-        if !opts.device_only {
-            let curr_cpu = read_cpu_stats();
-            print_iostat_cpu(out, &prev_cpu, &curr_cpu);
-            prev_cpu = curr_cpu;
-        }
-
-        if !opts.cpu_only {
-            let curr_disk = read_diskstats();
-            print_iostat_device_header(out, opts.extended, unit);
-            for c in &curr_disk {
-                if !opts.per_partition && !is_whole_device(&c.name) {
-                    continue;
-                }
-                if let Some(p) = prev_disk.iter().find(|p| p.name == c.name) {
-                    print_iostat_device_row(out, p, c, interval_secs, opts.extended, divisor);
-                }
-            }
-            let _ = writeln!(out);
-            prev_disk = curr_disk;
-        }
-
-        iteration += 1;
-    }
-}
-
 // ---------------------------------------------------------------------------
 // MPSTAT
 // ---------------------------------------------------------------------------
@@ -1818,21 +1590,6 @@ fn print_help(personality: Personality) {
             println!("  -q          Load average and queue length");
             println!("  -h          Display this help");
         }
-        Personality::Iostat => {
-            println!("Usage: iostat [OPTIONS] [interval [count]]");
-            println!();
-            println!("I/O Statistics");
-            println!();
-            println!("Options:");
-            println!("  -c          CPU statistics only");
-            println!("  -d          Device statistics only");
-            println!("  -x          Extended statistics");
-            println!("  -k          Display in kilobytes");
-            println!("  -m          Display in megabytes");
-            println!("  -p          Include partitions");
-            println!("  -N          Show LVM device mapper names");
-            println!("  -h          Display this help");
-        }
         Personality::Mpstat => {
             println!("Usage: mpstat [OPTIONS] [interval [count]]");
             println!();
@@ -1909,7 +1666,6 @@ fn main() {
 
     match personality {
         Personality::Sar => run_sar(&rest, &mut stdout),
-        Personality::Iostat => run_iostat(&rest, &mut stdout),
         Personality::Mpstat => run_mpstat(&rest, &mut stdout),
         Personality::Pidstat => run_pidstat(&rest, &mut stdout),
         Personality::Cifsiostat => run_cifsiostat(&rest, &mut stdout),
@@ -1940,11 +1696,6 @@ mod tests {
     }
 
     #[test]
-    fn test_personality_iostat() {
-        assert_eq!(detect_personality("iostat"), Personality::Iostat);
-    }
-
-    #[test]
     fn test_personality_mpstat() {
         assert_eq!(detect_personality("mpstat"), Personality::Mpstat);
     }
@@ -1966,7 +1717,12 @@ mod tests {
 
     #[test]
     fn test_personality_with_path_unix() {
-        assert_eq!(detect_personality("/usr/bin/iostat"), Personality::Iostat);
+        // Restored with `sar` after the iostat personality was removed: this
+        // test is about stripping a unix path down to its basename, and used
+        // iostat only as its example. Deleting it with the personality would
+        // have left `test_personality_with_path_windows` as the only coverage
+        // of basename extraction, on the platform this does not run on.
+        assert_eq!(detect_personality("/usr/bin/sar"), Personality::Sar);
     }
 
     #[test]
@@ -1993,11 +1749,6 @@ mod tests {
     #[test]
     fn test_personality_display_sar() {
         assert_eq!(format!("{}", Personality::Sar), "sar");
-    }
-
-    #[test]
-    fn test_personality_display_iostat() {
-        assert_eq!(format!("{}", Personality::Iostat), "iostat");
     }
 
     #[test]
@@ -2287,22 +2038,6 @@ mod tests {
         vec![DiskStat {
             name: "sda".to_string(),
             ..DiskStat::default()
-        }]
-    }
-
-    fn sample_cpu_stats() -> Vec<CpuStat> {
-        vec![CpuStat {
-            name: "cpu".to_string(),
-            user: 50_000,
-            nice: 1_000,
-            system: 20_000,
-            idle: 900_000,
-            iowait: 5_000,
-            irq: 500,
-            softirq: 200,
-            steal: 0,
-            guest: 0,
-            guest_nice: 0,
         }]
     }
 
@@ -2669,55 +2404,6 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_iostat_defaults() {
-        let args: Vec<String> = vec![];
-        let opts = parse_iostat_args(&args);
-        assert!(!opts.cpu_only);
-        assert!(!opts.device_only);
-        assert!(!opts.extended);
-        assert!(opts.unit_kb);
-    }
-
-    #[test]
-    fn test_iostat_cpu_only() {
-        let args: Vec<String> = vec!["-c".to_string()];
-        let opts = parse_iostat_args(&args);
-        assert!(opts.cpu_only);
-    }
-
-    #[test]
-    fn test_iostat_device_only() {
-        let args: Vec<String> = vec!["-d".to_string()];
-        let opts = parse_iostat_args(&args);
-        assert!(opts.device_only);
-    }
-
-    #[test]
-    fn test_iostat_extended() {
-        let args: Vec<String> = vec!["-x".to_string()];
-        let opts = parse_iostat_args(&args);
-        assert!(opts.extended);
-    }
-
-    #[test]
-    fn test_iostat_megabytes() {
-        let args: Vec<String> = vec!["-m".to_string()];
-        let opts = parse_iostat_args(&args);
-        assert!(opts.unit_mb);
-    }
-
-    #[test]
-    fn test_iostat_per_partition() {
-        let args: Vec<String> = vec!["-p".to_string()];
-        let opts = parse_iostat_args(&args);
-        assert!(opts.per_partition);
-    }
-
-    // -----------------------------------------------------------------------
-    // MPSTAT options
-    // -----------------------------------------------------------------------
-
-    #[test]
     fn test_mpstat_defaults() {
         let args: Vec<String> = vec![];
         let opts = parse_mpstat_args(&args);
@@ -2752,6 +2438,13 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
+    fn test_pidstat_threads() {
+        let args: Vec<String> = vec!["-t".to_string()];
+        let opts = parse_pidstat_args(&args);
+        assert!(opts.show_threads);
+    }
+
+    #[test]
     fn test_pidstat_defaults() {
         let args: Vec<String> = vec![];
         let opts = parse_pidstat_args(&args);
@@ -2776,46 +2469,6 @@ mod tests {
         assert!(opts.show_mem);
         assert!(opts.show_io);
     }
-
-    #[test]
-    fn test_pidstat_threads() {
-        let args: Vec<String> = vec!["-t".to_string()];
-        let opts = parse_pidstat_args(&args);
-        assert!(opts.show_threads);
-    }
-
-    // -----------------------------------------------------------------------
-    // is_whole_device
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn test_is_whole_device_sda() {
-        assert!(is_whole_device("sda"));
-    }
-
-    #[test]
-    fn test_is_whole_device_sda1_partition() {
-        assert!(!is_whole_device("sda1"));
-    }
-
-    #[test]
-    fn test_is_whole_device_loop() {
-        assert!(!is_whole_device("loop0"));
-    }
-
-    #[test]
-    fn test_is_whole_device_ram() {
-        assert!(!is_whole_device("ram0"));
-    }
-
-    #[test]
-    fn test_is_whole_device_sdb() {
-        assert!(is_whole_device("sdb"));
-    }
-
-    // -----------------------------------------------------------------------
-    // Output formatters (check no panic)
-    // -----------------------------------------------------------------------
 
     #[test]
     fn test_print_system_header() {
@@ -3002,79 +2655,6 @@ mod tests {
         print_io_transfer_row(&mut buf, "12:00:00 PM", &prev, &curr, 1.0);
         let output = String::from_utf8(buf).unwrap();
         assert!(output.contains("0.00"));
-    }
-
-    #[test]
-    fn test_print_iostat_cpu() {
-        let mut buf = Vec::new();
-        let prev = sample_cpu_stats();
-        let curr = sample_cpu_stats();
-        print_iostat_cpu(&mut buf, &prev, &curr);
-        let output = String::from_utf8(buf).unwrap();
-        assert!(output.contains("avg-cpu"));
-    }
-
-    #[test]
-    fn test_print_iostat_device_header_basic() {
-        let mut buf = Vec::new();
-        print_iostat_device_header(&mut buf, false, "kB");
-        let output = String::from_utf8(buf).unwrap();
-        assert!(output.contains("Device"));
-        assert!(output.contains("tps"));
-    }
-
-    #[test]
-    fn test_print_iostat_device_header_extended() {
-        let mut buf = Vec::new();
-        print_iostat_device_header(&mut buf, true, "kB");
-        let output = String::from_utf8(buf).unwrap();
-        assert!(output.contains("Device"));
-        assert!(output.contains("%util"));
-    }
-
-    #[test]
-    fn test_print_iostat_device_row_basic() {
-        let mut buf = Vec::new();
-        let prev = DiskStat {
-            name: "sda".to_string(),
-            reads_completed: 100,
-            sectors_read: 800,
-            writes_completed: 50,
-            sectors_written: 400,
-            ..DiskStat::default()
-        };
-        let curr = DiskStat {
-            name: "sda".to_string(),
-            reads_completed: 200,
-            sectors_read: 1600,
-            writes_completed: 100,
-            sectors_written: 800,
-            ..DiskStat::default()
-        };
-        print_iostat_device_row(&mut buf, &prev, &curr, 1.0, false, 1024.0);
-        let output = String::from_utf8(buf).unwrap();
-        assert!(output.contains("sda"));
-    }
-
-    #[test]
-    fn test_print_iostat_device_row_extended() {
-        let mut buf = Vec::new();
-        let prev = DiskStat {
-            name: "sda".to_string(),
-            ..DiskStat::default()
-        };
-        let curr = DiskStat {
-            name: "sda".to_string(),
-            reads_completed: 100,
-            sectors_read: 800,
-            writes_completed: 50,
-            sectors_written: 400,
-            io_time_ms: 1000,
-            ..DiskStat::default()
-        };
-        print_iostat_device_row(&mut buf, &prev, &curr, 1.0, true, 1024.0);
-        let output = String::from_utf8(buf).unwrap();
-        assert!(output.contains("sda"));
     }
 
     #[test]
@@ -3290,45 +2870,6 @@ mod tests {
         run_sar(&args, &mut buf);
         let output = String::from_utf8(buf).unwrap();
         assert!(output.contains("%usr"));
-    }
-
-    #[test]
-    fn test_run_iostat_basic() {
-        let mut buf = Vec::new();
-        let args = vec!["1".to_string(), "1".to_string()];
-        run_iostat(&args, &mut buf);
-        let output = String::from_utf8(buf).unwrap();
-        assert!(output.contains("avg-cpu"));
-        assert!(output.contains("Device"));
-    }
-
-    #[test]
-    fn test_run_iostat_cpu_only() {
-        let mut buf = Vec::new();
-        let args = vec!["-c".to_string(), "1".to_string(), "1".to_string()];
-        run_iostat(&args, &mut buf);
-        let output = String::from_utf8(buf).unwrap();
-        assert!(output.contains("avg-cpu"));
-        assert!(!output.contains("Device"));
-    }
-
-    #[test]
-    fn test_run_iostat_device_only() {
-        let mut buf = Vec::new();
-        let args = vec!["-d".to_string(), "1".to_string(), "1".to_string()];
-        run_iostat(&args, &mut buf);
-        let output = String::from_utf8(buf).unwrap();
-        assert!(!output.contains("avg-cpu"));
-        assert!(output.contains("Device"));
-    }
-
-    #[test]
-    fn test_run_iostat_extended() {
-        let mut buf = Vec::new();
-        let args = vec!["-x".to_string(), "1".to_string(), "1".to_string()];
-        run_iostat(&args, &mut buf);
-        let output = String::from_utf8(buf).unwrap();
-        assert!(output.contains("%util"));
     }
 
     #[test]

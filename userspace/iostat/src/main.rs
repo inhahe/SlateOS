@@ -359,22 +359,40 @@ fn compute_basic(
         ),
     };
 
-    let tps = (d_rd_ios + d_wr_ios) as f64 / interval;
+    // `iostat 0` reaches here with interval 0, and dividing by it printed
+    // `inf` in a column of measurements. `compute_extended` has guarded this
+    // since it was written (`if interval_ms > 0.0`); this half never did, so
+    // the same run reported infinite tps beside finite %util.
+    let ops = d_rd_ios.saturating_add(d_wr_ios);
+    let tps = if interval > 0.0 {
+        ops as f64 / interval
+    } else {
+        0.0
+    };
     let read_bytes = d_rd_sectors * current.sector_size;
     let write_bytes = d_wr_sectors * current.sector_size;
 
+    // Same guard for the byte rates, which divide by the same interval.
+    let per_sec = |bytes: u64, scale: f64| {
+        if interval > 0.0 {
+            bytes as f64 / scale / interval
+        } else {
+            0.0
+        }
+    };
+
     let (read_rate, write_rate, read_total, write_total) = match unit {
         DisplayUnit::MegaBytes => (
-            read_bytes as f64 / 1_048_576.0 / interval,
-            write_bytes as f64 / 1_048_576.0 / interval,
+            per_sec(read_bytes, 1_048_576.0),
+            per_sec(write_bytes, 1_048_576.0),
             current.rd_sectors * current.sector_size / 1_048_576,
             current.wr_sectors * current.sector_size / 1_048_576,
         ),
         // KB and Human both use KB for the rate column; Human formatting
         // is applied at display time for totals.
         _ => (
-            read_bytes as f64 / 1024.0 / interval,
-            write_bytes as f64 / 1024.0 / interval,
+            per_sec(read_bytes, 1024.0),
+            per_sec(write_bytes, 1024.0),
             current.rd_sectors * current.sector_size / 1024,
             current.wr_sectors * current.sector_size / 1024,
         ),
@@ -1037,4 +1055,175 @@ fn main() {
     }
 
     run(&config);
+}
+
+#[cfg(test)]
+// A test that unwraps is asserting the call succeeded, and a panic names the
+// line. CLAUDE.md allows these in test modules.
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    fn disk(name: &str, rd_ios: u64, rd_sectors: u64, wr_ios: u64, wr_sectors: u64) -> DiskStats {
+        DiskStats {
+            name: name.to_string(),
+            major: 8,
+            minor: 0,
+            rd_ios,
+            rd_merges: 0,
+            rd_sectors,
+            rd_ticks: 0,
+            wr_ios,
+            wr_merges: 0,
+            wr_sectors,
+            wr_ticks: 0,
+            io_cur: 0,
+            io_ticks: 0,
+            io_aveq: 0,
+            sector_size: 512,
+        }
+    }
+
+    // -- /proc/stat parsing ---------------------------------------------------
+
+    #[test]
+    fn a_cpu_line_parses_into_its_counters() {
+        let got = parse_cpu_line("100 20 30 400 5 0 1 0 0 0").unwrap();
+        assert_eq!(got.user, 100);
+        assert_eq!(got.nice, 20);
+        assert_eq!(got.system, 30);
+        assert_eq!(got.idle, 400);
+        assert_eq!(got.iowait, 5);
+        assert_eq!(got.total(), 556);
+    }
+
+    #[test]
+    fn a_short_cpu_line_is_refused_rather_than_padded() {
+        // A truncated /proc/stat read must not become a machine that was 100%
+        // idle; the caller has a chain of sources and None lets it say so.
+        assert!(parse_cpu_line("1 2 3").is_none());
+        assert!(parse_cpu_line("").is_none());
+    }
+
+    #[test]
+    fn percentages_of_an_empty_interval_do_not_divide_by_zero() {
+        // Two samples taken within the same tick: the delta is all zeros and
+        // so is its total. Built as a real delta rather than by passing a
+        // total that disagrees with the fields -- the caller always passes
+        // `delta.total()`, so a mismatched pair cannot occur and asserting on
+        // one would test a state the program cannot reach. My first version of
+        // this test did exactly that and "failed" against correct code.
+        let same = parse_cpu_line("7 7 7 7 7 7 7 7 7 7").unwrap();
+        let d = same.delta(&same);
+        assert_eq!(d.total(), 0);
+        let p = d.percentages(d.total());
+        assert_eq!(p.user, 0.0, "no time passed, so no percentage is knowable");
+        assert_eq!(p.idle, 0.0);
+        assert!(p.system.is_finite(), "and it must not be NaN either");
+    }
+
+    #[test]
+    fn a_counter_that_went_backwards_saturates_rather_than_wrapping() {
+        // /proc counters reset when a device is re-enumerated. Wrapping would
+        // turn a reset into billions of operations per second.
+        let now = parse_cpu_line("10 10 10 10 10 10 10 10 10 10").unwrap();
+        let before = parse_cpu_line("99 99 99 99 99 99 99 99 99 99").unwrap();
+        let d = now.delta(&before);
+        assert_eq!(d.user, 0);
+        assert_eq!(d.idle, 0);
+    }
+
+    // -- device classification ------------------------------------------------
+
+    #[test]
+    fn partitions_are_told_from_whole_devices() {
+        assert!(is_partition("sda1"));
+        assert!(is_partition("nvme0n1p1"));
+        assert!(!is_partition("sda"));
+        // `loop0` and `dm-0` end in digits and are not partitions of anything.
+        assert!(!is_partition("loop0"));
+        assert!(!is_partition("dm-0"));
+    }
+
+    #[test]
+    fn a_device_with_no_traffic_is_idle() {
+        assert!(disk("sda", 0, 0, 0, 0).is_idle());
+        assert!(!disk("sda", 1, 0, 0, 0).is_idle());
+        assert!(!disk("sda", 0, 0, 1, 0).is_idle());
+    }
+
+    // -- the rate arithmetic --------------------------------------------------
+
+    #[test]
+    fn the_first_report_is_totals_since_boot() {
+        // With no previous sample, iostat reports cumulative counters over the
+        // time since boot -- so the delta is the whole counter.
+        let b = compute_basic(
+            &disk("sda", 100, 200, 50, 100),
+            None,
+            1.0,
+            DisplayUnit::KiloBytes,
+        );
+        assert_eq!(b.tps, 150.0);
+        // 200 sectors * 512 bytes / 1024 = 100 kB
+        assert_eq!(b.read_rate, 100.0);
+        assert_eq!(b.write_rate, 50.0);
+    }
+
+    #[test]
+    fn a_later_report_is_the_delta_over_the_interval() {
+        let prev = disk("sda", 100, 200, 50, 100);
+        let curr = disk("sda", 110, 400, 55, 200);
+        let b = compute_basic(&curr, Some(&prev), 2.0, DisplayUnit::KiloBytes);
+        // 15 operations over 2 seconds
+        assert_eq!(b.tps, 7.5);
+        // 200 sectors * 512 / 1024 = 100 kB over 2 seconds
+        assert_eq!(b.read_rate, 50.0);
+    }
+
+    #[test]
+    fn megabytes_and_kilobytes_differ_by_exactly_1024() {
+        let d = disk("sda", 0, 2048, 0, 0);
+        let kb = compute_basic(&d, None, 1.0, DisplayUnit::KiloBytes);
+        let mb = compute_basic(&d, None, 1.0, DisplayUnit::MegaBytes);
+        assert_eq!(kb.read_rate, 1024.0);
+        assert_eq!(mb.read_rate, 1.0);
+    }
+
+    #[test]
+    fn a_device_counter_reset_does_not_become_a_huge_rate() {
+        // The device was re-enumerated and its counters restarted. Saturating
+        // gives 0; wrapping would report 18 quintillion operations.
+        let prev = disk("sda", 9_000, 9_000, 9_000, 9_000);
+        let curr = disk("sda", 5, 5, 5, 5);
+        let b = compute_basic(&curr, Some(&prev), 1.0, DisplayUnit::KiloBytes);
+        assert_eq!(b.tps, 0.0);
+        assert_eq!(b.read_rate, 0.0);
+    }
+
+    #[test]
+    fn a_zero_interval_does_not_report_infinity() {
+        // `iostat 0` is accepted by the argument parser. Dividing by it gave
+        // `inf`, which prints as "inf" in a column of measurements.
+        // `compute_extended` already guarded this; `compute_basic` did not.
+        let b = compute_basic(
+            &disk("sda", 10, 10, 10, 10),
+            None,
+            0.0,
+            DisplayUnit::KiloBytes,
+        );
+        assert!(b.tps.is_finite(), "tps was {}", b.tps);
+        assert!(b.read_rate.is_finite());
+        assert!(b.write_rate.is_finite());
+    }
+
+    // -- display --------------------------------------------------------------
+
+    #[test]
+    fn human_units_switch_at_the_right_thresholds() {
+        assert_eq!(format_human(0), "0K");
+        assert_eq!(format_human(1023), "1023K");
+        assert_eq!(format_human(1024), "1.0M");
+        assert_eq!(format_human(1_048_576), "1.0G");
+    }
 }

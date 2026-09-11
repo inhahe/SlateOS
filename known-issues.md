@@ -129740,7 +129740,7 @@ be reached, and the two implementations can drift apart with nothing noticing.
 | ~~`userspace/chpasswd`~~ | ~~`passwd`~~ | ~~`userspace/passwd`~~ — **alias removed 2026-09-10** |
 | ~~`userspace/head`~~ | ~~`tail`~~ | ~~coreutils bin~~ — **crate deleted 2026-09-10** |
 | ~~`userspace/pv`~~ | ~~`fuser`~~ | ~~`userspace/fuser`~~ — **alias removed 2026-09-10**, after `-n` was made real in the producer |
-| `userspace/sysstat` | `iostat` | `userspace/iostat` |
+| ~~`userspace/sysstat`~~ | ~~`iostat`~~ | ~~`userspace/iostat`~~ — **alias removed 2026-09-10**; `userspace/iostat` has the features and now has the tests |
 | ~~`userspace/who`~~ | ~~`w`~~ | ~~`userspace/w`~~ — **alias removed 2026-09-10**; `userspace/w` is now `userspace/finger` and `who` owns `w` |
 
 **`chpasswd:passwd` is RESOLVED 2026-09-10** — 404 lines removed, chpasswd is

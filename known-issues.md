@@ -52,6 +52,16 @@ minutes; both were still alive long after the invoking shell was gone, and were
 found with `ps -eo pid,ppid,etime,args` and killed by PID after confirming each
 one's argv and parent.
 
+**Killing the hung child is not enough, and this is the part that cost the most
+time.** The harness *shell* survives too, and on losing its child it simply
+advances to the next case — which for this subject is the next `getline`, which
+also hangs. Twenty minutes after the first cleanup both `awk-diff.sh` shells
+were still alive at 54 and 44 minutes, sitting on a new hang. A first sweep
+missed them because it grepped for the exact argv of the *previous* hang
+(`getline;`) and the new one reads `getline x`. **Kill the harness shell, not
+the case** — and grep for the harness path, which does not change, rather than
+for the case, which does.
+
 **Why `run-timeout.py` does not cover it, which is the part worth knowing.**
 That runner is the tree's answer to exactly this, and `CLAUDE.md` says to use it
 for anything that might hang. It works by putting the child in a Windows **Job

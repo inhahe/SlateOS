@@ -78,3 +78,57 @@ These subsystems are on the hot path for virtually every workload. Naive impleme
   see `reference-implementations.md` for which sources to read per subsystem
   and how to cite them. This is not optional; it is the primary mitigation
   against writing correct-but-naive code.
+
+---
+
+## The 10% rule needs a noise floor, and under emulation it does not have one
+
+Rule 3 above says to investigate a regression over 10%. That is the right rule and
+it **cannot be applied to a QEMU TCG measurement**, because the run-to-run spread of
+an unchanged benchmark is several times larger than 10%.
+
+Measured 2026-09-11 over `bench/history.jsonl` — 144 recorded runs, restricted to
+rows whose `run_verdict` is `clean`, grouped by `accel`, across all 86 benchmarks
+with at least 4 samples in a group. The figure is each benchmark's worst sample
+divided by its own median:
+
+| `accel` | clean runs | median benchmark | 90th pct | 99th pct |
+|---|---|---|---|---|
+| `Hyper-V/WHPX` | 8 | **1.03×** | 1.23× | 1.53× |
+| `QEMU TCG` | 9 | 1.29× | 2.13× | 2.78× |
+| (unrecorded, TCG-era) | 36 | 1.58× | 2.64× | 3.33× |
+
+### What to do with that
+
+* **Under WHPX, the 10% rule is sound as written.** The median benchmark moves 3%
+  between clean runs, so a 10% move is signal.
+* **Under TCG, treat anything below ~2× as unmeasured, not as unchanged.** A 40%
+  "regression" on a single TCG run is the ordinary behaviour of half the suite. Do
+  not investigate it, and — more important — do not take a 40% *improvement* as
+  evidence that an optimisation worked.
+* **A single run is never a measurement under TCG.** If you need a TCG number,
+  compare medians of several clean runs, and say how many.
+* **Check `run_verdict` before reading any number.** The figures above are for
+  `clean` rows only; on `contaminated` rows the spread is worse, and 55 of the 144
+  recorded runs are contaminated. A contaminated row is not a weak measurement, it
+  is an absent one.
+* **Never compare across `accel`.** The same unchanged code reads ~1716 ns under
+  TCG and ~249 ns under WHPX for `tcp_checksum_v4` — a 7× difference that is purely
+  the accelerator. Two rows with different `accel` are two different experiments.
+
+### Why this is written down rather than left to judgment
+
+The static cycle budgets in `kernel/src/bench.rs` compare against hardware figures
+and report `SCORE … OVER` for 9–21 benchmarks on **every** run. Nothing treats that
+as a failure, and `print_scorecard`'s own comment calls the over-target list
+"reference rather than a verdict" — correctly, as it turns out, but without saying
+that the reason is the noise floor above. Anyone who reads the budgets as a gate,
+as I did on 2026-09-10, concludes that a gate is being skipped rather than that the
+measurement cannot support one. See `known-issues.md` →
+`TD-A-THE-BENCHMARK-BUDGETS-NEVER-FIRE-IN-A-BOOT-TEST`, including both of its
+corrections.
+
+To re-derive these numbers after more runs accumulate: group `bench/history.jsonl`
+by `accel` over `run_verdict == "clean"`, and take the distribution of
+`max(samples) / median(samples)` per benchmark name. Nine clean TCG rows is a thin
+basis for the 99th percentile; the 50th is solid.

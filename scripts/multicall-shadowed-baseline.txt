@@ -38,5 +38,4 @@
 
 cron:at
 cron:crontab
-swapon:free
 useradd:newgrp

@@ -154,7 +154,13 @@ fn format_value(kib: u64, unit: Unit) -> String {
 /// selection (e.g. "1.2 GiB", "384 MiB", "64 KiB").
 fn format_human(kib: u64) -> String {
     let bytes = kib as f64 * 1024.0;
-    if bytes >= 1024.0 * 1024.0 * 1024.0 {
+    // The TiB tier exists because without it a 2 TiB machine reported
+    // "2048.0 GiB" -- arithmetically right and not what "human readable"
+    // means. Noticed while deleting `swapon`'s unreachable second `free`,
+    // whose own formatter did carry this tier.
+    if bytes >= 1024.0 * 1024.0 * 1024.0 * 1024.0 {
+        format!("{:.1} TiB", bytes / (1024.0 * 1024.0 * 1024.0 * 1024.0))
+    } else if bytes >= 1024.0 * 1024.0 * 1024.0 {
         format!("{:.1} GiB", bytes / (1024.0 * 1024.0 * 1024.0))
     } else if bytes >= 1024.0 * 1024.0 {
         format!("{:.1} MiB", bytes / (1024.0 * 1024.0))
@@ -684,6 +690,16 @@ mod tests {
     fn test_format_value_gib() {
         // 1_048_576 KiB = 1 GiB.
         assert_eq!(format_value(1_048_576, Unit::Gib), "1");
+    }
+
+    #[test]
+    fn test_format_human_tib() {
+        // 1 TiB in KiB.
+        let s = format_human(1024 * 1024 * 1024);
+        assert!(s.contains("TiB"), "expected TiB in '{s}'");
+        // ...and the tier below it still ends at GiB rather than spilling over.
+        let just_under = format_human(1024 * 1024 * 1024 - 1);
+        assert!(just_under.contains("GiB"), "expected GiB in '{just_under}'");
     }
 
     #[test]

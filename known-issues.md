@@ -451,6 +451,29 @@ with `id`'s output distinguishing "this uid has no account" from "the account
 database could not be read" -- the second deserves a diagnostic on stderr, not
 a silently numeric line.
 
+**The rest of the tree was swept for this shape and is clean.** Ten sites
+collapse an unreadable account or policy file into an empty collection:
+
+| Crate | Verdict |
+|---|---|
+| `doas` | **real defect** -- deleted every `deny :group`. Fixed 2026-09-11. |
+| `mktemp` | this entry: display only, `id`/`whoami`/`groups` print numbers |
+| `getent`, `loginctl`, `fuser` | display, or fail closed -- `loginctl`'s `require_user` exits when the lookup finds nobody |
+| `newgrp` | **already correct, deliberately** |
+
+`newgrp` is worth reading rather than re-deriving. Its `read_gshadow_db`
+carries the reasoning in a doc comment -- "An unreadable file is an empty list,
+and an empty list refuses everyone ... `newgrp` runs setuid root precisely so
+that it *can* read this file; a caller that cannot is not a reason to admit
+anyone" -- and `password_opens` returns `false` both for a group with no entry
+and for one whose password field is empty. Its `/etc/group` read fails the same
+way: nobody is a member, so the password is demanded rather than skipped. The
+rule is extracted from the file read specifically so every branch is reachable
+from a test, with a note that a stub accepting any password once survived there.
+
+So the shape is not on its own a defect. What decides is whether a DECISION or
+a DISPLAY sits above it, and in nine of ten cases here the answer was benign.
+
 ## TD-B-ONE-HUNDRED-AND-FORTY-THREE-DISCARDED-FAILURES-NO-GATE-LOOKS-AT (lane B, 2026-09-11)
 
 **In short:** `check-read-defaults` catches `.unwrap_or_default()` on a call

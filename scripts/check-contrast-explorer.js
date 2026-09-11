@@ -81,6 +81,13 @@ const probe = script + `
   globalThis.__brd = !!b && b.main === '#000000' && b.sec1 === b.acc &&
                      b.ladder.s0 === b.ladder.s1;
 
+  // There must be a worked link example. The palette gives a link and a caption
+  // one colour, so the underline is the only thing telling them apart -- a claim
+  // that cannot be judged if nothing on the page is actually a link.
+  cur = withLadder(PRESETS.brd);
+  render();
+  globalThis.__link = /text-decoration:\s*underline/.test(document.getElementById('fp').innerHTML);
+
   // The plan's role table must be live, not a hardcoded copy that drifts away
   // from the controls -- it is the first thing read on the page.
   cur = withLadder(PRESETS.brd);
@@ -214,5 +221,7 @@ if (!global.__brd) bad++;
               !!pl.live + ')');
   if (!ok) bad++;
 }
+console.log((global.__link ? 'ok    ' : 'FAIL  ') + 'a real link is drawn in the examples');
+if (!global.__link) bad++;
 console.log('populated ids: ' + Object.keys(store).filter(k => store[k].innerHTML).join(', '));
 process.exit(bad ? 1 : 0);

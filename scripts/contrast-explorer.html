@@ -183,10 +183,12 @@
             <em>optional theme</em> rather than the default, which lowers the urgency without removing it &mdash;
             switch the two example columns below to compare. Tracked as
             <code>TD-C-THIRTEEN-LIGHT-ACCENTS-STILL-FAIL-ON-CARDS</code>.</li>
-        <li><b><code>subtext0</code> has been given the same value as <code>subtext1</code>.</b> They were 1.10
-            apart in the shipped palette &mdash; one colour by the measure below &mdash; so there was no second
-            grey to keep. But <code>subtext0</code> has <b>1,087</b> uses to <code>subtext1</code>'s <b>161</b>,
-            so if these should differ, that is the one that carries the weight.</li>
+        <li><s><b><code>subtext0</code> has been given the same value as <code>subtext1</code>.</b></s>
+            <b>Settled 2026-09-11 (&sect;831):</b> they share a <em>value</em> but stay two <em>roles</em>. The
+            expensive thing was never the constant, it is the 1,087 places that name <code>subtext0</code> and the
+            161 that name <code>subtext1</code> &mdash; so keeping both names makes splitting them later a
+            one-line change instead of a hunt. The same now holds for the accent, which is what makes the
+            question below cheap to reverse.</li>
         <li><b>A link and a caption are now the same colour.</b> The accent and <code>subtext1</code> hold one
             value, so the only thing separating something you can click from something you can merely read is the
             underline. There is now a worked case to judge it by: in the settings window, <em>&ldquo;Your traffic

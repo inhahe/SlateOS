@@ -64783,6 +64783,20 @@ lint programme above is still worth doing; it is not a substitute for a
 differential, and two of its three crates so far were duplicates that a
 differential then deleted.
 
+**27 -> 26 (2026-09-11): `paste`, which ignores an empty delimiter.**
+`DIFF_PKG=paste bash scripts/paste-diff.sh`:
+
+**coreutils 202 passed, 0 differed. The standalone 144 passed, 58 differed.**
+
+| | cases | defect |
+|---|---|---|
+| **`-d ''` silently becomes TAB** | **14** | an explicitly empty delimiter means *join with nothing* — GNU emits `a1b1`. The standalone falls back to its default and emits `a1	b1`, and appends a trailing TAB where a file has run out (`a3	`). Exit 0 either way. Asking for no separator and getting the default one back is the worst possible answer, because the request was explicit. |
+| `(os error 2)`, and output before the error | 18 | `paste a.txt nosuch.txt`: the standalone prints all of `a.txt` and *then* reports the missing file; GNU opens every operand first and prints nothing. Output already written cannot be taken back, so a failed run leaves a partial file behind. |
+| long-option abbreviation | 13 | `--delim=,` and `--d ,` are `unrecognized option`. |
+| accepts what GNU refuses | 7 | a delimiter list ending in an unescaped backslash (`-d ''`, `-d 'a'`) is `delimiter list ends with an unescaped backslash` in GNU; the standalone accepts it and ignores it. |
+| **refuses non-UTF-8** | 4 | `paste bad.txt` → `stream did not contain valid UTF-8`. Fourth consecutive standalone with this. |
+| message shape | 2 | `option '-d' requires an argument` where GNU says `option requires an argument -- 'd'`. |
+
 **28 -> 27 (2026-09-11): `wc`, which does not align its columns.**
 `DIFF_PKG=wc bash scripts/wc-diff.sh`:
 

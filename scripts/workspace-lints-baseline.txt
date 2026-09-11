@@ -97,7 +97,6 @@ userspace/nproc
 userspace/nslookup
 userspace/ntpd
 userspace/passwd
-userspace/paste
 userspace/patch
 userspace/pgrep
 userspace/ping

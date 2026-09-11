@@ -2069,13 +2069,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "paste"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "patch"
 version = "0.1.0"
 

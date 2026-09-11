@@ -151,7 +151,6 @@ userspace/nslookup/src/main.rs:argv-as-string
 userspace/ntpd/src/main.rs:argv-as-string
 userspace/numactl/src/main.rs:argv-as-string
 userspace/objdump/src/main.rs:argv-as-string
-userspace/paste/src/main.rs:argv-as-string
 userspace/patch/src/main.rs:argv-as-string
 userspace/perf/src/main.rs:argv-as-string
 userspace/pgrep/src/main.rs:argv-as-string

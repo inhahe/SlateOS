@@ -249,15 +249,11 @@ pub fn snapshot(total_ns: u64) -> Snapshot {
 
 #[cfg(feature = "phase-timing")]
 mod sealed {
-    // The initializer below is already a `const { … }` block — exactly the
-    // form `missing_const_for_thread_local` asks for — but the lint fires
-    // anyway on rust-1.95, because it does not recognise the form the macro
-    // emits. Checked with a scalar `Cell<u64> = const { Cell::new(0) }`, which
-    // it also rejects, so this is the lint and not the code. Suppressed at
-    // module level because an `#[allow]` on a macro invocation is ignored.
-    // Same suppression, same reason, in `guitk`'s `signal.rs` and the
-    // compositor's `present/host.rs`.
-    #![allow(clippy::missing_const_for_thread_local)]
+    // `missing_const_for_thread_local` is allowed once in the workspace lint
+    // table, which carries lane B's measurement that it has no true positives on
+    // rust 1.95 -- it fires on initializers that already are const blocks and is
+    // silent on the ones that are not. The local suppression that used to be here
+    // was one of six saying the same thing.
 
     use super::Phase;
     use std::cell::Cell;

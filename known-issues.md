@@ -133935,7 +133935,7 @@ are designed out rather than discovered later:
 |---|---|
 | Different mount, so `resolve_mount` scans to a different entry | a few `starts_with` calls |
 | Separate memfs instance with far fewer children at its root, so `child_ino`'s map lookup is shallower | `O(log n)` on a small *n* either way |
-| The indexer's watch/exclude lists may differ between `/` and `/tmp` | bounded by the measured `index` phase, ~4 µs |
+| The indexer's watch/exclude lists may differ between `/` and `/tmp` | **none — eliminated, see below** |
 | The dcache is global, so `invalidate_negative_prefix` is identical | zero |
 
 ### What is still unknown
@@ -134015,3 +134015,92 @@ release-profile boot test, threshold 100. Its remedy is
 and not mine to clear. Pushed with the hook's own documented `ALLOW_STALE_RELEASE=1`,
 whose stated purpose is "you are about to run the release boot test", recorded here
 rather than used quietly, and the release boot is owed as soon as that gate clears.
+
+## TD-A-A-A-A-SELF-TEST-LEAVES-THE-INDEXER-LIVE-AND-IT-CHANGES-WHAT-THE-BENCHMARKS-MEASURE (lane A, 2026-09-11) — **benchmark cost depends on self-test ordering**
+
+**In short:** a self-test switches the file indexer on and never switches it off, so
+every benchmark that writes a file afterwards also pays for indexing it. Nobody chose
+that. It is not wrong exactly — a real system would have the indexer running — but the
+benchmark numbers depend on which self-test ran first, and nothing says so.
+
+### The mechanism
+
+* `is_live()` is `self.stats.initialized && self.stats.rebuild_count > 0`.
+* `index::init` has exactly one caller in the tree: `kshell.rs:27006`, an interactive
+  command. So on a normal boot the indexer should be dead.
+* But `index::self_test` calls `init(cfg)` and then `rebuild()?` (its Test 5), and
+  `rebuild_count` is incremented at `index.rs:245` and **never reset** — the only
+  `rebuild_count: 0` in the file is the static initialiser.
+* `default_config()` sets `watch_dirs: ["/"]`, and `path_in_subtree` returns `true`
+  unconditionally when the root is `/`: *"Empty prefix, or `dir` was exactly "/": the
+  whole tree."*
+
+So from the moment that self-test runs until the end of the boot, every `Vfs::write_file`
+to any path also runs `index::add_entry`, which resolves the path again via
+`Vfs::metadata`.
+
+### Three things this corrects, two of them mine from earlier today
+
+**1. The `index` phase's 4 115 ns is real work, not lock overhead.** I had reasoned that
+`on_file_changed` early-returns at `!is_watched`, so that phase bounded nothing about
+path resolution — and used that to reject a bound I had placed on `cache_identity`. The
+early return does not happen. The phase is a genuine `Vfs::metadata` plus an index
+insertion, which is why 4 µs was plausible when two lock acquisitions would not have been.
+It also means the `add_entry` single-resolution fix committed today **is** on a measured
+path.
+
+**2. The index is not an A/B confounder at all.** I listed it as *bounded* by the 4 µs
+phase. It is *eliminated*: `/` as a watch root subsumes `/tmp`, so both arms pay exactly
+the same index cost and it cancels in the difference. A better answer than the one I
+wrote, for a reason I had not looked up.
+
+**3. What the tell was.** `ns` measured 5 ns and `access` 23 ns in the same run, so the
+harness resolves single digits. 4 115 ns for what I believed was one uncontended spinlock
+acquire is two to three orders of magnitude off, and I wrote that number down twice
+without noticing the implausibility. The arithmetic was available immediately:
+~10 000 cycles for an operation that should take tens.
+
+### The fix, and why it is not obviously "reset it"
+
+The mechanical fix is for `index::self_test` to restore the prior state, the way
+`sockact.rs` was fixed today with `with_pristine_state`. But that would make the
+benchmarks measure an indexer that is *off*, which is less like a real system, not more.
+The honest options are to leave it live and **say so in the scorecard**, or to set it
+deliberately rather than inheriting it from test ordering. Either is a decision about
+what the write benchmarks are for, so it goes in the queue rather than getting picked
+here — but the current state, where the answer depends on which self-test ran first, is
+not one of the options.
+
+## TD-A-A-A-A-I-FILED-AN-ESCALATION-WHERE-THE-OPERATOR-COULD-NOT-READ-IT (lane A, 2026-09-11) — **caught by a gate, not by me**
+
+**In short:** I needed the operator to decide something, wrote it up carefully, and
+appended it to the end of the file where such questions go. The end of that file is the
+*archive* of already-answered ones. So the request for help was filed among the things
+that no longer need reading.
+
+`check-open-questions` refused the build and said exactly why: *"an OPEN question is
+filed below `# Resolved`, where the body says only answered ones go … The operator reads
+the queue from the top, so a question filed there is not a question that was asked."*
+
+### Why this one is worth an entry
+
+Every other instance of this shape I found today was in someone else's work or in a
+document: a stale commitment naming a retired script, a benchmark series excused by text
+the source no longer reached, a self-test asserting a round trip through one buffer, an
+instrument whose only assertion is `> 0`. This one is the same defect in a *message*, and
+I produced it in the same hour as writing three of those up. Appending to the end of a
+file is the default motion; in a file that is ordered by status, the default motion files
+by position and the position means "done".
+
+The gate existing at all is the reason this cost ten minutes instead of however long the
+operator would have taken to not see it. Worth noting that the gate's message is a model
+of the form: it names the cause, the two other causes it could have been, and the
+consequence in terms of who reads what.
+
+### Disposition
+
+The entry was **removed rather than promoted**. It asked whether to start lane C or
+authorise me to baseline their module; lane C turned up and wired the module properly, so
+the question was answered by events and not by the operator. Moving a dead question into
+the live queue would spend the operator's attention on a decision that no longer exists,
+which is the failure `deferred-questions.md` was created to prevent.

@@ -31,6 +31,52 @@ These subsystems are on the hot path for virtually every workload. Naive impleme
 | **Filesystem read/write** | All I/O | Compare to ext4 on Linux for sequential and random I/O throughput. Target: within 20% of Linux ext4. |
 | **Compositor frame** | Every display refresh | Must composite a full desktop in < 2ms at 4K to not miss 144Hz vsync. |
 
+#### A caveat on the compositor row: the instrument exists and asserts nothing
+
+*Added 2026-09-11 (lane A, from a finding by lane C), because this row names a
+quantified budget that something already measures on every frame and nothing compares
+against.*
+
+**There is an instrument.** `gui/compositor/src/lib.rs:2953` sets
+`last_frame_time_us` from the elapsed frame time, every frame. So the budget is not
+unmeasured.
+
+**The only assertion on it is `> 0`.** At `lib.rs:9766`:
+
+```rust
+assert!(compositor.frame_stats().last_frame_time_us > 0,
+        "the frame took no measurable time, so it did no work");
+```
+
+That is a test that the clock runs. Nothing anywhere compares the number to the 2 ms
+this row names. **That is worse than having no instrument**, and the reason is worth
+stating: a reader grepping for frame timing finds this, concludes the budget is
+covered, and stops looking. An instrument with a vacuous assertion is indistinguishable
+from coverage.
+
+*(A trap for whoever checks next: grepping `assert.*last_frame_time_us` returns nothing,
+because the `assert!(` is on the line above the expression. A single-line grep misses a
+multi-line macro. I briefly concluded the assertion did not exist.)*
+
+**And 2 ms at 4K is a host-hardware figure.** A QEMU run cannot be judged against it at
+all, so a ceiling derived from an emulated run would be meaningless and a ceiling
+derived from nothing would be `> 0` with more characters — a bound that cannot fire,
+which is harder to notice than no bound because it looks like diligence. Any ceiling
+added here must record the measurement it came from, beside it.
+
+**Where a real measurement would have to live**, since this was mis-scoped once
+already: `kernel/src/bench.rs` **cannot** measure it. The kernel is `no_std`, has no
+dependency on `gui/compositor`, and the compositor is its own userspace crate — so the
+suite that feeds `bench/history.jsonl` cannot reach it. Two homes that work, answering
+different questions:
+
+| Home | Answers | Does not answer |
+|---|---|---|
+| host criterion bench in `gui/compositor/benches/` | are we near 2 ms on real hardware | did this commit regress it |
+| ring-3 rung printing to serial, recorded into `history.jsonl` | did this commit regress it | are we near 2 ms |
+
+Tracked as `TD-C-THE-COMPOSITOR-FRAME-BUDGET-HAS-NO-INSTRUMENT` (lane C).
+
 #### A caveat on the read/write row: our write is not ext4's write
 
 *Added 2026-09-11 (lane A), because the row above specifies a comparison that is

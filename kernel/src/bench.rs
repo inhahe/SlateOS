@@ -6571,6 +6571,16 @@ fn bench_vfs_write_breakdown() {
             let _ = core::hint::black_box(Vfs::write_file(TMP_PATH, &data));
         }))
     } else {
+        // Say so. Without this the arm simply does not run, the series is not
+        // recorded, and the log contains nothing about it -- so a /tmp that is
+        // unmounted, read-only or full reads exactly like an A/B that was never
+        // interesting. Every other phase here opens with a SKIP line naming its
+        // reason; this one did not, and absence of a finding is not a clean result.
+        serial_println!(
+            "[bench]   vfs_write_breakdown: SKIP versioning A/B (cannot write {}) \
+             -- the unversioned arm is NOT measured in this run",
+            TMP_PATH,
+        );
         None
     };
 

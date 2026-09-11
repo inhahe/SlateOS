@@ -10,6 +10,7 @@
 //! trends, manage accounts, and get financial summaries.
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
@@ -1232,14 +1233,8 @@ impl FinanceApp {
                 self.palette.green
             };
 
-            cmds.push(RenderCommand::FillRect {
-                x: card_x,
-                y: card_y,
-                width: card_w,
-                height: card_h,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::all(8.0),
-            });
+            self.palette
+                .push_surface(cmds, card_x, card_y, card_w, card_h, 8.0, Surface::Card);
 
             cmds.push(RenderCommand::Text {
                 x: card_x + 8.0,
@@ -1400,14 +1395,8 @@ impl FinanceApp {
         let cw = self.content_w() - 16.0;
 
         // Search bar
-        cmds.push(RenderCommand::FillRect {
-            x: cx,
-            y: cy,
-            width: cw,
-            height: 32.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(6.0),
-        });
+        self.palette
+            .push_surface(cmds, cx, cy, cw, 32.0, 6.0, Surface::Card);
         let search_text = if self.search_query.is_empty() {
             if self.search_active {
                 String::from("|")
@@ -1456,14 +1445,8 @@ impl FinanceApp {
 
         // Column headers
         let list_y = cy + 40.0;
-        cmds.push(RenderCommand::FillRect {
-            x: cx,
-            y: list_y,
-            width: cw,
-            height: 28.0,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(cmds, cx, list_y, cw, 28.0, 0.0, Surface::Card);
         for (hx, label) in [
             (0.0, "Date"),
             (90.0, "Description"),
@@ -1602,14 +1585,8 @@ impl FinanceApp {
                 self.palette.green
             };
 
-            cmds.push(RenderCommand::FillRect {
-                x: cx,
-                y: iy,
-                width: cw,
-                height: item_h,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::all(8.0),
-            });
+            self.palette
+                .push_surface(cmds, cx, iy, cw, item_h, 8.0, Surface::Card);
 
             cmds.push(RenderCommand::Text {
                 x: cx + 12.0,
@@ -1729,14 +1706,8 @@ impl FinanceApp {
             let balance = self.account_balance(account.id);
             let (bal_str, bal_color) = Self::format_currency_colored(balance, &self.palette);
 
-            cmds.push(RenderCommand::FillRect {
-                x: ax,
-                y: ay,
-                width: card_w,
-                height: card_h,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::all(8.0),
-            });
+            self.palette
+                .push_surface(cmds, ax, ay, card_w, card_h, 8.0, Surface::Card);
             cmds.push(RenderCommand::Text {
                 x: ax + 12.0,
                 y: ay + 10.0,
@@ -1812,14 +1783,8 @@ impl FinanceApp {
         for (i, (label, amount, color)) in summaries.iter().enumerate() {
             let sx = cx + i as f32 * (cw / 3.0);
             let sw = cw / 3.0 - 12.0;
-            cmds.push(RenderCommand::FillRect {
-                x: sx,
-                y: cy + 36.0,
-                width: sw,
-                height: 70.0,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::all(8.0),
-            });
+            self.palette
+                .push_surface(cmds, sx, cy + 36.0, sw, 70.0, 8.0, Surface::Card);
             cmds.push(RenderCommand::Text {
                 x: sx + 12.0,
                 y: cy + 46.0,
@@ -1928,14 +1893,15 @@ impl FinanceApp {
 
     fn render_status(&self, cmds: &mut Vec<RenderCommand>) {
         let sy = self.height - Self::STATUS_H;
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: sy,
-            width: self.width,
-            height: Self::STATUS_H,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            cmds,
+            0.0,
+            sy,
+            self.width,
+            Self::STATUS_H,
+            0.0,
+            Surface::Card,
+        );
         cmds.push(RenderCommand::Text {
             x: Self::SIDEBAR_W + 8.0,
             y: sy + 6.0,

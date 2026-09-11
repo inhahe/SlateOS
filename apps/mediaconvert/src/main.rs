@@ -34,6 +34,7 @@
 #![allow(clippy::unreadable_literal)]
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent};
 use guitk::render::RenderTree;
@@ -1865,14 +1866,8 @@ impl MediaConvertApp {
             .profiles
             .get(self.selected_profile_idx)
             .map_or("None", |p| &p.name);
-        cmds.push(RenderCommand::FillRect {
-            x: 180.0,
-            y: 8.0,
-            width: 200.0,
-            height: 24.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
+        self.palette
+            .push_surface(cmds, 180.0, 8.0, 200.0, 24.0, CORNER_RADIUS, Surface::Card);
         cmds.push(RenderCommand::Text {
             x: 188.0,
             y: 14.0,
@@ -1886,14 +1881,8 @@ impl MediaConvertApp {
 
         // Quality preset
         let qual_label = format!("Quality: {}", self.quality_preset.label());
-        cmds.push(RenderCommand::FillRect {
-            x: 392.0,
-            y: 8.0,
-            width: 120.0,
-            height: 24.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
+        self.palette
+            .push_surface(cmds, 392.0, 8.0, 120.0, 24.0, CORNER_RADIUS, Surface::Card);
         cmds.push(RenderCommand::Text {
             x: 400.0,
             y: 14.0,
@@ -2134,14 +2123,8 @@ impl MediaConvertApp {
             .profiles
             .get(self.selected_profile_idx)
             .map_or("N/A".to_owned(), |p| p.output_format.label());
-        cmds.push(RenderCommand::FillRect {
-            x: lx,
-            y: cy,
-            width: max_w,
-            height: 24.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
+        self.palette
+            .push_surface(cmds, lx, cy, max_w, 24.0, CORNER_RADIUS, Surface::Card);
         cmds.push(RenderCommand::Text {
             x: lx + 8.0,
             y: cy + 6.0,
@@ -2356,14 +2339,8 @@ impl MediaConvertApp {
         width: f32,
         height: f32,
     ) {
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width,
-            height,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(cmds, x, y, width, height, 0.0, Surface::Card);
 
         let stats = self.queue_stats();
         cmds.push(RenderCommand::Text {
@@ -2384,14 +2361,15 @@ impl MediaConvertApp {
             }
 
             // Job row
-            cmds.push(RenderCommand::FillRect {
-                x: x + 4.0,
-                y: cy,
-                width: width - 8.0,
-                height: ITEM_HEIGHT + 8.0,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::all(CORNER_RADIUS),
-            });
+            self.palette.push_surface(
+                cmds,
+                x + 4.0,
+                cy,
+                width - 8.0,
+                ITEM_HEIGHT + 8.0,
+                CORNER_RADIUS,
+                Surface::Card,
+            );
 
             // Status indicator
             cmds.push(RenderCommand::FillRect {

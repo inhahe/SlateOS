@@ -35,6 +35,7 @@
 #![allow(clippy::fn_params_excessive_bools)]
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};
 use guitk::history::SampleHistory;
@@ -1816,14 +1817,15 @@ impl SysMonitorState {
             line_width: 1.0,
             corner_radii: CornerRadii::all(3.0),
         });
-        tree.push(RenderCommand::FillRect {
-            x: filter_x + 1.0,
-            y: content_y + 2.0,
-            width: filter_w - 2.0,
-            height: filter_h - 2.0,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::all(2.0),
-        });
+        self.palette.push_surface(
+            tree,
+            filter_x + 1.0,
+            content_y + 2.0,
+            filter_w - 2.0,
+            filter_h - 2.0,
+            2.0,
+            Surface::Card,
+        );
 
         let filter_display = if self.filter_text.is_empty() {
             "Filter (Ctrl+F)"
@@ -2664,14 +2666,8 @@ impl SysMonitorState {
         });
 
         // Background
-        tree.push(RenderCommand::FillRect {
-            x: menu.x,
-            y: menu.y,
-            width: menu_w,
-            height: menu_h,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        self.palette
+            .push_surface(tree, menu.x, menu.y, menu_w, menu_h, 4.0, Surface::Panel);
         tree.push(RenderCommand::StrokeRect {
             x: menu.x,
             y: menu.y,
@@ -2686,14 +2682,15 @@ impl SysMonitorState {
             let iy = menu.y + i as f32 * item_h;
 
             if menu.hover_index == Some(i) {
-                tree.push(RenderCommand::FillRect {
-                    x: menu.x + 2.0,
-                    y: iy,
-                    width: menu_w - 4.0,
-                    height: item_h,
-                    color: self.palette.surface1,
-                    corner_radii: CornerRadii::all(2.0),
-                });
+                self.palette.push_surface(
+                    tree,
+                    menu.x + 2.0,
+                    iy,
+                    menu_w - 4.0,
+                    item_h,
+                    2.0,
+                    Surface::Selected,
+                );
             }
 
             let text_color = if *action == ContextAction::Kill {
@@ -2720,14 +2717,8 @@ impl SysMonitorState {
 
     /// Render a card (rounded rect with dark background + border).
     fn render_card(&self, tree: &mut RenderTree, x: f32, y: f32, w: f32, h: f32) {
-        tree.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: w,
-            height: h,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::all(CARD_RADIUS),
-        });
+        self.palette
+            .push_surface(tree, x, y, w, h, CARD_RADIUS, Surface::Card);
         tree.push(RenderCommand::StrokeRect {
             x,
             y,
@@ -4122,11 +4113,18 @@ mod tests {
             let card = tree
                 .commands
                 .iter()
-                .find_map(|c| match c {
-                    RenderCommand::FillRect {
-                        y, height, color, ..
-                    } if (*y - card_top).abs() < 0.5 && *color == pal.mantle => Some(*height),
-                    _ => None,
+                // Through `logical_rect`: the card is a `mantle` fill under the
+                // Cards theme and a `border` outline under Borders, and the
+                // outline reports a rectangle a pixel shorter than the one it
+                // was asked for -- which is the height being measured here.
+                .find_map(|c| {
+                    let (_, y, _, height) = appearance::logical_rect(c)?;
+                    let paints_a_card = match c {
+                        RenderCommand::FillRect { color, .. } => *color == pal.mantle,
+                        RenderCommand::StrokeRect { color, .. } => *color == pal.border,
+                        _ => false,
+                    };
+                    (paints_a_card && (y - card_top).abs() < 0.5).then_some(height)
                 })
                 .expect("the alert card");
             let content = ALERT_ROW_HEIGHT.mul_add(rows as f32, ALERT_PANEL_HEADER);

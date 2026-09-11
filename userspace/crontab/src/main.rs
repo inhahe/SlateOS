@@ -33,7 +33,7 @@
 
 use std::env;
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process;
 
@@ -495,7 +495,24 @@ fn cmd_edit(username: &str) -> Result<(), Error> {
 }
 
 /// `crontab -r` — remove the crontab.
-fn cmd_remove(username: &str) -> Result<(), Error> {
+/// `crontab -r` -- delete a user's crontab, asking first when `-i` was given.
+///
+/// THE PROMPT GOES TO STDERR AND THE ANSWER IS READ FROM STDIN. A `-i` whose
+/// question nobody can see is worse than no `-i` at all: the command would
+/// appear to hang. Anything other than a leading `y` or `Y` cancels, which is
+/// what Debian's crontab does -- including end-of-input, so a `-i` run with
+/// stdin closed cancels rather than deleting.
+fn cmd_remove(username: &str, interactive: bool) -> Result<(), Error> {
+    if interactive {
+        eprint!("crontab: really delete {username}'s crontab? (y/n) ");
+        let _ = io::stderr().flush();
+        let mut answer = String::new();
+        let read = io::stdin().lock().read_line(&mut answer);
+        if read.is_err() || !answer.trim_start().starts_with(['y', 'Y']) {
+            eprintln!("crontab: {username}'s crontab was not deleted");
+            return Ok(());
+        }
+    }
     let path = crontab_path(username);
     match fs::remove_file(&path) {
         Ok(()) => {
@@ -610,6 +627,7 @@ fn print_usage() {
     eprintln!("  crontab -l                 List current user's crontab");
     eprintln!("  crontab -e                 Edit crontab ($EDITOR)");
     eprintln!("  crontab -r                 Remove current user's crontab");
+    eprintln!("  crontab -r -i              ...asking for confirmation first");
     eprintln!("  crontab -u <user> -l       List another user's crontab (root only)");
     eprintln!("  crontab -u <user> -e       Edit another user's crontab (root only)");
     eprintln!("  crontab -u <user> -r       Remove another user's crontab (root only)");
@@ -660,6 +678,12 @@ struct Args {
     /// would operate on the directory itself. An Option makes the next reader
     /// handle the case the comment used to handle.
     username: Option<String>,
+    /// `-i`: confirm before `-r` removes anything.
+    ///
+    /// Only `-r` reads it. Debian's crontab accepts `-i` alongside any action
+    /// and ignores it elsewhere, so this does too rather than refusing a
+    /// combination the tool it replaces tolerates.
+    interactive: bool,
     /// Whether -u was explicitly provided (requires root).
     explicit_user: bool,
     /// The action to perform.
@@ -686,12 +710,14 @@ fn parse_args() -> Result<Args, Error> {
             // they are.
             username: current_username(),
             explicit_user: false,
+            interactive: false,
             action: Action::Help,
         });
     }
 
     let mut username: Option<String> = None;
     let mut action: Option<Action> = None;
+    let mut interactive = false;
     let mut i = 1;
 
     while i < argc {
@@ -710,6 +736,10 @@ fn parse_args() -> Result<Args, Error> {
             }
             "-r" | "--remove" => {
                 action = Some(Action::Remove);
+                i += 1;
+            }
+            "-i" | "--interactive" => {
+                interactive = true;
                 i += 1;
             }
             "-u" | "--user" => {
@@ -753,6 +783,7 @@ fn parse_args() -> Result<Args, Error> {
     Ok(Args {
         username: Some(username),
         explicit_user,
+        interactive,
         action,
     })
 }
@@ -778,7 +809,7 @@ fn run() -> Result<(), Error> {
         }
         Action::List => cmd_list(spool_user(&args)?),
         Action::Edit => cmd_edit(spool_user(&args)?),
-        Action::Remove => cmd_remove(spool_user(&args)?),
+        Action::Remove => cmd_remove(spool_user(&args)?, args.interactive),
         Action::Install(ref source) => cmd_install(spool_user(&args)?, source),
         Action::Validate(ref source) => cmd_validate(source),
     }

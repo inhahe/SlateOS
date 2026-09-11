@@ -49,7 +49,8 @@ impl AccessType {
 #[derive(Clone, Debug)]
 struct ProcessMatch {
     pid: u32,
-    uid: u32,
+    /// `None` when the process's owner could not be read.
+    uid: Option<u32>,
     command: String,
     access: AccessType,
     _fd: Option<u32>,
@@ -72,17 +73,34 @@ fn read_proc_comm(pid: u32) -> String {
         .to_string()
 }
 
-fn read_proc_uid(pid: u32) -> u32 {
-    let status = fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default();
+/// The owner of `pid`, or `None` where it could not be read.
+///
+/// # Why `None` and not `0`
+///
+/// Every step of this used to answer `0`, and `uid_to_name(0)` is "root": an
+/// unreadable `/proc/<pid>/status` returned 0, a `Uid:` line that would not
+/// parse returned 0, and a status file with no `Uid:` line at all fell out of
+/// the loop to a bare `0`. So a process this program could not identify was
+/// reported as owned by the SUPERUSER, in a tool whose entire output is "who
+/// is holding this file".
+///
+/// A process exiting between the directory listing and this read is the
+/// ordinary case, not an exotic one, so this is a state the program reaches
+/// on a busy machine rather than a corner.
+///
+/// `userspace/lsof` had the identical defect through
+/// `read_uid(pid).unwrap_or(0)` and was repaired the same day.
+fn read_proc_uid(pid: u32) -> Option<u32> {
+    let status = fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
     for line in status.lines() {
         if let Some(rest) = line.strip_prefix("Uid:") {
             let parts: Vec<&str> = rest.split_whitespace().collect();
-            if let Some(uid_str) = parts.first() {
-                return uid_str.parse().unwrap_or(0);
-            }
+            // A `Uid:` line whose first field is not a number is a malformed
+            // status file, which is not the same as uid 0 either.
+            return parts.first().and_then(|s| s.parse().ok());
         }
     }
-    0
+    None
 }
 
 fn resolve_link(path: &str) -> Option<PathBuf> {
@@ -434,7 +452,13 @@ fn print_fuser_result(result: &FuserResult, verbose: bool) {
             let _ = writeln!(
                 out,
                 " {:>10} {:>6} {:>6} {}",
-                uid_to_name(proc_match.uid),
+                match proc_match.uid {
+                    Some(u) => uid_to_name(u),
+                    // Not "root", and not a blank column either: the reader has
+                    // to be able to tell this apart from a process genuinely
+                    // owned by someone.
+                    None => "?".to_string(),
+                },
                 proc_match.pid,
                 proc_match.access.flag(),
                 proc_match.command

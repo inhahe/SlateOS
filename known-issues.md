@@ -131683,6 +131683,63 @@ like a win from every angle except the one that matters. The allocation removed 
 unchanged control — and this is the opposite: an artifact that would cost real
 precision to silence.)*
 
+### Classifying the ten by accelerator ratio, and a 42× read/write asymmetry
+
+The cheap test established earlier — a cost larger under hardware virtualisation than
+under emulation is the hypervisor, not work — applied to the over-budget set and its
+neighbours. Ratio is TCG median ÷ WHPX median, so **> 1 means WHPX is faster**:
+
+| benchmark | WHPX | TCG | ratio | class |
+|---|---|---|---|---|
+| `io_ring_nop` | 7 | 76 | 10.79× | compute-bound |
+| `vfs_throughput_16k_read` | 3 079 | 26 355 | 8.56× | compute-bound |
+| `vfs_stat_root` | 894 | 3 769 | 4.21× | compute-bound |
+| `vfs_throughput_16k_write` | 128 973 | 486 212 | 3.77× | compute-bound |
+| `isr_latency` | 42 264 | 45 197 | **1.07×** | **hypervisor-bound** |
+| `hpet_read` | 13 476 | 448 | **0.03×** | **hypervisor-bound** |
+
+**`isr_latency` is a third artifact.** At 1.07× it barely moves between the two
+accelerators, which is the signature of a cost the host pays rather than the kernel —
+unsurprising for a measurement of real interrupt delivery. Its 3.5×-over-budget
+verdict is therefore not a kernel finding on either surface available here, and it
+joins `net_arp_lookup` and `net_ns_arp_lookup`. That leaves the "eight real gaps" at
+**five**.
+
+**`vfs_throughput_16k_write` is NOT an artifact**, which was my guess and was wrong.
+At 3.77× it sits beside the 4.2× median, so it is genuine kernel work and worth
+optimising. Recorded because the guess was reasonable — a file write under
+virtualisation *could* be dominated by device emulation — and one ratio settled it in
+a second.
+
+### The asymmetry, which is the real lead
+
+The same function benchmarks both directions on the same 16 KiB file:
+
+| | WHPX | throughput |
+|---|---|---|
+| `vfs_throughput_16k_read` | 3 079 ns | ~5.3 GB/s |
+| `vfs_throughput_16k_write` | 128 973 ns | ~127 MB/s |
+
+**Writes cost 42× reads for identical data on an identical path.** A read at 5.3 GB/s
+is plainly served from memory; a write at 127 MB/s is not. So the write path does
+something per call the read path does not — re-allocating or extending the file,
+journalling, or not caching at all. `Vfs::write_file` is called with the whole 16 KiB
+in one go, so it is not chunking overhead.
+
+That asymmetry is a better starting point than the budget. The budget says 2.6× over
+50 000 ns; the asymmetry says the write path costs 42× the read path for the same
+bytes, which is the kind of gap that usually has one cause rather than a diffuse
+2.6%-here-and-there.
+
+Two incidental defects noticed in the same function and not fixed, since they are
+documentation rather than behaviour:
+
+* Its doc says *"Benchmark VFS sequential write throughput (4 KiB chunks)"* and the
+  code writes 16 KiB **in a single call**. The "(4 KiB chunks)" describes a benchmark
+  this is not.
+* It runs as `vfs_write_16k` and scores as `vfs_throughput_16k_write` — another
+  instance of the documented name-divergence that `MEASUREMENTS` exists to track.
+
 ## TD-A-REQUEST-STATUS-HAS-NO-CHECKED-SHAPE-SO-EVERY-READER-COUNTS-DIFFERENTLY (lane A, 2026-09-11) — **open**
 
 **In short:** the `requests/` dropbox is how the three lanes hand work to each other,

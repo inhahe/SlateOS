@@ -31,6 +31,7 @@
 #![allow(clippy::too_many_arguments)]
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
@@ -2471,14 +2472,8 @@ impl SchedulerUI {
         // whatever `take_top` had left, and it is routinely shorter than one
         // row in a small window.
         let head = Rect::new(area.x, area.y, area.w, ROW_HEIGHT.min(area.h));
-        frame.push(RenderCommand::FillRect {
-            x: head.x,
-            y: head.y,
-            width: head.w,
-            height: head.h,
-            color: self.palette.surface1,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(frame, head.x, head.y, head.w, head.h, 0.0, Surface::Card);
 
         for (label, x) in [
             ("On", COL_ENABLED_X),
@@ -2762,14 +2757,8 @@ impl SchedulerUI {
         // Column headings, as a band of the area rather than a fixed-height
         // rectangle at its top corner. See `render_task_list`.
         let head = Rect::new(area.x, area.y, area.w, ROW_HEIGHT.min(area.h));
-        frame.push(RenderCommand::FillRect {
-            x: head.x,
-            y: head.y,
-            width: head.w,
-            height: head.h,
-            color: self.palette.surface1,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(frame, head.x, head.y, head.w, head.h, 0.0, Surface::Card);
 
         for (label, x) in [
             ("Time", COL_RUN_TIME_X),
@@ -3046,14 +3035,15 @@ impl SchedulerUI {
         let dialog = Rect::new(dx, dy, dialog_w.min(window.w), dialog_h.min(window.h));
 
         // Dialog background.
-        frame.push(RenderCommand::FillRect {
-            x: dialog.x,
-            y: dialog.y,
-            width: dialog.w,
-            height: dialog.h,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
+        self.palette.push_surface(
+            frame,
+            dialog.x,
+            dialog.y,
+            dialog.w,
+            dialog.h,
+            CORNER_RADIUS,
+            Surface::Panel,
+        );
 
         frame.push(RenderCommand::StrokeRect {
             x: dialog.x,
@@ -3293,14 +3283,15 @@ impl SchedulerUI {
         let dialog = Rect::new(dx, dy, dialog_w.min(window.w), dialog_h.min(window.h));
         let cut = |r: Rect| r.intersect(dialog).unwrap_or(Rect::EMPTY);
 
-        frame.push(RenderCommand::FillRect {
-            x: dialog.x,
-            y: dialog.y,
-            width: dialog.w,
-            height: dialog.h,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
+        self.palette.push_surface(
+            frame,
+            dialog.x,
+            dialog.y,
+            dialog.w,
+            dialog.h,
+            CORNER_RADIUS,
+            Surface::Panel,
+        );
 
         frame.push(RenderCommand::StrokeRect {
             x: dialog.x,
@@ -3460,14 +3451,8 @@ impl SchedulerUI {
         if rect.is_empty() {
             return;
         }
-        frame.push(RenderCommand::FillRect {
-            x: rect.x,
-            y: rect.y,
-            width: rect.w,
-            height: rect.h,
-            color: self.palette.surface1,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        self.palette
+            .push_surface(frame, rect.x, rect.y, rect.w, rect.h, 4.0, Surface::Card);
         frame.push(RenderCommand::StrokeRect {
             x: rect.x,
             y: rect.y,

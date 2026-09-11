@@ -21,6 +21,7 @@
 //! Uses the guitk library for UI rendering with Catppuccin Mocha colors.
 
 use appearance::Palette;
+use appearance::Surface;
 #[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]
@@ -2484,14 +2485,8 @@ impl HexEditor {
         ];
 
         for &(label, x) in &buttons {
-            tree.push(RenderCommand::FillRect {
-                x,
-                y: 4.0,
-                width: 44.0,
-                height: 28.0,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            self.palette
+                .push_surface(tree, x, 4.0, 44.0, 28.0, 4.0, Surface::Card);
             tree.push(RenderCommand::Text {
                 x: x + 6.0,
                 y: 10.0,
@@ -2738,23 +2733,25 @@ impl HexEditor {
 
                     // Background highlight.
                     if doc.selection.as_ref().is_some_and(|s| s.contains(offset)) {
-                        tree.push(RenderCommand::FillRect {
-                            x: ax - 1.0,
+                        self.palette.push_surface(
+                            tree,
+                            ax - 1.0,
                             y,
-                            width: char_w + 1.0,
-                            height: LINE_HEIGHT,
-                            color: self.palette.surface1,
-                            corner_radii: CornerRadii::ZERO,
-                        });
+                            char_w + 1.0,
+                            LINE_HEIGHT,
+                            0.0,
+                            Surface::Selected,
+                        );
                     } else if offset == doc.cursor {
-                        tree.push(RenderCommand::FillRect {
-                            x: ax - 1.0,
+                        self.palette.push_surface(
+                            tree,
+                            ax - 1.0,
                             y,
-                            width: char_w + 1.0,
-                            height: LINE_HEIGHT,
-                            color: self.palette.surface0,
-                            corner_radii: CornerRadii::ZERO,
-                        });
+                            char_w + 1.0,
+                            LINE_HEIGHT,
+                            0.0,
+                            Surface::Card,
+                        );
                     }
 
                     let ch = if byte.is_ascii_graphic() || byte == b' ' {
@@ -2799,14 +2796,15 @@ impl HexEditor {
         let panel_height = self.content_height();
 
         // Panel background.
-        tree.push(RenderCommand::FillRect {
-            x: panel_x,
-            y: panel_y,
-            width: INSPECTOR_WIDTH,
-            height: panel_height,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            tree,
+            panel_x,
+            panel_y,
+            INSPECTOR_WIDTH,
+            panel_height,
+            0.0,
+            Surface::Card,
+        );
 
         // Left border.
         tree.push(RenderCommand::Line {
@@ -3134,14 +3132,8 @@ impl HexEditor {
         });
 
         // Background.
-        tree.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: dialog_width,
-            height: dialog_height,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(8.0),
-        });
+        self.palette
+            .push_surface(tree, x, y, dialog_width, dialog_height, 8.0, Surface::Panel);
 
         tree.push(RenderCommand::StrokeRect {
             x,

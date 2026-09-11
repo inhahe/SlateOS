@@ -17,10 +17,6 @@
 # the code that did not use them.
 firejail: env::var("USER")
 firejail: env::var("USERNAME")
-logger: env::var("LOGNAME")
-logger: env::var("USER")
-lp: env::var("USER")
-lp: env::var("USER")  [2]
 mktemp: env::var("LOGNAME")
 mktemp: env::var("USER")
 screen: env::var("USER")

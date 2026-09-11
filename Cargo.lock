@@ -1493,6 +1493,10 @@ checksum = "616ec5685824bcc94416c6d4a7a446eea774a31efd7062c8480ba6fd06d7a6e5"
 [[package]]
 name = "logger"
 version = "0.1.0"
+dependencies = [
+ "authlib",
+ "userdb",
+]
 
 [[package]]
 name = "login"
@@ -1568,6 +1572,10 @@ dependencies = [
 [[package]]
 name = "lp"
 version = "0.1.0"
+dependencies = [
+ "authlib",
+ "userdb",
+]
 
 [[package]]
 name = "lsblk"

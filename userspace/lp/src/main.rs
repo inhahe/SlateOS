@@ -426,9 +426,35 @@ fn parse_job_file(content: &str) -> Option<PrintJob> {
 // Subcommand implementations
 // ---------------------------------------------------------------------------
 
+/// The caller's login name, or `None` if this build cannot determine it.
+///
+/// # Why not `$USER`
+///
+/// Two things were keyed on it, and the second decides what gets DELETED.
+/// `lprm` with no job id cancels "the current user's most recent job" by
+/// scanning the spool for `j.username == username` -- so `USER=alice lprm`
+/// cancelled alice's print job. The first stamps the owner onto a submitted
+/// job, which is what that scan later matches against.
+///
+/// Both fell back to `"root"`, so a caller this build could not identify
+/// submitted work as the superuser and cancelled the superuser's.
+// `#[cfg(not(test))]` to match both consumers: `run_lp` and `run_lprm` are
+// gated that way, so this is genuinely unused in a test build.
+#[cfg(not(test))]
+fn current_username() -> Option<String> {
+    let uid = authlib::identity::caller_uid()?;
+    userdb::UserDb::load(userdb::DEFAULT_PATH)
+        .ok()
+        .and_then(|db| db.find_uid(uid).and_then(userdb::Record::username))
+}
+
 #[cfg(not(test))]
 fn run_lp(cfg: &Config, writer: &mut dyn Write) -> io::Result<i32> {
-    let username = env::var("USER").unwrap_or_else(|_| "root".to_string());
+    let Some(username) = current_username() else {
+        return Err(io::Error::other(
+            "cannot determine who you are, and a print job records its owner",
+        ));
+    };
     let printer = cfg.printer.clone().unwrap_or_else(get_default_printer);
 
     for file_path in &cfg.files {
@@ -606,8 +632,16 @@ fn run_lprm(cfg: &Config, writer: &mut dyn Write) -> io::Result<i32> {
     }
 
     if cfg.job_ids.is_empty() {
-        // Cancel current user's most recent job
-        let username = env::var("USER").unwrap_or_else(|_| "root".to_string());
+        // Cancel the current user's most recent job. Not knowing who that is
+        // must not become "whoever `$USER` says", because this deletes their
+        // job: the match below is `j.username == username`.
+        let Some(username) = current_username() else {
+            writeln!(
+                writer,
+                "lprm: cannot determine who you are, and this cancels the job                  belonging to whoever you are; refusing"
+            )?;
+            return Ok(1);
+        };
         let jobs = read_jobs();
         if let Some(job) = jobs.iter().rev().find(|j| j.username == username) {
             let path = format!("{SPOOL_DIR}/{}.job", job.job_id);

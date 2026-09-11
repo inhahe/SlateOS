@@ -374,7 +374,43 @@ and listing the security-relevant crates by name is an enumeration that misses
 the next crate by construction, which is the defect shape this tree keeps
 finding.
 
-## TD-B-EFIBOOTMGR-MODIFIES-NOTHING (lane B, 2026-09-11)
+## TD-B-EFIBOOTMGR-MODIFIES-NOTHING (lane B, 2026-09-11) -- FIXED 2026-09-11
+
+**FIXED** by deleting the options, which is what the entry named as the proper
+fix. `efibootmgr` is a read-only reporter now: `-v`, `-h`, `-V`. All 32
+spellings of the removed options live in one `REMOVED_OPTIONS` const that both
+the help text and the parser are built from, so the sentence and the behaviour
+cannot drift apart, and re-adding one to the parser without efivarfs writes
+behind it fails a test.
+
+**The part the entry did not anticipate, and it is the important part.**
+Deleting an option from a parser whose fall-through arm was `_ => {}` does not
+refuse it -- it makes it a silent no-op. `efibootmgr -c -L Slate` would have
+printed a boot list and exited 0, which reads as success. That is the same lie
+with the incriminating sentence removed, and it would have been *harder* to
+notice than the fabricated "created Boot0003", because at least that named
+which lie it was telling. Every unrecognised argument is an error now, and a
+removed one gets a message that says it never wrote anything.
+
+**Two more fabrications in the same crate, found while removing the writes.**
+`print_boot_entries` emitted the fixed strings `BootCurrent: 0000` and
+`Timeout: 3 seconds` without either variable ever being read -- so a machine
+with a 10-second timeout, or one that booted from the network and sets no
+`BootCurrent`, was reported wrong in the header of a display whose entire job
+is to be that header. Both are read now, and a machine that does not set one
+gets no line rather than a plausible wrong one. This is the THIRD defect found
+in this crate in one day, and all three are the same shape: a value nobody had
+that got printed anyway.
+
+Also fixed in passing, all the same family: an EFI variable whose value is
+empty is four bytes (attributes only) and the `> 4` test called it absent; a
+label outside the basic plane arrives as a UTF-16 surrogate pair and
+`char::from_u32` per code unit rejected both halves, so such characters
+vanished from boot labels silently; `BootOrder` naming a `Boot####` that does
+not exist is now reported, because the firmware skips it and that is the
+symptom somebody runs this to explain; and `efivar` printed "EFI variables are
+not supported on this system." to *stdout* and exited 0.
+
 
 **In short:** `efibootmgr` accepts seven options that change the machine's boot
 configuration and performs none of them. It prints `efibootmgr: created

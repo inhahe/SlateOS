@@ -132015,6 +132015,63 @@ cost grows with the cache rather than with the work.
 Worth measuring before being changed, which needs either a `pub(crate)` hook or the
 phase instrumentation this breakdown deliberately avoided. Recorded rather than guessed.
 
+### Result: 42× on the journal phase, 29% off every file write
+
+Measured on the seventh unperturbed WHPX run. The evidence is a step change against a
+stable baseline rather than a median delta, which matters because the baseline spans two
+other changes:
+
+| commit | `vfs_write_256` | journal phase |
+|---|---|---|
+| `b770d800f` | 43 064 | — |
+| `1ec6842eb` | 44 290 | — |
+| `d7ebfa9b7` | 43 198 | — |
+| `c1c9352e6` | 44 775 | — |
+| `179ccdeb8` | 44 274 | — |
+| `4f6ca7a1b` | 43 288 | 14 206 |
+| **`96356d747`** | **30 867** | **337** |
+
+Six runs inside 43 064–44 775, then one at 30 867. **−29%**, and the journal phase fell
+**42×**.
+
+The breakdown accounts for the change exactly:
+
+| | before | after |
+|---|---|---|
+| full write | 43 813 | **30 183** |
+| `journal::record` | 14 206 | **337** |
+| `index::on_file_changed` | 3 997 | 4 115 |
+| remainder | 25 970 | 25 896 |
+
+The journal saved 13 869 ns; the total fell 13 630 ns. Those agree within 239 ns — inside
+the ~700 ns this subtraction can resolve — and the two untouched phases moved by 118 ns
+and −74 ns, i.e. not at all. So the change is isolated to the line it touched.
+
+Wider effects, on the same run:
+
+* `vfs_throughput_16k_write`: 129 358 → **115 993**, −10.3%. Still **OVER** its 50 000
+  budget, at 2.3× rather than 2.6×. A 16 KiB write pays the same single HPET read as a
+  256-byte one, so the absolute saving is the same and the proportional one is smaller —
+  which is what a fixed cost looks like.
+* `vfs_read_256` +1.9% and `vfs_stat_root` +5.0%: unchanged. Both are inside the p90
+  run-to-run movement of 5.2%, and neither goes through `journal::record`.
+* `over_target` stays at **9**. The write benchmark was over budget before and remains
+  over; nothing crossed. The earlier 10 → 9 was `task_count`, not this.
+
+### A baseline I nearly reported wrongly, for the third time
+
+My first pass compared the new row against the median of *all six* prior WHPX rows, and
+produced "`dashboard_api_status` −55.9%" — which the journal fix had nothing to do with.
+Three of those six predate `task_count`, so for any benchmark that change affected, the
+median is a blend of two populations and the delta is an artifact of the mix.
+
+This is the third appearance of the same trap today: a 0.0% reading from comparing a
+baseline against a member of itself, a 42× read/write ratio that spanned a cache
+boundary, and now a 56% figure from a baseline straddling an unrelated change. The
+defence that worked all three times was the same — **list the rows and look at them**
+before computing anything over them. `vfs_write_256`'s own history shows six flat runs
+and one step, which no median could have told me as clearly.
+
 ## TD-A-REQUEST-STATUS-HAS-NO-CHECKED-SHAPE-SO-EVERY-READER-COUNTS-DIFFERENTLY (lane A, 2026-09-11) — **open**
 
 **In short:** the `requests/` dropbox is how the three lanes hand work to each other,

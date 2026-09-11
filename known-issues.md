@@ -273,6 +273,48 @@ permanent is how a workaround outlives the thing it was working around.
 caller, which is the second time today that reading one line closely turned up
 something beside it.
 
+## TD-B-IDENTITY-FROM-THE-ENVIRONMENT-A-FAMILY-NOT-AN-INCIDENT (lane B, 2026-09-11)
+
+**In short:** Four times now, a program has taken a value that decides an
+authorization outcome from an environment variable the caller sets. Three were
+found and fixed on 2026-09-11; the fourth was found and fixed weeks earlier and
+is why the other three were looked for at all.
+
+| Program | Value | What it decided | Fixed |
+|---|---|---|---|
+| `sudo` | `$UID` | the caller's uid | earlier — the fix's note is what named the pattern |
+| `sudo` | `$HOSTNAME` | which sudoers rules apply (host half) | 2026-09-11 |
+| `sudo` | `$USER` | which rules apply, whose password, **which credential cache** | 2026-09-11 |
+| `login` | `$TTY` | whether root may log in at all (`/etc/securetty`) | 2026-09-11 |
+
+**Why it is a family and not four accidents.** Every one of them had a correct
+implementation sitting beside it. `sudo`'s `effective_uid` already read
+`getuid(2)` and carried a note saying "The fallback was the caller's to set" —
+and the username and hostname two lines away still read the environment.
+`login`'s `check_securetty` was correct in itself; only its input was wrong.
+The defect is never in the checking code, which is where anybody looks.
+
+**The two that were escalation, not mis-attribution:**
+
+* `sudo` `$USER` keyed the credential cache, so `USER=alice sudo` found alice's
+  live timestamp, **asked for no password**, and ran under alice's rules.
+* `login` `$TTY` defaulted to `"console"` when unset — the name a securetty
+  file is likeliest to list — so the control passed by default, on a terminal
+  nobody had looked at, with the caller doing nothing at all.
+
+**What was checked and is clean:** `su` and `newgrp` read only `$TERM` and
+`$SHELL`, which are legitimately the caller's. Of 22 userspace crates that read
+an identity variable, the rest use `$HOME` for a config path or `$SHELL` for
+which shell to launch — what those variables are for.
+
+**Still open:** `sudo`'s `current_tty` for the audit log, recorded separately
+below. It is the same shape with a bounded consequence.
+
+**No gate covers this.** The checkable rule is narrow enough to state: a value
+read from `env::var` must not reach an authorization decision. Whether that is
+mechanically detectable — the taint runs through several functions — is not
+settled, and is worth an attempt before a fifth instance is written.
+
 ## TD-B-SUDOS-AUDIT-LOG-RECORDS-THE-TTY-THE-CALLER-NAMED (lane B, 2026-09-11)
 
 **In short:** `sudo`'s audit log has a `TTY=` field, and the value comes from

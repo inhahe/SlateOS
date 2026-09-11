@@ -1363,6 +1363,46 @@ pub fn os_from_bytes(b: &[u8]) -> std::ffi::OsString {
     std::ffi::OsString::from(String::from_utf8_lossy(b).into_owned())
 }
 
+/// `path` with `suffix` stuck on the end, joined as BYTES.
+///
+/// This is the one piece of path arithmetic several utilities were each doing
+/// for themselves, and three of them were doing it wrong in the same way:
+///
+/// ```text
+/// format!("{}{}", path.display(), suffix)
+/// ```
+///
+/// `Path::display()` is lossy. Every byte of `path` that is not valid UTF-8
+/// comes back as U+FFFD, so the result is not "the file plus a suffix" — it is
+/// a DIFFERENT NAME, one the caller never had. `install --backup` renamed the
+/// existing file to it, `crontab -e` wrote the user's edits to it, and `pkg`
+/// deployed a replacement file to it and then printed a path that was not
+/// where the file went. On a filesystem whose rule is "any byte except `/` and
+/// NUL", that is not a corner case.
+///
+/// `userspace/coreutils/src/backup.rs` already did this correctly, byte-wise,
+/// for `cp`/`mv`/`ln`. It lives here instead of there because the three crates
+/// above are not coreutils and cannot reach into it — and because a rule that
+/// has to be re-derived per crate is one the next crate will get wrong.
+///
+/// # Examples
+///
+/// ```
+/// use std::path::Path;
+/// use quoting::with_suffix;
+/// assert_eq!(with_suffix(Path::new("/etc/hosts"), b"~"), Path::new("/etc/hosts~"));
+/// // Appended to the whole name, never before an extension.
+/// assert_eq!(with_suffix(Path::new("a.conf"), b".bak"), Path::new("a.conf.bak"));
+/// // An empty suffix is the path itself, not something adjacent to it.
+/// assert_eq!(with_suffix(Path::new("a"), b""), Path::new("a"));
+/// ```
+#[must_use]
+pub fn with_suffix(path: &std::path::Path, suffix: &[u8]) -> std::path::PathBuf {
+    let mut bytes = os_bytes(path.as_os_str()).into_owned();
+    bytes.extend_from_slice(suffix);
+    std::path::PathBuf::from(os_from_bytes(&bytes))
+}
+
 /// [`quotef`] for a path, a `String`, or anything else a call site already
 /// holds — which is the form nearly every caller wants.
 ///

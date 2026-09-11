@@ -651,27 +651,15 @@ fn create_target_dir(path: &Path, mode: u32, verbose: bool) -> Result<(), String
 
 // ── Install file ───────────────────────────────────────────────────
 
-/// `dst` with `suffix` appended, as BYTES.
+/// `dst` with the backup suffix appended.
 ///
-/// This was `format!("{}{}", dst.display(), suffix)`, and `Path::display()` is
-/// lossy: every byte of `dst` that is not valid UTF-8 comes back as U+FFFD. So
-/// on a destination whose name is not UTF-8 the rename below did not target
-/// "the file plus a tilde" — it targeted **a different name**, one the user
-/// never had. The existing file was moved somewhere they did not ask for and
-/// could not easily find, and `install` reported success.
-///
-/// Not a corner case here. This filesystem's rule is "any byte except `/` and
-/// NUL" (`design.txt`), which is the whole reason CLAUDE.md's item 7 exists,
-/// and names arrive from tarballs and foreign filesystems routinely.
-///
-/// `os_bytes`/`os_from_bytes` are the pair for exactly this: exact on the
-/// target, where an `OsStr` *is* its bytes. They are documented as lossy on a
-/// Windows host, which is why the tests below cannot exercise the case this
-/// function exists for — see the note there.
+/// A thin wrapper over [`quoting::with_suffix`], kept so the tests below have
+/// a name to address and so the reason lives somewhere a reader of this file
+/// will meet it: this was `format!("{}{}", dst.display(), suffix)`, and
+/// `display()` is lossy, so on a destination whose name is not UTF-8 the
+/// rename targeted a name the user never had.
 fn backup_name(dst: &Path, suffix: &str) -> PathBuf {
-    let mut bytes = quoting::os_bytes(dst.as_os_str()).into_owned();
-    bytes.extend_from_slice(suffix.as_bytes());
-    PathBuf::from(quoting::os_from_bytes(&bytes))
+    quoting::with_suffix(dst, suffix.as_bytes())
 }
 
 fn install_file(src: &Path, dst: &Path, args: &Args) -> Result<(), String> {

@@ -397,7 +397,10 @@ fn cmd_list(username: &str) -> Result<(), Error> {
 /// user can fix mistakes without losing their edits.
 fn cmd_edit(username: &str) -> Result<(), Error> {
     let path = crontab_path(username);
-    let tmp_path = PathBuf::from(format!("{}{TEMP_SUFFIX}", path.display()));
+    // Byte-wise: `path.display()` is lossy, so on a spool name that is not
+    // UTF-8 this wrote the user's edits to a different file and installed
+    // from it. See `quoting::with_suffix`.
+    let tmp_path = quoting::with_suffix(&path, TEMP_SUFFIX.as_bytes());
 
     // Ensure spool directory exists.
     ensure_spool_dir()?;

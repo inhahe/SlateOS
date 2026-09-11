@@ -830,13 +830,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "expand"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "explorer"
 version = "0.1.0"
 dependencies = [

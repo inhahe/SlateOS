@@ -65135,6 +65135,50 @@ number is different** — not by a constant factor either: 12→16, 24→48,
 gets the sizes wrong and drops a directory has no correct output left; there is
 nothing else in it to be right about.
 
+**13 -> 12 (2026-09-11): `env`, and a harness that measured nothing first.**
+`scripts/env-diff.sh`, written today, 61 cases against a GNU coreutils 9.4 built
+from source.
+
+**coreutils 39 passed, 20 differed. The standalone 18 passed, 41 differed.**
+
+The standalone's largest family is the program's core function: **16 cases where
+both sides exit 0 and the environment printed differs** — plain `env`, `env -0`,
+`env -u ZETA`. Eleven more leak `(os error N)` into diagnostics. Nine are
+options it does not have.
+
+**What the surviving half still gets wrong is the same root cause as `uname`:**
+8 of its 20 are `-S`/`--split-string` (absent entirely) and long-option
+abbreviations (`--unse`, `--ign`, `--nu`), because `env.rs` is one of the
+sixteen coreutils bins that still parse `argv` by hand instead of through
+`coreutils::getopt`. Three more exit 0 where GNU refuses — `env -u` with no
+argument, `env -C target` with no command.
+
+## Two things about the harness, both of which cost a run
+
+**`env` prints its own environment, and its environment contains `PATH`.** Every
+other harness here reaches its subject through `$bindir/ours/NAME` or
+`$bindir/gnu/NAME` — two *different* directories, which are the whole of `PATH`
+for one invocation. For this subject that would hand the two sides different
+`PATH` values by construction, so every case that dumps the environment differs
+on the harness's own scaffolding. "Normalising `PATH` away" would have hidden a
+difference in the variable most worth comparing. Instead there is **one**
+directory whose single entry is re-pointed between runs: identical `PATH`,
+identical `argv[0]`, nothing filtered. *A harness may not put its own identity
+into the subject's input* — visible here only because `env` is the program whose
+job is to show you that input.
+
+**The first run reported "59 passed, 0 differed" having compared nothing.** The
+fixed environment was built by a helper and expanded unquoted, so
+`WITH_SPACE=a b` split in two and the outer `env` read `b` as the command to
+run, with `env <case args>` as its arguments. Every case failed identically on
+both sides, which reads as agreement.
+
+**The only thing in the output that said so was the `xfail` pair.** `--help` and
+`--version` are *required* to differ, because that text is ours; they came back
+`XPASS`. A harness needs at least one case that must fail for the same reason a
+gate needs a refusal probe — without it, "everything agreed" and "nothing ran"
+print the same line.
+
 **14 -> 13 (2026-09-11): `hostname`, on a thin margin and one asymmetry.**
 `scripts/hostname-diff.sh`, written today, 61 cases against net-tools 3.23.
 

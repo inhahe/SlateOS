@@ -64712,6 +64712,41 @@ tsort, uniq, wc, xargs) and `dup-differential.py` only for the eighteen that
 have none. Writing a real harness for those eighteen would be better than
 either.
 
+**34 -> 33 (2026-09-11): `uniq`, and the first decided with the PROPER
+harness.** `DIFF_PKG=uniq bash scripts/uniq-diff.sh` — the tree's own
+`uniq-diff.sh`, 273 cases, `od -An -c`, and a GNU 9.4 reference built from
+source rather than Ubuntu's patched package.
+
+**coreutils 273 passed, 0 differed. The standalone 134 passed, 139 differed** —
+more than half the cases.
+
+`DIFF_PKG` is the knob `diff-wsl.sh` grew for exactly this, after
+`calc-diff.sh` once "reported 95 passed, 105 differed" and three bugs were
+written up against a `bc` nobody intends to ship, because the output-filename
+collision let the wrong binary win. Overriding it points a harness written for
+coreutils at the standalone instead, which is the whole question §1005 asks.
+
+Four representative defects:
+
+| case | GNU | standalone |
+|---|---|---|
+| `-z -f1` | `p
+q  p
+r ` | `p
+q ` — **a record is dropped** |
+| `+2` (traditional skip-chars) | works | treated as a FILENAME: *No such file or directory* |
+| `--group=both` | one blank line between groups | two |
+| `--group=b` | accepts the unambiguous abbreviation | rejects it |
+
+The `-z -f1` row is silent data loss, which is the worst outcome available to a
+filter: fewer records out than in, exit 0, nothing said.
+
+**This is the method working as corrected.** The four pairs before it were
+decided with `dup-differential.py` against Ubuntu's patched coreutils; this one
+used the built GNU reference and far more cases, and reached the same kind of
+verdict much more strongly. For the eighteen names that have a `<name>-diff.sh`,
+`DIFF_PKG=<name>` is the whole procedure.
+
 **Still open — the proper fix.** One name, one program. For each of the
 remaining 41: pick the implementation that is under test and maintained, make
 sure nothing in the other is worth keeping (the standalone ones are older but

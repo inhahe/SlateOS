@@ -133,7 +133,6 @@ userspace/tput
 userspace/traceroute
 userspace/tsort
 userspace/udevd
-userspace/uniq
 userspace/uptime
 userspace/vi
 userspace/vmstat

@@ -36,6 +36,7 @@
 #![allow(clippy::cognitive_complexity)]
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent};
 use guitk::render::{FontFamily, FontWeightHint, RenderCommand, RenderTree, TextOverflow};
@@ -2629,14 +2630,15 @@ impl Multiplexer {
         }
 
         // Background
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: self.window_width,
-            height: self.window_height,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            &mut cmds,
+            0.0,
+            0.0,
+            self.window_width,
+            self.window_height,
+            0.0,
+            Surface::Card,
+        );
 
         // Tab bar
         self.render_tab_bar(&mut cmds, session);
@@ -3041,14 +3043,15 @@ impl Multiplexer {
 
     #[allow(clippy::unused_self)] // kept as method for symmetry with other render_* dispatch
     fn render_detached(&self, cmds: &mut Vec<RenderCommand>) {
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: self.window_width,
-            height: self.window_height,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            cmds,
+            0.0,
+            0.0,
+            self.window_width,
+            self.window_height,
+            0.0,
+            Surface::Card,
+        );
 
         cmds.push(RenderCommand::Text {
             x: self.window_width / 2.0 - 100.0,
@@ -3123,14 +3126,15 @@ impl Multiplexer {
             let is_active = i == self.active_session;
 
             if is_active {
-                cmds.push(RenderCommand::FillRect {
-                    x: x + 4.0,
-                    y: row_y,
-                    width: w - 8.0,
-                    height: 22.0,
-                    color: self.palette.surface0,
-                    corner_radii: CornerRadii::all(4.0),
-                });
+                self.palette.push_surface(
+                    cmds,
+                    x + 4.0,
+                    row_y,
+                    w - 8.0,
+                    22.0,
+                    4.0,
+                    Surface::Selected,
+                );
             }
 
             let label = format!(
@@ -3214,14 +3218,15 @@ impl Multiplexer {
             let is_active = i == session.active_window;
 
             if is_active {
-                cmds.push(RenderCommand::FillRect {
-                    x: x + 4.0,
-                    y: row_y,
-                    width: w - 8.0,
-                    height: 22.0,
-                    color: self.palette.surface0,
-                    corner_radii: CornerRadii::all(4.0),
-                });
+                self.palette.push_surface(
+                    cmds,
+                    x + 4.0,
+                    row_y,
+                    w - 8.0,
+                    22.0,
+                    4.0,
+                    Surface::Selected,
+                );
             }
 
             let pane_count = window.layout.pane_count();

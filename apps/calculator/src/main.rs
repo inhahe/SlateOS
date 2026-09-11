@@ -16,6 +16,7 @@
 //! three that could drift apart.
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
@@ -1385,14 +1386,15 @@ impl CalculatorUi {
         if cell.w <= 0.0 || cell.h <= 0.0 {
             return;
         }
-        frame.push(RenderCommand::FillRect {
-            x: cell.x,
-            y: cell.y,
-            width: cell.w,
-            height: cell.h,
-            color: pal.surface0,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
+        pal.push_surface(
+            frame,
+            cell.x,
+            cell.y,
+            cell.w,
+            cell.h,
+            CORNER_RADIUS,
+            Surface::Card,
+        );
         let (centre_x, _) = cell.centre();
         frame.push(RenderCommand::Text {
             x: text::center_x(label, centre_x, FONT_SIZE_STATUS, FontWeightHint::Regular)
@@ -1413,14 +1415,15 @@ impl CalculatorUi {
         if band.h <= 0.0 {
             return;
         }
-        frame.push(RenderCommand::FillRect {
-            x: band.x,
-            y: band.y,
-            width: band.w,
-            height: band.h,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
+        self.palette.push_surface(
+            frame,
+            band.x,
+            band.y,
+            band.w,
+            band.h,
+            CORNER_RADIUS,
+            Surface::Card,
+        );
         frame.push(RenderCommand::StrokeRect {
             x: band.x,
             y: band.y,
@@ -1527,14 +1530,15 @@ impl CalculatorUi {
         if panel.h <= 0.0 {
             return;
         }
-        frame.push(RenderCommand::FillRect {
-            x: panel.x,
-            y: panel.y,
-            width: panel.w,
-            height: panel.h,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
+        self.palette.push_surface(
+            frame,
+            panel.x,
+            panel.y,
+            panel.w,
+            panel.h,
+            CORNER_RADIUS,
+            Surface::Card,
+        );
         frame.push(RenderCommand::Text {
             x: panel.x + PADDING,
             y: panel.y + 2.0,

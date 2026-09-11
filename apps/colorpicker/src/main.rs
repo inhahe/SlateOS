@@ -13,6 +13,7 @@
 //! running `y` down the window rather than at a fixed coordinate.
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::colorpicker::{self, Hsv};
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEventKind};
@@ -1591,14 +1592,15 @@ impl ColorPickerApp {
 
         // Copy button
         let copy_y = *y + SWATCH_SIZE - 24.0;
-        cmds.push(RenderCommand::FillRect {
-            x: info_x,
-            y: copy_y,
-            width: 60.0,
-            height: 22.0,
-            color: self.palette.surface1,
-            corner_radii: CornerRadii::all(SMALL_RADIUS),
-        });
+        self.palette.push_surface(
+            cmds,
+            info_x,
+            copy_y,
+            60.0,
+            22.0,
+            SMALL_RADIUS,
+            Surface::Card,
+        );
         cmds.hit(Target::CopyButton, Rect::new(info_x, copy_y, 60.0, 22.0));
         cmds.push(RenderCommand::Text {
             x: info_x + 12.0,
@@ -1618,14 +1620,15 @@ impl ColorPickerApp {
         let tab_width = (width - 2.0 * PADDING) / ColorFormat::ALL.len() as f32;
 
         // Tab bar background
-        cmds.push(RenderCommand::FillRect {
-            x: PADDING,
-            y: *y,
-            width: width - 2.0 * PADDING,
-            height: TAB_HEIGHT,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(SMALL_RADIUS),
-        });
+        self.palette.push_surface(
+            cmds,
+            PADDING,
+            *y,
+            width - 2.0 * PADDING,
+            TAB_HEIGHT,
+            SMALL_RADIUS,
+            Surface::Card,
+        );
 
         for (i, fmt) in ColorFormat::ALL.iter().enumerate() {
             let tab_x = PADDING + i as f32 * tab_width;
@@ -1636,14 +1639,15 @@ impl ColorPickerApp {
             );
 
             if is_active {
-                cmds.push(RenderCommand::FillRect {
-                    x: tab_x,
-                    y: *y,
-                    width: tab_width,
-                    height: TAB_HEIGHT,
-                    color: self.palette.surface1,
-                    corner_radii: CornerRadii::all(SMALL_RADIUS),
-                });
+                self.palette.push_surface(
+                    cmds,
+                    tab_x,
+                    *y,
+                    tab_width,
+                    TAB_HEIGHT,
+                    SMALL_RADIUS,
+                    Surface::Selected,
+                );
             }
 
             let text_color = if is_active {
@@ -1675,14 +1679,15 @@ impl ColorPickerApp {
         let field_w = width - 2.0 * PADDING;
 
         // Input field background
-        cmds.push(RenderCommand::FillRect {
-            x: PADDING,
-            y: *y,
-            width: field_w,
-            height: 30.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(SMALL_RADIUS),
-        });
+        self.palette.push_surface(
+            cmds,
+            PADDING,
+            *y,
+            field_w,
+            30.0,
+            SMALL_RADIUS,
+            Surface::Card,
+        );
         cmds.hit(Target::ValueBox, Rect::new(PADDING, *y, field_w, 30.0));
 
         // While typing, the border says whether what is in the box would be
@@ -1787,14 +1792,15 @@ impl ColorPickerApp {
         );
 
         // Track background
-        cmds.push(RenderCommand::FillRect {
-            x: track_x,
-            y: track_y,
-            width: track_w,
-            height: SLIDER_TRACK_HEIGHT,
-            color: pal.surface0,
-            corner_radii: CornerRadii::all(SLIDER_TRACK_HEIGHT / 2.0),
-        });
+        pal.push_surface(
+            cmds,
+            track_x,
+            track_y,
+            track_w,
+            SLIDER_TRACK_HEIGHT,
+            SLIDER_TRACK_HEIGHT / 2.0,
+            Surface::ControlTrack,
+        );
 
         // Filled portion
         let fill_frac = if max_val > 0.0 { value / max_val } else { 0.0 };
@@ -2026,14 +2032,15 @@ impl ColorPickerApp {
         let level = wcag_level(ratio);
 
         // Panel background
-        cmds.push(RenderCommand::FillRect {
-            x: PADDING,
-            y: *y,
-            width: width - 2.0 * PADDING,
-            height: CONTRAST_PANEL_HEIGHT,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(SMALL_RADIUS),
-        });
+        self.palette.push_surface(
+            cmds,
+            PADDING,
+            *y,
+            width - 2.0 * PADDING,
+            CONTRAST_PANEL_HEIGHT,
+            SMALL_RADIUS,
+            Surface::Card,
+        );
 
         // Foreground swatch
         let sw = 40.0;

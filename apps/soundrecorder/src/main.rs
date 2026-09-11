@@ -8,6 +8,7 @@
 #![allow(dead_code, clippy::too_many_arguments, clippy::vec_init_then_push)]
 
 use appearance::Palette;
+use appearance::Surface;
 #[allow(unused_imports)]
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent};
@@ -484,14 +485,15 @@ impl WaveformDisplay {
         let mut commands = Vec::new();
 
         // Background
-        commands.push(RenderCommand::FillRect {
-            x: self.x,
-            y: self.y,
-            width: self.width,
-            height: self.height,
-            color: pal.mantle,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        pal.push_surface(
+            &mut commands,
+            self.x,
+            self.y,
+            self.width,
+            self.height,
+            4.0,
+            Surface::Card,
+        );
 
         // Center line
         let center_y = self.y + self.height / 2.0;
@@ -628,14 +630,15 @@ impl VuMeter {
         let mut commands = Vec::new();
 
         // Background
-        commands.push(RenderCommand::FillRect {
-            x: self.x,
-            y: self.y,
-            width: self.width,
-            height: self.height,
-            color: pal.mantle,
-            corner_radii: CornerRadii::all(3.0),
-        });
+        pal.push_surface(
+            &mut commands,
+            self.x,
+            self.y,
+            self.width,
+            self.height,
+            3.0,
+            Surface::ControlTrack,
+        );
 
         // Level bar
         let bar_width = self.current_level * (self.width - 4.0);
@@ -1164,14 +1167,15 @@ impl NoiseGate {
 
         // Threshold slider track
         let track_y = y + 18.0;
-        commands.push(RenderCommand::FillRect {
+        pal.push_surface(
+            &mut commands,
             x,
-            y: track_y,
+            track_y,
             width,
-            height: 6.0,
-            color: pal.surface0,
-            corner_radii: CornerRadii::all(3.0),
-        });
+            6.0,
+            3.0,
+            Surface::ControlTrack,
+        );
 
         // Threshold position
         let knob_x = x + self.threshold * width;
@@ -1634,14 +1638,15 @@ impl RecordingHistory {
 
             // Row background
             if is_selected {
-                commands.push(RenderCommand::FillRect {
+                pal.push_surface(
+                    &mut commands,
                     x,
-                    y: ey,
+                    ey,
                     width,
-                    height: row_height - 2.0,
-                    color: pal.surface0,
-                    corner_radii: CornerRadii::all(4.0),
-                });
+                    row_height - 2.0,
+                    4.0,
+                    Surface::Selected,
+                );
             }
 
             // Filename
@@ -1970,14 +1975,15 @@ impl SoundRecorderApp {
         });
 
         // Title bar
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: self.window_width,
-            height: 40.0,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            &mut cmds,
+            0.0,
+            0.0,
+            self.window_width,
+            40.0,
+            0.0,
+            Surface::Card,
+        );
         cmds.push(RenderCommand::Text {
             x: 16.0,
             y: 10.0,

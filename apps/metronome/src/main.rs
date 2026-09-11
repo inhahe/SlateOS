@@ -25,6 +25,7 @@
 #![allow(clippy::fn_params_excessive_bools)]
 
 use appearance::Palette;
+use appearance::Surface;
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -598,14 +599,8 @@ impl MetronomeApp {
         });
 
         // BPM display
-        cmds.push(RenderCommand::FillRect {
-            x: 30.0,
-            y: 55.0,
-            width: 250.0,
-            height: 90.0,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::all(12.0),
-        });
+        self.palette
+            .push_surface(cmds, 30.0, 55.0, 250.0, 90.0, 12.0, Surface::Card);
         cmds.push(RenderCommand::Text {
             x: 60.0,
             y: 65.0,
@@ -753,14 +748,8 @@ impl MetronomeApp {
 
         // Practice mode indicator
         if self.practice_mode {
-            cmds.push(RenderCommand::FillRect {
-                x: 30.0,
-                y: stats_y + 25.0,
-                width: 400.0,
-                height: 30.0,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::all(6.0),
-            });
+            self.palette
+                .push_surface(cmds, 30.0, stats_y + 25.0, 400.0, 30.0, 6.0, Surface::Card);
             cmds.push(RenderCommand::Text {
                 x: 40.0,
                 y: stats_y + 30.0,
@@ -865,14 +854,15 @@ impl MetronomeApp {
         ];
 
         for (i, (text, col)) in settings.iter().enumerate() {
-            cmds.push(RenderCommand::FillRect {
-                x: 30.0,
-                y: 80.0 + i as f32 * 38.0,
-                width: 450.0,
-                height: 32.0,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::all(6.0),
-            });
+            self.palette.push_surface(
+                cmds,
+                30.0,
+                80.0 + i as f32 * 38.0,
+                450.0,
+                32.0,
+                6.0,
+                Surface::Card,
+            );
             cmds.push(RenderCommand::Text {
                 x: 45.0,
                 y: 86.0 + i as f32 * 38.0,

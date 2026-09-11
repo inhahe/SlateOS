@@ -34,6 +34,7 @@
 #![allow(clippy::cognitive_complexity)]
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
@@ -1548,14 +1549,8 @@ impl RenamerApp {
         let mut bx = 220.0;
         for (label, color) in buttons {
             let bw = text::padded_width(label, 10.0, 12.0, FontWeightHint::Regular);
-            cmds.push(RenderCommand::FillRect {
-                x: bx,
-                y: 6.0,
-                width: bw,
-                height: BUTTON_HEIGHT,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            self.palette
+                .push_surface(cmds, bx, 6.0, bw, BUTTON_HEIGHT, 4.0, Surface::Card);
             cmds.push(RenderCommand::Text {
                 x: bx + 10.0,
                 y: 12.0,

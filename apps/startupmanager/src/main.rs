@@ -21,6 +21,7 @@
 //! ```
 
 use appearance::Palette;
+use appearance::Surface;
 use std::collections::BTreeMap;
 use std::process::ExitCode;
 
@@ -2088,14 +2089,15 @@ impl StartupUI {
         if l.header.is_empty() {
             return;
         }
-        frame.push(RenderCommand::FillRect {
-            x: l.header.x,
-            y: l.header.y,
-            width: l.header.w,
-            height: l.header.h,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            frame,
+            l.header.x,
+            l.header.y,
+            l.header.w,
+            l.header.h,
+            0.0,
+            Surface::Card,
+        );
         frame.push(RenderCommand::Text {
             x: PADDING,
             y: l.header.y + ((l.header.h - FONT_SIZE_HEADING) / 2.0).max(0.0),
@@ -2210,14 +2212,15 @@ impl StartupUI {
         if l.search.is_empty() {
             return;
         }
-        frame.push(RenderCommand::FillRect {
-            x: l.search.x,
-            y: l.search.y,
-            width: l.search.w,
-            height: l.search.h,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        self.palette.push_surface(
+            frame,
+            l.search.x,
+            l.search.y,
+            l.search.w,
+            l.search.h,
+            4.0,
+            Surface::Card,
+        );
         if self.search_focused {
             frame.push(RenderCommand::StrokeRect {
                 x: l.search.x,
@@ -2255,14 +2258,15 @@ impl StartupUI {
 
     fn draw_table_header(&self, frame: &mut Frame, l: &Layout) {
         if !l.table_header.is_empty() {
-            frame.push(RenderCommand::FillRect {
-                x: l.table_header.x,
-                y: l.table_header.y,
-                width: l.table_header.w,
-                height: l.table_header.h,
-                color: self.palette.surface1,
-                corner_radii: CornerRadii::ZERO,
-            });
+            self.palette.push_surface(
+                frame,
+                l.table_header.x,
+                l.table_header.y,
+                l.table_header.w,
+                l.table_header.h,
+                0.0,
+                Surface::Card,
+            );
         }
 
         for (rect, col) in l.columns.iter().zip(SortColumn::all()) {
@@ -2428,14 +2432,15 @@ impl StartupUI {
         if l.details.is_empty() {
             return;
         }
-        frame.push(RenderCommand::FillRect {
-            x: l.details.x,
-            y: l.details.y,
-            width: l.details.w,
-            height: l.details.h,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            frame,
+            l.details.x,
+            l.details.y,
+            l.details.w,
+            l.details.h,
+            0.0,
+            Surface::Card,
+        );
         frame.push(RenderCommand::Line {
             x1: 0.0,
             y1: l.details.y,
@@ -2562,14 +2567,15 @@ impl StartupUI {
         if l.status.is_empty() {
             return;
         }
-        frame.push(RenderCommand::FillRect {
-            x: l.status.x,
-            y: l.status.y,
-            width: l.status.w,
-            height: l.status.h,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            frame,
+            l.status.x,
+            l.status.y,
+            l.status.w,
+            l.status.h,
+            0.0,
+            Surface::Card,
+        );
 
         let stats = self.manager.stats();
         let shown = self.filtered_count();
@@ -2628,14 +2634,7 @@ impl StartupUI {
         if rect.is_empty() {
             return;
         }
-        frame.push(RenderCommand::FillRect {
-            x: rect.x,
-            y: rect.y,
-            width: rect.w,
-            height: rect.h,
-            color: pal.surface0,
-            corner_radii: CornerRadii::all(8.0),
-        });
+        pal.push_surface(frame, rect.x, rect.y, rect.w, rect.h, 8.0, Surface::Card);
         frame.push(RenderCommand::StrokeRect {
             x: rect.x,
             y: rect.y,

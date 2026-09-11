@@ -131542,6 +131542,106 @@ What is still needed, and it is small:
 Nothing here is built. What changed is that the question stopped being "is this
 possible" and became three specific small things, each with a stated reason.
 
+### One of the eight localises: `vfs_stat_deep`'s overrun is procfs, not path resolution
+
+Two of the over-budget benchmarks measure path resolution, and comparing them settles
+where the cost is:
+
+| benchmark | path | components | budget | WHPX | vs budget |
+|---|---|---|---|---|---|
+| `vfs_stat_3comp` | regular filesystem | 3 | 2100 (3 × 700) | 2200 | **1.05×** |
+| `vfs_stat_deep` | `/proc/meminfo` | 2 | 1400 (2 × 700) | 6739 | **4.8×** |
+
+A **three**-component path on a regular filesystem lands within 5% of its budget. A
+**two**-component path into procfs is 4.8× over. So the component count is not the
+variable and general path resolution is not the problem — the benchmark's own doc
+comment says what is: resolving `/proc/meminfo` *"traverses the VFS mount table,
+descends into the procfs mount, and does a final filename lookup."*
+
+Per-component arithmetic makes the gap concrete: ~733 ns/component on a regular path
+against the 700 ns target, versus ~2 923 ns/component once procfs is involved —
+4× the cost for the same nominal work.
+
+**So `vfs_stat_deep`'s budget models the wrong thing.** `2 components × 700 ns` is a
+correct derivation for a 2-component path and this is not really a 2-component-path
+benchmark; it is a mount-crossing-into-a-synthetic-filesystem benchmark that happens
+to have two components. The name says so — it is registered as
+`vfs_stat_deep_2comp` — and the "deep" framing is what makes the budget look like a
+per-component question.
+
+Two things follow, and they want different people:
+
+* **The measurement is sound and the gap is real**, just differently located: procfs
+  stat costs about 4× a regular component. Whether that is acceptable for a synthetic
+  filesystem that formats its contents on read is a question for whoever owns procfs
+  performance, with a number to start from rather than a suspicion.
+* **The budget should be restated against what it measures.** Either give it a
+  procfs-aware target with the mount crossing priced in, or add a regular-filesystem
+  2-component benchmark beside it so the comparison that localised this is in the
+  suite rather than in this entry. The second is better: it turns a one-off analysis
+  into a standing control, which is the difference between knowing this today and
+  knowing it after the next change.
+
+Worth noting how close this came to being recorded as something else. "`vfs_stat_deep`
+is 4.8× over budget" invites a reading of path resolution being slow, and
+`vfs_stat_3comp` — sitting four lines away in the same scorecard, on target with *more*
+components — is the only thing that contradicts it. The two numbers are only useful
+together.
+
+### The loop closes: a budget went from failing to passing, and `over_target` moved
+
+`sched::task_count` replaced five `task_list().len()` calls. Measured on the fourth
+unperturbed WHPX run (`c1c9352e6`) against the median of the three before it:
+
+| benchmark | before | after | change | budget | then → now |
+|---|---|---|---|---|---|
+| `dashboard_api_status` | 59 068 | **16 549** | **−72.0%** | 10 000 | 5.91× over → 1.65× over |
+| `dashboard_api_health` | 59 135 | **15 561** | **−73.7%** | 15 000 | 3.94× over → 1.04× over |
+| `dashboard_api_metrics` | 77 623 | **34 831** | **−55.1%** | 55 000 | 1.41× over → **PASS** |
+| `vfs_stat_root` (control) | 893 | 896 | +0.3% | 700 | unchanged |
+
+**`over_target` went 10 → 9.** That is the first time in this entry's history that a
+budget has moved from failing to passing because of a deliberate change — the thing
+the entry opened by saying the budgets had never done.
+
+Three reasons to believe it rather than just like it: the changes are 10–14× the
+measured noise floor (p90 of run-to-run movement is 1.052×, so ~5% is the threshold of
+meaning); `vfs_stat_root` sat still at +0.3%, so this is not a global shift in the
+run; and all three movers are exactly the three endpoints that called
+`task_list().len()`, while the control did not.
+
+### And the prediction made before the change held
+
+The commit that made this change said plainly what it would *not* achieve: that
+`dashboard_api_status` could not meet its 10 µs budget under WHPX whatever happened,
+because `api_status` reads the HPET once and one HPET read costs ~13.5 µs on that
+accelerator — more than the entire budget.
+
+After the change: 16 549 ns measured, of which `hpet_read` is 13 484 ns. **81% of
+what remains is the timer read.** The actual work is now about 3 065 ns against a
+10 000 ns budget — comfortably inside it — and the benchmark still reports OVER,
+because the surface charges 13.5 µs for a clock.
+
+So `dashboard_api_status` has **changed class**. It was compute-bound (6.5× faster
+under WHPX than TCG) and is now timer-dominated, which makes WHPX the wrong surface
+for it and TCG the right one. That is the per-benchmark-surface point from earlier in
+this entry arriving as a concrete instance rather than an argument: a benchmark's
+class is not a fixed property, and optimising the code is one of the things that
+changes it.
+
+The practical consequence is small and specific: measure the two remaining OVER
+endpoints under TCG before concluding anything further about them, since under WHPX
+their budgets are now mostly measuring Hyper-V.
+
+### What the cost actually was
+
+Five callers wanted a count and the only available route built a `Vec<TaskInfo>` —
+one allocation plus roughly 70 bytes copied per task, under the scheduler lock —
+then discarded it. Removing that was worth 55–74% of three endpoints' total cost,
+which says the allocation and copy dominated them. It also shortens the window the
+scheduler lock is held on every procfs and dashboard read, which no benchmark here
+measures and which matters more on a contended machine than the numbers above.
+
 ## TD-A-REQUEST-STATUS-HAS-NO-CHECKED-SHAPE-SO-EVERY-READER-COUNTS-DIFFERENTLY (lane A, 2026-09-11) — **open**
 
 **In short:** the `requests/` dropbox is how the three lanes hand work to each other,

@@ -5383,6 +5383,22 @@ pub struct TaskInfo {
 /// Return a snapshot of all tasks in the scheduler.
 ///
 /// Used by the kernel debug shell to implement the `ps` command.
+/// How many tasks the scheduler knows about.
+///
+/// Exists because five callers wanted exactly this and the only way to get it
+/// was [`task_list`]`().len()`, which takes the same lock and then builds a
+/// `Vec<TaskInfo>` first -- one allocation plus a copy of every task's id,
+/// 32-byte name, state, priority and tick counters, around 70 bytes each --
+/// before the caller discards all of it and keeps a `usize`. Two of those
+/// callers are procfs readers and three are dashboard endpoints, so the waste
+/// was on paths that serve requests.
+///
+/// Holds the lock for a `len()` rather than for a map-and-collect, which also
+/// shortens the window the scheduler is held for on every one of those reads.
+pub fn task_count() -> usize {
+    SCHED.lock().tasks.len()
+}
+
 pub fn task_list() -> alloc::vec::Vec<TaskInfo> {
     let state = SCHED.lock();
     state

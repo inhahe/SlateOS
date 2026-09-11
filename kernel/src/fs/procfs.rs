@@ -15242,7 +15242,7 @@ impl FileSystem for ProcFs {
     }
 
     fn statvfs(&mut self) -> KernelResult<FsInfo> {
-        let task_count = crate::sched::task_list().len();
+        let task_count = crate::sched::task_count();
         Ok(FsInfo {
             fs_type: String::from("procfs"),
             volume_label: String::new(),
@@ -15257,7 +15257,7 @@ impl FileSystem for ProcFs {
     }
 
     fn debug_stats(&self) -> String {
-        let task_count = crate::sched::task_list().len();
+        let task_count = crate::sched::task_count();
         format!(
             "procfs: {} root files, {} task dirs",
             ROOT_FILES.len(),

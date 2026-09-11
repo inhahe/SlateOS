@@ -12,6 +12,8 @@
 use std::env;
 use std::fs;
 use std::io::{self, Write};
+
+use quoting::quoteaf_os;
 use std::process;
 
 const VERSION: &str = "0.1.0";
@@ -77,21 +79,6 @@ fn read_block_dev_info(device: &str) -> BlockDevInfo {
         _removable: removable,
         _rotational: rotational,
         _model,
-    }
-}
-
-fn generate_default_info(device: &str) -> BlockDevInfo {
-    BlockDevInfo {
-        _path: device.to_string(),
-        size_bytes: 256 * 1024 * 1024 * 1024, // 256 GiB
-        _size_sectors: 256 * 1024 * 1024 * 1024 / 512,
-        sector_size: 512,
-        block_size: 4096,
-        read_ahead: 128,
-        read_only: false,
-        _removable: false,
-        _rotational: false,
-        _model: "QEMU HARDDISK".to_string(),
     }
 }
 
@@ -172,11 +159,26 @@ fn cmd_blockdev(args: &[String]) {
 
     let stdout = io::stdout();
     let mut out = stdout.lock();
+    let mut failed = false;
 
     for device in &devices {
         let mut info = read_block_dev_info(device);
+
+        // A DEVICE WHOSE SIZE COULD NOT BE READ IS SKIPPED, not invented.
+        //
+        // This substituted `generate_default_info`: a 256 GiB disk with 512
+        // byte sectors, a 4096 block size and the model "QEMU HARDDISK". So
+        // `blockdev --getsize64 /dev/whatever` printed 274877906944 for a
+        // device that may not exist -- and that number is what scripts feed to
+        // `dd count=` and to partition-offset arithmetic. A fabricated size
+        // larger than the real device is a write past the end of it.
         if info.size_bytes == 0 {
-            info = generate_default_info(device);
+            eprintln!(
+                "blockdev: {}: cannot read the device size from sysfs",
+                quoteaf_os(device)
+            );
+            failed = true;
+            continue;
         }
 
         for op in &operations {
@@ -268,6 +270,14 @@ fn cmd_blockdev(args: &[String]) {
                 device
             );
         }
+    }
+
+    // The flag is READ. A device that could not be measured is a
+    // failure of the whole run, and the exit status is the only part of
+    // it a script sees -- which is the same reason the message above is
+    // a refusal rather than a substituted size.
+    if failed {
+        process::exit(1);
     }
 }
 
@@ -391,20 +401,31 @@ fn main() {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_generate_default_info() {
-        let info = generate_default_info("/dev/sda");
-        assert_eq!(info._path, "/dev/sda");
-        assert_eq!(info.sector_size, 512);
-        assert_eq!(info.block_size, 4096);
-        assert_eq!(info.read_ahead, 128);
-        assert!(!info.read_only);
-        assert_eq!(info._model, "QEMU HARDDISK");
+    /// A device to format and convert, for the tests that need one.
+    ///
+    /// THIS WAS `generate_default_info` AND IT WAS IN THE PROGRAM. `blockdev`
+    /// returned it for any device whose size sysfs would not give up, so
+    /// `--getsize64` answered 274877906944 -- 256 GiB -- for a device that may
+    /// not exist. Five tests below only ever needed a struct to format, which
+    /// is the one honest use it had, so it lives here.
+    fn fixture_info(device: &str) -> BlockDevInfo {
+        BlockDevInfo {
+            _path: device.to_string(),
+            size_bytes: 256 * 1024 * 1024 * 1024,
+            _size_sectors: 256 * 1024 * 1024 * 1024 / 512,
+            sector_size: 512,
+            block_size: 4096,
+            read_ahead: 128,
+            read_only: false,
+            _removable: false,
+            _rotational: false,
+            _model: "TEST DISK".to_string(),
+        }
     }
 
     #[test]
     fn test_default_info_size() {
-        let info = generate_default_info("/dev/sda");
+        let info = fixture_info("/dev/sda");
         assert_eq!(info.size_bytes, 256 * 1024 * 1024 * 1024);
     }
 
@@ -435,7 +456,7 @@ mod tests {
 
     #[test]
     fn test_block_dev_info_clone() {
-        let info = generate_default_info("/dev/sda");
+        let info = fixture_info("/dev/sda");
         let c = info.clone();
         assert_eq!(c._path, "/dev/sda");
         assert_eq!(c.size_bytes, info.size_bytes);
@@ -454,7 +475,7 @@ mod tests {
 
     #[test]
     fn test_default_sector_count() {
-        let info = generate_default_info("/dev/sda");
+        let info = fixture_info("/dev/sda");
         assert_eq!(
             info._size_sectors,
             info.size_bytes / info.sector_size as u64
@@ -463,13 +484,13 @@ mod tests {
 
     #[test]
     fn test_default_not_removable() {
-        let info = generate_default_info("/dev/sda");
+        let info = fixture_info("/dev/sda");
         assert!(!info._removable);
     }
 
     #[test]
     fn test_default_not_rotational() {
-        let info = generate_default_info("/dev/sda");
+        let info = fixture_info("/dev/sda");
         assert!(!info._rotational);
     }
 }

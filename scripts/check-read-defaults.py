@@ -82,7 +82,7 @@ from typing import NamedTuple
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gittree  # noqa: E402
 import rustlex  # noqa: E402
-from rustlex import strip_noise  # noqa: E402
+from rustlex import live_code, strip_noise  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 # Repo-relative and `/`-separated: the only spelling `gittree.Tree` accepts.
@@ -206,82 +206,6 @@ def scan_is_too_thin(scan: Scan) -> bool:
     nothing runs: it looks exactly like a floor that has nothing to say.
     """
     return scan.files < MIN_FILES or scan.reads < MIN_READS
-
-
-def live_code(src: str) -> tuple[str, str]:
-    """`src` with test code removed and nothing else.
-
-    # What this replaced
-
-    `src.split("#[cfg(test)]")[0]` -- "everything before the tests", which is
-    only true when the FIRST such attribute is the test module. A
-    `#[cfg(test)]` on a single helper is ordinary, and everything after it was
-    discarded along with the tests.
-
-    Measured before the fix: **35,706 lines across `userspace/`, 7% of the
-    lane, invisible to this checker.** `fdisk/src/main.rs` was read as 21 lines
-    of 3,818; `coreutils/src/bin/tar.rs` as 592 of 5,635.
-
-    The floors did not catch it because they are aggregate. Losing 7% of the
-    corpus leaves 398 live `read_to_string` calls against a floor of 120, and
-    every file was still opened so the file count never moved. **A floor on the
-    total cannot see a hole in the distribution** -- which is worth remembering
-    before trusting one anywhere else.
-
-    # How it works
-
-    Blank each `#[cfg(test)]` item by matching its braces, then cut at the test
-    module. Blanking preserves length, so match offsets still index the
-    original, which is what lets `survey` show real argument text.
-
-    Brace matching runs over the `strip_noise` output: a brace inside a string
-    or a comment must not close an item early, and this file has been wrong
-    about string boundaries twice already.
-    """
-    masked = strip_noise(src)
-    # Both views are blanked at the same offsets and returned together, so
-    # `survey` does not re-run `strip_noise` on the result. Running it twice
-    # per file doubled the honour-head suite's wall clock past ten minutes,
-    # which is a timeout rather than a slowdown.
-    out = list(src)
-    mout = list(masked)
-    i = 0
-    while True:
-        i = masked.find("#[cfg(test)]", i)
-        if i < 0:
-            break
-        # The test module ends the live region; everything after it goes.
-        rest = masked[i + len("#[cfg(test)]"):]
-        head = rest.lstrip()
-        # Skip any further attributes (`#[allow(...)]` is usual on test mods).
-        while head.startswith("#["):
-            close = head.find("]")
-            if close < 0:
-                break
-            head = head[close + 1:].lstrip()
-        if head.startswith("mod "):
-            return "".join(out[:i]), "".join(mout[:i])
-        # A single item: blank it from the attribute to its closing brace.
-        brace = masked.find("{", i)
-        if brace < 0:
-            return "".join(out[:i]), "".join(mout[:i])
-        depth = 0
-        j = brace
-        while j < len(masked):
-            if masked[j] == "{":
-                depth += 1
-            elif masked[j] == "}":
-                depth -= 1
-                if depth == 0:
-                    j += 1
-                    break
-            j += 1
-        for k in range(i, min(j, len(out))):
-            if out[k] != "\n":
-                out[k] = " "
-                mout[k] = " "
-        i = j
-    return "".join(out), "".join(mout)
 
 
 def survey(tree: gittree.Tree) -> Scan:

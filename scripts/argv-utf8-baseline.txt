@@ -39,7 +39,6 @@ userspace/chown/src/main.rs:argv-as-string
 userspace/chroot/src/main.rs:argv-as-string
 userspace/cmp/src/main.rs:argv-as-string
 userspace/column/src/main.rs:argv-as-string
-userspace/comm/src/main.rs:argv-as-string
 userspace/coredumpctl/src/main.rs:argv-as-string
 userspace/coreutils/src/bin/diff.rs:argv-as-string
 userspace/coreutils/src/bin/logger.rs:argv-as-string

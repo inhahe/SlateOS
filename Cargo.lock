@@ -2986,13 +2986,6 @@ name = "tcpdump"
 version = "0.1.0"
 
 [[package]]
-name = "tee"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "telnet"
 version = "0.1.0"
 dependencies = [

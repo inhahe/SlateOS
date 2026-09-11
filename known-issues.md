@@ -64747,6 +64747,42 @@ used the built GNU reference and far more cases, and reached the same kind of
 verdict much more strongly. For the eighteen names that have a `<name>-diff.sh`,
 `DIFF_PKG=<name>` is the whole procedure.
 
+**33 -> 32 (2026-09-11): `tee`, and the survey was wrong in the dangerous
+direction.** It ranked this pair **"standalone ahead"** — the only such verdict
+tested so far — on the strength of three options only the standalone mentions.
+Behaviour: **coreutils 71 passed 0 differed; the standalone 34 passed 37
+differed.**
+
+That is the failure mode the entry above warns about for the survey's first
+version, still live in the current one: an options count can say the standalone
+is ahead when it is behind on half the cases, and acting on it deletes the
+better implementation.
+
+Of the 37, seventeen are Rust's `io::Error` leaking `(os error 2)` into
+diagnostics where GNU prints only the `strerror` text — the file trees match
+exactly, so those are wording. The rest are real:
+
+| invocation | GNU | standalone |
+|---|---|---|
+| `--output-error=exit-n` | accepts the unambiguous abbreviation and writes the file | refuses, **writes nothing** |
+| `tee --output-error out` | `--output-error`'s argument is OPTIONAL, so `out` is the file — writes it | consumes `out` as the mode, fails, writes nothing |
+| `--output-error=e` | *ambiguous argument* | *invalid* — no ambiguity concept at all |
+
+**The uncomfortable part, and the reason this is worth more than one line.**
+Two ticks earlier I brought `userspace/tee` under the lint policy and added six
+tests to it. One of the sites I repaired is the `--output-error` argument
+handling: I replaced a bound-check-then-index with `let Some(next) =
+args.get(i)`, which made it provably non-panicking — and left it *behaviourally
+wrong*, because GNU's argument there is optional and ours consumes the next
+operand unconditionally. My own tests passed, because I wrote them against the
+behaviour rather than against GNU.
+
+A lint pass proves a program cannot crash. It says nothing about whether the
+program is right, and it is easy to come away feeling otherwise. The 129-crate
+lint programme above is still worth doing; it is not a substitute for a
+differential, and two of its three crates so far were duplicates that a
+differential then deleted.
+
 **Still open — the proper fix.** One name, one program. For each of the
 remaining 41: pick the implementation that is under test and maintained, make
 sure nothing in the other is worth keeping (the standalone ones are older but
@@ -129916,7 +129952,9 @@ indistinguishable from one with nothing to say.
 **The work, when someone does it:** pick a crate, add the two lines, fix what
 it reports. The count may only fall.
 
-**134 -> 129.** `uname` and `tee` were done on 2026-09-11 (the other three came
+**134 -> 129.** `uname` and `tee` were done on 2026-09-11 (`userspace/tee` was
+then deleted the same day as a duplicate -- see the pair log below, and the
+note there about what that says for this programme) (the other three came
 off earlier). Both were small — 2 and 8 non-test warnings — and both turned out
 to have **no tests at all**, which the count had no way to show. So the job is
 not one thing but two: satisfy the lints, and leave behind something that

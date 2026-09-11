@@ -37,6 +37,8 @@
 #      own lint policy.
 #  22. Refuse to publish a script whose self-test is reachable under only
 #      one spelling of its flag.
+#  23. Refuse a program that takes WHO or WHERE the caller is from a value
+#      the caller sets — `$USER`, `$TTY`, `$HOSTNAME` and the rest.
 #
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented; wrong again the moment gate 13 was written, when the
@@ -677,8 +679,17 @@ fi
 # posix/ is in scope as well as userspace/: it implements `gethostname` and
 # friends, so it is where this defect would be most load-bearing.
 # ---------------------------------------------------------------------------
-skip_envid=0
 envid="${repo_root:-.}/scripts/check-env-identity.py"
+skip_envid=0
+# Bypass: ALLOW_ENV_IDENTITY=1 git push origin <branch>
+#
+# Its own variable, like every other gate's, so silencing this one never
+# silences another.
+if [ "${ALLOW_ENV_IDENTITY:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_ENV_IDENTITY=1 set — skipping the identity-from-environment gate." >&2
+    skip_envid=1
+fi
+[ -n "$py" ] || skip_envid=1
 [ -f "$envid" ] || skip_envid=1
 # The baseline is in scope for the same reason read-defaults' is: a pin must be
 # re-verified by the push that carries it.

@@ -132072,6 +132072,28 @@ defence that worked all three times was the same — **list the rows and look at
 before computing anything over them. `vfs_write_256`'s own history shows six flat runs
 and one step, which no median could have told me as clearly.
 
+### Withdrawing one of my own two suggestions: the double `INDEX` lock is not worth fixing
+
+The note above offered two candidates for `index::on_file_changed`'s 4 115 ns. One was
+real: `add_entry` did `Vfs::stat(path)?` **and** `Vfs::metadata(path)`, two full path
+resolutions, when `FileMeta` is a superset of what it took from the `DirEntry` — fixed,
+and it also removed an `.unwrap_or(0)` that turned a metadata failure into a modified
+time of zero.
+
+The other was **not** worth acting on, and the arithmetic says so plainly: `is_live()`
+takes the `INDEX` lock, returns, and then `is_watched()` takes it again. An uncontended
+mutex acquisition here is tens of nanoseconds, so collapsing the two saves on the order
+of **25 ns of 4 115 — 0.6%**. Against that it costs a new predicate, a restructured
+shared helper (`is_watched` has three other callers, including `on_file_renamed`, which
+locks three times), and a diff that reads like an optimisation.
+
+Recorded rather than silently dropped because I wrote the suggestion down, and a
+plausible-sounding one in a known-issues file is an instruction to the next reader. The
+general rule it illustrates: **a redundancy is worth removing in proportion to what it
+costs, and "two of something where one would do" is not by itself a cost.** The
+duplicate *resolve* was ~1–2 µs and worth it; the duplicate *lock* is ~25 ns and is not.
+Both look identical when described as "this happens twice".
+
 ## TD-A-REQUEST-STATUS-HAS-NO-CHECKED-SHAPE-SO-EVERY-READER-COUNTS-DIFFERENTLY (lane A, 2026-09-11) — **open**
 
 **In short:** the `requests/` dropbox is how the three lanes hand work to each other,

@@ -365,11 +365,21 @@ fn make_index_entry(
 pub fn add_entry(path: impl AsRef<Path>) -> KernelResult<()> {
     let path = path.as_ref();
 
-    // Stat the file without holding the lock.
-    let dir_entry = super::Vfs::stat(path)?;
-    let meta_modified = super::Vfs::metadata(path)
-        .map(|m| m.modified_ns)
-        .unwrap_or(0);
+    // One lookup, not two, and without holding the lock.
+    //
+    // This was `Vfs::stat(path)?` followed by `Vfs::metadata(path)`, which is two
+    // full path resolutions of the same path back to back: `FileMeta` is a superset
+    // of what was taken from the `DirEntry` -- it carries `entry_type` and `size`
+    // as well as `modified_ns`. `add_entry` runs on every write to a watched path
+    // (`index::on_file_changed`), measured at 4115 ns of a 30 183 ns write by
+    // `bench_vfs_write_breakdown`, so the duplicate resolve was on a hot path.
+    //
+    // The `?` is also a fix: the old second call ended `.unwrap_or(0)`, so a
+    // metadata failure silently indexed the file with a modified time of zero --
+    // an error becoming a plausible-looking default, which is the shape this tree
+    // has been removing elsewhere. A file whose metadata cannot be read is not a
+    // file modified at the epoch.
+    let meta = super::Vfs::metadata(path)?;
 
     let name = path_filename(path);
     let name_lower = to_ascii_lower(name.as_bytes());
@@ -380,9 +390,9 @@ pub fn add_entry(path: impl AsRef<Path>) -> KernelResult<()> {
         name,
         name_lower,
         extension: extension.clone(),
-        entry_type: dir_entry.entry_type,
-        size: dir_entry.size,
-        modified_ns: meta_modified,
+        entry_type: meta.entry_type,
+        size: meta.size,
+        modified_ns: meta.modified_ns,
     };
 
     let mut idx = INDEX.lock();

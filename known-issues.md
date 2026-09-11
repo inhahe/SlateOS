@@ -64872,6 +64872,23 @@ number is different** — not by a constant factor either: 12→16, 24→48,
 gets the sizes wrong and drops a directory has no correct output left; there is
 nothing else in it to be right about.
 
+**18 -> 17 (2026-09-11): `sed`, which cannot parse a bracket expression.**
+`DIFF_PKG=sed bash scripts/sed-diff.sh`:
+
+**coreutils 449 passed, 0 differed. The standalone 103 passed, 346 differed.**
+
+| | cases | defect |
+|---|---|---|
+| **a delimiter inside `[...]`** | ⊂135 | `sed 's/[/]/:/g'` — the classic way to replace a slash — is `unterminated character class`. A `/` inside a bracket expression is not a delimiter, and getting that wrong breaks every expression that matches a path. `s/[^/]*$/LAST/` fails the same way. |
+| refuses what GNU accepts | 135 | the above, plus `y/ab/XY/`, where the escapes are never decoded so the two halves are measured as 8 against 2 and rejected for unequal length. |
+| **empty-match replacement** | ⊂68 | `s/a*/-/g` on `foo bar` gives `--------` — **the line replaced wholesale** — where GNU interleaves. Identical to the `gsub` defect in the standalone `awk` retired an hour earlier, which is some evidence about where both came from. |
+| **the Nth-match flag** | ⊂68 | `s/o/0/2g` replaces from the *first* match; the `2` means start at the second. |
+| exits 0 where GNU refuses | 51 | `sed 's/a'` — an unterminated `s` command — **runs**, and deletes the `a`. So does a trailing backslash, and `\c` recursive escaping. |
+| wrong exit status | ⊂80 | GNU distinguishes 1 (usage), 2 (cannot read an input), 4 (cannot open a script or `w` target). The standalone answers 1 for all of them, so a caller cannot tell a bad script from a missing file. `2q5` — quit with status 5 — is `expected command`. |
+| **stops at the first missing file** | ⊂10 | `sed s/a/A/ abc.txt nosuch.txt def.txt` prints `abc`'s output and stops; GNU reports the missing file and **still processes `def.txt`**. Operands after a bad one are silently dropped. |
+| `w` unimplemented | ⊂80 | `sed -n w FILE` is `unknown command: 'w'`. |
+| refuses non-UTF-8 | 2 | |
+
 **19 -> 18 (2026-09-11): `awk`, which never finishes.**
 `DIFF_PKG=awk bash scripts/awk-diff.sh`. **coreutils: 171 passed, 0 differed,
 13 differ on purpose.** The standalone's run has no pass count, because it

@@ -110,7 +110,6 @@ userspace/service
 userspace/sha256sum
 userspace/shell
 userspace/shuf
-userspace/sort
 userspace/ss
 userspace/stat
 userspace/strings

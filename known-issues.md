@@ -64780,6 +64780,25 @@ lint programme above is still worth doing; it is not a substitute for a
 differential, and two of its three crates so far were duplicates that a
 differential then deleted.
 
+**20 -> 19 (2026-09-11): `sort`, which truncates on a bad byte and exits 0.**
+`DIFF_PKG=sort bash scripts/sort-diff.sh`:
+
+**coreutils 280 passed, 0 differed. The standalone 113 passed, 167 differed.**
+
+| | cases | defect |
+|---|---|---|
+| **truncates, complains, succeeds** | **9** | `sort bytes.txt`, five lines of which one holds a high byte: GNU sorts all five. The standalone prints **one line**, writes `read error: stream did not contain valid UTF-8` to stderr — and **exits 0**. Partial output with a success status is the worst combination available: `sort < in > out` in a pipeline silently loses four fifths of the data and nothing downstream can tell. The other standalones merely refuse; this one refuses *halfway through* and calls it success. |
+| option unrecognised | 78 | `-i` (ignore nonprinting) and `-g` (general numeric) are whole sort modes, not flags. `-k1,1i` is rejected too — a key with a per-key modifier. |
+| **wrong order, exit 0** | **62** | `sort -n` over `+1 -0 0 01 1 1.0 1.00` gives `-0 0 +1 01 1 1.0 1.00`; GNU gives `+1 -0 0 01 1 1.0 1.00`, because GNU's `-n` does not accept a leading `+` and so ranks it as zero. `sort -nr` is not the reverse of the standalone's own ascending answer either. Putting lines in order is the whole program. |
+| `+1` read as a filename | 5 | the traditional key syntax `sort +1` and `sort +0.1` become `+1: No such file or directory (os error 2)` — printed to stderr while **exiting 0** and emitting an unsorted file. |
+| exits 0 where GNU refuses | 5 | `-t '	'` (`multi-character tab`) and `-k1.0` (`character offset is zero`) are both accepted and acted on. |
+| message shape | 7 | `sort -c a b` reports a disorder in `a` where GNU reports `extra operand 'b' not allowed with -c`; the operand error is the real one. |
+
+**Two families here exit 0 after writing a diagnostic** — the truncation and the
+`+1`-as-filename. That combination deserves its own note: a caller that checks
+the exit status, which is the correct thing to check, is told the run
+succeeded.
+
 **21 -> 20 (2026-09-11): `du`, whose every number is wrong.**
 `DIFF_PKG=du bash scripts/du-diff.sh`:
 

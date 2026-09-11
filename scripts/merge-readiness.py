@@ -56,7 +56,10 @@ from __future__ import annotations
 
 import argparse
 import subprocess
+import json
+import pathlib
 import sys
+import tempfile
 
 # What each lane's own suite speaks for. Deliberately the lane's *write* scope
 # from CLAUDE.md rather than "everything the build touches": the boot test
@@ -127,6 +130,74 @@ def current_lane() -> str:
     return res.stdout.strip().upper()[:1]
 
 
+BOOT_HISTORY = pathlib.Path(__file__).resolve().parent.parent / "bench" / "boot-history.jsonl"
+
+
+def last_green_boot(history=None) -> str | None:
+    """Commit of the most recent PASSING boot recorded against a clean tree.
+
+    `None` means *cannot tell*, and callers must report it as unknown rather than as
+    covered. A `dirty` record is skipped deliberately: a boot run against uncommitted
+    edits does not identify what was tested, so its `commit` is not evidence about that
+    commit.
+    """
+    path = pathlib.Path(history) if history else BOOT_HISTORY
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    best = None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if row.get("dirty"):
+            continue
+        if str(row.get("verdict", "")).lower() not in ("pass", "passed", "ok"):
+            continue
+        commit = row.get("commit")
+        if commit:
+            best = str(commit)
+    return best
+
+
+def boot_coverage_lines() -> list[str]:
+    """Whether the last green boot covers HEAD, as lines to print.
+
+    This is the question the script used to assert an answer to without asking it.
+    """
+    boot = last_green_boot()
+    if not boot:
+        return ["  Whether a suite run covers HEAD: UNKNOWN -- no passing boot is",
+                "  recorded against a clean tree in bench/boot-history.jsonl."]
+    try:
+        head = git("rev-parse", "HEAD").strip()
+        since = [c for c in git("rev-list", f"{boot}..HEAD").splitlines() if c]
+    except RuntimeError:
+        return [f"  Whether the boot at {boot} covers HEAD: UNKNOWN -- git could not",
+                "  compare them (is that commit still present?)."]
+    if not since:
+        return [f"  Your last passing boot ran at {head[:9]}, which is HEAD.",
+                "  It covers exactly what you are about to push."]
+    out = [f"  CAUTION: your last passing boot ran at {boot[:9]}, which is",
+           f"  {len(since)} commit(s) behind HEAD. Those commits are UNTESTED:"]
+    for c in since[:8]:
+        try:
+            subject = git("log", "-1", "--format=%s", c).strip()
+        except RuntimeError:
+            subject = ""
+        out.append(f"      {c[:9]}  {subject[:64]}")
+    if len(since) > 8:
+        out.append(f"      ... and {len(since) - 8} more")
+    out.append("  A merge of origin/main AFTER a green boot is the usual cause, and is")
+    out.append("  exactly the case this tool used to call covered.")
+    return out
+
+
 def report() -> int:
     lane = current_lane()
     if not lane:
@@ -144,9 +215,16 @@ def report() -> int:
 
     if not commits:
         print("merge-readiness: origin/main holds nothing you do not already have.")
-        print("  Your suite run covers exactly what you are about to push.")
+        for line in boot_coverage_lines():
+            print(line)
         return 0
 
+    # Printed in both branches: an unmerged origin/main and a stale boot are separate
+    # reasons a suite run may not cover what is about to be pushed, and either can hold
+    # while the other does not.
+    for line in boot_coverage_lines():
+        print(line)
+    print()
     buckets = classify(paths, lane)
     print(
         f"merge-readiness (lane {lane}): origin/main is {len(commits)} commit(s) "
@@ -280,8 +358,47 @@ def self_test() -> int:
             print(f"        want {want}")
             print(f"        got  {got}")
 
+    # `last_green_boot` -- mostly negative cases on purpose. A caller that receives a
+    # commit treats it as evidence, so every path that is not evidence must return
+    # None rather than the newest commit it happened to see.
+    J = json.dumps
+    boot_cases: list[tuple[str, str | None, str | None]] = [
+        ("a clean passing record is the answer",
+         J({"commit": "aaa111", "verdict": "pass", "dirty": False}), "aaa111"),
+        ("the LAST clean passing record wins, not the first",
+         J({"commit": "aaa111", "verdict": "pass", "dirty": False}) + chr(10) +
+         J({"commit": "bbb222", "verdict": "pass", "dirty": False}), "bbb222"),
+        ("a DIRTY record is not evidence about its commit",
+         J({"commit": "ccc333", "verdict": "pass", "dirty": True}), None),
+        ("a failing record is not evidence",
+         J({"commit": "ddd444", "verdict": "fail", "dirty": False}), None),
+        ("a later dirty record does not override an earlier clean pass",
+         J({"commit": "eee555", "verdict": "pass", "dirty": False}) + chr(10) +
+         J({"commit": "fff666", "verdict": "pass", "dirty": True}), "eee555"),
+        ("a malformed line is skipped, not fatal",
+         "{not json" + chr(10) + J({"commit": "ggg777", "verdict": "pass"}), "ggg777"),
+        ("a record with no commit field yields nothing",
+         J({"verdict": "pass", "dirty": False}), None),
+        ("an empty history is unknown, not covered", "", None),
+        ("an unreadable history is unknown, not covered", None, None),
+    ]
+    with tempfile.TemporaryDirectory() as td:
+        for name, text, want in boot_cases:
+            if text is None:
+                path = pathlib.Path(td) / "does-not-exist.jsonl"
+            else:
+                path = pathlib.Path(td) / "h.jsonl"
+                path.write_text(text, encoding="utf-8", newline="")
+            got = last_green_boot(path)
+            if got == want:
+                print(f"  ok    {name}")
+            else:
+                failures += 1
+                print(f"  FAIL  {name}")
+                print(f"        want {want!r}, got {got!r}")
+
     print(f"merge-readiness: self-test {'passed' if not failures else 'FAILED'} "
-          f"({failures} failure(s), {len(cases)} case(s))")
+          f"({failures} failure(s), {len(cases) + len(boot_cases)} case(s))")
     return 1 if failures else 0
 
 

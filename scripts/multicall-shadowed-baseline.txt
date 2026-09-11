@@ -38,4 +38,3 @@
 
 cron:at
 cron:crontab
-useradd:newgrp

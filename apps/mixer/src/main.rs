@@ -2292,6 +2292,7 @@ mod tests {
                     x,
                     y,
                     max_width: Some(mw),
+                    overflow: TextOverflow::Ellipsis,
                     text,
                     ..
                 } = c

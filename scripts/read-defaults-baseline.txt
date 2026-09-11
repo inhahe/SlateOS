@@ -53,7 +53,7 @@ diskutil: read_file(&format!("{dev_path}/device/model")).unwrap_or_default()  # 
 diskutil: read_file(&format!("{dev_path}/device/serial")).unwrap_or_default()  # examined 2026-09-11: as above
 dmesg: extract_json_string(line, "level").unwrap_or_default()  # examined 2026-09-11: "" reaches LogLevel::from_str and becomes Unknown
 dmesg: extract_json_string(line, "service").unwrap_or_default()  # examined 2026-09-11: an optional field; absent means the line came from the kernel rather than a service
-efibootmgr: read_efi_var("BootOrder").unwrap_or_default()
+efibootmgr: read_efi_var("BootOrder").unwrap_or_default()  # examined 2026-09-11: display only -- the modification paths write nothing at all, which is TD-B-EFIBOOTMGR-MODIFIES-NOTHING
 eject: fs::read_to_string(format!("{sys_path}/device/model")) .unwrap_or_default()  # examined 2026-09-11: descriptive only; the eject decision is guarded by `removable`, which is an Option
 eject: fs::read_to_string(format!("{sys_path}/device/vendor")) .unwrap_or_default()  # examined 2026-09-11: as above
 fuser: fs::read_to_string("/etc/passwd").unwrap_or_default()  # examined 2026-09-11: uid_to_name falls back to the numeric uid, which is what real fuser prints
@@ -78,7 +78,6 @@ mktemp: uid_to_name(uid).unwrap_or_default()  # examined 2026-09-11: is_empty() 
 monctl: read_file(&format!("{base}/modes")).unwrap_or_default()  # examined 2026-09-11: empty yields the resolution "unknown", which is honest
 newgrp: std::fs::read_to_string("/etc/group").unwrap_or_default()  # examined 2026-09-11: empty means nobody is a member, so the password IS demanded
 newgrp: std::fs::read_to_string("/etc/gshadow").unwrap_or_default()  # examined 2026-09-11: empty refuses everyone; see the fn's own doc comment
-objdump: parse_symbols(data, hdr, ss, sections).unwrap_or_default()
 oils: std::env::var("TARGET").unwrap_or_default()  # examined 2026-09-11: build.rs, where cargo always sets TARGET, so the default is unreachable
 oils: std::env::var_os("PATH").unwrap_or_default()  # examined 2026-09-11: var_os is None only when unset, and empty IS an unset PATH
 passwd: text(raw, idx).unwrap_or_default()  # examined 2026-09-11: a non-UTF-8 argument matches no option arm and falls through to being treated as a name, which is what it would have to be

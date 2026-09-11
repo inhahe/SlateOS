@@ -605,19 +605,36 @@ fn advance_day(dt: &mut DateTime) {
 // User / UID helpers
 // ============================================================================
 
-/// Determine the current username from environment.
-fn current_username() -> String {
-    if let Ok(user) = env::var("USER")
-        && !user.is_empty()
-    {
-        return user;
-    }
-    if let Ok(user) = env::var("LOGNAME")
-        && !user.is_empty()
-    {
-        return user;
-    }
-    format!("uid{}", process::id())
+/// The caller's login name, or `None` if this build cannot determine it.
+///
+/// # Why not `$USER`
+///
+/// It read `$USER`, then `$LOGNAME`, then a pid. Both variables are the
+/// caller's to set, and this name is written into the job file as the
+/// SUBMITTER, then compared by [`atd_may_run`] against the daemon's own name
+/// before a job runs. Both sides of that comparison came from here, so the
+/// guard weighed two strings the caller could influence rather than two
+/// identities.
+///
+/// # And the fallback was a different bug
+///
+/// `format!("uid{}", process::id())` is the PROCESS ID, not the uid, under a
+/// doc comment saying "from environment". A pid is unique per invocation, so
+/// it is not an identity at all: a job queued by a process with pid 4123 is
+/// recorded as `uid4123`, and the daemon comparing its own `uid5678` refuses
+/// it forever. With `$USER` unset -- which is how a daemon started by init
+/// runs -- `at` therefore refused every job it had itself accepted.
+///
+/// `userspace/crontab` had this exact pair, wording and all, and its repair
+/// note is what made this one recognisable. The uid fallback here is the REAL
+/// uid, which is stable across invocations and is the property the original
+/// was reaching for.
+fn current_username() -> Option<String> {
+    let uid = authlib::identity::caller_uid()?;
+    let named = userdb::UserDb::load(userdb::DEFAULT_PATH)
+        .ok()
+        .and_then(|db| db.find_uid(uid).and_then(userdb::Record::username));
+    Some(named.unwrap_or_else(|| format!("uid{uid}")))
 }
 
 // ============================================================================
@@ -1412,8 +1429,9 @@ fn atd_run_one(job: &Job, running_as: Option<&str>) -> bool {
 /// The daemon loop.
 fn cmd_atd(once: bool) -> Result<(), Error> {
     ensure_spool_dir()?;
+    // `None` here is already the fail-closed case in `atd_may_run`: a daemon
+    // that cannot tell who it is cannot tell whether it is a job's submitter.
     let me = current_username();
-    let me = if me.is_empty() { None } else { Some(me) };
     eprintln!(
         "atd: watching {SPOOL_DIR} every {ATD_POLL_SECS}s as {}",
         me.as_deref().unwrap_or("<unknown user>")
@@ -1443,9 +1461,23 @@ fn cmd_atd(once: bool) -> Result<(), Error> {
     }
 }
 
+/// The caller's name, or a refusal.
+///
+/// Queueing a job writes this into the job file as the submitter, and
+/// `atd_may_run` later refuses to run a job whose submitter is not the
+/// daemon's own user. A job filed under a name we had to guess is one that
+/// either never runs or runs for the wrong person, so not knowing is a
+/// refusal at submission time rather than a surprise at run time.
+fn require_username() -> Result<String, Error> {
+    current_username().ok_or_else(|| {
+        Error::Io(
+            "cannot determine who you are, and a job records its submitter; refusing".to_string(),
+        )
+    })
+}
+
 fn run() -> Result<(), Error> {
     let args = parse_args()?;
-    let username = current_username();
 
     match args.action {
         Action::Help => {
@@ -1466,18 +1498,32 @@ fn run() -> Result<(), Error> {
             let now = get_current_time().map_err(Error::Io)?;
             let target = parse_timespec(timespec, now)?;
             let commands = read_commands_stdin()?;
-            cmd_schedule(&commands, target, args.queue, args.mail, &username, now)
+            cmd_schedule(
+                &commands,
+                target,
+                args.queue,
+                args.mail,
+                &require_username()?,
+                now,
+            )
         }
         Action::ScheduleFile(ref path, ref timespec) => {
             let now = get_current_time().map_err(Error::Io)?;
             let target = parse_timespec(timespec, now)?;
             let commands = read_commands_file(path)?;
-            cmd_schedule(&commands, target, args.queue, args.mail, &username, now)
+            cmd_schedule(
+                &commands,
+                target,
+                args.queue,
+                args.mail,
+                &require_username()?,
+                now,
+            )
         }
         Action::Batch => {
             let now = get_current_time().map_err(Error::Io)?;
             let commands = read_commands_stdin()?;
-            cmd_batch(&commands, args.queue, args.mail, &username, now)
+            cmd_batch(&commands, args.queue, args.mail, &require_username()?, now)
         }
     }
 }
@@ -2083,6 +2129,47 @@ mod tests {
     }
 
     // ---- atd: the spool now has a drain ----------------------------------
+
+    /// `$USER` must not name the submitter a job is filed under.
+    ///
+    /// The name is written into the job file and `atd_may_run` compares it
+    /// against the daemon's own before running anything -- and BOTH sides came
+    /// from this lookup, so the guard weighed two strings the caller could
+    /// set rather than two identities.
+    #[test]
+    fn the_environment_cannot_name_the_submitter() {
+        // SAFETY: single-threaded test; both variables are removed again
+        // below. `set_var` is unsafe in edition 2024 only because a concurrent
+        // reader would be UB.
+        unsafe {
+            std::env::set_var("USER", "attacker-chosen");
+            std::env::set_var("LOGNAME", "attacker-chosen-too");
+        }
+        let answer = current_username();
+        unsafe {
+            std::env::remove_var("USER");
+            std::env::remove_var("LOGNAME");
+        }
+        assert_ne!(answer.as_deref(), Some("attacker-chosen"));
+        assert_ne!(answer.as_deref(), Some("attacker-chosen-too"));
+    }
+
+    /// The name must be the same on two calls within one run, and -- the part
+    /// the old pid fallback broke -- must not be derived from the pid.
+    ///
+    /// `format!("uid{}", process::id())` gave a different name to every
+    /// invocation, so a job queued as `uid4123` could never match a daemon
+    /// calling itself `uid5678`: with `$USER` unset, `at` refused every job it
+    /// had accepted.
+    #[test]
+    fn the_name_is_not_the_process_id() {
+        let pid_shaped = format!("uid{}", std::process::id());
+        assert_ne!(current_username().as_deref(), Some(pid_shaped.as_str()));
+        // Stable within a run, which a pid-derived name also is -- this pins
+        // the weaker property too so a future fallback cannot reintroduce a
+        // per-call value.
+        assert_eq!(current_username(), current_username());
+    }
 
     fn job(id: u32, epoch: i64, user: &str) -> Job {
         Job {

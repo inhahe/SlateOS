@@ -5,7 +5,7 @@
 //! - `factor`: Print prime factors of numbers
 //! - `numfmt`: Convert numbers from/to human-readable format
 
-use quoting::quoteaf_os;
+use quoting::{quoteaf, quoteaf_os};
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, Write};
@@ -436,10 +436,12 @@ fn run_numfmt() -> Result<(), String> {
                 to_unit = parse_unit(&arg["--to=".len()..])?;
             }
             _ if arg.starts_with("--padding=") => {
-                padding =
-                    Some(arg["--padding=".len()..].parse::<i32>().map_err(|_| {
-                        format!("invalid padding: '{}'", &arg["--padding=".len()..])
-                    })?);
+                let value = &arg["--padding=".len()..];
+                padding = Some(
+                    value
+                        .parse::<i32>()
+                        .map_err(|_| format!("invalid padding: {}", quoteaf_os(value)))?,
+                );
             }
             _ if arg.starts_with("--round=") => {
                 round = match &arg["--round=".len()..] {
@@ -459,9 +461,10 @@ fn run_numfmt() -> Result<(), String> {
                 format_str = Some(arg["--format=".len()..].to_string());
             }
             _ if arg.starts_with("--field=") => {
-                field = arg["--field=".len()..]
+                let value = &arg["--field=".len()..];
+                field = value
                     .parse::<usize>()
-                    .map_err(|_| format!("invalid field: '{}'", &arg["--field=".len()..]))?;
+                    .map_err(|_| format!("invalid field: {}", quoteaf_os(value)))?;
                 if field == 0 {
                     return Err("field number must be >= 1".to_string());
                 }
@@ -484,9 +487,10 @@ fn run_numfmt() -> Result<(), String> {
                 header_lines = 1;
             }
             _ if arg.starts_with("--header=") => {
-                header_lines = arg["--header=".len()..].parse::<usize>().map_err(|_| {
-                    format!("invalid header count: '{}'", &arg["--header=".len()..])
-                })?;
+                let value = &arg["--header=".len()..];
+                header_lines = value
+                    .parse::<usize>()
+                    .map_err(|_| format!("invalid header count: {}", quoteaf_os(value)))?;
             }
             "--" => {
                 i += 1;
@@ -629,7 +633,7 @@ fn extract_suffix(s: &str, unit: NumfmtUnit) -> Result<(&str, f64), String> {
                 b'T' => base * base * base * base,
                 b'P' => base * base * base * base * base,
                 b'E' => base * base * base * base * base * base,
-                _ => return Err(format!("invalid suffix: '{}'", c as char)),
+                _ => return Err(format!("invalid suffix: {}", quoteaf(&[c]))),
             }
         }
     };

@@ -5,7 +5,7 @@
 
 #![allow(dead_code)]
 
-use quoting::quoteaf_os;
+use quoting::{quoteaf, quoteaf_os};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{self, Read as _, Write as _};
@@ -135,8 +135,12 @@ impl<'a> Parser<'a> {
         self.skip_ws();
         match self.advance() {
             Some(b) if b == ch => Ok(()),
-            Some(b) => Err(format!("expected '{}', got '{}'", ch as char, b as char)),
-            None => Err(format!("expected '{}', got EOF", ch as char)),
+            Some(b) => Err(format!(
+                "expected {}, got {}",
+                quoteaf(&[ch]),
+                quoteaf(&[b])
+            )),
+            None => Err(format!("expected {}, got EOF", quoteaf(&[ch]))),
         }
     }
 
@@ -150,7 +154,7 @@ impl<'a> Parser<'a> {
             Some(b'f') => self.parse_literal("false", Value::Bool(false)),
             Some(b'n') => self.parse_literal("null", Value::Null),
             Some(b) if b == b'-' || b.is_ascii_digit() => self.parse_number(),
-            Some(b) => Err(format!("unexpected character: '{}'", b as char)),
+            Some(b) => Err(format!("unexpected character: {}", quoteaf(&[b]))),
             None => Err("unexpected EOF".into()),
         }
     }
@@ -240,7 +244,7 @@ impl<'a> Parser<'a> {
                 b'0'..=b'9' => b - b'0',
                 b'a'..=b'f' => b - b'a' + 10,
                 b'A'..=b'F' => b - b'A' + 10,
-                _ => return Err(format!("invalid hex digit: '{}'", b as char)),
+                _ => return Err(format!("invalid hex digit: {}", quoteaf(&[b]))),
             };
             val = val
                 .checked_mul(16)

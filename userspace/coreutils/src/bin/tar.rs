@@ -79,7 +79,7 @@ use coreutils::getopt::{self, Opt, Program, Takes};
 // `quoteaf` left with the hand-written option loop: every command-line
 // diagnostic now comes from `coreutils::getopt`, which does its own rendering
 // (glibc's straight-marked style, not gnulib's locale-aware one).
-use coreutils::quote::{escape, escape_os, os_bytes, quote};
+use coreutils::quote::{escape, escape_os, os_bytes, quote, quoteaf};
 // Used on every host by [`explode_old_option`], which has to build `-<byte>`
 // out of one byte of the old-style cluster and cannot go through `char`: a
 // cluster is argv, so it may hold any byte, and `0xE9 as char` would widen to
@@ -1137,7 +1137,7 @@ fn explode_old_option(args: &[OsString]) -> Result<Vec<OsString>, getopt::Error>
             // stays right if that ever stops being true: `0xE9 as char` widens
             // to the two bytes of `é`, where GNU's `%c` writes the one byte.
             return Err(getopt::Error {
-                sentence: format!("Old option '{}' requires an argument.", escape(&[letter])),
+                sentence: format!("Old option {} requires an argument.", quoteaf(&[letter])),
                 referral: None,
                 status: EXIT_FATAL,
             });

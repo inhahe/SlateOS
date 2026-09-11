@@ -660,8 +660,13 @@ fn install_file(src: &Path, dst: &Path, args: &Args) -> Result<(), String> {
     // Backup existing file
     if args.backup && dst.exists() {
         let backup_path = format!("{}{}", dst.display(), args.backup_suffix);
-        fs::rename(dst, &backup_path)
-            .map_err(|e| format!("cannot backup '{}' to '{backup_path}': {e}", dst.display()))?;
+        fs::rename(dst, &backup_path).map_err(|e| {
+            format!(
+                "cannot backup {} to {}: {e}",
+                quoteaf_os(dst),
+                quoteaf_os(&backup_path)
+            )
+        })?;
     }
 
     // Create parent directories if -D

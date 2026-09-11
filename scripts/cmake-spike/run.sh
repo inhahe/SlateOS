@@ -224,6 +224,48 @@ if [ -x cmake-slateos ]; then
         || echo "STRIP_FAILED — the staged binary is the unstripped one"
     echo "STAGED_BYTES=$(stat -c %s "$SLATE_SPIKE/cmake-slateos.elf")"
     ls -l "$SLATE_SPIKE/cmake-slateos.elf"
+
+    # THE BINARY ALONE IS INERT, and not in a subtle way: `cmake --version`
+    # itself fails without the module tree.
+    #
+    #     CMake Error: Could not find CMAKE_ROOT !!!
+    #     CMake has most likely not been installed correctly.
+    #     Modules directory not found in <prefix>/share/cmake-4.4
+    #
+    # Measured, not assumed — a host cmake copied into an empty directory
+    # prints exactly that for `--version`. So the data tree is staged here
+    # beside the binary and the rootfs build stages the two TOGETHER or
+    # neither, which is the rule design-decisions.md §344 arrived at for
+    # CPython: an interpreter without its stdlib dies inside
+    # `init_fs_encoding` before `main()`, and this is the same shape.
+    #
+    # `cmake --install` rather than copying `Modules/` out of the source
+    # tree: some modules are configured at build time, so the source copy is
+    # not what a working cmake reads.
+    #
+    # `Help/` is excluded and is 12 MB of the 24 — it is documentation for
+    # `--help-module`, and nothing needs it to configure a build. `Modules`
+    # and `Templates` are 12 MB together.
+    DATA_VER="$(echo "$VER" | cut -d. -f1,2)"
+    "$HOST_CMAKE" --install bld --prefix "$WORK/inst" >install.log 2>&1
+    echo "INSTALL_EXIT=$?"
+    SRC_DATA="$WORK/inst/share/cmake-$DATA_VER"
+    DEST_DATA="$SLATE_SPIKE/cmake-data/share/cmake-$DATA_VER"
+    if [ -d "$SRC_DATA/Modules" ]; then
+        rm -rf "$SLATE_SPIKE/cmake-data"
+        mkdir -p "$DEST_DATA"
+        cp -r "$SRC_DATA/Modules" "$DEST_DATA/"
+        [ -d "$SRC_DATA/Templates" ] && cp -r "$SRC_DATA/Templates" "$DEST_DATA/"
+        echo "DATA_FILES=$(find "$SLATE_SPIKE/cmake-data" -type f | wc -l)"
+        echo "DATA_BYTES=$(du -sb "$SLATE_SPIKE/cmake-data" | cut -f1)"
+        echo "SLATE_CMAKE_DATA_STAGED=$DEST_DATA"
+    else
+        # Loud: a staged binary with no module tree is a cmake that cannot
+        # even print its version, and the rootfs gate must not be the first
+        # thing to notice.
+        echo "NO_CMAKE_DATA — $SRC_DATA/Modules is absent, so the binary above"
+        echo "                would be staged inert. See install.log."
+    fi
     echo "SLATE_CMAKE_BUILT"
 else
     echo "NO_SLATE_BINARY"

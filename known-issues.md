@@ -64517,6 +64517,39 @@ pass over `b'X'` byte literals was needed for the same reason in reverse — a
 bare scan credited `tr` with `-A -F -X -Z`, which are `for b in b'A'..=b'Z'`
 expanding `[:upper:]`, not flags.
 
+**39 -> 38 (2026-09-11): `fold`.** The first pair retired under §1005, and the
+method is worth repeating because reading alone would not have decided it.
+The survey called this one "close -- read both", with the standalone 483 lines
+against coreutils' 874 and **no option unique to either side**, so an options
+diff had nothing to say.
+
+A behavioural differential did. Both binaries were built and run against GNU
+coreutils 9.4 over 18 cases: **coreutils agreed 18/18, the standalone 14/18.**
+The four are all user-visible and none is a missing option:
+
+| case | GNU and coreutils | standalone |
+|---|---|---|
+| `-w 0` | refuses, *invalid number of columns* | silently folds to one character per line |
+| legacy `-5` | `abcde` / `fghij` | *invalid option -- '5'* |
+| multibyte `-w 4` on three `é` | `éé` / `é` | all three on one line |
+| a `` in the line | resets the column | breaks the line |
+
+The `-w 0` row is the one that matters most: a silent wrong answer where GNU
+refuses is worse than a missing feature, because nothing downstream can tell.
+
+`userspace/fold` deleted. Two side-effects worth noting: the lint-exemption
+list fell 128 -> 127 without anyone fixing a warning, because the crate that
+was exempt is gone; and gate 24 stayed green, because `fold` is still a name
+the tree produces — it tracks the NAME, not the crate, which is exactly the
+distinction that made it worth building.
+
+**One observation about the remaining 38.** Every duplicated pair builds two
+binaries with the same file name into the same target directory, so the second
+`cargo build` silently overwrites the first. Which implementation you get
+depends on build order. That is not a new finding — §1005 describes the tools
+"alternating non-deterministically between two implementations" — but it is
+worth knowing that it reproduces locally in seconds.
+
 **Still open — the proper fix.** One name, one program. For each of the
 remaining 41: pick the implementation that is under test and maintained, make
 sure nothing in the other is worth keeping (the standalone ones are older but

@@ -147,7 +147,6 @@ userspace/nano/src/main.rs:argv-as-string
 userspace/nc/src/main.rs:argv-as-string
 userspace/netstat/src/main.rs:argv-as-string
 userspace/nftables/src/main.rs:argv-as-string
-userspace/nl/src/main.rs:argv-as-string
 userspace/nmap/src/main.rs:argv-as-string
 userspace/nologin/src/main.rs:argv-as-string
 userspace/nproc/src/main.rs:argv-as-string

@@ -64640,6 +64640,78 @@ are wrong in whatever way nobody tested.
 `userspace/tr` deleted; lint exemptions 125 -> 124, argv-utf8 221 -> 220,
 collisions 36 -> 35.
 
+**35 -> 34 (2026-09-11): `nl`.** The last of the five the survey first ranked
+backwards, and the worst pair so far: 43 cases, **coreutils 43/43, the
+standalone 21/43** — under half, with the DEFAULT invocation among the
+failures.
+
+Seven of the 22 are message wording. The other **fifteen are five distinct
+defects**, two of which are total:
+
+| defect | effect |
+|---|---|
+| unnumbered lines | emits a literal **tab** where GNU pads the field with spaces. Plain `nl` on any file containing a blank line produces different bytes. |
+| `-l N` | **no output at all**, at every value tried. The option is accepted and the program prints nothing. |
+| section delimiters `\:`, `\:\:`, `\:\:\:` | not recognised. GNU consumes the delimiter line and RESTARTS numbering; ours prints it as a line and keeps counting. |
+| a byte that is not UTF-8 | **no output at all** |
+| a CRLF line | the `
+` is stripped |
+
+`-l` deserves the emphasis. It is not mis-implemented, it is inert *and*
+destructive: the program consumes its input, prints nothing, and exits. Any
+pipeline using it loses the data silently.
+
+The unnumbered-line defect is the one that would be noticed last and hurt
+longest, because the output looks right in a terminal — a tab and seven spaces
+land in the same column — and is wrong to `diff`, to `cut -f`, and to anything
+counting bytes.
+
+`userspace/nl` deleted; lint exemptions 124 -> 123, argv-utf8 220 -> 219,
+collisions 35 -> 34.
+
+**All five of the originally-misranked names are now decided** (`nl`, `split`,
+`seq`, `comm`, `tr` — `split` and `comm` by the survey's corrected ranking,
+`seq`, `tr` and `nl` by differential). Every one of the three put to a
+differential went to coreutils, and none of the deciding differences was a
+missing option — which is what the survey measures.
+
+**A correction to the method, found after four retirements (2026-09-11).**
+`scripts/` already holds **59 differential harnesses** — `nl-diff.sh`,
+`cut-diff.sh`, `uniq-diff.sh` and the rest — and they cover **half the
+remaining pairs**. I wrote `dup-differential.py` without looking for them.
+
+They are better at the same job:
+
+* far more cases — `nl-diff.sh` has 222 against my 43, `uniq-diff.sh` 273;
+* `od -An -c`, so whitespace is exact. That decided `nl`: a literal tab where
+  GNU pads with spaces. Its own comment says a comparison that collapsed
+  whitespace "would agree with almost every wrong implementation";
+* both sides inside WSL under one `argv[0]`, because the Windows host's
+  coreutils are MSYS2's and word every diagnostic differently;
+* **a reference built from GNU 9.4 source**, because WSL's installed coreutils
+  is Ubuntu's patched `9.4-3ubuntu6.1` — §726's point that a green run against
+  it certifies agreement with Debian rather than with GNU;
+* and they are parameterised: `OURS=/path/to/binary ./scripts/uniq-diff.sh`,
+  which is exactly the question I wrote a new tool to ask.
+
+`dup-differential.py` compares against `wsl -e <name>` — the patched build —
+so its numbers are agreement with Ubuntu's coreutils and not with GNU.
+
+**Why the four verdicts still stand.** In each pair the coreutils side scored
+100% against that same reference while the standalone scored 52–88%, and every
+deciding difference was structural rather than a wording or packaging detail:
+`seq` counting backwards where GNU prints nothing, `nl -l` printing nothing at
+all, `tr` accepting an extra operand, `cut -b` refusing a non-UTF-8 stream. A
+reference that were systematically wrong could not have produced a perfect
+score for one side. That is internal consistency, not a built reference, which
+is why this is written down rather than waved away.
+
+**The rule going forward:** use `scripts/<name>-diff.sh` where one exists
+(awk, cmp, comm, dd, df, du, expand, join, paste, sed, sort, split, tar, tee,
+tsort, uniq, wc, xargs) and `dup-differential.py` only for the eighteen that
+have none. Writing a real harness for those eighteen would be better than
+either.
+
 **Still open — the proper fix.** One name, one program. For each of the
 remaining 41: pick the implementation that is under test and maintained, make
 sure nothing in the other is worth keeping (the standalone ones are older but

@@ -96,7 +96,6 @@ userspace/mktemp
 userspace/monctl
 userspace/mount
 userspace/nano
-userspace/nl
 userspace/nproc
 userspace/nslookup
 userspace/ntpd

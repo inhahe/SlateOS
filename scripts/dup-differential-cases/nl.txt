@@ -1,0 +1,75 @@
+# Cases for `nl`. Format: label | stdin | argv...
+#
+# `nl` is mostly a formatter, so its differences show up as output that looks
+# right at a glance and is wrong in a column. The rules worth probing:
+#
+#   * the DEFAULT body style is `t` -- number non-empty lines only -- which is
+#     the single most commonly got-wrong thing about this program;
+#   * `-w` is a minimum, not a maximum: a number wider than the field is NOT
+#     truncated;
+#   * the numbering RESTARTS at each section delimiter, and the delimiter lines
+#     themselves are consumed rather than printed;
+#   * `-v` and `-i` compose, and `-i` may be negative.
+
+# -- the default, which is `-b t` --
+default non empty     | a\n\nb\n                 |
+default all blank     | \n\n\n                   |
+default no newline    | a\nb                     |
+empty input           |                          |
+
+# -- body styles --
+style all             | a\n\nb\n                 | -b a
+style none            | a\nb\n                   | -b n
+style non empty       | a\n\nb\n                 | -b t
+style regex           | foo\nbar\nfoobar\n       | -b pfoo
+style regex no match  | a\nb\n                   | -b pzzz
+style unknown         | a\n                      | -b q
+
+# -- number format --
+format left           | a\n                      | -n ln
+format right          | a\n                      | -n rn
+format right zero     | a\n                      | -n rz
+format unknown        | a\n                      | -n xx
+
+# -- width, which is a minimum --
+width 1               | a\n                      | -w 1
+width 10              | a\n                      | -w 10
+width narrow overflow | a\n                      | -w 1 -v 1000
+width zero            | a\n                      | -w 0
+width negative        | a\n                      | -w -1
+
+# -- separator --
+separator default     | a\n                      |
+separator colon       | a\n                      | -s :
+separator empty       | a\n                      | -s ''
+separator multichar   | a\n                      | -s ' -> '
+
+# -- start and increment --
+start at 5            | a\nb\n                   | -v 5
+start at zero         | a\nb\n                   | -v 0
+start negative        | a\nb\n                   | -v -2
+increment two         | a\nb\nc\n                | -i 2
+increment negative    | a\nb\nc\n                | -i -1
+increment zero        | a\nb\n                   | -i 0
+start and increment   | a\nb\n                   | -v 10 -i 5
+
+# -- blank line joining --
+join two blanks       | a\n\n\nb\n               | -b a -l 2
+join three blanks     | a\n\n\n\nb\n             | -b a -l 3
+join one              | a\n\nb\n                 | -b a -l 1
+
+# -- sections: the delimiter lines are consumed and numbering restarts --
+section body          | \\:\\:\na\nb\n             | -b a
+section header        | \\:\\:\\:\nh\n\\:\\:\nb\n     | -b a -h a
+section footer        | \\:\na\n                   | -b a -f a
+section restarts      | a\n\\:\\:\nb\n             | -b a
+custom delimiter      | @@a\n                    | -d @ -b a
+
+# -- refusals --
+bad start             | a\n                      | -v x
+bad increment         | a\n                      | -i x
+bad width             | a\n                      | -w x
+
+# -- bytes that are not text --
+high byte             | a\x80b\n                 | -b a
+crlf line             | a\r\n                    | -b a

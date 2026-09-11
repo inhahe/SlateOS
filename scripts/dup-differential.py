@@ -26,6 +26,59 @@ missing option:
 That is the shape this tool exists to find: not missing features, which
 reading finds, but *wrong answers*, which it does not.
 
+# USE `scripts/<name>-diff.sh` INSTEAD WHEN ONE EXISTS
+
+There are 59 of those, and they cover **half the remaining duplicate pairs**:
+awk, cmp, comm, dd, df, du, expand, join, paste, sed, sort, split, tar, tee,
+tsort, uniq, wc, xargs. They are better than this file at the same job and I
+did not look for them before writing it.
+
+* They carry far more cases -- `nl-diff.sh` has 222 against the 43 here.
+* They compare through `od -An -c`, so whitespace is exact. That matters: the
+  defect that decided `nl` was a literal tab where GNU pads with spaces, and a
+  comparison that collapsed whitespace "would agree with almost every wrong
+  implementation" (its words).
+* They run BOTH sides inside WSL under `LC_ALL=C.UTF-8`, because the Windows
+  host's own coreutils are MSYS2's -- a Cygwin derivative whose `getopt` words
+  every diagnostic differently, so a harness pointed at it certifies sentences
+  no GNU/Linux system prints.
+* **They are parameterised**: `OURS=/path/to/binary ./scripts/nl-diff.sh`. So
+  the standalone half of a pair can be fed to them directly, which is exactly
+  the question this file was written for.
+
+This file is for the OTHER half -- cal, chown, date, diff, env, free,
+hostname, kill, logger, patch, ps, sha256sum, stat, strings, uname, uptime --
+where no such harness exists. Writing one `-diff.sh` per name would be better
+still; this is the cheaper thing that covers all of them.
+
+# THE REFERENCE HERE IS WEAKER THAN THEIRS, AND THAT IS THIS FILE'S REAL LIMIT
+
+`scripts/diff-wsl.sh` **builds GNU coreutils 9.4 from source** to compare
+against, because WSL's installed coreutils is Ubuntu's `9.4-3ubuntu6.1` and
+carries behavioural patches -- so a green run against it "certifies agreement
+with Debian rather than with GNU" (design-decisions.md §726).
+
+This file runs `wsl -e <name>`, which is that patched build. So a count here is
+agreement with Ubuntu's coreutils, not with GNU, and the distinction is real.
+
+Why the verdicts it has produced still stand: in every pair so far the
+`coreutils` side scored **100%** against this same reference while the
+standalone scored 52-88%, and the deciding differences were structural -- `seq`
+counting backwards where GNU prints nothing, `nl -l` printing nothing at all,
+`tr` accepting an extra operand. Those are not distribution patches, and a
+reference that were systematically wrong could not have produced a perfect
+score for one side. Internal consistency is not the same as a built reference,
+which is why this paragraph exists rather than a reassurance.
+
+**The right fix is a `<name>-diff.sh` per name, on `diff-wsl.sh`.** That gets
+the built reference, both sides under one `argv[0]`, and `od -An -c`. Until
+someone writes those eighteen, this is what covers them, and its number should
+be read as "does the standalone disagree with a real coreutils" rather than as
+a conformance score.
+
+Our own side runs as a Windows binary, which is sound for a stdin filter and is
+a limit worth remembering for anything that touches paths or line endings.
+
 # What it does
 
 For a name with both a `userspace/<name>` crate and a `coreutils` bin, it

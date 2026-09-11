@@ -149,7 +149,7 @@ fn api_status() -> Vec<u8> {
     let free_mem = total_mem.saturating_sub(used_mem);
 
     // Task count from scheduler.
-    let task_count = crate::sched::task_list().len();
+    let task_count = crate::sched::task_count();
 
     // Network interface info. `stats()` is the NIC's own column — the right one
     // to sit beside this interface's IP and MAC. Veth traffic has its own column
@@ -934,7 +934,7 @@ fn api_health() -> Vec<u8> {
     let httpd_status = if httpd_running { "ok" } else { "degraded" };
 
     // Task count (sanity — zero tasks is impossible during normal operation).
-    let task_count = crate::sched::task_list().len();
+    let task_count = crate::sched::task_count();
     let tasks_status = if task_count > 0 { "ok" } else { "critical" };
 
     // Filesystem health: check block cache dirty ratio.
@@ -1072,7 +1072,7 @@ fn api_metrics() -> Vec<u8> {
     );
 
     // -- Tasks ----------------------------------------------------------------
-    let task_count = crate::sched::task_list().len() as u64;
+    let task_count = crate::sched::task_count() as u64;
     prom_gauge(&mut t, "os_tasks_total", "Active task count.", task_count);
 
     // -- Network interface (L2) -----------------------------------------------

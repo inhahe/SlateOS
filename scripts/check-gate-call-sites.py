@@ -250,6 +250,23 @@ def report(repo: pathlib.Path, verbose: bool = False) -> int:
     for caller, label, raw in unresolved:
         # Not a finding against the tree -- a gap in this check.  Printed so it
         # cannot be mistaken for coverage.
+        #
+        # DO NOT silence these the way `check-gates-are-wired` does. That gate grew
+        # an exclusion on 2026-09-11 for pre-push gate 20, whose call site builds its
+        # script path from a variable (`suite="...scripts/test-$stem.py"`), and the
+        # exclusion is correct THERE because that gate asks "is every gate run?" and
+        # a test suite is not a gate.
+        #
+        # This gate asks a different question -- "does every call site speak its
+        # script's current interface?" -- and a call that runs a script with flags is
+        # in scope whatever the script is. So for gate 20 the honest answer is the one
+        # printed below: this check cannot verify that call site. Excluding it would
+        # be claiming coverage rather than losing it, which is the difference between
+        # the two gates and not an inconsistency between them.
+        #
+        # Harmless today for a narrower reason worth writing down: gate 20's call
+        # passes NO flags, so there is no interface for it to disagree with. The note
+        # earns its place against the edit that adds one.
         print(
             f"{caller}: gate {label} names its checker as {raw}, which this "
             "check could not resolve to a path; that call site is NOT covered"

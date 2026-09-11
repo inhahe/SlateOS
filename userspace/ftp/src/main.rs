@@ -1792,11 +1792,34 @@ fn read_line(prompt: &str) -> Option<String> {
     }
 }
 
-/// Prompt for a password (no echo on a real terminal, but we cannot suppress
-/// echo via raw syscalls easily, so we just print a prompt and read).
+/// Prompt for a password with the terminal not showing it.
+///
+/// This used to be `read_line(prompt)` under a comment reading "In a real
+/// terminal we would disable echo here. For now, just read a line." The
+/// comment was accurate and the user never saw it: the password appeared on
+/// screen as it was typed. `readpass` turns echo off and puts it back, and
+/// refuses to read at all on a terminal where it cannot — because reading
+/// there is what displays the secret.
 fn read_password(prompt: &str) -> Option<String> {
-    // In a real terminal we would disable echo here. For now, just read a line.
-    read_line(prompt)
+    let bytes = match readpass::read_password(prompt.as_bytes()) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("ftp: {e}");
+            return None;
+        }
+    };
+    // NOT `from_utf8_lossy`. A replacement character would be sent to the
+    // server as part of the password, so the user would be told their correct
+    // password was rejected. Refusing names the real problem instead.
+    match String::from_utf8(bytes) {
+        Ok(s) => Some(s),
+        Err(_) => {
+            eprintln!(
+                "ftp: the password contains bytes that are not valid UTF-8, which this client cannot send"
+            );
+            None
+        }
+    }
 }
 
 /// Run the interactive FTP REPL.

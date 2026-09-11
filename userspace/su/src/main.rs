@@ -63,7 +63,6 @@ use quoting::{os_bytes, quoteaf_os};
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io::{self, Write};
 use std::process;
 use std::time::SystemTime;
 
@@ -267,23 +266,11 @@ fn authenticate(
 /// read a line from stdin. The prompt is written to stderr so that it
 /// appears even when stdout is redirected.
 fn read_password(prompt: &str) -> Result<String, String> {
-    eprint!("{prompt}");
-    let _ = io::stderr().flush();
-
-    let mut password = String::new();
-    io::stdin()
-        .read_line(&mut password)
-        .map_err(|e| format!("failed to read password: {e}"))?;
-
-    // Strip the trailing newline.
-    if password.ends_with('\n') {
-        password.pop();
-        if password.ends_with('\r') {
-            password.pop();
-        }
-    }
-
-    Ok(password)
+    let bytes = readpass::read_password(prompt.as_bytes()).map_err(|e| e.to_string())?;
+    // NOT `from_utf8_lossy`: a replacement character would be compared against
+    // the stored hash, so a correct password would be reported as wrong.
+    String::from_utf8(bytes)
+        .map_err(|_| "the password contains bytes that are not valid UTF-8".to_string())
 }
 
 /// Get the current epoch time in seconds.

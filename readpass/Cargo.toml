@@ -1,0 +1,10 @@
+[package]
+name = "readpass"
+version = "0.1.0"
+edition = "2024"
+description = "SlateOS: read a secret from the terminal without showing it, or refuse"
+
+[dependencies]
+
+[lints]
+workspace = true

@@ -106,7 +106,22 @@ So the safeguard I announced was not the one I applied, which is worse than the
 first error, and the correction belongs here rather than in a commit message
 nobody will grep.
 
-## TD-B-FTP-ECHOES-THE-PASSWORD-IT-ASKS-FOR (lane B, 2026-09-10)
+## TD-B-FTP-ECHOES-THE-PASSWORD-IT-ASKS-FOR (lane B, 2026-09-10) -- FIXED 2026-09-11
+
+**FIXED,** and it was three programs rather than one. `userspace/passwd`
+and `userspace/su` carried the same defect with their own wording of the
+same comment, so `passwd` displayed both the old password and the new.
+The shared helper this entry asked for is the crate `readpass`: it clears
+`ECHO`, restores it from a `Drop` guard so the error path cannot leave a
+terminal silent, uses `TCSETSF` so type-ahead typed while echo was still
+on is discarded rather than read, and **refuses to read at all** on a
+terminal whose echo it could not clear.
+
+**The one judgement call.** A pipe is not a terminal, has no echo and
+shows nothing, so `readpass` reads plainly there rather than refusing --
+otherwise every script that pipes a password in would break. Only the
+terminal-that-will-not-go-quiet case refuses.
+
 
 **In short:** `ftp` prompts `Password: ` and the characters appear on screen as
 they are typed. Anyone looking at the terminal, and anything capturing it,

@@ -106,6 +106,46 @@ So the safeguard I announced was not the one I applied, which is worse than the
 first error, and the correction belongs here rather than in a commit message
 nobody will grep.
 
+## TD-B-ONE-HUNDRED-AND-SEVENTY-TWO-COMMAND-NAMES-NOBODY-CAN-RUN (lane B, 2026-09-11)
+
+**In short:** 172 command names are implemented in `userspace/` as multicall
+personalities — `gunzip`, `zcat`, `factor`, `printenv`, `setcap`, eleven
+SELinux tools — and nothing installs an executable under any of those names.
+The code is finished, tested, and unreachable. A further 11 names are worse:
+they are answered to by two different programs at once.
+
+**Why the number jumped from 51 on 2026-09-11.** It did not. The detector was
+blind. `scripts/multicall-aliases.py` recognised a dispatch arm only when it
+mapped to an enum literally named `Personality`, so the 8 crates that call
+theirs `Mode` and the one that calls it `InvokedAs` were invisible. Widening it
+to key on the *scrutinee* — is the matched variable the program's own
+invocation name? — took the ledger from 51 to 172 and the shadowing ledger from
+2 to 11. No source changed in that commit, so all 130 were reachable before it.
+
+**The 9 new shadowed pairs are the urgent half**, because a shadowed name is
+two implementations that can disagree with the winner picked by packaging:
+
+| Shadowing crate | Name | Who really provides it |
+|---|---|---|
+| `userspace/nologin` | `true`, `false` | coreutils |
+| `userspace/nproc` | `tty`, `logname` | coreutils |
+| `userspace/fuser` | `lsof` | `userspace/lsof` |
+| `userspace/hostnamectl` | `hostname` | `userspace/hostname` |
+| `userspace/resolvectl` | `nslookup` | `userspace/nslookup` |
+| `userspace/swapon` | `free` | `userspace/free` |
+| `userspace/useradd` | `newgrp` | `userspace/newgrp` |
+
+`nologin` answering to `true` and `false` is the one to look at first: those
+two run in nearly every shell script on the system, and `nologin`'s job is to
+*refuse* and exit non-zero.
+
+**The fix per name is a decision, not a patch.** Either the personality is
+deleted (the name belongs to whoever performs the operation — §1019), or the
+name gets a real producer, preferably its own crate so it gets its own
+capability identity. Both ledgers may only shrink, so the count is the
+progress bar — with the caveat this entry exists to record: the count is only
+a progress bar while the instrument holds still.
+
 ## TD-B-CRONTAB-SIGNALS-A-RELOAD-NOBODY-LISTENS-FOR (lane B, 2026-09-11)
 
 **In short:** `crontab` writes a file at `/run/crond/reload` after editing a

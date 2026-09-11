@@ -1,5 +1,5 @@
 #!/bin/sh
-# Twenty-one gates at the push boundary. Any one of them aborts the push.
+# Twenty-two gates at the push boundary. Any one of them aborts the push.
 #
 #   1. Refuse to publish the operator's private files (`todo2.txt`).
 #   2. Refuse to publish a command name that nothing can produce an executable
@@ -33,9 +33,16 @@
 #  20. Refuse to publish a `scripts/*.py` whose own test suite fails.
 #  21. Refuse to publish a crate that is not subject to the workspace's
 #      own lint policy.
+#  22. Refuse to publish a script whose self-test is reachable under only
+#      one spelling of its flag.
 #
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented, and it was wrong again the moment gate 13 was written --
+# and again at 19, and again at 22, which is four times out of four recent
+# additions. The list is what test-pre-push-gates.py compares against the
+# `# Gate N` sections, so a missing entry is a red tree for every lane rather
+# than a cosmetic lapse. If you are adding a gate: the count word, this list,
+# the section, and the bypass are four edits, and the suite checks all four.
 # the section and the bypass landed in `0ab4b55bc` and this list did not.
 # A list in a comment beside the code it lists is a second copy that rots. It
 # is short enough to be worth keeping, so it is *checked* --

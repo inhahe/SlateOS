@@ -72,6 +72,10 @@ import rustlex  # noqa: E402
 # names that actually appear in this tree rather than invented: `clear_all` and
 # `clear` are what the three documented instances called, `init_defaults` is what
 # they called next, and the rest are the same idea under other spellings.
+# Spelled out rather than written literally, so that a patch applied with a
+# heredoc cannot collapse it -- a mistake this session made six times.
+NL_ = chr(10)
+
 VERBS = (
     "clear_all",
     "clear",
@@ -341,6 +345,61 @@ def self_test() -> int:
     ]
 
     failures = 0
+
+    # --- the case that is not synthetic -------------------------------------
+    #
+    # Everything above proves the logic works on strings written for it. None of
+    # it would notice if `rust_scopes` stopped recognising the shapes this kernel
+    # actually uses, if `self_test_inner` were renamed tree-wide, or if the scan
+    # stopped opening files. See known-issues ->
+    # TD-A-A-WIRED-GATE-CAN-GRADE-ONE-LINE-AND-LOOK-LIKE-IT-GRADES-A-SUBSYSTEM,
+    # where two wired gates reported a clean tree while the code they are named
+    # after was deliberately broken.
+    #
+    # So: take the real file, confirm the gate is quiet on it, inject one reach
+    # into its self-test body, and require the gate to find exactly that. In
+    # memory -- the file is never written.
+    subject = pathlib.Path("kernel/src/sockact.rs")
+    if not subject.is_file():
+        print("  SKIP  mutation case: kernel/src/sockact.rs not found")
+        print("        (run from the repository root; this case is the only one")
+        print("         that proves the gate is still attached to the tree)")
+        failures += 1
+    else:
+        real = subject.read_text(encoding="utf-8", errors="replace")
+        before = findings_for(real, "sockact.rs")
+        if before:
+            failures += 1
+            print("  FAIL  mutation case: the real sockact.rs already has findings")
+            print(f"        {before}")
+        else:
+            # Inject after the first line that is inside a self_test* scope, so
+            # the injection lands where a real regression would.
+            lines = real.splitlines()
+            stacks = rust_scopes.scope_stack_per_line(lines)
+            at = next(
+                (
+                    i
+                    for i, st in enumerate(stacks)
+                    if any(s.name and s.name.startswith("self_test") for s in st)
+                ),
+                None,
+            )
+            if at is None:
+                failures += 1
+                print("  FAIL  mutation case: no self_test scope found in the real file")
+                print("        (that alone means this gate grades nothing here)")
+            else:
+                lines.insert(at, "    crate::eventlog::clear();")
+                after = findings_for(NL_.join(lines), "sockact.rs")
+                hit = [f for f in after if f[1:] == ("eventlog", "clear")]
+                if len(hit) == 1 and len(after) == 1:
+                    print("  ok    mutation case: the real sockact.rs, one reach injected")
+                else:
+                    failures += 1
+                    print("  FAIL  mutation case: injected one reach into the real file")
+                    print(f"        want exactly one eventlog::clear finding, got {after}")
+
     for name, rel, src, want in cases:
         got = findings_for(src, rel)
         if got == want:
@@ -353,7 +412,7 @@ def self_test() -> int:
 
     print(
         f"check-selftest-reach: self-test {'passed' if not failures else 'FAILED'} "
-        f"({failures} failure(s), {len(cases)} case(s))"
+        f"({failures} failure(s), {len(cases)} synthetic case(s) + 1 against the real tree)"
     )
     return 1 if failures else 0
 

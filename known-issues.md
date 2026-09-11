@@ -131874,6 +131874,67 @@ because it spanned a cache boundary. The ratio that was actually diagnostic was 
 dull one already in hand: 3.77× versus 1.07× tells you whether a cost is the kernel's
 or the host's, and it would have told me nothing about reads at all.
 
+### `write_file` carries ~43 µs of fixed cost on an in-memory filesystem
+
+`/` is **memfs** — the mount table says so at boot: `[vfs] Mounted memfs filesystem at
+'/' (rw)`. So the benchmark's writes never touch a device, and the data copy is a
+`Vec::clear()` followed by `extend_from_slice` on a buffer that keeps its capacity.
+That makes the measured cost hard to explain, and two benchmarks calling the *identical*
+operation separate the fixed part from the per-byte part:
+
+| benchmark | bytes | WHPX | ns/byte |
+|---|---|---|---|
+| `vfs_write_256` | 256 | 43 744 | 170.9 |
+| `vfs_throughput_16k_write` | 16 384 | 128 973 | 7.9 |
+
+Both are `Vfs::write_file(path, &data)` on memfs at root, differing only in size — so
+the comparison is sound in the way the read/write one was not. **64× the data costs
+2.95× the time**, which decomposes to:
+
+* **fixed cost ≈ 43.7 µs per call**
+* marginal ≈ **5.28 µs per KiB** (≈5.3 ns/byte)
+
+### The fixed cost localised against `stat`, which walks the same path
+
+`Vfs::stat` on the same filesystem resolves a path, takes the mount, locks the fs and
+reads metadata — for **894 ns** (`vfs_stat_root`, WHPX). `Vfs::write_file` does all of
+that and then the write-specific steps, for **43 744 ns**. So roughly **43 µs sits in
+the steps `write_file_resolved` adds on top of a resolve**, of which there are six:
+
+    check_path_access(Write) · check_writable · intercept::pre_write
+    enforce_quota_write · history::try_auto_record · memfs mutation
+    cache_identity + invalidate_identity · quota charge
+
+At ~7 µs apiece if spread evenly, though it is far likelier that one dominates.
+
+**Two candidates eliminated, cheaply, so the next person does not re-check them:**
+
+* **Auto-versioning is not it.** `history::try_auto_record` is documented as reading
+  the old contents through the VFS before every write, which would be a genuine
+  defect, but it opens with `if !is_auto_version_enabled() { return; }` — an atomic
+  load when versioning is off.
+* **Page-cache invalidation is not it.** `invalidate_identity` → `invalidate_file`
+  uses `cache.range(lo..=hi)` on a `BTreeMap`, so it is O(log n + k) in the pages
+  belonging to *that file* — one page for a 16 KiB file — not a scan of the cache. It
+  also returns immediately when `ino == 0` or the cache is unpopulated.
+
+### Why the read benchmark cannot localise this
+
+`vfs_read_256` is 2 065 ns against `vfs_write_256`'s 43 744 — a 21× gap on the same
+file at the same size — and it is the same cache-boundary artifact corrected above:
+reads are served from the shared page cache (design-decisions §38) and so skip the
+VFS→memfs path that the write must take. `stat` is the right comparison precisely
+because it *does* take that path.
+
+### The next step, stated so it is not guessed at
+
+A phase breakdown, which this suite already has an idiom for —
+`bench_vfs_readdir_breakdown` — plus the `#[inline(never)] pub fn bench_*` convention
+used by `dashboard::bench_api_status` to expose an internal for measurement. Timing the
+six steps individually is the only thing that will name the dominant one, and
+43 µs on an in-memory write is worth naming: every file write in the kernel pays it,
+not just this benchmark.
+
 ## TD-A-REQUEST-STATUS-HAS-NO-CHECKED-SHAPE-SO-EVERY-READER-COUNTS-DIFFERENTLY (lane A, 2026-09-11) — **open**
 
 **In short:** the `requests/` dropbox is how the three lanes hand work to each other,

@@ -56,7 +56,6 @@ dmesg: extract_json_string(line, "service").unwrap_or_default()  # examined 2026
 eject: fs::read_to_string(format!("{sys_path}/device/model")) .unwrap_or_default()  # examined 2026-09-11: descriptive only; the eject decision is guarded by `removable`, which is an Option
 eject: fs::read_to_string(format!("{sys_path}/device/vendor")) .unwrap_or_default()  # examined 2026-09-11: as above
 fuser: fs::read_to_string("/etc/passwd").unwrap_or_default()  # examined 2026-09-11: uid_to_name falls back to the numeric uid, which is what real fuser prints
-hostname: read_hostname().unwrap_or_default()  # examined 2026-09-11: BootSet deliberately treats empty and unreadable alike -- it sets the name in both cases; the comment above it says so
 hwinfo: fs::read_to_string(path) .unwrap_or_default()
 install: std::env::var("TARGET").unwrap_or_default()  # examined 2026-09-11: build.rs, where cargo always sets TARGET, so the default is unreachable
 losetup: std::env::var("TARGET").unwrap_or_default()  # examined 2026-09-11: build.rs, where cargo always sets TARGET, so the default is unreachable

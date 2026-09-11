@@ -113,6 +113,35 @@ directory — `--target-dir` per `DIFF_PKG` entry — after which the symlink ca
 point at the right one deliberately rather than at whatever survived. Until then
 the survey's column says "coreutils half only", which is the truth.
 
+## B-HOSTNAME-RESOLVES-THE-DOMAIN-WITHOUT-ETC-HOSTS (lane B, 2026-09-11)
+
+`hostname -d` and `hostname -f` answer from the resolver's search domain and
+never consult `/etc/hosts`. net-tools resolves through nsswitch, so on this host:
+
+    /etc/hosts:  127.0.1.1  Logoplex3.localdomain  Logoplex3
+
+    net-tools    hostname -d  ->  localdomain
+                 hostname -f  ->  Logoplex3.localdomain
+    ours         hostname -d  ->  attlocal.net
+                 hostname -f  ->  Logoplex3.attlocal.net
+
+**Both exit 0**, so a script asking for this machine's FQDN gets a confident
+answer that disagrees with every other resolver user on the same box —
+`getent hosts`, `ping`, anything using `gethostbyname`. On a machine whose
+`/etc/hosts` is the *only* place the FQDN is written, which is the normal case
+for a host without DNS registration, ours invents one from the DHCP search
+domain instead.
+
+13 of `coreutils`' 50 differences and 14 of the standalone's 54 are this one
+cause, so it is the largest single family in the pair and survives the
+retirement.
+
+**The fix** is to resolve the name the way the C library does — `getaddrinfo`
+with `AI_CANONNAME` on the result of `gethostname`, which is what net-tools
+does — rather than reading `/etc/resolv.conf`'s `search` line. The distinction
+matters beyond this program: the resolver's search list is for *completing
+queries*, not for naming this host.
+
 ## B-COREUTILS-UNAME-PARSES-ITS-OWN-OPTIONS (lane B, 2026-09-11)
 
 `userspace/coreutils/src/bin/uname.rs` parses `argv` by hand rather than through
@@ -65105,6 +65134,45 @@ number is different** — not by a constant factor either: 12→16, 24→48,
 3036→4112. Both exit 0. `du` prints nothing but sizes and paths, so a `du` that
 gets the sizes wrong and drops a directory has no correct output left; there is
 nothing else in it to be right about.
+
+**14 -> 13 (2026-09-11): `hostname`, on a thin margin and one asymmetry.**
+`scripts/hostname-diff.sh`, written today, 61 cases against net-tools 3.23.
+
+**coreutils 7 passed, 50 differed. The standalone 3 passed, 54 differed.**
+
+**Say the honest thing first: neither half is usable, and four cases is not a
+verdict.** This is nothing like `uname`'s 71 to 43. It is recorded as a
+retirement because §1005 makes `coreutils` the home and nothing here shows it to
+be the *worse* half — not because the measurement settles the programs.
+
+**The one asymmetry that is worth more than the count.** `hostname -s newname`:
+
+    net-tools   usage message, rc=255 -- a display flag and a set operand
+                cannot be combined
+    standalone  prints `Logoplex3`, rc=0 -- the operand is silently ignored
+
+A user typing that to set the name gets a success, a printed hostname, and an
+unchanged system. `coreutils` refuses it. That is the difference between the two
+halves that has consequences, and it is the shape this tree keeps finding: a
+step that reports success is not evidence it did anything.
+
+**What BOTH halves get wrong, which is the more useful output of the harness**
+— filed as `B-HOSTNAME-RESOLVES-THE-DOMAIN-WITHOUT-ETC-HOSTS`:
+
+| | coreutils | standalone | |
+|---|---|---|---|
+| domain resolution | 13 | 14 | `-d` answers `attlocal.net` where net-tools answers `localdomain`; `-f` likewise. net-tools resolves through nsswitch, so `/etc/hosts` (`127.0.1.1 Logoplex3.localdomain`) wins; ours takes the search domain from the resolver and never consults `/etc/hosts`. Both exit 0, so a script asking for the FQDN gets a confident wrong answer. |
+| missing options | 19 | 16 | `-a`/`--alias`, `-y`/`--yp`/`--nis`, `-A`/`--all-fqdns`, `-b`/`--boot` are absent from both. |
+| `-F FILE` | 16 | 23 | reading a name from a file disagrees on every fixture — empty, blank, spaced, two-line, commented. |
+| `(os error 13)` | ⊂ | ⊂ | `cannot write /proc/sys/kernel/hostname: Permission denied (os error 13) (are you root?)` where net-tools says `you must be root to change the host name`. |
+
+**A note on the harness, because this subject is unlike every other one here:
+`hostname` WRITES TO THE MACHINE.** `hostname foo` sets the system's name and
+there is no dry-run flag. As an ordinary user every such call is refused, which
+is why the operand cases above are comparisons at all. Run as root they would
+stop being comparisons and become edits — twice each, on a host two other lanes
+are using — so the harness checks `id -u` and refuses outright. That guard is
+specific to this one subject, not a rule for the family.
 
 **15 -> 14 (2026-09-11): `uname`, with a new harness.**
 `scripts/uname-diff.sh`, written today: 109 cases, and close to exhaustive

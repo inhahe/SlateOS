@@ -114,7 +114,6 @@ userspace/strings
 userspace/sysctl
 userspace/syslogd
 userspace/tac
-userspace/tar
 userspace/tcpdump
 userspace/timeout
 userspace/top

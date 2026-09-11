@@ -64902,6 +64902,29 @@ number is different** — not by a constant factor either: 12→16, 24→48,
 gets the sizes wrong and drops a directory has no correct output left; there is
 nothing else in it to be right about.
 
+**17 -> 16 (2026-09-11): `tar`, whose archives GNU cannot read back the same.**
+`DIFF_PKG=tar bash scripts/tar-diff.sh`:
+
+**coreutils 245 passed, 0 differed. The standalone 18 passed, 227 differed.**
+
+This is the last of the sixteen pairs that had a harness, and the worst kind of
+failure for an archiver: the archives it writes are not the archives it thinks
+it wrote.
+
+| | cases | defect |
+|---|---|---|
+| **GNU reads our archive differently** | 181 | `tar -tvf` on an archive the standalone created lists `-rwxr-xr-x 0/0` where GNU's own archive lists `-rwxr-xr-x inhahe/inhahe`: the `uname`/`gname` header fields are **left empty**, so every archive loses its owner names and GNU falls back to numeric ids. For a fifo, GNU listing our archive prints **nothing at all** — the entry is not in there. |
+| **every archive differs in `mode`** | 27 | byte 102 of block 0, which is the header's mode field, on a plain file, an empty file, a directory, a whole tree. Not an edge case: **every archive it creates has the wrong permission bits in it.** |
+| **fifos are skipped on extract** | 13 | `tar: x/p: unsupported type flag '6', skipping` — type flag 6 is a FIFO. GNU extracts it; the standalone silently omits it **and exits 0**, so a restore quietly loses every named pipe in the archive. |
+| name field wrong | 4 | a dangling symlink and a fifo are written with a different `name` field than GNU writes. |
+| **PANIC on a non-UTF-8 name** | 2 | `tar -cf X <name that is not UTF-8>` aborts with `thread 'main' panicked at library/std/src/env.rs`, **exit 134** — the same `std::env::args()` unwrap that decided `xargs`. `design.txt` says a path may hold every byte except `/` and NUL, and `tar` is the program whose entire job is preserving names. A `-C` argument that is not UTF-8 panics too. |
+
+**Every harness-backed pair is now settled.** Sixteen had one; all sixteen went
+to coreutils, and not one was close. The remaining 16 pairs have no harness, so
+nothing further should be deleted until one is written — the survey's counts
+are a ranking, not evidence, and this file records five occasions when they were
+wrong.
+
 **18 -> 17 (2026-09-11): `sed`, which cannot parse a bracket expression.**
 `DIFF_PKG=sed bash scripts/sed-diff.sh`:
 

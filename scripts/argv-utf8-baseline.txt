@@ -189,7 +189,6 @@ userspace/syslogd/src/main.rs:argv-as-string
 userspace/sysstat/src/main.rs:argv-as-string
 userspace/systemctl/src/main.rs:argv-as-string
 userspace/tac/src/main.rs:argv-as-string
-userspace/tar/src/main.rs:argv-as-string
 userspace/tcpdump/src/main.rs:argv-as-string
 userspace/telnet/src/main.rs:argv-as-string
 userspace/thermald/src/main.rs:argv-as-string

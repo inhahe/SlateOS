@@ -189,7 +189,34 @@ question marks where it printed six zeroes, which is the whole shape of it.
 **Trigger: fix them in batches by crate, dropping each from the baseline as it
 goes.** The baseline may only shrink, so the count is the progress bar.
 
-**Progress: 95 -> 74.** `ftp`'s six are fixed (2026-09-10) -- the three
+**Progress: 95 -> 74 -> 76.** It went UP, and the two extra are not
+regressions -- read the next paragraph before reading the count as a defeat.
+
+**The count was measured through a scanner that could not see the whole
+corpus.** `rustlex.live_code` cut each file at its first `#[cfg(test)] mod`,
+which in `oils/src/interp.rs` is a `mod stderr_tee` helper at line 3,348 of
+109,742. Fixing it (2026-09-11) added 65,069 lines to the visible corpus,
++15.6%, and the gate immediately found one real site in the newly-visible
+code: `fc -e` read back the file the user had just edited with
+`std::fs::read(&path).unwrap_or_default()` and RAN the result, so a failed
+read ran nothing and reported success. Fixed, not pinned.
+
+The other two came from teaching the gate `fs::read` -- absent until now
+because a bare `read` alternative matches every `buf.read(..)` method call.
+Both are `pwdb::from_files`, and both are CORRECT: "A file that cannot be read
+is an empty database, not an error. That is glibc's behaviour ... `ls -l` on a
+system with no /etc/passwd must still list the directory, printing numeric ids,
+rather than fail." They are pinned as known-and-justified. So the honest
+reading of 76 is 74 minus one fixed, plus two that were always there and are
+meant to be.
+
+**A ratchet whose count only shrinks cannot tell you that the instrument
+shrank instead of the problem.** Both times a scanner here was found blind, it
+was by accident -- a boot test going red in August, a count dropping by two in
+September. Neither floor noticed, because a floor on the total cannot see a
+hole in the distribution.
+
+`ftp`'s six are fixed (2026-09-10) -- the three
 `read_line("Name: ")` and three `read_password("Password: ")` sites now
 distinguish end-of-input from an empty answer, so a closed stdin aborts the
 login instead of sending a blank password.

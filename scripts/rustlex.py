@@ -196,9 +196,16 @@ def live_code(src: str) -> tuple[str, str]:
 
     # How it works
 
-    Blank each `#[cfg(test)]` item by matching its braces, then cut at the test
-    module. Blanking preserves length, so match offsets still index the
-    original, which is what lets `survey` show real argument text.
+    Blank each `#[cfg(test)]` item by matching its braces. Every one of them,
+    including the test module, and the scan runs to the end of the file --
+    there is no truncation and no special case for `mod`. Blanking preserves
+    length, so match offsets still index the original, which is what lets
+    `survey` show real argument text.
+
+    It did cut at the first `#[cfg(test)] mod`, which is the same "the first
+    one is the last thing in the file" assumption as the split it replaced.
+    `oils/src/interp.rs` opens with a `#[cfg(test)] mod stderr_tee` helper at
+    line 3,348 of 109,742 and that cut discarded 106,394 lines.
 
     Brace matching runs over the `strip_noise` output: a brace inside a string
     or a comment must not close an item early, and this file has been wrong
@@ -216,21 +223,40 @@ def live_code(src: str) -> tuple[str, str]:
         i = masked.find("#[cfg(test)]", i)
         if i < 0:
             break
-        # The test module ends the live region; everything after it goes.
-        rest = masked[i + len("#[cfg(test)]"):]
-        head = rest.lstrip()
-        # Skip any further attributes (`#[allow(...)]` is usual on test mods).
-        while head.startswith("#["):
-            close = head.find("]")
-            if close < 0:
-                break
-            head = head[close + 1:].lstrip()
-        if head.startswith("mod "):
-            return "".join(out[:i]), "".join(mout[:i])
-        # A single item: blank it from the attribute to its closing brace.
+        # EVERY `#[cfg(test)]` ITEM IS BLANKED AND THE SCAN CONTINUES. There
+        # is no special case for `mod`, and no truncation anywhere.
+        #
+        # There was: `if head.startswith("mod ")` returned everything before
+        # the attribute, on the reasoning that "the test module ends the live
+        # region". That is the SAME ASSUMPTION as the `split("#[cfg(test)]")[0]`
+        # this function was written to replace -- "the first one I find is the
+        # last thing in the file" -- moved down one level, from the attribute
+        # to the attribute-plus-`mod`. It is wrong for the same reason: a
+        # `#[cfg(test)] mod` can be a test HELPER sitting anywhere.
+        #
+        # `userspace/oils/src/interp.rs` is 109,742 lines. At line 3,348 it has
+        # `#[cfg(test)] mod stderr_tee`, a helper that captures stderr; the real
+        # `mod tests` is at line 70,020. This function returned 3,347 lines and
+        # discarded 106,394, including 64,773 lines of live interpreter. Every
+        # checker pointed here -- check-read-defaults and multicall-aliases --
+        # was blind to all of it, and their baselines were written that way.
+        #
+        # Blanking the module instead of cutting at it costs nothing: the tests
+        # are just as gone, and nothing is assumed about where they sit.
         brace = masked.find("{", i)
-        if brace < 0:
-            return "".join(out[:i]), "".join(mout[:i])
+        semi = masked.find(";", i)
+        if brace < 0 or (0 <= semi < brace):
+            # The attribute decorates a non-block item -- `#[cfg(test)] use
+            # std::cell::RefCell;`. There is no block to match, and searching
+            # on for a `{` would find one belonging to the NEXT item and blank
+            # everything between. Drop the attribute and carry on.
+            end = i + len("#[cfg(test)]")
+            for k in range(i, end):
+                if out[k] != "\n":
+                    out[k] = " "
+                    mout[k] = " "
+            i = end
+            continue
         depth = 0
         j = brace
         while j < len(masked):
@@ -314,6 +340,63 @@ def _self_test() -> int:
     for probe in ["let a = \"x\";", "// c\n", "r#\"q\"#", "'\\n'"]:
         expect(f"length preserved: {probe!r}",
                len(strip_noise(probe)), len(probe))
+
+    # --- live_code -------------------------------------------------------
+    #
+    # It had NO case here at all until 2026-09-11, which is why the `mod` cut
+    # below survived being moved into this module: the suite passed identically
+    # with and without the bug. Two gates import this function.
+    #
+    # THE SHIPPED BUG, and it is the same one `live_code` was written to fix,
+    # one level down. The split it replaced assumed the first `#[cfg(test)]`
+    # ended the file; this assumed the first `#[cfg(test)] mod` did.
+    # `oils/src/interp.rs` opens with a `#[cfg(test)] mod stderr_tee` helper at
+    # line 3,348 of 109,742 -- the real `mod tests` is at 70,020 -- so the cut
+    # returned 3,347 lines and discarded 106,394.
+    helper_first = """fn before() {}
+#[cfg(test)]
+mod stderr_tee { fn cap() {} }
+fn after_helper() { read_to_string(p); }
+#[cfg(test)]
+mod tests { fn t() {} }
+fn after_tests() {}
+"""
+    live, _ = live_code(helper_first)
+    expect("live code before a test helper mod survives", "before" in live, True)
+    expect("live code AFTER a test helper mod survives", "after_helper" in live, True)
+    expect("live code after the test mod survives", "after_tests" in live, True)
+    expect("the helper mod body goes", "cap" in live, False)
+    expect("the test mod body goes", "fn t()" in live, False)
+    expect("live_code preserves length", len(live), len(helper_first))
+
+    # An attribute on a non-block item has no braces of its own. Searching on
+    # for a `{` finds the NEXT item's and blanks everything in between.
+    use_plain = """#[cfg(test)]
+use std::cell::RefCell;
+fn kept() { read_to_string(p); }
+"""
+    live, _ = live_code(use_plain)
+    expect("a cfg(test) use does not swallow the next item", "kept" in live, True)
+
+    # ...but a *braced* use has braces that are its own, and only its own.
+    use_braced = """#[cfg(test)]
+use utmpfile::{Record, OFFSETS};
+fn kept_after_braced_use() {}
+"""
+    live, _ = live_code(use_braced)
+    expect("a braced cfg(test) use does not swallow the next item",
+           "kept_after_braced_use" in live, True)
+    expect("the braced use itself goes", "Record" in live, False)
+
+    # Brace matching runs over `strip_noise` output precisely so this holds.
+    brace_in_string = """#[cfg(test)]
+mod tests { fn t() { let s = "}"; } }
+fn tail() { read_to_string(p); }
+"""
+    live, _ = live_code(brace_in_string)
+    expect("a brace inside a string does not end a test mod early",
+           "tail" in live, True)
+    expect("the test mod around it still goes", "let s" in live, False)
 
     print(f"rustlex: self-test {'FAILED' if failures else 'passed'} "
           f"({failures} failure(s))")

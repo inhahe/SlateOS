@@ -42,9 +42,13 @@ Usage:
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import rustlex  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 COREUTILS_BIN = ROOT / "userspace" / "coreutils" / "src" / "bin"
@@ -83,7 +87,6 @@ _CHAR = re.compile(r"(?<![A-Za-z0-9_])(?<!\.\.=)'([A-Za-z])'\s*(?:=>|\|)(?!=)")
 # first `#[cfg(test)]` to end-of-file works because that is where every one of
 # these files puts its tests; a `#[cfg(test)]` in the middle would cost us the
 # code after it, which is a survey being conservative rather than wrong.
-_TESTS = re.compile(r"^#\[cfg\(test\)\]", re.MULTILINE)
 # `coreutils`'s newer parsers keep a table of long options with the `--` already
 # stripped, because that is the form the resolver compares against after
 # handling `--name=value` and GNU's unambiguous-abbreviation rule. Two shapes
@@ -157,8 +160,28 @@ def _local_options(text: str) -> tuple[set[str], set[str]]:
 
 
 def options(text: str) -> set[str]:
-    if (m := _TESTS.search(text)) is not None:
-        text = text[: m.start()]
+    # THE TESTS ARE CUT BY `rustlex.live_code`, NOT AT THE FIRST `#[cfg(test)]`.
+    #
+    # This was `text[: _TESTS.search(text).start()]` -- everything before the
+    # first line-start `#[cfg(test)]` -- which is only the tests when that
+    # attribute's first appearance is the test module. Put one on a helper (a
+    # `#[cfg(test)] use`, a test-only struct) and the cut lands at the top of
+    # the file, taking the whole program with it.
+    #
+    # That is not hypothetical here. Measured across `userspace/*/src/main.rs`,
+    # six crates lose more than fifty lines to the naive cut, and `stat` --
+    # which IS one of the colliding pairs this survey ranks -- showed 262 of its
+    # 2179 live lines. The result was a `stat` row reading 2840 standalone lines
+    # against 2118 for coreutils, with "only sa = 0": the larger implementation
+    # credited with not one option of its own. The line counts are measured
+    # elsewhere and were never truncated, so the row contradicted itself in the
+    # output for as long as it has existed.
+    #
+    # The stakes are the verdict. This survey exists to decide WHICH of two
+    # implementations is deleted, and an undercount of one side's options is an
+    # argument for deleting that side -- exactly the "silently drop working
+    # features" outcome the module docstring is written to prevent.
+    text, _masked = rustlex.live_code(text)
     opts = set(_SHORT.findall(text)) | set(_LONG.findall(text))
     opts |= {"-" + c for c in _BYTE.findall(text)}
     opts |= {"--" + n for n in _TABLE.findall(text)}

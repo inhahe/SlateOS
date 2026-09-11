@@ -198,7 +198,6 @@ _NAMEVAR = (
     r"invoked_as|exe_name|cmd_name|self_name"
 )
 _COMPARE = re.compile(rf'(?:{_NAMEVAR})\s*==\s*"([a-z][a-z0-9_.+-]{{0,20}})"')
-_TESTS = re.compile(r"^#\[cfg\(test\)\]", re.MULTILINE)
 # `let <ident> = <rest-of-line>` and `<ident>: &str` (a function parameter).
 # Used to FOLLOW the invocation name through rebindings rather than guess what
 # it is called -- see `name_vars`.
@@ -209,7 +208,11 @@ _PARAM = re.compile(r"\b([a-z_][a-z0-9_]*)\s*:\s*&\s*(?:str|String|OsStr)\b")
 # `detect_personality` and the lowercased TIMESPEC `lower` in at(1)'s time
 # parser, so a whole-file taint reports `noon`, `midnight` and `teatime` as
 # personalities.
-_FN = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:const\s+)?"
+# `[ \t]*` rather than `\s*` -- see check-read-defaults' LOCAL_FALLIBLE. `\s`
+# matches the newline, and `live_code` blanks test code to spaces, so `^\s*`
+# swallows a whole blanked test module and backtracks across it from every line
+# start inside it. That is quadratic in the size of the module.
+_FN = re.compile(r"^[ \t]*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:const\s+)?"
                  r"(?:unsafe\s+)?(?:extern\s+\"[^\"]*\"\s+)?fn\b",
                  re.MULTILINE)
 

@@ -136,9 +136,13 @@ Usage:  python scripts/audit-cli-fabrication.py [--list] [--limit N]
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import rustlex  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -297,33 +301,23 @@ def strip_tests(text: str) -> str:
 
     `userspace/oils`, a shell with dozens of modules, measured as having no
     I/O of any kind.
+
+    # Why this delegates to `rustlex.live_code` rather than matching braces here
+
+    It matched braces over the RAW text, so a `{` or `}` inside a string or a
+    comment moved the depth count and an item could close early or late.
+    `live_code` matches over `strip_noise` output, where strings and comments
+    are blanked, which is the same job done once and done right.
+
+    The two could not be merged until 2026-09-11, and the reason is worth
+    keeping: `live_code` used to CUT at the first `#[cfg(test)] mod` instead of
+    blanking it and carrying on. Calling it from here would have reintroduced
+    precisely the bug described above -- `crate_sources` concatenates every
+    file in the crate, so a cut at the first test module discards every later
+    file. Now that it blanks and continues, the contracts are identical.
     """
-    out = []
-    i = 0
-    while True:
-        idx = text.find("#[cfg(test)]", i)
-        if idx < 0:
-            out.append(text[i:])
-            return "".join(out)
-        out.append(text[i:idx])
-        # Find the `{` that opens the item this attribute decorates, then
-        # match to its close. An attribute on a non-block item (rare here)
-        # leaves nothing to skip, so fall back to dropping the attribute only.
-        brace = text.find("{", idx)
-        semi = text.find(";", idx)
-        if brace < 0 or (0 <= semi < brace):
-            i = idx + len("#[cfg(test)]")
-            continue
-        depth, j = 0, brace
-        while j < len(text):
-            if text[j] == "{":
-                depth += 1
-            elif text[j] == "}":
-                depth -= 1
-                if depth == 0:
-                    break
-            j += 1
-        i = j + 1
+    live, _ = rustlex.live_code(text)
+    return live
 
 
 BASELINE = ROOT / "scripts" / "cli-fabrication-baseline.txt"

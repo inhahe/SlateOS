@@ -1,6 +1,50 @@
 #!/usr/bin/env python3
-"""Survey the utility names that two crates both build, and say which side is
-ahead.
+"""Survey the utility names that two crates both build, and say how to decide
+between them.
+
+## This script no longer pronounces a winner, and here is the evidence
+
+It used to print a `verdict` column -- "standalone ahead", "coreutils ahead",
+"close -- read both". Five of those verdicts have now been put to a real
+differential harness, and the column went **nought for five**:
+
+| pair | the verdict | what the harness said |
+|---|---|---|
+| `tee` | standalone ahead | coreutils 71/0, standalone 34/37 — **inverted** |
+| `dd` | standalone ahead | coreutils 339/0, standalone 8/331 — **inverted** |
+| `expand` | close — read both | 216/0 against 90/126 — a landslide |
+| `comm` | close — read both | 197/0 against 104/93 — a landslide |
+| `join` | close — read both | 305/0 against 126/179 — a landslide |
+
+Both failure directions have one cause: **this script counts option names that
+appear in the source, and an option that is named is not an option that
+works.** The standalone `dd` mentions `bs` and implements none of its suffixes,
+so `dd bs=1M` errors. The standalone `join` mentions `-a` and rejects `-a1`,
+the ordinary spelling, costing it 64 cases. Counting mentions cannot see that,
+and no refinement of the counting can -- the fact is not in the text.
+
+"close" turned out to be the most misleading of the three rather than the most
+balanced. A pair is called close when the two line counts are close, and the
+smaller side is often smaller *precisely because a third of its options are
+missing*. Three "close" pairs were measured and all three were landslides.
+
+A third failure mode, which is about safety rather than ranking: **some
+standalone crates are multicall binaries, so their row is not about one
+program.** `userspace/stat` dispatches on `argv[0]` to `stat`, `readlink` and
+`ln`, so the `stat` row credits the standalone with 14 options it does not have
+-- `--backup`, `--symbolic` and `--no-target-directory` are `ln`'s,
+`--canonicalize-missing` and `--no-newline` are `readlink`'s. Two consequences
+follow, and the second is the dangerous one: the count compares three programs
+against one, and `git rm -r userspace/stat` would delete a `readlink` and an
+`ln` that nothing in the row mentions. Check what a crate's `argv[0]` dispatch
+serves before removing it; `scripts/check-roadmap-done.py` catches the fallout
+afterwards, but only for names the roadmap claims are done.
+
+So the column now says what would actually settle it: whether the tree already
+has a differential harness for this name, and the command to run. What this
+script still measures honestly -- line counts and the mentioned-option sets --
+is printed unchanged, because those are observations. The verdict was an
+inference, and the inference did not hold.
 
 ## Why this exists
 
@@ -53,6 +97,8 @@ import rustlex  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 COREUTILS_BIN = ROOT / "userspace" / "coreutils" / "src" / "bin"
 USERSPACE = ROOT / "userspace"
+# Where a `<name>-diff.sh` lives if the tree already has one for a pair.
+SCRIPTS = Path(__file__).resolve().parent
 
 # A short option is a dash and one character that is not a digit -- `-1` is far
 # more often a numeric operand (`head -1`) or part of a format string than a
@@ -248,38 +294,37 @@ def main() -> int:
         rows.append((name, cu_lines, st_lines, cu_opts, st_opts))
 
     print(f"{len(rows)} colliding names\n")
-    hdr = f"{'name':<12} {'coreutils':>9} {'standalone':>10}  {'only cu':>7} {'only sa':>7}  verdict"
+    hdr = (f"{'name':<12} {'coreutils':>9} {'standalone':>10}  "
+           f"{'only cu':>7} {'only sa':>7}  how to decide")
     print(hdr)
     print("-" * len(hdr))
-    ahead_sa = ahead_cu = 0
+    with_harness = 0
     for name, cl, sl, co, so in rows:
         only_cu, only_sa = co - so, so - co
-        # The verdict weighs options first and length second: a longer file that
-        # accepts strictly fewer options is longer for some other reason.
-        if len(only_sa) > len(only_cu) + 2:
-            verdict = "standalone ahead"
-            ahead_sa += 1
-        elif len(only_cu) > len(only_sa) + 2:
-            verdict = "coreutils ahead"
-            ahead_cu += 1
-        elif sl > cl * 2:
-            verdict = "standalone ahead (size)"
-            ahead_sa += 1
-        elif cl > sl * 2:
-            verdict = "coreutils ahead (size)"
-            ahead_cu += 1
+        # The only column here that has ever predicted a differential's answer.
+        # A verdict derived from these counts went nought for five against the
+        # harnesses -- see the module docstring -- so the counts are printed and
+        # left to speak for themselves, and this column says what would settle
+        # it instead.
+        if (SCRIPTS / f"{name}-diff.sh").is_file():
+            how = f"DIFF_PKG={name} bash scripts/{name}-diff.sh"
+            with_harness += 1
         else:
-            verdict = "close -- read both"
-        print(f"{name:<12} {cl:>9} {sl:>10}  {len(only_cu):>7} {len(only_sa):>7}  {verdict}")
+            how = "no harness -- write one"
+        print(f"{name:<12} {cl:>9} {sl:>10}  "
+              f"{len(only_cu):>7} {len(only_sa):>7}  {how}")
         if verbose:
             if only_cu:
                 print(f"             only coreutils: {' '.join(sorted(only_cu))}")
             if only_sa:
                 print(f"             only standalone: {' '.join(sorted(only_sa))}")
 
-    print(f"\ncoreutils ahead: {ahead_cu}   standalone ahead: {ahead_sa}   "
-          f"close: {len(rows) - ahead_cu - ahead_sa}")
-    print("\nEvery pair is read before either copy is deleted; this only ranks them.")
+    print(f"\n{with_harness} of {len(rows)} have a harness; "
+          f"{len(rows) - with_harness} would need one written.")
+    print("\nThe option counts say what each source MENTIONS. Five pairs ranked"
+          "\nfrom them have since been measured, and the ranking was wrong every"
+          "\ntime -- twice backwards, three times calling a landslide close. Run"
+          "\nthe harness; do not delete on a count.")
     return 0
 
 

@@ -64532,7 +64532,8 @@ The four are all user-visible and none is a missing option:
 | `-w 0` | refuses, *invalid number of columns* | silently folds to one character per line |
 | legacy `-5` | `abcde` / `fghij` | *invalid option -- '5'* |
 | multibyte `-w 4` on three `é` | `éé` / `é` | all three on one line |
-| a `` in the line | resets the column | breaks the line |
+| a `
+` in the line | resets the column | breaks the line |
 
 The `-w 0` row is the one that matters most: a silent wrong answer where GNU
 refuses is worse than a missing feature, because nothing downstream can tell.
@@ -64549,6 +64550,31 @@ binaries with the same file name into the same target directory, so the second
 depends on build order. That is not a new finding — §1005 describes the tools
 "alternating non-deterministically between two implementations" — but it is
 worth knowing that it reproduces locally in seconds.
+
+**38 -> 37 (2026-09-11): `cut`.** The survey called this one "close -- read
+both" as well, 843 standalone lines against coreutils' 1515. The differential
+(`scripts/dup-differential.py`, written for exactly this) ran 36 cases:
+**coreutils agreed with GNU 36/36, the standalone 24/36.**
+
+Counted honestly, the 12 split two ways. **Seven are message wording only** --
+both refuse, both exit 1, only the text differs -- and are a divergence rather
+than a defect. **Five are wrong answers:**
+
+| case | GNU and coreutils | standalone |
+|---|---|---|
+| `-b 1-3` on `ab` | passes the bytes through | **refuses the whole stream**: "did not contain valid UTF-8" |
+| `-c 1` on `éé` | the first byte | the first character |
+| `--output-delimiter` with `-b` ranges | `ab-de` | `abde`, delimiter dropped |
+| `-f 2` on a CRLF line | keeps the `` | strips it |
+| `-d ''` | works | refuses |
+
+The first is the one that settles it. `cut -b` is BYTE mode, and the standalone
+forces UTF-8 on the stream, so the flag whose entire purpose is byte-oriented
+work fails on binary input — CLAUDE.md item 7 in the one place it matters most.
+
+`userspace/cut` deleted; three ledgers moved with it (lint exemptions 127 ->
+126, argv-utf8 223 -> 222, collisions 38 -> 37) without anyone fixing a
+warning.
 
 **Still open — the proper fix.** One name, one program. For each of the
 remaining 41: pick the implementation that is under test and maintained, make

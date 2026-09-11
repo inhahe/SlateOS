@@ -44,7 +44,6 @@ userspace/cpio
 userspace/crond
 userspace/crontab
 userspace/ctags
-userspace/cut
 userspace/date
 userspace/dbus
 userspace/dd

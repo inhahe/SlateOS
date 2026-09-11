@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 # boot-test.sh — Build the kernel, boot it in QEMU, verify BOOT_OK.
 #
+# EDITING THIS FILE NOW RUNS scripts/test-boot-test.py AT PUSH TIME, which it
+# did not until 2026-09-11. Gate 20 selected subjects with
+# `^scripts/[^/]+\.py$`, so every shell script under scripts/ was silently
+# excluded -- and an excluded file looks exactly like one with no suite, so
+# nothing said so. The suite still ran, but only inside a boot test, ~1050s in.
+# It takes about a second here.
+#
 # Exit codes:
 #   0 — success marker detected AND no self-test failures
 #   1 — Timeout, PANIC, or a non-fatal self-test failure detected

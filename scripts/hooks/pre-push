@@ -697,26 +697,48 @@ if [ "$skip_suites" != "1" ]; then
     # `git diff` does not understand `--not --remotes`; that is rev-list
     # syntax, so the commits are listed first and then asked for their paths.
     # shellcheck disable=SC2086
-    changed_scripts=$(git rev-list $pushed_shas --not --remotes="$remote_name"                           2>/dev/null                       | xargs -r git diff-tree --no-commit-id --name-only -r                           2>/dev/null                       | grep -E '^scripts/[^/]+\.py$' | sort -u)
+    changed_scripts=$(git rev-list $pushed_shas --not --remotes="$remote_name"                           2>/dev/null                       | xargs -r git diff-tree --no-commit-id --name-only -r                           2>/dev/null                       | grep -E '^scripts/' | sort -u)
+    # PAIRED BY STEM, NOT BY EXTENSION.
+    #
+    # `scripts/foo.py`, `scripts/foo.sh` and an extensionless `scripts/hooks/foo`
+    # all pair with `scripts/test-foo.py`. The selector above used to be
+    # `^scripts/[^/]+\.py$`, which silently excluded every shell script and
+    # everything a directory deeper -- and an excluded file is indistinguishable
+    # from one with no suite, so nothing ever said so.
+    #
+    # Three subjects were in that position. `scripts/hooks/pre-push`, which I
+    # found and fixed by adding a case for `scripts/hooks/pre-push`; then
+    # `boot-test.sh` and `bootstrap-worktree.sh`, which lane A found immediately
+    # afterwards and which that case did nothing for. An enumeration needing one
+    # entry per instance misses the next one BY CONSTRUCTION, and this hook has
+    # now demonstrated that twice within an hour.
+    #
+    # Deriving the name fails closed: a script with no paired suite finds no
+    # file and takes the existing no-suite path.
     for f in $changed_scripts; do
         base=$(basename "$f")
         case "$base" in
             test-*) continue ;;   # a suite is not its own subject
         esac
-        suite="${repo_root:-.}/scripts/test-$base"
+        stem="${base%.*}"
+        suite="${repo_root:-.}/scripts/test-$stem.py"
         [ -f "$suite" ] || continue
-        suites_ran="$suites_ran $base"
-        if ! run_checker "suite-$base" "$py" "$suite"; then
+        case " $suites_ran " in
+            *" $stem "*) continue ;;   # already run for a sibling path
+        esac
+        suites_ran="$suites_ran $stem"
+        if ! run_checker "suite-$stem" "$py" "$suite"; then
             suites_failed=1
         fi
     done
 
-    # THIS FILE IS ALSO A SUBJECT, and was not one until now.
+    # THIS FILE HAS SIX SUITES, WHICH IS NOT A PAIRING.
     #
-    # The loop above pairs `scripts/<name>.py` with `scripts/test-<name>.py`.
-    # This hook is `scripts/hooks/pre-push`: not directly under `scripts/`, and
-    # with no `.py` to match, so `^scripts/[^/]+\.py$` never selected it and no
-    # edit to it has ever run its own six suites.
+    # The loop above finds one suite per subject by stem. This hook's suites are
+    # a prefix family -- test-pre-push-gates, -fmt-gate, -doclinks-gate,
+    # -identity-gate, -unixhalf-gate, -run-checker -- so it needs its own rule
+    # rather than a name. `test-pre-push.py` does not exist, so the stem rule
+    # finds nothing here and the two cannot double-run.
     #
     # That is why the header's gate count has been wrong FOUR TIMES -- before
     # gate 9, again at 13, again at 19, and again at 22 tonight, which lane A

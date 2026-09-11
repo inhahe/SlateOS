@@ -36,7 +36,23 @@ freely. See `roadmap.md` → "Three-Agent Parallel Execution" rule 3, and
 
 ---
 
-## TD-B-FOUR-MORE-PROGRAMS-SUBSTITUTE-INVENTED-DATA-ON-A-FAILED-READ (lane B, 2026-09-11)
+## TD-B-FOUR-MORE-PROGRAMS-SUBSTITUTE-INVENTED-DATA-ON-A-FAILED-READ (lane B, 2026-09-11) -- CLOSED 2026-09-11
+
+**CLOSED.** All three real entries are fixed: `acl` and `blockdev` on
+2026-09-11, `cgroup`'s two generators the same night. The fourth row was
+`numactl` and it was struck as wrong -- it measures rather than invents,
+and the correction is kept in the table rather than deleted because a row
+read without its context is exactly how this list could fill with false
+findings.
+
+**What the sweep was worth, stated honestly.** Six programs, five real
+fabrications removed (`efibootmgr`, `dmidecode`, `acl`, `blockdev`,
+`cgroup` x2), one false accusation caught by reading the code before
+acting on my own list. The grep that found them -- a function named
+`generate_default_*` or `fallback_*` returning constructed records --
+is a name pattern, not a behaviour pattern, so it finds this shape only
+while people keep naming it that way. Nothing gates it.
+
 
 **In short:** `efibootmgr` and `dmidecode` were each found inventing data when
 their real source could not be read. Grepping for the shape that produced them

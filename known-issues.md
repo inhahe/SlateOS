@@ -64780,6 +64780,22 @@ lint programme above is still worth doing; it is not a substitute for a
 differential, and two of its three crates so far were duplicates that a
 differential then deleted.
 
+**22 -> 21 (2026-09-11): `df`, which passes NOTHING and colours a pipe.**
+`DIFF_PKG=df bash scripts/df-diff.sh`:
+
+**coreutils 174 passed, 0 differed. The standalone 0 passed, 174 differed** —
+every case in the suite, which no other pair has managed.
+
+Three defects, each enough on its own:
+
+| | defect |
+|---|---|
+| **most filesystems are missing** | GNU lists 35 mounts on this host; the standalone lists **five**. Everything mounted `none`, `rootfs` or `tmpfs` is absent — `/dev`, `/dev/shm`, `/run`, `/run/lock`, `/run/user`, every bind mount. `df` exists to answer "where has my disk gone", and it is not reporting most of the places it could have gone. |
+| **ANSI colour written to a pipe** | the `Use%` column is wrapped in ESC-bracket-digits-m **on non-terminal output** — confirmed directly, 2 ESC bytes in `df / \| od -An -c`. Colour has to be gated on the output being a terminal; ungated, every pipeline that reads `df` gets control sequences in the middle of the field it is parsing. |
+| duplicated rows | `/dev/sdd` is listed three times, for `/`, `/mnt/wslg/distro` and `/snap`, where GNU lists the device once against `/`. |
+
+The column widths differ too, but that is the least of it.
+
 **23 -> 22 (2026-09-11): `xargs`, which PANICS on a non-UTF-8 argument.**
 `DIFF_PKG=xargs bash scripts/xargs-diff.sh`:
 

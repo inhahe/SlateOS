@@ -593,15 +593,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "df"
-version = "0.1.0"
-dependencies = [
- "procinfo",
- "quoting",
- "scratchdir",
-]
-
-[[package]]
 name = "dhcpcd"
 version = "0.1.0"
 dependencies = [

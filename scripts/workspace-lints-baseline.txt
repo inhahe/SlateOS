@@ -127,7 +127,6 @@ userspace/timeout
 userspace/top
 userspace/tput
 userspace/traceroute
-userspace/tsort
 userspace/udevd
 userspace/uptime
 userspace/vi

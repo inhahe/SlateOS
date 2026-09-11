@@ -45019,7 +45019,23 @@ impl Shell {
         }
         // Read as bytes: the editor may have left a command carrying a byte
         // that is not text, and the replay has to run what it actually wrote.
-        let edited = std::fs::read(&path).unwrap_or_default();
+        // A READ-BACK THAT FAILED IS NOT AN EMPTY EDIT.
+        //
+        // This was `.unwrap_or_default()`, so an unreadable temp file became an
+        // empty command list, `fc_run` ran nothing, and `fc` returned 0. The
+        // user edits a command, the read fails, and the shell reports success
+        // for work it never did. The branch above already settles the policy
+        // for this case -- edits that are not trustworthy are thrown away,
+        // nothing runs, and the status is 1 -- and a failed read-back is the
+        // same situation arrived at one step later.
+        let edited = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                let _ = std::fs::remove_file(&path); // best effort; the file is ours
+                self.perrln(&format!("fc: {path}: cannot read back the edited commands: {e}"));
+                return 1;
+            }
+        };
         let _ = std::fs::remove_file(&path); // best effort; the file is ours
         // bash raises `echo_input_at_read` (i.e. `set -v`) for the replay, so
         // each unit is echoed to stderr as it is read, and forces history

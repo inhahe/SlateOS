@@ -97,36 +97,65 @@ def remove(root: str, rel: str) -> None:
     os.remove(os.path.join(root, rel.replace("/", os.sep)))
 
 
-# The modules a checker needs beside it that are not the checker. Named once
-# because there are two fixture builders -- `new_repo` and `_push_fixture` --
-# and a list kept twice is a list that is right once. When `gittree` grew its
-# `import gitenv`, this list was updated in `new_repo` only, and every
-# `_push_fixture` case died of `ModuleNotFoundError` inside the hook, where the
-# traceback surfaced as a gate verdict rather than as a missing file.
+# The modules a checker needs beside it that are not the checker.
 #
-# `gitenv.py` travels with `gittree.py` because `gittree` imports it, and it
-# imports it from its *own* directory -- which in a fixture is this copy, not
-# the real `scripts/`. Omitting it does not degrade the fixture, it stops the
-# checker starting at all.
-# `rustlex.py` joins these because check-read-defaults imports it now.
-# `selftestflag.py` joins them because sixteen checkers import it since the
-# 2026-09-10 flag sweep -- including quote-names, which gate 8 exercises. I
-# added the import to those sixteen and not the entry here, and every gate 8
-# case then failed with `got 1, want 0`: the checker died of
-# ModuleNotFoundError inside the fixture and the harness read a non-zero exit
-# as a finding. That is the failure mode the paragraph above describes, three
-# comments up, happening again for the third support module in a row.
+# READ FROM THE IMPORTS, NOT LISTED. This was a tuple, and it was extended three
+# times -- each extension AFTER a failure rather than before one:
 #
-# A checker copied into a fixture repo without its support modules fails
-# on import, which every case would report as the checker refusing.
-SUPPORT = ("gittree.py", "gitenv.py", "rustlex.py", "selftestflag.py")
+#   gitenv.py        when `gittree` grew `import gitenv`. Updated in `new_repo`
+#                    only, so every `_push_fixture` case died of
+#                    ModuleNotFoundError inside the hook, where the traceback
+#                    surfaced as a gate verdict rather than as a missing file.
+#   rustlex.py       when check-read-defaults grew an import of it.
+#   selftestflag.py  when sixteen checkers grew one in the 2026-09-10 flag
+#                    sweep. Every gate 8 case failed `got 1, want 0` and main
+#                    was red for all three lanes until lane A bisected it.
+#
+# Three failures, three manual extensions, and the comment describing the first
+# two sat directly above the tuple while the third was written. An enumeration
+# that needs one entry per instance misses the next one BY CONSTRUCTION, and the
+# miss is silent here because a fixture lacking a module looks exactly like a
+# fixture that does not need one -- until the checker cannot start, and a
+# checker that cannot start is reported as a checker that found something.
+#
+# `support_for` walks the imports transitively, which is what made gitenv
+# necessary in the first place: `gittree` imports it, from its OWN directory,
+# which in a fixture is the copy rather than the real `scripts/`.
+#
+# It fails closed in the useful direction: a name that is not a file in
+# `scripts/` is not copied, so `import os` and `import re` are skipped without
+# being enumerated as exceptions.
+_IMPORT_RE = re.compile(r"^\s*(?:import|from)\s+([A-Za-z_][A-Za-z0-9_]*)", re.MULTILINE)
+
+
+def support_for(checkers: tuple[str, ...]) -> tuple[str, ...]:
+    """Sibling modules `checkers` import, transitively, as filenames."""
+    found: set[str] = set()
+    queue = list(checkers)
+    while queue:
+        path = os.path.join(HERE, queue.pop())
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                source = handle.read()
+        except OSError:
+            # A checker named by a case but absent is that case's problem to
+            # report, not this function's to hide.
+            continue
+        for name in _IMPORT_RE.findall(source):
+            module = name + ".py"
+            if module in found or module in checkers:
+                continue
+            if os.path.exists(os.path.join(HERE, module)):
+                found.add(module)
+                queue.append(module)
+    return tuple(sorted(found))
 
 
 def new_repo(tmp: str, name: str, checkers: tuple[str, ...]) -> str:
     """A repository with `checkers` (and their support modules) in `scripts/`."""
     root = os.path.join(tmp, name)
     os.makedirs(os.path.join(root, "scripts"))
-    for script in (*SUPPORT, *checkers):
+    for script in (*support_for(checkers), *checkers):
         shutil.copy(os.path.join(HERE, script), os.path.join(root, "scripts", script))
     git(root, "init", "--quiet")
     git(root, "config", "user.email", "t@example.com")
@@ -688,13 +717,19 @@ def case_gate3_an_unopenable_revision_is_not_a_finding(tmp: str) -> None:
 # report a crate it never judged.
 #
 # The checker loads `strip_comments_and_strings` out of `raced-globals.py`
-# through `srcload.py`, so both are installed alongside it. In the end-to-end
-# fixtures that also switches gate 3 on, which is harmless -- these fixtures
-# have no `static mut` and nothing raced -- and is why `_push` is told which
-# refusal it is looking for.
+# through `srcload.py`. In the end-to-end fixtures that also switches gate 3 on,
+# which is harmless -- these fixtures have no `static mut` and nothing raced --
+# and is why `_push` is told which refusal it is looking for.
+#
+# `srcload.py` USED TO BE LISTED HERE and is not any more: argv-utf8 has a plain
+# `import srcload`, so `support_for` finds it. `raced-globals.py` stays, and the
+# difference is exactly the limit of the derivation: srcload loads it AT RUNTIME
+# BY PATH, which is not an import statement and cannot be read out of the
+# source. A module reached that way still has to be named, and naming it here
+# rather than in a global list keeps the reason next to the case that needs it.
 # --------------------------------------------------------------------------
 
-_G4_CHECKERS = ("argv-utf8.py", "raced-globals.py", "srcload.py")
+_G4_CHECKERS = ("argv-utf8.py", "raced-globals.py")
 
 _ARGV_PANIC = '''\
 fn main() {
@@ -2190,7 +2225,7 @@ def _push_fixture(tmp: str, name: str,
     os.makedirs(hooks, exist_ok=True)
     copies = [(HOOK, os.path.join(hooks, "pre-push")),
               (LIB, os.path.join(work, "scripts", "run-checker.sh"))]
-    for script in (*SUPPORT, *checkers):
+    for script in (*support_for(checkers), *checkers):
         copies.append((os.path.join(HERE, script),
                        os.path.join(work, "scripts", script)))
     for src, dst in copies:

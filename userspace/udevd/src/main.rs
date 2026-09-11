@@ -776,15 +776,49 @@ impl DeviceDatabase {
 // ============================================================================
 
 /// Read a sysfs attribute file, stripping trailing newlines.
-fn read_sysfs_attr(devpath: &str, attr: &str) -> Option<String> {
+/// A device attribute's value, `Ok("")` if there is no such attribute, and
+/// `Err` if there is one and it could not be read.
+///
+/// # Why the three answers are not two
+///
+/// This returned `Option` built with `.ok()`, so "no such attribute" and
+/// "permission denied" were both `None`, and both call sites turned `None`
+/// into `""`. That is fine for `ATTR{x}=="v"`, which then does not match.
+///
+/// IT IS NOT FINE FOR `ATTR{x}!="v"`, which becomes `!glob_match(v, "")` --
+/// TRUE. So a rule saying "apply this to devices whose attribute is not v"
+/// fired for a device whose attribute could not be read at all, and a matching
+/// rule here can set OWNER and MODE on the device node. The same missing value
+/// failed closed in one direction and open in the other.
+/// Whether an `ATTR{..}` condition holds, given what the read returned.
+///
+/// Split from the read because the interesting case -- the attribute exists
+/// and could NOT be read -- cannot be arranged from a unit test: a path that
+/// does not exist is `Ok("")` by design, which is the other case entirely. My
+/// first attempt at a test for this asserted on a nonexistent path and failed
+/// against correct code, which is the second time this week I have built a
+/// state the program cannot reach and called it a defect.
+fn attr_matches(read: &std::io::Result<String>, pat: &str, negated: bool) -> bool {
+    match read {
+        Ok(val) => {
+            let hit = glob_match(pat, val);
+            if negated { !hit } else { hit }
+        }
+        // A condition that cannot be evaluated does not fire, in EITHER
+        // direction. Firing here means applying OWNER and MODE to a device
+        // node, so the safe answer to "I could not tell" is "this rule does
+        // not apply" rather than "the attribute is not that value".
+        Err(_) => false,
+    }
+}
+
+fn read_sysfs_attr(devpath: &str, attr: &str) -> std::io::Result<String> {
     let path = if devpath.starts_with(SYS_DIR) {
         format!("{devpath}/{attr}")
     } else {
         format!("{SYS_DIR}{devpath}/{attr}")
     };
-    fs::read_to_string(&path)
-        .ok()
-        .map(|s| s.trim_end().to_string())
+    optionalfile::read_or_empty(std::path::Path::new(&path)).map(|s| s.trim_end().to_string())
 }
 
 /// Read the uevent file for a sysfs device path.
@@ -923,13 +957,17 @@ fn check_match(cond: &MatchKey, event: &DeviceEvent) -> bool {
             let driver = event.env.get("DRIVER").cloned().unwrap_or_default();
             !glob_match(pat, &driver)
         }
+        // BOTH ARMS REFUSE ON A READ ERROR. A condition that cannot be
+        // evaluated does not fire, which is the safe direction when firing
+        // means applying OWNER and MODE to a device node. An ABSENT attribute
+        // is still a decidable answer -- `Ok("")` -- and keeps its old
+        // meaning: `!=` matches, because the attribute genuinely is not that
+        // value.
         MatchKey::Attr(attr_name, pat) => {
-            let val = read_sysfs_attr(&event.devpath, attr_name).unwrap_or_default();
-            glob_match(pat, &val)
+            attr_matches(&read_sysfs_attr(&event.devpath, attr_name), pat, false)
         }
         MatchKey::AttrNot(attr_name, pat) => {
-            let val = read_sysfs_attr(&event.devpath, attr_name).unwrap_or_default();
-            !glob_match(pat, &val)
+            attr_matches(&read_sysfs_attr(&event.devpath, attr_name), pat, true)
         }
         MatchKey::Env(env_key, pat) => {
             let val = event.env.get(env_key).cloned().unwrap_or_default();
@@ -1194,7 +1232,14 @@ fn compute_persistent_links(event: &DeviceEvent) -> Vec<String> {
     if event.subsystem == "block" {
         let model = read_sysfs_attr(&event.devpath, "device/model");
         let serial = read_sysfs_attr(&event.devpath, "device/serial");
-        if let (Some(m), Some(s)) = (model, serial) {
+        // Both must be READABLE and NON-EMPTY. `Ok("")` now means the
+        // attribute is not there, and an absent model or serial would build
+        // `disk/by-id/block--`, a link naming nothing -- which the old
+        // `.ok()` produced too for a file that existed and was empty.
+        if let (Ok(m), Ok(s)) = (model, serial)
+            && !m.is_empty()
+            && !s.is_empty()
+        {
             let sanitized_model = sanitize_for_devname(&m);
             let sanitized_serial = sanitize_for_devname(&s);
             links.push(format!(
@@ -1512,7 +1557,14 @@ fn read_uevent_from_sysfs(devpath: &str) -> Option<DeviceEvent> {
         }
     }
 
+    // `.ok()` is a SOURCE CHAIN here, not a discarded failure: if sysfs cannot
+    // answer, the uevent file is asked next. `.filter(|s| !s.is_empty())`
+    // keeps the old behaviour now that an absent attribute is `Ok("")` rather
+    // than `None` -- without it, a missing sysfs `subsystem` would stop the
+    // chain with an empty string instead of falling through to SUBSYSTEM.
     let subsystem = read_sysfs_attr(devpath, "subsystem")
+        .ok()
+        .filter(|s| !s.is_empty())
         .or_else(|| props.get("SUBSYSTEM").cloned())
         .unwrap_or_default();
 
@@ -2730,6 +2782,43 @@ mod tests {
     }
 
     // ---- Rule evaluation tests ----
+
+    #[test]
+    fn an_unreadable_attribute_does_not_fire_a_rule_in_either_direction() {
+        // THE ASYMMETRY THIS FIXES. `read_sysfs_attr` used `.ok()`, so a
+        // permission-denied read and a missing attribute were both `None`, and
+        // the caller turned `None` into `""`. For `ATTR{x}=="v"` that is no
+        // match, which is harmless. For `ATTR{x}!="v"` it is
+        // `!glob_match("v", "")` -- TRUE -- so the rule fired for a device
+        // nobody could read, and a matching rule here sets OWNER and MODE.
+        let unreadable: std::io::Result<String> =
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        assert!(!attr_matches(&unreadable, "8086", false));
+        assert!(
+            !attr_matches(&unreadable, "8086", true),
+            "the negative direction is the half that used to fire"
+        );
+    }
+
+    #[test]
+    fn an_absent_attribute_is_a_decidable_answer() {
+        // NOT the same as unreadable, and deliberately unchanged: the
+        // attribute is genuinely not "8086", so `!=` matches. `read_or_empty`
+        // returns Ok("") only for NotFound, which is what makes the two
+        // distinguishable at all.
+        let absent: std::io::Result<String> = Ok(String::new());
+        assert!(!attr_matches(&absent, "8086", false));
+        assert!(attr_matches(&absent, "8086", true));
+    }
+
+    #[test]
+    fn a_readable_attribute_matches_normally() {
+        let got: std::io::Result<String> = Ok("8086".to_string());
+        assert!(attr_matches(&got, "8086", false));
+        assert!(!attr_matches(&got, "8086", true));
+        assert!(!attr_matches(&got, "10de", false));
+        assert!(attr_matches(&got, "10de", true));
+    }
 
     #[test]
     fn rule_matches_kernel_name() {

@@ -86,17 +86,40 @@ are excluded — a file defining any local `fn get(..) -> Option<T>` otherwise
 implicates every slice in it, which is the difference between 39 findings and
 171.
 
-**The three worth fixing first**, from a sample of twelve:
+**The worst of them**, from a sample of twelve — and one of the three I first
+listed here was a false finding, which is recorded rather than deleted because
+a sample read without its context is exactly how this list could fill with
+them:
 
 | Site | What the default means |
 |---|---|
 | `ftp/src/main.rs:1792,1828,2001` | `read_password("Password: ").unwrap_or_default()` — **a failed password read becomes an empty password, which is then sent.** |
 | `stty/src/main.rs:1272-1304` (5×) | `tiocgwinsz(fd).unwrap_or_default()` — an ioctl failure becomes a 0×0 terminal, and the caller then computes a layout for it. |
-| `crontab/src/main.rs:669` | `current_username().unwrap_or_default()` — an empty username, in the field that decides whose crontab is edited. |
+| ~~`crontab/src/main.rs:669`~~ | **THIS ENTRY WAS WRONG.** I wrote it from a sample without reading the surrounding code. The empty username only ever accompanied `Action::Help`, which prints usage and touches no spool file — the line above it said so, and the real path already used `ok_or_else`. Corrected 2026-09-11; the field is `Option<String>` now so the next action added cannot inherit the trap. |
 
-Also `hostname` (empty hostname), `stat` (empty symlink target), `udevd` and
-`thermald` (empty sysfs attributes), `mktemp` (empty user and group names),
-`efibootmgr` (empty boot order).
+Also `stat` (empty symlink target), and `udevd` and `thermald`, both fixed
+2026-09-11.
+
+**Three more of the names above were re-read in context on 2026-09-11 and two
+are defensible**, which is the same correction as `crontab`'s and is why the
+whole list should be read before it is worked:
+
+* `hostname` — `read_hostname()` returns `Err` only when BOTH
+  /proc/sys/kernel/hostname and /etc/hostname are absent, empty or unreadable,
+  so `Err` already means "no hostname is configured". The caller is
+  `--boot-set`, whose job is to ensure one exists. Defensible.
+* `mktemp` (the `id` personality) — the three `uid_to_name`/`gid_to_name`
+  defaults are tested with `is_empty()` on the very next line and print
+  `uid=1000` without a name, which is what real `id` does for an unresolvable
+  uid. Defensible.
+* `efibootmgr` — NOT defensible, and worse than the entry said. The discarded
+  read was the small half; the crate substituted two INVENTED boot entries
+  ("Slate OS" and "UEFI Shell", with plausible device paths) whenever no real
+  ones were found, and printed them as the machine's boot configuration. A test
+  asserted the labels. Fixed 2026-09-11: it refuses, and says whether efivarfs
+  is absent or merely empty. The `unwrap_or_default()` on BootOrder stays
+  baselined — with the fabrication gone it leads to that refusal rather than to
+  an invented answer.
 
 **A separate finding from the same sample, not part of this entry's debt:**
 `userspace/last` carries a FOURTH copy of the utmp record parser
@@ -112,7 +135,7 @@ question marks where it printed six zeroes, which is the whole shape of it.
 **Trigger: fix them in batches by crate, dropping each from the baseline as it
 goes.** The baseline may only shrink, so the count is the progress bar.
 
-**Progress: 95 -> 84.** `ftp`'s six are fixed (2026-09-10) -- the three
+**Progress: 95 -> 74.** `ftp`'s six are fixed (2026-09-10) -- the three
 `read_line("Name: ")` and three `read_password("Password: ")` sites now
 distinguish end-of-input from an empty answer, so a closed stdin aborts the
 login instead of sending a blank password.
@@ -122,7 +145,22 @@ a display: `stty rows 40` read the Winsize, set one field, and wrote the whole
 struct back, so a failed TIOCGWINSZ set the terminal to 40 rows and zero
 columns and discarded both pixel dimensions. That is the same shape as
 sudo/visudo rewriting /etc/sudoers from an empty read -- the fifth instance of
-the family, in a terminal instead of a file. **Worth grepping the remaining 84
+the family, in a terminal instead of a file.
+
+`last`'s six followed (four wtmp fields, two lastlog), and then `udevd`'s two
+and `thermald`'s one, which were **not** display defects:
+
+* `udevd` matched udev rules with `read_sysfs_attr(..).unwrap_or_default()`.
+  An unreadable attribute became `""`, so `ATTR{x}=="v"` did not match --
+  harmless -- but `ATTR{x}!="v"` became `!glob_match(v, "")`, **true**. A rule
+  saying "apply to devices whose attribute is not v" fired for a device whose
+  attribute could not be read, and a matching rule there sets OWNER and MODE on
+  the device node. The same missing value failed closed one way and open the
+  other.
+* `thermald` read `trip_point_N_type` after checking the file exists, so a
+  failure was a read error rather than an absent trip point -- and it fell to
+  `_ => continue`, dropping the trip point silently. On a thermal daemon that
+  can be the critical one. **Worth grepping the remaining 84
 for the same pattern before working through them in order: a discarded read
 that is then written back is a different severity from one that is printed.**
 

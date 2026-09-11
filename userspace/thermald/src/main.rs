@@ -206,7 +206,25 @@ fn read_thermal_zones() -> Vec<ThermalZone> {
             if !tp_type_path.exists() {
                 break;
             }
-            let tp_type_str = read_file_string(&tp_type_path).unwrap_or_default();
+            // THE FILE EXISTS -- checked three lines up -- so a failure
+            // here is a read error, not an absent trip point. It became `""`,
+            // which fell to the `_ => continue` below and dropped the trip
+            // point WITHOUT A WORD. For a thermal daemon that can be the
+            // critical one, and the machine then has no shutdown threshold
+            // that anybody knows is missing.
+            //
+            // Still skipped -- guessing a trip type is worse than ignoring it
+            // -- but said out loud, because "this trip point exists and I
+            // cannot read it" is the one fact an operator needs to act on.
+            let Some(tp_type_str) = read_file_string(&tp_type_path) else {
+                // Quoted, because a sysfs path is a file name and a file
+                // name in a diagnostic can re-punctuate the line it lands in.
+                eprintln!(
+                    "thermald: {}: exists but could not be read; this trip point is being ignored",
+                    quoting::quotef_os(&tp_type_path)
+                );
+                continue;
+            };
             let tp_type = match tp_type_str.as_str() {
                 "active" => TripType::Active,
                 "passive" => TripType::Passive,

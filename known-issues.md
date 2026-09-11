@@ -73427,6 +73427,35 @@ retired all of them.
 
 ---
 
+### Resolution — confirmed 2026-09-11, by measurement rather than by memory
+
+**They all run.** `scripts/check-self-tests-wired.py` reports **1315 self-tests
+reachable from `main.rs`, 0 reachable from nothing**, with two allowlisted
+exceptions (`hardlockup::self_test_fire`, `proc::spawn::self_test_ctest_pty`) and
+six conditional call sites covered by five `// RAN-IF:` markers.
+
+Checked independently against a boot log rather than trusting the gate: of the
+**437** modules under `kernel/src/fs` that define a `pub fn self_test`, **435**
+leave their name in the serial output of the run of 2026-09-11. The two that do
+not are both explained and both run — `vfs_impl::self_test()` is called from
+`fs/ext4/mod.rs:94` as an ext4 submodule, and `sevenz` prints under the tag
+`[7z]`, so its module name never appears.
+
+**A note on how nearly this went wrong, because it is the entry's own subject
+one level up.** The first pass matched each module name against `self-test` with a
+hyphen, while the code prints `a11y::self_test` with an underscore, and reported
+**298 of 446 modules missing**. That is a false alarm large enough to have
+re-opened a closed investigation, produced by one character. The corrected
+measurement gives 2, both benign. An instrument that disagrees with a gate should
+be suspected before the gate is.
+
+Still open, separately: `TD-A-SELFTESTS-REACH-OUTSIDE-THEIR-OWN-MODULE` and
+`TD-A-PRISTINE-STATE-CAN-BE-TOO-BIG-FOR-THE-STACK`. `with_pristine` restores one
+module's table, so state living outside it is saved and restored by hand at each
+site — visible at the top of `fs/a11y.rs::self_test`, which saves two atomics
+`with_pristine` cannot see. The suites run; that limitation is worked around
+per-site rather than fixed.
+
 ## TD-A-SPARSE-FSTRIM-WRONG-DEVICE — hole punching queued discards for a nonexistent device at a file offset
 
 **Lane A. Found 2026-08-23, during the §261 byte-clean conversion.**
@@ -130392,6 +130421,35 @@ a test: three of the six are defects, and each command says so itself.
 brackets, a string that appears nowhere in the tree: the documentation that
 licensed the exemption was invented. The criterion is now the printed synopsis and
 nothing else, and every `allow` line quotes the help text that licenses it.
+
+### Resolution 2026-09-11 — the counted backlog is ZERO
+
+`scripts/absent-operand-ledger.txt` now holds no counted lines, only the three
+`allow` entries whose own help prints square brackets (`sharesheet history
+[count]`, `apppermissions log [count]`, `udp6 listen <port> [timeout_ms]`). The
+detector reports `3 site(s); 0 counted across 0 function(s), 3 allowed`.
+
+The last four were the ones deliberately left behind when ~105 siblings were
+fixed, because their subcommands printed no synopsis and therefore had no
+documented arity. **The synopsis was derived, not invented** — which matters,
+because the earlier attempt in this area invented a `filevault autolock [secs]`
+line that appears nowhere in the tree in order to justify an exemption. Every
+other subcommand of the same two commands already requires its id in angle
+brackets (`audioeq preamp <id> <cb>`, `audioeq remove <id>`, `kbshortcuts unbind
+<id>`, `kbshortcuts trigger <id>`), and four existing lines already settled how to
+word an arm that accepts two words, the closest being `notiffilter enable|disable
+<id>`. So the help text was read off the tree rather than chosen.
+
+`sharesheet share` was a different case: it already had a `parts.len() < 3` guard,
+making its `&"0"` default unreachable. Blanked to `&""` so the dead value fails
+closed — if the guard is ever removed, a missing target becomes a parse error
+rather than silently becoming target 0. Same treatment as `vmfrag compact`, where
+a missing result silently meant success.
+
+**Reaching zero is the point, not the tidiness.** With no counted lines left there
+is no backlog for a new site to hide inside, so the next numeric default for an
+absent operand is a finding on its first appearance rather than a rounding error
+in a total.
 
 ## TD-A-KSHELL-PRINTS-AN-OPERAND-AS-REQUIRED-AND-THEN-SUPPLIES-IT (lane A, 2026-09-10) — **open**, 83 sites (a floor)
 

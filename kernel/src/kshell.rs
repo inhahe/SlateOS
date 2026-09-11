@@ -81629,7 +81629,11 @@ fn cmd_sharesheet(args: &str) {
                 set_exit(1);
                 return;
             }
-            let tid: u32 = match parts.get(1).unwrap_or(&"0").parse() {
+            // `&""`, not `&"0"`: the guard above makes this default unreachable,
+            // and an unreachable default should fail closed rather than name a real
+            // target. If the guard is ever removed, a missing id becomes a parse
+            // error instead of silently becoming target 0.
+            let tid: u32 = match parts.get(1).unwrap_or(&"").parse() {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid target ID");
@@ -82532,7 +82536,12 @@ fn cmd_audioeq(args: &str) {
             }
         }
         "enable" | "on" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+            if parts.len() < 2 {
+                shell_println!("Usage: audioeq enable|on <id>");
+                set_exit(1);
+                return;
+            }
+            let id: u32 = match parts.get(1).unwrap_or(&"").parse() {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid config ID");
@@ -82549,7 +82558,12 @@ fn cmd_audioeq(args: &str) {
             }
         }
         "disable" | "off" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"1").parse() {
+            if parts.len() < 2 {
+                shell_println!("Usage: audioeq disable|off <id>");
+                set_exit(1);
+                return;
+            }
+            let id: u32 = match parts.get(1).unwrap_or(&"").parse() {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid config ID");
@@ -83921,7 +83935,12 @@ fn cmd_kbshortcuts(args: &str) {
             }
         }
         "enable" | "disable" => {
-            let id: u32 = match parts.get(1).unwrap_or(&"0").parse() {
+            if parts.len() < 2 {
+                shell_println!("Usage: kbshortcuts enable|disable <id>");
+                set_exit(1);
+                return;
+            }
+            let id: u32 = match parts.get(1).unwrap_or(&"").parse() {
                 Ok(v) => v,
                 Err(_) => {
                     shell_println!("Invalid shortcut ID");

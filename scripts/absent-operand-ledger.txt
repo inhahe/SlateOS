@@ -37,10 +37,21 @@
 # in scripts/option-refusal-ledger.txt, where all three functions already
 # appear. Blessed here means blessed for the absent-operand question only.
 #
+# BACKLOG REACHED ZERO on 2026-09-11. The last four were the ones left behind when
+# ~105 siblings were fixed, because their subcommands printed no synopsis and so
+# had no documented arity. The synopsis was not invented for them: every other
+# subcommand of the same two commands already required its id in angle brackets
+# (`audioeq preamp <id> <cb>`, `kbshortcuts trigger <id>`), and four existing lines
+# already settled how to word a two-word arm (`notiffilter enable|disable <id>`).
+# Reading the siblings is what made this a derivation rather than a choice -- an
+# earlier attempt in this area invented a `filevault autolock [secs]` synopsis that
+# appears nowhere in the tree, in order to justify an exemption.
+#
+# With no counted lines left, every new numeric default for an absent operand is a
+# finding on its first appearance. That is the point of reaching zero: there is no
+# backlog for a new site to hide inside.
+#
 allow cmd_sharesheet 10 # its own help prints `history [count]` -- square brackets
 allow cmd_apppermissions 10 # its own help prints `log [count]` -- square brackets
 allow cmd_udp6 5000 # its own help prints `listen <port> [timeout_ms]` -- square
 
-cmd_audioeq 2
-cmd_kbshortcuts 1
-cmd_sharesheet 1

@@ -39,7 +39,12 @@ run_case() {
         mkdir -p "$ROOT_DIR/build/spike/cmake-data/share/cmake-4.4/Modules"
         : > "$ROOT_DIR/build/spike/cmake-data/share/cmake-4.4/Modules/CMake.cmake"
     fi
-    OUT="$(eval "$BLOCK" 2>&1)"
+    # Output discarded on purpose, and now says so. `run_case` prints one line that
+    # every caller greps, so anything the block writes to stdout would corrupt the
+    # assertion. This used to capture into an OUT that nothing ever read, which is the
+    # same effect written in a way that looks like a forgotten variable -- and SC2034
+    # was right to flag it.
+    eval "$BLOCK" >/dev/null 2>&1 || true
     CM_STAGED=no; [ -e "$STAGE/bin/cmake" ] && CM_STAGED=yes
     DATA_STAGED=no; [ -d "$STAGE/share/cmake-4.4/Modules" ] && DATA_STAGED=yes
     echo "--- $label: binary=$CM_STAGED data=$DATA_STAGED"

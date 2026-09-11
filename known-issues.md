@@ -36,7 +36,25 @@ freely. See `roadmap.md` → "Three-Agent Parallel Execution" rule 3, and
 
 ---
 
-## TD-B-INSTALLS-BACKUP-RENAMES-TO-A-PATH-IT-INVENTED (lane B, 2026-09-11)
+## TD-B-INSTALLS-BACKUP-RENAMES-TO-A-PATH-IT-INVENTED (lane B, 2026-09-11) -- FIXED 2026-09-11
+
+**FIXED** with the `os_bytes`/`os_from_bytes` pair the entry named, factored
+into `backup_name(dst, suffix)` so the reasoning has somewhere to live and the
+contract has something to test.
+
+**The part the entry did not anticipate, and it is about the tests rather than
+the fix.** The defect only shows on a destination whose name is not valid
+UTF-8, and `os_bytes` is documented as lossy on a Windows *host* -- which is
+where this suite runs. So **none of the four new tests would fail against the
+broken code**. They pin what makes the target behaviour right (the suffix is
+appended to the whole name, byte for byte, never before an extension and never
+normalised) and they would catch a rewrite that changed it, but they cannot
+reach the case the function exists for.
+
+That is stated in the test module rather than left for someone to discover,
+because a suite that looks like it covers a fix and does not is worse than one
+that admits the gap. The non-UTF-8 case is exercised by the target.
+
 
 **In short:** `install --backup` moves the existing destination aside before
 writing the new file. It builds the backup's name with

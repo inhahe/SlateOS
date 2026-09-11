@@ -36,6 +36,5 @@
 # regeneration from being lost, and nothing reports the loss: the gate
 # stays green, the entries stay right, and only the reasoning goes.
 
-chown:chmod
 cron:at
 cron:crontab

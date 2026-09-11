@@ -1,7 +1,23 @@
-//! Slate OS File Ownership and Permission Utility
+//! Slate OS File Ownership Utility
 //!
-//! Dual-mode binary: invoked as `chown` it changes file owner/group; invoked
-//! as `chmod` it changes file permission bits. Mode detection is via `argv[0]`.
+//! Changes a file's owner and group.
+//!
+//! # It used to answer to `chmod` as well, and nobody could reach it
+//!
+//! `argv[0]` selected between a chown and a chmod personality. The chmod half
+//! could never run: `userspace/coreutils/src/bin/chmod.rs` produces the
+//! `chmod` executable, so whichever name this binary was installed under, the
+//! real one won. It was 543 lines of finished, tested, unreachable code, and
+//! `scripts/multicall-aliases.py` had it pinned as `chown:chmod`.
+//!
+//! The name went to coreutils rather than here, and not only because §1005
+//! makes coreutils the one home. Its front end is better at the part that is
+//! not shared: it treats `-r`, `-w` and `-x` as MODE LETTERS, so `chmod -r f`
+//! removes read permission, where the parser here had no such rule and would
+//! have taken `-r` as a filename and `f` as the mode. It also has
+//! `--preserve-root`, and it carries paths as `OsString` rather than `String`.
+//! The symbolic-mode grammar itself was never in either of them -- both call
+//! `modechange` -- so nothing of the hard part was at stake.
 //!
 //! User/group name resolution reads `/etc/users.yaml`, the Slate OS user database.
 //!
@@ -20,19 +36,6 @@
 //! chown --json OWNER FILE...          JSON output
 //! ```
 //!
-//! # Usage (chmod mode)
-//!
-//! ```text
-//! chmod 755 FILE...                   Octal mode
-//! chmod u+x FILE...                   Symbolic: add execute for user
-//! chmod g-w,o-w FILE...               Symbolic: remove write for group+other
-//! chmod a=rx FILE...                  Symbolic: set exact permissions for all
-//! chmod -R 644 DIR/...                Recursive
-//! chmod -v 755 FILE                   Verbose
-//! chmod -c 755 FILE                   Report only changes
-//! chmod --reference=REF FILE...       Copy mode from REF
-//! chmod --json 755 FILE               JSON output
-//! ```
 
 use quoting::quoteaf_os;
 use std::env;
@@ -376,34 +379,6 @@ fn do_chown(_path: &str, _uid: u32, _gid: u32, _no_follow: bool) -> Result<(), S
     Err("chown syscall unavailable on this platform".to_string())
 }
 
-/// Perform the chmod syscall on a single path.
-#[cfg(target_vendor = "slateos")]
-fn do_chmod(path: &str, mode: u32) -> Result<(), String> {
-    // SAFETY: SYS_FS_SET_PERMS reads `path.len()` bytes from `path.as_ptr()`
-    // and takes the new mode (low 12 bits) in arg2. The path slice outlives
-    // the call.
-    let ret = unsafe {
-        syscall3(
-            SYS_FS_SET_PERMS,
-            path.as_ptr() as u64,
-            path.len() as u64,
-            (mode & 0o7777) as u64,
-        )
-    };
-
-    if ret < 0 {
-        Err(kernel_error_to_string(ret))
-    } else {
-        Ok(())
-    }
-}
-
-/// Host fallback so the crate compiles for tests on development hosts.
-#[cfg(not(target_vendor = "slateos"))]
-fn do_chmod(_path: &str, _mode: u32) -> Result<(), String> {
-    Err("chmod syscall unavailable on this platform".to_string())
-}
-
 // ============================================================================
 // Recursive traversal — and the symlink rules that make it safe
 // ============================================================================
@@ -520,103 +495,6 @@ fn follow_operand(recursive: bool, no_deref: bool) -> bool {
 /// at the top of this section.
 const fn follow_child() -> bool {
     false
-}
-
-// ============================================================================
-// Mode parsing (chmod)
-// ============================================================================
-//
-// This section used to be ~260 lines of hand-written parser -- `ModeClause`,
-// `parse_symbolic_mode`, `clause_bits`, `clause_who_mask`, `apply_symbolic_mode`
-// and `parse_mode`. It was the third of four independent implementations of one
-// grammar in this tree, and like the other two it was wrong in the permissive
-// direction. `modechange` is that grammar written once, checked against 24,480
-// rows generated from GNU coreutils 9.4; see design-decisions.md 364 and
-// known-issues.md TD-B-THREE-UTILITIES-STILL-CARRY-THEIR-OWN-MODE-PARSER.
-//
-// What the deleted parser got wrong, all of it now fixed by construction:
-//
-//   * `b'x' | b'X' => x = true` -- `X` is not `x`. `X` sets an execute bit only
-//     on a directory or on a file that already has one, which is the entire
-//     point of `chmod -R a+rX` on a source tree: it makes directories traversable
-//     without making every `.c` file executable. The old code made them all
-//     executable.
-//   * The umask was never consulted, so `chmod +w f` granted write to group and
-//     other. GNU masks a clause that names no `who`: under `umask 022`,
-//     `chmod +w` is `u+w`. `chmod a+w` is unaffected, which is how a caller asks
-//     for the broad grant explicitly.
-//   * `if part.is_empty() { continue; }` accepted `,` and `u+r,` as valid.
-//   * Only one operator per clause: `u+r-w` was rejected, and `=u` (copy the
-//     user triad to another) was not implemented at all.
-//   * `chmod 0 f` was rejected -- `strip_prefix('0')` left an empty string, which
-//     fell through to the symbolic parser and died on a missing operator.
-//   * `-R` stripped setgid off directories. An octal mode is applied verbatim
-//     here, but gnulib protects setuid and setgid on a *directory* from any
-//     change that did not name them, so `chmod -R 755 d` leaves a setgid
-//     directory setgid. This is the one that silently changed the meaning of a
-//     shared group tree.
-
-use modechange::{Changes, adjust, compile, from_reference};
-
-#[cfg(unix)]
-unsafe extern "C" {
-    /// Set the file-mode creation mask, returning the previous one.
-    ///
-    /// POSIX has no read-only spelling of it -- reading it means setting it --
-    /// so this is the libc call rather than anything in `std`. (The doc comment
-    /// belongs on the declaration and not on the `extern` block: a block takes
-    /// no docs, and rustc warns the comment away as unused if it is put there.)
-    fn umask(mask: u32) -> u32;
-}
-
-/// Read the process umask, restoring it immediately.
-///
-/// Cached because `umask(0)` *writes* as well as reads: a second uncached call
-/// would read back the zero the first one wrote. `chmod` reads it once per run,
-/// but the cache makes that a property of the function rather than of the call
-/// site.
-#[cfg(unix)]
-fn read_umask() -> u32 {
-    use std::sync::OnceLock;
-    static UMASK: OnceLock<u32> = OnceLock::new();
-    *UMASK.get_or_init(|| {
-        // SAFETY: `umask` is a POSIX call that cannot fail and touches only this
-        // process's file-mode creation mask. The second call restores what the
-        // first read, so no other thread observes a zero mask for longer than
-        // these two instructions.
-        unsafe {
-            let previous = umask(0);
-            umask(previous);
-            previous
-        }
-    })
-}
-
-/// The build host is Windows, which has no umask. Zero means "mask nothing",
-/// so a who-less clause is taken at its word there.
-#[cfg(not(unix))]
-fn read_umask() -> u32 {
-    0
-}
-
-/// A compiled mode, plus the umask to apply to any clause of it that named no
-/// `who`.
-///
-/// The two travel together because they are only meaningful together, and
-/// because `--reference` supplies a change list that must *not* be masked: it
-/// copies bits that already exist on a real file, and a umask has no business
-/// filtering them. That is why the umask is a field rather than read at the
-/// point of use.
-struct ModeSpec {
-    changes: Changes,
-    umask_value: u32,
-}
-
-impl ModeSpec {
-    /// The mode `path` should end up with, given what it has now.
-    fn resolve(&self, old_mode: u32, is_dir: bool) -> u32 {
-        adjust(old_mode, is_dir, self.umask_value, &self.changes).mode
-    }
 }
 
 // ============================================================================
@@ -764,31 +642,17 @@ fn print_chown_json(path: &str, uid: Option<u32>, gid: Option<u32>, ok: bool, er
     );
 }
 
-/// Print a JSON change record for chmod.
-fn print_chmod_json(path: &str, mode: u32, ok: bool, err: &str) {
-    println!(
-        "{{\"path\":\"{}\",\"mode\":\"{:04o}\",\"ok\":{},\"error\":\"{}\"}}",
-        json_escape(path),
-        mode,
-        ok,
-        json_escape(err),
-    );
-}
-
 // ============================================================================
 // Argument parsing
 // ============================================================================
 
-/// Which binary personality we are running as.
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum Mode {
-    Chown,
-    Chmod,
-}
-
-/// Parsed command-line options (shared between chown and chmod).
+/// Parsed command-line options.
+///
+/// THIS CRATE ANSWERED TO `chmod` TOO, and could not be reached that way:
+/// `userspace/coreutils/src/bin/chmod.rs` produces the `chmod` executable, so
+/// the personality here was finished code nobody could run. It is deleted
+/// rather than left as dead weight, per design-decisions.md §1006.
 struct Options {
-    mode: Mode,
     /// -R / --recursive
     recursive: bool,
     /// -v / --verbose (report every file)
@@ -812,31 +676,12 @@ struct Options {
     files: Vec<String>,
 }
 
-/// Detect whether argv[0] ends in "chmod".
-fn detect_mode(argv0: &str) -> Mode {
-    let basename = argv0
-        .rsplit('/')
-        .next()
-        .unwrap_or(argv0)
-        .rsplit('\\')
-        .next()
-        .unwrap_or(argv0);
-    if basename == "chmod" || basename.starts_with("chmod.") {
-        Mode::Chmod
-    } else {
-        Mode::Chown
-    }
-}
-
 fn parse_args(args: &[String], db: &Db) -> Result<Options, String> {
     if args.is_empty() {
         return Err("no arguments provided".to_string());
     }
 
-    let mode = detect_mode(&args[0]);
-
     let mut opts = Options {
-        mode,
         recursive: false,
         verbose: false,
         changes: false,
@@ -896,17 +741,14 @@ fn parse_args(args: &[String], db: &Db) -> Result<Options, String> {
             continue;
         }
 
-        if (arg == "-h" || arg == "--no-dereference") && mode == Mode::Chown {
+        if arg == "-h" || arg == "--no-dereference" {
             opts.no_deref = true;
             i += 1;
             continue;
         }
 
-        // --from=OWNER:GROUP (chown only)
+        // --from=OWNER:GROUP
         if let Some(from_val) = arg.strip_prefix("--from=") {
-            if mode != Mode::Chown {
-                return Err("--from is only valid in chown mode".to_string());
-            }
             let (fuid, fgid) = parse_from_filter(from_val, db)?;
             opts.from_uid = fuid;
             opts.from_gid = fgid;
@@ -948,8 +790,7 @@ fn parse_args(args: &[String], db: &Db) -> Result<Options, String> {
 
     // When --reference is used, no spec is needed.
     if opts.reference.is_none() && opts.spec.is_empty() {
-        let what = if mode == Mode::Chown { "owner" } else { "mode" };
-        return Err(format!("missing {what} operand"));
+        return Err("missing owner operand".to_string());
     }
 
     Ok(opts)
@@ -1117,161 +958,6 @@ fn run_chown(opts: &Options, db: &Db) -> bool {
 }
 
 // ============================================================================
-// chmod execution
-// ============================================================================
-
-/// Run chmod on a single file. Returns (changed: bool, error: Option<String>).
-///
-/// `old_mode` is the file's current permission bits if known (used for change
-/// detection); pass `None` when the current mode could not be read.
-fn chmod_one(
-    path: &str,
-    mode_val: u32,
-    old_mode: Option<u32>,
-    opts: &Options,
-) -> (bool, Option<String>) {
-    let changed = match old_mode {
-        Some(old) => (old & 0o7777) != (mode_val & 0o7777),
-        None => true,
-    };
-
-    match do_chmod(path, mode_val) {
-        Ok(()) => {
-            if opts.json {
-                print_chmod_json(path, mode_val, true, "");
-            } else if opts.verbose {
-                if changed {
-                    eprintln!(
-                        "mode of {} changed to {:04o}",
-                        quoteaf_os(path),
-                        mode_val & 0o7777
-                    );
-                } else {
-                    eprintln!(
-                        "mode of {} retained as {:04o}",
-                        quoteaf_os(path),
-                        mode_val & 0o7777
-                    );
-                }
-            } else if opts.changes && changed {
-                eprintln!(
-                    "mode of {} changed to {:04o}",
-                    quoteaf_os(path),
-                    mode_val & 0o7777
-                );
-            }
-            (changed, None)
-        }
-        Err(e) => {
-            if opts.json {
-                print_chmod_json(path, mode_val, false, &e);
-            } else if !opts.silent {
-                eprintln!("chmod: cannot change mode of {}: {e}", quoteaf_os(path));
-            }
-            (false, Some(e))
-        }
-    }
-}
-
-/// Execute chmod for all target files.
-fn run_chmod(opts: &Options) -> bool {
-    // Parse the mode spec. --reference builds the change list from the
-    // reference file's bits instead of from a string.
-    let mode_spec = if let Some(ref refpath) = opts.reference {
-        match read_metadata(refpath) {
-            // Umask 0: `--reference` copies bits off a file that already has
-            // them, and masking those would filter the answer to a question
-            // nobody asked.
-            Ok(meta) => ModeSpec {
-                changes: from_reference(meta.perms & modechange::CHMOD_MODE_BITS),
-                umask_value: 0,
-            },
-            Err(e) => {
-                if !opts.silent {
-                    eprintln!("chmod: cannot read reference {}: {e}", quoteaf_os(refpath));
-                }
-                return false;
-            }
-        }
-    } else {
-        match compile(opts.spec.as_bytes()) {
-            Some(changes) => ModeSpec {
-                changes,
-                umask_value: read_umask(),
-            },
-            // GNU's wording, and deliberately one message for every way the
-            // grammar can be broken: the user does not care which rule they
-            // tripped, only that the string is not a mode.
-            None => {
-                eprintln!("chmod: invalid mode: \u{2018}{}\u{2019}", opts.spec);
-                return false;
-            }
-        }
-    };
-
-    let mut any_error = false;
-
-    for file in &opts.files {
-        // A command-line symlink *is* dereferenced here, matching GNU chmod
-        // (`fts` with `FTS_COMFOLLOW`): the operand is a name the caller typed
-        // and can see. Links met during the walk below are a different matter
-        // and are skipped outright.
-        let paths: Vec<WalkEntry> = if opts.recursive {
-            let p = Path::new(file);
-            if p.is_dir() {
-                collect_recursive(p)
-            } else {
-                vec![WalkEntry {
-                    path: p.to_path_buf(),
-                    is_symlink: false,
-                }]
-            }
-        } else {
-            vec![WalkEntry {
-                path: PathBuf::from(file),
-                is_symlink: false,
-            }]
-        };
-
-        for entry in &paths {
-            // GNU chmod skips every symbolic link it meets while recursing,
-            // and so do we. A symlink has no useful mode bits of its own, so
-            // the only thing chmod on one can do is change its target's — and
-            // `srv/x -> /etc/shadow` would make `chmod -R 777 srv/` a way to
-            // make /etc/shadow world-writable.
-            if entry.is_symlink {
-                continue;
-            }
-            let path_str = entry.path.to_string_lossy();
-
-            // Read the current mode (best-effort) for symbolic application and
-            // change detection.
-            let current_mode = read_metadata(&path_str)
-                .ok()
-                .map(|m| m.perms & modechange::CHMOD_MODE_BITS);
-
-            // Even an octal mode is resolved against the current one now,
-            // because `dir` is not decoration: gnulib protects setuid and
-            // setgid on a directory from a change that did not name them, so
-            // `chmod -R 755 d` leaves a setgid directory setgid. The old code
-            // applied an octal verbatim and stripped it.
-            //
-            // If the current mode is unknown, 0 is the base: `+` and `=` still
-            // land where they should, and `-` on an unset bit is a no-op.
-            let base = current_mode.unwrap_or(0);
-            let mode_val = mode_spec.resolve(base, entry.path.is_dir());
-
-            let (_, err) = chmod_one(&path_str, mode_val, current_mode, opts);
-            if err.is_some() {
-                any_error = true;
-            }
-        }
-    }
-
-    !any_error
-}
-
-// ============================================================================
 // Help text
 // ============================================================================
 
@@ -1303,37 +989,6 @@ fn print_chown_help() {
     println!("  chown --from=root:root alice:staff /shared/*");
 }
 
-fn print_chmod_help() {
-    println!("Slate OS chmod v0.1.0 -- Change file permissions");
-    println!();
-    println!("USAGE:");
-    println!("  chmod [OPTIONS] MODE FILE...");
-    println!("  chmod [OPTIONS] --reference=REF FILE...");
-    println!();
-    println!("MODE FORMATS:");
-    println!("  Octal:    755, 644, 0777");
-    println!("  Symbolic: u+x, g-w, o+r, a+rx, u=rwx,g=rx,o=r");
-    println!();
-    println!("  Classes: u=user  g=group  o=other  a=all");
-    println!("  Ops:     + add   - remove   = set exactly");
-    println!("  Perms:   r=read  w=write  x=execute  s=setuid/gid  t=sticky");
-    println!();
-    println!("OPTIONS:");
-    println!("  -R, --recursive          Operate recursively on directories");
-    println!("  -v, --verbose            Report every file processed");
-    println!("  -c, --changes            Report only files with actual changes");
-    println!("  -f, --silent, --quiet    Suppress error messages");
-    println!("  --reference=FILE         Use permissions of FILE");
-    println!("  --json                   JSON output");
-    println!("  --help                   Show this help");
-    println!();
-    println!("EXAMPLES:");
-    println!("  chmod 755 script.sh");
-    println!("  chmod u+x,g+x script.sh");
-    println!("  chmod -R a+rX /var/www");
-    println!("  chmod 4755 /usr/bin/setuid_prog");
-}
-
 // ============================================================================
 // Entry point
 // ============================================================================
@@ -1341,37 +996,23 @@ fn print_chmod_help() {
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    let binary_mode = args.first().map(|a| detect_mode(a)).unwrap_or(Mode::Chown);
-
-    // Load the user database for name resolution (chown needs this; chmod
-    // does not, but loading is cheap and keeps the code path simple).
+    // Load the user database for name resolution.
     let db = read_db();
 
     let opts = match parse_args(&args, &db) {
         Ok(o) => o,
         Err(msg) => {
             if msg.is_empty() {
-                match binary_mode {
-                    Mode::Chown => print_chown_help(),
-                    Mode::Chmod => print_chmod_help(),
-                }
+                print_chown_help();
                 process::exit(0);
             }
-            let name = if binary_mode == Mode::Chown {
-                "chown"
-            } else {
-                "chmod"
-            };
-            eprintln!("{name}: {msg}");
-            eprintln!("Try '{name} --help' for usage information.");
+            eprintln!("chown: {msg}");
+            eprintln!("Try 'chown --help' for usage information.");
             process::exit(1);
         }
     };
 
-    let success = match opts.mode {
-        Mode::Chown => run_chown(&opts, &db),
-        Mode::Chmod => run_chmod(&opts),
-    };
+    let success = run_chown(&opts, &db);
 
     if !success {
         process::exit(1);
@@ -1439,196 +1080,6 @@ mod tests {
         // This binary implements neither -H nor -L, so there is no flag that
         // could ask to follow, and following is the escape itself.
         assert!(!follow_child());
-    }
-
-    // ---- mode detection ----------------------------------------------------
-
-    #[test]
-    fn detect_mode_recognizes_chmod() {
-        assert_eq!(detect_mode("chmod"), Mode::Chmod);
-        assert_eq!(detect_mode("/usr/bin/chmod"), Mode::Chmod);
-        assert_eq!(detect_mode("C:\\bin\\chmod.exe"), Mode::Chmod);
-        assert_eq!(detect_mode("chmod.exe"), Mode::Chmod);
-    }
-
-    #[test]
-    fn detect_mode_defaults_to_chown() {
-        assert_eq!(detect_mode("chown"), Mode::Chown);
-        assert_eq!(detect_mode("/usr/bin/chown"), Mode::Chown);
-        assert_eq!(detect_mode("anything-else"), Mode::Chown);
-    }
-
-    // ---- mode parsing -------------------------------------------------------
-    //
-    // Every row below was measured against GNU coreutils 9.4 under WSL. The
-    // grammar itself is `modechange`'s, checked there against 24,480 generated
-    // rows; what these tests pin is *this* binary's use of it -- the umask it
-    // passes, the `dir` flag it passes, and the base mode it starts from. Those
-    // three are the caller's decisions, and all three were wrong before.
-
-    /// Resolve a spec the way `run_chmod` does, with an explicit umask.
-    ///
-    /// The umask has to be a parameter rather than read from the process: the
-    /// build host is Windows and has none, so a test that relied on the real
-    /// one would assert nothing here and something different on every
-    /// developer's machine.
-    fn resolve(spec: &str, old: u32, is_dir: bool, umask_value: u32) -> u32 {
-        let changes = compile(spec.as_bytes()).unwrap_or_else(|| panic!("GNU accepts {spec:?}"));
-        ModeSpec {
-            changes,
-            umask_value,
-        }
-        .resolve(old, is_dir)
-    }
-
-    #[test]
-    fn an_octal_mode_is_the_mode_it_spells() {
-        assert_eq!(resolve("755", 0o000, false, 0), 0o755);
-        assert_eq!(resolve("0644", 0o777, false, 0), 0o644);
-        assert_eq!(resolve("00755", 0o000, false, 0), 0o755);
-        assert_eq!(resolve("4755", 0o000, false, 0), 0o4755);
-        // `chmod 0 f` -- the old parser stripped the leading zero, was left with
-        // an empty string, fell through to the symbolic branch and died on a
-        // missing operator. GNU sets the mode to 0.
-        assert_eq!(resolve("0", 0o777, false, 0), 0);
-        assert_eq!(resolve("=", 0o777, false, 0), 0);
-    }
-
-    /// An octal is never masked, however the umask is set.
-    #[test]
-    fn an_octal_mode_ignores_the_umask() {
-        for umask_value in [0o000, 0o022, 0o077, 0o002] {
-            assert_eq!(resolve("755", 0o000, false, umask_value), 0o755);
-        }
-    }
-
-    /// A clause that names no `who` is masked by the umask; one that names a
-    /// `who` is not.
-    ///
-    /// The old parser never read the umask at all, so `chmod +w f` granted
-    /// write to group and other -- a silent broadening of exactly the kind this
-    /// utility exists to prevent. Measured, from mode `000`: `+w` is `0222`
-    /// under umask 000, `0200` under 022 **and** 077, `0220` under 002, while
-    /// `a+w` is `0222` under all four.
-    #[test]
-    fn a_clause_with_no_who_is_masked_by_the_umask() {
-        for (umask_value, want) in [
-            (0o000, 0o222),
-            (0o022, 0o200),
-            (0o077, 0o200),
-            (0o002, 0o220),
-        ] {
-            assert_eq!(resolve("+w", 0o000, false, umask_value), want);
-            assert_eq!(resolve("a+w", 0o000, false, umask_value), 0o222);
-        }
-        // Execute bits are not in any of these umasks, so `+x` from 644 is 755
-        // under three of them and 744 under 077.
-        assert_eq!(resolve("+x", 0o644, false, 0o022), 0o755);
-        assert_eq!(resolve("+x", 0o644, false, 0o077), 0o744);
-        // Removal is masked too: `-w` from 666 keeps the bits the umask held.
-        assert_eq!(resolve("-w", 0o666, false, 0o022), 0o466);
-        assert_eq!(resolve("-w", 0o666, false, 0o002), 0o446);
-    }
-
-    /// `X` sets an execute bit only where one is already earned.
-    ///
-    /// The old parser matched `b'x' | b'X'`, which is what makes
-    /// `chmod -R a+rX src/` -- the standard way to make a tree readable --
-    /// mark every source file executable. `X` fires on a directory, or on a
-    /// file that already has some execute bit, and on nothing else.
-    #[test]
-    fn capital_x_is_not_x() {
-        assert_eq!(resolve("a+rX", 0o644, false, 0), 0o644);
-        assert_eq!(resolve("a+rX", 0o700, false, 0), 0o755);
-        assert_eq!(resolve("a+rX", 0o700, true, 0), 0o755);
-        // A directory earns it whatever its own bits say.
-        assert_eq!(resolve("a=,+X", 0o000, true, 0), 0o111);
-        assert_eq!(resolve("a=,+X", 0o000, false, 0), 0o000);
-    }
-
-    /// A directory keeps setuid and setgid through a change that did not name
-    /// them; a file does not.
-    ///
-    /// This is the one that quietly broke shared group trees. The old code
-    /// applied an octal verbatim, so `chmod -R 755 d` on a setgid directory
-    /// cleared the bit and every file created there afterwards landed in the
-    /// creator's own group instead of the project's. Measured: a `2775`
-    /// directory under `chmod -R 755` comes out `2755`, and a `6755` one under
-    /// `chmod -R 700` comes out `6700`, while a `4755` *file* under
-    /// `chmod 755` comes out `755`.
-    #[test]
-    fn a_directory_keeps_setgid_through_an_unrelated_change() {
-        assert_eq!(resolve("755", 0o2775, true, 0), 0o2755);
-        assert_eq!(resolve("700", 0o6755, true, 0), 0o6700);
-        assert_eq!(resolve("755", 0o4755, false, 0), 0o755);
-        // Naming the bit still changes it, on a directory as much as on a file.
-        assert_eq!(resolve("g-s", 0o2775, true, 0), 0o775);
-        assert_eq!(resolve("2755", 0o0755, true, 0), 0o2755);
-    }
-
-    /// Several operators in one clause, and `=u` copying an existing triad.
-    ///
-    /// Neither was implemented: the old parser read exactly one operator per
-    /// comma-separated part and knew only `rwxstX` as permission letters, so
-    /// `u+r-w` and `g=u` were both rejected outright.
-    #[test]
-    fn several_operators_in_one_clause_and_copying_a_triad() {
-        assert_eq!(resolve("u+r-w", 0o000, false, 0), 0o400);
-        assert_eq!(resolve("u+r-w", 0o777, false, 0), 0o577);
-        assert_eq!(resolve("g=u", 0o750, false, 0), 0o770);
-        assert_eq!(resolve("go=u", 0o700, false, 0), 0o777);
-    }
-
-    #[test]
-    fn the_ordinary_symbolic_forms_still_work() {
-        assert_eq!(resolve("u+x", 0o644, false, 0), 0o744);
-        assert_eq!(resolve("go-w", 0o666, false, 0), 0o644);
-        assert_eq!(resolve("a=rx", 0o777, false, 0), 0o555);
-        assert_eq!(resolve("u=rwx,g=rx,o=r", 0o000, false, 0), 0o754);
-        assert_eq!(resolve("u+s", 0o755, false, 0), 0o4755);
-        assert_eq!(resolve("+t", 0o755, false, 0), 0o1755);
-        assert_eq!(resolve("u=r", 0o777, false, 0), 0o477);
-    }
-
-    /// The boundary between a mode GNU accepts and one it refuses.
-    ///
-    /// `+` is valid and means "add nothing"; `=` is valid and clears
-    /// everything. The old parser refused `+`, and *accepted* `,` and `u+r,` by
-    /// skipping empty parts -- so a typo that dropped a clause silently became
-    /// a no-op instead of an error.
-    #[test]
-    fn the_boundary_between_a_valid_and_an_invalid_mode() {
-        for spec in ["+", "=", "0", "0777", "00755", "u+r-w", "g=u"] {
-            assert!(compile(spec.as_bytes()).is_some(), "GNU accepts {spec:?}");
-        }
-        for spec in [",", "u+r,", "", "u", "u+z", "8", "77777", "a", "ugo"] {
-            assert!(compile(spec.as_bytes()).is_none(), "GNU refuses {spec:?}");
-        }
-        // `+` adds nothing, so it leaves the mode alone rather than zeroing it.
-        assert_eq!(resolve("+", 0o644, false, 0o022), 0o644);
-    }
-
-    /// `--reference` copies the file's bits verbatim, umask and all.
-    #[test]
-    fn a_reference_mode_is_copied_not_masked() {
-        let spec = ModeSpec {
-            changes: from_reference(0o4711),
-            umask_value: 0,
-        };
-        assert_eq!(spec.resolve(0o000, false), 0o4711);
-        assert_eq!(spec.resolve(0o777, false), 0o4711);
-        // Even on a directory: `from_reference` mentions every bit, so setuid
-        // and setgid are copied from the reference rather than preserved from
-        // the target.
-        assert_eq!(spec.resolve(0o2755, true), 0o4711);
-    }
-
-    /// GNU's wording, which this binary did not have: one message for every
-    /// broken rule, with a colon and curly quotes.
-    #[test]
-    fn the_invalid_mode_diagnostic_matches_gnu() {
-        let rendered = format!("chmod: invalid mode: \u{2018}{}\u{2019}", "u+z");
-        assert_eq!(rendered, "chmod: invalid mode: \u{2018}u+z\u{2019}");
     }
 
     // ---- owner spec parsing ------------------------------------------------

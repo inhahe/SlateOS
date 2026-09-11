@@ -2,7 +2,7 @@
 name = "chown"
 version = "0.1.0"
 edition = "2024"
-description = "SlateOS file ownership and permission utility (chown/chmod)"
+description = "SlateOS file ownership utility (chown)"
 
 # `pwdb` for `/etc/passwd` and `/etc/group`, which is where a name becomes a
 # number for every POSIX tool. This crate read `/etc/users.yaml` through

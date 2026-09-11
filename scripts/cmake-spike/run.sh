@@ -205,7 +205,24 @@ grep -v "undefined symbol\|duplicate symbol\|^>>>" slate-link.log | head -20
 if [ -x cmake-slateos ]; then
     file cmake-slateos
     readelf -h cmake-slateos | grep -E "Type|Entry"
+    echo "UNSTRIPPED_BYTES=$(stat -c %s cmake-slateos)"
+
+    # Stage the STRIPPED binary. Unstripped this is 274 MB of mostly
+    # `debug_info`, against a 384 MB image — it would not fit beside the rest
+    # of the rootfs, and an artifact that cannot be staged is not a port.
+    # `--strip-debug` and not `--strip-all`, matching how CPython is staged
+    # (design-decisions.md §344): the symbol table costs 7 MB and is what makes
+    # a fault address on the serial console into a function name.
     cp cmake-slateos "$SLATE_SPIKE/cmake-slateos.elf"
+    # binutils `strip` first, because it edits in place. `zig objcopy` needs an
+    # explicit output path and fails with "expected output parameter" if given
+    # one argument — which it did, harmlessly, while the fallback did the work
+    # and left a confusing error above a correct result.
+    strip --strip-debug "$SLATE_SPIKE/cmake-slateos.elf" 2>/dev/null \
+        || "$SLATE_ZIG" objcopy --strip-debug cmake-slateos \
+            "$SLATE_SPIKE/cmake-slateos.elf" \
+        || echo "STRIP_FAILED — the staged binary is the unstripped one"
+    echo "STAGED_BYTES=$(stat -c %s "$SLATE_SPIKE/cmake-slateos.elf")"
     ls -l "$SLATE_SPIKE/cmake-slateos.elf"
     echo "SLATE_CMAKE_BUILT"
 else

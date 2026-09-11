@@ -131542,6 +131542,52 @@ What is still needed, and it is small:
 Nothing here is built. What changed is that the question stopped being "is this
 possible" and became three specific small things, each with a stated reason.
 
+### One of the eight localises: `vfs_stat_deep`'s overrun is procfs, not path resolution
+
+Two of the over-budget benchmarks measure path resolution, and comparing them settles
+where the cost is:
+
+| benchmark | path | components | budget | WHPX | vs budget |
+|---|---|---|---|---|---|
+| `vfs_stat_3comp` | regular filesystem | 3 | 2100 (3 × 700) | 2200 | **1.05×** |
+| `vfs_stat_deep` | `/proc/meminfo` | 2 | 1400 (2 × 700) | 6739 | **4.8×** |
+
+A **three**-component path on a regular filesystem lands within 5% of its budget. A
+**two**-component path into procfs is 4.8× over. So the component count is not the
+variable and general path resolution is not the problem — the benchmark's own doc
+comment says what is: resolving `/proc/meminfo` *"traverses the VFS mount table,
+descends into the procfs mount, and does a final filename lookup."*
+
+Per-component arithmetic makes the gap concrete: ~733 ns/component on a regular path
+against the 700 ns target, versus ~2 923 ns/component once procfs is involved —
+4× the cost for the same nominal work.
+
+**So `vfs_stat_deep`'s budget models the wrong thing.** `2 components × 700 ns` is a
+correct derivation for a 2-component path and this is not really a 2-component-path
+benchmark; it is a mount-crossing-into-a-synthetic-filesystem benchmark that happens
+to have two components. The name says so — it is registered as
+`vfs_stat_deep_2comp` — and the "deep" framing is what makes the budget look like a
+per-component question.
+
+Two things follow, and they want different people:
+
+* **The measurement is sound and the gap is real**, just differently located: procfs
+  stat costs about 4× a regular component. Whether that is acceptable for a synthetic
+  filesystem that formats its contents on read is a question for whoever owns procfs
+  performance, with a number to start from rather than a suspicion.
+* **The budget should be restated against what it measures.** Either give it a
+  procfs-aware target with the mount crossing priced in, or add a regular-filesystem
+  2-component benchmark beside it so the comparison that localised this is in the
+  suite rather than in this entry. The second is better: it turns a one-off analysis
+  into a standing control, which is the difference between knowing this today and
+  knowing it after the next change.
+
+Worth noting how close this came to being recorded as something else. "`vfs_stat_deep`
+is 4.8× over budget" invites a reading of path resolution being slow, and
+`vfs_stat_3comp` — sitting four lines away in the same scorecard, on target with *more*
+components — is the only thing that contradicts it. The two numbers are only useful
+together.
+
 ## TD-A-REQUEST-STATUS-HAS-NO-CHECKED-SHAPE-SO-EVERY-READER-COUNTS-DIFFERENTLY (lane A, 2026-09-11) — **open**
 
 **In short:** the `requests/` dropbox is how the three lanes hand work to each other,

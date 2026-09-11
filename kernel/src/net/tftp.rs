@@ -172,6 +172,39 @@ fn build_error(code: u16, msg: &str) -> Vec<u8> {
     pkt
 }
 
+/// The TFTP error code that means the same thing as a given [`KernelError`].
+///
+/// This is the *forward* half of a mapping this file already performs four
+/// times in reverse -- each of the four client receive paths turns
+/// `ERR_FILE_NOT_FOUND` back into `KernelError::NotFound` and
+/// `ERR_ACCESS_VIOLATION` back into `KernelError::PermissionDenied`. Only the
+/// reverse direction was ever written, so both server paths collapsed every
+/// failure onto a single code: `handle_rrq` told every client `File not found`
+/// whether the file was absent, unreadable, a directory, or on a disk that had
+/// stopped answering. A client that maps that back to `NotFound` is then
+/// confidently wrong, and the server's own `SERVER_ERRORS` counter cannot tell
+/// a misnamed file from failing hardware.
+///
+/// `ERR_UNDEFINED` is the honest code for everything else: RFC 1350 has no code
+/// for `the server could not determine the answer`, and picking a specific one
+/// that nearly fits would be this same conflation one step further along. The
+/// message carries what the code cannot, and the caller logs the variant to
+/// serial -- a refusal the operator cannot see is barely a refusal.
+fn error_to_tftp_code(e: KernelError) -> (u16, &'static str) {
+    match e {
+        KernelError::NotFound => (ERR_FILE_NOT_FOUND, "File not found"),
+        KernelError::PermissionDenied | KernelError::InvalidCapability => {
+            (ERR_ACCESS_VIOLATION, "Access denied")
+        }
+        KernelError::DiskFull => (ERR_DISK_FULL, "Disk full"),
+        KernelError::IsADirectory => (ERR_ACCESS_VIOLATION, "Not a regular file"),
+        KernelError::ReadOnlyFilesystem => {
+            (ERR_ACCESS_VIOLATION, "Read-only filesystem")
+        }
+        _ => (ERR_UNDEFINED, "Server could not complete request"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Packet parsing
 // ---------------------------------------------------------------------------
@@ -1173,8 +1206,14 @@ fn handle_rrq(client_ip: Ipv4Addr, client_port: u16, data: &[u8]) {
     let full_path = format!("{}/{}", SERVER_STATE.lock().root_path, filename);
     let file_data = match crate::fs::vfs::Vfs::read_file(&full_path) {
         Ok(d) => d,
-        Err(_) => {
-            let err = build_error(ERR_FILE_NOT_FOUND, "File not found");
+        Err(e) => {
+            // Was ERR_FILE_NOT_FOUND for every error, which told the client that
+            // a refused file and a failing disk were both simply absent.
+            if e != KernelError::NotFound {
+                crate::serial_println!("[tftp] RRQ {} failed: {:?}", full_path, e);
+            }
+            let (code, msg) = error_to_tftp_code(e);
+            let err = build_error(code, msg);
             let _ = super::udp::send(TFTP_PORT, client_ip, client_port, &err);
             SERVER_ERRORS.fetch_add(1, Ordering::Relaxed);
             return;
@@ -1274,16 +1313,40 @@ fn handle_wrq(client_ip: Ipv4Addr, client_port: u16, data: &[u8]) {
         return;
     }
 
-    // Check if the file already exists, with no state lock held. `exists` is
-    // used rather than a full `read_file`: the old probe pulled the entire
-    // file into the heap only to drop it, which a client could use to make the
-    // server allocate a file's worth of memory per rejected request.
+    // Check whether the file already exists, with no state lock held. A probe
+    // rather than a full `read_file`: the old one pulled the entire file into
+    // the heap only to drop it, which a client could use to make the server
+    // allocate a file's worth of memory per rejected request.
+    //
+    // `exists_or_err`, not `exists`. `exists` is `stat(..).is_ok()`, so a stat
+    // that failed for any reason other than absence answered `not there` -- the
+    // overwrite guard below did not fire, and the server went on to accept a
+    // remote write to a path it had just failed to inspect. This is the only
+    // instance of that shape in this lane reachable from off the machine, and
+    // the rule is lane B's, from `mkfs` formatting a live filesystem because
+    // `is_mounted` could not read /proc/mounts: for a check guarding a
+    // destructive action, `I could not tell` must not equal `go ahead`.
     let full_path = format!("{}/{}", SERVER_STATE.lock().root_path, filename);
-    if crate::fs::vfs::Vfs::exists(&full_path) {
-        let err = build_error(ERR_FILE_EXISTS, "File already exists");
-        let _ = super::udp::send(TFTP_PORT, client_ip, client_port, &err);
-        SERVER_ERRORS.fetch_add(1, Ordering::Relaxed);
-        return;
+    match crate::fs::vfs::Vfs::exists_or_err(&full_path) {
+        Ok(false) => {}
+        Ok(true) => {
+            let err = build_error(ERR_FILE_EXISTS, "File already exists");
+            let _ = super::udp::send(TFTP_PORT, client_ip, client_port, &err);
+            SERVER_ERRORS.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        Err(e) => {
+            crate::serial_println!(
+                "[tftp] WRQ {} refused: cannot tell whether it exists: {:?}",
+                full_path,
+                e
+            );
+            let (code, msg) = error_to_tftp_code(e);
+            let err = build_error(code, msg);
+            let _ = super::udp::send(TFTP_PORT, client_ip, client_port, &err);
+            SERVER_ERRORS.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
     }
 
     let mut state = SERVER_STATE.lock();

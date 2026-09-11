@@ -43,6 +43,8 @@
 #      the tree can produce.
 #  25. Refuse a raw control byte -- below 0x20 and not TAB, LF or CR, or
 #      0x7F -- in a tracked text file.
+#  26. Refuse a coreutils bin that never reads `argv`, and so silently
+#      ignores every option it is given.
 #
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented; wrong again the moment gate 13 was written, when the
@@ -3530,6 +3532,75 @@ echo "pre-push: $n_ran gate(s) ran, $n_skipped skipped." >&2
 # Asked for by lane A in
 # requests/a-b-the-halt-should-warn-at-push-time-but-must-not-block-the-push.md
 # ---------------------------------------------------------------------------
+# Gate 26: refuse a coreutils bin that never reads `argv`.
+#
+# Such a program cannot honour an option, and does not refuse one either: it
+# runs, prints what it always prints, and exits 0. Worse than an unimplemented
+# option and worse than the refusing stub §1006 forbids, because a refusal tells
+# the caller it did not get what it asked for.
+#
+#     date -d @0      ours: the current time    GNU: Thu Jan  1 00:00:00 1970
+#     uptime -s       ours: up 00:26            GNU: 2026-09-11 19:24:28
+#
+# Both were found one program at a time by writing a differential harness, and
+# both had shipped. This is the cheap check that notices the third.
+#
+# Scoped to `userspace/coreutils/` plus the checker and its baseline -- the
+# latter for gate 8's reason, that a baseline edited by hand must be judged by
+# the same push that edits it. 0.4 s per sha.
+# ---------------------------------------------------------------------------
+argvign="${repo_root:-.}/scripts/check-argv-ignored.py"
+skip_argvign=0
+# Bypass: ALLOW_ARGV_IGNORED=1 git push origin <branch>
+if [ "${ALLOW_ARGV_IGNORED:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_ARGV_IGNORED=1 set — skipping the argv-ignored gate." >&2
+    skip_argvign=1
+fi
+[ -n "$py" ] || skip_argvign=1
+[ -f "$argvign" ] || skip_argvign=1
+touches userspace/coreutils/ \
+        scripts/check-argv-ignored.py scripts/argv-ignored-baseline.txt \
+        || skip_argvign=1
+[ -n "${pushed_shas# }" ] || skip_argvign=1
+note_gate argv-ignored "$skip_argvign"
+
+argvign_failed=0
+if [ "$skip_argvign" != "1" ]; then
+    # The checker before its verdict. Its first draft reported md5sum and
+    # sha256sum -- eleven-line bins that hand off to coreutils::digest::main,
+    # which does the parsing -- so two of its four findings were false. A gate
+    # with that rate gets switched off before it catches anything.
+    if ! run_checker argv-ignored-selftest "$py" "$argvign" --selftest; then
+        echo "pre-push: check-argv-ignored.py FAILED ITS OWN SELF-TEST — its verdict is not trustworthy." >&2
+        argvign_failed=1
+    else
+        for sha in $pushed_shas; do
+            if ! run_checker "argv-ignored-$sha" "$py" "$argvign" --head "$sha"; then
+                argvign_failed=1
+            fi
+        done
+    fi
+fi
+
+if [ "$argvign_failed" != "0" ]; then
+    cat >&2 <<EOF
+
+pre-push: REFUSING to push — a coreutils bin never reads its command line.
+
+A program that does not look at \`argv\` cannot honour an option, and does not
+refuse one either. It runs, prints what it always prints, and exits 0, so the
+caller is told nothing.
+
+Route it through \`coreutils::getopt\`, or hand off to a shared \`main\` that
+does — \`md5sum.rs\` is eleven lines and delegates to \`coreutils::digest::main\`.
+
+To push anyway:
+    ALLOW_ARGV_IGNORED=1 git push $remote_name ...
+
+EOF
+    exit 1
+fi
+
 # Gate 25: refuse to publish a raw control byte in a text file.
 #
 # A byte below 0x20 that is not TAB, LF or CR, and 0x7F. Almost always a shell

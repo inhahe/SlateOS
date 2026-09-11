@@ -325,6 +325,7 @@ dependencies = [
 name = "chroot"
 version = "0.1.0"
 dependencies = [
+ "authlib",
  "pwdb",
  "quoting",
  "scratchdir",
@@ -3222,7 +3223,9 @@ dependencies = [
 name = "wall"
 version = "0.1.0"
 dependencies = [
+ "authlib",
  "quoting",
+ "userdb",
 ]
 
 [[package]]

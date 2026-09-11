@@ -15,7 +15,6 @@
 # a name, `ttyname(0)` for the terminal, `/proc/sys/kernel/hostname` for the
 # host. All four already exist in this tree and all four were sitting beside
 # the code that did not use them.
-chroot: env::var("USER")
 firejail: env::var("USER")
 firejail: env::var("USERNAME")
 logger: env::var("LOGNAME")
@@ -27,5 +26,3 @@ mktemp: env::var("USER")
 screen: env::var("USER")
 screen: env::var("USER")  [2]
 ssh: env::var("USER")
-wall: env::var("LOGNAME")
-wall: env::var("USER")

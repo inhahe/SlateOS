@@ -193,32 +193,31 @@ fn resolve_gid(name: &str, db: &Db) -> Option<u32> {
 // Caller UID detection
 // ============================================================================
 
-/// Get the current (calling) user's UID.
+/// The calling user's uid, or `None` if this build cannot determine it.
 ///
-/// Tries /proc/self/status first, then falls back to the USER env var
-/// matched against the user database, then defaults to u32::MAX (nobody).
-fn get_caller_uid(db: &Db) -> u32 {
-    // Try /proc/self/status for the real UID.
-    if let Ok(content) = fs::read_to_string("/proc/self/status") {
-        for line in content.lines() {
-            if let Some(rest) = line.strip_prefix("Uid:")
-                && let Some(uid_str) = rest.split_whitespace().next()
-                && let Ok(uid) = uid_str.parse::<u32>()
-            {
-                return uid;
-            }
-        }
-    }
-
-    // Fallback: resolve USER env var against the database.
-    if let Ok(name) = env::var("USER")
-        && let Some(user) = db.user_by_name(name.as_bytes())
-    {
-        return user.uid;
-    }
-
-    // Unknown caller.
-    u32::MAX
+/// # Why `$USER` is not a fallback
+///
+/// It read `/proc/self/status` first -- the right source -- and then fell back
+/// to resolving **`$USER`** against the user database, and finally to
+/// `u32::MAX`. The one caller is the check directly below:
+///
+///     if caller_uid != 0 { "only root can use chroot" }
+///
+/// so `USER=root chroot /dir cmd` walked past it. `chroot(2)` would still have
+/// refused a caller who is not really root, so this is not an escalation -- but
+/// a guard that can be talked out of its answer stops being a guard, and the
+/// refusal then arrives from a lower layer that cannot say what was actually
+/// wrong.
+///
+/// `getuid(2)` through `authlib::identity::caller_uid` is the same source
+/// `sudo`, `at` and `crontab` were moved to, for the same reason.
+///
+/// `u32::MAX` is gone with it. It failed in the safe direction for this
+/// caller -- `u32::MAX != 0` refuses -- but it is a uid-shaped value standing
+/// for "I do not know", and the next caller to compare it against something
+/// other than zero inherits a silent wrong answer.
+fn get_caller_uid() -> Option<u32> {
+    authlib::identity::caller_uid()
 }
 
 // ============================================================================
@@ -502,11 +501,18 @@ fn main() {
         }
     };
 
-    // Root privilege check: only uid 0 may use chroot.
-    let caller_uid = get_caller_uid(&db);
-    if caller_uid != 0 {
-        eprintln!("chroot: only root can use chroot (current uid: {caller_uid})");
-        process::exit(125);
+    // Root privilege check: only uid 0 may use chroot. Not knowing who the
+    // caller is refuses, because "I could not tell" is not "root".
+    match get_caller_uid() {
+        Some(0) => {}
+        Some(uid) => {
+            eprintln!("chroot: only root can use chroot (current uid: {uid})");
+            process::exit(125);
+        }
+        None => {
+            eprintln!("chroot: cannot determine the calling user; only root can use chroot");
+            process::exit(125);
+        }
     }
 
     // Validate that the new root directory exists and is a directory.

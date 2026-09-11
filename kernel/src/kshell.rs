@@ -82727,6 +82727,11 @@ fn cmd_screensaver(args: &str) {
                 set_exit(1);
                 return;
             }
+            if parts.len() < 3 {
+                shell_println!("Usage: screensaver timeout <id> <s>");
+                set_exit(1);
+                return;
+            }
             let id: u32 = match parts.get(1).unwrap_or(&"").parse() {
                 Ok(v) => v,
                 Err(_) => {
@@ -82735,7 +82740,7 @@ fn cmd_screensaver(args: &str) {
                     return;
                 }
             };
-            let secs: u32 = parts.get(2).unwrap_or(&"300").parse().unwrap_or(300);
+            let secs: u32 = parts.get(2).unwrap_or(&"").parse().unwrap_or(300);
             match screensaver::set_timeout(id, secs) {
                 Ok(()) => shell_println!("Timeout: {}s", secs.clamp(30, 7200)),
                 Err(e) => {
@@ -84205,7 +84210,12 @@ fn cmd_sysanimations(args: &str) {
             }
         },
         "speed" => {
-            let pct: u32 = parts.get(1).unwrap_or(&"100").parse().unwrap_or(100);
+            if parts.len() < 2 {
+                shell_println!("Usage: sysanimations speed <percent>");
+                set_exit(1);
+                return;
+            }
+            let pct: u32 = parts.get(1).unwrap_or(&"").parse().unwrap_or(100);
             match sysanimations::set_speed(pct) {
                 Ok(()) => shell_println!("Speed: {}%", pct.clamp(10, 400)),
                 Err(e) => {
@@ -84351,6 +84361,11 @@ fn cmd_filevault(args: &str) {
                 set_exit(1);
                 return;
             }
+            if parts.len() < 3 {
+                shell_println!("Usage: filevault autolock <id> <seconds>");
+                set_exit(1);
+                return;
+            }
             let id: u32 = match parts.get(1).unwrap_or(&"").parse() {
                 Ok(v) => v,
                 Err(_) => {
@@ -84359,7 +84374,7 @@ fn cmd_filevault(args: &str) {
                     return;
                 }
             };
-            let secs: u32 = parts.get(2).unwrap_or(&"300").parse().unwrap_or(300);
+            let secs: u32 = parts.get(2).unwrap_or(&"").parse().unwrap_or(300);
             match filevault::set_auto_lock(id, secs) {
                 Ok(()) => shell_println!("Auto-lock: {}s", secs),
                 Err(e) => {
@@ -110984,8 +110999,13 @@ fn cmd_vmfrag(args: &str) {
             }
         }
         "compact" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: vmfrag compact <zone> <ok|fail>");
+                set_exit(1);
+                return;
+            }
             let name = parts.get(1).copied().unwrap_or("");
-            let success = parts.get(2).copied().unwrap_or("ok") == "ok";
+            let success = parts.get(2).copied().unwrap_or("") == "ok";
             match vmfrag::record_compaction(name, success) {
                 Ok(()) => shell_println!(
                     "vmfrag: compaction {} {}",

@@ -1114,10 +1114,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hostname"
-version = "0.1.0"
-
-[[package]]
 name = "hostnamectl"
 version = "0.1.0"
 dependencies = [

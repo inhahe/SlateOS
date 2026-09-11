@@ -6,7 +6,6 @@
 //! - **pv** (default) -- monitor data flowing through a pipe (pipe viewer)
 //! - **truncate** -- shrink or extend file size
 //! - **shred** -- overwrite files to hinder recovery
-//! - **fuser** -- find processes using files or sockets
 //!
 //! # Examples
 //!
@@ -19,9 +18,6 @@
 //!
 //! # Shred
 //! shred -vuz secret.key
-//!
-//! # Fuser
-//! fuser -v /var/log/syslog
 //! ```
 
 use quoting::quotef_os;
@@ -58,7 +54,6 @@ enum Personality {
     Pv,
     Truncate,
     Shred,
-    Fuser,
 }
 
 /// Detect personality from the basename of argv\[0\].
@@ -71,7 +66,6 @@ fn detect_personality(argv0: &str) -> Personality {
     match basename {
         "truncate" => Personality::Truncate,
         "shred" => Personality::Shred,
-        "fuser" => Personality::Fuser,
         _ => Personality::Pv,
     }
 }
@@ -940,523 +934,6 @@ fn run_shred(args: &[String]) -> Result<(), String> {
 }
 
 // ============================================================================
-// fuser mode
-// ============================================================================
-
-/// Access type for a process using a file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // Root and Mmap are part of the complete access-type enum
-enum AccessType {
-    /// File descriptor access (reading/writing).
-    Fd,
-    /// Root directory.
-    Root,
-    /// Current working directory.
-    Cwd,
-    /// Memory-mapped file.
-    Mmap,
-    /// Executable.
-    Exe,
-}
-
-impl std::fmt::Display for AccessType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Fd => write!(f, "f"),
-            Self::Root => write!(f, "r"),
-            Self::Cwd => write!(f, "c"),
-            Self::Mmap => write!(f, "m"),
-            Self::Exe => write!(f, "e"),
-        }
-    }
-}
-
-/// Information about a process using a target resource.
-#[derive(Debug, Clone)]
-struct ProcessUse {
-    pid: u32,
-    user: String,
-    access: AccessType,
-    command: String,
-}
-
-/// Configuration for fuser mode.
-struct FuserConfig {
-    send_signal: bool,
-    signal: i32,
-    show_all: bool,
-    mount_mode: bool,
-    namespace: String,
-    verbose: bool,
-    show_user: bool,
-    targets: Vec<String>,
-}
-
-impl Default for FuserConfig {
-    fn default() -> Self {
-        Self {
-            send_signal: false,
-            signal: 9, // SIGKILL
-            show_all: false,
-            mount_mode: false,
-            namespace: "file".into(),
-            verbose: false,
-            show_user: false,
-            targets: Vec::new(),
-        }
-    }
-}
-
-/// Map a signal name to its number.
-fn signal_name_to_number(name: &str) -> Result<i32, String> {
-    // Support both "KILL" and "SIGKILL" forms.
-    let canonical = name.to_ascii_uppercase();
-    let canonical = canonical.strip_prefix("SIG").unwrap_or(&canonical);
-
-    match canonical {
-        "HUP" => Ok(1),
-        "INT" => Ok(2),
-        "QUIT" => Ok(3),
-        "ILL" => Ok(4),
-        "TRAP" => Ok(5),
-        "ABRT" | "IOT" => Ok(6),
-        "BUS" => Ok(7),
-        "FPE" => Ok(8),
-        "KILL" => Ok(9),
-        "USR1" => Ok(10),
-        "SEGV" => Ok(11),
-        "USR2" => Ok(12),
-        "PIPE" => Ok(13),
-        "ALRM" => Ok(14),
-        "TERM" => Ok(15),
-        "STKFLT" => Ok(16),
-        "CHLD" => Ok(17),
-        "CONT" => Ok(18),
-        "STOP" => Ok(19),
-        "TSTP" => Ok(20),
-        "TTIN" => Ok(21),
-        "TTOU" => Ok(22),
-        "URG" => Ok(23),
-        "XCPU" => Ok(24),
-        "XFSZ" => Ok(25),
-        "VTALRM" => Ok(26),
-        "PROF" => Ok(27),
-        "WINCH" => Ok(28),
-        "IO" | "POLL" => Ok(29),
-        "PWR" => Ok(30),
-        "SYS" => Ok(31),
-        _ => {
-            // Try parsing as a number.
-            name.parse::<i32>()
-                .map_err(|_| format!("unknown signal: {name}"))
-        }
-    }
-}
-
-/// Map a signal number to its name. Held for the future -N / --watchfd
-/// path where we emit signal info; currently unused.
-#[allow(dead_code)]
-fn signal_number_to_name(num: i32) -> &'static str {
-    match num {
-        1 => "HUP",
-        2 => "INT",
-        3 => "QUIT",
-        4 => "ILL",
-        5 => "TRAP",
-        6 => "ABRT",
-        7 => "BUS",
-        8 => "FPE",
-        9 => "KILL",
-        10 => "USR1",
-        11 => "SEGV",
-        12 => "USR2",
-        13 => "PIPE",
-        14 => "ALRM",
-        15 => "TERM",
-        16 => "STKFLT",
-        17 => "CHLD",
-        18 => "CONT",
-        19 => "STOP",
-        20 => "TSTP",
-        21 => "TTIN",
-        22 => "TTOU",
-        23 => "URG",
-        24 => "XCPU",
-        25 => "XFSZ",
-        26 => "VTALRM",
-        27 => "PROF",
-        28 => "WINCH",
-        29 => "IO",
-        30 => "PWR",
-        31 => "SYS",
-        _ => "UNKNOWN",
-    }
-}
-
-fn parse_fuser_args(args: &[String]) -> Result<FuserConfig, String> {
-    let mut cfg = FuserConfig::default();
-    let mut i = 0;
-
-    while i < args.len() {
-        let arg = &args[i];
-        if arg == "--help" || arg == "-h" {
-            print_fuser_usage();
-            process::exit(0);
-        } else if arg == "-k" || arg == "--kill" {
-            cfg.send_signal = true;
-        } else if arg == "-a" || arg == "--all" {
-            cfg.show_all = true;
-        } else if arg == "-m" || arg == "--mount" {
-            cfg.mount_mode = true;
-        } else if arg == "-v" || arg == "--verbose" {
-            cfg.verbose = true;
-        } else if arg == "-u" || arg == "--user" {
-            cfg.show_user = true;
-        } else if arg == "-s" {
-            i += 1;
-            let val = args.get(i).ok_or("-s requires a SIGNAL argument")?;
-            cfg.signal = signal_name_to_number(val)?;
-        } else if arg == "-n" || arg == "--namespace" {
-            i += 1;
-            let val = args
-                .get(i)
-                .ok_or("-n requires a NAMESPACE argument")?
-                .clone();
-            match val.as_str() {
-                "file" | "tcp" | "udp" => cfg.namespace = val,
-                _ => return Err(format!("unknown namespace: {val}")),
-            }
-        } else if let Some(rest) = arg.strip_prefix("--namespace=") {
-            match rest {
-                "file" | "tcp" | "udp" => cfg.namespace = rest.to_string(),
-                _ => return Err(format!("unknown namespace: {rest}")),
-            }
-        } else if arg.starts_with('-') && arg.len() > 1 && arg.as_bytes()[1].is_ascii_uppercase() {
-            // -SIGNAL shorthand (e.g. -KILL, -HUP, -9)
-            let sig_str = &arg[1..];
-            cfg.signal = signal_name_to_number(sig_str)?;
-            cfg.send_signal = true;
-        } else if arg.starts_with('-') && arg.len() > 1 {
-            return Err(format!("unknown option: {arg}"));
-        } else {
-            cfg.targets.push(arg.clone());
-        }
-        i += 1;
-    }
-
-    if cfg.targets.is_empty() {
-        return Err("no targets specified".into());
-    }
-
-    Ok(cfg)
-}
-
-fn print_fuser_usage() {
-    eprintln!("Usage: fuser [OPTIONS] FILE...");
-    eprintln!("       fuser -n tcp|udp PORT");
-    eprintln!("Find processes using files or sockets.");
-    eprintln!();
-    eprintln!("Options:");
-    eprintln!("  -k, --kill               Send signal to processes (default SIGKILL)");
-    eprintln!("  -SIGNAL                  Signal to send (e.g. -HUP, -9)");
-    eprintln!("  -s SIGNAL                Signal to send");
-    eprintln!("  -a, --all                Display unused files too");
-    eprintln!("  -m, --mount              All processes on mount point");
-    eprintln!("  -n SPACE, --namespace=SPACE  Namespace: file, tcp, udp");
-    eprintln!("  -v, --verbose            Verbose output (USER PID ACCESS COMMAND)");
-    eprintln!("  -u, --user               Show user name");
-    eprintln!("  -h, --help               Show this help");
-}
-
-/// Parse a /proc/<pid>/fd/<n> symlink target to determine which file is open.
-///
-/// Returns the target path if it can be read.
-fn parse_proc_fd_link(pid: u32, fd: u32) -> Option<String> {
-    let link_path = format!("/proc/{pid}/fd/{fd}");
-    fs::read_link(&link_path)
-        .ok()
-        .and_then(|p| p.to_str().map(String::from))
-}
-
-/// Read the command name for a PID from /proc/<pid>/comm.
-fn read_proc_comm(pid: u32) -> String {
-    let path = format!("/proc/{pid}/comm");
-    fs::read_to_string(&path)
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|_| "?".into())
-}
-
-/// Read the owning user for a PID from /proc/<pid>/status (Uid line).
-fn read_proc_user(pid: u32) -> String {
-    let path = format!("/proc/{pid}/status");
-    let content = match fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return "?".into(),
-    };
-
-    for line in content.lines() {
-        if let Some(rest) = line.strip_prefix("Uid:\t") {
-            // Format: real effective saved filesystem
-            let uid_str = rest.split_whitespace().next().unwrap_or("?");
-            return uid_str.to_string();
-        }
-    }
-
-    "?".into()
-}
-
-/// Find all PIDs that have the given file path open.
-fn find_file_users(target: &str) -> Vec<ProcessUse> {
-    let mut results = Vec::new();
-
-    // Canonicalize the target path.
-    let canonical = match fs::canonicalize(target) {
-        Ok(p) => p.to_string_lossy().to_string(),
-        Err(_) => target.to_string(),
-    };
-
-    // Scan /proc
-    let proc_dir = match fs::read_dir("/proc") {
-        Ok(d) => d,
-        Err(_) => return results,
-    };
-
-    for entry in proc_dir.flatten() {
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        let pid: u32 = match name_str.parse() {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-
-        // Check /proc/<pid>/fd/*
-        let fd_dir = format!("/proc/{pid}/fd");
-        if let Ok(fds) = fs::read_dir(&fd_dir) {
-            for fd_entry in fds.flatten() {
-                let fd_name = fd_entry.file_name();
-                let fd_num: u32 = match fd_name.to_string_lossy().parse() {
-                    Ok(n) => n,
-                    Err(_) => continue,
-                };
-
-                if let Some(link_target) = parse_proc_fd_link(pid, fd_num)
-                    && link_target == canonical
-                {
-                    results.push(ProcessUse {
-                        pid,
-                        user: read_proc_user(pid),
-                        access: AccessType::Fd,
-                        command: read_proc_comm(pid),
-                    });
-                    break; // One entry per PID
-                }
-            }
-        }
-
-        // Check /proc/<pid>/cwd
-        let cwd_path = format!("/proc/{pid}/cwd");
-        if let Ok(link) = fs::read_link(&cwd_path)
-            && link.to_string_lossy() == canonical
-        {
-            // Only add if not already found via fd
-            if !results.iter().any(|r| r.pid == pid) {
-                results.push(ProcessUse {
-                    pid,
-                    user: read_proc_user(pid),
-                    access: AccessType::Cwd,
-                    command: read_proc_comm(pid),
-                });
-            }
-        }
-
-        // Check /proc/<pid>/exe
-        let exe_path = format!("/proc/{pid}/exe");
-        if let Ok(link) = fs::read_link(&exe_path)
-            && link.to_string_lossy() == canonical
-            && !results.iter().any(|r| r.pid == pid)
-        {
-            results.push(ProcessUse {
-                pid,
-                user: read_proc_user(pid),
-                access: AccessType::Exe,
-                command: read_proc_comm(pid),
-            });
-        }
-    }
-
-    results
-}
-
-/// Find processes using a TCP or UDP port by parsing /proc/net/{tcp,udp}.
-fn find_net_users(port_str: &str, proto: &str) -> Result<Vec<ProcessUse>, String> {
-    let port: u16 = port_str
-        .parse()
-        .map_err(|e| format!("invalid port '{port_str}': {e}"))?;
-
-    let proc_net_path = format!("/proc/net/{proto}");
-    let content = fs::read_to_string(&proc_net_path)
-        .map_err(|e| format!("cannot read {proc_net_path}: {e}"))?;
-
-    let mut inodes: Vec<u64> = Vec::new();
-
-    // Skip header line, parse each line for local_address containing our port.
-    for line in content.lines().skip(1) {
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        if fields.len() < 10 {
-            continue;
-        }
-
-        // Field 1 is local_address as hex_ip:hex_port
-        let local_addr = fields[1];
-        if let Some(port_hex) = local_addr.split(':').nth(1)
-            && let Ok(p) = u16::from_str_radix(port_hex, 16)
-            && p == port
-        {
-            // Field 9 is the inode
-            if let Ok(inode) = fields[9].parse::<u64>() {
-                inodes.push(inode);
-            }
-        }
-    }
-
-    if inodes.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    // Now find which PIDs have these inodes in their fd links.
-    let mut results = Vec::new();
-    let proc_dir = match fs::read_dir("/proc") {
-        Ok(d) => d,
-        Err(_) => return Ok(results),
-    };
-
-    for entry in proc_dir.flatten() {
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        let pid: u32 = match name_str.parse() {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-
-        let fd_dir = format!("/proc/{pid}/fd");
-        if let Ok(fds) = fs::read_dir(&fd_dir) {
-            for fd_entry in fds.flatten() {
-                if let Some(link_target) = parse_proc_fd_link(
-                    pid,
-                    fd_entry.file_name().to_string_lossy().parse().unwrap_or(0),
-                ) {
-                    // Socket inodes appear as "socket:[12345]"
-                    if let Some(rest) = link_target.strip_prefix("socket:[")
-                        && let Some(inode_str) = rest.strip_suffix(']')
-                        && let Ok(inode) = inode_str.parse::<u64>()
-                        && inodes.contains(&inode)
-                    {
-                        results.push(ProcessUse {
-                            pid,
-                            user: read_proc_user(pid),
-                            access: AccessType::Fd,
-                            command: read_proc_comm(pid),
-                        });
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(results)
-}
-
-/// Send a signal to a process by writing to an appropriate mechanism.
-///
-/// On a real Unix system this would call `kill(pid, sig)`. We do it via libc.
-fn send_signal(pid: u32, sig: i32) -> Result<(), String> {
-    #[cfg(target_family = "unix")]
-    {
-        unsafe extern "C" {
-            fn kill(pid: i32, sig: i32) -> i32;
-        }
-        // SAFETY: kill() is a standard POSIX function. We pass a valid PID and
-        // signal number. The return value is checked for errors.
-        let ret = unsafe { kill(pid as i32, sig) };
-        if ret != 0 {
-            return Err(format!(
-                "failed to send signal {} to PID {}: errno",
-                signal_number_to_name(sig),
-                pid,
-            ));
-        }
-    }
-
-    #[cfg(not(target_family = "unix"))]
-    {
-        let _ = (pid, sig);
-        Err("signal sending not supported on this platform".into())
-    }
-
-    #[cfg(target_family = "unix")]
-    Ok(())
-}
-
-fn run_fuser(args: &[String]) -> Result<(), String> {
-    let cfg = parse_fuser_args(args)?;
-
-    for target in &cfg.targets {
-        let users = if cfg.namespace == "tcp" || cfg.namespace == "udp" {
-            find_net_users(target, &cfg.namespace)?
-        } else {
-            find_file_users(target)
-        };
-
-        if users.is_empty() {
-            if cfg.show_all {
-                eprintln!("{target}: no processes found");
-            }
-            continue;
-        }
-
-        if cfg.verbose {
-            eprintln!(
-                "{:<25} {:>6} {:>6} {:>6} COMMAND",
-                "FILE", "USER", "PID", "ACCESS"
-            );
-            for u in &users {
-                eprintln!(
-                    "{:<25} {:>6} {:>6} {:>6} {}",
-                    target, u.user, u.pid, u.access, u.command
-                );
-            }
-        } else {
-            // Standard output: file: PID PID ...
-            let pids: Vec<String> = users
-                .iter()
-                .map(|u| {
-                    let mut s = u.pid.to_string();
-                    if cfg.show_user {
-                        s.push_str(&format!("({})", u.user));
-                    }
-                    s
-                })
-                .collect();
-            // PID list goes to stdout, filename header to stderr
-            eprintln!("{target}:");
-            println!("{}", pids.join(" "));
-        }
-
-        // Send signals if requested.
-        if cfg.send_signal {
-            for u in &users {
-                if let Err(e) = send_signal(u.pid, cfg.signal) {
-                    eprintln!("fuser: {e}");
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-// ============================================================================
 // Main entry point
 // ============================================================================
 
@@ -1470,14 +947,12 @@ fn main() {
         Personality::Pv => "pv",
         Personality::Truncate => "truncate",
         Personality::Shred => "shred",
-        Personality::Fuser => "fuser",
     };
 
     let result = match personality {
         Personality::Pv => run_pv(&tool_args),
         Personality::Truncate => run_truncate(&tool_args),
         Personality::Shred => run_shred(&tool_args),
-        Personality::Fuser => run_fuser(&tool_args),
     };
 
     if let Err(e) = result {
@@ -1538,18 +1013,6 @@ mod tests {
     fn test_personality_shred_with_path() {
         assert_eq!(detect_personality("/sbin/shred"), Personality::Shred);
     }
-
-    #[test]
-    fn test_personality_fuser() {
-        assert_eq!(detect_personality("fuser"), Personality::Fuser);
-    }
-
-    #[test]
-    fn test_personality_fuser_with_path() {
-        assert_eq!(detect_personality("/usr/sbin/fuser"), Personality::Fuser);
-    }
-
-    // -- Size parsing ---------------------------------------------------------
 
     #[test]
     fn test_parse_size_bare_number() {
@@ -1883,53 +1346,6 @@ mod tests {
     // -- Signal name/number mapping -------------------------------------------
 
     #[test]
-    fn test_signal_kill() {
-        assert_eq!(signal_name_to_number("KILL").unwrap(), 9);
-    }
-
-    #[test]
-    fn test_signal_sigkill() {
-        assert_eq!(signal_name_to_number("SIGKILL").unwrap(), 9);
-    }
-
-    #[test]
-    fn test_signal_hup() {
-        assert_eq!(signal_name_to_number("HUP").unwrap(), 1);
-    }
-
-    #[test]
-    fn test_signal_term() {
-        assert_eq!(signal_name_to_number("TERM").unwrap(), 15);
-    }
-
-    #[test]
-    fn test_signal_number_string() {
-        assert_eq!(signal_name_to_number("9").unwrap(), 9);
-    }
-
-    #[test]
-    fn test_signal_unknown() {
-        assert!(signal_name_to_number("BOGUS").is_err());
-    }
-
-    #[test]
-    fn test_signal_number_to_name_kill() {
-        assert_eq!(signal_number_to_name(9), "KILL");
-    }
-
-    #[test]
-    fn test_signal_number_to_name_hup() {
-        assert_eq!(signal_number_to_name(1), "HUP");
-    }
-
-    #[test]
-    fn test_signal_number_to_name_unknown() {
-        assert_eq!(signal_number_to_name(99), "UNKNOWN");
-    }
-
-    // -- Shred pattern generation ---------------------------------------------
-
-    #[test]
     fn test_shred_pattern_random_not_zero() {
         let mut buf = vec![0u8; 256];
         generate_shred_pattern(&mut buf, 0, 42);
@@ -1992,14 +1408,6 @@ mod tests {
     }
 
     // -- Proc fd path parsing -------------------------------------------------
-
-    #[test]
-    fn test_parse_proc_fd_nonexistent() {
-        // PID 0 fd 99999 should not exist
-        assert!(parse_proc_fd_link(0, 99999).is_none());
-    }
-
-    // -- Line counting --------------------------------------------------------
 
     #[test]
     fn test_line_count_in_buffer() {
@@ -2125,47 +1533,5 @@ mod tests {
     fn test_pv_parse_unknown_flag() {
         let args = vec!["--bogus".to_string()];
         assert!(parse_pv_args(&args).is_err());
-    }
-
-    // -- Fuser argument parsing -----------------------------------------------
-
-    #[test]
-    fn test_fuser_parse_kill() {
-        let args = vec!["-k".to_string(), "/tmp/f".to_string()];
-        let cfg = parse_fuser_args(&args).unwrap();
-        assert!(cfg.send_signal);
-        assert_eq!(cfg.signal, 9); // default SIGKILL
-    }
-
-    #[test]
-    fn test_fuser_parse_signal_shorthand() {
-        let args = vec!["-HUP".to_string(), "/tmp/f".to_string()];
-        let cfg = parse_fuser_args(&args).unwrap();
-        assert!(cfg.send_signal);
-        assert_eq!(cfg.signal, 1);
-    }
-
-    #[test]
-    fn test_fuser_parse_namespace() {
-        let args = vec!["-n".to_string(), "tcp".to_string(), "80".to_string()];
-        let cfg = parse_fuser_args(&args).unwrap();
-        assert_eq!(cfg.namespace, "tcp");
-    }
-
-    #[test]
-    fn test_fuser_parse_no_targets_error() {
-        let args: Vec<String> = vec!["-v".to_string()];
-        assert!(parse_fuser_args(&args).is_err());
-    }
-
-    // -- Access type display --------------------------------------------------
-
-    #[test]
-    fn test_access_type_display() {
-        assert_eq!(format!("{}", AccessType::Fd), "f");
-        assert_eq!(format!("{}", AccessType::Root), "r");
-        assert_eq!(format!("{}", AccessType::Cwd), "c");
-        assert_eq!(format!("{}", AccessType::Mmap), "m");
-        assert_eq!(format!("{}", AccessType::Exe), "e");
     }
 }

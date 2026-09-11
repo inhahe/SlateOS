@@ -129706,7 +129706,7 @@ be reached, and the two implementations can drift apart with nothing noticing.
 | `userspace/chown` | `chmod` | coreutils bin |
 | ~~`userspace/chpasswd`~~ | ~~`passwd`~~ | ~~`userspace/passwd`~~ — **alias removed 2026-09-10** |
 | ~~`userspace/head`~~ | ~~`tail`~~ | ~~coreutils bin~~ — **crate deleted 2026-09-10** |
-| `userspace/pv` | `fuser` | `userspace/fuser` |
+| ~~`userspace/pv`~~ | ~~`fuser`~~ | ~~`userspace/fuser`~~ — **alias removed 2026-09-10**, after `-n` was made real in the producer |
 | `userspace/sysstat` | `iostat` | `userspace/iostat` |
 | `userspace/who` | `w` | `userspace/w` |
 

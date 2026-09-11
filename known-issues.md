@@ -64783,6 +64783,59 @@ lint programme above is still worth doing; it is not a substitute for a
 differential, and two of its three crates so far were duplicates that a
 differential then deleted.
 
+**THE KNOB THAT SELECTS THE SUBJECT WAS NOT REACHING THE SUBJECT
+(2026-09-11, fixed).** `DIFF_PKG=<pkg>` — the override every entry above uses
+to point a coreutils harness at the standalone half instead — was being
+**dropped at the WSL boundary**, and the run came back green anyway.
+
+    DIFF_PKG=no-such-package-at-all ./scripts/expand-diff.sh
+    216 passed, 0 differed, 2 differ on purpose
+
+216 passing cases for a package that does not exist. `diff-wsl.sh` re-execs
+every harness inside WSL, and environment variables do not cross that boundary
+by themselves, so the re-exec rebuilt the environment from a written-out list
+of four names — `OURS VERBOSE DIFF_GNU_DIR DIFF_GNU_CACHE`. `DIFF_PKG` was not
+on it. The far side then applied its own default of `coreutils` and measured
+the half nobody asked about.
+
+**Why this is the worst possible failure for the §1005 work.** Both runs of a
+pair measured the same binary, so every pair scores a **perfect tie** no matter
+how far apart the halves really are — and a tie reads as "the two are
+equivalent, delete either", which is the one conclusion that can delete the
+better half. `expand` is the proof: it reported *216 / 216, a dead heat* both
+ways, and with the knob fixed it reports **216 passed / 0 differed** for
+coreutils against **90 passed / 126 differed** for the standalone.
+
+**The seven retirements already made are NOT affected, and that is checked
+rather than assumed.** A contaminated pair of runs measures one binary twice
+and therefore *must* print the same numbers twice; the harnesses are
+deterministic. Every retirement above recorded two different numbers — `dd`
+339/0 against 8/331, `tee` 71/0 against 34/37, `uniq` 273/0 against 134/139 —
+and no single subject can produce both halves of any of those. The asymmetry
+itself is the evidence the swap happened.
+
+**The general defect, which this tree has now hit four times:** an enumeration
+that needs one entry per instance misses the next instance BY CONSTRUCTION, and
+misses it silently. The fix does not add `DIFF_PKG` to the list; it removes the
+list. Every `DIFF_`-prefixed name found in the environment now crosses, so a
+knob added later crosses without anyone remembering. Taking the names from the
+*environment* rather than from the shell is also exactly the right cut: a knob
+a harness writes into itself is set again on the far side and need not travel,
+while an operator's override exists only on this side and is lost if it does
+not.
+
+Guarded by `scripts/test-diff-forward.sh`, which is built on the two-probe
+rule, because for a forwarded variable "the value crossed" and "the value was
+dropped and the default did the same thing" look identical in green. So it sets
+`DIFF_PKG` to values that *must* refuse — a package that does not exist, and a
+package that exists with no such binary — and requires both to fail. It scores
+4/4 against the fix and 2/4 against the old code, failing exactly the two
+refusal probes.
+
+*(Written POSIX, not bash: `diff-wsl.sh` declares `shell=sh` and two harnesses
+are `#!/bin/sh`, so the obvious `${!DIFF_@}` — which works when tried, because
+it is tried under bash — would have broken them. shellcheck said so.)*
+
 **32 -> 31 (2026-09-11): `dd`, and the survey's second inversion.** Ranked
 **"standalone ahead"** on 21 option names the standalone mentions and coreutils
 does not. `DIFF_PKG=dd bash scripts/dd-diff.sh`:

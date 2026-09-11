@@ -38,6 +38,5 @@
 
 cron:at
 cron:crontab
-resolvectl:nslookup
 swapon:free
 useradd:newgrp

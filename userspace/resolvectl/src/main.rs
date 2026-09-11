@@ -581,94 +581,6 @@ fn cmd_resolvconf(args: &[String]) {
 // nslookup command
 // ============================================================================
 
-fn cmd_nslookup(args: &[String]) {
-    let mut query_type = "A".to_string();
-    let mut names: Vec<String> = Vec::new();
-    let mut server: Option<String> = None;
-
-    for arg in args {
-        match arg.as_str() {
-            "-h" | "--help" => {
-                println!("Usage: nslookup [-type=TYPE] <hostname> [server]");
-                println!();
-                println!("DNS lookup utility.");
-                println!();
-                println!("Options:");
-                println!("  -type=TYPE    Query type (A, AAAA, MX, NS, TXT, etc.)");
-                println!("  -h, --help    Show help");
-                println!("  -V, --version Show version");
-                process::exit(0);
-            }
-            "-V" | "--version" => {
-                println!("nslookup {VERSION}");
-                process::exit(0);
-            }
-            s if s.starts_with("-type=") || s.starts_with("-query=") => {
-                if let Some(t) = s.split_once('=').map(|(_, v)| v) {
-                    query_type = t.to_string();
-                }
-            }
-            s if !s.starts_with('-') => {
-                if names.is_empty() {
-                    names.push(s.to_string());
-                } else if server.is_none() {
-                    server = Some(s.to_string());
-                }
-            }
-            _ => {}
-        }
-    }
-
-    if names.is_empty() {
-        eprintln!("nslookup: no hostname specified");
-        process::exit(1);
-    }
-
-    let config = read_resolv_conf();
-    let dns_server = server.unwrap_or_else(|| {
-        config
-            .servers
-            .first()
-            .map(|s| s.address.clone())
-            .unwrap_or_else(|| "127.0.0.53".to_string())
-    });
-
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-
-    let _ = writeln!(out, "Server:\t\t{dns_server}");
-    let _ = writeln!(out, "Address:\t{dns_server}#53");
-    let _ = writeln!(out);
-
-    let rtype = record_type_str(&query_type);
-
-    for name in &names {
-        let _ = writeln!(out, "Non-authoritative answer:");
-        let ips = resolve_hostname(name);
-        if ips.is_empty() {
-            let _ = writeln!(out, "** server can't find {name}: NXDOMAIN");
-        } else {
-            for ip in &ips {
-                match (rtype, ip) {
-                    ("A", IpAddr::V4(v4)) => {
-                        let _ = writeln!(out, "Name:\t{name}");
-                        let _ = writeln!(out, "Address: {v4}");
-                    }
-                    ("AAAA", IpAddr::V6(v6)) => {
-                        let _ = writeln!(out, "Name:\t{name}");
-                        let _ = writeln!(out, "Address: {v6}");
-                    }
-                    _ => {
-                        let _ = writeln!(out, "Name:\t{name}");
-                        let _ = writeln!(out, "Address: {ip}");
-                    }
-                }
-            }
-        }
-        let _ = writeln!(out);
-    }
-}
-
 // ============================================================================
 // host command
 // ============================================================================
@@ -784,7 +696,6 @@ fn main() {
     match prog_name.as_str() {
         "resolvconf" => cmd_resolvconf(&rest),
         "systemd-resolve" => cmd_resolvectl(&rest),
-        "nslookup" => cmd_nslookup(&rest),
         "host" => cmd_host(&rest),
         _ => cmd_resolvectl(&rest),
     }

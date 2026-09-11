@@ -20,6 +20,7 @@
 //! data for initial development.
 
 use appearance::Palette;
+use appearance::Surface;
 #[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]
@@ -2952,14 +2953,8 @@ impl NetScanApp {
         value: &str,
         placeholder: &str,
     ) {
-        tree.push(RenderCommand::FillRect {
-            x,
-            y,
-            width,
-            height: INPUT_HEIGHT,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(SMALL_RADIUS),
-        });
+        self.palette
+            .push_surface(tree, x, y, width, INPUT_HEIGHT, SMALL_RADIUS, Surface::Card);
         tree.push(RenderCommand::StrokeRect {
             x,
             y,
@@ -3178,14 +3173,8 @@ impl NetScanApp {
     }
 
     fn render_table_header(&self, tree: &mut RenderTree, x: f32, y: f32, width: f32) {
-        tree.push(RenderCommand::FillRect {
-            x,
-            y,
-            width,
-            height: TABLE_HEADER_HEIGHT,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(tree, x, y, width, TABLE_HEADER_HEIGHT, 0.0, Surface::Card);
 
         let columns = host_columns(width);
         host_table(&columns, x).header_weighted(
@@ -3347,14 +3336,15 @@ impl NetScanApp {
         });
 
         // Left border
-        tree.push(RenderCommand::FillRect {
+        self.palette.push_surface(
+            tree,
             x,
-            y: top_y,
-            width: 1.0,
-            height: self.window_height - top_y,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::ZERO,
-        });
+            top_y,
+            1.0,
+            self.window_height - top_y,
+            0.0,
+            Surface::Card,
+        );
 
         if let Some(host) = self.selected_host() {
             self.render_host_detail(tree, x + PADDING, top_y + PADDING, host);
@@ -3466,14 +3456,15 @@ impl NetScanApp {
                     color: Color::rgba(0, 0, 0, 120),
                     corner_radii: CornerRadii::all(SMALL_RADIUS),
                 });
-                tree.push(RenderCommand::FillRect {
-                    x: x + PADDING,
-                    y: menu_y,
-                    width: 120.0,
-                    height: 56.0,
-                    color: self.palette.surface0,
-                    corner_radii: CornerRadii::all(SMALL_RADIUS),
-                });
+                self.palette.push_surface(
+                    tree,
+                    x + PADDING,
+                    menu_y,
+                    120.0,
+                    56.0,
+                    SMALL_RADIUS,
+                    Surface::Panel,
+                );
                 tree.push(RenderCommand::Text {
                     x: x + PADDING + 10.0,
                     y: menu_y + 8.0,
@@ -3564,14 +3555,8 @@ impl NetScanApp {
 
         // Port list header
         dy += 8.0;
-        tree.push(RenderCommand::FillRect {
-            x,
-            y: dy,
-            width: w,
-            height: 1.0,
-            color: self.palette.surface1,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(tree, x, dy, w, 1.0, 0.0, Surface::Card);
         dy += 6.0;
         tree.push(RenderCommand::Text {
             x,
@@ -3940,14 +3925,15 @@ impl NetScanApp {
 
         // History table header
         let header_y = content_y + 24.0;
-        tree.push(RenderCommand::FillRect {
-            x: PADDING,
-            y: header_y,
-            width: self.window_width - PADDING * 2.0,
-            height: TABLE_HEADER_HEIGHT,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            tree,
+            PADDING,
+            header_y,
+            self.window_width - PADDING * 2.0,
+            TABLE_HEADER_HEIGHT,
+            0.0,
+            Surface::Card,
+        );
 
         let hist_cols = [
             (PADDING + 4.0, "#"),
@@ -4157,14 +4143,15 @@ impl NetScanApp {
             let table_y = btn_y + BUTTON_HEIGHT + 16.0;
 
             // Header
-            tree.push(RenderCommand::FillRect {
-                x: PADDING,
-                y: table_y,
-                width: self.window_width - PADDING * 2.0,
-                height: TABLE_HEADER_HEIGHT,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::ZERO,
-            });
+            self.palette.push_surface(
+                tree,
+                PADDING,
+                table_y,
+                self.window_width - PADDING * 2.0,
+                TABLE_HEADER_HEIGHT,
+                0.0,
+                Surface::Card,
+            );
             let hop_cols = [
                 (PADDING + 4.0, "Hop"),
                 (PADDING + 50.0, "IP Address"),
@@ -4341,14 +4328,15 @@ impl NetScanApp {
         if let Some(ref info) = self.whois_result {
             let card_y = btn_y + BUTTON_HEIGHT + 16.0;
 
-            tree.push(RenderCommand::FillRect {
-                x: PADDING,
-                y: card_y,
-                width: 500.0,
-                height: 220.0,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::all(CORNER_RADIUS),
-            });
+            self.palette.push_surface(
+                tree,
+                PADDING,
+                card_y,
+                500.0,
+                220.0,
+                CORNER_RADIUS,
+                Surface::Card,
+            );
             tree.push(RenderCommand::StrokeRect {
                 x: PADDING,
                 y: card_y,

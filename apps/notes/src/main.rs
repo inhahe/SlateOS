@@ -32,6 +32,7 @@
 #![allow(clippy::missing_errors_doc)]
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::event::{Event, EventResult, Key, KeyEvent};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
@@ -2054,14 +2055,8 @@ impl NotesApp {
 
         // Sort button
         let sort_label = format!("Sort: {}", self.sort_order.label());
-        cmds.push(RenderCommand::FillRect {
-            x: 160.0,
-            y: 6.0,
-            width: 100.0,
-            height: 24.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
+        self.palette
+            .push_surface(cmds, 160.0, 6.0, 100.0, 24.0, CORNER_RADIUS, Surface::Card);
         cmds.push(RenderCommand::Text {
             x: 168.0,
             y: 12.0,
@@ -2105,14 +2100,15 @@ impl NotesApp {
         // Search box
         let search_x = 310.0;
         let search_w = 200.0;
-        cmds.push(RenderCommand::FillRect {
-            x: search_x,
-            y: 6.0,
-            width: search_w,
-            height: 24.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
+        self.palette.push_surface(
+            cmds,
+            search_x,
+            6.0,
+            search_w,
+            24.0,
+            CORNER_RADIUS,
+            Surface::Card,
+        );
         let search_text = if self.search_query.is_empty() {
             "Search notes...".to_owned()
         } else {
@@ -2162,14 +2158,8 @@ impl NotesApp {
                 .get(i)
                 .copied()
                 .unwrap_or(self.palette.overlay0);
-            cmds.push(RenderCommand::FillRect {
-                x: tx,
-                y: 6.0,
-                width: btn_w,
-                height: 24.0,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::all(CORNER_RADIUS),
-            });
+            self.palette
+                .push_surface(cmds, tx, 6.0, btn_w, 24.0, CORNER_RADIUS, Surface::Card);
             cmds.push(RenderCommand::Text {
                 x: tx + 8.0,
                 y: 12.0,
@@ -2478,24 +2468,26 @@ impl NotesApp {
         content_h: f32,
     ) {
         // List panel background
-        cmds.push(RenderCommand::FillRect {
+        self.palette.push_surface(
+            cmds,
             x,
-            y: content_y,
-            width: NOTE_LIST_WIDTH,
-            height: content_h,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+            content_y,
+            NOTE_LIST_WIDTH,
+            content_h,
+            0.0,
+            Surface::Card,
+        );
 
         // Header
-        cmds.push(RenderCommand::FillRect {
+        self.palette.push_surface(
+            cmds,
             x,
-            y: content_y,
-            width: NOTE_LIST_WIDTH,
-            height: HEADER_HEIGHT,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::ZERO,
-        });
+            content_y,
+            NOTE_LIST_WIDTH,
+            HEADER_HEIGHT,
+            0.0,
+            Surface::Card,
+        );
         cmds.push(RenderCommand::Text {
             x: x + 12.0,
             y: content_y + 9.0,
@@ -2530,14 +2522,15 @@ impl NotesApp {
 
                 // Background for selected
                 if is_selected {
-                    cmds.push(RenderCommand::FillRect {
+                    self.palette.push_surface(
+                        cmds,
                         x,
-                        y: iy,
-                        width: NOTE_LIST_WIDTH,
-                        height: item_h,
-                        color: self.palette.surface0,
-                        corner_radii: CornerRadii::ZERO,
-                    });
+                        iy,
+                        NOTE_LIST_WIDTH,
+                        item_h,
+                        0.0,
+                        Surface::Selected,
+                    );
                     // Blue accent bar
                     cmds.push(RenderCommand::FillRect {
                         x,
@@ -2709,14 +2702,15 @@ impl NotesApp {
 
         // Note title header
         let title_y = y;
-        cmds.push(RenderCommand::FillRect {
+        self.palette.push_surface(
+            cmds,
             x,
-            y: title_y,
+            title_y,
             width,
-            height: HEADER_HEIGHT + 8.0,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+            HEADER_HEIGHT + 8.0,
+            0.0,
+            Surface::Card,
+        );
         cmds.push(RenderCommand::Text {
             x: x + EDITOR_PADDING,
             y: title_y + 10.0,
@@ -2730,14 +2724,8 @@ impl NotesApp {
 
         // Note metadata line
         let meta_y = title_y + HEADER_HEIGHT + 8.0;
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y: meta_y,
-            width,
-            height: 20.0,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(cmds, x, meta_y, width, 20.0, 0.0, Surface::Card);
 
         let nb_name = self
             .find_notebook(note.notebook_id)
@@ -2765,14 +2753,8 @@ impl NotesApp {
             let mut tx = x + EDITOR_PADDING;
             for tag in &note.tags {
                 let tw = text::padded_width(tag, 8.0, 10.0, FontWeightHint::Regular);
-                cmds.push(RenderCommand::FillRect {
-                    x: tx,
-                    y: tags_y + 2.0,
-                    width: tw,
-                    height: 18.0,
-                    color: self.palette.surface0,
-                    corner_radii: CornerRadii::all(9.0),
-                });
+                self.palette
+                    .push_surface(cmds, tx, tags_y + 2.0, tw, 18.0, 9.0, Surface::Card);
                 cmds.push(RenderCommand::Text {
                     x: tx + 8.0,
                     y: tags_y + 5.0,
@@ -2928,14 +2910,15 @@ impl NotesApp {
 
         // Header row
         let header_y = y + EDITOR_PADDING;
-        cmds.push(RenderCommand::FillRect {
-            x: x + EDITOR_PADDING,
-            y: header_y,
-            width: usable_w,
-            height: LINE_HEIGHT + 4.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
+        self.palette.push_surface(
+            cmds,
+            x + EDITOR_PADDING,
+            header_y,
+            usable_w,
+            LINE_HEIGHT + 4.0,
+            CORNER_RADIUS,
+            Surface::Card,
+        );
         for (ci, header) in table.headers.iter().enumerate() {
             cmds.push(RenderCommand::Text {
                 x: x + EDITOR_PADDING + ci as f32 * col_w + 8.0,
@@ -3099,14 +3082,15 @@ impl NotesApp {
                 }
                 MdBlock::CodeBlock { language, code } => {
                     let block_h = code.lines().count() as f32 * LINE_HEIGHT + 16.0;
-                    cmds.push(RenderCommand::FillRect {
-                        x: x + EDITOR_PADDING,
-                        y: ly,
-                        width: max_w,
-                        height: block_h,
-                        color: self.palette.surface0,
-                        corner_radii: CornerRadii::all(6.0),
-                    });
+                    self.palette.push_surface(
+                        cmds,
+                        x + EDITOR_PADDING,
+                        ly,
+                        max_w,
+                        block_h,
+                        6.0,
+                        Surface::Card,
+                    );
                     if !language.is_empty() {
                         cmds.push(RenderCommand::Text {
                             x: x + EDITOR_PADDING + 8.0,
@@ -3185,14 +3169,8 @@ impl NotesApp {
         height: f32,
     ) {
         // Background
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width,
-            height,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(cmds, x, y, width, height, 0.0, Surface::Card);
 
         // Left border
         cmds.push(RenderCommand::Line {

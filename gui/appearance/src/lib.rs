@@ -260,7 +260,7 @@ pub const LIGHT_BORDER: Color = LIGHT_TEXT;
 use settingsfile::yaml_enum;
 
 pub mod surface;
-pub use surface::{Surface, SurfacePaint};
+pub use surface::{CommandSink, Surface, SurfacePaint};
 
 // ============================================================================
 // Theme mode
@@ -1385,6 +1385,14 @@ pub struct Palette {
     pub link: Color,
     /// The outline that carries structure under [`SurfaceStyle::Borders`].
     pub border: Color,
+    /// Whether boxes are outlined or filled.
+    ///
+    /// Carried here rather than passed alongside, and that is the whole reason
+    /// the conversion is tractable: a `Palette` is already threaded to every
+    /// draw site in the tree, so a site needs no new argument to honour the
+    /// user's choice. `panel_alpha` and `light` are here for the same reason --
+    /// settings-derived values every drawer needs.
+    pub surface_style: SurfaceStyle,
     /// The blue of the categorical set. See the type's note on hues.
     pub blue: Color,
     /// Green — also "this succeeded", "this is allowed", "this is safe".
@@ -1480,6 +1488,7 @@ impl Palette {
                 text: LIGHT_TEXT,
                 link: LIGHT_LINK,
                 border: LIGHT_BORDER,
+                surface_style: SurfaceStyle::Borders,
                 blue: LIGHT_BLUE,
                 green: LIGHT_GREEN,
                 red: LIGHT_RED,
@@ -1508,6 +1517,7 @@ impl Palette {
                 text: TEXT,
                 link: LINK,
                 border: BORDER,
+                surface_style: SurfaceStyle::Borders,
                 blue: BLUE,
                 green: GREEN,
                 red: RED,
@@ -1533,11 +1543,19 @@ impl Palette {
         // light/dark branch to keep. Transparency is dropped with it -- see
         // `high_contrast`.
         if let Some(scheme) = settings.high_contrast {
-            return Self::high_contrast(scheme, settings);
+            let mut palette = Self::high_contrast(scheme, settings);
+            // The surface style survives high contrast, where the colours do
+            // not. It is a layout decision -- whether a box has an outline or a
+            // fill -- and a high-contrast scheme has an opinion about colour,
+            // not about that. Someone who chose outlined boxes and then turned
+            // on high contrast has not asked for filled ones.
+            palette.surface_style = settings.surface_style;
+            return palette;
         }
         let mut palette = Self::for_mode(settings.theme_mode.is_light());
         palette.accent = settings.effective_accent();
         palette.panel_alpha = settings.transparency.panel_alpha();
+        palette.surface_style = settings.surface_style;
         palette
     }
 
@@ -1695,6 +1713,9 @@ impl Palette {
             accent,
             panel_alpha: _,
             light: _,
+            // Not a colour, so not a role. Named and discarded rather than
+            // swept up by `..`, on the same terms as the two above it.
+            surface_style: _,
         } = *self;
         [
             ("crust", crust),

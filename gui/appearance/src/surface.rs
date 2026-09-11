@@ -19,6 +19,49 @@ use guitk::color::Color;
 use guitk::render::RenderTree;
 use guitk::style::CornerRadii;
 
+/// Somewhere render commands can be sent.
+///
+/// The tree emits into four different receivers -- `Vec<RenderCommand>` at
+/// 1,258 sites, `Frame` at 299, `RenderTree` at 247, and assorted others -- and
+/// `Frame::push` is not a plain append: it tracks the clip stack, so writing to
+/// its inner buffer would lose that. One small trait lets every converted draw
+/// site stay a single line regardless of what it is drawing into, which matters
+/// when there are 991 of them.
+pub trait CommandSink {
+    /// Emit one command.
+    fn emit(&mut self, cmd: guitk::render::RenderCommand);
+}
+
+impl CommandSink for Vec<guitk::render::RenderCommand> {
+    fn emit(&mut self, cmd: guitk::render::RenderCommand) {
+        self.push(cmd);
+    }
+}
+
+impl CommandSink for RenderTree {
+    fn emit(&mut self, cmd: guitk::render::RenderCommand) {
+        self.push(cmd);
+    }
+}
+
+/// So that `&mut receiver` is the right call shape whether the receiver is an
+/// owned `Vec` or already a `&mut` binding. Without this the converted call
+/// sites would have to know which they were looking at, and they cannot -- the
+/// two are spelled identically at the point of use.
+impl<S: CommandSink + ?Sized> CommandSink for &mut S {
+    fn emit(&mut self, cmd: guitk::render::RenderCommand) {
+        (**self).emit(cmd);
+    }
+}
+
+impl<T> CommandSink for guitk::frame::Frame<T> {
+    fn emit(&mut self, cmd: guitk::render::RenderCommand) {
+        // Through `push`, never into the buffer behind it: this one maintains
+        // the clip stack as it goes.
+        self.push(cmd);
+    }
+}
+
 /// What a box *is*, which is what a draw site knows.
 ///
 /// Deliberately not a list of shades. A caller that knew it wanted `surface1`
@@ -87,8 +130,8 @@ impl Palette {
     /// not a container being told apart from its background -- it is a part of a
     /// control, and the fill *is* the thing. See [`Surface::ControlTrack`].
     #[must_use]
-    pub fn surface_paint(&self, what: Surface, style: SurfaceStyle) -> SurfacePaint {
-        match (style, what) {
+    pub fn surface_paint(&self, what: Surface) -> SurfacePaint {
+        match (self.surface_style, what) {
             // Borders: nothing is filled, structure is carried by the outline.
             (SurfaceStyle::Borders, Surface::Card | Surface::Sidebar) => SurfacePaint {
                 fill: None,
@@ -131,7 +174,53 @@ impl Palette {
         }
     }
 
-    /// Draw `what` as a rectangle, in whichever way `style` calls for.
+    /// Append `what` as a rectangle to a plain command list.
+    ///
+    /// The form nearly every call site wants, because most of the tree emits
+    /// into a `Vec<RenderCommand>` rather than a `RenderTree` -- 1,258 sites
+    /// spell it `cmds.push`, 299 `frame.push`, 57 `commands.push`. A
+    /// `RenderTree` caller passes `&mut tree.commands`, which is exactly what
+    /// `RenderTree::push` does anyway.
+    pub fn push_surface<S: CommandSink + ?Sized>(
+        &self,
+        out: &mut S,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        radius: f32,
+        what: Surface,
+    ) {
+        let paint = self.surface_paint(what);
+        let radii = CornerRadii::all(radius);
+        if let Some(fill) = paint.fill {
+            out.emit(guitk::render::RenderCommand::FillRect {
+                x,
+                y,
+                width,
+                height,
+                color: fill,
+                corner_radii: radii,
+            });
+        }
+        if let Some(border) = paint.border {
+            // Inset by half the line so the stroke lands inside the rectangle
+            // the caller asked for. Without this a bordered row is a pixel
+            // taller than the filled row it replaces, and a column of them
+            // drifts -- invisible in one row, obvious down a page.
+            out.emit(guitk::render::RenderCommand::StrokeRect {
+                x: x + 0.5,
+                y: y + 0.5,
+                width: (width - 1.0).max(0.0),
+                height: (height - 1.0).max(0.0),
+                color: border,
+                line_width: 1.0,
+                corner_radii: radii,
+            });
+        }
+    }
+
+    /// Draw `what` as a rectangle, in whichever way the theme calls for.
     ///
     /// The one-line form, which is what nearly every call site wants. A site
     /// with a shape this cannot emit should call
@@ -146,36 +235,8 @@ impl Palette {
         height: f32,
         radius: f32,
         what: Surface,
-        style: SurfaceStyle,
     ) {
-        let paint = self.surface_paint(what, style);
-        let radii = CornerRadii::all(radius);
-        if let Some(fill) = paint.fill {
-            tree.push(guitk::render::RenderCommand::FillRect {
-                x,
-                y,
-                width,
-                height,
-                color: fill,
-                corner_radii: radii,
-            });
-        }
-        if let Some(border) = paint.border {
-            // Inset by half the line so the stroke lands inside the rectangle
-            // the caller asked for. Without this a bordered row is one pixel
-            // taller than the filled row it replaces, and a column of them
-            // drifts -- which is the kind of difference that only shows up
-            // once a whole page is converted.
-            tree.push(guitk::render::RenderCommand::StrokeRect {
-                x: x + 0.5,
-                y: y + 0.5,
-                width: (width - 1.0).max(0.0),
-                height: (height - 1.0).max(0.0),
-                color: border,
-                line_width: 1.0,
-                corner_radii: radii,
-            });
-        }
+        self.push_surface(tree, x, y, width, height, radius, what);
     }
 }
 
@@ -195,6 +256,15 @@ mod tests {
         Palette::for_mode(true)
     }
 
+    /// The light palette in a chosen style. Since the style rides on the
+    /// palette, "the same palette under the other theme" is how these tests
+    /// have to ask the question.
+    fn styled(style: SurfaceStyle) -> Palette {
+        let mut p = Palette::for_mode(true);
+        p.surface_style = style;
+        p
+    }
+
     /// The property the whole change exists for.
     ///
     /// Under cards, "selected" is a shade one step above whatever is underneath,
@@ -204,7 +274,7 @@ mod tests {
     #[test]
     fn selected_means_one_thing_everywhere_under_borders() {
         let p = light();
-        let selected = p.surface_paint(Surface::Selected, SurfaceStyle::Borders);
+        let selected = styled(SurfaceStyle::Borders).surface_paint(Surface::Selected);
         assert_eq!(
             selected.fill, None,
             "a selected box is not filled under borders"
@@ -212,11 +282,13 @@ mod tests {
         assert_eq!(selected.border, Some(p.accent));
 
         // ...and under cards it is a fill, which is what makes it relative.
-        let carded = p.surface_paint(Surface::Selected, SurfaceStyle::Cards);
+        let carded = styled(SurfaceStyle::Cards).surface_paint(Surface::Selected);
         assert_eq!(carded.fill, Some(p.surface1));
         assert_ne!(
             carded.fill,
-            p.surface_paint(Surface::Card, SurfaceStyle::Cards).fill,
+            styled(SurfaceStyle::Cards)
+                .surface_paint(Surface::Card)
+                .fill,
             "selected and unselected must differ under cards, or selection is invisible"
         );
     }
@@ -230,7 +302,7 @@ mod tests {
     fn a_control_track_is_filled_in_both_themes() {
         let p = light();
         for style in [SurfaceStyle::Borders, SurfaceStyle::Cards] {
-            let paint = p.surface_paint(Surface::ControlTrack, style);
+            let paint = styled(style).surface_paint(Surface::ControlTrack);
             assert_eq!(
                 paint.fill,
                 Some(p.surface2),
@@ -247,7 +319,7 @@ mod tests {
         let p = light();
         let ladder = [p.surface0, p.surface1, p.surface2, p.mantle, p.crust];
         for what in [Surface::Card, Surface::Selected, Surface::Sidebar] {
-            let paint = p.surface_paint(what, SurfaceStyle::Borders);
+            let paint = styled(SurfaceStyle::Borders).surface_paint(what);
             if let Some(fill) = paint.fill {
                 assert!(
                     !ladder.contains(&fill),
@@ -261,7 +333,6 @@ mod tests {
     /// outlined has vanished, which is the one outcome worse than either theme.
     #[test]
     fn no_surface_is_invisible_in_either_theme() {
-        let p = light();
         for style in [SurfaceStyle::Borders, SurfaceStyle::Cards] {
             for what in [
                 Surface::Card,
@@ -270,7 +341,7 @@ mod tests {
                 Surface::Sidebar,
                 Surface::ControlTrack,
             ] {
-                let paint = p.surface_paint(what, style);
+                let paint = styled(style).surface_paint(what);
                 assert!(
                     paint.fill.is_some() || paint.border.is_some(),
                     "{what:?} under {style:?} is drawn with nothing at all"
@@ -286,18 +357,9 @@ mod tests {
     /// row and obvious down a whole page.
     #[test]
     fn a_bordered_box_fills_the_rectangle_it_was_given() {
-        let p = light();
+        let p = styled(SurfaceStyle::Borders);
         let mut tree = RenderTree::new();
-        p.draw_surface(
-            &mut tree,
-            10.0,
-            20.0,
-            100.0,
-            40.0,
-            6.0,
-            Surface::Card,
-            SurfaceStyle::Borders,
-        );
+        p.draw_surface(&mut tree, 10.0, 20.0, 100.0, 40.0, 6.0, Surface::Card);
         let stroke = tree
             .commands
             .iter()
@@ -335,18 +397,9 @@ mod tests {
     /// A degenerate rectangle does not produce a negative-sized stroke.
     #[test]
     fn a_zero_sized_surface_does_not_go_negative() {
-        let p = light();
+        let p = styled(SurfaceStyle::Borders);
         let mut tree = RenderTree::new();
-        p.draw_surface(
-            &mut tree,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            Surface::Card,
-            SurfaceStyle::Borders,
-        );
+        p.draw_surface(&mut tree, 0.0, 0.0, 0.0, 0.0, 0.0, Surface::Card);
         for cmd in &tree.commands {
             if let RenderCommand::StrokeRect { width, height, .. } = cmd {
                 assert!(

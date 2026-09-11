@@ -1341,6 +1341,7 @@ dependencies = [
  "log",
  "net80211",
  "netipc",
+ "netproto",
  "netring",
  "sha2",
  "spin",
@@ -1829,6 +1830,10 @@ dependencies = [
  "guitk",
  "oswindow",
 ]
+
+[[package]]
+name = "netproto"
+version = "0.1.0"
 
 [[package]]
 name = "netring"

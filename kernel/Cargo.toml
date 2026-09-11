@@ -12,6 +12,7 @@ log = "0.4"
 # Shared kernel<->netstack IPC control-message schema (opcodes, status codes,
 # request/reply encode/decode). Single source of truth with the daemon side;
 # no_std, dependency-free, so it builds cleanly for the kernel's custom target.
+netproto = { path = "../netproto" }
 netipc = { path = "../netipc" }
 # Shared atomic SPSC ring driver over the netipc::ring ABI. Adds the unsafe
 # Acquire/Release SQ/CQ index accesses the forbid-unsafe netipc can't host; the

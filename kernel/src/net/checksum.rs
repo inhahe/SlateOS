@@ -23,6 +23,35 @@
 //! is worth. Optimising the checksum is now a single edit that lifts the whole
 //! stack rather than seven edits that drift apart again.
 //!
+//! # Where the loop actually lives, since 2026-09-10
+//!
+//! Not here. The five functions below are **adapters** over `netproto`, which is a
+//! shared `no_std` crate lane C maintains and which had the same algorithms
+//! independently. Verified equal before adopting, against RFC 1071 §3's own worked
+//! example rather than by reading: the accumulators are bit-identical, this module's
+//! `fold` gives `0xddf2`, `netproto`'s gives `0x220d`, and `!0xddf2 == 0x220d`.
+//!
+//! **This file survives on purpose, and the reason is the self-test below.** It
+//! carries that RFC vector, and `test = false` on the kernel binary means a
+//! `#[cfg(test)] mod tests` could not replace it. So the file is now the boot-time
+//! check that `netproto` computes what this kernel needs — an external oracle for a
+//! dependency, which is worth more than the lines it costs. Deleting it would remove
+//! the only thing that would notice if the shared crate drifted.
+//!
+//! **The adoption depends on `#[inline]` in `netproto`, and that is fragile.** The
+//! workspace sets `lto = false`, so a non-generic `pub fn` in another crate cannot be
+//! inlined without it — and the paragraph above is exactly what happens when this
+//! loop stops being inlined into its callers. Lane C added the attributes with that
+//! reasoning beside them (`netproto/src/checksum.rs`) for the same reason this note
+//! exists: four bare `#[inline]`s read as cargo-culting and get tidied away.
+//!
+//! Nothing in the tree would catch the regression. `bench.rs` scores
+//! `tcp_checksum_v4` against a 2000-cycle budget and `tcp_checksum_v6` against 2200,
+//! which looks like the gate for precisely this — but `bench::run_all` is deferred to
+//! a background kernel task and neither benchmark appears in a boot's serial log, so
+//! the budget never fires. Recorded in `known-issues.md`; until it does fire, the
+//! comments on both sides of the crate boundary are the whole protection.
+//!
 //! # The arithmetic
 //!
 //! The sum is over 16-bit big-endian words, in one's-complement (end-around
@@ -51,21 +80,8 @@ use super::ipv6::Ipv6Addr;
 #[allow(clippy::arithmetic_side_effects)]
 #[allow(clippy::indexing_slicing)]
 #[must_use]
-pub fn sum_bytes(mut sum: u32, data: &[u8]) -> u32 {
-    let mut i = 0;
-    while i + 1 < data.len() {
-        let word = u16::from_be_bytes([data[i], data[i + 1]]);
-        sum = sum.wrapping_add(u32::from(word));
-        i += 2;
-    }
-    // Odd trailing byte: it is the *high* half of the final word, so shift it
-    // left. Padding on the wrong side is the classic way to get a checksum
-    // that is right for even-length messages and wrong for odd-length ones —
-    // which is to say, right in most tests.
-    if i < data.len() {
-        sum = sum.wrapping_add(u32::from(data[i]) << 8);
-    }
-    sum
+pub fn sum_bytes(sum: u32, data: &[u8]) -> u32 {
+    netproto::checksum::accumulate(sum, data)
 }
 
 /// Fold a 32-bit accumulator down to 16 bits with end-around carry.
@@ -75,20 +91,23 @@ pub fn sum_bytes(mut sum: u32, data: &[u8]) -> u32 {
 /// `0xFFFF` here.
 #[allow(clippy::arithmetic_side_effects)]
 #[must_use]
-pub fn fold(mut sum: u32) -> u32 {
-    // Two iterations always suffice for a u32 (the first fold leaves at most
-    // 0x1FFFE), but the loop costs nothing and stays correct if the
-    // accumulator ever widens.
-    while sum > 0xFFFF {
-        sum = (sum & 0xFFFF).wrapping_add(sum >> 16);
-    }
-    sum
+pub fn fold(sum: u32) -> u32 {
+    // DERIVED from netproto rather than reimplemented. netproto's `fold` folds AND
+    // complements; this one only folds, and `!x` is the only difference. Expressing it
+    // this way keeps exactly one folding loop in the tree, which is the property this
+    // module was created to hold.
+    u32::from(!netproto::checksum::fold(sum))
 }
 
 /// Fold and complement: the value to write into a checksum field.
 #[must_use]
 pub fn finish(sum: u32) -> u16 {
-    !fold(sum) as u16
+    // netproto's `fold` IS this function. The names collide the wrong way round --
+    // theirs complements and ours does not -- so the mapping is written out here once
+    // instead of being rediscovered at each call site. A careless `fold` -> `fold`
+    // substitution inserts a complement and yields a checksum that never verifies,
+    // found on a wire trace rather than at a keyboard.
+    netproto::checksum::fold(sum)
 }
 
 /// The one's-complement sum of the IPv4 pseudo-header (RFC 793 / 768).
@@ -101,15 +120,11 @@ pub fn finish(sum: u32) -> u16 {
 #[allow(clippy::arithmetic_side_effects)]
 #[must_use]
 pub fn pseudo_v4(src: Ipv4Addr, dst: Ipv4Addr, protocol: u8, seg_len: u16) -> u32 {
-    let mut sum: u32 = 0;
-    sum = sum.wrapping_add(u32::from(u16::from_be_bytes([src.0[0], src.0[1]])));
-    sum = sum.wrapping_add(u32::from(u16::from_be_bytes([src.0[2], src.0[3]])));
-    sum = sum.wrapping_add(u32::from(u16::from_be_bytes([dst.0[0], dst.0[1]])));
-    sum = sum.wrapping_add(u32::from(u16::from_be_bytes([dst.0[2], dst.0[3]])));
-    // The zero byte and the protocol byte form one word: 0x00PP.
-    sum = sum.wrapping_add(u32::from(protocol));
-    sum = sum.wrapping_add(u32::from(seg_len));
-    sum
+    // netproto's order is length-before-protocol, matching its ipv6 sibling. Lane C
+    // chose that deliberately so a swapped call is a compile error -- `u16` does not
+    // coerce to `u8` -- rather than a checksum that never verifies. The reorder happens
+    // here, once, where the types still catch it.
+    netproto::ipv4::pseudo_header_sum(&src.0, &dst.0, seg_len, protocol)
 }
 
 /// The one's-complement sum of the IPv6 pseudo-header (RFC 8200 §8.1).
@@ -121,25 +136,7 @@ pub fn pseudo_v4(src: Ipv4Addr, dst: Ipv4Addr, protocol: u8, seg_len: u16) -> u3
 #[allow(clippy::indexing_slicing)]
 #[must_use]
 pub fn pseudo_v6(src: &Ipv6Addr, dst: &Ipv6Addr, next_header: u8, seg_len: u32) -> u32 {
-    let mut sum: u32 = 0;
-    for i in 0..8 {
-        sum = sum.wrapping_add(u32::from(u16::from_be_bytes([
-            src.0[i * 2],
-            src.0[i * 2 + 1],
-        ])));
-    }
-    for i in 0..8 {
-        sum = sum.wrapping_add(u32::from(u16::from_be_bytes([
-            dst.0[i * 2],
-            dst.0[i * 2 + 1],
-        ])));
-    }
-    // Upper-layer packet length is a full 32-bit field: two words.
-    sum = sum.wrapping_add(seg_len >> 16);
-    sum = sum.wrapping_add(seg_len & 0xFFFF);
-    // Three zero bytes + next header: only the last word is non-zero.
-    sum = sum.wrapping_add(u32::from(next_header));
-    sum
+    netproto::ipv6::pseudo_header_sum(&src.0, &dst.0, seg_len, next_header)
 }
 
 /// A message with an intact checksum field folds to this value.

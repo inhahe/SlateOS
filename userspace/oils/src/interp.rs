@@ -45032,7 +45032,9 @@ impl Shell {
             Ok(bytes) => bytes,
             Err(e) => {
                 let _ = std::fs::remove_file(&path); // best effort; the file is ours
-                self.perrln(&format!("fc: {path}: cannot read back the edited commands: {e}"));
+                self.perrln(&format!(
+                    "fc: {path}: cannot read back the edited commands: {e}"
+                ));
                 return 1;
             }
         };

@@ -131226,6 +131226,42 @@ population behaved differently. The error is not carelessness about the sample; 
 is treating *n*=1 as a measurement instead of as a hypothesis — and the cost is
 that each wrong conclusion arrived with enough supporting detail to look measured.
 
+### Third correction, same day — the WHPX evidence is one layout sweep, so the prerequisite is smaller than stated
+
+The correction above concludes that a regression gate is *possible under hardware
+acceleration and not under TCG*, and makes "run the benchmarks under WHPX" the
+prerequisite. The WHPX half of that rests on eight rows, and I did not check what
+the eight rows were.
+
+**Every Hyper-V/WHPX row in `bench/history.jsonl` — all fourteen — is an arm of a
+single layout sweep**, carrying `experiment: "layout sweep: textpad=N (identical
+source, deliberately perturbed…)"`. Five of the eight clean ones share one commit
+(`334124dbf`). **There are zero ordinary WHPX runs on record.**
+
+So `1.03×` is the within-sitting spread of one build under deliberate perturbation
+— which is a genuine and interesting number, answering the question that sweep
+asked (*does code layout move these?* yes, by ~3%) — and it is **not** run-to-run
+spread across days, reboots and host states. It is the smaller quantity, and it
+flatters the conclusion I drew from it.
+
+**What this changes, and it is mostly good news.** The prerequisite is no longer
+"enable WHPX" — this host already runs it, 14 times, and the knob is
+`QEMU_EXTRA="-accel whpx" ./scripts/boot-test.sh --bench`. The prerequisite is
+**a handful of `--bench` runs under WHPX on unperturbed source**, which is hours of
+wall-clock and no decision at all. Only after that is there a basis for saying
+whether a 2× gate would be quiet there.
+
+Note also that `QEMU_EXTRA` auto-stamps a run as an experiment
+(`boot-test.sh:2769`), so such runs will be marked — deliberately, and correctly,
+since non-default emulator flags are exactly what a reader needs warned about. The
+baseline a gate uses would have to decide whether an `-accel whpx` experiment row
+counts as ordinary. That is the one real design question left in this entry.
+
+*(Fourth correction to the same entry in one day. The first three each replaced a
+conclusion drawn from a population I had not inspected: one boot log, one benchmark
+series, and now eight rows whose `experiment` field was sitting in the same JSON
+object I was reading `accel` out of.)*
+
 ## TD-A-REQUEST-STATUS-HAS-NO-CHECKED-SHAPE-SO-EVERY-READER-COUNTS-DIFFERENTLY (lane A, 2026-09-11) — **open**
 
 **In short:** the `requests/` dropbox is how the three lanes hand work to each other,

@@ -198,7 +198,6 @@ _NAMEVAR = (
     r"invoked_as|exe_name|cmd_name|self_name"
 )
 _COMPARE = re.compile(rf'(?:{_NAMEVAR})\s*==\s*"([a-z][a-z0-9_.+-]{{0,20}})"')
-_TESTS = re.compile(r"^#\[cfg\(test\)\]", re.MULTILINE)
 # `let <ident> = <rest-of-line>` and `<ident>: &str` (a function parameter).
 # Used to FOLLOW the invocation name through rebindings rather than guess what
 # it is called -- see `name_vars`.

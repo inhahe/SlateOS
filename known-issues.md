@@ -64888,7 +64888,7 @@ cases:
 | `BEGIN {FS = ""}` on `a` | `1 a` | `3 ` — a one-character line reported as three fields |
 | `length("héllo")` | `5` | `8` |
 | `atan2(1, 1)` | `0.7854` | `undefined function: atan2` |
-| `ORS = " "` | NUL separators | the two characters backslash-zero |
+| `ORS = "\0"` | NUL separators | the two characters backslash-zero |
 
 Also wrong: `RS = ""` paragraph mode, `CONVFMT`, `OFMT`, strnum comparison,
 `split` with a regex, `sub` with an escaped `&`, the arithmetic operators, and

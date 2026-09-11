@@ -9762,9 +9762,50 @@ mod tests {
 
         assert!(compositor.compose_frame(), "nothing was drawn");
         assert_eq!(compositor.window_count(), 1);
+        let frame_us = compositor.frame_stats().last_frame_time_us;
         assert!(
-            compositor.frame_stats().last_frame_time_us > 0,
+            frame_us > 0,
             "the frame took no measurable time, so it did no work"
+        );
+
+        // A ceiling, because `> 0` alone only proves the clock runs.
+        //
+        // `performance-targets.md` sets the real target -- a full desktop
+        // composited in under 2 ms at 4K, or a 144 Hz refresh is missed -- and
+        // until 2026-09-11 nothing anywhere compared a frame time to anything.
+        // That target is a *host hardware* figure and cannot be judged from a
+        // debug-profile unit test, so this is not it. What it is: a bound that
+        // catches an order-of-magnitude regression in the render path.
+        //
+        // DERIVED FROM MEASUREMENT, which is the whole point -- a ceiling
+        // guessed generously is `> 0` with more characters, and reads as
+        // diligence while being unable to fire. Twelve independent first frames
+        // of this scene, each on a fresh compositor, debug profile, on the
+        // development host on 2026-09-11:
+        //
+        //     min 4_622   median 4_977   max 5_842   (microseconds)
+        //
+        // 50 ms is about ten times that median, so this fires on a tenfold
+        // regression and not on hardware eight times slower than the machine it
+        // was measured on.
+        //
+        // That headroom is not theoretical. Proving the bound could fire -- by
+        // setting it to 1 us -- happened to run while the machine was busy and
+        // reported 9_012 us, well outside the twelve-sample spread above. A
+        // dozen quiet samples understate the tail, and a bound drawn tightly
+        // around them would have been flaky within the hour.
+        //
+        // The tighter fact, recorded rather than asserted: the compositor's own
+        // budget -- `FrameStats::end_frame`, which counts a dropped frame when
+        // one exceeds `target_interval` -- was satisfied in all twelve, with the
+        // 60 Hz interval at 16_666 us against a ~5 ms frame. That is 3.3x of
+        // headroom, and asserting it here would be the more meaningful test and
+        // the more flaky one. If someone later runs this where timing is
+        // controlled, `dropped_frames == 0` is the assertion to reach for.
+        const FRAME_CEILING_US: u64 = 50_000;
+        assert!(
+            frame_us < FRAME_CEILING_US,
+            "a frame of this trivial scene took {frame_us} us, over the              {FRAME_CEILING_US} us ceiling; the measured median when this bound              was set was 4_977 us, so something in the render path has changed              by an order of magnitude"
         );
     }
 

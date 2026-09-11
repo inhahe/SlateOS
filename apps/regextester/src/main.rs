@@ -2053,19 +2053,20 @@ impl App {
         focused: bool,
     ) {
         // Header
-        cmds.push(RenderCommand::FillRect {
+        self.palette.push_surface_radii(
+            cmds,
             x,
             y,
             width,
-            height: 24.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii {
+            24.0,
+            CornerRadii {
                 top_left: 4.0,
                 top_right: 4.0,
                 bottom_left: 0.0,
                 bottom_right: 0.0,
             },
-        });
+            Surface::Card,
+        );
         cmds.push(RenderCommand::Text {
             x: x + 8.0,
             y: y + 5.0,
@@ -2080,19 +2081,20 @@ impl App {
         // Body
         let body_y = y + 24.0;
         let body_height = height - 24.0;
-        cmds.push(RenderCommand::FillRect {
+        self.palette.push_surface_radii(
+            cmds,
             x,
-            y: body_y,
+            body_y,
             width,
-            height: body_height,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii {
+            body_height,
+            CornerRadii {
                 top_left: 0.0,
                 top_right: 0.0,
                 bottom_left: 4.0,
                 bottom_right: 4.0,
             },
-        });
+            Surface::Card,
+        );
 
         // Border
         cmds.push(RenderCommand::StrokeRect {

@@ -2262,19 +2262,20 @@ impl SchedulerUI {
     fn render_header(&self, frame: &mut Frame, layout: &Layout) {
         let band = layout.header;
         let width = band.w;
-        frame.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: band.y,
+        self.palette.push_surface_radii(
+            frame,
+            0.0,
+            band.y,
             width,
-            height: band.h,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii {
+            band.h,
+            CornerRadii {
                 top_left: CORNER_RADIUS,
                 top_right: CORNER_RADIUS,
                 bottom_left: 0.0,
                 bottom_right: 0.0,
             },
-        });
+            Surface::Card,
+        );
 
         if let (Some(y), Some((x, w))) = (
             centre_line(band, FONT_SIZE_HEADING),
@@ -2977,19 +2978,20 @@ impl SchedulerUI {
         let bar_h = band.h;
         let y = band.y;
 
-        frame.push(RenderCommand::FillRect {
-            x: 0.0,
+        self.palette.push_surface_radii(
+            frame,
+            0.0,
             y,
             width,
-            height: bar_h,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii {
+            bar_h,
+            CornerRadii {
                 top_left: 0.0,
                 top_right: 0.0,
                 bottom_left: CORNER_RADIUS,
                 bottom_right: CORNER_RADIUS,
             },
-        });
+            Surface::Card,
+        );
 
         run_in(
             frame,

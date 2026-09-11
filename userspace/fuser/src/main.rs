@@ -66,11 +66,18 @@ struct FuserResult {
 // /proc scanning
 // ============================================================================
 
+/// The process's command name, or `?` where it could not be read.
+///
+/// `?` rather than the empty string, matching the owner column beside it: a
+/// process that exited between the directory listing and this read is the
+/// ordinary case on a busy machine, and it printed as a blank command in a
+/// table whose other columns were filled in. A blank cell reads as "this
+/// process has no name", which is not a thing.
 fn read_proc_comm(pid: u32) -> String {
-    fs::read_to_string(format!("/proc/{pid}/comm"))
-        .unwrap_or_default()
-        .trim()
-        .to_string()
+    match fs::read_to_string(format!("/proc/{pid}/comm")) {
+        Ok(text) => text.trim().to_string(),
+        Err(_) => "?".to_string(),
+    }
 }
 
 /// The owner of `pid`, or `None` where it could not be read.

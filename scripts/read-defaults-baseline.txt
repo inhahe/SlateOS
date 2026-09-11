@@ -47,17 +47,16 @@ acpi: read_sysfs_string(&path.join("technology")).unwrap_or_default()  # examine
 acpi: read_sysfs_string(&path.join("type")).unwrap_or_default()  # examined 2026-09-11: a cooling-device column, printed as read
 coreutils: sprintf(b"%.6g", &[Value::Num(n)], b"%.6g").unwrap_or_default()
 coreutils: std::env::var("TARGET").unwrap_or_default()
-cpupower: read_sysfs_string(&format!("{}/scaling_available_frequencies", base)) .unwrap_or_default()
-cpupower: read_sysfs_string(&format!("{}/scaling_available_governors", base)).unwrap_or_default()
+cpupower: read_sysfs_string(&format!("{}/scaling_available_frequencies", base)) .unwrap_or_default()  # examined 2026-09-11: as above
+cpupower: read_sysfs_string(&format!("{}/scaling_available_governors", base)).unwrap_or_default()  # examined 2026-09-11: display only, joined into a list line; nothing validates against it
 diskutil: read_file(&format!("{dev_path}/device/model")).unwrap_or_default()  # examined 2026-09-11: the Model line is printed only when non-empty, and loop/dm devices have none
 diskutil: read_file(&format!("{dev_path}/device/serial")).unwrap_or_default()  # examined 2026-09-11: as above
 dmesg: extract_json_string(line, "level").unwrap_or_default()  # examined 2026-09-11: "" reaches LogLevel::from_str and becomes Unknown
 dmesg: extract_json_string(line, "service").unwrap_or_default()
 efibootmgr: read_efi_var("BootOrder").unwrap_or_default()
-eject: fs::read_to_string(format!("{sys_path}/device/model")) .unwrap_or_default()
-eject: fs::read_to_string(format!("{sys_path}/device/vendor")) .unwrap_or_default()
-fuser: fs::read_to_string("/etc/passwd").unwrap_or_default()
-fuser: fs::read_to_string(format!("/proc/{pid}/comm")) .unwrap_or_default()
+eject: fs::read_to_string(format!("{sys_path}/device/model")) .unwrap_or_default()  # examined 2026-09-11: descriptive only; the eject decision is guarded by `removable`, which is an Option
+eject: fs::read_to_string(format!("{sys_path}/device/vendor")) .unwrap_or_default()  # examined 2026-09-11: as above
+fuser: fs::read_to_string("/etc/passwd").unwrap_or_default()  # examined 2026-09-11: uid_to_name falls back to the numeric uid, which is what real fuser prints
 hostname: read_hostname().unwrap_or_default()
 hwinfo: fs::read_to_string(path) .unwrap_or_default()
 install: std::env::var("TARGET").unwrap_or_default()

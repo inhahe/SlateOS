@@ -184,6 +184,8 @@ impl Builder {
 /// [`crate::ipv6::pseudo_header_sum`] has it too — but it is easy to assume
 /// away, so it is pinned by
 /// `ipv4::tests::the_checksum_cannot_see_a_source_destination_swap`.
+// `#[inline]`: cross-crate inlining, `lto = false`. See checksum.rs.
+#[inline]
 #[must_use]
 pub fn pseudo_header_sum(src: &Ipv4Addr, dst: &Ipv4Addr, upper_len: u16, protocol: u8) -> u32 {
     let mut ph = [0u8; 12];

@@ -118,6 +118,8 @@ impl Builder {
 /// length, next-header) into a running checksum sum, per RFC 8200 §8.1. Use
 /// with [`crate::checksum::internet_continue`] to checksum TCP/UDP/ICMPv6 over
 /// IPv6.
+// `#[inline]`: cross-crate inlining, `lto = false`. See checksum.rs.
+#[inline]
 #[must_use]
 pub fn pseudo_header_sum(src: &Ipv6Addr, dst: &Ipv6Addr, upper_len: u32, next_header: u8) -> u32 {
     let mut sum = checksum::accumulate(0, src);

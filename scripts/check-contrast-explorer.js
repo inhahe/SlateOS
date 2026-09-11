@@ -102,6 +102,17 @@ const probe = script + `
     };
   }
 
+  // The two open questions must each draw three distinct options, and they must
+  // follow the live colours -- an option panel that ignores the controls would
+  // be answering the question with the wrong palette.
+  cur = withLadder(PRESETS.brd);
+  cur.acc = MARK;
+  render();
+  globalThis.__q = {
+    q13: document.getElementById('q13').innerHTML,
+    q14: document.getElementById('q14').innerHTML,
+  };
+
   // The plan's role table must be live, not a hardcoded copy that drifts away
   // from the controls -- it is the first thing read on the page.
   cur = withLadder(PRESETS.brd);
@@ -241,6 +252,31 @@ if (!global.__brd) bad++;
   console.log((ok ? 'ok    ' : 'FAIL  ') + 'every link is underlined and takes the link colour (' +
               l.underlines + ' underlined, colour reaches:' + !!l.colourReaches + ')');
   if (!ok) bad++;
+}
+{
+  const q = global.__q || {};
+  const q13 = q.q13 || '', q14 = q.q14 || '';
+  // `MARK` lives inside the probe that runs against the page; out here it has
+  // to be spelled again.
+  const MARKED = '#ff00ff';
+  const checks = [
+    ['C-Q13 draws three options', (q13.match(/<h3>/g) || []).length === 3],
+    ['C-Q13 draws a window per option', (q13.match(/class="win"/g) || []).length === 3],
+    ['C-Q13 follows the accent control', q13.includes(MARKED)],
+    // Option A accents all three marks, B and C accent one -- so the three
+    // columns must differ. Equal accent counts would mean the options are the
+    // same picture with different captions.
+    ['C-Q13 options actually differ', new Set(
+      q13.split('<h3>').slice(1).map(s => (s.split(MARKED).length - 1))
+    ).size > 1],
+    ['C-Q14 draws three options', (q14.match(/<h3>/g) || []).length === 3],
+    ['C-Q14 draws a window per option', (q14.match(/class="win"/g) || []).length === 3],
+    ['C-Q14 options actually differ', new Set(q14.split('<h3>').slice(1)).size === 3],
+  ];
+  for (const [what, ok] of checks) {
+    console.log((ok ? 'ok    ' : 'FAIL  ') + what);
+    if (!ok) bad++;
+  }
 }
 console.log('populated ids: ' + Object.keys(store).filter(k => store[k].innerHTML).join(', '));
 process.exit(bad ? 1 : 0);

@@ -131783,7 +131783,45 @@ intent — *"a test whose only path to running is a fixture CI might stop provid
 test with an expiry date on it"*. Falling back when the probe fails is the designed
 behaviour, not a fail-open.
 
-## TD-A-THE-BENCHMARK-BUDGETS-NEVER-FIRE-IN-A-BOOT-TEST (lane A, 2026-09-10) — **open**, but see the CORRECTION at the end: the title is wrong, the benchmarks do run, and `over_target` is recorded and never judged
+## TD-A-THE-BENCHMARK-BUDGETS-NEVER-FIRE-IN-A-BOOT-TEST (lane A, 2026-09-10) — **the title is false and kept for searchability; the budgets DO fire, and two have moved under deliberate change. Read the state-of-play below, not the chronology.**
+
+> **State of play, 2026-09-11.** This entry is 900 lines of chronology with four
+> corrections in it. The corrections are worth reading — each records a conclusion I
+> drew from a population I had not inspected — but nobody should have to read 900
+> lines to learn where things stand. Here is where they stand:
+>
+> * **The budgets fire.** `--bench` exists, waits for `BENCH_OK`, and has recorded
+>   150 runs. `over_target` went **10 → 9** when `dashboard_api_metrics` came under
+>   budget from a deliberate change, which is the thing the title says never happens.
+> * **Three of the original ten were never kernel findings**: `net_arp_lookup`,
+>   `net_ns_arp_lookup` and `isr_latency` are hypervisor-bound, identified by
+>   accelerator ratio (a cost larger under WHPX than under TCG is a VM exit, not work).
+> * **Two now meet their budgets** — `dashboard_api_metrics` under WHPX,
+>   `dashboard_api_health` under TCG — and `dashboard_api_status` is within 6% on TCG.
+> * **The surface must be chosen per benchmark, not per accelerator.**
+>   `dashboard_api_status` reads 1.65× over on WHPX and 1.06× on TCG; `vfs_stat_root`
+>   reads 1.28× on WHPX and 4.19× on TCG. One policy is wrong for one of them either
+>   way.
+> * **Two real fixes came out of it.** `sched::task_count` removed a `Vec<TaskInfo>`
+>   built to read `.len()` (−55–74% on three endpoints under WHPX, −97% under TCG),
+>   and `journal::record` stopped timestamping every file write from the HPET
+>   (**42×** on that phase, **−29%** on every file write).
+> * **Still open and real:** `vfs_throughput_16k_write` at 2.3× over budget, whose
+>   remaining cost is `invalidate_negative_prefix` scanning all 1024 dcache entries
+>   per write plus memfs's own write; and `vfs_stat_deep`, localised to procfs
+>   traversal rather than path resolution.
+> * **Unresolved question for the operator or the lanes:** `QEMU_EXTRA` stamps WHPX
+>   runs as experiments, and `comparable_records` excludes experiments from history
+>   windows — correctly. A gate wanting a WHPX baseline needs either another way to
+>   pass the accelerator or `-accel whpx` recognised as a surface rather than an
+>   experiment.
+>
+> The recurring methodological fault, stated once here so it is not buried: **four
+> times I drew a confident conclusion from a population I had not looked at** — one
+> boot log, one benchmark series, eight layout-sweep rows read as ordinary runs, and a
+> baseline straddling an unrelated change. Each arrived with enough supporting detail
+> to look measured. The defence that worked every time was to list the rows and read
+> them before computing anything over them.
 
 **In short:** the kernel's micro-benchmarks each carry a cycle budget, so a change that
 makes something twice as slow is supposed to fail the build. They do not run during a
@@ -132922,3 +132960,248 @@ grep -rlE "/tmp/" scripts/*.py scripts/*.sh          # candidates
 ```
 The step that cannot be skipped is reading the line. Two of my three passes failed
 at precisely that point, in opposite directions.
+
+## TD-A-A-HISTORY-RATCHET-THAT-GATES-THE-BOOT-CAN-DEADLOCK-THE-BOOT-THAT-FEEDS-IT (lane A, 2026-09-11) — **two instances, both fixed; the second fix opens a hole named below**
+
+**In short:** several checks here learn from a file that only a boot test writes, and
+they also run *as* a gate on that boot test. When one of them sees something it dislikes,
+the only thing that would clear it is a new entry in that file — which it has just
+prevented anyone from producing. The build is then stuck in a way that has nothing to do
+with the code.
+
+### Instance 1 — `check-boot-skips.py`
+
+A ratchet over `bench/boot-history.jsonl`'s recorded skips. A skip whose emitting source
+line had been deleted stayed in the history forever, so the gate kept failing and the
+only way to update the history was a boot it was blocking. Fixed by `_collapse()` +
+`still_emitted()`: a history entry whose source line no longer exists is **stale**, not a
+finding.
+
+### Instance 2 — `test-bench-history.py`, same day
+
+*"no undeclared benchmark vanished between consecutive records."* Caused by me:
+`vfs_write_breakdown_ns` was recorded at `4f6ca7a1b`, I removed the phase before the run
+at `96356d747` — because it sat exactly on the harness's empty-closure floor and tripped
+`BELOW-FLOOR` every run — and the series then vanished between two consecutive records.
+`BOOT=1`, at a pre-build gate, so nothing could merge.
+
+Restoring the phase does not clear it. The guard compares `records[-2]` and `records[-1]`,
+and those are fixed history; clearing it needs a *third* record, which needs the boot the
+gate refuses.
+
+Fixed the same way as instance 1: `declared_series()` reads `kernel/src/bench.rs` for
+every `score("…")` and `track("…")`, and a removal whose name the **source still
+declares** is a lag rather than a loss.
+
+### Why that is not filing off a ratchet that caught me
+
+The distinction worth keeping, because the action looks identical to the bad version:
+
+* The guard's question is *"did this benchmark stop being measured?"* The records are a
+  **proxy** for that; `bench.rs` is the authority. Consulting the source replaces a proxy
+  with the thing itself.
+* Its teeth are intact — a name absent from the source *and* from the latest record is
+  still an undeclared removal and still fails.
+* It is **positive** evidence, which is the test `unexplained_removals`' own docstring
+  sets: a name is excused because the source says the series continues, not because
+  nothing says it stopped.
+
+### A correction to my own reasoning: there was no dilemma
+
+I justified the restore as two mechanisms in conflict — BELOW-FLOOR against the
+history guard — and chose the guard because lost records are irreversible. That
+reasoning is sound and it was not needed, because the tree had already answered the
+question and I had not looked.
+
+**Two benchmarks already sit at exactly the floor** and have not been removed:
+`shm_rw_64bytes` and `net_ethernet_parse`, both `min=18 cycles <= harness floor 18`,
+the same 18 as mine. Three cheap operations all pinning to 18 is the harness saying
+"below my resolution", not "something is wrong" — and the standing treatment of such
+a series here is to keep it and let the line print.
+
+So removing mine was not a judgement call between two guards; it was inconsistent
+with two existing precedents in the same scorecard. The cheaper way to that answer was
+one `grep -c BELOW-FLOOR` on a boot log, which I ran only after the tree had gone red.
+
+### The hole this fix opens, uncovered
+
+`declared_series()` trusts the presence of a `track("name")` call in the file. **It does
+not check that the enclosing function is still called.** So a benchmark whose call was
+removed from `run_all`, with the function left behind, would stop appearing in records,
+keep its `track(` text, and have its disappearance excused — which is precisely the
+"coverage lost silently" this guard exists to prevent.
+
+Two things I checked, hoping one would close it, and neither does:
+
+* **No reachability check exists.** Nothing in `scripts/` verifies that every declared
+  benchmark is reachable from `run_all` — the analogue of `check-self-tests-wired.py` for
+  benchmarks does not exist.
+* **The compiler does not close it either.** An uncalled `fn bench_x()` is `dead_code`,
+  which is a *warning*, and this build already emits ~18 000 of them, so one more is
+  invisible. `dead_code` is `#[allow]`-ed at three sites in these files, so it is
+  otherwise active — but active and fatal are different things here.
+
+**A cheap partial fix exists and is not done:** require the enclosing `fn`'s name to
+appear more than once in `bench.rs` (definition plus at least one call). Removing the
+call from `run_all` drops it to one. That is a weak reachability proxy — it would miss a
+function reached only through a pointer or a macro — but it is ~15 lines and closes the
+ordinary case. Left undone deliberately rather than silently: it is a second change to a
+shared guard in the same sitting as the first, and the first was prompted by my own
+breakage, which is the worst moment to keep editing a guard.
+
+## TD-A-A-A-PHASE-BREAKDOWN-BUILT-BY-SUBTRACTING-MINIMA-IS-NOT-A-DECOMPOSITION (lane A, 2026-09-11) — **method defect in `bench_vfs_write_breakdown`; it manufactured a 26 µs phantom**
+
+**In short:** I built a tool that splits the cost of a file write into labelled steps, and
+then chased a large "unaccounted" leftover it reported. The leftover was mostly an
+artifact of how the tool does its arithmetic, not time the kernel actually spends. Three
+separate mistakes stacked up, and the leftover is an *upper bound* on hidden cost rather
+than a measurement of it. Nothing shipped wrong; the risk was spending a day optimising a
+function that was never slow.
+
+### 1. The arithmetic does not decompose
+
+`remainder = resolved_only.min_ns - Σ(phase.min_ns)`.
+
+Each phase is timed in its **own 200-iteration loop** and contributes its own *best*
+iteration. The whole is also its own best iteration. But the minimum of a sum is
+`>=` the sum of the minima, and equality needs every component to hit its personal best
+*in the same iteration*. With nine components that essentially never happens, so the
+residual silently absorbs all of the co-occurrence slack.
+
+**Consequence: a large residual is consistent with no hidden cost at all.** It is an
+upper bound on unmeasured work, and it was being read as a quantity. The honest forms are
+to subtract *means* from the mean (slack still there, but not systematically one-signed),
+or to label the number as the bound it is.
+
+### 2. A module-name collision meant the wrong function was subtracted
+
+The `ns` phase times `crate::ipc::namespace::check_writable(raw)`. `write_file_resolved`
+calls **`crate::fs::vfs::check_writable`** — a different, private function in a different
+module that happens to share the name. So the phase credited 5 ns to the chain for a
+function that is not in it, and the real `check_writable` stayed unmeasured inside the
+residual. Two functions with one name, one import away from each other, and the benchmark
+picked the wrong one without a compile error because both take a `&Path` and return
+`KernelResult<()>`.
+
+### 3. The component list was wrong: nine, not two
+
+I recorded that the residual "contains exactly two things" — the dcache scan and memfs's
+own write — and redirected the next work item onto memfs from that. Reading
+`write_file_resolved` line by line, the unmeasured set is: `vfs::check_writable`,
+`enforce_quota_write` (distinct from the `charge_bytes` the `quota` phase times),
+`history::try_auto_record`, `resolve_mount`, `fs.lock()`, memfs's `write_file`,
+`cache_identity`, `page_cache::invalidate_identity`, and
+`dcache.invalidate_negative_prefix`. Four of those are private to `vfs.rs`, which is
+*why* they were skipped — and skipping them was never recorded.
+
+### Three bounds I tried to put on it from data already in hand, and why each failed
+
+Worth keeping, because each looked sound:
+
+* **"`metadata_now_ns()` is an MMIO clock read, like the journal bug."** No — it is
+  documented as deliberately `clock_realtime()` (TSC) precisely so a file is not stamped
+  1970; the comment at `vfs.rs:199` predates me and is correct.
+* **"`index` was 4 115 ns and calls `Vfs::metadata`, so one path resolution is <= 4 µs."**
+  No — `on_file_changed` early-returns on `!is_live() || !is_watched(path)` and may never
+  reach `add_entry` at all, so that phase bounds nothing about resolution.
+* **"memfs's `write_file` must hold it."** Its existing-file arm is `resolve_write_path`,
+  `walk` (zero components for a root-level file), `child_ino`, three attribute tests,
+  `clear` + `extend_from_slice(256)`, `touch_modified`. Nothing there is tens of µs.
+
+Every nameable component being cheap is what finally indicted the method rather than the
+kernel.
+
+### The fix, not yet applied
+
+Held back because a boot test is mid-build and `bench.rs` is in it.
+
+1. Point the `ns` phase at the function actually called; `pub(crate)` the four private
+   helpers so they can be timed at all.
+2. Report the residual as an upper bound, and compute a mean-based residual beside it.
+3. State in the serial line how many components the residual covers, so "unaccounted" can
+   never again be read as "one thing I have not looked at yet."
+
+### The generalisation
+
+This session has now produced four errors of one shape: *a population I had not inspected,
+summarised by a number I trusted.* A baseline median compared against its own member; a
+42× asymmetry spanning a page-cache boundary; eight layout-sweep rows read as ordinary
+runs; and now a residual read as a cost. The defence that worked every time is the same
+one: **list the members and look at them before computing anything over them.** Here the
+members were the nine call sites of a 38-line function.
+
+## TD-A-A-A-EVERY-BENCHMARKED-WRITE-ALSO-READS-AND-SHA-256-HASHES-THE-OLD-CONTENT (lane A, 2026-09-11) — **unmeasured, and it re-explains two over-budget benchmarks**
+
+**In short:** SlateOS keeps an automatic 16-deep undo history for files. To do that, every
+time a file is overwritten the kernel first reads back what was there and computes a
+SHA-256 checksum of it. That work is real and it happens on every write the benchmarks
+perform — but no benchmark measures it, so it has been sitting inside an "unaccounted"
+figure while I looked for it in the wrong places. Two benchmarks that miss their
+performance targets are both plausibly missing them for this reason.
+
+### The chain, all of it verified
+
+* `main.rs:9495` calls `fs::history::set_auto_version(true)` immediately after `BOOT_OK`.
+* `main.rs:9527` calls `bench::run_all()`. **Auto-versioning is therefore on for every
+  benchmark**, and the comment at `history.rs:143` explains why it is deliberately off
+  *before* that point: hashing multi-megabyte files with `IF=0` during boot staging once
+  starved the hard-lockup watchdog into a false positive (`B-PTHREAD-YIELDBUDGET`).
+* `write_file_resolved` calls `history::try_auto_record(path)` on every write.
+* `try_auto_record` proceeds when `is_auto_version_enabled()` (now true) and
+  `should_auto_version(path)`. The latter returns **false** only for `/proc`, `/dev`,
+  `/sys`, `/tmp`, and two internal metadata filenames. The write benchmarks use
+  root-level paths, so it returns **true**.
+* `record_version` then reads the file's current contents, hashes them, inserts into the
+  content-addressed store, appends a version entry, and evicts past
+  `max_versions_per_file: 16`.
+
+So a 200-iteration write benchmark performs 200 read-backs, 200 SHA-256 computations and
+200 CAS insertions, in a debug build, and attributes none of it.
+
+### What this re-explains
+
+* **The ~26 µs "remainder"** in `bench_vfs_write_breakdown`. I had enumerated the
+  residual's contents twice and missed `try_auto_record` both times, because it looks like
+  a cheap feature-flag check at the call site and the expensive half is two functions
+  down.
+* **`vfs_throughput_16k_write`, 2.3× over budget.** I recorded this as CPU-bound kernel
+  write work on the strength of a 3.77× accelerator ratio. The ratio says *real CPU work,
+  not VM exits*, which is correct and which SHA-256 also satisfies — and 16 KB is 64× the
+  data of the 256-byte case, so a per-byte hash cost would dominate there exactly as
+  observed. Consistent with, not yet proven.
+* **`vfs_write_256` over budget**, same mechanism at 1/64th the data.
+
+### A clean A/B exists with no new hooks, and it is free
+
+`should_auto_version` skips `/tmp`, and `/tmp` is mounted by `fs::memfs::mount("/tmp")`
+(`main.rs:1497`) — **the same filesystem implementation as `/`**. So writing identical
+bytes to `/bench_x.tmp` and `/tmp/bench_x.tmp` differs in essentially one thing: whether
+the version record happens. The delta isolates the cost with no `pub(crate)` change, no
+instrumentation, and no feature gate.
+
+Confounders, each bounded and each small against a predicted ~20 µs effect, stated so they
+are designed out rather than discovered later:
+
+| Confounder | Size |
+|---|---|
+| Different mount, so `resolve_mount` scans to a different entry | a few `starts_with` calls |
+| Separate memfs instance with far fewer children at its root, so `child_ino`'s map lookup is shallower | `O(log n)` on a small *n* either way |
+| The indexer's watch/exclude lists may differ between `/` and `/tmp` | bounded by the measured `index` phase, ~4 µs |
+| The dcache is global, so `invalidate_negative_prefix` is identical | zero |
+
+### What is still unknown
+
+Whether the **read-back** or the **hash** dominates. They are separable with the same
+trick — a path that exists versus one that does not, since `record_version` returns early
+for a missing file — but that changes the write from overwrite to create, which is a
+different code path. Prefer splitting it by data size instead: the hash is per-byte and
+the read-back's resolution cost is not.
+
+### The policy question, not mine to settle
+
+Whether every file write in the OS should cost a read-back plus a SHA-256 is a
+user-visible performance tradeoff, and `design.txt` does not mention auto-versioning at
+all — so it is not settled by the spec. Raised in `open-questions.md` rather than decided
+here. Note that the benchmark-validity half is independent of the answer: whatever the
+policy, a benchmark named `vfs_write_256` should say whether its number includes
+versioning.

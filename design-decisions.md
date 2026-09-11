@@ -10699,7 +10699,38 @@ has this shape, and the three-lane arrangement manufactures it.
 Running `python scripts/stamp-ancestry.py` after every merge, next to
 `python scripts/ki_dupes.py`. Two post-merge checks is one habit, not two; if a
 third arrives, they should be folded into one `scripts/after-merge.py` rather
-than accumulating as a list nobody remembers. The family table is data, so a new
+than accumulating as a list nobody remembers.
+
+> **Amended 2026-09-11 — this commitment is now one check, not two.**
+> `scripts/stamp-ancestry.py` no longer exists. Lane B reported on 2026-08-21 that it
+> could no longer succeed — their §355 stopped committing the ring-3 fixtures, so
+> `git ls-files '*.stamp'` returns nothing, the script's "refuse to report clean for a
+> family I cannot see" branch fired unconditionally, and every boot printed a staleness
+> warning that was not true. Lane A retired it the next day: **§277**, *"A staleness
+> check that can only fail is retired, not repaired"*, with the passing-path warning
+> re-pointed at `ctest-fixtures.py sysroot-check`.
+>
+> So the post-merge habit is **`python scripts/ki_dupes.py`** alone. Left here rather
+> than rewritten because the commitment was true when written and the reasoning above
+> it — why lane A wrote a read-only check about lane B's artifacts — still stands.
+>
+> **How this was found is the part worth keeping.** I ran `ki_dupes.py` after every
+> merge across a long session and never once ran `stamp-ancestry.py`. That looked like
+> a lapsed habit and was a dead instruction: the script had been gone for three weeks.
+> A document that says "what this commits us to" is read as present tense, and this one
+> recorded its own retraction two sections away under a different number. When a
+> decision is superseded, the superseding entry is not enough — the superseded
+> *instruction* has to be annotated where someone will be standing when they read it.
+>
+> **And the habit set is one check, not two.** `check-generated-tables.py`'s own
+> docstring says *"Run this after every merge, next to `scripts/ki_dupes.py`"*, which
+> reads like a second habit. It is not: that script is wired into `boot-test.sh` and
+> `pre-boot.py`, so the build already runs it and the sentence is telling a human to
+> do what the build does. Its docstring predates its wiring.
+>
+> So `python scripts/ki_dupes.py` is the whole post-merge habit. That also answers
+> the fold-into-`after-merge.py` trigger above: it fires when a *third* arrives, and
+> there is not yet a second. The family table is data, so a new
 artifact family costs four lines — and the reason it is a table at all is
 `services/.gitignore`: a rule replicated per directory is a rule the next
 directory opts out of by not having it.

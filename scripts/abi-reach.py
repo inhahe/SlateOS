@@ -132,12 +132,32 @@ def survey(syscall_dir: pathlib.Path = SYSCALL) -> dict:
         native_reach |= handler_bodies.get(fn, set())
 
     only_linux = {c: sorted(s) for c, s in linux_reach.items() if c not in native_reach}
+
+    # MODULE granularity, which is the question actually asked. A single function being
+    # Linux-only is usually benign: `proc::itimer::timeval_to_ns` converts a `timeval`
+    # to nanoseconds, which only the Linux ABI needs because the native call takes
+    # nanoseconds directly -- and `proc::itimer::set_real` IS reached by SYS_ITIMER_SET.
+    # Reporting that function as Linux-only is true and led me to tell lane B their
+    # itimer request was still open when it had been done the same day they filed it.
+    # A module where NOTHING is natively reachable is the real signal: that is a
+    # capability with no native door, which is what all four known instances were.
+    def module_of(call):
+        return call.rsplit("::", 1)[0]
+
+    native_modules = {module_of(c) for c in native_reach}
+    only_linux_modules = {}
+    for call, shims in linux_reach.items():
+        mod = module_of(call)
+        if mod not in native_modules:
+            only_linux_modules.setdefault(mod, set()).update(shims)
+    only_linux_modules = {m: sorted(v) for m, v in only_linux_modules.items()}
     unregistered = sorted(set(handler_bodies) - set(native_regs))
     return {
         "linux_arms": linux_arms,
         "native_regs": native_regs,
         "only_linux": only_linux,
         "unregistered_handlers": unregistered,
+        "only_linux_modules": only_linux_modules,
         "linux_reach_total": len(linux_reach),
         "native_reach_total": len(native_reach),
     }
@@ -150,6 +170,23 @@ def report(strict: bool = False) -> int:
     print(f"  Linux shims reach {s['linux_reach_total']} distinct kernel call(s); "
           f"native handlers reach {s['native_reach_total']}.")
     print()
+
+    mods = s["only_linux_modules"]
+    if mods:
+        print(f"  *** {len(mods)} MODULE(S) that no registered native handler reaches at"
+              " all. This is the headline: a module with no native door is what all four"
+              " known instances were.")
+        print()
+        for mod, shims in sorted(mods.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+            names = ", ".join(shims[:4]) + (f" +{len(shims) - 4}" if len(shims) > 4 else "")
+            print(f"    {mod}")
+            print(f"        via {names}")
+        print()
+    else:
+        print("  Every module a Linux shim reaches is also reached by some native")
+        print("  handler. Individual functions below may still be Linux-only, which is")
+        print("  usually a data-shape conversion the native ABI does not need.")
+        print()
 
     only = s["only_linux"]
     if not only:

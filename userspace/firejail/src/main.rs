@@ -1339,10 +1339,31 @@ fn firejail_shutdown(target: &str) -> i32 {
 ///
 /// `"unknown"` is not a user name any lookup will match, which is the point:
 /// it cannot be mistaken for an answer.
+/// The sandbox's owner, as recorded in its info file and shown by `--list`.
+///
+/// # This is attribution, not enforcement -- and it still has to be true
+///
+/// Nothing compares this value to decide anything: it is stored and then
+/// printed. So reading `$USER` was not a way to gain access to another user's
+/// sandbox. It was a way to make `firejail --list` say somebody else owned
+/// yours, which is a different problem with the same cause.
+///
+/// The fallback has been repaired once already -- the test below records it,
+/// where the old comment read "Should return at least \"root\" as fallback",
+/// pinning the defect as the contract. That change stopped an unset
+/// environment attributing every sandbox to root. This one stops a SET
+/// environment attributing it to anyone the caller likes.
+///
+/// `"unknown"` remains for the case where there is genuinely no answer, and
+/// it is the honest word for it.
 fn get_current_user() -> String {
-    env::var("USER")
-        .or_else(|_| env::var("USERNAME"))
-        .unwrap_or_else(|_| String::from("unknown"))
+    let Some(uid) = authlib::identity::caller_uid() else {
+        return String::from("unknown");
+    };
+    userdb::UserDb::load(userdb::DEFAULT_PATH)
+        .ok()
+        .and_then(|db| db.find_uid(uid).and_then(userdb::Record::username))
+        .unwrap_or_else(|| format!("uid{uid}"))
 }
 
 /// Print firejail help text.
@@ -3324,9 +3345,19 @@ mod tests {
         // to root.
         let user = get_current_user();
         assert!(!user.is_empty());
-        if std::env::var("USER").is_err() && std::env::var("USERNAME").is_err() {
-            assert_eq!(user, "unknown", "an unset environment must not name root");
+        // The environment cannot name the owner at all now, set or unset.
+        // SAFETY: single-threaded test; both are removed again below.
+        unsafe {
+            std::env::set_var("USER", "attacker-chosen");
+            std::env::set_var("USERNAME", "attacker-chosen-too");
         }
+        let named = get_current_user();
+        unsafe {
+            std::env::remove_var("USER");
+            std::env::remove_var("USERNAME");
+        }
+        assert_ne!(named, "attacker-chosen");
+        assert_ne!(named, "attacker-chosen-too");
     }
 
     // -----------------------------------------------------------------------

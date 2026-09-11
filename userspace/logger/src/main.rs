@@ -552,10 +552,33 @@ fn get_hostname() -> String {
         .unwrap_or_else(|| "localhost".to_string())
 }
 
+/// The default syslog tag: who is logging, when `-t` did not say.
+///
+/// # This is not the escalation shape, and the difference is worth stating
+///
+/// `-t` accepts any tag at all, so a caller can already write `logger -t root`
+/// and nothing here can or should stop them. The tag is not an enforced
+/// identity field. So unlike `sudo`'s `$USER` or `wall`'s banner, reading the
+/// environment here was not a way to claim to be someone else -- that way was
+/// already open and is meant to be.
+///
+/// What was wrong is the FALLBACK. It was `"root"`, so a caller this build
+/// could not identify was labelled the superuser in the system log -- the one
+/// name an operator reading syslog treats as significant. An unidentifiable
+/// caller is not root; it is unidentifiable.
+///
+/// The chain now degrades truthfully: the real login name, else the real uid,
+/// else this program's own name. Every step says something that is so.
 fn get_username() -> String {
-    env::var("USER")
-        .or_else(|_| env::var("LOGNAME"))
-        .unwrap_or_else(|_| "root".to_string())
+    let Some(uid) = authlib::identity::caller_uid() else {
+        // No uid at all. `logger` is the truthful answer: this line came from
+        // the logger utility and we cannot say more than that.
+        return "logger".to_string();
+    };
+    userdb::UserDb::load(userdb::DEFAULT_PATH)
+        .ok()
+        .and_then(|db| db.find_uid(uid).and_then(userdb::Record::username))
+        .unwrap_or_else(|| format!("uid{uid}"))
 }
 
 fn get_pid() -> u32 {

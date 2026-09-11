@@ -13,6 +13,7 @@ description = "SlateOS chroot utility"
 # it is the reason the file cannot be mode 0600. See `known-issues.md` ->
 # `B-USERS-YAML-IS-WORLD-READABLE-AND-HOLDS-EVERY-PASSWORD-HASH`.
 [dependencies]
+authlib = { path = "../authlib" }
 # chroot names the new root directory and the command it will exec, both
 # from the command line. It is a privilege boundary, so a word it prints
 # unquoted is one an unprivileged caller steered into a privileged program's

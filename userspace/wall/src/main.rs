@@ -33,10 +33,45 @@ fn detect_mode(argv0: &str) -> Mode {
 
 // ── Common helpers ───────────────────────────────────────────────
 
-fn get_username() -> String {
-    env::var("USER")
-        .or_else(|_| env::var("LOGNAME"))
-        .unwrap_or_else(|_| "unknown".to_string())
+/// The caller's login name, or `None` if this build cannot determine it.
+///
+/// # Why not `$USER`
+///
+/// It was `$USER`, then `$LOGNAME`, then `"unknown"`, and the name goes
+/// straight into the banner this program writes to EVERY logged-in terminal:
+///
+///     Broadcast message from {user} ({tty}) ({when}):
+///
+/// So `USER=root wall` announced itself as root on every screen on the
+/// machine. A message that appears to come from the administrator, telling
+/// everyone to do something, is the oldest social-engineering shape there is,
+/// and a broadcast is the widest possible delivery for it.
+///
+/// `get_tty` beside this one already reads `/proc/self/fd/0` -- the real
+/// descriptor -- so the terminal half of the banner was never forgeable. Only
+/// the name was.
+fn get_username() -> Option<String> {
+    let uid = authlib::identity::caller_uid()?;
+    userdb::UserDb::load(userdb::DEFAULT_PATH)
+        .ok()
+        .and_then(|db| db.find_uid(uid).and_then(userdb::Record::username))
+}
+
+/// The caller's name, or a refusal.
+///
+/// An anonymous system-wide broadcast is worse than no broadcast: every
+/// recipient has to decide whether to believe it, with nothing to go on. So
+/// not knowing who is sending stops the send.
+fn require_username() -> String {
+    match get_username() {
+        Some(u) => u,
+        None => {
+            eprintln!(
+                "wall: cannot determine who you are, and the broadcast says who it is from; refusing"
+            );
+            process::exit(1);
+        }
+    }
 }
 
 fn get_tty() -> String {
@@ -234,7 +269,7 @@ fn run_wall(args: &[String]) -> i32 {
         buf
     };
 
-    let username = get_username();
+    let username = require_username();
     let tty = get_tty();
     let timestamp = format_timestamp();
 
@@ -317,7 +352,7 @@ fn run_write(args: &[String]) -> i32 {
         return 1;
     }
 
-    let username = get_username();
+    let username = require_username();
     let tty = get_tty();
 
     // Open the target terminal for writing
@@ -487,9 +522,25 @@ mod tests {
 
     // Username
     #[test]
-    fn test_get_username_not_empty() {
-        let user = get_username();
-        assert!(!user.is_empty());
+    fn test_get_username_is_never_the_environments() {
+        // SAFETY: single-threaded test; both variables are removed again
+        // below. `set_var` is unsafe in edition 2024 only because a
+        // concurrent reader would be UB.
+        unsafe {
+            std::env::set_var("USER", "attacker-chosen");
+            std::env::set_var("LOGNAME", "attacker-chosen-too");
+        }
+        let answer = get_username();
+        unsafe {
+            std::env::remove_var("USER");
+            std::env::remove_var("LOGNAME");
+        }
+        // `None` on a host with no user database, the real name on one with
+        // it. Never what the caller put in the environment.
+        assert_ne!(answer.as_deref(), Some("attacker-chosen"));
+        assert_ne!(answer.as_deref(), Some("attacker-chosen-too"));
+        // ...and never the empty string dressed as a name.
+        assert_ne!(answer.as_deref(), Some(""));
     }
 
     // TTY

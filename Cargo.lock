@@ -325,6 +325,7 @@ dependencies = [
 name = "chroot"
 version = "0.1.0"
 dependencies = [
+ "authlib",
  "pwdb",
  "quoting",
  "scratchdir",
@@ -914,7 +915,9 @@ dependencies = [
 name = "firejail"
 version = "0.1.0"
 dependencies = [
+ "authlib",
  "scratchdir",
+ "userdb",
 ]
 
 [[package]]
@@ -1492,6 +1495,10 @@ checksum = "616ec5685824bcc94416c6d4a7a446eea774a31efd7062c8480ba6fd06d7a6e5"
 [[package]]
 name = "logger"
 version = "0.1.0"
+dependencies = [
+ "authlib",
+ "userdb",
+]
 
 [[package]]
 name = "login"
@@ -1567,6 +1574,10 @@ dependencies = [
 [[package]]
 name = "lp"
 version = "0.1.0"
+dependencies = [
+ "authlib",
+ "userdb",
+]
 
 [[package]]
 name = "lsblk"
@@ -1727,6 +1738,10 @@ dependencies = [
 [[package]]
 name = "mesg"
 version = "0.1.0"
+dependencies = [
+ "authlib",
+ "userdb",
+]
 
 [[package]]
 name = "metronome"
@@ -2415,7 +2430,9 @@ version = "0.1.0"
 name = "screen"
 version = "0.1.0"
 dependencies = [
+ "authlib",
  "quoting",
+ "userdb",
 ]
 
 [[package]]
@@ -2670,12 +2687,14 @@ version = "0.1.0"
 name = "ssh"
 version = "0.1.0"
 dependencies = [
+ "authlib",
  "posix",
  "quoting",
  "randrange",
  "scratchdir",
  "sha2",
  "sshwire",
+ "userdb",
 ]
 
 [[package]]
@@ -3218,7 +3237,9 @@ dependencies = [
 name = "wall"
 version = "0.1.0"
 dependencies = [
+ "authlib",
  "quoting",
+ "userdb",
 ]
 
 [[package]]

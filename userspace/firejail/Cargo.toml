@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS firejail utility"
 [dependencies]
+userdb = { path = "../userdb" }
+authlib = { path = "../authlib" }
 
 # The sandbox-file tests write into a private scratch directory rather than a
 # fixed `firejail_test_*` under the system temp directory. The fixed names made

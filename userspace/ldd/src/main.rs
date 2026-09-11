@@ -1954,7 +1954,7 @@ mod tests {
     /// -- so a binary whose `.dynstr` is malformed reported nothing missing.
     #[test]
     fn an_unnamed_symbol_and_an_unreadable_one_are_not_the_same() {
-        let table = b" libfoo.so.1 ";
+        let table = b"\0libfoo.so.1\0";
         // `st_name == 0` points at the leading NUL: a symbol with no name.
         // That is a real answer, and `.ok()` keeps it as one.
         assert_eq!(strtab_get(table, 0).ok(), Some(String::new()));

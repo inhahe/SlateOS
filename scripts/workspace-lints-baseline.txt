@@ -37,7 +37,6 @@ userspace/blkid
 userspace/chown
 userspace/chpasswd
 userspace/chroot
-userspace/cmp
 userspace/column
 userspace/cpio
 userspace/crond
@@ -114,7 +113,6 @@ userspace/sha256sum
 userspace/shell
 userspace/shuf
 userspace/sort
-userspace/split
 userspace/ss
 userspace/stat
 userspace/strings
@@ -134,6 +132,5 @@ userspace/vmstat
 userspace/wall
 userspace/watch
 userspace/who
-userspace/xargs
 userspace/xdg
 userspace/yacc

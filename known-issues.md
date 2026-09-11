@@ -64730,10 +64730,7 @@ Four representative defects:
 
 | case | GNU | standalone |
 |---|---|---|
-| `-z -f1` | `p
-q  p
-r ` | `p
-q ` — **a record is dropped** |
+| `-z -f1` | `p\nq\0 p\nr\0` | `p\nq\0` — **a record is dropped** |
 | `+2` (traditional skip-chars) | works | treated as a FILENAME: *No such file or directory* |
 | `--group=both` | one blank line between groups | two |
 | `--group=b` | accepts the unambiguous abbreviation | rejects it |
@@ -64783,6 +64780,66 @@ lint programme above is still worth doing; it is not a substitute for a
 differential, and two of its three crates so far were duplicates that a
 differential then deleted.
 
+**23 -> 22 (2026-09-11): `xargs`, which PANICS on a non-UTF-8 argument.**
+`DIFF_PKG=xargs bash scripts/xargs-diff.sh`:
+
+**coreutils 334 passed, 0 differed. The standalone 133 passed, 201 differed.**
+
+This one contains the most serious single defect the whole §1005 campaign has
+found.
+
+| | cases | defect |
+|---|---|---|
+| **PANIC on a non-UTF-8 argv** | **24** | `printf 'a b\n' | xargs argv café` — with `café` in Latin-1 — aborts with `thread 'main' panicked at library/std/src/env.rs:878: called Result::unwrap()`, **exit 134**. It is `std::env::args()` unwrapping, and it is a crash rather than an error. `xargs`'s entire job is handing arbitrary bytes to another program; GNU passes the byte through and exits 0. This is CLAUDE.md self-review item 7 and the `unwrap_used` lint in one place, in the program least entitled to assume its input is text. |
+| **`\v` and `\f` are not whitespace** | **40** | GNU splits arguments on vertical tab and form feed; the standalone keeps them inside the argument, so `\013a b` yields the argument `\va` instead of `a`, and `\013\014 a` yields two arguments where GNU yields one. Exit 0 both ways — **the executed command silently receives different arguments**. |
+| `-E` / `--eof` unimplemented | 69 | the logical-EOF marker, the option that stops `xargs` at a sentinel line. |
+| message shape | 42 | `unterminated single quote` for GNU's `unmatched single quote; by default quotes are special to xargs unless you use the -0 option` — GNU's sentence names the fix, and the exit status differs too (125 against 1). |
+| accepts what GNU refuses | 11 | a quote left open across a newline is accepted as a literal; and `-s 25` with a 30-byte argument **runs anyway** where GNU refuses with `argument line too long` — the one option whose whole purpose is to impose a limit. |
+| `(os error 2)` | 15 | |
+
+**The panic and the `-s` overrun are the two that matter beyond this pair.**
+A tool that aborts on a byte it cannot decode is worse than one that errors,
+because exit 134 is indistinguishable from the child having been killed; and a
+size limit that is not enforced silently hands the kernel the `E2BIG` the
+option exists to prevent.
+
+**24 -> 23 (2026-09-11): `split`, whose `-C` is not implemented but exits 0.**
+`DIFF_PKG=split bash scripts/split-diff.sh`:
+
+**coreutils 207 passed, 0 differed. The standalone 65 passed, 142 differed.**
+
+| | cases | defect |
+|---|---|---|
+| **`-b` size suffixes** | **46** | `-b 1b`, `-b 1KB`, `-b 1KiB` are all `invalid number of bytes`. Suffixed sizes are the normal way to call `split`, and this is the same defect family that decided `dd` — a size operand that accepts only a bare integer. |
+| **`-C` produces the wrong files, exit 0** | **22** | `split -C 2` means *at most 2 bytes of whole lines per file*. GNU writes `xaa`..`xak` accordingly. The standalone writes one file per input record regardless of the number — `-C 2`, `-C 3` and `-C 4` all produce the identical five files. The option is accepted, ignored, and the run succeeds. |
+| refuses what GNU accepts | 20 | `split -6` and `-1` (numeric shorthand for `-l`), and `-x` (hex suffixes). |
+| message shape | 38 | `invalid number of -n: '0'` for GNU's `invalid number of chunks: '0'`. |
+| accepts what GNU refuses | 11 | `--numeric-suffixes=abc` and `=-1` are `invalid start value for numerical suffix` in GNU and are silently accepted here; `--numeric-suffixes=98` should exhaust the suffix space after `x99` and instead keeps going. |
+| `(os error 2)`, and a wrong diagnosis | 5 | `--additional-suffix=a/b` is reported as `No such file or directory` where GNU says `invalid suffix 'a/b', contains directory separator`. The message sends you to look for a missing file when the argument is the problem. |
+
+`-C` is the entry worth keeping: an option that is parsed, accepted, silently
+ignored, and then exits 0 is indistinguishable from a working one until someone
+looks at the file sizes.
+
+**25 -> 24 (2026-09-11): `cmp`, which names the wrong file as truncated.**
+`DIFF_PKG=cmp bash scripts/cmp-diff.sh`:
+
+**coreutils 141 passed, 0 differed. The standalone 54 passed, 87 differed.**
+
+| | cases | defect |
+|---|---|---|
+| **the EOF message names the wrong file** | ⊂61 | `cmp a short`, where `short` is the shorter file: GNU says `EOF on short after byte 4, line 1`; the standalone says `EOF on **a** after byte 4, in line 2`. It names the file that did *not* end, and gets the line number wrong. The whole content of that diagnostic is *which* file ran out, and it is the opposite of the truth. |
+| message shape | 61 | the above, plus `in line N` for GNU's `line N` throughout. |
+| option unrecognised | 13 | `-c` (`--print-chars`) and long-option abbreviations like `--verb`. |
+| refuses what GNU accepts | 7 | `-i 1T` (a size suffix on `--ignore-initial`); and a repeated `-n 3 -n 10`, where GNU takes the last and exits 0 while the standalone reports a difference. |
+| `(os error 2)` | 6 | |
+| accepts what GNU refuses | 1 | `-i 9223372036854775808` overflows silently and exits 0; GNU refuses it as an invalid value. |
+
+*Harness note:* the standalone run reported `2 NO LONGER differ (update the
+harness)`. Those two expected-difference entries are correct for the surviving
+coreutils half and were deliberately left alone — the harness documents the
+program the tree ships, not the one being deleted.
+
 **26 -> 25 (2026-09-11): `tsort`, which splits tokens on a carriage
 return.** `DIFF_PKG=tsort bash scripts/tsort-diff.sh`:
 
@@ -64791,7 +64848,10 @@ return.** `DIFF_PKG=tsort bash scripts/tsort-diff.sh`:
 | | cases | defect |
 |---|---|---|
 | loop diagnostic shape | 39 | GNU prints a header naming the file and then one line per node — `tsort: cyc2.txt: input contains a loop:` / `tsort: a` / `tsort: b`. The standalone prints a full sentence per node (`tsort: a: input contains a loop`) and **never names the file**, so with several operands you cannot tell which one has the cycle. |
-| **`` splits a token** | **5** | on `ab x`, GNU reads two tokens (`ab` and `x`) and succeeds; the standalone splits at the CR, counts three, and refuses with `input contains an odd number of tokens`. Legitimate input rejected — and a CRLF file is the ordinary way to meet a CR. |
+| **`
+` splits a token** | **5** | on `a
+b x`, GNU reads two tokens (`a
+b` and `x`) and succeeds; the standalone splits at the CR, counts three, and refuses with `input contains an odd number of tokens`. Legitimate input rejected — and a CRLF file is the ordinary way to meet a CR. |
 | accepts what GNU refuses | 3 | `tsort -h` prints a usage message and exits 0; GNU rejects `-h` as an invalid option. An accidental `-h` therefore looks like a successful sort that produced no edges. |
 | `(os error 2)` | 3 | including `tsort ''`, where GNU quotes the empty operand (`tsort: '': No such file…`) and the standalone renders it as nothing at all: `tsort: : No such file or directory (os error 2)`. |
 | **refuses non-UTF-8** | 2 | fifth consecutive standalone. |
@@ -64870,7 +64930,7 @@ most balanced one: it is the one that most reliably conceals a landslide.
 |---|---|---|
 | `--total` missing | 49 | GNU's summary line (`1	1	2	total`) is unimplemented, so half the suite dies at `unrecognized option '--total'`. |
 | missing second line | 25 | on unsorted input GNU prints `comm: file 1 is not in sorted order` **and** `comm: input is not in sorted order`; only the first is printed. |
-| **empty `--output-delimiter`** | **4** | `--output-delimiter=` means **NUL** to GNU, which emits ` ` separators. The standalone emits *nothing*, so columns 1, 2 and 3 become indistinguishable — the output stops carrying the answer. Both exit 0. |
+| **empty `--output-delimiter`** | **4** | `--output-delimiter=` means **NUL** to GNU, which emits `\0` separators. The standalone emits *nothing*, so columns 1, 2 and 3 become indistinguishable — the output stops carrying the answer. Both exit 0. |
 | accepts what GNU refuses | 4 | a repeated `--output-delimiter` is `comm: multiple output delimiters specified` in GNU; the standalone takes the last one and exits 0. |
 | `(os error N)` | 7 | `comm: nosuch.txt: No such file or directory (os error 2)`. One of these also reports the *wrong* failure — it opens the files before validating the options, so a doubled delimiter on two missing files is reported as the missing file. |
 | **refuses non-UTF-8** | 2 | `comm bad1.txt bad2.txt` → `read error: stream did not contain valid UTF-8`, exit 1, no output. GNU compares the bytes and succeeds. |

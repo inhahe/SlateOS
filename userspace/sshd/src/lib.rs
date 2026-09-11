@@ -8684,7 +8684,7 @@ DenyGroups nogroup
     #[test]
     fn an_encrypted_openssh_private_key_is_refused_not_guessed() {
         let mut raw = Vec::new();
-        raw.extend_from_slice(b"openssh-key-v1 ");
+        raw.extend_from_slice(b"openssh-key-v1\0");
         raw.extend_from_slice(&ssh_string(b"aes256-ctr"));
         raw.extend_from_slice(&ssh_string(b"bcrypt"));
         raw.extend_from_slice(&ssh_string(b"salt-and-rounds"));

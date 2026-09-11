@@ -37,7 +37,6 @@ userspace/cgroup/src/main.rs:argv-as-string
 userspace/chattr/src/main.rs:argv-as-string
 userspace/chown/src/main.rs:argv-as-string
 userspace/chroot/src/main.rs:argv-as-string
-userspace/cmp/src/main.rs:argv-as-string
 userspace/column/src/main.rs:argv-as-string
 userspace/coredumpctl/src/main.rs:argv-as-string
 userspace/coreutils/src/bin/diff.rs:argv-as-string
@@ -180,7 +179,6 @@ userspace/sftp/src/main.rs:argv-as-string
 userspace/sha256sum/src/main.rs:argv-as-string
 userspace/shuf/src/main.rs:argv-as-string
 userspace/sort/src/main.rs:argv-as-string
-userspace/split/src/main.rs:argv-as-string
 userspace/ss/src/main.rs:argv-as-string
 userspace/ssh-keygen/src/lib.rs:argv-as-string
 userspace/ssh/src/lib.rs:argv-as-string
@@ -224,7 +222,6 @@ userspace/who/src/main.rs:argv-as-string
 userspace/whois/src/main.rs:argv-as-string
 userspace/wipefs/src/main.rs:argv-as-string
 userspace/wpa/src/main.rs:argv-as-string
-userspace/xargs/src/main.rs:argv-as-string
 userspace/xattr/src/main.rs:argv-as-string
 userspace/xdg/src/main.rs:argv-as-string
 userspace/yacc/src/main.rs:argv-as-string

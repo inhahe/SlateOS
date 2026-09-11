@@ -85,8 +85,22 @@ const probe = script + `
   // one colour, so the underline is the only thing telling them apart -- a claim
   // that cannot be judged if nothing on the page is actually a link.
   cur = withLadder(PRESETS.brd);
+  cur.link = MARK;
   render();
-  globalThis.__link = /text-decoration:\s*underline/.test(document.getElementById('fp').innerHTML);
+  {
+    const h = document.getElementById('fp').innerHTML;
+    const underlines = (h.match(/text-decoration:\s*underline/g) || []).length;
+    // Every clickable thing must be underlined AND carry the link colour --
+    // colour alone fails WCAG 1.4.1, and an underline alone loses the fast cue.
+    // Counting them catches the failure that actually happened: "Learn more"
+    // was underlined and "Show report" was not.
+    globalThis.__link = {
+      underlines,
+      colourReaches: h.includes(MARK),
+      // no clickable left on the old accent: the link colour is separate now
+      allMarked: underlines >= 3,
+    };
+  }
 
   // The plan's role table must be live, not a hardcoded copy that drifts away
   // from the controls -- it is the first thing read on the page.
@@ -216,12 +230,17 @@ console.log((global.__brd ? 'ok    ' : 'FAIL  ') + 'the decided preset is presen
 if (!global.__brd) bad++;
 {
   const pl = global.__plan || {};
-  const ok = pl.live && pl.rows === 6;
+  const ok = pl.live && pl.rows === 7;
   console.log((ok ? 'ok    ' : 'FAIL  ') + 'the plan role table is live (' + pl.rows + ' rows, live:' +
               !!pl.live + ')');
   if (!ok) bad++;
 }
-console.log((global.__link ? 'ok    ' : 'FAIL  ') + 'a real link is drawn in the examples');
-if (!global.__link) bad++;
+{
+  const l = global.__link || {};
+  const ok = l.allMarked && l.colourReaches;
+  console.log((ok ? 'ok    ' : 'FAIL  ') + 'every link is underlined and takes the link colour (' +
+              l.underlines + ' underlined, colour reaches:' + !!l.colourReaches + ')');
+  if (!ok) bad++;
+}
 console.log('populated ids: ' + Object.keys(store).filter(k => store[k].innerHTML).join(', '));
 process.exit(bad ? 1 : 0);

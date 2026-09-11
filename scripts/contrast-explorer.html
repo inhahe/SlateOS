@@ -113,6 +113,7 @@
     <div class="row"><label>Secondary (subtext1)</label><input type="color" id="c_sec1"><input type="text" id="t_sec1"></div>
     <div class="row"><label>Accent text</label><input type="color" id="c_acc"><input type="text" id="t_acc"></div>
     <div class="row"><label>Disabled / hint (overlay0)</label><input type="color" id="c_ovl"><input type="text" id="t_ovl"></div>
+    <div class="row"><label>Link</label><input type="color" id="c_link"><input type="text" id="t_link"></div>
     <div class="row"><label>Border (unselected)</label><input type="color" id="c_bord"><input type="text" id="t_bord"></div>
     <div class="row"><label>Page (unshaded)</label><input type="color" id="c_page"><input type="text" id="t_page"></div>
     <div class="row"><label>Card being measured</label><input type="color" id="c_card"><input type="text" id="t_card"></div>
@@ -189,13 +190,13 @@
             161 that name <code>subtext1</code> &mdash; so keeping both names makes splitting them later a
             one-line change instead of a hunt. The same now holds for the accent, which is what makes the
             question below cheap to reverse.</li>
-        <li><b>A link and a caption are now the same colour.</b> The accent and <code>subtext1</code> hold one
-            value, so the only thing separating something you can click from something you can merely read is the
-            underline. There is now a worked case to judge it by: in the settings window, <em>&ldquo;Your traffic
-            is visible to the network operator. <span style="text-decoration:underline">Learn more</span>&rdquo;</em>
-            puts a link inside a caption of its own colour. Defensible when the outline carries selection and
-            state, but it is the first thing to look at if the examples read wrong &mdash; and the cheapest fix,
-            if it does, is to give the accent back a value of its own.</li>
+        <li><s><b>A link and a caption are now the same colour.</b></s>
+            <b>Settled 2026-09-11 (&sect;832):</b> links have their own colour, <code>#0036A3</code>, and are
+            <u>always underlined</u>. Both, not either &mdash; WCAG&nbsp;1.4.1 forbids colour as the only
+            indicator, so the underline is the load-bearing half and the colour is the fast half. The same review
+            found that only one of the three clickable things in these mock-ups had been underlined, which is the
+            failure the rule exists to prevent; the checker now counts underlines rather than asking whether one
+            exists.</li>
       </ol>
 
       <h3 style="font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:#666;margin:14px 0 6px">What the conversion actually touches</h3>
@@ -358,7 +359,7 @@ const PRESETS = {
   //     pure white and fails on the background we actually use.
   //   * pure cyan #00FFFF is 1.25 on white. It is not a text colour at any size.
   // #00688B is the most saturated cerulean that still clears the floor with real margin.
-  brd: { main:'#000000', sec:'#00688B', sec1:'#00688B', acc:'#00688B', ovl:'#9CA0B0',
+  brd: { main:'#000000', sec:'#00688B', sec1:'#00688B', acc:'#00688B', link:'#0036A3', ovl:'#9CA0B0',
          page:'#EFF1F5', card:'#EFF1F5',
          ladder: { mantle:'#EFF1F5', crust:'#EFF1F5', s0:'#EFF1F5', s1:'#EFF1F5', s2:'#CCD0DA' },
          borders: true },
@@ -409,7 +410,7 @@ const PRESETS = {
 const SHIPPED_LADDER = { mantle:'#E6E9EF', crust:'#DCE0E8', s0:'#CCD0DA', s1:'#BCC0CC', s2:'#ACB0BE' };
 
 const $ = id => document.getElementById(id);
-const KEYS = ['main','sec','sec1','acc','ovl','bord','page','card'];
+const KEYS = ['main','sec','sec1','acc','link','ovl','bord','page','card'];
 // overlay0 was missing from this tool entirely until 2026-09-09, though the
 // palette declares it and the tree uses it 829 times -- more than surface1.
 // Its absence is why the ink tables looked easier to satisfy than the real
@@ -418,7 +419,10 @@ const KEYS = ['main','sec','sec1','acc','ovl','bord','page','card'];
 // than surface2 borrowed: once borders carry the structure, the line is doing
 // the job the fill used to, and it has to be settable independently of the
 // shade ladder -- which in the border theme is flat.
-const INK_DEFAULTS = { ovl: '#9CA0B0', bord: '#000000' };
+// `link` is its own role rather than the accent reused. Per §831: when two
+// roles converge, change the values and leave the names alone -- and these two
+// have now diverged again, which is exactly the case that rule was written for.
+const INK_DEFAULTS = { ovl: '#9CA0B0', bord: '#000000', link: '#0036A3' };
 // The five panes, in ladder order. Kept separate from KEYS because they live on
 // `cur.ladder` rather than on `cur` -- and because until 2026-09-09 they were
 // not editable at all, which is the bug this fixes: the examples read the
@@ -477,6 +481,11 @@ function renderFullPages() {
     : `background:${shade};border:1px solid transparent;`;
 
   const T1 = `color:${ink}`, T2 = `color:${dim}`, TA = `color:${acc}`;
+  // A link is marked twice over, and deliberately. The colour alone would not
+  // do: WCAG 1.4.1 forbids colour as the *only* visual means of conveying
+  // information, so a reader who cannot separate two blues would have nothing
+  // left. The underline is the load-bearing half; the colour is the fast half.
+  const TL = `color:${cur.link};text-decoration:underline`;
 
   // A chip naming the pane an element is drawn from. In the bordered column the
   // fill is gone, so it names the border instead -- which is the honest answer
@@ -504,7 +513,7 @@ function renderFullPages() {
           <div class="r" style="${surf(b, L.s0)}">
             <div class="g"><div style="${T1}">Home network</div>
               <div class="t2s" style="${T2}">Connected &middot; 5 GHz &middot; strong</div></div>
-            <div style="${TA}">Disconnect</div>${tagF(b, 'surface0')}
+            <div style="${TL}">Disconnect</div>${tagF(b, 'surface0')}
           </div>
           <div class="r" style="${surf(b, L.s0)}">
             <div class="g"><div style="${T1}">Guest</div>
@@ -526,7 +535,7 @@ function renderFullPages() {
                thing you can merely read. -->
           <div class="t2s" style="${T2};margin:2px 0 9px">
             Your traffic is visible to the network operator.
-            <span style="${TA};text-decoration:underline">Learn more</span>
+            <span style="${TL}">Learn more</span>
           </div>
           <div style="margin-top:11px">
             <span class="btn" style="background:${acc};color:${page}">Save</span>
@@ -594,7 +603,7 @@ function renderFullPages() {
              border-radius:9px;padding:11px 13px;margin-top:13px;box-shadow:0 6px 16px rgba(0,0,0,.16)">
           <div style="font-weight:600;${T1}">Backup finished${tag(b ? 'base' : 'mantle')}</div>
           <div class="t2s" style="${T2}">4,812 files &middot; 2.1 GB &middot; 3 min 14 s</div>
-          <div class="t2s" style="margin-top:5px;${TA}">Show report</div>
+          <div class="t2s" style="margin-top:5px;${TL}">Show report</div>
         </div>
       </div>
     </div>`;
@@ -803,6 +812,7 @@ function render() {
     ['main text', cur.main, 'row titles, sidebar entries, section headings'],
     ['secondary text', cur.sec1, 'the small print under a row'],
     ['selected border / toggle on', cur.acc, 'the outline round the selected thing'],
+    ['link', cur.link, 'anything you can click through to — always underlined too'],
     ['border, unselected', cur.bord, 'every other outline'],
     ['background', cur.page, 'behind everything'],
     ['disabled / hint', cur.ovl, 'switched-off controls only'],

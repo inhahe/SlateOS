@@ -42,9 +42,5 @@ allow cmd_apppermissions 10 # its own help prints `log [count]` -- square bracke
 allow cmd_udp6 5000 # its own help prints `listen <port> [timeout_ms]` -- square
 
 cmd_audioeq 2
-cmd_filevault 1
 cmd_kbshortcuts 1
-cmd_screensaver 1
 cmd_sharesheet 1
-cmd_sysanimations 1
-cmd_vmfrag 1

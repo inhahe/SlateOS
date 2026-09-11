@@ -172,7 +172,6 @@ userspace/screen/src/main.rs:argv-as-string
 userspace/selinux/src/main.rs:argv-as-string
 userspace/service/src/main.rs:argv-as-string
 userspace/sftp/src/main.rs:argv-as-string
-userspace/sha256sum/src/main.rs:argv-as-string
 userspace/shuf/src/main.rs:argv-as-string
 userspace/ss/src/main.rs:argv-as-string
 userspace/ssh-keygen/src/lib.rs:argv-as-string

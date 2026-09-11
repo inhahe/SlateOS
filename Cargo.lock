@@ -2504,14 +2504,6 @@ name = "sha2"
 version = "0.1.0"
 
 [[package]]
-name = "sha256sum"
-version = "0.1.0"
-dependencies = [
- "quoting",
- "sha2",
-]
-
-[[package]]
 name = "shell"
 version = "0.1.0"
 

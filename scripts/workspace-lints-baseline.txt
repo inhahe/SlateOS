@@ -105,7 +105,6 @@ userspace/rsync
 userspace/sanitize
 userspace/screen
 userspace/service
-userspace/sha256sum
 userspace/shell
 userspace/shuf
 userspace/ss

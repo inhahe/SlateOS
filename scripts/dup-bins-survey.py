@@ -97,8 +97,65 @@ import rustlex  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 COREUTILS_BIN = ROOT / "userspace" / "coreutils" / "src" / "bin"
 USERSPACE = ROOT / "userspace"
-# Where a `<name>-diff.sh` lives if the tree already has one for a pair.
+# Where the differential harnesses live.
 SCRIPTS = Path(__file__).resolve().parent
+
+_DIFF_BINS = re.compile(r"^DIFF_BINS=[\"']?(.+?)[\"']?\s*$", re.M)
+
+
+def harness_for(name: str) -> str | None:
+    """How to run a differential for `name`, or `None` if nothing covers it.
+
+    ## Why this is not just `scripts/<name>-diff.sh`
+
+    Because that answer was wrong, and wrong in the direction that wastes a
+    day. `sha256sum` has no `sha256sum-diff.sh`, so this column told a reader to
+    write one -- while `digest-diff.sh` has covered it all along through
+    `DIFF_BINS="md5sum sha256sum"`, and `interleave-diff.sh` covers it too.
+    Eleven of the tree's subjects are reached only that way.
+
+    The same shape as every other enumeration defect in this tree: a rule with
+    one entry per instance, which misses the next instance silently. So the
+    harnesses are asked what they cover rather than assumed to be named after
+    it -- `DIFF_BINS` is read from each `*-diff.sh`, and a family harness is
+    reported with the `PROG=` that narrows a run to the one binary.
+
+    ## A family harness covers the NAME but cannot be aimed at the half
+
+    Reported differently for that reason. `DIFF_PKG=<name>` fails outright on a
+    family harness -- cargo is asked for a `md5sum` bin in the `sha256sum`
+    package -- and `DIFF_PKG="coreutils <name>"` builds *both* packages' copy of
+    the binary into the same path, so which one the harness measures is decided
+    by build order. That is not a theory:
+
+        $ DIFF_PKG="coreutils sha256sum" PROG=sha256sum ./scripts/digest-diff.sh
+        113 passed, 0 differed     <- sha256sum (SlateOS coreutils)
+        113 passed, 0 differed     <- sha256sum (SlateOS coreutils)
+        39 passed, 74 differed     <- sha256sum (Slate OS)
+
+    Three runs of one command, subject confirmed by `--version` each time. The
+    same defect family as `DIFF_PKG` not crossing the WSL boundary -- an
+    authoritative-looking pass count about a binary nobody chose -- except
+    non-deterministic, so it cannot even be reproduced into a bug report.
+
+    So the column says what is true: the harness exists, it measures the
+    `coreutils` half, and aiming it at the standalone needs `--version`
+    checked on every run. See
+    `TD-B-A-FAMILY-HARNESS-CANNOT-BE-AIMED-AT-ONE-HALF-OF-A-PAIR`.
+    """
+    direct = SCRIPTS / f"{name}-diff.sh"
+    if direct.is_file():
+        return f"DIFF_PKG={name} bash scripts/{name}-diff.sh"
+    for path in sorted(SCRIPTS.glob("*-diff.sh")):
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        m = _DIFF_BINS.search(text)
+        if m and name in m.group(1).split():
+            return (f"PROG={name} bash scripts/{path.name}"
+                    f"  (coreutils half only -- see TD-B-A-FAMILY-HARNESS-...)")
+    return None
 
 # A short option is a dash and one character that is not a digit -- `-1` is far
 # more often a numeric operand (`head -1`) or part of a format string than a
@@ -363,8 +420,8 @@ def main() -> int:
         # harnesses -- see the module docstring -- so the counts are printed and
         # left to speak for themselves, and this column says what would settle
         # it instead.
-        if (SCRIPTS / f"{name}-diff.sh").is_file():
-            how = f"DIFF_PKG={name} bash scripts/{name}-diff.sh"
+        how = harness_for(name)
+        if how is not None:
             with_harness += 1
         else:
             how = "no harness -- write one"

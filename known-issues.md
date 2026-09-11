@@ -76,6 +76,43 @@ terminator before comparing — and the formatter has to emit the
 and context output alike. Upstream diffutils carries a flag per side for exactly
 this.
 
+## TD-B-A-FAMILY-HARNESS-CANNOT-BE-AIMED-AT-ONE-HALF-OF-A-PAIR (lane B, 2026-09-11)
+
+**Six harnesses here cover several binaries at once via `DIFF_BINS`, and for
+those the `DIFF_PKG` knob cannot select which half of a duplicate pair is
+measured. What it selects instead is a coin flip.**
+
+`DIFF_PKG=sha256sum` fails outright — cargo is asked for an `md5sum` bin in the
+`sha256sum` package, because `DIFF_BINS` names the whole family. The obvious
+next try, `DIFF_PKG="coreutils sha256sum"`, builds *both* packages' copy of
+`sha256sum` into the same path, and whichever links last wins:
+
+    $ DIFF_PKG="coreutils sha256sum" PROG=sha256sum ./scripts/digest-diff.sh
+    113 passed,  0 differed     <- sha256sum (SlateOS coreutils)
+    113 passed,  0 differed     <- sha256sum (SlateOS coreutils)
+     39 passed, 74 differed     <- sha256sum (Slate OS)
+
+Three runs of one command, no edits between them, subject confirmed by
+`--version` each time.
+
+**This is the same defect family as `DIFF_PKG` not crossing the WSL boundary**
+— an authoritative-looking pass count about a binary nobody chose — with one
+thing worse: it is *non-deterministic*, so it cannot be reproduced into a bug
+report and cannot be caught by a gate that runs once. The only reason the
+`sha256sum` numbers below are trustworthy is that `--version` was checked on
+every single run, which is a discipline and not a mechanism.
+
+**Which names this affects:** `calc-diff.sh` (bc, dc), `digest-diff.sh` (md5sum,
+sha256sum), `interleave-diff.sh` (eleven names), `write-error-diff.sh` (eleven
+names), `time-diff.sh`, `osh-diff.sh`.
+
+**The proper fix.** Build each side to a path of its own instead of letting both
+write `debug/<name>`. `diff-wsl.sh` already reaches every subject through
+`$bindir/{ours,gnu}/NAME`, so the missing piece is a per-package target
+directory — `--target-dir` per `DIFF_PKG` entry — after which the symlink can
+point at the right one deliberately rather than at whatever survived. Until then
+the survey's column says "coreutils half only", which is the truth.
+
 ## B-PATCH-WRITES-ITS-PROGRESS-TO-STDERR-NOT-STDOUT (lane B, 2026-09-11)
 
 **Both halves of the `patch` pair write `patching file X` to stderr. GNU writes
@@ -65041,6 +65078,30 @@ number is different** — not by a constant factor either: 12→16, 24→48,
 3036→4112. Both exit 0. `du` prints nothing but sizes and paths, so a `du` that
 gets the sizes wrong and drops a directory has no correct output left; there is
 nothing else in it to be right about.
+
+**16 -> 15 (2026-09-11): `sha256sum`, found by fixing the survey's own column.**
+This pair was listed as "no harness -- write one" for weeks. It has had one all
+along: `digest-diff.sh` covers `md5sum` and `sha256sum` together through
+`DIFF_BINS`, and `interleave-diff.sh` covers it too. The column looked for a
+`sha256sum-diff.sh` and found none — an enumeration with one entry per instance,
+missing the next instance silently, for the fourth time in this tree.
+
+`PROG=sha256sum bash scripts/digest-diff.sh`, subject confirmed by `--version`
+on every run because of
+`TD-B-A-FAMILY-HARNESS-CANNOT-BE-AIMED-AT-ONE-HALF-OF-A-PAIR`:
+
+**coreutils 113 passed, 0 differed. The standalone 39 passed, 74 differed.**
+
+The standalone's `--check` mode is the bulk of it: on a file with no valid
+checksum lines it answers `WARNING: 1 line(s) are improperly formatted` plus
+`no file was verified`, where GNU says `a: no properly formatted checksum lines
+found` — GNU names the file, which is the whole point of the message when
+several are being checked.
+
+Worth noting what this pair is NOT: the survey had it at 210 lines against 1538
+until `dup-bins-survey.py` was taught to count shared modules, and that reading
+made `coreutils` look like a stub. It is 5067 with `digest.rs` counted — a port
+of upstream's `digest.c` shared with `md5sum` — and it passes 113 of 113.
 
 **17 -> 16 (2026-09-11): `tar`, whose archives GNU cannot read back the same.**
 `DIFF_PKG=tar bash scripts/tar-diff.sh`:

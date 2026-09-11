@@ -132150,6 +132150,123 @@ bench_*` convention. **One caution for whoever builds it:** timing a *copy* of
 two-lists-that-must-agree failure this file records in several other places. Instrument
 the real function or expose it, rather than reimplementing it beside a stopwatch.
 
+### The tail, named — and one 256-byte write resolves its path about five times
+
+`bench_vfs_write_breakdown` measured the six tail operations of
+`Vfs::write_file_resolved` directly. Of a 43 813 ns write under WHPX:
+
+| operation | ns | share |
+|---|---|---|
+| **`journal::record`** | **14 206** | **32%** |
+| `index::on_file_changed` | 3 997 | 9% |
+| `quota::charge_bytes` | 123 | 0.3% |
+| `notify::emit_modified` | 34 | 0.1% |
+| `audit::log_ok` | 22 | 0.1% |
+| named tail | 18 382 | 42% |
+| remainder — `invalidate_negative_prefix` + memfs's own write | 25 970 | 59% |
+| resolve, access, intercept | 479 | 1.1% |
+
+`journal::record` is **one HPET read** — fixed, see the commit. What the rest shows is
+structural rather than a single hot line.
+
+### Roughly five path resolutions, for one write
+
+Following the same 256-byte write through:
+
+1. `Vfs::write_file` → `resolve_follow(path)` — resolution #1.
+2. `memfs::write_file` → `resolve_write_path(path)` — follows symlinks again to find the
+   write target — #2 — then `walk(&parent_path)` — #3 — then `child_ino`.
+3. `cache_identity` → `fs.metadata(relative)` — #4, to learn the inode the write just
+   touched.
+4. `index::on_file_changed` → `add_entry(path)` → `Vfs::stat(path)` — #5, a *full* VFS
+   resolve plus metadata, of the path the caller has been holding all along.
+
+Every one of those is correct in isolation. Together they re-derive the same answer
+about the same path up to five times inside one operation, and the information was
+available at step 1 — `write_file_resolved` already holds the resolved path, and after
+the write it holds the filesystem handle and the relative path too.
+
+So the shape of the remaining cost is not "one slow function" but **metadata being
+re-derived instead of passed forward.** The two obvious candidates, in order of
+bluntness:
+
+* `cache_identity` and `index::add_entry` both want the inode/metadata of a file the
+  write has just finished touching. A `write_file` that returned, or an internal form
+  that yielded, the resulting `(ino, size)` would remove #4 and most of #5.
+* `index::on_file_changed` takes the `INDEX` lock twice before doing any work —
+  `is_live()` locks, returns, then `is_watched()` locks again. One acquisition would do.
+
+### And `invalidate_negative_prefix`, which is the single biggest unmeasured piece
+
+It is not separately measurable — a private method on a private type — so it sits inside
+the 25 970 ns remainder together with memfs's write. What is known about it from reading:
+it iterates **all `VFS_DCACHE_SIZE` = 1024 entries on every write**, and each entry holds
+two `PathBuf`s, so it touches on the order of 80 KB per write regardless of path length
+or data size. Its purpose is narrow — drop *negative* entries that claimed this path did
+not exist, because a write may have created it — and a scan is a defensible
+implementation for a fixed 1024-slot table, but it is the one part of the write path whose
+cost grows with the cache rather than with the work.
+
+Worth measuring before being changed, which needs either a `pub(crate)` hook or the
+phase instrumentation this breakdown deliberately avoided. Recorded rather than guessed.
+
+### Result: 42× on the journal phase, 29% off every file write
+
+Measured on the seventh unperturbed WHPX run. The evidence is a step change against a
+stable baseline rather than a median delta, which matters because the baseline spans two
+other changes:
+
+| commit | `vfs_write_256` | journal phase |
+|---|---|---|
+| `b770d800f` | 43 064 | — |
+| `1ec6842eb` | 44 290 | — |
+| `d7ebfa9b7` | 43 198 | — |
+| `c1c9352e6` | 44 775 | — |
+| `179ccdeb8` | 44 274 | — |
+| `4f6ca7a1b` | 43 288 | 14 206 |
+| **`96356d747`** | **30 867** | **337** |
+
+Six runs inside 43 064–44 775, then one at 30 867. **−29%**, and the journal phase fell
+**42×**.
+
+The breakdown accounts for the change exactly:
+
+| | before | after |
+|---|---|---|
+| full write | 43 813 | **30 183** |
+| `journal::record` | 14 206 | **337** |
+| `index::on_file_changed` | 3 997 | 4 115 |
+| remainder | 25 970 | 25 896 |
+
+The journal saved 13 869 ns; the total fell 13 630 ns. Those agree within 239 ns — inside
+the ~700 ns this subtraction can resolve — and the two untouched phases moved by 118 ns
+and −74 ns, i.e. not at all. So the change is isolated to the line it touched.
+
+Wider effects, on the same run:
+
+* `vfs_throughput_16k_write`: 129 358 → **115 993**, −10.3%. Still **OVER** its 50 000
+  budget, at 2.3× rather than 2.6×. A 16 KiB write pays the same single HPET read as a
+  256-byte one, so the absolute saving is the same and the proportional one is smaller —
+  which is what a fixed cost looks like.
+* `vfs_read_256` +1.9% and `vfs_stat_root` +5.0%: unchanged. Both are inside the p90
+  run-to-run movement of 5.2%, and neither goes through `journal::record`.
+* `over_target` stays at **9**. The write benchmark was over budget before and remains
+  over; nothing crossed. The earlier 10 → 9 was `task_count`, not this.
+
+### A baseline I nearly reported wrongly, for the third time
+
+My first pass compared the new row against the median of *all six* prior WHPX rows, and
+produced "`dashboard_api_status` −55.9%" — which the journal fix had nothing to do with.
+Three of those six predate `task_count`, so for any benchmark that change affected, the
+median is a blend of two populations and the delta is an artifact of the mix.
+
+This is the third appearance of the same trap today: a 0.0% reading from comparing a
+baseline against a member of itself, a 42× read/write ratio that spanned a cache
+boundary, and now a 56% figure from a baseline straddling an unrelated change. The
+defence that worked all three times was the same — **list the rows and look at them**
+before computing anything over them. `vfs_write_256`'s own history shows six flat runs
+and one step, which no median could have told me as clearly.
+
 ## TD-A-REQUEST-STATUS-HAS-NO-CHECKED-SHAPE-SO-EVERY-READER-COUNTS-DIFFERENTLY (lane A, 2026-09-11) — **open**
 
 **In short:** the `requests/` dropbox is how the three lanes hand work to each other,

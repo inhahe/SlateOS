@@ -4171,6 +4171,7 @@ pub fn run_all() {
     // cost, so the lock cost had better be measured first.
     bench_lock_primitives();
     bench_vfs_stat_breakdown();
+    bench_vfs_write_breakdown();
     bench_vfs_read_write();
     bench_vfs_readdir();
     // After `bench_vfs_readdir`, never before: the breakdown creates and then
@@ -6484,6 +6485,148 @@ fn bench_lock_primitives() {
     // set at the inferred value: if the inference was right this sits exactly
     // on the line, and any movement is then real.
     score("lock_uncontended", &tracked, 500);
+}
+
+/// Where `Vfs::write_file`'s fixed cost goes.
+///
+/// `write_file` costs ~43 us on memfs for a 256-byte write, against 922 ns for
+/// `stat` over the same resolve (`vfs_stat_breakdown_full`). Since the shared
+/// prefix is under a microsecond, essentially all of it is in the write-specific
+/// steps, and reading eliminated five candidates without finding the one that
+/// matters: the data copy (64x the bytes costs 2.95x the time),
+/// `history::try_auto_record` (early-returns when versioning is off),
+/// `invalidate_identity` (a `BTreeMap` range over one page),
+/// `memfs::child_ino` (a map lookup, not a scan) and `touch_modified` (the TSC,
+/// not the HPET). See `known-issues.md` →
+/// `TD-A-THE-BENCHMARK-BUDGETS-NEVER-FIRE-IN-A-BOOT-TEST`.
+///
+/// **Built from the public layered entry points, not from a copy of
+/// `write_file_resolved`'s body.** A reimplementation beside a stopwatch measures
+/// the reimplementation, and drifts from the real function silently -- the same
+/// two-lists-that-must-agree failure this tree has been bitten by elsewhere.
+/// Every phase below calls the real code.
+///
+/// 256 bytes on purpose: the quantity of interest is the fixed cost, and at 256
+/// bytes the copy is noise while the path is fully exercised.
+fn bench_vfs_write_breakdown() {
+    use crate::fs::vfs::{PathAccess, Vfs};
+
+    const PATH: &str = "/bench_write_breakdown.tmp";
+    let data = alloc::vec![0u8; 256];
+
+    if Vfs::write_file(PATH, &data).is_err() {
+        serial_println!("[bench] vfs_write_breakdown: SKIP (VFS write unavailable)");
+        return;
+    }
+    // The resolved form of the same path, so the `_resolved` phase is fed what
+    // `write_file` actually hands to `write_file_resolved` rather than the raw
+    // string. If resolution rewrites the path, feeding the raw one would charge
+    // the difference to the wrong phase -- the caution `bench_vfs_stat_breakdown`
+    // states for the same reason.
+    let Ok(resolved) = Vfs::resolve_path(PATH) else {
+        serial_println!("[bench] vfs_write_breakdown: SKIP (resolve failed)");
+        return;
+    };
+
+    let full = run("vfs_write_breakdown_full", 200, || {
+        let _ = core::hint::black_box(Vfs::write_file(PATH, &data));
+    });
+    let resolved_only = run("vfs_write_breakdown_resolved", 200, || {
+        let _ = core::hint::black_box(Vfs::write_file_resolved(&resolved, &data));
+    });
+    // No `ns` phase here, deliberately. `ipc::namespace::check_writable` opens with
+    // `if ns_fast_path_available() { return Ok(()); }` -- one atomic load, and its own
+    // comment says that deliberately skips `owner_process`'s THREAD_OWNERS lock
+    // because the process id is not needed when nothing is gated. Measured at 4 ns,
+    // which tripped the harness's BELOW-FLOOR check by sitting exactly on the
+    // 18-cycle empty-closure floor. The reading was correct, the phase was 0.009% of
+    // the total, and `vfs_stat_breakdown_ns` already covers this module above the
+    // floor -- so keeping it bought a permanent BELOW-FLOOR line every run for no
+    // information.
+    let access_only = run("vfs_write_breakdown_access", 200, || {
+        let _ = core::hint::black_box(crate::fs::vfs::check_path_access(
+            &resolved,
+            PathAccess::Write,
+        ));
+    });
+    let intercept_only = run("vfs_write_breakdown_intercept", 200, || {
+        let _ = core::hint::black_box(crate::fs::intercept::pre_write(&resolved));
+    });
+
+    // The tail of `write_file_resolved`, which the first run showed holds 99% of
+    // the cost. Every one of these is per-write and independent of the byte count,
+    // which is why a 256-byte and a 16 KiB write cost nearly the same.
+    let quota_only = run("vfs_write_breakdown_quota", 200, || {
+        // No black_box: these return unit, and clippy denies passing one to a
+        // function. They all mutate global state, so the call cannot be elided.
+        crate::fs::quota::charge_bytes(0, 0, 256);
+    });
+    let notify_only = run("vfs_write_breakdown_notify", 200, || {
+        crate::fs::notify::emit_modified(&resolved);
+    });
+    let index_only = run("vfs_write_breakdown_index", 200, || {
+        crate::fs::index::on_file_changed(&resolved);
+    });
+    let journal_only = run("vfs_write_breakdown_journal", 200, || {
+        crate::fs::journal::record(crate::fs::journal::JournalEventType::Modified, &resolved);
+    });
+    let audit_only = run("vfs_write_breakdown_audit", 200, || {
+        crate::fs::audit::log_ok(crate::fs::audit::AuditOp::Write, 0, &resolved);
+    });
+
+    let named = access_only.min_ns.saturating_add(intercept_only.min_ns);
+    let tail = quota_only
+        .min_ns
+        .saturating_add(notify_only.min_ns)
+        .saturating_add(index_only.min_ns)
+        .saturating_add(journal_only.min_ns)
+        .saturating_add(audit_only.min_ns);
+    // What is left is `invalidate_negative_prefix` -- a private method, so not
+    // separately measurable -- plus memfs's own write. Nothing else.
+    let remainder = resolved_only
+        .min_ns
+        .saturating_sub(named)
+        .saturating_sub(tail);
+
+    serial_println!(
+        "[bench]   vfs_write_breakdown: full {}ns, resolved {}ns (resolve {}ns), \
+         access {}ns + intercept {}ns = {}ns, remainder {}ns",
+        full.min_ns,
+        resolved_only.min_ns,
+        full.min_ns.saturating_sub(resolved_only.min_ns),
+        access_only.min_ns,
+        intercept_only.min_ns,
+        named,
+        remainder,
+    );
+    serial_println!(
+        "[bench]   vfs_write_breakdown tail: quota {}ns + notify {}ns + index {}ns \
+         + journal {}ns + audit {}ns = {}ns",
+        quota_only.min_ns,
+        notify_only.min_ns,
+        index_only.min_ns,
+        journal_only.min_ns,
+        audit_only.min_ns,
+        tail,
+    );
+    serial_println!(
+        "[bench]   vfs_write_breakdown: remainder {}ns is invalidate_negative_prefix \
+         (a scan of all 1024 dcache entries, each holding two PathBufs) plus \
+         memfs's own write -- nothing else is left",
+        remainder,
+    );
+
+    track("vfs_write_breakdown_full", &full);
+    track("vfs_write_breakdown_resolved", &resolved_only);
+    track("vfs_write_breakdown_access", &access_only);
+    track("vfs_write_breakdown_intercept", &intercept_only);
+    track("vfs_write_breakdown_quota", &quota_only);
+    track("vfs_write_breakdown_notify", &notify_only);
+    track("vfs_write_breakdown_index", &index_only);
+    track("vfs_write_breakdown_journal", &journal_only);
+    track("vfs_write_breakdown_audit", &audit_only);
+
+    let _ = Vfs::remove(PATH);
 }
 
 fn bench_vfs_stat_breakdown() {

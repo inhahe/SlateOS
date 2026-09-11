@@ -61,19 +61,6 @@ struct FuserResult {
     processes: Vec<ProcessMatch>,
 }
 
-#[derive(Clone, Debug)]
-struct LsofEntry {
-    command: String,
-    pid: u32,
-    user: String,
-    fd_str: String,
-    type_str: String,
-    _device: String,
-    _size_off: String,
-    _node: String,
-    name: String,
-}
-
 // ============================================================================
 // /proc scanning
 // ============================================================================
@@ -469,199 +456,6 @@ fn print_fuser_result(result: &FuserResult, verbose: bool) {
 // lsof personality
 // ============================================================================
 
-fn lsof_scan_all() -> Vec<LsofEntry> {
-    let mut entries = Vec::new();
-    let pids = get_process_ids();
-
-    for pid in pids {
-        let comm = read_proc_comm(pid);
-        let uid = read_proc_uid(pid);
-        let user = uid_to_name(uid);
-
-        // cwd
-        if let Some(cwd) = resolve_link(&format!("/proc/{pid}/cwd")) {
-            entries.push(LsofEntry {
-                command: comm.clone(),
-                pid,
-                user: user.clone(),
-                fd_str: "cwd".to_string(),
-                type_str: "DIR".to_string(),
-                _device: String::new(),
-                _size_off: String::new(),
-                _node: String::new(),
-                name: cwd.to_string_lossy().to_string(),
-            });
-        }
-
-        // exe
-        if let Some(exe) = resolve_link(&format!("/proc/{pid}/exe")) {
-            entries.push(LsofEntry {
-                command: comm.clone(),
-                pid,
-                user: user.clone(),
-                fd_str: "txt".to_string(),
-                type_str: "REG".to_string(),
-                _device: String::new(),
-                _size_off: String::new(),
-                _node: String::new(),
-                name: exe.to_string_lossy().to_string(),
-            });
-        }
-
-        // Open file descriptors.
-        let fd_dir = format!("/proc/{pid}/fd");
-        if let Ok(fd_entries) = fs::read_dir(&fd_dir) {
-            for entry in fd_entries.flatten() {
-                let fd_name = entry.file_name().to_string_lossy().to_string();
-                if let Some(target) = resolve_link(entry.path().to_str().unwrap_or_default()) {
-                    let target_str = target.to_string_lossy().to_string();
-                    let type_str = if target_str.starts_with("socket:") {
-                        "sock"
-                    } else if target_str.starts_with("pipe:") {
-                        "FIFO"
-                    } else if target_str.starts_with("anon_inode:") {
-                        "anon"
-                    } else {
-                        "REG"
-                    };
-                    // Determine read/write mode.
-                    let mode = fd_read_mode(pid, &fd_name);
-                    entries.push(LsofEntry {
-                        command: comm.clone(),
-                        pid,
-                        user: user.clone(),
-                        fd_str: format!("{fd_name}{mode}"),
-                        type_str: type_str.to_string(),
-                        _device: String::new(),
-                        _size_off: String::new(),
-                        _node: String::new(),
-                        name: target_str,
-                    });
-                }
-            }
-        }
-    }
-
-    entries
-}
-
-fn fd_read_mode(pid: u32, fd: &str) -> &'static str {
-    let fdinfo = format!("/proc/{pid}/fdinfo/{fd}");
-    if let Ok(content) = fs::read_to_string(&fdinfo) {
-        for line in content.lines() {
-            if let Some(flags_str) = line.strip_prefix("flags:") {
-                let flags_str = flags_str.trim();
-                if let Ok(flags) = u32::from_str_radix(
-                    flags_str.trim_start_matches("0o").trim_start_matches('0'),
-                    8,
-                ) {
-                    return match flags & 3 {
-                        0 => "r",
-                        1 => "w",
-                        2 => "u", // read+write
-                        _ => "u",
-                    };
-                }
-            }
-        }
-    }
-    "u"
-}
-
-fn lsof_main(args: &[String]) -> i32 {
-    let mut filter_pid: Option<u32> = None;
-    let mut filter_user: Option<String> = None;
-    let mut filter_path: Option<String> = None;
-    let mut i = 0;
-
-    while i < args.len() {
-        match args[i].as_str() {
-            "-p" => {
-                i += 1;
-                if i < args.len() {
-                    filter_pid = args[i].parse().ok();
-                }
-            }
-            "-u" => {
-                i += 1;
-                if i < args.len() {
-                    filter_user = Some(args[i].clone());
-                }
-            }
-            "--help" | "-h" => {
-                println!("Usage: lsof [options] [path ...]");
-                println!();
-                println!("List open files.");
-                println!();
-                println!("Options:");
-                println!("  -p PID     Show only for PID");
-                println!("  -u USER    Show only for USER");
-                println!("  -h, --help Display this help");
-                println!("  --version  Display version");
-                return 0;
-            }
-            "--version" => {
-                println!("lsof (Slate OS) {VERSION}");
-                return 0;
-            }
-            s if !s.starts_with('-') => {
-                filter_path = Some(s.to_string());
-            }
-            other => {
-                eprintln!("lsof: unknown option {}", quoteaf_os(other));
-            }
-        }
-        i += 1;
-    }
-
-    let entries = lsof_scan_all();
-
-    // Print header.
-    println!(
-        "{:<12} {:>6} {:<10} {:>4} {:>6} NAME",
-        "COMMAND", "PID", "USER", "FD", "TYPE"
-    );
-
-    for entry in &entries {
-        // Apply filters.
-        if let Some(pid) = filter_pid
-            && entry.pid != pid
-        {
-            continue;
-        }
-        if let Some(ref user) = filter_user
-            && &entry.user != user
-        {
-            continue;
-        }
-        if let Some(ref path) = filter_path
-            && !entry.name.contains(path.as_str())
-        {
-            continue;
-        }
-
-        println!(
-            "{:<12} {:>6} {:<10} {:>4} {:>6} {}",
-            truncate_str(&entry.command, 12),
-            entry.pid,
-            truncate_str(&entry.user, 10),
-            entry.fd_str,
-            entry.type_str,
-            entry.name
-        );
-    }
-
-    0
-}
-
-fn truncate_str(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        s[..max].to_string()
-    }
-}
-
 // ============================================================================
 // fuser personality
 // ============================================================================
@@ -819,28 +613,11 @@ fn fuser_main(args: &[String]) -> i32 {
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    let prog_name = {
-        let s = args.first().map(|s| s.as_str()).unwrap_or("fuser");
-        let bytes = s.as_bytes();
-        let mut last_sep = 0;
-        for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' {
-                last_sep = i + 1;
-            }
-        }
-        let base = &s[last_sep..];
-        let base = base.strip_suffix(".exe").unwrap_or(base);
-        base.to_string()
-    };
-
+    // No personality probe: `lsof` is `userspace/lsof`, which this could
+    // never out-rank -- it produces the executable, and its option set is a
+    // strict superset of the one that stood here.
     let rest: Vec<String> = args.into_iter().skip(1).collect();
-
-    let exit_code = match prog_name.as_str() {
-        "lsof" => lsof_main(&rest),
-        _ => fuser_main(&rest),
-    };
-
-    process::exit(exit_code);
+    process::exit(fuser_main(&rest));
 }
 
 // ============================================================================
@@ -922,21 +699,6 @@ mod tests {
     }
 
     #[test]
-    fn test_truncate_str_short() {
-        assert_eq!(truncate_str("hello", 10), "hello");
-    }
-
-    #[test]
-    fn test_truncate_str_long() {
-        assert_eq!(truncate_str("hello world", 5), "hello");
-    }
-
-    #[test]
-    fn test_truncate_str_exact() {
-        assert_eq!(truncate_str("hello", 5), "hello");
-    }
-
-    #[test]
     fn test_uid_to_name_fallback() {
         // Should fall back to numeric string for unknown UIDs.
         let name = uid_to_name(99999);
@@ -956,23 +718,6 @@ mod tests {
         let result = find_processes_for_path("/nonexistent/path/that/does/not/exist");
         // Should return empty results, not crash.
         assert!(result.processes.is_empty());
-    }
-
-    #[test]
-    fn test_lsof_entry_creation() {
-        let entry = LsofEntry {
-            command: "bash".to_string(),
-            pid: 1234,
-            user: "root".to_string(),
-            fd_str: "0r".to_string(),
-            type_str: "REG".to_string(),
-            _device: String::new(),
-            _size_off: String::new(),
-            _node: String::new(),
-            name: "/dev/null".to_string(),
-        };
-        assert_eq!(entry.pid, 1234);
-        assert_eq!(entry.command, "bash");
     }
 
     // -- port lookup ---------------------------------------------------------

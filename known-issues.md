@@ -64783,6 +64783,24 @@ lint programme above is still worth doing; it is not a substitute for a
 differential, and two of its three crates so far were duplicates that a
 differential then deleted.
 
+**24 -> 23 (2026-09-11): `split`, whose `-C` is not implemented but exits 0.**
+`DIFF_PKG=split bash scripts/split-diff.sh`:
+
+**coreutils 207 passed, 0 differed. The standalone 65 passed, 142 differed.**
+
+| | cases | defect |
+|---|---|---|
+| **`-b` size suffixes** | **46** | `-b 1b`, `-b 1KB`, `-b 1KiB` are all `invalid number of bytes`. Suffixed sizes are the normal way to call `split`, and this is the same defect family that decided `dd` — a size operand that accepts only a bare integer. |
+| **`-C` produces the wrong files, exit 0** | **22** | `split -C 2` means *at most 2 bytes of whole lines per file*. GNU writes `xaa`..`xak` accordingly. The standalone writes one file per input record regardless of the number — `-C 2`, `-C 3` and `-C 4` all produce the identical five files. The option is accepted, ignored, and the run succeeds. |
+| refuses what GNU accepts | 20 | `split -6` and `-1` (numeric shorthand for `-l`), and `-x` (hex suffixes). |
+| message shape | 38 | `invalid number of -n: '0'` for GNU's `invalid number of chunks: '0'`. |
+| accepts what GNU refuses | 11 | `--numeric-suffixes=abc` and `=-1` are `invalid start value for numerical suffix` in GNU and are silently accepted here; `--numeric-suffixes=98` should exhaust the suffix space after `x99` and instead keeps going. |
+| `(os error 2)`, and a wrong diagnosis | 5 | `--additional-suffix=a/b` is reported as `No such file or directory` where GNU says `invalid suffix 'a/b', contains directory separator`. The message sends you to look for a missing file when the argument is the problem. |
+
+`-C` is the entry worth keeping: an option that is parsed, accepted, silently
+ignored, and then exits 0 is indistinguishable from a working one until someone
+looks at the file sizes.
+
 **25 -> 24 (2026-09-11): `cmp`, which names the wrong file as truncated.**
 `DIFF_PKG=cmp bash scripts/cmp-diff.sh`:
 

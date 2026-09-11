@@ -113,7 +113,6 @@ userspace/sha256sum
 userspace/shell
 userspace/shuf
 userspace/sort
-userspace/split
 userspace/ss
 userspace/stat
 userspace/strings

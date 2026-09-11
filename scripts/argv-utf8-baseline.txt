@@ -179,7 +179,6 @@ userspace/sftp/src/main.rs:argv-as-string
 userspace/sha256sum/src/main.rs:argv-as-string
 userspace/shuf/src/main.rs:argv-as-string
 userspace/sort/src/main.rs:argv-as-string
-userspace/split/src/main.rs:argv-as-string
 userspace/ss/src/main.rs:argv-as-string
 userspace/ssh-keygen/src/lib.rs:argv-as-string
 userspace/ssh/src/lib.rs:argv-as-string

@@ -94,14 +94,24 @@ divided by its own median:
 
 | `accel` | clean runs | median benchmark | 90th pct | 99th pct |
 |---|---|---|---|---|
-| `Hyper-V/WHPX` | 8 | **1.03×** | 1.23× | 1.53× |
+| `Hyper-V/WHPX` | 8 ⚠ | **1.03×** | 1.23× | 1.53× |
 | `QEMU TCG` | 9 | 1.29× | 2.13× | 2.78× |
 | (unrecorded, TCG-era) | 36 | 1.58× | 2.64× | 3.33× |
 
 ### What to do with that
 
-* **Under WHPX, the 10% rule is sound as written.** The median benchmark moves 3%
-  between clean runs, so a 10% move is signal.
+* **⚠ The WHPX row does not support a conclusion yet, and the ⚠ is there to stop
+  it being quoted as if it did.** All eight of those rows — in fact all fourteen
+  WHPX rows in the file — are arms of a single *layout sweep*, carrying
+  `experiment: "layout sweep: textpad=N (identical source, deliberately
+  perturbed…)"`. Five of the eight share one commit. **There are zero ordinary
+  WHPX runs recorded.** So 1.03× is the within-sitting spread of one build under
+  deliberate perturbation, not run-to-run spread across days, reboots and host
+  states — and it is the smaller quantity, in the direction that flatters the
+  conclusion. What it genuinely shows is that *code layout* moves these numbers
+  by ~3% under WHPX, which is the question that sweep was asking.
+  *To make the row mean what the column header says, run `--bench` under
+  `-accel whpx` on unperturbed source a handful of times.*
 * **Under TCG, treat anything below ~2× as unmeasured, not as unchanged.** A 40%
   "regression" on a single TCG run is the ordinary behaviour of half the suite. Do
   not investigate it, and — more important — do not take a 40% *improvement* as

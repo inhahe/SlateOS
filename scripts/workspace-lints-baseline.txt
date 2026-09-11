@@ -114,7 +114,6 @@ userspace/rsync
 userspace/sanitize
 userspace/screen
 userspace/sed
-userspace/seq
 userspace/service
 userspace/sha256sum
 userspace/shell

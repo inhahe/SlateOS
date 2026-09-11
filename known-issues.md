@@ -64565,7 +64565,8 @@ than a defect. **Five are wrong answers:**
 | `-b 1-3` on `ab` | passes the bytes through | **refuses the whole stream**: "did not contain valid UTF-8" |
 | `-c 1` on `éé` | the first byte | the first character |
 | `--output-delimiter` with `-b` ranges | `ab-de` | `abde`, delimiter dropped |
-| `-f 2` on a CRLF line | keeps the `` | strips it |
+| `-f 2` on a CRLF line | keeps the `
+` | strips it |
 | `-d ''` | works | refuses |
 
 The first is the one that settles it. `cut -b` is BYTE mode, and the standalone
@@ -64575,6 +64576,41 @@ work fails on binary input — CLAUDE.md item 7 in the one place it matters most
 `userspace/cut` deleted; three ledgers moved with it (lint exemptions 127 ->
 126, argv-utf8 223 -> 222, collisions 38 -> 37) without anyone fixing a
 warning.
+
+**37 -> 36 (2026-09-11): `seq`.** One of the five names the survey's FIRST
+version ranked backwards, so it is exactly where reading had already proved
+unreliable. 41 cases: **coreutils 41/41 against GNU, the standalone 28/41.**
+
+Five of the thirteen are message wording. **Eight are wrong answers**, and two
+of those would change what a script does:
+
+| case | GNU and coreutils | standalone |
+|---|---|---|
+| `seq 5 2` | **nothing** — a descending range with the default `+1` step is empty | counts backwards: `5 4 3 2` |
+| `seq -f %03g 1 3` | `001 002 003` | `1 2 3` — the option is accepted and ignored |
+| `seq -f %.2f 1 3` | `1.00 2.00 3.00` | `1 2 3` |
+| `seq -f '%g%%' 1 2` | `1%` | `1%%` |
+| `seq -f %d 1 3` | refuses: not a float format | prints anyway |
+| `seq 0x1 0x3` | `1 2 3` | refuses |
+| `seq nan` | refuses, exit 1 | exit 0, no output |
+
+`seq 5 2` is the one to read twice. `for i in $(seq $start $end)` is the
+commonest use of this program, and with `start > end` GNU runs the loop zero
+times while ours runs it *backwards*. Nothing in the script says which it got.
+
+The `-f` rows are §1006's shape in miniature: the option is parsed, stored, and
+advertised in `--help` as "use printf-style FORMAT", and does not reach the
+output.
+
+`userspace/seq` deleted; lint exemptions 126 -> 125, argv-utf8 222 -> 221,
+collisions 37 -> 36.
+
+**The tool grew a bound because of this pair.** `seq 1 inf` and `seq 1 0 5`
+are the natural ways to ask a number generator to misbehave, and the first run
+hung on them. `dup-differential.py` now caps each case at 5 s and 1 MiB and
+records a timeout as its own outcome — so a side that hangs where the other
+answers is a visible difference rather than a stuck harness. A differential
+that cannot survive the inputs it exists to try is not one.
 
 **Still open — the proper fix.** One name, one program. For each of the
 remaining 41: pick the implementation that is under test and maintained, make

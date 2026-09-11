@@ -149,17 +149,51 @@ def build(name: str, coreutils: bool, dest: Path) -> Path:
     return dest
 
 
+# Per-case wall clock, and an output cap.
+#
+# BOTH are load-bearing and neither was there on the first run, which hung.
+# "Runs forever" and "emits without end" are exactly the behaviours a
+# differential is looking for -- `seq 1 inf` and `seq 1 0 5` are the obvious
+# ways to ask for them -- so a harness that cannot survive them cannot report
+# them. A timeout is recorded as its own outcome rather than as a crash, so a
+# side that hangs where the other answers is a visible difference.
+CASE_TIMEOUT_S = 5
+CASE_OUTPUT_CAP = 1 << 20
+
+TIMED_OUT = b"<<TIMED OUT>>"
+
+
+def _capped(out: bytes) -> bytes:
+    return out if len(out) <= CASE_OUTPUT_CAP else out[:CASE_OUTPUT_CAP] + b"<<TRUNCATED>>"
+
+
 def run_local(exe: Path, args: list[str], stdin: bytes) -> tuple[bytes, bytes, int]:
-    r = subprocess.run([str(exe), *args], input=stdin, capture_output=True, check=False)
-    return r.stdout, r.stderr, r.returncode
+    try:
+        r = subprocess.run(
+            [str(exe), *args],
+            input=stdin,
+            capture_output=True,
+            check=False,
+            timeout=CASE_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        return TIMED_OUT, b"", -1
+    return _capped(r.stdout), _capped(r.stderr), r.returncode
 
 
 def run_gnu(name: str, args: list[str], stdin: bytes) -> tuple[bytes, bytes, int]:
     """The host's own implementation, through WSL."""
-    r = subprocess.run(
-        ["wsl", "-e", name, *args], input=stdin, capture_output=True, check=False
-    )
-    return r.stdout, r.stderr, r.returncode
+    try:
+        r = subprocess.run(
+            ["wsl", "-e", name, *args],
+            input=stdin,
+            capture_output=True,
+            check=False,
+            timeout=CASE_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        return TIMED_OUT, b"", -1
+    return _capped(r.stdout), _capped(r.stderr), r.returncode
 
 
 def selftest() -> int:

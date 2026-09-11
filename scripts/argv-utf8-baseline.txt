@@ -181,7 +181,6 @@ userspace/scp/src/main.rs:argv-as-string
 userspace/screen/src/main.rs:argv-as-string
 userspace/sed/src/main.rs:argv-as-string
 userspace/selinux/src/main.rs:argv-as-string
-userspace/seq/src/main.rs:argv-as-string
 userspace/service/src/main.rs:argv-as-string
 userspace/sftp/src/main.rs:argv-as-string
 userspace/sha256sum/src/main.rs:argv-as-string

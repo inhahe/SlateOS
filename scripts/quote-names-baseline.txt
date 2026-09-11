@@ -37,7 +37,7 @@
 # a macro nobody had thought to look in. An empty ratchet is a claim
 # about the detector as much as about the code.
 #
-# 188 sites across 40 files.
+# 183 sites across 38 files.
 
 userspace/arp/src/main.rs:1
 userspace/at/src/main.rs:5
@@ -65,8 +65,6 @@ userspace/nproc/src/main.rs:4
 userspace/nslookup/src/main.rs:4
 userspace/oils/src/arith.rs:1
 userspace/oils/src/interp.rs:16
-userspace/oils/tests/cli_options.rs:1
-userspace/oils/tests/redirect_dup.rs:4
 userspace/ping/src/main.rs:7
 userspace/sed/src/main.rs:1
 userspace/seq/src/main.rs:1

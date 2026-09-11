@@ -17,6 +17,31 @@
 //! split on `:`, which cannot parse a binary record — so its user list was
 //! always empty, and it fell back to inventing a session from `$USER`.
 //!
+//! # The record layout
+//!
+//! | Offset | Size | Field         |
+//! |--------|------|---------------|
+//! | 0      | 2    | ut_type (i16) |
+//! | 2      | 2    | padding       |
+//! | 4      | 4    | ut_pid (u32)  |
+//! | 8      | 32   | ut_line       |
+//! | 40     | 4    | ut_id         |
+//! | 44     | 32   | ut_user       |
+//! | 76     | 256  | ut_host       |
+//! | 332    | 4    | ut_exit       |
+//! | 336    | 4    | ut_session    |
+//! | 340    | 4    | ut_tv_sec     |
+//! | 344    | 4    | ut_tv_usec    |
+//! | 348    | 16   | ut_addr_v6    |
+//! | 364    | 20   | unused        |
+//! | = 384 bytes total              |
+//!
+//! Lifted from `userspace/last`, whose copy of this table was CORRECT ABOUT THE
+//! PADDING AT OFFSET 2 while this crate's code read four bytes there. The
+//! documentation of the fourth copy named the thing the shared implementation
+//! got wrong, which is an argument for moving prose to where the code is rather
+//! than for keeping four of each.
+//!
 //! # Why the fields are `Vec<u8>` and not `String`
 //!
 //! `who` decoded them with `String::from_utf8_lossy`. CLAUDE.md names that
@@ -40,21 +65,26 @@
 pub const RECORD_SIZE: usize = 384;
 
 // Field offsets within a record. These are the x86_64 `struct utmpx` layout.
-const UT_TYPE_OFFSET: usize = 0;
-const UT_PID_OFFSET: usize = 4;
-const UT_LINE_OFFSET: usize = 8;
-const UT_LINE_SIZE: usize = 32;
-const UT_ID_OFFSET: usize = 40;
-const UT_ID_SIZE: usize = 4;
-const UT_USER_OFFSET: usize = 44;
-const UT_USER_SIZE: usize = 32;
-const UT_HOST_OFFSET: usize = 76;
-const UT_HOST_SIZE: usize = 256;
-const UT_EXIT_OFFSET: usize = 332;
-const UT_SESSION_OFFSET: usize = 336;
-const UT_TV_SEC_OFFSET: usize = 340;
-const UT_TV_USEC_OFFSET: usize = 344;
-const UT_ADDR_OFFSET: usize = 348;
+//
+// PUBLIC because they are the format, not an implementation detail: `RECORD_SIZE`
+// has always been public for the same reason. A caller building a fixture needs
+// to lay bytes out at exactly these positions, and the alternative is each test
+// re-declaring the table this crate exists to hold once.
+pub const UT_TYPE_OFFSET: usize = 0;
+pub const UT_PID_OFFSET: usize = 4;
+pub const UT_LINE_OFFSET: usize = 8;
+pub const UT_LINE_SIZE: usize = 32;
+pub const UT_ID_OFFSET: usize = 40;
+pub const UT_ID_SIZE: usize = 4;
+pub const UT_USER_OFFSET: usize = 44;
+pub const UT_USER_SIZE: usize = 32;
+pub const UT_HOST_OFFSET: usize = 76;
+pub const UT_HOST_SIZE: usize = 256;
+pub const UT_EXIT_OFFSET: usize = 332;
+pub const UT_SESSION_OFFSET: usize = 336;
+pub const UT_TV_SEC_OFFSET: usize = 340;
+pub const UT_TV_USEC_OFFSET: usize = 344;
+pub const UT_ADDR_OFFSET: usize = 348;
 
 /// `ut_type` for an unused slot.
 pub const EMPTY: i32 = 0;

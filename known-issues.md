@@ -112,10 +112,19 @@ question marks where it printed six zeroes, which is the whole shape of it.
 **Trigger: fix them in batches by crate, dropping each from the baseline as it
 goes.** The baseline may only shrink, so the count is the progress bar.
 
-**Progress: 95 -> 89.** `ftp`'s six are fixed (2026-09-10) -- the three
+**Progress: 95 -> 84.** `ftp`'s six are fixed (2026-09-10) -- the three
 `read_line("Name: ")` and three `read_password("Password: ")` sites now
 distinguish end-of-input from an empty answer, so a closed stdin aborts the
 login instead of sending a blank password.
+
+`stty`'s five followed, and three of them were a READ-MODIFY-WRITE rather than
+a display: `stty rows 40` read the Winsize, set one field, and wrote the whole
+struct back, so a failed TIOCGWINSZ set the terminal to 40 rows and zero
+columns and discarded both pixel dimensions. That is the same shape as
+sudo/visudo rewriting /etc/sudoers from an empty read -- the fifth instance of
+the family, in a terminal instead of a file. **Worth grepping the remaining 84
+for the same pattern before working through them in order: a discarded read
+that is then written back is a different severity from one that is printed.**
 
 ## TD-B-WHO-S-W-MODE-CANNOT-BE-REACHED-BY-ANY-INVOCATION (lane B, 2026-09-10)
 

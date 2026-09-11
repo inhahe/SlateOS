@@ -131955,6 +131955,66 @@ bench_*` convention. **One caution for whoever builds it:** timing a *copy* of
 two-lists-that-must-agree failure this file records in several other places. Instrument
 the real function or expose it, rather than reimplementing it beside a stopwatch.
 
+### The tail, named — and one 256-byte write resolves its path about five times
+
+`bench_vfs_write_breakdown` measured the six tail operations of
+`Vfs::write_file_resolved` directly. Of a 43 813 ns write under WHPX:
+
+| operation | ns | share |
+|---|---|---|
+| **`journal::record`** | **14 206** | **32%** |
+| `index::on_file_changed` | 3 997 | 9% |
+| `quota::charge_bytes` | 123 | 0.3% |
+| `notify::emit_modified` | 34 | 0.1% |
+| `audit::log_ok` | 22 | 0.1% |
+| named tail | 18 382 | 42% |
+| remainder — `invalidate_negative_prefix` + memfs's own write | 25 970 | 59% |
+| resolve, access, intercept | 479 | 1.1% |
+
+`journal::record` is **one HPET read** — fixed, see the commit. What the rest shows is
+structural rather than a single hot line.
+
+### Roughly five path resolutions, for one write
+
+Following the same 256-byte write through:
+
+1. `Vfs::write_file` → `resolve_follow(path)` — resolution #1.
+2. `memfs::write_file` → `resolve_write_path(path)` — follows symlinks again to find the
+   write target — #2 — then `walk(&parent_path)` — #3 — then `child_ino`.
+3. `cache_identity` → `fs.metadata(relative)` — #4, to learn the inode the write just
+   touched.
+4. `index::on_file_changed` → `add_entry(path)` → `Vfs::stat(path)` — #5, a *full* VFS
+   resolve plus metadata, of the path the caller has been holding all along.
+
+Every one of those is correct in isolation. Together they re-derive the same answer
+about the same path up to five times inside one operation, and the information was
+available at step 1 — `write_file_resolved` already holds the resolved path, and after
+the write it holds the filesystem handle and the relative path too.
+
+So the shape of the remaining cost is not "one slow function" but **metadata being
+re-derived instead of passed forward.** The two obvious candidates, in order of
+bluntness:
+
+* `cache_identity` and `index::add_entry` both want the inode/metadata of a file the
+  write has just finished touching. A `write_file` that returned, or an internal form
+  that yielded, the resulting `(ino, size)` would remove #4 and most of #5.
+* `index::on_file_changed` takes the `INDEX` lock twice before doing any work —
+  `is_live()` locks, returns, then `is_watched()` locks again. One acquisition would do.
+
+### And `invalidate_negative_prefix`, which is the single biggest unmeasured piece
+
+It is not separately measurable — a private method on a private type — so it sits inside
+the 25 970 ns remainder together with memfs's write. What is known about it from reading:
+it iterates **all `VFS_DCACHE_SIZE` = 1024 entries on every write**, and each entry holds
+two `PathBuf`s, so it touches on the order of 80 KB per write regardless of path length
+or data size. Its purpose is narrow — drop *negative* entries that claimed this path did
+not exist, because a write may have created it — and a scan is a defensible
+implementation for a fixed 1024-slot table, but it is the one part of the write path whose
+cost grows with the cache rather than with the work.
+
+Worth measuring before being changed, which needs either a `pub(crate)` hook or the
+phase instrumentation this breakdown deliberately avoided. Recorded rather than guessed.
+
 ## TD-A-REQUEST-STATUS-HAS-NO-CHECKED-SHAPE-SO-EVERY-READER-COUNTS-DIFFERENTLY (lane A, 2026-09-11) — **open**
 
 **In short:** the `requests/` dropbox is how the three lanes hand work to each other,

@@ -145,14 +145,19 @@ import sys
 # `module::function` -> why it is deliberately never invoked.
 ALLOWLIST = {
     "proc::spawn::self_test_ctest_pty": (
-        "Disabled 2026-09-09 after its first run found a real defect. The "
-        "fixture exits 44 (parent cannot write 0x03 to the pty master) "
-        "because its child waits in a non-yielding 2,000,000-iteration spin "
-        "and exits first, closing the last slave. Not disabled for being "
-        "wrong: boot-test.sh's check_selftest_failures fails the whole run "
-        "on any 'self-test failed' line with no allowlist, so a correct "
-        "rung reporting someone else's bug reddens every lane. Re-enable in "
-        "main.rs once lane B's fixture yields in that spin -- see "
+        "Disabled again 2026-09-10 after its second run, and the REASON HAS "
+        "CHANGED -- the first disable blamed a non-yielding spin, which lane B "
+        "has since fixed (the anti-starvation line is gone from the log). Exit "
+        "is now 44: the serial log shows the child reaching zombie BEFORE the "
+        "parent writes 0x03, so the child dies at startup and the master write "
+        "correctly fails on a closed slave. The fixture returns 44 before it "
+        "reaches waitpid, so lane B's 48/49/50 (login_tty, signal, readiness "
+        "byte) cannot fire while the child dies early -- a child startup "
+        "failure is always reported as a parent write failure. Not disabled "
+        "for being wrong: boot-test.sh fails the whole run on any un-allowlisted "
+        "self-test failure, so a correct rung reporting someone else's bug "
+        "reddens every lane. Re-enable once the fixture reaps before reporting "
+        "a write failure -- see "
         "requests/b-a-run-the-ctest-pty-fixture-so-a-synthesised-ctrl-c-is-finally-tested.md."
     ),
     "hardlockup::self_test_fire": (

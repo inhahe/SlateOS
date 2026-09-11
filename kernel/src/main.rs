@@ -773,6 +773,17 @@ extern "C" fn kernel_main() -> ! {
             );
 
             cputime::init();
+            // Before init, not after, because init is this conversion's FIRST
+            // caller: it reads the CMOS clock and converts it, and the conversion
+            // used to index a 12-element month table with whatever the hardware
+            // said. A test placed after init would run after the panic it exists to
+            // prevent -- which is what the RTC's own bounds check does, eight
+            // thousand lines later at step 23, at Diagnostic severity.
+            selftest::dispatch(
+                "timekeeping",
+                selftest::Severity::Integrity,
+                timekeeping::self_test(),
+            );
             timekeeping::init();
 
             console::boot_step(console::BootStatus::Running, "Virtual memory");
@@ -2588,9 +2599,38 @@ extern "C" fn kernel_main() -> ! {
     // Reported to lane B in
     // `requests/b-a-run-the-ctest-pty-fixture-so-a-synthesised-ctrl-c-is-finally-tested.md`.
     //
-    // RE-ENABLE when lane B's fixture yields in that spin. One line: restore
-    // the `selftest::dispatch_debug` call below and drop the entry from
-    // `ALLOWLIST` in `scripts/check-self-tests-wired.py`.
+    // DISABLED AGAIN 2026-09-10, and the reason has changed, which is the point of
+    // re-running it. Exit 44 now, not 47 -- and 44 is NOT the failure it was when
+    // this rung was first disabled.
+    //
+    // The serial log orders it unambiguously. The child (process 201, task 170)
+    // becomes a zombie BEFORE the parent writes, in both runs:
+    //
+    //     [cow] Cloned address space: parent=... -> child=...
+    //     [thread] Spawned thread (task 170) in process 201
+    //     [thread] Process 201 has no threads left -- now zombie   <-- child gone
+    //     [thread] Process 200 has no threads left -- now zombie   <-- parent, exit 44
+    //
+    // So the child dies at STARTUP and the parent's `write(fm, "", 1)` then
+    // fails because the slave it would have reached is already closed. 44 is this
+    // kernel reporting correctly on a child that had already gone.
+    //
+    // Which means the fixture's error-path ORDER hides the fault: the parent
+    // returns 44 before it ever reaches `waitpid`, so lane B's new codes 48/49/50
+    // -- login_tty gave no controlling terminal, signal() refused SIGINT, the
+    // readiness byte never went out -- can never fire while the child dies early.
+    // A child startup failure is always reported as a parent write failure.
+    //
+    // The earlier 47 was the same child failure with the race falling the other
+    // way: without the yield the parent won, wrote, reaped, and saw a status that
+    // was not 77. lane B's sched_yield is correct and working -- the
+    // anti-starvation line is gone from this run -- and it let the child exit
+    // sooner, which moved the symptom from 47 to 44 without changing the cause.
+    //
+    // RE-ENABLE when the fixture reaps before reporting a write failure, or
+    // otherwise lets a child startup failure surface as 48/49/50. Reported to
+    // lane B; tracked in
+    // `requests/b-a-run-the-ctest-pty-fixture-so-a-synthesised-ctrl-c-is-finally-tested.md`.
     //
     // {
     //     #[inline(never)]

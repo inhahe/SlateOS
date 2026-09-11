@@ -1191,7 +1191,22 @@ fn parse_ascii_num(data: &[u8], offset: usize, len: usize) -> u32 {
 /// Convert a date/time to seconds since Unix epoch (1970-01-01 00:00:00 UTC).
 ///
 /// Uses the standard civil-to-days algorithm.
-fn datetime_to_epoch(year: u32, month: u32, day: u32, hour: u32, minute: u32, second: u32) -> u64 {
+/// Convert a broken-down date to Unix epoch seconds.
+///
+/// `pub(crate)` so `timekeeping::self_test` can use it as an ORACLE. This is an
+/// independent implementation of what `timekeeping::datetime_to_epoch` computes --
+/// Hinnant's algorithm, no lookup table, total by construction -- and two
+/// implementations of one calendar is maintenance debt that is also worth something:
+/// a rewrite of either has something to disagree with that was not written by the
+/// same hand on the same afternoon.
+pub(crate) fn datetime_to_epoch(
+    year: u32,
+    month: u32,
+    day: u32,
+    hour: u32,
+    minute: u32,
+    second: u32,
+) -> u64 {
     // Clamp month to valid range.
     let month = month.clamp(1, 12);
 

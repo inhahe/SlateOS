@@ -138,6 +138,71 @@ ALLOWED: dict[str, str] = {
 }
 
 
+sys.path.insert(0, SCRIPT_DIR)
+
+from rustscan import strip_comments  # noqa: E402
+
+
+def _collapse(text: str) -> str:
+    """Whitespace-insensitive form, because the recorded name and the source line
+    differ in spacing: serial output carries `[syscall] foo` and the source writes
+    `[syscall]   foo`. Matching verbatim would report a line as GONE while it is
+    still there, which is the dangerous direction for this check.
+    """
+    return ' '.join(text.split())
+
+
+def still_emitted(name: str) -> bool:
+    """Whether any source line could still print this skip.
+
+    A history-based ratchet that GATES the boot it learns from can deadlock, and
+    this one did on 2026-09-10. Three `[syscall]` skips were converted into real
+    assertions -- the resolution this gate's own message recommends -- and the gate
+    went on failing, because it judges the last 25 RECORDED boots and the fix cannot
+    be recorded until a boot happens. The gate blocked the boot that would have
+    cleared it.
+
+    So a skip whose emitting line no longer exists under `kernel/src` is reported as
+    stale rather than failed. The reasoning is sound rather than convenient: a skip
+    can only appear in a future boot if some source line prints it, so when that line
+    is gone the history describes a tree that no longer exists.
+
+    What this deliberately does NOT protect against: RENAMING a skip to silence it.
+    A renamed skip starts a fresh window and is caught again once `--min` boots have
+    accumulated, so a rename buys ten boots of quiet, not permanent quiet. That is an
+    acceptable trade for not deadlocking, and it is part of why the minimum exists.
+    """
+    # Two candidate needles: the text before `: OK` (which carries the subsystem and
+    # the syscall numbers) and the text after it (the section name). Either being
+    # present means the line can still fire. The tail alone is sometimes a single
+    # word -- `arming` -- so the head is what decides those.
+    collapsed = _collapse(name)
+    head, _, tail = collapsed.partition(': OK')
+    needles = [n for n in (_collapse(head), _collapse(tail).strip(' -' + chr(8212)))
+               if len(n) >= 8]
+    if not needles:
+        return True          # nothing distinctive enough to decide; fail closed
+    src_dir = os.path.join(REPO_ROOT, 'kernel', 'src')
+    for root, _dirs, files in os.walk(src_dir):
+        for fn in files:
+            if not fn.endswith('.rs'):
+                continue
+            try:
+                with open(os.path.join(root, fn), encoding='utf-8', errors='replace') as fh:
+                    raw = fh.read()
+            except OSError:
+                return True  # cannot read it, so cannot claim the line is gone
+            # Comments blanked, string literals kept: the skip text lives in a
+            # `serial_println!` literal, and a COMMENT quoting a removed skip would
+            # otherwise make a stale finding look live. That is the same defect this
+            # lane fixed in check-absent-operand-default this morning, where a comment
+            # quoting the line it replaced was counted as a live site -- so the shared
+            # scanner is used rather than a fresh scan of the raw text.
+            body = _collapse(strip_comments(raw, keep_literals=True))
+            if any(n in body for n in needles):
+                return True
+    return False
+
 def load(path: str) -> list[dict]:
     """Every well-formed JSON object in the history, oldest first.
 
@@ -275,6 +340,13 @@ def main(argv: list[str] | None = None) -> int:
 
     failed = False
     for name in res["always"]:
+        if not still_emitted(name):
+            print(
+                f"check-boot-skips: stale: {name} skipped on all {res['n']} "
+                f"boot(s), but no line under kernel/src prints it any more -- the "
+                f"history describes a tree that no longer exists. Not a finding."
+            )
+            continue
         failed = True
         print(f"check-boot-skips: FAIL: {name} has been skipped on all "
               f"{res['n']} of the last {res['n']} recorded boot(s). Its "

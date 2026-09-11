@@ -131642,6 +131642,47 @@ which says the allocation and copy dominated them. It also shortens the window t
 scheduler lock is held on every procfs and dashboard read, which no benchmark here
 measures and which matters more on a contended machine than the numbers above.
 
+### A trap for whoever picks up the two endpoints still marked OVER
+
+`dashboard_api_status` reports 16 549 ns against a 10 000 ns budget, and **13 484 ns
+of that is one HPET read**. The obvious way to make it pass is to stop reading the
+HPET: the endpoint only needs `uptime_secs`, `apic::tick_count()` is an atomic load
+at 100 Hz, and `uptime_ns` could be derived from it at 10 ms resolution. That change
+would remove 81% of the measured cost and turn the verdict green.
+
+**It would also be the wrong change, and the reasoning is worth stating because the
+number is so persuasive.**
+
+The 13.5 µs is not what an HPET read costs. It is what a *VM exit* costs under
+Hyper-V/WHPX. Under TCG the same read is **448 ns**, because the HPET is emulated
+inline there, and on real hardware an MMIO timer read is in that neighbourhood rather
+than in microseconds. The 10 000 ns budget was set for hardware. So on the platform
+the budget describes, `now_ns()` is already cheap and there is nothing to fix.
+
+Dropping nanosecond uptime to satisfy that benchmark would be **degrading the product
+to satisfy the test surface** — trading real reported precision for a number that is
+only red on one accelerator. It is the same error as tuning against an emulator's
+instruction timings, arriving through a more respectable-looking door: a failing
+budget, a named cost, and a clean fix.
+
+The tell that distinguishes this case from a real finding is available and cheap:
+**compare the two accelerators.** A cost that is 30× larger under hardware
+virtualisation than under emulation is a VM exit, not work —
+`comparable_records`' docstring says so, and `hpet_read` measures exactly that
+(448 ns TCG, 13 484 ns WHPX, 0.03×). Real work goes the other way: the median
+benchmark is 4.2× *faster* under WHPX.
+
+So the correct next step for these two endpoints is the one already recorded —
+**measure them under TCG**, where the timer is not a VM exit and the budget is being
+compared against something like the quantity it was written for. Not to optimise the
+clock away.
+
+*(Noting this rather than acting on it because the change is four lines and looks
+like a win from every angle except the one that matters. The allocation removed in
+`task_count` was a real defect on every surface — 55–74% on three endpoints, with an
+unchanged control — and this is the opposite: an artifact that would cost real
+precision to silence.)*
+
 ## TD-A-REQUEST-STATUS-HAS-NO-CHECKED-SHAPE-SO-EVERY-READER-COUNTS-DIFFERENTLY (lane A, 2026-09-11) — **open**
 
 **In short:** the `requests/` dropbox is how the three lanes hand work to each other,

@@ -2940,6 +2940,9 @@ version = "0.1.0"
 [[package]]
 name = "thermald"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "tictactoe"
@@ -3040,6 +3043,7 @@ version = "0.1.0"
 name = "udevd"
 version = "0.1.0"
 dependencies = [
+ "optionalfile",
  "quoting",
 ]
 

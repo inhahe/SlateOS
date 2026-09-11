@@ -112,7 +112,7 @@ question marks where it printed six zeroes, which is the whole shape of it.
 **Trigger: fix them in batches by crate, dropping each from the baseline as it
 goes.** The baseline may only shrink, so the count is the progress bar.
 
-**Progress: 95 -> 84.** `ftp`'s six are fixed (2026-09-10) -- the three
+**Progress: 95 -> 75.** `ftp`'s six are fixed (2026-09-10) -- the three
 `read_line("Name: ")` and three `read_password("Password: ")` sites now
 distinguish end-of-input from an empty answer, so a closed stdin aborts the
 login instead of sending a blank password.
@@ -122,7 +122,22 @@ a display: `stty rows 40` read the Winsize, set one field, and wrote the whole
 struct back, so a failed TIOCGWINSZ set the terminal to 40 rows and zero
 columns and discarded both pixel dimensions. That is the same shape as
 sudo/visudo rewriting /etc/sudoers from an empty read -- the fifth instance of
-the family, in a terminal instead of a file. **Worth grepping the remaining 84
+the family, in a terminal instead of a file.
+
+`last`'s six followed (four wtmp fields, two lastlog), and then `udevd`'s two
+and `thermald`'s one, which were **not** display defects:
+
+* `udevd` matched udev rules with `read_sysfs_attr(..).unwrap_or_default()`.
+  An unreadable attribute became `""`, so `ATTR{x}=="v"` did not match --
+  harmless -- but `ATTR{x}!="v"` became `!glob_match(v, "")`, **true**. A rule
+  saying "apply to devices whose attribute is not v" fired for a device whose
+  attribute could not be read, and a matching rule there sets OWNER and MODE on
+  the device node. The same missing value failed closed one way and open the
+  other.
+* `thermald` read `trip_point_N_type` after checking the file exists, so a
+  failure was a read error rather than an absent trip point -- and it fell to
+  `_ => continue`, dropping the trip point silently. On a thermal daemon that
+  can be the critical one. **Worth grepping the remaining 84
 for the same pattern before working through them in order: a discarded read
 that is then written back is a different severity from one that is printed.**
 

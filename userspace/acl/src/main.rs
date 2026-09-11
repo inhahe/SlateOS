@@ -21,6 +21,9 @@ const VERSION: &str = "0.1.0";
 // ============================================================================
 
 #[derive(Clone, Debug, PartialEq)]
+// `User` and `Group` are constructed only by `parse_acl_entry`, which is the
+// extended-entry reader this build cannot reach yet. See its doc comment.
+#[allow(dead_code)]
 enum AclTag {
     UserObj,
     User(String),
@@ -45,6 +48,9 @@ struct Perms {
 }
 
 impl Perms {
+    /// Dead for the same reason as [`parse_acl_entry`], which is its only
+    /// caller; see there.
+    #[allow(dead_code)]
     fn from_rwx(s: &str) -> Self {
         Self {
             read: s.contains('r'),
@@ -85,6 +91,22 @@ struct FileAcl {
 // ACL parsing
 // ============================================================================
 
+/// Parse one `user:name:rwx` entry.
+///
+/// NOT CALLED BY THE PROGRAM, and kept deliberately. It is the other half of a
+/// read this build cannot do: extended ACL entries live in extended
+/// attributes, `posix` lists every xattr call as a stub, and this is the
+/// function that would turn `user:www-data:r--` into an `AclEntry` the moment
+/// one could be fetched. Its 18 tests describe the format precisely.
+///
+/// It went quiet when `setfacl` was deleted -- that command parsed entries in
+/// order to apply them, and it applied nothing. Deleting this too would throw
+/// away correct, tested code that the working version needs, so it is marked
+/// rather than removed.
+///
+/// TRIGGER: when `getxattr` stops being a stub, call this from `read_file_acl`
+/// and drop the allow.
+#[allow(dead_code)]
 fn parse_acl_entry(s: &str) -> Option<AclEntry> {
     let is_default = s.starts_with("default:");
     let entry_str = if is_default {
@@ -128,101 +150,81 @@ fn parse_acl_entry(s: &str) -> Option<AclEntry> {
     })
 }
 
-fn read_file_acl(path: &str) -> FileAcl {
-    // Try reading extended attributes for ACLs.
-    let xattr_path = "/proc/self/fd/0".to_string(); // placeholder
-    let _ = xattr_path;
-
-    // Read basic permissions from stat.
-    let metadata = fs::metadata(path);
-    let (owner, group, access) = if let Ok(_meta) = metadata {
-        // On a real system we'd get uid/gid and convert to names.
-        let owner = "root".to_string();
-        let group = "root".to_string();
-        // Default ACL from file mode.
-        let mode = 0o755u32; // Default.
-        let access = vec![
-            AclEntry {
-                tag: AclTag::UserObj,
-                perms: Perms::from_mode(mode, 6),
-                _default: false,
-            },
-            AclEntry {
-                tag: AclTag::GroupObj,
-                perms: Perms::from_mode(mode, 3),
-                _default: false,
-            },
-            AclEntry {
-                tag: AclTag::Other,
-                perms: Perms::from_mode(mode, 0),
-                _default: false,
-            },
-        ];
-        (owner, group, access)
-    } else {
-        generate_default_acl()
-    };
-
-    FileAcl {
-        path: path.to_string(),
-        owner,
-        group,
-        access,
-        default: Vec::new(),
-    }
+/// The file's ownership and mode, or `None` where this build cannot ask.
+///
+/// Unix only. The host build exists to run the test suite and has no uid, gid
+/// or mode to report; returning zeros there would be the same defect this
+/// commit removes, one platform over.
+#[cfg(unix)]
+fn file_ids_and_mode(meta: &fs::Metadata) -> Option<(u32, u32, u32)> {
+    use std::os::unix::fs::MetadataExt;
+    Some((meta.uid(), meta.gid(), meta.mode()))
 }
 
-fn generate_default_acl() -> (String, String, Vec<AclEntry>) {
-    let owner = "root".to_string();
-    let group = "root".to_string();
+#[cfg(not(unix))]
+fn file_ids_and_mode(_meta: &fs::Metadata) -> Option<(u32, u32, u32)> {
+    None
+}
+
+/// A uid as a name, or the number when the database cannot say.
+///
+/// Printing the number is what real getfacl does for an unresolvable id, and
+/// it is true: the number was read from the inode.
+fn uid_name(uid: u32) -> String {
+    userdb::UserDb::load(userdb::DEFAULT_PATH)
+        .ok()
+        .and_then(|db| db.find_uid(uid).and_then(userdb::Record::username))
+        .unwrap_or_else(|| uid.to_string())
+}
+
+/// The access ACL of `path`, or `Err` saying why there is none to report.
+///
+/// # What this replaced
+///
+/// It called `fs::metadata` and DISCARDED the result -- `if let Ok(_meta)` --
+/// then reported owner "root", group "root" and mode 0o755 for every file,
+/// readable or not. On the failing branch it called `generate_default_acl`,
+/// which added `user:www-data:r--`: a permissions claim naming a real service
+/// account, about a file whose ownership had never been read. `getfacl` is
+/// what somebody runs to audit who can reach a file.
+///
+/// # What it can honestly report
+///
+/// The three base entries -- `user::`, `group::`, `other::` -- are defined by
+/// the file mode, which is real and readable. Extended entries live in
+/// extended attributes, and `posix` lists every xattr call as a stub, so this
+/// build cannot read them and does not pretend to: `has_extended` stays false
+/// and the caller prints nothing rather than inventing an entry.
+fn read_file_acl(path: &str) -> Result<FileAcl, String> {
+    let meta = fs::metadata(path).map_err(|e| format!("{path}: {e}"))?;
+    let (uid, gid, mode) = file_ids_and_mode(&meta)
+        .ok_or_else(|| format!("{path}: this build cannot read file ownership"))?;
+
     let access = vec![
         AclEntry {
             tag: AclTag::UserObj,
-            perms: Perms {
-                read: true,
-                write: true,
-                execute: true,
-            },
-            _default: false,
-        },
-        AclEntry {
-            tag: AclTag::User("www-data".to_string()),
-            perms: Perms {
-                read: true,
-                write: false,
-                execute: false,
-            },
+            perms: Perms::from_mode(mode, 6),
             _default: false,
         },
         AclEntry {
             tag: AclTag::GroupObj,
-            perms: Perms {
-                read: true,
-                write: false,
-                execute: true,
-            },
-            _default: false,
-        },
-        AclEntry {
-            tag: AclTag::Mask,
-            perms: Perms {
-                read: true,
-                write: false,
-                execute: true,
-            },
+            perms: Perms::from_mode(mode, 3),
             _default: false,
         },
         AclEntry {
             tag: AclTag::Other,
-            perms: Perms {
-                read: true,
-                write: false,
-                execute: true,
-            },
+            perms: Perms::from_mode(mode, 0),
             _default: false,
         },
     ];
-    (owner, group, access)
+
+    Ok(FileAcl {
+        path: path.to_string(),
+        owner: uid_name(uid),
+        group: uid_name(gid),
+        access,
+        default: Vec::new(),
+    })
 }
 
 // ============================================================================
@@ -382,125 +384,39 @@ fn cmd_getfacl(args: &[String]) {
 
     let stdout = io::stdout();
     let mut out = stdout.lock();
+    let mut failed = false;
+
+    // A file whose ownership cannot be read has no ACL to report, and saying
+    // so per file is what real getfacl does -- it continues to the next
+    // operand and exits non-zero at the end.
+    let show =
+        |out: &mut io::StdoutLock<'_>, path: &str, failed: &mut bool| match read_file_acl(path) {
+            Ok(acl) => print_file_acl(out, &acl, omit_header, absolute, tabular),
+            Err(e) => {
+                eprintln!("getfacl: {e}");
+                *failed = true;
+            }
+        };
 
     for path in &paths {
-        let acl = read_file_acl(path);
-        print_file_acl(&mut out, &acl, omit_header, absolute, tabular);
+        show(&mut out, path, &mut failed);
 
         if recursive && let Ok(entries) = fs::read_dir(path) {
             for entry in entries.flatten() {
                 let child = entry.path().to_string_lossy().to_string();
-                let child_acl = read_file_acl(&child);
-                print_file_acl(&mut out, &child_acl, omit_header, absolute, tabular);
+                show(&mut out, &child, &mut failed);
             }
         }
+    }
+
+    if failed {
+        process::exit(1);
     }
 }
 
 // ============================================================================
 // setfacl command
 // ============================================================================
-
-fn cmd_setfacl(args: &[String]) {
-    let mut modify_entries: Vec<String> = Vec::new();
-    let mut remove_entries: Vec<String> = Vec::new();
-    let mut remove_all = false;
-    let mut remove_default = false;
-    let mut set_entries: Vec<String> = Vec::new();
-    let mut recursive = false;
-    let mut paths: Vec<String> = Vec::new();
-
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "-h" | "--help" => {
-                println!("Usage: setfacl [options] <file> [file ...]");
-                println!();
-                println!("Set file access control lists.");
-                println!();
-                println!("Options:");
-                println!("  -m, --modify ACL   Modify ACL entries");
-                println!("  -x, --remove ACL   Remove ACL entries");
-                println!("  -b, --remove-all   Remove all ACL entries");
-                println!("  -k, --remove-default Remove default ACL");
-                println!("  --set ACL          Set ACL (replaces existing)");
-                println!("  -R, --recursive    Recurse into directories");
-                println!("  -n, --no-mask      Don't recalculate mask");
-                println!("  -M, --modify-file FILE  Read entries from file");
-                println!("  -h, --help         Show help");
-                println!("  -V, --version      Show version");
-                process::exit(0);
-            }
-            "-V" | "--version" => {
-                println!("setfacl {VERSION}");
-                process::exit(0);
-            }
-            "-m" | "--modify" => {
-                i += 1;
-                if i < args.len() {
-                    modify_entries.push(args[i].clone());
-                }
-            }
-            "-x" | "--remove" => {
-                i += 1;
-                if i < args.len() {
-                    remove_entries.push(args[i].clone());
-                }
-            }
-            "-b" | "--remove-all" => remove_all = true,
-            "-k" | "--remove-default" => remove_default = true,
-            "--set" => {
-                i += 1;
-                if i < args.len() {
-                    set_entries.push(args[i].clone());
-                }
-            }
-            "-R" | "--recursive" => recursive = true,
-            s if !s.starts_with('-') => paths.push(s.to_string()),
-            _ => {}
-        }
-        i += 1;
-    }
-
-    if paths.is_empty() {
-        eprintln!("setfacl: no files specified");
-        process::exit(1);
-    }
-
-    for path in &paths {
-        if remove_all {
-            eprintln!("setfacl: removing all ACL entries from {path}");
-        }
-        if remove_default {
-            eprintln!("setfacl: removing default ACL from {path}");
-        }
-        for entry_str in &set_entries {
-            if let Some(entry) = parse_acl_entry(entry_str) {
-                eprintln!(
-                    "setfacl: setting {} on {path}: {}{}",
-                    entry_str,
-                    format_acl_tag(&entry.tag),
-                    entry.perms.to_rwx()
-                );
-            }
-        }
-        for entry_str in &modify_entries {
-            if let Some(entry) = parse_acl_entry(entry_str) {
-                eprintln!(
-                    "setfacl: modifying {path}: {}{}",
-                    format_acl_tag(&entry.tag),
-                    entry.perms.to_rwx()
-                );
-            }
-        }
-        for entry_str in &remove_entries {
-            eprintln!("setfacl: removing {entry_str} from {path}");
-        }
-        if recursive {
-            eprintln!("setfacl: recursing into {path}");
-        }
-    }
-}
 
 // ============================================================================
 // CLI
@@ -509,27 +425,20 @@ fn cmd_setfacl(args: &[String]) {
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    let prog_name = {
-        let s = args.first().map(|s| s.as_str()).unwrap_or("getfacl");
-        let bytes = s.as_bytes();
-        let mut last_sep = 0;
-        for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' {
-                last_sep = i + 1;
-            }
-        }
-        let base = &s[last_sep..];
-        let base = base.strip_suffix(".exe").unwrap_or(base);
-        base.to_string()
-    };
-
     let rest: Vec<String> = args.into_iter().skip(1).collect();
 
-    match prog_name.as_str() {
-        "setfacl" => cmd_setfacl(&rest),
-        "chacl" => cmd_setfacl(&rest),
-        _ => cmd_getfacl(&rest),
-    }
+    // `setfacl` and `chacl` ARE GONE, under design-decisions 1006: a command
+    // that does not work is deleted, not kept as a stub. They printed
+    // "setfacl: removing all ACL entries from <path>", "modifying ...",
+    // "recursing into <path>" -- and this crate contains no write of any kind.
+    // Zero fs::write, File::create, set_permissions or setxattr in 793 lines.
+    // Announcing a modification that did not happen is worse than refusing,
+    // because the output is the only evidence anybody has.
+    //
+    // They cannot be implemented here yet either: ACL entries live in extended
+    // attributes and `posix` lists every xattr call as a stub. The names come
+    // back when there is something behind them.
+    cmd_getfacl(&rest);
 }
 
 // ============================================================================
@@ -710,14 +619,6 @@ mod tests {
         }];
         let mask = get_mask_perms(&entries);
         assert_eq!(mask.to_rwx(), "r-x");
-    }
-
-    #[test]
-    fn test_generate_default_acl() {
-        let (owner, group, access) = generate_default_acl();
-        assert_eq!(owner, "root");
-        assert_eq!(group, "root");
-        assert!(access.len() >= 4);
     }
 
     #[test]

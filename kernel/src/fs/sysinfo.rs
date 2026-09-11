@@ -322,9 +322,30 @@ pub fn storage_info() -> Vec<StorageDevice> {
     STATE.lock().storage.clone()
 }
 
+/// How many storage devices are known.
+///
+/// Exists because `procfs::gen_sysinfo` wanted only the count and the only way
+/// to get it was [`storage_info`]`().len()`, which clones the whole table --
+/// and `StorageDevice` owns a `PathBuf` and a `String`, so that is two
+/// allocations per device plus the `Vec`, all freed again immediately. Same
+/// reasoning as `sched::task_count`, at a much smaller scale: there are a few
+/// devices rather than a scheduler's worth of tasks, so this is about not
+/// allocating on a read path rather than about a measured cost.
+pub fn storage_count() -> usize {
+    STATE.lock().storage.len()
+}
+
 /// Get GPU information.
 pub fn gpu_info() -> Vec<GpuInfo> {
     STATE.lock().gpus.clone()
+}
+
+/// How many GPUs are known.
+///
+/// See [`storage_count`]; `GpuInfo` owns three `String`s, so the cloning form
+/// cost three allocations per GPU to produce one integer.
+pub fn gpu_count() -> usize {
+    STATE.lock().gpus.len()
 }
 
 /// Get network interfaces.

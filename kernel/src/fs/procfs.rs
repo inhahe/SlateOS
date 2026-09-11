@@ -7634,12 +7634,9 @@ fn gen_sysinfo() -> Vec<u8> {
     out.push_str(&format!("Scheduler:  {}\n", kp.sched_model));
     out.push_str(&format!(
         "Storage:    {} devices\n",
-        super::sysinfo::storage_info().len()
+        super::sysinfo::storage_count()
     ));
-    out.push_str(&format!(
-        "GPUs:       {}\n",
-        super::sysinfo::gpu_info().len()
-    ));
+    out.push_str(&format!("GPUs:       {}\n", super::sysinfo::gpu_count()));
 
     out.into_bytes()
 }

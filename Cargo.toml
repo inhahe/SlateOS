@@ -89,6 +89,10 @@ members = [
     "killconv",
     "ttyidle",
     "utmpfile",
+    # Reading a secret from the terminal without showing it. Three programs --
+    # ftp, passwd, su -- each shipped a comment saying echo ought to be turned
+    # off here, and none of them did it.
+    "readpass",
     # Reading a file whose absence is normal but whose unreadability is not.
     # Four programs wrote read_to_string(p).unwrap_or_default() independently,
     # which collapses "absent" and "could not read" into one empty string; in

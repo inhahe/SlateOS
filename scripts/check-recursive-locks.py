@@ -691,7 +691,17 @@ def self_test() -> int:
 
 
 def main() -> int:
-    if "--self-test" in sys.argv[1:]:
+    # BOTH SPELLINGS, AND NO SILENT FALL-THROUGH. `--selftest` used to miss
+    # this branch and run the real 807-file scan instead, exiting 0 -- so a
+    # mistyped self-test reported success without testing the parser at all.
+    selftest_spellings = ("--self-test", "--selftest", "--self_test")
+    unknown = [a for a in sys.argv[1:]
+               if a.startswith("-") and a not in selftest_spellings]
+    if unknown:
+        print(f"check-recursive-locks.py: unrecognised option {unknown[0]!r}.",
+              file=sys.stderr)
+        return 2
+    if any(a in selftest_spellings for a in sys.argv[1:]):
         return self_test()
     root = Path(__file__).resolve().parent.parent / "kernel" / "src"
     if not root.is_dir():

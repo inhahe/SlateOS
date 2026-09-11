@@ -1562,7 +1562,7 @@ def resolve_rename(name, renames):
     return name
 
 
-def unexplained_removals(removed, current, renames):
+def unexplained_removals(removed, current, renames, declared=None):
     """Split vanished benchmark names into the two ways they can be wrong.
 
     Returns `(undeclared, misdeclared)`: names with no entry in the rename
@@ -1578,8 +1578,21 @@ def unexplained_removals(removed, current, renames):
     a successor present in this very record. Absence of evidence excuses
     nothing, which is what keeps the ledger from decaying into an allow-list.
     """
+    # A name the SOURCE still records has not stopped being measured -- the records
+    # simply lag it by one run, which happens every time a series is added or removed.
+    # Treating that as a loss deadlocks the boot test this gates: clearing it needs a
+    # new record, and the gate runs before the run that would write one. Same shape as
+    # `check-boot-skips.py`'s `still_emitted()`, and the same remedy.
+    #
+    # Positive evidence, not absence of it: excused because the source says the series
+    # continues, not because nothing says it stopped. A name absent from the source as
+    # well still falls through to the checks below and still fails.
+    if declared is None:
+        declared = declared_series()
     undeclared, misdeclared = [], []
     for name in sorted(removed):
+        if name in declared:
+            continue
         successor = resolve_rename(name, renames)
         if successor == name:
             undeclared.append(name)
@@ -4006,6 +4019,32 @@ KERNEL_SRC = os.path.join(REPO_ROOT, "kernel", "src")
 #: benchmarks out of every log it was given. The suite caught it; nothing else
 #: would have, because an empty parse looks like a boot that scored nothing.
 SCORE_CALL_RE = re.compile(r'\bscore\(\s*"([^"]+)"')
+#: `track("name", ...)` -- the same thing for a series with no target.
+#:
+#: Separate from `SCORE_CALL_RE` rather than widened into it, because the two answer
+#: different questions and one caller wants only the first: a *scored* series has a
+#: budget and a *tracked* one does not. `declared_series` unions them, because the
+#: question it answers -- is this name still measured? -- does not care which.
+TRACK_CALL_RE = re.compile(r'\btrack\(\s*"([^"]+)"')
+
+
+def declared_series(bench_source=BENCH_SOURCE):
+    """Every series name `kernel/src/bench.rs` still records, scored or tracked.
+
+    The authority for "is this benchmark still measured?". `bench/history.jsonl` is
+    only a proxy for it, and a proxy that lags by one run every time a series is
+    added or removed -- which is what made a records-only comparison deadlock the
+    boot test it gates. See `unexplained_removals`.
+
+    Returns an empty set if the source cannot be read, which makes the caller fall
+    back to the stricter records-only behaviour rather than excusing everything: a
+    scanner that cannot see the source must not be the reason a removal passes.
+    """
+    try:
+        text = open(bench_source, encoding="utf-8", errors="replace").read()
+    except OSError:
+        return set()
+    return set(SCORE_CALL_RE.findall(text)) | set(TRACK_CALL_RE.findall(text))
 #: A column-0 `fn`, i.e. the start of a new benchmark body.
 BENCH_FN_RE = re.compile(r"^(?:pub(?:\([^)]*\))?\s+)?(?:unsafe\s+)?"
                          r"(?:extern\s+\"C\"\s+)?fn\s+(\w+)")

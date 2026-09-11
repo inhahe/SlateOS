@@ -6534,15 +6534,36 @@ fn bench_vfs_write_breakdown() {
     let resolved_only = run("vfs_write_breakdown_resolved", 200, || {
         let _ = core::hint::black_box(Vfs::write_file_resolved(&resolved, &data));
     });
-    // No `ns` phase here, deliberately. `ipc::namespace::check_writable` opens with
-    // `if ns_fast_path_available() { return Ok(()); }` -- one atomic load, and its own
-    // comment says that deliberately skips `owner_process`'s THREAD_OWNERS lock
-    // because the process id is not needed when nothing is gated. Measured at 4 ns,
-    // which tripped the harness's BELOW-FLOOR check by sitting exactly on the
-    // 18-cycle empty-closure floor. The reading was correct, the phase was 0.009% of
-    // the total, and `vfs_stat_breakdown_ns` already covers this module above the
-    // floor -- so keeping it bought a permanent BELOW-FLOOR line every run for no
-    // information.
+    // RESTORED 2026-09-11, having been removed earlier the same day. It reads 4 ns --
+    // `ipc::namespace::check_writable` opens with
+    // `if ns_fast_path_available() { return Ok(()); }`, one atomic load -- which sits
+    // exactly on the 18-cycle empty-closure floor and therefore trips the harness's
+    // BELOW-FLOOR check on every run. I removed it for that reason. That was wrong.
+    //
+    // Two of this harness's own mechanisms disagree here, and the stronger one is not
+    // the one that prints:
+    //
+    //   * BELOW-FLOOR says a reading at the floor is suspect, and its own message
+    //     names the benign explanation. Cost of living with it: one informational
+    //     line per --bench run.
+    //   * test-bench-history.py's "no undeclared benchmark vanished between
+    //     consecutive records" says a recorded series must not stop being measured.
+    //     Cost of breaking it: the series' history is orphaned, and the records
+    //     cannot be regenerated -- each is a ~9-minute boot of a commit now past.
+    //
+    // bench/renamed-series.txt deliberately has no retirement syntax: a declared
+    // rename is excused only while its successor is being measured, because coverage
+    // lost silently is what the guard exists to stop. So the honest options were to
+    // restore this or to rename it onto a live series, and there is no live series it
+    // continues into.
+    //
+    // Left at one call rather than amortised over N: looping inside the closure would
+    // make the number mean "N calls", and this harness's rule is that a redefined
+    // benchmark needs a NEW name -- which would orphan this series all over again.
+    let raw = crate::fs::path::Path::new(PATH);
+    let ns_only = run("vfs_write_breakdown_ns", 200, || {
+        let _ = core::hint::black_box(crate::ipc::namespace::check_writable(raw));
+    });
     let access_only = run("vfs_write_breakdown_access", 200, || {
         let _ = core::hint::black_box(crate::fs::vfs::check_path_access(
             &resolved,
@@ -6574,7 +6595,10 @@ fn bench_vfs_write_breakdown() {
         crate::fs::audit::log_ok(crate::fs::audit::AuditOp::Write, 0, &resolved);
     });
 
-    let named = access_only.min_ns.saturating_add(intercept_only.min_ns);
+    let named = ns_only
+        .min_ns
+        .saturating_add(access_only.min_ns)
+        .saturating_add(intercept_only.min_ns);
     let tail = quota_only
         .min_ns
         .saturating_add(notify_only.min_ns)
@@ -6590,10 +6614,11 @@ fn bench_vfs_write_breakdown() {
 
     serial_println!(
         "[bench]   vfs_write_breakdown: full {}ns, resolved {}ns (resolve {}ns), \
-         access {}ns + intercept {}ns = {}ns, remainder {}ns",
+         ns {}ns + access {}ns + intercept {}ns = {}ns, remainder {}ns",
         full.min_ns,
         resolved_only.min_ns,
         full.min_ns.saturating_sub(resolved_only.min_ns),
+        ns_only.min_ns,
         access_only.min_ns,
         intercept_only.min_ns,
         named,
@@ -6618,6 +6643,7 @@ fn bench_vfs_write_breakdown() {
 
     track("vfs_write_breakdown_full", &full);
     track("vfs_write_breakdown_resolved", &resolved_only);
+    track("vfs_write_breakdown_ns", &ns_only);
     track("vfs_write_breakdown_access", &access_only);
     track("vfs_write_breakdown_intercept", &intercept_only);
     track("vfs_write_breakdown_quota", &quota_only);

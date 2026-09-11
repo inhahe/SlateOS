@@ -132,6 +132,5 @@ userspace/vmstat
 userspace/wall
 userspace/watch
 userspace/who
-userspace/xargs
 userspace/xdg
 userspace/yacc

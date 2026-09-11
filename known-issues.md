@@ -64783,6 +64783,30 @@ lint programme above is still worth doing; it is not a substitute for a
 differential, and two of its three crates so far were duplicates that a
 differential then deleted.
 
+**23 -> 22 (2026-09-11): `xargs`, which PANICS on a non-UTF-8 argument.**
+`DIFF_PKG=xargs bash scripts/xargs-diff.sh`:
+
+**coreutils 334 passed, 0 differed. The standalone 133 passed, 201 differed.**
+
+This one contains the most serious single defect the whole §1005 campaign has
+found.
+
+| | cases | defect |
+|---|---|---|
+| **PANIC on a non-UTF-8 argv** | **24** | `printf 'a b
+' \| xargs argv café` — with `café` in Latin-1 — aborts with `thread 'main' panicked at library/std/src/env.rs:878: called Result::unwrap()`, **exit 134**. It is `std::env::args()` unwrapping, and it is a crash rather than an error. `xargs`'s entire job is handing arbitrary bytes to another program; GNU passes the byte through and exits 0. This is CLAUDE.md self-review item 7 and the `unwrap_used` lint in one place, in the program least entitled to assume its input is text. |
+| **`` and `` are not whitespace** | **40** | GNU splits arguments on vertical tab and form feed; the standalone keeps them inside the argument, so `a b` yields the argument `a` instead of `a`, and ` a` yields two arguments where GNU yields one. Exit 0 both ways — **the executed command silently receives different arguments**. |
+| `-E` / `--eof` unimplemented | 69 | the logical-EOF marker, the option that stops `xargs` at a sentinel line. |
+| message shape | 42 | `unterminated single quote` for GNU's `unmatched single quote; by default quotes are special to xargs unless you use the -0 option` — GNU's sentence names the fix, and the exit status differs too (125 against 1). |
+| accepts what GNU refuses | 11 | a quote left open across a newline is accepted as a literal; and `-s 25` with a 30-byte argument **runs anyway** where GNU refuses with `argument line too long` — the one option whose whole purpose is to impose a limit. |
+| `(os error 2)` | 15 | |
+
+**The panic and the `-s` overrun are the two that matter beyond this pair.**
+A tool that aborts on a byte it cannot decode is worse than one that errors,
+because exit 134 is indistinguishable from the child having been killed; and a
+size limit that is not enforced silently hands the kernel the `E2BIG` the
+option exists to prevent.
+
 **24 -> 23 (2026-09-11): `split`, whose `-C` is not implemented but exits 0.**
 `DIFF_PKG=split bash scripts/split-diff.sh`:
 

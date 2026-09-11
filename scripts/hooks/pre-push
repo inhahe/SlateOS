@@ -41,6 +41,8 @@
 #      the caller sets — `$USER`, `$TTY`, `$HOSTNAME` and the rest.
 #  24. Refuse a roadmap entry marked `[x]` that names a program nothing in
 #      the tree can produce.
+#  25. Refuse a raw control byte -- below 0x20 and not TAB, LF or CR, or
+#      0x7F -- in a tracked text file.
 #
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented; wrong again the moment gate 13 was written, when the
@@ -3528,6 +3530,84 @@ echo "pre-push: $n_ran gate(s) ran, $n_skipped skipped." >&2
 # Asked for by lane A in
 # requests/a-b-the-halt-should-warn-at-push-time-but-must-not-block-the-push.md
 # ---------------------------------------------------------------------------
+# Gate 25: refuse to publish a raw control byte in a text file.
+#
+# A byte below 0x20 that is not TAB, LF or CR, and 0x7F. Almost always a shell
+# heredoc, which collapses `\0`, `\b` and `\n` into the byte they name before
+# the receiving program ever runs -- so the program writes the byte and commits
+# it.
+#
+# WHY IT NEEDS A GATE AT ALL, given nothing misbehaves: two of the six found on
+# 2026-09-11 were Rust byte-string literals, and Rust accepts a raw NUL inside
+# one. `b"hello<NUL>"` and `b"hello\0"` are the SAME VALUE, so those crates
+# compiled, passed their tests and shipped with unreadable literals in them.
+# A defect that changes the source and not the behaviour has no natural
+# discovery path -- no build, lint, test or review can see it. The others were
+# documentation, and were silently WRONG INSTRUCTIONS: a comment quoting the
+# regex `\b(\w+)::` with the `\b` turned into a backspace.
+#
+# UNSCOPED BY PATH, unlike most gates here, because there is no subtree this
+# cannot land in -- it has already landed in kernel/, posix/, userspace/ and
+# scripts/. `--pushed` keeps that affordable: it reads only the paths the new
+# commits touch, which is half a second against the 18 seconds a whole-tree
+# `--head` costs per sha.
+#
+# One run per pushed ref rather than per sha, because `--pushed` already walks
+# every commit the push would publish (`git log <sha> --not --remotes`), so a
+# byte added by one commit and removed by a later one is still caught -- the
+# same reasoning gate 1 uses for todo2.txt.
+# ---------------------------------------------------------------------------
+ctlbytes="${repo_root:-.}/scripts/check-control-bytes.py"
+skip_ctlbytes=0
+# Bypass: ALLOW_CONTROL_BYTES=1 git push origin <branch>
+if [ "${ALLOW_CONTROL_BYTES:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_CONTROL_BYTES=1 set — skipping the control-byte gate." >&2
+    skip_ctlbytes=1
+fi
+[ -n "$py" ] || skip_ctlbytes=1
+[ -f "$ctlbytes" ] || skip_ctlbytes=1
+[ -n "${pushed_shas# }" ] || skip_ctlbytes=1
+note_gate control-bytes "$skip_ctlbytes"
+
+ctlbytes_failed=0
+if [ "$skip_ctlbytes" != "1" ]; then
+    # The checker before its verdict, as every gate here does. This one has
+    # earned it twice: its first classifier called a freshly corrupted source
+    # file binary and skipped it, and its second called every short file
+    # binary. Both printed a confident "clean".
+    if ! run_checker control-bytes-selftest "$py" "$ctlbytes" --selftest; then
+        echo "pre-push: check-control-bytes.py FAILED ITS OWN SELF-TEST — its verdict is not trustworthy." >&2
+        ctlbytes_failed=1
+    else
+        for sha in $pushed_shas; do
+            if ! run_checker "control-bytes-$sha" "$py" "$ctlbytes" \
+                    --pushed "$sha" --remote "$remote_name"; then
+                ctlbytes_failed=1
+            fi
+        done
+    fi
+fi
+
+if [ "$ctlbytes_failed" != "0" ]; then
+    cat >&2 <<EOF
+
+pre-push: REFUSING to push — a raw control byte in a tracked text file.
+
+Almost always a shell heredoc: \`\\0\`, \`\\b\` and \`\\n\` are collapsed into the
+byte they name before the receiving program sees them. Write the file with
+the Write tool, or from a script on disk, rather than through a heredoc.
+
+If the byte is deliberate:
+    python scripts/check-control-bytes.py --update-baseline
+and then say in the baseline why it is there.
+
+To push anyway:
+    ALLOW_CONTROL_BYTES=1 git push $remote_name ...
+
+EOF
+    exit 1
+fi
+
 if [ "$skip" -eq 0 ] && [ -f "$repo_root/scripts/check-lane-signals.py" ]; then
     if ! "$py" "$repo_root/scripts/check-lane-signals.py" --quiet >&2; then
         echo "" >&2

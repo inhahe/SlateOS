@@ -80,9 +80,17 @@ got to yet, and both are worth a line of explanation.
 Usage:
     python scripts/check-control-bytes.py                 # check the worktree
     python scripts/check-control-bytes.py --head HEAD     # check a revision
+    python scripts/check-control-bytes.py --changed A..B  # only what B changed
     python scripts/check-control-bytes.py --list          # every occurrence
     python scripts/check-control-bytes.py --update-baseline
     python scripts/check-control-bytes.py --selftest
+
+`--changed` is the mode the push hook uses. `--head` reads all 6431 tracked
+files and takes 18 seconds; a push of three commits would pay that three times,
+and a gate that adds a minute to every push is a gate that gets bypassed.
+`--changed` costs half a second, and it is the more accurate scope anyway: this
+is a ratchet, so everything already in the tree is clean or baselined and the
+only question a push has to answer is whether IT introduced one.
 """
 
 from __future__ import annotations
@@ -134,6 +142,24 @@ def _load_check_eol():
 # 1% leaves two orders of magnitude of headroom on both sides.
 BINARY_CONTROL_FRACTION = 0.01
 
+# ...but a fraction alone is wrong for SHORT files, and the refusal probe is
+# what proved it. A sixteen-byte fixture holding one NUL is 6.25% control bytes,
+# so the fraction called it binary and the gate reported "clean -- 1 text
+# file(s)" on the commit that had just added it. Any short file -- a one-line
+# `.txt`, a tiny config, a fixture -- would have been invisible for exactly the
+# reason it needed checking.
+#
+# So a file is binary only if it has MANY control bytes *and* a high proportion
+# of them. Real data has thousands; corrupted text has one to ten. A small blob
+# that falls between gets called text, reported, and can be baselined -- a false
+# positive, which is the direction a gate should fail in.
+#
+# Worth recording how this was missed the first time: the self-test fixture for
+# "a source file with one NUL is still text" was a 430-byte file, comfortably
+# under the fraction. The test passed because the fixture was too big to expose
+# the bug, which is its own lesson about choosing fixture sizes.
+BINARY_MIN_CONTROL = 32
+
 
 def is_binary(data: bytes) -> bool:
     """Whether these bytes are data rather than text that may be corrupted.
@@ -145,7 +171,10 @@ def is_binary(data: bytes) -> bool:
     self-test is what noticed.
 
     Two questions instead, neither of which a handful of stray bytes can move:
-    does it decode as UTF-8, and is it *mostly* control bytes.
+    does it decode as UTF-8, and does it hold MANY control bytes AND a high
+    proportion of them. The "many" half is not redundant -- see
+    `BINARY_MIN_CONTROL`, where a sixteen-byte fixture with one NUL was called
+    binary by the proportion alone and skipped.
     """
     if not data:
         return False
@@ -154,7 +183,7 @@ def is_binary(data: bytes) -> bool:
     except UnicodeDecodeError:
         return True
     ctrl = sum(1 for b in data if (b < 0x20 and b not in ALLOWED) or b == 0x7F)
-    return ctrl > len(data) * BINARY_CONTROL_FRACTION
+    return ctrl >= BINARY_MIN_CONTROL and ctrl > len(data) * BINARY_CONTROL_FRACTION
 
 
 def offences(data: bytes) -> list[tuple[int, int]]:
@@ -231,6 +260,108 @@ def scan_revision(rev: str) -> tuple[list[tuple[str, int, int, int]], int]:
     return found, scanned
 
 
+def scan_changed(rng: str) -> tuple[list[tuple[str, int, int, int]], int]:
+    """The files a revision range touches, judged at the range's head.
+
+    This is the mode the push hook uses, and it exists for a reason beyond
+    speed. `--head` reads all 6431 tracked files through git and takes 18
+    seconds; a push of three commits would pay that three times, and a gate
+    that adds a minute to every push is a gate that gets bypassed. Scanning
+    what the push actually changed costs well under a second.
+
+    It is also the more accurate scope. This is a ratchet: everything already
+    in the tree is either clean or baselined, so the only question a push has
+    to answer is whether IT introduced one.
+
+    `git diff` failing and `git diff` reporting no changed files must not look
+    alike -- that is the defect family this tree keeps meeting -- so a failed
+    invocation raises rather than returning an empty list.
+    """
+    import subprocess
+    r = subprocess.run(["git", "diff", "--name-only", "-z", rng],
+                       capture_output=True)
+    if r.returncode != 0:
+        msg = r.stderr.decode("utf-8", "replace").strip()
+        raise gittree.GitTreeError(f"git diff {rng} failed: {msg}")
+    rels = [p.decode("utf-8", "surrogateescape")
+            for p in r.stdout.split(b"\0") if p]
+    head = rng.split("..")[-1] or "HEAD"
+    tree = gittree.RevTree(head)
+    found: list[tuple[str, int, int, int]] = []
+    scanned = 0
+    for rel in rels:
+        data = tree.read_bytes(rel)
+        if data is None:
+            # Deleted by this range, or never in it. Absent is not an offence.
+            continue
+        if is_binary(data):
+            continue
+        scanned += 1
+        hits = offences(data)
+        if not hits:
+            continue
+        per_byte: dict[int, int] = {}
+        for _off, b in hits:
+            per_byte[b] = per_byte.get(b, 0) + 1
+        for off, b in hits:
+            found.append((rel, line_of(data, off), b, per_byte[b]))
+    return found, scanned
+
+
+def pushed_paths(sha: str, remote: str) -> list[str]:
+    """Every path the commits this push would publish touch.
+
+    `git log --name-only <sha> --not --remotes=<remote>` rather than a
+    two-point `git diff`, and the difference matters twice:
+
+      * a byte added by one commit and removed by a later one is invisible to a
+        diff of the endpoints, and is still readable in the published history.
+        This is the same reasoning gate 1 uses for `todo2.txt`;
+      * it needs no base revision, so a root commit and a first push are not
+        edge cases that have to be special-cased into working.
+
+    `-z`, because a path is bytes and git quotes it otherwise
+    (CLAUDE.md self-review item 7).
+    """
+    import subprocess
+    r = subprocess.run(
+        ["git", "log", "--pretty=format:", "--name-only", "-z",
+         sha, "--not", f"--remotes={remote}"], capture_output=True)
+    if r.returncode != 0:
+        msg = r.stderr.decode("utf-8", "replace").strip()
+        raise gittree.GitTreeError(f"git log for {sha} failed: {msg}")
+    seen: dict[str, None] = {}
+    for p in r.stdout.split(b"\0"):
+        if p:
+            seen[p.decode("utf-8", "surrogateescape")] = None
+    return list(seen)
+
+
+def scan_pushed(sha: str, remote: str) -> tuple[list[tuple[str, int, int, int]], int]:
+    """The paths `pushed_paths` names, judged as of `sha`."""
+    rels = pushed_paths(sha, remote)
+    tree = gittree.RevTree(sha)
+    found: list[tuple[str, int, int, int]] = []
+    scanned = 0
+    for rel in rels:
+        data = tree.read_bytes(rel)
+        if data is None:
+            # Deleted by this push. A file that is not there cannot offend.
+            continue
+        if is_binary(data):
+            continue
+        scanned += 1
+        hits = offences(data)
+        if not hits:
+            continue
+        per_byte: dict[int, int] = {}
+        for _off, b in hits:
+            per_byte[b] = per_byte.get(b, 0) + 1
+        for off, b in hits:
+            found.append((rel, line_of(data, off), b, per_byte[b]))
+    return found, scanned
+
+
 def baseline_keys() -> set[tuple[str, int]]:
     """`(path, byte)` pairs the baseline tolerates."""
     if not BASELINE.is_file():
@@ -281,7 +412,28 @@ def report(found: list[tuple[str, int, int, int]]) -> None:
         print(f"{p}:{ln}: raw {name} (0x{b:02x}){times}")
 
 
-def check(rev: str | None, show_all: bool) -> int:
+def check(rev: str | None, show_all: bool, rng: str | None = None,
+          pushed: str | None = None, remote: str = "origin") -> int:
+    if rng or pushed:
+        found, scanned = (scan_pushed(pushed, remote) if pushed
+                          else scan_changed(rng))
+        label = f"pushed by {pushed}" if pushed else rng
+        # No floor here, and that is not an oversight: a range that changed two
+        # files legitimately scans two files. The thing that must not be quiet
+        # is `git diff` FAILING, and `scan_changed` raises for that rather than
+        # returning an empty list -- so "nothing changed" and "I could not ask"
+        # stay distinguishable, which is the whole lesson of this gate.
+        if not show_all:
+            tolerated = baseline_keys()
+            new = [f for f in found if (f[0], f[2]) not in tolerated]
+            if not new:
+                print(f"check-control-bytes: clean -- {scanned} text "
+                      f"file(s) {label}")
+                return 0
+            return _refuse(new)
+        report(found)
+        print(f"\n{len(found)} occurrence(s) across {scanned} changed file(s)")
+        return 0
     found, scanned = (scan_revision(rev) if rev else scan_worktree())
     if scanned < FLOOR:
         where = f"revision {rev}" if rev else "the working tree"
@@ -301,6 +453,11 @@ def check(rev: str | None, show_all: bool) -> int:
         print(f"check-control-bytes: clean -- {scanned} text file(s), "
               f"{len(tolerated)} baselined occurrence(s)")
         return 0
+    return _refuse(new)
+
+
+def _refuse(new: list[tuple[str, int, int, int]]) -> int:
+    """The refusal message, shared by every mode so they cannot drift apart."""
     print("check-control-bytes: raw control byte(s) in tracked text:",
           file=sys.stderr)
     for p, ln, b, n in new:
@@ -373,7 +530,19 @@ def self_test() -> int:
          is_binary(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + bytes(range(256))))
     case("bytes that are not UTF-8 are binary", is_binary(b"\xff\xfe\x00\x41"))
     case("mostly-control is binary even when it decodes",
-         is_binary(bytes(10) + b"ab"))
+         is_binary(bytes(200) + b"ab"))
+    # The case the probe had to find for me. The `src` fixture above is 430
+    # bytes, comfortably under the 1% fraction, so it passed against a
+    # fraction-only classifier that failed every SHORT file. The fixture was too
+    # big to expose the bug it was written to cover.
+    probe = b"a probe: b" + bytes([34, 104, 105, 0, 34]) + b"\n"
+    case("a 16-byte file with one NUL is text, not binary", not is_binary(probe))
+    case("...and its NUL is found",
+         offences(probe) == [(probe.index(b"\x00"), 0x00)])
+    case("a one-byte file that IS a NUL is text, and reported",
+         not is_binary(bytes(1)) and offences(bytes(1)) == [(0, 0x00)])
+    case("a short file of pure control bytes is still text (too few to be data)",
+         not is_binary(bytes(8)))
     case("plain prose is text", not is_binary("hello — world\n".encode()))
 
     # -- the baseline reader --
@@ -412,6 +581,14 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Refuse raw control bytes in tracked text.")
     ap.add_argument("--head", metavar="REV",
                     help="judge this revision rather than the working tree")
+    ap.add_argument("--pushed", metavar="SHA",
+                    help="judge every path the commits this push would publish "
+                         "touch, as of SHA; the mode the push hook uses")
+    ap.add_argument("--remote", default="origin",
+                    help="remote whose branches bound --pushed (default origin)")
+    ap.add_argument("--changed", metavar="RANGE",
+                    help="judge only the files a revision range touches, at "
+                         "the range's head; the mode the push hook uses")
     ap.add_argument("--list", action="store_true",
                     help="print every occurrence, baselined or not")
     ap.add_argument("--update-baseline", action="store_true",
@@ -434,7 +611,7 @@ def main() -> int:
         n = write_baseline(found)
         print(f"wrote {BASELINE.name} with {n} entr{'y' if n == 1 else 'ies'}")
         return 0
-    return check(args.head, args.list)
+    return check(args.head, args.list, args.changed, args.pushed, args.remote)
 
 
 if __name__ == "__main__":

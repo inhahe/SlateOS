@@ -45,7 +45,15 @@ GUARD = re.compile(
     # `self.current_utc` and `settings.current_language()`, which name what a
     # card is *showing*, not a selection, and mislabelled three display cards.
     r"^\s*(\}\s*)?(else\s+)?if\s+.*(select|active|highlight|focus|chosen|pressed|hover"
-    r"|is_current|==\s*\w*current|current_(index|row|tab|page|item))",
+    # `current` is back to a broad match, and the reason is worth keeping: it
+    # was narrowed to compensate for the `if let` guard three lines above,
+    # which contained a literal backspace byte instead of `\b` and therefore
+    # never fired (lane B found it). With that repaired, the two cases the
+    # narrowing existed for -- `if let Some(lang) = settings.current_language()`
+    # and `if let .. = local_time(self.current_utc)` -- are excluded as the
+    # lookups they are, and a genuine `if row.path == state.current_dir` is
+    # classified as the selection it is.
+    r"|[\w.]*current)",
     re.I,
 )
 
@@ -87,7 +95,7 @@ def classify(context: str, preceding: list) -> str:
         # the selected item, usually to draw a details panel about it -- not a
         # test that the box being drawn is itself selected. jsonviewer had
         # exactly that, and its JSON-path panel was classified Selected.
-        if re.match(r"^\s*(\}\s*)?(else\s+)?if\s+let", line):
+        if re.match(r"^\s*(\}\s*)?(else\s+)?if\s+let\b", line):
             continue
         if GUARD.match(line):
             return "Selected"

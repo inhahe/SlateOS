@@ -50,6 +50,7 @@
 //! recorded in `todo.txt`.
 
 use coreutils::diag;
+use coreutils::getopt::{Opt, Takes};
 use coreutils::stdfd;
 use std::env;
 use std::ffi::{OsStr, OsString};
@@ -212,6 +213,55 @@ struct Failure {
 /// `env`. That is not a simplification — `env FOO=1 prog -i` must pass `-i` to
 /// `prog`, and there is no way to tell that case from `env FOO=1 -i` except by
 /// the rule that options come first.
+/// GNU `env`'s `getopt_long` string, exactly, leading `+` included.
+///
+/// The `+` is "stop at the first operand", which for `env` is not an
+/// optimisation but the whole semantics: `env FOO=1 ls -l` must hand `-l` to
+/// `ls`, not read it as `env`'s own. [`coreutils::getopt`] implements that mode
+/// and its own docs name `env` as one of the callers it was written for.
+const SHORT_OPTIONS: &str = "+iu:0vC:S:";
+
+/// GNU `env`'s `longopts[]`, in upstream's declaration order.
+///
+/// **Including the six we do not implement**, which is deliberate and is the
+/// lesson `uname` paid for: the table is what decides whether an abbreviation
+/// is ambiguous and which option a diagnostic names first. A table missing a
+/// name does not merely fail to offer it — every abbreviation of the missing
+/// name resolves to some *other* option and is acted on, where GNU would have
+/// refused. `--s` is ambiguous here only because `--split-string` is present.
+///
+/// Read from GNU's own binary rather than from its documentation, with
+/// `env --=x`: the empty prefix matches every entry, so the ambiguity message
+/// lists the whole table in declaration order.
+const LONG_OPTIONS: &[(&str, Takes)] = &[
+    ("ignore-environment", Takes::Nothing),
+    ("null", Takes::Nothing),
+    ("unset", Takes::Required),
+    ("chdir", Takes::Required),
+    ("default-signal", Takes::Optional),
+    ("ignore-signal", Takes::Optional),
+    ("block-signal", Takes::Optional),
+    ("list-signal-handling", Takes::Nothing),
+    ("debug", Takes::Nothing),
+    ("split-string", Takes::Required),
+    ("help", Takes::Nothing),
+    ("version", Takes::Nothing),
+];
+
+/// Parse `env`'s argv.
+///
+/// # Why this goes through [`coreutils::getopt`]
+///
+/// It used to walk `argv` itself, matching long names with `match name { … }`.
+/// `scripts/env-diff.sh` found that eight of its twenty differences from GNU
+/// were downstream of that: no long-option abbreviation, so `--unse`, `--ign`
+/// and `--nu` were `unrecognized option` where GNU accepts them, and no
+/// ambiguity rule at all. The same finding, and the same fix, as `uname`.
+///
+/// # Errors
+///
+/// An unknown option, an ambiguous abbreviation, a missing option argument, or
+/// one of the six options GNU has and this does not.
 fn parse_args(args: &[OsString]) -> Result<Config, Failure> {
     let mut cfg = Config {
         ignore_env: false,
@@ -222,141 +272,74 @@ fn parse_args(args: &[OsString]) -> Result<Config, Failure> {
         command: Vec::new(),
     };
 
-    let mut i = 0usize;
-    // --- options ---
-    while let Some(arg) = args.get(i) {
-        let bytes = os_bytes(arg);
-        let Some(body) = bytes.strip_prefix(b"-") else {
-            break; // an operand; options are over
-        };
-        if body.is_empty() {
-            // A bare `-` is GNU's historical synonym for `-i`.
+    // Operands come back through the parser rather than being sliced out of
+    // `args` by index: with `+` the first one ends the options, and everything
+    // after it is an operand too, so the split is the parser's to make.
+    let mut operands: Vec<OsString> = Vec::new();
+
+    for item in ENV.parse(args, SHORT_OPTIONS, LONG_OPTIONS) {
+        match item.map_err(fail)? {
+            Opt::Long("ignore-environment", _) | Opt::Short(b'i', _) => cfg.ignore_env = true,
+            Opt::Long("null", _) | Opt::Short(b'0', _) => cfg.sep = Sep::Nul,
+            Opt::Long("unset", v) | Opt::Short(b'u', v) => {
+                cfg.unset.push(v.unwrap_or_default());
+            }
+            Opt::Long("chdir", v) | Opt::Short(b'C', v) => cfg.chdir = Some(v.unwrap_or_default()),
+            // Present in the table so abbreviation and ambiguity match GNU's,
+            // refused explicitly because they are not implemented. §1006 --
+            // "a command that does not work is deleted, not kept as a refusing
+            // stub" -- is about whole commands; an option that says plainly
+            // that it is absent is better than one that silently does nothing,
+            // and better than a table that lies about what GNU offers.
+            Opt::Long(other, _) => {
+                return Err(fail(
+                    ENV.usage_referring(format!("option '--{other}' is not implemented")),
+                ));
+            }
+            Opt::Short(other, _) => return Err(fail(ENV.invalid_option(other))),
+            Opt::Operand(arg) => operands.push(arg.clone()),
+        }
+    }
+
+    // --- NAME=VALUE operands, then the command and everything after it ---
+    let mut rest = operands.iter();
+    let mut command: Vec<OsString> = Vec::new();
+    let mut first = true;
+    for arg in rest.by_ref() {
+        // A bare `-` is GNU's historical synonym for `-i`, and it is accepted
+        // only as the FIRST operand. Measured against GNU 9.4 rather than
+        // assumed, because the rule is narrower than it looks:
+        //
+        //     env -            ->  empty environment, rc 0
+        //     env - FOO=1      ->  FOO=1
+        //     env FOO=1 -      ->  rc 127, `-`: No such file or directory
+        //     env - -          ->  rc 127, the SECOND `-` is the command
+        //
+        // So it is not "a `-` anywhere means -i"; once anything has been taken
+        // as an operand, a later `-` is a command name like any other.
+        //
+        // This arm is here rather than in the option loop because `getopt`
+        // hands a lone `-` back as an operand, which is what POSIX says it is.
+        // Losing it was a REGRESSION introduced by moving this parser onto the
+        // shared module -- `env -` passed before that change and failed after,
+        // and `scripts/env-diff.sh` is what said so.
+        if first && os_bytes(arg).as_ref() == b"-" {
             cfg.ignore_env = true;
-            i = i.saturating_add(1);
+            first = false;
             continue;
         }
-        if let Some(long) = body.strip_prefix(b"-") {
-            if long.is_empty() {
-                i = i.saturating_add(1); // `--` ends the options
+        first = false;
+        match split_assignment(arg) {
+            Some(pair) => cfg.assign.push(pair),
+            None => {
+                command.push(arg.clone());
                 break;
             }
-            i = parse_long(long, args, i, &mut cfg)?;
-            continue;
         }
-        i = parse_shorts(body, args, i, &mut cfg)?;
     }
-
-    // --- NAME=VALUE operands ---
-    while let Some(arg) = args.get(i) {
-        let Some(pair) = split_assignment(arg) else {
-            break;
-        };
-        cfg.assign.push(pair);
-        i = i.saturating_add(1);
-    }
-
-    // --- the command, and everything after it verbatim ---
-    cfg.command = args.get(i..).unwrap_or(&[]).to_vec();
+    command.extend(rest.cloned());
+    cfg.command = command;
     Ok(cfg)
-}
-
-/// Handle one `--long` option. Returns the index of the next argument.
-fn parse_long(
-    long: &[u8],
-    args: &[OsString],
-    i: usize,
-    cfg: &mut Config,
-) -> Result<usize, Failure> {
-    // Split `--name=value` before matching, so the name is matched alone.
-    let (name, inline) = match long.iter().position(|&b| b == b'=') {
-        Some(eq) => (
-            long.get(..eq).unwrap_or_default(),
-            long.get(eq.saturating_add(1)..),
-        ),
-        None => (long, None),
-    };
-
-    /// Take `--opt=value` if present, else the next argument. `resolved` is
-    /// the option's own spelling, for the diagnostic when there is neither.
-    fn value(
-        inline: Option<&[u8]>,
-        args: &[OsString],
-        i: usize,
-        resolved: &str,
-    ) -> Result<(OsString, usize), Failure> {
-        if let Some(v) = inline {
-            return Ok((os_from_bytes(v), i.saturating_add(1)));
-        }
-        match args.get(i.saturating_add(1)) {
-            Some(v) => Ok((v.clone(), i.saturating_add(2))),
-            None => Err(fail(ENV.long_missing_argument(resolved))),
-        }
-    }
-
-    match name {
-        b"ignore-environment" => {
-            cfg.ignore_env = true;
-            Ok(i.saturating_add(1))
-        }
-        b"null" => {
-            cfg.sep = Sep::Nul;
-            Ok(i.saturating_add(1))
-        }
-        b"unset" => {
-            let (v, next) = value(inline, args, i, "unset")?;
-            cfg.unset.push(v);
-            Ok(next)
-        }
-        b"chdir" => {
-            let (v, next) = value(inline, args, i, "chdir")?;
-            cfg.chdir = Some(v);
-            Ok(next)
-        }
-        // `whole` is the option exactly as typed, `--` included, because there
-        // is no resolution to name instead.
-        _ => {
-            let mut whole = b"--".to_vec();
-            whole.extend_from_slice(long);
-            Err(fail(ENV.unrecognized_option(&whole)))
-        }
-    }
-}
-
-/// Handle a bundle of short options (`-i`, `-i0`, `-u NAME`, `-uNAME`).
-fn parse_shorts(
-    body: &[u8],
-    args: &[OsString],
-    i: usize,
-    cfg: &mut Config,
-) -> Result<usize, Failure> {
-    for (pos, &c) in body.iter().enumerate() {
-        match c {
-            b'i' => cfg.ignore_env = true,
-            b'0' => cfg.sep = Sep::Nul,
-            b'u' | b'C' => {
-                // The rest of this token is the value; if there is no rest,
-                // the next argument is. `-uFOO`, `-u FOO` and `-iuFOO` all
-                // reach here with the same meaning.
-                let rest = body.get(pos.saturating_add(1)..).unwrap_or_default();
-                let (v, next) = if rest.is_empty() {
-                    match args.get(i.saturating_add(1)) {
-                        Some(v) => (v.clone(), i.saturating_add(2)),
-                        None => return Err(fail(ENV.short_missing_argument(c))),
-                    }
-                } else {
-                    (os_from_bytes(rest), i.saturating_add(1))
-                };
-                if c == b'u' {
-                    cfg.unset.push(v);
-                } else {
-                    cfg.chdir = Some(v);
-                }
-                return Ok(next);
-            }
-            _ => return Err(fail(ENV.invalid_option(c))),
-        }
-    }
-    Ok(i.saturating_add(1))
 }
 
 fn fail(e: coreutils::getopt::Error) -> Failure {

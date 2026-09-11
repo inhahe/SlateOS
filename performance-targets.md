@@ -87,35 +87,50 @@ Rule 3 above says to investigate a regression over 10%. That is the right rule a
 it **cannot be applied to a QEMU TCG measurement**, because the run-to-run spread of
 an unchanged benchmark is several times larger than 10%.
 
-Measured 2026-09-11 over `bench/history.jsonl` — 144 recorded runs, restricted to
-rows whose `run_verdict` is `clean`, grouped by `accel`, across all 86 benchmarks
-with at least 4 samples in a group. The figure is each benchmark's worst sample
-divided by its own median:
+**Measured 2026-09-11, pairwise.** For each consecutive pair of runs and each
+benchmark, `max(a,b) / min(a,b)` — the factor by which an unchanged benchmark moved
+between two runs. Pairwise rather than `max/median` because **`max/median` is not a
+spread statistic: it grows with the number of samples**, so it cannot compare two
+accelerators with different run counts. (The first version of this table did exactly
+that, at 8 WHPX samples against 36 TCG ones, which flattered WHPX mechanically. See
+the note below.)
 
-| `accel` | clean runs | median benchmark | 90th pct | 99th pct |
+| `accel` | basis | median benchmark | 90th pct | worst / p99 |
 |---|---|---|---|---|
-| `Hyper-V/WHPX` | 8 ⚠ | **1.03×** | 1.23× | 1.53× |
-| `QEMU TCG` | 9 | 1.29× | 2.13× | 2.78× |
-| (unrecorded, TCG-era) | 36 | 1.58× | 2.64× | 3.33× |
+| `Hyper-V/WHPX` | 1 pair, 99 benchmarks | **1.022×** | 1.060× | 1.33× (worst) |
+| `QEMU TCG` | 31 pairs, 2749 observations | **1.099×** | 1.750× | 2.62× (p99) |
+
+WHPX is genuinely the tighter surface — 2.2% typical movement against 9.9% — and that
+conclusion now rests on unperturbed runs rather than on layout-sweep arms. **But the
+WHPX row is a single pair**: one draw of the statistic per benchmark. Whether 1.022×
+is stable needs a third run, and until it exists treat the WHPX column as indicative.
 
 ### What to do with that
 
-* **⚠ The WHPX row does not support a conclusion yet, and the ⚠ is there to stop
-  it being quoted as if it did.** All eight of those rows — in fact all fourteen
-  WHPX rows in the file — are arms of a single *layout sweep*, carrying
-  `experiment: "layout sweep: textpad=N (identical source, deliberately
-  perturbed…)"`. Five of the eight share one commit. **There are zero ordinary
-  WHPX runs recorded.** So 1.03× is the within-sitting spread of one build under
-  deliberate perturbation, not run-to-run spread across days, reboots and host
-  states — and it is the smaller quantity, in the direction that flatters the
-  conclusion. What it genuinely shows is that *code layout* moves these numbers
-  by ~3% under WHPX, which is the question that sweep was asking.
-  *To make the row mean what the column header says, run `--bench` under
-  `-accel whpx` on unperturbed source a handful of times.*
-* **Under TCG, treat anything below ~2× as unmeasured, not as unchanged.** A 40%
-  "regression" on a single TCG run is the ordinary behaviour of half the suite. Do
-  not investigate it, and — more important — do not take a 40% *improvement* as
-  evidence that an optimisation worked.
+* **How the WHPX row got its number, because the first version of it was wrong in a
+  way worth not repeating.** Until 2026-09-11 every `Hyper-V/WHPX` row in
+  `bench/history.jsonl` — all fourteen — was an arm of one *layout sweep*, carrying
+  `experiment: "layout sweep: textpad=N (identical source, deliberately perturbed…)"`,
+  five of them on a single commit. The first version of this table read those as
+  ordinary runs and reported 1.03×, which was the within-sitting spread of one build
+  under deliberate perturbation: a smaller quantity than run-to-run spread, in the
+  direction that flattered the conclusion. The figure in the table now comes from two
+  runs made specifically for it, via
+  `QEMU_EXTRA="-accel whpx" ./scripts/boot-test.sh --bench`. The lesson is the cheap
+  one: **read the `experiment` field before reading `accel`** — they sit in the same
+  JSON object.
+* **Under TCG, a 10% rule is inside the median benchmark's own movement** (9.9%), and
+  **33% of observations exceed 25%** (p75 = 1.386×). Treat anything below ~1.75× as unmeasured
+  rather than unchanged — that is the 90th percentile, so one benchmark in ten beats
+  it with no code change at all. This cuts both ways and the second way is the one
+  that bites: do not take a 40% *improvement* on one TCG run as evidence that an
+  optimisation worked.
+* **Under WHPX a 10% rule is just outside the 90th percentile** (6.0%), so it is
+  plausibly usable at the cost of roughly one false alarm in ten benchmarks; ~15%
+  would be quiet. Device- and timer-bound benchmarks are the exception and are not
+  measurable there at all — see `known-issues.md` →
+  `TD-A-THE-BENCHMARK-BUDGETS-NEVER-FIRE-IN-A-BOOT-TEST`, where three of them collapse
+  onto one VM-exit cost.
 * **A single run is never a measurement under TCG.** If you need a TCG number,
   compare medians of several clean runs, and say how many.
 * **Check `run_verdict` before reading any number.** The figures above are for

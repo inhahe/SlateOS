@@ -1046,11 +1046,12 @@ fn next_at_job_id(spool_dir: &Path) -> u32 {
 // Spool/config paths
 // ---------------------------------------------------------------------------
 
-const CRONTAB_SPOOL_DIR: &str = "/var/spool/cron/crontabs";
-const SYSTEM_CRONTAB: &str = "/etc/crontab";
-const ANACRONTAB: &str = "/etc/anacrontab";
-const ANACRON_SPOOL_DIR: &str = "/var/spool/anacron";
-const AT_SPOOL_DIR: &str = "/var/spool/at";
+// Spelled in `cronspool` so the daemons and the editor cannot drift apart.
+const CRONTAB_SPOOL_DIR: &str = cronspool::USER_CRONTABS;
+const SYSTEM_CRONTAB: &str = cronspool::SYSTEM_CRONTAB;
+const ANACRONTAB: &str = cronspool::ANACRONTAB;
+const ANACRON_SPOOL_DIR: &str = cronspool::ANACRON_SPOOL;
+const AT_SPOOL_DIR: &str = cronspool::AT_SPOOL;
 
 fn user_crontab_path(user: &str) -> PathBuf {
     PathBuf::from(CRONTAB_SPOOL_DIR).join(user)

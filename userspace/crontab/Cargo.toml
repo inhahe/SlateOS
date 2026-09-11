@@ -4,5 +4,6 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS crontab — manage per-user cron job schedules"
 [dependencies]
+cronspool = { path = "../../cronspool" }
 authlib = { path = "../authlib" }
 userdb = { path = "../userdb" }

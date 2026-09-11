@@ -60,7 +60,6 @@
 use quoting::quoteaf_os;
 use std::env;
 use std::ffi::OsString;
-use std::io::{self, BufRead, Write};
 use std::process;
 use userdb::{Aging, Record, UserDb};
 
@@ -384,32 +383,20 @@ fn check_password_strength(password: &str) -> StrengthResult {
 // Terminal helpers
 // ============================================================================
 
-/// Read a password from stdin without echoing.
-/// On Slate OS, we disable echo via ioctl on /dev/tty.
-/// Falls back to normal line read if terminal control is unavailable.
+/// Read a password from the terminal without echoing it.
+///
+/// The body used to be an ordinary `read_line` under the comment "Attempt to
+/// disable echo. On Slate OS this would use termios ioctls. For now, just read
+/// a line" -- so the new password, and the old one, appeared on screen as they
+/// were typed. `readpass` turns echo off and restores it on every path, and
+/// refuses to read on a terminal where it cannot.
 fn read_password_no_echo(prompt: &str) -> Result<String, String> {
-    eprint!("{prompt}");
-    let _ = io::stderr().flush();
-
-    // Attempt to disable echo. On Slate OS this would use termios ioctls.
-    // For now, just read a line — the real echo-disable will be done
-    // via the POSIX termios layer when the kernel supports it.
-    let mut line = String::new();
-    io::stdin()
-        .lock()
-        .read_line(&mut line)
-        .map_err(|e| format!("read error: {e}"))?;
-    eprintln!(); // newline after hidden input
-
-    // Trim trailing newline.
-    if line.ends_with('\n') {
-        line.pop();
-    }
-    if line.ends_with('\r') {
-        line.pop();
-    }
-
-    Ok(line)
+    let bytes = readpass::read_password(prompt.as_bytes()).map_err(|e| e.to_string())?;
+    // NOT `from_utf8_lossy`: a replacement character would be hashed in place
+    // of what was typed, and the account would then reject the password its
+    // owner had just chosen.
+    String::from_utf8(bytes)
+        .map_err(|_| "the password contains bytes that are not valid UTF-8".to_string())
 }
 
 // ============================================================================

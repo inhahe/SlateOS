@@ -1,0 +1,10 @@
+[package]
+name = "cronspool"
+version = "0.1.0"
+edition = "2024"
+description = "SlateOS: where cron jobs live on disk, spelled once"
+
+[dependencies]
+
+[lints]
+workspace = true

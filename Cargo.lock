@@ -79,6 +79,7 @@ name = "at"
 version = "0.1.0"
 dependencies = [
  "civildate",
+ "cronspool",
 ]
 
 [[package]]
@@ -480,20 +481,27 @@ name = "cron"
 version = "0.1.0"
 dependencies = [
  "civildate",
+ "cronspool",
 ]
 
 [[package]]
 name = "crond"
 version = "0.1.0"
 dependencies = [
+ "cronspool",
  "scratchdir",
 ]
+
+[[package]]
+name = "cronspool"
+version = "0.1.0"
 
 [[package]]
 name = "crontab"
 version = "0.1.0"
 dependencies = [
  "authlib",
+ "cronspool",
  "userdb",
 ]
 
@@ -990,6 +998,7 @@ name = "ftp"
 version = "0.1.0"
 dependencies = [
  "quoting",
+ "readpass",
 ]
 
 [[package]]
@@ -2029,6 +2038,7 @@ dependencies = [
  "authlib",
  "posix",
  "quoting",
+ "readpass",
  "scratchdir",
  "userdb",
 ]
@@ -2286,6 +2296,10 @@ version = "0.1.0"
 dependencies = [
  "quoting",
 ]
+
+[[package]]
+name = "readpass"
+version = "0.1.0"
 
 [[package]]
 name = "regextester"
@@ -2770,6 +2784,7 @@ version = "0.1.0"
 dependencies = [
  "authlib",
  "quoting",
+ "readpass",
  "userdb",
 ]
 

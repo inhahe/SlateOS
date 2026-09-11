@@ -67,10 +67,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 // ============================================================================
 
 /// Per-user crontab spool directory.
-const USER_CRONTAB_DIR: &str = "/var/spool/cron/crontabs";
+// Spelled in `cronspool` so the daemons and the editor cannot drift apart.
+const USER_CRONTAB_DIR: &str = cronspool::USER_CRONTABS;
 
 /// System-wide crontab.
-const SYSTEM_CRONTAB: &str = "/etc/crontab";
+const SYSTEM_CRONTAB: &str = cronspool::SYSTEM_CRONTAB;
 
 /// Drop-in directory for system crontab fragments.
 ///
@@ -79,13 +80,13 @@ const SYSTEM_CRONTAB: &str = "/etc/crontab";
 /// getting a parser of its own. `userspace/crond` gave it one and read it with
 /// the five-field user-crontab grammar, so the user name was executed as the
 /// program.
-const SYSTEM_CRON_DIR: &str = "/etc/cron.d";
+const SYSTEM_CRON_DIR: &str = cronspool::SYSTEM_CRON_D;
 
 /// Anacron configuration file.
-const ANACRONTAB_PATH: &str = "/etc/anacrontab";
+const ANACRONTAB_PATH: &str = cronspool::ANACRONTAB;
 
 /// Anacron timestamp spool directory.
-const ANACRON_SPOOL: &str = "/var/spool/anacron";
+const ANACRON_SPOOL: &str = cronspool::ANACRON_SPOOL;
 
 /// PID file for daemon mode.
 const PID_PATH: &str = "/var/run/crond2.pid";

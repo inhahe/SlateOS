@@ -89,6 +89,14 @@ members = [
     "killconv",
     "ttyidle",
     "utmpfile",
+    # Where cron jobs live on disk. Five paths were spelled in four crates
+    # under a different name in nearly every one, and `crontab` wrote to a
+    # directory neither daemon read, so the job never ran and nothing said so.
+    "cronspool",
+    # Reading a secret from the terminal without showing it. Three programs --
+    # ftp, passwd, su -- each shipped a comment saying echo ought to be turned
+    # off here, and none of them did it.
+    "readpass",
     # Reading a file whose absence is normal but whose unreadability is not.
     # Four programs wrote read_to_string(p).unwrap_or_default() independently,
     # which collapses "absent" and "could not read" into one empty string; in

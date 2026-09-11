@@ -51,7 +51,8 @@ use std::process;
 // ============================================================================
 
 /// Spool directory for at job files.
-const SPOOL_DIR: &str = "/var/spool/at";
+// Spelled in `cronspool` so the daemons and the editor cannot drift apart.
+const SPOOL_DIR: &str = cronspool::AT_SPOOL;
 
 /// Default queue letter.
 const DEFAULT_QUEUE: char = 'a';

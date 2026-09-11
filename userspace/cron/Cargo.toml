@@ -3,6 +3,7 @@ name = "cron"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
+cronspool = { path = "../../cronspool" }
 # `at` computes a schedule relative to now, so it needs a real clock and a
 # real calendar. The conversion lives in `civildate` rather than here
 # because six copies of it already existed in this tree.

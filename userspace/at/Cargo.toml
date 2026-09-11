@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS at — schedule one-time command execution at a specified time"
 [dependencies]
+cronspool = { path = "../../cronspool" }
 # Calendar arithmetic, so `at` does not carry a second copy of the
 # month table -- the copy it had was indexed without a range guard.
 civildate = { path = "../../civildate" }

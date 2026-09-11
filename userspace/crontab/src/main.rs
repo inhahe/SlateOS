@@ -42,7 +42,18 @@ use std::process;
 // ============================================================================
 
 /// Per-user crontab spool directory.
-const SPOOL_DIR: &str = "/var/spool/cron";
+///
+/// **This is where the daemons look, and it has to be.** It read
+/// `/var/spool/cron` while both `userspace/crond` (`USER_CRONTAB_DIR`) and
+/// `userspace/cron` (`CRONTAB_SPOOL_DIR`) read `/var/spool/cron/crontabs`, so
+/// `crontab -e` wrote `/var/spool/cron/alice`, no daemon ever looked there,
+/// and the job never ran. Nothing reported it: `crontab -l` reads back the
+/// same file it wrote, so the crontab listed correctly and simply did not
+/// fire.
+///
+/// The producer moved rather than the consumers, because the consumers are
+/// what decides whether a job runs and they already agreed with each other.
+const SPOOL_DIR: &str = cronspool::USER_CRONTABS;
 
 /// Path where we write to signal `crond` to reload crontab files.
 const RELOAD_SIGNAL_PATH: &str = "/run/crond/reload";
@@ -1035,6 +1046,6 @@ PATH=/usr/bin:/bin
     #[test]
     fn crontab_path_construction() {
         let path = crontab_path("alice");
-        assert_eq!(path, PathBuf::from("/var/spool/cron/alice"));
+        assert_eq!(path, PathBuf::from("/var/spool/cron/crontabs/alice"));
     }
 }

@@ -932,6 +932,12 @@ mod tests {
         assert!(bad("u+r,"));
         assert!(bad("*"));
         assert!(bad("u*x"));
+        // A letter that is not a permission. `z` is not `r`, `w`, `x`, `X`,
+        // `s`, `t` or a copy source, so the clause names nothing that exists
+        // and GNU refuses it rather than ignoring the letter. Moved here from
+        // `userspace/chown`'s chmod personality when that was deleted -- it
+        // was the one case in that suite this file did not already cover.
+        assert!(bad("u+z"));
     }
 
     /// A clause may legally name no permissions at all, and then does nothing.

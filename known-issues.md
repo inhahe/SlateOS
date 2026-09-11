@@ -131438,6 +131438,74 @@ would be.
 shape one expects if the budgets are hardware-derived and WHPX is closer to hardware.
 One row cannot carry that conclusion and it is recorded as a number, not a finding.
 
+### 2026-09-11 — three unperturbed WHPX runs, and the budgets can be a verdict after all
+
+**`over_target` is 10. Three times out of three.** Commits `b770d800f`, `1ec6842eb`,
+`d7ebfa9b7`, each a separate `QEMU_EXTRA="-accel whpx" ./scripts/boot-test.sh --bench`.
+Against 13–21 under TCG, that is the difference between a number and a verdict.
+
+And the run-to-run spread is stable across both available pairs, so the figure is not
+a one-pair fluke:
+
+| | n | median | p90 | worst |
+|---|---|---|---|---|
+| pair 1→2 | 99 | 1.022× | 1.060× | 1.33× |
+| pair 2→3 | 99 | 1.017× | 1.051× | 1.43× |
+| pooled | 198 | **1.020×** | 1.052× | 1.33× (p99) |
+
+### The ten, named — and two of them are measuring Hyper-V
+
+| benchmark | measured | budget | over |
+|---|---|---|---|
+| `net_ns_arp_lookup` | 13 984 | 1 000 | **14.0×** ⚠ |
+| `net_arp_lookup` | 13 571 | 1 000 | **13.6×** ⚠ |
+| `dashboard_api_status` | 59 068 | 10 000 | 5.9× |
+| `vfs_stat_deep` | 6 739 | 1 400 | 4.8× |
+| `dashboard_api_health` | 59 135 | 15 000 | 3.9× |
+| `isr_latency` | 34 796 | 10 000 | 3.5× |
+| `vfs_throughput_16k_write` | 129 151 | 50 000 | 2.6× |
+| `dashboard_api_metrics` | 77 623 | 55 000 | 1.4× |
+| `vfs_stat_root` | 893 | 700 | 1.28× |
+| `vfs_stat_3comp` | 2 200 | 2 100 | 1.05× |
+
+⚠ **The two ARP rows are artifacts, and this is the concrete cost of the VM-exit
+floor.** Under TCG they measure **901 ns and 803 ns against a 1 000 ns budget — both
+inside it.** They breach it under WHPX only because one HPET read costs a VM exit
+there, which is ~13.6 µs. So 2 of the 10 "failures" are grading Hyper-V, and a gate
+ratcheted at 10 would be pinning two numbers that say nothing about this kernel.
+
+**The other eight are real**, and they are hardware-derived budgets missed on the
+closest surface to hardware available here, so they are not emulation excuses. The
+`dashboard_api_*` trio at 1.4–5.9× and `vfs_stat_deep` at 4.8× are the largest.
+
+### So the entry's original question has an answer
+
+*Can the budgets refuse?* **Yes, under WHPX, at a ratchet of 8** — with the two
+timer-bound benchmarks excluded rather than pinned, because a ratchet including them
+would hold a constant that belongs to the hypervisor. Under TCG the answer remains no:
+`over_target` swings 13–21 run to run, and the median benchmark moves 9.9%.
+
+What is still needed, and it is small:
+
+1. **A per-benchmark surface field.** Nothing records which benchmarks are
+   device/timer-bound. The derivation is now mechanical — a benchmark whose WHPX/TCG
+   ratio sits at the VM-exit floor rather than near the 4.2× median is timer-bound —
+   and it identifies exactly three today (`hpet_read`, `net_arp_lookup`,
+   `net_ns_arp_lookup`).
+2. **A decision about the `experiment` tag.** `QEMU_EXTRA` auto-stamps these runs
+   (`boot-test.sh:2769`), and `comparable_records` excludes experiments from history
+   windows — correctly, since non-default emulator flags are exactly what a reader
+   needs warned about. A gate wanting a WHPX baseline has to either pass the
+   accelerator some other way or treat `-accel whpx` as a recognised surface rather
+   than an experiment. That is the one genuine design choice left, and it is the kind
+   that should be asked rather than assumed.
+3. **`run_verdict` came back `unknown` on all three runs**, not `clean`, so any gate
+   keying on `clean` would skip every WHPX run today. Worth understanding before
+   building on it.
+
+Nothing here is built. What changed is that the question stopped being "is this
+possible" and became three specific small things, each with a stated reason.
+
 ## TD-A-REQUEST-STATUS-HAS-NO-CHECKED-SHAPE-SO-EVERY-READER-COUNTS-DIFFERENTLY (lane A, 2026-09-11) — **open**
 
 **In short:** the `requests/` dropbox is how the three lanes hand work to each other,

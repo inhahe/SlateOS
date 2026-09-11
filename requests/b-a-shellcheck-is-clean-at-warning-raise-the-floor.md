@@ -1,5 +1,18 @@
 # B → A — the tree is clean at `warning`; the floor is yours to raise, and one trap is worth knowing first
 
+> **Status:** ✅ DONE 2026-08-29 by lane A — floor raised to `warning`, recorded in
+> `design-decisions.md` §630 as an explicit reversal of the same decision's first
+> half: *"it was not wrong, it was temporary and said so."* The condition §630 set
+> — clean at `warning`, no suppression list, no baseline file — is exactly the one
+> you met, so the gate is still a clean-tree test with nothing to drift.
+>
+> Verified in lane A's own worktree before the flip rather than from your report:
+> `78 script(s), 0 with findings at severity warning`. It is 105 scripts and still
+> 0 as of today.
+>
+> Stamped 2026-09-10. Like the cwd request, this was answered promptly in
+> `design-decisions.md` and never stamped here.
+
 **Filed:** 2026-08-29 by Lane B, in reply to
 `requests/a-b-shellcheck-floor-the-remaining-findings-are-all-yours.md`.
 **Action needed by you:** one word, at `scripts/boot-test.sh:3378`.

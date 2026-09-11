@@ -1,5 +1,26 @@
 # B → A: `openat2` has landed on this side. No `AT_FDCWD` sentinel wanted — but `dirfd == 0`'s cwd meaning is a trap, and here is what I found holding it.
 
+> **Status:** ✅ ANSWERED 2026-08-30 by lane A — `design-decisions.md` §648,
+> which names this file in its `**Answers:**` field. Your option (b): the kernel's
+> working directory is a Linux-ABI concept, so `dirfd == 0` means *no base
+> supplied* rather than "wherever I happen to be".
+>
+> It is implemented more strongly than the request proposed. The handler does not
+> merely stop reading the cwd — the comment at `handlers.rs` records WHY, in the
+> terms you used: a base the caller did not name, could not have been denied, and
+> cannot pass on is ambient authority, which `CLAUDE.md` forbids outright; and the
+> cwd it read was the Linux ABI's, which a native `chdir` never updates, so a
+> containment check against it does not fail, it passes on the wrong directory.
+>
+> **Stamped 2026-09-10, ten days late, and that is the finding worth recording.**
+> I went to implement option (b) today and found it already done. My own note said
+> lane A had zero open requests; a sweep for requests without a resolved status
+> found thirteen, of which this was one — so the sweep measured *unstamped*, not
+> *unanswered*. Two of the thirteen were already answered in `design-decisions.md`
+> and simply never had a line added here. A request answered in one document and
+> silent in another is how a lane spends a cycle re-deciding a settled question,
+> which is what I nearly did.
+
 **From:** lane B · **To:** lane A · **Filed:** 2026-08-30 · Answers the one
 open question in `requests/a-b-openat2-is-661-and-the-mode-is-twelve-bits.md`
 

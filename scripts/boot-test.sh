@@ -3876,6 +3876,64 @@ check_merge_readiness_selftest() {
 
 check_merge_readiness_selftest
 
+# A self-test that clears ANOTHER module's state destroys it on a live machine
+# and then reports success.
+#
+# Placed before the build, and it has to be static, for the reason the original
+# survey's author wrote down: at boot these tables are empty, so clearing them
+# changes nothing and every assertion passes. No boot test can catch this. The
+# three instances found on 2026-08-23 -- svcstart deregistering every service,
+# logpersist and eventlog discarding the operator's event history -- were all
+# found by static survey, never by a failing run.
+#
+# That survey was `build/survey_reach.py`, and build/ is gitignored, so it was
+# never tracked and is gone. A FOURTH instance arrived in the eighteen days
+# nothing re-ran it: sockact::self_test called servicemgr::clear_all() at both
+# ends of its body, leaving the registry empty on every boot. The gate below is
+# that survey, tracked this time, and it refuses the pre-fix file when pointed
+# at it.
+check_selftest_reach() {
+    local py
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== Self-test reach check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    if ! run_checker check-selftest-reach-selftest "$py" \
+            "$PROJECT_ROOT/scripts/check-selftest-reach.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The self-test reach analyser fails its" >&2
+        echo "own cases, so it is no longer reading scopes or masking comments" >&2
+        echo "correctly and its verdict cannot be trusted in either direction." >&2
+        return 1
+    fi
+
+    echo "=== Checking that no self-test clears another module's state ==="
+    if run_checker check-selftest-reach "$py" \
+            "$PROJECT_ROOT/scripts/check-selftest-reach.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  A self-test clears state belonging to" >&2
+    echo "another module, and nothing moves that state aside for the duration." >&2
+    echo "On a live machine the suite destroys it and then reports success; at" >&2
+    echo "boot the table is empty, so no run will ever tell you." >&2
+    echo "" >&2
+    echo "Give the reached module a pub(crate) fn with_pristine_state and" >&2
+    echo "compose it in this suite's pub fn self_test, the way svcstart does" >&2
+    echo "with servicemgr::with_pristine_state -- or add the triple to ALLOWED" >&2
+    echo "in the checker with the reason it is safe, which must be about the" >&2
+    echo "reached function and not about how unlikely the suite is to run." >&2
+    exit 1
+}
+
+check_selftest_reach
+
 # The third way a gate can be inert, and the last of the triad.
 #
 #   check-gates-can-refuse   -- CAN this gate ever say no?

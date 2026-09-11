@@ -712,8 +712,38 @@ fn test_expect_state(entry_id: u32, want: ActivationState, what: &str) -> Kernel
     Ok(())
 }
 
-/// Run socket activation self-tests.
+/// Run socket activation self-tests, against a service table of their own.
+///
+/// **Two pristine windows, and the outer one is the one that matters.** The
+/// suite asserts an exact set of activation units, and it gets one by calling
+/// [`servicemgr::clear_all`](crate::fs::servicemgr::clear_all) followed by
+/// `init_defaults()`. On a live machine that deregisters every service — and the
+/// suite then called `clear_all()` again as cleanup, so it finished by leaving
+/// the registry EMPTY rather than as it found it.
+///
+/// `with_pristine` alone would not have helped: its guarantee is that *this*
+/// module's `STATE` comes back, and it says nothing about anything the suite
+/// reaches into. So the service table is moved aside too, by
+/// [`servicemgr::with_pristine_state`](crate::fs::servicemgr::with_pristine_state),
+/// exactly as `svcstart::self_test` does — whose doc comment describes this same
+/// hazard, in the same words, about the same function.
+///
+/// Why it never showed up as a failure: at boot the service table is empty, so
+/// clearing it changes nothing and every assertion passes. `main.rs` does not
+/// seed the registry, and `servicemgr`'s own suite runs *after* this one. The
+/// damage needs a machine with services registered before this point, or a suite
+/// run from the shell — which is to say, it needs someone to be using the
+/// feature. `known-issues.md` →
+/// `TD-A-SELFTESTS-REACH-OUTSIDE-THEIR-OWN-MODULE` records three earlier
+/// instances of this; this is the fourth, and it arrived after that entry was
+/// closed because the survey script it names was never tracked by git.
 pub fn self_test() -> KernelResult<()> {
+    crate::fs::servicemgr::with_pristine_state(|| {
+        crate::fs::selftest::with_pristine(&STATE, State::new(), self_test_inner)
+    })
+}
+
+fn self_test_inner() -> KernelResult<()> {
     crate::serial_println!("[sockact] Running socket activation self-tests...");
 
     // Clean slate.
@@ -966,12 +996,12 @@ pub fn self_test() -> KernelResult<()> {
     }
     crate::serial_println!("[sockact]   15. Procfs content: OK");
 
-    // Clean up.
-    crate::fs::servicemgr::clear_all();
-    {
-        let mut state = STATE.lock();
-        *state = State::new();
-    }
+    // No cleanup here, deliberately. This used to end with
+    // `servicemgr::clear_all()` and a by-hand reset of `STATE`, which is not a
+    // restore — it is a second wipe, and it left the machine's service registry
+    // empty while reading like the tidy-up that made the suite safe. Both tables
+    // are now moved aside by the wrappers in `self_test` and put back by them on
+    // the way out, including when an assertion above returns early.
 
     crate::serial_println!("[sockact] All 15 self-tests passed.");
     Ok(())

@@ -45,6 +45,7 @@ const BUF_SIZE: usize = 8192;
 
 /// Controls how write errors are handled.
 #[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(test, derive(Debug))]
 enum OutputErrorMode {
     /// Default: silently ignore pipe errors, warn on others (GNU default).
     WarnNopipe,
@@ -61,6 +62,7 @@ enum OutputErrorMode {
 // ============================================================================
 
 /// Fully parsed command-line configuration.
+#[cfg_attr(test, derive(Debug))]
 struct Config {
     /// Files to write to (in addition to stdout).
     file_paths: Vec<String>,
@@ -75,6 +77,7 @@ struct Config {
 
 /// Result of argument parsing -- either a runnable config or an early-exit
 /// action.
+#[cfg_attr(test, derive(Debug))]
 enum ParseResult {
     Run(Config),
     Help,
@@ -97,21 +100,19 @@ fn parse_args(args: &[String]) -> ParseResult {
     let mut end_of_opts = false;
 
     let mut i = 1;
-    while i < args.len() {
-        let arg = &args[i];
-
+    while let Some(arg) = args.get(i) {
         if end_of_opts || !arg.starts_with('-') || arg == "-" {
             // Positional argument (file path). `-` is treated as a filename
             // (stdin-as-file is not meaningful for tee, but we accept it for
             // compatibility and it will just fail to open, which is fine).
             file_paths.push(arg.clone());
-            i += 1;
+            i = i.saturating_add(1);
             continue;
         }
 
         if arg == "--" {
             end_of_opts = true;
-            i += 1;
+            i = i.saturating_add(1);
             continue;
         }
 
@@ -130,13 +131,13 @@ fn parse_args(args: &[String]) -> ParseResult {
                     eq_val.to_string()
                 } else {
                     // Next argument is the mode value.
-                    i += 1;
-                    if i >= args.len() {
+                    i = i.saturating_add(1);
+                    let Some(next) = args.get(i) else {
                         eprintln!("tee: option '--output-error' requires an argument");
                         eprintln!("Try 'tee --help' for more information.");
                         process::exit(1);
-                    }
-                    args[i].clone()
+                    };
+                    next.clone()
                 };
 
                 output_error = match mode_str.as_str() {
@@ -158,12 +159,12 @@ fn parse_args(args: &[String]) -> ParseResult {
                 process::exit(1);
             }
 
-            i += 1;
+            i = i.saturating_add(1);
             continue;
         }
 
         // Short options: may be combined (e.g., `-ai` = `-a -i`).
-        for ch in arg[1..].chars() {
+        for ch in arg.get(1..).unwrap_or_default().chars() {
             match ch {
                 'a' => append = true,
                 'i' => ignore_interrupts = true,
@@ -176,7 +177,7 @@ fn parse_args(args: &[String]) -> ParseResult {
             }
         }
 
-        i += 1;
+        i = i.saturating_add(1);
     }
 
     // `-p` upgrades the default to WarnNopipe if no explicit --output-error
@@ -275,7 +276,17 @@ fn run(config: &Config) -> i32 {
             }
         };
 
-        let chunk = &buf[..n];
+        // `Read::read` promises `n <= buf.len()`. Checked rather than
+        // trusted: a reader that broke that promise would have `tee`
+        // copy bytes it never read -- stale buffer contents -- into
+        // every output file, which is worse than stopping.
+        let Some(chunk) = buf.get(..n) else {
+            eprintln!(
+                "tee: read reported {n} bytes into a {}-byte buffer",
+                buf.len()
+            );
+            return 1;
+        };
 
         // Write to stdout.
         if let Err(e) = stdout_lock.write_all(chunk) {
@@ -392,5 +403,92 @@ fn main() {
             let code = run(&config);
             process::exit(code);
         }
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
+mod tests {
+    use super::*;
+
+    fn argv(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    fn run_config(v: &[&str]) -> Config {
+        match parse_args(&argv(v)) {
+            ParseResult::Run(c) => c,
+            other => panic!("expected a runnable config, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_empty_argv_is_a_runnable_config_rather_than_a_panic() {
+        // A program CAN be started with an empty argument vector: `execve`
+        // takes it from the caller and nothing requires a program name in it.
+        // The old `while i < args.len() { let arg = &args[i]; }` was safe here
+        // by arithmetic, but the loop it sat in was one edit away from not
+        // being -- which is what the lint is for.
+        let c = run_config(&[]);
+        assert!(c.file_paths.is_empty());
+        assert!(!c.append);
+    }
+
+    #[test]
+    fn combined_short_options_are_split() {
+        // `-ai` is `-a -i`, and the splitting reads `arg[1..]` -- a slice that
+        // is only safe because the branch above proved a leading `-`.
+        let c = run_config(&["tee", "-ai", "out.txt"]);
+        assert!(c.append);
+        assert!(c.ignore_interrupts);
+        assert_eq!(c.file_paths, vec!["out.txt".to_string()]);
+    }
+
+    #[test]
+    fn a_lone_dash_is_a_file_name_not_an_option() {
+        let c = run_config(&["tee", "-"]);
+        assert_eq!(c.file_paths, vec!["-".to_string()]);
+    }
+
+    #[test]
+    fn double_dash_ends_the_options() {
+        // Everything after `--` is a name, including something that looks
+        // exactly like a flag.
+        let c = run_config(&["tee", "--", "-a"]);
+        assert!(!c.append, "-a after -- must be a file name");
+        assert_eq!(c.file_paths, vec!["-a".to_string()]);
+    }
+
+    #[test]
+    fn output_error_takes_its_value_both_ways() {
+        // The separated form advances the index and then reads the next
+        // argument; that read used to index and would have panicked on
+        // `tee --output-error` with nothing after it, which is why the parser
+        // checks the bound first.
+        assert!(matches!(
+            run_config(&["tee", "--output-error=exit"]).output_error,
+            OutputErrorMode::Exit
+        ));
+        assert!(matches!(
+            run_config(&["tee", "--output-error", "warn"]).output_error,
+            OutputErrorMode::Warn
+        ));
+    }
+
+    #[test]
+    fn dash_p_upgrades_the_default_but_does_not_override_an_explicit_mode() {
+        // GNU behaviour: `-p` only moves the DEFAULT.
+        assert!(matches!(
+            run_config(&["tee", "-p"]).output_error,
+            OutputErrorMode::WarnNopipe
+        ));
+        assert!(matches!(
+            run_config(&["tee", "-p", "--output-error=exit"]).output_error,
+            OutputErrorMode::Exit
+        ));
     }
 }

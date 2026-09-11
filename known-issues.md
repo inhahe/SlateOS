@@ -129644,7 +129644,7 @@ than a note was checking the roadmap and finding mDNS marked done TWICE: once
 for the kernel responder with the real multicast addresses, once for this. Two
 `[x]` entries for one feature is the tell.
 
-## TD-B-HALF-THE-TREE-IS-NOT-SUBJECT-TO-THE-LINT-POLICY (lane B, 2026-09-10) — ratcheted, 134 open
+## TD-B-HALF-THE-TREE-IS-NOT-SUBJECT-TO-THE-LINT-POLICY (lane B, 2026-09-10) — ratcheted, 129 open
 
 **In short:** CLAUDE.md requires `#![deny(clippy::all, clippy::pedantic)]` in
 every crate plus five defensive lints in non-test code. **134 of 256 crates**
@@ -129685,6 +129685,30 @@ indistinguishable from one with nothing to say.
 
 **The work, when someone does it:** pick a crate, add the two lines, fix what
 it reports. The count may only fall.
+
+**134 -> 129.** `uname` and `tee` were done on 2026-09-11 (the other three came
+off earlier). Both were small — 2 and 8 non-test warnings — and both turned out
+to have **no tests at all**, which the count had no way to show. So the job is
+not one thing but two: satisfy the lints, and leave behind something that
+proves the crate still does what it did. They have 3 and 6 tests now.
+
+Two findings worth more than the warnings:
+
+* **`uname` indexed `&args[1..]`.** A program can be started with an EMPTY
+  argument vector — `execve` takes it from the caller and nothing requires a
+  program name in it — so that slice panicked before a single option was read.
+  Reachable by a caller rather than by a user, which is why no amount of
+  command-line testing would have found it.
+* **`tee` sliced `&buf[..n]`** on the result of `Read::read`. That one cannot
+  panic, because `Read` promises `n <= buf.len()`; it is now checked anyway,
+  because a reader that broke the promise would have `tee` copy stale buffer
+  bytes it never read into every output file, and stopping is better than that.
+
+**The house style, measured before following it:** of 50 covered crates only 9
+use a crate-level `#![allow(clippy::arithmetic_side_effects, ...)]`. The other
+41 fixed the warnings. So the blanket is for genuinely bounded, pervasive
+arithmetic — `ar`'s archive offsets, with its rationale written down — and not
+the default answer.
 
 **A worked example, with the real number.** `userspace/at` (1,900 lines) was
 put through it on 2026-09-10. With the test module exempted the way the covered

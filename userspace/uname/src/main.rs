@@ -59,6 +59,7 @@ const PROC_CPUINFO: &str = "/proc/cpuinfo";
 /// Which information fields to print. Order matches the `-a` output order
 /// defined by POSIX (s, n, r, v, m) plus our extensions (p, i, o).
 #[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(test, derive(Debug))]
 enum Field {
     KernelName,
     NodeName,
@@ -86,6 +87,7 @@ const ALL_FIELDS: [Field; 8] = [
 // Parsed command-line request
 // ============================================================================
 
+#[cfg_attr(test, derive(Debug))]
 enum Request {
     /// Print the selected fields.
     PrintFields(Vec<Field>),
@@ -246,7 +248,11 @@ impl SystemInfo {
 
 /// Escape a string for JSON output. Wraps the result in double quotes.
 fn json_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
+    // `saturating_add`: this is a capacity HINT, so the only question it has
+    // to answer correctly is "do not panic". A length near `usize::MAX`
+    // cannot happen here, but an allocation hint is the wrong place to
+    // find out.
+    let mut out = String::with_capacity(s.len().saturating_add(2));
     out.push('"');
     for ch in s.chars() {
         match ch {
@@ -285,7 +291,12 @@ fn parse_args(args: &[String]) -> Request {
     let mut fields: Vec<Field> = Vec::new();
     let mut seen_json = false;
 
-    for arg in &args[1..] {
+    // `get(1..)` and not `&args[1..]`: a program CAN be started with an
+    // empty argv. `execve` takes the argument vector from its caller and
+    // nothing requires a program name in it, so `args` may be empty and
+    // the slice would panic before a single option was read. Empty argv
+    // means no options, which is what `uname` with no arguments does.
+    for arg in args.get(1..).unwrap_or_default() {
         let arg_str = arg.as_str();
 
         // Long options.
@@ -460,5 +471,56 @@ fn run(request: Request) -> i32 {
             println!("{}", info.to_json());
             0
         }
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
+mod tests {
+    use super::*;
+
+    fn argv(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn an_empty_argv_is_the_default_request_rather_than_a_panic() {
+        // A program CAN be started with an empty argument vector: `execve`
+        // takes it from the caller and nothing requires a program name in it.
+        // `&args[1..]` panicked here before any option was read, which is a
+        // crash reachable by a caller rather than by a user.
+        //
+        // The answer is the same one a bare `uname` gives, which is the only
+        // sensible reading of "no options were passed".
+        match parse_args(&argv(&[])) {
+            Request::PrintFields(f) => assert_eq!(f, vec![Field::KernelName]),
+            other => panic!("empty argv should print the kernel name, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn argv0_alone_prints_the_kernel_name() {
+        // The case the one above must agree with: `uname` with no operands.
+        // If these two ever disagree, an empty argv has become a special case
+        // rather than simply a shorter one.
+        assert_eq!(
+            format!("{:?}", parse_args(&argv(&["uname"]))),
+            format!("{:?}", parse_args(&argv(&[])))
+        );
+    }
+
+    #[test]
+    fn json_escape_quotes_and_escapes() {
+        assert_eq!(json_escape("plain"), "\"plain\"");
+        assert_eq!(json_escape("a\"b"), "\"a\\\"b\"");
+        assert_eq!(json_escape("a\\b"), "\"a\\\\b\"");
+        // A newline inside a value would otherwise end the JSON line and let
+        // the value forge a field of its own.
+        assert_eq!(json_escape("a\nb"), "\"a\\nb\"");
+        assert_eq!(json_escape(""), "\"\"");
     }
 }

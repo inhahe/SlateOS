@@ -73,26 +73,26 @@
 </style>
 
 <header>
-  <h1>Contrast explorer — main / secondary / accent on a shaded card</h1>
-  <p>Live WCAG contrast for every text colour against whatever is actually behind it. The card sits inside a wider
-     unshaded page area that carries the same three text roles, so you can see both at once. Presets are the real
-     palette values from <code>gui/appearance/src/lib.rs</code>; “A” and “B” are my proposals for
-     <code>open-questions.md</code> → C-Q10. <b>Worth knowing before you pick:</b> the greyest card
-     (SURFACE2) tops out at 9.71 : 1 even against pure black, so A is reachable but needs genuinely
-     dark ink; and B <i>cannot</i> fix secondary or accent on its own — at today's grey they need a
-     card lighter than the page itself.</p>
+  <h1>The plan &mdash; borders by default, shaded cards as an optional theme</h1>
+  <p>This page opens on the <b>decided</b> palette, not the shipped one. C&#8209;Q10 was answered on
+     2026&#8209;09&#8209;11: boxes are told apart by a line around them rather than by a fill, on a plain
+     background, and the grey-filled look survives as a theme that can be switched on.
+     <code>design-decisions.md</code> §829 and §830 carry the reasoning. Everything below is live &mdash;
+     every colour is editable and every example, table and verdict follows it, so this is the place to
+     retune before the conversion starts rather than after. The earlier presets are kept so the
+     superseded palette can still be compared against.</p>
 </header>
 
 <div class="wrap">
   <div class="panel">
-    <h2>Preset</h2>
+    <h2>Earlier options &mdash; kept as history</h2>
     <div class="presets">
-      <button data-p="cur" class="on">Current</button>
+      <button data-p="cur">Current (superseded)</button>
       <button data-p="a">A — darken greys</button>
       <button data-p="b">B — lighten cards</button>
     </div>
 
-    <h2>Operator&rsquo;s palette (2026-09-09) &mdash; which way should the card ladder go?</h2>
+    <h2>Card-ladder options (2026-09-09) &mdash; asked and answered</h2>
     <div class="presets">
       <button data-p="op1">1 &mdash; surface0 only</button>
       <button data-p="op2">2 &mdash; page + one card</button>
@@ -101,7 +101,7 @@
 
     <h2>Decided &mdash; 2026-09-11</h2>
     <div class="presets">
-      <button data-p="brd">Borders (the default)</button>
+      <button data-p="brd" class="on">Borders (the default)</button>
     </div>
     <p class="note" style="margin-top:6px">Borders are the decision; the shaded cards stay as an
        optional theme, which is why both columns are still drawn below. In this preset the panes are
@@ -163,6 +163,58 @@
          <code>mantle</code> (353) and <code>crust</code> (285) are <em>lighter</em> than the page. A palette
          naming one card colour has to say what becomes of the other four. Anything below 4.5 is marked.</p>
       <div id="allsurf"></div>
+    </div>
+
+    <div class="panel" style="margin-top:18px">
+      <h2>The plan, in full &mdash; what is decided, what is not, and what changes in the code</h2>
+
+      <h3 style="font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:#666;margin:2px 0 6px">Decided</h3>
+      <table>
+        <thead><tr><th>role</th><th>value</th><th>where you see it</th></tr></thead>
+        <tbody id="plan_roles"></tbody>
+      </table>
+      <p class="note">One blue-green does three jobs &mdash; the selected border, secondary text, and a switch
+         that is on. It <b>replaces</b> the old blue accent rather than joining it: every blue-green dark enough
+         to clear 4.5 lands 1.19&ndash;1.74 from <code>#0036A3</code>, which is not a second colour.</p>
+
+      <h3 style="font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:#666;margin:14px 0 6px">Still open &mdash; three things this decision did not settle</h3>
+      <ol class="note" style="margin-top:0">
+        <li><b>Colouring the card theme so everything clears 4.50.</b> Your words, and still true. It is now an
+            <em>optional theme</em> rather than the default, which lowers the urgency without removing it &mdash;
+            switch the two example columns below to compare. Tracked as
+            <code>TD-C-THIRTEEN-LIGHT-ACCENTS-STILL-FAIL-ON-CARDS</code>.</li>
+        <li><b><code>subtext0</code> has been given the same value as <code>subtext1</code>.</b> They were 1.10
+            apart in the shipped palette &mdash; one colour by the measure below &mdash; so there was no second
+            grey to keep. But <code>subtext0</code> has <b>1,087</b> uses to <code>subtext1</code>'s <b>161</b>,
+            so if these should differ, that is the one that carries the weight.</li>
+        <li><b>A link and a caption are now the same colour.</b> The accent and <code>subtext1</code> hold one
+            value, so &ldquo;Disconnect&rdquo; and &ldquo;Connected &middot; 5&nbsp;GHz &middot; strong&rdquo; sit
+            in one row at one colour. Defensible when the outline carries selection, but it is the first thing to
+            look at if the examples read wrong.</li>
+      </ol>
+
+      <h3 style="font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:#666;margin:14px 0 6px">What the conversion actually touches</h3>
+      <p class="note" style="margin-top:0">Counted, not estimated &mdash;
+         <code>grep</code> across <code>gui/</code> and <code>apps/</code>:</p>
+      <table>
+        <thead><tr><th>what</th><th class="num">count</th><th>treatment</th></tr></thead>
+        <tbody>
+          <tr><td><code>FillRect</code> literals naming a surface role</td><td class="num">766</td>
+              <td>route through one helper</td></tr>
+          <tr><td>helper calls (<code>fill_rounded</code>, <code>fill_rect</code>&hellip;) naming one</td><td class="num">26</td>
+              <td>route through one helper</td></tr>
+          <tr><td>surface-role mentions in total, across 376 files</td><td class="num">2,365</td>
+              <td>mostly borders, text and tests &mdash; untouched</td></tr>
+        </tbody>
+      </table>
+      <p class="note">So it is about <b>790 draw sites</b>, not the 1,713 quoted earlier &mdash; that figure counted
+         every mention of a surface role, including the ones that were already borders. The shape of the change is
+         <em>not</em> &ldquo;replace each fill with a border&rdquo;, because the shaded look has to keep working:
+         each site stops choosing a fill and instead names <em>what it is</em> &mdash; a card, a selected row, a
+         control track &mdash; and one place decides how that is drawn in the active theme. Two consequences worth
+         knowing: the fills that are genuinely <b>control chrome</b> (a switch track, a scrollbar, a progress
+         groove) stay fills in <em>both</em> themes and must be classified out by hand rather than swept, and the
+         shade ladder cannot be deleted, only stop being the default.</p>
     </div>
 
     <div class="panel" style="margin-top:18px">
@@ -364,7 +416,7 @@ const LKEYS = ['mantle','crust','s0','s1','s2'];
 // `a` and `b` did not, and used to fall through to SHIPPED_LADDER at each read
 // site -- which is exactly what made them un-editable.
 const withLadder = pre => ({ ...INK_DEFAULTS, ...pre, ladder: { ...(pre.ladder || SHIPPED_LADDER) } });
-let cur = withLadder(PRESETS.cur);
+let cur = withLadder(PRESETS.brd);
 // Whether to chip each element with the pane it is drawn from.
 let showTags = true;
 
@@ -723,6 +775,20 @@ function render() {
   renderAllSurfaces();
   renderUseCases();
   renderFullPages();
+
+  // The plan's role table, driven from the live controls so it cannot drift
+  // from what the rest of the page is showing.
+  $('plan_roles').innerHTML = [
+    ['main text', cur.main, 'row titles, sidebar entries, section headings'],
+    ['secondary text', cur.sec1, 'the small print under a row'],
+    ['selected border / toggle on', cur.acc, 'the outline round the selected thing'],
+    ['border, unselected', cur.bord, 'every other outline'],
+    ['background', cur.page, 'behind everything'],
+    ['disabled / hint', cur.ovl, 'switched-off controls only'],
+  ].map(([role, hex, where]) =>
+    `<tr><td>${role}</td><td><span style="display:inline-block;width:11px;height:11px;border:1px solid ` +
+    `rgba(0,0,0,.3);border-radius:2px;background:${hex};vertical-align:middle;margin-right:6px"></span>` +
+    `<code>${hex.toUpperCase()}</code></td><td>${where}</td></tr>`).join('');
 
   // Pane against pane. The question this answers is not "can you read on it"
   // but "is this a different colour at all" -- six named rungs are only six

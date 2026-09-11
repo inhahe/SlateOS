@@ -81,6 +81,16 @@ const probe = script + `
   globalThis.__brd = !!b && b.main === '#000000' && b.sec1 === b.acc &&
                      b.ladder.s0 === b.ladder.s1;
 
+  // The plan's role table must be live, not a hardcoded copy that drifts away
+  // from the controls -- it is the first thing read on the page.
+  cur = withLadder(PRESETS.brd);
+  cur.bord = MARK;
+  render();
+  globalThis.__plan = {
+    live: document.getElementById('plan_roles').innerHTML.includes(MARK.toUpperCase()),
+    rows: (document.getElementById('plan_roles').innerHTML.match(/<tr>/g) || []).length,
+  };
+
   // The pane-vs-pane table must exist and must react to a pane change.
   cur = withLadder(PRESETS.cur); render();
   const psBefore = document.getElementById('panesep').innerHTML;
@@ -197,5 +207,12 @@ console.log((global.__bord ? 'ok    ' : 'FAIL  ') + 'the border colour reaches t
 if (!global.__bord) bad++;
 console.log((global.__brd ? 'ok    ' : 'FAIL  ') + 'the decided preset is present and flat');
 if (!global.__brd) bad++;
+{
+  const pl = global.__plan || {};
+  const ok = pl.live && pl.rows === 6;
+  console.log((ok ? 'ok    ' : 'FAIL  ') + 'the plan role table is live (' + pl.rows + ' rows, live:' +
+              !!pl.live + ')');
+  if (!ok) bad++;
+}
 console.log('populated ids: ' + Object.keys(store).filter(k => store[k].innerHTML).join(', '));
 process.exit(bad ? 1 : 0);

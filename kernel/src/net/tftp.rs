@@ -198,9 +198,7 @@ fn error_to_tftp_code(e: KernelError) -> (u16, &'static str) {
         }
         KernelError::DiskFull => (ERR_DISK_FULL, "Disk full"),
         KernelError::IsADirectory => (ERR_ACCESS_VIOLATION, "Not a regular file"),
-        KernelError::ReadOnlyFilesystem => {
-            (ERR_ACCESS_VIOLATION, "Read-only filesystem")
-        }
+        KernelError::ReadOnlyFilesystem => (ERR_ACCESS_VIOLATION, "Read-only filesystem"),
         _ => (ERR_UNDEFINED, "Server could not complete request"),
     }
 }

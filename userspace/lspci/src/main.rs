@@ -18,6 +18,7 @@
 //! lspci --json             JSON output
 //! ```
 
+use quoting::quotef_os;
 use std::env;
 use std::fs;
 use std::process;
@@ -247,7 +248,10 @@ fn scan_sysfs() -> Vec<PciDevice> {
             read_hex_file(&format!("{dev_path}/vendor")),
             read_hex_file(&format!("{dev_path}/device")),
         ) else {
-            eprintln!("lspci: {name}: cannot read the device identity, skipping");
+            eprintln!(
+                "lspci: {}: cannot read the device identity, skipping",
+                quotef_os(&name)
+            );
             continue;
         };
         let vendor_id = vendor_id as u16;

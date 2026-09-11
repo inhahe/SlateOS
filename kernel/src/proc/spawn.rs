@@ -84,6 +84,28 @@ fn pathz_skip(rung: core::fmt::Arguments<'_>, missing: &str) {
     );
 }
 
+/// Skip a rung because the VFS could not say whether a prerequisite is there.
+///
+/// Distinct from [`pathz_skip`] on purpose. Both gates below used to ask
+/// `Vfs::exists`, which is `stat(..).is_ok()`, so a stat that failed for any
+/// reason other than absence produced `prerequisite missing` for a file that
+/// may well be present -- and `check-boot-skips.py` ratchets these lines, so
+/// the wrong reason persists and sends the next reader hunting a staging bug
+/// that is not there.
+///
+/// The rung is skipped either way: it cannot run without the artifact, and it
+/// cannot run without knowing. Only the stated reason differs, and the counter
+/// is the same one so the ratchet still sees it.
+fn pathz_skip_unknown(rung: core::fmt::Arguments<'_>, path: &str, e: KernelError) {
+    PATHZ_SKIPPED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    serial_println!(
+        "[spawn]   SKIP: {} — prerequisite {} could not be checked: {:?}",
+        rung,
+        path,
+        e
+    );
+}
+
 /// Prerequisite gate for a Path-Z rung.
 ///
 /// Returns `true` — having logged one `SKIP` line naming the rung and the first
@@ -91,9 +113,16 @@ fn pathz_skip(rung: core::fmt::Arguments<'_>, missing: &str) {
 /// `return Ok(())`.  Returns `false` when the whole set is present.
 fn pathz_missing(rung: &str, required: &[&str]) -> bool {
     for path in required {
-        if !crate::fs::Vfs::exists(path) {
-            pathz_skip(format_args!("{rung}"), path);
-            return true;
+        match crate::fs::Vfs::exists_or_err(path) {
+            Ok(true) => {}
+            Ok(false) => {
+                pathz_skip(format_args!("{rung}"), path);
+                return true;
+            }
+            Err(e) => {
+                pathz_skip_unknown(format_args!("{rung}"), path, e);
+                return true;
+            }
         }
     }
     false
@@ -114,9 +143,16 @@ fn pathz_missing(rung: &str, required: &[&str]) -> bool {
 /// second list, so the gate cannot fall behind what the rung actually needs.
 fn pathz_fixtures_missing(rung: &str, fixtures: &[(&str, &str)]) -> bool {
     for (src, _dst) in fixtures {
-        if !crate::fs::Vfs::exists(src) {
-            pathz_skip(format_args!("{rung}"), src);
-            return true;
+        match crate::fs::Vfs::exists_or_err(src) {
+            Ok(true) => {}
+            Ok(false) => {
+                pathz_skip(format_args!("{rung}"), src);
+                return true;
+            }
+            Err(e) => {
+                pathz_skip_unknown(format_args!("{rung}"), src, e);
+                return true;
+            }
         }
     }
     false
@@ -12935,7 +12971,11 @@ pub fn self_test_fastpy_slateos_rm() -> KernelResult<()> {
     let exit_code = pcb::exit_code(result.pid);
     // Capture the post-run existence *before* teardown/cleanup so nothing else
     // can perturb it.
-    let still_exists = crate::fs::Vfs::exists(RM_FILE);
+    // `exists_or_err`, not `exists`: `exists` is `stat(..).is_ok()`, so a stat
+    // that failed for any reason other than absence answered `it is gone` and
+    // passed this rung on a check that had not run. For a verdict, `I could
+    // not tell` is not `the operation worked`.
+    let still_exists = crate::fs::Vfs::exists_or_err(RM_FILE);
 
     thread::on_thread_exit(result.task_id);
     pcb::destroy(result.pid);
@@ -12963,13 +13003,25 @@ pub fn self_test_fastpy_slateos_rm() -> KernelResult<()> {
 
     // The real verification: the file must actually be gone.  A no-op remove
     // that returned 0 without deleting would pass the exit check but fail here.
-    if still_exists {
-        serial_println!(
-            "[spawn]   FAIL: fastpy-rm (ring 3) — process exited 0 but {} still exists per the \
-             VFS (os.remove did not actually delete)",
-            RM_FILE
-        );
-        return Err(KernelError::InternalError);
+    match still_exists {
+        Ok(false) => {}
+        Ok(true) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-rm (ring 3) — process exited 0 but {} still exists \
+                 per the VFS (os.remove did not actually delete)",
+                RM_FILE
+            );
+            return Err(KernelError::InternalError);
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-rm (ring 3) — exited 0 but the VFS could not say \
+                 whether {} survived: {:?}",
+                RM_FILE,
+                e
+            );
+            return Err(e);
+        }
     }
 
     serial_println!(
@@ -13070,7 +13122,11 @@ pub fn self_test_fastpy_slateos_mv() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
     // Capture post-run filesystem state before teardown.
-    let src_exists = crate::fs::Vfs::exists(MV_SRC);
+    // `exists_or_err`, not `exists`: `exists` is `stat(..).is_ok()`, so a stat
+    // that failed for any reason other than absence answered `it is gone` and
+    // passed this rung on a check that had not run. For a verdict, `I could
+    // not tell` is not `the operation worked`.
+    let src_exists = crate::fs::Vfs::exists_or_err(MV_SRC);
     let dst_contents = crate::fs::Vfs::read_file(MV_DST);
 
     thread::on_thread_exit(result.task_id);
@@ -13096,13 +13152,25 @@ pub fn self_test_fastpy_slateos_mv() -> KernelResult<()> {
     }
 
     // Real verification: source gone, destination holds the original bytes.
-    if src_exists {
-        serial_println!(
-            "[spawn]   FAIL: fastpy-mv (ring 3) — exited 0 but {} still exists (rename did not \
-             remove the old name)",
-            MV_SRC
-        );
-        return Err(KernelError::InternalError);
+    match src_exists {
+        Ok(false) => {}
+        Ok(true) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-mv (ring 3) — exited 0 but {} still exists (rename \
+                 did not remove the old name)",
+                MV_SRC
+            );
+            return Err(KernelError::InternalError);
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-mv (ring 3) — exited 0 but the VFS could not say \
+                 whether {} survived the rename: {:?}",
+                MV_SRC,
+                e
+            );
+            return Err(e);
+        }
     }
     match dst_contents {
         Ok(bytes) if bytes == PAYLOAD => {}
@@ -13341,7 +13409,11 @@ pub fn self_test_fastpy_slateos_rmdir() -> KernelResult<()> {
 
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
-    let still_exists = crate::fs::Vfs::exists(RM_DIR);
+    // `exists_or_err`, not `exists`: `exists` is `stat(..).is_ok()`, so a stat
+    // that failed for any reason other than absence answered `it is gone` and
+    // passed this rung on a check that had not run. For a verdict, `I could
+    // not tell` is not `the operation worked`.
+    let still_exists = crate::fs::Vfs::exists_or_err(RM_DIR);
 
     thread::on_thread_exit(result.task_id);
     pcb::destroy(result.pid);
@@ -13365,13 +13437,25 @@ pub fn self_test_fastpy_slateos_rmdir() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
-    if still_exists {
-        serial_println!(
-            "[spawn]   FAIL: fastpy-rmdir (ring 3) — exited 0 but {} still exists per the VFS \
-             (os.rmdir did not actually remove it)",
-            RM_DIR
-        );
-        return Err(KernelError::InternalError);
+    match still_exists {
+        Ok(false) => {}
+        Ok(true) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-rmdir (ring 3) — exited 0 but {} still exists per \
+                 the VFS (os.rmdir did not actually remove it)",
+                RM_DIR
+            );
+            return Err(KernelError::InternalError);
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-rmdir (ring 3) — exited 0 but the VFS could not say \
+                 whether {} survived: {:?}",
+                RM_DIR,
+                e
+            );
+            return Err(e);
+        }
     }
 
     serial_println!(
@@ -19732,8 +19816,13 @@ pub fn self_test_fastpy_slateos_pkg_gc() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
     // Capture existence before teardown so nothing perturbs it.
-    let keep_exists = crate::fs::Vfs::exists(KEEP_BLOB);
-    let orphan_exists = crate::fs::Vfs::exists(ORPHAN_BLOB);
+    // This pair is why the question is about *direction*, not about the call:
+    // `if !keep_exists` below refuses when the stat fails, which is harmless,
+    // and `if orphan_exists` passes when the stat fails, which is a false
+    // verdict -- the same `Vfs::exists`, opposite consequence, decided only by
+    // which way the assertion is written. Both now report.
+    let keep_exists = crate::fs::Vfs::exists_or_err(KEEP_BLOB);
+    let orphan_exists = crate::fs::Vfs::exists_or_err(ORPHAN_BLOB);
 
     thread::on_thread_exit(result.task_id);
     pcb::destroy(result.pid);
@@ -19754,22 +19843,46 @@ pub fn self_test_fastpy_slateos_pkg_gc() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     // The referenced blob must survive.
-    if !keep_exists {
-        serial_println!(
-            "[spawn]   FAIL: fastpy-pkg gc (ring 3) — reclaimed the *referenced* blob {} \
-             (should have kept it)",
-            KEEP_BLOB
-        );
-        return Err(KernelError::InternalError);
+    match keep_exists {
+        Ok(true) => {}
+        Ok(false) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-pkg gc (ring 3) — reclaimed the *referenced* blob \
+                 {} (should have kept it)",
+                KEEP_BLOB
+            );
+            return Err(KernelError::InternalError);
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-pkg gc (ring 3) — could not say whether the \
+                 referenced blob {} survived: {:?}",
+                KEEP_BLOB,
+                e
+            );
+            return Err(e);
+        }
     }
     // The orphan blob must be gone.
-    if orphan_exists {
-        serial_println!(
-            "[spawn]   FAIL: fastpy-pkg gc (ring 3) — orphan blob {} still exists \
-             (gc did not reclaim it)",
-            ORPHAN_BLOB
-        );
-        return Err(KernelError::InternalError);
+    match orphan_exists {
+        Ok(false) => {}
+        Ok(true) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-pkg gc (ring 3) — orphan blob {} still exists \
+                 (gc did not reclaim it)",
+                ORPHAN_BLOB
+            );
+            return Err(KernelError::InternalError);
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: fastpy-pkg gc (ring 3) — could not say whether the orphan \
+                 blob {} was reclaimed: {:?}",
+                ORPHAN_BLOB,
+                e
+            );
+            return Err(e);
+        }
     }
 
     serial_println!(
@@ -20848,6 +20961,12 @@ pub fn self_test_linux_link() -> KernelResult<()> {
     // the disk fixture ever goes away, rather than silently becoming a
     // `return Ok(())`.  A test whose only path to running is a fixture CI might
     // stop providing is a test with an expiry date on it.
+    //
+    // `exists`, not `exists_or_err`, and deliberately so: this is the one place
+    // in the file where flattening a stat failure into `false` is the wanted
+    // behaviour. It selects which fixture paths to use, and falling back to the
+    // tmpfs pair when /mnt cannot be inspected is exactly the expiry-date
+    // protection described above. Nothing destructive rides on the answer.
     let on_ext4 = crate::fs::Vfs::exists("/mnt");
     let (src_path, dst_path, src_nul, dst_nul, base): (&str, &str, &[u8], &[u8], &str) = if on_ext4
     {
@@ -28223,7 +28342,11 @@ pub fn self_test_linux_real_glibc_shell_relpath() -> KernelResult<()> {
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
     let good = crate::fs::Vfs::read_file(GOOD_PATH);
-    let wrong_exists = crate::fs::Vfs::exists(WRONG_PATH);
+    // `exists_or_err`, not `exists`: `exists` is `stat(..).is_ok()`, so a stat
+    // that failed for any reason other than absence answered `it is gone` and
+    // passed this rung on a check that had not run. For a verdict, `I could
+    // not tell` is not `the operation worked`.
+    let wrong_exists = crate::fs::Vfs::exists_or_err(WRONG_PATH);
 
     thread::on_thread_exit(result.task_id);
     pcb::destroy(result.pid);
@@ -28248,14 +28371,26 @@ pub fn self_test_linux_real_glibc_shell_relpath() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
-    if wrong_exists {
-        serial_println!(
-            "[spawn]   FAIL: real dash relpath — file landed at {} (root) instead of the \
-             cwd-relative {}; relative open ignored the process cwd",
-            WRONG_PATH,
-            GOOD_PATH
-        );
-        return Err(KernelError::InternalError);
+    match wrong_exists {
+        Ok(false) => {}
+        Ok(true) => {
+            serial_println!(
+                "[spawn]   FAIL: real dash relpath — file landed at {} (root) instead of \
+                 the cwd-relative {}; relative open ignored the process cwd",
+                WRONG_PATH,
+                GOOD_PATH
+            );
+            return Err(KernelError::InternalError);
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: real dash relpath — could not say whether anything landed \
+                 at {}: {:?}",
+                WRONG_PATH,
+                e
+            );
+            return Err(e);
+        }
     }
 
     match good {

@@ -131262,6 +131262,71 @@ conclusion drawn from a population I had not inspected: one boot log, one benchm
 series, and now eight rows whose `experiment` field was sitting in the same JSON
 object I was reading `accel` out of.)*
 
+### 2026-09-11 — the first unperturbed WHPX run, and it settles the prerequisite question
+
+`QEMU_EXTRA="-accel whpx" ./scripts/boot-test.sh --bench` **works, passes, and
+records a full row** — 99 entries, `accel: Hyper-V/WHPX`, `profile: release`,
+`BENCH_OK` reached, commit `b770d800f`. It is the first WHPX row in
+`bench/history.jsonl` that is not a layout-sweep arm. Two facts about the row before
+the interesting part: `QEMU_EXTRA` auto-stamps it `experiment: "QEMU_EXTRA=-accel
+whpx (non-default emulator flags)"` (`boot-test.sh:2769`), and its `run_verdict` came
+back `unknown` rather than `clean`.
+
+**The 2026-08-19 characterisation in `comparable_records` holds, almost exactly.**
+Against the median of 32 unperturbed release TCG rows, over the 99 benchmarks both
+have:
+
+| | documented 2026-08-19 | measured 2026-09-11 |
+|---|---|---|
+| median benchmark | ~3.5× faster | **4.20× faster** |
+| best | ~10× | **10.8×** (`io_ring_nop`, 75.5 ns → 7 ns) |
+| device-bound | ~30× *slower* | **33× slower** (`hpet_read`, 448 ns → 13 693 ns) |
+
+### The part that decides the gate question: three benchmarks collapse into one number
+
+Exactly three benchmarks land in the 12–16 µs band under WHPX, and they agree to
+within 0.8%:
+
+| | WHPX | TCG median |
+|---|---|---|
+| `net_ns_arp_lookup` | 13 578 | 803 |
+| `net_arp_lookup` | 13 585 | 901 |
+| `hpet_read` | 13 693 | **448** |
+
+Under TCG these three span 2× **and rank in the opposite order** — `hpet_read` is the
+fastest of the three there and the slowest here. Under WHPX they are one number,
+because one HPET read costs a VM exit and that exit is ~13.6 µs. So the two ARP
+benchmarks under WHPX **are not measuring ARP**; they are measuring a VM exit with
+some ARP work lost inside the error bars. The ~450 ns of real signal that separates
+`hpet_read` from `net_arp_lookup` under TCG is 3% of the WHPX number.
+
+### What follows, and it is not what the previous correction said
+
+That correction made the prerequisite *"a handful of `--bench` runs under WHPX on
+unperturbed source"*, implying WHPX is the better measurement surface and the gate
+follows once rows exist. **One run is enough to show the prerequisite was the wrong
+shape**: the answer is per-benchmark, not per-accelerator.
+
+* **Compute-bound benchmarks:** WHPX is 4–11× faster and a plausible gating surface.
+  Whether it is *tighter* run-to-run is still unmeasured — this is one row, and the
+  1.03× figure from the layout sweep measures something else (see the correction
+  above).
+* **Device- or timer-bound benchmarks:** WHPX is the wrong surface at any sample
+  size. A gate there would grade Hyper-V's exit latency, and a 4% move in it would
+  swallow the entire quantity the benchmark exists to measure. These want TCG, where
+  the HPET is emulated inline and the three benchmarks separate.
+
+So a gate cannot pick an accelerator; it has to pick one **per benchmark**, and the
+tree has no field recording which class a benchmark is in. Deriving it is cheap and
+now has a method — a benchmark whose WHPX/TCG ratio sits near the VM-exit floor
+instead of near the median is device-bound — but it is a real addition rather than a
+configuration change, which is what the previous two corrections each assumed it
+would be.
+
+**`over_target` on this run: 10.** Against the 13–21 range of TCG runs, which is the
+shape one expects if the budgets are hardware-derived and WHPX is closer to hardware.
+One row cannot carry that conclusion and it is recorded as a number, not a finding.
+
 ## TD-A-REQUEST-STATUS-HAS-NO-CHECKED-SHAPE-SO-EVERY-READER-COUNTS-DIFFERENTLY (lane A, 2026-09-11) — **open**
 
 **In short:** the `requests/` dropbox is how the three lanes hand work to each other,

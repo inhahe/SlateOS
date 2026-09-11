@@ -188,7 +188,17 @@ capability identity. Both ledgers may only shrink, so the count is the
 progress bar — with the caveat this entry exists to record: the count is only
 a progress bar while the instrument holds still.
 
-## TD-B-CRONTAB-SIGNALS-A-RELOAD-NOBODY-LISTENS-FOR (lane B, 2026-09-11)
+## TD-B-CRONTAB-SIGNALS-A-RELOAD-NOBODY-LISTENS-FOR (lane B, 2026-09-11) -- FIXED 2026-09-11
+
+**FIXED by deleting the write,** which is the option this entry named as
+the better default. One thing the entry did not know when it was filed, and
+which settles it rather than merely favouring it: implementing the watcher
+could not have helped either. `crond` sleeps to the next MINUTE BOUNDARY
+and reloads when it wakes, and cron's granularity is one minute -- so the
+earliest a newly added job can run is exactly the moment the daemon
+re-reads the spool. An instant reload would notice the change sooner and
+still run nothing sooner.
+
 
 **In short:** `crontab` writes a file at `/run/crond/reload` after editing a
 crontab, meaning "daemon, re-read the spool". `crond` has no reload watcher —

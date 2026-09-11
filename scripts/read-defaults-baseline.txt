@@ -80,7 +80,6 @@ mktemp: gid_to_name(gid).unwrap_or_default()  # examined 2026-09-11: as above
 mktemp: uid_to_name(euid).unwrap_or_default()  # examined 2026-09-11: as above
 mktemp: uid_to_name(uid).unwrap_or_default()  # examined 2026-09-11: is_empty() prints uid=N with no name, as real id does
 monctl: read_file(&format!("{base}/modes")).unwrap_or_default()  # examined 2026-09-11: empty yields the resolution "unknown", which is honest
-monctl: read_file(&format!("{base}/status")).unwrap_or_default()
 netstat: fs::read_to_string(format!("/proc/{pid}/comm")) .unwrap_or_default()
 newgrp: std::fs::read_to_string("/etc/group").unwrap_or_default()  # examined 2026-09-11: empty means nobody is a member, so the password IS demanded
 newgrp: std::fs::read_to_string("/etc/gshadow").unwrap_or_default()  # examined 2026-09-11: empty refuses everyone; see the fn's own doc comment
@@ -89,7 +88,6 @@ oils: std::env::var("TARGET").unwrap_or_default()
 oils: std::env::var_os("PATH").unwrap_or_default()  # examined 2026-09-11: var_os is None only when unset, and empty IS an unset PATH
 passwd: text(raw, idx).unwrap_or_default()
 pkg: extract_string(line, "\"desc\":\"").unwrap_or_default()
-pkg: fs::read_to_string(path) .unwrap_or_default()
 powerctl: read_file(&format!("{base}/type")).unwrap_or_default()
 pwdb: std::fs::read(group).unwrap_or_default()
 pwdb: std::fs::read(passwd).unwrap_or_default()

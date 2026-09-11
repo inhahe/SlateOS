@@ -83,7 +83,15 @@ fn read_file(path: &str) -> Option<String> {
 
 struct DisplayInfo {
     name: String,
-    connected: bool,
+    /// Whether the connector reports a display, or `None` if `status` could
+    /// not be read.
+    ///
+    /// It was `bool`, from `read_file(status).unwrap_or_default() ==
+    /// "connected"`, so a connector whose `status` attribute could not be read
+    /// printed as DISCONNECTED in red -- a definite claim about a port nobody
+    /// had successfully asked. The text-table path always has a real answer,
+    /// so only the sysfs path produces `None`.
+    connected: Option<bool>,
     resolution: String,
     refresh_hz: u32,
     brightness: u32,
@@ -104,8 +112,7 @@ fn read_displays() -> Vec<DisplayInfo> {
 
                 let base = format!("/sys/class/drm/{name}");
 
-                let status = read_file(&format!("{base}/status")).unwrap_or_default();
-                let connected = status == "connected";
+                let connected = read_file(&format!("{base}/status")).map(|s| s == "connected");
 
                 let modes = read_file(&format!("{base}/modes")).unwrap_or_default();
                 let resolution = modes.lines().next().unwrap_or("unknown").to_string();
@@ -138,7 +145,9 @@ fn read_displays() -> Vec<DisplayInfo> {
             if parts.len() >= 3 {
                 displays.push(DisplayInfo {
                     name: parts[0].to_string(),
-                    connected: parts[1] == "connected",
+                    // The table says one or the other; there is no third
+                    // state to represent here.
+                    connected: Some(parts[1] == "connected"),
                     resolution: parts.get(2).unwrap_or(&"?").to_string(),
                     refresh_hz: parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(60),
                     brightness: read_backlight_percent(),
@@ -285,14 +294,16 @@ fn cmd_status() {
     }
 
     for disp in &displays {
-        let status = if disp.connected {
-            "\x1b[32mconnected\x1b[0m"
-        } else {
-            "\x1b[31mdisconnected\x1b[0m"
+        let status = match disp.connected {
+            Some(true) => "\x1b[32mconnected\x1b[0m",
+            Some(false) => "\x1b[31mdisconnected\x1b[0m",
+            // Magenta, not red: this is not a disconnected port, it is
+            // one whose state could not be read.
+            None => "\x1b[35mstatus unreadable\x1b[0m",
         };
 
         println!("{}: {}", disp.name, status);
-        if disp.connected {
+        if disp.connected == Some(true) {
             println!("  Resolution:  {}", disp.resolution);
             println!("  Refresh:     {} Hz", disp.refresh_hz);
             println!("  Brightness:  {}%", disp.brightness);
@@ -319,10 +330,10 @@ fn cmd_list() {
     );
 
     for disp in &displays {
-        let status = if disp.connected {
-            "connected"
-        } else {
-            "disconnected"
+        let status = match disp.connected {
+            Some(true) => "connected",
+            Some(false) => "disconnected",
+            None => "unknown",
         };
         println!(
             "{:<25} {:<12} {:<16} {:<8}",
@@ -334,7 +345,7 @@ fn cmd_list() {
 fn cmd_resolution() {
     let displays = read_displays();
     for disp in &displays {
-        if disp.connected {
+        if disp.connected == Some(true) {
             println!("{}: {} @ {}Hz", disp.name, disp.resolution, disp.refresh_hz);
         }
     }
@@ -345,7 +356,7 @@ fn cmd_dpms(args: &[String]) {
         // Show DPMS status.
         let displays = read_displays();
         for disp in &displays {
-            if disp.connected {
+            if disp.connected == Some(true) {
                 println!("{}: DPMS {}", disp.name, disp.dpms_state);
             }
         }

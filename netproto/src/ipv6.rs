@@ -61,7 +61,11 @@ impl<'a> Packet<'a> {
         dst.copy_from_slice(&buf[24..40]);
         let rest = &buf[HEADER_LEN..];
         let plen = payload_len as usize;
-        let payload = if plen <= rest.len() { &rest[..plen] } else { rest };
+        let payload = if plen <= rest.len() {
+            &rest[..plen]
+        } else {
+            rest
+        };
         Some(Packet {
             traffic_class,
             flow_label,
@@ -98,9 +102,8 @@ impl Builder {
     #[must_use]
     pub fn build_header(&self, payload_len: u16) -> [u8; HEADER_LEN] {
         let mut h = [0u8; HEADER_LEN];
-        let vcf: u32 = (6u32 << 28)
-            | ((self.traffic_class as u32) << 20)
-            | (self.flow_label & 0x000F_FFFF);
+        let vcf: u32 =
+            (6u32 << 28) | ((self.traffic_class as u32) << 20) | (self.flow_label & 0x000F_FFFF);
         h[0..4].copy_from_slice(&vcf.to_be_bytes());
         h[4..6].copy_from_slice(&payload_len.to_be_bytes());
         h[6] = self.next_header;

@@ -5,8 +5,8 @@
 //! borrowed slice rather than decoded. The header checksum is computed with
 //! the shared [`crate::checksum`] implementation.
 
-use crate::checksum;
 use crate::Ipv4Addr;
+use crate::checksum;
 
 /// Minimum IPv4 header length (no options), in bytes.
 pub const MIN_HEADER_LEN: usize = 20;
@@ -86,9 +86,23 @@ impl<'a> Packet<'a> {
         // Clamp the payload to total_len when it is sane; otherwise use the
         // rest of the buffer. Never index past the validated bound.
         let total = total_len as usize;
-        let end = if total >= header_len && total <= buf.len() { total } else { buf.len() };
+        let end = if total >= header_len && total <= buf.len() {
+            total
+        } else {
+            buf.len()
+        };
         let payload = &buf[header_len..end];
-        Some(Packet { dscp_ecn, total_len, id, flags_frag, ttl, protocol, src, dst, payload })
+        Some(Packet {
+            dscp_ecn,
+            total_len,
+            id,
+            flags_frag,
+            ttl,
+            protocol,
+            src,
+            dst,
+            payload,
+        })
     }
 }
 
@@ -293,8 +307,8 @@ mod tests {
     fn the_pseudo_header_is_the_twelve_bytes_rfc_793_draws() {
         let expected: [u8; 12] = [
             10, 0, 2, 15, // source address
-            10, 0, 2, 2, // destination address
-            0,    // mandatory zero
+            10, 0, 2, 2,         // destination address
+            0,         // mandatory zero
             PROTO_TCP, // protocol
             0x01, 0x2c, // upper-layer length, 300, big-endian
         ];
@@ -317,10 +331,22 @@ mod tests {
     #[test]
     fn every_input_reaches_the_sum() {
         let base = checksum::fold(pseudo_header_sum(&A, &B, 300, PROTO_TCP));
-        assert_ne!(base, checksum::fold(pseudo_header_sum(&C, &B, 300, PROTO_TCP)));
-        assert_ne!(base, checksum::fold(pseudo_header_sum(&A, &C, 300, PROTO_TCP)));
-        assert_ne!(base, checksum::fold(pseudo_header_sum(&A, &B, 301, PROTO_TCP)));
-        assert_ne!(base, checksum::fold(pseudo_header_sum(&A, &B, 300, PROTO_UDP)));
+        assert_ne!(
+            base,
+            checksum::fold(pseudo_header_sum(&C, &B, 300, PROTO_TCP))
+        );
+        assert_ne!(
+            base,
+            checksum::fold(pseudo_header_sum(&A, &C, 300, PROTO_TCP))
+        );
+        assert_ne!(
+            base,
+            checksum::fold(pseudo_header_sum(&A, &B, 301, PROTO_TCP))
+        );
+        assert_ne!(
+            base,
+            checksum::fold(pseudo_header_sum(&A, &B, 300, PROTO_UDP))
+        );
     }
 
     /// Swapping source and destination leaves the sum unchanged, and that is a
@@ -375,8 +401,8 @@ mod tests {
         assert!(crate::tcp::Segment::parse(&buf[..n], &C, &B).is_none());
 
         let mut ubuf = [0u8; 64];
-        let un = crate::udp::write(&mut ubuf, &A, &B, 5353, 53, &payload)
-            .expect("fits in 64 bytes");
+        let un =
+            crate::udp::write(&mut ubuf, &A, &B, 5353, 53, &payload).expect("fits in 64 bytes");
         assert!(crate::udp::Datagram::parse(&ubuf[..un], &A, &B).is_some());
         assert!(crate::udp::Datagram::parse(&ubuf[..un], &C, &B).is_none());
     }

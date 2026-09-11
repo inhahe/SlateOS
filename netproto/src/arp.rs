@@ -77,7 +77,13 @@ impl Packet {
         let sender_ip = [buf[14], buf[15], buf[16], buf[17]];
         target_mac.copy_from_slice(&buf[18..24]);
         let target_ip = [buf[24], buf[25], buf[26], buf[27]];
-        Some(Packet { op, sender_mac, sender_ip, target_mac, target_ip })
+        Some(Packet {
+            op,
+            sender_mac,
+            sender_ip,
+            target_mac,
+            target_ip,
+        })
     }
 
     /// Serialize just the 28-byte ARP body.
@@ -111,7 +117,11 @@ impl Packet {
 /// transmit. The Ethernet destination is broadcast and the target MAC is
 /// zeroed, per convention.
 #[must_use]
-pub fn request(sender_mac: &MacAddr, sender_ip: &Ipv4Addr, target_ip: &Ipv4Addr) -> [u8; FRAME_LEN] {
+pub fn request(
+    sender_mac: &MacAddr,
+    sender_ip: &Ipv4Addr,
+    target_ip: &Ipv4Addr,
+) -> [u8; FRAME_LEN] {
     Packet {
         op: Op::Request,
         sender_mac: *sender_mac,

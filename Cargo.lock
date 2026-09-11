@@ -2512,13 +2512,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "seq"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "serde_core"
 version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -83,7 +83,12 @@ struct AcAdapterInfo {
 #[derive(Debug, Clone)]
 struct ThermalZone {
     name: String,
-    temperature: i64, // millidegrees Celsius
+    /// Millidegrees Celsius, or `None` when the sensor did not answer.
+    ///
+    /// It was `i64` with `.unwrap_or(0)` behind it, so a zone whose `temp`
+    /// could not be read printed as 0.0 degrees C -- and for a thermal sensor
+    /// zero reads as "very cool", which is the opposite of a warning.
+    temperature: Option<i64>,
     trip_points: Vec<TripPoint>,
     policy: String,
 }
@@ -312,7 +317,7 @@ fn read_thermal_zones() -> Vec<ThermalZone> {
             }
 
             let path = entry.path();
-            let temperature = read_sysfs_i64(&path.join("temp")).unwrap_or(0);
+            let temperature = read_sysfs_i64(&path.join("temp"));
             let policy = read_sysfs_string(&path.join("policy")).unwrap_or_default();
 
             let mut trip_points = Vec::new();
@@ -378,6 +383,43 @@ fn read_cooling_devices() -> Vec<CoolingDevice> {
 // ---------------------------------------------------------------------------
 // Temperature formatting
 // ---------------------------------------------------------------------------
+
+/// The state a zone is in, from its temperature and its trip points.
+///
+/// IT USED TO BE THE LITERAL TEXT `ok`. Every zone printed "ok" whatever its
+/// temperature, so a machine sitting above its own critical trip point
+/// reported exactly what a cold one did. That is a claim about thermal state
+/// that was never computed -- the same shape as the `generate_default_*`
+/// sweep, in a format string rather than a function.
+///
+/// `None` temperature yields "unknown": a sensor that did not answer is not a
+/// zone that is fine.
+///
+/// The hottest crossed trip point wins, in ACPI's own order of seriousness.
+/// A zone below every trip point is "ok", and that is now something the
+/// program has checked rather than something it says.
+fn zone_state(temperature: Option<i64>, trips: &[TripPoint]) -> &'static str {
+    let Some(temp) = temperature else {
+        return "unknown";
+    };
+    let mut worst: Option<TripType> = None;
+    for tp in trips.iter().filter(|tp| temp >= tp.temp) {
+        let more_serious = match (worst, tp.kind) {
+            (None, _) => true,
+            (Some(TripType::Active), _) => !matches!(tp.kind, TripType::Active),
+            (Some(TripType::Passive), TripType::Hot | TripType::Critical) => true,
+            (Some(TripType::Hot), TripType::Critical) => true,
+            _ => false,
+        };
+        if more_serious {
+            worst = Some(tp.kind);
+        }
+    }
+    match worst {
+        Some(k) => k.as_str(),
+        None => "ok",
+    }
+}
 
 fn format_temp(millidegrees: i64, fahrenheit: bool) -> String {
     let celsius = millidegrees as f64 / 1000.0;
@@ -487,9 +529,14 @@ fn run_acpi(cfg: &Config, writer: &mut dyn Write) -> io::Result<()> {
         for zone in &zones {
             writeln!(
                 writer,
-                "Thermal {}: ok, {}",
+                "Thermal {}: {}, {}",
                 zone.name,
-                format_temp(zone.temperature, cfg.fahrenheit)
+                zone_state(zone.temperature, &zone.trip_points),
+                match zone.temperature {
+                    Some(t) => format_temp(t, cfg.fahrenheit),
+                    // NOT "0.0 degrees C". The sensor did not answer.
+                    None => "temperature unavailable".to_string(),
+                }
             )?;
 
             if cfg.verbose {
@@ -727,6 +774,60 @@ mod tests {
         assert_eq!(format_time(0), "00:00:00");
         assert_eq!(format_time(60), "01:00:00");
         assert_eq!(format_time(125), "02:05:00");
+    }
+
+    fn trip(kind: TripType, temp: i64) -> TripPoint {
+        TripPoint { kind, temp }
+    }
+
+    /// A sensor that did not answer is not a zone that is fine.
+    #[test]
+    fn an_unreadable_sensor_is_unknown_not_ok() {
+        let trips = [trip(TripType::Critical, 90_000)];
+        assert_eq!(zone_state(None, &trips), "unknown");
+        // ...and a zone that DID answer, below every trip point, is ok --
+        // which is now a checked claim rather than a literal.
+        assert_eq!(zone_state(Some(40_000), &trips), "ok");
+    }
+
+    /// The whole line used to read "ok" no matter the temperature, so a
+    /// machine above its own critical trip point reported what a cold one did.
+    #[test]
+    fn the_hottest_crossed_trip_point_names_the_state() {
+        let trips = [
+            trip(TripType::Active, 60_000),
+            trip(TripType::Passive, 70_000),
+            trip(TripType::Hot, 80_000),
+            trip(TripType::Critical, 90_000),
+        ];
+        assert_eq!(zone_state(Some(50_000), &trips), "ok");
+        assert_eq!(zone_state(Some(65_000), &trips), "active");
+        assert_eq!(zone_state(Some(75_000), &trips), "passive");
+        assert_eq!(zone_state(Some(85_000), &trips), "hot");
+        assert_eq!(zone_state(Some(95_000), &trips), "critical");
+        // Exactly at the trip point counts as crossed, which is what the
+        // kernel means by a trip point being reached.
+        assert_eq!(zone_state(Some(90_000), &trips), "critical");
+    }
+
+    /// Trip points are not required to be listed in temperature order, and
+    /// sysfs does not promise they are.
+    #[test]
+    fn trip_point_order_in_the_list_does_not_matter() {
+        let jumbled = [
+            trip(TripType::Critical, 90_000),
+            trip(TripType::Active, 60_000),
+            trip(TripType::Hot, 80_000),
+        ];
+        assert_eq!(zone_state(Some(85_000), &jumbled), "hot");
+        assert_eq!(zone_state(Some(61_000), &jumbled), "active");
+    }
+
+    /// A zone with no trip points at all cannot be over one.
+    #[test]
+    fn a_zone_with_no_trip_points_is_ok_when_it_answers() {
+        assert_eq!(zone_state(Some(120_000), &[]), "ok");
+        assert_eq!(zone_state(None, &[]), "unknown");
     }
 
     #[test]

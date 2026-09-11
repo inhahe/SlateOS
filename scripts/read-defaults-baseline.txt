@@ -45,12 +45,6 @@ efibootmgr: read_efi_var("BootOrder").unwrap_or_default()
 eject: fs::read_to_string(format!("{sys_path}/device/model")) .unwrap_or_default()
 eject: fs::read_to_string(format!("{sys_path}/device/vendor")) .unwrap_or_default()
 eject: fs::read_to_string(format!("{sys_path}/removable")) .unwrap_or_default()
-ftp: read_line("Name: ").unwrap_or_default()
-ftp: read_line("Name: ").unwrap_or_default()  [2]
-ftp: read_line("Name: ").unwrap_or_default()  [3]
-ftp: read_password("Password: ").unwrap_or_default()
-ftp: read_password("Password: ").unwrap_or_default()  [2]
-ftp: read_password("Password: ").unwrap_or_default()  [3]
 fuser: fs::read_to_string("/etc/passwd").unwrap_or_default()
 fuser: fs::read_to_string(format!("/proc/{pid}/comm")) .unwrap_or_default()
 fuser: fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default()

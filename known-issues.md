@@ -36,6 +36,39 @@ freely. See `roadmap.md` → "Three-Agent Parallel Execution" rule 3, and
 
 ---
 
+## TD-B-FTP-ECHOES-THE-PASSWORD-IT-ASKS-FOR (lane B, 2026-09-10)
+
+**In short:** `ftp` prompts `Password: ` and the characters appear on screen as
+they are typed. Anyone looking at the terminal, and anything capturing it,
+sees the password.
+
+**Where.** `userspace/ftp/src/main.rs`, `read_password`, which is three lines
+and entirely honest about itself:
+
+    fn read_password(prompt: &str) -> Option<String> {
+        // In a real terminal we would disable echo here. For now, just read a line.
+        read_line(prompt)
+    }
+
+The comment is accurate and the user never sees it. That is the whole of the
+issue: the program's behaviour and its self-description disagree only from
+outside.
+
+**The proper fix.** Clear `ECHO` in the terminal's `c_lflag` for the duration
+of the read and restore it afterwards, including on the error path -- a
+password prompt that leaves echo off after a failure is its own bug. `posix`
+has `tcgetattr`/`tcsetattr`; `userspace/passwd` and `userspace/su` need the
+same thing, so it belongs in a small shared helper rather than three copies.
+
+**Until then** the prompt should say so rather than look like a normal
+password prompt, which is a one-line change and is NOT what this entry asks
+for -- it asks for echo suppression. Noted because a warning that becomes
+permanent is how a workaround outlives the thing it was working around.
+
+**Found while fixing** the discarded-failure defect in the same function's
+caller, which is the second time today that reading one line closely turned up
+something beside it.
+
 ## TD-B-EIGHTY-THREE-DISCARDED-FAILURES-ARE-PINNED-UNREAD (lane B, 2026-09-10)
 
 **In short:** `check-read-defaults` was widened to see two more spellings of the
@@ -78,6 +111,11 @@ caller print `?`, skip the row, or refuse. `userspace/iostat` prints six
 question marks where it printed six zeroes, which is the whole shape of it.
 **Trigger: fix them in batches by crate, dropping each from the baseline as it
 goes.** The baseline may only shrink, so the count is the progress bar.
+
+**Progress: 95 -> 89.** `ftp`'s six are fixed (2026-09-10) -- the three
+`read_line("Name: ")` and three `read_password("Password: ")` sites now
+distinguish end-of-input from an empty answer, so a closed stdin aborts the
+login instead of sending a blank password.
 
 ## TD-B-WHO-S-W-MODE-CANNOT-BE-REACHED-BY-ANY-INVOCATION (lane B, 2026-09-10)
 

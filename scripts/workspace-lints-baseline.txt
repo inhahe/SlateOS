@@ -68,7 +68,6 @@ userspace/iconv
 userspace/indexer
 userspace/install
 userspace/ip
-userspace/join
 userspace/journalctl
 userspace/jq
 userspace/kill

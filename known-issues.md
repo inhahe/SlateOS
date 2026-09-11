@@ -64783,6 +64783,35 @@ lint programme above is still worth doing; it is not a substitute for a
 differential, and two of its three crates so far were duplicates that a
 differential then deleted.
 
+**29 -> 28 (2026-09-11): `join`, and all three "close" pairs have now come
+apart.** `DIFF_PKG=join bash scripts/join-diff.sh`, subject confirmed by
+`--version`:
+
+**coreutils 305 passed, 0 differed. The standalone 126 passed, 179 differed.**
+
+| | cases | defect |
+|---|---|---|
+| **attached short-option arguments** | **64** | `-a1`, `-a2`, `-v1`, `-t:`, `-j1` are all `unrecognized option`. These are not exotic spellings — `join -a1 x y` is how the option is normally written, and GNU accepts the attached and detached forms alike. One getopt gap costs a third of the suite. |
+| both refuse, different message | 59 | including several where the *diagnosis* is wrong: `join -o 1.1 a b c` is reported as `expected 2 file operands, got 3` where GNU says `invalid file number in field spec`. |
+| accepts what GNU refuses | 17 | `-e X -e Y` (`conflicting empty-field replacement strings`) silently takes the last; `-j 1 -1 2` (`incompatible join fields 0, 1`) silently proceeds and prints a join nobody asked for. |
+| refuses what GNU accepts | 17 | `-o '1.1 2.2'` — a blank-separated output-field list, which is the standard `-o` syntax — is `invalid field number`. |
+| **both exit 0, output differs** | **12** | the silent ones. `-o 1.2 -o 2.2`: GNU **accumulates** repeated `-o` and prints `2 x`; the standalone keeps only the last and prints `x`. `-o auto` on ragged records emits a different number of fields than GNU. `-e X -o auto -a 1` omits the missing field instead of filling it with `X`, shifting every column after it. And on a line with trailing blanks, GNU keeps the empty final field the blanks produce (`a 1 2  x`) where the standalone drops it (`a 1 2 x`). |
+| `(os error N)` | 8 | `join: nosuch.txt: No such file or directory (os error 2)`. |
+| **refuses non-UTF-8** | 2 | `join bad1.txt bad2.txt` → `read error: stream did not contain valid UTF-8`, exit 1, no output. GNU joins the bytes and succeeds. |
+
+**Three for three on the non-UTF-8 refusal** — `expand`, `comm`, `join`, same
+wording, same whole-file refusal, on three programs whose job is to move bytes
+around rather than to read them. It is now safe to predict for the remaining 28
+and to stop being surprised by it.
+
+**All three of the survey's "close — read both" pairs have now been measured,
+and all three were landslides**: `expand` 126 differences, `comm` 93, `join`
+179. "Close" was a statement about the two *line counts*, and the line counts
+were close — 873 vs 712, 1120 vs 700, 2102 vs 1173. What the survey cannot see
+is that the smaller half is smaller *because a third of the options are
+missing*. That makes "close" the least informative verdict it prints, not the
+most balanced one: it is the one that most reliably conceals a landslide.
+
 **30 -> 29 (2026-09-11): `comm`, the second "close" pair to come apart.**
 `DIFF_PKG=comm bash scripts/comm-diff.sh`, subject confirmed by `--version`:
 

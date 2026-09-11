@@ -210,7 +210,6 @@ userspace/thermald/src/main.rs:argv-as-string
 userspace/timeout/src/main.rs:argv-as-string
 userspace/top/src/main.rs:argv-as-string
 userspace/tput/src/main.rs:argv-as-string
-userspace/tr/src/main.rs:argv-as-string
 userspace/traceroute/src/main.rs:argv-as-string
 userspace/tsort/src/main.rs:argv-as-string
 userspace/tuned/src/main.rs:argv-as-string

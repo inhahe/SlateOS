@@ -3094,13 +3094,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tr"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "traceroute"
 version = "0.1.0"
 dependencies = [

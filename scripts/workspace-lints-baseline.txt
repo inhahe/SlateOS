@@ -131,7 +131,6 @@ userspace/tcpdump
 userspace/timeout
 userspace/top
 userspace/tput
-userspace/tr
 userspace/traceroute
 userspace/tsort
 userspace/udevd

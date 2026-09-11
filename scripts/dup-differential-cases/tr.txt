@@ -1,0 +1,81 @@
+# Cases for `tr`. Format: label | stdin | argv...
+#
+# `tr` is a good differential target because almost all of its behaviour is in
+# how it INTERPRETS its two set arguments, and the interesting rules are the
+# ones nobody implements by accident: what happens when SET2 is shorter than
+# SET1, how `[:class:]` interacts with `-d` and `-s`, whether a range is
+# endpoint-inclusive, and which escapes are recognised inside a set.
+#
+# It is also one of the five names the survey's first version ranked backwards,
+# having credited `tr` with flags `-A -F -X -Z` that were really `b'A'..=b'Z'`
+# in a character-class expansion.
+
+# -- the basic translation --
+lower to upper        | hello\n                  | a-z A-Z
+upper to lower        | HELLO\n                  | A-Z a-z
+single pair           | banana\n                 | a x
+explicit set          | hello\n                  | el ip
+identity              | abc\n                    | abc abc
+
+# -- SET2 shorter than SET1: GNU pads with the last character --
+set2 shorter          | abcdef\n                 | a-f xy
+set2 one char         | abcdef\n                 | a-f z
+set2 longer           | abc\n                    | abc wxyz
+set2 empty            | abc\n                    | abc ''
+
+# -- ranges --
+range inclusive       | az\n                     | a-z A-Z
+range single          | aaa\n                    | a-a b
+range reversed        | abc\n                    | c-a x
+digit range           | a1b2\n                   | 0-9 x
+
+# -- character classes --
+class alpha           | ab12\n                   | [:alpha:] x
+class digit           | ab12\n                   | [:digit:] x
+class space           | a b\tc\n                 | [:space:] _
+class upper to lower  | AbC\n                    | [:upper:] [:lower:]
+class punct           | a,b.c\n                  | [:punct:] x
+class in set2 alone   | abc\n                    | abc [:upper:]
+
+# -- delete --
+delete chars          | hello\n                  | -d l
+delete range          | a1b2c3\n                 | -d 0-9
+delete class          | ab 12\n                  | -d [:digit:]
+delete complement     | ab12\n                   | -d -c [:digit:]
+delete with two sets  | abc\n                    | -d abc xyz
+
+# -- squeeze --
+squeeze repeats       | aabbcc\n                 | -s abc
+squeeze after xlate   | aabb\n                   | -s ab xy
+squeeze class         | a   b\n                  | -s [:space:]
+squeeze one set only  | hello\n                  | -s l
+
+# -- complement --
+complement translate  | abc123\n                 | -c 0-9 x
+complement delete     | abc123\n                 | -cd 0-9
+complement squeeze    | ab111cd\n                | -cs 0-9
+
+# -- combined -d and -s --
+delete then squeeze   | aabbcc\n                 | -ds a b
+
+# -- escapes inside a set --
+escape newline        | a\nb\n                   | '\\n' x
+escape tab            | a\tb\n                   | '\\t' _
+escape backslash      | a\\b\n                   | '\\\\' x
+octal escape          | abc\n                    | '\\141' x
+
+# -- bytes that are not text --
+high byte             | a\x80b\n                 | a x
+delete high byte      | a\x80b\n                 | -d '\\200'
+
+# -- refusals --
+no arguments          | abc\n                    |
+one set with -s       | abc\n                    | -s
+three sets            | abc\n                    | a b c
+empty set1            | abc\n                    | '' x
+unknown class         | abc\n                    | [:nosuch:] x
+
+# -- edges --
+empty input           |                          | a-z A-Z
+no trailing newline   | abc                      | a-z A-Z
+nul in input          | a\x00b\n                 | a x

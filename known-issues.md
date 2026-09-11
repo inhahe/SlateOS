@@ -64612,6 +64612,34 @@ records a timeout as its own outcome — so a side that hangs where the other
 answers is a visible difference rather than a stuck harness. A differential
 that cannot survive the inputs it exists to try is not one.
 
+**36 -> 35 (2026-09-11): `tr`.** Also one of the five the survey first ranked
+backwards -- it had credited `tr` with flags `-A -F -X -Z` that were really
+`b'A'..=b'Z'` inside a character-class expansion. 46 cases: **coreutils 46/46,
+the standalone 38/46.**
+
+Five of the eight are message wording. The other **three are one defect wearing
+three hats**: GNU refuses, ours succeeds.
+
+| invocation | GNU and coreutils | standalone |
+|---|---|---|
+| `tr abc ''` | *when not truncating set1, string2 must be non-empty*, exit 1 | passes `abc` through, exit 0 |
+| `tr abc '[:upper:]'` | *misaligned `[:upper:]` construct*, exit 1 | outputs `ABC`, exit 0 |
+| `tr a b c` | *extra operand 'c'*, exit 1 | outputs `bbc`, exit 0 — the third operand is ignored |
+
+The third is the one a person hits. An extra operand is a typo, and GNU stops;
+ours produces output that looks entirely reasonable. The second is subtler and
+worse for portability: `[:upper:]` in SET2 is only valid opposite `[:lower:]`
+in SET1, so a script that works here fails on any real system.
+
+**Worth noting against the previous two.** `cut` and `seq` were too STRICT in
+places (`cut -b` refusing non-UTF-8) and too lax in others. `tr` is uniformly
+too lax: every difference is a malformed invocation accepted. Three pairs in,
+the standalone implementations are not wrong in one characteristic way -- they
+are wrong in whatever way nobody tested.
+
+`userspace/tr` deleted; lint exemptions 125 -> 124, argv-utf8 221 -> 220,
+collisions 36 -> 35.
+
 **Still open — the proper fix.** One name, one program. For each of the
 remaining 41: pick the implementation that is under test and maintained, make
 sure nothing in the other is worth keeping (the standalone ones are older but

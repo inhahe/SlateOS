@@ -168,8 +168,17 @@ ENV_PATTERN = re.compile(
 # 0.00% busy in every column -- a perfectly idle machine. The defect was
 # identical to the one this gate was written for and one call deeper than its
 # pattern could see, so the gate passed the file for a year.
+# `[ \t]*`, NOT `\s*`. Indentation is spaces and tabs; `\s` also matches the
+# newline, so `^\s*` at a line start consumes every following blank line as
+# well -- and then backtracks over the whole run one character at a time
+# looking for `fn`. `rustlex.live_code` BLANKS test code to spaces rather than
+# deleting it, so a crate with a big test module now carries a whitespace run
+# the size of that module: `oils/src/interp.rs` has one of 1.5 MB. Scanning it
+# is quadratic in the run length, and this pattern alone did not finish in 290
+# seconds on that file. It was fast before only because `live_code` used to cut
+# the run off instead of blanking it.
 LOCAL_FALLIBLE = re.compile(
-    r"^\s*(?:pub\s+)?fn\s+(\w+)\s*\([^)]*\)\s*->\s*(?:Option|Result)\s*<", re.M
+    r"^[ \t]*(?:pub\s+)?fn\s+(\w+)\s*\([^)]*\)\s*->\s*(?:Option|Result)\s*<", re.M
 )
 
 

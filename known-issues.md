@@ -86,13 +86,16 @@ are excluded — a file defining any local `fn get(..) -> Option<T>` otherwise
 implicates every slice in it, which is the difference between 39 findings and
 171.
 
-**The three worth fixing first**, from a sample of twelve:
+**The worst of them**, from a sample of twelve — and one of the three I first
+listed here was a false finding, which is recorded rather than deleted because
+a sample read without its context is exactly how this list could fill with
+them:
 
 | Site | What the default means |
 |---|---|
 | `ftp/src/main.rs:1792,1828,2001` | `read_password("Password: ").unwrap_or_default()` — **a failed password read becomes an empty password, which is then sent.** |
 | `stty/src/main.rs:1272-1304` (5×) | `tiocgwinsz(fd).unwrap_or_default()` — an ioctl failure becomes a 0×0 terminal, and the caller then computes a layout for it. |
-| `crontab/src/main.rs:669` | `current_username().unwrap_or_default()` — an empty username, in the field that decides whose crontab is edited. |
+| ~~`crontab/src/main.rs:669`~~ | **THIS ENTRY WAS WRONG.** I wrote it from a sample without reading the surrounding code. The empty username only ever accompanied `Action::Help`, which prints usage and touches no spool file — the line above it said so, and the real path already used `ok_or_else`. Corrected 2026-09-11; the field is `Option<String>` now so the next action added cannot inherit the trap. |
 
 Also `hostname` (empty hostname), `stat` (empty symlink target), `udevd` and
 `thermald` (empty sysfs attributes), `mktemp` (empty user and group names),
@@ -112,7 +115,7 @@ question marks where it printed six zeroes, which is the whole shape of it.
 **Trigger: fix them in batches by crate, dropping each from the baseline as it
 goes.** The baseline may only shrink, so the count is the progress bar.
 
-**Progress: 95 -> 75.** `ftp`'s six are fixed (2026-09-10) -- the three
+**Progress: 95 -> 74.** `ftp`'s six are fixed (2026-09-10) -- the three
 `read_line("Name: ")` and three `read_password("Password: ")` sites now
 distinguish end-of-input from an empty answer, so a closed stdin aborts the
 login instead of sending a blank password.

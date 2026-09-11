@@ -640,8 +640,15 @@ fn print_usage() {
 
 /// Parsed command-line arguments.
 struct Args {
-    /// Target username (from -u, or current user).
-    username: String,
+    /// Target username (from -u, or the caller's uid), when there is one.
+    ///
+    /// `None` ONLY for `Action::Help`, which prints usage and touches no spool
+    /// file. It was `String` holding `""` for that case, which is safe today
+    /// and only today: `crontab_path("")` is `/var/spool/cron/` -- the spool
+    /// DIRECTORY -- so any future action that read this field without checking
+    /// would operate on the directory itself. An Option makes the next reader
+    /// handle the case the comment used to handle.
+    username: Option<String>,
     /// Whether -u was explicitly provided (requires root).
     explicit_user: bool,
     /// The action to perform.
@@ -666,7 +673,7 @@ fn parse_args() -> Result<Args, Error> {
             // Help does not touch a spool file, so a caller this build cannot
             // name still gets the usage text rather than an error about who
             // they are.
-            username: current_username().unwrap_or_default(),
+            username: current_username(),
             explicit_user: false,
             action: Action::Help,
         });
@@ -733,7 +740,7 @@ fn parse_args() -> Result<Args, Error> {
     let action = action.unwrap_or(Action::Help);
 
     Ok(Args {
-        username,
+        username: Some(username),
         explicit_user,
         action,
     })
@@ -758,12 +765,24 @@ fn run() -> Result<(), Error> {
             print_usage();
             Ok(())
         }
-        Action::List => cmd_list(&args.username),
-        Action::Edit => cmd_edit(&args.username),
-        Action::Remove => cmd_remove(&args.username),
-        Action::Install(ref source) => cmd_install(&args.username, source),
+        Action::List => cmd_list(spool_user(&args)?),
+        Action::Edit => cmd_edit(spool_user(&args)?),
+        Action::Remove => cmd_remove(spool_user(&args)?),
+        Action::Install(ref source) => cmd_install(spool_user(&args)?, source),
         Action::Validate(ref source) => cmd_validate(source),
     }
+}
+
+/// The username for an action that opens a spool file.
+///
+/// `parse_args` only leaves this `None` for `Action::Help`, so in practice
+/// this never fails -- and it is written as a refusal rather than an
+/// `expect` because "in practice" is a claim about today's call sites, and the
+/// cost of being wrong is `crontab_path("")` opening the spool directory.
+fn spool_user(args: &Args) -> Result<&str, Error> {
+    args.username
+        .as_deref()
+        .ok_or_else(|| Error::Permission("cannot determine who is running this command".into()))
 }
 
 fn main() {

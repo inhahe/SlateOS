@@ -97,7 +97,6 @@ userspace/nproc
 userspace/nslookup
 userspace/ntpd
 userspace/passwd
-userspace/paste
 userspace/patch
 userspace/pgrep
 userspace/ping
@@ -128,14 +127,12 @@ userspace/timeout
 userspace/top
 userspace/tput
 userspace/traceroute
-userspace/tsort
 userspace/udevd
 userspace/uptime
 userspace/vi
 userspace/vmstat
 userspace/wall
 userspace/watch
-userspace/wc
 userspace/who
 userspace/xargs
 userspace/xdg

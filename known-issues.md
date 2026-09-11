@@ -64783,6 +64783,55 @@ lint programme above is still worth doing; it is not a substitute for a
 differential, and two of its three crates so far were duplicates that a
 differential then deleted.
 
+**26 -> 25 (2026-09-11): `tsort`, which splits tokens on a carriage
+return.** `DIFF_PKG=tsort bash scripts/tsort-diff.sh`:
+
+**coreutils 87 passed, 0 differed. The standalone 18 passed, 69 differed.**
+
+| | cases | defect |
+|---|---|---|
+| loop diagnostic shape | 39 | GNU prints a header naming the file and then one line per node — `tsort: cyc2.txt: input contains a loop:` / `tsort: a` / `tsort: b`. The standalone prints a full sentence per node (`tsort: a: input contains a loop`) and **never names the file**, so with several operands you cannot tell which one has the cycle. |
+| **`` splits a token** | **5** | on `ab x`, GNU reads two tokens (`ab` and `x`) and succeeds; the standalone splits at the CR, counts three, and refuses with `input contains an odd number of tokens`. Legitimate input rejected — and a CRLF file is the ordinary way to meet a CR. |
+| accepts what GNU refuses | 3 | `tsort -h` prints a usage message and exits 0; GNU rejects `-h` as an invalid option. An accidental `-h` therefore looks like a successful sort that produced no edges. |
+| `(os error 2)` | 3 | including `tsort ''`, where GNU quotes the empty operand (`tsort: '': No such file…`) and the standalone renders it as nothing at all: `tsort: : No such file or directory (os error 2)`. |
+| **refuses non-UTF-8** | 2 | fifth consecutive standalone. |
+| a different order | 17 | both exit 0 and the orders differ (`a b c d` against GNU's `a c b d`). Stated carefully: for these inputs both orders are **legal** topological sorts, so this family is not evidence of a bug — it is evidence that the two implementations are not interchangeable, which is the question §1005 asks. The coreutils half matches GNU byte for byte on all 87. |
+
+*Also worth recording:* the standalone identifies itself as `tsort (Slate OS
+coreutils) 0.1.0` — it claims to be the very build it is the duplicate of. The
+two halves are told apart by a space and a version number. That mattered here,
+because `--version` is what was used to prove each run had the right subject.
+
+**27 -> 26 (2026-09-11): `paste`, which ignores an empty delimiter.**
+`DIFF_PKG=paste bash scripts/paste-diff.sh`:
+
+**coreutils 202 passed, 0 differed. The standalone 144 passed, 58 differed.**
+
+| | cases | defect |
+|---|---|---|
+| **`-d ''` silently becomes TAB** | **14** | an explicitly empty delimiter means *join with nothing* — GNU emits `a1b1`. The standalone falls back to its default and emits `a1	b1`, and appends a trailing TAB where a file has run out (`a3	`). Exit 0 either way. Asking for no separator and getting the default one back is the worst possible answer, because the request was explicit. |
+| `(os error 2)`, and output before the error | 18 | `paste a.txt nosuch.txt`: the standalone prints all of `a.txt` and *then* reports the missing file; GNU opens every operand first and prints nothing. Output already written cannot be taken back, so a failed run leaves a partial file behind. |
+| long-option abbreviation | 13 | `--delim=,` and `--d ,` are `unrecognized option`. |
+| accepts what GNU refuses | 7 | a delimiter list ending in an unescaped backslash (`-d ''`, `-d 'a'`) is `delimiter list ends with an unescaped backslash` in GNU; the standalone accepts it and ignores it. |
+| **refuses non-UTF-8** | 4 | `paste bad.txt` → `stream did not contain valid UTF-8`. Fourth consecutive standalone with this. |
+| message shape | 2 | `option '-d' requires an argument` where GNU says `option requires an argument -- 'd'`. |
+
+**28 -> 27 (2026-09-11): `wc`, which does not align its columns.**
+`DIFF_PKG=wc bash scripts/wc-diff.sh`:
+
+**coreutils 116 passed, 0 differed. The standalone 43 passed, 73 differed.**
+
+| | cases | defect |
+|---|---|---|
+| **no column alignment** | **34** | GNU right-aligns every count in a fixed-width field — `      2       3       6`. The standalone prints `2 3 6`. That is `wc`'s entire output format, it is wrong on every single invocation, and it is invisible to any comparison that normalises whitespace. |
+| long-option abbreviation | 24 | `wc --lin` and `wc --w` are `unrecognized option`; GNU accepts any unambiguous prefix. |
+| `(os error 21)`, and a row that vanishes | 11 | `wc adir` — GNU prints the diagnostic **and** a `0 0 0 adir` row, and still prints a `total` line for the other operands. The standalone prints the diagnostic only, so the failed file disappears from the table and the total silently omits it. |
+| accepts what GNU refuses | 3 | a zero-length name in `--files0-from` (`invalid zero-length file name`), and `--files0-from` combined with a file operand (`file operands cannot be combined with --files0-from`). |
+| missing second line | 1 | `Try 'wc --help' for more information.` |
+
+The alignment family is the one to note: 34 cases where both sides exit 0, the
+numbers are identical, and the bytes are not. `wc` output is read in columns.
+
 **29 -> 28 (2026-09-11): `join`, and all three "close" pairs have now come
 apart.** `DIFF_PKG=join bash scripts/join-diff.sh`, subject confirmed by
 `--version`:

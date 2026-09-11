@@ -151,7 +151,6 @@ userspace/nslookup/src/main.rs:argv-as-string
 userspace/ntpd/src/main.rs:argv-as-string
 userspace/numactl/src/main.rs:argv-as-string
 userspace/objdump/src/main.rs:argv-as-string
-userspace/paste/src/main.rs:argv-as-string
 userspace/patch/src/main.rs:argv-as-string
 userspace/perf/src/main.rs:argv-as-string
 userspace/pgrep/src/main.rs:argv-as-string
@@ -205,7 +204,6 @@ userspace/timeout/src/main.rs:argv-as-string
 userspace/top/src/main.rs:argv-as-string
 userspace/tput/src/main.rs:argv-as-string
 userspace/traceroute/src/main.rs:argv-as-string
-userspace/tsort/src/main.rs:argv-as-string
 userspace/tuned/src/main.rs:argv-as-string
 userspace/udevd/src/main.rs:argv-as-string
 userspace/udisks/src/main.rs:argv-as-string
@@ -221,7 +219,6 @@ userspace/vi/src/main.rs:to_str-unwrap
 userspace/vmstat/src/main.rs:argv-as-string
 userspace/wall/src/main.rs:argv-as-string
 userspace/watch/src/main.rs:argv-as-string
-userspace/wc/src/main.rs:argv-as-string
 userspace/wget/src/main.rs:argv-as-string
 userspace/who/src/main.rs:argv-as-string
 userspace/whois/src/main.rs:argv-as-string

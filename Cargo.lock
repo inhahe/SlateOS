@@ -2069,13 +2069,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "paste"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "patch"
 version = "0.1.0"
 
@@ -3059,13 +3052,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tsort"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "ttyidle"
 version = "0.1.0"
 
@@ -3250,13 +3236,6 @@ name = "watch"
 version = "0.1.0"
 dependencies = [
  "libcall",
- "quoting",
-]
-
-[[package]]
-name = "wc"
-version = "0.1.0"
-dependencies = [
  "quoting",
 ]
 

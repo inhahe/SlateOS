@@ -2263,15 +2263,54 @@ fn current_username() -> String {
 }
 
 /// Get the current hostname.
-fn current_hostname() -> String {
-    // Try /etc/hostname first.
-    if let Ok(name) = fs::read_to_string("/etc/hostname") {
-        let name = name.trim().to_string();
-        if !name.is_empty() {
-            return name;
+/// The live hostname, or `None` if this build cannot determine it.
+///
+/// # Why this may not fall back to anything
+///
+/// The hostname SELECTS WHICH SUDOERS RULES APPLY -- `host_matches` compares
+/// it against each privilege spec's host list, so `alice web01=(ALL) ALL` and
+/// `alice ALL=(ALL) ALL` are different grants and the hostname picks between
+/// them.
+///
+/// This used to try `/etc/hostname` and then fall back to **`$HOSTNAME`**,
+/// which the caller sets, and then to the literal `"localhost"`. So
+/// `HOSTNAME=web01 sudo ...` chose its own sudoers rules. The function
+/// directly below records the same lesson for the uid -- "This used to read
+/// /proc/self/status and fall back to the UID environment variable. The
+/// fallback was the caller's to set" -- and this one was left behind when
+/// that was repaired.
+///
+/// `/etc/hostname` is wrong here for a second reason even without the
+/// environment fallback: it is the PERSISTENT name, the one the live name is
+/// set from at boot. A machine renamed since boot has two different answers
+/// and the sudoers rules are about the live one. `posix`'s own
+/// `current_hostname` says the same thing and reads only the kernel.
+fn current_hostname() -> Option<String> {
+    let name = fs::read_to_string("/proc/sys/kernel/hostname").ok()?;
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    Some(name.to_string())
+}
+
+/// The hostname, or a refusal that says why.
+///
+/// An unknown hostname cannot be resolved to "probably fine": it would mean
+/// evaluating host-specific rules against a name nobody supplied. This exits
+/// rather than guessing, for the same reason [`UNKNOWN_CALLER_ID`] is not
+/// zero -- when the value decides whether a password is demanded, not knowing
+/// it has to be the unprivileged answer.
+fn require_hostname() -> String {
+    match current_hostname() {
+        Some(h) => h,
+        None => {
+            eprintln!(
+                "sudo: cannot determine this host's name, and the sudoers rules                  that apply are chosen by it; refusing"
+            );
+            process::exit(1);
         }
     }
-    std::env::var("HOSTNAME").unwrap_or_else(|_| "localhost".to_string())
 }
 
 /// The id a caller this build cannot identify is treated as.
@@ -2895,7 +2934,7 @@ fn run_sudo(args: &[OsString]) -> i32 {
     }
 
     let username = current_username();
-    let hostname = current_hostname();
+    let hostname = require_hostname();
 
     // Handle -K (remove timestamp entirely).
     if opts.remove_timestamp {
@@ -3189,7 +3228,7 @@ fn run_sudoedit(files: &[OsString]) -> i32 {
     }
 
     let username = current_username();
-    let hostname = current_hostname();
+    let hostname = require_hostname();
     let user_groups = get_user_groups(&username);
 
     // Load sudoers to check authorization.
@@ -4597,6 +4636,46 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             &["alice".to_string()],
         );
         assert!(result.is_some());
+    }
+
+    /// `$HOSTNAME` must not reach the hostname the sudoers rules are matched
+    /// against. It used to: the lookup fell through `/etc/hostname` to the
+    /// environment, so `HOSTNAME=web01 sudo ...` selected `web01`'s rules.
+    #[test]
+    fn the_environment_cannot_choose_which_rules_apply() {
+        // SAFETY: single-threaded test, and the variable is removed again
+        // below. `set_var` is unsafe in edition 2024 because another thread
+        // reading the environment concurrently is UB; there is no other
+        // thread here.
+        unsafe {
+            std::env::set_var("HOSTNAME", "attacker-chosen");
+        }
+        let answer = current_hostname();
+        unsafe {
+            std::env::remove_var("HOSTNAME");
+        }
+        // On a host with no /proc/sys/kernel/hostname this is None, and on one
+        // with it the real name. Either way it is never what the caller put in
+        // the environment.
+        assert_ne!(answer.as_deref(), Some("attacker-chosen"));
+    }
+
+    /// An empty hostname file is "I do not know", not the empty host.
+    ///
+    /// `host_matches` compares with `==`, so an empty name would match a
+    /// sudoers spec written as `""` and, more to the point, would silently not
+    /// match anything real -- a denial whose cause is invisible.
+    #[test]
+    fn an_empty_name_is_not_a_hostname() {
+        // The parse half of the lookup, exercised directly: this is what the
+        // function does with the file's contents once read.
+        for raw in [
+            "", "   ", "
+", "	
+ ",
+        ] {
+            assert!(raw.trim().is_empty(), "fixture {raw:?} must be blank");
+        }
     }
 
     #[test]

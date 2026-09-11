@@ -19,9 +19,7 @@ enum Mode {
     Nproc,
     Arch,
     Pathchk,
-    Logname,
     Users,
-    Tty,
 }
 
 fn detect_mode(argv0: &str) -> Mode {
@@ -31,9 +29,7 @@ fn detect_mode(argv0: &str) -> Mode {
     match lower.as_str() {
         "arch" => Mode::Arch,
         "pathchk" => Mode::Pathchk,
-        "logname" => Mode::Logname,
         "users" => Mode::Users,
-        "tty" => Mode::Tty,
         _ => Mode::Nproc,
     }
 }
@@ -297,33 +293,6 @@ fn check_path(path: &str, portability: bool, posix_check: bool) -> Result<(), St
     Ok(())
 }
 
-// ── logname ────────────────────────────────────────────────────────
-
-fn run_logname() -> Result<(), String> {
-    let argv: Vec<String> = env::args().collect();
-    if argv.len() > 1 && (argv[1] == "-h" || argv[1] == "--help") {
-        eprintln!("Usage: logname");
-        eprintln!("Print the user's login name.");
-        process::exit(0);
-    }
-
-    // Try LOGNAME, then USER, then /etc/passwd lookup via uid
-    if let Ok(name) = env::var("LOGNAME")
-        && !name.is_empty()
-    {
-        println!("{name}");
-        return Ok(());
-    }
-    if let Ok(name) = env::var("USER")
-        && !name.is_empty()
-    {
-        println!("{name}");
-        return Ok(());
-    }
-
-    Err("no login name".to_string())
-}
-
 // ── users ──────────────────────────────────────────────────────────
 
 fn run_users() -> Result<(), String> {
@@ -381,71 +350,6 @@ fn extract_string(bytes: &[u8]) -> String {
     String::from_utf8_lossy(&bytes[..end]).to_string()
 }
 
-// ── tty ────────────────────────────────────────────────────────────
-
-fn run_tty() -> Result<(), String> {
-    let argv: Vec<String> = env::args().collect();
-    let mut silent = false;
-
-    for arg in &argv[1..] {
-        match arg.as_str() {
-            "-s" | "--silent" | "--quiet" => silent = true,
-            "-h" | "--help" => {
-                eprintln!("Usage: tty [-s]");
-                eprintln!("Print the file name of the terminal connected to stdin.");
-                eprintln!();
-                eprintln!("  -s, --silent  print nothing, only return exit status");
-                process::exit(0);
-            }
-            _ => {}
-        }
-    }
-
-    // Try to determine the terminal
-    let tty_name = get_tty_name();
-
-    match tty_name {
-        Some(name) => {
-            if !silent {
-                println!("{name}");
-            }
-            Ok(())
-        }
-        None => {
-            if !silent {
-                println!("not a tty");
-            }
-            process::exit(1);
-        }
-    }
-}
-
-fn get_tty_name() -> Option<String> {
-    // Try /proc/self/fd/0 (stdin) readlink
-    if let Ok(target) = fs::read_link("/proc/self/fd/0") {
-        let path = target.to_string_lossy().to_string();
-        if path.starts_with("/dev/") {
-            return Some(path);
-        }
-    }
-
-    // Try TTY env var
-    if let Ok(tty) = env::var("TTY")
-        && !tty.is_empty()
-    {
-        return Some(tty);
-    }
-
-    // Try GPG_TTY
-    if let Ok(tty) = env::var("GPG_TTY")
-        && !tty.is_empty()
-    {
-        return Some(tty);
-    }
-
-    None
-}
-
 // ── Main ───────────────────────────────────────────────────────────
 
 fn run() -> Result<(), String> {
@@ -456,9 +360,8 @@ fn run() -> Result<(), String> {
         Mode::Nproc => run_nproc(),
         Mode::Arch => run_arch(),
         Mode::Pathchk => run_pathchk(),
-        Mode::Logname => run_logname(),
+
         Mode::Users => run_users(),
-        Mode::Tty => run_tty(),
     }
 }
 
@@ -498,18 +401,8 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_logname() {
-        assert_eq!(detect_mode("logname"), Mode::Logname);
-    }
-
-    #[test]
     fn test_detect_users() {
         assert_eq!(detect_mode("users"), Mode::Users);
-    }
-
-    #[test]
-    fn test_detect_tty() {
-        assert_eq!(detect_mode("tty"), Mode::Tty);
     }
 
     #[test]

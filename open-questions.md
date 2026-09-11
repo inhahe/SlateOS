@@ -1142,6 +1142,71 @@ The one thing worth avoiding is leaving the *reason* stale — the project has
 already lost ~1,100 commits once to a decision whose premise had quietly
 expired, which is why this was checked at all.
 
+## B-Q11 — [B] 169 command names exist inside other programs and cannot be run. Give them their own programs, or delete them? — Status: OPEN
+
+**In short:** A program can behave as several different commands depending on
+the name it was started under — the same file installed as `useradd` and as
+`userdel` does two different jobs. We have 169 such extra names, and **not one
+of them is installed anywhere**, so the code behind them is finished, tested,
+and unrunnable. `useradd` answers to `userdel`, `usermod`, `groupadd`,
+`groupdel` and `groupmod`; `systemctl` to 14 more names; `selinux` to 11. The
+question is whether to give those names real programs, install one program
+under many names, or delete the code.
+
+**Why it is not just a packaging chore.** SlateOS grants permissions
+per-program: the kernel decides what a program may do by looking at *which
+binary* it is, not at what name it was started under. So one file installed
+under six names holds one set of permissions — the union of all six jobs.
+`userdel` would run holding everything `useradd` needs, and vice versa. That is
+the reason `design-decisions.md` §8 retired multi-name programs in the first
+place. §1005 later overruled §8 for the `coreutils` bundle specifically, and
+left everything else unstated, which is why this is a question rather than a
+lookup.
+
+### The options
+
+**A. One crate per name — 169 new programs.**
+*What changes:* `userdel` exists as its own command and can be granted only the
+permission to delete a user. Every name gets its own permission set.
+Cost: 169 crates to create and keep building; much of each is a thin wrapper
+around shared code that already exists.
+
+**B. Install the one program under every name.**
+*What changes:* `userdel` runs, and is the same file as `useradd`, so it holds
+`useradd`'s permissions too. Cheapest by far — a packaging list, no new code —
+and it is how busybox and toybox ship. It gives up per-command permissions for
+these 169.
+
+**C. Delete the extra names.**
+*What changes:* `userdel` does not exist; deleting a user is whatever
+`useradd` itself offers. Removes several thousand lines of working code, and
+scripts written for Linux that call `userdel` stop working.
+
+**D. Case by case.**
+*What changes:* nothing uniform. Some names get crates (the ones a script is
+likely to call), some are deleted (tools for subsystems SlateOS does not have,
+like the 11 SELinux ones), some are left. Best end result, most judgement, and
+needs a rule for deciding or it becomes 169 separate arguments.
+
+**My recommendation: D, with a default of B for anything kept.** The
+permission argument is real but it is not equally real for every name: the
+five `useradd` siblings all edit the same two files and would end up with
+near-identical grants anyway, whereas `systemctl`'s 14 are genuinely different
+jobs. Starting from B costs nothing and can be narrowed to A later for names
+where the permission split turns out to matter; starting from A commits 169
+crates up front to buy a separation most of them do not need.
+
+**If this is never answered:** nothing breaks and nothing gets worse. The code
+is unreachable, so it cannot misbehave; it is dead weight that can drift from
+the reachable copy beside it — which has already happened once, where a bug was
+fixed in `coreutils`' `logname` and left in the unreachable copy inside
+`nproc`. The ledger (`scripts/multicall-aliases-baseline.txt`) only shrinks, so
+the number cannot quietly grow while the question waits.
+
+**Where it bites:** `scripts/multicall-aliases.py` and its baseline;
+`known-issues.md` →
+`TD-B-ONE-HUNDRED-AND-SEVENTY-TWO-COMMAND-NAMES-NOBODY-CAN-RUN`.
+
 ## B-Q10 — [B] Your grep's manual and your grep disagree about one flag. Which one is right? — Status: OPEN
 
 **In short:** we are copying your `grep`'s extra features into SlateOS's. One

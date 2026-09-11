@@ -1,8 +1,20 @@
 //! Slate OS `crontab` — per-user cron schedule management
 //!
 //! User-facing companion to the `crond` daemon. Manages crontab files stored
-//! in `/var/spool/cron/<username>`. After any modification the tool signals
-//! `crond` to reload by writing to `/run/crond/reload`.
+//! in `/var/spool/cron/crontabs/<username>` -- the path is `cronspool`'s, so
+//! that this and both daemons cannot disagree about where a job lives.
+//!
+//! # It does not signal the daemon, and there is nothing a signal could buy
+//!
+//! It used to write the username to `/run/crond/reload` after every change.
+//! Nothing read that file: `crond` has no reload watcher, and never had one.
+//!
+//! Implementing one would also gain nothing. `crond` sleeps to the next MINUTE
+//! BOUNDARY and calls `load_all_crontabs()` when it wakes, and cron's
+//! granularity is one minute -- so the earliest moment a newly added job could
+//! possibly run is exactly the moment the daemon re-reads the spool. An
+//! instant reload would let it notice the change sooner and still not run
+//! anything sooner.
 //!
 //! # Usage
 //!
@@ -34,7 +46,7 @@
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process;
 
 // ============================================================================
@@ -54,9 +66,6 @@ use std::process;
 /// The producer moved rather than the consumers, because the consumers are
 /// what decides whether a job runs and they already agreed with each other.
 const SPOOL_DIR: &str = cronspool::USER_CRONTABS;
-
-/// Path where we write to signal `crond` to reload crontab files.
-const RELOAD_SIGNAL_PATH: &str = "/run/crond/reload";
 
 /// Fallback editor when `$EDITOR` and `$VISUAL` are both unset.
 const DEFAULT_EDITOR: &str = "/bin/vi";
@@ -354,18 +363,6 @@ fn crontab_path(username: &str) -> PathBuf {
 // Signal crond to reload
 // ============================================================================
 
-/// Write a reload trigger so `crond` picks up changes on the next cycle.
-///
-/// We write the username to `/run/crond/reload`. If the directory or file
-/// doesn't exist yet (crond not running), we silently ignore the error --
-/// crond will load the file on its next startup regardless.
-fn signal_reload(username: &str) {
-    if let Some(parent) = Path::new(RELOAD_SIGNAL_PATH).parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    let _ = fs::write(RELOAD_SIGNAL_PATH, username.as_bytes());
-}
-
 // ============================================================================
 // Commands
 // ============================================================================
@@ -467,7 +464,6 @@ fn cmd_edit(username: &str) -> Result<(), Error> {
             fs::write(&path, &new_content)
                 .map_err(|e| Error::Io(format!("cannot install crontab: {e}")))?;
             let _ = fs::remove_file(&tmp_path);
-            signal_reload(username);
             eprintln!(
                 "crontab: installing new crontab ({} entr{})",
                 entry_count,
@@ -516,7 +512,6 @@ fn cmd_remove(username: &str, interactive: bool) -> Result<(), Error> {
     let path = crontab_path(username);
     match fs::remove_file(&path) {
         Ok(()) => {
-            signal_reload(username);
             eprintln!("crontab: crontab for {username} removed");
             Ok(())
         }
@@ -555,7 +550,6 @@ fn cmd_install(username: &str, source: &str) -> Result<(), Error> {
     let path = crontab_path(username);
     fs::write(&path, &content).map_err(|e| Error::Io(format!("cannot install crontab: {e}")))?;
 
-    signal_reload(username);
     eprintln!(
         "crontab: installing new crontab ({} entr{})",
         entry_count,

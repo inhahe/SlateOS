@@ -351,7 +351,24 @@ fn record_with_old_path(event_type: JournalEventType, path: &Path, old_path: Opt
     let seq = journal.next_seq;
     journal.next_seq = seq.wrapping_add(1);
 
-    let timestamp_ns = crate::hpet::elapsed_ns();
+    // `clock_monotonic`, not `hpet::elapsed_ns`. Both satisfy this field's
+    // documented contract -- "monotonic nanoseconds since boot (from HPET or
+    // TSC)" -- and they differ in cost by three orders of magnitude: the HPET is
+    // an MMIO read, which is a VM exit under hardware virtualisation, while
+    // `clock_monotonic` is `rdtsc`.
+    //
+    // This is called on EVERY file write, from the tail of
+    // `Vfs::write_file_resolved`, and `bench_vfs_write_breakdown` measured it at
+    // 14 206 ns of a 43 813 ns write under WHPX -- 32% of the whole operation, and
+    // almost exactly the 13 484 ns that `hpet_read` costs on that surface. On real
+    // hardware an MMIO timer read is cheaper than a VM exit but still far dearer
+    // than a register read, so this is a product cost rather than an emulator
+    // artifact.
+    //
+    // `memfs::touch_modified` already timestamps the same write from the TSC via
+    // `vfs::metadata_now_ns`, so the cheap clock was already good enough for the
+    // mtime of the very file this entry describes.
+    let timestamp_ns = crate::timekeeping::clock_monotonic();
 
     let entry = JournalEntry {
         seq,

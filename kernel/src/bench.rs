@@ -6527,7 +6527,6 @@ fn bench_vfs_write_breakdown() {
         serial_println!("[bench] vfs_write_breakdown: SKIP (resolve failed)");
         return;
     };
-    let raw = crate::fs::path::Path::new(PATH);
 
     let full = run("vfs_write_breakdown_full", 200, || {
         let _ = core::hint::black_box(Vfs::write_file(PATH, &data));
@@ -6535,9 +6534,15 @@ fn bench_vfs_write_breakdown() {
     let resolved_only = run("vfs_write_breakdown_resolved", 200, || {
         let _ = core::hint::black_box(Vfs::write_file_resolved(&resolved, &data));
     });
-    let ns_only = run("vfs_write_breakdown_ns", 200, || {
-        let _ = core::hint::black_box(crate::ipc::namespace::check_writable(raw));
-    });
+    // No `ns` phase here, deliberately. `ipc::namespace::check_writable` opens with
+    // `if ns_fast_path_available() { return Ok(()); }` -- one atomic load, and its own
+    // comment says that deliberately skips `owner_process`'s THREAD_OWNERS lock
+    // because the process id is not needed when nothing is gated. Measured at 4 ns,
+    // which tripped the harness's BELOW-FLOOR check by sitting exactly on the
+    // 18-cycle empty-closure floor. The reading was correct, the phase was 0.009% of
+    // the total, and `vfs_stat_breakdown_ns` already covers this module above the
+    // floor -- so keeping it bought a permanent BELOW-FLOOR line every run for no
+    // information.
     let access_only = run("vfs_write_breakdown_access", 200, || {
         let _ = core::hint::black_box(crate::fs::vfs::check_path_access(
             &resolved,
@@ -6569,10 +6574,7 @@ fn bench_vfs_write_breakdown() {
         crate::fs::audit::log_ok(crate::fs::audit::AuditOp::Write, 0, &resolved);
     });
 
-    let named = ns_only
-        .min_ns
-        .saturating_add(access_only.min_ns)
-        .saturating_add(intercept_only.min_ns);
+    let named = access_only.min_ns.saturating_add(intercept_only.min_ns);
     let tail = quota_only
         .min_ns
         .saturating_add(notify_only.min_ns)
@@ -6588,11 +6590,10 @@ fn bench_vfs_write_breakdown() {
 
     serial_println!(
         "[bench]   vfs_write_breakdown: full {}ns, resolved {}ns (resolve {}ns), \
-         ns {}ns + access {}ns + intercept {}ns = {}ns, remainder {}ns",
+         access {}ns + intercept {}ns = {}ns, remainder {}ns",
         full.min_ns,
         resolved_only.min_ns,
         full.min_ns.saturating_sub(resolved_only.min_ns),
-        ns_only.min_ns,
         access_only.min_ns,
         intercept_only.min_ns,
         named,
@@ -6617,7 +6618,6 @@ fn bench_vfs_write_breakdown() {
 
     track("vfs_write_breakdown_full", &full);
     track("vfs_write_breakdown_resolved", &resolved_only);
-    track("vfs_write_breakdown_ns", &ns_only);
     track("vfs_write_breakdown_access", &access_only);
     track("vfs_write_breakdown_intercept", &intercept_only);
     track("vfs_write_breakdown_quota", &quota_only);

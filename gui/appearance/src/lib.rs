@@ -57,6 +57,14 @@ pub const SURFACE2: Color = Color::from_hex(0x585B70);
 pub const TEXT: Color = Color::from_hex(0xCDD6F4);
 pub const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
 pub const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
+
+/// Dark mode's link colour. See [`LIGHT_LINK`].
+pub const LINK: Color = BLUE;
+
+/// Dark mode's border. The mirror of [`LIGHT_BORDER`]: "the strongest mark
+/// available" is near-white here and black there, the same flip the whole
+/// ladder makes.
+pub const BORDER: Color = TEXT;
 pub const BLUE: Color = Color::from_hex(0x89B4FA);
 pub const GREEN: Color = Color::from_hex(0xA6E3A1);
 pub const RED: Color = Color::from_hex(0xF38BA8);
@@ -201,7 +209,15 @@ pub const LIGHT_OVERLAY0: Color = Color::from_hex(0x9CA0B0);
 ///
 /// Was `#686B80`, which cleared the floor on the bare page (4.64) and nothing
 /// else — measured once, against the one surface it happened to be tried on.
-pub const LIGHT_SUBTEXT0: Color = Color::from_hex(0x3D3D3F);
+/// Secondary text. Cerulean since 2026-09-11 (§829): in the bordered theme the
+/// same value marks the selected outline and a switch that is on, so secondary
+/// text, selection and "on" read as one family.
+///
+/// Holds the same value as [`LIGHT_SUBTEXT1`] and is deliberately still a role
+/// of its own -- see §831. 1,087 call sites name this one and 161 name the
+/// other; splitting them later is a one-line change here, and would be a
+/// thousand-site audit if the roles had been merged.
+pub const LIGHT_SUBTEXT0: Color = Color::from_hex(0x00688B);
 
 /// Secondary text: the second line of a list row, a caption, a hint.
 ///
@@ -212,10 +228,27 @@ pub const LIGHT_SUBTEXT0: Color = Color::from_hex(0x3D3D3F);
 ///
 /// Was `#5C5F77`: 5.53:1 on the page, **2.89:1** on the greyest card, drawn in
 /// 58 places and never measured against anything but the page.
-pub const LIGHT_SUBTEXT1: Color = Color::from_hex(0x373739);
+/// Secondary text, the more prominent rung. Same value as [`LIGHT_SUBTEXT0`];
+/// see §831 for why both names survive that.
+pub const LIGHT_SUBTEXT1: Color = Color::from_hex(0x00688B);
 
 /// Main text.
 pub const LIGHT_TEXT: Color = Color::from_hex(0x000000);
+
+/// Anything you can click through to. Its own role rather than the accent
+/// reused (§832): the accent marks *selection and state*, a link marks
+/// *navigation*, and once the accent became cerulean those stopped being one
+/// colour. Never the only mark on a link -- WCAG 1.4.1 forbids colour as the
+/// sole indicator, so a link is underlined as well.
+pub const LIGHT_LINK: Color = LIGHT_BLUE;
+
+/// The outline that carries structure in the bordered theme (§829), where a box
+/// is told apart by its edge rather than by being filled.
+///
+/// Black, at the operator's instruction. A border needs 3:1 against its
+/// background to be a perceivable UI component, not the 4.5 text needs --
+/// nothing is drawn *on* a border -- so this is far above what it must clear.
+pub const LIGHT_BORDER: Color = LIGHT_TEXT;
 
 // ============================================================================
 // Configuration-file spellings
@@ -1337,6 +1370,11 @@ pub struct Palette {
     pub subtext1: Color,
     /// Primary text.
     pub text: Color,
+    /// Anything you can click through to. Always drawn underlined as well,
+    /// because colour alone is not a sufficient mark for a link.
+    pub link: Color,
+    /// The outline that carries structure under [`SurfaceStyle::Borders`].
+    pub border: Color,
     /// The blue of the categorical set. See the type's note on hues.
     pub blue: Color,
     /// Green — also "this succeeded", "this is allowed", "this is safe".
@@ -1430,6 +1468,8 @@ impl Palette {
                 subtext0: LIGHT_SUBTEXT0,
                 subtext1: LIGHT_SUBTEXT1,
                 text: LIGHT_TEXT,
+                link: LIGHT_LINK,
+                border: LIGHT_BORDER,
                 blue: LIGHT_BLUE,
                 green: LIGHT_GREEN,
                 red: LIGHT_RED,
@@ -1456,6 +1496,8 @@ impl Palette {
                 subtext0: SUBTEXT0,
                 subtext1: SUBTEXT1,
                 text: TEXT,
+                link: LINK,
+                border: BORDER,
                 blue: BLUE,
                 green: GREEN,
                 red: RED,
@@ -1610,7 +1652,7 @@ impl Palette {
     /// every sweep that reads this. A guarantee that is documented but not real
     /// is worse than none, because it is the reason nobody looks.
     #[must_use]
-    pub fn roles(&self) -> [(&'static str, Color); 21] {
+    pub fn roles(&self) -> [(&'static str, Color); 23] {
         // A struct pattern with no `..` is exhaustive, so this stops compiling
         // the moment `Palette` grows a field: a new colour cannot reach the
         // palette without someone deciding, right here, whether it is a role.
@@ -1628,6 +1670,8 @@ impl Palette {
             subtext0,
             subtext1,
             text,
+            link,
+            border,
             red,
             green,
             yellow,
@@ -1653,6 +1697,14 @@ impl Palette {
             ("subtext0", subtext0),
             ("subtext1", subtext1),
             ("text", text),
+            ("link", link),
+            // `border` is a role and belongs in this list, but note for anyone
+            // sweeping it: it is the one entry here that is never drawn *on*.
+            // A border is a UI component, so its bar is 3:1 against its
+            // background, not the 4.5 every other entry has to clear. A sweep
+            // that applies the text floor uniformly will report it as failing
+            // when it is not.
+            ("border", border),
             ("red", red),
             ("green", green),
             ("yellow", yellow),
@@ -3261,7 +3313,7 @@ mod tests {
     /// keep-them-in-step arrangement this crate exists to abolish, and the
     /// one that would have gone stale is this one, because it is the copy
     /// nothing outside the file can see.
-    fn roles(p: &Palette) -> [(&'static str, Color); 21] {
+    fn roles(p: &Palette) -> [(&'static str, Color); 23] {
         p.roles()
     }
 
@@ -3317,6 +3369,7 @@ mod tests {
         // brightness can hold for both — but *distance from the base* rises
         // monotonically in each, and that is what a caller is actually asking
         // for when it reaches for surface1 over surface0.
+        let mut ties: Vec<String> = Vec::new();
         for light in [false, true] {
             let p = Palette::for_mode(light);
             let ladder = [
@@ -3332,13 +3385,34 @@ mod tests {
                 let [(lo, lo_c), (hi, hi_c)] = pair else {
                     unreachable!("windows(2) yields pairs")
                 };
+                // `>=`, not `>`, and only because §831 has subtext0 and
+                // subtext1 deliberately holding one value while staying two
+                // roles. Everywhere else a tie would mean the ladder had
+                // collapsed, so the exact permitted tie is pinned immediately
+                // below rather than this being relaxed for everyone.
                 assert!(
-                    contrast(*hi_c, p.base) > contrast(*lo_c, p.base),
-                    "{hi} is no further from the base than {lo} in {} mode",
+                    contrast(*hi_c, p.base) >= contrast(*lo_c, p.base),
+                    "{hi} is closer to the base than {lo} in {} mode",
                     if light { "light" } else { "dark" }
                 );
+                if (contrast(*hi_c, p.base) - contrast(*lo_c, p.base)).abs() < f32::EPSILON {
+                    ties.push(format!(
+                        "{lo}/{hi} in {} mode",
+                        if light { "light" } else { "dark" }
+                    ));
+                }
             }
         }
+        // The permitted ties, exactly. Relaxing the rung comparison to `>=`
+        // above would otherwise let the whole ladder quietly collapse to one
+        // colour and still pass, so every tie it now allows is named here.
+        // Light mode has one, by §831: subtext0 and subtext1 hold a single
+        // value while staying two roles. Dark mode has none.
+        assert_eq!(
+            ties,
+            ["subtext0/subtext1 in light mode"],
+            "the set of ladder rungs sharing a value changed"
+        );
     }
 
     #[test]
@@ -4239,18 +4313,20 @@ mod tests {
             ("text", LIGHT_TEXT),
             ("subtext0", LIGHT_SUBTEXT0),
             ("subtext1", LIGHT_SUBTEXT1),
-            ("accent (blue)", LIGHT_BLUE),
+            ("link", LIGHT_LINK),
         ];
-        // Every surface an ink can land on, palest first. `mantle` and `crust`
-        // are lighter than the base, so they are easier than it and included
-        // for completeness rather than doubt.
-        let surfaces: [(&str, Color); 6] = [
+        // The surfaces the **default** theme puts text on. Since §829 a box is
+        // told apart by its outline rather than by being filled, so a reader is
+        // looking at text on the page, on a menu or dialog, or on a sidebar --
+        // and never on a card, because in this theme there are none.
+        //
+        // `border` is deliberately not an ink here: nothing is drawn on top of
+        // a border, so its bar is the 3:1 of a UI component, not 4.5. It is
+        // checked separately below.
+        let surfaces: [(&str, Color); 3] = [
             ("base", LIGHT_BASE),
             ("mantle", LIGHT_MANTLE),
             ("crust", LIGHT_CRUST),
-            ("surface0", LIGHT_SURFACE0),
-            ("surface1", LIGHT_SURFACE1),
-            ("surface2", LIGHT_SURFACE2),
         ];
 
         let mut failures = Vec::new();
@@ -4270,6 +4346,47 @@ mod tests {
                 "
   "
             )
+        );
+
+        // The optional card theme, pinned rather than asserted clean.
+        //
+        // Under `SurfaceStyle::Cards` text does land on the three card shades,
+        // and the cerulean secondary does not clear the floor on any of them.
+        // That is a known, open gap the operator scoped deliberately when they
+        // chose borders as the default -- "I guess we still have to figure out
+        // how to color them" -- and it is tracked as
+        // `TD-C-THIRTEEN-LIGHT-ACCENTS-STILL-FAIL-ON-CARDS`.
+        //
+        // The exact set is asserted, not the empty set, for the reason §828
+        // gives: an assertion that cannot pass gets muted or deleted, and then
+        // stops reporting the *next* failure too. A fourth entry appearing here
+        // -- main text or the link slipping below the floor, say -- still fails
+        // this test.
+        let cards: [(&str, Color); 3] = [
+            ("surface0", LIGHT_SURFACE0),
+            ("surface1", LIGHT_SURFACE1),
+            ("surface2", LIGHT_SURFACE2),
+        ];
+        let mut card_failures = Vec::new();
+        for (ink_name, ink) in inks {
+            for (surface_name, surface) in cards {
+                if contrast_ratio(ink, surface) < FLOOR {
+                    card_failures.push(format!("{ink_name} on {surface_name}"));
+                }
+            }
+        }
+        card_failures.sort_unstable();
+        assert_eq!(
+            card_failures,
+            [
+                "subtext0 on surface0",
+                "subtext0 on surface1",
+                "subtext0 on surface2",
+                "subtext1 on surface0",
+                "subtext1 on surface1",
+                "subtext1 on surface2",
+            ],
+            "the card theme's known-failing set changed; if something new fell              below the floor it needs fixing, and if something was fixed this              list should shrink to match"
         );
     }
 

@@ -17,47 +17,19 @@ use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
 // ---------------------------------------------------------------------------
-// Personality detection
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Personality {
-    Chpasswd,
-    Passwd,
-}
-
-fn detect_personality(argv0: &str) -> Personality {
-    let base = argv0.rsplit('/').next().unwrap_or(argv0);
-    let base = base.rsplit('\\').next().unwrap_or(base);
-    let lower = base.to_ascii_lowercase();
-    let lower = lower.strip_suffix(".exe").unwrap_or(&lower);
-    match lower {
-        "passwd" => Personality::Passwd,
-        _ => Personality::Chpasswd,
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
 struct Config {
-    personality: Personality,
     /// The account named on the command line, still as the bytes the caller
     /// gave. Not a `String`: `env::args()` *panics* on an argument that is not
     /// valid UTF-8, which on this OS is legal input. See `known-issues.md` ->
     /// `B-COREUTILS-PANIC-ON-A-NON-UTF-8-ARGUMENT`.
-    username: Option<OsString>,
     encrypted: bool, // -e: passwords are already encrypted
     hash_method: HashMethod,
     min_length: usize,
     shadow_file: PathBuf,
-    lock_user: bool,       // -l
-    unlock_user: bool,     // -u
-    delete_password: bool, // -d
-    expire_password: bool, // -e for passwd personality
-    status: bool,          // -S
     show_help: bool,
     show_version: bool,
 }
@@ -81,17 +53,10 @@ type HashMethod = posix::crypt::Method;
 impl Default for Config {
     fn default() -> Self {
         Self {
-            personality: Personality::Chpasswd,
-            username: None,
             encrypted: false,
             hash_method: HashMethod::Sha512,
             min_length: 6,
             shadow_file: PathBuf::from("/etc/shadow"),
-            lock_user: false,
-            unlock_user: false,
-            delete_password: false,
-            expire_password: false,
-            status: false,
             show_help: false,
             show_version: false,
         }
@@ -102,15 +67,7 @@ fn parse_args(args: &[OsString]) -> Result<Config, String> {
     // `argv[0]` is a path, and one that cannot be decoded is not either of the
     // two names this binary answers to -- so it takes the default, which is
     // the same answer any other unrecognised name gets.
-    let personality = args
-        .first()
-        .and_then(|a| a.to_str())
-        .map_or(Personality::Chpasswd, detect_personality);
-
-    let mut cfg = Config {
-        personality,
-        ..Default::default()
-    };
+    let mut cfg = Config::default();
 
     let mut i = 1;
 
@@ -119,48 +76,17 @@ fn parse_args(args: &[OsString]) -> Result<Config, String> {
     while i < args.len() {
         let Some(raw) = args.get(i) else { break };
         let arg = raw.to_str().unwrap_or_default();
-        match personality {
-            Personality::Chpasswd => match arg {
-                "-e" | "--encrypted" => cfg.encrypted = true,
-                "-m" | "--md5" => cfg.hash_method = HashMethod::Md5,
-                "-s" | "--sha256" => cfg.hash_method = HashMethod::Sha256,
-                "-S" | "--sha512" => cfg.hash_method = HashMethod::Sha512,
-                "-h" | "--help" => cfg.show_help = true,
-                "-V" | "--version" => cfg.show_version = true,
-                other if other.starts_with('-') => {
-                    return Err(format!("chpasswd: unknown option: {other}"));
-                }
-                _ => {} // positional args ignored
-            },
-            Personality::Passwd => match arg {
-                "-l" | "--lock" => cfg.lock_user = true,
-                "-u" | "--unlock" => cfg.unlock_user = true,
-                "-d" | "--delete" => cfg.delete_password = true,
-                "-e" | "--expire" => cfg.expire_password = true,
-                "-S" | "--status" => cfg.status = true,
-                "-n" | "--mindays" => {
-                    i += 1; // skip value
-                }
-                "-x" | "--maxdays" => {
-                    i += 1;
-                }
-                "-w" | "--warndays" => {
-                    i += 1;
-                }
-                "-i" | "--inactive" => {
-                    i += 1;
-                }
-                "-h" | "--help" => cfg.show_help = true,
-                "-V" | "--version" => cfg.show_version = true,
-                other if other.starts_with('-') => {
-                    return Err(format!("passwd: unknown option: {other}"));
-                }
-                _ => {
-                    if cfg.username.is_none() {
-                        cfg.username = Some(raw.clone());
-                    }
-                }
-            },
+        match arg {
+            "-e" | "--encrypted" => cfg.encrypted = true,
+            "-m" | "--md5" => cfg.hash_method = HashMethod::Md5,
+            "-s" | "--sha256" => cfg.hash_method = HashMethod::Sha256,
+            "-S" | "--sha512" => cfg.hash_method = HashMethod::Sha512,
+            "-h" | "--help" => cfg.show_help = true,
+            "-V" | "--version" => cfg.show_version = true,
+            other if other.starts_with('-') => {
+                return Err(format!("chpasswd: unknown option: {other}"));
+            }
+            _ => {} // positional args ignored
         }
         i += 1;
     }
@@ -351,46 +277,6 @@ fn update_password(
 // Password status display
 // ---------------------------------------------------------------------------
 
-#[cfg(not(test))]
-fn show_password_status(
-    shadow_path: &std::path::Path,
-    username: &str,
-    writer: &mut dyn Write,
-) -> Result<(), String> {
-    let entries = read_shadow_file(shadow_path).map_err(|e| format!("cannot read shadow: {e}"))?;
-
-    let entry = entries
-        .iter()
-        .find(|e| e.username == username)
-        .ok_or_else(|| format!("user '{username}' not found"))?;
-
-    let status = if entry.password_hash.starts_with('!')
-        || entry.password_hash == "*"
-        || entry.password_hash == "!!"
-    {
-        "L" // locked / no password (! prefix or sentinel)
-    } else if entry.password_hash.is_empty() {
-        "NP" // no password
-    } else {
-        "P" // password set
-    };
-
-    writeln!(
-        writer,
-        "{} {} {} {} {} {} {}",
-        username,
-        status,
-        entry.last_changed,
-        entry.min_days,
-        entry.max_days,
-        entry.warn_days,
-        entry.inactive_days,
-    )
-    .map_err(|e| format!("write: {e}"))?;
-
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
 // chpasswd mode
 // ---------------------------------------------------------------------------
@@ -480,230 +366,28 @@ fn run_chpasswd(
 // passwd mode (interactive)
 // ---------------------------------------------------------------------------
 
-#[cfg(not(test))]
-fn run_passwd(
-    cfg: &Config,
-    reader: &mut dyn BufRead,
-    writer: &mut dyn Write,
-    err_writer: &mut dyn Write,
-) -> i32 {
-    // An account name is text, so a name that is not text names no account.
-    // It is carried through as the empty string, which no account has either,
-    // so it fails at the same place any other unknown name does rather than at
-    // a decoding step -- one message for one condition.
-    let username = cfg
-        .username
-        .as_ref()
-        .map(|n| n.to_str().unwrap_or_default().to_string())
-        .or_else(|| env::var("USER").ok())
-        .unwrap_or_else(|| "root".to_string());
-
-    // Lock user
-    if cfg.lock_user {
-        match lock_user(&cfg.shadow_file, &username) {
-            Ok(()) => {
-                let _ = writeln!(writer, "passwd: password for {username} locked");
-                return 0;
-            }
-            Err(e) => {
-                let _ = writeln!(err_writer, "passwd: {e}");
-                return 1;
-            }
-        }
-    }
-
-    // Unlock user
-    if cfg.unlock_user {
-        match unlock_user(&cfg.shadow_file, &username) {
-            Ok(()) => {
-                let _ = writeln!(writer, "passwd: password for {username} unlocked");
-                return 0;
-            }
-            Err(e) => {
-                let _ = writeln!(err_writer, "passwd: {e}");
-                return 1;
-            }
-        }
-    }
-
-    // Delete password
-    if cfg.delete_password {
-        match update_password(&cfg.shadow_file, &username, "") {
-            Ok(()) => {
-                let _ = writeln!(writer, "passwd: password for {username} deleted");
-                return 0;
-            }
-            Err(e) => {
-                let _ = writeln!(err_writer, "passwd: {e}");
-                return 1;
-            }
-        }
-    }
-
-    // Show status
-    if cfg.status {
-        match show_password_status(&cfg.shadow_file, &username, writer) {
-            Ok(()) => return 0,
-            Err(e) => {
-                let _ = writeln!(err_writer, "passwd: {e}");
-                return 1;
-            }
-        }
-    }
-
-    // Expire password
-    if cfg.expire_password {
-        // Set last_changed to 0 to force password change
-        let entries = match read_shadow_file(&cfg.shadow_file) {
-            Ok(e) => e,
-            Err(e) => {
-                let _ = writeln!(err_writer, "passwd: cannot read shadow: {e}");
-                return 1;
-            }
-        };
-        let mut entries = entries;
-        if let Some(entry) = entries.iter_mut().find(|e| e.username == username) {
-            entry.last_changed = "0".to_string();
-        }
-        if let Err(e) = write_shadow_file(&cfg.shadow_file, &entries) {
-            let _ = writeln!(err_writer, "passwd: cannot write shadow: {e}");
-            return 1;
-        }
-        let _ = writeln!(writer, "passwd: password for {username} expired");
-        return 0;
-    }
-
-    // Interactive password change
-    let _ = writeln!(writer, "Changing password for {username}.");
-    let _ = write!(writer, "New password: ");
-    let _ = writer.flush();
-
-    let mut password1 = String::new();
-    if reader.read_line(&mut password1).is_err() {
-        let _ = writeln!(err_writer, "passwd: error reading password");
-        return 1;
-    }
-    let password1 = password1.trim().to_string();
-
-    if let Err(e) = validate_password(&password1, cfg.min_length) {
-        let _ = writeln!(err_writer, "passwd: {e}");
-        return 1;
-    }
-
-    let _ = write!(writer, "Retype new password: ");
-    let _ = writer.flush();
-
-    let mut password2 = String::new();
-    if reader.read_line(&mut password2).is_err() {
-        let _ = writeln!(err_writer, "passwd: error reading password");
-        return 1;
-    }
-    let password2 = password2.trim();
-
-    if password1 != password2 {
-        let _ = writeln!(err_writer, "passwd: passwords don't match");
-        return 1;
-    }
-
-    let Some(hash) = hash_new_password(&password1, cfg.hash_method) else {
-        let _ = writeln!(
-            err_writer,
-            "passwd: cannot read `/dev/urandom', so no salt can be generated; \
-             refusing to write a password without one"
-        );
-        return 1;
-    };
-    match update_password(&cfg.shadow_file, &username, &hash) {
-        Ok(()) => {
-            let _ = writeln!(writer, "passwd: password updated successfully");
-            0
-        }
-        Err(e) => {
-            let _ = writeln!(err_writer, "passwd: {e}");
-            1
-        }
-    }
-}
-
-#[cfg(not(test))]
-fn lock_user(shadow_path: &std::path::Path, username: &str) -> Result<(), String> {
-    let mut entries =
-        read_shadow_file(shadow_path).map_err(|e| format!("cannot read shadow: {e}"))?;
-
-    let entry = entries
-        .iter_mut()
-        .find(|e| e.username == username)
-        .ok_or_else(|| format!("user '{username}' not found"))?;
-
-    if !entry.password_hash.starts_with('!') {
-        entry.password_hash = format!("!{}", entry.password_hash);
-    }
-
-    write_shadow_file(shadow_path, &entries).map_err(|e| format!("cannot write shadow: {e}"))?;
-    Ok(())
-}
-
-#[cfg(not(test))]
-fn unlock_user(shadow_path: &std::path::Path, username: &str) -> Result<(), String> {
-    let mut entries =
-        read_shadow_file(shadow_path).map_err(|e| format!("cannot read shadow: {e}"))?;
-
-    let entry = entries
-        .iter_mut()
-        .find(|e| e.username == username)
-        .ok_or_else(|| format!("user '{username}' not found"))?;
-
-    if let Some(stripped) = entry.password_hash.strip_prefix('!') {
-        entry.password_hash = stripped.to_string();
-    }
-
-    write_shadow_file(shadow_path, &entries).map_err(|e| format!("cannot write shadow: {e}"))?;
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
 // Help / version
 // ---------------------------------------------------------------------------
 
 #[cfg(not(test))]
-fn print_help(personality: Personality) {
-    match personality {
-        Personality::Chpasswd => {
-            println!("Usage: chpasswd [OPTIONS]");
-            println!();
-            println!("Update passwords in batch mode. Read user:password pairs from stdin.");
-            println!();
-            println!("Options:");
-            println!("  -e, --encrypted  Passwords are already encrypted");
-            println!("  -m, --md5        Use MD5 hash method");
-            println!("  -s, --sha256     Use SHA-256 hash method");
-            println!("  -S, --sha512     Use SHA-512 hash method (default)");
-            println!("  -h, --help       Show this help");
-            println!("  -V, --version    Show version");
-        }
-        Personality::Passwd => {
-            println!("Usage: passwd [OPTIONS] [username]");
-            println!();
-            println!("Change user password.");
-            println!();
-            println!("Options:");
-            println!("  -l, --lock       Lock the named account");
-            println!("  -u, --unlock     Unlock the named account");
-            println!("  -d, --delete     Delete the password (make it empty)");
-            println!("  -e, --expire     Force password expiration");
-            println!("  -S, --status     Show password status");
-            println!("  -h, --help       Show this help");
-            println!("  -V, --version    Show version");
-        }
-    }
+fn print_help() {
+    println!("Usage: chpasswd [OPTIONS]");
+    println!();
+    println!("Update passwords in batch mode. Read user:password pairs from stdin.");
+    println!();
+    println!("Options:");
+    println!("  -e, --encrypted  Passwords are already encrypted");
+    println!("  -m, --md5        Use MD5 hash method");
+    println!("  -s, --sha256     Use SHA-256 hash method");
+    println!("  -S, --sha512     Use SHA-512 hash method (default)");
+    println!("  -h, --help       Show this help");
+    println!("  -V, --version    Show version");
 }
 
 #[cfg(not(test))]
-fn print_version(personality: Personality) {
-    let name = match personality {
-        Personality::Chpasswd => "chpasswd",
-        Personality::Passwd => "passwd",
-    };
+fn print_version() {
+    let name = "chpasswd";
     println!("{name} (Slate OS) 0.1.0");
 }
 
@@ -727,12 +411,12 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     };
 
     if cfg.show_help {
-        print_help(cfg.personality);
+        print_help();
         return 0;
     }
 
     if cfg.show_version {
-        print_version(cfg.personality);
+        print_version();
         return 0;
     }
 
@@ -743,10 +427,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     let stderr = io::stderr();
     let mut err_writer = stderr.lock();
 
-    match cfg.personality {
-        Personality::Chpasswd => run_chpasswd(&cfg, &mut reader, &mut writer, &mut err_writer),
-        Personality::Passwd => run_passwd(&cfg, &mut reader, &mut writer, &mut err_writer),
-    }
+    run_chpasswd(&cfg, &mut reader, &mut writer, &mut err_writer)
 }
 
 // ---------------------------------------------------------------------------
@@ -763,58 +444,12 @@ mod tests {
         parts.iter().map(OsString::from).collect()
     }
 
-    /// An argument that a `String` cannot hold. The development host is
-    /// Windows, where argv arrives as UTF-16 and the unrepresentable case is
-    /// an unpaired surrogate rather than a stray byte -- so the fixture is
-    /// written both ways.
-    fn not_text() -> OsString {
-        #[cfg(unix)]
-        {
-            use std::os::unix::ffi::OsStringExt as _;
-            OsString::from_vec(vec![b'a', 0x80, b'b'])
-        }
-        #[cfg(not(unix))]
-        {
-            use std::os::windows::ffi::OsStringExt as _;
-            OsString::from_wide(&[0x0061, 0xD800, 0x0062])
-        }
-    }
-
     /// A username that is not text is a name, not a crash. `env::args()`
     /// would have panicked before `main` ran a line of this file.
-    #[test]
-    fn a_username_that_is_not_text_is_a_name_and_not_a_crash() {
-        let odd = not_text();
-        assert!(
-            odd.to_str().is_none(),
-            "the fixture must be unrepresentable as a `String`, or this test              asserts nothing"
-        );
-
-        let args = vec![OsString::from("passwd"), odd.clone()];
-        let cfg = parse_args(&args).expect("a name, however spelled, parses");
-        assert_eq!(cfg.username.as_deref(), Some(odd.as_os_str()));
-    }
-
-    #[test]
-    fn test_detect_personality_chpasswd() {
-        assert_eq!(detect_personality("chpasswd"), Personality::Chpasswd);
-        assert_eq!(
-            detect_personality("/usr/sbin/chpasswd"),
-            Personality::Chpasswd
-        );
-    }
-
-    #[test]
-    fn test_detect_personality_passwd() {
-        assert_eq!(detect_personality("passwd"), Personality::Passwd);
-        assert_eq!(detect_personality("/usr/bin/passwd"), Personality::Passwd);
-    }
-
     #[test]
     fn test_parse_args_chpasswd_basic() {
         let args = argv(&["chpasswd"]);
         let cfg = parse_args(&args).unwrap();
-        assert_eq!(cfg.personality, Personality::Chpasswd);
         assert!(!cfg.encrypted);
     }
 
@@ -840,49 +475,10 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_args_passwd_lock() {
-        let args = argv(&["passwd", "-l", "user1"]);
-        let cfg = parse_args(&args).unwrap();
-        assert_eq!(cfg.personality, Personality::Passwd);
-        assert!(cfg.lock_user);
-        assert_eq!(cfg.username.as_deref(), Some(std::ffi::OsStr::new("user1")));
-    }
-
-    #[test]
-    fn test_parse_args_passwd_unlock() {
-        let args = argv(&["passwd", "-u", "user1"]);
-        let cfg = parse_args(&args).unwrap();
-        assert!(cfg.unlock_user);
-    }
-
-    #[test]
-    fn test_parse_args_passwd_delete() {
-        let args = argv(&["passwd", "-d"]);
-        let cfg = parse_args(&args).unwrap();
-        assert!(cfg.delete_password);
-    }
-
-    #[test]
-    fn test_parse_args_passwd_expire() {
-        let args = argv(&["passwd", "-e"]);
-        let cfg = parse_args(&args).unwrap();
-        assert!(cfg.expire_password);
-    }
-
-    #[test]
-    fn test_parse_args_passwd_status() {
-        let args = argv(&["passwd", "-S"]);
-        let cfg = parse_args(&args).unwrap();
-        assert!(cfg.status);
-    }
-
-    #[test]
     fn test_parse_args_help() {
-        for name in &["chpasswd", "passwd"] {
-            let args = argv(&[name, "--help"]);
-            let cfg = parse_args(&args).unwrap();
-            assert!(cfg.show_help);
-        }
+        let args = argv(&["chpasswd", "--help"]);
+        let cfg = parse_args(&args).unwrap();
+        assert!(cfg.show_help);
     }
 
     /// A salt `crypt` can carry verbatim, in the alphabet `generate_salt`

@@ -128279,6 +128279,173 @@ B-COREUTILS-PANIC-ON-A-NON-UTF-8-ARGUMENT, not this entry, and the tests say so
 where a reader would otherwise take it for a parsing failure.
 
 
+## TD-B-SWEPT-FOR-OTHER-DOCUMENTED-BUT-UNPARSED-FLAGS (lane B, 2026-09-10) — closed, `who` was isolated
+
+**In short:** `coreutils/src/bin/who.rs` documented `Usage: who [-a]` and read
+no arguments at all. Swept the rest of coreutils for the same shape — a flag a
+program advertises and never parses. **There are none.** Recorded because the
+sweep took three attempts and each failure is the same kind.
+
+**Attempt 1 — flags anywhere in the `//!` block.** Four hits, all prose: `ls -l`
+in a comment about column widths (`chown`), `cat -A` in an example pipeline
+(`more`), `diff -u` describing an input format (`patch`), and `--workspace`
+from a `cargo` command someone quoted. A doc block mentions *other commands*,
+and their flags look exactly like the subject's.
+
+**Attempt 2 — only the `Usage:` line and the option list beneath it.** Precise,
+and nearly empty: **6 of ~100 binaries have such a block**, so a clean negative
+over them says almost nothing. `who` itself would have been caught, which is
+the only reason the attempt was worth making.
+
+**Attempt 3 — the runtime `--help` text, which is what a user actually sees.**
+31 binaries print an option list. Three appeared to advertise an unparsed long
+option: `free --giga/--pebi/--peta`, `kill --list/--table`,
+`stat --quoting-style`. All three are parsed. **Option tables store names
+without the leading dashes** — `("giga", Takes::Nothing)`, matched as
+`Opt::Long("giga", _)` — so a comparison keyed on the `--` spelling finds the
+help text and misses the parser.
+
+**The transferable part:** for this question the *help text* is the right
+corpus and the *parser table* is the wrong one to match textually, because the
+two spell the same flag differently on purpose. `who` was findable only because
+it had no parser at all.
+
+## TD-B-POLL-WITH-A-ZERO-TIMEOUT-IS-NOT-A-YIELD (lane B, 2026-09-10) — swept, one instance, fixed
+
+**In short:** `poll(fds, n, 0)` returns immediately on this kernel **without
+parking or requesting a reschedule**. That is correct per POSIX — poll with
+timeout 0 must not block — so it is not a kernel defect. It does mean a spin
+loop built on it holds its quantum until the timer preempts, and **is not a
+wait**. Swept `services/` and `userspace/`: two files use the idiom, one was a
+spin, and it is fixed.
+
+**How it was found.** Lane A checked the precondition `services/ctest-pty`
+rests on, rather than taking my word that the fixture yielded. It did not. My
+earlier `O_NONBLOCK`+poll change fixed the *hang*; the exit-44 race went away
+because each iteration now enters the kernel and TCG is slow enough that the
+parent always wins. **I was holding a timing property and believed it was an
+invariant**, and nothing in the source says otherwise, because "poll with a
+zero timeout, then continue" reads as a wait in every language it appears in.
+
+**The sweep.**
+
+| file | verdict |
+|---|---|
+| `services/ctest-pty/main.c` | three spins, all now `sched_yield()` per iteration |
+| `userspace/sshd/src/lib.rs` | **fine** — its `fd_readable` is a readiness *check* inside a loop that blocks; the loop's own comment reads "no polling, no wake-ups" |
+
+**The yield primitive that does work**, verified in the kernel rather than
+assumed: `posix::sched_yield` issues `SYS_SLEEP(0)`, and
+`kernel/src/syscall/handlers.rs:8439` reads `if duration_ns == 0 { // Zero
+sleep -> just yield. sched::yield_now(); }`.
+
+**Why this is worth an entry given one instance.** The idiom is attractive and
+wrong in a way that testing does not reveal: a spin that never yields still
+*works*, because the timer preempts it eventually. It fails only under a
+faster poll path, KVM instead of TCG, or a smaller iteration budget — none of
+which looks like a change to the code that contains the bug.
+
+## TD-B-RECHECKED-THE-CLAIMS-THE-TRUNCATION-COULD-HAVE-FALSIFIED (lane B, 2026-09-10) — closed, one was wrong
+
+**In short:** `check-read-defaults` truncated every file at its first
+`#[cfg(test)]`, hiding 35,706 lines across 17 files, and that produced a
+**written record asserting a defect was absent** — `B-FDISK-CANNOT-PARTITION`
+said fdisk "prints no 'partition table has been altered'" when it printed it
+three times. Swept for others. **Exactly one entry was wrong, and it is
+corrected.**
+
+**The method, since the first two attempts were too broad.** Grepping
+known-issues for absence claims returns 996, almost all about kernel or lane C
+code the truncation never touched. Cross-referencing crate names returns noise,
+because `at` and `last` match as substrings of ordinary English. What narrows
+it is three conditions at once: an entry **dated today** (the truncating
+checker is a day old), **naming one of the 17 hidden files**, and **making an
+absence claim**. That is six entries.
+
+| entry | verdict |
+|---|---|
+| `B-FDISK-CANNOT-PARTITION` | **wrong** — corrected, and the fabrication fixed |
+| `B-CROND-AND-ATD-NEVER-RUN-A-JOB` | already corrected earlier today, separately |
+| `TD-B-FOUR-MORE-PROGRAMS-RUN-A-SHELL-AS-THE-WRONG-USER` | claim holds — re-tested against full source |
+| `TD-B-FIVE-PROGRAMS-STILL-TAKE-THE-CALLERS-IDENTITY` | closed; the file lost 79 lines, none relevant |
+| `TD-B-HALF-THE-TREE-IS-NOT-SUBJECT-TO-THE-LINT-POLICY` | claims are about manifests, not source |
+| `B-SIX-COMMAND-NAMES-HAVE-TWO-IMPLEMENTATIONS` | its gate reads whole files |
+
+**The sudo re-test is the one worth describing**, because it went wrong twice
+before it went right. The entry claims "No `setuid`/`setgid`/`CommandExt::uid`
+anywhere in `src/`". A pattern search reports **two hits** — which reads as a
+falsified claim. Both are false positives: `("stay_setuid", DefaultShape::Flag)`
+is a *sudoers option name* in a table, and `record.uid()` is a getter on a
+passwd record, not `CommandExt::uid`. The claim holds.
+
+So the check that was hunting a measurement error produced one of its own, in
+the same shape, and only reading the two lines settled it. That is the
+twentieth such case today and the reason this entry records the *method*
+rather than only the verdict.
+
+## TD-B-TWELVE-COPIES-OF-ONE-RUST-LEXER (lane B, 2026-09-10) — three consolidated, one deliberately not
+
+**In short:** twelve scripts under `scripts/` define a Rust comment/string
+masker. Only one handled raw strings, so the bug fixed there — `r"a\"` ends at
+that quote, because a backslash is not an escape inside a raw string — was live
+in three others. `scripts/rustlex.py` is now the one implementation, with the
+fixtures beside it. Three checkers converted; **one was reverted, and that is
+the useful part.**
+
+**Why one implementation.** The function has been wrong three separate times
+across its copies: a char literal holding a quote (`rest.find('"')`, in thirty-odd
+crates) opening a string that ran to the next quote anywhere later; a raw string
+ending in a backslash swallowing its terminator; and lane A's `mask_noncode`
+blanking string *bodies* when the pattern it measures **is** a string literal,
+taking a real count of 37 to 0 with the gate green. Every one failed toward
+silence.
+
+**The one that could not be converted, and why it matters more than the three
+that could.** `check-one-libc-per-process` reported a NEW error on
+`posix/src/crypt.rs:470` — a line that is plainly inside
+`pub extern "C" fn crypt`. The two lexers differ by exactly one observable:
+
+    source   pub extern "C" fn crypt() { ... }
+    local    pub extern " " fn crypt() { ... }     <- keeps the quotes
+    shared   pub extern     fn crypt() { ... }     <- blanks them too
+
+The checker finds its subject by matching `extern "`. Blanking the delimiters
+destroys the marker it needs, so every `extern "C"` function became "not an
+extern C function" and its contents became findings.
+
+**Two functions with the same name, the same docstring and the same stated
+job can differ in a detail one caller depends on, and nothing shows it until
+you swap them.** That is an argument for consolidating carefully rather than
+against consolidating — but it is why each conversion was verified by *diffing
+the checker's output before and after* rather than by running it and seeing it
+pass. Three produced byte-identical output. The fourth did not, and was
+reverted rather than argued with.
+
+**CORRECTION, next tick: "twelve copies of one lexer" overstated it.** Read
+individually, the remaining eight are **three different jobs** whose names do
+not distinguish them:
+
+| script | job |
+|---|---|
+| `rustscan` | comments *and* literals — the same job. **Converted.** |
+| `host-errmsg` | comments only, literals **kept on purpose** — it searches for message text *inside* strings |
+| `check-variant-lists`, `count_centrings`, `getopt-ambiguity-check`, `rustemit` | `//` comments only |
+| `check-absent-operand-default` (`mask_noncode`) | lane A's |
+| `check-shell-callables` (`mask`) | shell, not Rust |
+
+Converting `host-errmsg` would blank the literals it exists to read and take
+its count to zero with its gate green — lane A's `mask_noncode` bug exactly, in
+the opposite direction. So the real duplication was **two** implementations of
+one job, not twelve, and both are now `rustlex`.
+
+`rustscan` is a library four checkers import — three of them lane C's gates —
+and its copy did not know raw strings, so that bug was live in all four. After
+delegating, all four produce **byte-identical output**, so nothing lane C sees
+changes today and the bug is closed for tomorrow. `rustlex` grew
+`keep_literals` to take rustscan's signature, which is the parameter it should
+have had: a masker that cannot be asked to spare literals invites each caller
+to write its own.
+
 ## TD-B-THE-2285-DELETIONS-PREDATE-THEIR-INSTRUMENT'S-FIX (lane B, 2026-09-10) — checked, no impact
 
 **In short:** `ccefac978` at 05:51 deleted 2,285 commands on the strength of
@@ -129250,14 +129417,36 @@ accurately. It cannot *change* one. There is no `File::create`, no
 `OpenOptions`, and no write to any device anywhere in its 4,789 lines — the
 only `write_all` calls in the crate go to stdout and stderr.
 
-**It does not claim otherwise, and that is why this is an entry rather than a
-deletion.** It prints no "partition table has been altered", no "Syncing
-disks", no "The partition table has been written". Asked to work
-interactively it prints its help and exits 0. Under `design-decisions.md` 1006
-the test is whether a command states a fact it did not measure, and every fact
-this one states — partition types, GUIDs, start and end sectors, sizes — it
-read off the actual device. A viewer named `fdisk` is a misleading *name*, not
-a fabricated *answer*.
+**CORRECTED 2026-09-10: it DID claim otherwise, three times, and this entry
+said the opposite because the measurement behind it saw 0.4% of the file.**
+
+`fdisk -n` printed `Created partition: start=..., size=...` and then
+**`The partition table has been altered.`** `-d` printed `Partition 2 has been
+deleted.` and the same sentence. `-t` printed `Changed type of partition 1 to
+'Linux filesystem'.` and the same sentence again. No device was opened for any
+of them.
+
+**Why this entry got it wrong, which is the part worth keeping.** The phrase
+appears **three times** in the 4,869-line file — and **zero times in the first
+21 lines**. Line 21 is where fdisk's first `#[cfg(test)]` sits, which is
+exactly where `src.split("#[cfg(test)]")[0]` truncates. That idiom was in
+`check-read-defaults` until it was fixed two ticks before this correction, and
+`audit-cli-fabrication` documents having fixed the same thing earlier.
+
+So the measurement bug did not merely hide a defect. It produced a written
+record asserting the defect was **absent**, in bold, and that record then stood
+as the reason not to look again. A wrong answer decays; a wrong answer written
+down as a finding compounds.
+
+**Fixed:** all three actions refuse and exit non-zero, naming what is
+implemented (GPT structures and CRCs) and what is not (opening the device,
+writing LBA 0/1 and the mirror header, re-reading to confirm). Verified with
+`rustlex.strip_noise(src, keep_literals=True)` — comments blanked, string
+literals kept — so the check is about what the program can *print* rather than
+what its source *mentions*.
+
+**The viewer is untouched and remains accurate.** Everything fdisk reports
+about a table it READ it read off the actual device.
 
 ### What is actually there
 
@@ -129401,7 +129590,27 @@ this was written — worth reading its commit first, because the lesson there
 was that the *failure* path is where the design decision lives: it now refuses
 rather than running a command outside the constraints it was asked for.
 
-## B-THREE-COPIES-OF-THE-KILL-CONVENTION-AND-ONE-HAD-DIVERGED (lane B, 2026-09-10) — one fixed, duplication open
+## ~~B-THREE-COPIES-OF-THE-KILL-CONVENTION-AND-ONE-HAD-DIVERGED~~ (lane B, 2026-09-10) — CLOSED
+
+**Closed by extraction.** `killconv` holds the convention:
+`exit_code_for_signal(SIGKILL) == 137`, with named constants and the inverse.
+All nine call sites across `kill`, `pgrep` and `htop` now name a signal instead
+of writing a number, and no bare `128 + N` literal remains in the lane.
+
+**The syscall stub deliberately stayed put.** Moving inline assembly between
+crates buys nothing: the three copies are identical and mechanical, and the
+defect was never there. What was worth centralising is the arithmetic **nobody
+can check by looking** — the difference between `9` and `137` is invisible at
+every point a test can reach, because the value is only observable from the
+parent of the killed process.
+
+`killconv` carries five tests including the two that would have caught the
+original bug: that `exit_code_for_signal(SIGKILL) != SIGKILL`, and that no
+status in `0..=128` is ever read back as a signal death. It also saturates a
+signal above 127 rather than wrapping into the range a program uses for its own
+exit status — the same confusion in the other direction.
+
+### Original entry
 
 **In short:** `SYS_PROCESS_KILL` (506) takes a PID and an **exit code**, not a
 signal number. The tree's convention for "killed by signal N" is the shell's
@@ -129456,11 +129665,58 @@ be reached, and the two implementations can drift apart with nothing noticing.
 | Shadowing crate | Name | Real producer |
 |---|---|---|
 | `userspace/chown` | `chmod` | coreutils bin |
-| `userspace/chpasswd` | `passwd` | `userspace/passwd` |
-| `userspace/head` | `tail` | coreutils bin |
+| ~~`userspace/chpasswd`~~ | ~~`passwd`~~ | ~~`userspace/passwd`~~ — **alias removed 2026-09-10** |
+| ~~`userspace/head`~~ | ~~`tail`~~ | ~~coreutils bin~~ — **crate deleted 2026-09-10** |
 | `userspace/pv` | `fuser` | `userspace/fuser` |
 | `userspace/sysstat` | `iostat` | `userspace/iostat` |
 | `userspace/who` | `w` | `userspace/w` |
+
+**`chpasswd:passwd` is RESOLVED 2026-09-10** — 404 lines removed, chpasswd is
+713 lines and does one thing. The account below is the scoping that made the
+second attempt work, kept because the first attempt failed for a reason worth
+remembering: it was done in dependent steps, and each step's breakage hid the
+next step's target.
+
+**The scoping, as written before the attempt.** The verdict
+is clear and the work is not small.
+
+*The verdict:* `userspace/passwd` is the producer and the better one — 2,083
+lines and 61 tests to chpasswd's 755 live lines and 31 — and it implements
+every operation the shadowing branch did (`-l -u -d -e -S`). chpasswd's extra
+flags (`--encrypted`, `--md5`, `--sha512`) are **chpasswd's own**, not
+passwd's; comparing flag sets across a multicall binary mixes both
+personalities and makes the shadow look richer.
+
+*Why it is not a two-line change:* removing the alias leaves a one-variant
+enum — the shape of the removed thing left behind, which the next reader will
+reasonably add a second variant to. Doing it properly touches the
+`Personality` enum, `detect_personality`, the `Config` field, the argument
+`match`, `print_help`, `print_version`, the `run_*` dispatch and six tests.
+Attempted across several dependent steps; the failures cascaded and it was
+reverted. Tree clean, 31 and 61 tests pass.
+
+*What the attempt established for whoever finishes it:* the `-l/-u/-d/-e/-S`
+arm is the only personality-specific parsing — everything else is shared
+password-file machinery that stays. And the non-UTF-8-username property does
+**not** need moving: `userspace/passwd` already has `not_text` and
+`an_argument_that_is_not_text_is_a_name_and_not_a_crash`, at lines 1591 and
+1612. I nearly duplicated them because I searched for them and piped the search
+through `head -6`, which cut the output above line 1591.
+
+**A second `who` existed and it was the thin one — deleted 2026-09-10.**
+`coreutils/src/bin/who.rs` was 359 lines with 17 tests against
+`userspace/who`'s 1,691 and 53, and it **ignored its arguments entirely**
+while documenting `Usage: who [-a]`. So `who -a` silently behaved like `who`.
+
+That is the case this entry warned about — "if the shadowing implementation is
+the better one, the fix is to make *it* the producer and delete the other" —
+arriving from an unexpected direction. `head:tail` resolved the opposite way
+the same day: there the shadowing crate was the thin one and coreutils had
+both. **The rule is not "prefer coreutils" or "prefer the standalone"; it is
+read both.**
+
+The `who:w` row is unaffected: `userspace/who` still answers to `w`, and
+`userspace/w` still provides it. Seven pairs remain.
 | `userspace/cron` | `crond` | `userspace/crond` |
 | `userspace/cron` | `crontab` | `userspace/crontab` |
 
@@ -129505,6 +129761,25 @@ Shadowing is a ratchet now, in `scripts/multicall-shadowed-baseline.txt`, so a
 Delete the shadowing branch: the name belongs to whichever program performs
 the operation, which is what `design-decisions.md` 1019 says and what
 `4182acf8d` did for `login`/`loginmgr`.
+
+**`head:tail` is resolved, and reading is what resolved it.** The pair looked
+like a refactor: `Tool::Tail` threads through fifteen sites in
+`userspace/head`, so removing the shadowed name meant rewriting the crate —
+which has **zero tests** in 1,115 lines. Then the obvious question: coreutils
+provides `tail`, but does it provide `head`?
+
+| | lines | tests |
+|---|---|---|
+| `coreutils/src/bin/head.rs` | 1,284 | 22 |
+| `coreutils/src/bin/tail.rs` | 2,471 | 31 |
+| `userspace/head` | 1,115 | **0** |
+
+Both, both larger, both tested. So it was never a refactor: the crate
+duplicated two commands that coreutils implements more completely, and it is
+deleted. Every option `userspace/head` accepted is accepted by one of the two —
+checked against **both** binaries together, because comparing against
+`coreutils/head` alone showed nine "missing" flags that are all tail's
+(`--follow`, `--pid`, `--sleep-interval`).
 
 **But read before deleting.** "Shadowed" means the branch is unreachable, not
 that it is worse. If the shadowing implementation is the better one, the fix is

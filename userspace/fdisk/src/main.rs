@@ -3643,45 +3643,48 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
                     print_fdisk_interactive_help(&mut out);
                 }
                 Action::NewPartition => {
-                    out.push(b"Created partition: start=");
-                    out.push_u64(opts.new_start);
-                    out.push(b", size=");
-                    out.push_u64(opts.new_size);
-                    out.push(b" sectors (");
-                    out.push_size(opts.new_size.saturating_mul(sector_size));
-                    out.push(b")");
-                    if opts.type_code_set {
-                        out.push(b", type=");
-                        let tn = gpt_type_name(&opts.type_code);
-                        if !bytes_eq(tn, b"unknown") {
-                            out.push(tn);
-                        } else {
-                            out.push(b"0x");
-                            out.push_hex_u8(opts.type_code[0]);
-                        }
-                    }
-                    out.push_newline();
-                    out.push(b"The partition table has been altered.\n");
+                    // NO WRITE HAPPENS, so nothing is reported as having
+                    // happened. This printed "Created partition: start=...,
+                    // size=..." followed by "The partition table has been
+                    // altered." -- in a crate with no File::create, no
+                    // OpenOptions and no write to any device anywhere.
+                    //
+                    // 1019: the caller loses their belief that the disk is
+                    // partitioned. The next thing done after `fdisk -n` is
+                    // `mkfs` on a partition that does not exist, so the
+                    // failure surfaces one tool later and is attributed to the
+                    // wrong one.
+                    out.push(
+                        b"fdisk: cannot create a partition: this build reads \
+partition tables and cannot write one.\n\
+fdisk: the GPT structures and CRCs are implemented and tested; opening the \
+device, writing LBA 0/1 and the mirror header, and re-reading to confirm are \
+not.\n",
+                    );
+                    out.flush();
+                    return 1;
                 }
                 Action::DeletePartition => {
-                    out.push(b"Partition ");
-                    out.push_u32(opts.part_num);
-                    out.push(b" has been deleted.\n");
-                    out.push(b"The partition table has been altered.\n");
+                    // Printed "Partition N has been deleted." and "The
+                    // partition table has been altered." No device was
+                    // opened. See the NewPartition arm.
+                    out.push(
+                        b"fdisk: cannot delete a partition: this build reads \
+partition tables and cannot write one.\n",
+                    );
+                    out.flush();
+                    return 1;
                 }
                 Action::ChangeType => {
-                    out.push(b"Changed type of partition ");
-                    out.push_u32(opts.change_part_num);
-                    out.push(b" to '");
-                    let tn = gpt_type_name(&opts.type_code);
-                    if !bytes_eq(tn, b"unknown") {
-                        out.push(tn);
-                    } else {
-                        out.push(b"0x");
-                        out.push_hex_u8(opts.type_code[0]);
-                    }
-                    out.push(b"'.\n");
-                    out.push(b"The partition table has been altered.\n");
+                    // Printed "Changed type of partition N to '...'." and "The
+                    // partition table has been altered." No device was
+                    // opened. See the NewPartition arm.
+                    out.push(
+                        b"fdisk: cannot change a partition type: this build \
+reads partition tables and cannot write one.\n",
+                    );
+                    out.flush();
+                    return 1;
                 }
                 _ => {}
             }

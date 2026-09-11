@@ -4,5 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS process grep and kill"
 [dependencies]
+# The 128+N convention. See `killconv`.
+killconv = { path = "../../killconv" }
 procinfo = { path = "../../procinfo" }
 quoting = { path = "../quoting" }

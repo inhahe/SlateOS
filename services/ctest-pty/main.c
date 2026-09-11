@@ -94,6 +94,24 @@
  * always wins, finite so a broken one fails instead of hanging. */
 #define SPIN 2000000L
 
+/* `sched_yield()` with no <sched.h> in the sysroot.
+ *
+ * Every spin below calls this once per iteration, and the reason is exact:
+ * `readable()` uses `poll(&pfd, 1, 0)`, and this kernel answers a zero-timeout
+ * poll immediately without parking -- correct per POSIX, since poll with
+ * timeout 0 must not block, and therefore NOT a yield primitive. A spin built
+ * on it holds its quantum until the timer preempts.
+ *
+ * Before this, exit 44 was avoided by timing rather than by construction: the
+ * O_NONBLOCK+poll change made each iteration enter the kernel, which under TCG
+ * is slow enough that the parent always won. That argument does not survive a
+ * faster poll path, KVM instead of TCG, or a smaller SPIN.
+ *
+ * `sched_yield()` does yield here, checked in the kernel rather than assumed:
+ * posix issues SYS_SLEEP(0), and the handler reads
+ *   `if duration_ns == 0 { sched::yield_now(); }`. */
+extern int sched_yield(void);
+
 /* Is `fd` readable right now?  Zero timeout, so this never waits. */
 static int readable(int fd)
 {
@@ -122,6 +140,10 @@ static long read_bounded(int fd, char *buf, long want)
     long got = 0;
     for (long i = 0; i < SPIN && got < want; i++) {
         if (!readable(fd)) {
+            /* The writer is the other side of this pty and cannot run while we
+             * hold the CPU. Yielding is what makes this a wait rather than a
+             * race we usually win. */
+            sched_yield();
             continue;
         }
         long n = read(fd, buf + got, (size_t)(want - got));
@@ -347,6 +369,9 @@ int main(void)
             if (got_sigint) {
                 _exit(77);
             }
+            /* The signal is delivered by the kernel on our behalf, but the
+             * process that raises it needs the CPU to get there. */
+            sched_yield();
         }
         _exit(78); /* handler never ran */
     }
@@ -377,6 +402,11 @@ int main(void)
         pid_t w = -1;
         for (long i = 0; i < SPIN && w <= 0; i++) {
             w = waitpid(kid, &status, WNOHANG);
+            if (w <= 0) {
+                /* WNOHANG means the child must run to exit, and it cannot
+                 * while this loop owns the quantum. */
+                sched_yield();
+            }
         }
         if (w != kid) {
             return 45;

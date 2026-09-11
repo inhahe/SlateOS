@@ -91,7 +91,6 @@ userspace/grub2/src/main.rs:argv-as-string
 userspace/grub2/src/main.rs:to_str-unwrap
 userspace/gzip/src/main.rs:argv-as-string
 userspace/hardlink/src/main.rs:argv-as-string
-userspace/head/src/main.rs:argv-as-string
 userspace/hexdump/src/main.rs:argv-as-string
 userspace/hostname/src/main.rs:argv-as-string
 userspace/hostnamectl/src/main.rs:argv-as-string

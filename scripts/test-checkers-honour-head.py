@@ -108,7 +108,10 @@ def remove(root: str, rel: str) -> None:
 # imports it from its *own* directory -- which in a fixture is this copy, not
 # the real `scripts/`. Omitting it does not degrade the fixture, it stops the
 # checker starting at all.
-SUPPORT = ("gittree.py", "gitenv.py")
+# `rustlex.py` joins these because check-read-defaults imports it now.
+# A checker copied into a fixture repo without its support modules fails
+# on import, which every case would report as the checker refusing.
+SUPPORT = ("gittree.py", "gitenv.py", "rustlex.py")
 
 
 def new_repo(tmp: str, name: str, checkers: tuple[str, ...]) -> str:

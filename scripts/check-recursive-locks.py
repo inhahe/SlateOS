@@ -40,6 +40,10 @@ Exit codes: 0 clean, 1 findings, 2 could not run.
 from __future__ import annotations
 
 import re
+
+import os as _os, sys as _sys
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+from rustlex import strip_noise  # noqa: E402
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -110,115 +114,6 @@ def _char_literal_end(src: str, i: int) -> int | None:
     if i + 2 < n and src[i + 2] == "'":
         return i + 3
     return None
-
-
-def strip_noise(src: str, keep_literals: bool = False) -> str:
-    """Blank out comments and string/char literals, preserving byte offsets.
-
-    Offsets must be preserved because every later step reports and slices by
-    index; replacing rather than deleting keeps line numbers exact.
-
-    Char literals matter as much as strings here, and for a reason that is easy
-    to miss: a `'"'` in the source opens a string as far as a quote-only scanner
-    is concerned, and that phantom string then runs to the next `"` in the file,
-    blanking every brace in between. `find_bodies` loses its nesting and returns
-    a fraction of the file -- silently, because a gate that finds nothing looks
-    exactly like a gate that found nothing wrong. That is not hypothetical: it
-    hid a real lock-order inversion in `kshell.rs`, where this function saw 43
-    of the file's 984 function bodies.
-
-    With `keep_literals=True`, literals are still *scanned* -- which is the part
-    that matters, since a `//` inside `"https://x"` opens no comment and a `"`
-    inside a comment opens no string -- but their characters are passed through
-    instead of blanked. Comments go either way.
-
-    That mode exists because the sibling gates that match *on* literal text
-    (`check-option-refusal.py`, `check-usage-status.py`, `check-query-status.py`
-    look for `"Usage: ..."`, `"-x"`, `shell_println!`) each grew their own
-    line-local comment stripper that understood only `//` to end of line. There
-    were five hand-rolled Rust lexers in `scripts/` and only this one handled
-    nested `/* */`, raw strings and char literals or had a self-test. One
-    parameter here is cheaper than five parsers, and far cheaper than five
-    parsers that disagree: the two `check-{usage,query}-status.py` mirrors had
-    already drifted apart on exactly this point without either being able to
-    report it.
-    """
-    out = list(src)
-    i, n = 0, len(src)
-
-    def blank(k: int) -> None:
-        """Blank one literal character unless the caller asked to keep it."""
-        if not keep_literals and src[k] != "\n":
-            out[k] = " "
-
-    while i < n:
-        c = src[i]
-        if c == "'":
-            end = _char_literal_end(src, i)
-            if end is None:
-                i += 1  # a lifetime or a loop label, not a literal
-                continue
-            while i < min(end, n):
-                blank(i)
-                i += 1
-            continue
-        if (
-            c in ("r", "b")
-            and (i == 0 or not (src[i - 1].isalnum() or src[i - 1] == "_"))
-            and (raw := _raw_string_start(src, i)) is not None
-        ):
-            hashes, quote = raw
-            for k in range(i, quote + 1):
-                blank(k)
-            i = quote + 1
-            close = '"' + "#" * hashes
-            end = src.find(close, i)
-            stop = n if end == -1 else min(end + len(close), n)
-            while i < stop:
-                blank(i)
-                i += 1
-            continue
-        if c == "/" and i + 1 < n and src[i + 1] == "/":
-            while i < n and src[i] != "\n":
-                out[i] = " "
-                i += 1
-        elif c == "/" and i + 1 < n and src[i + 1] == "*":
-            depth = 1
-            out[i] = out[i + 1] = " "
-            i += 2
-            while i < n and depth:
-                if src[i] == "/" and i + 1 < n and src[i + 1] == "*":
-                    depth += 1
-                    out[i] = out[i + 1] = " "
-                    i += 2
-                    continue
-                if src[i] == "*" and i + 1 < n and src[i + 1] == "/":
-                    depth -= 1
-                    out[i] = out[i + 1] = " "
-                    i += 2
-                    continue
-                if src[i] != "\n":
-                    out[i] = " "
-                i += 1
-        elif c == '"':
-            blank(i)
-            i += 1
-            while i < n:
-                if src[i] == "\\":
-                    blank(i)
-                    if i + 1 < n:
-                        blank(i + 1)
-                    i += 2
-                    continue
-                if src[i] == '"':
-                    blank(i)
-                    i += 1
-                    break
-                blank(i)
-                i += 1
-        else:
-            i += 1
-    return "".join(out)
 
 
 def find_all_bodies(src: str) -> dict[str, list[tuple[int, int]]]:

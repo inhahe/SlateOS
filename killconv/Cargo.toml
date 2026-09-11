@@ -1,0 +1,10 @@
+[package]
+name = "killconv"
+version = "0.1.0"
+edition = "2024"
+description = "SlateOS: the exit code a process reports when killed by a signal"
+
+[dependencies]
+
+[lints]
+workspace = true

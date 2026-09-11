@@ -1106,13 +1106,6 @@ name = "hardlink"
 version = "0.1.0"
 
 [[package]]
-name = "head"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "hearts"
 version = "0.1.0"
 dependencies = [
@@ -1158,6 +1151,7 @@ dependencies = [
 name = "htop"
 version = "0.1.0"
 dependencies = [
+ "killconv",
  "procinfo",
 ]
 
@@ -1354,9 +1348,14 @@ version = "0.1.0"
 name = "kill"
 version = "0.1.0"
 dependencies = [
+ "killconv",
  "procinfo",
  "quoting",
 ]
+
+[[package]]
+name = "killconv"
+version = "0.1.0"
 
 [[package]]
 name = "klotski"
@@ -2052,6 +2051,7 @@ dependencies = [
 name = "pgrep"
 version = "0.1.0"
 dependencies = [
+ "killconv",
  "procinfo",
  "quoting",
 ]

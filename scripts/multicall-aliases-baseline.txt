@@ -48,9 +48,6 @@ coredumpctl:coredump-extract
 cpupower:cpufreq-info
 cpupower:cpufreq-set
 cpupower:turbostat
-cron:atq
-cron:atrm
-cron:batch
 crond:anacron
 dmidecode:biosdecode
 efibootmgr:efivar

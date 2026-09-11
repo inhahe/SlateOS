@@ -3230,8 +3230,10 @@ dependencies = [
 name = "who"
 version = "0.1.0"
 dependencies = [
+ "authlib",
  "procinfo",
  "quoting",
+ "utmpfile",
 ]
 
 [[package]]

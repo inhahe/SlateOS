@@ -52,6 +52,16 @@ const UT_HOST_OFFSET: usize = 76;
 const UT_HOST_SIZE: usize = 256;
 const UT_TV_SEC_OFFSET: usize = 340;
 
+/// `ut_type` for an unused slot.
+pub const EMPTY: i32 = 0;
+/// `ut_type` for a run-level change.
+pub const RUN_LVL: i32 = 1;
+/// `ut_type` for a clock change, recorded before the new time.
+pub const NEW_TIME: i32 = 3;
+/// `ut_type` for a clock change, recorded after the old time.
+pub const OLD_TIME: i32 = 4;
+/// `ut_type` for a process spawned by init.
+pub const INIT_PROCESS: i32 = 5;
 /// `ut_type` for a normal logged-in user session.
 pub const USER_PROCESS: i32 = 7;
 /// `ut_type` for a terminal waiting for a login.
@@ -313,6 +323,28 @@ mod tests {
         assert_eq!(got.len(), 1, "a dead record is still a record");
         assert!(!got[0].is_user_session());
         assert_eq!(count_user_sessions(&data), 0);
+    }
+
+    #[test]
+    fn the_ut_type_values_are_the_linux_ones() {
+        // These are ABI, not preference: a record written by anything else on
+        // this system carries these numbers. They were spread across `who`
+        // (all nine) and `uptime` (one), and the two agreed -- which is luck
+        // rather than a guarantee, and is what this crate removes.
+        assert_eq!(
+            [
+                EMPTY,
+                RUN_LVL,
+                BOOT_TIME,
+                NEW_TIME,
+                OLD_TIME,
+                INIT_PROCESS,
+                LOGIN_PROCESS,
+                USER_PROCESS,
+                DEAD_PROCESS
+            ],
+            [0, 1, 2, 3, 4, 5, 6, 7, 8]
+        );
     }
 
     #[test]

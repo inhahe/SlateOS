@@ -3285,18 +3285,19 @@ impl RssReaderApp {
         let is_selected = self.sidebar_selection == SidebarSelection::AllFeeds;
         let active_highlight = is_selected && self.active_pane == ActivePane::Sidebar;
         if is_selected {
-            cmds.push(RenderCommand::FillRect {
-                x: x + 4.0,
-                y: cy,
-                width: panel_width - 8.0,
-                height: item_height,
-                color: if active_highlight {
-                    self.palette.surface1
+            self.palette.push_surface(
+                cmds,
+                x + 4.0,
+                cy,
+                panel_width - 8.0,
+                item_height,
+                4.0,
+                if active_highlight {
+                    Surface::Selected
                 } else {
-                    self.palette.surface0
+                    Surface::Card
                 },
-                corner_radii: CornerRadii::all(4.0),
-            });
+            );
         }
         cmds.push(RenderCommand::Text {
             x: x + 12.0,
@@ -3341,18 +3342,19 @@ impl RssReaderApp {
         let is_starred_selected = self.sidebar_selection == SidebarSelection::Starred;
         let starred_highlight = is_starred_selected && self.active_pane == ActivePane::Sidebar;
         if is_starred_selected {
-            cmds.push(RenderCommand::FillRect {
-                x: x + 4.0,
-                y: cy,
-                width: panel_width - 8.0,
-                height: item_height,
-                color: if starred_highlight {
-                    self.palette.surface1
+            self.palette.push_surface(
+                cmds,
+                x + 4.0,
+                cy,
+                panel_width - 8.0,
+                item_height,
+                4.0,
+                if starred_highlight {
+                    Surface::Selected
                 } else {
-                    self.palette.surface0
+                    Surface::Card
                 },
-                corner_radii: CornerRadii::all(4.0),
-            });
+            );
         }
         cmds.push(RenderCommand::Text {
             x: x + 12.0,
@@ -3408,18 +3410,19 @@ impl RssReaderApp {
             let is_folder_selected = self.sidebar_selection == SidebarSelection::Folder(folder.id);
             let folder_highlight = is_folder_selected && self.active_pane == ActivePane::Sidebar;
             if is_folder_selected {
-                cmds.push(RenderCommand::FillRect {
-                    x: x + 4.0,
-                    y: cy,
-                    width: panel_width - 8.0,
-                    height: item_height,
-                    color: if folder_highlight {
-                        self.palette.surface1
+                self.palette.push_surface(
+                    cmds,
+                    x + 4.0,
+                    cy,
+                    panel_width - 8.0,
+                    item_height,
+                    4.0,
+                    if folder_highlight {
+                        Surface::Selected
                     } else {
-                        self.palette.surface0
+                        Surface::Card
                     },
-                    corner_radii: CornerRadii::all(4.0),
-                });
+                );
             }
 
             // Expand/collapse indicator
@@ -3477,18 +3480,19 @@ impl RssReaderApp {
                     let feed_highlight =
                         is_feed_selected && self.active_pane == ActivePane::Sidebar;
                     if is_feed_selected {
-                        cmds.push(RenderCommand::FillRect {
-                            x: x + 4.0,
-                            y: cy,
-                            width: panel_width - 8.0,
-                            height: item_height,
-                            color: if feed_highlight {
-                                self.palette.surface1
+                        self.palette.push_surface(
+                            cmds,
+                            x + 4.0,
+                            cy,
+                            panel_width - 8.0,
+                            item_height,
+                            4.0,
+                            if feed_highlight {
+                                Surface::Selected
                             } else {
-                                self.palette.surface0
+                                Surface::Card
                             },
-                            corner_radii: CornerRadii::all(4.0),
-                        });
+                        );
                     }
 
                     // Health indicator dot
@@ -3564,18 +3568,19 @@ impl RssReaderApp {
                 let is_feed_selected = self.sidebar_selection == SidebarSelection::Feed(feed.id);
                 let feed_highlight = is_feed_selected && self.active_pane == ActivePane::Sidebar;
                 if is_feed_selected {
-                    cmds.push(RenderCommand::FillRect {
-                        x: x + 4.0,
-                        y: cy,
-                        width: panel_width - 8.0,
-                        height: item_height,
-                        color: if feed_highlight {
-                            self.palette.surface1
+                    self.palette.push_surface(
+                        cmds,
+                        x + 4.0,
+                        cy,
+                        panel_width - 8.0,
+                        item_height,
+                        4.0,
+                        if feed_highlight {
+                            Surface::Selected
                         } else {
-                            self.palette.surface0
+                            Surface::Card
                         },
-                        corner_radii: CornerRadii::all(4.0),
-                    });
+                    );
                 }
 
                 let health_color = if feed.health.is_healthy() {
@@ -3696,18 +3701,19 @@ impl RssReaderApp {
 
             // Selection highlight
             if is_selected {
-                cmds.push(RenderCommand::FillRect {
-                    x: x + 4.0,
-                    y: cy,
-                    width: panel_width - 8.0,
-                    height: item_height - 4.0,
-                    color: if is_active {
-                        self.palette.surface1
+                self.palette.push_surface(
+                    cmds,
+                    x + 4.0,
+                    cy,
+                    panel_width - 8.0,
+                    item_height - 4.0,
+                    6.0,
+                    if is_active {
+                        Surface::Selected
                     } else {
-                        self.palette.surface0
+                        Surface::Card
                     },
-                    corner_radii: CornerRadii::all(6.0),
-                });
+                );
             }
 
             // Unread indicator dot

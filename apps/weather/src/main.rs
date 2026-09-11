@@ -2399,18 +2399,19 @@ impl WeatherApp {
             let is_active = i == self.active_location_idx;
 
             // Row background
-            cmds.push(RenderCommand::FillRect {
-                x: padding,
-                y: cy,
-                width: self.width - padding * 2.0,
-                height: row_h,
-                color: if is_active {
-                    self.palette.surface1
+            self.palette.push_surface(
+                cmds,
+                padding,
+                cy,
+                self.width - padding * 2.0,
+                row_h,
+                8.0,
+                if is_active {
+                    Surface::Selected
                 } else {
-                    self.palette.surface0
+                    Surface::Card
                 },
-                corner_radii: CornerRadii::all(8.0),
-            });
+            );
 
             // Active indicator
             if is_active {

@@ -1685,18 +1685,19 @@ impl DiskAnalyzerUI {
         for (mode, label) in ViewMode::ALL {
             let btn = Rect::new(btn_x, 7.0, view_button_width(label), BUTTON_HEIGHT);
             let active = self.view_mode == *mode;
-            frame.push(RenderCommand::FillRect {
-                x: btn.x,
-                y: btn.y,
-                width: btn.w,
-                height: btn.h,
-                color: if active {
-                    self.palette.surface1
+            self.palette.push_surface(
+                frame,
+                btn.x,
+                btn.y,
+                btn.w,
+                btn.h,
+                CORNER_RADIUS,
+                if active {
+                    Surface::Selected
                 } else {
-                    self.palette.surface0
+                    Surface::Card
                 },
-                corner_radii: CornerRadii::all(CORNER_RADIUS),
-            });
+            );
             frame.push(RenderCommand::Text {
                 x: btn.x + 8.0,
                 y: 14.0,

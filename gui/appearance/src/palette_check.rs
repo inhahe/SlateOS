@@ -714,19 +714,31 @@ mod tests {
         }
     }
 
-    /// The pair that `TD-C-TEXT-ON-THE-LIGHT-THEMES-TWO-PALEST-SURFACES-IS-BELOW-THE-CONTRAST-FLOOR`
-    /// is about, measured through this function rather than by hand.
+    /// The two palest light surfaces now clear the contrast floor.
     ///
-    /// The entry quotes 4.39 for light `surface1` and 3.69 for light
-    /// `surface2`. Those numbers were computed directly from the palette; this
-    /// asserts the sweep that will police them reproduces the same two, so a
-    /// later fix to the palette can be checked against the entry it closes.
-    #[test]
-    fn the_two_pale_surfaces_measure_what_the_known_issue_says_they_do() {
+    /// This used to assert the opposite. `TD-C-TEXT-ON-THE-LIGHT-THEMES-TWO-
+    /// PALEST-SURFACES-IS-BELOW-THE-CONTRAST-FLOOR` recorded light `surface1`
+    /// at 4.39 and `surface2` at 3.69 against a `text` of `#4C4F69`, and this
+    /// test pinned those two numbers so a later fix could be checked against
+    /// the entry it closed.
+    ///
+    /// §826 closed it: the operator chose `#000000` for main text, which lifts
+    /// `surface1` to 11.55 and `surface2` to 9.71. The test now guards the fix
+    /// rather than the defect -- if either falls back under 4.5, the entry it
+    /// closed has reopened.
+    ///
+    /// **It was red for days and nobody saw it.** `palette_check` is behind the
+    /// `testing` feature, so `cargo test -p appearance` never compiles this
+    /// module; it takes `--features testing`, or a run that pulls appearance in
+    /// as a dependency of something that enables it. A test that only exists
+    /// under a feature nobody passes is a test that reports nothing, which is
+    /// the same defect as an instrument with no threshold wearing a different
+    /// hat.
+    fn the_two_palest_light_surfaces_clear_the_contrast_floor() {
         let p = Palette::for_mode(true);
         for (name, card, want) in [
-            ("surface1", p.surface1, 4.39),
-            ("surface2", p.surface2, 3.69),
+            ("surface1", p.surface1, 11.55),
+            ("surface2", p.surface2, 9.71),
         ] {
             let cmds = vec![fill(0.0, 0.0, 100.0, 100.0, card), label(1.0, 1.0, p.text)];
             let found = text_on_background(&cmds, p.base);
@@ -737,8 +749,9 @@ mod tests {
                 found[0].ratio
             );
             assert!(
-                found[0].ratio < 4.5,
-                "`{name}` is supposed to be the failing case"
+                found[0].ratio >= 4.5,
+                "`{name}` is back under the floor at {:.2}:1;                  TD-C-TEXT-ON-THE-LIGHT-THEMES-TWO-PALEST-SURFACES has reopened",
+                found[0].ratio
             );
         }
     }

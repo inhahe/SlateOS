@@ -78631,7 +78631,43 @@ constant chosen beside the fill) is the one worth keeping.
 
 ---
 
-### TD-C-TEXT-ON-THE-LIGHT-THEMES-TWO-PALEST-SURFACES-IS-BELOW-THE-CONTRAST-FLOOR — 2026-08-24 — OPEN, **surveyed 2026-09-03: wider than this heading says**
+### TD-C-TEXT-ON-THE-LIGHT-THEMES-TWO-PALEST-SURFACES-IS-BELOW-THE-CONTRAST-FLOOR — 2026-08-24 — **CLOSED 2026-09-11 by §826**
+
+**Closed.** The operator chose `#000000` for the light theme's main text
+(`design-decisions.md` §826). Every figure in the table below is superseded;
+measured again through `palette_check::text_on_background` on 2026-09-11:
+
+| card | light, then | light, now |
+|---|---|---|
+| `base` | 7.06 | 18.57 |
+| `mantle` | 6.57 | 17.27 |
+| `crust` | 6.04 | 15.87 |
+| `surface0` | 5.17 | 13.60 |
+| `surface1` | **4.39** | **11.55** |
+| `surface2` | **3.69** | **9.71** |
+
+**It was fixed on 2026-09-09 and nobody noticed until 2026-09-11.** The test
+that pinned this entry --
+`palette_check::tests::the_two_pale_surfaces_measure_what_the_known_issue_says_they_do`
+-- went red the moment §826 landed, because it asserted the *defect*: that
+`surface1` measures 4.39 and is under the floor. It stayed red and unseen for
+two days, because `palette_check` sits behind the `testing` feature and
+`cargo test -p appearance` does not enable it. It surfaces only under
+`--features testing`, or in a run that pulls `appearance` in as a dependency of
+a crate that enables it -- which is how it was finally seen, in a combined
+`-p appearance -p guitk -p compositor` run after a hard shutdown.
+
+**Two things worth carrying from that.** A test written to pin a defect becomes
+a false alarm the day the defect is fixed, and reads as a regression rather than
+as success -- it is now rewritten to assert the *fix*, so a return under 4.5
+reopens this entry by name. And a test behind a feature flag nobody passes
+reports nothing at all; `cargo test -p <crate>` is not the same command as
+`cargo test --workspace` and the difference is invisible until it matters.
+
+The original entry follows, unaltered, because its survey is still the record of
+how the measurement was made.
+
+
 
 **In short.** The desktop's light theme has six background shades a card or
 panel can be painted. On the two palest of them, ordinary text is below the

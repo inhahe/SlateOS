@@ -36,6 +36,7 @@
 #![allow(clippy::needless_pass_by_value)]
 
 use appearance::Palette;
+use appearance::Surface;
 #[allow(unused_imports)]
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent};
@@ -1969,14 +1970,8 @@ impl RemindersApp {
         let total_h = active.len() as f32 * NOTIFICATION_HEIGHT;
 
         // Background for all notifications
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: self.width,
-            height: total_h,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(cmds, 0.0, 0.0, self.width, total_h, 0.0, Surface::Panel);
 
         for (i, notif) in active.iter().enumerate() {
             let y = i as f32 * NOTIFICATION_HEIGHT;
@@ -2016,14 +2011,15 @@ impl RemindersApp {
             });
 
             // Dismiss button
-            cmds.push(RenderCommand::FillRect {
-                x: self.width - 100.0,
-                y: y + 10.0,
-                width: 80.0,
-                height: 28.0,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::all(SMALL_RADIUS),
-            });
+            self.palette.push_surface(
+                cmds,
+                self.width - 100.0,
+                y + 10.0,
+                80.0,
+                28.0,
+                SMALL_RADIUS,
+                Surface::Card,
+            );
             cmds.push(RenderCommand::Text {
                 x: self.width - 88.0,
                 y: y + 16.0,
@@ -2036,14 +2032,15 @@ impl RemindersApp {
             });
 
             // Snooze button
-            cmds.push(RenderCommand::FillRect {
-                x: self.width - 200.0,
-                y: y + 10.0,
-                width: 80.0,
-                height: 28.0,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::all(SMALL_RADIUS),
-            });
+            self.palette.push_surface(
+                cmds,
+                self.width - 200.0,
+                y + 10.0,
+                80.0,
+                28.0,
+                SMALL_RADIUS,
+                Surface::Card,
+            );
             cmds.push(RenderCommand::Text {
                 x: self.width - 190.0,
                 y: y + 16.0,
@@ -2062,24 +2059,26 @@ impl RemindersApp {
     /// Render the top header bar.
     fn render_header(&self, cmds: &mut Vec<RenderCommand>, y_offset: f32) {
         // Header background
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: y_offset,
-            width: self.width,
-            height: HEADER_HEIGHT,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            cmds,
+            0.0,
+            y_offset,
+            self.width,
+            HEADER_HEIGHT,
+            0.0,
+            Surface::Card,
+        );
 
         // Bottom border
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: y_offset + HEADER_HEIGHT - 1.0,
-            width: self.width,
-            height: 1.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            cmds,
+            0.0,
+            y_offset + HEADER_HEIGHT - 1.0,
+            self.width,
+            1.0,
+            0.0,
+            Surface::Card,
+        );
 
         // App title
         cmds.push(RenderCommand::Text {
@@ -2108,14 +2107,15 @@ impl RemindersApp {
         // Search box
         let search_x = 240.0;
         let search_w = 300.0;
-        cmds.push(RenderCommand::FillRect {
-            x: search_x,
-            y: y_offset + 12.0,
-            width: search_w,
-            height: 32.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(SMALL_RADIUS),
-        });
+        self.palette.push_surface(
+            cmds,
+            search_x,
+            y_offset + 12.0,
+            search_w,
+            32.0,
+            SMALL_RADIUS,
+            Surface::Card,
+        );
         cmds.push(RenderCommand::StrokeRect {
             x: search_x,
             y: y_offset + 12.0,
@@ -2148,14 +2148,15 @@ impl RemindersApp {
 
         // Sort indicator
         let sort_x = search_x + search_w + 20.0;
-        cmds.push(RenderCommand::FillRect {
-            x: sort_x,
-            y: y_offset + 12.0,
-            width: 100.0,
-            height: 32.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(SMALL_RADIUS),
-        });
+        self.palette.push_surface(
+            cmds,
+            sort_x,
+            y_offset + 12.0,
+            100.0,
+            32.0,
+            SMALL_RADIUS,
+            Surface::Card,
+        );
         cmds.push(RenderCommand::Text {
             x: sort_x + 8.0,
             y: y_offset + 20.0,
@@ -2189,24 +2190,12 @@ impl RemindersApp {
     /// Render the left sidebar with views and categories.
     fn render_sidebar(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, h: f32) {
         // Background
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: w,
-            height: h,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(cmds, x, y, w, h, 0.0, Surface::Sidebar);
 
         // Right border
-        cmds.push(RenderCommand::FillRect {
-            x: x + w - 1.0,
-            y,
-            width: 1.0,
-            height: h,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(cmds, x + w - 1.0, y, 1.0, h, 0.0, Surface::Card);
 
         let mut row_y = y + PADDING;
 
@@ -2317,14 +2306,15 @@ impl RemindersApp {
 
         // Categories section
         row_y += 12.0;
-        cmds.push(RenderCommand::FillRect {
-            x: x + PADDING,
-            y: row_y,
-            width: w - PADDING * 2.0,
-            height: 1.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            cmds,
+            x + PADDING,
+            row_y,
+            w - PADDING * 2.0,
+            1.0,
+            0.0,
+            Surface::Card,
+        );
         row_y += 12.0;
 
         cmds.push(RenderCommand::Text {
@@ -2725,24 +2715,12 @@ impl RemindersApp {
         };
 
         // Background
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: w,
-            height: h,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(cmds, x, y, w, h, 0.0, Surface::Card);
 
         // Left border
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: 1.0,
-            height: h,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(cmds, x, y, 1.0, h, 0.0, Surface::Card);
 
         let pad = PADDING;
         let mut row_y = y + pad;
@@ -2793,14 +2771,8 @@ impl RemindersApp {
         row_y += 32.0;
 
         // Separator
-        cmds.push(RenderCommand::FillRect {
-            x: x + pad,
-            y: row_y,
-            width: content_w,
-            height: 1.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(cmds, x + pad, row_y, content_w, 1.0, 0.0, Surface::Card);
         row_y += 12.0;
 
         // Detail fields
@@ -2931,14 +2903,8 @@ impl RemindersApp {
 
         // Description
         if !task.description.is_empty() {
-            cmds.push(RenderCommand::FillRect {
-                x: x + pad,
-                y: row_y,
-                width: content_w,
-                height: 1.0,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::ZERO,
-            });
+            self.palette
+                .push_surface(cmds, x + pad, row_y, content_w, 1.0, 0.0, Surface::Card);
             row_y += 12.0;
 
             cmds.push(RenderCommand::Text {
@@ -2981,14 +2947,8 @@ impl RemindersApp {
 
         // Subtasks
         if !task.subtasks.is_empty() {
-            cmds.push(RenderCommand::FillRect {
-                x: x + pad,
-                y: row_y,
-                width: content_w,
-                height: 1.0,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::ZERO,
-            });
+            self.palette
+                .push_surface(cmds, x + pad, row_y, content_w, 1.0, 0.0, Surface::Card);
             row_y += 12.0;
 
             let done_count = task.subtasks.iter().filter(|s| s.completed).count();
@@ -3079,14 +3039,8 @@ impl RemindersApp {
         // Snooze options (if task has a due date and is not completed)
         if task.due.is_some() && !task.completed {
             row_y += 8.0;
-            cmds.push(RenderCommand::FillRect {
-                x: x + pad,
-                y: row_y,
-                width: content_w,
-                height: 1.0,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::ZERO,
-            });
+            self.palette
+                .push_surface(cmds, x + pad, row_y, content_w, 1.0, 0.0, Surface::Card);
             row_y += 12.0;
 
             cmds.push(RenderCommand::Text {
@@ -3108,14 +3062,8 @@ impl RemindersApp {
                 let bx = x + pad + col as f32 * (btn_w + 8.0);
                 let by = row_y + row_idx as f32 * 30.0;
 
-                cmds.push(RenderCommand::FillRect {
-                    x: bx,
-                    y: by,
-                    width: btn_w,
-                    height: 24.0,
-                    color: self.palette.surface0,
-                    corner_radii: CornerRadii::all(SMALL_RADIUS),
-                });
+                self.palette
+                    .push_surface(cmds, bx, by, btn_w, 24.0, SMALL_RADIUS, Surface::Card);
                 cmds.push(RenderCommand::Text {
                     x: bx + 8.0,
                     y: by + 5.0,

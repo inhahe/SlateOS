@@ -2310,15 +2310,14 @@ impl ScreenRecorderApp {
         let mut cmds = Vec::new();
 
         // Sidebar background
-        self.palette.push_surface(
-            &mut cmds,
-            0.0,
-            0.0,
-            SIDEBAR_WIDTH,
-            self.window_height,
-            0.0,
-            Surface::Sidebar,
-        );
+        cmds.push(RenderCommand::FillRect {
+            x: 0.0,
+            y: 0.0,
+            width: SIDEBAR_WIDTH,
+            height: self.window_height,
+            color: self.palette.mantle,
+            corner_radii: CornerRadii::ZERO,
+        });
 
         // App title
         cmds.push(RenderCommand::Text {
@@ -2354,15 +2353,14 @@ impl ScreenRecorderApp {
 
             // Highlight background for active/hovered
             if is_active {
-                self.palette.push_surface(
-                    &mut cmds,
-                    4.0,
+                cmds.push(RenderCommand::FillRect {
+                    x: 4.0,
                     y,
-                    SIDEBAR_WIDTH - 8.0,
-                    item_height - 2.0,
-                    SMALL_RADIUS,
-                    Surface::Selected,
-                );
+                    width: SIDEBAR_WIDTH - 8.0,
+                    height: item_height - 2.0,
+                    color: self.palette.surface0,
+                    corner_radii: CornerRadii::all(SMALL_RADIUS),
+                });
                 // Active indicator bar
                 cmds.push(RenderCommand::FillRect {
                     x: 0.0,
@@ -2373,15 +2371,14 @@ impl ScreenRecorderApp {
                     corner_radii: CornerRadii::all(1.5),
                 });
             } else if is_hovered {
-                self.palette.push_surface(
-                    &mut cmds,
-                    4.0,
+                cmds.push(RenderCommand::FillRect {
+                    x: 4.0,
                     y,
-                    SIDEBAR_WIDTH - 8.0,
-                    item_height - 2.0,
-                    SMALL_RADIUS,
-                    Surface::Selected,
-                );
+                    width: SIDEBAR_WIDTH - 8.0,
+                    height: item_height - 2.0,
+                    color: self.palette.surface1,
+                    corner_radii: CornerRadii::all(SMALL_RADIUS),
+                });
             }
 
             let text_color = if is_active {
@@ -2461,15 +2458,14 @@ impl ScreenRecorderApp {
         let mut cmds = Vec::new();
 
         // Toolbar background
-        self.palette.push_surface(
-            &mut cmds,
-            SIDEBAR_WIDTH,
-            0.0,
-            self.window_width - SIDEBAR_WIDTH,
-            TOOLBAR_HEIGHT,
-            0.0,
-            Surface::Sidebar,
-        );
+        cmds.push(RenderCommand::FillRect {
+            x: SIDEBAR_WIDTH,
+            y: 0.0,
+            width: self.window_width - SIDEBAR_WIDTH,
+            height: TOOLBAR_HEIGHT,
+            color: self.palette.mantle,
+            corner_radii: CornerRadii::ZERO,
+        });
 
         // Bottom border
         cmds.push(RenderCommand::Line {
@@ -2664,8 +2660,14 @@ impl ScreenRecorderApp {
     fn render_annotation_toolbar(&self, x: f32, y: f32, width: f32) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
 
-        self.palette
-            .push_surface(&mut cmds, x, y, width, 40.0, SMALL_RADIUS, Surface::Card);
+        cmds.push(RenderCommand::FillRect {
+            x,
+            y,
+            width,
+            height: 40.0,
+            color: self.palette.surface0,
+            corner_radii: CornerRadii::all(SMALL_RADIUS),
+        });
 
         let tools = AnnotationTool::all();
         let tool_btn_w: f32 = 80.0;
@@ -3583,15 +3585,14 @@ impl ScreenRecorderApp {
 
         let bar_y = self.window_height - STATUS_BAR_HEIGHT;
 
-        self.palette.push_surface(
-            &mut cmds,
-            0.0,
-            bar_y,
-            self.window_width,
-            STATUS_BAR_HEIGHT,
-            0.0,
-            Surface::Card,
-        );
+        cmds.push(RenderCommand::FillRect {
+            x: 0.0,
+            y: bar_y,
+            width: self.window_width,
+            height: STATUS_BAR_HEIGHT,
+            color: self.palette.crust,
+            corner_radii: CornerRadii::ZERO,
+        });
 
         // Top border
         cmds.push(RenderCommand::Line {

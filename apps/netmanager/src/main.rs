@@ -17,6 +17,7 @@
 //! representative data for initial development.
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEventKind};
 use guitk::frame::Rect;
@@ -1110,14 +1111,8 @@ fn render_sidebar(frame: &mut Frame, app: &NetManagerApp) {
 
         // Selection highlight
         if is_selected {
-            frame.push(RenderCommand::FillRect {
-                x: row.x,
-                y: row.y,
-                width: row.w,
-                height: row.h,
-                color: app.palette.surface0,
-                corner_radii: CornerRadii::all(6.0),
-            });
+            app.palette
+                .push_surface(frame, row.x, row.y, row.w, row.h, 6.0, Surface::Selected);
         }
 
         // Type indicator circle
@@ -1586,14 +1581,15 @@ fn render_tab_dns(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, pw: 
     // Input field
     let input = Rect::new(lx, y, FIELD_INPUT_WIDTH, FIELD_HEIGHT);
     let focused = app.focus == Some(Field::DnsInput);
-    frame.push(RenderCommand::FillRect {
-        x: input.x,
-        y: input.y,
-        width: input.w,
-        height: input.h,
-        color: app.palette.surface0,
-        corner_radii: CornerRadii::all(4.0),
-    });
+    app.palette.push_surface(
+        frame,
+        input.x,
+        input.y,
+        input.w,
+        input.h,
+        4.0,
+        Surface::Card,
+    );
     frame.push(RenderCommand::StrokeRect {
         x: input.x,
         y: input.y,
@@ -1794,14 +1790,15 @@ fn render_tab_vpn(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, pw: 
         let item_y = y;
 
         // Card background
-        frame.push(RenderCommand::FillRect {
-            x: lx,
-            y: item_y,
-            width: pw - SECTION_PADDING * 2.0,
-            height: VPN_ITEM_HEIGHT,
-            color: app.palette.surface0,
-            corner_radii: CornerRadii::all(6.0),
-        });
+        app.palette.push_surface(
+            frame,
+            lx,
+            item_y,
+            pw - SECTION_PADDING * 2.0,
+            VPN_ITEM_HEIGHT,
+            6.0,
+            Surface::Card,
+        );
 
         // Status indicator
         frame.push(RenderCommand::FillRect {
@@ -2173,14 +2170,15 @@ fn render_tab_diagnostics(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f
         let row_h = 32.0;
 
         // Row background
-        frame.push(RenderCommand::FillRect {
-            x: lx,
+        app.palette.push_surface(
+            frame,
+            lx,
             y,
-            width: pw - SECTION_PADDING * 2.0,
-            height: row_h,
-            color: app.palette.surface0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+            pw - SECTION_PADDING * 2.0,
+            row_h,
+            4.0,
+            Surface::Card,
+        );
 
         // Status indicator
         frame.push(RenderCommand::FillRect {
@@ -2386,14 +2384,15 @@ fn render_editable_field(
     let box_rect = Rect::new(vx, y, FIELD_INPUT_WIDTH, FIELD_HEIGHT);
     if editing {
         // Input box background
-        frame.push(RenderCommand::FillRect {
-            x: box_rect.x,
-            y: box_rect.y,
-            width: box_rect.w,
-            height: box_rect.h,
-            color: pal.surface0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        pal.push_surface(
+            frame,
+            box_rect.x,
+            box_rect.y,
+            box_rect.w,
+            box_rect.h,
+            4.0,
+            Surface::Card,
+        );
         frame.push(RenderCommand::StrokeRect {
             x: box_rect.x,
             y: box_rect.y,
@@ -2538,14 +2537,7 @@ fn render_mini_button(
     color: Color,
 ) -> Rect {
     let size = MINI_BUTTON_SIZE;
-    frame.push(RenderCommand::FillRect {
-        x,
-        y,
-        width: size,
-        height: size,
-        color: pal.surface1,
-        corner_radii: CornerRadii::all(3.0),
-    });
+    pal.push_surface(frame, x, y, size, size, 3.0, Surface::Card);
     frame.push(RenderCommand::Text {
         x: x + 5.0,
         y: y + 4.0,
@@ -4427,14 +4419,30 @@ mod tests {
         let mut frame = Frame::new(WINDOW_WIDTH, WINDOW_HEIGHT);
         render_sidebar(&mut frame, &app);
         let cmds = frame.commands();
-        // The highlight is the only rounded full-width row rect in pal.surface0.
+        // The highlight is the only full-width row the selection paints. Which
+        // command that is depends on the theme -- a `surface1` fill under Cards,
+        // an accent outline under Borders -- and the outline is drawn half a
+        // line inside the rectangle asked for, so both its position and its
+        // width come back out by that much.
+        let want_w = SIDEBAR_WIDTH - 8.0;
         let highlights: Vec<f32> = cmds
             .iter()
             .filter_map(|c| match c {
                 RenderCommand::FillRect {
                     y, width, color, ..
-                } if *color == pal.surface0 && (*width - (SIDEBAR_WIDTH - 8.0)).abs() < 0.01 => {
+                } if (*color == pal.surface0 || *color == pal.surface1)
+                    && (*width - want_w).abs() < 0.01 =>
+                {
                     Some(*y)
+                }
+                RenderCommand::StrokeRect {
+                    y,
+                    width,
+                    color,
+                    line_width,
+                    ..
+                } if *color == pal.accent && (*width + *line_width - want_w).abs() < 0.01 => {
+                    Some(y - line_width / 2.0)
                 }
                 _ => None,
             })

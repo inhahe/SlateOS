@@ -5,6 +5,7 @@
 //! filtering, sorting, WIP limits, swimlanes, archiving, and JSON export/import.
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow, content_bottom};
@@ -1463,14 +1464,8 @@ fn render_filter_bar(tree: &mut RenderTree, app: &KanbanApp, width: f32, y_offse
     } else {
         app.palette.text
     };
-    tree.push(RenderCommand::FillRect {
-        x: 70.0,
-        y: y_offset + 5.0,
-        width: 180.0,
-        height: 26.0,
-        color: app.palette.surface0,
-        corner_radii: CornerRadii::all(3.0),
-    });
+    app.palette
+        .push_surface(tree, 70.0, y_offset + 5.0, 180.0, 26.0, 3.0, Surface::Card);
     tree.push(RenderCommand::Text {
         x: 78.0,
         y: y_offset + 9.0,
@@ -1495,14 +1490,8 @@ fn render_filter_bar(tree: &mut RenderTree, app: &KanbanApp, width: f32, y_offse
     });
 
     let priority_label = app.filter.priority_filter.map_or("All", |p| p.label());
-    tree.push(RenderCommand::FillRect {
-        x: 332.0,
-        y: y_offset + 5.0,
-        width: 70.0,
-        height: 26.0,
-        color: app.palette.surface0,
-        corner_radii: CornerRadii::all(3.0),
-    });
+    app.palette
+        .push_surface(tree, 332.0, y_offset + 5.0, 70.0, 26.0, 3.0, Surface::Card);
     tree.push(RenderCommand::Text {
         x: 340.0,
         y: y_offset + 9.0,
@@ -2460,14 +2449,7 @@ fn render_card_detail_body(
                 )
                 .font(11.0, FontWeightHint::Regular);
             let card_h = (COMMENT_BODY_TOP + body.height() + COMMENT_PAD).max(COMMENT_MIN_HEIGHT);
-            tree.push(RenderCommand::FillRect {
-                x: content_x,
-                y: cy,
-                width: content_w,
-                height: card_h,
-                color: pal.surface0,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            pal.push_surface(tree, content_x, cy, content_w, card_h, 4.0, Surface::Card);
             tree.push(RenderCommand::Text {
                 x: content_x + COMMENT_PAD,
                 y: cy + 4.0,
@@ -2516,14 +2498,8 @@ fn render_archive_view(tree: &mut RenderTree, app: &KanbanApp, width: f32, y_sta
     let mut cy = y_start + 44.0;
     for card_id in &board.archived_card_ids {
         if let Some(card) = board.cards.get(card_id) {
-            tree.push(RenderCommand::FillRect {
-                x: 20.0,
-                y: cy,
-                width: width - 40.0,
-                height: 40.0,
-                color: app.palette.surface0,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            app.palette
+                .push_surface(tree, 20.0, cy, width - 40.0, 40.0, 4.0, Surface::Card);
             tree.push(RenderCommand::Text {
                 x: 32.0,
                 y: cy + 6.0,
@@ -2856,14 +2832,15 @@ fn render_input_overlay(tree: &mut RenderTree, app: &KanbanApp, width: f32, heig
     });
 
     // Input field
-    tree.push(RenderCommand::FillRect {
-        x: dlg_x + 16.0,
-        y: dlg_y + 42.0,
-        width: dlg_w - 32.0,
-        height: 30.0,
-        color: app.palette.surface0,
-        corner_radii: CornerRadii::all(4.0),
-    });
+    app.palette.push_surface(
+        tree,
+        dlg_x + 16.0,
+        dlg_y + 42.0,
+        dlg_w - 32.0,
+        30.0,
+        4.0,
+        Surface::Card,
+    );
     tree.push(RenderCommand::Text {
         x: dlg_x + 24.0,
         y: dlg_y + 48.0,
@@ -2893,14 +2870,8 @@ fn render_app(app: &KanbanApp, width: f32, height: f32) -> RenderTree {
     let mut tree = RenderTree::new();
 
     // Full-window background
-    tree.push(RenderCommand::FillRect {
-        x: 0.0,
-        y: 0.0,
-        width,
-        height,
-        color: app.palette.crust,
-        corner_radii: CornerRadii::ZERO,
-    });
+    app.palette
+        .push_surface(&mut tree, 0.0, 0.0, width, height, 0.0, Surface::Card);
 
     // Toolbar
     render_toolbar(&mut tree, app, width);
@@ -4412,6 +4383,11 @@ mod tests {
             .find(|(_, t)| t.starts_with("Comments ("))
             .expect("the comments section has a header")
             .0;
+        // A comment card is filled under the Cards theme and outlined under
+        // Borders, so both commands have to count -- and the outline's geometry
+        // has to be un-inset back to the rectangle the caller asked for, since
+        // `push_surface` strokes half a line inside it. Without that, a body
+        // line sitting exactly on a card's top edge reads as outside it.
         let mut cards: Vec<(f32, f32)> = tree
             .commands
             .iter()
@@ -4424,6 +4400,16 @@ mod tests {
                     ..
                 } if *color == pal.surface0 && corner_radii.top_left == 4.0 && *y > header_y => {
                     Some((*y, *height))
+                }
+                RenderCommand::StrokeRect {
+                    y,
+                    height,
+                    color,
+                    corner_radii,
+                    line_width,
+                    ..
+                } if *color == pal.border && corner_radii.top_left == 4.0 && *y > header_y => {
+                    Some((y - line_width / 2.0, height + line_width))
                 }
                 _ => None,
             })

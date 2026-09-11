@@ -3165,8 +3165,14 @@ impl RssReaderApp {
     /// Render the toolbar with filter, sort, and search controls.
     fn render_toolbar(&self, cmds: &mut Vec<RenderCommand>, y: f32, height: f32) {
         // Toolbar background
-        self.palette
-            .push_surface(cmds, 0.0, y, self.width, height, 0.0, Surface::Card);
+        cmds.push(RenderCommand::FillRect {
+            x: 0.0,
+            y,
+            width: self.width,
+            height,
+            color: self.palette.mantle,
+            corner_radii: CornerRadii::ZERO,
+        });
 
         // Filter button
         let filter_x = 12.0;
@@ -4021,8 +4027,14 @@ impl RssReaderApp {
 
     /// Render the status bar at the bottom of the window.
     fn render_status_bar(&self, cmds: &mut Vec<RenderCommand>, y: f32, height: f32) {
-        self.palette
-            .push_surface(cmds, 0.0, y, self.width, height, 0.0, Surface::Card);
+        cmds.push(RenderCommand::FillRect {
+            x: 0.0,
+            y,
+            width: self.width,
+            height,
+            color: self.palette.crust,
+            corner_radii: CornerRadii::ZERO,
+        });
 
         // Top border
         cmds.push(RenderCommand::Line {

@@ -39,6 +39,7 @@
 //! `C-RENDERER-AND-HIT-TEST-DERIVE-THE-SAME-LAYOUT-SEPARATELY`.
 
 use appearance::Palette;
+use appearance::Surface;
 use std::process::ExitCode;
 
 use guitk::color::Color;
@@ -2223,14 +2224,15 @@ impl DefragUI {
         let sidebar_y = layout.sidebar.y;
 
         // Sidebar background
-        frame.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: sidebar_y,
-            width: layout.sidebar.w,
-            height: layout.sidebar.h,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            frame,
+            0.0,
+            sidebar_y,
+            layout.sidebar.w,
+            layout.sidebar.h,
+            0.0,
+            Surface::Sidebar,
+        );
 
         // Drive rows below the sidebar's bottom edge record no hit box: more
         // drives than fit is the ordinary case on a short window, and a row
@@ -2403,14 +2405,15 @@ impl DefragUI {
         let strip = layout.tabs;
 
         // Tab bar background
-        frame.push(RenderCommand::FillRect {
-            x: strip.x,
-            y: strip.y,
-            width: strip.w,
-            height: strip.h,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            frame,
+            strip.x,
+            strip.y,
+            strip.w,
+            strip.h,
+            0.0,
+            Surface::Card,
+        );
 
         frame.clip(strip);
 
@@ -2492,14 +2495,8 @@ impl DefragUI {
             let map_h = h - (map_y - y) - LEGEND_HEIGHT - PADDING * 2.0;
 
             // Map background
-            frame.push(RenderCommand::FillRect {
-                x: x + PADDING,
-                y: map_y,
-                width: map_w,
-                height: map_h,
-                color: self.palette.crust,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            self.palette
+                .push_surface(frame, x + PADDING, map_y, map_w, map_h, 4.0, Surface::Card);
 
             // Draw blocks
             let cell = BLOCK_SIZE + BLOCK_GAP;
@@ -2621,14 +2618,8 @@ impl DefragUI {
         analysis: &AnalysisResult,
     ) {
         // Summary panel
-        frame.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: 280.0,
-            height: 120.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
+        self.palette
+            .push_surface(frame, x, y, 280.0, 120.0, CORNER_RADIUS, Surface::Card);
 
         let lines = [
             (
@@ -2787,14 +2778,8 @@ impl DefragUI {
 
         // Header row
         let header_y = y;
-        frame.push(RenderCommand::FillRect {
-            x,
-            y: header_y,
-            width: w,
-            height: ROW_HEIGHT,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(frame, x, header_y, w, ROW_HEIGHT, 0.0, Surface::Card);
 
         let columns = file_list_columns(w);
         let table = Table::with_gap(&columns, x, PADDING);
@@ -2851,14 +2836,8 @@ impl DefragUI {
             // than by position on screen, so the stripes do not invert as the
             // list scrolls.
             if i % 2 == 0 {
-                frame.push(RenderCommand::FillRect {
-                    x,
-                    y: ry,
-                    width: w,
-                    height: ROW_HEIGHT,
-                    color: self.palette.surface0,
-                    corner_radii: CornerRadii::ZERO,
-                });
+                self.palette
+                    .push_surface(frame, x, ry, w, ROW_HEIGHT, 0.0, Surface::Card);
             }
 
             // Excluded indicator
@@ -2986,14 +2965,15 @@ impl DefragUI {
             let card_y = y + PADDING;
             let card_w = w - 2.0 * PADDING;
 
-            frame.push(RenderCommand::FillRect {
-                x: card_x,
-                y: card_y,
-                width: card_w,
-                height: 200.0,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::all(CORNER_RADIUS),
-            });
+            self.palette.push_surface(
+                frame,
+                card_x,
+                card_y,
+                card_w,
+                200.0,
+                CORNER_RADIUS,
+                Surface::ControlTrack,
+            );
 
             frame.push(RenderCommand::Text {
                 x: card_x + PADDING,
@@ -3073,14 +3053,15 @@ impl DefragUI {
         let card_w = w - 2.0 * PADDING;
 
         // Before/After comparison card
-        frame.push(RenderCommand::FillRect {
-            x: card_x,
-            y: card_y,
-            width: card_w,
-            height: 260.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
+        self.palette.push_surface(
+            frame,
+            card_x,
+            card_y,
+            card_w,
+            260.0,
+            CORNER_RADIUS,
+            Surface::Card,
+        );
 
         frame.push(RenderCommand::Text {
             x: card_x + PADDING,
@@ -3229,14 +3210,15 @@ impl DefragUI {
         let card_w = w - 2.0 * PADDING;
 
         // Schedule card
-        frame.push(RenderCommand::FillRect {
-            x: card_x,
-            y: card_y,
-            width: card_w,
-            height: 220.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
+        self.palette.push_surface(
+            frame,
+            card_x,
+            card_y,
+            card_w,
+            220.0,
+            CORNER_RADIUS,
+            Surface::Card,
+        );
 
         frame.push(RenderCommand::Text {
             x: card_x + PADDING,
@@ -3343,14 +3325,15 @@ impl DefragUI {
         // open, so the card grows rather than the field hanging off its edge.
         let editor_h = if self.show_exclude_editor { 28.0 } else { 0.0 };
         let excl_y = card_y + 240.0;
-        frame.push(RenderCommand::FillRect {
-            x: card_x,
-            y: excl_y,
-            width: card_w,
-            height: 40.0 + self.excludes.len() as f32 * 24.0 + editor_h,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
+        self.palette.push_surface(
+            frame,
+            card_x,
+            excl_y,
+            card_w,
+            40.0 + self.excludes.len() as f32 * 24.0 + editor_h,
+            CORNER_RADIUS,
+            Surface::Card,
+        );
 
         frame.push(RenderCommand::Text {
             x: card_x + PADDING,
@@ -3468,14 +3451,15 @@ impl DefragUI {
                 Target::ExcludeInput,
                 Rect::new(card_x + PADDING, ey, field_w, 22.0),
             );
-            frame.push(RenderCommand::FillRect {
-                x: card_x + PADDING,
-                y: ey,
-                width: field_w,
-                height: 22.0,
-                color: self.palette.crust,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            self.palette.push_surface(
+                frame,
+                card_x + PADDING,
+                ey,
+                field_w,
+                22.0,
+                4.0,
+                Surface::Card,
+            );
             // A caret, so an empty field does not look like a dead box: this
             // is the only place in the window that takes typed text, and with
             // nothing in it there is otherwise no sign it is listening.
@@ -3537,14 +3521,8 @@ impl DefragUI {
             color: Color::rgba(0, 0, 0, 100),
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
-        frame.push(RenderCommand::FillRect {
-            x: dx,
-            y: dy,
-            width: dw,
-            height: dh,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
+        self.palette
+            .push_surface(frame, dx, dy, dw, dh, CORNER_RADIUS, Surface::Card);
 
         // Warning title
         frame.push(RenderCommand::Text {
@@ -3605,14 +3583,15 @@ impl DefragUI {
         );
 
         // Cancel button
-        frame.push(RenderCommand::FillRect {
-            x: cancel_x,
-            y: dy + dh - BUTTON_HEIGHT - PADDING,
-            width: BUTTON_WIDTH,
-            height: BUTTON_HEIGHT,
-            color: self.palette.surface1,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        self.palette.push_surface(
+            frame,
+            cancel_x,
+            dy + dh - BUTTON_HEIGHT - PADDING,
+            BUTTON_WIDTH,
+            BUTTON_HEIGHT,
+            4.0,
+            Surface::Card,
+        );
         frame.push(RenderCommand::Text {
             x: cancel_x + 28.0,
             y: dy + dh - BUTTON_HEIGHT - PADDING + 8.0,

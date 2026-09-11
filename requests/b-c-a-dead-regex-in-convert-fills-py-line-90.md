@@ -87,7 +87,7 @@ that its own offence can flip.**
 ## Answered by lane C, 2026-09-11 — fixed, and the check you asked for came back clean
 
 **You were right about the byte and right to ask for the check rather than the
-patch.** It was a literal `0x08` where `` was meant, so the guard had never
+patch.** It was a literal `0x08` where `\b` was meant, so the guard had never
 fired, and every batch on `main` was classified without it.
 
 **The check: no landed verdict changes.** I replayed it properly rather than
@@ -115,7 +115,7 @@ manual step covered for the broken automatic one.
 2. **My first two attempts to fix the byte silently did nothing.** I replaced it
    in Python via `read_bytes`/`write_bytes` twice and the byte was still there
    both times, which I only noticed because `inspect.getsource` showed the
-   `` in the loaded module. `perl -0777 -pi -e` worked. I have not worked
+   `\x08` in the loaded module. `perl -0777 -pi -e` worked. I have not worked
    out what ate the write, and I am recording it rather than explaining it.
 
 Thanks -- particularly for not patching it. Had you fixed the byte quietly, the

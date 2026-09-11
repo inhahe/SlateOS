@@ -9,6 +9,7 @@
 //! Uses the guitk library for UI rendering.
 
 use appearance::Palette;
+use appearance::Surface;
 #[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]
@@ -846,14 +847,15 @@ impl LauncherState {
         let input_radii = CornerRadii::all(8.0);
 
         // Input background
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: input_width,
-            height: INPUT_HEIGHT - PADDING,
-            color: self.palette.mantle,
-            corner_radii: input_radii,
-        });
+        self.palette.push_surface_radii(
+            &mut cmds,
+            0.0,
+            0.0,
+            input_width,
+            INPUT_HEIGHT - PADDING,
+            input_radii,
+            Surface::Card,
+        );
 
         // Input border
         cmds.push(RenderCommand::StrokeRect {

@@ -1777,19 +1777,20 @@ fn render_column_header(
     let header_h: f32 = 36.0;
 
     // Header background
-    tree.push(RenderCommand::FillRect {
+    pal.push_surface_radii(
+        tree,
         x,
         y,
-        width: col_width,
-        height: header_h,
-        color: pal.mantle,
-        corner_radii: CornerRadii {
+        col_width,
+        header_h,
+        CornerRadii {
             top_left: 6.0,
             top_right: 6.0,
             bottom_left: 0.0,
             bottom_right: 0.0,
         },
-    });
+        Surface::Card,
+    );
 
     // Column name
     tree.push(RenderCommand::Text {

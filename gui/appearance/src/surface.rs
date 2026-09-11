@@ -232,8 +232,28 @@ impl Palette {
         radius: f32,
         what: Surface,
     ) {
+        self.push_surface_radii(out, x, y, width, height, CornerRadii::all(radius), what);
+    }
+
+    /// As [`push_surface`](Self::push_surface), for a box whose corners are not
+    /// all the same.
+    ///
+    /// A header rounded along its top edge and square along its bottom is the
+    /// common case -- it sits against the panel below it. Those sites cannot use
+    /// the single-radius form and would otherwise have had to assemble the
+    /// commands themselves, which is precisely how a draw site ends up choosing
+    /// a colour again.
+    pub fn push_surface_radii<S: CommandSink + ?Sized>(
+        &self,
+        out: &mut S,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        radii: CornerRadii,
+        what: Surface,
+    ) {
         let paint = self.surface_paint(what);
-        let radii = CornerRadii::all(radius);
         if let Some(fill) = paint.fill {
             out.emit(guitk::render::RenderCommand::FillRect {
                 x,

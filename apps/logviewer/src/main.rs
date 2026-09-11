@@ -1720,19 +1720,20 @@ impl App {
             let panel_w = WINDOW_WIDTH - 2.0 * PADDING;
 
             // Header
-            cmds.push(RenderCommand::FillRect {
-                x: PADDING,
-                y: y + PADDING,
-                width: panel_w,
-                height: 50.0,
-                color: self.palette.mantle,
-                corner_radii: CornerRadii {
+            self.palette.push_surface_radii(
+                cmds,
+                PADDING,
+                y + PADDING,
+                panel_w,
+                50.0,
+                CornerRadii {
                     top_left: 8.0,
                     top_right: 8.0,
                     bottom_left: 0.0,
                     bottom_right: 0.0,
                 },
-            });
+                Surface::Card,
+            );
 
             // Level badge
             let level_w =
@@ -1781,19 +1782,20 @@ impl App {
 
             // Message body
             let body_y = y + PADDING + 54.0;
-            cmds.push(RenderCommand::FillRect {
-                x: PADDING,
-                y: body_y,
-                width: panel_w,
-                height: height - 80.0,
-                color: self.palette.crust,
-                corner_radii: CornerRadii {
+            self.palette.push_surface_radii(
+                cmds,
+                PADDING,
+                body_y,
+                panel_w,
+                height - 80.0,
+                CornerRadii {
                     top_left: 0.0,
                     top_right: 0.0,
                     bottom_left: 8.0,
                     bottom_right: 8.0,
                 },
-            });
+                Surface::Card,
+            );
 
             // Message
             cmds.push(RenderCommand::Text {

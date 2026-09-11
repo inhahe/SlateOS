@@ -2807,19 +2807,20 @@ impl FileAssocUI {
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
         pal.push_surface(frame, d.x, d.y, d.w, d.h, CORNER_RADIUS, Surface::Card);
-        frame.push(RenderCommand::FillRect {
-            x: d.x,
-            y: d.y,
-            width: d.w,
-            height: DIALOG_TITLE_HEIGHT.min(d.h),
-            color: pal.surface1,
-            corner_radii: CornerRadii {
+        pal.push_surface_radii(
+            frame,
+            d.x,
+            d.y,
+            d.w,
+            DIALOG_TITLE_HEIGHT.min(d.h),
+            CornerRadii {
                 top_left: CORNER_RADIUS,
                 top_right: CORNER_RADIUS,
                 bottom_left: 0.0,
                 bottom_right: 0.0,
             },
-        });
+            Surface::Panel,
+        );
         frame.push(RenderCommand::Text {
             x: d.x + PADDING,
             y: d.y + (DIALOG_TITLE_HEIGHT - FONT_SIZE).max(0.0) / 2.0,

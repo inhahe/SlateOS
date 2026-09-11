@@ -133177,7 +133177,31 @@ performance targets are both plausibly missing them for this reason.
   `max_versions_per_file: 16`.
 
 So a 200-iteration write benchmark performs 200 read-backs, 200 SHA-256 computations and
-200 CAS insertions, in a debug build, and attributes none of it.
+200 CAS insertions, and attributes none of it.
+
+> **Correction, same day: these runs are RELEASE builds, not debug.**
+> `boot-test.sh`'s own usage text says it outright — *"Without it, `--bench` means
+> release and everything else means debug"* — and `bench/boot-history.jsonl` confirms
+> it: the two commits this analysis rests on, `4f6ca7a1b` and `96356d747`, are both
+> recorded `profile=release`.
+>
+> I had argued the magnitude from debug-build slowness, quoting `history.rs`'s comment
+> about hashing multi-megabyte files taking seconds. That comment is correct in its own
+> context — boot-time staging, which genuinely is debug — and I carried it somewhere it
+> does not apply. Optimised SHA-256 over 256 bytes is single-digit microseconds, not
+> twenty-six.
+>
+> **What survives and what does not.** The mechanism is unchanged and still verified
+> from the source: the write path reads the old contents back, hashes them, and inserts
+> into the CAS, on every write outside `/proc`, `/dev`, `/sys`, `/tmp`, and
+> `set_auto_version(true)` runs before `bench::run_all`. It is real, it is on the
+> measured path, and nothing measures it. What does **not** survive is the claim that it
+> explains most of the residual. It is probably a few microseconds of the twenty-six,
+> which puts the weight back on the residual being an *upper bound* rather than a cost —
+> the other entry filed today.
+>
+> This makes the A/B measurement more valuable, not less: it was designed to confirm a
+> prediction and will now have to produce the number instead.
 
 ### What this re-explains
 

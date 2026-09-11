@@ -46,7 +46,13 @@ content-addressed store and evicts past 16. `main.rs` enables this at `BOOT_OK`,
 
 ext4 on Linux does none of that. So "within 20% of Linux ext4" compares a versioned
 write against an unversioned one, and the gap grows with file size because the hash is
-per-byte: at 16 KiB there is 64× the hashing of a 256-byte write. `vfs_write_256` and
+per-byte: at 16 KiB there is 64× the hashing of a 256-byte write. (Corrected the same
+day: the benchmark runs are **release** builds — `--bench` implies release unless
+`--profile=debug` is given, and `boot-history.jsonl` confirms it — so the hash is
+optimised and its share of a small write is single-digit microseconds, not the tens I
+first argued from a debug-build comment that belongs to boot-time staging. The
+comparison below is still unlike-for-unlike; the size of the gap is what I got wrong.)
+`vfs_write_256` and
 `vfs_throughput_16k_write` are both over budget, and this is the leading candidate for
 why — I had previously recorded the 16k one as CPU-bound kernel write work on the
 strength of an accelerator ratio that hashing satisfies equally well.

@@ -28,6 +28,7 @@
 )]
 
 use appearance::Palette;
+use appearance::Surface;
 #[allow(unused_imports)]
 use guitk::event::{
     Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -1477,18 +1478,19 @@ impl FileDiffApp {
             let btn_w = text::width(label, UI_FONT_SIZE) + 16.0;
             let is_active = self.view_mode == *mode;
 
-            tree.push(RenderCommand::FillRect {
-                x: *btn_x,
-                y: btn_y,
-                width: btn_w,
-                height: btn_h,
-                color: if is_active {
-                    self.palette.surface1
+            self.palette.push_surface(
+                tree,
+                *btn_x,
+                btn_y,
+                btn_w,
+                btn_h,
+                4.0,
+                if is_active {
+                    Surface::Selected
                 } else {
-                    self.palette.surface0
+                    Surface::Card
                 },
-                corner_radii: CornerRadii::all(4.0),
-            });
+            );
 
             tree.push(RenderCommand::Text {
                 x: *btn_x + 8.0,
@@ -1523,14 +1525,8 @@ impl FileDiffApp {
             let full_label = format!("{label} ({shortcut})");
             let btn_w = text::width(&full_label, UI_FONT_SIZE) + 16.0;
 
-            tree.push(RenderCommand::FillRect {
-                x: *btn_x,
-                y: btn_y,
-                width: btn_w,
-                height: btn_h,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            self.palette
+                .push_surface(tree, *btn_x, btn_y, btn_w, btn_h, 4.0, Surface::Sidebar);
 
             tree.push(RenderCommand::Text {
                 x: *btn_x + 8.0,
@@ -1563,18 +1559,19 @@ impl FileDiffApp {
         for (label, active) in &ignore_toggles {
             let btn_w = text::width(label, UI_FONT_SIZE) + 16.0;
 
-            tree.push(RenderCommand::FillRect {
-                x: *btn_x,
-                y: btn_y,
-                width: btn_w,
-                height: btn_h,
-                color: if *active {
-                    self.palette.surface1
+            self.palette.push_surface(
+                tree,
+                *btn_x,
+                btn_y,
+                btn_w,
+                btn_h,
+                4.0,
+                if *active {
+                    Surface::Selected
                 } else {
-                    self.palette.surface0
+                    Surface::Card
                 },
-                corner_radii: CornerRadii::all(4.0),
-            });
+            );
 
             tree.push(RenderCommand::Text {
                 x: *btn_x + 8.0,
@@ -1605,18 +1602,19 @@ impl FileDiffApp {
         let sync_w = text::width(sync_label, UI_FONT_SIZE) + 16.0;
         let sync_x = self.width - sync_w - 8.0;
 
-        tree.push(RenderCommand::FillRect {
-            x: sync_x,
-            y: btn_y,
-            width: sync_w,
-            height: btn_h,
-            color: if self.sync_scroll {
-                self.palette.surface1
+        self.palette.push_surface(
+            tree,
+            sync_x,
+            btn_y,
+            sync_w,
+            btn_h,
+            4.0,
+            if self.sync_scroll {
+                Surface::Selected
             } else {
-                self.palette.surface0
+                Surface::Card
             },
-            corner_radii: CornerRadii::all(4.0),
-        });
+        );
 
         tree.push(RenderCommand::Text {
             x: sync_x + 8.0,
@@ -1661,14 +1659,15 @@ impl FileDiffApp {
         let lines_y = content_y + header_h;
 
         // Separator line
-        tree.push(RenderCommand::FillRect {
-            x: panel_width,
-            y: content_y,
-            width: SEPARATOR_WIDTH,
-            height: content_height,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            tree,
+            panel_width,
+            content_y,
+            SEPARATOR_WIDTH,
+            content_height,
+            0.0,
+            Surface::Card,
+        );
 
         // Render visible lines
         let pairs = &self.sbs.pairs;
@@ -2105,14 +2104,8 @@ impl FileDiffApp {
         };
 
         // Header
-        tree.push(RenderCommand::FillRect {
-            x: 0.0,
-            y,
-            width: self.width,
-            height: LINE_HEIGHT,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(tree, 0.0, y, self.width, LINE_HEIGHT, 0.0, Surface::Card);
 
         let summary = format!(
             "Directory Compare: {} same, {} different, {} left only, {} right only",
@@ -2368,14 +2361,8 @@ impl FileDiffApp {
         let track_w: f32 = 6.0;
 
         // Track
-        tree.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: track_w,
-            height,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(3.0),
-        });
+        self.palette
+            .push_surface(tree, x, y, track_w, height, 3.0, Surface::ControlTrack);
 
         // Thumb
         let ratio = visible / total_lines;
@@ -2387,14 +2374,15 @@ impl FileDiffApp {
         };
         let thumb_y = y + scroll_ratio * (height - thumb_h);
 
-        tree.push(RenderCommand::FillRect {
+        self.palette.push_surface(
+            tree,
             x,
-            y: thumb_y,
-            width: track_w,
-            height: thumb_h,
-            color: self.palette.surface2,
-            corner_radii: CornerRadii::all(3.0),
-        });
+            thumb_y,
+            track_w,
+            thumb_h,
+            3.0,
+            Surface::ControlTrack,
+        );
     }
 }
 
@@ -2411,14 +2399,7 @@ fn render_panel_header(
     width: f32,
     path: &str,
 ) {
-    tree.push(RenderCommand::FillRect {
-        x,
-        y,
-        width,
-        height: LINE_HEIGHT,
-        color: pal.crust,
-        corner_radii: CornerRadii::ZERO,
-    });
+    pal.push_surface(tree, x, y, width, LINE_HEIGHT, 0.0, Surface::Card);
 
     let display_path = if path.is_empty() { "(no file)" } else { path };
     tree.push(RenderCommand::Text {
@@ -3809,8 +3790,15 @@ mod tests {
         let mut box_at: Option<(f32, f32)> = None;
         let mut checked = 0;
         for cmd in &tree.commands {
+            // A button is a fill under Cards and an outline under Borders, and
+            // the outline sits half a line inside the rectangle asked for -- so
+            // this tracks the *logical* rectangle, or a label would be measured
+            // against a box a pixel narrower than the one it is drawn in.
+            if let Some((bx, _, bw, _)) = appearance::logical_rect(cmd) {
+                box_at = Some((bx, bw));
+                continue;
+            }
             match cmd {
-                RenderCommand::FillRect { x, width, .. } => box_at = Some((*x, *width)),
                 RenderCommand::Text {
                     x,
                     text,

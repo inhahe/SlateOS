@@ -29,6 +29,7 @@
 //! Uses the guitk library for UI rendering.
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::render::{FontFamily, FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
@@ -3117,14 +3118,11 @@ fn render_block_preview(block: &MdBlock, ctx: &mut PreviewContext) {
             let block_height = (code.lines().count() as f32 + 1.0) * LINE_HEIGHT + 16.0;
             if ctx.is_visible(block_height) {
                 // Code block background.
-                ctx.cmds.push(RenderCommand::FillRect {
-                    x: ctx.x,
-                    y: ctx.render_y(),
-                    width: ctx.width,
-                    height: block_height,
-                    color: ctx.palette.surface0,
-                    corner_radii: CornerRadii::all(6.0),
-                });
+                let pal = ctx.palette;
+                let g0 = ctx.x;
+                let g1 = ctx.render_y();
+                let g2 = ctx.width;
+                pal.push_surface(&mut ctx.cmds, g0, g1, g2, block_height, 6.0, Surface::Card);
 
                 // Language label.
                 if !language.is_empty() {
@@ -3293,14 +3291,11 @@ fn render_block_preview(block: &MdBlock, ctx: &mut PreviewContext) {
 
             // Header row background.
             if ctx.is_visible(row_height) {
-                ctx.cmds.push(RenderCommand::FillRect {
-                    x: ctx.x,
-                    y: ctx.render_y(),
-                    width: ctx.width,
-                    height: row_height,
-                    color: ctx.palette.surface0,
-                    corner_radii: CornerRadii::ZERO,
-                });
+                let pal = ctx.palette;
+                let g0 = ctx.x;
+                let g1 = ctx.render_y();
+                let g2 = ctx.width;
+                pal.push_surface(&mut ctx.cmds, g0, g1, g2, row_height, 0.0, Surface::Card);
 
                 // Header cells.
                 for (j, cell) in headers.iter().enumerate() {
@@ -4169,14 +4164,15 @@ pub fn render_find_replace(
     }
 
     // Panel background.
-    cmds.push(RenderCommand::FillRect {
+    pal.push_surface(
+        &mut cmds,
         x,
         y,
         width,
-        height: FIND_PANEL_HEIGHT,
-        color: pal.mantle,
-        corner_radii: CornerRadii::ZERO,
-    });
+        FIND_PANEL_HEIGHT,
+        0.0,
+        Surface::Card,
+    );
 
     // Bottom border.
     cmds.push(RenderCommand::Line {
@@ -4201,14 +4197,15 @@ pub fn render_find_replace(
     });
 
     // Find input box.
-    cmds.push(RenderCommand::FillRect {
-        x: x + 70.0,
-        y: y + 4.0,
-        width: width * 0.4,
-        height: 22.0,
-        color: pal.surface0,
-        corner_radii: CornerRadii::all(4.0),
-    });
+    pal.push_surface(
+        &mut cmds,
+        x + 70.0,
+        y + 4.0,
+        width * 0.4,
+        22.0,
+        4.0,
+        Surface::Card,
+    );
 
     cmds.push(RenderCommand::Text {
         x: x + 74.0,
@@ -4255,14 +4252,15 @@ pub fn render_find_replace(
     });
 
     // Replace input box.
-    cmds.push(RenderCommand::FillRect {
-        x: x + 70.0,
-        y: y + 32.0,
-        width: width * 0.4,
-        height: 22.0,
-        color: pal.surface0,
-        corner_radii: CornerRadii::all(4.0),
-    });
+    pal.push_surface(
+        &mut cmds,
+        x + 70.0,
+        y + 32.0,
+        width * 0.4,
+        22.0,
+        4.0,
+        Surface::Card,
+    );
 
     cmds.push(RenderCommand::Text {
         x: x + 74.0,
@@ -4281,14 +4279,7 @@ pub fn render_find_replace(
     let mut bx = btn_x;
     for label in &btn_labels {
         let bw = text::width(label, SMALL_BUTTON_FONT_SIZE) + 16.0;
-        cmds.push(RenderCommand::FillRect {
-            x: bx,
-            y: y + 32.0,
-            width: bw,
-            height: 22.0,
-            color: pal.surface0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        pal.push_surface(&mut cmds, bx, y + 32.0, bw, 22.0, 4.0, Surface::Card);
         cmds.push(RenderCommand::Text {
             x: bx + 8.0,
             y: y + 36.0,
@@ -4349,14 +4340,15 @@ pub fn render_template_chooser(
     });
 
     // Dialog background.
-    cmds.push(RenderCommand::FillRect {
-        x: dialog_x,
-        y: dialog_y,
-        width: dialog_width,
-        height: dialog_height,
-        color: pal.mantle,
-        corner_radii: CornerRadii::all(8.0),
-    });
+    pal.push_surface(
+        &mut cmds,
+        dialog_x,
+        dialog_y,
+        dialog_width,
+        dialog_height,
+        8.0,
+        Surface::Panel,
+    );
 
     // Dialog border.
     cmds.push(RenderCommand::StrokeRect {
@@ -4388,14 +4380,15 @@ pub fn render_template_chooser(
         let btn_height = 40.0;
         let btn_width = dialog_width - 40.0;
 
-        cmds.push(RenderCommand::FillRect {
-            x: dialog_x + 20.0,
-            y: btn_y,
-            width: btn_width,
-            height: btn_height,
-            color: pal.surface0,
-            corner_radii: CornerRadii::all(6.0),
-        });
+        pal.push_surface(
+            &mut cmds,
+            dialog_x + 20.0,
+            btn_y,
+            btn_width,
+            btn_height,
+            6.0,
+            Surface::Panel,
+        );
 
         cmds.push(RenderCommand::Text {
             x: dialog_x + 32.0,
@@ -4976,14 +4969,15 @@ impl App {
                     &self.find_state,
                 ));
                 // Split divider.
-                cmds.push(RenderCommand::FillRect {
-                    x: content_x + half_width - 1.0,
-                    y: content_y,
-                    width: 2.0,
-                    height: content_height,
-                    color: self.palette.surface0,
-                    corner_radii: CornerRadii::ZERO,
-                });
+                self.palette.push_surface(
+                    &mut cmds,
+                    content_x + half_width - 1.0,
+                    content_y,
+                    2.0,
+                    content_height,
+                    0.0,
+                    Surface::Card,
+                );
                 cmds.extend(render_preview(
                     &self.cached_blocks,
                     &self.palette,
@@ -5072,14 +5066,8 @@ impl App {
             color: self.palette.base,
             corner_radii: CornerRadii::all(6.0),
         });
-        cmds.push(RenderCommand::FillRect {
-            x: dx,
-            y: dy,
-            width: dw,
-            height: 32.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(&mut cmds, dx, dy, dw, 32.0, 0.0, Surface::Card);
 
         let name = self
             .documents
@@ -5130,14 +5118,15 @@ impl App {
 
         let mut by = dy + 74.0;
         for (label, hint) in options {
-            cmds.push(RenderCommand::FillRect {
-                x: dx + 12.0,
-                y: by,
-                width: dw - 24.0,
-                height: 30.0,
-                color: self.palette.surface1,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            self.palette.push_surface(
+                &mut cmds,
+                dx + 12.0,
+                by,
+                dw - 24.0,
+                30.0,
+                4.0,
+                Surface::Card,
+            );
             cmds.push(RenderCommand::Text {
                 x: dx + 20.0,
                 y: by + 7.0,
@@ -5187,14 +5176,8 @@ impl App {
             color: self.palette.base,
             corner_radii: CornerRadii::all(6.0),
         });
-        cmds.push(RenderCommand::FillRect {
-            x: dx,
-            y: dy,
-            width: dw,
-            height: 32.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(cmds, dx, dy, dw, 32.0, 0.0, Surface::Card);
 
         let name = self
             .documents

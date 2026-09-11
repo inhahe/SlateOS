@@ -14,6 +14,7 @@
 //! - Station search
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::listview::ListViewport;
@@ -1330,14 +1331,8 @@ impl RadioApp {
         for (label, scr) in &tabs {
             let active = self.screen == *scr;
             if active {
-                cmds.push(RenderCommand::FillRect {
-                    x: x + 4.0,
-                    y: ty,
-                    width: w - 8.0,
-                    height: 20.0,
-                    color: self.palette.surface0,
-                    corner_radii: CornerRadii::all(4.0),
-                });
+                self.palette
+                    .push_surface(cmds, x + 4.0, ty, w - 8.0, 20.0, 4.0, Surface::Selected);
             }
             cmds.push(RenderCommand::Text {
                 x: x + 12.0,
@@ -1379,14 +1374,15 @@ impl RadioApp {
             // All genres option
             let all_active = self.genre_filter.is_none();
             if all_active {
-                cmds.push(RenderCommand::FillRect {
-                    x: x + 6.0,
-                    y: ty,
-                    width: w - 12.0,
-                    height: 18.0,
-                    color: self.palette.surface0,
-                    corner_radii: CornerRadii::all(3.0),
-                });
+                self.palette.push_surface(
+                    cmds,
+                    x + 6.0,
+                    ty,
+                    w - 12.0,
+                    18.0,
+                    3.0,
+                    Surface::Selected,
+                );
             }
             cmds.push(RenderCommand::Text {
                 x: x + 14.0,
@@ -1430,14 +1426,15 @@ impl RadioApp {
                 let gy = ty + (row as f32) * GENRE_ROW_HEIGHT;
                 let active = self.genre_filter == Some(*genre);
                 if active {
-                    cmds.push(RenderCommand::FillRect {
-                        x: x + 6.0,
-                        y: gy,
-                        width: w - 12.0,
-                        height: 18.0,
-                        color: self.palette.surface0,
-                        corner_radii: CornerRadii::all(3.0),
-                    });
+                    self.palette.push_surface(
+                        cmds,
+                        x + 6.0,
+                        gy,
+                        w - 12.0,
+                        18.0,
+                        3.0,
+                        Surface::Selected,
+                    );
                 }
                 // Genre color dot
                 cmds.push(RenderCommand::FillRect {
@@ -1492,14 +1489,8 @@ impl RadioApp {
         });
 
         // Separator
-        cmds.push(RenderCommand::FillRect {
-            x: x + w - 1.0,
-            y,
-            width: 1.0,
-            height: h,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(cmds, x + w - 1.0, y, 1.0, h, 0.0, Surface::Card);
     }
 
     fn render_station_list(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, h: f32) {
@@ -1570,14 +1561,15 @@ impl RadioApp {
                     && self.play_state == PlayState::Playing;
 
                 if is_sel {
-                    cmds.push(RenderCommand::FillRect {
-                        x: x + 4.0,
-                        y: ry,
-                        width: w - 8.0,
-                        height: row_h - 4.0,
-                        color: self.palette.surface0,
-                        corner_radii: CornerRadii::all(6.0),
-                    });
+                    self.palette.push_surface(
+                        cmds,
+                        x + 4.0,
+                        ry,
+                        w - 8.0,
+                        row_h - 4.0,
+                        6.0,
+                        Surface::Card,
+                    );
                 }
 
                 // Playing indicator
@@ -1688,24 +1680,12 @@ impl RadioApp {
     }
 
     fn render_player_bar(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, h: f32) {
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: w,
-            height: h,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(cmds, x, y, w, h, 0.0, Surface::Card);
 
         // Separator
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: w,
-            height: 1.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(cmds, x, y, w, 1.0, 0.0, Surface::Card);
 
         if let Some(idx) = self.current_station {
             if let Some(station) = self.stations.get(idx) {
@@ -1803,14 +1783,8 @@ impl RadioApp {
         });
 
         // Volume bar
-        cmds.push(RenderCommand::FillRect {
-            x: vol_x,
-            y: y + 22.0,
-            width: 80.0,
-            height: 4.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(2.0),
-        });
+        self.palette
+            .push_surface(cmds, vol_x, y + 22.0, 80.0, 4.0, 2.0, Surface::Card);
         let vol_fill = if self.muted {
             0.0
         } else {
@@ -1892,14 +1866,8 @@ impl RadioApp {
         let sx = (self.width - sw) / 2.0;
         let sy: f32 = 40.0;
 
-        cmds.push(RenderCommand::FillRect {
-            x: sx,
-            y: sy,
-            width: sw,
-            height: sh,
-            color: self.palette.surface1,
-            corner_radii: CornerRadii::all(8.0),
-        });
+        self.palette
+            .push_surface(cmds, sx, sy, sw, sh, 8.0, Surface::Card);
 
         let display = if self.search_query.is_empty() {
             "Type to search stations...".to_string()

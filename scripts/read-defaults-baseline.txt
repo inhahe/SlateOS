@@ -85,7 +85,6 @@ powerctl: read_file(&format!("{base}/type")).unwrap_or_default()
 pwdb: std::fs::read(group).unwrap_or_default()  # examined 2026-09-11: as above
 pwdb: std::fs::read(passwd).unwrap_or_default()  # examined 2026-09-11: from_files' docstring argues this -- an unreadable database is empty, as glibc does, so ls -l still lists a directory with numeric ids
 rfkill: read_sysfs(&base.join("type")).unwrap_or_default()
-sha256sum: std::env::var("TARGET").unwrap_or_default()  # examined 2026-09-11: build.rs, where cargo always sets TARGET, so the default is unreachable
 shell: std::env::var("TARGET").unwrap_or_default()  # examined 2026-09-11: build.rs, where cargo always sets TARGET, so the default is unreachable
 tuned: std::fs::read_to_string(ACTIVE_PROFILE) .unwrap_or_default()
 udisks: fs::read_to_string(path) .unwrap_or_default()

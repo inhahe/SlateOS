@@ -17,6 +17,7 @@
 #![allow(clippy::too_many_arguments)]
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
@@ -1305,14 +1306,15 @@ impl UnitConverterApp {
         let swap_cx = f32::midpoint(main_left, main_right);
         let swap_cy: f32 = 115.0;
         let swap_r: f32 = 18.0;
-        tree.push(RenderCommand::FillRect {
-            x: swap_cx - swap_r,
-            y: swap_cy - swap_r,
-            width: swap_r * 2.0,
-            height: swap_r * 2.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(swap_r),
-        });
+        self.palette.push_surface(
+            tree,
+            swap_cx - swap_r,
+            swap_cy - swap_r,
+            swap_r * 2.0,
+            swap_r * 2.0,
+            swap_r,
+            Surface::Card,
+        );
         tree.push(RenderCommand::Text {
             x: swap_cx - 7.0,
             y: swap_cy - 8.0,
@@ -1367,14 +1369,15 @@ impl UnitConverterApp {
 
         // --- Large result display ---
         let result_y: f32 = 190.0;
-        tree.push(RenderCommand::FillRect {
-            x: main_left + 16.0,
-            y: result_y,
-            width: main_width - 32.0,
-            height: 80.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(10.0),
-        });
+        self.palette.push_surface(
+            tree,
+            main_left + 16.0,
+            result_y,
+            main_width - 32.0,
+            80.0,
+            10.0,
+            Surface::Panel,
+        );
 
         // Shadow hint.
         tree.push(RenderCommand::BoxShadow {
@@ -1432,14 +1435,15 @@ impl UnitConverterApp {
             overflow: TextOverflow::Clip,
         });
 
-        tree.push(RenderCommand::FillRect {
-            x: main_left + 16.0,
-            y: formula_y + 18.0,
-            width: main_width - 32.0,
-            height: 32.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(6.0),
-        });
+        self.palette.push_surface(
+            tree,
+            main_left + 16.0,
+            formula_y + 18.0,
+            main_width - 32.0,
+            32.0,
+            6.0,
+            Surface::Card,
+        );
 
         tree.push(RenderCommand::Text {
             x: main_left + 28.0,
@@ -1456,18 +1460,19 @@ impl UnitConverterApp {
         let fav_btn_y: f32 = 356.0;
         let fav_btn_w: f32 = 120.0;
         let fav_btn_h: f32 = 28.0;
-        tree.push(RenderCommand::FillRect {
-            x: main_left + 20.0,
-            y: fav_btn_y,
-            width: fav_btn_w,
-            height: fav_btn_h,
-            color: if self.show_favorites {
-                self.palette.surface1
+        self.palette.push_surface(
+            tree,
+            main_left + 20.0,
+            fav_btn_y,
+            fav_btn_w,
+            fav_btn_h,
+            6.0,
+            if self.show_favorites {
+                Surface::Selected
             } else {
-                self.palette.surface0
+                Surface::Card
             },
-            corner_radii: CornerRadii::all(6.0),
-        });
+        );
         tree.push(RenderCommand::Text {
             x: main_left + 30.0,
             y: fav_btn_y + 7.0,
@@ -1506,14 +1511,15 @@ impl UnitConverterApp {
                         break;
                     }
 
-                    tree.push(RenderCommand::FillRect {
-                        x: main_left + 20.0,
-                        y: fy,
-                        width: main_width - 40.0,
-                        height: fav_item_h - 4.0,
-                        color: self.palette.surface0,
-                        corner_radii: CornerRadii::all(4.0),
-                    });
+                    self.palette.push_surface(
+                        tree,
+                        main_left + 20.0,
+                        fy,
+                        main_width - 40.0,
+                        fav_item_h - 4.0,
+                        4.0,
+                        Surface::Card,
+                    );
 
                     tree.push(RenderCommand::Text {
                         x: main_left + 30.0,
@@ -1560,14 +1566,8 @@ impl UnitConverterApp {
             self.palette.surface1
         };
 
-        tree.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: w,
-            height: h,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(8.0),
-        });
+        self.palette
+            .push_surface(tree, x, y, w, h, 8.0, Surface::Card);
 
         tree.push(RenderCommand::StrokeRect {
             x,
@@ -1708,14 +1708,8 @@ impl UnitConverterApp {
         });
 
         // Background.
-        tree.push(RenderCommand::FillRect {
-            x: dd_x,
-            y: dd_y,
-            width: dd_w,
-            height: dd_h,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(8.0),
-        });
+        self.palette
+            .push_surface(tree, dd_x, dd_y, dd_w, dd_h, 8.0, Surface::Card);
 
         tree.push(RenderCommand::StrokeRect {
             x: dd_x,
@@ -1794,14 +1788,15 @@ impl UnitConverterApp {
         });
 
         // Background.
-        tree.push(RenderCommand::FillRect {
-            x: panel_x,
-            y: 0.0,
-            width: HISTORY_PANEL_WIDTH,
-            height: WINDOW_HEIGHT,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            tree,
+            panel_x,
+            0.0,
+            HISTORY_PANEL_WIDTH,
+            WINDOW_HEIGHT,
+            0.0,
+            Surface::Card,
+        );
 
         // Header.
         tree.push(RenderCommand::Text {
@@ -1878,14 +1873,15 @@ impl UnitConverterApp {
                 }
 
                 // Entry background.
-                tree.push(RenderCommand::FillRect {
-                    x: panel_x + 8.0,
-                    y: ey + 2.0,
-                    width: HISTORY_PANEL_WIDTH - 16.0,
-                    height: item_h - 6.0,
-                    color: self.palette.surface0,
-                    corner_radii: CornerRadii::all(6.0),
-                });
+                self.palette.push_surface(
+                    tree,
+                    panel_x + 8.0,
+                    ey + 2.0,
+                    HISTORY_PANEL_WIDTH - 16.0,
+                    item_h - 6.0,
+                    6.0,
+                    Surface::Card,
+                );
 
                 // Category badge.
                 let cat_color = entry.category.accent(&self.palette);

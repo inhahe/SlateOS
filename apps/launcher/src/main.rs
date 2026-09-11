@@ -9,6 +9,7 @@
 //! Uses the guitk library for UI rendering.
 
 use appearance::Palette;
+use appearance::Surface;
 #[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]
@@ -846,14 +847,15 @@ impl LauncherState {
         let input_radii = CornerRadii::all(8.0);
 
         // Input background
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: input_width,
-            height: INPUT_HEIGHT - PADDING,
-            color: self.palette.mantle,
-            corner_radii: input_radii,
-        });
+        self.palette.push_surface_radii(
+            &mut cmds,
+            0.0,
+            0.0,
+            input_width,
+            INPUT_HEIGHT - PADDING,
+            input_radii,
+            Surface::Card,
+        );
 
         // Input border
         cmds.push(RenderCommand::StrokeRect {
@@ -963,14 +965,15 @@ impl LauncherState {
 
             // Row background (highlight if selected)
             if is_selected {
-                cmds.push(RenderCommand::FillRect {
-                    x: 0.0,
-                    y: row_y,
-                    width: input_width,
-                    height: ROW_HEIGHT,
-                    color: self.palette.surface1,
-                    corner_radii: CornerRadii::all(6.0),
-                });
+                self.palette.push_surface(
+                    &mut cmds,
+                    0.0,
+                    row_y,
+                    input_width,
+                    ROW_HEIGHT,
+                    6.0,
+                    Surface::Selected,
+                );
 
                 // Selection indicator bar on the left
                 cmds.push(RenderCommand::FillRect {
@@ -2064,8 +2067,13 @@ mod tests {
         let y = commands
             .iter()
             .find_map(|cmd| match *cmd {
-                RenderCommand::FillRect { y, height, .. } if height == ROW_HEIGHT => Some(y),
-                _ => None,
+                // Whichever way the theme drew it: a fill under Cards, an
+                // outline under Borders. The click this test checks has to land
+                // on the row as laid out, not on the stroke half a pixel inside
+                // it, so the rectangle comes back through `logical_rect`.
+                ref cmd => appearance::logical_rect(cmd)
+                    .filter(|(_, _, _, h)| (h - ROW_HEIGHT).abs() < 0.01)
+                    .map(|(_, y, _, _)| y),
             })
             .expect("the selected row draws a highlight");
         state.selected_index = restore;
@@ -2406,8 +2414,14 @@ mod tests {
             oswindow::app::App::render(app, 700.0, 500.0)
                 .commands
                 .iter()
+                // Strokes count as well as fills. The question this answers is
+                // "did the theme reach this window", and since the surface
+                // conversion a card is an outline -- so a helper that collected
+                // only fills would see the same list under two themes and report
+                // that nothing had changed.
                 .filter_map(|c| match c {
-                    RenderCommand::FillRect { color, .. } => Some(*color),
+                    RenderCommand::FillRect { color, .. }
+                    | RenderCommand::StrokeRect { color, .. } => Some(*color),
                     _ => None,
                 })
                 .collect()

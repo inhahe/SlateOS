@@ -43,6 +43,7 @@
 #![allow(clippy::wildcard_imports)]
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
@@ -2058,14 +2059,15 @@ impl DiagramApp {
         let mut cmds: Vec<RenderCommand> = Vec::with_capacity(512);
 
         // Background.
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: self.window_w,
-            height: self.window_h,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            &mut cmds,
+            0.0,
+            0.0,
+            self.window_w,
+            self.window_h,
+            0.0,
+            Surface::Card,
+        );
 
         self.render_toolbar(&mut cmds);
         self.render_palette(&mut cmds);
@@ -3155,14 +3157,15 @@ impl DiagramApp {
                 AlignOp::DistributeV,
             ];
             for op in &ops {
-                cmds.push(RenderCommand::FillRect {
-                    x: px + 12.0,
-                    y: row_y,
-                    width: PROPERTIES_WIDTH - 24.0,
-                    height: 22.0,
-                    color: self.palette.surface0,
-                    corner_radii: CornerRadii::all(3.0),
-                });
+                self.palette.push_surface(
+                    cmds,
+                    px + 12.0,
+                    row_y,
+                    PROPERTIES_WIDTH - 24.0,
+                    22.0,
+                    3.0,
+                    Surface::Card,
+                );
                 cmds.push(RenderCommand::Text {
                     x: px + 18.0,
                     y: row_y + 5.0,

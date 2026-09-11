@@ -33,6 +33,7 @@
 #![allow(clippy::cognitive_complexity)]
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
@@ -1132,18 +1133,19 @@ impl App {
             let w = text::measure(&file.name, SMALL_TEXT, FontWeightHint::Bold) + 20.0;
             let active = fi == self.active_file;
 
-            cmds.push(RenderCommand::FillRect {
-                x: tab_x,
-                y: 8.0,
-                width: w,
-                height: 28.0,
-                color: if active {
-                    self.palette.surface0
+            self.palette.push_surface(
+                cmds,
+                tab_x,
+                8.0,
+                w,
+                28.0,
+                4.0,
+                if active {
+                    Surface::Selected
                 } else {
-                    self.palette.crust
+                    Surface::Card
                 },
-                corner_radii: CornerRadii::all(4.0),
-            });
+            );
             cmds.push(RenderCommand::Text {
                 x: tab_x + 10.0,
                 y: 14.0,
@@ -1275,14 +1277,8 @@ impl App {
         // Search box
         let search_x = lx + 12.0;
         let search_w = 250.0;
-        cmds.push(RenderCommand::FillRect {
-            x: search_x,
-            y: y + 6.0,
-            width: search_w,
-            height: 24.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(12.0),
-        });
+        self.palette
+            .push_surface(cmds, search_x, y + 6.0, search_w, 24.0, 12.0, Surface::Card);
 
         let search_text = if self.filter.search_query.is_empty() {
             "Search logs..."
@@ -1725,19 +1721,20 @@ impl App {
             let panel_w = WINDOW_WIDTH - 2.0 * PADDING;
 
             // Header
-            cmds.push(RenderCommand::FillRect {
-                x: PADDING,
-                y: y + PADDING,
-                width: panel_w,
-                height: 50.0,
-                color: self.palette.mantle,
-                corner_radii: CornerRadii {
+            self.palette.push_surface_radii(
+                cmds,
+                PADDING,
+                y + PADDING,
+                panel_w,
+                50.0,
+                CornerRadii {
                     top_left: 8.0,
                     top_right: 8.0,
                     bottom_left: 0.0,
                     bottom_right: 0.0,
                 },
-            });
+                Surface::Card,
+            );
 
             // Level badge
             let level_w =
@@ -1786,19 +1783,20 @@ impl App {
 
             // Message body
             let body_y = y + PADDING + 54.0;
-            cmds.push(RenderCommand::FillRect {
-                x: PADDING,
-                y: body_y,
-                width: panel_w,
-                height: height - 80.0,
-                color: self.palette.crust,
-                corner_radii: CornerRadii {
+            self.palette.push_surface_radii(
+                cmds,
+                PADDING,
+                body_y,
+                panel_w,
+                height - 80.0,
+                CornerRadii {
                     top_left: 0.0,
                     top_right: 0.0,
                     bottom_left: 8.0,
                     bottom_right: 8.0,
                 },
-            });
+                Surface::Card,
+            );
 
             // Message
             cmds.push(RenderCommand::Text {
@@ -1873,14 +1871,15 @@ impl App {
                 max_width: Some(100.0),
                 overflow: TextOverflow::Ellipsis,
             });
-            cmds.push(RenderCommand::FillRect {
-                x: PADDING + 16.0,
-                y: raw_y + 18.0,
-                width: panel_w - 32.0,
-                height: LINE_HEIGHT + 8.0,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            self.palette.push_surface(
+                cmds,
+                PADDING + 16.0,
+                raw_y + 18.0,
+                panel_w - 32.0,
+                LINE_HEIGHT + 8.0,
+                4.0,
+                Surface::Card,
+            );
             cmds.push(RenderCommand::Text {
                 x: PADDING + 24.0,
                 y: raw_y + 22.0,

@@ -1,6 +1,50 @@
 #!/usr/bin/env python3
-"""Survey the utility names that two crates both build, and say which side is
-ahead.
+"""Survey the utility names that two crates both build, and say how to decide
+between them.
+
+## This script no longer pronounces a winner, and here is the evidence
+
+It used to print a `verdict` column -- "standalone ahead", "coreutils ahead",
+"close -- read both". Five of those verdicts have now been put to a real
+differential harness, and the column went **nought for five**:
+
+| pair | the verdict | what the harness said |
+|---|---|---|
+| `tee` | standalone ahead | coreutils 71/0, standalone 34/37 — **inverted** |
+| `dd` | standalone ahead | coreutils 339/0, standalone 8/331 — **inverted** |
+| `expand` | close — read both | 216/0 against 90/126 — a landslide |
+| `comm` | close — read both | 197/0 against 104/93 — a landslide |
+| `join` | close — read both | 305/0 against 126/179 — a landslide |
+
+Both failure directions have one cause: **this script counts option names that
+appear in the source, and an option that is named is not an option that
+works.** The standalone `dd` mentions `bs` and implements none of its suffixes,
+so `dd bs=1M` errors. The standalone `join` mentions `-a` and rejects `-a1`,
+the ordinary spelling, costing it 64 cases. Counting mentions cannot see that,
+and no refinement of the counting can -- the fact is not in the text.
+
+"close" turned out to be the most misleading of the three rather than the most
+balanced. A pair is called close when the two line counts are close, and the
+smaller side is often smaller *precisely because a third of its options are
+missing*. Three "close" pairs were measured and all three were landslides.
+
+A third failure mode, which is about safety rather than ranking: **some
+standalone crates are multicall binaries, so their row is not about one
+program.** `userspace/stat` dispatches on `argv[0]` to `stat`, `readlink` and
+`ln`, so the `stat` row credits the standalone with 14 options it does not have
+-- `--backup`, `--symbolic` and `--no-target-directory` are `ln`'s,
+`--canonicalize-missing` and `--no-newline` are `readlink`'s. Two consequences
+follow, and the second is the dangerous one: the count compares three programs
+against one, and `git rm -r userspace/stat` would delete a `readlink` and an
+`ln` that nothing in the row mentions. Check what a crate's `argv[0]` dispatch
+serves before removing it; `scripts/check-roadmap-done.py` catches the fallout
+afterwards, but only for names the roadmap claims are done.
+
+So the column now says what would actually settle it: whether the tree already
+has a differential harness for this name, and the command to run. What this
+script still measures honestly -- line counts and the mentioned-option sets --
+is printed unchanged, because those are observations. The verdict was an
+inference, and the inference did not hold.
 
 ## Why this exists
 
@@ -53,6 +97,65 @@ import rustlex  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 COREUTILS_BIN = ROOT / "userspace" / "coreutils" / "src" / "bin"
 USERSPACE = ROOT / "userspace"
+# Where the differential harnesses live.
+SCRIPTS = Path(__file__).resolve().parent
+
+_DIFF_BINS = re.compile(r"^DIFF_BINS=[\"']?(.+?)[\"']?\s*$", re.M)
+
+
+def harness_for(name: str) -> str | None:
+    """How to run a differential for `name`, or `None` if nothing covers it.
+
+    ## Why this is not just `scripts/<name>-diff.sh`
+
+    Because that answer was wrong, and wrong in the direction that wastes a
+    day. `sha256sum` has no `sha256sum-diff.sh`, so this column told a reader to
+    write one -- while `digest-diff.sh` has covered it all along through
+    `DIFF_BINS="md5sum sha256sum"`, and `interleave-diff.sh` covers it too.
+    Eleven of the tree's subjects are reached only that way.
+
+    The same shape as every other enumeration defect in this tree: a rule with
+    one entry per instance, which misses the next instance silently. So the
+    harnesses are asked what they cover rather than assumed to be named after
+    it -- `DIFF_BINS` is read from each `*-diff.sh`, and a family harness is
+    reported with the `PROG=` that narrows a run to the one binary.
+
+    ## A family harness covers the NAME but cannot be aimed at the half
+
+    Reported differently for that reason. `DIFF_PKG=<name>` fails outright on a
+    family harness -- cargo is asked for a `md5sum` bin in the `sha256sum`
+    package -- and `DIFF_PKG="coreutils <name>"` builds *both* packages' copy of
+    the binary into the same path, so which one the harness measures is decided
+    by build order. That is not a theory:
+
+        $ DIFF_PKG="coreutils sha256sum" PROG=sha256sum ./scripts/digest-diff.sh
+        113 passed, 0 differed     <- sha256sum (SlateOS coreutils)
+        113 passed, 0 differed     <- sha256sum (SlateOS coreutils)
+        39 passed, 74 differed     <- sha256sum (Slate OS)
+
+    Three runs of one command, subject confirmed by `--version` each time. The
+    same defect family as `DIFF_PKG` not crossing the WSL boundary -- an
+    authoritative-looking pass count about a binary nobody chose -- except
+    non-deterministic, so it cannot even be reproduced into a bug report.
+
+    So the column says what is true: the harness exists, it measures the
+    `coreutils` half, and aiming it at the standalone needs `--version`
+    checked on every run. See
+    `TD-B-A-FAMILY-HARNESS-CANNOT-BE-AIMED-AT-ONE-HALF-OF-A-PAIR`.
+    """
+    direct = SCRIPTS / f"{name}-diff.sh"
+    if direct.is_file():
+        return f"DIFF_PKG={name} bash scripts/{name}-diff.sh"
+    for path in sorted(SCRIPTS.glob("*-diff.sh")):
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        m = _DIFF_BINS.search(text)
+        if m and name in m.group(1).split():
+            return (f"PROG={name} bash scripts/{path.name}"
+                    f"  (coreutils half only -- see TD-B-A-FAMILY-HARNESS-...)")
+    return None
 
 # A short option is a dash and one character that is not a digit -- `-1` is far
 # more often a numeric operand (`head -1`) or part of a format string than a
@@ -196,6 +299,60 @@ def crate_sources(crate: Path) -> list[Path]:
     return sorted(src.rglob("*.rs")) if src.is_dir() else []
 
 
+_MODREF = re.compile(r"\b(?:coreutils|crate)::([a-z][a-z0-9_]*)")
+
+
+def coreutils_modules(seeds: list[Path]) -> list[Path]:
+    """The `coreutils` modules a bin reaches, transitively.
+
+    ## Why this exists: the comparison was unfair by construction
+
+    Until this was added, a row compared **one file** of `coreutils` --
+    `src/bin/<name>.rs` -- against the standalone's **entire crate**. But
+    `coreutils` deliberately factors shared behaviour into modules and the
+    standalone crates do not, so the thing being counted on one side was a leaf
+    and on the other a whole program.
+
+    `sha256sum` is the clearest case. Its bin is 210 lines against the
+    standalone's 1538, which reads as a rout. The bin is 210 lines *because*
+    `--check`, the option table, the three checksum-file formats, the name
+    escaping and the exit statuses all live in `digest.rs` -- 1363 lines, a port
+    of upstream's `digest.c`, shared with `md5sum`. Counting it, the row is
+    1573 against 1538 plus whatever `getopt.rs` contributes.
+
+    **This is the mechanism behind every "standalone ahead" verdict**, including
+    the two that were put to a harness and came back inverted. `tee` and `dd`
+    were not ranked wrongly by bad luck; they were ranked wrongly by a
+    comparison that reads a factored implementation's leaf and a copy-pasted
+    one's entirety. The module docstring already said the scrape "cannot see an
+    option that is parsed by a shared helper" -- what it did not draw is that
+    the blindness is one-sided, and therefore a bias rather than noise.
+
+    ## How
+
+    Follow `coreutils::<mod>` from the bin and `crate::<mod>` from each module
+    reached, to a fixed point. A textual scrape, like everything else here: it
+    will follow a name inside a comment or a string, and that is the harmless
+    direction -- it counts a module the bin might not use, where the previous
+    behaviour was to count none of them at all.
+    """
+    src = USERSPACE / "coreutils" / "src"
+    found: dict[Path, None] = {}
+    queue = list(seeds)
+    while queue:
+        path = queue.pop()
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for name in set(_MODREF.findall(text)):
+            for cand in (src / f"{name}.rs", src / name / "mod.rs"):
+                if cand.is_file() and cand not in found:
+                    found[cand] = None
+                    queue.append(cand)
+    return sorted(found)
+
+
 def read(paths: list[Path]) -> tuple[set[str], int]:
     """The option set and the line count for one side of a pair.
 
@@ -243,43 +400,45 @@ def main() -> int:
         st_paths = crate_sources(USERSPACE / name)
         if not cu_paths or not st_paths:
             continue
+        # The shared modules the bin reaches, without which this row compares a
+        # leaf file against a whole crate. See `coreutils_modules`.
+        cu_paths = cu_paths + coreutils_modules(cu_paths)
         cu_opts, cu_lines = read(cu_paths)
         st_opts, st_lines = read(st_paths)
         rows.append((name, cu_lines, st_lines, cu_opts, st_opts))
 
     print(f"{len(rows)} colliding names\n")
-    hdr = f"{'name':<12} {'coreutils':>9} {'standalone':>10}  {'only cu':>7} {'only sa':>7}  verdict"
+    hdr = (f"{'name':<12} {'coreutils':>9} {'standalone':>10}  "
+           f"{'only cu':>7} {'only sa':>7}  how to decide")
     print(hdr)
     print("-" * len(hdr))
-    ahead_sa = ahead_cu = 0
+    with_harness = 0
     for name, cl, sl, co, so in rows:
         only_cu, only_sa = co - so, so - co
-        # The verdict weighs options first and length second: a longer file that
-        # accepts strictly fewer options is longer for some other reason.
-        if len(only_sa) > len(only_cu) + 2:
-            verdict = "standalone ahead"
-            ahead_sa += 1
-        elif len(only_cu) > len(only_sa) + 2:
-            verdict = "coreutils ahead"
-            ahead_cu += 1
-        elif sl > cl * 2:
-            verdict = "standalone ahead (size)"
-            ahead_sa += 1
-        elif cl > sl * 2:
-            verdict = "coreutils ahead (size)"
-            ahead_cu += 1
+        # The only column here that has ever predicted a differential's answer.
+        # A verdict derived from these counts went nought for five against the
+        # harnesses -- see the module docstring -- so the counts are printed and
+        # left to speak for themselves, and this column says what would settle
+        # it instead.
+        how = harness_for(name)
+        if how is not None:
+            with_harness += 1
         else:
-            verdict = "close -- read both"
-        print(f"{name:<12} {cl:>9} {sl:>10}  {len(only_cu):>7} {len(only_sa):>7}  {verdict}")
+            how = "no harness -- write one"
+        print(f"{name:<12} {cl:>9} {sl:>10}  "
+              f"{len(only_cu):>7} {len(only_sa):>7}  {how}")
         if verbose:
             if only_cu:
                 print(f"             only coreutils: {' '.join(sorted(only_cu))}")
             if only_sa:
                 print(f"             only standalone: {' '.join(sorted(only_sa))}")
 
-    print(f"\ncoreutils ahead: {ahead_cu}   standalone ahead: {ahead_sa}   "
-          f"close: {len(rows) - ahead_cu - ahead_sa}")
-    print("\nEvery pair is read before either copy is deleted; this only ranks them.")
+    print(f"\n{with_harness} of {len(rows)} have a harness; "
+          f"{len(rows) - with_harness} would need one written.")
+    print("\nThe option counts say what each source MENTIONS. Five pairs ranked"
+          "\nfrom them have since been measured, and the ranking was wrong every"
+          "\ntime -- twice backwards, three times calling a landslide close. Run"
+          "\nthe harness; do not delete on a count.")
     return 0
 
 

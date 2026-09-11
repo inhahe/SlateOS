@@ -24,6 +24,7 @@
 #![allow(dead_code, clippy::too_many_arguments)]
 
 use appearance::Palette;
+use appearance::Surface;
 use std::collections::HashMap;
 
 use guitk::color::Color;
@@ -3092,14 +3093,8 @@ impl RssReaderApp {
     /// Render the title bar with app name and quick actions.
     fn render_title_bar(&self, cmds: &mut Vec<RenderCommand>, height: f32) {
         // Title bar background
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: self.width,
-            height,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(cmds, 0.0, 0.0, self.width, height, 0.0, Surface::Card);
 
         // RSS icon (simplified as text)
         cmds.push(RenderCommand::Text {
@@ -3143,14 +3138,8 @@ impl RssReaderApp {
 
         // Right side: refresh all button area
         let refresh_x = self.width - 120.0;
-        cmds.push(RenderCommand::FillRect {
-            x: refresh_x,
-            y: 8.0,
-            width: 100.0,
-            height: 24.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        self.palette
+            .push_surface(cmds, refresh_x, 8.0, 100.0, 24.0, 4.0, Surface::Card);
         cmds.push(RenderCommand::Text {
             x: refresh_x + 10.0,
             y: 12.0,
@@ -3192,14 +3181,8 @@ impl RssReaderApp {
             FilterMode::Unread => self.palette.blue,
             FilterMode::Starred => self.palette.yellow,
         };
-        cmds.push(RenderCommand::FillRect {
-            x: filter_x,
-            y: y + 6.0,
-            width: 110.0,
-            height: 24.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        self.palette
+            .push_surface(cmds, filter_x, y + 6.0, 110.0, 24.0, 4.0, Surface::Card);
         cmds.push(RenderCommand::Text {
             x: filter_x + 8.0,
             y: y + 10.0,
@@ -3213,14 +3196,8 @@ impl RssReaderApp {
 
         // Sort button
         let sort_x = 132.0;
-        cmds.push(RenderCommand::FillRect {
-            x: sort_x,
-            y: y + 6.0,
-            width: 160.0,
-            height: 24.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        self.palette
+            .push_surface(cmds, sort_x, y + 6.0, 160.0, 24.0, 4.0, Surface::Card);
         cmds.push(RenderCommand::Text {
             x: sort_x + 8.0,
             y: y + 10.0,
@@ -3234,14 +3211,8 @@ impl RssReaderApp {
 
         // Search box
         let search_x = self.width - 260.0;
-        cmds.push(RenderCommand::FillRect {
-            x: search_x,
-            y: y + 6.0,
-            width: 240.0,
-            height: 24.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        self.palette
+            .push_surface(cmds, search_x, y + 6.0, 240.0, 24.0, 4.0, Surface::Card);
         if self.search_active {
             cmds.push(RenderCommand::StrokeRect {
                 x: search_x,
@@ -3296,14 +3267,8 @@ impl RssReaderApp {
         panel_height: f32,
     ) {
         // Sidebar background
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: panel_width,
-            height: panel_height,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(cmds, x, y, panel_width, panel_height, 0.0, Surface::Sidebar);
 
         // Clip to sidebar area
         cmds.push(RenderCommand::PushClip {
@@ -3320,18 +3285,19 @@ impl RssReaderApp {
         let is_selected = self.sidebar_selection == SidebarSelection::AllFeeds;
         let active_highlight = is_selected && self.active_pane == ActivePane::Sidebar;
         if is_selected {
-            cmds.push(RenderCommand::FillRect {
-                x: x + 4.0,
-                y: cy,
-                width: panel_width - 8.0,
-                height: item_height,
-                color: if active_highlight {
-                    self.palette.surface1
+            self.palette.push_surface(
+                cmds,
+                x + 4.0,
+                cy,
+                panel_width - 8.0,
+                item_height,
+                4.0,
+                if active_highlight {
+                    Surface::Selected
                 } else {
-                    self.palette.surface0
+                    Surface::Card
                 },
-                corner_radii: CornerRadii::all(4.0),
-            });
+            );
         }
         cmds.push(RenderCommand::Text {
             x: x + 12.0,
@@ -3376,18 +3342,19 @@ impl RssReaderApp {
         let is_starred_selected = self.sidebar_selection == SidebarSelection::Starred;
         let starred_highlight = is_starred_selected && self.active_pane == ActivePane::Sidebar;
         if is_starred_selected {
-            cmds.push(RenderCommand::FillRect {
-                x: x + 4.0,
-                y: cy,
-                width: panel_width - 8.0,
-                height: item_height,
-                color: if starred_highlight {
-                    self.palette.surface1
+            self.palette.push_surface(
+                cmds,
+                x + 4.0,
+                cy,
+                panel_width - 8.0,
+                item_height,
+                4.0,
+                if starred_highlight {
+                    Surface::Selected
                 } else {
-                    self.palette.surface0
+                    Surface::Card
                 },
-                corner_radii: CornerRadii::all(4.0),
-            });
+            );
         }
         cmds.push(RenderCommand::Text {
             x: x + 12.0,
@@ -3443,18 +3410,19 @@ impl RssReaderApp {
             let is_folder_selected = self.sidebar_selection == SidebarSelection::Folder(folder.id);
             let folder_highlight = is_folder_selected && self.active_pane == ActivePane::Sidebar;
             if is_folder_selected {
-                cmds.push(RenderCommand::FillRect {
-                    x: x + 4.0,
-                    y: cy,
-                    width: panel_width - 8.0,
-                    height: item_height,
-                    color: if folder_highlight {
-                        self.palette.surface1
+                self.palette.push_surface(
+                    cmds,
+                    x + 4.0,
+                    cy,
+                    panel_width - 8.0,
+                    item_height,
+                    4.0,
+                    if folder_highlight {
+                        Surface::Selected
                     } else {
-                        self.palette.surface0
+                        Surface::Card
                     },
-                    corner_radii: CornerRadii::all(4.0),
-                });
+                );
             }
 
             // Expand/collapse indicator
@@ -3512,18 +3480,19 @@ impl RssReaderApp {
                     let feed_highlight =
                         is_feed_selected && self.active_pane == ActivePane::Sidebar;
                     if is_feed_selected {
-                        cmds.push(RenderCommand::FillRect {
-                            x: x + 4.0,
-                            y: cy,
-                            width: panel_width - 8.0,
-                            height: item_height,
-                            color: if feed_highlight {
-                                self.palette.surface1
+                        self.palette.push_surface(
+                            cmds,
+                            x + 4.0,
+                            cy,
+                            panel_width - 8.0,
+                            item_height,
+                            4.0,
+                            if feed_highlight {
+                                Surface::Selected
                             } else {
-                                self.palette.surface0
+                                Surface::Card
                             },
-                            corner_radii: CornerRadii::all(4.0),
-                        });
+                        );
                     }
 
                     // Health indicator dot
@@ -3599,18 +3568,19 @@ impl RssReaderApp {
                 let is_feed_selected = self.sidebar_selection == SidebarSelection::Feed(feed.id);
                 let feed_highlight = is_feed_selected && self.active_pane == ActivePane::Sidebar;
                 if is_feed_selected {
-                    cmds.push(RenderCommand::FillRect {
-                        x: x + 4.0,
-                        y: cy,
-                        width: panel_width - 8.0,
-                        height: item_height,
-                        color: if feed_highlight {
-                            self.palette.surface1
+                    self.palette.push_surface(
+                        cmds,
+                        x + 4.0,
+                        cy,
+                        panel_width - 8.0,
+                        item_height,
+                        4.0,
+                        if feed_highlight {
+                            Surface::Selected
                         } else {
-                            self.palette.surface0
+                            Surface::Card
                         },
-                        corner_radii: CornerRadii::all(4.0),
-                    });
+                    );
                 }
 
                 let health_color = if feed.health.is_healthy() {
@@ -3672,14 +3642,8 @@ impl RssReaderApp {
         panel_height: f32,
     ) {
         // Background
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: panel_width,
-            height: panel_height,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(cmds, x, y, panel_width, panel_height, 0.0, Surface::Card);
 
         cmds.push(RenderCommand::PushClip {
             x,
@@ -3737,18 +3701,19 @@ impl RssReaderApp {
 
             // Selection highlight
             if is_selected {
-                cmds.push(RenderCommand::FillRect {
-                    x: x + 4.0,
-                    y: cy,
-                    width: panel_width - 8.0,
-                    height: item_height - 4.0,
-                    color: if is_active {
-                        self.palette.surface1
+                self.palette.push_surface(
+                    cmds,
+                    x + 4.0,
+                    cy,
+                    panel_width - 8.0,
+                    item_height - 4.0,
+                    6.0,
+                    if is_active {
+                        Surface::Selected
                     } else {
-                        self.palette.surface0
+                        Surface::Card
                     },
-                    corner_radii: CornerRadii::all(6.0),
-                });
+                );
             }
 
             // Unread indicator dot
@@ -3930,14 +3895,8 @@ impl RssReaderApp {
             } else {
                 self.palette.blue
             };
-            cmds.push(RenderCommand::FillRect {
-                x: x + padding,
-                y: cy,
-                width: 60.0,
-                height: 22.0,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            self.palette
+                .push_surface(cmds, x + padding, cy, 60.0, 22.0, 4.0, Surface::Card);
             cmds.push(RenderCommand::Text {
                 x: x + padding + 8.0,
                 y: cy + 4.0,
@@ -3950,14 +3909,15 @@ impl RssReaderApp {
             });
 
             if article.is_starred {
-                cmds.push(RenderCommand::FillRect {
-                    x: x + padding + 68.0,
-                    y: cy,
-                    width: 70.0,
-                    height: 22.0,
-                    color: self.palette.surface0,
-                    corner_radii: CornerRadii::all(4.0),
-                });
+                self.palette.push_surface(
+                    cmds,
+                    x + padding + 68.0,
+                    cy,
+                    70.0,
+                    22.0,
+                    4.0,
+                    Surface::Card,
+                );
                 cmds.push(RenderCommand::Text {
                     x: x + padding + 76.0,
                     y: cy + 4.0,
@@ -3977,14 +3937,8 @@ impl RssReaderApp {
                 } else {
                     x + padding + 68.0
                 };
-                cmds.push(RenderCommand::FillRect {
-                    x: cache_x,
-                    y: cy,
-                    width: 62.0,
-                    height: 22.0,
-                    color: self.palette.surface0,
-                    corner_radii: CornerRadii::all(4.0),
-                });
+                self.palette
+                    .push_surface(cmds, cache_x, cy, 62.0, 22.0, 4.0, Surface::Card);
                 cmds.push(RenderCommand::Text {
                     x: cache_x + 6.0,
                     y: cy + 4.0,
@@ -4189,14 +4143,15 @@ impl RssReaderApp {
         let dy = (self.height - dialog_height) / 2.0;
 
         // Dialog background
-        cmds.push(RenderCommand::FillRect {
-            x: dx,
-            y: dy,
-            width: dialog_width,
-            height: dialog_height,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(12.0),
-        });
+        self.palette.push_surface(
+            cmds,
+            dx,
+            dy,
+            dialog_width,
+            dialog_height,
+            12.0,
+            Surface::Panel,
+        );
 
         // Dialog border
         cmds.push(RenderCommand::StrokeRect {
@@ -4253,14 +4208,8 @@ impl RssReaderApp {
             }
 
             // Key hint
-            cmds.push(RenderCommand::FillRect {
-                x: dx + 20.0,
-                y: row_y,
-                width: 120.0,
-                height: 18.0,
-                color: self.palette.crust,
-                corner_radii: CornerRadii::all(3.0),
-            });
+            self.palette
+                .push_surface(cmds, dx + 20.0, row_y, 120.0, 18.0, 3.0, Surface::Panel);
             cmds.push(RenderCommand::Text {
                 x: dx + 26.0,
                 y: row_y + 2.0,
@@ -4306,14 +4255,15 @@ impl RssReaderApp {
         let dy = (self.height - dialog_height) / 2.0;
 
         // Dialog background
-        cmds.push(RenderCommand::FillRect {
-            x: dx,
-            y: dy,
-            width: dialog_width,
-            height: dialog_height,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(12.0),
-        });
+        self.palette.push_surface(
+            cmds,
+            dx,
+            dy,
+            dialog_width,
+            dialog_height,
+            12.0,
+            Surface::Panel,
+        );
         cmds.push(RenderCommand::StrokeRect {
             x: dx,
             y: dy,
@@ -4349,14 +4299,15 @@ impl RssReaderApp {
         });
 
         // URL input field
-        cmds.push(RenderCommand::FillRect {
-            x: dx + 20.0,
-            y: dy + 76.0,
-            width: dialog_width - 40.0,
-            height: 32.0,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        self.palette.push_surface(
+            cmds,
+            dx + 20.0,
+            dy + 76.0,
+            dialog_width - 40.0,
+            32.0,
+            4.0,
+            Surface::Panel,
+        );
         cmds.push(RenderCommand::StrokeRect {
             x: dx + 20.0,
             y: dy + 76.0,
@@ -4390,14 +4341,15 @@ impl RssReaderApp {
         });
 
         // Folder dropdown
-        cmds.push(RenderCommand::FillRect {
-            x: dx + 20.0,
-            y: dy + 144.0,
-            width: dialog_width - 40.0,
-            height: 32.0,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        self.palette.push_surface(
+            cmds,
+            dx + 20.0,
+            dy + 144.0,
+            dialog_width - 40.0,
+            32.0,
+            4.0,
+            Surface::Panel,
+        );
         cmds.push(RenderCommand::Text {
             x: dx + 28.0,
             y: dy + 152.0,
@@ -4413,14 +4365,15 @@ impl RssReaderApp {
         let button_y = dy + dialog_height - 52.0;
 
         // Cancel button
-        cmds.push(RenderCommand::FillRect {
-            x: dx + dialog_width - 200.0,
-            y: button_y,
-            width: 80.0,
-            height: 32.0,
-            color: self.palette.surface1,
-            corner_radii: CornerRadii::all(6.0),
-        });
+        self.palette.push_surface(
+            cmds,
+            dx + dialog_width - 200.0,
+            button_y,
+            80.0,
+            32.0,
+            6.0,
+            Surface::Panel,
+        );
         cmds.push(RenderCommand::Text {
             x: dx + dialog_width - 182.0,
             y: button_y + 8.0,
@@ -4473,14 +4426,15 @@ impl RssReaderApp {
         let dy = (self.height - dialog_height) / 2.0;
 
         // Dialog background
-        cmds.push(RenderCommand::FillRect {
-            x: dx,
-            y: dy,
-            width: dialog_width,
-            height: dialog_height,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(12.0),
-        });
+        self.palette.push_surface(
+            cmds,
+            dx,
+            dy,
+            dialog_width,
+            dialog_height,
+            12.0,
+            Surface::Panel,
+        );
         cmds.push(RenderCommand::StrokeRect {
             x: dx,
             y: dy,

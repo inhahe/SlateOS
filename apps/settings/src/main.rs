@@ -1997,14 +1997,7 @@ const PREVIEW_HEIGHT: f32 = 176.0;
 /// selected row, a switch in each position, all three text roles, and a link.
 /// The link is underlined here for the same reason it is underlined everywhere
 /// (§832) — colour alone is not a sufficient mark.
-fn render_theme_preview(
-    tree: &mut RenderTree,
-    pal: &Palette,
-    style: SurfaceStyle,
-    x: f32,
-    y: f32,
-    width: f32,
-) {
+fn render_theme_preview(tree: &mut RenderTree, pal: &Palette, x: f32, y: f32, width: f32) {
     const ROW_H: f32 = 30.0;
     const PAD: f32 = 9.0;
     let inner = width - PAD * 2.0;
@@ -2031,7 +2024,7 @@ fn render_theme_preview(
         ("Home network", "Connected", Surface::Card),
         ("Guest", "Saved", Surface::Selected),
     ] {
-        pal.draw_surface(tree, x + PAD, ry, inner, ROW_H, 5.0, what, style);
+        pal.draw_surface(tree, x + PAD, ry, inner, ROW_H, 5.0, what);
         tree.text(x + PAD + 8.0, ry + 5.0, label, pal.text, 11.0);
         tree.text(x + PAD + 8.0, ry + 17.0, sub, pal.subtext0, 9.5);
         ry += ROW_H + 5.0;
@@ -2039,7 +2032,7 @@ fn render_theme_preview(
 
     // A switch. Its track is `ControlTrack`, which stays filled in both themes
     // — the one place the two themes agree, and worth seeing.
-    pal.draw_surface(tree, x + PAD, ry, inner, ROW_H, 5.0, Surface::Card, style);
+    pal.draw_surface(tree, x + PAD, ry, inner, ROW_H, 5.0, Surface::Card);
     tree.text(
         x + PAD + 8.0,
         ry + 9.0,
@@ -2056,7 +2049,6 @@ fn render_theme_preview(
         15.0,
         7.5,
         Surface::ControlTrack,
-        style,
     );
     tree.push(RenderCommand::FillRect {
         x: track_x + 15.0,
@@ -3198,9 +3190,13 @@ impl SettingsState {
             30.0,
         );
 
-        let preview_pal = *pal;
+        // The preview's palette carries the style, so it cannot be handed one
+        // palette and a different style -- the mismatch a separate argument
+        // made possible, and which the page-level test was written to catch.
+        let mut preview_pal = *pal;
+        preview_pal.surface_style = style;
         s.draw(move |tree, x, y| {
-            render_theme_preview(tree, &preview_pal, style, x, y, PREVIEW_WIDTH);
+            render_theme_preview(tree, &preview_pal, x, y, PREVIEW_WIDTH);
         });
         s.advance(PREVIEW_HEIGHT + 10.0);
 
@@ -9017,10 +9013,11 @@ mod against_the_real_compositor {
     fn the_preview_follows_the_style_it_is_showing() {
         use guitk::render::{RenderCommand, RenderTree};
 
-        let pal = crate::Palette::for_mode(true);
         let count = |style| {
+            let mut pal = crate::Palette::for_mode(true);
+            pal.surface_style = style;
             let mut tree = RenderTree::new();
-            crate::render_theme_preview(&mut tree, &pal, style, 0.0, 0.0, crate::PREVIEW_WIDTH);
+            crate::render_theme_preview(&mut tree, &pal, 0.0, 0.0, crate::PREVIEW_WIDTH);
             let strokes = tree
                 .commands
                 .iter()
@@ -9084,14 +9081,7 @@ mod against_the_real_compositor {
 
         let pal = crate::Palette::for_mode(true);
         let mut tree = RenderTree::new();
-        crate::render_theme_preview(
-            &mut tree,
-            &pal,
-            crate::SurfaceStyle::Borders,
-            0.0,
-            0.0,
-            crate::PREVIEW_WIDTH,
-        );
+        crate::render_theme_preview(&mut tree, &pal, 0.0, 0.0, crate::PREVIEW_WIDTH);
 
         let colours: Vec<guitk::color::Color> = tree
             .commands

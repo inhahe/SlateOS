@@ -23,6 +23,7 @@
 mod backend;
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::dialog::{DialogAction, FileDialog, list_directory};
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -1770,14 +1771,15 @@ pub fn render_path_bar(state: &AppState, frame: &mut Frame, y_offset: f32, width
     ];
     let mut x = 4.0;
     for (btn_text, target) in &nav_btns {
-        frame.push(RenderCommand::FillRect {
+        state.palette.push_surface(
+            frame,
             x,
-            y: y_offset + 4.0,
-            width: NAV_BUTTON_SIZE,
-            height: NAV_BUTTON_SIZE,
-            color: state.palette.surface0,
-            corner_radii: CornerRadii::all(3.0),
-        });
+            y_offset + 4.0,
+            NAV_BUTTON_SIZE,
+            NAV_BUTTON_SIZE,
+            3.0,
+            Surface::Sidebar,
+        );
         frame.push(RenderCommand::Text {
             x: x + 8.0,
             y: y_offset + 10.0,
@@ -1812,14 +1814,15 @@ pub fn render_path_bar(state: &AppState, frame: &mut Frame, y_offset: f32, width
     };
 
     let path_x = x + 8.0;
-    frame.push(RenderCommand::FillRect {
-        x: path_x,
-        y: y_offset + 4.0,
-        width: width - path_x - 8.0,
-        height: NAV_BUTTON_SIZE,
-        color: state.palette.surface0,
-        corner_radii: CornerRadii::all(3.0),
-    });
+    state.palette.push_surface(
+        frame,
+        path_x,
+        y_offset + 4.0,
+        width - path_x - 8.0,
+        NAV_BUTTON_SIZE,
+        3.0,
+        Surface::Sidebar,
+    );
     frame.push(RenderCommand::Text {
         x: path_x + 8.0,
         y: y_offset + 10.0,
@@ -1896,14 +1899,9 @@ pub fn render_sidebar(state: &AppState, frame: &mut Frame, y_offset: f32, height
 
             // Highlight if this is the current directory.
             if row.path == state.current_dir {
-                frame.push(RenderCommand::FillRect {
-                    x: 0.0,
-                    y: ry,
-                    width: w,
-                    height: ROW_H,
-                    color: state.palette.surface1,
-                    corner_radii: CornerRadii::ZERO,
-                });
+                state
+                    .palette
+                    .push_surface(frame, 0.0, ry, w, ROW_H, 0.0, Surface::Selected);
             }
 
             // Expand/collapse indicator.
@@ -1991,14 +1989,15 @@ pub fn render_column_headers(
     y_offset: f32,
     width: f32,
 ) -> f32 {
-    frame.push(RenderCommand::FillRect {
-        x: x_offset,
-        y: y_offset,
+    state.palette.push_surface(
+        frame,
+        x_offset,
+        y_offset,
         width,
-        height: HEADER_H,
-        color: state.palette.surface0,
-        corner_radii: CornerRadii::ZERO,
-    });
+        HEADER_H,
+        0.0,
+        Surface::Card,
+    );
 
     let mut x = x_offset + 4.0;
     for col in Column::all() {
@@ -2070,14 +2069,7 @@ pub fn render_file_row(
             corner_radii: CornerRadii::ZERO,
         });
     } else if is_hovered {
-        frame.push(RenderCommand::FillRect {
-            x: x_offset,
-            y,
-            width,
-            height: ROW_H,
-            color: pal.surface0,
-            corner_radii: CornerRadii::ZERO,
-        });
+        pal.push_surface(frame, x_offset, y, width, ROW_H, 0.0, Surface::Selected);
     }
 
     let mut x = x_offset + 4.0;
@@ -2305,14 +2297,7 @@ pub fn render_progress_bar(
     width: f32,
 ) -> f32 {
     // Background.
-    frame.push(RenderCommand::FillRect {
-        x,
-        y,
-        width,
-        height: PROGRESS_H,
-        color: pal.surface0,
-        corner_radii: CornerRadii::ZERO,
-    });
+    pal.push_surface(frame, x, y, width, PROGRESS_H, 0.0, Surface::ControlTrack);
 
     // Operation label.
     frame.push(RenderCommand::Text {
@@ -2468,14 +2453,15 @@ pub fn render_drag_overlay(
             // Floating badge near cursor.
             let badge_w = 140.0;
             let badge_h = 28.0;
-            frame.push(RenderCommand::FillRect {
-                x: *mouse_x + 12.0,
-                y: *mouse_y + 12.0,
-                width: badge_w,
-                height: badge_h,
-                color: pal.surface1,
-                corner_radii: CornerRadii::all(6.0),
-            });
+            pal.push_surface(
+                frame,
+                *mouse_x + 12.0,
+                *mouse_y + 12.0,
+                badge_w,
+                badge_h,
+                6.0,
+                Surface::Card,
+            );
             frame.push(RenderCommand::Text {
                 x: *mouse_x + 20.0,
                 y: *mouse_y + 20.0,
@@ -2511,14 +2497,15 @@ pub fn render_drag_overlay(
             });
             let badge_w = 140.0;
             let badge_h = 28.0;
-            frame.push(RenderCommand::FillRect {
-                x: *mouse_x + 12.0,
-                y: *mouse_y + 12.0,
-                width: badge_w,
-                height: badge_h,
-                color: pal.surface1,
-                corner_radii: CornerRadii::all(6.0),
-            });
+            pal.push_surface(
+                frame,
+                *mouse_x + 12.0,
+                *mouse_y + 12.0,
+                badge_w,
+                badge_h,
+                6.0,
+                Surface::Card,
+            );
             frame.push(RenderCommand::Text {
                 x: *mouse_x + 20.0,
                 y: *mouse_y + 20.0,

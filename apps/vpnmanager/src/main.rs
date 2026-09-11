@@ -18,6 +18,7 @@
 //! representative data for initial development.
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::dialog::{DialogAction, FileDialog, list_directory};
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -2747,14 +2748,15 @@ fn render_tab_split_tunnel(frame: &mut Frame, app: &VpnManager, px: f32, py: f32
         FIELD_HEIGHT,
     );
     let focused = app.focus == Some(Field::AllowedIp);
-    frame.push(RenderCommand::FillRect {
-        x: input.x,
-        y: input.y,
-        width: input.w,
-        height: input.h,
-        color: app.palette.mantle,
-        corner_radii: CornerRadii::all(4.0),
-    });
+    app.palette.push_surface(
+        frame,
+        input.x,
+        input.y,
+        input.w,
+        input.h,
+        4.0,
+        Surface::Card,
+    );
     frame.push(RenderCommand::StrokeRect {
         x: input.x,
         y: input.y,
@@ -2965,14 +2967,15 @@ fn render_tab_log(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw: f32
     }
 
     // Log header
-    frame.push(RenderCommand::FillRect {
-        x: px + SECTION_PADDING,
+    app.palette.push_surface(
+        frame,
+        px + SECTION_PADDING,
         y,
-        width: pw - SECTION_PADDING * 2.0,
-        height: LOG_ENTRY_HEIGHT,
-        color: app.palette.surface1,
-        corner_radii: CornerRadii::all(3.0),
-    });
+        pw - SECTION_PADDING * 2.0,
+        LOG_ENTRY_HEIGHT,
+        3.0,
+        Surface::Card,
+    );
     frame.push(RenderCommand::Text {
         x: px + SECTION_PADDING + 8.0,
         y: y + 4.0,
@@ -3306,14 +3309,8 @@ fn render_add_dialog(frame: &mut Frame, app: &VpnManager) {
     let dy = (frame.height - dialog_h) / 2.0;
 
     // Dialog background
-    frame.push(RenderCommand::FillRect {
-        x: dx,
-        y: dy,
-        width: dialog_w,
-        height: dialog_h,
-        color: app.palette.surface0,
-        corner_radii: CornerRadii::all(12.0),
-    });
+    app.palette
+        .push_surface(frame, dx, dy, dialog_w, dialog_h, 12.0, Surface::Panel);
     frame.push(RenderCommand::StrokeRect {
         x: dx,
         y: dy,
@@ -3761,14 +3758,15 @@ fn render_dialog_field(
 
     // Input box
     let box_rect = Rect::new(x + 100.0, y, fw - 100.0, FIELD_HEIGHT);
-    frame.push(RenderCommand::FillRect {
-        x: box_rect.x,
-        y: box_rect.y,
-        width: box_rect.w,
-        height: box_rect.h,
-        color: pal.mantle,
-        corner_radii: CornerRadii::all(4.0),
-    });
+    pal.push_surface(
+        frame,
+        box_rect.x,
+        box_rect.y,
+        box_rect.w,
+        box_rect.h,
+        4.0,
+        Surface::Card,
+    );
     frame.push(RenderCommand::StrokeRect {
         x: box_rect.x,
         y: box_rect.y,

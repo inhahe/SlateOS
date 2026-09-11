@@ -36,6 +36,293 @@ freely. See `roadmap.md` → "Three-Agent Parallel Execution" rule 3, and
 
 ---
 
+## B-DIFF-REPORTS-IDENTICAL-FOR-FILES-THAT-DIFFER (lane B, 2026-09-11)
+
+**Both halves of the `diff` pair say two files are the same when one of them
+lacks a trailing newline.** Not a formatting difference — the wrong answer, with
+the wrong exit status.
+
+    $ printf 'alpha
+bravo
+' > a.txt ; printf 'alpha
+bravo' > b.txt
+    $ /usr/bin/diff a.txt b.txt
+    2c2
+    < bravo
+    ---
+    > bravo
+    \ No newline at end of file
+    ; rc=1
+    $ our diff a.txt b.txt
+    ; rc=0
+
+**Why this one matters more than a wrong option.** `diff`'s exit status is what
+scripts read — `if diff expected actual; then` is the shape of half the tests in
+any build system — and this answers "no difference" for a real difference. A
+build that regenerates a file without its final newline passes its own check. A
+patch produced from it loses the `\ No newline at end of file` marker, so
+applying it *adds* a newline that was never there.
+
+**Found by `scripts/diff-diff.sh`**, written 2026-09-11, which is the first
+harness for this pair. Four cases in the `coreutils` half and eight in the
+standalone, so **neither half is safe** and the defect predates whichever
+survives. That both have it is also the clearest evidence yet that the two
+halves share ancestry.
+
+**The proper fix.** The comparison has to treat "line with newline" and "line
+without newline" as different lines, which means the reader cannot discard the
+terminator before comparing — and the formatter has to emit the
+`\ No newline at end of file` marker after the affected line in normal, unified
+and context output alike. Upstream diffutils carries a flag per side for exactly
+this.
+
+## TD-B-A-FAMILY-HARNESS-CANNOT-BE-AIMED-AT-ONE-HALF-OF-A-PAIR (lane B, 2026-09-11)
+
+**Six harnesses here cover several binaries at once via `DIFF_BINS`, and for
+those the `DIFF_PKG` knob cannot select which half of a duplicate pair is
+measured. What it selects instead is a coin flip.**
+
+`DIFF_PKG=sha256sum` fails outright — cargo is asked for an `md5sum` bin in the
+`sha256sum` package, because `DIFF_BINS` names the whole family. The obvious
+next try, `DIFF_PKG="coreutils sha256sum"`, builds *both* packages' copy of
+`sha256sum` into the same path, and whichever links last wins:
+
+    $ DIFF_PKG="coreutils sha256sum" PROG=sha256sum ./scripts/digest-diff.sh
+    113 passed,  0 differed     <- sha256sum (SlateOS coreutils)
+    113 passed,  0 differed     <- sha256sum (SlateOS coreutils)
+     39 passed, 74 differed     <- sha256sum (Slate OS)
+
+Three runs of one command, no edits between them, subject confirmed by
+`--version` each time.
+
+**This is the same defect family as `DIFF_PKG` not crossing the WSL boundary**
+— an authoritative-looking pass count about a binary nobody chose — with one
+thing worse: it is *non-deterministic*, so it cannot be reproduced into a bug
+report and cannot be caught by a gate that runs once. The only reason the
+`sha256sum` numbers below are trustworthy is that `--version` was checked on
+every single run, which is a discipline and not a mechanism.
+
+**Which names this affects:** `calc-diff.sh` (bc, dc), `digest-diff.sh` (md5sum,
+sha256sum), `interleave-diff.sh` (eleven names), `write-error-diff.sh` (eleven
+names), `time-diff.sh`, `osh-diff.sh`.
+
+**The proper fix.** Build each side to a path of its own instead of letting both
+write `debug/<name>`. `diff-wsl.sh` already reaches every subject through
+`$bindir/{ours,gnu}/NAME`, so the missing piece is a per-package target
+directory — `--target-dir` per `DIFF_PKG` entry — after which the symlink can
+point at the right one deliberately rather than at whatever survived. Until then
+the survey's column says "coreutils half only", which is the truth.
+
+## B-COREUTILS-UNAME-PARSES-ITS-OWN-OPTIONS (lane B, 2026-09-11)
+
+`userspace/coreutils/src/bin/uname.rs` parses `argv` by hand rather than through
+`coreutils::getopt`, and the ten cases it fails in `scripts/uname-diff.sh` are
+all downstream of that one decision.
+
+**No long-option abbreviation (5 cases).** GNU accepts any unambiguous prefix,
+so `uname --mach`, `--proc`, `--hard`, `--k` and `--kernel-n` all work. `uname.rs`
+matches the long names exactly — `match long { b"machine" => ... }` — so each is
+`unrecognized option`. `getopt.rs` implements the prefix rule and documents it
+(`sort --fo`).
+
+**Curly quotes in the diagnostic (5 cases).** Ours says
+`unrecognized option 'x'` with U+2018/U+2019; GNU says it with ASCII
+apostrophes. Checked in four configurations before calling it a defect — the
+built GNU 9.4, and Ubuntu's installed binary under `C`, `C.UTF-8` and
+`en_US.UTF-8` — and all four are ASCII, because that message comes from glibc's
+getopt rather than from coreutils' locale-aware `quote()`. `uname.rs` reaches
+for `quote()`; `getopt.rs` uses `named()`, which is ASCII and correct.
+
+**The fix is to route it through `coreutils::getopt`**, which closes both
+families at once rather than patching two symptoms. That is also the direction
+`scripts/argv-utf8.py` argues for from a different angle: of the 35 bins already
+clean of the argv-as-String defect, 24 go through `getopt`; of the 49 dirty
+ones, none do. A bin that parses options through the shared module never had a
+reason to reach for `String` in the first place.
+
+## B-PATCH-WRITES-ITS-PROGRESS-TO-STDERR-NOT-STDOUT (lane B, 2026-09-11)
+
+**Both halves of the `patch` pair write `patching file X` to stderr. GNU writes
+it to stdout.** Verified directly rather than inferred from a harness column:
+
+    $ /usr/bin/patch -p1 -i p.patch </dev/null 2>/dev/null
+    patching file a/base.txt          <- stdout
+    $ our patch    -p1 -i p.patch </dev/null 2>/dev/null
+                                      <- nothing
+    $ our patch    -p1 -i p.patch </dev/null 2>&1 >/dev/null
+    patching file a/base.txt          <- stderr
+
+Both exit 0 and both apply the patch correctly, so this is not a failure — it is
+the same information on the wrong channel. It matters twice: anything capturing
+`patch`'s stdout (a build log, a CI transcript) records nothing from ours, and
+anything treating stderr as the error channel sees noise on every successful
+run. It is also the single largest source of difference in
+`scripts/patch-diff.sh`, touching nearly every case, which is how it was found.
+
+## TD-B-THE-PATCH-PAIR-IS-NOT-DECIDED-BY-ITS-HARNESS (lane B, 2026-09-11)
+
+`scripts/patch-diff.sh` was written to settle the second of the two pairs where
+`coreutils` is the thinner half. **It did not settle it**, and that is recorded
+rather than rounded into a verdict.
+
+65 cases against GNU patch 2.7.6 (Ubuntu `2.7.6-7build3`, a plain rebuild with
+no Debian source patches — the least-diverged reference any harness here uses):
+
+| half | passed | wrong tree on disk | wrong exit status | wording only |
+|---|---|---|---|---|
+| `coreutils` | 3 | **29** | 6 | 27 |
+| standalone | 3 | **26** | 2 | 34 |
+
+Three of 65 each. The standalone is *marginally* ahead where it counts — three
+fewer wrong trees and four fewer wrong exit statuses — but this is nothing like
+`diff`'s 43 against 21, and neither half is usable. **Do not act on a three-case
+margin.** The honest reading is that `patch` needs work whichever half is kept,
+and that a decision wants either a repaired implementation to compare or a
+narrower harness aimed at the families above.
+
+*The tree comparison is why those numbers mean anything.* `patch`'s output is a
+**side effect**, so unlike every other harness here this one snapshots the whole
+working tree after each case — every file, its mode, a hash of its bytes, and
+the `.orig` and `.rej` files left behind. A `patch` that printed the right words
+while writing the wrong bytes passes a stdout comparison, and 29 of coreutils'
+62 differences are exactly that: right words, wrong files.
+
+**Three defects in the harness itself, found by its own first run**, kept here
+because each would recur in any future harness for a program that mutates state:
+
+1. **It reported 0 passed of 65.** The generated patches were labelled
+   `a/base.txt` while the tree held the file at `a/base.txt`, so `-p1` stripped
+   `a/` and looked for `base.txt` at the root. Nothing was ever found. A
+   uniform zero is a harness result, not a subject result, and should be read
+   that way before any conclusion is drawn.
+2. **GNU patch prompts on stdin when it cannot find the file**, and stdin was
+   the patch — so it consumed the rest of the patch as answers to
+   `File to patch:`. Fixed by driving with `-i FILE` and `</dev/null`, which
+   needs no option either side might lack. Any harness for an interactive-capable
+   program has to take stdin away from the prompt.
+3. An apostrophe inside a single-quoted `xfail` reason terminated the string
+   (shellcheck SC1011), which showed up as one "differ on purpose" instead of
+   two. The same bug as in `diff-diff.sh`, written an hour earlier.
+
+## TD-B-DIFF-IS-THE-FIRST-PAIR-THE-STANDALONE-WINS (lane B, 2026-09-11)
+
+**Sixteen pairs have now been measured against a harness and fifteen went to
+`coreutils`. `diff` is the first that does not**, and it is the pair §1005
+anticipated when it said "for about half of them the standalone crate is the
+substantially larger implementation and `coreutils`'s namesake is a stub".
+
+`bash scripts/diff-diff.sh`, 107 cases against GNU diffutils 3.10:
+
+| half | passed | differed |
+|---|---|---|
+| `coreutils` | 21 | **86** |
+| standalone | **43** | 64 |
+
+Twice as good, and still failing 64. Neither half is close to GNU, which is why
+this is filed rather than acted on.
+
+**What `coreutils` fails at, and it is not subtle:** 52 of its 86 are
+`diff: requires exactly two files`. It has no option parsing beyond `-q` and
+`-u`, so **every other option is read as a third file operand** — `-s`, `-c`,
+`-i`, `-w`, `-y`, `-r`, `-B`, `-a` all produce that one sentence. A further 13
+are that it cannot read stdin: `diff base.txt -` is
+`-: No such file or directory (os error 2)`.
+
+**What the standalone fails at:** 42 are output-format differences, 14 are the
+numeric context forms `-U N` and `-C N` (it has `--unified` and `--context` but
+not the counted spellings), and 8 are the newline defect above.
+
+**The decision this sets up, and why it is not taken here.** §1005 says
+`coreutils` is the one home and the better half survives *inside* it. For every
+pair so far that meant deleting the standalone. Here it means the opposite:
+porting the standalone's implementation into `coreutils/src/bin/diff.rs`, then
+deleting the crate. That is real work rather than a deletion, it should fix the
+newline defect on the way in rather than carry it across, and it wants doing
+deliberately — so it is recorded here with the harness that will judge it.
+
+## TD-B-DIFF-HARNESSES-HAVE-NO-PER-CASE-BOUND-AND-ORPHAN-ACROSS-WSL (lane B, 2026-09-11)
+
+**What.** 28 of the 59 `scripts/<name>-diff.sh` harnesses do not bound an
+individual case. One subject that does not terminate stops the whole run, and
+the processes survive every kill available from the Windows side.
+
+**CORRECTION (2026-09-11, same day).** This entry first said *none* of the
+harnesses bounds a case. That was asserted without measuring and is false:
+**31 of 59 already do**, through a pattern this tree established long ago --
+`DIFF_NEED=timeout` in the header, and `timeout -k 2 30` inside the harness's
+own `run_side`. `tsort-diff.sh` even explains why it bounds the *reference*
+too: "a harness that only bounded our side would hang on the day the reference
+was the buggy one."
+
+The wrong premise was the expensive part, not the wrong sentence. It led to
+the elaborate fix proposed below -- wrapping `diff-wsl.sh`'s `$bindir`
+symlinks -- together with a real trap in it. All of that was designing a
+solution to a problem already solved 31 times a few files away. **The actual
+fix is to copy the existing pattern into the 28 that lack it**, which needs no
+shared machinery touched and carries none of that risk.
+
+The 28 without a bound: `all`, `awk`, `calc`, `cat`, `csplit`, `cut`, `df`,
+`du`, `ed`, `expr`, `extfloat`, `find`, `head`, `interleave`, `ls`, `more`,
+`nl`, `od`, `sed`, `sh`, `sort`, `split`, `tar`, `test`, `tr`, `uniq`, `wc`,
+`xargs`. Several of those are interpreters (`awk`, `ed`, `sh`, `expr`, `calc`)
+where a non-terminating program is not an exotic input but a normal one.
+
+*What made me assert it: I grepped `diff-wsl.sh` for `timeout`, found none,
+and concluded the family had no bound. The bound is in the harnesses, not the
+library. Absence of evidence where I chose to look.*
+
+**How it showed up.** `DIFF_PKG=awk bash scripts/awk-diff.sh` reached
+
+    awk 'NR == 1 {getline; print "got", $0} {print "main", $0}'
+
+and stopped. The standalone `awk` hangs on `getline` (that pair is now retired).
+Two separate attempts left an `awk` process running inside WSL for 35 and 25
+minutes; both were still alive long after the invoking shell was gone, and were
+found with `ps -eo pid,ppid,etime,args` and killed by PID after confirming each
+one's argv and parent.
+
+**Killing the hung child is not enough, and this is the part that cost the most
+time.** The harness *shell* survives too, and on losing its child it simply
+advances to the next case — which for this subject is the next `getline`, which
+also hangs. Twenty minutes after the first cleanup both `awk-diff.sh` shells
+were still alive at 54 and 44 minutes, sitting on a new hang. A first sweep
+missed them because it grepped for the exact argv of the *previous* hang
+(`getline;`) and the new one reads `getline x`. **Kill the harness shell, not
+the case** — and grep for the harness path, which does not change, rather than
+for the case, which does.
+
+**Why `run-timeout.py` does not cover it, which is the part worth knowing.**
+That runner is the tree's answer to exactly this, and `CLAUDE.md` says to use it
+for anything that might hang. It works by putting the child in a Windows **Job
+Object** with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. But `diff-wsl.sh` re-execs
+the harness *inside WSL*, so the processes that actually hang are Linux-side and
+are not in that job. Killing the Windows side tears down `wsl.exe` and leaves
+the real work running. **A process-tree killer does not cross the WSL
+boundary** — worth knowing for any tooling here that shells into WSL, not just
+these harnesses.
+
+**The fix, superseded — see the correction above.** Copy the existing
+`DIFF_NEED=timeout` + `timeout -k 2 30` pattern into the 28 harnesses that lack
+it. What follows was written before I measured, and is kept only because the
+argv[0] trap in it is real and would bite anyone who tried the clever version:
+
+**The superseded idea.** A bound on the far side of the boundary, where the processes
+actually are: each case invoked under `timeout` inside WSL. The clean place is
+`diff-wsl.sh`'s `$bindir` construction — four `ln -s` calls that build
+`$bindir/{ours,gnu}/NAME` — since every harness reaches its subject through
+those links, so wrapping there fixes all 50 at once with no harness edited.
+
+**The trap in that fix, which is why it is not done yet.** Those are symlinks
+named after the utility *on purpose*: `argv[0]` has to be the bare word, or
+every diagnostic's `prog: ` prefix changes and every harness starts reporting
+false differences in its error messages. `timeout N /path/to/real` makes
+`argv[0]` the full path. A wrapper has to preserve the bare name — `timeout`
+uses `execvp`, so `PATH=<dir> exec timeout N NAME "$@"` does preserve it, but
+that also rewrites `PATH` for the subject, which matters for any utility that
+spawns another (`xargs`, `awk`'s `system()`, `find -exec`). Getting this wrong
+is a silent, tree-wide change to what 50 harnesses measure, so it wants doing
+deliberately with the two-probe rule rather than in passing.
+
 ## TD-B-INSTALL-REIMPLEMENTS-A-BACKUP-POLICY-COREUTILS-ALREADY-HAS (lane B, 2026-09-11)
 
 **In short:** `userspace/install` has its own backup handling, and
@@ -64780,6 +65067,366 @@ lint programme above is still worth doing; it is not a substitute for a
 differential, and two of its three crates so far were duplicates that a
 differential then deleted.
 
+**20 -> 19 (2026-09-11): `sort`, which truncates on a bad byte and exits 0.**
+`DIFF_PKG=sort bash scripts/sort-diff.sh`:
+
+**coreutils 280 passed, 0 differed. The standalone 113 passed, 167 differed.**
+
+| | cases | defect |
+|---|---|---|
+| **truncates, complains, succeeds** | **9** | `sort bytes.txt`, five lines of which one holds a high byte: GNU sorts all five. The standalone prints **one line**, writes `read error: stream did not contain valid UTF-8` to stderr — and **exits 0**. Partial output with a success status is the worst combination available: `sort < in > out` in a pipeline silently loses four fifths of the data and nothing downstream can tell. The other standalones merely refuse; this one refuses *halfway through* and calls it success. |
+| option unrecognised | 78 | `-i` (ignore nonprinting) and `-g` (general numeric) are whole sort modes, not flags. `-k1,1i` is rejected too — a key with a per-key modifier. |
+| **wrong order, exit 0** | **62** | `sort -n` over `+1 -0 0 01 1 1.0 1.00` gives `-0 0 +1 01 1 1.0 1.00`; GNU gives `+1 -0 0 01 1 1.0 1.00`, because GNU's `-n` does not accept a leading `+` and so ranks it as zero. `sort -nr` is not the reverse of the standalone's own ascending answer either. Putting lines in order is the whole program. |
+| `+1` read as a filename | 5 | the traditional key syntax `sort +1` and `sort +0.1` become `+1: No such file or directory (os error 2)` — printed to stderr while **exiting 0** and emitting an unsorted file. |
+| exits 0 where GNU refuses | 5 | `-t '	'` (`multi-character tab`) and `-k1.0` (`character offset is zero`) are both accepted and acted on. |
+| message shape | 7 | `sort -c a b` reports a disorder in `a` where GNU reports `extra operand 'b' not allowed with -c`; the operand error is the real one. |
+
+**Two families here exit 0 after writing a diagnostic** — the truncation and the
+`+1`-as-filename. That combination deserves its own note: a caller that checks
+the exit status, which is the correct thing to check, is told the run
+succeeded.
+
+**21 -> 20 (2026-09-11): `du`, whose every number is wrong.**
+`DIFF_PKG=du bash scripts/du-diff.sh`:
+
+**coreutils 188 passed, 0 differed. The standalone 3 passed, 185 differed.**
+
+The whole of it is visible in the first case, `du t`:
+
+| GNU | standalone |
+|---|---|
+| 4 → `t/empty` | *(absent)* |
+| 12 → `t/sub/deep` | 16 → `t/sub/deep` |
+| 24 → `t/sub` | 48 → `t/sub` |
+| 3036 → `t` | 4112 → `t` |
+
+**An empty directory is missing from the listing**, and **every remaining
+number is different** — not by a constant factor either: 12→16, 24→48,
+3036→4112. Both exit 0. `du` prints nothing but sizes and paths, so a `du` that
+gets the sizes wrong and drops a directory has no correct output left; there is
+nothing else in it to be right about.
+
+**15 -> 14 (2026-09-11): `uname`, with a new harness.**
+`scripts/uname-diff.sh`, written today: 109 cases, and close to exhaustive
+rather than representative, because `uname` has no input and nine flags so its
+whole behaviour is a function of `argv` and the host.
+
+**coreutils 71 passed, 10 differed. The standalone 43 passed, 38 differed.**
+28 cases differ on purpose on both sides.
+
+**Those 28 matter to the numbers and are worth explaining.** `uname -o` prints
+`SlateOS` where GNU prints `GNU/Linux`, which is the *correct* answer — this is
+not GNU/Linux — and the operating-system field rides along in `-a` and in every
+pairing that includes `-o`. Counted as failures they were 36 and 64; marked as
+intended divergence they are 10 and 38. The cases are still run and still
+compared, so if that string ever changed to match GNU the harness would report
+an XPASS rather than going quiet.
+
+The standalone's 38 include the two families below plus 21 more, and it also
+gets `-p` and `-i` wrong on their own.
+
+**What the surviving half still gets wrong — 10 cases, two families, one
+cause.** Both are recorded as `B-COREUTILS-UNAME-PARSES-ITS-OWN-OPTIONS`:
+`uname.rs` hand-rolls its option parsing instead of using `coreutils::getopt`,
+so it re-implements — differently — what the shared module already gets right.
+
+**16 -> 15 (2026-09-11): `sha256sum`, found by fixing the survey's own column.**
+This pair was listed as "no harness -- write one" for weeks. It has had one all
+along: `digest-diff.sh` covers `md5sum` and `sha256sum` together through
+`DIFF_BINS`, and `interleave-diff.sh` covers it too. The column looked for a
+`sha256sum-diff.sh` and found none — an enumeration with one entry per instance,
+missing the next instance silently, for the fourth time in this tree.
+
+`PROG=sha256sum bash scripts/digest-diff.sh`, subject confirmed by `--version`
+on every run because of
+`TD-B-A-FAMILY-HARNESS-CANNOT-BE-AIMED-AT-ONE-HALF-OF-A-PAIR`:
+
+**coreutils 113 passed, 0 differed. The standalone 39 passed, 74 differed.**
+
+The standalone's `--check` mode is the bulk of it: on a file with no valid
+checksum lines it answers `WARNING: 1 line(s) are improperly formatted` plus
+`no file was verified`, where GNU says `a: no properly formatted checksum lines
+found` — GNU names the file, which is the whole point of the message when
+several are being checked.
+
+Worth noting what this pair is NOT: the survey had it at 210 lines against 1538
+until `dup-bins-survey.py` was taught to count shared modules, and that reading
+made `coreutils` look like a stub. It is 5067 with `digest.rs` counted — a port
+of upstream's `digest.c` shared with `md5sum` — and it passes 113 of 113.
+
+**17 -> 16 (2026-09-11): `tar`, whose archives GNU cannot read back the same.**
+`DIFF_PKG=tar bash scripts/tar-diff.sh`:
+
+**coreutils 245 passed, 0 differed. The standalone 18 passed, 227 differed.**
+
+This is the last of the sixteen pairs that had a harness, and the worst kind of
+failure for an archiver: the archives it writes are not the archives it thinks
+it wrote.
+
+| | cases | defect |
+|---|---|---|
+| **GNU reads our archive differently** | 181 | `tar -tvf` on an archive the standalone created lists `-rwxr-xr-x 0/0` where GNU's own archive lists `-rwxr-xr-x inhahe/inhahe`: the `uname`/`gname` header fields are **left empty**, so every archive loses its owner names and GNU falls back to numeric ids. For a fifo, GNU listing our archive prints **nothing at all** — the entry is not in there. |
+| **every archive differs in `mode`** | 27 | byte 102 of block 0, which is the header's mode field, on a plain file, an empty file, a directory, a whole tree. Not an edge case: **every archive it creates has the wrong permission bits in it.** |
+| **fifos are skipped on extract** | 13 | `tar: x/p: unsupported type flag '6', skipping` — type flag 6 is a FIFO. GNU extracts it; the standalone silently omits it **and exits 0**, so a restore quietly loses every named pipe in the archive. |
+| name field wrong | 4 | a dangling symlink and a fifo are written with a different `name` field than GNU writes. |
+| **PANIC on a non-UTF-8 name** | 2 | `tar -cf X <name that is not UTF-8>` aborts with `thread 'main' panicked at library/std/src/env.rs`, **exit 134** — the same `std::env::args()` unwrap that decided `xargs`. `design.txt` says a path may hold every byte except `/` and NUL, and `tar` is the program whose entire job is preserving names. A `-C` argument that is not UTF-8 panics too. |
+
+**Every harness-backed pair is now settled.** Sixteen had one; all sixteen went
+to coreutils, and not one was close. The remaining 16 pairs have no harness, so
+nothing further should be deleted until one is written — the survey's counts
+are a ranking, not evidence, and this file records five occasions when they were
+wrong.
+
+**18 -> 17 (2026-09-11): `sed`, which cannot parse a bracket expression.**
+`DIFF_PKG=sed bash scripts/sed-diff.sh`:
+
+**coreutils 449 passed, 0 differed. The standalone 103 passed, 346 differed.**
+
+| | cases | defect |
+|---|---|---|
+| **a delimiter inside `[...]`** | ⊂135 | `sed 's/[/]/:/g'` — the classic way to replace a slash — is `unterminated character class`. A `/` inside a bracket expression is not a delimiter, and getting that wrong breaks every expression that matches a path. `s/[^/]*$/LAST/` fails the same way. |
+| refuses what GNU accepts | 135 | the above, plus `y/ab/XY/`, where the escapes are never decoded so the two halves are measured as 8 against 2 and rejected for unequal length. |
+| **empty-match replacement** | ⊂68 | `s/a*/-/g` on `foo bar` gives `--------` — **the line replaced wholesale** — where GNU interleaves. Identical to the `gsub` defect in the standalone `awk` retired an hour earlier, which is some evidence about where both came from. |
+| **the Nth-match flag** | ⊂68 | `s/o/0/2g` replaces from the *first* match; the `2` means start at the second. |
+| exits 0 where GNU refuses | 51 | `sed 's/a'` — an unterminated `s` command — **runs**, and deletes the `a`. So does a trailing backslash, and `\c` recursive escaping. |
+| wrong exit status | ⊂80 | GNU distinguishes 1 (usage), 2 (cannot read an input), 4 (cannot open a script or `w` target). The standalone answers 1 for all of them, so a caller cannot tell a bad script from a missing file. `2q5` — quit with status 5 — is `expected command`. |
+| **stops at the first missing file** | ⊂10 | `sed s/a/A/ abc.txt nosuch.txt def.txt` prints `abc`'s output and stops; GNU reports the missing file and **still processes `def.txt`**. Operands after a bad one are silently dropped. |
+| `w` unimplemented | ⊂80 | `sed -n w FILE` is `unknown command: 'w'`. |
+| refuses non-UTF-8 | 2 | |
+
+**19 -> 18 (2026-09-11): `awk`, which never finishes.**
+`DIFF_PKG=awk bash scripts/awk-diff.sh`. **coreutils: 171 passed, 0 differed,
+13 differ on purpose.** The standalone's run has no pass count, because it
+never finished:
+
+    awk 'NR == 1 {getline; print "got", $0} {print "main", $0}'
+
+fed three lines, GNU prints `got b` / `main b` / `main c` and exits 0. The
+standalone **hangs forever** — killed at a 5-second bound with no output, twice,
+having also been left running for 35 minutes by an earlier attempt. `getline` is
+one of awk's basic constructs, and a hang is worse than a crash: no diagnostic,
+no exit status, and a process nobody notices.
+
+In the cases it reached before that, **21 differed**, and they are not edge
+cases:
+
+| construct | GNU | standalone |
+|---|---|---|
+| range pattern `/b/,/c/` | `b` `c` | **parse error** — `unexpected token in expression: Comma` |
+| `{NF = 2; print}` | `alice 30` | `alice 30 red` — assigning `NF` does not rebuild the record |
+| array as a function parameter | `set` | *(empty)* — **arrays are not passed by reference**, so no awk program that fills an array in a function works |
+| `gsub(/x*/, "-")` on `Alpha1` | `-A-l-p-h-a-1-` | `-------` — **the line is replaced wholesale**; empty-match handling destroys the data |
+| bare `length` | `6 6 2` | ` 6 2` — `length` with no argument yields nothing |
+| `BEGIN {FS = ""}` on `a` | `1 a` | `3 ` — a one-character line reported as three fields |
+| `length("héllo")` | `5` | `8` |
+| `atan2(1, 1)` | `0.7854` | `undefined function: atan2` |
+| `ORS = "\0"` | NUL separators | the two characters backslash-zero |
+
+Also wrong: `RS = ""` paragraph mode, `CONVFMT`, `OFMT`, strnum comparison,
+`split` with a regex, `sub` with an escaped `&`, the arithmetic operators, and
+`substr`/`index`/`toupper` on non-ASCII.
+
+*A note on the run, since it cost an hour.* No `*-diff.sh` harness bounds an
+individual case, and `run-timeout.py` — which exists for exactly this — does not
+help here either: the harness re-execs into WSL, so the hung processes are Linux
+side and outside the Windows Job Object that runner relies on. Killing the
+Windows-side job left `awk` running in WSL for 35 minutes. Recorded as
+`TD-B-DIFF-HARNESSES-HAVE-NO-PER-CASE-BOUND-AND-ORPHAN-ACROSS-WSL`; the fix is
+a bound inside the harness, on the far side of the boundary, rather than around
+it.
+
+**WHY THE SURVEY KEPT SAYING "STANDALONE AHEAD", AND IT WAS NOT BAD LUCK
+(2026-09-11, fixed).** Every entry above that records an inverted verdict has
+the same cause, and it is structural rather than statistical.
+
+`dup-bins-survey.py` counted **one file** of `coreutils` — `src/bin/<name>.rs`
+— against the standalone's **entire crate**. `coreutils` deliberately factors
+shared behaviour into modules; the standalone crates duplicate it inline. So
+the comparison read a factored implementation's *leaf* against a copy-pasted
+one's *whole*.
+
+`sha256sum` shows it plainly. The bin was counted at 210 lines against 1538 —
+a rout. It is 210 lines **because** `--check`, the option table, the three
+checksum-file formats, the name escaping and the exit statuses live in
+`digest.rs`, 1363 lines, a port of upstream's `digest.c` shared with `md5sum`.
+Counted properly the row is **5067 against 1538**, and the option tally goes
+from 0/14 to 4/4.
+
+The survey's own docstring had always said the scrape "cannot see an option
+that is parsed by a shared helper". What nobody drew is that **the blindness is
+one-sided**, and therefore a bias with a direction rather than noise. Every
+`tee`, `dd`, `date`, `ps`, `uptime` style verdict was produced by it.
+
+Fixed by following `coreutils::<mod>` from the bin and `crate::<mod>` from each
+module reached, to a fixed point. **The corrected table is nearly the opposite
+of the old one**: `coreutils` is the larger half on 17 of the 19 remaining
+pairs — `date` 257→1913, `uptime` 231→1887, `ps` 351→2007, `uname` 681→2337,
+`hostname` 1075→2731, `env` 767→4261, `free` 1901→5395.
+
+**Two pairs are now isolated and deserve the attention the other seventeen were
+absorbing: `diff` (414 vs 1541) and `patch` (892 vs 2183).** Their numbers did
+not move at all, because those two coreutils bins reach no shared modules. They
+are genuinely the thinner half, they are the pairs where deleting the
+standalone could destroy the better program, and neither has a harness. Do not
+touch either without writing one.
+
+**22 -> 21 (2026-09-11): `df`, which passes NOTHING and colours a pipe.**
+`DIFF_PKG=df bash scripts/df-diff.sh`:
+
+**coreutils 174 passed, 0 differed. The standalone 0 passed, 174 differed** —
+every case in the suite, which no other pair has managed.
+
+Three defects, each enough on its own:
+
+| | defect |
+|---|---|
+| **most filesystems are missing** | GNU lists 35 mounts on this host; the standalone lists **five**. Everything mounted `none`, `rootfs` or `tmpfs` is absent — `/dev`, `/dev/shm`, `/run`, `/run/lock`, `/run/user`, every bind mount. `df` exists to answer "where has my disk gone", and it is not reporting most of the places it could have gone. |
+| **ANSI colour written to a pipe** | the `Use%` column is wrapped in ESC-bracket-digits-m **on non-terminal output** — confirmed directly, 2 ESC bytes in `df / \| od -An -c`. Colour has to be gated on the output being a terminal; ungated, every pipeline that reads `df` gets control sequences in the middle of the field it is parsing. |
+| duplicated rows | `/dev/sdd` is listed three times, for `/`, `/mnt/wslg/distro` and `/snap`, where GNU lists the device once against `/`. |
+
+The column widths differ too, but that is the least of it.
+
+**23 -> 22 (2026-09-11): `xargs`, which PANICS on a non-UTF-8 argument.**
+`DIFF_PKG=xargs bash scripts/xargs-diff.sh`:
+
+**coreutils 334 passed, 0 differed. The standalone 133 passed, 201 differed.**
+
+This one contains the most serious single defect the whole §1005 campaign has
+found.
+
+| | cases | defect |
+|---|---|---|
+| **PANIC on a non-UTF-8 argv** | **24** | `printf 'a b\n' | xargs argv café` — with `café` in Latin-1 — aborts with `thread 'main' panicked at library/std/src/env.rs:878: called Result::unwrap()`, **exit 134**. It is `std::env::args()` unwrapping, and it is a crash rather than an error. `xargs`'s entire job is handing arbitrary bytes to another program; GNU passes the byte through and exits 0. This is CLAUDE.md self-review item 7 and the `unwrap_used` lint in one place, in the program least entitled to assume its input is text. |
+| **`\v` and `\f` are not whitespace** | **40** | GNU splits arguments on vertical tab and form feed; the standalone keeps them inside the argument, so `\013a b` yields the argument `\va` instead of `a`, and `\013\014 a` yields two arguments where GNU yields one. Exit 0 both ways — **the executed command silently receives different arguments**. |
+| `-E` / `--eof` unimplemented | 69 | the logical-EOF marker, the option that stops `xargs` at a sentinel line. |
+| message shape | 42 | `unterminated single quote` for GNU's `unmatched single quote; by default quotes are special to xargs unless you use the -0 option` — GNU's sentence names the fix, and the exit status differs too (125 against 1). |
+| accepts what GNU refuses | 11 | a quote left open across a newline is accepted as a literal; and `-s 25` with a 30-byte argument **runs anyway** where GNU refuses with `argument line too long` — the one option whose whole purpose is to impose a limit. |
+| `(os error 2)` | 15 | |
+
+**The panic and the `-s` overrun are the two that matter beyond this pair.**
+A tool that aborts on a byte it cannot decode is worse than one that errors,
+because exit 134 is indistinguishable from the child having been killed; and a
+size limit that is not enforced silently hands the kernel the `E2BIG` the
+option exists to prevent.
+
+**24 -> 23 (2026-09-11): `split`, whose `-C` is not implemented but exits 0.**
+`DIFF_PKG=split bash scripts/split-diff.sh`:
+
+**coreutils 207 passed, 0 differed. The standalone 65 passed, 142 differed.**
+
+| | cases | defect |
+|---|---|---|
+| **`-b` size suffixes** | **46** | `-b 1b`, `-b 1KB`, `-b 1KiB` are all `invalid number of bytes`. Suffixed sizes are the normal way to call `split`, and this is the same defect family that decided `dd` — a size operand that accepts only a bare integer. |
+| **`-C` produces the wrong files, exit 0** | **22** | `split -C 2` means *at most 2 bytes of whole lines per file*. GNU writes `xaa`..`xak` accordingly. The standalone writes one file per input record regardless of the number — `-C 2`, `-C 3` and `-C 4` all produce the identical five files. The option is accepted, ignored, and the run succeeds. |
+| refuses what GNU accepts | 20 | `split -6` and `-1` (numeric shorthand for `-l`), and `-x` (hex suffixes). |
+| message shape | 38 | `invalid number of -n: '0'` for GNU's `invalid number of chunks: '0'`. |
+| accepts what GNU refuses | 11 | `--numeric-suffixes=abc` and `=-1` are `invalid start value for numerical suffix` in GNU and are silently accepted here; `--numeric-suffixes=98` should exhaust the suffix space after `x99` and instead keeps going. |
+| `(os error 2)`, and a wrong diagnosis | 5 | `--additional-suffix=a/b` is reported as `No such file or directory` where GNU says `invalid suffix 'a/b', contains directory separator`. The message sends you to look for a missing file when the argument is the problem. |
+
+`-C` is the entry worth keeping: an option that is parsed, accepted, silently
+ignored, and then exits 0 is indistinguishable from a working one until someone
+looks at the file sizes.
+
+**25 -> 24 (2026-09-11): `cmp`, which names the wrong file as truncated.**
+`DIFF_PKG=cmp bash scripts/cmp-diff.sh`:
+
+**coreutils 141 passed, 0 differed. The standalone 54 passed, 87 differed.**
+
+| | cases | defect |
+|---|---|---|
+| **the EOF message names the wrong file** | ⊂61 | `cmp a short`, where `short` is the shorter file: GNU says `EOF on short after byte 4, line 1`; the standalone says `EOF on **a** after byte 4, in line 2`. It names the file that did *not* end, and gets the line number wrong. The whole content of that diagnostic is *which* file ran out, and it is the opposite of the truth. |
+| message shape | 61 | the above, plus `in line N` for GNU's `line N` throughout. |
+| option unrecognised | 13 | `-c` (`--print-chars`) and long-option abbreviations like `--verb`. |
+| refuses what GNU accepts | 7 | `-i 1T` (a size suffix on `--ignore-initial`); and a repeated `-n 3 -n 10`, where GNU takes the last and exits 0 while the standalone reports a difference. |
+| `(os error 2)` | 6 | |
+| accepts what GNU refuses | 1 | `-i 9223372036854775808` overflows silently and exits 0; GNU refuses it as an invalid value. |
+
+*Harness note:* the standalone run reported `2 NO LONGER differ (update the
+harness)`. Those two expected-difference entries are correct for the surviving
+coreutils half and were deliberately left alone — the harness documents the
+program the tree ships, not the one being deleted.
+
+**26 -> 25 (2026-09-11): `tsort`, which splits tokens on a carriage
+return.** `DIFF_PKG=tsort bash scripts/tsort-diff.sh`:
+
+**coreutils 87 passed, 0 differed. The standalone 18 passed, 69 differed.**
+
+| | cases | defect |
+|---|---|---|
+| loop diagnostic shape | 39 | GNU prints a header naming the file and then one line per node — `tsort: cyc2.txt: input contains a loop:` / `tsort: a` / `tsort: b`. The standalone prints a full sentence per node (`tsort: a: input contains a loop`) and **never names the file**, so with several operands you cannot tell which one has the cycle. |
+| **`
+` splits a token** | **5** | on `a
+b x`, GNU reads two tokens (`a
+b` and `x`) and succeeds; the standalone splits at the CR, counts three, and refuses with `input contains an odd number of tokens`. Legitimate input rejected — and a CRLF file is the ordinary way to meet a CR. |
+| accepts what GNU refuses | 3 | `tsort -h` prints a usage message and exits 0; GNU rejects `-h` as an invalid option. An accidental `-h` therefore looks like a successful sort that produced no edges. |
+| `(os error 2)` | 3 | including `tsort ''`, where GNU quotes the empty operand (`tsort: '': No such file…`) and the standalone renders it as nothing at all: `tsort: : No such file or directory (os error 2)`. |
+| **refuses non-UTF-8** | 2 | fifth consecutive standalone. |
+| a different order | 17 | both exit 0 and the orders differ (`a b c d` against GNU's `a c b d`). Stated carefully: for these inputs both orders are **legal** topological sorts, so this family is not evidence of a bug — it is evidence that the two implementations are not interchangeable, which is the question §1005 asks. The coreutils half matches GNU byte for byte on all 87. |
+
+*Also worth recording:* the standalone identifies itself as `tsort (Slate OS
+coreutils) 0.1.0` — it claims to be the very build it is the duplicate of. The
+two halves are told apart by a space and a version number. That mattered here,
+because `--version` is what was used to prove each run had the right subject.
+
+**27 -> 26 (2026-09-11): `paste`, which ignores an empty delimiter.**
+`DIFF_PKG=paste bash scripts/paste-diff.sh`:
+
+**coreutils 202 passed, 0 differed. The standalone 144 passed, 58 differed.**
+
+| | cases | defect |
+|---|---|---|
+| **`-d ''` silently becomes TAB** | **14** | an explicitly empty delimiter means *join with nothing* — GNU emits `a1b1`. The standalone falls back to its default and emits `a1	b1`, and appends a trailing TAB where a file has run out (`a3	`). Exit 0 either way. Asking for no separator and getting the default one back is the worst possible answer, because the request was explicit. |
+| `(os error 2)`, and output before the error | 18 | `paste a.txt nosuch.txt`: the standalone prints all of `a.txt` and *then* reports the missing file; GNU opens every operand first and prints nothing. Output already written cannot be taken back, so a failed run leaves a partial file behind. |
+| long-option abbreviation | 13 | `--delim=,` and `--d ,` are `unrecognized option`. |
+| accepts what GNU refuses | 7 | a delimiter list ending in an unescaped backslash (`-d ''`, `-d 'a'`) is `delimiter list ends with an unescaped backslash` in GNU; the standalone accepts it and ignores it. |
+| **refuses non-UTF-8** | 4 | `paste bad.txt` → `stream did not contain valid UTF-8`. Fourth consecutive standalone with this. |
+| message shape | 2 | `option '-d' requires an argument` where GNU says `option requires an argument -- 'd'`. |
+
+**28 -> 27 (2026-09-11): `wc`, which does not align its columns.**
+`DIFF_PKG=wc bash scripts/wc-diff.sh`:
+
+**coreutils 116 passed, 0 differed. The standalone 43 passed, 73 differed.**
+
+| | cases | defect |
+|---|---|---|
+| **no column alignment** | **34** | GNU right-aligns every count in a fixed-width field — `      2       3       6`. The standalone prints `2 3 6`. That is `wc`'s entire output format, it is wrong on every single invocation, and it is invisible to any comparison that normalises whitespace. |
+| long-option abbreviation | 24 | `wc --lin` and `wc --w` are `unrecognized option`; GNU accepts any unambiguous prefix. |
+| `(os error 21)`, and a row that vanishes | 11 | `wc adir` — GNU prints the diagnostic **and** a `0 0 0 adir` row, and still prints a `total` line for the other operands. The standalone prints the diagnostic only, so the failed file disappears from the table and the total silently omits it. |
+| accepts what GNU refuses | 3 | a zero-length name in `--files0-from` (`invalid zero-length file name`), and `--files0-from` combined with a file operand (`file operands cannot be combined with --files0-from`). |
+| missing second line | 1 | `Try 'wc --help' for more information.` |
+
+The alignment family is the one to note: 34 cases where both sides exit 0, the
+numbers are identical, and the bytes are not. `wc` output is read in columns.
+
+**29 -> 28 (2026-09-11): `join`, and all three "close" pairs have now come
+apart.** `DIFF_PKG=join bash scripts/join-diff.sh`, subject confirmed by
+`--version`:
+
+**coreutils 305 passed, 0 differed. The standalone 126 passed, 179 differed.**
+
+| | cases | defect |
+|---|---|---|
+| **attached short-option arguments** | **64** | `-a1`, `-a2`, `-v1`, `-t:`, `-j1` are all `unrecognized option`. These are not exotic spellings — `join -a1 x y` is how the option is normally written, and GNU accepts the attached and detached forms alike. One getopt gap costs a third of the suite. |
+| both refuse, different message | 59 | including several where the *diagnosis* is wrong: `join -o 1.1 a b c` is reported as `expected 2 file operands, got 3` where GNU says `invalid file number in field spec`. |
+| accepts what GNU refuses | 17 | `-e X -e Y` (`conflicting empty-field replacement strings`) silently takes the last; `-j 1 -1 2` (`incompatible join fields 0, 1`) silently proceeds and prints a join nobody asked for. |
+| refuses what GNU accepts | 17 | `-o '1.1 2.2'` — a blank-separated output-field list, which is the standard `-o` syntax — is `invalid field number`. |
+| **both exit 0, output differs** | **12** | the silent ones. `-o 1.2 -o 2.2`: GNU **accumulates** repeated `-o` and prints `2 x`; the standalone keeps only the last and prints `x`. `-o auto` on ragged records emits a different number of fields than GNU. `-e X -o auto -a 1` omits the missing field instead of filling it with `X`, shifting every column after it. And on a line with trailing blanks, GNU keeps the empty final field the blanks produce (`a 1 2  x`) where the standalone drops it (`a 1 2 x`). |
+| `(os error N)` | 8 | `join: nosuch.txt: No such file or directory (os error 2)`. |
+| **refuses non-UTF-8** | 2 | `join bad1.txt bad2.txt` → `read error: stream did not contain valid UTF-8`, exit 1, no output. GNU joins the bytes and succeeds. |
+
+**Three for three on the non-UTF-8 refusal** — `expand`, `comm`, `join`, same
+wording, same whole-file refusal, on three programs whose job is to move bytes
+around rather than to read them. It is now safe to predict for the remaining 28
+and to stop being surprised by it.
+
+**All three of the survey's "close — read both" pairs have now been measured,
+and all three were landslides**: `expand` 126 differences, `comm` 93, `join`
+179. "Close" was a statement about the two *line counts*, and the line counts
+were close — 873 vs 712, 1120 vs 700, 2102 vs 1173. What the survey cannot see
+is that the smaller half is smaller *because a third of the options are
+missing*. That makes "close" the least informative verdict it prints, not the
+most balanced one: it is the one that most reliably conceals a landslide.
+
 **30 -> 29 (2026-09-11): `comm`, the second "close" pair to come apart.**
 `DIFF_PKG=comm bash scripts/comm-diff.sh`, subject confirmed by `--version`:
 
@@ -127360,58 +128007,115 @@ used *only* in exempt positions, which is the property that actually matters.
 **Also found in the same survey:** `overlay1` and `overlay2` are declared and
 used **zero** times anywhere in `gui` or `apps`. They are dead palette rungs.
 
-## TD-C-BORDER-CONVERSION-IN-PROGRESS — 991 DRAW SITES STILL CHOOSE THEIR OWN FILL
+## TD-C-THE-SHELL-NEEDS-CONVERTING-BY-HAND-NOT-BY-SWEEP
 
 **Date:** 2026-09-11. **Lane:** C.
-**Where:** `gui/**` and `apps/**`; run `python gui/appearance/survey-fills.py` for
-the current count and classification.
+**Where:** `gui/desktop/**` — about 106 convertible draw sites across 30 files.
 
-**In short:** the decision to outline boxes rather than fill them (§829) is
-built, switchable and previewable, but the ~991 places that actually draw a box
-have not moved yet. Until they do, the setting changes the preview and little
-else. Nothing is broken; the desktop looks exactly as it did.
+**In short:** every application has been converted to the new bordered theme.
+The desktop shell itself has not, and should not be done the same way. Running
+the converter over it works and compiles, and breaks **28 tests** — not
+because the conversion is wrong, but because those 28 are the tests that keep
+the shell's colours honest, and they state things the conversion changes on
+purpose.
 
-**Done, and on `main`:**
+**What they are.** The `every_site_draws_the_role_it_claims` family, plus
+`the_panels_own_surfaces_come_from_the_palette` and several accent-policy tests.
+They assert specific role assignments — "the content well is `p.crust`", "the
+filter field is `p.surface0`" — by finding a `FillRect` of that colour. Under
+`SurfaceStyle::Borders` those boxes are outlines, so the fill is not there to
+find.
 
-1. `appearance` carries the decided palette, with `link` and `border` as roles
-   of their own.
-2. `appearance::surface` is the single decision point: a `Surface` enum naming
-   *what a box is*, and `Palette::surface_paint` / `draw_surface` turning that
-   into a fill, an outline, or both, per `SurfaceStyle`.
-3. Settings → Themes offers "Outlined" / "Filled" with a live preview, and the
-   setting persists as `theme.surface_style`.
+**Why that is not simply a test update.** Two of them are about the accent:
+`the_accent_marks_where_you_are_and_never_what_a_thing_is` (launcher) and
+`only_the_active_filter_tab_follows_the_accent` (clipboard viewer). The
+conversion draws **every** `Surface::Selected` as an accent outline, which is a
+direct statement about accent policy — and the shell already has one, written
+down and enforced. Whether "selected row" everywhere should take the accent, or
+only the places the shell currently gives it to, is a design question those
+tests are the record of. Rewriting them in bulk so a sweep passes is changing
+the test to fit the code.
 
-**Left:** the draw sites. The survey classifies them by what the surrounding
-code calls them:
+**Three misclassifications the shell produced before it was reverted,** kept
+here because they are the shape to expect when it is done properly:
 
-| what it looks like | count | share |
+| site | classified | actually |
 |---|---|---|
-| `Card` | 674 | 68% |
-| `Selected` | 158 | 16% |
-| `ControlTrack` | 68 | 7% |
-| `Sidebar` | 55 | 6% |
-| `Panel` | 36 | 4% |
+| `datetime_settings.rs:625` | Selected | the "Current time" *display card* — the guard matched `self.current_utc` |
+| `language_settings.rs:610` | Selected | the "Current language" display card, same cause |
+| `notif_pane.rs:1720` | Selected | a dismiss button shown on hover; an accent outline over-signals it |
 
-**Two things about that table, both learned by getting it wrong first.**
+The classifier was narrowed afterwards so bare `current` no longer qualifies —
+it named what a card was *showing*, not a selection. `hover` was kept, because
+`context_ext`'s two hovered menu rows are genuine selection and were right.
 
-The `ControlTrack` row is the reason this cannot be a blind sweep. A switch
-track, a scrollbar trough and a progress groove **stay filled in both themes** —
-outlined instead, a switch track reads as an empty box rather than as the off
-half of a control. Sixty-eight sites would have been silently broken.
+**How to do it:** file by file, reading each site, and deciding per test
+whether the role claim it encodes still holds under borders or has genuinely
+changed. Roughly 30 files; the mechanical part still works and can do the
+typing.
 
-And the first run of the survey reported **1,090** sites, with a doc comment in
-`palette_check.rs` classified as a control track. Two faults: it matched inside
-comments, and it read a fixed ±6-line window, which runs into the *next* draw
-site and attributes that site's role and naming words to this one. Scoping the
-lookup to the literal's own braces and skipping comment lines removed 99 false
-positives and moved `ControlTrack` from 96 to 68. **The classification is a
-starting point for review, not an answer** — that is why the survey prints
-samples, and why the conversion should land in reviewable batches rather than
-one commit.
+**If never done:** the applications follow the theme and the shell around them
+does not — the taskbar, launcher, notification pane and every settings panel
+keep their fills whichever style is chosen. That is visibly inconsistent, and
+it is the half the user looks at most.
 
-**If never finished:** the desktop keeps the filled look, the new setting is
-mostly inert, and the palette carries two roles (`link`, `border`) that only the
-preview uses. Nothing degrades; it simply does not arrive.
+## TD-C-BORDER-CONVERSION — APPLICATIONS DONE, SHELL AND 211 STRIPS WAITING ON A DECISION
+
+**Date:** 2026-09-11. **Lane:** C.
+**Where:** run `python gui/appearance/survey-fills.py` for the live count;
+`gui/appearance/convert-fills.py` is the converter and the record of what it
+refuses to touch.
+
+**In short:** every application now follows the theme — switch between outlined
+and filled boxes in Settings and they change. The desktop shell does not, and
+neither do toolbars and status bars anywhere. Both are waiting on a decision
+rather than on work.
+
+**Done:** 436 draw sites across roughly 60 applications, plus the model
+(`appearance::surface`), the theme setting, and the Settings page with its
+preview. All green, all on `main`.
+
+**Remaining, and why each waits:**
+
+| count | what | blocked on |
+|---|---|---|
+| 211 | toolbars, status bars, tab strips, data bars | **C-Q14** |
+| 158 | `gui/desktop` — the shell | **C-Q13** |
+| ~25 | sites inside test modules, and a handful of odd shapes | nothing; they are noise |
+| 2 | hairline separator rules | nothing; correctly left alone |
+
+**C-Q13 is the one that matters.** The applications follow the theme and the
+shell around them does not — the taskbar, launcher, notification pane and every
+settings panel keep their fills whichever style is chosen. That is visible, and
+the shell is the half a user looks at most. The question is whether every
+selected row takes the accent outline; the shell already has a stricter rule
+(`the_accent_marks_where_you_are_and_never_what_a_thing_is`) with tests
+enforcing it, and converting the shell breaks 28 of those tests — most
+mechanically, two of them substantively. See
+`TD-C-THE-SHELL-NEEDS-CONVERTING-BY-HAND-NOT-BY-SWEEP`.
+
+**C-Q14 is safe to leave.** Doing nothing selects the option that keeps today's
+appearance for those 211 sites.
+
+**What the conversion learned not to convert,** each from a case that broke
+something, and each now a commented rule in `convert-fills.py`:
+
+| category | what happened |
+|---|---|
+| control tracks | a switch track outlined reads as an empty box |
+| data bars | a statistics bar says what it says by the area it fills; jsonviewer's tests caught it in a minute |
+| structural strips | a box around a full-width toolbar reads as a box that failed to fit |
+| hairline rules | a 1px fill outlined is a rectangle of zero height; the tray's calendar rule broke the test that measures whether a six-row month fits |
+| `if let Some(x) = …selected…` | a *lookup* of the selected item to draw details about it, not a test that this box is selected |
+| bare `current` | matched `self.current_utc`, naming what a card shows rather than what is chosen |
+
+**The recurring test failure had one cause** and is worth knowing before touching
+the shell: a helper that finds a box by matching `FillRect` on a colour stops
+finding it when the box becomes an outline. `appearance::logical_rect` returns
+the rectangle the caller asked for either way. The better-shaped fix, where a
+test can take it, is to ask the palette — `palette.surface_paint(Surface::ControlTrack).fill`
+— rather than naming a shade, which is what the system tray's slider test now
+does.
 
 ## TD-C-THE-ACCESSIBILITY-CONFIG-IS-A-DEAD-PARALLEL-COPY
 

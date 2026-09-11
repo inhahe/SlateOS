@@ -1,9 +1,0 @@
-[package]
-name = "awk"
-version = "0.1.0"
-edition = "2024"
-description = "SlateOS awk pattern-action text processor"
-[dependencies]
-# Program text, field values and file names all come from the user; a field
-# is whatever the input line held.
-quoting = { path = "../quoting" }

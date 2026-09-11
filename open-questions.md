@@ -911,6 +911,106 @@ cutover), §71 (Q23, shared session for server sockets).
 
 ---
 
+## C-Q13 — [C] Under the bordered theme, does *every* selected row take the accent, or does the accent stay reserved? — Status: OPEN
+
+**In short:** you chose outlined boxes over filled ones, and picked a blue-green
+for "the outline round the selected thing". Applying that literally means every
+selected row, tab and list item in the system gets a blue-green outline. The
+desktop shell currently has a stricter rule — the accent colour marks *where you
+are*, and nothing else — and it has tests enforcing it. Those two rules
+disagree, and I need to know which wins before converting the shell.
+
+**Glossary.** *Accent* is the one colour the user picks that appears throughout
+the interface; here it is the blue-green `#00688B`. *Selected* means the row,
+tab or item currently chosen — a highlighted entry in a list.
+
+**Where it bites:** `gui/desktop/**`. The conversion draws every
+`Surface::Selected` as an accent outline, and two existing tests say that is too
+much: `launcher::the_accent_marks_where_you_are_and_never_what_a_thing_is` and
+`clipboard_viewer::only_the_active_filter_tab_follows_the_accent`. Both pass
+today and both would have to be rewritten.
+
+**The options**
+
+**A. Every selected thing takes the accent.**
+*What changes:* a selected file in a list, a selected row in settings and the
+active tab all get the same blue-green outline.
+For: selection looks identical everywhere, which is the property that made you
+choose borders in the first place — under fills it was impossible, because
+"selected" was a shade relative to whatever was underneath. Against: the accent
+appears in many more places at once, and the two tests above become wrong rather
+than merely out of date.
+
+**B. The accent marks only "where you are"; other selections get a stronger
+neutral outline.**
+*What changes:* the active tab and the focused pane keep the blue-green; a
+selected row in a list gets a heavier or darker black outline instead.
+For: keeps the shell's existing rule, which was deliberate. Against: needs a
+second visual weight to exist — two black outlines differing only in thickness —
+and "selected" stops meaning one thing, which is most of what borders bought.
+
+**C. Decide per surface: lists take the accent, chrome does not.**
+*What changes:* rows in content take the blue-green; tabs and toolbars use the
+neutral outline.
+For: closest to what the shell does now. Against: it is the relative rule again
+in a new form — you would have to know what kind of container you are in to know
+what selected looks like.
+
+**My recommendation: A**, because it is the reason the decision went to borders.
+The shell's rule was written when "selected" was a shade, and the shade version
+had no choice but to be relative. But this is your call, and B is entirely
+defensible if the accent everywhere turns out to be noisy — that is a judgement
+about how it looks, and the explorer can show you both.
+
+**If it is never answered:** every application already follows the new theme.
+The shell does not and will not — the taskbar, launcher, notification pane and
+all the settings panels keep their filled boxes whichever style you choose. That
+is visibly inconsistent, and the shell is the half you look at most. Nothing
+breaks; it just stays half-converted.
+
+## C-Q14 — [C] Does a bordered theme outline a toolbar, or just draw a line under it? — Status: OPEN
+
+**In short:** a toolbar, a status bar and a tab strip run the full width of a
+window. Under the filled theme they are a band of slightly different grey. Under
+the bordered theme there is no obvious equivalent: drawing a box around a
+full-width strip looks like a box, and leaving it unmarked loses the separation
+entirely. The usual answer is a single line along one edge, but that is a third
+thing, neither fill nor outline, and someone has to decide it.
+
+**Where it bites:** 210 draw sites across the tree, currently left as fills by
+the conversion so they look exactly as they do today. `apps/weather`'s title
+strip, `apps/notes`'s toolbar and status bar, `jsonviewer`'s tab bar and so on.
+
+**The options**
+
+**A. A separator line on one edge.**
+*What changes:* a toolbar is the same colour as the page with a thin line under
+it; a status bar has a line above it.
+For: what most desktops do, and the least visually heavy. Against: adds a third
+way of drawing a surface, so `Surface` grows a member and the decision point
+grows an arm.
+
+**B. Leave them filled in both themes.**
+*What changes:* nothing — this is today's appearance, made permanent.
+For: free, and already true; structural chrome arguably *should* be a different
+material from content. Against: the bordered theme is then not really bordered
+at the window's edges, which may look half-done.
+
+**C. Outline them like everything else.**
+*What changes:* a visible rectangle around each toolbar and status bar.
+For: consistent, no new concept. Against: a box around a full-width strip reads
+as a box that failed to fit, which is why almost nothing does this.
+
+**My recommendation: A**, and I would treat the extra `Surface` member as cheap
+— it is one arm in one `match`, which is exactly what that type exists for. **B**
+is a perfectly reasonable answer if you would rather not grow the vocabulary,
+and it costs nothing to choose later, since those sites are untouched.
+
+**If it is never answered:** option B happens by default. The strips stay
+filled, which is not wrong and is what you see today — so this one is genuinely
+safe to leave, unlike C-Q13.
+
+
 ## C-Q12 — [C] There are two system trays, and neither can do what the spec asks. Which one is the real one? — Status: OPEN
 
 **In short:** the little row of icons at the right-hand end of the taskbar —

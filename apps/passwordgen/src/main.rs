@@ -21,6 +21,7 @@
 // centralised rather than diverging per-crate.
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
@@ -1568,18 +1569,19 @@ impl PasswordApp {
         for tab in &tabs {
             let is_active = *tab == self.active_tab;
             let btn_w = text::padded_width_any_weight(tab.label(), 10.0, 11.0);
-            cmds.push(RenderCommand::FillRect {
-                x: tx,
-                y: 8.0,
-                width: btn_w,
-                height: 24.0,
-                color: if is_active {
-                    self.palette.surface1
+            self.palette.push_surface(
+                cmds,
+                tx,
+                8.0,
+                btn_w,
+                24.0,
+                CORNER_RADIUS,
+                if is_active {
+                    Surface::Selected
                 } else {
-                    self.palette.surface0
+                    Surface::Card
                 },
-                corner_radii: CornerRadii::all(CORNER_RADIUS),
-            });
+            );
             cmds.push(RenderCommand::Text {
                 x: tx + 10.0,
                 y: 14.0,
@@ -1644,14 +1646,8 @@ impl PasswordApp {
     }
 
     fn render_left_panel(&self, cmds: &mut Vec<RenderCommand>, y: f32, height: f32) {
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y,
-            width: LEFT_PANEL_WIDTH,
-            height,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(cmds, 0.0, y, LEFT_PANEL_WIDTH, height, 0.0, Surface::Card);
 
         cmds.push(RenderCommand::Line {
             x1: LEFT_PANEL_WIDTH,
@@ -1679,14 +1675,8 @@ impl PasswordApp {
         });
         cy += 18.0;
 
-        cmds.push(RenderCommand::FillRect {
-            x: lx,
-            y: cy,
-            width: max_w,
-            height: 32.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
+        self.palette
+            .push_surface(cmds, lx, cy, max_w, 32.0, CORNER_RADIUS, Surface::Card);
         // A refusal takes this slot: the user pressed Generate, so the answer
         // to "where is my password" belongs where the password would be, not
         // in a corner they have no reason to look at.
@@ -1720,14 +1710,15 @@ impl PasswordApp {
 
         for (label, color) in &buttons {
             let btn_w = text::padded_width(label, 12.0, 11.0, FontWeightHint::Bold);
-            cmds.push(RenderCommand::FillRect {
-                x: lx,
-                y: cy,
-                width: btn_w.min(max_w),
-                height: 28.0,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::all(CORNER_RADIUS),
-            });
+            self.palette.push_surface(
+                cmds,
+                lx,
+                cy,
+                btn_w.min(max_w),
+                28.0,
+                CORNER_RADIUS,
+                Surface::Card,
+            );
             cmds.push(RenderCommand::Text {
                 x: lx + 12.0,
                 y: cy + 8.0,
@@ -2036,14 +2027,15 @@ impl PasswordApp {
                     total
                 };
                 for entry in self.history.iter().rev().take(shown) {
-                    cmds.push(RenderCommand::FillRect {
-                        x: lx,
-                        y: cy,
-                        width: max_w,
-                        height: ITEM_HEIGHT,
-                        color: self.palette.surface0,
-                        corner_radii: CornerRadii::all(CORNER_RADIUS),
-                    });
+                    self.palette.push_surface(
+                        cmds,
+                        lx,
+                        cy,
+                        max_w,
+                        ITEM_HEIGHT,
+                        CORNER_RADIUS,
+                        Surface::Card,
+                    );
 
                     // Strength dot
                     cmds.push(RenderCommand::FillRect {

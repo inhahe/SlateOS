@@ -35,6 +35,7 @@
 // Many items are used only via test module and the real GUI event loop
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
@@ -1777,14 +1778,8 @@ impl App {
             let w = text::measure(label, NORMAL_TEXT, tab_weight) + 20.0;
 
             if active {
-                cmds.push(RenderCommand::FillRect {
-                    x: tab_x,
-                    y: 8.0,
-                    width: w,
-                    height: 28.0,
-                    color: self.palette.surface0,
-                    corner_radii: CornerRadii::all(4.0),
-                });
+                self.palette
+                    .push_surface(cmds, tab_x, 8.0, w, 28.0, 4.0, Surface::Selected);
             }
 
             cmds.push(RenderCommand::Text {
@@ -1977,14 +1972,7 @@ impl App {
         // Input background
         let input_x = x + 80.0;
         let input_width = width - 80.0;
-        cmds.push(RenderCommand::FillRect {
-            x: input_x,
-            y,
-            width: input_width,
-            height,
-            color: pal.mantle,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        pal.push_surface(cmds, input_x, y, input_width, height, 4.0, Surface::Card);
 
         // Border
         cmds.push(RenderCommand::StrokeRect {
@@ -2065,19 +2053,20 @@ impl App {
         focused: bool,
     ) {
         // Header
-        cmds.push(RenderCommand::FillRect {
+        self.palette.push_surface_radii(
+            cmds,
             x,
             y,
             width,
-            height: 24.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii {
+            24.0,
+            CornerRadii {
                 top_left: 4.0,
                 top_right: 4.0,
                 bottom_left: 0.0,
                 bottom_right: 0.0,
             },
-        });
+            Surface::Card,
+        );
         cmds.push(RenderCommand::Text {
             x: x + 8.0,
             y: y + 5.0,
@@ -2092,19 +2081,20 @@ impl App {
         // Body
         let body_y = y + 24.0;
         let body_height = height - 24.0;
-        cmds.push(RenderCommand::FillRect {
+        self.palette.push_surface_radii(
+            cmds,
             x,
-            y: body_y,
+            body_y,
             width,
-            height: body_height,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii {
+            body_height,
+            CornerRadii {
                 top_left: 0.0,
                 top_right: 0.0,
                 bottom_left: 4.0,
                 bottom_right: 4.0,
             },
-        });
+            Surface::Card,
+        );
 
         // Border
         cmds.push(RenderCommand::StrokeRect {
@@ -2219,14 +2209,8 @@ impl App {
         height: f32,
     ) {
         // Panel background
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width,
-            height,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        self.palette
+            .push_surface(cmds, x, y, width, height, 4.0, Surface::Card);
 
         // Sub-tabs: Matches | Groups | Explanation | Replace
         let tab_labels = ["Matches", "Groups", "Explain"];
@@ -2236,14 +2220,8 @@ impl App {
             let selected = ti == 0; // Simplified: always show matches
 
             if selected {
-                cmds.push(RenderCommand::FillRect {
-                    x: tx,
-                    y: y + 4.0,
-                    width: tw,
-                    height: 22.0,
-                    color: self.palette.surface0,
-                    corner_radii: CornerRadii::all(3.0),
-                });
+                self.palette
+                    .push_surface(cmds, tx, y + 4.0, tw, 22.0, 3.0, Surface::Selected);
             }
 
             cmds.push(RenderCommand::Text {
@@ -2300,14 +2278,15 @@ impl App {
             let explain_y =
                 y + height - (self.explanations.len().min(6) as f32) * LINE_HEIGHT - 30.0;
 
-            cmds.push(RenderCommand::FillRect {
-                x: x + 4.0,
-                y: explain_y - 4.0,
-                width: width - 8.0,
-                height: 1.0,
-                color: self.palette.surface1,
-                corner_radii: CornerRadii::ZERO,
-            });
+            self.palette.push_surface(
+                cmds,
+                x + 4.0,
+                explain_y - 4.0,
+                width - 8.0,
+                1.0,
+                0.0,
+                Surface::Card,
+            );
 
             cmds.push(RenderCommand::Text {
                 x: x + 8.0,
@@ -2359,14 +2338,15 @@ impl App {
 
             // Highlight current match row
             if is_current {
-                cmds.push(RenderCommand::FillRect {
-                    x: x + 4.0,
-                    y: row_y,
-                    width: width - 8.0,
-                    height: LINE_HEIGHT * 2.0 - 4.0,
-                    color: self.palette.surface0,
-                    corner_radii: CornerRadii::all(4.0),
-                });
+                self.palette.push_surface(
+                    cmds,
+                    x + 4.0,
+                    row_y,
+                    width - 8.0,
+                    LINE_HEIGHT * 2.0 - 4.0,
+                    4.0,
+                    Surface::Selected,
+                );
             }
 
             // Match index and position
@@ -2466,18 +2446,19 @@ impl App {
             let w = text::width(label, SMALL_TEXT) + 16.0;
             let selected = self.library_category_filter == *cat;
 
-            cmds.push(RenderCommand::FillRect {
-                x: cat_x,
-                y: content_y,
-                width: w,
-                height: 24.0,
-                color: if selected {
-                    self.palette.surface1
+            self.palette.push_surface(
+                cmds,
+                cat_x,
+                content_y,
+                w,
+                24.0,
+                12.0,
+                if selected {
+                    Surface::Selected
                 } else {
-                    self.palette.surface0
+                    Surface::Card
                 },
-                corner_radii: CornerRadii::all(12.0),
-            });
+            );
             cmds.push(RenderCommand::Text {
                 x: cat_x + 8.0,
                 y: content_y + 5.0,
@@ -2517,18 +2498,19 @@ impl App {
             let selected = self.selected_library_entry == Some(*original_idx);
 
             // Row background
-            cmds.push(RenderCommand::FillRect {
-                x: PADDING,
-                y: row_y,
-                width: self.window_width - 2.0 * PADDING,
-                height: 54.0,
-                color: if selected {
-                    self.palette.surface0
+            self.palette.push_surface(
+                cmds,
+                PADDING,
+                row_y,
+                self.window_width - 2.0 * PADDING,
+                54.0,
+                6.0,
+                if selected {
+                    Surface::Selected
                 } else {
-                    self.palette.mantle
+                    Surface::Card
                 },
-                corner_radii: CornerRadii::all(6.0),
-            });
+            );
 
             // Category badge
             let cat_label = entry.category.label();
@@ -2692,14 +2674,15 @@ impl App {
 
         // Right column: Replace reference
         let right_x = PADDING + col_width + PADDING;
-        cmds.push(RenderCommand::FillRect {
-            x: right_x,
-            y: content_y,
-            width: col_width,
-            height: self.window_height - content_y - PADDING,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::all(6.0),
-        });
+        self.palette.push_surface(
+            cmds,
+            right_x,
+            content_y,
+            col_width,
+            self.window_height - content_y - PADDING,
+            6.0,
+            Surface::Card,
+        );
 
         cmds.push(RenderCommand::Text {
             x: right_x + 12.0,

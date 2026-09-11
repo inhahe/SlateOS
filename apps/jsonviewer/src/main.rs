@@ -45,6 +45,7 @@
 #![allow(clippy::indexing_slicing)]
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::Color;
 use guitk::event::{Event, EventResult, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
@@ -2842,14 +2843,8 @@ impl App {
         let mut bx = 200.0;
         for (label, color) in &buttons {
             let bw = text::width(label, SMALL_TEXT) + 16.0;
-            cmds.push(RenderCommand::FillRect {
-                x: bx,
-                y: 8.0,
-                width: bw,
-                height: 28.0,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            self.palette
+                .push_surface(cmds, bx, 8.0, bw, 28.0, 4.0, Surface::Card);
             cmds.push(RenderCommand::Text {
                 x: bx + 8.0,
                 y: 18.0,
@@ -2950,14 +2945,8 @@ impl App {
         }
 
         // New tab button
-        cmds.push(RenderCommand::FillRect {
-            x: tab_x,
-            y: y + 6.0,
-            width: 28.0,
-            height: 24.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        self.palette
+            .push_surface(cmds, tab_x, y + 6.0, 28.0, 24.0, 4.0, Surface::Card);
         cmds.push(RenderCommand::Text {
             x: tab_x + 8.0,
             y: y + 16.0,
@@ -2999,14 +2988,15 @@ impl App {
             let mode_width = mode_width(*mode);
 
             if is_active {
-                cmds.push(RenderCommand::FillRect {
-                    x: mode_x,
-                    y: y + 3.0,
-                    width: mode_width,
-                    height: 24.0,
-                    color: self.palette.surface1,
-                    corner_radii: CornerRadii::all(4.0),
-                });
+                self.palette.push_surface(
+                    cmds,
+                    mode_x,
+                    y + 3.0,
+                    mode_width,
+                    24.0,
+                    4.0,
+                    Surface::Selected,
+                );
             }
 
             cmds.push(RenderCommand::Text {
@@ -3134,14 +3124,15 @@ impl App {
 
                 // Selection highlight
                 if i == doc.selected_node {
-                    cmds.push(RenderCommand::FillRect {
-                        x: 0.0,
-                        y: row_y,
+                    self.palette.push_surface(
+                        cmds,
+                        0.0,
+                        row_y,
                         width,
-                        height: LINE_HEIGHT,
-                        color: self.palette.surface0,
-                        corner_radii: CornerRadii::ZERO,
-                    });
+                        LINE_HEIGHT,
+                        0.0,
+                        Surface::Selected,
+                    );
                 }
 
                 // Search match highlight
@@ -3263,14 +3254,8 @@ impl App {
 
         // Gutter (line numbers)
         let gutter_width = 50.0;
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: top,
-            width: gutter_width,
-            height,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(cmds, 0.0, top, gutter_width, height, 0.0, Surface::Sidebar);
 
         for i in first_visible..last_visible {
             let row_y = top + (i as f32 * LINE_HEIGHT) - scroll;
@@ -3462,14 +3447,15 @@ impl App {
         let general = stats_table(&stats_cols);
 
         for (label, val, color) in &stats {
-            cmds.push(RenderCommand::FillRect {
-                x: PADDING,
-                y: row_y - 10.0,
-                width: stats_card_width(width),
-                height: 28.0,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            self.palette.push_surface(
+                cmds,
+                PADDING,
+                row_y - 10.0,
+                stats_card_width(width),
+                28.0,
+                4.0,
+                Surface::Card,
+            );
             general.cell_weighted(
                 cmds,
                 STATS_LABEL,
@@ -4118,14 +4104,8 @@ impl App {
         });
 
         // Search input
-        cmds.push(RenderCommand::FillRect {
-            x: 50.0,
-            y: bar_y + 4.0,
-            width: 300.0,
-            height: 28.0,
-            color: self.palette.surface1,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        self.palette
+            .push_surface(cmds, 50.0, bar_y + 4.0, 300.0, 28.0, 4.0, Surface::Card);
         cmds.push(RenderCommand::Text {
             x: 58.0,
             y: bar_y + 18.0,
@@ -5785,7 +5765,16 @@ mod tests {
         let mut checked = 0;
         for width in [0.0_f32, 1.0, 20.0, 60.0, 120.0, 240.0, 499.0, 880.0] {
             for cmd in stats_commands(width) {
-                if let RenderCommand::FillRect { x, width: w, .. } = cmd {
+                // Both kinds. The property here is geometry, not fill, and
+                // since the surface conversion a card is an outline under the
+                // default theme -- so counting only `FillRect` stopped seeing
+                // the rectangles this was written to check.
+                let rect = match cmd {
+                    RenderCommand::FillRect { x, width: w, .. }
+                    | RenderCommand::StrokeRect { x, width: w, .. } => Some((x, w)),
+                    _ => None,
+                };
+                if let Some((x, w)) = rect {
                     assert!(w >= 0.0, "at width {width} a rect at {x} is {w} wide");
                     checked += 1;
                 }

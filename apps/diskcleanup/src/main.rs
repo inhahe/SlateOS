@@ -37,6 +37,7 @@
 //! One source, read twice.
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, MouseButton, MouseEvent, MouseEventKind};
 use guitk::modal::{AlertDialog, DialogResult};
@@ -1654,14 +1655,8 @@ impl CleanupUI {
 
         // Alternating row background.
         if index.is_multiple_of(2) {
-            tree.push(RenderCommand::FillRect {
-                x: 0.0,
-                y,
-                width,
-                height: ROW_HEIGHT,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::ZERO,
-            });
+            self.palette
+                .push_surface(tree, 0.0, y, width, ROW_HEIGHT, 0.0, Surface::Card);
         }
 
         // The drawn square, centred inside the *hit* rectangle rather than
@@ -1758,19 +1753,20 @@ impl CleanupUI {
 
     fn render_header(&self, tree: &mut RenderTree, lay: &Layout, title: &str) {
         let width = lay.width();
-        tree.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
+        self.palette.push_surface_radii(
+            tree,
+            0.0,
+            0.0,
             width,
-            height: HEADER_HEIGHT,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii {
+            HEADER_HEIGHT,
+            CornerRadii {
                 top_left: CORNER_RADIUS,
                 top_right: CORNER_RADIUS,
                 bottom_left: 0.0,
                 bottom_right: 0.0,
             },
-        });
+            Surface::Card,
+        );
 
         tree.push(RenderCommand::Text {
             x: PADDING,
@@ -1791,19 +1787,20 @@ impl CleanupUI {
     /// each of them, with the corner radii spelled out three times.
     fn render_footer_strip(&self, tree: &mut RenderTree, lay: &Layout) {
         let (x, y, width, height) = lay.footer();
-        tree.push(RenderCommand::FillRect {
+        self.palette.push_surface_radii(
+            tree,
             x,
             y,
             width,
             height,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii {
+            CornerRadii {
                 top_left: 0.0,
                 top_right: 0.0,
                 bottom_left: CORNER_RADIUS,
                 bottom_right: CORNER_RADIUS,
             },
-        });
+            Surface::Card,
+        );
     }
 
     fn render_footer(&self, tree: &mut RenderTree, lay: &Layout) {

@@ -3688,7 +3688,7 @@ mod tests {
 
     #[test]
     fn mbstowcs_with_a_null_destination_counts_and_ignores_n() {
-        let src = b"hello ";
+        let src = b"hello\0";
         let got = unsafe { mbstowcs(core::ptr::null_mut(), src.as_ptr(), 0) };
         assert_eq!(got, 5, "n must be ignored when dst is null");
         // A large n must give the same answer.
@@ -3735,7 +3735,7 @@ mod tests {
         let written = unsafe { wcstombs(out.as_mut_ptr(), src.as_ptr(), 3) };
         assert_eq!(written, 3, "n still bounds a real write");
 
-        let msrc = b"hello ";
+        let msrc = b"hello\0";
         let mut wout = [0 as WcharT; 8];
         let got = unsafe { mbstowcs(wout.as_mut_ptr(), msrc.as_ptr(), 2) };
         assert_eq!(got, 2);

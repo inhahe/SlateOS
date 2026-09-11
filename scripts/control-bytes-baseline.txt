@@ -1,0 +1,11 @@
+# Occurrences of a raw control byte that are known and tolerated.
+# Written by scripts/check-control-bytes.py --update-baseline.
+# Fields: path<TAB>byte (hex)<TAB>note
+#
+# Every entry here is either a deliberate control byte in a fixture or
+# a defect nobody has got to yet. Both deserve the note.
+
+kernel/src/main.rs	03	lane A's file. Line 2614, a comment quoting
+#   write(fm, "[ETX]", 1) where the escape became the byte. Filed as
+#   requests/b-a-a-raw-control-byte-is-sitting-in-a-comment-in-main-rs.md
+#   on 2026-09-11; remove this entry when lane A lands the fix.

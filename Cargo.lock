@@ -115,13 +115,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "awk"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "backup"
 version = "0.1.0"
 dependencies = [
@@ -355,13 +348,6 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
-]
-
-[[package]]
-name = "cmp"
-version = "0.1.0"
-dependencies = [
- "quoting",
 ]
 
 [[package]]
@@ -600,15 +586,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "df"
-version = "0.1.0"
-dependencies = [
- "procinfo",
- "quoting",
- "scratchdir",
-]
-
-[[package]]
 name = "dhcpcd"
 version = "0.1.0"
 dependencies = [
@@ -728,14 +705,6 @@ version = "0.1.0"
 dependencies = [
  "guitk",
  "oswindow",
-]
-
-[[package]]
-name = "du"
-version = "0.1.0"
-dependencies = [
- "quoting",
- "scratchdir",
 ]
 
 [[package]]
@@ -1304,13 +1273,6 @@ dependencies = [
 [[package]]
 name = "irqbalance"
 version = "0.1.0"
-
-[[package]]
-name = "join"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
 
 [[package]]
 name = "journalctl"
@@ -2076,13 +2038,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "paste"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "patch"
 version = "0.1.0"
 
@@ -2470,13 +2425,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sed"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "selinux"
 version = "0.1.0"
 dependencies = [
@@ -2556,14 +2504,6 @@ name = "sha2"
 version = "0.1.0"
 
 [[package]]
-name = "sha256sum"
-version = "0.1.0"
-dependencies = [
- "quoting",
- "sha2",
-]
-
-[[package]]
 name = "shell"
 version = "0.1.0"
 
@@ -2640,13 +2580,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sort"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "soundrecorder"
 version = "0.1.0"
 dependencies = [
@@ -2676,13 +2609,6 @@ name = "spin"
 version = "0.9.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6980e8d7511241f8acf4aebddbb1ff938df5eebe98691418c4468d0b72a96a67"
-
-[[package]]
-name = "split"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
 
 [[package]]
 name = "spreadsheet"
@@ -2945,13 +2871,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tar"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "taskscheduler"
 version = "0.1.0"
 dependencies = [
@@ -3066,13 +2985,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tsort"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "ttyidle"
 version = "0.1.0"
 
@@ -3109,13 +3021,6 @@ name = "udisks"
 version = "0.1.0"
 dependencies = [
  "procinfo",
- "quoting",
-]
-
-[[package]]
-name = "uname"
-version = "0.1.0"
-dependencies = [
  "quoting",
 ]
 
@@ -3261,13 +3166,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "wc"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "weather"
 version = "0.1.0"
 dependencies = [
@@ -3346,13 +3244,6 @@ name = "wpa"
 version = "0.1.0"
 dependencies = [
  "hmac",
-]
-
-[[package]]
-name = "xargs"
-version = "0.1.0"
-dependencies = [
- "quoting",
 ]
 
 [[package]]

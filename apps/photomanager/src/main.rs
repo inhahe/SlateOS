@@ -37,6 +37,7 @@
 #![allow(clippy::doc_markdown)]
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::Color;
 use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -2776,14 +2777,15 @@ impl PhotoApp {
         // Search box
         let search_x = sort_x + 124.0;
         let search_w = 200.0;
-        cmds.push(RenderCommand::FillRect {
-            x: search_x,
-            y: 8.0,
-            width: search_w,
-            height: 24.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
+        self.palette.push_surface(
+            cmds,
+            search_x,
+            8.0,
+            search_w,
+            24.0,
+            CORNER_RADIUS,
+            Surface::Card,
+        );
         let search_text = if self.search_query.is_empty() {
             "Search photos...".to_owned()
         } else {
@@ -2821,18 +2823,19 @@ impl PhotoApp {
 
         // Slideshow button
         let ss_x = width - 100.0;
-        cmds.push(RenderCommand::FillRect {
-            x: ss_x,
-            y: 8.0,
-            width: 80.0,
-            height: 24.0,
-            color: if self.slideshow.is_some() {
-                self.palette.surface1
+        self.palette.push_surface(
+            cmds,
+            ss_x,
+            8.0,
+            80.0,
+            24.0,
+            CORNER_RADIUS,
+            if self.slideshow.is_some() {
+                Surface::Selected
             } else {
-                self.palette.surface0
+                Surface::Card
             },
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
+        );
         cmds.push(RenderCommand::Text {
             x: ss_x + 8.0,
             y: 14.0,
@@ -3002,14 +3005,8 @@ impl PhotoApp {
         height: f32,
     ) {
         // Background
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width,
-            height,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(cmds, x, y, width, height, 0.0, Surface::Card);
 
         // Separator
         cmds.push(RenderCommand::Line {
@@ -3314,14 +3311,15 @@ impl PhotoApp {
             } else {
                 self.palette.surface1
             };
-            cmds.push(RenderCommand::FillRect {
-                x: cx,
-                y: cy,
-                width: thumb,
-                height: thumb,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::all(CORNER_RADIUS),
-            });
+            self.palette.push_surface(
+                cmds,
+                cx,
+                cy,
+                thumb,
+                thumb,
+                CORNER_RADIUS,
+                Surface::ControlTrack,
+            );
             cmds.push(RenderCommand::StrokeRect {
                 x: cx,
                 y: cy,
@@ -3421,14 +3419,15 @@ impl PhotoApp {
         let display_x = x + (width - display_w) / 2.0;
         let display_y = y + 10.0;
 
-        cmds.push(RenderCommand::FillRect {
-            x: display_x,
-            y: display_y,
-            width: display_w,
-            height: display_h,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
+        self.palette.push_surface(
+            cmds,
+            display_x,
+            display_y,
+            display_w,
+            display_h,
+            CORNER_RADIUS,
+            Surface::Card,
+        );
         cmds.push(RenderCommand::StrokeRect {
             x: display_x,
             y: display_y,
@@ -3520,14 +3519,15 @@ impl PhotoApp {
 
                 let is_selected = self.selected_photo == Some(pid);
 
-                cmds.push(RenderCommand::FillRect {
-                    x: cx,
-                    y: ty,
-                    width: thumb,
-                    height: thumb,
-                    color: self.palette.surface0,
-                    corner_radii: CornerRadii::all(CORNER_RADIUS),
-                });
+                self.palette.push_surface(
+                    cmds,
+                    cx,
+                    ty,
+                    thumb,
+                    thumb,
+                    CORNER_RADIUS,
+                    Surface::ControlTrack,
+                );
                 if is_selected {
                     cmds.push(RenderCommand::StrokeRect {
                         x: cx,
@@ -3572,14 +3572,8 @@ impl PhotoApp {
         };
 
         // Full black background
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width,
-            height,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(cmds, x, y, width, height, 0.0, Surface::Card);
 
         if let Some(pid) = ss.current_photo()
             && let Some(photo) = self.find_photo(pid)
@@ -3590,14 +3584,15 @@ impl PhotoApp {
             let display_x = x + (width - display_w) / 2.0;
             let display_y = y + (height - display_h) / 2.0;
 
-            cmds.push(RenderCommand::FillRect {
-                x: display_x,
-                y: display_y,
-                width: display_w,
-                height: display_h,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::all(8.0),
-            });
+            self.palette.push_surface(
+                cmds,
+                display_x,
+                display_y,
+                display_w,
+                display_h,
+                8.0,
+                Surface::Card,
+            );
 
             cmds.push(RenderCommand::Text {
                 x: display_x + display_w / 2.0 - 60.0,

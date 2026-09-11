@@ -31,6 +31,7 @@
 #![allow(clippy::arithmetic_side_effects, clippy::indexing_slicing, dead_code)]
 
 use appearance::Palette;
+use appearance::Surface;
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -2830,14 +2831,8 @@ impl TorrentApp {
         });
 
         // Header bar
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width,
-            height: header_h,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(&mut cmds, 0.0, 0.0, width, header_h, 0.0, Surface::Card);
 
         // Title
         cmds.push(RenderCommand::Text {
@@ -2863,14 +2858,8 @@ impl TorrentApp {
         let mut bx = 120.0;
         for label in &buttons {
             let bw = text::padded_width(label, 12.0, 12.0, FontWeightHint::Regular);
-            cmds.push(RenderCommand::FillRect {
-                x: bx,
-                y: 8.0,
-                width: bw,
-                height: 32.0,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            self.palette
+                .push_surface(&mut cmds, bx, 8.0, bw, 32.0, 4.0, Surface::Card);
             cmds.push(RenderCommand::Text {
                 x: bx + 12.0,
                 y: 16.0,
@@ -3062,14 +3051,8 @@ impl TorrentApp {
 
         // Status bar
         let sy = height - status_h;
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: sy,
-            width,
-            height: status_h,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(&mut cmds, 0.0, sy, width, status_h, 0.0, Surface::Card);
 
         let (downloading, seeding, total, dl_speed, ul_speed) = self.stats();
         cmds.push(RenderCommand::Text {
@@ -3134,14 +3117,15 @@ impl TorrentApp {
 
             let is_sel = self.selected_torrent == Some(torrent.id);
             if is_sel {
-                cmds.push(RenderCommand::FillRect {
-                    x: x + 4.0,
-                    y: ry,
-                    width: w - 8.0,
-                    height: row_h - 2.0,
-                    color: self.palette.surface0,
-                    corner_radii: CornerRadii::all(4.0),
-                });
+                self.palette.push_surface(
+                    cmds,
+                    x + 4.0,
+                    ry,
+                    w - 8.0,
+                    row_h - 2.0,
+                    4.0,
+                    Surface::Card,
+                );
             }
 
             let mut cx = x + 8.0;

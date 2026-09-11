@@ -52,6 +52,16 @@
 set -u
 
 DIFF_PROG='tar'
+# Every invocation below is bounded with it -- all sixteen of them, on both
+# sides -- so it is declared rather than assumed present. Without this the
+# harness would run on a host lacking `timeout` and silently lose the bound.
+#
+# 60 seconds rather than the 30 the smaller harnesses use: `tar` cases build and
+# walk real directory trees, so a slow one is not necessarily a stuck one. Long
+# enough that no healthy case can reach it, short enough that a stuck one does
+# not cost an afternoon. The reference is wrapped too, because a harness that
+# bounded only our side would hang on the day the reference was the buggy one.
+DIFF_NEED=timeout
 DIFF_NEED='find stat cmp od sha256sum touch ln readlink mkfifo'
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
@@ -242,10 +252,10 @@ create_case() {
   local label="$1"; shift
   local o_rc g_rc
   rm -f o.tar g.tar
-  diff_run env PATH="$bindir/ours" tar -cf o.tar "$@" \
+  diff_run timeout -k 2 60 env PATH="$bindir/ours" tar -cf o.tar "$@" \
     </dev/null >"$DIFF_TMP/o.out" 2>"$DIFF_TMP/o.err"; o_rc=$?
   # shellcheck disable=SC2086  # GNUFMT is three separate words on purpose.
-  diff_run env PATH="$bindir/gnu" tar $GNUFMT -cf g.tar "$@" \
+  diff_run timeout -k 2 60 env PATH="$bindir/gnu" tar $GNUFMT -cf g.tar "$@" \
     </dev/null >"$DIFF_TMP/g.out" 2>"$DIFF_TMP/g.err"; g_rc=$?
   settle "$o_rc" "$g_rc" "archive:$(archive_delta o.tar g.tar)" 'archive:same'
   report "create: tar -cf X $label"
@@ -263,9 +273,9 @@ interop_case() {
   local label="$1"; shift
   local o_rc g_rc
   rm -f o.tar g.tar
-  diff_run env PATH="$bindir/ours" tar -cf o.tar "$@" </dev/null >/dev/null 2>&1
+  diff_run timeout -k 2 60 env PATH="$bindir/ours" tar -cf o.tar "$@" </dev/null >/dev/null 2>&1
   # shellcheck disable=SC2086
-  diff_run env PATH="$bindir/gnu" tar $GNUFMT -cf g.tar "$@" </dev/null >/dev/null 2>&1
+  diff_run timeout -k 2 60 env PATH="$bindir/gnu" tar $GNUFMT -cf g.tar "$@" </dev/null >/dev/null 2>&1
   # Both archives are read by the *same* tar — GNU's — so any difference in the
   # listing is a difference in the archives and not in the two readers.
   diff_run "$gnu_real" -tvf o.tar >"$DIFF_TMP/o.out" 2>"$DIFF_TMP/o.err"; o_rc=$?
@@ -280,9 +290,9 @@ interop_case() {
 list_case() {
   local label="$1"; shift
   local o_rc g_rc
-  diff_run env PATH="$bindir/ours" tar "$@" </dev/null >"$DIFF_TMP/o.out" 2>"$DIFF_TMP/o.err"
+  diff_run timeout -k 2 60 env PATH="$bindir/ours" tar "$@" </dev/null >"$DIFF_TMP/o.out" 2>"$DIFF_TMP/o.err"
   o_rc=$?
-  diff_run env PATH="$bindir/gnu" tar "$@" </dev/null >"$DIFF_TMP/g.out" 2>"$DIFF_TMP/g.err"
+  diff_run timeout -k 2 60 env PATH="$bindir/gnu" tar "$@" </dev/null >"$DIFF_TMP/g.out" 2>"$DIFF_TMP/g.err"
   g_rc=$?
   settle "$o_rc" "$g_rc"
   report "list: tar $* ($label)"
@@ -383,9 +393,9 @@ extract_case() {
   local o_rc g_rc o_man g_man
   rm -rf od gd; mkdir od gd
   if [ -n "${PREP:-}" ]; then ( cd od && "$PREP" ); ( cd gd && "$PREP" ); fi
-  ( cd od && diff_run env PATH="$bindir/ours" tar -xf "../$archive" "$@" \
+  ( cd od && diff_run timeout -k 2 60 env PATH="$bindir/ours" tar -xf "../$archive" "$@" \
       </dev/null >"$DIFF_TMP/o.out" 2>"$DIFF_TMP/o.err" ); o_rc=$?
-  ( cd gd && diff_run env PATH="$bindir/gnu" tar -xf "../$archive" "$@" \
+  ( cd gd && diff_run timeout -k 2 60 env PATH="$bindir/gnu" tar -xf "../$archive" "$@" \
       </dev/null >"$DIFF_TMP/g.out" 2>"$DIFF_TMP/g.err" ); g_rc=$?
   o_man=$(manifest od); g_man=$(manifest gd)
   settle "$o_rc" "$g_rc" "tree{$(printf '%s' "$o_man" | tr '\n' '|')}" \
@@ -404,9 +414,9 @@ extract_case_quiet() {
   local label="$1" archive="$2"; shift 2
   local o_rc g_rc o_man g_man
   rm -rf od gd; mkdir od gd
-  ( cd od && diff_run env PATH="$bindir/ours" tar -xf "../$archive" "$@" \
+  ( cd od && diff_run timeout -k 2 60 env PATH="$bindir/ours" tar -xf "../$archive" "$@" \
       </dev/null >"$DIFF_TMP/o.out" 2>"$DIFF_TMP/o.err" ); o_rc=$?
-  ( cd gd && diff_run env PATH="$bindir/gnu" tar -xf "../$archive" "$@" \
+  ( cd gd && diff_run timeout -k 2 60 env PATH="$bindir/gnu" tar -xf "../$archive" "$@" \
       </dev/null >"$DIFF_TMP/g.out" 2>"$DIFF_TMP/g.err" ); g_rc=$?
   o_man=$(manifest od); g_man=$(manifest gd)
   settle "$o_rc" "$g_rc" "tree{$(printf '%s' "$o_man" | tr '\n' '|')}" \
@@ -419,9 +429,9 @@ extract_case_quiet() {
 plain_case() {
   local label="$1"; shift
   local o_rc g_rc
-  diff_run env PATH="$bindir/ours" tar "$@" </dev/null >"$DIFF_TMP/o.out" 2>"$DIFF_TMP/o.err"
+  diff_run timeout -k 2 60 env PATH="$bindir/ours" tar "$@" </dev/null >"$DIFF_TMP/o.out" 2>"$DIFF_TMP/o.err"
   o_rc=$?
-  diff_run env PATH="$bindir/gnu" tar "$@" </dev/null >"$DIFF_TMP/g.out" 2>"$DIFF_TMP/g.err"
+  diff_run timeout -k 2 60 env PATH="$bindir/gnu" tar "$@" </dev/null >"$DIFF_TMP/g.out" 2>"$DIFF_TMP/g.err"
   g_rc=$?
   settle "$o_rc" "$g_rc"
   report "$label: tar $*"
@@ -430,9 +440,9 @@ plain_case() {
 plain_xcase() {
   local reason="$1" label="$2"; shift 2
   local o_rc g_rc
-  diff_run env PATH="$bindir/ours" tar "$@" </dev/null >"$DIFF_TMP/o.out" 2>"$DIFF_TMP/o.err"
+  diff_run timeout -k 2 60 env PATH="$bindir/ours" tar "$@" </dev/null >"$DIFF_TMP/o.out" 2>"$DIFF_TMP/o.err"
   o_rc=$?
-  diff_run env PATH="$bindir/gnu" tar "$@" </dev/null >"$DIFF_TMP/g.out" 2>"$DIFF_TMP/g.err"
+  diff_run timeout -k 2 60 env PATH="$bindir/gnu" tar "$@" </dev/null >"$DIFF_TMP/g.out" 2>"$DIFF_TMP/g.err"
   g_rc=$?
   settle "$o_rc" "$g_rc"
   xreport "$label: tar $*" "$reason"
@@ -1210,9 +1220,9 @@ old_case() {
     printf 'A\n' > "$d/src/a"
     touch -d '2020-01-02 03:04:05' "$d/src/a" "$d/src" "$d/other"
   done
-  ( cd od && diff_run env PATH="$bindir/ours" tar "$@" \
+  ( cd od && diff_run timeout -k 2 60 env PATH="$bindir/ours" tar "$@" \
       </dev/null >"$DIFF_TMP/o.out" 2>"$DIFF_TMP/o.err" ); o_rc=$?
-  ( cd gd && diff_run env PATH="$bindir/gnu" tar "$@" \
+  ( cd gd && diff_run timeout -k 2 60 env PATH="$bindir/gnu" tar "$@" \
       </dev/null >"$DIFF_TMP/g.out" 2>"$DIFF_TMP/g.err" ); g_rc=$?
   settle "$o_rc" "$g_rc" "made:$(old_made od)" "made:$(old_made gd)"
   report "old option: tar $* ($label)"

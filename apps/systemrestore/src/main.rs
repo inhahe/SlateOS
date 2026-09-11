@@ -21,6 +21,7 @@
 //! ```
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
@@ -2992,14 +2993,15 @@ impl SystemRestoreUI {
     /// Render the header bar.
     fn render_header(&self, rt: &mut RenderTree) {
         // Header background.
-        rt.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: self.window_width,
-            height: HEADER_HEIGHT,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            rt,
+            0.0,
+            0.0,
+            self.window_width,
+            HEADER_HEIGHT,
+            0.0,
+            Surface::Card,
+        );
 
         // Title.
         rt.push(RenderCommand::Text {
@@ -3015,14 +3017,15 @@ impl SystemRestoreUI {
 
         // Snapshot count badge.
         let count_text = format!("{} snapshots", self.manager.tree.count());
-        rt.push(RenderCommand::FillRect {
-            x: 240.0,
-            y: HEADER_HEIGHT / 2.0 - 10.0,
-            width: 100.0,
-            height: 20.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(10.0),
-        });
+        self.palette.push_surface(
+            rt,
+            240.0,
+            HEADER_HEIGHT / 2.0 - 10.0,
+            100.0,
+            20.0,
+            10.0,
+            Surface::Card,
+        );
         rt.push(RenderCommand::Text {
             x: 255.0,
             y: HEADER_HEIGHT / 2.0 - FONT_SIZE_SMALL / 2.0,
@@ -3036,14 +3039,15 @@ impl SystemRestoreUI {
 
         // Search box.
         let search_x = self.window_width - 260.0;
-        rt.push(RenderCommand::FillRect {
-            x: search_x,
-            y: HEADER_HEIGHT / 2.0 - 14.0,
-            width: 240.0,
-            height: 28.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        self.palette.push_surface(
+            rt,
+            search_x,
+            HEADER_HEIGHT / 2.0 - 14.0,
+            240.0,
+            28.0,
+            4.0,
+            Surface::Card,
+        );
         let search_display = if self.search_query.is_empty() {
             "Search snapshots...".to_string()
         } else {
@@ -3229,14 +3233,15 @@ impl SystemRestoreUI {
 
                 // Selection highlight.
                 if is_selected {
-                    rt.push(RenderCommand::FillRect {
-                        x: PADDING,
-                        y: row_y,
-                        width: self.window_width - 2.0 * PADDING,
-                        height: TREE_ROW_HEIGHT,
-                        color: self.palette.surface0,
-                        corner_radii: CornerRadii::all(4.0),
-                    });
+                    self.palette.push_surface(
+                        rt,
+                        PADDING,
+                        row_y,
+                        self.window_width - 2.0 * PADDING,
+                        TREE_ROW_HEIGHT,
+                        4.0,
+                        Surface::Selected,
+                    );
                 }
 
                 // Connection lines.
@@ -3380,14 +3385,15 @@ impl SystemRestoreUI {
 
                 // Selection highlight.
                 if is_selected {
-                    rt.push(RenderCommand::FillRect {
-                        x: timeline_x + 20.0,
-                        y: entry_y,
-                        width: self.window_width - timeline_x - 40.0,
-                        height: TIMELINE_ENTRY_HEIGHT - 4.0,
-                        color: self.palette.surface0,
-                        corner_radii: CornerRadii::all(4.0),
-                    });
+                    self.palette.push_surface(
+                        rt,
+                        timeline_x + 20.0,
+                        entry_y,
+                        self.window_width - timeline_x - 40.0,
+                        TIMELINE_ENTRY_HEIGHT - 4.0,
+                        4.0,
+                        Surface::Selected,
+                    );
                 }
 
                 // Timeline dot.
@@ -3831,14 +3837,15 @@ impl SystemRestoreUI {
         });
 
         // Panel background.
-        rt.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: panel_y,
-            width: self.window_width,
-            height: DETAILS_PANEL_HEIGHT,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            rt,
+            0.0,
+            panel_y,
+            self.window_width,
+            DETAILS_PANEL_HEIGHT,
+            0.0,
+            Surface::Card,
+        );
 
         if let Some(id) = self.selected_id {
             if let Some(snap) = self.manager.tree.get_snapshot(id) {
@@ -3976,14 +3983,8 @@ impl SystemRestoreUI {
             for tag in &snap.tags {
                 let tag_width =
                     text::padded_width(tag, 8.0, FONT_SIZE_SMALL, FontWeightHint::Regular);
-                rt.push(RenderCommand::FillRect {
-                    x: tag_x,
-                    y,
-                    width: tag_width,
-                    height: 18.0,
-                    color: self.palette.surface1,
-                    corner_radii: CornerRadii::all(9.0),
-                });
+                self.palette
+                    .push_surface(rt, tag_x, y, tag_width, 18.0, 9.0, Surface::Card);
                 rt.push(RenderCommand::Text {
                     x: tag_x + 8.0,
                     y: y + 2.0,
@@ -4290,14 +4291,15 @@ impl SystemRestoreUI {
             max_width: Some(60.0),
             overflow: TextOverflow::Ellipsis,
         });
-        rt.push(RenderCommand::FillRect {
-            x: dx + PADDING,
-            y: field_y + 18.0,
-            width: dialog_w - 2.0 * PADDING,
-            height: 28.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        self.palette.push_surface(
+            rt,
+            dx + PADDING,
+            field_y + 18.0,
+            dialog_w - 2.0 * PADDING,
+            28.0,
+            4.0,
+            Surface::Panel,
+        );
         let name_display = if self.form_name.is_empty() {
             "Enter snapshot name..."
         } else {
@@ -4331,14 +4333,15 @@ impl SystemRestoreUI {
             max_width: Some(100.0),
             overflow: TextOverflow::Ellipsis,
         });
-        rt.push(RenderCommand::FillRect {
-            x: dx + PADDING,
-            y: field_y + 18.0,
-            width: dialog_w - 2.0 * PADDING,
-            height: 28.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        self.palette.push_surface(
+            rt,
+            dx + PADDING,
+            field_y + 18.0,
+            dialog_w - 2.0 * PADDING,
+            28.0,
+            4.0,
+            Surface::Panel,
+        );
 
         // Components checkboxes.
         field_y += 56.0;
@@ -4418,14 +4421,15 @@ impl SystemRestoreUI {
         // Buttons.
         let btn_y = dy + dialog_h - 40.0;
         // Cancel.
-        rt.push(RenderCommand::FillRect {
-            x: dx + dialog_w - 220.0,
-            y: btn_y,
-            width: BUTTON_WIDTH,
-            height: BUTTON_HEIGHT,
-            color: self.palette.surface1,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        self.palette.push_surface(
+            rt,
+            dx + dialog_w - 220.0,
+            btn_y,
+            BUTTON_WIDTH,
+            BUTTON_HEIGHT,
+            4.0,
+            Surface::Panel,
+        );
         rt.push(RenderCommand::Text {
             x: dx + dialog_w - 200.0,
             y: btn_y + 8.0,
@@ -4542,14 +4546,15 @@ impl SystemRestoreUI {
             });
 
             // Tip: create a snapshot before restoring.
-            rt.push(RenderCommand::FillRect {
-                x: dx + PADDING,
-                y: dy + 140.0,
-                width: dialog_w - 2.0 * PADDING,
-                height: 28.0,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            self.palette.push_surface(
+                rt,
+                dx + PADDING,
+                dy + 140.0,
+                dialog_w - 2.0 * PADDING,
+                28.0,
+                4.0,
+                Surface::Panel,
+            );
             rt.push(RenderCommand::Text {
                 x: dx + PADDING + 8.0,
                 y: dy + 146.0,
@@ -4564,14 +4569,15 @@ impl SystemRestoreUI {
 
         // Buttons.
         let btn_y = dy + dialog_h - 40.0;
-        rt.push(RenderCommand::FillRect {
-            x: dx + dialog_w - 220.0,
-            y: btn_y,
-            width: BUTTON_WIDTH,
-            height: BUTTON_HEIGHT,
-            color: self.palette.surface1,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        self.palette.push_surface(
+            rt,
+            dx + dialog_w - 220.0,
+            btn_y,
+            BUTTON_WIDTH,
+            BUTTON_HEIGHT,
+            4.0,
+            Surface::Panel,
+        );
         rt.push(RenderCommand::Text {
             x: dx + dialog_w - 200.0,
             y: btn_y + 8.0,
@@ -4662,14 +4668,15 @@ impl SystemRestoreUI {
         }
 
         let btn_y = dy + dialog_h - 40.0;
-        rt.push(RenderCommand::FillRect {
-            x: dx + dialog_w - 220.0,
-            y: btn_y,
-            width: BUTTON_WIDTH,
-            height: BUTTON_HEIGHT,
-            color: self.palette.surface1,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        self.palette.push_surface(
+            rt,
+            dx + dialog_w - 220.0,
+            btn_y,
+            BUTTON_WIDTH,
+            BUTTON_HEIGHT,
+            4.0,
+            Surface::Panel,
+        );
         rt.push(RenderCommand::Text {
             x: dx + dialog_w - 200.0,
             y: btn_y + 8.0,
@@ -4747,14 +4754,15 @@ impl SystemRestoreUI {
         });
 
         // Path field.
-        rt.push(RenderCommand::FillRect {
-            x: dx + PADDING,
-            y: dy + 80.0,
-            width: dialog_w - 2.0 * PADDING,
-            height: 28.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        self.palette.push_surface(
+            rt,
+            dx + PADDING,
+            dy + 80.0,
+            dialog_w - 2.0 * PADDING,
+            28.0,
+            4.0,
+            Surface::Panel,
+        );
         rt.push(RenderCommand::Text {
             x: dx + PADDING + 8.0,
             y: dy + 86.0,
@@ -4767,14 +4775,15 @@ impl SystemRestoreUI {
         });
 
         let btn_y = dy + dialog_h - 40.0;
-        rt.push(RenderCommand::FillRect {
-            x: dx + dialog_w - 220.0,
-            y: btn_y,
-            width: BUTTON_WIDTH,
-            height: BUTTON_HEIGHT,
-            color: self.palette.surface1,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        self.palette.push_surface(
+            rt,
+            dx + dialog_w - 220.0,
+            btn_y,
+            BUTTON_WIDTH,
+            BUTTON_HEIGHT,
+            4.0,
+            Surface::Panel,
+        );
         rt.push(RenderCommand::Text {
             x: dx + dialog_w - 200.0,
             y: btn_y + 8.0,
@@ -4852,14 +4861,15 @@ impl SystemRestoreUI {
         });
 
         // Path field.
-        rt.push(RenderCommand::FillRect {
-            x: dx + PADDING,
-            y: dy + 80.0,
-            width: dialog_w - 2.0 * PADDING,
-            height: 28.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        self.palette.push_surface(
+            rt,
+            dx + PADDING,
+            dy + 80.0,
+            dialog_w - 2.0 * PADDING,
+            28.0,
+            4.0,
+            Surface::Panel,
+        );
         rt.push(RenderCommand::Text {
             x: dx + PADDING + 8.0,
             y: dy + 86.0,
@@ -4872,14 +4882,15 @@ impl SystemRestoreUI {
         });
 
         let btn_y = dy + dialog_h - 40.0;
-        rt.push(RenderCommand::FillRect {
-            x: dx + dialog_w - 220.0,
-            y: btn_y,
-            width: BUTTON_WIDTH,
-            height: BUTTON_HEIGHT,
-            color: self.palette.surface1,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        self.palette.push_surface(
+            rt,
+            dx + dialog_w - 220.0,
+            btn_y,
+            BUTTON_WIDTH,
+            BUTTON_HEIGHT,
+            4.0,
+            Surface::Panel,
+        );
         rt.push(RenderCommand::Text {
             x: dx + dialog_w - 200.0,
             y: btn_y + 8.0,

@@ -5,6 +5,7 @@
 //! batch operations, statistics, and export/import. Inspired by CopyQ and Ditto.
 
 use appearance::Palette;
+use appearance::Surface;
 use std::collections::{HashSet, VecDeque};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -1206,14 +1207,9 @@ fn field_border(focused: bool, pal: &Palette) -> Color {
 fn render_search_bar(frame: &mut Frame, state: &AppState, x: f32, y: f32, w: f32, h: f32) {
     let focused = state.focus == Some(Field::Search);
     let box_rect = Rect::new(x, y, w, h);
-    frame.push(RenderCommand::FillRect {
-        x,
-        y,
-        width: w,
-        height: h,
-        color: state.palette.surface0,
-        corner_radii: CornerRadii::all(6.0),
-    });
+    state
+        .palette
+        .push_surface(frame, x, y, w, h, 6.0, Surface::Card);
     if focused {
         frame.push(RenderCommand::StrokeRect {
             x,
@@ -1273,14 +1269,15 @@ fn render_search_bar(frame: &mut Frame, state: &AppState, x: f32, y: f32, w: f32
         .type_filter
         .map_or(state.palette.overlay0, |t| t.badge_color(&state.palette));
     let badge = Rect::new(x + w - 100.0, y + 7.0, 80.0, 22.0);
-    frame.push(RenderCommand::FillRect {
-        x: badge.x,
-        y: badge.y,
-        width: badge.w,
-        height: badge.h,
-        color: state.palette.surface1,
-        corner_radii: CornerRadii::all(4.0),
-    });
+    state.palette.push_surface(
+        frame,
+        badge.x,
+        badge.y,
+        badge.w,
+        badge.h,
+        4.0,
+        Surface::Card,
+    );
     frame.push(RenderCommand::Text {
         x: badge.x + 8.0,
         y: badge.y + 4.0,
@@ -1314,14 +1311,15 @@ fn render_tab_bar(frame: &mut Frame, state: &AppState, x: f32, y: f32, w: f32, h
         let is_active = state.active_tab == tab;
         let rect = Rect::new(tx, y + 2.0, TAB_W, h - 4.0);
         if is_active {
-            frame.push(RenderCommand::FillRect {
-                x: rect.x,
-                y: rect.y,
-                width: rect.w,
-                height: rect.h,
-                color: state.palette.surface0,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            state.palette.push_surface(
+                frame,
+                rect.x,
+                rect.y,
+                rect.w,
+                rect.h,
+                4.0,
+                Surface::Selected,
+            );
         }
         frame.push(RenderCommand::Text {
             x: rect.x + 16.0,
@@ -1371,18 +1369,19 @@ fn render_tag_strip(frame: &mut Frame, state: &AppState, x: f32, y: f32, w: f32,
 
     let mut tx = x + 40.0;
     let all = Rect::new(tx, y + 3.0, 36.0, 19.0);
-    frame.push(RenderCommand::FillRect {
-        x: all.x,
-        y: all.y,
-        width: all.w,
-        height: all.h,
-        color: if state.tag_filter.is_none() {
-            state.palette.surface1
+    state.palette.push_surface(
+        frame,
+        all.x,
+        all.y,
+        all.w,
+        all.h,
+        3.0,
+        if state.tag_filter.is_none() {
+            Surface::Selected
         } else {
-            state.palette.mantle
+            Surface::Card
         },
-        corner_radii: CornerRadii::all(3.0),
-    });
+    );
     frame.push(RenderCommand::Text {
         x: all.x + 7.0,
         y: all.y + 4.0,
@@ -1404,18 +1403,19 @@ fn render_tag_strip(frame: &mut Frame, state: &AppState, x: f32, y: f32, w: f32,
         let chip_w = text::padded_width(tag, 8.0, 10.0, FontWeightHint::Regular);
         let chip = Rect::new(tx, y + 3.0, chip_w, 19.0);
         let active = state.tag_filter.as_deref() == Some(tag.as_str());
-        frame.push(RenderCommand::FillRect {
-            x: chip.x,
-            y: chip.y,
-            width: chip.w,
-            height: chip.h,
-            color: if active {
-                state.palette.surface1
+        state.palette.push_surface(
+            frame,
+            chip.x,
+            chip.y,
+            chip.w,
+            chip.h,
+            3.0,
+            if active {
+                Surface::Selected
             } else {
-                state.palette.mantle
+                Surface::Card
             },
-            corner_radii: CornerRadii::all(3.0),
-        });
+        );
         frame.push(RenderCommand::Text {
             x: chip.x + 6.0,
             y: chip.y + 4.0,
@@ -1444,14 +1444,9 @@ fn render_history_panel(frame: &mut Frame, state: &AppState, rect: Rect, visible
     let list_w = w * 0.55;
     let detail_w = (w - list_w - 8.0).max(0.0);
 
-    frame.push(RenderCommand::FillRect {
-        x,
-        y,
-        width: list_w,
-        height: h,
-        color: state.palette.surface0,
-        corner_radii: CornerRadii::all(6.0),
-    });
+    state
+        .palette
+        .push_surface(frame, x, y, list_w, h, 6.0, Surface::Card);
 
     // The clip is what keeps a half-scrolled row from taking clicks where it
     // is not drawn: `Frame::hit` intersects with it.
@@ -1506,14 +1501,9 @@ fn render_history_panel(frame: &mut Frame, state: &AppState, rect: Rect, visible
     frame.push(RenderCommand::PopClip);
 
     let detail_x = x + list_w + 8.0;
-    frame.push(RenderCommand::FillRect {
-        x: detail_x,
-        y,
-        width: detail_w,
-        height: h,
-        color: state.palette.surface0,
-        corner_radii: CornerRadii::all(6.0),
-    });
+    state
+        .palette
+        .push_surface(frame, detail_x, y, detail_w, h, 6.0, Surface::Card);
 
     match state.selected_id.and_then(|id| state.store.get(id)) {
         Some(entry) => render_detail_panel(
@@ -1558,18 +1548,19 @@ fn render_entry_row(
 ) {
     let Rect { x, y, w, h } = rect;
 
-    frame.push(RenderCommand::FillRect {
+    pal.push_surface(
+        frame,
         x,
         y,
-        width: w,
-        height: h,
-        color: if flags.selected {
-            pal.surface1
+        w,
+        h,
+        4.0,
+        if flags.selected {
+            Surface::Selected
         } else {
-            pal.surface0
+            Surface::Card
         },
-        corner_radii: CornerRadii::all(4.0),
-    });
+    );
 
     if flags.selected {
         frame.push(RenderCommand::FillRect {
@@ -1748,14 +1739,7 @@ fn render_detail_panel(
         for (index, tag) in entry.tags.iter().enumerate() {
             let tag_w = text::padded_width(tag, 8.0, 10.0, FontWeightHint::Regular);
             let chip = Rect::new(tx, cy, tag_w, 18.0);
-            frame.push(RenderCommand::FillRect {
-                x: chip.x,
-                y: chip.y,
-                width: chip.w,
-                height: chip.h,
-                color: pal.surface1,
-                corner_radii: CornerRadii::all(3.0),
-            });
+            pal.push_surface(frame, chip.x, chip.y, chip.w, chip.h, 3.0, Surface::Card);
             frame.push(RenderCommand::Text {
                 x: chip.x + 6.0,
                 y: chip.y + 3.0,
@@ -1775,14 +1759,15 @@ fn render_detail_panel(
     // Tag entry: a box that takes the keyboard and a button that commits it.
     let add_w = 44.0_f32;
     let field = Rect::new(x + pad, cy, (w - pad * 2.0 - add_w - 6.0).max(0.0), 20.0);
-    frame.push(RenderCommand::FillRect {
-        x: field.x,
-        y: field.y,
-        width: field.w,
-        height: field.h,
-        color: pal.mantle,
-        corner_radii: CornerRadii::all(3.0),
-    });
+    pal.push_surface(
+        frame,
+        field.x,
+        field.y,
+        field.w,
+        field.h,
+        3.0,
+        Surface::Card,
+    );
     frame.push(RenderCommand::StrokeRect {
         x: field.x,
         y: field.y,
@@ -1816,14 +1801,7 @@ fn render_detail_panel(
     frame.hit(Target::TagField, field);
 
     let add = Rect::new(field.right() + 6.0, cy, add_w, 20.0);
-    frame.push(RenderCommand::FillRect {
-        x: add.x,
-        y: add.y,
-        width: add.w,
-        height: add.h,
-        color: pal.surface1,
-        corner_radii: CornerRadii::all(3.0),
-    });
+    pal.push_surface(frame, add.x, add.y, add.w, add.h, 3.0, Surface::Card);
     frame.push(RenderCommand::Text {
         x: add.x + 8.0,
         y: add.y + 4.0,
@@ -1840,14 +1818,7 @@ fn render_detail_panel(
     if (entry.clip_type == ClipType::Code || entry.clip_type == ClipType::PlainText)
         && let Some(lang) = detect_code_language(&entry.content)
     {
-        frame.push(RenderCommand::FillRect {
-            x: x + pad,
-            y: cy,
-            width: 100.0,
-            height: 18.0,
-            color: pal.surface1,
-            corner_radii: CornerRadii::all(3.0),
-        });
+        pal.push_surface(frame, x + pad, cy, 100.0, 18.0, 3.0, Surface::Card);
         frame.push(RenderCommand::Text {
             x: x + pad + 6.0,
             y: cy + 3.0,
@@ -1903,14 +1874,9 @@ fn render_detail_panel(
 }
 
 fn render_templates_panel(frame: &mut Frame, state: &AppState, x: f32, y: f32, w: f32, h: f32) {
-    frame.push(RenderCommand::FillRect {
-        x,
-        y,
-        width: w,
-        height: h,
-        color: state.palette.surface0,
-        corner_radii: CornerRadii::all(6.0),
-    });
+    state
+        .palette
+        .push_surface(frame, x, y, w, h, 6.0, Surface::Card);
 
     frame.push(RenderCommand::PushClip {
         x,
@@ -1950,18 +1916,19 @@ fn render_templates_panel(frame: &mut Frame, state: &AppState, x: f32, y: f32, w
         for (idx, tmpl) in state.store.templates.iter().enumerate() {
             let is_sel = state.selected_template == Some(idx);
             let row = Rect::new(x + pad, cy, (w - pad * 2.0).max(0.0), 32.0);
-            frame.push(RenderCommand::FillRect {
-                x: row.x,
-                y: row.y,
-                width: row.w,
-                height: row.h,
-                color: if is_sel {
-                    state.palette.surface1
+            state.palette.push_surface(
+                frame,
+                row.x,
+                row.y,
+                row.w,
+                row.h,
+                4.0,
+                if is_sel {
+                    Surface::Selected
                 } else {
-                    state.palette.surface0
+                    Surface::Card
                 },
-                corner_radii: CornerRadii::all(4.0),
-            });
+            );
             frame.push(RenderCommand::Text {
                 x: row.x + 8.0,
                 y: row.y + 8.0,
@@ -2010,14 +1977,9 @@ fn render_templates_panel(frame: &mut Frame, state: &AppState, x: f32, y: f32, w
             Target::DeleteTemplate,
         ),
     ] {
-        frame.push(RenderCommand::FillRect {
-            x: rect.x,
-            y: rect.y,
-            width: rect.w,
-            height: rect.h,
-            color: state.palette.surface1,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        state
+            .palette
+            .push_surface(frame, rect.x, rect.y, rect.w, rect.h, 4.0, Surface::Card);
         frame.push(RenderCommand::Text {
             x: rect.x + 12.0,
             y: rect.y + 6.0,
@@ -2104,14 +2066,9 @@ fn render_templates_panel(frame: &mut Frame, state: &AppState, x: f32, y: f32, w
     );
 
     let save = Rect::new(x + pad, cy, BUTTON_W, 24.0);
-    frame.push(RenderCommand::FillRect {
-        x: save.x,
-        y: save.y,
-        width: save.w,
-        height: save.h,
-        color: state.palette.surface1,
-        corner_radii: CornerRadii::all(4.0),
-    });
+    state
+        .palette
+        .push_surface(frame, save.x, save.y, save.w, save.h, 4.0, Surface::Card);
     frame.push(RenderCommand::Text {
         x: save.x + 12.0,
         y: save.y + 6.0,
@@ -2162,14 +2119,7 @@ fn render_template_field(
     });
 
     let rect = Rect::new(x + 60.0, y - 2.0, (w - 60.0).max(0.0), field.height);
-    frame.push(RenderCommand::FillRect {
-        x: rect.x,
-        y: rect.y,
-        width: rect.w,
-        height: rect.h,
-        color: pal.mantle,
-        corner_radii: CornerRadii::all(3.0),
-    });
+    pal.push_surface(frame, rect.x, rect.y, rect.w, rect.h, 3.0, Surface::Card);
     frame.push(RenderCommand::StrokeRect {
         x: rect.x,
         y: rect.y,
@@ -2227,14 +2177,9 @@ fn render_toolbar(frame: &mut Frame, state: &AppState, x: f32, y: f32, w: f32, h
         ("Import", state.palette.mauve, Target::ImportSelected),
     ] {
         let rect = Rect::new(bx, y + 5.0, BUTTON_W, (h - 10.0).max(0.0));
-        frame.push(RenderCommand::FillRect {
-            x: rect.x,
-            y: rect.y,
-            width: rect.w,
-            height: rect.h,
-            color: state.palette.surface1,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        state
+            .palette
+            .push_surface(frame, rect.x, rect.y, rect.w, rect.h, 4.0, Surface::Card);
         frame.push(RenderCommand::Text {
             x: rect.x + 10.0,
             y: y + 11.0,
@@ -2266,14 +2211,9 @@ fn render_toolbar(frame: &mut Frame, state: &AppState, x: f32, y: f32, w: f32, h
 }
 
 fn render_stats_bar(frame: &mut Frame, state: &AppState, x: f32, y: f32, w: f32, h: f32) {
-    frame.push(RenderCommand::FillRect {
-        x,
-        y,
-        width: w,
-        height: h,
-        color: state.palette.mantle,
-        corner_radii: CornerRadii::all(3.0),
-    });
+    state
+        .palette
+        .push_surface(frame, x, y, w, h, 3.0, Surface::Card);
 
     frame.push(RenderCommand::Text {
         x: x + 10.0,

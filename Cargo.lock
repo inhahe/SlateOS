@@ -3025,13 +3025,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "uname"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "undelete"
 version = "0.1.0"
 dependencies = [

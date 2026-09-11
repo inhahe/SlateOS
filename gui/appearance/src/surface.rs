@@ -19,6 +19,39 @@ use guitk::color::Color;
 use guitk::render::RenderTree;
 use guitk::style::CornerRadii;
 
+/// Somewhere render commands can be sent.
+///
+/// The tree emits into four different receivers -- `Vec<RenderCommand>` at
+/// 1,258 sites, `Frame` at 299, `RenderTree` at 247, and assorted others -- and
+/// `Frame::push` is not a plain append: it tracks the clip stack, so writing to
+/// its inner buffer would lose that. One small trait lets every converted draw
+/// site stay a single line regardless of what it is drawing into, which matters
+/// when there are 991 of them.
+pub trait CommandSink {
+    /// Emit one command.
+    fn emit(&mut self, cmd: guitk::render::RenderCommand);
+}
+
+impl CommandSink for Vec<guitk::render::RenderCommand> {
+    fn emit(&mut self, cmd: guitk::render::RenderCommand) {
+        self.push(cmd);
+    }
+}
+
+impl CommandSink for RenderTree {
+    fn emit(&mut self, cmd: guitk::render::RenderCommand) {
+        self.push(cmd);
+    }
+}
+
+impl<T> CommandSink for guitk::frame::Frame<T> {
+    fn emit(&mut self, cmd: guitk::render::RenderCommand) {
+        // Through `push`, never into the buffer behind it: this one maintains
+        // the clip stack as it goes.
+        self.push(cmd);
+    }
+}
+
 /// What a box *is*, which is what a draw site knows.
 ///
 /// Deliberately not a list of shades. A caller that knew it wanted `surface1`
@@ -138,9 +171,9 @@ impl Palette {
     /// spell it `cmds.push`, 299 `frame.push`, 57 `commands.push`. A
     /// `RenderTree` caller passes `&mut tree.commands`, which is exactly what
     /// `RenderTree::push` does anyway.
-    pub fn push_surface(
+    pub fn push_surface<S: CommandSink + ?Sized>(
         &self,
-        out: &mut Vec<guitk::render::RenderCommand>,
+        out: &mut S,
         x: f32,
         y: f32,
         width: f32,
@@ -151,7 +184,7 @@ impl Palette {
         let paint = self.surface_paint(what);
         let radii = CornerRadii::all(radius);
         if let Some(fill) = paint.fill {
-            out.push(guitk::render::RenderCommand::FillRect {
+            out.emit(guitk::render::RenderCommand::FillRect {
                 x,
                 y,
                 width,
@@ -165,7 +198,7 @@ impl Palette {
             // the caller asked for. Without this a bordered row is a pixel
             // taller than the filled row it replaces, and a column of them
             // drifts -- invisible in one row, obvious down a page.
-            out.push(guitk::render::RenderCommand::StrokeRect {
+            out.emit(guitk::render::RenderCommand::StrokeRect {
                 x: x + 0.5,
                 y: y + 0.5,
                 width: (width - 1.0).max(0.0),
@@ -193,7 +226,7 @@ impl Palette {
         radius: f32,
         what: Surface,
     ) {
-        self.push_surface(&mut tree.commands, x, y, width, height, radius, what);
+        self.push_surface(tree, x, y, width, height, radius, what);
     }
 }
 
@@ -290,7 +323,6 @@ mod tests {
     /// outlined has vanished, which is the one outcome worse than either theme.
     #[test]
     fn no_surface_is_invisible_in_either_theme() {
-        let p = light();
         for style in [SurfaceStyle::Borders, SurfaceStyle::Cards] {
             for what in [
                 Surface::Card,

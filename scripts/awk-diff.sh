@@ -73,6 +73,10 @@ set -u
 # Into WSL, build ours for Linux, find gawk, and put both behind the one name
 # `awk` so `argv[0]` matches. See `scripts/diff-wsl.sh`.
 DIFF_PROG='awk'
+# Declared because every invocation below is bounded with it; see `run_side`.
+# Without this the harness would run on a host lacking `timeout` and silently
+# lose its only protection against a subject that does not terminate.
+DIFF_NEED=timeout
 # `command -v awk` is not good enough: on a Debian-family system `/usr/bin/awk`
 # is whatever `update-alternatives` last pointed at, and mawk is a legitimate
 # answer. mawk is not the reference — it has no `--posix`, no `ENVIRON`
@@ -119,16 +123,35 @@ printf '#!/usr/bin/awk -f\nBEGIN { print "shebang" }\n'      > p3.awk
 # `print | "cmd"`, `"cmd" | getline`), and with a one-entry PATH every such
 # case degenerates into two shells agreeing that `cat` does not exist — which
 # is a comparison of the harness against itself.
+# Every invocation is bounded, on BOTH sides, the way `tsort-diff.sh` and 30
+# other harnesses here already do it.
+#
+# The reason is specific and was paid for. `awk` is a programming language, so a
+# subject that never terminates is not an exotic input, it is a normal one --
+# and the standalone `awk` hung on `getline`, which is about as ordinary as awk
+# gets. Unbounded, that stopped the whole run: two attempts left `awk` processes
+# alive inside WSL for 35 and 25 minutes, and killing the hung *case* only let
+# the harness advance to the next `getline` and hang again.
+#
+# The reference is wrapped too, and that is not symmetry for its own sake --
+# `tsort-diff.sh` puts it best: "a harness that only bounded our side would hang
+# on the day the reference was the buggy one."
+#
+# 30 seconds, `-k 2`: every case here is a few lines of input, so a subject
+# still running after half a minute is not slow, it is stuck. `diff_run` keeps
+# bash's own announcement of a signalled child out of the captured stderr.
 run_side() {
   local side=$1 stdin=$2 out=$3 err=$4; shift 4
   local flags=
   [ "$side" = gnu ] && flags=$GNUFLAGS
   if [ "$stdin" = "-" ]; then
     # shellcheck disable=SC2086
-    env PATH="$bindir/$side:/usr/bin:/bin" awk $flags "$@" </dev/null >"$out" 2>"$err"
+    diff_run timeout -k 2 30 env PATH="$bindir/$side:/usr/bin:/bin" awk $flags "$@" \
+      </dev/null >"$out" 2>"$err"
   else
     # shellcheck disable=SC2086
-    env PATH="$bindir/$side:/usr/bin:/bin" awk $flags "$@" <"$stdin" >"$out" 2>"$err"
+    diff_run timeout -k 2 30 env PATH="$bindir/$side:/usr/bin:/bin" awk $flags "$@" \
+      <"$stdin" >"$out" 2>"$err"
   fi
 }
 

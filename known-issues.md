@@ -38,9 +38,34 @@ freely. See `roadmap.md` → "Three-Agent Parallel Execution" rule 3, and
 
 ## TD-B-DIFF-HARNESSES-HAVE-NO-PER-CASE-BOUND-AND-ORPHAN-ACROSS-WSL (lane B, 2026-09-11)
 
-**What.** None of the 50-odd `scripts/<name>-diff.sh` harnesses bounds an
+**What.** 28 of the 59 `scripts/<name>-diff.sh` harnesses do not bound an
 individual case. One subject that does not terminate stops the whole run, and
 the processes survive every kill available from the Windows side.
+
+**CORRECTION (2026-09-11, same day).** This entry first said *none* of the
+harnesses bounds a case. That was asserted without measuring and is false:
+**31 of 59 already do**, through a pattern this tree established long ago --
+`DIFF_NEED=timeout` in the header, and `timeout -k 2 30` inside the harness's
+own `run_side`. `tsort-diff.sh` even explains why it bounds the *reference*
+too: "a harness that only bounded our side would hang on the day the reference
+was the buggy one."
+
+The wrong premise was the expensive part, not the wrong sentence. It led to
+the elaborate fix proposed below -- wrapping `diff-wsl.sh`'s `$bindir`
+symlinks -- together with a real trap in it. All of that was designing a
+solution to a problem already solved 31 times a few files away. **The actual
+fix is to copy the existing pattern into the 28 that lack it**, which needs no
+shared machinery touched and carries none of that risk.
+
+The 28 without a bound: `all`, `awk`, `calc`, `cat`, `csplit`, `cut`, `df`,
+`du`, `ed`, `expr`, `extfloat`, `find`, `head`, `interleave`, `ls`, `more`,
+`nl`, `od`, `sed`, `sh`, `sort`, `split`, `tar`, `test`, `tr`, `uniq`, `wc`,
+`xargs`. Several of those are interpreters (`awk`, `ed`, `sh`, `expr`, `calc`)
+where a non-terminating program is not an exotic input but a normal one.
+
+*What made me assert it: I grepped `diff-wsl.sh` for `timeout`, found none,
+and concluded the family had no bound. The bound is in the harnesses, not the
+library. Absence of evidence where I chose to look.*
 
 **How it showed up.** `DIFF_PKG=awk bash scripts/awk-diff.sh` reached
 
@@ -72,7 +97,12 @@ the real work running. **A process-tree killer does not cross the WSL
 boundary** — worth knowing for any tooling here that shells into WSL, not just
 these harnesses.
 
-**The proper fix.** A bound on the far side of the boundary, where the processes
+**The fix, superseded — see the correction above.** Copy the existing
+`DIFF_NEED=timeout` + `timeout -k 2 30` pattern into the 28 harnesses that lack
+it. What follows was written before I measured, and is kept only because the
+argv[0] trap in it is real and would bite anyone who tried the clever version:
+
+**The superseded idea.** A bound on the far side of the boundary, where the processes
 actually are: each case invoked under `timeout` inside WSL. The clean place is
 `diff-wsl.sh`'s `$bindir` construction — four `ln -s` calls that build
 `$bindir/{ours,gnu}/NAME` — since every harness reaches its subject through

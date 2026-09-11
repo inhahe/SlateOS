@@ -303,7 +303,19 @@ struct DynEntry {
 /// A symbol from .dynsym.  We only need name, binding/type info, and section index.
 #[derive(Debug, Clone)]
 struct DynSym {
-    name: String,
+    /// The symbol's name, or `None` when the string table could not supply it.
+    ///
+    /// `None` IS NOT THE EMPTY NAME. `st_name == 0` points at the string
+    /// table's leading NUL and means "this symbol has no name" -- a section
+    /// symbol, say -- which `strtab_get` returns as `Ok("")`. An offset PAST
+    /// the end of the table means the table is malformed and the name is
+    /// unknown, which it returns as `Err`.
+    ///
+    /// Both used to become `String::new()` via `unwrap_or_default()`, and the
+    /// consumer below drops empty names, so a symbol whose name could not be
+    /// read vanished from `ldd -r`'s undefined-symbol report -- leaving a
+    /// binary with a corrupt `.dynstr` looking like one with nothing missing.
+    name: Option<String>,
     st_info: u8,
     st_shndx: u16,
 }
@@ -866,7 +878,7 @@ fn parse_dynsym_entries(data: &[u8], strtab: &[u8], class: u8, le: bool) -> Resu
             let name_off = read_u32(data, base, le)? as usize;
             let st_info = data[base + 4];
             let st_shndx = read_u16(data, base + 6, le)?;
-            let name = strtab_get(strtab, name_off).unwrap_or_default();
+            let name = strtab_get(strtab, name_off).ok();
             DynSym {
                 name,
                 st_info,
@@ -878,7 +890,7 @@ fn parse_dynsym_entries(data: &[u8], strtab: &[u8], class: u8, le: bool) -> Resu
             let name_off = read_u32(data, base, le)? as usize;
             let st_info = data[base + 12];
             let st_shndx = read_u16(data, base + 14, le)?;
-            let name = strtab_get(strtab, name_off).unwrap_or_default();
+            let name = strtab_get(strtab, name_off).ok();
             DynSym {
                 name,
                 st_info,
@@ -1365,10 +1377,21 @@ fn find_unused_deps(
 ) -> Vec<String> {
     // Collect undefined symbols from .dynsym.
     let dynsyms = elf.parse_dynsym().unwrap_or_default();
+
+    // A NAME WE COULD NOT READ MAKES THIS WHOLE ANSWER UNSAFE. This function
+    // reports which direct dependencies are UNUSED, and it proves that by
+    // showing no undefined symbol needs them. A symbol whose name is unknown
+    // could be the one a library provides, so with any of those present the
+    // honest answer is "I cannot tell you any of them are unused" -- not a
+    // shorter list arrived at by ignoring the symbols we failed to read.
+    if dynsyms.iter().any(|s| s.is_undefined() && s.name.is_none()) {
+        return Vec::new();
+    }
+
     let undefined_syms: HashSet<&str> = dynsyms
         .iter()
-        .filter(|s| s.is_undefined() && !s.name.is_empty())
-        .map(|s| s.name.as_str())
+        .filter(|s| s.is_undefined() && s.name.as_ref().is_some_and(|n| !n.is_empty()))
+        .filter_map(|s| s.name.as_deref())
         .collect();
 
     if undefined_syms.is_empty() {
@@ -1402,7 +1425,7 @@ fn find_unused_deps(
                     .filter(|s| {
                         !s.is_undefined() && (s.binding() == STB_GLOBAL || s.binding() == STB_WEAK)
                     })
-                    .map(|s| s.name)
+                    .filter_map(|s| s.name)
                     .collect()
             })
             .unwrap_or_default();
@@ -1428,7 +1451,14 @@ fn print_relocs(out: &mut impl Write, elf: &Elf) -> io::Result<()> {
     let dynstr = elf.dynstr_section();
 
     // Helper: look up a symbol name by index.
-    let sym_name = |idx: usize| -> &str { dynsyms.get(idx).map_or("", |s| s.name.as_str()) };
+    // `?` rather than "" for a name that could not be read: a relocation
+    // against an unnamed symbol and one against an unreadable name print
+    // differently, which is the whole point.
+    let sym_name = |idx: usize| -> &str {
+        dynsyms
+            .get(idx)
+            .map_or("", |s| s.name.as_deref().unwrap_or("?"))
+    };
 
     writeln!(out, "\nRelocations:")?;
 
@@ -1910,6 +1940,22 @@ mod tests {
     fn test_read_u32_truncated() {
         let data = [0x01u8, 0x02, 0x03];
         assert!(read_u32(&data, 0, true).is_err());
+    }
+
+    /// The distinction `DynSym.name` exists to carry.
+    ///
+    /// Both of these used to reach `unwrap_or_default()` and come out as the
+    /// same empty `String`, and the undefined-symbol report drops empty names
+    /// -- so a binary whose `.dynstr` is malformed reported nothing missing.
+    #[test]
+    fn an_unnamed_symbol_and_an_unreadable_one_are_not_the_same() {
+        let table = b" libfoo.so.1 ";
+        // `st_name == 0` points at the leading NUL: a symbol with no name.
+        // That is a real answer, and `.ok()` keeps it as one.
+        assert_eq!(strtab_get(table, 0).ok(), Some(String::new()));
+        // An offset past the end of the table is a malformed table. The name
+        // is unknown, and `.ok()` says so rather than inventing an empty one.
+        assert_eq!(strtab_get(table, 100).ok(), None);
     }
 
     #[test]

@@ -53,8 +53,6 @@ hwinfo: fs::read_to_string(path) .unwrap_or_default()
 install: std::env::var("TARGET").unwrap_or_default()
 ldd: strtab_get(dynstr, vn_file).unwrap_or_default()
 ldd: strtab_get(dynstr, vna_name).unwrap_or_default()
-ldd: strtab_get(strtab, name_off).unwrap_or_default()
-ldd: strtab_get(strtab, name_off).unwrap_or_default()  [2]
 losetup: std::env::var("TARGET").unwrap_or_default()
 lsblk: read_file(&format!("{dev_path}/device/model")).unwrap_or_default()
 lsblk: read_file(&format!("{dev_path}/device/serial")).unwrap_or_default()

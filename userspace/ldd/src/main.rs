@@ -1326,7 +1326,12 @@ fn print_version_info(out: &mut impl Write, elf: &Elf) -> io::Result<()> {
             break;
         };
 
-        let file_name = strtab_get(dynstr, vn_file).unwrap_or_default();
+        // `?` for a name the string table could not supply, matching
+        // `sym_name` in this file. `.unwrap_or_default()` printed a bare
+        // "	:" -- a version requirement attributed to no library at all,
+        // which reads as a formatting glitch rather than as a malformed
+        // `.dynstr`.
+        let file_name = strtab_get(dynstr, vn_file).unwrap_or_else(|_| "?".to_string());
         writeln!(out, "\t{file_name}:")?;
 
         // Walk auxiliary records: vna_hash(4), vna_flags(2), vna_other(2),
@@ -1343,7 +1348,7 @@ fn print_version_info(out: &mut impl Write, elf: &Elf) -> io::Result<()> {
             let Ok(vna_next) = read_u32(data, aux_pos + 12, le) else {
                 break;
             };
-            let ver_name = strtab_get(dynstr, vna_name).unwrap_or_default();
+            let ver_name = strtab_get(dynstr, vna_name).unwrap_or_else(|_| "?".to_string());
             writeln!(out, "\t\t{ver_name} ({file_name}) => found")?;
             if vna_next == 0 {
                 break;

@@ -49,8 +49,8 @@ coreutils: sprintf(b"%.6g", &[Value::Num(n)], b"%.6g").unwrap_or_default()
 coreutils: std::env::var("TARGET").unwrap_or_default()
 cpupower: read_sysfs_string(&format!("{}/scaling_available_frequencies", base)) .unwrap_or_default()
 cpupower: read_sysfs_string(&format!("{}/scaling_available_governors", base)).unwrap_or_default()
-diskutil: read_file(&format!("{dev_path}/device/model")).unwrap_or_default()
-diskutil: read_file(&format!("{dev_path}/device/serial")).unwrap_or_default()
+diskutil: read_file(&format!("{dev_path}/device/model")).unwrap_or_default()  # examined 2026-09-11: the Model line is printed only when non-empty, and loop/dm devices have none
+diskutil: read_file(&format!("{dev_path}/device/serial")).unwrap_or_default()  # examined 2026-09-11: as above
 dmesg: extract_json_string(line, "level").unwrap_or_default()  # examined 2026-09-11: "" reaches LogLevel::from_str and becomes Unknown
 dmesg: extract_json_string(line, "service").unwrap_or_default()
 efibootmgr: read_efi_var("BootOrder").unwrap_or_default()
@@ -61,8 +61,6 @@ fuser: fs::read_to_string(format!("/proc/{pid}/comm")) .unwrap_or_default()
 hostname: read_hostname().unwrap_or_default()
 hwinfo: fs::read_to_string(path) .unwrap_or_default()
 install: std::env::var("TARGET").unwrap_or_default()
-ldd: strtab_get(dynstr, vn_file).unwrap_or_default()
-ldd: strtab_get(dynstr, vna_name).unwrap_or_default()
 losetup: std::env::var("TARGET").unwrap_or_default()
 lsblk: read_file(&format!("{dev_path}/device/model")).unwrap_or_default()  # examined 2026-09-11: an empty Model column is right for loop/dm devices, which have none
 lsblk: read_file(&format!("{dev_path}/device/serial")).unwrap_or_default()  # examined 2026-09-11: as above
@@ -88,8 +86,8 @@ oils: std::env::var_os("PATH").unwrap_or_default()  # examined 2026-09-11: var_o
 passwd: text(raw, idx).unwrap_or_default()
 pkg: extract_string(line, "\"desc\":\"").unwrap_or_default()
 powerctl: read_file(&format!("{base}/type")).unwrap_or_default()
-pwdb: std::fs::read(group).unwrap_or_default()
-pwdb: std::fs::read(passwd).unwrap_or_default()
+pwdb: std::fs::read(group).unwrap_or_default()  # examined 2026-09-11: as above
+pwdb: std::fs::read(passwd).unwrap_or_default()  # examined 2026-09-11: from_files' docstring argues this -- an unreadable database is empty, as glibc does, so ls -l still lists a directory with numeric ids
 rfkill: read_sysfs(&base.join("type")).unwrap_or_default()
 sha256sum: std::env::var("TARGET").unwrap_or_default()
 shell: std::env::var("TARGET").unwrap_or_default()

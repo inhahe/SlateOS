@@ -64640,6 +64640,40 @@ are wrong in whatever way nobody tested.
 `userspace/tr` deleted; lint exemptions 125 -> 124, argv-utf8 221 -> 220,
 collisions 36 -> 35.
 
+**35 -> 34 (2026-09-11): `nl`.** The last of the five the survey first ranked
+backwards, and the worst pair so far: 43 cases, **coreutils 43/43, the
+standalone 21/43** — under half, with the DEFAULT invocation among the
+failures.
+
+Seven of the 22 are message wording. The other **fifteen are five distinct
+defects**, two of which are total:
+
+| defect | effect |
+|---|---|
+| unnumbered lines | emits a literal **tab** where GNU pads the field with spaces. Plain `nl` on any file containing a blank line produces different bytes. |
+| `-l N` | **no output at all**, at every value tried. The option is accepted and the program prints nothing. |
+| section delimiters `\:`, `\:\:`, `\:\:\:` | not recognised. GNU consumes the delimiter line and RESTARTS numbering; ours prints it as a line and keeps counting. |
+| a byte that is not UTF-8 | **no output at all** |
+| a CRLF line | the `` is stripped |
+
+`-l` deserves the emphasis. It is not mis-implemented, it is inert *and*
+destructive: the program consumes its input, prints nothing, and exits. Any
+pipeline using it loses the data silently.
+
+The unnumbered-line defect is the one that would be noticed last and hurt
+longest, because the output looks right in a terminal — a tab and seven spaces
+land in the same column — and is wrong to `diff`, to `cut -f`, and to anything
+counting bytes.
+
+`userspace/nl` deleted; lint exemptions 124 -> 123, argv-utf8 220 -> 219,
+collisions 35 -> 34.
+
+**All five of the originally-misranked names are now decided** (`nl`, `split`,
+`seq`, `comm`, `tr` — `split` and `comm` by the survey's corrected ranking,
+`seq`, `tr` and `nl` by differential). Every one of the three put to a
+differential went to coreutils, and none of the deciding differences was a
+missing option — which is what the survey measures.
+
 **Still open — the proper fix.** One name, one program. For each of the
 remaining 41: pick the implementation that is under test and maintained, make
 sure nothing in the other is worth keeping (the standalone ones are older but

@@ -198,7 +198,6 @@ userspace/traceroute/src/main.rs:argv-as-string
 userspace/tuned/src/main.rs:argv-as-string
 userspace/udevd/src/main.rs:argv-as-string
 userspace/udisks/src/main.rs:argv-as-string
-userspace/uname/src/main.rs:argv-as-string
 userspace/unshare/src/main.rs:argv-as-string
 userspace/update-alternatives/src/main.rs:argv-as-string
 userspace/updatedb/src/main.rs:argv-as-string

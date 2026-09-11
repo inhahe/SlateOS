@@ -113,6 +113,33 @@ directory — `--target-dir` per `DIFF_PKG` entry — after which the symlink ca
 point at the right one deliberately rather than at whatever survived. Until then
 the survey's column says "coreutils half only", which is the truth.
 
+## B-COREUTILS-UNAME-PARSES-ITS-OWN-OPTIONS (lane B, 2026-09-11)
+
+`userspace/coreutils/src/bin/uname.rs` parses `argv` by hand rather than through
+`coreutils::getopt`, and the ten cases it fails in `scripts/uname-diff.sh` are
+all downstream of that one decision.
+
+**No long-option abbreviation (5 cases).** GNU accepts any unambiguous prefix,
+so `uname --mach`, `--proc`, `--hard`, `--k` and `--kernel-n` all work. `uname.rs`
+matches the long names exactly — `match long { b"machine" => ... }` — so each is
+`unrecognized option`. `getopt.rs` implements the prefix rule and documents it
+(`sort --fo`).
+
+**Curly quotes in the diagnostic (5 cases).** Ours says
+`unrecognized option 'x'` with U+2018/U+2019; GNU says it with ASCII
+apostrophes. Checked in four configurations before calling it a defect — the
+built GNU 9.4, and Ubuntu's installed binary under `C`, `C.UTF-8` and
+`en_US.UTF-8` — and all four are ASCII, because that message comes from glibc's
+getopt rather than from coreutils' locale-aware `quote()`. `uname.rs` reaches
+for `quote()`; `getopt.rs` uses `named()`, which is ASCII and correct.
+
+**The fix is to route it through `coreutils::getopt`**, which closes both
+families at once rather than patching two symptoms. That is also the direction
+`scripts/argv-utf8.py` argues for from a different angle: of the 35 bins already
+clean of the argv-as-String defect, 24 go through `getopt`; of the 49 dirty
+ones, none do. A bin that parses options through the shared module never had a
+reason to reach for `String` in the first place.
+
 ## B-PATCH-WRITES-ITS-PROGRESS-TO-STDERR-NOT-STDOUT (lane B, 2026-09-11)
 
 **Both halves of the `patch` pair write `patching file X` to stderr. GNU writes
@@ -65078,6 +65105,30 @@ number is different** — not by a constant factor either: 12→16, 24→48,
 3036→4112. Both exit 0. `du` prints nothing but sizes and paths, so a `du` that
 gets the sizes wrong and drops a directory has no correct output left; there is
 nothing else in it to be right about.
+
+**15 -> 14 (2026-09-11): `uname`, with a new harness.**
+`scripts/uname-diff.sh`, written today: 109 cases, and close to exhaustive
+rather than representative, because `uname` has no input and nine flags so its
+whole behaviour is a function of `argv` and the host.
+
+**coreutils 71 passed, 10 differed. The standalone 43 passed, 38 differed.**
+28 cases differ on purpose on both sides.
+
+**Those 28 matter to the numbers and are worth explaining.** `uname -o` prints
+`SlateOS` where GNU prints `GNU/Linux`, which is the *correct* answer — this is
+not GNU/Linux — and the operating-system field rides along in `-a` and in every
+pairing that includes `-o`. Counted as failures they were 36 and 64; marked as
+intended divergence they are 10 and 38. The cases are still run and still
+compared, so if that string ever changed to match GNU the harness would report
+an XPASS rather than going quiet.
+
+The standalone's 38 include the two families below plus 21 more, and it also
+gets `-p` and `-i` wrong on their own.
+
+**What the surviving half still gets wrong — 10 cases, two families, one
+cause.** Both are recorded as `B-COREUTILS-UNAME-PARSES-ITS-OWN-OPTIONS`:
+`uname.rs` hand-rolls its option parsing instead of using `coreutils::getopt`,
+so it re-implements — differently — what the shared module already gets right.
 
 **16 -> 15 (2026-09-11): `sha256sum`, found by fixing the survey's own column.**
 This pair was listed as "no harness -- write one" for weeks. It has had one all

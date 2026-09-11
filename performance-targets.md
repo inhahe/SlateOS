@@ -31,6 +31,36 @@ These subsystems are on the hot path for virtually every workload. Naive impleme
 | **Filesystem read/write** | All I/O | Compare to ext4 on Linux for sequential and random I/O throughput. Target: within 20% of Linux ext4. |
 | **Compositor frame** | Every display refresh | Must composite a full desktop in < 2ms at 4K to not miss 144Hz vsync. |
 
+#### A caveat on the read/write row: our write is not ext4's write
+
+*Added 2026-09-11 (lane A), because the row above specifies a comparison that is
+currently between two different operations, and a target that compares unlike things
+can never be met — which teaches people to ignore targets.*
+
+**Every write to an ordinary path also reads the old contents back and SHA-256-hashes
+them.** SlateOS keeps an automatic 16-deep version history per file;
+`vfs::write_file_resolved` calls `history::try_auto_record`, which on any path outside
+`/proc`, `/dev`, `/sys` and `/tmp` reads the file, hashes it, inserts into the
+content-addressed store and evicts past 16. `main.rs` enables this at `BOOT_OK`, before
+`bench::run_all`, so it is on for every measurement.
+
+ext4 on Linux does none of that. So "within 20% of Linux ext4" compares a versioned
+write against an unversioned one, and the gap grows with file size because the hash is
+per-byte: at 16 KiB there is 64× the hashing of a 256-byte write. `vfs_write_256` and
+`vfs_throughput_16k_write` are both over budget, and this is the leading candidate for
+why — I had previously recorded the 16k one as CPU-bound kernel write work on the
+strength of an accelerator ratio that hashing satisfies equally well.
+
+**What to do with the row until it is resolved.** Read it as a target for the write
+*plus* its version record, or measure against `/tmp`, which `should_auto_version` skips
+and which is the same `memfs` implementation — `bench_vfs_write_breakdown` now records
+both as `vfs_write_breakdown_unversioned` and `..._history` so the two can be separated
+host-side. Do not quietly compare the versioned number to a Linux figure.
+
+Whether every write *should* cost a read-back plus a hash is a policy question, not a
+measurement one: `design.txt` does not mention auto-versioning at all. It is in
+`deferred-questions.md` with a trigger, because it needs the cost figure above first.
+
 ### Benchmarking Protocol
 
 1. **Write the benchmark before or alongside the implementation**, not after. Use `criterion` for microbenchmarks. Put benchmarks in `bench/<subsystem>/`.

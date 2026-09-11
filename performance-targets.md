@@ -122,9 +122,17 @@ divided by its own median:
   `clean` rows only; on `contaminated` rows the spread is worse, and 55 of the 144
   recorded runs are contaminated. A contaminated row is not a weak measurement, it
   is an absent one.
-* **Never compare across `accel`.** The same unchanged code reads ~1716 ns under
-  TCG and ~249 ns under WHPX for `tcp_checksum_v4` — a 7× difference that is purely
-  the accelerator. Two rows with different `accel` are two different experiments.
+* **Never compare across `accel`**, and the tree already measured why better than a
+  single benchmark can show. `scripts/bench-history.py::comparable_records` records,
+  from one byte-identical binary (`kernel_sha 7a17cf6be2a1`, 2026-08-19): the median
+  benchmark is **~3.5× faster** under Hyper-V/WHPX than under TCG, the best ~10×,
+  **and the device-bound ones ~30× _slower_** — an HPET read costs a VM exit under
+  hardware virtualisation and is emulated inline under TCG. So WHPX is not uniformly
+  faster, and the difference is not a scale factor that could be divided out. In that
+  function's words, a window mixing the two *"does not have a wider spread; it has two
+  populations."*
+  `comparable_records` already filters on `accel` for exactly this reason, so the
+  machinery respects the rule; it is the prose here that needed to catch up.
 
 ### Why this is written down rather than left to judgment
 

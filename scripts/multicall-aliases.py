@@ -95,6 +95,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gittree  # noqa: E402
+import rustlex  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 # Repo-relative, `/`-separated, because that is the only spelling the `Tree`
@@ -299,8 +300,20 @@ def name_vars(text: str) -> set[str]:
 
 def invocation_aliases(text: str, crate: str) -> set[str]:
     """Names this source dispatches on, other than the crate's own."""
-    if (m := _TESTS.search(text)) is not None:
-        text = text[: m.start()]
+    # `rustlex.live_code`, NOT `text[: first #[cfg(test)]]`.
+    #
+    # The naive cut is right only when the first such attribute is the test
+    # module. `userspace/last` has a `#[cfg(test)] use` for its fixture
+    # builder's offsets at line 39 of 2,025, so this gate saw 38 lines, missed
+    # the dispatch at 1,233, and reported `last:lastb` and `last:lastlog` as no
+    # longer present -- which `--update-baseline` would have recorded as two
+    # aliases FIXED. Nothing was fixed; the scanner had gone blind, and a
+    # baseline cannot tell those apart. Measured: 38 lines seen, 1,252 live.
+    #
+    # check-read-defaults had the identical bug and its `live_code` is the
+    # repair; it now lives in `rustlex` because a second checker needed it and
+    # wrote the naive version instead.
+    text, _masked = rustlex.live_code(text)
     names: set[str] = set()
     # The enum arm needs no corroboration: a type literally named `Personality`
     # mapped from a string is invocation-name dispatch and nothing else. Demanding

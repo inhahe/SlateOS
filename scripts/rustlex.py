@@ -156,6 +156,100 @@ def strip_noise(src: str, keep_literals: bool = False) -> str:
     return "".join(out)
 
 
+# ---------------------------------------------------------------------------
+# Moved here from `check-read-defaults.py` on 2026-09-11, because a SECOND
+# checker needed it and had written the naive version instead.
+#
+# `multicall-aliases.py` cut its view of a file at the first `#[cfg(test)]`
+# with `text[: m.start()]`. On `userspace/last` that is a `#[cfg(test)] use`
+# for the fixture builder's offsets, at line 39 of 2,025 -- so the gate saw 38
+# lines, missed the dispatch at 1,233, and reported `last:lastb` and
+# `last:lastlog` as NO LONGER PRESENT. `--update-baseline` would have recorded
+# that as two aliases fixed. Nothing was fixed; the scanner had gone blind, and
+# the ledger cannot tell those apart.
+#
+# That is the same defect check-read-defaults had and documents below, found
+# again in another file eight hours later, and triggered by an edit of mine
+# that added an ordinary `#[cfg(test)] use`. One implementation now.
+# ---------------------------------------------------------------------------
+
+
+def live_code(src: str) -> tuple[str, str]:
+    """`src` with test code removed and nothing else.
+
+    # What this replaced
+
+    `src.split("#[cfg(test)]")[0]` -- "everything before the tests", which is
+    only true when the FIRST such attribute is the test module. A
+    `#[cfg(test)]` on a single helper is ordinary, and everything after it was
+    discarded along with the tests.
+
+    Measured before the fix: **35,706 lines across `userspace/`, 7% of the
+    lane, invisible to this checker.** `fdisk/src/main.rs` was read as 21 lines
+    of 3,818; `coreutils/src/bin/tar.rs` as 592 of 5,635.
+
+    The floors did not catch it because they are aggregate. Losing 7% of the
+    corpus leaves 398 live `read_to_string` calls against a floor of 120, and
+    every file was still opened so the file count never moved. **A floor on the
+    total cannot see a hole in the distribution** -- which is worth remembering
+    before trusting one anywhere else.
+
+    # How it works
+
+    Blank each `#[cfg(test)]` item by matching its braces, then cut at the test
+    module. Blanking preserves length, so match offsets still index the
+    original, which is what lets `survey` show real argument text.
+
+    Brace matching runs over the `strip_noise` output: a brace inside a string
+    or a comment must not close an item early, and this file has been wrong
+    about string boundaries twice already.
+    """
+    masked = strip_noise(src)
+    # Both views are blanked at the same offsets and returned together, so
+    # `survey` does not re-run `strip_noise` on the result. Running it twice
+    # per file doubled the honour-head suite's wall clock past ten minutes,
+    # which is a timeout rather than a slowdown.
+    out = list(src)
+    mout = list(masked)
+    i = 0
+    while True:
+        i = masked.find("#[cfg(test)]", i)
+        if i < 0:
+            break
+        # The test module ends the live region; everything after it goes.
+        rest = masked[i + len("#[cfg(test)]"):]
+        head = rest.lstrip()
+        # Skip any further attributes (`#[allow(...)]` is usual on test mods).
+        while head.startswith("#["):
+            close = head.find("]")
+            if close < 0:
+                break
+            head = head[close + 1:].lstrip()
+        if head.startswith("mod "):
+            return "".join(out[:i]), "".join(mout[:i])
+        # A single item: blank it from the attribute to its closing brace.
+        brace = masked.find("{", i)
+        if brace < 0:
+            return "".join(out[:i]), "".join(mout[:i])
+        depth = 0
+        j = brace
+        while j < len(masked):
+            if masked[j] == "{":
+                depth += 1
+            elif masked[j] == "}":
+                depth -= 1
+                if depth == 0:
+                    j += 1
+                    break
+            j += 1
+        for k in range(i, min(j, len(out))):
+            if out[k] != "\n":
+                out[k] = " "
+                mout[k] = " "
+        i = j
+    return "".join(out), "".join(mout)
+
+
 def _self_test() -> int:
     """Fixtures for every way this has been wrong.
 

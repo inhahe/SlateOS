@@ -490,6 +490,12 @@ def expand(value: str, assigns: dict[str, str], depth: int = 6) -> str:
     return value
 
 
+#: A shell-library filename anywhere on a `source` line. Used only when the captured
+#: path is unusable -- see the comment in `sourced_basenames`. `/` is excluded from the
+#: class on purpose so a full path yields its basename without extra work.
+SH_LIB_TOKEN_RE = re.compile(r"[A-Za-z0-9_.+-]+\.(?:sh|bash)\b")
+
+
 def sourced_basenames(text: str) -> set[str]:
     """Basenames of the files this text `source`s.
 
@@ -510,6 +516,25 @@ def sourced_basenames(text: str) -> set[str]:
         base = arg.replace("\\", "/").rsplit("/", 1)[-1]
         if base and "$" not in base:
             out.add(base)
+            continue
+        # The captured token was not a usable path. `SOURCE_RE`'s `\S+` stops at the
+        # first space, so a path built with a command substitution that contains one --
+        # `. "$(dirname "${BASH_SOURCE[0]}")/lib/worktree.sh"`, the idiom most of this
+        # tree uses -- captures `"$(dirname` and resolves to nothing, dropping the
+        # source. That is a false REFUSAL, not the false negative this docstring
+        # promises: the sourced file's functions leave the caller's resolved set and
+        # every call to one is reported undefined. It red-treed all three lanes over
+        # `slate_ensure_src`, which was defined and sourced the whole time.
+        #
+        # Harvest any shell-library token from the rest of the physical line instead.
+        # Additive, basename-only, so the promise above holds rather than just claiming to.
+        # From m.end(), not m.start(): SOURCE_RE's leading alternation can begin the
+        # match ON the preceding newline, so searching from the start finds that very
+        # newline and harvests an empty line. Caught by calling the function directly
+        # rather than re-reading it.
+        eol = text.find(chr(10), m.end())
+        line = text[m.start():eol if eol != -1 else len(text)]
+        out.update(SH_LIB_TOKEN_RE.findall(line))
     return out
 
 
@@ -657,6 +682,11 @@ def self_test() -> int:
               file=sys.stderr)
         return 1
 
+    # For the spaced-source-path regression below. Not a hard requirement the way
+    # boot-test.sh is: another lane may legitimately retire this script, and the case
+    # is written to pass through its absence rather than fail on it.
+    worktree_sh = next(
+        (p for p in files if p.as_posix().endswith("scripts/test-worktree.sh")), None)
     real = read_text(boot)
     masked = mask(real)
     hits, masked_by = candidates(files)
@@ -698,6 +728,20 @@ def self_test() -> int:
          "run_checker" in visible.get(boot, set()), True),
         ("run_checker is NOT defined in boot-test.sh itself",
          "run_checker" in functions_in(masked), False),
+
+        # -- a source path built with a command substitution that contains a space.
+        # `SOURCE_RE`'s `\S+` captures only `"$(dirname`, so the basename was unusable
+        # and the source was dropped entirely -- taking every function in the sourced
+        # library out of the caller's resolved set and reporting each call to one as
+        # undefined. That red-treed all three lanes at a pre-build gate over
+        # `slate_ensure_src`, which was defined and sourced the whole time.
+        ("a spaced command substitution in a source path still names its library",
+         "worktree.sh" in sourced_basenames(
+             '. "$(dirname "${BASH_SOURCE[0]}")/lib/worktree.sh" || exit 1' + chr(10)),
+         True),
+        ("and slate_ensure_src is therefore visible to test-worktree.sh",
+         worktree_sh is None
+         or "slate_ensure_src" in visible.get(worktree_sh, set()), True),
 
         # -- the finding, planted in real bytes
         ("a bare undefined callee is seen", nonce in callees(planted), True),

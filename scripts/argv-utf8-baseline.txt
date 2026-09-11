@@ -72,6 +72,7 @@ userspace/env/src/main.rs:env-as-string
 userspace/expand/src/main.rs:argv-as-string
 userspace/file/src/main.rs:argv-as-string
 userspace/findmnt/src/main.rs:argv-as-string
+userspace/finger/src/main.rs:argv-as-string
 userspace/fio/src/main.rs:argv-as-string
 userspace/firejail/src/main.rs:argv-as-string
 userspace/flock/src/main.rs:argv-as-string
@@ -230,7 +231,6 @@ userspace/useradm/src/main.rs:argv-as-string
 userspace/vi/src/main.rs:argv-as-string
 userspace/vi/src/main.rs:to_str-unwrap
 userspace/vmstat/src/main.rs:argv-as-string
-userspace/w/src/main.rs:argv-as-string
 userspace/wall/src/main.rs:argv-as-string
 userspace/watch/src/main.rs:argv-as-string
 userspace/wc/src/main.rs:argv-as-string

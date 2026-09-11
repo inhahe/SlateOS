@@ -16,6 +16,7 @@ cron:atq
 cron:atrm
 cron:batch
 crond:anacron
+finger:pinky
 getty:mingetty
 hexdump:xxd
 kill:killall
@@ -54,8 +55,7 @@ systemctl:systemd-notify
 systemctl:systemd-path
 systemctl:systemd-tmpfiles
 upower:upowerd
-w:finger
-w:pinky
+who:w
 xdg:mimeopen
 xdg:xdg-mime
 zip:unzip

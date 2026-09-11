@@ -146,7 +146,6 @@ userspace/uniq
 userspace/uptime
 userspace/vi
 userspace/vmstat
-userspace/w
 userspace/wall
 userspace/watch
 userspace/wc

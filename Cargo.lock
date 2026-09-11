@@ -888,6 +888,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "finger"
+version = "0.1.0"
+dependencies = [
+ "ttyidle",
+ "utmpfile",
+]
+
+[[package]]
 name = "fio"
 version = "0.1.0"
 dependencies = [
@@ -3174,14 +3182,6 @@ dependencies = [
  "guitk",
  "oswindow",
  "scratchdir",
-]
-
-[[package]]
-name = "w"
-version = "0.1.0"
-dependencies = [
- "ttyidle",
- "utmpfile",
 ]
 
 [[package]]

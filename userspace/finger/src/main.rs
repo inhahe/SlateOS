@@ -1,12 +1,16 @@
-// Slate OS w — show who is logged in and what they are doing
+// Slate OS finger — user information lookup
 //
 // Multi-personality binary:
-//   w      — show logged-in users and their activity
 //   finger — user information lookup (RFC 1288)
 //   pinky  — lightweight finger
 //
+// IT USED TO ANSWER TO `w` TOO, and that name now belongs to `userspace/who`,
+// which performs the operation: `who -w` computes JCPU and PCPU, which this
+// program has no columns for at all, and derives WHAT from the session
+// leader's cmdline where this printed a fixed "-". design-decisions 1019 --
+// the name belongs to whichever program does the work.
+//
 // Usage:
-//   w [OPTIONS] [user]
 //   finger [OPTIONS] [user@host | user...]
 //   pinky [OPTIONS] [user...]
 
@@ -27,7 +31,6 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Personality {
-    W,
     Finger,
     Pinky,
 }
@@ -38,9 +41,10 @@ fn detect_personality(argv0: &str) -> Personality {
     let lower = base.to_ascii_lowercase();
     let lower = lower.strip_suffix(".exe").unwrap_or(&lower);
     match lower {
-        "finger" => Personality::Finger,
         "pinky" => Personality::Pinky,
-        _ => Personality::W,
+        // `finger` is the default now that `w` is gone -- and it is also the
+        // crate's name, so argv[0] and the package agree.
+        _ => Personality::Finger,
     }
 }
 
@@ -102,7 +106,6 @@ struct Config {
     no_header: bool,
     short_format: bool,
     long_format: bool,
-    from_field: bool,
     idle_sort: bool,
     show_help: bool,
     show_version: bool,
@@ -115,12 +118,11 @@ struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            personality: Personality::W,
+            personality: Personality::Finger,
             users: Vec::new(),
             no_header: false,
             short_format: false,
             long_format: false,
-            from_field: true,
             idle_sort: false,
             show_help: false,
             show_version: false,
@@ -135,32 +137,19 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
     let personality = args
         .first()
         .map(|a| detect_personality(a))
-        .unwrap_or(Personality::W);
+        .unwrap_or(Personality::Finger);
 
     let mut cfg = Config {
         personality,
         ..Default::default()
     };
 
-    let mut i = 1;
-
-    while i < args.len() {
-        let arg = &args[i];
-
+    // Iterating rather than indexing a counter. `&args[i]` can panic and
+    // `i += 1` can overflow -- neither can actually happen here, but saying so
+    // in a comment is weaker than not writing the constructs, and this loop
+    // never needed the index for anything else.
+    for arg in args.iter().skip(1) {
         match personality {
-            Personality::W => match arg.as_str() {
-                "-h" | "--no-header" => cfg.no_header = true,
-                "-s" | "--short" => cfg.short_format = true,
-                "-f" | "--from" => cfg.from_field = !cfg.from_field,
-                "-i" | "--ip-addr" => {} // accept, shows IP instead of hostname
-                "-o" | "--old-style" => cfg.short_format = true,
-                "--help" => cfg.show_help = true,
-                "-V" | "--version" => cfg.show_version = true,
-                other if other.starts_with('-') => {
-                    return Err(format!("w: unknown option: {other}"));
-                }
-                _ => cfg.users.push(arg.clone()),
-            },
             Personality::Finger => match arg.as_str() {
                 "-l" => cfg.long_format = true,
                 "-s" => cfg.short_format = true,
@@ -176,7 +165,11 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
             Personality::Pinky => match arg.as_str() {
                 "-l" => cfg.long_format = true,
                 "-s" => cfg.short_format = true,
-                "-f" => cfg.from_field = false,
+                // pinky's own help says "-f  Omit header in short
+                // format", and this set `from_field`, which only `run_w` ever
+                // read -- so `pinky -f` did nothing at all. `no_header` is the
+                // field run_pinky actually consults.
+                "-f" => cfg.no_header = true,
                 "-w" => {} // omit name field
                 "-i" => {} // show IPs
                 "-b" => cfg.no_plan = true,
@@ -190,7 +183,6 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
                 _ => cfg.users.push(arg.clone()),
             },
         }
-        i += 1;
     }
 
     Ok(cfg)
@@ -479,83 +471,6 @@ fn format_login_time(timestamp: u64) -> String {
 // Output formatting
 // ---------------------------------------------------------------------------
 
-fn run_w(cfg: &Config, writer: &mut dyn Write) -> io::Result<()> {
-    let entries = read_utmp_entries();
-
-    // Filter by user if specified
-    let entries: Vec<&UtmpEntry> = if cfg.users.is_empty() {
-        entries.iter().collect()
-    } else {
-        entries
-            .iter()
-            .filter(|e| cfg.users.iter().any(|u| u.as_bytes() == e.user.as_slice()))
-            .collect()
-    };
-
-    // Header
-    if !cfg.no_header {
-        let time = get_current_time();
-        let uptime = get_uptime_str();
-        let loadavg = get_load_avg();
-        let nusers = entries.len();
-        writeln!(writer, " {time} {uptime},  {nusers} user(s),  {loadavg}")?;
-
-        if cfg.short_format {
-            writeln!(writer, "USER     TTY        IDLE  WHAT")?;
-        } else if cfg.from_field {
-            writeln!(
-                writer,
-                "USER     TTY      FROM             LOGIN@   IDLE   WHAT"
-            )?;
-        } else {
-            writeln!(writer, "USER     TTY        LOGIN@   IDLE   WHAT")?;
-        }
-    }
-
-    // Output entries
-    for entry in &entries {
-        // The columns are written rather than formatted because the
-        // fields are bytes. Same widths, same order, same single space
-        // between columns as the `{:<8} {:<10}` strings these replace.
-        if cfg.short_format {
-            write_col(writer, &entry.user, 8)?;
-            writer.write_all(b" ")?;
-            write_col(writer, &entry.tty, 10)?;
-            write!(writer, " {} ", format_idle(entry.idle_secs))?;
-            writer.write_all(&entry.what)?;
-            writeln!(writer)?;
-        } else if cfg.from_field {
-            write_col(writer, &entry.user, 8)?;
-            writer.write_all(b" ")?;
-            write_col(writer, &entry.tty, 8)?;
-            writer.write_all(b" ")?;
-            write_col(writer, &entry.host, 16)?;
-            write!(
-                writer,
-                " {:<8} {} ",
-                format_login_time(entry.login_time),
-                format_idle(entry.idle_secs)
-            )?;
-            writer.write_all(&entry.what)?;
-            writeln!(writer)?;
-        } else {
-            write_col(writer, &entry.user, 8)?;
-            writer.write_all(b" ")?;
-            write_col(writer, &entry.tty, 10)?;
-            write!(
-                writer,
-                " {:<8} {} ",
-                format_login_time(entry.login_time),
-                format_idle(entry.idle_secs)
-            )?;
-            writer.write_all(&entry.what)?;
-            writeln!(writer)?;
-        }
-    }
-
-    Ok(())
-}
-
 fn run_finger(cfg: &Config, writer: &mut dyn Write) -> io::Result<()> {
     if cfg.users.is_empty() {
         // No user specified — show all logged in users (short format)
@@ -786,19 +701,6 @@ fn write_col(writer: &mut dyn Write, bytes: &[u8], width: usize) -> io::Result<(
 
 fn print_help(personality: Personality) {
     match personality {
-        Personality::W => {
-            println!("Usage: w [OPTIONS] [user]");
-            println!();
-            println!("Show who is logged on and what they are doing.");
-            println!();
-            println!("Options:");
-            println!("  -h, --no-header  Don't print the header");
-            println!("  -s, --short      Short format");
-            println!("  -f, --from       Toggle showing FROM field");
-            println!("  -i, --ip-addr    Show IP addresses instead of hostnames");
-            println!("  -V, --version    Show version");
-            println!("  --help           Show this help");
-        }
         Personality::Finger => {
             println!("Usage: finger [OPTIONS] [user[@host]...]");
             println!();
@@ -833,7 +735,6 @@ fn print_help(personality: Personality) {
 
 fn print_version(personality: Personality) {
     let name = match personality {
-        Personality::W => "w",
         Personality::Finger => "finger",
         Personality::Pinky => "pinky",
     };
@@ -876,7 +777,6 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
     let mut writer = stdout.lock();
 
     let result = match cfg.personality {
-        Personality::W => run_w(&cfg, &mut writer),
         Personality::Finger => run_finger(&cfg, &mut writer),
         Personality::Pinky => run_pinky(&cfg, &mut writer),
     };
@@ -885,7 +785,6 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
         Ok(()) => 0,
         Err(e) => {
             let name = match cfg.personality {
-                Personality::W => "w",
                 Personality::Finger => "finger",
                 Personality::Pinky => "pinky",
             };
@@ -900,6 +799,9 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+// A test that unwraps is asserting the call succeeded, and a panic names the
+// line. CLAUDE.md allows these in test modules for that reason.
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -956,12 +858,6 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_personality_w() {
-        assert_eq!(detect_personality("w"), Personality::W);
-        assert_eq!(detect_personality("/usr/bin/w"), Personality::W);
-    }
-
-    #[test]
     fn test_detect_personality_finger() {
         assert_eq!(detect_personality("finger"), Personality::Finger);
         assert_eq!(detect_personality("/usr/bin/finger"), Personality::Finger);
@@ -974,30 +870,32 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_args_w_basic() {
-        let args = vec!["w".to_string()];
-        let cfg = parse_args(&args).unwrap();
-        assert_eq!(cfg.personality, Personality::W);
-        assert!(cfg.users.is_empty());
-    }
-
-    #[test]
     fn test_parse_args_w_user() {
-        let args = vec!["w".to_string(), "root".to_string()];
+        let args = vec!["finger".to_string(), "root".to_string()];
         let cfg = parse_args(&args).unwrap();
         assert_eq!(cfg.users, vec!["root"]);
     }
 
     #[test]
-    fn test_parse_args_w_no_header() {
-        let args = vec!["w".to_string(), "-h".to_string()];
+    fn pinky_dash_f_omits_the_header_as_its_help_promises() {
+        // It set `from_field`, which only `run_w` read, so `pinky -f` did
+        // nothing while the help said "Omit header in short format".
+        let args = vec!["pinky".to_string(), "-f".to_string()];
         let cfg = parse_args(&args).unwrap();
         assert!(cfg.no_header);
     }
 
     #[test]
+    fn an_unknown_option_is_refused_under_the_new_default() {
+        // `-h` was `w`'s. With `w` gone the default personality is finger,
+        // which does not take it -- and says so rather than ignoring it.
+        let args = vec!["w".to_string(), "-h".to_string()];
+        assert!(parse_args(&args).is_err());
+    }
+
+    #[test]
     fn test_parse_args_w_short() {
-        let args = vec!["w".to_string(), "-s".to_string()];
+        let args = vec!["finger".to_string(), "-s".to_string()];
         let cfg = parse_args(&args).unwrap();
         assert!(cfg.short_format);
     }
@@ -1047,7 +945,7 @@ mod tests {
 
     #[test]
     fn test_parse_args_version() {
-        for name in &["w", "finger", "pinky"] {
+        for name in &["finger", "pinky"] {
             let args = vec![name.to_string(), "--version".to_string()];
             let cfg = parse_args(&args).unwrap();
             assert!(cfg.show_version);
@@ -1056,7 +954,7 @@ mod tests {
 
     #[test]
     fn test_parse_args_help() {
-        for name in &["w", "finger", "pinky"] {
+        for name in &["finger", "pinky"] {
             let args = vec![name.to_string(), "--help".to_string()];
             let cfg = parse_args(&args).unwrap();
             assert!(cfg.show_help);
@@ -1157,20 +1055,6 @@ mod tests {
     }
 
     #[test]
-    fn test_run_w_empty() {
-        let cfg = Config {
-            personality: Personality::W,
-            no_header: true,
-            ..Default::default()
-        };
-        let mut buf = Vec::new();
-        run_w(&cfg, &mut buf).unwrap();
-        // Should produce some output (at least current user)
-        // Output depends on environment, just check it's valid UTF-8 (doesn't crash).
-        let _output = String::from_utf8(buf).unwrap();
-    }
-
-    #[test]
     fn test_run_finger_no_users() {
         let cfg = Config {
             personality: Personality::Finger,
@@ -1205,43 +1089,6 @@ mod tests {
         run_finger(&cfg, &mut buf).unwrap();
         let output = String::from_utf8(buf).unwrap();
         assert!(output.contains("Remote finger not supported"));
-    }
-
-    #[test]
-    fn test_run_w_with_header() {
-        let cfg = Config {
-            personality: Personality::W,
-            no_header: false,
-            ..Default::default()
-        };
-        let mut buf = Vec::new();
-        run_w(&cfg, &mut buf).unwrap();
-        let output = String::from_utf8(buf).unwrap();
-        assert!(output.contains("load average"));
-    }
-
-    #[test]
-    fn test_run_w_filter_user() {
-        let cfg = Config {
-            personality: Personality::W,
-            users: vec!["nonexistent_user_xyz".to_string()],
-            no_header: true,
-            ..Default::default()
-        };
-        let mut buf = Vec::new();
-        run_w(&cfg, &mut buf).unwrap();
-        let output = String::from_utf8(buf).unwrap();
-        assert!(output.is_empty() || !output.contains("nonexistent_user_xyz"));
-    }
-
-    #[test]
-    fn test_default_config() {
-        let cfg = Config::default();
-        assert_eq!(cfg.personality, Personality::W);
-        assert!(cfg.users.is_empty());
-        assert!(!cfg.no_header);
-        assert!(!cfg.short_format);
-        assert!(cfg.from_field);
     }
 
     #[test]

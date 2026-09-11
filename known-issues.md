@@ -130580,6 +130580,55 @@ whether a fresh machine can ever push. Recorded as the next step rather than
 guessed at, because guessing at the mechanism is what produced the three wrong
 options above.
 
+### Second correction, same day — the design above is viable only on hardware acceleration
+
+The correction above says to "compare each benchmark against the median of recent
+clean runs at the same `accel`". I wrote that after reading **one** benchmark's
+series — `tcp_checksum_v4`, which is stable to ±2% on clean runs — and treating it
+as the population. It is not. Measured across all 86 benchmarks with ≥4 clean
+samples at a fixed `accel`, worst-sample ÷ median is:
+
+| `accel` | clean rows | 50th | 90th | 99th |
+|---|---|---|---|---|
+| `Hyper-V/WHPX` | 8 | **1.03×** | 1.23× | 1.53× |
+| `QEMU TCG` | 9 | 1.29× | 2.13× | 2.78× |
+| (unrecorded, TCG-era) | 36 | 1.58× | 2.64× | 3.33× |
+
+So on a *clean* run at a *fixed* accelerator, the median benchmark's worst sample
+is still **1.3–1.6× its own median under emulation**, and ~1.03× under hardware
+virtualisation. Two consequences:
+
+* **`CLAUDE.md`'s "investigate any regression over 10%" is inside the emulator's
+  noise by a factor of three to six.** It is a sound rule that cannot be applied
+  to a TCG measurement at all.
+* **A "nothing may double" gate is quiet under WHPX and unusable under TCG.** 2× sits
+  above the 99th percentile (1.53×) on WHPX, so it would fire only on something
+  real; under TCG it sits near the 88th percentile, which is roughly ten false
+  alarms per run across 86 benchmarks.
+
+### Which reframes the whole item
+
+This is not "wire up a gate that was left unwired". It is: **whether a performance
+regression gate is possible at all is decided by which accelerator the boot test
+runs under**, and the default is TCG (`QEMU_EXTRA="-accel tcg,…"`; the eight WHPX
+rows come from a sweep on 2026-08-19). Under TCG no threshold separates a real 2×
+regression from ordinary run-to-run spread, so there is nothing to wire.
+
+The actionable form is therefore a prerequisite, not an implementation: if the
+budgets are to refuse, benchmark runs need to happen under WHPX, and then the gate
+is ~30 lines over data that already exists. Until then `over_target` is the right
+thing to record and the wrong thing to gate on, which is what the tree already
+does — and `print_scorecard`'s own comment, "labelled as reference rather than as a
+verdict", turns out to have been exactly right for a reason it does not state.
+
+### The method note, because it is the third instance today
+
+One boot log gave me the wrong cause. One benchmark series gave me the wrong
+stability. Both times the sample was real, the reasoning from it was sound, and the
+population behaved differently. The error is not carelessness about the sample; it
+is treating *n*=1 as a measurement instead of as a hypothesis — and the cost is
+that each wrong conclusion arrived with enough supporting detail to look measured.
+
 ## TD-A-REQUEST-STATUS-HAS-NO-CHECKED-SHAPE-SO-EVERY-READER-COUNTS-DIFFERENTLY (lane A, 2026-09-11) — **open**
 
 **In short:** the `requests/` dropbox is how the three lanes hand work to each other,

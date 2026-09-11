@@ -49,6 +49,7 @@
 //! One field that is two words silently shifts every field after it.
 
 use coreutils::diag;
+use coreutils::getopt::{Opt, Program, Takes};
 use coreutils::stdfd;
 use std::env;
 use std::ffi::OsString;
@@ -183,67 +184,118 @@ enum Request {
 // Command line
 // ============================================================================
 
+/// `uname`'s usage status is 1: `uname -Z; echo $?` prints 1.
+const UNAME: Program = Program::new("uname", 1);
+
+/// GNU `uname`'s `getopt_long` string, exactly.
+const SHORT_OPTIONS: &str = "asnrvmpio";
+
+/// GNU `uname`'s `longopts[]`, in upstream's order, plus the two
+/// `parse_long_options` adds.
+///
+/// The order is not decorative: it decides which spellings an abbreviation is
+/// ambiguous between, and `--k` has to be ambiguous across exactly
+/// `--kernel-name`, `--kernel-release` and `--kernel-version`.
+const LONG_OPTIONS: &[(&str, Takes)] = &[
+    ("all", Takes::Nothing),
+    ("kernel-name", Takes::Nothing),
+    // Undocumented aliases that are nonetheless in the table, and so are
+    // nonetheless reachable. `--sysname` and `--release` appear in no help text
+    // and no man page; they were found by asking GNU's own binary for its table
+    // with `uname --=x`, the empty prefix matching every entry. Omitting them
+    // is the dangerous direction: without `--release` present, `--r` is
+    // unrecognised here and accepted there, and every other abbreviation of a
+    // missing name resolves to some OTHER option and is acted on.
+    ("sysname", Takes::Nothing),
+    ("nodename", Takes::Nothing),
+    ("kernel-release", Takes::Nothing),
+    ("release", Takes::Nothing),
+    ("kernel-version", Takes::Nothing),
+    ("machine", Takes::Nothing),
+    ("processor", Takes::Nothing),
+    ("hardware-platform", Takes::Nothing),
+    ("operating-system", Takes::Nothing),
+    ("help", Takes::Nothing),
+    ("version", Takes::Nothing),
+];
+
 /// Parse the arguments after `argv[0]`.
+///
+/// # Why this goes through [`coreutils::getopt`] rather than reading `argv`
+///
+/// It used to read `argv` itself, matching long names with `match long { … }`,
+/// and `scripts/uname-diff.sh` found ten differences from GNU that were all
+/// downstream of that one decision:
+///
+///   * **no long-option abbreviation.** GNU accepts any unambiguous prefix, so
+///     `uname --mach`, `--proc`, `--hard` and `--kernel-n` all work and `--k`
+///     is `option '--k' is ambiguous; possibilities: …`. An exact `match` has
+///     none of that, and cannot grow it without reimplementing the ambiguity
+///     rule too.
+///   * **the wrong quotation marks.** The hand-written diagnostics used
+///     [`quote`], which follows the locale and produces `‘x’`. GNU's
+///     `unrecognized option` comes from glibc's getopt and is ASCII in every
+///     locale -- checked against the built GNU 9.4 and against Ubuntu's binary
+///     under `C`, `C.UTF-8` and `en_US.UTF-8` before being called a defect,
+///     because a missing locale catalogue would have looked the same.
+///     [`getopt`] already quotes the way glibc does.
+///
+/// Both were symptoms of the same thing, which is why this is a rewrite onto
+/// the shared module rather than two patches. `scripts/argv-utf8.py` makes the
+/// same argument from another direction: of the bins already clean of the
+/// argv-as-`String` defect, most go through `getopt`; of the dirty ones, none
+/// do.
+///
+/// # Errors
+///
+/// An unknown option, an ambiguous abbreviation, or any operand at all.
 fn parse_args(args: &[OsString]) -> Result<Request, String> {
     let mut selection = Selection::default();
-    let mut end_of_options = false;
 
-    for arg in args {
-        let bytes = os_bytes(arg);
-
-        if end_of_options || bytes.first() != Some(&b'-') || bytes.len() == 1 {
-            return Err(format!(
-                "extra operand {}\nTry 'uname --help' for more information.",
-                quote(&bytes)
-            ));
-        }
-
-        if bytes.starts_with(b"--") {
-            if bytes.len() == 2 {
-                end_of_options = true;
-                continue;
+    for item in UNAME.parse(args, SHORT_OPTIONS, LONG_OPTIONS) {
+        let opt = item.map_err(|e| e.to_string())?;
+        match opt {
+            Opt::Long("help", _) | Opt::Short(b'h', _) => return Ok(Request::Help),
+            Opt::Long("version", _) => return Ok(Request::Version),
+            Opt::Long("all", _) | Opt::Short(b'a', _) => selection = Selection::all(),
+            Opt::Long("kernel-name" | "sysname", _) | Opt::Short(b's', _) => {
+                selection.set(Field::KernelName);
             }
-            let long = bytes.get(2..).unwrap_or_default();
-            match long {
-                b"help" => return Ok(Request::Help),
-                b"version" => return Ok(Request::Version),
-                b"all" => selection = Selection::all(),
-                b"kernel-name" => selection.set(Field::KernelName),
-                b"nodename" => selection.set(Field::NodeName),
-                b"kernel-release" => selection.set(Field::KernelRelease),
-                b"kernel-version" => selection.set(Field::KernelVersion),
-                b"machine" => selection.set(Field::Machine),
-                b"processor" => selection.set(Field::Processor),
-                b"hardware-platform" => selection.set(Field::HardwarePlatform),
-                b"operating-system" => selection.set(Field::OperatingSystem),
-                _ => {
-                    return Err(format!(
-                        "unrecognized option {}\nTry 'uname --help' for more information.",
-                        quote(&bytes)
-                    ));
-                }
+            Opt::Long("nodename", _) | Opt::Short(b'n', _) => selection.set(Field::NodeName),
+            Opt::Long("kernel-release" | "release", _) | Opt::Short(b'r', _) => {
+                selection.set(Field::KernelRelease);
             }
-            continue;
-        }
-
-        for &c in bytes.get(1..).unwrap_or_default() {
-            match c {
-                b'a' => selection = Selection::all(),
-                b's' => selection.set(Field::KernelName),
-                b'n' => selection.set(Field::NodeName),
-                b'r' => selection.set(Field::KernelRelease),
-                b'v' => selection.set(Field::KernelVersion),
-                b'm' => selection.set(Field::Machine),
-                b'p' => selection.set(Field::Processor),
-                b'i' => selection.set(Field::HardwarePlatform),
-                b'o' => selection.set(Field::OperatingSystem),
-                _ => {
-                    return Err(format!(
-                        "invalid option -- {}\nTry 'uname --help' for more information.",
-                        quote(&[c])
-                    ));
-                }
+            Opt::Long("kernel-version", _) | Opt::Short(b'v', _) => {
+                selection.set(Field::KernelVersion);
             }
+            Opt::Long("machine", _) | Opt::Short(b'm', _) => selection.set(Field::Machine),
+            Opt::Long("processor", _) | Opt::Short(b'p', _) => selection.set(Field::Processor),
+            Opt::Long("hardware-platform", _) | Opt::Short(b'i', _) => {
+                selection.set(Field::HardwarePlatform);
+            }
+            Opt::Long("operating-system", _) | Opt::Short(b'o', _) => {
+                selection.set(Field::OperatingSystem);
+            }
+            // `uname` takes no operands at all, and names only the first --
+            // upstream reports `argv[optind]`.
+            Opt::Operand(name) => {
+                return Err(UNAME
+                    .usage_referring(format!(
+                        "extra operand {}",
+                        quote(&os_bytes(name.as_os_str()))
+                    ))
+                    .to_string());
+            }
+            // Unreachable: the parser yields only names from the tables above,
+            // and every one is handled. Refusing rather than ignoring, so an
+            // entry added without a handler fails loudly instead of silently
+            // selecting nothing.
+            Opt::Long(other, _) => {
+                return Err(UNAME
+                    .usage_referring(format!("option '--{other}' is unhandled"))
+                    .to_string());
+            }
+            Opt::Short(other, _) => return Err(UNAME.invalid_option(other).to_string()),
         }
     }
 

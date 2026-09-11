@@ -79,6 +79,7 @@ name = "at"
 version = "0.1.0"
 dependencies = [
  "civildate",
+ "cronspool",
 ]
 
 [[package]]
@@ -480,20 +481,27 @@ name = "cron"
 version = "0.1.0"
 dependencies = [
  "civildate",
+ "cronspool",
 ]
 
 [[package]]
 name = "crond"
 version = "0.1.0"
 dependencies = [
+ "cronspool",
  "scratchdir",
 ]
+
+[[package]]
+name = "cronspool"
+version = "0.1.0"
 
 [[package]]
 name = "crontab"
 version = "0.1.0"
 dependencies = [
  "authlib",
+ "cronspool",
  "userdb",
 ]
 

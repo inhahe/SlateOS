@@ -104,7 +104,7 @@ MUTATOR_RE = re.compile(
 # pairs: `ar` inside `sidebar`/`taskbar`/`toolbar`/`tar`/`rar`, `cache` inside
 # `pagecache`/`fscache`, `vfs`, `index`, `policy` and so on), so the class was
 # live in 21 modules and had fired in one. The indexed version matches
-# `(\w+)::(\w+)\s*\(` and compares the captured module name, which cannot
+# `\b(\w+)::(\w+)\s*\(` and compares the captured module name, which cannot
 # collide on a suffix.
 #
 # The direction matters: the bug made the tool report FEWER problems than exist.

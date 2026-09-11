@@ -343,6 +343,43 @@ def survey(tree: gittree.Tree) -> Scan:
     return Scan(sorted(found), files, reads)
 
 
+def read_notes() -> dict[str, str]:
+    """Each pinned entry's trailing ` # note`, keyed by the entry.
+
+    # Why this exists
+
+    A line in the baseline means one of two things -- "a defect nobody has
+    fixed" or "read in context and correct as it stands" -- and the file could
+    not tell them apart. Every entry therefore had to be re-read by whoever
+    next worked the ledger, which is how `acpi`'s seven and `mktemp`'s four
+    were each examined twice before anybody wrote down that they were fine.
+
+    The obvious fix -- a comment beside the entry -- is one regeneration from
+    being lost, because `--update-baseline` rewrites this file wholesale.
+    `multicall-aliases` records that exact loss: "Policy written into a
+    generated file is one regeneration from being lost, and nothing reports the
+    loss: the gate stays green, the entries stay right, and only the reasoning
+    goes." So the notes are read back off the previous file and re-attached to
+    the entries that survive. An entry that has gone takes its note with it,
+    which is right: the note was about that site.
+
+    Read from the DISK rather than the revision, because the only caller is
+    `--update-baseline`, which writes the disk.
+    """
+    notes: dict[str, str] = {}
+    try:
+        text = BASELINE.read_text(encoding="utf-8")
+    except OSError:
+        return notes
+    for line in text.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        entry, sep, note = line.partition("#")
+        if sep and note.strip():
+            notes[entry.strip()] = "  # " + note.strip()
+    return notes
+
+
 def read_baseline(tree: gittree.Tree) -> set[str] | None:
     """The pinned set, out of the REVISION rather than the disk.
 
@@ -393,6 +430,20 @@ HEADER = """\
 #
 #     python scripts/check-read-defaults.py --update-baseline
 #
+#
+# A trailing `  # note` on an entry says it has been READ IN CONTEXT and is
+# correct as it stands -- the empty string reaches something that handles it,
+# or the field is printed only when non-empty. An entry with NO note has not
+# been examined, or has been and is a real defect.
+#
+# That distinction is the whole point: a bare line used to mean either "a
+# defect nobody has fixed" or "fine, and somebody already checked", and the
+# file could not tell them apart -- so `acpi`'s seven and `mktemp`'s four were
+# each read twice before anyone wrote the answer down.
+#
+# `--update-baseline` carries these forward; see `read_notes`. Do not write
+# anything here that is not about one entry: this file is regenerated, and a
+# free-standing paragraph would be lost silently.
 """
 
 
@@ -568,6 +619,45 @@ def _self_test() -> int:
            "comments, not test modules",
            scan.reads, 3)
 
+    # A note beside an entry must survive `--update-baseline`, or the reason an
+    # entry is known-good is one regeneration from being lost -- and losing it
+    # is silent, because the entries stay right and only the reasoning goes.
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        fake = Path(tmp) / "baseline.txt"
+        fake.write_text(
+            "# header\n"
+            "alpha: keeps(x).unwrap_or_default()  # examined: maps to Unknown\n"
+            "beta: gone(y).unwrap_or_default()  # a note on an entry that disappears\n"
+            "gamma: bare(z).unwrap_or_default()\n",
+            encoding="utf-8",
+        )
+        saved = globals()["BASELINE"]
+        globals()["BASELINE"] = fake
+        try:
+            notes = read_notes()
+        finally:
+            globals()["BASELINE"] = saved
+
+    expect("a note is read back off the previous baseline",
+           notes.get("alpha: keeps(x).unwrap_or_default()"),
+           "  # examined: maps to Unknown")
+    expect("an entry with no note has none",
+           "gamma: bare(z).unwrap_or_default()" in notes, False)
+    expect("the header is not an entry", any(k.startswith("#") for k in notes), False)
+
+    # The writer's half: a surviving entry keeps its note, a new one has none,
+    # and the note of an entry that is gone goes with it.
+    found_fx = ["alpha: keeps(x).unwrap_or_default()", "delta: new(w).unwrap_or_default()"]
+    rendered = "".join(f"{f}{notes.get(f, '')}\n" for f in found_fx)
+    expect("the surviving entry keeps its note",
+           "alpha: keeps(x).unwrap_or_default()  # examined: maps to Unknown" in rendered,
+           True)
+    expect("a new entry is written bare",
+           "delta: new(w).unwrap_or_default()\n" in rendered, True)
+    expect("a vanished entry takes its note with it", "beta" in rendered, False)
+
     # The floors, both directions. A floor never observed to refuse is a claim
     # with no evidence behind it.
     expect("a full scan is not too thin",
@@ -611,6 +701,7 @@ def main() -> int:
         scan = survey(tree)
         pinned = read_baseline(tree)
     found = scan.found
+    notes = read_notes()
 
     # Before any verdict: did we actually look? A floor breach is not a finding
     # against anyone's code, it is "no verdict reached" -- so it exits 2 and
@@ -643,7 +734,7 @@ def main() -> int:
 
     if args.update:
         BASELINE.write_text(
-            HEADER + "".join(f"{f}\n" for f in found),
+            HEADER + "".join(f"{f}{notes.get(f, '')}\n" for f in found),
             encoding="utf-8",
             # newline="" so Python does not translate to CRLF on Windows, which
             # would leave the file dirty against the repo's `eol=lf` attribute.

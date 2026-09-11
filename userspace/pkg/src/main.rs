@@ -3120,14 +3120,27 @@ fn cmd_update(db: &PackageDb) {
                 let index_path = db.repo_index_path(&repo.name);
                 match fs::write(&index_path, &body) {
                     Ok(()) => {
-                        let entry_count = count_index_entries(&index_path);
-                        total_entries += entry_count;
-                        println!(
-                            "  {} updated: {} ({} packages)",
-                            repo.name,
-                            format_size(body.len() as u64),
-                            entry_count
-                        );
+                        // The fetch and the write both succeeded; only the
+                        // read-back can fail here, and the size is still worth
+                        // reporting when it does -- that part we know.
+                        match count_index_entries(&index_path) {
+                            Some(entry_count) => {
+                                total_entries += entry_count;
+                                println!(
+                                    "  {} updated: {} ({} packages)",
+                                    repo.name,
+                                    format_size(body.len() as u64),
+                                    entry_count
+                                );
+                            }
+                            None => {
+                                println!(
+                                    "  {} updated: {} (written, but could not be read back to count)",
+                                    repo.name,
+                                    format_size(body.len() as u64)
+                                );
+                            }
+                        }
                     }
                     Err(e) => {
                         eprintln!("  {} write error: {e}", repo.name);
@@ -3139,12 +3152,21 @@ fn cmd_update(db: &PackageDb) {
                 eprintln!("  {} fetch failed: {e}", repo.name);
                 // Check for cached data
                 let index_path = db.repo_index_path(&repo.name);
-                if index_path.exists() {
-                    let cached_count = count_index_entries(&index_path);
-                    total_entries += cached_count;
-                    println!("  {} using cache ({} packages)", repo.name, cached_count);
-                } else {
-                    failures += 1;
+                // AN UNREADABLE CACHE IS NOT A USABLE ONE. `exists()` is not
+                // enough: the file can be there and unreadable, and "using
+                // cache (0 packages)" claims a fallback that did not happen.
+                // That counts as a failure, the same as having no cache at
+                // all, because the outcome for the caller is identical -- this
+                // repository contributed nothing.
+                match count_index_entries(&index_path) {
+                    Some(cached_count) => {
+                        total_entries += cached_count;
+                        println!("  {} using cache ({} packages)", repo.name, cached_count);
+                    }
+                    None => {
+                        eprintln!("  {} cache is present but unreadable", repo.name);
+                        failures += 1;
+                    }
                 }
             }
         }
@@ -3153,8 +3175,10 @@ fn cmd_update(db: &PackageDb) {
     if failures == repos.len() as u32 {
         // All repos failed — try legacy index as last resort
         let legacy_path = db.repo_dir.join("index");
-        if legacy_path.exists() {
-            let legacy_count = count_index_entries(&legacy_path);
+        // `count_index_entries` subsumes the `exists()` check: it returns
+        // `None` for a file that is absent AND for one that cannot be read,
+        // and neither is a legacy index we can use.
+        if let Some(legacy_count) = count_index_entries(&legacy_path) {
             println!(
                 "\nAll repositories failed. Using legacy cached index ({} packages).",
                 legacy_count
@@ -3642,12 +3666,28 @@ fn response_is_complete(data: &[u8]) -> bool {
     true
 }
 
-fn count_index_entries(path: &Path) -> usize {
-    fs::read_to_string(path)
-        .unwrap_or_default()
-        .split("\n\n")
-        .filter(|chunk| !chunk.trim().is_empty())
-        .count()
+/// How many package records an index file holds, or `None` if it cannot be
+/// read.
+///
+/// # `None` is not zero
+///
+/// This was `.unwrap_or_default()`, so an index that existed but could not be
+/// read counted as EMPTY -- and every caller checks `exists()` first, so an
+/// unreadable file is the only way the read fails. The three messages then
+/// said "updated: 41 kB (0 packages)", "using cache (0 packages)" and
+/// "Using legacy cached index (0 packages)": successful-sounding sentences
+/// carrying a number nobody counted.
+///
+/// Zero is also what an empty index honestly reports, which is what makes the
+/// conflation worth removing -- the reader cannot tell the two apart.
+fn count_index_entries(path: &Path) -> Option<usize> {
+    Some(
+        fs::read_to_string(path)
+            .ok()?
+            .split("\n\n")
+            .filter(|chunk| !chunk.trim().is_empty())
+            .count(),
+    )
 }
 
 // ============================================================================

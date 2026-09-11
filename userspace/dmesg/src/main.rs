@@ -39,6 +39,20 @@ enum LogLevel {
     Notice = 5,
     Info = 6,
     Debug = 7,
+    /// The line carried no level, or one this program does not recognise.
+    ///
+    /// **Not a severity**, which is why it sits outside the 0..=7 range the
+    /// kernel uses and why the level filter treats it specially rather than
+    /// comparing it. It used to be `Info`: `parse_json_kmsg` ended with
+    /// `LogLevel::from_str(&level_str).unwrap_or(LogLevel::Info)`, and `-l`
+    /// keeps messages whose numeric level is at or below the requested one --
+    /// so a message with a malformed level was silently reclassified as Info
+    /// (6) and then dropped from `dmesg -l err` (3).
+    ///
+    /// That is the wrong direction for a log viewer. Filtering narrows, and
+    /// narrowing away a line you could not classify hides the evidence
+    /// somebody is filtering in order to find.
+    Unknown = 255,
 }
 
 impl LogLevel {
@@ -66,6 +80,7 @@ impl LogLevel {
             Self::Notice => "notice",
             Self::Info => "info",
             Self::Debug => "debug",
+            Self::Unknown => "unknown",
         }
     }
 
@@ -77,6 +92,7 @@ impl LogLevel {
             Self::Notice => "\x1b[36m",                    // cyan
             Self::Info => "",                              // default
             Self::Debug => "\x1b[90m",                     // dim gray
+            Self::Unknown => "\x1b[35m",                   // magenta: not a severity
         }
     }
 }
@@ -161,10 +177,21 @@ fn parse_json_kmsg(line: &str) -> Option<KernelMessage> {
     // Minimal JSON extraction — no full parser needed.
     let ts = extract_json_number(line, "ts").unwrap_or(0);
     let level_str = extract_json_string(line, "level").unwrap_or_default();
-    let msg = extract_json_string(line, "msg").unwrap_or_default();
+    // A RECORD WITH NO `msg` FIELD IS NOT A MESSAGE. This was
+    // `.unwrap_or_default()`, so a line that began with `{` but carried no
+    // message -- a truncated write, a different JSON schema, a stray brace --
+    // became a message whose text was the empty string, and dmesg printed a
+    // blank line for it at timestamp 0.
+    //
+    // `?` and not a check for emptiness: `{"msg":""}` is a record that says
+    // the message is empty, which is a different thing from one that does not
+    // say anything, and `Some("")` keeps it.
+    let msg = extract_json_string(line, "msg")?;
     let service = extract_json_string(line, "service").unwrap_or_default();
 
-    let level = LogLevel::from_str(&level_str).unwrap_or(LogLevel::Info);
+    // NOT `unwrap_or(LogLevel::Info)`. A level this program cannot read is not
+    // an informational message; see `LogLevel::Unknown`.
+    let level = LogLevel::from_str(&level_str).unwrap_or(LogLevel::Unknown);
 
     Some(KernelMessage {
         timestamp_us: ts * 1_000_000, // ts is in seconds
@@ -479,7 +506,10 @@ fn main() {
     if let Some(min_level) = config.level_filter {
         // Keep messages at or above the specified severity.
         // Lower numeric value = higher severity.
-        messages.retain(|m| (m.level as u8) <= (min_level as u8));
+        // `Unknown` is kept by every filter. It cannot be shown to be below
+        // the threshold, and dropping it would hide exactly the line whose
+        // severity nobody could establish.
+        messages.retain(|m| m.level == LogLevel::Unknown || (m.level as u8) <= (min_level as u8));
     }
 
     // Filter by search.
@@ -538,6 +568,7 @@ fn main() {
                 for msg in new_messages.iter().skip(last_count) {
                     // Apply filters.
                     if let Some(min_level) = config.level_filter
+                        && msg.level != LogLevel::Unknown
                         && (msg.level as u8) > (min_level as u8)
                     {
                         continue;
@@ -638,6 +669,50 @@ mod tests {
         assert_eq!(json_escape("a\\b"), "a\\\\b");
         assert_eq!(json_escape("a\nb"), "a\\nb");
         assert_eq!(json_escape("plain"), "plain");
+    }
+
+    /// A level nobody could read must not be filtered away.
+    ///
+    /// It used to become `Info` (6), and `-l err` keeps `level <= 3`, so a
+    /// message whose level field was malformed vanished from the view somebody
+    /// opened specifically to find problems.
+    #[test]
+    fn an_unreadable_level_survives_a_level_filter() {
+        let line = r#"{"ts":1,"level":"not-a-level","msg":"disk on fire"}"#;
+        let m = parse_kmsg_line(line).expect("a line with a message is a message");
+        assert_eq!(
+            m.level,
+            LogLevel::Unknown,
+            "an unrecognised level is Unknown"
+        );
+
+        // The filter's own rule, applied directly: Unknown is kept whatever
+        // the threshold, and a real Info is not kept at `err`.
+        let keeps =
+            |lvl: LogLevel, min: LogLevel| lvl == LogLevel::Unknown || (lvl as u8) <= (min as u8);
+        assert!(
+            keeps(LogLevel::Unknown, LogLevel::Error),
+            "must survive -l err"
+        );
+        assert!(
+            keeps(LogLevel::Unknown, LogLevel::Emergency),
+            "and -l emerg"
+        );
+        assert!(
+            !keeps(LogLevel::Info, LogLevel::Error),
+            "real Info is filtered"
+        );
+        assert!(
+            keeps(LogLevel::Critical, LogLevel::Error),
+            "crit passes err"
+        );
+    }
+
+    /// `Unknown` is not a severity and must not sort as one.
+    #[test]
+    fn unknown_is_outside_the_kernel_severity_range() {
+        assert!((LogLevel::Unknown as u8) > (LogLevel::Debug as u8));
+        assert_eq!(LogLevel::Unknown.name(), "unknown");
     }
 
     #[test]

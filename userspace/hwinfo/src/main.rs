@@ -81,7 +81,31 @@ impl Default for HwInfoOptions {
 
 fn probe_cpu() -> Vec<HwDevice> {
     let mut devices = Vec::new();
-    let cpuinfo = fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
+    // AN UNREADABLE /proc/cpuinfo IS NOT A MACHINE WITH NO CPU.
+    //
+    // This was `.unwrap_or_default()`, so a failed read produced an empty
+    // string, the loop below iterated over nothing, and `probe_cpu` returned
+    // an empty list. The caller extends the inventory with it, so `hwinfo`
+    // printed a hardware listing with no processor in it and no hint that
+    // anything had gone wrong -- and a machine with zero CPUs is not a reading
+    // anyone would take at face value, which is precisely why it needs to say
+    // what happened instead of showing it.
+    let cpuinfo = match fs::read_to_string("/proc/cpuinfo") {
+        Ok(text) => text,
+        Err(e) => {
+            // SAY SO, THEN FALL THROUGH TO THE PLACEHOLDER BELOW.
+            //
+            // Returning here was the first attempt and it was wrong: it threw
+            // away an entry that is TRUE. A machine running `hwinfo` has a
+            // processor, so "there is a CPU and its details are unknown" is a
+            // correct statement, unlike the invented serial numbers and boot
+            // entries removed elsewhere this week. What was missing is any
+            // hint that the details are unknown BECAUSE the file could not be
+            // read, rather than because it said nothing useful.
+            eprintln!("hwinfo: cannot read /proc/cpuinfo ({e}); CPU details unavailable");
+            String::new()
+        }
+    };
 
     let mut current_props = BTreeMap::new();
     let mut cpu_count = 0u32;
@@ -115,7 +139,18 @@ fn probe_cpu() -> Vec<HwDevice> {
         devices.push(dev);
     }
 
-    // Fallback if /proc/cpuinfo not available.
+    // A PLACEHOLDER, NOT A FABRICATION, and the difference is worth stating
+    // because this file sits next to several that WERE fabricating.
+    //
+    // Nothing here is a claim that could be false: the machine running this
+    // program has a processor, and "Unknown" is what we know about it. Compare
+    // `dmidecode`, which invented the serial number "SN-00000001" -- an
+    // identity claim about one specific machine, which asset tracking reads.
+    // The test below asserts this entry exists; that is fine for the same
+    // reason, and it would not be if the entry named a vendor or a model.
+    //
+    // The read failure is reported on stderr above, so the reader can tell
+    // "no cpuinfo" from "cpuinfo said nothing I recognised".
     if devices.is_empty() {
         let mut dev = HwDevice::new("cpu");
         dev.description = "Processor".to_string();

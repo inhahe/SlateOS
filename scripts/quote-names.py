@@ -89,6 +89,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # one matters because this script's own self-test builds one.
 import gitenv  # noqa: E402
 import gittree  # noqa: E402
+from rustlex import live_code  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 BASELINE = Path(__file__).resolve().parent / "quote-names-baseline.txt"
@@ -114,12 +115,37 @@ IGNORE = {
     "userspace/coreutils/tests/diagnostics_quote_names.rs": "the detector's own fixtures",
 }
 
+# The macros that build a message somebody will read.
+#
+# There were THREE spellings of this set, one inside each predicate below, and
+# they had already drifted: `hand_written_quotes` matched `println!` and the
+# other two did not. None of the three matched `format!`.
+#
+# That last gap is the one that bit. `userspace/efibootmgr` was given three
+# diagnostics of the same shape in one commit on 2026-09-11; this gate refused
+# the push over the `eprintln!` and passed the two that `format!` built a call
+# earlier, in the same file, in the same commit. **A message does not stop
+# being a message because it is assembled before it is printed.** The value
+# reaches a terminal either way, and a newline in it forges a line either way.
+#
+# `format!` earns its place on measurement rather than on the principle: of the
+# 507 `format!` sites this widening finds, 398 are inside `Err(..)`,
+# `map_err(..)` or `ok_or(..)`, which is a message by construction, and the
+# sampled remainder is mostly `SomeError::Variant(format!(..))` -- the same
+# thing with a type around it. `userspace/rsync` alone holds 32 of the shape
+# `format!("cannot open '{}': {e}", path.display())`, which is this gate's
+# canonical defect written in the one macro it could not see.
+#
+# Spelled once now, so the next predicate cannot disagree with the other three.
+_MESSAGE_OPEN = re.compile(r'(?:e?println!|format!)\s*\(\s*"')
+
 
 def bare_interpolated_name(line: str) -> str | None:
     """Port of `bare_interpolated_name` in diagnostics_quote_names.rs.
 
     Matches `eprintln!("prog: {ident}: ...` — the shape where `ident` reaches
-    the message as a bare name.
+    the message as a bare name — in any of the macros `_MESSAGE_OPEN` lists,
+    not only in `eprintln!`. See that constant for why `format!` is one.
 
     `line` is a *logical* line: `join_wrapped_calls` has already pulled a call
     that rustfmt split back onto one. What arrives here can therefore be
@@ -127,7 +153,7 @@ def bare_interpolated_name(line: str) -> str | None:
     so the macro and its opening quote are matched with whitespace between
     them allowed rather than by a bare `partition`.
     """
-    m = re.search(r'eprintln!\(\s*"', line)
+    m = _MESSAGE_OPEN.search(line)
     if m is None:
         return None
     after = line[m.end() :]
@@ -172,8 +198,9 @@ def _format_string_end(after_open_quote: str) -> int:
 def positional_name_arg(line: str) -> str | None:
     """The positional twin of [`bare_interpolated_name`].
 
-    Matches `eprintln!("prog: {}: ...", <path>.display())` -- the same
-    diagnostic, the same defect, the older spelling. Returns the argument text
+    Matches `eprintln!("prog: {}: ...", <path>.display())` -- and the same
+    shape in the other macros `_MESSAGE_OPEN` lists -- the same diagnostic,
+    the same defect, the older spelling. Returns the argument text
     so the report can show which name reaches the message.
 
     Deliberately requires `.display()`. A bare identifier in a `{}` could be an
@@ -181,7 +208,7 @@ def positional_name_arg(line: str) -> str | None:
     wolf; `.display()` exists on `Path` and `PathBuf` and nothing else here, so
     it identifies a file name rather than guessing at one.
     """
-    m = re.search(r'eprintln!\(\s*"', line)
+    m = _MESSAGE_OPEN.search(line)
     if m is None:
         return None
     after = line[m.end():]
@@ -261,7 +288,7 @@ def hand_written_quotes(line: str) -> bool:
     joined onto one logical line) cannot be mistaken for a placeholder and
     swallow the real one that follows it.
     """
-    m = re.search(r'e?println!\s*\(\s*"', line)
+    m = _MESSAGE_OPEN.search(line)
     if m is None:
         return False
     return quotes_around_placeholder(line[m.end() :])
@@ -682,7 +709,18 @@ def survey_tree(tree: gittree.Tree) -> Survey:
             text = _decode(tree.read_bytes(rel))
             if text is None:
                 continue
-            hits = violations(text)
+            # Test code is not a diagnostic. This gate was the only one of the
+            # eleven rustlex exists for that read `#[cfg(test)]` as production
+            # -- harmless while it saw only `eprintln!`, and not harmless the
+            # moment it saw `format!`: `userspace/oils` builds shell source in
+            # its fixtures (`format!("eval '{src}'")`), which is a shell test
+            # doing its job and would have entered the ledger as a defect
+            # nobody could ever fix.
+            #
+            # `live_code` BLANKS the test items to spaces rather than cutting
+            # at the first one, so the line numbers this reports still point at
+            # the line a reader will open.
+            hits = violations(live_code(text)[0])
             if hits:
                 found[rel] = hits
     return Survey(found, scanned)
@@ -853,10 +891,28 @@ def write_baseline(found: dict[str, list[tuple[int, str, str]]]) -> None:
         "# There is exactly one legitimate reason a number here may go UP: the",
         "# detector was corrected and now sees sites it used to miss. That is a",
         "# commit which changes `quote-names.py` and no `.rs` file under the",
-        "# scanned roots, and it has happened once -- 2026-08-23, when calls that",
-        "# rustfmt had wrapped onto two lines turned out to be invisible, hiding",
-        "# 71 real sites. If a number rises in a commit that also edits code, the",
-        "# code is what raised it.",
+        "# scanned roots. If a number rises in a commit that also edits code,",
+        "# the code is what raised it.",
+        "#",
+        "# It has happened three times.",
+        "#",
+        "#   2026-08-23  Calls rustfmt had wrapped onto two lines were invisible.",
+        "#               71 sites.",
+        "#   2026-09-10  `{}` with the name in the argument list counted as well",
+        "#               as `{name}` captured inline. 224 sites.",
+        "#   2026-09-11  The gate matched `eprintln!` and, in one predicate of",
+        "#               three, `println!`. It never matched `format!`. A message",
+        "#               does not stop being a message because it is assembled",
+        "#               before it is printed: 398 of the sites this found are",
+        "#               inside `Err(..)`, `map_err(..)` or `ok_or(..)`. Found",
+        "#               because efibootmgr was given three diagnostics of one",
+        "#               shape in one commit and this gate refused one of them.",
+        "#               507 sites, and the ledger had been at ZERO.",
+        "#",
+        "# That last line is the one to read twice. This file said the tree was",
+        "# clean the day before, and the tree was not clean; it was unexamined in",
+        "# a macro nobody had thought to look in. An empty ratchet is a claim",
+        "# about the detector as much as about the code.",
         "#",
         f"# {sum(len(v) for v in found.values())} sites across {len(found)} files.",
         "",
@@ -953,12 +1009,34 @@ def selftest() -> int:
     expect("uppercase-prog", 'eprintln!("Cut: {path}: {e}");', 0)
     expect("empty-prog", 'eprintln!(": {path}: {e}");', 0)
     expect("not-an-ident", 'eprintln!("cut: {path.display()}: {e}");', 0)
-    expect("stdout-not-stderr", 'println!("cut: {path}: {e}");', 0)
+    # This case used to want 0, on the reading that stdout is not a diagnostic
+    # channel. Two things overturned it. The weaker: section 5 below already
+    # wanted 1 for `println!("cut: '{path}'")`, so the file contradicted itself
+    # and the contradiction WAS the drift -- one predicate had been widened to
+    # `println!` and the other two had not. The stronger: what this predicate
+    # matches is not a channel, it is a shape. `<prog>: {name}: <reason>` is
+    # the diagnostic form; a program printing one to stdout is a second bug,
+    # not an exemption from this one, and the newline in `name` forges a line
+    # of output either way.
+    expect("bare name on stdout is still a diagnostic", 'println!("cut: {path}: {e}");', 1)
 
     # 5. Hand-written quotes: the shape that looks fixed and is not.
     expect("hand-quotes", "eprintln!(\"cut: '{path}': {e}\");", 1)
     expect("hand-quotes-stdout", "println!(\"cut: '{path}'\");", 1)
-    expect("hand-quotes-no-macro", "let s = format!(\"'{path}'\");", 0)
+    # This case used to want 0, under the label `hand-quotes-no-macro`: the
+    # reading was that `format!` does not print, so it is not a diagnostic.
+    # That is true of the macro and false of the tree. Measured on 2026-09-11:
+    # 507 sites, 398 of them inside `Err(..)`, `map_err(..)` or `ok_or(..)`,
+    # and most of the rest `SomeError::Variant(format!(..))` -- a message with
+    # a type around it, printed by whatever `main` catches it. `userspace/rsync`
+    # alone holds 32 of `format!("cannot open '{}': {e}", path.display())`.
+    #
+    # The cost is admitted rather than argued away: nothing in the syntax
+    # separates a `format!` that builds a message from one that builds data,
+    # so this predicate cannot be precise. The two mitigations are the
+    # test-code exclusion (case 13) and the IGNORE table, which records a
+    # reason where a baseline entry would record only a number.
+    expect("hand-quotes-in-format", "let s = format!(\"'{path}'\");", 1)
 
     # 5a. A *doubled* brace is Rust's escape for a literal one, so quotes around
     #     it wrap printed text, not a name. Help text full of JSON examples is
@@ -1391,6 +1469,74 @@ def selftest() -> int:
                 f"HEAD was {before!r} before the case and is {after!r} after. "
                 "The git commands above are not reaching the temp directory."
             )
+
+    # 12. `format!` builds messages too, and this gate could not see one.
+    #
+    #     Every case above is an `eprintln!` -- which is how the gate came to
+    #     match only that macro, and how it stayed that way. On 2026-09-11
+    #     `userspace/efibootmgr` was given three diagnostics of one shape in
+    #     one commit; the push was refused over the `eprintln!` and the two
+    #     that `format!` built a call earlier went through, in the same file,
+    #     under the same review. The first four cases here fail against the
+    #     detector as it stood that morning.
+    expect(
+        "format! with hand-written quotes",
+        """fn f() -> String { format!("unrecognized argument '{arg}'") }""",
+        1,
+    )
+    expect(
+        "format! into Err -- 398 of the 507 sites are written this way",
+        """fn f() { return Err(format!("cannot open '{}': {e}", path.display())); }""",
+        1,
+    )
+    expect(
+        "format! carrying a bare name",
+        """fn f() -> String { format!("rsync: {path}: {e}") }""",
+        1,
+    )
+    expect(
+        "println! carrying a bare name -- two of the three predicates missed it",
+        """fn f() { println!("ls: {path}: {e}"); }""",
+        1,
+    )
+    #     The remedy must still not read as the defect, in the new macro as in
+    #     the old one. A gate that flags its own fix is a gate that gets turned
+    #     off.
+    expect(
+        "format! already routed through the quoting helpers",
+        """fn f() -> String { format!("cut: {}: {e}", quotef_os(path)) }""",
+        0,
+    )
+
+    # 13. Test code is not a diagnostic.
+    #
+    #     This gate was the only one of the eleven `rustlex` exists for that
+    #     read `#[cfg(test)]` as production code. That was harmless while it
+    #     saw only `eprintln!` and stopped being harmless the moment it saw
+    #     `format!`: `userspace/oils` is a shell, and its fixtures build shell
+    #     source with `format!("eval '{src}'")`. Eleven of its sixteen sites
+    #     were exactly that, and they would have entered the ledger as defects
+    #     nobody could ever fix -- a ratchet whose floor is unreachable stops
+    #     being read, which is the reason the IGNORE table exists at all.
+    #
+    #     The blanking belongs to `survey_tree` rather than to `violations`,
+    #     so what is asserted here is the composition the survey performs.
+    fixture = (
+        """fn f() -> String { format!("rsync: cannot open '{p}'") }\n"""
+        "#[cfg(test)]\n"
+        "mod tests {\n"
+        """    fn t() { let _ = format!("eval '{src}'"); }\n"""
+        "}\n"
+    )
+    checked += 1
+    live = violations(live_code(fixture)[0])
+    if [(n, w) for n, w, _s in live] != [(1, "hand-written quotes")]:
+        failures.append(
+            f"test-code exclusion: want one site on line 1, got {live}. "
+            "Either the fixture entered the ledger, or `live_code` cut the "
+            "file instead of blanking it and the line numbers no longer point "
+            "at the line a reader opens."
+        )
 
     for f in failures:
         print(f"selftest FAIL {f}")

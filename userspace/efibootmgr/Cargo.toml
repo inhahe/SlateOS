@@ -4,3 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS EFI boot manager"
 [dependencies]
+# A name or argument put straight into a diagnostic hands it control of
+# stderr: an argument containing a newline forges a line of this program's
+# output. See `userspace/quoting`.
+quoting = { path = "../quoting" }

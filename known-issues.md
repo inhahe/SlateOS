@@ -374,6 +374,74 @@ and listing the security-relevant crates by name is an enumeration that misses
 the next crate by construction, which is the defect shape this tree keeps
 finding.
 
+## TD-B-EFIBOOTMGR-MODIFIES-NOTHING (lane B, 2026-09-11) -- FIXED 2026-09-11
+
+**FIXED** by deleting the options, which is what the entry named as the proper
+fix. `efibootmgr` is a read-only reporter now: `-v`, `-h`, `-V`. All 32
+spellings of the removed options live in one `REMOVED_OPTIONS` const that both
+the help text and the parser are built from, so the sentence and the behaviour
+cannot drift apart, and re-adding one to the parser without efivarfs writes
+behind it fails a test.
+
+**The part the entry did not anticipate, and it is the important part.**
+Deleting an option from a parser whose fall-through arm was `_ => {}` does not
+refuse it -- it makes it a silent no-op. `efibootmgr -c -L Slate` would have
+printed a boot list and exited 0, which reads as success. That is the same lie
+with the incriminating sentence removed, and it would have been *harder* to
+notice than the fabricated "created Boot0003", because at least that named
+which lie it was telling. Every unrecognised argument is an error now, and a
+removed one gets a message that says it never wrote anything.
+
+**Two more fabrications in the same crate, found while removing the writes.**
+`print_boot_entries` emitted the fixed strings `BootCurrent: 0000` and
+`Timeout: 3 seconds` without either variable ever being read -- so a machine
+with a 10-second timeout, or one that booted from the network and sets no
+`BootCurrent`, was reported wrong in the header of a display whose entire job
+is to be that header. Both are read now, and a machine that does not set one
+gets no line rather than a plausible wrong one. This is the THIRD defect found
+in this crate in one day, and all three are the same shape: a value nobody had
+that got printed anyway.
+
+Also fixed in passing, all the same family: an EFI variable whose value is
+empty is four bytes (attributes only) and the `> 4` test called it absent; a
+label outside the basic plane arrives as a UTF-16 surrogate pair and
+`char::from_u32` per code unit rejected both halves, so such characters
+vanished from boot labels silently; `BootOrder` naming a `Boot####` that does
+not exist is now reported, because the firmware skips it and that is the
+symptom somebody runs this to explain; and `efivar` printed "EFI variables are
+not supported on this system." to *stdout* and exited 0.
+
+
+**In short:** `efibootmgr` accepts seven options that change the machine's boot
+configuration and performs none of them. It prints `efibootmgr: created
+Boot0003` and `efibootmgr: deleted Boot0003` having written nothing at all:
+there is no `fs::write`, no `File::create`, no `OpenOptions` anywhere in the
+crate. The modifications happen in memory and are then printed as though they
+had been applied.
+
+**The options:** `-c/--create`, `-B/--delete-bootnum`, `-a/--active`,
+`-A/--inactive`, `-n/--bootnext`, `-o/--bootorder`, `-t/--timeout`.
+
+**Why this is the §1006 case.** design-decisions.md §1006 is the operator's
+decision that a command which does not work is deleted, not kept as a stub, and
+`userspace/acl`'s `setfacl`/`chacl` were removed under it the same morning for
+exactly this — printing "removing all ACL entries from <path>" with zero writes
+in 793 lines. This is that, in a tool whose subject is whether the machine
+boots.
+
+**It is the second defect found in this crate today and I missed it the first
+time.** The earlier repair removed `generate_default_entries`, which invented
+two boot entries when efivarfs could not be read, so that the tool stopped
+fabricating what it REPORTS. Nobody looked at what it CLAIMS TO WRITE. Reading
+a program for one defect family is not reading it.
+
+**The proper fix** is to delete the seven options, their fields on `Options`,
+the modification block, their help text and the tests that cover them —
+`efibootmgr` becomes a read-only reporter, which is what it actually is. Adding
+them back needs efivarfs write support: the immutable attribute has to be
+cleared before a variable can be replaced, and `posix` does not expose
+`FS_IOC_SETFLAGS` today. That is the condition to reopen this.
+
 ## TD-B-SUDOS-AUDIT-LOG-RECORDS-THE-TTY-THE-CALLER-NAMED (lane B, 2026-09-11) -- FIXED 2026-09-11
 
 **FIXED** with `ttyname(0)`, which is what the entry named as the proper
@@ -421,6 +489,59 @@ one that says nothing at exactly that moment.
 The existing docstring's care about `var_os` versus `var` stays relevant: a tty
 name is a path under `/dev` and may not be UTF-8.
 
+## TD-B-MKTEMPS-ACCOUNT-LOOKUPS-CANNOT-TELL-ABSENT-FROM-UNREADABLE (lane B, 2026-09-11)
+
+**In short:** `userspace/mktemp` -- which is also `id`, `whoami` and `groups` --
+reads `/etc/passwd` and `/etc/group` with `Err(_) => return Vec::new()`. An
+unreadable database is therefore an empty one, so `id alice` answers "no such
+user" with confidence when the real problem is that it could not look.
+
+**Where.** `read_passwd` and `read_group` in
+`userspace/mktemp/src/main.rs`. The four `mktemp:` entries in
+`scripts/read-defaults-baseline.txt` sit on top of these and are NOT the defect:
+`uid_to_name(uid).unwrap_or_default()` feeds an `is_empty()` check that prints
+`uid=1000` with no name, which is exactly what real `id` does for an account
+with no record. They stay pinned.
+
+**Why it is an entry and not a same-day fix.** The visible cost is
+degradation, not a wrong decision: `id` and `groups` print numbers instead of
+names. The one confidently-wrong answer is `id <name>` reporting no such user.
+Nothing here grants or refuses anything.
+
+The same line in `userspace/doas` DID guard a privileged action -- an
+unreadable `/etc/group` silently deleted every `deny :group` rule -- and was
+fixed on 2026-09-11. That is the difference worth keeping: the identical
+`Err(_) => Vec::new()` is a cosmetic defect in one crate and a policy
+inversion in the other, and only reading what sits above it tells you which.
+
+**The proper fix** is `Option<Vec<..>>` from both readers, as `doas` now has,
+with `id`'s output distinguishing "this uid has no account" from "the account
+database could not be read" -- the second deserves a diagnostic on stderr, not
+a silently numeric line.
+
+**The rest of the tree was swept for this shape and is clean.** Ten sites
+collapse an unreadable account or policy file into an empty collection:
+
+| Crate | Verdict |
+|---|---|
+| `doas` | **real defect** -- deleted every `deny :group`. Fixed 2026-09-11. |
+| `mktemp` | this entry: display only, `id`/`whoami`/`groups` print numbers |
+| `getent`, `loginctl`, `fuser` | display, or fail closed -- `loginctl`'s `require_user` exits when the lookup finds nobody |
+| `newgrp` | **already correct, deliberately** |
+
+`newgrp` is worth reading rather than re-deriving. Its `read_gshadow_db`
+carries the reasoning in a doc comment -- "An unreadable file is an empty list,
+and an empty list refuses everyone ... `newgrp` runs setuid root precisely so
+that it *can* read this file; a caller that cannot is not a reason to admit
+anyone" -- and `password_opens` returns `false` both for a group with no entry
+and for one whose password field is empty. Its `/etc/group` read fails the same
+way: nobody is a member, so the password is demanded rather than skipped. The
+rule is extracted from the file read specifically so every branch is reachable
+from a test, with a note that a stub accepting any password once survived there.
+
+So the shape is not on its own a defect. What decides is whether a DECISION or
+a DISPLAY sits above it, and in nine of ten cases here the answer was benign.
+
 ## TD-B-ONE-HUNDRED-AND-FORTY-THREE-DISCARDED-FAILURES-NO-GATE-LOOKS-AT (lane B, 2026-09-11)
 
 **In short:** `check-read-defaults` catches `.unwrap_or_default()` on a call
@@ -458,6 +579,32 @@ noise and then becomes bypassed".
 on a call that reads the world — which means the std readers and local
 functions that touch the filesystem, not every local function returning
 `Option`. Measure the count for that subset alone before pinning anything.
+
+**DONE 2026-09-11, and the subset is small: 18 sites in 7 crates**, against 143
+for the unscoped pattern. The filter is transitive — a local function reads the
+world if its body does, or if it calls one that does — which keeps
+`read_sysfs_u32` and `get_file_mtime` and drops the buffer parsers
+(`read_u16_le(buf, 16)`) that dominate the raw count.
+
+All 18 were READ rather than pinned, which is what a population this size is
+for. Fixed: `lspci` (an unreadable `vendor` became PCI ID 0000, printed as
+"Unknown vendor 0000"), `acpi` and `thermald` (a sensor that did not answer
+became 0 degrees and the classifier called the zone OK), `lsof` (a process
+whose uid could not be read was attributed to ROOT), `vmstat` (an unreadable
+`/proc/uptime` became a 1-second DIVISOR, so since-boot rates printed as raw
+totals — wrong by 86,400 on a machine up for a day).
+
+Left alone deliberately, with the reason recorded at each site: `ar`'s mtime
+(zero is already its `-D` deterministic value), `acpi`'s `cur_state`/`max_state`
+and `lspci`'s class/revision/IRQ/subsystem (zero is a legitimate reading for
+every one), `ntpd`'s drift (a missing drift file means zero drift, which is
+what ntpd itself assumes).
+
+**No gate was built for this subset, and that is the recommendation.** Eighteen
+sites, now all either fixed or annotated, is a population where a ratchet would
+cost more than it caught — and the interesting half, deciding whether a literal
+default is wrong, is exactly the judgement a regex cannot make. The larger 143
+stays unpinned for the reason above.
 
 ## TD-B-EIGHTY-THREE-DISCARDED-FAILURES-ARE-PINNED-UNREAD (lane B, 2026-09-10)
 

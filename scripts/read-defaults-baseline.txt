@@ -24,71 +24,72 @@
 #
 #     python scripts/check-read-defaults.py --update-baseline
 #
-acpi: read_sysfs_string(&path.join("manufacturer")).unwrap_or_default()
-acpi: read_sysfs_string(&path.join("model_name")).unwrap_or_default()
-acpi: read_sysfs_string(&path.join("policy")).unwrap_or_default()
-acpi: read_sysfs_string(&path.join("serial_number")).unwrap_or_default()
-acpi: read_sysfs_string(&path.join("status")).unwrap_or_default()
-acpi: read_sysfs_string(&path.join("technology")).unwrap_or_default()
-acpi: read_sysfs_string(&path.join("type")).unwrap_or_default()
+#
+# A trailing `  # note` on an entry says it has been READ IN CONTEXT and is
+# correct as it stands -- the empty string reaches something that handles it,
+# or the field is printed only when non-empty. An entry with NO note has not
+# been examined, or has been and is a real defect.
+#
+# That distinction is the whole point: a bare line used to mean either "a
+# defect nobody has fixed" or "fine, and somebody already checked", and the
+# file could not tell them apart -- so `acpi`'s seven and `mktemp`'s four were
+# each read twice before anyone wrote the answer down.
+#
+# `--update-baseline` carries these forward; see `read_notes`. Do not write
+# anything here that is not about one entry: this file is regenerated, and a
+# free-standing paragraph would be lost silently.
+acpi: read_sysfs_string(&path.join("manufacturer")).unwrap_or_default()  # examined 2026-09-11: printed only when non-empty
+acpi: read_sysfs_string(&path.join("model_name")).unwrap_or_default()  # examined 2026-09-11: printed only when non-empty
+acpi: read_sysfs_string(&path.join("policy")).unwrap_or_default()  # examined 2026-09-11: printed only when non-empty
+acpi: read_sysfs_string(&path.join("serial_number")).unwrap_or_default()  # examined 2026-09-11: printed only when non-empty
+acpi: read_sysfs_string(&path.join("status")).unwrap_or_default()  # examined 2026-09-11: reaches a match that maps "" to BatteryStatus::Unknown
+acpi: read_sysfs_string(&path.join("technology")).unwrap_or_default()  # examined 2026-09-11: printed only when non-empty; absent is the common case
+acpi: read_sysfs_string(&path.join("type")).unwrap_or_default()  # examined 2026-09-11: a cooling-device column, printed as read
 coreutils: sprintf(b"%.6g", &[Value::Num(n)], b"%.6g").unwrap_or_default()
-coreutils: std::env::var("TARGET").unwrap_or_default()
-cpupower: read_sysfs_string(&format!("{}/scaling_available_frequencies", base)) .unwrap_or_default()
-cpupower: read_sysfs_string(&format!("{}/scaling_available_governors", base)).unwrap_or_default()
-diskutil: read_file(&format!("{dev_path}/device/model")).unwrap_or_default()
-diskutil: read_file(&format!("{dev_path}/device/serial")).unwrap_or_default()
-dmesg: extract_json_string(line, "level").unwrap_or_default()
-dmesg: extract_json_string(line, "msg").unwrap_or_default()
-dmesg: extract_json_string(line, "service").unwrap_or_default()
-efibootmgr: read_efi_var("BootOrder").unwrap_or_default()
-eject: fs::read_to_string(format!("{sys_path}/device/model")) .unwrap_or_default()
-eject: fs::read_to_string(format!("{sys_path}/device/vendor")) .unwrap_or_default()
-eject: fs::read_to_string(format!("{sys_path}/removable")) .unwrap_or_default()
-fuser: fs::read_to_string("/etc/passwd").unwrap_or_default()
-fuser: fs::read_to_string(format!("/proc/{pid}/comm")) .unwrap_or_default()
-fuser: fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default()
-hostname: read_hostname().unwrap_or_default()
-hwinfo: fs::read_to_string("/proc/cpuinfo").unwrap_or_default()
+coreutils: std::env::var("TARGET").unwrap_or_default()  # examined 2026-09-11: build.rs, where cargo always sets TARGET, so the default is unreachable
+cpupower: read_sysfs_string(&format!("{}/scaling_available_frequencies", base)) .unwrap_or_default()  # examined 2026-09-11: as above
+cpupower: read_sysfs_string(&format!("{}/scaling_available_governors", base)).unwrap_or_default()  # examined 2026-09-11: display only, joined into a list line; nothing validates against it
+diskutil: read_file(&format!("{dev_path}/device/model")).unwrap_or_default()  # examined 2026-09-11: the Model line is printed only when non-empty, and loop/dm devices have none
+diskutil: read_file(&format!("{dev_path}/device/serial")).unwrap_or_default()  # examined 2026-09-11: as above
+dmesg: extract_json_string(line, "level").unwrap_or_default()  # examined 2026-09-11: "" reaches LogLevel::from_str and becomes Unknown
+dmesg: extract_json_string(line, "service").unwrap_or_default()  # examined 2026-09-11: an optional field; absent means the line came from the kernel rather than a service
+eject: fs::read_to_string(format!("{sys_path}/device/model")) .unwrap_or_default()  # examined 2026-09-11: descriptive only; the eject decision is guarded by `removable`, which is an Option
+eject: fs::read_to_string(format!("{sys_path}/device/vendor")) .unwrap_or_default()  # examined 2026-09-11: as above
+fuser: fs::read_to_string("/etc/passwd").unwrap_or_default()  # examined 2026-09-11: uid_to_name falls back to the numeric uid, which is what real fuser prints
+hostname: read_hostname().unwrap_or_default()  # examined 2026-09-11: BootSet deliberately treats empty and unreadable alike -- it sets the name in both cases; the comment above it says so
 hwinfo: fs::read_to_string(path) .unwrap_or_default()
-install: std::env::var("TARGET").unwrap_or_default()
-ldd: strtab_get(dynstr, vn_file).unwrap_or_default()
-ldd: strtab_get(dynstr, vna_name).unwrap_or_default()
-losetup: std::env::var("TARGET").unwrap_or_default()
-lsblk: read_file(&format!("{dev_path}/device/model")).unwrap_or_default()
-lsblk: read_file(&format!("{dev_path}/device/serial")).unwrap_or_default()
-lspci: read_file(&format!("{dev_path}/driver/name")).unwrap_or_default()
-lsusb: read_attr(&format!("{dev_path}/bMaxPower")).unwrap_or_default()
-lsusb: read_attr(&format!("{dev_path}/bcdUSB")).unwrap_or_default()
-lsusb: read_attr(&format!("{dev_path}/manufacturer")).unwrap_or_default()
-lsusb: read_attr(&format!("{dev_path}/product")).unwrap_or_default()
-lsusb: read_attr(&format!("{dev_path}/serial")).unwrap_or_default()
-lsusb: read_attr(&format!("{dev_path}/speed")).unwrap_or_default()
+install: std::env::var("TARGET").unwrap_or_default()  # examined 2026-09-11: build.rs, where cargo always sets TARGET, so the default is unreachable
+losetup: std::env::var("TARGET").unwrap_or_default()  # examined 2026-09-11: build.rs, where cargo always sets TARGET, so the default is unreachable
+lsblk: read_file(&format!("{dev_path}/device/model")).unwrap_or_default()  # examined 2026-09-11: an empty Model column is right for loop/dm devices, which have none
+lsblk: read_file(&format!("{dev_path}/device/serial")).unwrap_or_default()  # examined 2026-09-11: as above
+lspci: read_file(&format!("{dev_path}/driver/name")).unwrap_or_default()  # examined 2026-09-11: a device with no driver bound has no driver/name link at all, so empty IS unbound
+lsusb: read_attr(&format!("{dev_path}/bMaxPower")).unwrap_or_default()  # examined 2026-09-11: sysfs omits the file when the device exposes no such descriptor, so empty IS absent; the display omits the line, as real lsusb does
+lsusb: read_attr(&format!("{dev_path}/bcdUSB")).unwrap_or_default()  # examined 2026-09-11: sysfs omits the file when the device exposes no such descriptor, so empty IS absent; the display omits the line, as real lsusb does
+lsusb: read_attr(&format!("{dev_path}/manufacturer")).unwrap_or_default()  # examined 2026-09-11: sysfs omits the file when the device exposes no such descriptor, so empty IS absent; the display omits the line, as real lsusb does
+lsusb: read_attr(&format!("{dev_path}/product")).unwrap_or_default()  # examined 2026-09-11: sysfs omits the file when the device exposes no such descriptor, so empty IS absent; the display omits the line, as real lsusb does
+lsusb: read_attr(&format!("{dev_path}/serial")).unwrap_or_default()  # examined 2026-09-11: sysfs omits the file when the device exposes no such descriptor, so empty IS absent; the display omits the line, as real lsusb does
+lsusb: read_attr(&format!("{dev_path}/speed")).unwrap_or_default()  # examined 2026-09-11: sysfs omits the file when the device exposes no such descriptor, so empty IS absent; the display omits the line, as real lsusb does
 man: extract_name_line(page.source).unwrap_or_default()
-mktemp: gid_to_name(egid).unwrap_or_default()
-mktemp: gid_to_name(gid).unwrap_or_default()
-mktemp: uid_to_name(euid).unwrap_or_default()
-mktemp: uid_to_name(uid).unwrap_or_default()
-monctl: read_file(&format!("{base}/modes")).unwrap_or_default()
-monctl: read_file(&format!("{base}/status")).unwrap_or_default()
-netstat: fs::read_to_string(format!("/proc/{pid}/comm")) .unwrap_or_default()
-newgrp: std::fs::read_to_string("/etc/group").unwrap_or_default()
-newgrp: std::fs::read_to_string("/etc/gshadow").unwrap_or_default()
-objdump: parse_symbols(data, hdr, ss, sections).unwrap_or_default()
-oils: std::env::var("TARGET").unwrap_or_default()
-oils: std::env::var_os("PATH").unwrap_or_default()
-passwd: text(raw, idx).unwrap_or_default()
+mktemp: gid_to_name(egid).unwrap_or_default()  # examined 2026-09-11: as above
+mktemp: gid_to_name(gid).unwrap_or_default()  # examined 2026-09-11: as above
+mktemp: uid_to_name(euid).unwrap_or_default()  # examined 2026-09-11: as above
+mktemp: uid_to_name(uid).unwrap_or_default()  # examined 2026-09-11: is_empty() prints uid=N with no name, as real id does
+monctl: read_file(&format!("{base}/modes")).unwrap_or_default()  # examined 2026-09-11: empty yields the resolution "unknown", which is honest
+newgrp: std::fs::read_to_string("/etc/group").unwrap_or_default()  # examined 2026-09-11: empty means nobody is a member, so the password IS demanded
+newgrp: std::fs::read_to_string("/etc/gshadow").unwrap_or_default()  # examined 2026-09-11: empty refuses everyone; see the fn's own doc comment
+oils: std::env::var("TARGET").unwrap_or_default()  # examined 2026-09-11: build.rs, where cargo always sets TARGET, so the default is unreachable
+oils: std::env::var_os("PATH").unwrap_or_default()  # examined 2026-09-11: var_os is None only when unset, and empty IS an unset PATH
+passwd: text(raw, idx).unwrap_or_default()  # examined 2026-09-11: a non-UTF-8 argument matches no option arm and falls through to being treated as a name, which is what it would have to be
 pkg: extract_string(line, "\"desc\":\"").unwrap_or_default()
-pkg: fs::read_to_string(path) .unwrap_or_default()
 powerctl: read_file(&format!("{base}/type")).unwrap_or_default()
-pwdb: std::fs::read(group).unwrap_or_default()
-pwdb: std::fs::read(passwd).unwrap_or_default()
+pwdb: std::fs::read(group).unwrap_or_default()  # examined 2026-09-11: as above
+pwdb: std::fs::read(passwd).unwrap_or_default()  # examined 2026-09-11: from_files' docstring argues this -- an unreadable database is empty, as glibc does, so ls -l still lists a directory with numeric ids
 rfkill: read_sysfs(&base.join("type")).unwrap_or_default()
-sha256sum: std::env::var("TARGET").unwrap_or_default()
-shell: std::env::var("TARGET").unwrap_or_default()
-stat: do_readlink(file).unwrap_or_default()
+sha256sum: std::env::var("TARGET").unwrap_or_default()  # examined 2026-09-11: build.rs, where cargo always sets TARGET, so the default is unreachable
+shell: std::env::var("TARGET").unwrap_or_default()  # examined 2026-09-11: build.rs, where cargo always sets TARGET, so the default is unreachable
 tuned: std::fs::read_to_string(ACTIVE_PROFILE) .unwrap_or_default()
 udisks: fs::read_to_string(path) .unwrap_or_default()
-update-alternatives: std::env::var("TARGET").unwrap_or_default()
-updatedb: std::env::var("TARGET").unwrap_or_default()
+update-alternatives: std::env::var("TARGET").unwrap_or_default()  # examined 2026-09-11: build.rs, where cargo always sets TARGET, so the default is unreachable
+updatedb: std::env::var("TARGET").unwrap_or_default()  # examined 2026-09-11: build.rs, where cargo always sets TARGET, so the default is unreachable
 upower: std::fs::read_to_string(p) .unwrap_or_default()
 who: fs::read_to_string(entry.path()).unwrap_or_default()

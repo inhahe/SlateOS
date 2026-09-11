@@ -261,13 +261,19 @@ fn read_attr(path: &str) -> Option<String> {
 }
 
 /// Read a sysfs attribute file and parse as hex u16, returning 0 on failure.
-fn read_hex_u16(path: &str) -> u16 {
-    read_attr(path)
-        .and_then(|s| {
-            let s = s.trim_start_matches("0x");
-            u16::from_str_radix(s, 16).ok()
-        })
-        .unwrap_or(0)
+/// A hex sysfs attribute, or `None` where it could not be read or parsed.
+///
+/// There is no defaulting wrapper beside this one. There WAS -- I wrote
+/// `read_hex_u16` returning `unwrap_or(0)` and a comment saying the other
+/// hex fields would keep using it, and clippy pointed out that nothing did:
+/// `idVendor` and `idProduct` were its only two callers, and the class triple
+/// goes through `read_hex_u8`. The comment asserted a caller that did not
+/// exist, so both it and the wrapper are gone.
+fn read_hex_u16_req(path: &str) -> Option<u16> {
+    read_attr(path).and_then(|s| {
+        let s = s.trim_start_matches("0x");
+        u16::from_str_radix(s, 16).ok()
+    })
 }
 
 /// Read a sysfs attribute file and parse as hex u8, returning 0 on failure.
@@ -319,9 +325,24 @@ fn parent_sysfs_name(name: &str) -> String {
 /// sysfs directory is a USB device at all -- interface directories like
 /// `1-2:1.0` have no `idVendor` -- and the two callers do different things
 /// with the answer: skip this entry, or return nothing at all.
-fn read_device(dev_path: &str, name: String) -> UsbDevice {
-    let vendor_id = read_hex_u16(&format!("{dev_path}/idVendor"));
-    let product_id = read_hex_u16(&format!("{dev_path}/idProduct"));
+fn read_device(dev_path: &str, name: String) -> Option<UsbDevice> {
+    // THE IDENTITY IS REQUIRED, and 0000 is not a valid USB vendor.
+    //
+    // `read_hex_u16` ends in `.unwrap_or(0)`, so an `idVendor` that could not
+    // be read or parsed became the ID 0000 -- and `device_description` then
+    // looks that up, finds nothing, and prints the device with no
+    // manufacturer at all. A device that vanished mid-scan is not a device
+    // from vendor 0000.
+    //
+    // The callers already check that `idVendor` EXISTS before calling, because
+    // that is what distinguishes a device directory from an interface one like
+    // `1-2:1.0`. So reaching here with an unreadable file means something
+    // changed underneath us, which is worth saying rather than absorbing.
+    //
+    // `userspace/lspci` had the identical defect through the same helper shape
+    // and was repaired the same day.
+    let vendor_id = read_hex_u16_req(&format!("{dev_path}/idVendor"))?;
+    let product_id = read_hex_u16_req(&format!("{dev_path}/idProduct"))?;
     let manufacturer = read_attr(&format!("{dev_path}/manufacturer")).unwrap_or_default();
     let product = read_attr(&format!("{dev_path}/product")).unwrap_or_default();
     let serial = read_attr(&format!("{dev_path}/serial")).unwrap_or_default();
@@ -345,7 +366,7 @@ fn read_device(dev_path: &str, name: String) -> UsbDevice {
         .unwrap_or(0);
     let parent_name = parent_sysfs_name(&name);
 
-    UsbDevice {
+    Some(UsbDevice {
         bus,
         devnum,
         vendor_id,
@@ -363,7 +384,7 @@ fn read_device(dev_path: &str, name: String) -> UsbDevice {
         max_power,
         sysfs_name: name,
         parent_name,
-    }
+    })
 }
 
 fn scan_sysfs() -> Vec<UsbDevice> {
@@ -391,7 +412,13 @@ fn scan_sysfs() -> Vec<UsbDevice> {
             continue;
         }
 
-        devices.push(read_device(&dev_path, name));
+        match read_device(&dev_path, name) {
+            Some(dev) => devices.push(dev),
+            None => eprintln!(
+                "lsusb: {}: cannot read the device identity, skipping",
+                quoteaf_os(&dev_path)
+            ),
+        }
     }
 
     // Sort by bus, then device number.
@@ -414,7 +441,13 @@ fn scan_single_sysfs(path: &str) -> Vec<UsbDevice> {
         .unwrap_or("")
         .to_string();
 
-    devices.push(read_device(path, name));
+    match read_device(path, name) {
+        Some(dev) => devices.push(dev),
+        None => eprintln!(
+            "lsusb: {}: cannot read the device identity",
+            quoteaf_os(path)
+        ),
+    }
 
     devices
 }

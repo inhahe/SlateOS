@@ -737,8 +737,18 @@ fn parse_relocations(
 
     // Get associated symbol table for name resolution
     let sym_section = sections.get(rel_section.sh_link as usize);
+    // `Vec::new()` is the "there is no symbol table section" arm below, so
+    // `.unwrap_or_default()` made a table that FAILED TO PARSE the same thing
+    // as one that is not there -- and every relocation then printed with no
+    // symbol name, silently.
     let symbols = if let Some(ss) = sym_section {
-        parse_symbols(data, hdr, ss, sections).unwrap_or_default()
+        match parse_symbols(data, hdr, ss, sections) {
+            Ok(syms) => syms,
+            Err(e) => {
+                eprintln!("objdump: cannot parse the symbol table: {e}");
+                Vec::new()
+            }
+        }
     } else {
         Vec::new()
     };
@@ -788,10 +798,19 @@ fn parse_relocations(
             (r_info >> 8) as usize
         };
 
-        let sym_name = symbols
-            .get(sym_idx)
-            .map(|s| s.name.clone())
-            .unwrap_or_default();
+        // INDEX 0 IS `STN_UNDEF` AND MEANS "NO SYMBOL", which is a real
+        // answer -- section-relative relocations use it, and an empty name is
+        // how upstream objdump shows them. Any other index that does not
+        // resolve is a symbol we could not name, which is not the same, so it
+        // reads `?` -- the spelling `ldd` uses for the same situation.
+        let sym_name = if sym_idx == 0 {
+            String::new()
+        } else {
+            symbols
+                .get(sym_idx)
+                .map(|s| s.name.clone())
+                .unwrap_or_else(|| "?".to_string())
+        };
 
         relocs.push(Relocation {
             r_offset,
@@ -2172,11 +2191,11 @@ fn run_nm() -> Result<()> {
                 if sym.st_shndx == SHN_UNDEF {
                     write!(w, "{prefix}{:16} ", "")?;
                 } else {
-                    write!(w, "{prefix}{} ", format_nm_value(sym.st_value, opts.radix),)?;
+                    write!(w, "{prefix}{} ", format_nm_value(sym.st_value, opts.radix))?;
                 }
 
                 if opts.print_size {
-                    write!(w, "{} ", format_nm_value(sym.st_size, opts.radix),)?;
+                    write!(w, "{} ", format_nm_value(sym.st_size, opts.radix))?;
                 }
 
                 writeln!(w, "{sym_char} {}", sym.name)?;

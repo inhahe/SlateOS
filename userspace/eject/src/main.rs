@@ -128,7 +128,15 @@ fn find_mountpoint_for_device(device: &str) -> Option<String> {
 #[derive(Clone, Debug)]
 struct DeviceInfo {
     name: String,
-    removable: bool,
+    /// Whether sysfs says the device is removable, or `None` if the attribute
+    /// could not be read.
+    ///
+    /// The guard below already treated an unreadable attribute as "not
+    /// removable", which is the safe direction and stays. What was wrong was
+    /// the SENTENCE: it said "is not a removable device" for a device nobody
+    /// had asked, and then advised `--force`, so a user following the advice
+    /// would eject something whose removability had never been established.
+    removable: Option<bool>,
     _model: String,
     _vendor: String,
     device_type: String,
@@ -141,9 +149,8 @@ fn get_device_info(device: &str) -> DeviceInfo {
     let sys_path = format!("/sys/block/{base_name}");
 
     let removable = fs::read_to_string(format!("{sys_path}/removable"))
-        .unwrap_or_default()
-        .trim()
-        == "1";
+        .ok()
+        .map(|s| s.trim() == "1");
 
     let model = fs::read_to_string(format!("{sys_path}/device/model"))
         .unwrap_or_default()
@@ -182,7 +189,9 @@ fn list_removable_devices() -> Vec<DeviceInfo> {
             let name = entry.file_name().to_string_lossy().to_string();
             let dev_path = format!("/dev/{name}");
             let info = get_device_info(&dev_path);
-            if info.removable {
+            // Listing removable devices: one we could not ask is not one we
+            // can list as removable.
+            if info.removable == Some(true) {
                 devices.push(info);
             }
         }
@@ -235,12 +244,25 @@ fn do_eject(opts: &EjectOptions) -> i32 {
             "eject: device {} is {} (removable={})",
             quoteaf_os(device),
             info.device_type,
-            info.removable
+            match info.removable {
+                Some(true) => "removable=1",
+                Some(false) => "removable=0",
+                None => "removable=unreadable",
+            }
         );
     }
 
-    if !opts.force && !info.removable {
-        eprintln!("eject: {device} is not a removable device");
+    if !opts.force && info.removable != Some(true) {
+        match info.removable {
+            Some(false) => eprintln!("eject: {device} is not a removable device"),
+            // Distinct wording, because the advice that follows differs in
+            // kind: forcing past a device that SAYS it is fixed is a decision,
+            // and forcing past one nobody could ask is a guess.
+            None => {
+                eprintln!("eject: cannot read whether {device} is removable; not assuming it is")
+            }
+            Some(true) => unreachable!("handled by the condition above"),
+        }
         eprintln!("eject: use --force to override");
         return 1;
     }
@@ -468,7 +490,13 @@ mod tests {
     #[test]
     fn test_device_info_nonexistent() {
         let info = get_device_info("/dev/nonexistent_device_xyz");
-        assert!(!info.removable);
+        // `None`, not `Some(false)`. There is no sysfs entry for this device,
+        // so nobody said it is fixed -- the attribute could not be read, and
+        // the two now print differently. The guard treats both as "do not
+        // eject", which is what the old `assert!(!info.removable)` was really
+        // checking.
+        assert_eq!(info.removable, None);
+        assert_ne!(info.removable, Some(true), "must not be ejectable");
     }
 
     #[test]

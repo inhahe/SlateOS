@@ -809,8 +809,24 @@ fn run_stat(opts: &StatOpts) -> bool {
             match do_stat(file, follow) {
                 Ok(st) => {
                     // Get link target if it's a symlink.
+                    // THREE STATES, NOT TWO. The empty string means "not a
+                    // symlink" here -- the `else` arm below -- so
+                    // `.unwrap_or_default()` made a symlink whose target could
+                    // not be read indistinguishable from an ordinary file: the
+                    // display checks `is_empty()` and omits the arrow, so
+                    // `stat` printed the link as though it were not one.
+                    //
+                    // A marker keeps the arrow (this IS a link) while saying
+                    // the target is unknown, and the reason goes to stderr
+                    // where it does not corrupt `--format` output.
                     let link_target = if st.st_mode & S_IFMT == S_IFLNK {
-                        do_readlink(file).unwrap_or_default()
+                        do_readlink(file).unwrap_or_else(|e| {
+                            eprintln!(
+                                "stat: {}: cannot read the symbolic link target: {e}",
+                                quoteaf_os(file)
+                            );
+                            "(unreadable)".to_string()
+                        })
                     } else {
                         String::new()
                     };

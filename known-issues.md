@@ -36,6 +36,82 @@ freely. See `roadmap.md` → "Three-Agent Parallel Execution" rule 3, and
 
 ---
 
+## B-DIFF-REPORTS-IDENTICAL-FOR-FILES-THAT-DIFFER (lane B, 2026-09-11)
+
+**Both halves of the `diff` pair say two files are the same when one of them
+lacks a trailing newline.** Not a formatting difference — the wrong answer, with
+the wrong exit status.
+
+    $ printf 'alpha
+bravo
+' > a.txt ; printf 'alpha
+bravo' > b.txt
+    $ /usr/bin/diff a.txt b.txt
+    2c2
+    < bravo
+    ---
+    > bravo
+    \ No newline at end of file
+    ; rc=1
+    $ our diff a.txt b.txt
+    ; rc=0
+
+**Why this one matters more than a wrong option.** `diff`'s exit status is what
+scripts read — `if diff expected actual; then` is the shape of half the tests in
+any build system — and this answers "no difference" for a real difference. A
+build that regenerates a file without its final newline passes its own check. A
+patch produced from it loses the `\ No newline at end of file` marker, so
+applying it *adds* a newline that was never there.
+
+**Found by `scripts/diff-diff.sh`**, written 2026-09-11, which is the first
+harness for this pair. Four cases in the `coreutils` half and eight in the
+standalone, so **neither half is safe** and the defect predates whichever
+survives. That both have it is also the clearest evidence yet that the two
+halves share ancestry.
+
+**The proper fix.** The comparison has to treat "line with newline" and "line
+without newline" as different lines, which means the reader cannot discard the
+terminator before comparing — and the formatter has to emit the
+`\ No newline at end of file` marker after the affected line in normal, unified
+and context output alike. Upstream diffutils carries a flag per side for exactly
+this.
+
+## TD-B-DIFF-IS-THE-FIRST-PAIR-THE-STANDALONE-WINS (lane B, 2026-09-11)
+
+**Sixteen pairs have now been measured against a harness and fifteen went to
+`coreutils`. `diff` is the first that does not**, and it is the pair §1005
+anticipated when it said "for about half of them the standalone crate is the
+substantially larger implementation and `coreutils`'s namesake is a stub".
+
+`bash scripts/diff-diff.sh`, 107 cases against GNU diffutils 3.10:
+
+| half | passed | differed |
+|---|---|---|
+| `coreutils` | 21 | **86** |
+| standalone | **43** | 64 |
+
+Twice as good, and still failing 64. Neither half is close to GNU, which is why
+this is filed rather than acted on.
+
+**What `coreutils` fails at, and it is not subtle:** 52 of its 86 are
+`diff: requires exactly two files`. It has no option parsing beyond `-q` and
+`-u`, so **every other option is read as a third file operand** — `-s`, `-c`,
+`-i`, `-w`, `-y`, `-r`, `-B`, `-a` all produce that one sentence. A further 13
+are that it cannot read stdin: `diff base.txt -` is
+`-: No such file or directory (os error 2)`.
+
+**What the standalone fails at:** 42 are output-format differences, 14 are the
+numeric context forms `-U N` and `-C N` (it has `--unified` and `--context` but
+not the counted spellings), and 8 are the newline defect above.
+
+**The decision this sets up, and why it is not taken here.** §1005 says
+`coreutils` is the one home and the better half survives *inside* it. For every
+pair so far that meant deleting the standalone. Here it means the opposite:
+porting the standalone's implementation into `coreutils/src/bin/diff.rs`, then
+deleting the crate. That is real work rather than a deletion, it should fix the
+newline defect on the way in rather than carry it across, and it wants doing
+deliberately — so it is recorded here with the harness that will judge it.
+
 ## TD-B-DIFF-HARNESSES-HAVE-NO-PER-CASE-BOUND-AND-ORPHAN-ACROSS-WSL (lane B, 2026-09-11)
 
 **What.** 28 of the 59 `scripts/<name>-diff.sh` harnesses do not bound an

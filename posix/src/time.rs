@@ -1200,6 +1200,30 @@ pub unsafe extern "C" fn ctime_r(timep: *const TimeT, buf: *mut u8) -> *mut u8 {
 /// **GNU extensions**: `%s` (epoch seconds), `%P` (lowercase am/pm).
 ///
 /// **Literal**: `%n` (newline), `%t` (tab), `%%` (percent).
+/// `strftime` in an explicit locale.
+///
+/// We have exactly one locale, so this is `strftime` and the handle is
+/// ignored. That is a larger claim than it is for the character-class wrappers
+/// and is worth stating: the month and day names `%A`/`%B` are what a locale
+/// would change, and in the C locale they are English. Anything that wanted
+/// translated names would need a real locale first, and would find this
+/// function unchanged rather than silently wrong.
+///
+/// # Safety
+///
+/// `buf`, `fmt` and `tm` must satisfy [`strftime`]'s contract.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn strftime_l(
+    buf: *mut u8,
+    maxsize: usize,
+    fmt: *const u8,
+    tm: *const Tm,
+    _loc: crate::locale::LocaleT,
+) -> usize {
+    // SAFETY: forwarding this function's own contract.
+    unsafe { strftime(buf, maxsize, fmt, tm) }
+}
+
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::too_many_lines)]
 pub unsafe extern "C" fn strftime(

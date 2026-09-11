@@ -518,6 +518,19 @@ pub(crate) fn abi_asserts() -> String {
         msg_controllen,
         msg_flags
     );
+    // `struct mmsghdr` is in <sys/socket.h> only under _GNU_SOURCE, which the
+    // fixture defines. Its second field is `unsigned int`, not `size_t`: the
+    // obvious guess is wrong and would move nothing on x86-64 while breaking
+    // the moment anything reads the array with a different stride.
+    abi!(
+        out,
+        hdrs,
+        crate::socket::Mmsghdr,
+        "struct mmsghdr",
+        "sys/socket.h",
+        msg_hdr,
+        msg_len
+    );
     abi!(
         out,
         hdrs,

@@ -30,6 +30,7 @@
 mod scan;
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEventKind};
 use guitk::frame::Rect;
@@ -1611,14 +1612,15 @@ impl DiskAnalyzerUI {
         let input_width =
             (width - 4.0 * PADDING - scan_width - modes_width).clamp(80.0, INPUT_WIDTH);
         let input = Rect::new(PADDING, 7.0, input_width, INPUT_HEIGHT);
-        frame.push(RenderCommand::FillRect {
-            x: input.x,
-            y: input.y,
-            width: input.w,
-            height: input.h,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
+        self.palette.push_surface(
+            frame,
+            input.x,
+            input.y,
+            input.w,
+            input.h,
+            CORNER_RADIUS,
+            Surface::Card,
+        );
         if self.path_focused {
             // The caret would be the usual signal, and there is no caret here
             // because there is no text-editing widget behind this field. An
@@ -1891,14 +1893,15 @@ impl DiskAnalyzerUI {
         let table = Table::with_gap(&columns, 0.0, PADDING);
 
         // Table header.
-        frame.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: area.y,
+        self.palette.push_surface(
+            frame,
+            0.0,
+            area.y,
             width,
-            height: TABLE_HEADER_HEIGHT,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::ZERO,
-        });
+            TABLE_HEADER_HEIGHT,
+            0.0,
+            Surface::Card,
+        );
         frame.draw_with(|cmds| table.header(cmds, area.y + 8.0, self.palette.text, FONT_SIZE));
         for (index, column) in SORTABLE_COLUMNS.iter().enumerate() {
             frame.hit(
@@ -1960,14 +1963,8 @@ impl DiskAnalyzerUI {
             // Alternating row background. Striped by absolute row index, not by
             // position on screen, so the stripes do not invert as you scroll.
             if i % 2 == 0 {
-                frame.push(RenderCommand::FillRect {
-                    x: 0.0,
-                    y: ry,
-                    width,
-                    height: ROW_HEIGHT,
-                    color: self.palette.surface0,
-                    corner_radii: CornerRadii::ZERO,
-                });
+                self.palette
+                    .push_surface(frame, 0.0, ry, width, ROW_HEIGHT, 0.0, Surface::Card);
             }
 
             let indent = row_indent(row.depth, table.width(NAME_COL));
@@ -2252,14 +2249,8 @@ impl DiskAnalyzerUI {
         let tx = (self.tooltip_x + 12.0).min(width - tw - 4.0).max(4.0);
         let ty = (self.tooltip_y + 12.0).min(height - th - 4.0).max(4.0);
 
-        frame.push(RenderCommand::FillRect {
-            x: tx,
-            y: ty,
-            width: tw,
-            height: th,
-            color: self.palette.surface1,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
+        self.palette
+            .push_surface(frame, tx, ty, tw, th, CORNER_RADIUS, Surface::Panel);
         frame.push(RenderCommand::StrokeRect {
             x: tx,
             y: ty,

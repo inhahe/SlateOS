@@ -24,6 +24,7 @@
 //! - 5 sample habits pre-loaded
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent};
 use guitk::render::RenderTree;
@@ -1179,14 +1180,15 @@ impl HabitTrackerApp {
     }
 
     fn render_header(&self, cmds: &mut Vec<RenderCommand>) {
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: self.width,
-            height: Self::HEADER_H,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            cmds,
+            0.0,
+            0.0,
+            self.width,
+            Self::HEADER_H,
+            0.0,
+            Surface::Card,
+        );
 
         cmds.push(RenderCommand::Text {
             x: 16.0,
@@ -1281,14 +1283,8 @@ impl HabitTrackerApp {
 
     fn render_nav(&self, cmds: &mut Vec<RenderCommand>) {
         let y = Self::HEADER_H;
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y,
-            width: self.width,
-            height: Self::NAV_H,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(cmds, 0.0, y, self.width, Self::NAV_H, 0.0, Surface::Sidebar);
 
         let tabs = [
             Screen::Dashboard,
@@ -1781,14 +1777,8 @@ impl HabitTrackerApp {
         value: &str,
         accent: Color,
     ) {
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: w,
-            height: h,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(8.0),
-        });
+        self.palette
+            .push_surface(cmds, x, y, w, h, 8.0, Surface::Card);
         cmds.push(RenderCommand::FillRect {
             x,
             y,
@@ -2150,14 +2140,8 @@ impl HabitTrackerApp {
         let fx = (self.width - fw) / 2.0;
         let fy = (self.height - fh) / 2.0;
 
-        cmds.push(RenderCommand::FillRect {
-            x: fx,
-            y: fy,
-            width: fw,
-            height: fh,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::all(12.0),
-        });
+        self.palette
+            .push_surface(cmds, fx, fy, fw, fh, 12.0, Surface::Card);
         cmds.push(RenderCommand::StrokeRect {
             x: fx,
             y: fy,
@@ -2190,14 +2174,8 @@ impl HabitTrackerApp {
             max_width: Some(60.0),
             overflow: TextOverflow::Ellipsis,
         });
-        cmds.push(RenderCommand::FillRect {
-            x: fx + 80.0,
-            y: fy + 48.0,
-            width: 290.0,
-            height: 28.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        self.palette
+            .push_surface(cmds, fx + 80.0, fy + 48.0, 290.0, 28.0, 4.0, Surface::Card);
         let display_name = if self.create_name.is_empty() {
             String::from("Type a name...")
         } else {
@@ -2300,14 +2278,15 @@ impl HabitTrackerApp {
             overflow: TextOverflow::Ellipsis,
         });
 
-        cmds.push(RenderCommand::FillRect {
-            x: fx + 210.0,
-            y: fy + fh - 60.0,
-            width: 90.0,
-            height: 32.0,
-            color: self.palette.surface1,
-            corner_radii: CornerRadii::all(6.0),
-        });
+        self.palette.push_surface(
+            cmds,
+            fx + 210.0,
+            fy + fh - 60.0,
+            90.0,
+            32.0,
+            6.0,
+            Surface::Card,
+        );
         cmds.push(RenderCommand::Text {
             x: fx + 228.0,
             y: fy + fh - 52.0,
@@ -2322,14 +2301,8 @@ impl HabitTrackerApp {
 
     fn render_status(&self, cmds: &mut Vec<RenderCommand>) {
         let y = self.height - Self::STATUS_H;
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y,
-            width: self.width,
-            height: Self::STATUS_H,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(cmds, 0.0, y, self.width, Self::STATUS_H, 0.0, Surface::Card);
         cmds.push(RenderCommand::Text {
             x: 12.0,
             y: y + 7.0,

@@ -6,6 +6,7 @@
 //! (H.264, H.265, VP9, AV1, AAC, Opus, FLAC).
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -3001,14 +3002,15 @@ impl VideoPlayerApp {
         let mut cmds = Vec::with_capacity(256);
 
         // Background
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: self.width,
-            height: self.height,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            &mut cmds,
+            0.0,
+            0.0,
+            self.width,
+            self.height,
+            0.0,
+            Surface::Card,
+        );
 
         match self.active_tab {
             PlayerTab::Player => self.render_player_view(&mut cmds),
@@ -3234,14 +3236,8 @@ impl VideoPlayerApp {
 
     fn render_controls(&self, cmds: &mut Vec<RenderCommand>, y: f32, height: f32) {
         // Controls background
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y,
-            width: self.width,
-            height,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(cmds, 0.0, y, self.width, height, 0.0, Surface::Card);
 
         // Seek bar. The x and width come from the same rectangle the mouse
         // is hit-tested against, so a click lands where the line was drawn.
@@ -3263,14 +3259,15 @@ impl VideoPlayerApp {
 
         // Buffer progress (slightly ahead of play position)
         let buffer_frac = (self.progress_fraction() + 0.05).min(1.0);
-        cmds.push(RenderCommand::FillRect {
-            x: seek_x,
-            y: seek_y,
-            width: seek_w * buffer_frac as f32,
-            height: seek_h,
-            color: self.palette.surface1,
-            corner_radii: CornerRadii::all(3.0),
-        });
+        self.palette.push_surface(
+            cmds,
+            seek_x,
+            seek_y,
+            seek_w * buffer_frac as f32,
+            seek_h,
+            3.0,
+            Surface::ControlTrack,
+        );
 
         // Play progress
         let progress = self.progress_fraction() as f32;
@@ -3677,14 +3674,15 @@ impl VideoPlayerApp {
 
             // Highlight current
             if is_current {
-                cmds.push(RenderCommand::FillRect {
-                    x: 8.0,
-                    y: ey,
-                    width: panel_w - 16.0,
-                    height: item_h - 2.0,
-                    color: self.palette.surface0,
-                    corner_radii: CornerRadii::all(4.0),
-                });
+                self.palette.push_surface(
+                    cmds,
+                    8.0,
+                    ey,
+                    panel_w - 16.0,
+                    item_h - 2.0,
+                    4.0,
+                    Surface::Selected,
+                );
             }
 
             // Index
@@ -4582,14 +4580,8 @@ impl VideoPlayerApp {
             let sy = top + 52.0 + row as f32 * 24.0;
 
             // Key badge
-            cmds.push(RenderCommand::FillRect {
-                x: kx,
-                y: sy - 1.0,
-                width: 80.0,
-                height: 20.0,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::all(3.0),
-            });
+            self.palette
+                .push_surface(cmds, kx, sy - 1.0, 80.0, 20.0, 3.0, Surface::Card);
             cmds.push(RenderCommand::Text {
                 x: kx + 4.0,
                 y: sy + 2.0,

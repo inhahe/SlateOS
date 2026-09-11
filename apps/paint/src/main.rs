@@ -21,6 +21,7 @@
 //! Uses the guitk library for UI rendering.
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::canvas::Canvas;
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -2810,14 +2811,15 @@ impl PaintApp {
         let mut cmds = Vec::with_capacity(512);
 
         // Background fill
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: self.window_width,
-            height: self.window_height,
-            color: self.theme.crust,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.theme.push_surface(
+            &mut cmds,
+            0.0,
+            0.0,
+            self.window_width,
+            self.window_height,
+            0.0,
+            Surface::Card,
+        );
 
         self.render_option_bar(&mut cmds);
         self.render_toolbar(&mut cmds);
@@ -3554,14 +3556,8 @@ impl PaintApp {
         let btn_w = 32.0;
         for (i, &label) in btn_labels.iter().enumerate() {
             let bx = px + 4.0 + i as f32 * (btn_w + 2.0);
-            cmds.push(RenderCommand::FillRect {
-                x: bx,
-                y: btn_y,
-                width: btn_w,
-                height: 20.0,
-                color: self.theme.surface0,
-                corner_radii: CornerRadii::all(3.0),
-            });
+            self.theme
+                .push_surface(cmds, bx, btn_y, btn_w, 20.0, 3.0, Surface::Card);
             cmds.push(RenderCommand::Text {
                 x: bx + 4.0,
                 y: btn_y + 4.0,
@@ -3962,14 +3958,15 @@ impl PaintApp {
 
             // Slider track
             let track_y = sy + 16.0;
-            cmds.push(RenderCommand::FillRect {
-                x: slider_x,
-                y: track_y,
-                width: slider_w,
-                height: 8.0,
-                color: self.theme.surface0,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            self.theme.push_surface(
+                cmds,
+                slider_x,
+                track_y,
+                slider_w,
+                8.0,
+                4.0,
+                Surface::ControlTrack,
+            );
 
             // Slider fill
             let fill_ratio = f32::from(value) / 255.0;
@@ -4016,14 +4013,15 @@ impl PaintApp {
             overflow: TextOverflow::Clip,
         });
 
-        cmds.push(RenderCommand::FillRect {
-            x: slider_x + 32.0,
-            y: hex_y - 2.0,
-            width: 100.0,
-            height: 20.0,
-            color: self.theme.surface0,
-            corner_radii: CornerRadii::all(3.0),
-        });
+        self.theme.push_surface(
+            cmds,
+            slider_x + 32.0,
+            hex_y - 2.0,
+            100.0,
+            20.0,
+            3.0,
+            Surface::ControlTrack,
+        );
 
         cmds.push(RenderCommand::Text {
             x: slider_x + 36.0,
@@ -4041,14 +4039,8 @@ impl PaintApp {
         let buttons = [("OK", self.theme.green), ("Cancel", self.theme.red)];
         for (i, &(label, label_color)) in buttons.iter().enumerate() {
             let bx = slider_x + i as f32 * 80.0;
-            cmds.push(RenderCommand::FillRect {
-                x: bx,
-                y: btn_y,
-                width: 70.0,
-                height: 24.0,
-                color: self.theme.surface0,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            self.theme
+                .push_surface(cmds, bx, btn_y, 70.0, 24.0, 4.0, Surface::ControlTrack);
             cmds.push(RenderCommand::Text {
                 x: bx + 8.0,
                 y: btn_y + 5.0,

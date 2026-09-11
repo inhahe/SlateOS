@@ -16,6 +16,7 @@
 //! Uses the guitk library for UI rendering.
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -2133,14 +2134,15 @@ impl WhiteboardApp {
         let mut cmds = Vec::new();
 
         // Background
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: self.win_width,
-            height: self.win_height,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            &mut cmds,
+            0.0,
+            0.0,
+            self.win_width,
+            self.win_height,
+            0.0,
+            Surface::Card,
+        );
 
         self.render_top_bar(&mut cmds);
         self.render_page_tabs(&mut cmds);
@@ -2371,14 +2373,15 @@ impl WhiteboardApp {
 
         // "+" button to add page
         let plus = self.add_page_button();
-        cmds.push(RenderCommand::FillRect {
-            x: plus.x,
-            y: plus.y,
-            width: plus.width,
-            height: plus.height,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        self.palette.push_surface(
+            cmds,
+            plus.x,
+            plus.y,
+            plus.width,
+            plus.height,
+            4.0,
+            Surface::Card,
+        );
         cmds.push(RenderCommand::Text {
             x: plus.x + 7.0,
             y: plus.y + 3.0,
@@ -2947,14 +2950,15 @@ impl WhiteboardApp {
         });
 
         // "+" add layer button
-        cmds.push(RenderCommand::FillRect {
-            x: panel_x + RIGHT_PANEL_WIDTH - 30.0,
-            y: panel_y + 4.0,
-            width: 22.0,
-            height: 22.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        self.palette.push_surface(
+            cmds,
+            panel_x + RIGHT_PANEL_WIDTH - 30.0,
+            panel_y + 4.0,
+            22.0,
+            22.0,
+            4.0,
+            Surface::Card,
+        );
         cmds.push(RenderCommand::Text {
             x: panel_x + RIGHT_PANEL_WIDTH - 25.0,
             y: panel_y + 7.0,

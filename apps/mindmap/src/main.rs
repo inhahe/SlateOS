@@ -34,6 +34,7 @@
 #![allow(clippy::wildcard_imports)]
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
@@ -2016,14 +2017,8 @@ impl MindMapApp {
         ];
 
         for (label, bx) in &buttons {
-            cmds.push(RenderCommand::FillRect {
-                x: *bx,
-                y: 6.0,
-                width: 70.0,
-                height: 28.0,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::all(PANEL_CORNER),
-            });
+            self.palette
+                .push_surface(cmds, *bx, 6.0, 70.0, 28.0, PANEL_CORNER, Surface::Card);
             cmds.push(RenderCommand::Text {
                 x: *bx + 6.0,
                 y: 14.0,
@@ -2106,14 +2101,8 @@ impl MindMapApp {
         }
 
         // "+" button to add a new tab
-        cmds.push(RenderCommand::FillRect {
-            x: tx,
-            y: y + 4.0,
-            width: 24.0,
-            height: 20.0,
-            color: self.palette.surface1,
-            corner_radii: CornerRadii::all(PANEL_CORNER),
-        });
+        self.palette
+            .push_surface(cmds, tx, y + 4.0, 24.0, 20.0, PANEL_CORNER, Surface::Card);
         cmds.push(RenderCommand::Text {
             x: tx + 7.0,
             y: y + 8.0,
@@ -2389,14 +2378,15 @@ impl MindMapApp {
             let indicator_y = sy + sh / 2.0 - COLLAPSE_SIZE / 2.0;
             let indicator_text = if node.collapsed { "+" } else { "-" };
 
-            cmds.push(RenderCommand::FillRect {
-                x: indicator_x,
-                y: indicator_y,
-                width: COLLAPSE_SIZE,
-                height: COLLAPSE_SIZE,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::all(2.0),
-            });
+            self.palette.push_surface(
+                cmds,
+                indicator_x,
+                indicator_y,
+                COLLAPSE_SIZE,
+                COLLAPSE_SIZE,
+                2.0,
+                Surface::Card,
+            );
             cmds.push(RenderCommand::Text {
                 x: indicator_x + 2.0,
                 y: indicator_y + 1.0,

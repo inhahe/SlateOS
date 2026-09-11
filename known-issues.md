@@ -36,6 +36,49 @@ freely. See `roadmap.md` → "Three-Agent Parallel Execution" rule 3, and
 
 ---
 
+## TD-B-EIGHTY-THREE-DISCARDED-FAILURES-ARE-PINNED-UNREAD (lane B, 2026-09-10)
+
+**In short:** `check-read-defaults` was widened to see two more spellings of the
+defect it already catches, and found 83 more sites. They are pinned in the
+baseline **as a set**, not inspected one at a time, so the ratchet holds the
+line while the triage happens. Sampling them found real defects, listed below.
+The 16 original `read_to_string` entries were inspected individually and are
+not part of this.
+
+**What the widening added.** `env::var(..).unwrap_or_default()`, and
+`local_fn(..).unwrap_or_default()` where the function is defined in the same
+file and its signature says it returns `Option` or `Result`. The return type is
+read from the definition rather than guessed from the name, and method calls
+are excluded — a file defining any local `fn get(..) -> Option<T>` otherwise
+implicates every slice in it, which is the difference between 39 findings and
+171.
+
+**The three worth fixing first**, from a sample of twelve:
+
+| Site | What the default means |
+|---|---|
+| `ftp/src/main.rs:1792,1828,2001` | `read_password("Password: ").unwrap_or_default()` — **a failed password read becomes an empty password, which is then sent.** |
+| `stty/src/main.rs:1272-1304` (5×) | `tiocgwinsz(fd).unwrap_or_default()` — an ioctl failure becomes a 0×0 terminal, and the caller then computes a layout for it. |
+| `crontab/src/main.rs:669` | `current_username().unwrap_or_default()` — an empty username, in the field that decides whose crontab is edited. |
+
+Also `hostname` (empty hostname), `stat` (empty symlink target), `udevd` and
+`thermald` (empty sysfs attributes), `mktemp` (empty user and group names),
+`efibootmgr` (empty boot order).
+
+**A separate finding from the same sample, not part of this entry's debt:**
+`userspace/last` carries a FOURTH copy of the utmp record parser
+(`extract_string(data, offset + UT_USER_OFFSET, ..)`). who, uptime and w were
+converted to the `utmpfile` crate earlier today and `last` was missed because
+it reads `/var/log/wtmp` rather than `/var/run/utmp` — the same format under a
+different path, so a grep for the path could not find it. Its fields are
+`String` via the same lossy decode that was removed from `who`.
+
+**The proper fix** is per-site and mostly small: keep the `Option` and let the
+caller print `?`, skip the row, or refuse. `userspace/iostat` prints six
+question marks where it printed six zeroes, which is the whole shape of it.
+**Trigger: fix them in batches by crate, dropping each from the baseline as it
+goes.** The baseline may only shrink, so the count is the progress bar.
+
 ## TD-B-WHO-S-W-MODE-CANNOT-BE-REACHED-BY-ANY-INVOCATION (lane B, 2026-09-10)
 
 **In short:** `who` contains a complete `w` — the header line with uptime and

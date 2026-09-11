@@ -1787,18 +1787,19 @@ impl QrApp {
         for ct in &types {
             let is_active = *ct == self.code_type;
             let btn_w = text::padded_width(ct.label(), 10.0, 11.0, FontWeightHint::Regular);
-            cmds.push(RenderCommand::FillRect {
-                x: tx,
-                y: 8.0,
-                width: btn_w,
-                height: 24.0,
-                color: if is_active {
-                    self.palette.surface1
+            self.palette.push_surface(
+                cmds,
+                tx,
+                8.0,
+                btn_w,
+                24.0,
+                CORNER_RADIUS,
+                if is_active {
+                    Surface::Selected
                 } else {
-                    self.palette.surface0
+                    Surface::Card
                 },
-                corner_radii: CornerRadii::all(CORNER_RADIUS),
-            });
+            );
             cmds.push(RenderCommand::Text {
                 x: tx + 10.0,
                 y: 14.0,
@@ -1943,18 +1944,19 @@ impl QrApp {
                 mx = lx;
                 cy += 26.0;
             }
-            cmds.push(RenderCommand::FillRect {
-                x: mx,
-                y: cy,
-                width: btn_w,
-                height: 22.0,
-                color: if is_active {
-                    self.palette.surface1
+            self.palette.push_surface(
+                cmds,
+                mx,
+                cy,
+                btn_w,
+                22.0,
+                CORNER_RADIUS,
+                if is_active {
+                    Surface::Selected
                 } else {
-                    self.palette.surface0
+                    Surface::Card
                 },
-                corner_radii: CornerRadii::all(CORNER_RADIUS),
-            });
+            );
             cmds.push(RenderCommand::Text {
                 x: mx + 8.0,
                 y: cy + 5.0,
@@ -2466,18 +2468,19 @@ impl QrApp {
 
         for ec in EcLevel::all() {
             let is_active = *ec == self.ec_level;
-            cmds.push(RenderCommand::FillRect {
-                x: lx,
-                y: cy,
-                width: max_w,
-                height: 22.0,
-                color: if is_active {
-                    self.palette.surface1
+            self.palette.push_surface(
+                cmds,
+                lx,
+                cy,
+                max_w,
+                22.0,
+                CORNER_RADIUS,
+                if is_active {
+                    Surface::Selected
                 } else {
-                    self.palette.surface0
+                    Surface::Card
                 },
-                corner_radii: CornerRadii::all(CORNER_RADIUS),
-            });
+            );
             cmds.push(RenderCommand::Text {
                 x: lx + 8.0,
                 y: cy + 5.0,
@@ -2515,18 +2518,19 @@ impl QrApp {
 
         for ms in ModuleSize::all() {
             let is_active = *ms == self.module_size;
-            cmds.push(RenderCommand::FillRect {
-                x: lx,
-                y: cy,
-                width: max_w,
-                height: 22.0,
-                color: if is_active {
-                    self.palette.surface1
+            self.palette.push_surface(
+                cmds,
+                lx,
+                cy,
+                max_w,
+                22.0,
+                CORNER_RADIUS,
+                if is_active {
+                    Surface::Selected
                 } else {
-                    self.palette.surface0
+                    Surface::Card
                 },
-                corner_radii: CornerRadii::all(CORNER_RADIUS),
-            });
+            );
             cmds.push(RenderCommand::Text {
                 x: lx + 8.0,
                 y: cy + 5.0,

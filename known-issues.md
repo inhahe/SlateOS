@@ -127737,58 +127737,63 @@ does not — the taskbar, launcher, notification pane and every settings panel
 keep their fills whichever style is chosen. That is visibly inconsistent, and
 it is the half the user looks at most.
 
-## TD-C-BORDER-CONVERSION-IN-PROGRESS — 991 DRAW SITES STILL CHOOSE THEIR OWN FILL
+## TD-C-BORDER-CONVERSION — APPLICATIONS DONE, SHELL AND 211 STRIPS WAITING ON A DECISION
 
 **Date:** 2026-09-11. **Lane:** C.
-**Where:** `gui/**` and `apps/**`; run `python gui/appearance/survey-fills.py` for
-the current count and classification.
+**Where:** run `python gui/appearance/survey-fills.py` for the live count;
+`gui/appearance/convert-fills.py` is the converter and the record of what it
+refuses to touch.
 
-**In short:** the decision to outline boxes rather than fill them (§829) is
-built, switchable and previewable, but the ~991 places that actually draw a box
-have not moved yet. Until they do, the setting changes the preview and little
-else. Nothing is broken; the desktop looks exactly as it did.
+**In short:** every application now follows the theme — switch between outlined
+and filled boxes in Settings and they change. The desktop shell does not, and
+neither do toolbars and status bars anywhere. Both are waiting on a decision
+rather than on work.
 
-**Done, and on `main`:**
+**Done:** 436 draw sites across roughly 60 applications, plus the model
+(`appearance::surface`), the theme setting, and the Settings page with its
+preview. All green, all on `main`.
 
-1. `appearance` carries the decided palette, with `link` and `border` as roles
-   of their own.
-2. `appearance::surface` is the single decision point: a `Surface` enum naming
-   *what a box is*, and `Palette::surface_paint` / `draw_surface` turning that
-   into a fill, an outline, or both, per `SurfaceStyle`.
-3. Settings → Themes offers "Outlined" / "Filled" with a live preview, and the
-   setting persists as `theme.surface_style`.
+**Remaining, and why each waits:**
 
-**Left:** the draw sites. The survey classifies them by what the surrounding
-code calls them:
-
-| what it looks like | count | share |
+| count | what | blocked on |
 |---|---|---|
-| `Card` | 674 | 68% |
-| `Selected` | 158 | 16% |
-| `ControlTrack` | 68 | 7% |
-| `Sidebar` | 55 | 6% |
-| `Panel` | 36 | 4% |
+| 211 | toolbars, status bars, tab strips, data bars | **C-Q14** |
+| 158 | `gui/desktop` — the shell | **C-Q13** |
+| ~25 | sites inside test modules, and a handful of odd shapes | nothing; they are noise |
+| 2 | hairline separator rules | nothing; correctly left alone |
 
-**Two things about that table, both learned by getting it wrong first.**
+**C-Q13 is the one that matters.** The applications follow the theme and the
+shell around them does not — the taskbar, launcher, notification pane and every
+settings panel keep their fills whichever style is chosen. That is visible, and
+the shell is the half a user looks at most. The question is whether every
+selected row takes the accent outline; the shell already has a stricter rule
+(`the_accent_marks_where_you_are_and_never_what_a_thing_is`) with tests
+enforcing it, and converting the shell breaks 28 of those tests — most
+mechanically, two of them substantively. See
+`TD-C-THE-SHELL-NEEDS-CONVERTING-BY-HAND-NOT-BY-SWEEP`.
 
-The `ControlTrack` row is the reason this cannot be a blind sweep. A switch
-track, a scrollbar trough and a progress groove **stay filled in both themes** —
-outlined instead, a switch track reads as an empty box rather than as the off
-half of a control. Sixty-eight sites would have been silently broken.
+**C-Q14 is safe to leave.** Doing nothing selects the option that keeps today's
+appearance for those 211 sites.
 
-And the first run of the survey reported **1,090** sites, with a doc comment in
-`palette_check.rs` classified as a control track. Two faults: it matched inside
-comments, and it read a fixed ±6-line window, which runs into the *next* draw
-site and attributes that site's role and naming words to this one. Scoping the
-lookup to the literal's own braces and skipping comment lines removed 99 false
-positives and moved `ControlTrack` from 96 to 68. **The classification is a
-starting point for review, not an answer** — that is why the survey prints
-samples, and why the conversion should land in reviewable batches rather than
-one commit.
+**What the conversion learned not to convert,** each from a case that broke
+something, and each now a commented rule in `convert-fills.py`:
 
-**If never finished:** the desktop keeps the filled look, the new setting is
-mostly inert, and the palette carries two roles (`link`, `border`) that only the
-preview uses. Nothing degrades; it simply does not arrive.
+| category | what happened |
+|---|---|
+| control tracks | a switch track outlined reads as an empty box |
+| data bars | a statistics bar says what it says by the area it fills; jsonviewer's tests caught it in a minute |
+| structural strips | a box around a full-width toolbar reads as a box that failed to fit |
+| hairline rules | a 1px fill outlined is a rectangle of zero height; the tray's calendar rule broke the test that measures whether a six-row month fits |
+| `if let Some(x) = …selected…` | a *lookup* of the selected item to draw details about it, not a test that this box is selected |
+| bare `current` | matched `self.current_utc`, naming what a card shows rather than what is chosen |
+
+**The recurring test failure had one cause** and is worth knowing before touching
+the shell: a helper that finds a box by matching `FillRect` on a colour stops
+finding it when the box becomes an outline. `appearance::logical_rect` returns
+the rectangle the caller asked for either way. The better-shaped fix, where a
+test can take it, is to ask the palette — `palette.surface_paint(Surface::ControlTrack).fill`
+— rather than naming a shade, which is what the system tray's slider test now
+does.
 
 ## TD-C-THE-ACCESSIBILITY-CONFIG-IS-A-DEAD-PARALLEL-COPY
 

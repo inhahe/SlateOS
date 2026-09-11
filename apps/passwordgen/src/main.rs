@@ -1569,18 +1569,19 @@ impl PasswordApp {
         for tab in &tabs {
             let is_active = *tab == self.active_tab;
             let btn_w = text::padded_width_any_weight(tab.label(), 10.0, 11.0);
-            cmds.push(RenderCommand::FillRect {
-                x: tx,
-                y: 8.0,
-                width: btn_w,
-                height: 24.0,
-                color: if is_active {
-                    self.palette.surface1
+            self.palette.push_surface(
+                cmds,
+                tx,
+                8.0,
+                btn_w,
+                24.0,
+                CORNER_RADIUS,
+                if is_active {
+                    Surface::Selected
                 } else {
-                    self.palette.surface0
+                    Surface::Card
                 },
-                corner_radii: CornerRadii::all(CORNER_RADIUS),
-            });
+            );
             cmds.push(RenderCommand::Text {
                 x: tx + 10.0,
                 y: 14.0,

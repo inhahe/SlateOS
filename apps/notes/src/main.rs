@@ -2074,18 +2074,19 @@ impl NotesApp {
         } else {
             self.palette.overlay0
         };
-        cmds.push(RenderCommand::FillRect {
-            x: 270.0,
-            y: 6.0,
-            width: 24.0,
-            height: 24.0,
-            color: if self.show_favorites_only {
-                self.palette.surface1
+        self.palette.push_surface(
+            cmds,
+            270.0,
+            6.0,
+            24.0,
+            24.0,
+            CORNER_RADIUS,
+            if self.show_favorites_only {
+                Surface::Selected
             } else {
-                self.palette.surface0
+                Surface::Card
             },
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
+        );
         cmds.push(RenderCommand::Text {
             x: 276.0,
             y: 12.0,

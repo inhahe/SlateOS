@@ -1369,18 +1369,19 @@ fn render_tag_strip(frame: &mut Frame, state: &AppState, x: f32, y: f32, w: f32,
 
     let mut tx = x + 40.0;
     let all = Rect::new(tx, y + 3.0, 36.0, 19.0);
-    frame.push(RenderCommand::FillRect {
-        x: all.x,
-        y: all.y,
-        width: all.w,
-        height: all.h,
-        color: if state.tag_filter.is_none() {
-            state.palette.surface1
+    state.palette.push_surface(
+        frame,
+        all.x,
+        all.y,
+        all.w,
+        all.h,
+        3.0,
+        if state.tag_filter.is_none() {
+            Surface::Selected
         } else {
-            state.palette.mantle
+            Surface::Card
         },
-        corner_radii: CornerRadii::all(3.0),
-    });
+    );
     frame.push(RenderCommand::Text {
         x: all.x + 7.0,
         y: all.y + 4.0,
@@ -1402,18 +1403,19 @@ fn render_tag_strip(frame: &mut Frame, state: &AppState, x: f32, y: f32, w: f32,
         let chip_w = text::padded_width(tag, 8.0, 10.0, FontWeightHint::Regular);
         let chip = Rect::new(tx, y + 3.0, chip_w, 19.0);
         let active = state.tag_filter.as_deref() == Some(tag.as_str());
-        frame.push(RenderCommand::FillRect {
-            x: chip.x,
-            y: chip.y,
-            width: chip.w,
-            height: chip.h,
-            color: if active {
-                state.palette.surface1
+        state.palette.push_surface(
+            frame,
+            chip.x,
+            chip.y,
+            chip.w,
+            chip.h,
+            3.0,
+            if active {
+                Surface::Selected
             } else {
-                state.palette.mantle
+                Surface::Card
             },
-            corner_radii: CornerRadii::all(3.0),
-        });
+        );
         frame.push(RenderCommand::Text {
             x: chip.x + 6.0,
             y: chip.y + 4.0,
@@ -1546,18 +1548,19 @@ fn render_entry_row(
 ) {
     let Rect { x, y, w, h } = rect;
 
-    frame.push(RenderCommand::FillRect {
+    pal.push_surface(
+        frame,
         x,
         y,
-        width: w,
-        height: h,
-        color: if flags.selected {
-            pal.surface1
+        w,
+        h,
+        4.0,
+        if flags.selected {
+            Surface::Selected
         } else {
-            pal.surface0
+            Surface::Card
         },
-        corner_radii: CornerRadii::all(4.0),
-    });
+    );
 
     if flags.selected {
         frame.push(RenderCommand::FillRect {
@@ -1913,18 +1916,19 @@ fn render_templates_panel(frame: &mut Frame, state: &AppState, x: f32, y: f32, w
         for (idx, tmpl) in state.store.templates.iter().enumerate() {
             let is_sel = state.selected_template == Some(idx);
             let row = Rect::new(x + pad, cy, (w - pad * 2.0).max(0.0), 32.0);
-            frame.push(RenderCommand::FillRect {
-                x: row.x,
-                y: row.y,
-                width: row.w,
-                height: row.h,
-                color: if is_sel {
-                    state.palette.surface1
+            state.palette.push_surface(
+                frame,
+                row.x,
+                row.y,
+                row.w,
+                row.h,
+                4.0,
+                if is_sel {
+                    Surface::Selected
                 } else {
-                    state.palette.surface0
+                    Surface::Card
                 },
-                corner_radii: CornerRadii::all(4.0),
-            });
+            );
             frame.push(RenderCommand::Text {
                 x: row.x + 8.0,
                 y: row.y + 8.0,

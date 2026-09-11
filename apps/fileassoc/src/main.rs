@@ -2341,18 +2341,19 @@ impl FileAssocUI {
         if r.is_empty() {
             return;
         }
-        frame.push(RenderCommand::FillRect {
-            x: r.x,
-            y: r.y,
-            width: r.w,
-            height: r.h,
-            color: if selected {
-                self.palette.surface0
+        self.palette.push_surface(
+            frame,
+            r.x,
+            r.y,
+            r.w,
+            r.h,
+            0.0,
+            if selected {
+                Surface::Selected
             } else {
-                self.palette.mantle
+                Surface::Card
             },
-            corner_radii: CornerRadii::ZERO,
-        });
+        );
 
         if let Some(cat) = cat {
             frame.push(RenderCommand::FillRect {
@@ -2724,18 +2725,19 @@ impl FileAssocUI {
             for (i, app) in compatible.iter().enumerate() {
                 let is_default = ft.default_app_id.as_deref() == Some(app.id.as_str());
                 let r = Rect::new(x, y, content_w, COMPAT_ROW_HEIGHT);
-                frame.push(RenderCommand::FillRect {
-                    x: r.x,
-                    y: r.y,
-                    width: r.w,
-                    height: r.h,
-                    color: if is_default {
-                        self.palette.surface0
+                self.palette.push_surface(
+                    frame,
+                    r.x,
+                    r.y,
+                    r.w,
+                    r.h,
+                    3.0,
+                    if is_default {
+                        Surface::Selected
                     } else {
-                        self.palette.mantle
+                        Surface::Card
                     },
-                    corner_radii: CornerRadii::all(3.0),
-                });
+                );
                 frame.push(RenderCommand::Text {
                     x: r.x + 8.0,
                     y: r.y + (r.h - FONT_SIZE_SMALL).max(0.0) / 2.0,

@@ -1133,18 +1133,19 @@ impl App {
             let w = text::measure(&file.name, SMALL_TEXT, FontWeightHint::Bold) + 20.0;
             let active = fi == self.active_file;
 
-            cmds.push(RenderCommand::FillRect {
-                x: tab_x,
-                y: 8.0,
-                width: w,
-                height: 28.0,
-                color: if active {
-                    self.palette.surface0
+            self.palette.push_surface(
+                cmds,
+                tab_x,
+                8.0,
+                w,
+                28.0,
+                4.0,
+                if active {
+                    Surface::Selected
                 } else {
-                    self.palette.crust
+                    Surface::Card
                 },
-                corner_radii: CornerRadii::all(4.0),
-            });
+            );
             cmds.push(RenderCommand::Text {
                 x: tab_x + 10.0,
                 y: 14.0,

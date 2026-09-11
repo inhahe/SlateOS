@@ -2823,18 +2823,19 @@ impl PhotoApp {
 
         // Slideshow button
         let ss_x = width - 100.0;
-        cmds.push(RenderCommand::FillRect {
-            x: ss_x,
-            y: 8.0,
-            width: 80.0,
-            height: 24.0,
-            color: if self.slideshow.is_some() {
-                self.palette.surface1
+        self.palette.push_surface(
+            cmds,
+            ss_x,
+            8.0,
+            80.0,
+            24.0,
+            CORNER_RADIUS,
+            if self.slideshow.is_some() {
+                Surface::Selected
             } else {
-                self.palette.surface0
+                Surface::Card
             },
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
+        );
         cmds.push(RenderCommand::Text {
             x: ss_x + 8.0,
             y: 14.0,

@@ -1478,18 +1478,19 @@ impl FileDiffApp {
             let btn_w = text::width(label, UI_FONT_SIZE) + 16.0;
             let is_active = self.view_mode == *mode;
 
-            tree.push(RenderCommand::FillRect {
-                x: *btn_x,
-                y: btn_y,
-                width: btn_w,
-                height: btn_h,
-                color: if is_active {
-                    self.palette.surface1
+            self.palette.push_surface(
+                tree,
+                *btn_x,
+                btn_y,
+                btn_w,
+                btn_h,
+                4.0,
+                if is_active {
+                    Surface::Selected
                 } else {
-                    self.palette.surface0
+                    Surface::Card
                 },
-                corner_radii: CornerRadii::all(4.0),
-            });
+            );
 
             tree.push(RenderCommand::Text {
                 x: *btn_x + 8.0,
@@ -1558,18 +1559,19 @@ impl FileDiffApp {
         for (label, active) in &ignore_toggles {
             let btn_w = text::width(label, UI_FONT_SIZE) + 16.0;
 
-            tree.push(RenderCommand::FillRect {
-                x: *btn_x,
-                y: btn_y,
-                width: btn_w,
-                height: btn_h,
-                color: if *active {
-                    self.palette.surface1
+            self.palette.push_surface(
+                tree,
+                *btn_x,
+                btn_y,
+                btn_w,
+                btn_h,
+                4.0,
+                if *active {
+                    Surface::Selected
                 } else {
-                    self.palette.surface0
+                    Surface::Card
                 },
-                corner_radii: CornerRadii::all(4.0),
-            });
+            );
 
             tree.push(RenderCommand::Text {
                 x: *btn_x + 8.0,
@@ -1600,18 +1602,19 @@ impl FileDiffApp {
         let sync_w = text::width(sync_label, UI_FONT_SIZE) + 16.0;
         let sync_x = self.width - sync_w - 8.0;
 
-        tree.push(RenderCommand::FillRect {
-            x: sync_x,
-            y: btn_y,
-            width: sync_w,
-            height: btn_h,
-            color: if self.sync_scroll {
-                self.palette.surface1
+        self.palette.push_surface(
+            tree,
+            sync_x,
+            btn_y,
+            sync_w,
+            btn_h,
+            4.0,
+            if self.sync_scroll {
+                Surface::Selected
             } else {
-                self.palette.surface0
+                Surface::Card
             },
-            corner_radii: CornerRadii::all(4.0),
-        });
+        );
 
         tree.push(RenderCommand::Text {
             x: sync_x + 8.0,

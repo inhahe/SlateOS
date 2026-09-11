@@ -1460,18 +1460,19 @@ impl UnitConverterApp {
         let fav_btn_y: f32 = 356.0;
         let fav_btn_w: f32 = 120.0;
         let fav_btn_h: f32 = 28.0;
-        tree.push(RenderCommand::FillRect {
-            x: main_left + 20.0,
-            y: fav_btn_y,
-            width: fav_btn_w,
-            height: fav_btn_h,
-            color: if self.show_favorites {
-                self.palette.surface1
+        self.palette.push_surface(
+            tree,
+            main_left + 20.0,
+            fav_btn_y,
+            fav_btn_w,
+            fav_btn_h,
+            6.0,
+            if self.show_favorites {
+                Surface::Selected
             } else {
-                self.palette.surface0
+                Surface::Card
             },
-            corner_radii: CornerRadii::all(6.0),
-        });
+        );
         tree.push(RenderCommand::Text {
             x: main_left + 30.0,
             y: fav_btn_y + 7.0,

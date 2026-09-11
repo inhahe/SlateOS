@@ -2446,18 +2446,19 @@ impl App {
             let w = text::width(label, SMALL_TEXT) + 16.0;
             let selected = self.library_category_filter == *cat;
 
-            cmds.push(RenderCommand::FillRect {
-                x: cat_x,
-                y: content_y,
-                width: w,
-                height: 24.0,
-                color: if selected {
-                    self.palette.surface1
+            self.palette.push_surface(
+                cmds,
+                cat_x,
+                content_y,
+                w,
+                24.0,
+                12.0,
+                if selected {
+                    Surface::Selected
                 } else {
-                    self.palette.surface0
+                    Surface::Card
                 },
-                corner_radii: CornerRadii::all(12.0),
-            });
+            );
             cmds.push(RenderCommand::Text {
                 x: cat_x + 8.0,
                 y: content_y + 5.0,
@@ -2497,18 +2498,19 @@ impl App {
             let selected = self.selected_library_entry == Some(*original_idx);
 
             // Row background
-            cmds.push(RenderCommand::FillRect {
-                x: PADDING,
-                y: row_y,
-                width: self.window_width - 2.0 * PADDING,
-                height: 54.0,
-                color: if selected {
-                    self.palette.surface0
+            self.palette.push_surface(
+                cmds,
+                PADDING,
+                row_y,
+                self.window_width - 2.0 * PADDING,
+                54.0,
+                6.0,
+                if selected {
+                    Surface::Selected
                 } else {
-                    self.palette.mantle
+                    Surface::Card
                 },
-                corner_radii: CornerRadii::all(6.0),
-            });
+            );
 
             // Category badge
             let cat_label = entry.category.label();

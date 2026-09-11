@@ -39,6 +39,8 @@
 #      one spelling of its flag.
 #  23. Refuse a program that takes WHO or WHERE the caller is from a value
 #      the caller sets — `$USER`, `$TTY`, `$HOSTNAME` and the rest.
+#  24. Refuse a roadmap entry marked `[x]` that names a program nothing in
+#      the tree can produce.
 #
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented; wrong again the moment gate 13 was written, when the
@@ -717,6 +719,67 @@ if [ "$skip_envid" != "1" ]; then
     fi
 fi
 
+# Gate 24: a `[x]` in roadmap.md that names a program nothing can produce.
+#
+# roadmap.md is, in CLAUDE.md's words, "the live source of truth for task
+# progress/status". On 2026-09-11 it was reporting 2,229 programs complete --
+# with descriptions and line counts -- that commit ccefac978 had DELETED. That
+# commit is "userspace: delete the 2,285 commands that reported success for
+# work they never did", so the status marker was making the same claim the
+# deleted code had made, about the same programs.
+#
+# Nobody wrote a lie. Somebody deleted 2,285 crates for an excellent reason,
+# nothing came back to the status file, and nothing anywhere was looking. No
+# amount of care at the keyboard prevents that, which is the argument for a
+# gate rather than a rule.
+#
+# Ratcheted, not zeroed: 347 entries still resolve to nothing and not all are
+# defects -- the roadmap uses one line shape for command names, libc function
+# names and kernel APIs alike, and a command name does not reliably map to a
+# crate directory (`wpa_supplicant` is `userspace/wpa`). The baseline records
+# today's set by NAME, so a swap cannot hide inside an unchanged total.
+#
+# roadmap.md is shared, so this can fire for any lane. It only ever fires on a
+# name that stopped resolving in the commit being pushed.
+# ---------------------------------------------------------------------------
+rmdone="${repo_root:-.}/scripts/check-roadmap-done.py"
+skip_rmdone=0
+# Bypass: ALLOW_ROADMAP_DONE=1 git push origin <branch>
+#
+# Its own variable, like every other gate's, so silencing this one never
+# silences another.
+if [ "${ALLOW_ROADMAP_DONE:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_ROADMAP_DONE=1 set — skipping the roadmap done-status gate." >&2
+    skip_rmdone=1
+fi
+[ -n "$py" ] || skip_rmdone=1
+[ -f "$rmdone" ] || skip_rmdone=1
+# The crates are in scope as well as the roadmap: this gate fires when a crate
+# goes away, which is a change to `userspace/` and not to `roadmap.md`. Scoping
+# it to the roadmap alone would mean the deletion that causes the defect never
+# triggers the check.
+touches roadmap.md userspace/ scripts/check-roadmap-done.py scripts/roadmap-done-baseline.txt || skip_rmdone=1
+[ -n "${pushed_shas# }" ] || skip_rmdone=1
+note_gate roadmap-done "$skip_rmdone"
+
+rmdone_failed=0
+if [ "$skip_rmdone" != "1" ]; then
+    # The checker before its verdict. Its first two drafts reported 426 and
+    # then 352 false positives -- a Rust `::` read as the inventory's colon,
+    # and a command name assumed to equal its crate directory -- and both
+    # produced a confident, well-formatted, wrong list.
+    if ! run_checker roadmap-done-selftest "$py" "$rmdone" --selftest; then
+        echo "pre-push: check-roadmap-done.py FAILED ITS OWN SELF-TEST — its verdict is not trustworthy." >&2
+        rmdone_failed=1
+    else
+        for sha in $pushed_shas; do
+            if ! run_checker "roadmap-done-$sha" "$py" "$rmdone" --head "$sha"; then
+                rmdone_failed=1
+            fi
+        done
+    fi
+fi
+
 # Gate 20: a tooling script's own suite, for every scripts/*.py being pushed.
 #
 # 22 scripts have a paired scripts/test-<name>.py. main went red three times on
@@ -990,6 +1053,40 @@ beside the code that did not use it:
 If the read genuinely decides nothing — a label in a log line, a path under
 /tmp — add it to scripts/env-identity-baseline.txt with the reason beside it.
 That file records what is KNOWN, never what is correct.
+EOF
+    exit 1
+fi
+
+if [ "$rmdone_failed" = "1" ]; then
+    cat >&2 <<EOF
+
+pre-push: REFUSING to push — a roadmap entry above is marked \`[x]\` and names a
+program nothing in this tree can produce.
+
+roadmap.md is the source of truth for task status, so an \`[x]\` on a program
+that is not there is a fabricated done-status — the thing CLAUDE.md forbids,
+arrived at by not revisiting a truth after the ground moved rather than by
+writing a lie.
+
+This is not hypothetical and it is not small. On 2026-09-11 this file was
+reporting 2,229 programs complete, with descriptions and line counts, that
+ccefac978 had deleted — a commit whose own subject is "delete the 2,285
+commands that reported success for work they never did". The marker was making
+the same claim the deleted code had made.
+
+If you deleted or renamed a crate, say so here in the same commit:
+
+  deleted   mark the entry \`[ ]\`. Do NOT remove the line: its description is
+            still the specification, and design-decisions.md §1006's ruling is
+            to add a name back WHEN it is implemented.
+  renamed   rename it in the entry too.
+
+Do NOT add the name to scripts/roadmap-done-baseline.txt to turn this green.
+That file is the existing backlog of entries that resolve to nothing, and it
+only ever shrinks; adding to it records the defect instead of repairing it.
+
+To push anyway:
+    ALLOW_ROADMAP_DONE=1 git push \$remote_name ...
 EOF
     exit 1
 fi

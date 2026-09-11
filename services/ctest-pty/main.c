@@ -414,11 +414,46 @@ int main(void)
         if (!WIFEXITED(status)) {
             return 46;
         }
-        if (WEXITSTATUS(status) != 77) {
-            /* 78 == the handler never ran, which is the interesting
-             * failure: the line discipline did not turn 0x03 into a
-             * SIGINT that crossed into the child. */
+        /* ONE CODE PER CHILD STATUS.  This returned 47 for every status
+         * that was not 77, which collapsed a fault in the kernel's signal
+         * delivery with three faults in this fixture's own setup -- and
+         * the exit code is the only thing anybody can read here, since
+         * the child's status dies with the child and a ring-3 process's
+         * exit code is not logged.  So 47 meant "the ^C did not become a
+         * SIGINT" and also "isatty said no" and also "signal() refused"
+         * and also "the readiness byte did not go out", and no run could
+         * tell which, or even which lane owned it.
+         *
+         * The fixture's own failures are 48-50 and belong to whoever
+         * changes this file.  47 keeps its documented meaning and now has
+         * only that meaning.
+         *
+         *   47  child exited 78: the handler never ran.  The line
+         *       discipline did not turn 0x03 into a SIGINT that crossed
+         *       into the child.  THE INTERESTING ONE.
+         *   48  child exited 70: its fd 0 was not a tty, so login_tty did
+         *       not give it a controlling terminal.  Nothing about the
+         *       signal path was exercised.
+         *   49  child exited 71: signal() refused SIGINT.
+         *   50  child exited 72: the child could not write its readiness
+         *       byte, so the parent's ^C was never synchronised.
+         *   51  any other status: the child died in a way it did not
+         *       choose, since every path it takes ends in one of the
+         *       above.  That is a crash or a startup failure before main,
+         *       not a pty result. */
+        switch (WEXITSTATUS(status)) {
+        case 77:
+            break; /* the handler ran; this is the pass */
+        case 78:
             return 47;
+        case 70:
+            return 48;
+        case 71:
+            return 49;
+        case 72:
+            return 50;
+        default:
+            return 51;
         }
     }
 

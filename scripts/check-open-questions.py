@@ -46,6 +46,8 @@ import pathlib
 import re
 import sys
 
+import selftestflag
+
 DOC = "open-questions.md"
 
 #: The archive heading, matched exactly.  Not a prefix match: `# Resolved` and
@@ -337,7 +339,7 @@ def self_test() -> int:
 
 
 def main(argv: list[str]) -> int:
-    if "--self-test" in argv:
+    if selftestflag.wants_selftest(argv):
         return self_test()
 
     root = pathlib.Path(__file__).resolve().parent.parent

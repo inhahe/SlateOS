@@ -104,6 +104,8 @@ import pathlib
 import re
 import string
 import sys
+
+import selftestflag
 import time
 from collections import defaultdict
 from typing import NamedTuple
@@ -907,7 +909,7 @@ def self_test() -> int:
 def main(argv: list[str]) -> int:
     global PROFILE
     PROFILE = "--profile" in argv
-    if "--self-test" in argv:
+    if selftestflag.wants_selftest(argv):
         return self_test()
 
     files = [

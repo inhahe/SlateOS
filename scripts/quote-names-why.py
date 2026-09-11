@@ -979,7 +979,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("target", type=Path, nargs="?")
     ap.add_argument("--batch", action="store_true", help="target is a list of crates")
-    ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--selftest", "--self-test", "--self_test", dest="selftest", action="store_true")
     a = ap.parse_args()
 
     if a.selftest:

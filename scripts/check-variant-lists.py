@@ -71,6 +71,8 @@ import pathlib
 import re
 import sys
 
+import selftestflag
+
 # Every directory in the tree that holds first-party Rust, matched as a prefix
 # (`net` picks up netipc/netproto/netring). Lane C shipped this checking `gui`,
 # `apps`, `net*` and `pkg` only, because that is where it had been falsified;
@@ -511,7 +513,7 @@ def resolve_self_test() -> int:
 
 
 def main(argv: list[str]) -> int:
-    if "--self-test" in argv:
+    if selftestflag.wants_selftest(argv):
         return self_test()
     verbose = "--list" in argv
     root = pathlib.Path(__file__).resolve().parent.parent

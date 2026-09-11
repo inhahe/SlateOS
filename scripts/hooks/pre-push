@@ -3113,6 +3113,73 @@ EOF
     exit 1
 fi
 
+# Gate 22: every self-test runs under every spelling of its flag.
+#
+# Distinct from gate 21 (gate-call-sites), which reads the two AUTOMATED
+# callers -- boot-test.sh and this hook -- and checks that each invocation's
+# arguments are ones the named script accepts. That cannot see the failure this
+# gate exists for, because the caller here is a PERSON at a terminal, and the
+# scripts involved are not invoked from either file.
+#
+# On 2026-09-10 sixteen scripts took one spelling literally:
+#
+#     python scripts/rustscan.py --selftest              exit 0, ran nothing
+#     python scripts/check-recursive-locks.py --selftest exit 0, scanned 807 files
+#
+# The other spelling missed the branch and fell through to the default action,
+# which for a checker is its scan -- and the scan passes. So the command that
+# asks "is this checker still correct?" printed a success line without asking.
+# Lane A read one and spent five minutes believing a file was clean while the
+# boot test's log said otherwise.
+#
+# A self-test that can silently not happen is worth less than no self-test,
+# because somebody believes it. Same family as a gate that sets `fail=1` and
+# never reads it: success and not-running must not be the same observation.
+# ---------------------------------------------------------------------------
+flagspell="${repo_root:-.}/scripts/check-selftest-flag-spellings.py"
+skip_flagspell=0
+if [ "${ALLOW_SELFTEST_FLAG_DRIFT:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_SELFTEST_FLAG_DRIFT=1 set — skipping the self-test flag gate." >&2
+    skip_flagspell=1
+fi
+[ -n "$py" ] || skip_flagspell=1
+[ -f "$flagspell" ] || skip_flagspell=1
+touches scripts/ || skip_flagspell=1
+note_gate selftest-flag-spellings "$skip_flagspell"
+
+if [ "$skip_flagspell" != "1" ]; then
+    if ! run_checker selftest-flag-spellings-selftest "$py" "$flagspell" --selftest; then
+        echo "pre-push: check-selftest-flag-spellings.py FAILED ITS OWN SELF-TEST — its verdict is not trustworthy." >&2
+        skip_flagspell=refused
+    fi
+fi
+
+if [ "$skip_flagspell" = "refused" ] || { [ "$skip_flagspell" != "1" ] && ! run_checker selftest-flag-spellings "$py" "$flagspell"; }; then
+    cat >&2 <<'EOF'
+
+pre-push: REFUSING to push — a script's self-test can be asked for in a
+spelling that does not reach it.
+
+`--selftest` and `--self-test` must both run the self-test. When only one does,
+the other falls through to the script's default action — its real scan, or a
+usage notice — and EXITS 0. The mistyped command then reports success without
+having tested anything, which is indistinguishable from a genuine pass.
+
+Use `selftestflag.wants_selftest(argv)`, or name both spellings in one
+add_argument call.
+
+Reproduce exactly what the hook saw:
+    python scripts/check-selftest-flag-spellings.py
+
+Full output is kept at the path named above.
+
+To push anyway:
+    ALLOW_SELFTEST_FLAG_DRIFT=1 git push $remote_name ...
+
+EOF
+    exit 1
+fi
+
 # ---------------------------------------------------------------------------
 # The tally. Unconditional, and on stderr with the rest of the hook's output.
 #

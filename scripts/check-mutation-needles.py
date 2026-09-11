@@ -377,7 +377,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("--root", default=None,
                         help="directory of gates to scan (default: scripts/)")
-    parser.add_argument("--self-test", action="store_true",
+    parser.add_argument("--self-test", "--selftest", "--self_test", dest="self_test", action="store_true",
                         help="run this gate's own cases and exit")
     args = parser.parse_args(argv)
 

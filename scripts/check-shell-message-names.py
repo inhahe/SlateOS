@@ -63,6 +63,8 @@ from __future__ import annotations
 
 import re
 import sys
+
+import selftestflag
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -215,7 +217,7 @@ def self_test() -> int:
 
 
 def main() -> int:
-    if "--self-test" in sys.argv[1:]:
+    if selftestflag.wants_selftest(sys.argv[1:]):
         return self_test()
 
     try:

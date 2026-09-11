@@ -975,7 +975,7 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__.split("\n\n")[0],
         formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--self-test", action="store_true",
+    parser.add_argument("--self-test", "--selftest", action="store_true",
                         help="verify the padding mechanism (builds only, no "
                              "QEMU) and exit")
     parser.add_argument("--pads", default="0,1024,2048,3072",

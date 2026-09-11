@@ -76,6 +76,8 @@ import os
 import re
 import subprocess
 import sys
+
+import selftestflag
 from pathlib import Path
 from typing import NamedTuple
 
@@ -1547,7 +1549,7 @@ def main() -> int:
             pass
 
     args = sys.argv[1:]
-    if "--selftest" in args:
+    if selftestflag.wants_selftest(args):
         return selftest()
     if "--fix" in args:
         return fix([a for a in args if not a.startswith("--")])

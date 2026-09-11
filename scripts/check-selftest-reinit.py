@@ -98,6 +98,8 @@ import pathlib
 import re
 import sys
 
+import selftestflag
+
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 BASELINE = ROOT / "scripts" / "selftest-reinit-baseline.txt"
 
@@ -309,7 +311,7 @@ fn run_self_test_inner() -> bool {
 
 
 def main() -> int:
-    if "--self-test" in sys.argv:
+    if selftestflag.wants_selftest(sys.argv):
         return self_test()
 
     src = ROOT / "kernel" / "src"

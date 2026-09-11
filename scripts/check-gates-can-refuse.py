@@ -809,7 +809,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     ap.add_argument("--list", action="store_true",
                     help="print findings and exit 0")
-    ap.add_argument("--selftest", action="store_true",
+    ap.add_argument("--selftest", "--self-test", "--self_test", dest="selftest", action="store_true",
                     help="verify the checker itself")
     ap.add_argument("paths", nargs="*", type=Path,
                     help="grade these files instead of scripts/check-*.py; "

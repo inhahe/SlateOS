@@ -114,6 +114,8 @@ Exit status: 0 clean, 1 unaccounted assertions found.
 import pathlib
 import re
 import sys
+
+import selftestflag
 from typing import NamedTuple
 
 # `strip_noise` and friends are the directory's one self-tested Rust scanner.
@@ -1317,7 +1319,7 @@ def analyse(path: pathlib.Path, allowed: dict[tuple[str, bytes], str] = ALLOWED)
 
 
 def main(argv):
-    if "--self-test" in argv[1:]:
+    if selftestflag.wants_selftest(argv[1:]):
         return self_test()
 
     # An explicit path is how this checker gets tested against real history: run

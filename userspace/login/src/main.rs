@@ -229,8 +229,58 @@ fn check_nologin(uid: u32) -> Result<(), LoginError> {
     Ok(())
 }
 
-/// Check if TTY is listed in /etc/securetty (for root login)
-fn check_securetty(uid: u32, tty: &str) -> Result<(), LoginError> {
+/// The terminal this login is happening on, or `None` if it cannot be named.
+///
+/// `ttyname(0)`, as `login` and `getty` have always done it: getty opens the
+/// terminal and hands it to `login` as descriptor 0, so the descriptor IS the
+/// answer and nothing needs to be passed alongside it.
+#[cfg(unix)]
+fn controlling_tty() -> Option<String> {
+    unsafe extern "C" {
+        fn ttyname(fd: i32) -> *const std::ffi::c_char;
+    }
+    // SAFETY: `ttyname` takes a descriptor and returns either null or a
+    // pointer to a NUL-terminated string in static storage, valid until the
+    // next call to it. The bytes are copied out before anything else runs.
+    let bytes = unsafe {
+        let ptr = ttyname(0);
+        if ptr.is_null() {
+            return None;
+        }
+        std::ffi::CStr::from_ptr(ptr).to_bytes().to_vec()
+    };
+    String::from_utf8(bytes).ok()
+}
+
+/// The host build has no `ttyname`, so it cannot name a terminal and says so.
+#[cfg(not(unix))]
+fn controlling_tty() -> Option<String> {
+    None
+}
+
+/// Is root allowed to log in on this terminal?
+///
+/// `/etc/securetty` lists the terminals at which root may authenticate --
+/// typically the physical console alone, so that a stolen password is not
+/// enough from a serial line or a network tty.
+///
+/// # `tty` is an `Option`, and `None` refuses
+///
+/// The terminal used to come from **`$TTY`**, defaulting to `"console"`:
+///
+///     let tty = env::var("TTY").unwrap_or_else(|_| "console".to_string());
+///
+/// Both halves defeated the control. `TTY=console login` names whatever the
+/// caller likes, and leaving `$TTY` unset produced `"console"` -- the very
+/// name a securetty file is most likely to list -- so the check passed by
+/// DEFAULT on a terminal nobody had looked at.
+///
+/// It is the controlling terminal now, and a terminal that cannot be named
+/// cannot be shown to be on the list. For root, with a securetty file
+/// present, that is a refusal: the whole point of the file is that root
+/// authenticates only where it says, and "I could not tell where this is" is
+/// not one of the places it says.
+fn check_securetty(uid: u32, tty: Option<&str>) -> Result<(), LoginError> {
     if uid != 0 {
         return Ok(()); // Only applies to root
     }
@@ -238,6 +288,12 @@ fn check_securetty(uid: u32, tty: &str) -> Result<(), LoginError> {
     let content = match std::fs::read_to_string(SECURETTY_FILE) {
         Ok(c) => c,
         Err(_) => return Ok(()), // No securetty = all ttys allowed
+    };
+
+    let Some(tty) = tty else {
+        return Err(LoginError::AuthFailed(
+            "root login refused: this terminal cannot be identified".to_string(),
+        ));
     };
 
     let tty_short = tty.strip_prefix("/dev/").unwrap_or(tty);
@@ -669,8 +725,11 @@ fn do_login(
         check_nologin(user.uid)?;
 
         // Check securetty for root
-        let tty = env::var("TTY").unwrap_or_else(|_| "console".to_string());
-        check_securetty(user.uid, &tty)?;
+        let tty_name = controlling_tty();
+        check_securetty(user.uid, tty_name.as_deref())?;
+        // The audit records take the same answer. A terminal nobody could name
+        // is recorded as `?` rather than as the console it might not be.
+        let tty = tty_name.unwrap_or_else(|| "?".to_string());
 
         // The account's own policy -- locked, expired, dead after expiry --
         // refuses before a password is asked for.
@@ -1624,9 +1683,56 @@ mod tests {
         assert!(check_nologin(0).is_ok());
     }
 
+    /// The securetty control, stated as the property it has to have.
+    ///
+    /// This cannot exercise the file-reading half without an `/etc/securetty`
+    /// on the build host, so it pins the two decisions that do not depend on
+    /// the file's contents -- and those are the two that were wrong.
+    #[test]
+    fn root_on_a_terminal_that_cannot_be_named_is_refused() {
+        // With no /etc/securetty every terminal is allowed, including an
+        // unnamed one: absence of the file means the rule is not in force.
+        // On a host that HAS the file, an unnameable terminal must refuse.
+        let has_file = std::fs::metadata(SECURETTY_FILE).is_ok();
+        let verdict = check_securetty(0, None);
+        assert_eq!(
+            verdict.is_err(),
+            has_file,
+            "with securetty present an unnameable terminal must refuse,              and with it absent the rule is not in force"
+        );
+    }
+
+    /// `$TTY` must not be able to name the terminal root is judged to be on.
+    ///
+    /// The old lookup was `env::var("TTY").unwrap_or_else(|_| "console")`, so
+    /// setting it chose the answer -- and leaving it UNSET produced "console",
+    /// the name a securetty file is most likely to list, passing the check by
+    /// default on a terminal nobody had looked at.
+    #[test]
+    fn the_environment_cannot_name_the_terminal() {
+        // SAFETY: single-threaded test and the variable is removed again
+        // below; `set_var` is unsafe in edition 2024 only because a concurrent
+        // reader would be UB.
+        unsafe {
+            std::env::set_var("TTY", "console");
+        }
+        let answer = controlling_tty();
+        unsafe {
+            std::env::remove_var("TTY");
+        }
+        assert_ne!(
+            answer.as_deref(),
+            Some("console"),
+            "the terminal name must come from the descriptor, not the caller"
+        );
+    }
+
     #[test]
     fn test_check_securetty_non_root() {
-        assert!(check_securetty(1000, "tty1").is_ok());
+        assert!(check_securetty(1000, Some("tty1")).is_ok());
+        // ...and an unidentifiable terminal is still fine for a non-root user:
+        // securetty is a rule about root and nobody else.
+        assert!(check_securetty(1000, None).is_ok());
     }
 
     #[test]

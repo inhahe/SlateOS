@@ -1709,7 +1709,11 @@ fn build_environment(
     // Always set these.
     set_or_replace(&mut env, "USER", target_user.as_ref());
     set_or_replace(&mut env, "LOGNAME", target_user.as_ref());
-    set_or_replace(&mut env, "SUDO_USER", current_username().as_ref());
+    // SUDO_USER is what the command being run sees as "who invoked me", so it
+    // is the same identity claim as the one the sudoers match is made on and
+    // must come from the same place. It read `$USER` too, so a forged name
+    // propagated into the child's environment as sudo's own attestation.
+    set_or_replace(&mut env, "SUDO_USER", require_username().as_ref());
 
     if login_shell {
         set_or_replace(&mut env, "HOME", target_home.as_ref());
@@ -2255,11 +2259,61 @@ fn authenticate_against(
 // Platform helpers (Slate OS stubs)
 // ============================================================================
 
-/// Get the current username.
-fn current_username() -> String {
-    std::env::var("USER")
-        .or_else(|_| std::env::var("LOGNAME"))
-        .unwrap_or_else(|_| "unknown".to_string())
+/// The caller's login name, or `None` if this build cannot determine it.
+///
+/// # Why this may not read the environment
+///
+/// It used to be `$USER`, then `$LOGNAME`, then the literal `"unknown"`. All
+/// three are the caller's to set, and this name decides three things:
+///
+///   * **which sudoers rules apply** -- `user_matches` compares it against
+///     each privilege spec's user list;
+///   * **whose password is demanded** -- `authenticate(&username, ..)`;
+///   * **which credential cache is consulted** -- `timestamp_path` is
+///     `TIMESTAMP_DIR/<username>`.
+///
+/// The third is the one that turns this from mis-attribution into privilege
+/// escalation. `check_timestamp` skips the password prompt entirely when the
+/// named user authenticated recently, so with the name under the caller's
+/// control:
+///
+///     USER=alice sudo <command>
+///
+/// finds alice's live timestamp, asks for no password at all, and is then
+/// authorised against alice's rules. No knowledge of alice's password is
+/// needed -- only that she ran sudo in the last few minutes.
+///
+/// So the name comes from `getuid(2)` through `authlib::identity::caller_uid`
+/// and is resolved against the user database, exactly as `effective_uid`
+/// below already does for the id. That function's own note records this
+/// lesson being learned once already: "This used to read /proc/self/status and
+/// fall back to the UID environment variable. The fallback was the caller's to
+/// set". The username was left behind, as the hostname was.
+fn current_username() -> Option<String> {
+    let uid = authlib::identity::caller_uid()?;
+    userdb::UserDb::load(userdb::DEFAULT_PATH)
+        .ok()
+        .and_then(|db| db.find_uid(uid).and_then(userdb::Record::username))
+}
+
+/// The caller's login name, or a refusal that says why.
+///
+/// **No numeric fallback.** A uid with no account record could be spelled
+/// `uid1000` and matched against sudoers, but a sudoers file naming `uid1000`
+/// is not a thing anyone writes, so the match would fail and the denial would
+/// look like a policy decision rather than a lookup failure. Worse, the same
+/// string would key a timestamp file, giving every unnamed uid one shared
+/// credential cache. Refusing names the real problem.
+fn require_username() -> String {
+    match current_username() {
+        Some(u) => u,
+        None => {
+            eprintln!(
+                "sudo: cannot determine who you are; refusing rather than                  guessing at a name that selects your privileges"
+            );
+            process::exit(1);
+        }
+    }
 }
 
 /// Get the current hostname.
@@ -2933,7 +2987,7 @@ fn run_sudo(args: &[OsString]) -> i32 {
         return run_sudoedit(&opts.command);
     }
 
-    let username = current_username();
+    let username = require_username();
     let hostname = require_hostname();
 
     // Handle -K (remove timestamp entirely).
@@ -3227,7 +3281,7 @@ fn run_sudoedit(files: &[OsString]) -> i32 {
         return 1;
     }
 
-    let username = current_username();
+    let username = require_username();
     let hostname = require_hostname();
     let user_groups = get_user_groups(&username);
 
@@ -4636,6 +4690,43 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             &["alice".to_string()],
         );
         assert!(result.is_some());
+    }
+
+    /// `$USER` must not reach the name sudo authorises, authenticates and
+    /// caches credentials under.
+    ///
+    /// The cache is what makes this escalation rather than mis-attribution:
+    /// `timestamp_path` is `TIMESTAMP_DIR/<username>` and `check_timestamp`
+    /// skips the password prompt when that file is fresh, so a forged name
+    /// borrows whoever last ran sudo.
+    #[test]
+    fn the_environment_cannot_choose_who_you_are() {
+        // SAFETY: single-threaded test; both variables are removed again
+        // below. `set_var` is unsafe in edition 2024 because a concurrent
+        // reader would be UB, and there is no other thread here.
+        unsafe {
+            std::env::set_var("USER", "attacker-chosen");
+            std::env::set_var("LOGNAME", "attacker-chosen-too");
+        }
+        let answer = current_username();
+        unsafe {
+            std::env::remove_var("USER");
+            std::env::remove_var("LOGNAME");
+        }
+        assert_ne!(answer.as_deref(), Some("attacker-chosen"));
+        assert_ne!(answer.as_deref(), Some("attacker-chosen-too"));
+    }
+
+    /// The credential cache path must not be reachable from a name the caller
+    /// supplied -- and must not escape its directory even if one ever were.
+    #[test]
+    fn a_timestamp_path_stays_under_its_directory() {
+        let ours = timestamp_path("alice");
+        assert!(ours.starts_with(TIMESTAMP_DIR), "{ours:?}");
+        assert!(ours.ends_with("alice"), "{ours:?}");
+        // Different users do not share a cache; sharing one is the same bug
+        // as letting the name be chosen.
+        assert_ne!(timestamp_path("alice"), timestamp_path("bob"));
     }
 
     /// `$HOSTNAME` must not reach the hostname the sudoers rules are matched

@@ -54,7 +54,6 @@ userspace/diskutil
 userspace/dmesg
 userspace/du
 userspace/env
-userspace/expand
 userspace/fdisk
 userspace/file
 userspace/fmt

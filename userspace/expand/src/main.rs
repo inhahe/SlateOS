@@ -55,7 +55,7 @@ enum Mode {
 #[derive(Clone)]
 enum TabStops {
     /// Regular interval (e.g. every 8 columns).
-    Regular(usize),
+    Regular(std::num::NonZeroUsize),
     /// Explicit list of 1-based column positions.
     List(Vec<usize>),
 }
@@ -104,17 +104,14 @@ fn parse_tab_stops(s: &str) -> Option<TabStops> {
             return None;
         }
         // Positions must be strictly ascending.
-        for i in 1..positions.len() {
-            if positions[i] <= positions[i - 1] {
-                return None;
-            }
+        if positions.windows(2).any(|w| w.first() >= w.last()) {
+            return None;
         }
         Some(TabStops::List(positions))
     } else {
-        let n: usize = s.trim().parse().ok()?;
-        if n == 0 {
-            return None;
-        }
+        // `NonZeroUsize::parse` rejects 0 for us, which is the same
+        // answer the explicit check gave and is now the type's job.
+        let n: std::num::NonZeroUsize = s.trim().parse().ok()?;
         Some(TabStops::Regular(n))
     }
 }
@@ -126,15 +123,19 @@ fn next_tab_stop(col: usize, stops: &TabStops) -> Option<usize> {
     match stops {
         TabStops::Regular(interval) => {
             // Next multiple of `interval` that is strictly greater than `col`.
-            Some((col / interval + 1) * interval)
+            Some(
+                (col / *interval)
+                    .saturating_add(1)
+                    .saturating_mul(interval.get()),
+            )
         }
         TabStops::List(positions) => {
             // Find the first position (1-based) that is strictly greater than
             // `col + 1` (converting 0-based col to 1-based).
-            let col_1based = col + 1;
+            let col_1based = col.saturating_add(1);
             for &pos in positions {
                 if pos > col_1based {
-                    return Some(pos - 1); // Convert back to 0-based.
+                    return Some(pos.saturating_sub(1)); // Back to 0-based.
                 }
             }
             // Past the last explicit tab stop -- no more stops.
@@ -163,7 +164,7 @@ fn parse_args(args: &[String]) -> ParseResult {
     let mode = if args.is_empty() {
         Mode::Expand
     } else {
-        detect_mode(&args[0])
+        detect_mode(args.first().map_or("", String::as_str))
     };
 
     let mut file_paths: Vec<String> = Vec::new();
@@ -179,18 +180,16 @@ fn parse_args(args: &[String]) -> ParseResult {
     };
 
     let mut i = 1;
-    while i < args.len() {
-        let arg = &args[i];
-
+    while let Some(arg) = args.get(i) {
         if end_of_opts || !arg.starts_with('-') || arg == "-" {
             file_paths.push(arg.clone());
-            i += 1;
+            i = i.saturating_add(1);
             continue;
         }
 
         if arg == "--" {
             end_of_opts = true;
-            i += 1;
+            i = i.saturating_add(1);
             continue;
         }
 
@@ -211,12 +210,12 @@ fn parse_args(args: &[String]) -> ParseResult {
                 let val = if let Some(eq_val) = arg.strip_prefix("--tabs=") {
                     eq_val.to_string()
                 } else {
-                    i += 1;
-                    if i >= args.len() {
+                    i = i.saturating_add(1);
+                    let Some(next) = args.get(i) else {
                         eprintln!("{prog_name}: option '--tabs' requires an argument");
                         process::exit(1);
-                    }
-                    args[i].clone()
+                    };
+                    next.clone()
                 };
                 tab_stops_str = Some(val);
             } else {
@@ -225,7 +224,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                 process::exit(1);
             }
 
-            i += 1;
+            i = i.saturating_add(1);
             continue;
         }
 
@@ -242,12 +241,12 @@ fn parse_args(args: &[String]) -> ParseResult {
                     // consume the next argument.
                     let remainder: String = chars.collect();
                     let val = if remainder.is_empty() {
-                        i += 1;
-                        if i >= args.len() {
+                        i = i.saturating_add(1);
+                        let Some(next) = args.get(i) else {
                             eprintln!("{prog_name}: option '-t' requires an argument");
                             process::exit(1);
-                        }
-                        args[i].clone()
+                        };
+                        next.clone()
                     } else {
                         remainder
                     };
@@ -265,7 +264,7 @@ fn parse_args(args: &[String]) -> ParseResult {
             }
         }
 
-        i += 1;
+        i = i.saturating_add(1);
     }
 
     // Default to stdin if no files given.
@@ -284,7 +283,10 @@ fn parse_args(args: &[String]) -> ParseResult {
                 process::exit(1);
             }
         },
-        None => TabStops::Regular(8),
+        // 8 is expand's default tab width and is not zero.
+        None => {
+            TabStops::Regular(std::num::NonZeroUsize::new(8).unwrap_or(std::num::NonZeroUsize::MIN))
+        }
     };
 
     // Determine initial_only:
@@ -318,7 +320,7 @@ fn expand_line(line: &str, stops: &TabStops, initial_only: bool) -> String {
             // Replace tab with spaces up to the next tab stop.
             match next_tab_stop(col, stops) {
                 Some(next_col) => {
-                    let spaces = next_col - col;
+                    let spaces = next_col.saturating_sub(col);
                     for _ in 0..spaces {
                         out.push(' ');
                     }
@@ -328,7 +330,7 @@ fn expand_line(line: &str, stops: &TabStops, initial_only: bool) -> String {
                     // Past the last explicit tab stop -- insert a single space
                     // (matches GNU expand behavior).
                     out.push(' ');
-                    col += 1;
+                    col = col.saturating_add(1);
                 }
             }
         } else {
@@ -340,7 +342,7 @@ fn expand_line(line: &str, stops: &TabStops, initial_only: bool) -> String {
                 col = 0;
                 past_leading = false;
             } else {
-                col += 1;
+                col = col.saturating_add(1);
             }
         }
     }
@@ -405,7 +407,7 @@ fn unexpand_line(line: &str, stops: &TabStops, initial_only: bool) -> String {
             if space_run_start.is_none() {
                 space_run_start = Some(col);
             }
-            col += 1;
+            col = col.saturating_add(1);
 
             // Check if we have reached a tab stop. If so, emit a tab for the
             // accumulated spaces.
@@ -437,13 +439,13 @@ fn unexpand_line(line: &str, stops: &TabStops, initial_only: bool) -> String {
                 if let Some(next) = next_tab_stop(col, stops) {
                     col = next;
                 } else {
-                    col += 1;
+                    col = col.saturating_add(1);
                 }
             } else if ch == '\n' {
                 col = 0;
                 past_leading = false;
             } else {
-                col += 1;
+                col = col.saturating_add(1);
             }
         }
     }
@@ -587,6 +589,124 @@ fn main() {
                     process::exit(1);
                 }
             }
+        }
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
+mod tests {
+    use super::*;
+
+    fn regular(n: usize) -> TabStops {
+        TabStops::Regular(std::num::NonZeroUsize::new(n).unwrap())
+    }
+
+    // -- Tab stop parsing --
+
+    #[test]
+    fn a_zero_interval_is_rejected_by_the_type() {
+        // `TabStops::Regular` holds a `NonZeroUsize`, so `col / interval`
+        // cannot divide by zero however the value arrived. The parse used to
+        // reject 0 with an explicit check and the division four functions
+        // away had to trust it; now the type carries the invariant.
+        assert!(parse_tab_stops("0").is_none());
+        assert!(parse_tab_stops("8").is_some());
+    }
+
+    #[test]
+    fn a_tab_stop_too_large_to_represent_is_rejected() {
+        // GNU says "tab stop is too large"; the answer that matters is that
+        // it is refused rather than wrapped into something small.
+        assert!(parse_tab_stops("99999999999999999999").is_none());
+        assert!(parse_tab_stops("-1").is_none());
+        assert!(parse_tab_stops("").is_none());
+    }
+
+    #[test]
+    fn an_explicit_list_must_ascend_strictly() {
+        assert!(parse_tab_stops("1,3,5").is_some());
+        // Equal is not ascending: two stops at one column would make
+        // `next_tab_stop` return a column it had already passed.
+        assert!(parse_tab_stops("1,3,3").is_none());
+        assert!(parse_tab_stops("5,3").is_none());
+    }
+
+    // -- Where the next stop is --
+
+    #[test]
+    fn a_regular_interval_lands_on_the_next_multiple() {
+        let t = regular(8);
+        assert_eq!(next_tab_stop(0, &t), Some(8));
+        assert_eq!(next_tab_stop(7, &t), Some(8));
+        // Strictly greater: a column already on a stop moves to the NEXT one,
+        // or a tab at column 8 would expand to nothing.
+        assert_eq!(next_tab_stop(8, &t), Some(16));
+    }
+
+    #[test]
+    fn a_huge_interval_saturates_instead_of_wrapping() {
+        // `-t` is bounded only by `usize`, and the product used to be a plain
+        // multiply. Saturating keeps the answer monotonic, which is what the
+        // caller's `next_col - col` depends on.
+        let t = regular(usize::MAX);
+        let stop = next_tab_stop(1, &t).unwrap();
+        assert!(stop > 1, "a stop must be past the column it starts from");
+    }
+
+    #[test]
+    fn past_the_last_explicit_stop_there_is_none() {
+        let t = TabStops::List(vec![3, 5]);
+        assert_eq!(next_tab_stop(0, &t), Some(2));
+        assert_eq!(next_tab_stop(2, &t), Some(4));
+        // Nothing beyond the list; the caller emits a single space.
+        assert_eq!(next_tab_stop(9, &t), None);
+    }
+
+    // -- Expansion --
+
+    #[test]
+    fn tabs_become_spaces_to_the_next_stop() {
+        let t = regular(8);
+        assert_eq!(expand_line("a	b", &t, false), "a       b");
+        assert_eq!(expand_line("	a", &t, false), "        a");
+        assert_eq!(expand_line("no tabs", &t, false), "no tabs");
+    }
+
+    #[test]
+    fn a_newline_resets_the_column() {
+        // Without the reset, the second line's tab would expand against the
+        // first line's width.
+        let t = regular(8);
+        assert_eq!(
+            expand_line(
+                "ab
+cd	e", &t, false
+            ),
+            "ab
+cd      e"
+        );
+    }
+
+    #[test]
+    fn initial_only_stops_at_the_first_non_blank() {
+        let t = regular(8);
+        assert_eq!(expand_line("	a	b", &t, true), "        a	b");
+    }
+
+    // -- Argument parsing --
+
+    #[test]
+    fn an_empty_argv_does_not_panic() {
+        // `execve` takes the argument vector from its caller and nothing
+        // requires a program name in it. This crate already guarded argv[0],
+        // unlike `uname`, and the test pins that it stays guarded.
+        match parse_args(&[]) {
+            ParseResult::Run(_) | ParseResult::Help(_) | ParseResult::Version(_) => {}
         }
     }
 }

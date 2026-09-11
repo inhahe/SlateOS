@@ -7,3 +7,6 @@ description = "SlateOS tab/space conversion utility (expand + unexpand)"
 # expand names the files whose tabs it is expanding, which are whatever the
 # caller listed -- commonly a shell glob over a directory nobody audited.
 quoting = { path = "../quoting" }
+
+[lints]
+workspace = true

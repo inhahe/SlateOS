@@ -129644,7 +129644,7 @@ than a note was checking the roadmap and finding mDNS marked done TWICE: once
 for the kernel responder with the real multicast addresses, once for this. Two
 `[x]` entries for one feature is the tell.
 
-## TD-B-HALF-THE-TREE-IS-NOT-SUBJECT-TO-THE-LINT-POLICY (lane B, 2026-09-10) — ratcheted, 129 open
+## TD-B-HALF-THE-TREE-IS-NOT-SUBJECT-TO-THE-LINT-POLICY (lane B, 2026-09-10) — ratcheted, 128 open
 
 **In short:** CLAUDE.md requires `#![deny(clippy::all, clippy::pedantic)]` in
 every crate plus five defensive lints in non-test code. **134 of 256 crates**
@@ -129703,6 +129703,27 @@ Two findings worth more than the warnings:
   panic, because `Read` promises `n <= buf.len()`; it is now checked anyway,
   because a reader that broke the promise would have `tee` copy stale buffer
   bytes it never read into every output file, and stopping is better than that.
+
+**`expand` (2026-09-11), and the interesting part is that it had no bug.** 24
+warnings, and a full behavioural diff against GNU coreutils 9.4 — six tab-stop
+values including `0`, `-1` and one too large for `usize` — matched byte for
+byte on stdout and on exit code. So the lints bought no defect here, and the
+work was still worth doing for the one structural change they prompted:
+
+`TabStops::Regular` now holds a `NonZeroUsize` instead of a `usize`. The parser
+already rejected 0, and `next_tab_stop`'s `col / interval` four functions away
+had to trust that. The type carries it now, so the division cannot panic
+however the value arrived — and `col / *interval` uses
+`impl Div<NonZeroUsize> for usize`, which is documented as never panicking, so
+the proof is the type's rather than a comment's.
+
+That is the shape worth repeating: the lint could not be satisfied honestly
+without making the invariant explicit, and making it explicit removed the need
+for the invariant to be remembered.
+
+10 tests added — it had none, like the two before it. Three crates in and all
+three had no tests at all, which is starting to look less like a coincidence
+than like what "not subject to the lint policy" selected for.
 
 **The house style, measured before following it:** of 50 covered crates only 9
 use a crate-level `#![allow(clippy::arithmetic_side_effects, ...)]`. The other

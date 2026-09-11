@@ -115,13 +115,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "awk"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "backup"
 version = "0.1.0"
 dependencies = [

@@ -14,6 +14,7 @@
 //! xxd -i data.bin
 //! ```
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
@@ -145,10 +146,10 @@ Options:
 /// Parse a numeric argument that may be decimal or hex (0x prefix).
 fn parse_number(s: &str) -> Result<u64, String> {
     if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-        u64::from_str_radix(hex, 16).map_err(|_| format!("invalid hex number: '{s}'"))
+        u64::from_str_radix(hex, 16).map_err(|_| format!("invalid hex number: {}", quoteaf_os(s)))
     } else {
         s.parse::<u64>()
-            .map_err(|_| format!("invalid number: '{s}'"))
+            .map_err(|_| format!("invalid number: {}", quoteaf_os(s)))
     }
 }
 

@@ -10,6 +10,9 @@ description = "SlateOS ftpd - FTP server daemon"
 # `_password` and never read, so any password logged in any user listed in the
 # world-readable /etc/passwd.
 [dependencies]
+# User names, path names and command arguments arrive over the control
+# connection before authentication.
+quoting = { path = "../quoting" }
 authlib = { path = "../authlib" }
 
 # Tests only: they build a real `$6$` shadow entry with the same hasher

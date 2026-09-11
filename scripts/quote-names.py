@@ -103,16 +103,25 @@ ROOTS = ("userspace", "services", "init", "posix")
 # Kept byte-for-byte in step with NOT_A_NAME in diagnostics_quote_names.rs.
 NOT_A_NAME = {"msg", "e", "err", "error", "message", "reason"}
 
+# Cargo's directories for code that is ENTIRELY test code.
+#
+# `live_code` blanks `#[cfg(test)]` items, which is every test inside a `src/`
+# file and none of these: an integration test needs no attribute, because the
+# whole file is only ever built by `cargo test`. The gate read them as
+# production and `userspace/oils` -- a SHELL, whose integration tests build
+# shell source like `format!("( exec >'{p}'; echo X )")` -- was the proof.
+#
+# This subsumes the entry that used to sit in IGNORE for
+# `coreutils/tests/diagnostics_quote_names.rs`, which holds the detector's own
+# fixtures and was exempted one file at a time. One file at a time is the
+# enumeration-that-misses-the-next-instance shape, and the next instance was
+# already in the tree.
+TEST_DIRS = ("tests", "benches")
+
 # Files whose hits are not defects, with the reason. This table records *why*
 # a file is exempt; the baseline records only *that* a site exists, which is
 # the wrong place for a judgement. Keep it short -- every entry is a hole.
 IGNORE = {
-    # The bad form appears here as the detector's own fixtures: the test feeds
-    # `eprintln!("cp: {path}: {e}")` to `bare_interpolated_name` and asserts it
-    # is caught. Baselining them would be worse than a false positive -- they
-    # can never be "fixed", so the count could never reach zero, and a ratchet
-    # with an unreachable floor stops being read.
-    "userspace/coreutils/tests/diagnostics_quote_names.rs": "the detector's own fixtures",
     # All seven sites are `format!("'{ch}'")` building the NAME of a terminal
     # symbol -- `Symbol::Terminal(..)`, `terminals.insert(..)`, `prec_tag` --
     # where `'a'` is yacc's own spelling for a character-literal token. The
@@ -929,6 +938,8 @@ def survey_tree(tree: gittree.Tree) -> Survey:
     for top in ROOTS:
         for rel in tree.files_under(top):
             if not rel.endswith(".rs") or rel in IGNORE:
+                continue
+            if any(part in TEST_DIRS for part in rel.split("/")):
                 continue
             scanned += 1
             text = _decode(tree.read_bytes(rel))
@@ -1867,6 +1878,35 @@ def selftest() -> int:
         "        \"a format!(\" => Err(format!(\"tool: got '{w}'\")),",
         '        "a format!(" => Err(format!("tool: got {}", quoteaf_os(&w))),',
     )
+
+    # 15. An INTEGRATION test is test code with no attribute on it.
+    #
+    #     Case 13 covers `#[cfg(test)]`, which is every test inside a `src/`
+    #     file and none of these: a file under `tests/` is only ever built by
+    #     `cargo test`, so it carries no marker for `live_code` to find. The
+    #     gate read them as production, and `userspace/oils` -- a shell, whose
+    #     integration tests build shell source -- was where it showed.
+    #
+    #     This replaced a one-file IGNORE entry for the detector's own
+    #     fixtures. Exempting test files one at a time is the shape that misses
+    #     the next instance by construction, and the next instance was already
+    #     in the tree when the entry was written.
+    def skipped(rel: str) -> bool:
+        return any(part in TEST_DIRS for part in rel.split("/"))
+
+    for rel, want in (
+        ("userspace/oils/tests/redirect_dup.rs", True),
+        ("userspace/coreutils/tests/diagnostics_quote_names.rs", True),
+        ("userspace/foo/benches/throughput.rs", True),
+        ("userspace/foo/src/main.rs", False),
+        # Not a test directory: the word has to be a whole path component, or
+        # a crate called `attestation` would exempt itself.
+        ("userspace/attestation/src/main.rs", False),
+        ("userspace/foo/src/testsuite.rs", False),
+    ):
+        checked += 1
+        if skipped(rel) != want:
+            failures.append(f"test-dir rule: {rel} skipped={not want}, wanted {want}")
 
     for f in failures:
         print(f"selftest FAIL {f}")

@@ -35,6 +35,10 @@ import sys
 import textwrap
 from pathlib import Path
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import selftestflag  # noqa: E402
+
 ROOT = Path(__file__).resolve().parent.parent
 
 # The functions `--fix` emits. Order matters: it is the order they go into the
@@ -100,6 +104,34 @@ def wire_cargo(crate: Path, why: str) -> str:
     return "wired"
 
 
+def _preceded_by_attribute(src: str, pos: int) -> bool:
+    """Is the item at `pos` carrying an attribute on the line(s) above it?
+
+    Walks back over blank lines and comments, because an attribute may sit
+    above either. A doc comment counts as an attribute for this purpose -- it
+    binds to the item after it exactly as `#[..]` does, and inserting between
+    the two would re-document the wrong import.
+    """
+    for line in reversed(src[:pos].splitlines()):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("#["):
+            return True
+        # A doc comment binds to the item after it exactly as an attribute
+        # does, so inserting between the two would re-document the wrong
+        # import. An inner one (`//!`) belongs to the enclosing module and is
+        # a safe boundary.
+        if stripped.startswith("///"):
+            return True
+        # A plain comment binds to nothing; keep looking past it for an
+        # attribute above.
+        if stripped.startswith("//"):
+            continue
+        return False
+    return False
+
+
 def wire_use(path: Path) -> str:
     src = path.read_text(encoding="utf-8")
     used = [f for f in FUNCS if re.search(rf"\b{f}\s*\(", src)]
@@ -109,10 +141,31 @@ def wire_use(path: Path) -> str:
         return "already"
     imp = used[0] if len(used) == 1 else "{" + ", ".join(sorted(used)) + "}"
     line = f"use quoting::{imp};\n"
-    # Insert before the first top-level `use`, which rustfmt then sorts into
-    # place. Anchoring on the first `use` rather than on a named one keeps
-    # this working for a crate whose imports are in any order.
-    m = re.search(r"^use ", src, re.M)
+    # Insert before a top-level `use` that does NOT have an attribute attached
+    # to it, which rustfmt then sorts into place.
+    #
+    # The attribute check is the whole of this. Anchoring on the first `use`
+    # alone put the new import between an existing `#[cfg(not(test))]` and the
+    # `use` it was written for, which does TWO wrong things at once and only
+    # announces one of them:
+    #
+    #     #[cfg(not(test))]        #[cfg(not(test))]
+    #     use std::env;      ->    use quoting::quoteaf_os;   <- now gated
+    #                              use std::env;              <- now ungated
+    #
+    # `userspace/chpasswd` is the crate that did it. The gated import failed
+    # to compile for the test target and that was noticed; `use std::env`
+    # silently losing its gate was not, and nothing would have reported it.
+    # An attribute binds to the item after it, so an insertion point is only
+    # safe if nothing is bound to the item it displaces.
+    m = next(
+        (
+            m
+            for m in re.finditer(r"^use ", src, re.M)
+            if not _preceded_by_attribute(src, m.start())
+        ),
+        None,
+    )
     if not m:
         return "no-use-block"
     src = src[: m.start()] + line + src[m.start() :]
@@ -132,6 +185,53 @@ def wire(crate: Path, why: str) -> int:
     return 0
 
 
+def selftest() -> int:
+    """Where this tool writes, and the one place it must not.
+
+    An attribute binds to the item after it, so inserting a `use` immediately
+    below one gives the new import an attribute meant for something else AND
+    takes it away from the item that had it. Only the first of those fails to
+    compile; the second is silent. `userspace/chpasswd` is the crate it
+    happened to, on 2026-09-11, in a batch of thirty.
+    """
+    cases = [
+        ("#[cfg(not(test))]\nuse std::env;\n", True, "the chpasswd shape"),
+        ("use std::env;\n", False, "a bare use"),
+        ("//! module doc\n\nuse std::env;\n", False, "an inner doc is a boundary"),
+        ("/// documents the import\nuse std::env;\n", True, "a doc comment binds too"),
+        ("// an ordinary remark\nuse std::env;\n", False, "a plain comment binds to nothing"),
+        ("// remark\n#[cfg(unix)]\nuse std::env;\n", True, "an attribute above a remark"),
+        ("fn f() {}\n\nuse std::env;\n", False, "an item above is a boundary"),
+    ]
+    failures = []
+    for src, want, label in cases:
+        got = _preceded_by_attribute(src, src.index("use std::env;"))
+        if got != want:
+            failures.append(f"{label}: want {want}, got {got}")
+
+    # And the insertion end to end: the import must land ABOVE the first
+    # unattributed use and leave the attributed one exactly as it was.
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        f = Path(td) / "main.rs"
+        f.write_text(
+            "#[cfg(not(test))]\nuse std::env;\nuse std::fs;\n\nfn g() { let _ = quoteaf_os(\"x\"); }\n",
+            encoding="utf-8",
+            newline="",
+        )
+        wire_use(f)
+        got = f.read_text(encoding="utf-8")
+    want = "#[cfg(not(test))]\nuse std::env;\nuse quoting::quoteaf_os;\nuse std::fs;\n"
+    if want not in got:
+        failures.append(f"insertion point: wanted {want!r} in {got!r}")
+
+    for f2 in failures:
+        print(f"selftest FAIL {f2}")
+    print(f"selftest: {len(cases) + 1 - len(failures)}/{len(cases) + 1} cases pass")
+    return 1 if failures else 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("crate", type=Path, nargs="?")
@@ -146,6 +246,9 @@ def main() -> int:
         "OEM code page, so passing one on the command line writes mojibake "
         "into the manifest -- silently, because a comment is never compiled.",
     )
+    if selftestflag.wants_selftest(sys.argv[1:]):
+        return selftest()
+
     a = ap.parse_args()
 
     if a.batch:

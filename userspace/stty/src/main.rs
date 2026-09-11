@@ -34,6 +34,7 @@
 // stays in place everywhere else in the workspace.
 #![allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs::File;
 #[cfg(unix)]
@@ -371,14 +372,17 @@ fn parse_cc(s: &str) -> Result<u8, String> {
     // not as the ASCII characters '0', 'A', etc.).  Single non-digit characters
     // fall through to the single-char branch below.
     if s.chars().all(|c| c.is_ascii_digit()) {
-        return s
-            .parse::<u8>()
-            .map_err(|_| format!("invalid control character (out of range 0-255): '{s}'"));
+        return s.parse::<u8>().map_err(|_| {
+            format!(
+                "invalid control character (out of range 0-255): {}",
+                quoteaf_os(s)
+            )
+        });
     }
     if s.len() == 1 {
         return Ok(s.as_bytes()[0]);
     }
-    Err(format!("invalid control character: '{s}'"))
+    Err(format!("invalid control character: {}", quoteaf_os(s)))
 }
 
 // ============================================================================
@@ -664,18 +668,18 @@ fn parse_save(s: &str) -> Result<Termios, String> {
         ));
     }
     let parse_hex_u32 = |s: &str| -> Result<u32, String> {
-        u32::from_str_radix(s, 16).map_err(|_| format!("invalid hex u32: '{s}'"))
+        u32::from_str_radix(s, 16).map_err(|_| format!("invalid hex u32: {}", quoteaf_os(s)))
     };
     let parse_hex_u8 = |s: &str| -> Result<u8, String> {
-        u8::from_str_radix(s, 16).map_err(|_| format!("invalid hex u8: '{s}'"))
+        u8::from_str_radix(s, 16).map_err(|_| format!("invalid hex u8: {}", quoteaf_os(s)))
     };
 
     let c_iflag = parse_hex_u32(parts[0])?;
     let c_oflag = parse_hex_u32(parts[1])?;
     let c_cflag = parse_hex_u32(parts[2])?;
     let c_lflag = parse_hex_u32(parts[3])?;
-    let c_line =
-        u8::from_str_radix(parts[4], 16).map_err(|_| format!("invalid hex u8: '{}'", parts[4]))?;
+    let c_line = u8::from_str_radix(parts[4], 16)
+        .map_err(|_| format!("invalid hex u8: {}", quoteaf_os(parts[4])))?;
     let c_ispeed = parse_hex_u32(parts[5])?;
     let c_ospeed = parse_hex_u32(parts[6])?;
 
@@ -976,7 +980,7 @@ fn apply_setting(t: &mut Termios, setting: &str) -> Result<(), String> {
         return Ok(());
     }
 
-    Err(format!("unknown setting: '{setting}'"))
+    Err(format!("unknown setting: {}", quoteaf_os(setting)))
 }
 
 /// Set or clear a single bit in a flag word.
@@ -1157,7 +1161,7 @@ fn parse_action(args: &[String]) -> Result<Action, String> {
                     .get(j)
                     .ok_or("rows requires a value")?
                     .parse()
-                    .map_err(|_| format!("invalid row count: '{}'", args[j]))?;
+                    .map_err(|_| format!("invalid row count: {}", quoteaf_os(&args[j])))?;
                 // Treat a lone `rows N` as SetRows only if it is the only setting.
                 if args.len() == 2 {
                     return Ok(Action::SetRows(n));
@@ -1172,7 +1176,7 @@ fn parse_action(args: &[String]) -> Result<Action, String> {
                     .get(j)
                     .ok_or("cols requires a value")?
                     .parse()
-                    .map_err(|_| format!("invalid column count: '{}'", args[j]))?;
+                    .map_err(|_| format!("invalid column count: {}", quoteaf_os(&args[j])))?;
                 if args.len() == 2 {
                     return Ok(Action::SetCols(n));
                 }
@@ -1245,7 +1249,7 @@ fn looks_like_saved(s: &str) -> bool {
 fn open_device(path: &str) -> Result<i32, String> {
     // Use Rust's std::fs::File::open so we don't have to deal with
     // null-terminated strings in inline asm.
-    let f = File::open(path).map_err(|e| format!("cannot open '{path}': {e}"))?;
+    let f = File::open(path).map_err(|e| format!("cannot open {}: {e}", quoteaf_os(path)))?;
     // SAFETY: IntoRawFd transfers ownership of the fd; close_fd will close it.
     #[cfg(unix)]
     let raw = f.into_raw_fd();
@@ -1334,12 +1338,12 @@ fn run(fd: i32, action: Action) -> Result<(), String> {
                         if let Some(rest) = s.strip_prefix("rows=") {
                             ws.ws_row = rest
                                 .parse()
-                                .map_err(|_| format!("invalid row count: '{rest}'"))?;
+                                .map_err(|_| format!("invalid row count: {}", quoteaf_os(rest)))?;
                             ws_changed = true;
                         } else if let Some(rest) = s.strip_prefix("cols=") {
                             ws.ws_col = rest
                                 .parse()
-                                .map_err(|_| format!("invalid col count: '{rest}'"))?;
+                                .map_err(|_| format!("invalid col count: {}", quoteaf_os(rest)))?;
                             ws_changed = true;
                         } else {
                             apply_setting(&mut t, &s)?;

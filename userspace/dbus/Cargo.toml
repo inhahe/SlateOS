@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS dbus - D-Bus message bus daemon (dbus-daemon/dbus-send/dbus-monitor)"
 [dependencies]
+# Bus names, object paths and interface names arrive over the socket from
+# any connected client.
+quoting = { path = "../quoting" }

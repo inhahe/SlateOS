@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS terminal settings utility"
 [dependencies]
+# Setting names come from argv and the terminal device name comes from the
+# filesystem.
+quoting = { path = "../quoting" }
 
 [lints]
 workspace = true

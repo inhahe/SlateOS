@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS stream editor"
 [dependencies]
+# Script text, file names and the pattern space all come from the user or
+# the input.
+quoting = { path = "../quoting" }

@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS network port scanner"
 [dependencies]
+# Host specifications come from argv and service banners come from the
+# scanned host.
+quoting = { path = "../quoting" }
 
 [lints]
 workspace = true

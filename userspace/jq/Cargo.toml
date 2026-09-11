@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS JSON processor"
 [dependencies]
+# Filter text comes from argv and object keys come from the JSON being read,
+# which is untrusted input.
+quoting = { path = "../quoting" }

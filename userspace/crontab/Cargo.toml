@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS crontab — manage per-user cron job schedules"
 [dependencies]
+# Crontab file names and the account name come from argv, and the file
+# contents come from the user's editor.
+quoting = { path = "../quoting" }
 cronspool = { path = "../../cronspool" }
 authlib = { path = "../authlib" }
 userdb = { path = "../userdb" }

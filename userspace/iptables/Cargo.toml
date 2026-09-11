@@ -3,4 +3,9 @@ name = "iptables"
 version = "0.1.0"
 edition = "2024"
 description = "SlateOS iptables utility"
+# Chain, table and address strings reach these diagnostics straight from
+# argv. A name holding a newline forges a line of iptables' own stderr, and
+# one holding a quote walks out of the hand-written quotes. See
+# `userspace/quoting`.
 [dependencies]
+quoting = { path = "../quoting" }

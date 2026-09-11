@@ -4,4 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS dhcpcd - DHCP client daemon"
 [dependencies]
+# Interface names come from argv and lease fields come off the wire from the
+# DHCP server.
+quoting = { path = "../quoting" }
 libcall = { path = "../../libcall" }

@@ -25,6 +25,7 @@
 //! "not supported" error rather than silently invoking the wrong syscall.
 //! See `todo.txt` for the design-gap note.
 
+use quoting::quoteaf_os;
 use std::env;
 use std::io::{self, Write};
 use std::process;
@@ -498,7 +499,7 @@ fn parse_args() -> Result<Options, String> {
                 opts.hw_addr = Some(hw);
             }
             other if other.starts_with('-') => {
-                return Err(format!("unknown option: '{other}'"));
+                return Err(format!("unknown option: {}", quoteaf_os(other)));
             }
             _ => {
                 positionals.push(arg.to_string());

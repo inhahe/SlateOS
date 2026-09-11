@@ -8,6 +8,7 @@
 //! - `users`: Print logged-in user names
 //! - `tty`: Print the terminal name
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs;
 use std::process;
@@ -57,7 +58,7 @@ fn run_nproc() -> Result<(), String> {
                 let val = &argv[i]["--ignore=".len()..];
                 ignore = val
                     .parse::<u32>()
-                    .map_err(|_| format!("invalid number: '{val}'"))?;
+                    .map_err(|_| format!("invalid number: {}", quoteaf_os(val)))?;
             }
             "--ignore" => {
                 i += 1;
@@ -66,7 +67,7 @@ fn run_nproc() -> Result<(), String> {
                 }
                 ignore = argv[i]
                     .parse::<u32>()
-                    .map_err(|_| format!("invalid number: '{}'", argv[i]))?;
+                    .map_err(|_| format!("invalid number: {}", quoteaf_os(&argv[i])))?;
             }
             _ => {}
         }
@@ -272,7 +273,11 @@ fn check_path(path: &str, portability: bool, posix_check: bool) -> Result<(), St
         if portability {
             for c in component.chars() {
                 if !is_portable_char(c) && c != '/' {
-                    return Err(format!("nonportable character '{}' in path '{}'", c, path));
+                    return Err(format!(
+                        "nonportable character {} in path {}",
+                        quoteaf_os(c.to_string()),
+                        quoteaf_os(path)
+                    ));
                 }
             }
         }
@@ -286,7 +291,7 @@ fn check_path(path: &str, portability: bool, posix_check: bool) -> Result<(), St
 
         // Check for null bytes
         if component.contains('\0') {
-            return Err(format!("path '{}' contains null byte", path));
+            return Err(format!("path {} contains null byte", quoteaf_os(path)));
         }
     }
 

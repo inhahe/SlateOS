@@ -7,6 +7,7 @@
 //! Supported encodings: UTF-8, UTF-16LE, UTF-16BE, UTF-32LE, UTF-32BE,
 //! ASCII, ISO-8859-1 (Latin-1), ISO-8859-15 (Latin-9), Windows-1252, KOI8-R.
 
+use quoting::quoteaf_os;
 use std::env;
 use std::io::{self, Read, Write};
 use std::process;
@@ -1011,7 +1012,10 @@ fn main() {
     let mut out_file;
     let writer: &mut dyn Write = if let Some(ref path) = opts.output_file {
         out_file = std::fs::File::create(path).unwrap_or_else(|e| {
-            die(&format!("cannot open output file '{path}': {e}"));
+            die(&format!(
+                "cannot open output file {}: {e}",
+                quoteaf_os(path)
+            ));
         });
         &mut out_file
     } else {

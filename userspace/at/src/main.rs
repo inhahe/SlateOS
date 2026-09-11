@@ -40,6 +40,7 @@
 //! Uses `clock_gettime` (syscall 40) for current time via inline x86_64
 //! assembly.
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs;
 use std::io::{self, Read, Write};
@@ -537,7 +538,10 @@ fn parse_relative_offset(now_epoch: i64, tokens: &[&str]) -> Result<i64, Error> 
     }
 
     let n: i64 = tokens[0].parse().map_err(|_| {
-        Error::TimeParse(format!("invalid number in relative time: '{}'", tokens[0]))
+        Error::TimeParse(format!(
+            "invalid number in relative time: {}",
+            quoteaf_os(tokens[0])
+        ))
     })?;
 
     if n < 0 {
@@ -1016,7 +1020,8 @@ fn read_commands_stdin() -> Result<String, Error> {
 
 /// Read commands from a file.
 fn read_commands_file(path: &str) -> Result<String, Error> {
-    fs::read_to_string(path).map_err(|e| Error::Io(format!("cannot read '{}': {e}", path)))
+    fs::read_to_string(path)
+        .map_err(|e| Error::Io(format!("cannot read {}: {e}", quoteaf_os(path))))
 }
 
 // ============================================================================
@@ -1129,9 +1134,9 @@ fn parse_args() -> Result<Args, Error> {
             if argc < 2 {
                 return Err(Error::Usage("atrm: missing job ID".into()));
             }
-            let id: u32 = argv[1]
-                .parse()
-                .map_err(|_| Error::Usage(format!("atrm: invalid job ID: '{}'", argv[1])))?;
+            let id: u32 = argv[1].parse().map_err(|_| {
+                Error::Usage(format!("atrm: invalid job ID: {}", quoteaf_os(&argv[1])))
+            })?;
             return Ok(Args {
                 action: Action::Remove(id),
                 queue,
@@ -1184,9 +1189,9 @@ fn parse_args() -> Result<Args, Error> {
                 if i + 1 >= argc {
                     return Err(Error::Usage("-d requires a job ID".into()));
                 }
-                let id: u32 = argv[i + 1]
-                    .parse()
-                    .map_err(|_| Error::Usage(format!("invalid job ID: '{}'", argv[i + 1])))?;
+                let id: u32 = argv[i + 1].parse().map_err(|_| {
+                    Error::Usage(format!("invalid job ID: {}", quoteaf_os(&argv[i + 1])))
+                })?;
                 action = Some(Action::Remove(id));
                 i += 2;
             }
@@ -1194,9 +1199,9 @@ fn parse_args() -> Result<Args, Error> {
                 if i + 1 >= argc {
                     return Err(Error::Usage("-c requires a job ID".into()));
                 }
-                let id: u32 = argv[i + 1]
-                    .parse()
-                    .map_err(|_| Error::Usage(format!("invalid job ID: '{}'", argv[i + 1])))?;
+                let id: u32 = argv[i + 1].parse().map_err(|_| {
+                    Error::Usage(format!("invalid job ID: {}", quoteaf_os(&argv[i + 1])))
+                })?;
                 action = Some(Action::Cat(id));
                 i += 2;
             }

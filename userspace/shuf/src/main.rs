@@ -5,6 +5,7 @@
 //! - `factor`: Print prime factors of numbers
 //! - `numfmt`: Convert numbers from/to human-readable format
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs;
 use std::io::{self, BufRead, Write};
@@ -152,14 +153,14 @@ fn run_shuf() -> Result<(), String> {
                 head_count = Some(
                     argv[i]
                         .parse::<usize>()
-                        .map_err(|_| format!("invalid count: '{}'", argv[i]))?,
+                        .map_err(|_| format!("invalid count: {}", quoteaf_os(&argv[i])))?,
                 );
             }
             _ if arg.starts_with("--head-count=") => {
                 let val = &arg["--head-count=".len()..];
                 head_count = Some(
                     val.parse::<usize>()
-                        .map_err(|_| format!("invalid count: '{val}'"))?,
+                        .map_err(|_| format!("invalid count: {}", quoteaf_os(val)))?,
                 );
             }
             "-o" | "--output" => {
@@ -178,7 +179,7 @@ fn run_shuf() -> Result<(), String> {
                 let val = &arg["--random-source=".len()..];
                 seed = Some(
                     val.parse::<u64>()
-                        .map_err(|_| format!("invalid seed: '{val}'"))?,
+                        .map_err(|_| format!("invalid seed: {}", quoteaf_os(val)))?,
                 );
             }
             "--" => {
@@ -189,7 +190,7 @@ fn run_shuf() -> Result<(), String> {
                 break;
             }
             _ if arg.starts_with('-') && arg.len() > 1 => {
-                return Err(format!("unknown option '{arg}'"));
+                return Err(format!("unknown option {}", quoteaf_os(arg)));
             }
             _ => {
                 input_file = Some(arg.clone());
@@ -258,14 +259,14 @@ fn run_shuf() -> Result<(), String> {
 fn parse_range(s: &str) -> Result<(i64, i64), String> {
     let parts: Vec<&str> = s.splitn(2, '-').collect();
     if parts.len() != 2 {
-        return Err(format!("invalid range: '{s}'"));
+        return Err(format!("invalid range: {}", quoteaf_os(s)));
     }
     let lo = parts[0]
         .parse::<i64>()
-        .map_err(|_| format!("invalid range start: '{}'", parts[0]))?;
+        .map_err(|_| format!("invalid range start: {}", quoteaf_os(parts[0])))?;
     let hi = parts[1]
         .parse::<i64>()
-        .map_err(|_| format!("invalid range end: '{}'", parts[1]))?;
+        .map_err(|_| format!("invalid range end: {}", quoteaf_os(parts[1])))?;
     if lo > hi {
         return Err(format!("range start {lo} is greater than end {hi}"));
     }
@@ -324,7 +325,7 @@ fn run_factor() -> Result<(), String> {
             }
             let n = arg
                 .parse::<u64>()
-                .map_err(|_| format!("'{arg}' is not a valid number"))?;
+                .map_err(|_| format!("{} is not a valid number", quoteaf_os(arg)))?;
             print_factors(n);
         }
     } else {
@@ -338,7 +339,7 @@ fn run_factor() -> Result<(), String> {
             }
             let n = line
                 .parse::<u64>()
-                .map_err(|_| format!("'{line}' is not a valid number"))?;
+                .map_err(|_| format!("{} is not a valid number", quoteaf_os(line)))?;
             print_factors(n);
         }
     }
@@ -448,7 +449,7 @@ fn run_numfmt() -> Result<(), String> {
                             Box::leak(arg["--round=".len()..].to_string().into_boxed_str());
                         s
                     }
-                    other => return Err(format!("invalid rounding method: '{other}'")),
+                    other => return Err(format!("invalid rounding method: {}", quoteaf_os(other))),
                 };
             }
             _ if arg.starts_with("--suffix=") => {
@@ -496,7 +497,7 @@ fn run_numfmt() -> Result<(), String> {
                 break;
             }
             _ if arg.starts_with('-') && arg.len() > 1 => {
-                return Err(format!("unknown option '{arg}'"));
+                return Err(format!("unknown option {}", quoteaf_os(arg)));
             }
             _ => inputs.push(arg.clone()),
         }
@@ -568,7 +569,7 @@ fn parse_unit(s: &str) -> Result<NumfmtUnit, String> {
         "si" => Ok(NumfmtUnit::Si),
         "iec" => Ok(NumfmtUnit::Iec),
         "iec-i" => Ok(NumfmtUnit::IecI),
-        _ => Err(format!("invalid unit: '{s}'")),
+        _ => Err(format!("invalid unit: {}", quoteaf_os(s))),
     }
 }
 
@@ -581,13 +582,13 @@ fn parse_number_with_suffix(s: &str, unit: NumfmtUnit) -> Result<f64, String> {
     match unit {
         NumfmtUnit::None => s
             .parse::<f64>()
-            .map_err(|_| format!("invalid number: '{s}'")),
+            .map_err(|_| format!("invalid number: {}", quoteaf_os(s))),
         NumfmtUnit::Auto | NumfmtUnit::Si | NumfmtUnit::Iec | NumfmtUnit::IecI => {
             // Strip trailing suffix and multiply
             let (num_str, multiplier) = extract_suffix(s, unit)?;
             let base: f64 = num_str
                 .parse()
-                .map_err(|_| format!("invalid number: '{num_str}'"))?;
+                .map_err(|_| format!("invalid number: {}", quoteaf_os(num_str)))?;
             Ok(base * multiplier)
         }
     }
@@ -613,7 +614,7 @@ fn extract_suffix(s: &str, unit: NumfmtUnit) -> Result<(&str, f64), String> {
     };
 
     if num_part.is_empty() {
-        return Err(format!("invalid number: '{s}'"));
+        return Err(format!("invalid number: {}", quoteaf_os(s)));
     }
 
     let multiplier = match suffix_char {

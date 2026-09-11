@@ -5,6 +5,7 @@
 
 #![allow(dead_code)]
 
+use quoting::quoteaf_os;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{self, Read as _, Write as _};
@@ -352,7 +353,7 @@ impl<'a> Parser<'a> {
         for b in expected.bytes() {
             match self.advance() {
                 Some(got) if got == b => {}
-                _ => return Err(format!("expected '{}'", expected)),
+                _ => return Err(format!("expected {}", quoteaf_os(expected))),
             }
         }
         Ok(value)

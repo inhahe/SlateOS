@@ -12,4 +12,7 @@ description = "SlateOS chpasswd - batch password change (chpasswd/passwd)"
 # true rather than aspirational. See
 # `requests/c-b-passwd-and-login-disagree-about-etc-shadow.md`.
 [dependencies]
+# Account names arrive on stdin, one per line, from whatever produced that
+# stream.
+quoting = { path = "../quoting" }
 posix = { path = "../../posix" }

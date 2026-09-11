@@ -5,6 +5,8 @@ edition = "2024"
 description = "SlateOS inetd - internet super-server daemon"
 
 [dependencies]
+# Service names, program paths and arguments come from inetd.conf.
+quoting = { path = "../quoting" }
 # `monoclock` for the connection-rate window. This crate is the other reason
 # that crate exists: `prune` subtracted `60_000` from a reading in nanoseconds
 # to mean "one minute", so the sliding window was sixty *microseconds* wide,

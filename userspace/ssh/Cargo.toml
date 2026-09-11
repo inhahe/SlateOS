@@ -36,6 +36,8 @@ description = "SlateOS SSH-2 client"
 # Both suites were green. See known-issues.md
 # `TD-B-THE-SSH-WIRE-LAYER-IS-WRITTEN-TWICE-AND-NOTHING-MAKES-THE-TWO-COPIES-AGREE`.
 [dependencies]
+userdb = { path = "../userdb" }
+authlib = { path = "../authlib" }
 # The host name added to known_hosts comes from the command line or from the
 # ssh config file, so it is not text ssh chose.
 quoting = { path = "../quoting" }

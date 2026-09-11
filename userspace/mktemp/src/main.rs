@@ -997,19 +997,18 @@ fn get_effective_username() -> String {
         return name;
     }
 
-    // Try environment variables.
-    if let Ok(name) = env::var("USER")
-        && !name.is_empty()
-    {
-        return name;
-    }
-    if let Ok(name) = env::var("LOGNAME")
-        && !name.is_empty()
-    {
-        return name;
-    }
-
-    // Last resort: numeric UID.
+    // NO ENVIRONMENT STEP. `$USER` and `$LOGNAME` used to sit here, and they
+    // sat BETWEEN TWO CORRECT ANSWERS: `uid_to_name(euid)` above is the real
+    // lookup, and `euid.to_string()` below is the real uid. The only thing the
+    // environment could add was a wrong answer in the gap between them.
+    //
+    // This binary answers to `whoami`, `groups` and `id` as well as `mktemp`,
+    // so the name is not decoration: `USER=root whoami` printed root, and
+    // `groups` listed the groups of whoever the variable named.
+    //
+    // The numeric uid is a truthful last resort -- it is what the kernel says,
+    // it is stable, and `id`/`whoami` print a number rather than a name for an
+    // account with no record, which is what a reader needs to see.
     euid.to_string()
 }
 

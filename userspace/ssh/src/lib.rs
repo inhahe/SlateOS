@@ -1171,6 +1171,19 @@ fn parse_args() -> Result<Config, String> {
 ///
 /// The usage message, or a description of the first malformed option, as a
 /// string suitable for printing after `ssh: `.
+/// This machine's account name for the calling uid, or `None` if it has none.
+///
+/// Used only as the DEFAULT remote login name when the destination did not
+/// name one. `getuid(2)` resolved through the user database, which is what
+/// OpenSSH does; there is deliberately no numeric fallback, because a remote
+/// server expects a login name and `1000` is not one.
+fn local_login_name() -> Option<String> {
+    let uid = authlib::identity::caller_uid()?;
+    userdb::UserDb::load(userdb::DEFAULT_PATH)
+        .ok()
+        .and_then(|db| db.find_uid(uid).and_then(userdb::Record::username))
+}
+
 pub fn parse_args_from(args: Vec<String>) -> Result<Config, String> {
     if args.len() < 2 {
         return Err(format!(
@@ -1263,8 +1276,26 @@ pub fn parse_args_from(args: Vec<String>) -> Result<Config, String> {
     let (user, hostname) = if let Some((name, host)) = dest.split_once('@') {
         (name.to_string(), host.to_string())
     } else {
-        // Default to current user or "root".
-        let user = env::var("USER").unwrap_or_else(|_| "root".to_string());
+        // THE DEFAULT REMOTE NAME IS THE LOCAL ACCOUNT, NOT `$USER`, AND
+        // NEVER `root`.
+        //
+        // This is not the shape the other identity repairs were. Which
+        // account to authenticate as on a remote machine is entirely the
+        // caller's to choose -- `ssh alice@host` and `-l alice` say so
+        // outright -- and the remote server is what decides whether the
+        // attempt succeeds. Nothing local is being protected.
+        //
+        // What was wrong is the fallback. With `$USER` unset, `ssh host`
+        // tried to log in as ROOT: a surprising account to reach for, one
+        // that many servers refuse outright, and one whose repeated failures
+        // are what lockout policies are written about. OpenSSH uses the local
+        // account name (`getpwuid(getuid())`) and errors when it has none.
+        let Some(user) = local_login_name() else {
+            return Err(
+                "cannot determine your local account name; give one as user@host or with -l"
+                    .to_string(),
+            );
+        };
         (user, dest)
     };
 
@@ -3701,6 +3732,10 @@ mod tests {
 
     #[test]
     fn both_spellings_of_the_identity_option_set_the_same_thing() {
+        // `me@host`, not a bare `host`: the bare form now defaults the
+        // remote name to this machine's account, so it would make these
+        // tests depend on the build host having a user database. What
+        // they are about is the identity OPTION.
         // OpenSSH accepts `-i` and `-o IdentityFile=` interchangeably. A client
         // that honoured one and ignored the other would, for half its callers,
         // silently authenticate with a key they did not ask for -- and succeed,
@@ -3709,14 +3744,14 @@ mod tests {
             "ssh".into(),
             "-i".into(),
             "/tmp/k".into(),
-            "host".into(),
+            "me@host".into(),
         ])
         .expect("valid");
         let dash_o = parse_args_from(vec![
             "ssh".into(),
             "-o".into(),
             "IdentityFile=/tmp/k".into(),
-            "host".into(),
+            "me@host".into(),
         ])
         .expect("valid");
 
@@ -3726,7 +3761,9 @@ mod tests {
 
     #[test]
     fn no_identity_option_leaves_the_choice_to_the_default() {
-        let c = parse_args_from(vec!["ssh".into(), "host".into()]).expect("valid");
+        // `me@host` for the same reason as the test above: a bare destination
+        // now defaults the remote name to this machine's account.
+        let c = parse_args_from(vec!["ssh".into(), "me@host".into()]).expect("valid");
         assert_eq!(
             c.identity_file, None,
             "`None` is what tells `load_identity` the user did not name a file"

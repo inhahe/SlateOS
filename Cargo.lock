@@ -2687,12 +2687,14 @@ version = "0.1.0"
 name = "ssh"
 version = "0.1.0"
 dependencies = [
+ "authlib",
  "posix",
  "quoting",
  "randrange",
  "scratchdir",
  "sha2",
  "sshwire",
+ "userdb",
 ]
 
 [[package]]

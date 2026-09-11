@@ -42,15 +42,11 @@
 //! that never repaints and never responds, and is very hard to recognise.
 
 #![allow(unsafe_code)]
-// A clippy false positive, checked rather than assumed: both of this module's
-// thread-locals are already initialised with `const` blocks — precisely what
-// the lint asks for — and splitting them into separate `thread_local!` blocks
-// showed it firing on each independently, including on `Cell::new(false)`,
-// which cannot be made any more constant than it is. The `allow` is at file
-// scope because the lint is reported against the whole macro invocation, and
-// an attribute written on a macro invocation is passed to the macro and
-// discarded. Nothing is hidden by the breadth: this module has exactly the two.
-#![allow(clippy::missing_const_for_thread_local)]
+// `missing_const_for_thread_local` is allowed once in the workspace lint
+// table, which carries lane B's measurement that it has no true positives on
+// rust 1.95 -- it fires on initializers that already are const blocks and is
+// silent on the ones that are not. The local suppression that used to be here
+// was one of six saying the same thing.
 
 use std::cell::{Cell, RefCell};
 use std::io;

@@ -328,18 +328,13 @@ impl Watcher {
 // have dragged it into the shipped compositor.
 #[cfg(feature = "testing")]
 #[allow(clippy::expect_used)]
-// `missing_const_for_thread_local` fires on `TURN_DEPTH` although its
-// initializer *is* `const { Cell::new(0) }` -- written exactly the way the lint
-// asks for, on clippy 1.95, and it asks anyway. The suppression sits on the
-// module because the lint reports from inside the `thread_local!` expansion,
-// where an attribute on the invocation does not reach it. (The lint was renamed
-// from `thread_local_initializer_can_be_made_const`; naming the old one earned a
-// "has been renamed" warning and suppressed nothing, which is how the rename was
-// noticed.) Delete this when a later clippy stops firing.
-#[allow(
-    clippy::missing_const_for_thread_local,
-    reason = "already a const block; clippy 1.95 fires regardless"
-)]
+// `missing_const_for_thread_local` is allowed once in the workspace lint table,
+// which carries the measurement that it has no true positives on rust 1.95.
+// The local suppression that used to be here was one of six saying the same
+// thing. (Worth keeping from the one that was here: the lint was renamed from
+// `thread_local_initializer_can_be_made_const`, and naming the old spelling
+// earns a "has been renamed" warning while suppressing nothing -- which is how
+// the rename was noticed at all.)
 pub mod testing {
     //! Test support: run against a private, throwaway configuration directory.
     //!

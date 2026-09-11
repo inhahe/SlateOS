@@ -9779,21 +9779,37 @@ mod tests {
         //
         // DERIVED FROM MEASUREMENT, which is the whole point -- a ceiling
         // guessed generously is `> 0` with more characters, and reads as
-        // diligence while being unable to fire. Twelve independent first frames
-        // of this scene, each on a fresh compositor, debug profile, on the
-        // development host on 2026-09-11:
+        // diligence while being unable to fire. Independent first frames of this
+        // scene, each on a fresh compositor, debug profile, 2026-09-11:
         //
-        //     min 4_622   median 4_977   max 5_842   (microseconds)
+        //     n=12   min 4_622   p50 4_977              max 5_842   (us)
+        //     n=24   min 4_371   p50 4_975   p90 5_602  max 6_671   (us)
+        //
+        // AND WHAT THE MACHINE WAS DOING, because a bound without that can only
+        // be relaxed and not adjudicated. Both sets were taken on a 12-logical-
+        // CPU Windows host carrying ~525 processes, including a browser (45
+        // chrome.exe, 32 msedgewebview2.exe) and 16 python.exe. That is an
+        // ordinary loaded developer desktop and emphatically NOT an idle box --
+        // so these are not best-case figures, which is the useful direction for
+        // a ceiling to be wrong in. The p50 moved by 2 us between the two sets
+        // and the max by 829, so the centre is stable under this load and only
+        // the tail travels.
         //
         // 50 ms is about ten times that median, so this fires on a tenfold
         // regression and not on hardware eight times slower than the machine it
         // was measured on.
         //
         // That headroom is not theoretical. Proving the bound could fire -- by
-        // setting it to 1 us -- happened to run while the machine was busy and
-        // reported 9_012 us, well outside the twelve-sample spread above. A
-        // dozen quiet samples understate the tail, and a bound drawn tightly
-        // around them would have been flaky within the hour.
+        // setting it to 1 us -- happened to run while the machine was busier
+        // still and reported 9_012 us, outside both spreads above. So the
+        // observed tail reaches about 1.8x the median while the ceiling sits at
+        // roughly 10x it, and about 5.5x the worst frame ever seen here.
+        //
+        // IF THIS EVER FIRES, the question is not "is the ceiling too tight".
+        // It is: what was the machine doing, and how does the figure compare to
+        // the numbers above? Under 15_000 us, suspect load and re-run on a
+        // quieter box before believing it. An order of magnitude past them is
+        // the render path, which is what this exists to catch.
         //
         // The tighter fact, recorded rather than asserted: the compositor's own
         // budget -- `FrameStats::end_frame`, which counts a dropped frame when

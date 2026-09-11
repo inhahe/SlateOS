@@ -442,13 +442,56 @@ fn full_render(session: &Session) {
 // Session persistence
 // ============================================================================
 
-fn session_dir() -> String {
-    let uid = env::var("USER").unwrap_or_else(|_| "root".to_string());
-    format!("/tmp/screen-{}", uid)
+/// The caller's login name, or `None` if this build cannot determine it.
+fn current_username() -> Option<String> {
+    let uid = authlib::identity::caller_uid()?;
+    userdb::UserDb::load(userdb::DEFAULT_PATH)
+        .ok()
+        .and_then(|db| db.find_uid(uid).and_then(userdb::Record::username))
+}
+
+/// Where this user's sessions live.
+///
+/// # Why the name may not come from `$USER`
+///
+/// This was `/tmp/screen-$USER`, defaulting to `root`. The directory is where
+/// sessions are listed from and attached to, so the variable chose WHOSE
+/// sessions the command operated on: `USER=alice screen -ls` listed alice's,
+/// and `-r` would attach to one. Terminal sessions are the most sensitive
+/// thing a multiplexer holds -- an attached session sees everything typed into
+/// it, passwords included.
+///
+/// Real `screen` places sockets under a per-user directory and relies on the
+/// filesystem to enforce ownership; a name the caller picks defeats that
+/// before the permissions are ever consulted.
+///
+/// `None` when the user cannot be identified: there is no directory to name,
+/// rather than a shared `screen-root` that every unidentifiable caller lands
+/// in together.
+fn session_dir() -> Option<String> {
+    Some(format!("/tmp/screen-{}", current_username()?))
+}
+
+/// [`session_dir`], or a refusal.
+///
+/// Every caller needs a directory it can name, and there is no safe shared
+/// one: a `screen-unknown` that every unidentifiable caller falls into would
+/// put their sessions in a single place any of them could attach to, which is
+/// the defect this repair is about, arrived at from the other direction.
+fn require_session_dir() -> String {
+    match session_dir() {
+        Some(d) => d,
+        None => {
+            eprintln!(
+                "screen: cannot determine who you are, and sessions are private to a user; refusing"
+            );
+            process::exit(1);
+        }
+    }
 }
 
 fn save_session_info(session: &Session) {
-    let dir = session_dir();
+    let dir = require_session_dir();
     let _ = fs::create_dir_all(&dir);
 
     let info_path = format!("{}/{}.session", dir, session.name);
@@ -470,7 +513,7 @@ fn save_session_info(session: &Session) {
 }
 
 fn mark_session_detached(name: &str) {
-    let dir = session_dir();
+    let dir = require_session_dir();
     let info_path = format!("{}/{}.session", dir, name);
     if let Ok(content) = fs::read_to_string(&info_path) {
         let updated = content.replace("status=attached", "status=detached");
@@ -479,13 +522,13 @@ fn mark_session_detached(name: &str) {
 }
 
 fn remove_session_info(name: &str) {
-    let dir = session_dir();
+    let dir = require_session_dir();
     let info_path = format!("{}/{}.session", dir, name);
     let _ = fs::remove_file(&info_path);
 }
 
 fn list_sessions() {
-    let dir = session_dir();
+    let dir = require_session_dir();
 
     if let Ok(entries) = fs::read_dir(&dir) {
         let mut found = false;
@@ -648,7 +691,11 @@ fn process_command(session: &mut Session, input: &str) {
             }
         }
         "whoami" => {
-            let user = env::var("USER").unwrap_or_else(|_| "root".to_string());
+            // `whoami` inside a session: the real user, or a word that is not
+            // a username. Answering "root" for "I cannot tell" is the one
+            // answer that could mislead somebody into thinking they had
+            // privileges they do not.
+            let user = current_username().unwrap_or_else(|| "unknown".to_string());
             if let Some(win) = session.active_mut() {
                 win.add_line(&user);
             }
@@ -1046,7 +1093,7 @@ fn main() {
     }
 
     if wipe {
-        let dir = session_dir();
+        let dir = require_session_dir();
         if let Ok(entries) = fs::read_dir(&dir) {
             for entry in entries.flatten() {
                 if let Some(name) = entry.file_name().to_str()
@@ -1069,7 +1116,7 @@ fn main() {
         // Try to reattach — for now, just create a new session with that name.
         let session_name = if name.is_empty() {
             // Find most recent.
-            let dir = session_dir();
+            let dir = require_session_dir();
             let mut latest: Option<String> = None;
             if let Ok(entries) = fs::read_dir(&dir) {
                 for entry in entries.flatten() {
@@ -1104,4 +1151,52 @@ fn main() {
     let mut session = Session::new(&name);
     run_session(&mut session);
     remove_session_info(&name);
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `$USER` must not choose whose sessions are listed or attached to.
+    ///
+    /// `session_dir` was `/tmp/screen-$USER` defaulting to `root`, so
+    /// `USER=alice screen -ls` listed alice's sessions and `-r` would attach
+    /// to one. An attached session sees everything typed into it.
+    #[test]
+    fn the_environment_cannot_choose_whose_sessions() {
+        // SAFETY: single-threaded test and the variable is removed again
+        // below; `set_var` is unsafe in edition 2024 only because a
+        // concurrent reader would be UB.
+        unsafe {
+            std::env::set_var("USER", "attacker-chosen");
+        }
+        let name = current_username();
+        let dir = session_dir();
+        unsafe {
+            std::env::remove_var("USER");
+        }
+        assert_ne!(name.as_deref(), Some("attacker-chosen"));
+        assert_ne!(dir.as_deref(), Some("/tmp/screen-attacker-chosen"));
+        // ...and never the old default, which was the worst of the three.
+        assert_ne!(dir.as_deref(), Some("/tmp/screen-root"));
+    }
+
+    /// Two users do not share a directory, which is the whole basis for the
+    /// filesystem enforcing session ownership.
+    #[test]
+    fn the_directory_is_per_user() {
+        assert_eq!(
+            session_dir().is_some(),
+            current_username().is_some(),
+            "a directory exists exactly when the user can be named"
+        );
+        if let Some(d) = session_dir() {
+            assert!(d.starts_with("/tmp/screen-"), "{d}");
+            assert_ne!(d, "/tmp/screen-", "the name must not be empty");
+        }
+    }
 }

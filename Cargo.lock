@@ -915,7 +915,9 @@ dependencies = [
 name = "firejail"
 version = "0.1.0"
 dependencies = [
+ "authlib",
  "scratchdir",
+ "userdb",
 ]
 
 [[package]]
@@ -2428,7 +2430,9 @@ version = "0.1.0"
 name = "screen"
 version = "0.1.0"
 dependencies = [
+ "authlib",
  "quoting",
+ "userdb",
 ]
 
 [[package]]

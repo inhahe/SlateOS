@@ -130348,7 +130348,7 @@ One bound, too: `crate::uname::NODENAME_MAX` (64) replaces `fs::nameservice`'s 2
 `SYS_HOSTNAME_SET`'s 64, which disagreed — a 100-byte name was settable through one
 door, refused at another, and unreportable by `gethostname` once stored.
 
-## TD-A-45-CALL-SITES-STILL-READ-A-FAILED-STAT-AS-ABSENCE (lane A, 2026-09-10) — **open**, 45 sites
+## TD-A-45-CALL-SITES-STILL-READ-A-FAILED-STAT-AS-ABSENCE (lane A, 2026-09-10) — FIXED 2026-09-11 at every site whose false answer licensed an action
 
 **In short:** the kernel has a helper that answers "does this file exist?", and it
 answers "no" both when the file really is missing and when the check itself failed —
@@ -130412,7 +130412,81 @@ is the direction the name implies — `is_mounted() == false` means "go ahead", 
 *false* answer is permissive (mounted, busy, locked, in_use, protected, exists, …)
 returned exactly one, which is the one fixed above.
 
-## TD-A-THE-BENCHMARK-BUDGETS-NEVER-FIRE-IN-A-BOOT-TEST (lane A, 2026-09-10) — **open**
+### Resolution 2026-09-11 — and a correction to what the count above was counting
+
+Fixed: **16 sites** whose `false` answer licensed an action — one in `net/tftp.rs`
+(`5eea3890b`), nine in `fs/overlay.rs` (`22f8c6575`), six rung verdicts in
+`proc/spawn.rs` (`345652f83`). Deliberately left: the sites where a `false` answer makes the caller
+*refuse*, which is the safe direction; `write_file`'s now carries a comment saying why.
+
+**The count was roughly right and the composition was wrong, which mattered more.**
+This entry said "most are the harmless use — *is there a config file to read?*", and
+gave that as the reason not to convert them. Almost none are. The dominant category
+is **assertions inside boot self-tests** — `fs/tmpwatch` ×6, `volume` ×3, `logpersist`,
+`container`, `oci` ×2, and sixteen across `proc/spawn`'s ring-3 rungs — where
+flattening does not "add noise that hides the sites that matter". It makes a rung
+report a verdict it did not earn.
+
+`fastpy-rm` is the example. Its check is introduced as *"the real verification: the
+file must actually be gone. A no-op remove that returned 0 without deleting would
+pass the exit check but fail here"*, and the rung's doc comment calls it *"the
+false-pass-proof check"*. It was `let still_exists = Vfs::exists(RM_FILE);` — so a
+stat that failed answered "gone" and the rung passed. The check designed to be
+false-pass-proof had a false-pass mode of its own, and the same was true of
+`fastpy-mv`, `fastpy-rmdir`, `fastpy-pkg gc` and the dash-relpath rung.
+
+**The clearest single illustration is a pair two lines apart**, in the pkg-gc rung:
+
+```rust
+let keep_exists   = Vfs::exists(KEEP_BLOB);     // if !keep_exists  { FAIL }
+let orphan_exists = Vfs::exists(ORPHAN_BLOB);   // if  orphan_exists { FAIL }
+```
+
+Identical call, opposite consequence. A failed stat makes the first **refuse** —
+harmless — and the second **pass** — a false verdict. Nothing about either line tells
+you which it is; only the direction of the assertion three lines later does. That is
+why the audit question has to be *"does a false answer let the caller proceed?"* and
+can never be *"does it call `exists`?"*.
+
+### Why a grep could not have sorted these, and nearly misled me into thinking there was less work
+
+`exists(` has **129 non-comment occurrences** in `kernel/src`; only ~36 are
+`Vfs::exists`. The rest are unrelated `exists(handle)` lookups over in-memory tables
+— `cgroup`, `container`, `netns`, `pidns`, `userns`, `tty`, `pty`, `epoll`,
+`inotify`, `signalfd`, `timerfd`, `alsa_pcm`, `drm::card_fd`, `evdev_fd`, `volume`,
+`cnetwork` — which are map lookups and cannot fail, so they have no error to flatten.
+`is_directory(` returns 44, of which 34 are on parsed on-disk entries in `fat`,
+`ntfs` and `iso9660` and have nothing to do with the VFS.
+
+And a bare `grep exists` over the same tree returns mostly **prose**: the first forty
+hits are all doc comments using the English word. That is the fifth mechanism in this
+tree that reads prose as code, after a checker counting a comment, a fixture matching
+its own scan, `argv[optind - 1]` inside module docs, and a comment opening
+`# shellcheck`. The count in this entry's own title survived only because it was
+spelled `Vfs::exists` — which also appears in prose, including in this file.
+
+### Left open deliberately, with the reason
+
+Six sites answer in the *refusing* direction and are safe, but their **messages** are
+wrong when the stat failed rather than returned `NotFound`:
+
+| site | says | truth when the stat failed |
+|---|---|---|
+| `spawn.rs` ×4 staging preconditions | "staged *X* but VFS reports it absent" | the VFS reported nothing |
+| `pathz_missing` / `pathz_fixtures_missing` | `SKIP: <rung> — prerequisite missing: X` | the prerequisite may be present |
+
+Both `pathz` gates now name the error on a separate line instead, because a SKIP line
+claiming an artifact is absent sends the next reader hunting a staging bug that is not
+there — and `check-boot-skips.py` ratchets these, so a wrong reason is a wrong reason
+that persists. The four staging preconditions are cosmetic and stay as they are.
+
+One site is flattened **on purpose** and now says so: `on_ext4 = Vfs::exists("/mnt")`
+chooses between ext4 and tmpfs fixture paths, and its comment already states the
+intent — *"a test whose only path to running is a fixture CI might stop providing is a
+test with an expiry date on it"*. Falling back when the probe fails is the designed
+behaviour, not a fail-open.
+
+## TD-A-THE-BENCHMARK-BUDGETS-NEVER-FIRE-IN-A-BOOT-TEST (lane A, 2026-09-10) — **open**, but see the CORRECTION at the end: the title is wrong, the benchmarks do run, and `over_target` is recorded and never judged
 
 **In short:** the kernel's micro-benchmarks each carry a cycle budget, so a change that
 makes something twice as slow is supposed to fail the build. They do not run during a
@@ -130476,6 +130550,127 @@ answer rather than two local fixes.
 
 Not chosen yet. Whichever it is, the property to preserve is the one the budgets were
 written for: a number that refuses, rather than a number that is printed.
+
+### Correction 2026-09-11 — the title is wrong, and so were all three options
+
+**Everything above is premised on the benchmarks not running under a boot test.
+They do, and they have 144 times.** The entry should be read as: *`over_target` is
+recorded on every run and has never been a verdict.* That is still a real finding,
+and it is a different one with a different fix.
+
+What I got wrong, and how:
+
+| the entry says | measured 2026-09-11 |
+|---|---|
+| "they do not run during a boot test — the boot finishes first" | `scripts/boot-test.sh` line 1795: `--bench) BENCH=1; WAIT_MARKER="BENCH_OK"`. The flag already exists and already waits. |
+| "no occurrence of `tcp_checksum_v4` at all" | true of the run I looked at, which was not `--bench`. **All 144 rows** of `bench/history.jsonl` carry `tcp_checksum_v4`. |
+| option: "have the boot test wait for a second marker" | implemented; one flag. |
+| option: "move the budgets … beside `bench/boot-history.jsonl`. *Cost:* needs the numbers to be recorded, which they currently are not" | they are recorded — 144 rows × 63–99 entries, plus a per-run `over_target` count. |
+
+I measured one boot log, found the benchmarks absent, and wrote down the first
+explanation that fit — never checking whether the obstacle I had named was the
+one in force. It was not even present. The same mistake as this morning's request
+triage: diagnosing from the first blocker found, and never asking whether
+removing it would be sufficient.
+
+### What is actually true, and why nobody made the budget a verdict
+
+`over_target` runs **9 to 21 per boot**, on every run, and nothing has ever
+refused because of it. The reason is good: across all runs the numbers are not
+comparable. `tcp_checksum_v4` carries a 2000 ns budget and the recorded series
+includes 1840, 1944, 2012, 2633, 3241 and 3835 — **the same code spanning 2×**. A
+gate on that refuses at random, which is worse than one that never refuses,
+because it teaches everyone to re-run until green and that habit disarms the gate
+for every genuine regression too.
+
+**But the spread is not noise, and the tree already records the variable that
+explains it.** Restricted to `run_verdict == "clean"`, the same benchmark reads
+
+```
+1712 1717 1676 1713 1676 1676 1717 1700 1717 1672 1716 1875 1711 1719 1716 …
+```
+
+— 37 clean runs inside ±2%. Then 8 runs at **246–253**, then back to ~1950. That
+is not a 7× optimisation and a 7× regression; it is `accel`:
+
+| runs | `accel` | `tcp_checksum_v4` | `over_target` |
+|---|---|---|---|
+| 37 | (unrecorded, TCG-era) | ~1716 | 12–15 |
+| 8 | `Hyper-V/WHPX` | ~249 | 9–10 |
+| 7 | `QEMU TCG` | ~1950 | 13–18 |
+
+A cycle budget is meaningful **per accelerator**, and the row already says which
+one ran. `bench-history.py` even has `cmd_accel_compare` for exactly this.
+
+### So the fix is composition, not construction
+
+Every ingredient exists: `--bench`, `run_verdict`, `dispersion`, `accel`,
+`cmd_accel_compare`, and 144 rows of history. The missing step is the one that
+turns them into a refusal:
+
+* judge **only** runs where `run_verdict == "clean"` — on a contaminated run,
+  emit **no verdict** rather than a pass, since "could not measure" is not
+  "did not regress" (the same rule this file closed sixteen call sites over today);
+* compare each benchmark against the median of recent clean runs **at the same
+  `accel`**, not against the static budget;
+* ratchet `over_target` per `accel`, since its clean-run range is tight (12–15
+  under TCG, 9–10 under WHPX) and a jump is a real signal.
+
+Not built yet, and this time the reason is stated rather than assumed: it needs a
+decision about what happens on a host where no clean run at that `accel` exists
+yet — refuse to judge, or fall back to the static budget — and that choice changes
+whether a fresh machine can ever push. Recorded as the next step rather than
+guessed at, because guessing at the mechanism is what produced the three wrong
+options above.
+
+### Second correction, same day — the design above is viable only on hardware acceleration
+
+The correction above says to "compare each benchmark against the median of recent
+clean runs at the same `accel`". I wrote that after reading **one** benchmark's
+series — `tcp_checksum_v4`, which is stable to ±2% on clean runs — and treating it
+as the population. It is not. Measured across all 86 benchmarks with ≥4 clean
+samples at a fixed `accel`, worst-sample ÷ median is:
+
+| `accel` | clean rows | 50th | 90th | 99th |
+|---|---|---|---|---|
+| `Hyper-V/WHPX` | 8 | **1.03×** | 1.23× | 1.53× |
+| `QEMU TCG` | 9 | 1.29× | 2.13× | 2.78× |
+| (unrecorded, TCG-era) | 36 | 1.58× | 2.64× | 3.33× |
+
+So on a *clean* run at a *fixed* accelerator, the median benchmark's worst sample
+is still **1.3–1.6× its own median under emulation**, and ~1.03× under hardware
+virtualisation. Two consequences:
+
+* **`CLAUDE.md`'s "investigate any regression over 10%" is inside the emulator's
+  noise by a factor of three to six.** It is a sound rule that cannot be applied
+  to a TCG measurement at all.
+* **A "nothing may double" gate is quiet under WHPX and unusable under TCG.** 2× sits
+  above the 99th percentile (1.53×) on WHPX, so it would fire only on something
+  real; under TCG it sits near the 88th percentile, which is roughly ten false
+  alarms per run across 86 benchmarks.
+
+### Which reframes the whole item
+
+This is not "wire up a gate that was left unwired". It is: **whether a performance
+regression gate is possible at all is decided by which accelerator the boot test
+runs under**, and the default is TCG (`QEMU_EXTRA="-accel tcg,…"`; the eight WHPX
+rows come from a sweep on 2026-08-19). Under TCG no threshold separates a real 2×
+regression from ordinary run-to-run spread, so there is nothing to wire.
+
+The actionable form is therefore a prerequisite, not an implementation: if the
+budgets are to refuse, benchmark runs need to happen under WHPX, and then the gate
+is ~30 lines over data that already exists. Until then `over_target` is the right
+thing to record and the wrong thing to gate on, which is what the tree already
+does — and `print_scorecard`'s own comment, "labelled as reference rather than as a
+verdict", turns out to have been exactly right for a reason it does not state.
+
+### The method note, because it is the third instance today
+
+One boot log gave me the wrong cause. One benchmark series gave me the wrong
+stability. Both times the sample was real, the reasoning from it was sound, and the
+population behaved differently. The error is not carelessness about the sample; it
+is treating *n*=1 as a measurement instead of as a hypothesis — and the cost is
+that each wrong conclusion arrived with enough supporting detail to look measured.
 
 ## TD-A-REQUEST-STATUS-HAS-NO-CHECKED-SHAPE-SO-EVERY-READER-COUNTS-DIFFERENTLY (lane A, 2026-09-11) — **open**
 

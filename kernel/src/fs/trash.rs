@@ -508,13 +508,19 @@ fn recursive_delete(path: &Path) -> KernelResult<()> {
         };
 
         if let Err(e) = result {
-            worst_error = Some(e);
+            // `get_or_insert`, not `=`: the later failures in a tree walk are
+            // usually consequences of the first, and this returned whichever
+            // happened to be last despite the doc promising the first.
+            let _ = worst_error.get_or_insert(e);
         }
     }
 
     // Now the directory should be empty — remove it.
     if let Err(e) = Vfs::rmdir(path) {
-        worst_error = Some(e);
+        // Especially here: a child that could not be deleted makes this fail
+        // with NotEmpty, which would have masked the PermissionDenied that
+        // actually explains the failure.
+        let _ = worst_error.get_or_insert(e);
     }
 
     match worst_error {

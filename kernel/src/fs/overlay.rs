@@ -63,6 +63,37 @@ use crate::fs::vfs::Vfs;
 use crate::fs::{DirEntry, EntryType, FileMeta};
 use crate::serial_println;
 
+/// Stat a layer path, distinguishing absence from a failure to look.
+///
+/// `Ok(None)` only for [`KernelError::NotFound`]; every other error is
+/// returned. Every caller below uses the answer to decide whether to remove,
+/// overwrite or create something, and for a decision like that a stat that
+/// failed is not a path that is absent.
+///
+/// `Vfs::exists` and `Vfs::is_directory` are both `stat(..)` with the error
+/// flattened to `false`. That is what made `which_layer` serve the base
+/// image's older content, and what let `remove` report success for a file it
+/// had left on disk.
+///
+/// Returning the entry rather than a bool also collapses the `exists` then
+/// `is_directory` pair the callers used to do, which was two stats of the same
+/// path with a window in between.
+fn layer_stat(path: &Path) -> KernelResult<Option<DirEntry>> {
+    match Vfs::stat(path) {
+        Ok(e) => Ok(Some(e)),
+        Err(KernelError::NotFound) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Whether a path is a directory, reporting a stat that failed.
+///
+/// The replacement for `Vfs::is_directory` at any site that goes on to create
+/// or delete on the strength of a `false`.
+fn is_dir_or_err(path: &Path) -> KernelResult<bool> {
+    Ok(matches!(layer_stat(path)?, Some(e) if e.entry_type == EntryType::Directory))
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -187,10 +218,16 @@ pub fn create(
 ) -> KernelResult<OverlayId> {
     let (lower_path, upper_path) = (lower_path.as_ref(), upper_path.as_ref());
     // Validate paths exist and are directories.
-    if !Vfs::is_directory(lower_path) {
+    //
+    // `NotADirectory` is kept for both `absent` and `present but a file`,
+    // which is what the old `is_directory` reported for each -- telling them
+    // apart is a contract change and does not belong in the same commit as a
+    // safety fix. What changes is only that a stat which *failed* now
+    // propagates instead of being reported as `not a directory`.
+    if !is_dir_or_err(lower_path)? {
         return Err(KernelError::NotADirectory);
     }
-    if !Vfs::is_directory(upper_path) {
+    if !is_dir_or_err(upper_path)? {
         return Err(KernelError::NotADirectory);
     }
 
@@ -456,6 +493,11 @@ pub fn write_file(id: OverlayId, rel_path: impl AsRef<Path>, data: &[u8]) -> Ker
         m.writes = m.writes.saturating_add(1);
 
         let upper_p = layer_join(&m.upper_path, &rel);
+        // `exists`, deliberately, and this is the one site in the module where
+        // that is right: the answer only decides whether to pre-create parent
+        // directories, and the `write_file` below runs either way and reports
+        // its own failure. A `false` here does not let anything proceed that
+        // would not otherwise have proceeded, which is the test that matters.
         let in_upper = Vfs::exists(&upper_p);
         (upper_p, !in_upper)
     };
@@ -556,21 +598,26 @@ pub fn remove(id: OverlayId, rel_path: impl AsRef<Path>) -> KernelResult<()> {
         )
     };
 
-    let in_upper = Vfs::exists(&upper_full);
+    // One stat of the upper path, not two, and every failure reported. The
+    // old pair -- `exists` here and `is_directory` below -- both answered
+    // `false` when the stat itself failed, so a stat failure left the upper
+    // file in place, recorded a whiteout over the lower one, and returned
+    // `Ok(())`. The caller was told a file was deleted that is still on disk,
+    // and is masked only for as long as the whiteout survives.
+    let upper = layer_stat(&upper_full)?;
     let in_lower = if lower_hidden {
         false
     } else {
-        Vfs::exists(&lower_full)
+        Vfs::exists_or_err(&lower_full)?
     };
 
-    if !in_upper && !in_lower {
+    if upper.is_none() && !in_lower {
         return Err(KernelError::NotFound);
     }
 
     // Remove from upper if present.
-    if in_upper {
-        // Check if it's a directory or file.
-        if Vfs::is_directory(&upper_full) {
+    if let Some(entry) = upper {
+        if entry.entry_type == EntryType::Directory {
             Vfs::rmdir(&upper_full)?;
         } else {
             Vfs::remove(&upper_full)?;
@@ -633,11 +680,14 @@ pub fn rmdir(id: OverlayId, rel_path: impl AsRef<Path>) -> KernelResult<()> {
         )
     };
 
-    let in_upper = Vfs::is_directory(&upper_full);
+    // Same flattening as `remove`: a stat that failed reported `not a
+    // directory here`, so the upper directory was left in place and a
+    // whiteout was recorded as though it had been removed.
+    let in_upper = is_dir_or_err(&upper_full)?;
     let in_lower = if lower_hidden {
         false
     } else {
-        Vfs::is_directory(&lower_full)
+        is_dir_or_err(&lower_full)?
     };
 
     if !in_upper && !in_lower {
@@ -803,7 +853,12 @@ pub fn copy_up(id: OverlayId, rel_path: impl AsRef<Path>) -> KernelResult<()> {
     };
 
     // Already in upper? No-op.
-    if Vfs::exists(&upper_full) {
+    //
+    // `exists_or_err`: `exists` answered `false` when the stat failed, and
+    // this function would then copy the lower layer's content over the upper
+    // file -- silently reverting whatever had been written to it. A no-op
+    // guard that fails open is an overwrite.
+    if Vfs::exists_or_err(&upper_full)? {
         return Ok(());
     }
 
@@ -843,30 +898,70 @@ pub fn copy_up(id: OverlayId, rel_path: impl AsRef<Path>) -> KernelResult<()> {
 /// **Warning**: this deletes all files in the upper directory.
 pub fn reset(id: OverlayId) -> KernelResult<u64> {
     let upper_path = {
+        let inner = OVERLAYS.lock();
+        let m = inner.mounts.get(&id).ok_or(KernelError::NotFound)?;
+        m.upper_path.clone()
+    };
+
+    // Enumerate before clearing anything, and propagate. This was
+    // `Vfs::readdir(&upper_path).unwrap_or_default()` *after* the metadata had
+    // already been cleared, which is the worst ordering available: an upper
+    // layer that could not be read yielded an empty list, so the loop removed
+    // nothing, `Ok(0)` was returned, and the whiteout set -- the only record
+    // of which files had been deleted through this overlay -- was gone. Every
+    // file the caller had deleted reappeared, and the call reported success.
+    let entries = Vfs::readdir(&upper_path)?;
+
+    // Remove all content in the upper directory (but keep the dir itself).
+    // Best-effort across entries, then report: stopping at the first failure
+    // would leave more behind, and ignoring them all is what this is fixing.
+    // The *first* error is kept rather than the last, because later failures
+    // in a tree walk are usually consequences of the first.
+    let mut removed = 0u64;
+    let mut first_error: Option<KernelError> = None;
+    let mut failed = 0u32;
+    for entry in &entries {
+        let full = upper_path.join(&entry.name);
+        let outcome = if entry.entry_type == EntryType::Directory {
+            Vfs::remove_recursive(&full)
+        } else {
+            Vfs::remove(&full).map(|()| 1u64)
+        };
+        match outcome {
+            Ok(count) => removed = removed.saturating_add(count),
+            Err(e) => {
+                failed = failed.saturating_add(1);
+                serial_println!(
+                    "[overlay] reset {}: {} not removed: {:?}",
+                    id,
+                    full.display(),
+                    e
+                );
+                let _ = first_error.get_or_insert(e);
+            }
+        }
+    }
+
+    // Clear the metadata only once the upper layer really is empty. The
+    // whiteout set describes deletions that are still in force; dropping it
+    // while the files it masks are still present would resurface them.
+    if let Some(e) = first_error {
+        serial_println!(
+            "[overlay] reset {}: {} of {} entries remain; metadata kept",
+            id,
+            failed,
+            entries.len()
+        );
+        return Err(e);
+    }
+
+    {
         let mut inner = OVERLAYS.lock();
         let m = inner.mounts.get_mut(&id).ok_or(KernelError::NotFound)?;
-
-        // Clear overlay metadata.
         m.whiteouts.clear();
         m.opaque_dirs.clear();
         m.whiteout_count = 0;
         m.copyups = 0;
-
-        m.upper_path.clone()
-    };
-
-    // Remove all content in the upper directory (but keep the dir itself).
-    let entries = Vfs::readdir(&upper_path).unwrap_or_default();
-    let mut removed = 0u64;
-    for entry in &entries {
-        let full = upper_path.join(&entry.name);
-        if entry.entry_type == EntryType::Directory {
-            if let Ok(count) = Vfs::remove_recursive(&full) {
-                removed = removed.saturating_add(count);
-            }
-        } else if Vfs::remove(&full).is_ok() {
-            removed = removed.saturating_add(1);
-        }
     }
 
     Ok(removed)
@@ -892,21 +987,61 @@ pub fn commit(id: OverlayId) -> KernelResult<u64> {
     };
 
     let mut applied = 0u64;
+    let mut first_error: Option<KernelError> = None;
+    let mut failed = 0u32;
 
     // Apply whiteouts (delete from lower).
+    //
+    // Every arm of this used to end in `.is_ok()`, so a removal that failed
+    // was indistinguishable from one that was not needed. The lower layer is
+    // normally read-only -- this function's own doc comment says so -- which
+    // means the ordinary case made every removal fail, and `commit` returned
+    // `Ok` having applied none of them.
     for rel in &whiteouts {
         let lower_full = layer_join(&lower_path, rel);
-        if Vfs::is_directory(&lower_full) {
-            if Vfs::remove_recursive(&lower_full).is_ok() {
-                applied = applied.saturating_add(1);
+        let outcome = match layer_stat(&lower_full) {
+            // Already absent from lower: the whiteout has nothing to apply.
+            // That is success, and counting it as applied would overstate the
+            // work, so it adds nothing and raises nothing.
+            Ok(None) => Ok(0),
+            Ok(Some(e)) if e.entry_type == EntryType::Directory => {
+                Vfs::remove_recursive(&lower_full).map(|_| 1u64)
             }
-        } else if Vfs::remove(&lower_full).is_ok() {
-            applied = applied.saturating_add(1);
+            Ok(Some(_)) => Vfs::remove(&lower_full).map(|()| 1u64),
+            Err(e) => Err(e),
+        };
+        match outcome {
+            Ok(n) => applied = applied.saturating_add(n),
+            Err(e) => {
+                failed = failed.saturating_add(1);
+                serial_println!(
+                    "[overlay] commit {}: whiteout {} not applied: {:?}",
+                    id,
+                    lower_full.display(),
+                    e
+                );
+                let _ = first_error.get_or_insert(e);
+            }
         }
     }
 
     // Copy upper-layer files to lower.
     applied = applied.saturating_add(merge_dir_to_lower(&upper_path, &lower_path, Path::new(""))?);
+
+    // Do not reset after a partial commit. `reset` clears the whiteout set,
+    // which is the only record of the deletions this function was asked to
+    // perform; discarding it after failing to apply them leaves the lower
+    // layer holding files the caller believes are gone, with nothing left to
+    // retry from. The old code reset unconditionally and returned `Ok`.
+    if let Some(e) = first_error {
+        serial_println!(
+            "[overlay] commit {}: {} of {} whiteouts unapplied; not reset",
+            id,
+            failed,
+            whiteouts.len()
+        );
+        return Err(e);
+    }
 
     // Reset the overlay.
     reset(id)?;
@@ -929,9 +1064,13 @@ fn merge_dir_to_lower(upper_base: &Path, lower_base: &Path, rel: &Path) -> Kerne
         let upper_full = layer_join(upper_base, &child_rel);
 
         if entry.entry_type == EntryType::Directory {
-            // Ensure directory exists in lower.
-            if !Vfs::is_directory(&lower_full) {
-                let _ = Vfs::mkdir(&lower_full);
+            // Ensure directory exists in lower. The `let _ =` here discarded
+            // the one error worth having: if the lower path is an existing
+            // *file*, mkdir fails, the recursion below then tries to write
+            // children underneath it, and the failure surfaced as whichever
+            // child happened to be first.
+            if !is_dir_or_err(&lower_full)? {
+                Vfs::mkdir(&lower_full)?;
             }
             count = count.saturating_add(merge_dir_to_lower(upper_base, lower_base, &child_rel)?);
         } else {
@@ -967,7 +1106,11 @@ fn ensure_upper_parents(id: OverlayId, rel_path: &Path) -> KernelResult<()> {
         prefix.push(part);
 
         let full = layer_join(&upper_path, &prefix);
-        if !Vfs::is_directory(&full) {
+        // `is_directory` answered `false` for `absent` and for `the stat
+        // failed` alike, so a permission or resolve failure became the
+        // `AlreadyExists` that the following mkdir returned -- a real problem
+        // reported under a name that sounds benign.
+        if !is_dir_or_err(&full)? {
             Vfs::mkdir(&full)?;
         }
     }

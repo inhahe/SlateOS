@@ -1,0 +1,56 @@
+# Cases for `cut`. Format: label | stdin | argv...
+#
+# Chosen to cover what `cut` is actually asked to do, and weighted towards the
+# answers that are wrong rather than absent: an out-of-range field, a delimiter
+# that is not a tab, a line with no delimiter at all, and bytes that are not
+# text. GNU's behaviour on each is documented and specific.
+
+# -- fields --
+fields 1              | a\tb\tc\n                    | -f 1
+fields 2              | a\tb\tc\n                    | -f 2
+fields last           | a\tb\tc\n                    | -f 3
+fields range          | a\tb\tc\td\n                 | -f 2-3
+fields open range     | a\tb\tc\td\n                 | -f 2-
+fields open start     | a\tb\tc\td\n                 | -f -2
+fields list           | a\tb\tc\td\n                 | -f 1,3
+fields past the end   | a\tb\n                       | -f 9
+fields zero           | a\tb\n                       | -f 0
+fields reversed range | a\tb\tc\n                    | -f 3-1
+fields empty spec     | a\tb\n                       | -f
+
+# -- a line with no delimiter: GNU prints it whole unless -s --
+no delimiter          | abc\n                        | -f 1
+no delimiter -s       | abc\n                        | -s -f 1
+mixed lines           | a\tb\nplain\n                | -f 1
+mixed lines -s        | a\tb\nplain\n                | -s -f 1
+
+# -- a delimiter that is not a tab --
+comma delimiter       | a,b,c\n                      | -d , -f 2
+space delimiter       | a b c\n                      | -d ' ' -f 2
+multichar delimiter   | a::b\n                       | -d :: -f 1
+empty delimiter       | a\tb\n                       | -d '' -f 1
+
+# -- bytes and characters --
+bytes 1               | abcdef\n                     | -b 1
+bytes range           | abcdef\n                     | -b 2-4
+bytes past the end    | ab\n                         | -b 5
+chars range           | abcdef\n                     | -c 2-4
+bytes on multibyte    | \xc3\xa9\xc3\xa9\n           | -b 1-2
+chars on multibyte    | \xc3\xa9\xc3\xa9\n           | -c 1
+bytes on a stray byte | a\x80b\n                     | -b 1-3
+
+# -- output delimiter --
+output delimiter      | a\tb\tc\n                    | -f 1,3 --output-delimiter=:
+output delim on bytes | abcdef\n                     | -b 1-2,4-5 --output-delimiter=-
+
+# -- refusals: two selectors, no selector, a bad one --
+no selector           | a\tb\n                       |
+two selectors         | a\tb\n                       | -f 1 -b 1
+bad field spec        | a\tb\n                       | -f x
+negative field        | a\tb\n                       | -f -0
+
+# -- line endings and emptiness --
+empty input           |                              | -f 1
+no trailing newline   | a\tb                         | -f 2
+blank lines           | \n\n                         | -f 1
+crlf line             | a\tb\r\n                     | -f 2

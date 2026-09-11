@@ -129665,13 +129665,19 @@ be reached, and the two implementations can drift apart with nothing noticing.
 | Shadowing crate | Name | Real producer |
 |---|---|---|
 | `userspace/chown` | `chmod` | coreutils bin |
-| `userspace/chpasswd` | `passwd` | `userspace/passwd` |
+| ~~`userspace/chpasswd`~~ | ~~`passwd`~~ | ~~`userspace/passwd`~~ — **alias removed 2026-09-10** |
 | ~~`userspace/head`~~ | ~~`tail`~~ | ~~coreutils bin~~ — **crate deleted 2026-09-10** |
 | `userspace/pv` | `fuser` | `userspace/fuser` |
 | `userspace/sysstat` | `iostat` | `userspace/iostat` |
 | `userspace/who` | `w` | `userspace/w` |
 
-**`chpasswd:passwd` scoped 2026-09-10, attempted, and reverted.** The verdict
+**`chpasswd:passwd` is RESOLVED 2026-09-10** — 404 lines removed, chpasswd is
+713 lines and does one thing. The account below is the scoping that made the
+second attempt work, kept because the first attempt failed for a reason worth
+remembering: it was done in dependent steps, and each step's breakage hid the
+next step's target.
+
+**The scoping, as written before the attempt.** The verdict
 is clear and the work is not small.
 
 *The verdict:* `userspace/passwd` is the producer and the better one — 2,083

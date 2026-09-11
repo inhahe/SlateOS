@@ -156,7 +156,15 @@ to key on the *scrutinee* — is the matched variable the program's own
 invocation name? — took the ledger from 51 to 172 and the shadowing ledger from
 2 to 11. No source changed in that commit, so all 130 were reachable before it.
 
-**The 9 new shadowed pairs are the urgent half**, because a shadowed name is
+**UPDATE 2026-09-11: the shadowing ledger is empty.** All 11 entries are
+cleared — the 9 below plus `chown:chmod` and the two `cron` ones. Six were
+deleted as the weaker copy, two after PORTING what they had that the reachable
+copy lacked (`free` gained `-l/--lohi`, `--tebi` and the GNU long forms;
+`crontab` gained `-i`), and `userspace/cron` went entirely: 2,508 lines whose
+every entry point was shadowed, unreachable, or an outright refusal. The
+unreachable ledger stands at 169.
+
+**The 9 new shadowed pairs were the urgent half**, because a shadowed name is
 two implementations that can disagree with the winner picked by packaging:
 
 | Shadowing crate | Name | Who really provides it |

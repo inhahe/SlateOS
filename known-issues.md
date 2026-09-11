@@ -130443,7 +130443,7 @@ intent — *"a test whose only path to running is a fixture CI might stop provid
 test with an expiry date on it"*. Falling back when the probe fails is the designed
 behaviour, not a fail-open.
 
-## TD-A-THE-BENCHMARK-BUDGETS-NEVER-FIRE-IN-A-BOOT-TEST (lane A, 2026-09-10) — **open**
+## TD-A-THE-BENCHMARK-BUDGETS-NEVER-FIRE-IN-A-BOOT-TEST (lane A, 2026-09-10) — **open**, but see the CORRECTION at the end: the title is wrong, the benchmarks do run, and `over_target` is recorded and never judged
 
 **In short:** the kernel's micro-benchmarks each carry a cycle budget, so a change that
 makes something twice as slow is supposed to fail the build. They do not run during a
@@ -130507,6 +130507,78 @@ answer rather than two local fixes.
 
 Not chosen yet. Whichever it is, the property to preserve is the one the budgets were
 written for: a number that refuses, rather than a number that is printed.
+
+### Correction 2026-09-11 — the title is wrong, and so were all three options
+
+**Everything above is premised on the benchmarks not running under a boot test.
+They do, and they have 144 times.** The entry should be read as: *`over_target` is
+recorded on every run and has never been a verdict.* That is still a real finding,
+and it is a different one with a different fix.
+
+What I got wrong, and how:
+
+| the entry says | measured 2026-09-11 |
+|---|---|
+| "they do not run during a boot test — the boot finishes first" | `scripts/boot-test.sh` line 1795: `--bench) BENCH=1; WAIT_MARKER="BENCH_OK"`. The flag already exists and already waits. |
+| "no occurrence of `tcp_checksum_v4` at all" | true of the run I looked at, which was not `--bench`. **All 144 rows** of `bench/history.jsonl` carry `tcp_checksum_v4`. |
+| option: "have the boot test wait for a second marker" | implemented; one flag. |
+| option: "move the budgets … beside `bench/boot-history.jsonl`. *Cost:* needs the numbers to be recorded, which they currently are not" | they are recorded — 144 rows × 63–99 entries, plus a per-run `over_target` count. |
+
+I measured one boot log, found the benchmarks absent, and wrote down the first
+explanation that fit — never checking whether the obstacle I had named was the
+one in force. It was not even present. The same mistake as this morning's request
+triage: diagnosing from the first blocker found, and never asking whether
+removing it would be sufficient.
+
+### What is actually true, and why nobody made the budget a verdict
+
+`over_target` runs **9 to 21 per boot**, on every run, and nothing has ever
+refused because of it. The reason is good: across all runs the numbers are not
+comparable. `tcp_checksum_v4` carries a 2000 ns budget and the recorded series
+includes 1840, 1944, 2012, 2633, 3241 and 3835 — **the same code spanning 2×**. A
+gate on that refuses at random, which is worse than one that never refuses,
+because it teaches everyone to re-run until green and that habit disarms the gate
+for every genuine regression too.
+
+**But the spread is not noise, and the tree already records the variable that
+explains it.** Restricted to `run_verdict == "clean"`, the same benchmark reads
+
+```
+1712 1717 1676 1713 1676 1676 1717 1700 1717 1672 1716 1875 1711 1719 1716 …
+```
+
+— 37 clean runs inside ±2%. Then 8 runs at **246–253**, then back to ~1950. That
+is not a 7× optimisation and a 7× regression; it is `accel`:
+
+| runs | `accel` | `tcp_checksum_v4` | `over_target` |
+|---|---|---|---|
+| 37 | (unrecorded, TCG-era) | ~1716 | 12–15 |
+| 8 | `Hyper-V/WHPX` | ~249 | 9–10 |
+| 7 | `QEMU TCG` | ~1950 | 13–18 |
+
+A cycle budget is meaningful **per accelerator**, and the row already says which
+one ran. `bench-history.py` even has `cmd_accel_compare` for exactly this.
+
+### So the fix is composition, not construction
+
+Every ingredient exists: `--bench`, `run_verdict`, `dispersion`, `accel`,
+`cmd_accel_compare`, and 144 rows of history. The missing step is the one that
+turns them into a refusal:
+
+* judge **only** runs where `run_verdict == "clean"` — on a contaminated run,
+  emit **no verdict** rather than a pass, since "could not measure" is not
+  "did not regress" (the same rule this file closed sixteen call sites over today);
+* compare each benchmark against the median of recent clean runs **at the same
+  `accel`**, not against the static budget;
+* ratchet `over_target` per `accel`, since its clean-run range is tight (12–15
+  under TCG, 9–10 under WHPX) and a jump is a real signal.
+
+Not built yet, and this time the reason is stated rather than assumed: it needs a
+decision about what happens on a host where no clean run at that `accel` exists
+yet — refuse to judge, or fall back to the static budget — and that choice changes
+whether a fresh machine can ever push. Recorded as the next step rather than
+guessed at, because guessing at the mechanism is what produced the three wrong
+options above.
 
 ## TD-A-REQUEST-STATUS-HAS-NO-CHECKED-SHAPE-SO-EVERY-READER-COUNTS-DIFFERENTLY (lane A, 2026-09-11) — **open**
 

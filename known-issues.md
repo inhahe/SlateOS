@@ -36,6 +36,49 @@ freely. See `roadmap.md` → "Three-Agent Parallel Execution" rule 3, and
 
 ---
 
+## TD-B-DIFF-HARNESSES-HAVE-NO-PER-CASE-BOUND-AND-ORPHAN-ACROSS-WSL (lane B, 2026-09-11)
+
+**What.** None of the 50-odd `scripts/<name>-diff.sh` harnesses bounds an
+individual case. One subject that does not terminate stops the whole run, and
+the processes survive every kill available from the Windows side.
+
+**How it showed up.** `DIFF_PKG=awk bash scripts/awk-diff.sh` reached
+
+    awk 'NR == 1 {getline; print "got", $0} {print "main", $0}'
+
+and stopped. The standalone `awk` hangs on `getline` (that pair is now retired).
+Two separate attempts left an `awk` process running inside WSL for 35 and 25
+minutes; both were still alive long after the invoking shell was gone, and were
+found with `ps -eo pid,ppid,etime,args` and killed by PID after confirming each
+one's argv and parent.
+
+**Why `run-timeout.py` does not cover it, which is the part worth knowing.**
+That runner is the tree's answer to exactly this, and `CLAUDE.md` says to use it
+for anything that might hang. It works by putting the child in a Windows **Job
+Object** with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. But `diff-wsl.sh` re-execs
+the harness *inside WSL*, so the processes that actually hang are Linux-side and
+are not in that job. Killing the Windows side tears down `wsl.exe` and leaves
+the real work running. **A process-tree killer does not cross the WSL
+boundary** — worth knowing for any tooling here that shells into WSL, not just
+these harnesses.
+
+**The proper fix.** A bound on the far side of the boundary, where the processes
+actually are: each case invoked under `timeout` inside WSL. The clean place is
+`diff-wsl.sh`'s `$bindir` construction — four `ln -s` calls that build
+`$bindir/{ours,gnu}/NAME` — since every harness reaches its subject through
+those links, so wrapping there fixes all 50 at once with no harness edited.
+
+**The trap in that fix, which is why it is not done yet.** Those are symlinks
+named after the utility *on purpose*: `argv[0]` has to be the bare word, or
+every diagnostic's `prog: ` prefix changes and every harness starts reporting
+false differences in its error messages. `timeout N /path/to/real` makes
+`argv[0]` the full path. A wrapper has to preserve the bare name — `timeout`
+uses `execvp`, so `PATH=<dir> exec timeout N NAME "$@"` does preserve it, but
+that also rewrites `PATH` for the subject, which matters for any utility that
+spawns another (`xargs`, `awk`'s `system()`, `find -exec`). Getting this wrong
+is a silent, tree-wide change to what 50 harnesses measure, so it wants doing
+deliberately with the two-probe rule rather than in passing.
+
 ## TD-B-INSTALL-REIMPLEMENTS-A-BACKUP-POLICY-COREUTILS-ALREADY-HAS (lane B, 2026-09-11)
 
 **In short:** `userspace/install` has its own backup handling, and

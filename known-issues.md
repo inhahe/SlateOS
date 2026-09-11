@@ -78652,10 +78652,26 @@ that pinned this entry --
 -- went red the moment §826 landed, because it asserted the *defect*: that
 `surface1` measures 4.39 and is under the floor. It stayed red and unseen for
 two days, because `palette_check` sits behind the `testing` feature and
-`cargo test -p appearance` does not enable it. It surfaces only under
-`--features testing`, or in a run that pulls `appearance` in as a dependency of
-a crate that enables it -- which is how it was finally seen, in a combined
-`-p appearance -p guitk -p compositor` run after a hard shutdown.
+`cargo test -p appearance` does not enable it. It surfaces under
+`cargo test -p appearance --features testing`, or in any invocation that also
+builds a crate which enables that feature -- feature unification then turns it
+on for `appearance`'s own test binary.
+
+**Exactly two crates do:** `gui/compositor` and `gui/desktop`, both as
+dev-dependencies. `apps/settings` does *not* -- it enables
+`settingsfile/testing` only, which is easy to misread as the same thing.
+Measured rather than assumed, because the first version of this paragraph said
+"a crate that enables it" and I could not have named which:
+
+| invocation | tests in `appearance` |
+|---|---|
+| `-p appearance` | 102 — `palette_check` absent |
+| `-p appearance -p settings` | 102 — still absent |
+| `-p appearance -p guitk -p compositor` | **114** — present, and red |
+
+So `cargo test --workspace` *does* catch it, since `compositor` and `desktop`
+are members. What does not is the per-crate command this file's own workflow
+recommends, which is what was being run.
 
 **Two things worth carrying from that.** A test written to pin a defect becomes
 a false alarm the day the defect is fixed, and reads as a regression rather than

@@ -286,6 +286,7 @@ is why the other three were looked for at all.
 | `sudo` | `$HOSTNAME` | which sudoers rules apply (host half) | 2026-09-11 |
 | `sudo` | `$USER` | which rules apply, whose password, **which credential cache** | 2026-09-11 |
 | `login` | `$TTY` | whether root may log in at all (`/etc/securetty`) | 2026-09-11 |
+| `at` | `$USER` | the submitter a job is filed under, compared before it runs | 2026-09-11 |
 
 **Why it is a family and not four accidents.** Every one of them had a correct
 implementation sitting beside it. `sudo`'s `effective_uid` already read
@@ -310,10 +311,35 @@ which shell to launch — what those variables are for.
 **Still open:** `sudo`'s `current_tty` for the audit log, recorded separately
 below. It is the same shape with a bounded consequence.
 
-**No gate covers this.** The checkable rule is narrow enough to state: a value
-read from `env::var` must not reach an authorization decision. Whether that is
-mechanically detectable — the taint runs through several functions — is not
-settled, and is worth an attempt before a fifth instance is written.
+**The fifth was found by looking, not by accident** (`at`, 2026-09-11), which
+is the first time that has happened with this family. It also carried a second
+defect with no security framing at all: the fallback was
+`format!("uid{}", process::id())` — the PROCESS ID, so a job queued by pid 4123
+was filed under `uid4123` and the daemon calling itself `uid5678` refused it.
+With `$USER` unset, which is how a daemon started by init runs, `at` refused
+every job it had accepted. `crontab` had the identical pair and its repair note
+is what made this one recognisable.
+
+**The gate this needs, now that there is enough data to design it.** Taint
+analysis is the obvious approach and the wrong one — the value runs through
+several functions and the checkers here are regex-based. The tractable rule is
+a RATCHET over the read itself:
+
+> Reading `USER`, `LOGNAME`, `UID`, `EUID`, `GID`, `HOSTNAME`, `TTY`,
+> `USERNAME` or `SUDO_USER` from the environment is a finding unless the site
+> is in the baseline.
+
+The legitimate uses are few and reviewable — 22 crates read one of these, and
+most are `$HOME` for a config path or `$SHELL` for which shell to launch — so
+the baseline starts small and only shrinks. It does not need to prove the value
+reaches an authorization decision, which is the part that cannot be done with
+these tools; it makes each new read say why it is not one of these five.
+
+Two rules considered and rejected: keying on crates that depend on `authlib` or
+`userdb` would have missed `at`, which depended on neither until it was fixed;
+and listing the security-relevant crates by name is an enumeration that misses
+the next crate by construction, which is the defect shape this tree keeps
+finding.
 
 ## TD-B-SUDOS-AUDIT-LOG-RECORDS-THE-TTY-THE-CALLER-NAMED (lane B, 2026-09-11)
 

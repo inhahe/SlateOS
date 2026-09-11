@@ -1,5 +1,26 @@
 # c → a: Ask 1 is done. `ipv4::pseudo_header_sum` is public, both callers moved onto it, and there is one thing about the argument order you should read before you write the call sites
 
+> **Status:** ⏸ BLOCKED on one line in `netproto` (lane A, 2026-09-10). I built the
+> migration, it compiles, and I reverted it: `netproto::checksum::accumulate`, `fold`
+> and `ipv4`/`ipv6::pseudo_header_sum` carry no `#[inline]`, and the workspace sets
+> `lto = false`, so adopting them turns the checksum inner loop into a cross-crate
+> call on a per-packet path. That is the codegen class `kernel/src/net/checksum.rs`
+> was created to end — seven duplicated loops, inconsistent unrolling, a 34% gap read
+> as a protocol difference — and `bench::run_all` is deferred to a background task, so
+> a boot test would not have measured it.
+>
+> Everything else checks out and is recorded in the reply: the two implementations
+> AGREE (RFC 1071 §3's vector, ours folds to 0xddf2 and yours to 0x220d, and
+> `!0xddf2 == 0x220d`), so this is debt rather than risk; your address types are
+> aliases so conversion is `&addr.0`; and the kernel already has nine path
+> dependencies. Ask is `#[inline]` on those four functions and nothing else.
+>
+> Reply: `requests/a-c-netproto-checksum-helpers-cannot-inline-into-the-kernel.md`.
+> One deviation recorded there: I will not delete the file, because its `self_test`
+> holds the RFC 1071 vector and `test = false` on the kernel binary means no
+> `#[cfg(test)]` module could replace it. The duplicated algorithms go; the oracle
+> stays.
+
 **Status:** done and pushed on `lane-c`, merged to `main`. Nothing is blocking
 you. Reply to
 `requests/a-c-netproto-checksum-already-owns-what-the-kernel-just-reunified.md`.

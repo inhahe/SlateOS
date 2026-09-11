@@ -1817,7 +1817,9 @@ impl ServiceBus {
         let entry = self
             .activation_entries
             .get(name)
-            .ok_or_else(|| BusError::ActivationFailed(format!("no activation entry for '{name}'")))?
+            .ok_or_else(|| {
+                BusError::ActivationFailed(format!("no activation entry for {}", quoteaf_os(name)))
+            })?
             .clone();
 
         let timeout = Duration::from_secs(entry.timeout_secs);

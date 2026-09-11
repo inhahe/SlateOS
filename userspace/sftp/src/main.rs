@@ -1857,7 +1857,7 @@ fn parse_command(line: &str) -> Result<SftpCommand, String> {
         "chmod" => match (arg1, arg2) {
             (Some(mode_str), Some(path)) => {
                 let mode = parse_octal(&mode_str)
-                    .ok_or_else(|| format!("chmod: invalid mode '{mode_str}'"))?;
+                    .ok_or_else(|| format!("chmod: invalid mode {}", quoteaf_os(&mode_str)))?;
                 Ok(SftpCommand::Chmod { mode, path })
             }
             _ => Err("chmod: requires mode and path arguments".into()),
@@ -1920,9 +1920,9 @@ fn parse_args(args: &[String]) -> Result<Config, SftpError> {
                 let port_str = args
                     .get(i)
                     .ok_or_else(|| SftpError::BadArg("-P requires a port number".into()))?;
-                cfg.port = port_str
-                    .parse::<u16>()
-                    .map_err(|_| SftpError::BadArg(format!("invalid port '{port_str}'")))?;
+                cfg.port = port_str.parse::<u16>().map_err(|_| {
+                    SftpError::BadArg(format!("invalid port {}", quoteaf_os(port_str)))
+                })?;
             }
             "-b" | "--batch" => {
                 i = i
@@ -1953,7 +1953,10 @@ fn parse_args(args: &[String]) -> Result<Config, SftpError> {
                 }
             }
             other => {
-                return Err(SftpError::BadArg(format!("unrecognised option '{other}'")));
+                return Err(SftpError::BadArg(format!(
+                    "unrecognised option {}",
+                    quoteaf_os(other)
+                )));
             }
         }
         i = i
@@ -2060,8 +2063,12 @@ fn run_interactive<R: BufRead>(session: &mut Session, reader: &mut R) -> Result<
 /// Run batch mode: read commands from a file.
 fn run_batch(session: &mut Session, batch_file: &str) -> Result<(), SftpError> {
     let data = os_read_file(batch_file)?;
-    let text = String::from_utf8(data)
-        .map_err(|_| SftpError::BadArg(format!("batch file '{batch_file}' is not valid UTF-8")))?;
+    let text = String::from_utf8(data).map_err(|_| {
+        SftpError::BadArg(format!(
+            "batch file {} is not valid UTF-8",
+            quoteaf_os(batch_file)
+        ))
+    })?;
     let mut reader = io::Cursor::new(text.as_bytes().to_vec());
     // In batch mode we still use run_interactive but without a real terminal.
     run_interactive(

@@ -20,7 +20,7 @@
 //! shred -vuz secret.key
 //! ```
 
-use quoting::quotef_os;
+use quoting::{quoteaf_os, quotef_os};
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -92,7 +92,7 @@ fn parse_size(s: &str) -> Result<u64, String> {
 
     let base: u64 = num_str
         .parse()
-        .map_err(|e| format!("invalid number '{num_str}': {e}"))?;
+        .map_err(|e| format!("invalid number {}: {e}", quoteaf_os(num_str)))?;
 
     let multiplier = suffix_multiplier(suffix)?;
 
@@ -138,7 +138,7 @@ fn suffix_multiplier(suffix: &str) -> Result<u64, String> {
         "T" | "TB" => Ok(1024u64 * 1024 * 1024 * 1024),
         "P" | "PB" => Ok(1024u64 * 1024 * 1024 * 1024 * 1024),
         "E" | "EB" => Ok(1024u64 * 1024 * 1024 * 1024 * 1024 * 1024),
-        _ => Err(format!("unknown size suffix '{suffix}'")),
+        _ => Err(format!("unknown size suffix {}", quoteaf_os(suffix))),
     }
 }
 
@@ -407,7 +407,8 @@ fn run_pv(args: &[String]) -> Result<(), String> {
             if f == "-" {
                 v.push(Box::new(io::stdin().lock()));
             } else {
-                let file = File::open(f).map_err(|e| format!("cannot open '{f}': {e}"))?;
+                let file =
+                    File::open(f).map_err(|e| format!("cannot open {}: {e}", quoteaf_os(f)))?;
                 v.push(Box::new(file));
             }
         }
@@ -637,7 +638,7 @@ fn compute_truncate_size(current: u64, prefix: Option<char>, value: u64) -> Resu
                     .ok_or_else(|| "size overflow".to_string())
             }
         }
-        Some(c) => Err(format!("unknown size prefix '{c}'")),
+        Some(c) => Err(format!("unknown size prefix {}", quoteaf_os(c.to_string()))),
     }
 }
 
@@ -647,7 +648,7 @@ fn run_truncate(args: &[String]) -> Result<(), String> {
     // Determine the base size value from -r or -s.
     let (prefix, base_size) = if let Some(ref refpath) = cfg.reference {
         let meta = fs::metadata(refpath)
-            .map_err(|e| format!("cannot stat reference '{}': {}", refpath, e))?;
+            .map_err(|e| format!("cannot stat reference {}: {}", quoteaf_os(refpath), e))?;
         (None, meta.len())
     } else {
         let spec = cfg.size_spec.as_ref().expect("validated above");
@@ -666,17 +667,17 @@ fn run_truncate(args: &[String]) -> Result<(), String> {
             .write(true)
             .create(!cfg.no_create)
             .open(path)
-            .map_err(|e| format!("cannot open '{path}': {e}"))?;
+            .map_err(|e| format!("cannot open {}: {e}", quoteaf_os(path)))?;
 
         let current_len = file
             .metadata()
-            .map_err(|e| format!("cannot stat '{path}': {e}"))?
+            .map_err(|e| format!("cannot stat {}: {e}", quoteaf_os(path)))?
             .len();
 
         let new_size = compute_truncate_size(current_len, prefix, base_size)?;
 
         file.set_len(new_size)
-            .map_err(|e| format!("cannot truncate '{path}' to {new_size}: {e}"))?;
+            .map_err(|e| format!("cannot truncate {} to {new_size}: {e}", quoteaf_os(path)))?;
     }
 
     Ok(())
@@ -735,11 +736,11 @@ fn parse_shred_args(args: &[String]) -> Result<ShredConfig, String> {
             let val = args.get(i).ok_or("-n requires a COUNT argument")?;
             cfg.iterations = val
                 .parse()
-                .map_err(|e| format!("invalid iteration count '{val}': {e}"))?;
+                .map_err(|e| format!("invalid iteration count {}: {e}", quoteaf_os(val)))?;
         } else if let Some(rest) = arg.strip_prefix("--iterations=") {
             cfg.iterations = rest
                 .parse()
-                .map_err(|e| format!("invalid iteration count '{rest}': {e}"))?;
+                .map_err(|e| format!("invalid iteration count {}: {e}", quoteaf_os(rest)))?;
         } else if arg == "-s" || arg == "--size" {
             i += 1;
             let val = args.get(i).ok_or("-s requires a SIZE argument")?;
@@ -855,7 +856,7 @@ fn run_shred(args: &[String]) -> Result<(), String> {
         }
 
         let file_size = fs::metadata(path)
-            .map_err(|e| format!("cannot stat '{path}': {e}"))?
+            .map_err(|e| format!("cannot stat {}: {e}", quoteaf_os(path)))?
             .len();
 
         let shred_size = cfg.overwrite_size.unwrap_or(file_size);
@@ -864,7 +865,7 @@ fn run_shred(args: &[String]) -> Result<(), String> {
         let mut file = OpenOptions::new()
             .write(true)
             .open(path)
-            .map_err(|e| format!("cannot open '{path}' for writing: {e}"))?;
+            .map_err(|e| format!("cannot open {} for writing: {e}", quoteaf_os(path)))?;
 
         // Use the file path hash as a seed component for reproducibility in tests.
         let path_hash = path
@@ -890,7 +891,7 @@ fn run_shred(args: &[String]) -> Result<(), String> {
             }
 
             file.seek(SeekFrom::Start(0))
-                .map_err(|e| format!("seek error on '{path}': {e}"))?;
+                .map_err(|e| format!("seek error on {}: {e}", quoteaf_os(path)))?;
 
             let mut remaining = shred_size;
             while remaining > 0 {
@@ -905,25 +906,26 @@ fn run_shred(args: &[String]) -> Result<(), String> {
                 }
 
                 file.write_all(write_buf)
-                    .map_err(|e| format!("write error on '{path}': {e}"))?;
+                    .map_err(|e| format!("write error on {}: {e}", quoteaf_os(path)))?;
                 remaining -= chunk as u64;
             }
 
             file.flush()
-                .map_err(|e| format!("flush error on '{path}': {e}"))?;
+                .map_err(|e| format!("flush error on {}: {e}", quoteaf_os(path)))?;
 
             // Sync to disk
             file.sync_all()
-                .map_err(|e| format!("sync error on '{path}': {e}"))?;
+                .map_err(|e| format!("sync error on {}: {e}", quoteaf_os(path)))?;
         }
 
         // Remove if requested.
         if cfg.remove_after {
             // Truncate to zero first.
             file.set_len(0)
-                .map_err(|e| format!("truncate error on '{path}': {e}"))?;
+                .map_err(|e| format!("truncate error on {}: {e}", quoteaf_os(path)))?;
             drop(file);
-            fs::remove_file(path).map_err(|e| format!("cannot remove '{path}': {e}"))?;
+            fs::remove_file(path)
+                .map_err(|e| format!("cannot remove {}: {e}", quoteaf_os(path)))?;
             if cfg.verbose {
                 eprintln!("shred: {}: removed", quotef_os(path));
             }

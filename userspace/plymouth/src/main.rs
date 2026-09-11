@@ -189,7 +189,7 @@ fn set_default_theme(theme: &str) -> io::Result<()> {
     if !themes.iter().any(|t| t.name == theme) {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
-            format!("theme '{theme}' not found"),
+            format!("theme {} not found", quoteaf_os(theme)),
         ));
     }
 

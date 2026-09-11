@@ -222,19 +222,19 @@ fn parse_field_spec(s: &str) -> Result<(usize, usize, SortModifiers), String> {
         let char_str = &num_part[dot_idx + 1..];
         let field = field_str
             .parse::<usize>()
-            .map_err(|_| format!("invalid field number: '{field_str}'"))?;
+            .map_err(|_| format!("invalid field number: {}", quoteaf_os(field_str)))?;
         let char_pos = if char_str.is_empty() {
             0
         } else {
             char_str
                 .parse::<usize>()
-                .map_err(|_| format!("invalid character position: '{char_str}'"))?
+                .map_err(|_| format!("invalid character position: {}", quoteaf_os(char_str)))?
         };
         (field, char_pos)
     } else {
         let field = num_part
             .parse::<usize>()
-            .map_err(|_| format!("invalid field number: '{num_part}'"))?;
+            .map_err(|_| format!("invalid field number: {}", quoteaf_os(num_part)))?;
         (field, 0)
     };
 

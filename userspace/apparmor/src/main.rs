@@ -1329,23 +1329,26 @@ fn set_profile_mode(profile_name: &str, mode: ProfileMode) -> Result<(), String>
                 Some(p) => match &p.profile_file {
                     Some(f) => f.clone(),
                     None => {
-                        return Err(format!("No profile file found for '{}'", profile_name));
+                        return Err(format!(
+                            "No profile file found for {}",
+                            quoteaf_os(profile_name)
+                        ));
                     }
                 },
                 None => {
-                    return Err(format!("Profile '{}' not found", profile_name));
+                    return Err(format!("Profile {} not found", quoteaf_os(profile_name)));
                 }
             }
         }
     };
 
     let content = fs::read_to_string(&profile_path)
-        .map_err(|e| format!("Cannot read '{}': {}", profile_path.display(), e))?;
+        .map_err(|e| format!("Cannot read {}: {}", quoteaf_os(&profile_path), e))?;
 
     let new_content = rewrite_profile_flags(&content, mode);
 
     fs::write(&profile_path, new_content)
-        .map_err(|e| format!("Cannot write '{}': {}", profile_path.display(), e))?;
+        .map_err(|e| format!("Cannot write {}: {}", quoteaf_os(&profile_path), e))?;
 
     // Also write to the kernel interface to take immediate effect
     let _iface_path = format!("{}/profiles", APPARMORFS);

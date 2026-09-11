@@ -10,6 +10,8 @@ use std::fmt;
 use std::io::{self, BufRead, Read};
 use std::process;
 
+use quoting::quoteaf_os;
+
 // ---------------------------------------------------------------------------
 // Address family
 // ---------------------------------------------------------------------------
@@ -34,7 +36,7 @@ impl Family {
             "arp" => Ok(Self::Arp),
             "bridge" => Ok(Self::Bridge),
             "netdev" => Ok(Self::Netdev),
-            _ => Err(format!("unknown family '{s}'")),
+            _ => Err(format!("unknown family {}", quoteaf_os(s))),
         }
     }
 
@@ -74,7 +76,7 @@ impl ChainType {
             "filter" => Ok(Self::Filter),
             "nat" => Ok(Self::Nat),
             "route" => Ok(Self::Route),
-            _ => Err(format!("unknown chain type '{s}'")),
+            _ => Err(format!("unknown chain type {}", quoteaf_os(s))),
         }
     }
 
@@ -113,7 +115,7 @@ impl Hook {
             "output" => Ok(Self::Output),
             "postrouting" => Ok(Self::Postrouting),
             "ingress" => Ok(Self::Ingress),
-            _ => Err(format!("unknown hook '{s}'")),
+            _ => Err(format!("unknown hook {}", quoteaf_os(s))),
         }
     }
 
@@ -147,7 +149,7 @@ impl Policy {
         match s {
             "accept" => Ok(Self::Accept),
             "drop" => Ok(Self::Drop),
-            _ => Err(format!("unknown policy '{s}'")),
+            _ => Err(format!("unknown policy {}", quoteaf_os(s))),
         }
     }
 
@@ -232,7 +234,7 @@ impl CtState {
             "established" => Ok(Self::Established),
             "related" => Ok(Self::Related),
             "invalid" => Ok(Self::Invalid),
-            _ => Err(format!("unknown ct state '{s}'")),
+            _ => Err(format!("unknown ct state {}", quoteaf_os(s))),
         }
     }
 
@@ -271,7 +273,7 @@ impl MetaKey {
             "length" => Ok(Self::Length),
             "protocol" => Ok(Self::Protocol),
             "iiftype" => Ok(Self::Iiftype),
-            _ => Err(format!("unknown meta key '{s}'")),
+            _ => Err(format!("unknown meta key {}", quoteaf_os(s))),
         }
     }
 
@@ -558,7 +560,7 @@ impl SetDataType {
             "inet_service" => Ok(Self::InetService),
             "mark" => Ok(Self::Mark),
             "ifname" => Ok(Self::Ifname),
-            _ => Err(format!("unknown set type '{s}'")),
+            _ => Err(format!("unknown set type {}", quoteaf_os(s))),
         }
     }
 
@@ -595,7 +597,7 @@ impl SetFlag {
             "constant" => Ok(Self::Constant),
             "interval" => Ok(Self::Interval),
             "timeout" => Ok(Self::Timeout),
-            _ => Err(format!("unknown set flag '{s}'")),
+            _ => Err(format!("unknown set flag {}", quoteaf_os(s))),
         }
     }
 
@@ -727,7 +729,7 @@ impl LimitUnit {
             "minute" | "min" | "/minute" | "/min" => Ok(Self::Minute),
             "hour" | "/hour" => Ok(Self::Hour),
             "day" | "/day" => Ok(Self::Day),
-            _ => Err(format!("unknown limit unit '{s}'")),
+            _ => Err(format!("unknown limit unit {}", quoteaf_os(s))),
         }
     }
 
@@ -857,13 +859,23 @@ impl Ruleset {
     fn get_table(&self, family: Family, name: &str) -> Result<&Table, String> {
         self.find_table(family, name)
             .map(|i| &self.tables[i])
-            .ok_or_else(|| format!("table '{name}' does not exist in family {family}"))
+            .ok_or_else(|| {
+                format!(
+                    "table {} does not exist in family {family}",
+                    quoteaf_os(name)
+                )
+            })
     }
 
     fn get_table_mut(&mut self, family: Family, name: &str) -> Result<&mut Table, String> {
         self.find_table(family, name)
             .map(|i| &mut self.tables[i])
-            .ok_or_else(|| format!("table '{name}' does not exist in family {family}"))
+            .ok_or_else(|| {
+                format!(
+                    "table {} does not exist in family {family}",
+                    quoteaf_os(name)
+                )
+            })
     }
 }
 
@@ -966,7 +978,7 @@ fn parse_match(tokens: &mut Tokens<'_>) -> Result<Option<MatchExpr>, String> {
                     let (op, val) = parse_cmp_value(tokens)?;
                     Ok(Some(MatchExpr::IpProtocol { op, value: val }))
                 }
-                _ => Err(format!("unknown ip field '{field}'")),
+                _ => Err(format!("unknown ip field {}", quoteaf_os(field))),
             }
         }
         "tcp" => {
@@ -981,7 +993,7 @@ fn parse_match(tokens: &mut Tokens<'_>) -> Result<Option<MatchExpr>, String> {
                     let result = parse_set_or_cmp(tokens, "tcp sport")?;
                     Ok(Some(result))
                 }
-                _ => Err(format!("unknown tcp field '{field}'")),
+                _ => Err(format!("unknown tcp field {}", quoteaf_os(field))),
             }
         }
         "udp" => {
@@ -996,14 +1008,14 @@ fn parse_match(tokens: &mut Tokens<'_>) -> Result<Option<MatchExpr>, String> {
                     let (op, val) = parse_cmp_value(tokens)?;
                     Ok(Some(MatchExpr::UdpSport { op, value: val }))
                 }
-                _ => Err(format!("unknown udp field '{field}'")),
+                _ => Err(format!("unknown udp field {}", quoteaf_os(field))),
             }
         }
         "ct" => {
             tokens.next_token();
             let field = tokens.expect("ct field")?;
             if field != "state" {
-                return Err(format!("unknown ct field '{field}'"));
+                return Err(format!("unknown ct field {}", quoteaf_os(field)));
             }
             let val_str = tokens.expect("ct state value")?;
             let mut states = Vec::new();
@@ -1047,14 +1059,14 @@ fn parse_match(tokens: &mut Tokens<'_>) -> Result<Option<MatchExpr>, String> {
                     let (op, val) = parse_cmp_value(tokens)?;
                     Ok(Some(MatchExpr::EtherDaddr { op, value: val }))
                 }
-                _ => Err(format!("unknown ether field '{field}'")),
+                _ => Err(format!("unknown ether field {}", quoteaf_os(field))),
             }
         }
         "icmp" => {
             tokens.next_token();
             let field = tokens.expect("icmp field")?;
             if field != "type" {
-                return Err(format!("unknown icmp field '{field}'"));
+                return Err(format!("unknown icmp field {}", quoteaf_os(field)));
             }
             let (op, val) = parse_cmp_value(tokens)?;
             Ok(Some(MatchExpr::IcmpType { op, value: val }))
@@ -1155,7 +1167,10 @@ fn parse_set_or_cmp(tokens: &mut Tokens<'_>, field: &str) -> Result<MatchExpr, S
         "tcp dport" => Ok(MatchExpr::TcpDport { op, value: val }),
         "tcp sport" => Ok(MatchExpr::TcpSport { op, value: val }),
         "udp dport" => Ok(MatchExpr::UdpDport { op, value: val }),
-        _ => Err(format!("unexpected field '{field}' in set_or_cmp")),
+        _ => Err(format!(
+            "unexpected field {} in set_or_cmp",
+            quoteaf_os(field)
+        )),
     }
 }
 
@@ -1212,7 +1227,10 @@ fn parse_verdicts(tokens: &mut Tokens<'_>) -> Result<Vec<Verdict>, String> {
                 break;
             }
             _ => {
-                return Err(format!("unexpected token '{tok}' in verdict position"));
+                return Err(format!(
+                    "unexpected token {} in verdict position",
+                    quoteaf_os(tok)
+                ));
             }
         }
     }
@@ -1242,7 +1260,7 @@ fn exec_command(rs: &mut Ruleset, flags: &Flags, words: &[String]) -> Result<Str
         "export" => exec_export(rs, flags),
         "monitor" => Ok("monitoring not available in standalone mode\n".to_string()),
         "insert" => exec_insert(rs, &mut tokens),
-        _ => Err(format!("unknown command '{cmd}'")),
+        _ => Err(format!("unknown command {}", quoteaf_os(cmd))),
     }
 }
 
@@ -1262,7 +1280,7 @@ fn exec_add(rs: &mut Ruleset, tokens: &mut Tokens<'_>) -> Result<String, String>
         "counter" => add_counter(rs, tokens),
         "quota" => add_quota(rs, tokens),
         "limit" => add_limit(rs, tokens),
-        _ => Err(format!("cannot add object type '{obj_type}'")),
+        _ => Err(format!("cannot add object type {}", quoteaf_os(obj_type))),
     }
 }
 
@@ -1327,13 +1345,13 @@ fn add_chain(rs: &mut Ruleset, tokens: &mut Tokens<'_>) -> Result<String, String
         // Parse: type <type> hook <hook> priority <prio> ; policy <policy> ;
         let type_kw = tokens.expect("'type' keyword")?;
         if type_kw != "type" {
-            return Err(format!("expected 'type', got '{type_kw}'"));
+            return Err(format!("expected 'type', got {}", quoteaf_os(type_kw)));
         }
         let chain_type = ChainType::parse(tokens.expect("chain type")?)?;
 
         let hook_kw = tokens.expect("'hook' keyword")?;
         if hook_kw != "hook" {
-            return Err(format!("expected 'hook', got '{hook_kw}'"));
+            return Err(format!("expected 'hook', got {}", quoteaf_os(hook_kw)));
         }
         let hook = Hook::parse(tokens.expect("hook name")?)?;
 
@@ -1347,13 +1365,13 @@ fn add_chain(rs: &mut Ruleset, tokens: &mut Tokens<'_>) -> Result<String, String
 
         let prio_kw = tokens.expect("'priority' keyword")?;
         if prio_kw != "priority" {
-            return Err(format!("expected 'priority', got '{prio_kw}'"));
+            return Err(format!("expected 'priority', got {}", quoteaf_os(prio_kw)));
         }
         let prio_str = tokens.expect("priority value")?;
         let prio_str = prio_str.trim_end_matches(';');
         let priority: i32 = prio_str
             .parse()
-            .map_err(|_| format!("invalid priority '{prio_str}'"))?;
+            .map_err(|_| format!("invalid priority {}", quoteaf_os(prio_str)))?;
 
         // Skip semicolons
         while tokens.peek() == Some(";") {
@@ -1411,7 +1429,7 @@ fn add_rule(rs: &mut Ruleset, tokens: &mut Tokens<'_>, insert: bool) -> Result<S
         position = Some(
             pos_str
                 .parse::<usize>()
-                .map_err(|_| format!("invalid position '{pos_str}'"))?,
+                .map_err(|_| format!("invalid position {}", quoteaf_os(pos_str)))?,
         );
     }
 
@@ -1439,9 +1457,13 @@ fn add_rule(rs: &mut Ruleset, tokens: &mut Tokens<'_>, insert: bool) -> Result<S
     }
 
     let table = rs.get_table_mut(family, &table_name)?;
-    let chain_idx = table
-        .find_chain(&chain_name)
-        .ok_or_else(|| format!("chain '{chain_name}' not found in table '{table_name}'"))?;
+    let chain_idx = table.find_chain(&chain_name).ok_or_else(|| {
+        format!(
+            "chain {} not found in table {}",
+            quoteaf_os(&chain_name),
+            quoteaf_os(&table_name)
+        )
+    })?;
 
     if insert {
         if let Some(pos) = position {
@@ -1552,7 +1574,7 @@ fn add_set(rs: &mut Ruleset, tokens: &mut Tokens<'_>) -> Result<String, String> 
 
     let table = rs.get_table_mut(family, &table_name)?;
     if table.find_set(&set_name).is_some() {
-        return Err(format!("set '{set_name}' already exists"));
+        return Err(format!("set {} already exists", quoteaf_os(&set_name)));
     }
     let mut set = NamedSet::new(&set_name, key_type);
     set.flags = flags;
@@ -1639,7 +1661,7 @@ fn add_map(rs: &mut Ruleset, tokens: &mut Tokens<'_>) -> Result<String, String> 
 
     let table = rs.get_table_mut(family, &table_name)?;
     if table.find_map(&map_name).is_some() {
-        return Err(format!("map '{map_name}' already exists"));
+        return Err(format!("map {} already exists", quoteaf_os(&map_name)));
     }
     let mut map = NamedMap::new(&map_name, key_type, value_type);
     map.elements = elements;
@@ -1682,9 +1704,13 @@ fn add_element(rs: &mut Ruleset, tokens: &mut Tokens<'_>) -> Result<String, Stri
     }
 
     let table = rs.get_table_mut(family, &table_name)?;
-    let set_idx = table
-        .find_set(&set_name)
-        .ok_or_else(|| format!("set '{set_name}' not found in table '{table_name}'"))?;
+    let set_idx = table.find_set(&set_name).ok_or_else(|| {
+        format!(
+            "set {} not found in table {}",
+            quoteaf_os(&set_name),
+            quoteaf_os(&table_name)
+        )
+    })?;
     table.sets[set_idx].elements.extend(new_elements);
 
     Ok(String::new())
@@ -1702,7 +1728,10 @@ fn add_counter(rs: &mut Ruleset, tokens: &mut Tokens<'_>) -> Result<String, Stri
     let counter_name = tokens.expect("counter name")?.to_string();
     let table = rs.get_table_mut(family, &table_name)?;
     if table.find_counter(&counter_name).is_some() {
-        return Err(format!("counter '{counter_name}' already exists"));
+        return Err(format!(
+            "counter {} already exists",
+            quoteaf_os(&counter_name)
+        ));
     }
     table.counters.push(CounterObj::new(&counter_name));
     Ok(String::new())
@@ -1749,7 +1778,7 @@ fn add_quota(rs: &mut Ruleset, tokens: &mut Tokens<'_>) -> Result<String, String
 
     let table = rs.get_table_mut(family, &table_name)?;
     if table.find_quota(&quota_name).is_some() {
-        return Err(format!("quota '{quota_name}' already exists"));
+        return Err(format!("quota {} already exists", quoteaf_os(&quota_name)));
     }
     table.quotas.push(QuotaObj::new(&quota_name, limit, inv));
     Ok(String::new())
@@ -1792,7 +1821,7 @@ fn add_limit(rs: &mut Ruleset, tokens: &mut Tokens<'_>) -> Result<String, String
 
     let table = rs.get_table_mut(family, &table_name)?;
     if table.find_limit(&limit_name).is_some() {
-        return Err(format!("limit '{limit_name}' already exists"));
+        return Err(format!("limit {} already exists", quoteaf_os(&limit_name)));
     }
     let mut lim = LimitObj::new(&limit_name, rate, unit);
     lim.burst = burst;
@@ -1807,7 +1836,10 @@ fn add_limit(rs: &mut Ruleset, tokens: &mut Tokens<'_>) -> Result<String, String
 fn exec_insert(rs: &mut Ruleset, tokens: &mut Tokens<'_>) -> Result<String, String> {
     let obj_type = tokens.expect("object type")?;
     if obj_type != "rule" {
-        return Err(format!("can only insert rules, not '{obj_type}'"));
+        return Err(format!(
+            "can only insert rules, not {}",
+            quoteaf_os(obj_type)
+        ));
     }
     add_rule(rs, tokens, true)
 }
@@ -1828,7 +1860,10 @@ fn exec_delete(rs: &mut Ruleset, tokens: &mut Tokens<'_>) -> Result<String, Stri
         "counter" => delete_counter(rs, tokens),
         "quota" => delete_quota(rs, tokens),
         "limit" => delete_limit(rs, tokens),
-        _ => Err(format!("cannot delete object type '{obj_type}'")),
+        _ => Err(format!(
+            "cannot delete object type {}",
+            quoteaf_os(obj_type)
+        )),
     }
 }
 
@@ -1846,7 +1881,7 @@ fn delete_table(rs: &mut Ruleset, tokens: &mut Tokens<'_>) -> Result<String, Str
     let (family, name) = parse_family_and_name(tokens)?;
     let idx = rs
         .find_table(family, &name)
-        .ok_or_else(|| format!("table '{name}' not found in family {family}"))?;
+        .ok_or_else(|| format!("table {} not found in family {family}", quoteaf_os(&name)))?;
     rs.tables.remove(idx);
     Ok(String::new())
 }
@@ -1857,9 +1892,12 @@ fn delete_chain(rs: &mut Ruleset, tokens: &mut Tokens<'_>) -> Result<String, Str
     let table = rs.get_table_mut(family, &table_name)?;
     let idx = table
         .find_chain(&chain_name)
-        .ok_or_else(|| format!("chain '{chain_name}' not found"))?;
+        .ok_or_else(|| format!("chain {} not found", quoteaf_os(&chain_name)))?;
     if !table.chains[idx].rules.is_empty() {
-        return Err(format!("chain '{chain_name}' is not empty; flush it first"));
+        return Err(format!(
+            "chain {} is not empty; flush it first",
+            quoteaf_os(&chain_name)
+        ));
     }
     table.chains.remove(idx);
     Ok(String::new())
@@ -1875,17 +1913,17 @@ fn delete_rule(rs: &mut Ruleset, tokens: &mut Tokens<'_>) -> Result<String, Stri
         let h_str = tokens.expect("handle number")?;
         h_str
             .parse()
-            .map_err(|_| format!("invalid handle '{h_str}'"))?
+            .map_err(|_| format!("invalid handle {}", quoteaf_os(h_str)))?
     } else {
         handle_tok
             .parse()
-            .map_err(|_| format!("invalid handle '{handle_tok}'"))?
+            .map_err(|_| format!("invalid handle {}", quoteaf_os(handle_tok)))?
     };
 
     let table = rs.get_table_mut(family, &table_name)?;
     let chain_idx = table
         .find_chain(&chain_name)
-        .ok_or_else(|| format!("chain '{chain_name}' not found"))?;
+        .ok_or_else(|| format!("chain {} not found", quoteaf_os(&chain_name)))?;
     let rule_idx = table.chains[chain_idx]
         .rules
         .iter()
@@ -1901,7 +1939,7 @@ fn delete_set(rs: &mut Ruleset, tokens: &mut Tokens<'_>) -> Result<String, Strin
     let table = rs.get_table_mut(family, &table_name)?;
     let idx = table
         .find_set(&set_name)
-        .ok_or_else(|| format!("set '{set_name}' not found"))?;
+        .ok_or_else(|| format!("set {} not found", quoteaf_os(&set_name)))?;
     table.sets.remove(idx);
     Ok(String::new())
 }
@@ -1912,7 +1950,7 @@ fn delete_map(rs: &mut Ruleset, tokens: &mut Tokens<'_>) -> Result<String, Strin
     let table = rs.get_table_mut(family, &table_name)?;
     let idx = table
         .find_map(&map_name)
-        .ok_or_else(|| format!("map '{map_name}' not found"))?;
+        .ok_or_else(|| format!("map {} not found", quoteaf_os(&map_name)))?;
     table.maps.remove(idx);
     Ok(String::new())
 }
@@ -1946,7 +1984,7 @@ fn delete_element(rs: &mut Ruleset, tokens: &mut Tokens<'_>) -> Result<String, S
     let table = rs.get_table_mut(family, &table_name)?;
     let set_idx = table
         .find_set(&set_name)
-        .ok_or_else(|| format!("set '{set_name}' not found"))?;
+        .ok_or_else(|| format!("set {} not found", quoteaf_os(&set_name)))?;
     table.sets[set_idx]
         .elements
         .retain(|e| !to_remove.contains(e));
@@ -1959,7 +1997,7 @@ fn delete_counter(rs: &mut Ruleset, tokens: &mut Tokens<'_>) -> Result<String, S
     let table = rs.get_table_mut(family, &table_name)?;
     let idx = table
         .find_counter(&counter_name)
-        .ok_or_else(|| format!("counter '{counter_name}' not found"))?;
+        .ok_or_else(|| format!("counter {} not found", quoteaf_os(&counter_name)))?;
     table.counters.remove(idx);
     Ok(String::new())
 }
@@ -1970,7 +2008,7 @@ fn delete_quota(rs: &mut Ruleset, tokens: &mut Tokens<'_>) -> Result<String, Str
     let table = rs.get_table_mut(family, &table_name)?;
     let idx = table
         .find_quota(&quota_name)
-        .ok_or_else(|| format!("quota '{quota_name}' not found"))?;
+        .ok_or_else(|| format!("quota {} not found", quoteaf_os(&quota_name)))?;
     table.quotas.remove(idx);
     Ok(String::new())
 }
@@ -1981,7 +2019,7 @@ fn delete_limit(rs: &mut Ruleset, tokens: &mut Tokens<'_>) -> Result<String, Str
     let table = rs.get_table_mut(family, &table_name)?;
     let idx = table
         .find_limit(&limit_name)
-        .ok_or_else(|| format!("limit '{limit_name}' not found"))?;
+        .ok_or_else(|| format!("limit {} not found", quoteaf_os(&limit_name)))?;
     table.limits.remove(idx);
     Ok(String::new())
 }
@@ -2005,7 +2043,7 @@ fn exec_list(rs: &Ruleset, flags: &Flags, tokens: &mut Tokens<'_>) -> Result<Str
         "counters" => list_all_counters(rs, tokens),
         "quotas" => list_all_quotas(rs, tokens),
         "limits" => list_all_limits(rs, tokens),
-        _ => Err(format!("cannot list '{obj_type}'")),
+        _ => Err(format!("cannot list {}", quoteaf_os(obj_type))),
     }
 }
 
@@ -2105,7 +2143,7 @@ fn list_chain(rs: &Ruleset, flags: &Flags, tokens: &mut Tokens<'_>) -> Result<St
     let table = rs.get_table(family, &table_name)?;
     let chain_idx = table
         .find_chain(&chain_name)
-        .ok_or_else(|| format!("chain '{chain_name}' not found"))?;
+        .ok_or_else(|| format!("chain {} not found", quoteaf_os(&chain_name)))?;
     let chain = &table.chains[chain_idx];
     let mut out = String::new();
     format_chain_nft(&mut out, table, chain, flags, 1);
@@ -2172,7 +2210,7 @@ fn list_set(rs: &Ruleset, _flags: &Flags, tokens: &mut Tokens<'_>) -> Result<Str
     let table = rs.get_table(family, &table_name)?;
     let set_idx = table
         .find_set(&set_name)
-        .ok_or_else(|| format!("set '{set_name}' not found"))?;
+        .ok_or_else(|| format!("set {} not found", quoteaf_os(&set_name)))?;
     let mut out = String::new();
     format_set_nft(&mut out, table, &table.sets[set_idx]);
     Ok(out)
@@ -2207,7 +2245,7 @@ fn list_map(rs: &Ruleset, _flags: &Flags, tokens: &mut Tokens<'_>) -> Result<Str
     let table = rs.get_table(family, &table_name)?;
     let map_idx = table
         .find_map(&map_name)
-        .ok_or_else(|| format!("map '{map_name}' not found"))?;
+        .ok_or_else(|| format!("map {} not found", quoteaf_os(&map_name)))?;
     let mut out = String::new();
     format_map_nft(&mut out, table, &table.maps[map_idx]);
     Ok(out)
@@ -2322,7 +2360,7 @@ fn exec_flush(rs: &mut Ruleset, tokens: &mut Tokens<'_>) -> Result<String, Strin
             let table = rs.get_table_mut(family, &table_name)?;
             let idx = table
                 .find_chain(&chain_name)
-                .ok_or_else(|| format!("chain '{chain_name}' not found"))?;
+                .ok_or_else(|| format!("chain {} not found", quoteaf_os(&chain_name)))?;
             table.chains[idx].rules.clear();
             Ok(String::new())
         }
@@ -2332,7 +2370,7 @@ fn exec_flush(rs: &mut Ruleset, tokens: &mut Tokens<'_>) -> Result<String, Strin
             let table = rs.get_table_mut(family, &table_name)?;
             let idx = table
                 .find_set(&set_name)
-                .ok_or_else(|| format!("set '{set_name}' not found"))?;
+                .ok_or_else(|| format!("set {} not found", quoteaf_os(&set_name)))?;
             table.sets[idx].elements.clear();
             Ok(String::new())
         }
@@ -2342,11 +2380,11 @@ fn exec_flush(rs: &mut Ruleset, tokens: &mut Tokens<'_>) -> Result<String, Strin
             let table = rs.get_table_mut(family, &table_name)?;
             let idx = table
                 .find_map(&map_name)
-                .ok_or_else(|| format!("map '{map_name}' not found"))?;
+                .ok_or_else(|| format!("map {} not found", quoteaf_os(&map_name)))?;
             table.maps[idx].elements.clear();
             Ok(String::new())
         }
-        _ => Err(format!("cannot flush '{obj_type}'")),
+        _ => Err(format!("cannot flush {}", quoteaf_os(obj_type))),
     }
 }
 
@@ -2357,7 +2395,10 @@ fn exec_flush(rs: &mut Ruleset, tokens: &mut Tokens<'_>) -> Result<String, Strin
 fn exec_rename(rs: &mut Ruleset, tokens: &mut Tokens<'_>) -> Result<String, String> {
     let obj_type = tokens.expect("object type to rename")?;
     if obj_type != "chain" {
-        return Err(format!("can only rename chains, not '{obj_type}'"));
+        return Err(format!(
+            "can only rename chains, not {}",
+            quoteaf_os(obj_type)
+        ));
     }
     let (family, table_name) = parse_family_and_name(tokens)?;
     let old_name = tokens.expect("old chain name")?.to_string();
@@ -2366,10 +2407,10 @@ fn exec_rename(rs: &mut Ruleset, tokens: &mut Tokens<'_>) -> Result<String, Stri
     let table = rs.get_table_mut(family, &table_name)?;
     let idx = table
         .find_chain(&old_name)
-        .ok_or_else(|| format!("chain '{old_name}' not found"))?;
+        .ok_or_else(|| format!("chain {} not found", quoteaf_os(&old_name)))?;
 
     if table.find_chain(&new_name).is_some() {
-        return Err(format!("chain '{new_name}' already exists"));
+        return Err(format!("chain {} already exists", quoteaf_os(&new_name)));
     }
 
     table.chains[idx].name = new_name;
@@ -2615,7 +2656,8 @@ fn run_batch_file(rs: &mut Ruleset, flags: &Flags, path: &str) -> Result<String,
             .map_err(|e| format!("failed to read stdin: {e}"))?;
         buf
     } else {
-        std::fs::read_to_string(path).map_err(|e| format!("failed to read '{path}': {e}"))?
+        std::fs::read_to_string(path)
+            .map_err(|e| format!("failed to read {}: {e}", quoteaf_os(path)))?
     };
 
     run_batch_string(rs, flags, &content)

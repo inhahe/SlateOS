@@ -372,9 +372,9 @@ fn parse_url(url: &str) -> Result<ParsedUrl, CurlError> {
     // Split host from port.
     let (host, port) = match host_port.rsplit_once(':') {
         Some((host, port_str)) => {
-            let port: u16 = port_str
-                .parse()
-                .map_err(|_| CurlError::InvalidUrl(format!("invalid port number '{port_str}'")))?;
+            let port: u16 = port_str.parse().map_err(|_| {
+                CurlError::InvalidUrl(format!("invalid port number {}", quoteaf_os(port_str)))
+            })?;
             (host, port)
         }
         None => {
@@ -607,9 +607,9 @@ fn parse_status_line(line: &str) -> Result<HttpStatus, CurlError> {
         .ok_or_else(|| CurlError::InvalidResponse("missing status code".to_string()))?;
     let reason = parts.next().unwrap_or("").to_string();
 
-    let code: u16 = code_str
-        .parse()
-        .map_err(|_| CurlError::InvalidResponse(format!("invalid status code '{code_str}'")))?;
+    let code: u16 = code_str.parse().map_err(|_| {
+        CurlError::InvalidResponse(format!("invalid status code {}", quoteaf_os(code_str)))
+    })?;
 
     Ok(HttpStatus { code, reason })
 }
@@ -735,7 +735,10 @@ impl ChunkedDecoder {
                     }
 
                     let chunk_size = usize::from_str_radix(hex_trimmed, 16).map_err(|_| {
-                        CurlError::ChunkedDecodeError(format!("invalid chunk size '{hex_trimmed}'"))
+                        CurlError::ChunkedDecodeError(format!(
+                            "invalid chunk size {}",
+                            quoteaf_os(hex_trimmed)
+                        ))
                     })?;
 
                     self.line_buf.clear();
@@ -1374,7 +1377,10 @@ fn parse_args() -> Result<Options, CurlError> {
             "--max-redirs" => {
                 let val = value(&mut it, "--max-redirs requires a number")?;
                 opts.max_redirects = val.parse().map_err(|_| {
-                    CurlError::InvalidArgument(format!("invalid redirect count '{val}'"))
+                    CurlError::InvalidArgument(format!(
+                        "invalid redirect count {}",
+                        quoteaf_os(&val)
+                    ))
                 })?;
             }
             "-u" | "--user" => {
@@ -1417,15 +1423,15 @@ fn parse_args() -> Result<Options, CurlError> {
             }
             "--connect-timeout" => {
                 let val = value(&mut it, "--connect-timeout requires seconds")?;
-                opts.connect_timeout_secs = val
-                    .parse()
-                    .map_err(|_| CurlError::InvalidArgument(format!("invalid timeout '{val}'")))?;
+                opts.connect_timeout_secs = val.parse().map_err(|_| {
+                    CurlError::InvalidArgument(format!("invalid timeout {}", quoteaf_os(&val)))
+                })?;
             }
             "--max-time" | "-m" => {
                 let val = value(&mut it, "--max-time requires seconds")?;
-                opts.max_time_secs = val
-                    .parse()
-                    .map_err(|_| CurlError::InvalidArgument(format!("invalid max-time '{val}'")))?;
+                opts.max_time_secs = val.parse().map_err(|_| {
+                    CurlError::InvalidArgument(format!("invalid max-time {}", quoteaf_os(&val)))
+                })?;
             }
             "-w" | "--write-out" => {
                 let val = value(&mut it, "-w requires a format string")?;
@@ -1435,7 +1441,10 @@ fn parse_args() -> Result<Options, CurlError> {
                 opts.show_progress = true;
             }
             s if s.starts_with('-') => {
-                return Err(CurlError::InvalidArgument(format!("unknown option '{s}'")));
+                return Err(CurlError::InvalidArgument(format!(
+                    "unknown option {}",
+                    quoteaf_os(s)
+                )));
             }
             other => {
                 opts.urls.push(other.to_string());

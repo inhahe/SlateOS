@@ -460,7 +460,12 @@ fn create_temp(opts: &MktempOpts) -> Result<String, String> {
             match fs::create_dir(&path) {
                 Ok(()) => return Ok(path),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(e) => return Err(format!("mktemp: failed to create directory '{path}': {e}")),
+                Err(e) => {
+                    return Err(format!(
+                        "mktemp: failed to create directory {}: {e}",
+                        quoteaf_os(&path)
+                    ));
+                }
             }
         } else {
             // Use OpenOptions with create_new to avoid overwriting.
@@ -471,7 +476,12 @@ fn create_temp(opts: &MktempOpts) -> Result<String, String> {
             {
                 Ok(_) => return Ok(path),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(e) => return Err(format!("mktemp: failed to create file '{path}': {e}")),
+                Err(e) => {
+                    return Err(format!(
+                        "mktemp: failed to create file {}: {e}",
+                        quoteaf_os(&path)
+                    ));
+                }
             }
         }
     }

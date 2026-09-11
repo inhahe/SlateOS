@@ -271,7 +271,7 @@ impl CapMask {
         let s = s.strip_prefix("0X").unwrap_or(s);
         u64::from_str_radix(s, 16)
             .map(Self)
-            .map_err(|e| format!("invalid hex '{}': {}", s, e))
+            .map_err(|e| format!("invalid hex {}: {}", quoteaf_os(s), e))
     }
 
     /// Return a sorted list of capabilities present in this mask.
@@ -600,7 +600,7 @@ fn parse_cap_names(s: &str) -> Result<Vec<Cap>, String> {
         }
         match Cap::from_name(name) {
             Some(cap) => caps.push(cap),
-            None => return Err(format!("unknown capability '{}'", name)),
+            None => return Err(format!("unknown capability {}", quoteaf_os(name))),
         }
     }
     Ok(caps)
@@ -613,7 +613,12 @@ fn parse_set_flags(s: &str) -> Result<CapSpecSets, String> {
             'e' | 'E' => sets.effective = true,
             'i' | 'I' => sets.inheritable = true,
             'p' | 'P' => sets.permitted = true,
-            _ => return Err(format!("unknown set flag '{}' (expected e/i/p)", ch)),
+            _ => {
+                return Err(format!(
+                    "unknown set flag {} (expected e/i/p)",
+                    quoteaf_os(ch.to_string())
+                ));
+            }
         }
     }
     Ok(sets)

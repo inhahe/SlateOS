@@ -216,7 +216,7 @@ fn resolve_dependencies(
     let entry = dep_entries
         .iter()
         .find(|e| e.name == target)
-        .ok_or_else(|| format!("module '{module}' not found in modules.dep"))?;
+        .ok_or_else(|| format!("module {} not found in modules.dep", quoteaf_os(module)))?;
 
     let mut result = Vec::new();
     let mut visited = Vec::new();

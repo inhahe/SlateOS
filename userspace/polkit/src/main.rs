@@ -378,7 +378,7 @@ fn refusal_before_prompting(auth: &mut authlib::Authenticator, record: &Record) 
     }
 
     if record.is_locked() {
-        return Some(format!("account '{username}' is locked"));
+        return Some(format!("account {} is locked", quoteaf_os(&username)));
     }
     if record.has_legacy_password() {
         return Some(format!(

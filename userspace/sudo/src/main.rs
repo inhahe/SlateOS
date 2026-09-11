@@ -1192,7 +1192,7 @@ fn validate_sudoers_line(line: &str, line_num: usize, strict: bool, errors: &mut
             if default_shape(&setting.name).is_none() {
                 errors.push(SyntaxError {
                     line_num,
-                    message: format!("unknown Defaults setting '{}'", setting.name),
+                    message: format!("unknown Defaults setting {}", quoteaf_os(&setting.name)),
                     is_warning: true,
                 });
             } else if strict && !HONOURED_DEFAULTS.contains(&setting.name.as_str()) {

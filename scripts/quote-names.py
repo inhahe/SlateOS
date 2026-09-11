@@ -113,6 +113,17 @@ IGNORE = {
     # can never be "fixed", so the count could never reach zero, and a ratchet
     # with an unreachable floor stops being read.
     "userspace/coreutils/tests/diagnostics_quote_names.rs": "the detector's own fixtures",
+    # All seven sites are `format!("'{ch}'")` building the NAME of a terminal
+    # symbol -- `Symbol::Terminal(..)`, `terminals.insert(..)`, `prec_tag` --
+    # where `'a'` is yacc's own spelling for a character-literal token. The
+    # quotes are grammar syntax, not decoration on a message, and rewriting
+    # them changes which symbols a grammar matches.
+    #
+    # This is the false positive the `format!` widening was always going to
+    # have, and it is here rather than in the baseline because a baseline
+    # entry says only that a site exists: these can never reach zero, and a
+    # ratchet with an unreachable floor stops being read.
+    "userspace/yacc/src/main.rs": "'{ch}' is a yacc terminal name, not a diagnostic",
 }
 
 # The macros that build a message somebody will read.
@@ -137,7 +148,7 @@ IGNORE = {
 # canonical defect written in the one macro it could not see.
 #
 # Spelled once now, so the next predicate cannot disagree with the other three.
-_MESSAGE_OPEN = re.compile(r'(?:e?println!|format!)\s*\(\s*"')
+_MESSAGE_OPEN = re.compile(r'(?P<mac>e?println!|format!)\s*\(\s*"')
 
 
 def bare_interpolated_name(line: str) -> str | None:
@@ -534,6 +545,189 @@ def _split_args(args: str) -> list[str] | None:
     return out if all(out) else None
 
 
+def _scan_to_close(line: str, i: int) -> int:
+    """Index of the paren closing a macro call whose `(` is already consumed.
+
+    Refuses on any quote. A comma inside a string literal is not a separator
+    and a `)` inside one is not a terminator, and telling them apart needs a
+    lexer rather than a counter -- `_split_args` declines the same input for
+    the same reason, so nothing reaches the rewrite on a guess.
+    """
+    depth = 1
+    while i < len(line):
+        ch = line[i]
+        if ch in "\"'":
+            return -1
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return -1
+
+
+def _outside_a_literal(line: str, pos: int) -> bool:
+    """Whether `pos` sits outside every string literal on `line`.
+
+    A match-arm pattern is very often a literal -- `"-a" => println!(..)` is
+    how the option-dispatch wrappers are written -- so a literal containing
+    the text `println!(` is a shape that exists in this tree and must not be
+    mistaken for the call itself. The old regex bought this with `_ARM_ATOM`,
+    which could consume a literal only whole; a scanner has to count instead.
+    """
+    inside = False
+    i = 0
+    while i < pos:
+        ch = line[i]
+        if inside and ch == "\\":
+            i += 2
+            continue
+        if ch == '"':
+            inside = not inside
+        i += 1
+    return not inside
+
+
+def _macro_call(line: str) -> tuple[int, str, str, str, int] | None:
+    """Locate the one message-building macro call on `line`.
+
+    Returns `(start, mac, fmt, args_text, close)`: where the macro name
+    begins, which macro it is, the format string's contents, everything
+    between that string and the call's closing paren, and where that paren is.
+
+    A regex did this until 2026-09-11, anchored to the start and the end of
+    the line. That works while every site is a whole statement --
+    `eprintln!("cut: {path}: {e}");` -- and cannot reach the shape `format!`
+    is nearly always written in, because the call is an expression with code
+    on both sides of it:
+
+        _ => Err(format!("unknown family '{s}'")),
+        .map_err(|e| format!("read '{}': {e}", path.display()))?;
+
+    There is nothing to anchor to there. Counting parens from the macro's own
+    `(` finds the end wherever it happens to be, and the text on either side
+    is carried through untouched.
+
+    Two calls on one line returns `None`: which one is "the" call is then
+    ambiguous, and a rewrite would repair one and leave the other while
+    reporting the line fixed.
+    """
+    cands = [m for m in _MESSAGE_OPEN.finditer(line) if _outside_a_literal(line, m.start())]
+    if len(cands) != 1:
+        return None
+    m = cands[0]
+    fmt_start = m.end()
+    rel = _format_string_end(line[fmt_start:])
+    if rel < 0:
+        return None
+    fmt_end = fmt_start + rel
+    close = _scan_to_close(line, fmt_end)
+    if close < 0:
+        return None
+    return (
+        m.start(),
+        m.group("mac"),
+        line[fmt_start : fmt_end - 1],
+        line[fmt_end:close],
+        close,
+    )
+
+
+def _positional_slots(fmt: str) -> list[bool] | None:
+    """One entry per argument `fmt` consumes, `True` where the placeholder is
+    wrapped in hand-written single quotes.
+
+    This is what lets a quoted placeholder share an argument list with a bare
+    one. The single commonest remaining shape in the tree is
+
+        format!("Cannot read '{}': {}", profile_path.display(), e)
+
+    -- the name quoted, the error not -- and counting quoted placeholders
+    against all placeholders cannot tell which argument is which, so it used
+    to decline. Position can: the first slot is the name, the second is the
+    error, and only the first gets wrapped.
+
+    `None` when the string contains brace syntax this cannot account for.
+    Miscounting a slot does not produce a wrong message, it shifts EVERY
+    argument after it, so the uncertain cases are refused rather than guessed:
+
+    * a lone `}`, which is not valid format syntax and means the scan has lost
+      its place;
+    * an unterminated `{`.
+
+    `{{` and `}}` are brace escapes and consume nothing. `{name}` and
+    `{name:spec}` capture from the enclosing scope and consume nothing either;
+    `{}` and `{:spec}` consume an argument. That distinction is the whole
+    reason this cannot be done by counting `{}` occurrences.
+    """
+    slots: list[bool] = []
+    i, n = 0, len(fmt)
+    while i < n:
+        ch = fmt[i]
+        if ch == "{":
+            if fmt.startswith("{{", i):
+                i += 2
+                continue
+            j = fmt.find("}", i)
+            if j < 0:
+                return None
+            body = fmt[i + 1 : j]
+            if body == "" or body.startswith(":"):
+                slots.append(
+                    i > 0 and fmt[i - 1] == "'" and j + 1 < n and fmt[j + 1] == "'"
+                )
+            i = j + 1
+            continue
+        if ch == "}":
+            if fmt.startswith("}}", i):
+                i += 2
+                continue
+            return None
+        i += 1
+    return slots
+
+
+# An argument that is a *value* -- an identifier, a field, an index -- rather
+# than the result of a call.
+#
+# Only a value may be wrapped. A call may already be a rendering: `cal`'s
+# `shown(arg)` is `escape_unprintable(..)`, which has octal-escaped the bytes
+# already, and `quoteaf_os` around it would escape the backslashes a second
+# time and print `\\012` where the name held a newline. Declining every call
+# costs a handful of sites that a person can look at, and the alternative is a
+# fixer that silently double-escapes.
+_PLAIN_VALUE = re.compile(
+    r"^&?[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*|\[[^\[\]]*\])*$"
+)
+
+# Calls that RENDER a name rather than being one. `quotef_os` takes the value
+# itself, so these come off rather than being wrapped.
+_RENDERERS = (".display()", ".to_string_lossy()")
+
+
+def _name_expr(arg: str) -> str:
+    """The name a rendering call was applied to.
+
+    `path.display()` is not a name, it is a *rendering* of one, and a lossy
+    rendering: `Display for Path` and `to_string_lossy` both put U+FFFD where
+    the bytes are not UTF-8, so the name in the message is not the name on
+    disk and cannot be matched against it. On a filesystem whose rule is "any
+    byte except `/` and NUL" that is not a corner case.
+
+    Stripping the call is therefore not a convenience for the rewrite: it is
+    half the repair. `quoteaf_os(&path.display())` would not even compile --
+    `std::path::Display` is not `AsRef<OsStr>` -- so without this the fixer
+    would emit code that fails to build, which is the one output a fixer must
+    never produce.
+    """
+    for suffix in _RENDERERS:
+        if arg.endswith(suffix):
+            return arg[: -len(suffix)]
+    return arg
+
+
 def fix_line(line: str) -> tuple[str | None, str]:
     """Rewrite one flagged line, or explain why it was left alone.
 
@@ -551,20 +745,22 @@ def fix_line(line: str) -> tuple[str | None, str]:
     positional placeholder the rewrite would renumber, an argument list this
     cannot parse -- is returned unchanged with a reason, never guessed at.
     """
-    m = _CALL.match(line)
-    if m is None:
-        return None, "not a single-line println!/eprintln! call"
-    fmt, rest = m.group("fmt"), m.group("args")
-    args = _split_args(rest)
+    call = _macro_call(line)
+    if call is None:
+        return None, "not a single-line message-building macro call"
+    start, mac, fmt, args_text, close = call
+    args = _split_args(args_text)
     if args is None:
         return None, "argument list not safely splittable"
 
     def rebuilt(new_fmt: str, new_args: list[str]) -> str:
         tail = "".join(f", {a}" for a in new_args)
-        return (
-            f'{m.group("lead")}{m.group("mac")}("{new_fmt}"{tail})'
-            f'{m.group("end")}{m.group("tail") or ""}'
-        )
+        # The call itself is re-emitted in canonical form, which is how a
+        # wrapped call that `join_wrapped_calls` reassembled loses the spaces
+        # the join left behind. Everything OUTSIDE it -- `line[:start]` and
+        # `line[close + 1:]`, the expression the call is nested in -- is
+        # reproduced byte for byte and never parsed.
+        return f'{line[:start]}{mac}("{new_fmt}"{tail}){line[close + 1 :]}'
 
     ident = bare_interpolated_name(line)
     if ident is not None:
@@ -575,6 +771,17 @@ def fix_line(line: str) -> tuple[str | None, str]:
         if "{}" in head or args:
             return None, "would renumber an existing positional argument"
         return rebuilt(fmt.replace("{" + ident + "}", "{}", 1), [f"quotef_os(&{ident})"]), ""
+
+    # `prog: {}: reason` with the name in the argument list. Nothing is quoted
+    # here and the placeholder count does not change -- only the argument is
+    # replaced -- so this is the one shape with no renumbering hazard at all.
+    if positional_name_arg(line) is not None:
+        if len(args) != 1:
+            return None, "the colon form with more than one argument"
+        name = _name_expr(args[0])
+        if not _PLAIN_VALUE.match(name):
+            return None, "the name is the result of a call, which may already render it"
+        return rebuilt(fmt, [f"quotef_os(&{name})"]), ""
 
     inline = _INLINE_QUOTED.findall(fmt)
     positional = len(_POSITIONAL_QUOTED.findall(fmt))
@@ -587,12 +794,30 @@ def fix_line(line: str) -> tuple[str | None, str]:
             "",
         )
 
-    if positional == 1 and not inline and len(args) == 1:
-        # The single `'{}'` must be the only positional placeholder, or the
-        # lone argument is not the one it names.
-        if sum(1 for p in _ANY_PLACEHOLDER.findall(fmt) if p == "{}") != 1:
-            return None, "more than one positional placeholder"
-        return rebuilt(_POSITIONAL_QUOTED.sub("{}", fmt, count=1), [f"quoteaf_os(&{args[0]})"]), ""
+    if positional and not inline:
+        slots = _positional_slots(fmt)
+        if slots is None:
+            return None, "brace syntax this cannot account for"
+        if len(args) != len(slots):
+            return None, "positional placeholders and arguments do not line up"
+        # Every quoted slot must be the plain `'{}'` form. `'{:?}'` is not the
+        # same defect -- `Debug` escapes the value already -- and stripping the
+        # quotes off one would leave a placeholder this did not repair.
+        if sum(slots) != positional:
+            return None, "a quoted placeholder carries a format spec"
+        wrapped = [_name_expr(a) for a, q in zip(args, slots) if q]
+        if not all(_PLAIN_VALUE.match(w) for w in wrapped):
+            return None, "the name is the result of a call, which may already render it"
+        return (
+            rebuilt(
+                _POSITIONAL_QUOTED.sub("{}", fmt),
+                [
+                    f"quoteaf_os(&{_name_expr(a)})" if q else a
+                    for a, q in zip(args, slots)
+                ],
+            ),
+            "",
+        )
 
     return None, "mixed or multi-argument quoting -- fix by hand"
 
@@ -1231,10 +1456,65 @@ def selftest() -> int:
         "eprintln!(\"lp: {} wants '{p}'\", n);",
         None,
     )
+    # This one used to be a decline, under the blanket comment above that
+    # every case in this group "would be corrupted by a rewrite that went
+    # ahead anyway". That is true of the other three and was never true of
+    # this one: two quoted placeholders and two arguments map in order before
+    # the rewrite and in the same order after it, so nothing moves. It was
+    # declined by a `positional == 1` guard and the comment was written over
+    # the whole group. The shape is real -- `rsync` has
+    # `format!("symlink '{}' -> '{}': {e}", dst.display(), target.display())`
+    # -- and refusing it sent a fixable line to be done by hand.
+    #
+    # What still declines is `"a '{}' b {}"`, where a quoted placeholder and a
+    # bare one share the argument list: the count no longer identifies which
+    # argument is the name, and guessing would swap two values in a message
+    # while every test went on passing. That is `fix-declines-mixed-positional`
+    # below.
     expect_fix(
-        "declines-two-positional-quotes",
+        "fixes-two-positional-quotes-because-they-map-in-order",
         "eprintln!(\"lp: '{}' and '{}'\", a, b);",
+        'eprintln!("lp: {} and {}", quoteaf_os(&a), quoteaf_os(&b));',
+    )
+    # A quoted slot sharing an argument list with a bare one. This was a
+    # decline for one commit, on the reading that the count no longer says
+    # which argument is the name. POSITION says it: slot 1 is quoted so
+    # argument 1 is the name, slot 2 is not so argument 2 is left alone. It is
+    # the single commonest shape left in the tree --
+    # `format!("Cannot read '{}': {}", path.display(), e)`, 34 sites -- and
+    # counting rather than positioning is what made it look unfixable.
+    expect_fix(
+        "a-quoted-slot-beside-a-bare-one-maps-by-position",
+        "eprintln!(\"lp: '{}' wants {}\", a, n);",
+        'eprintln!("lp: {} wants {}", quoteaf_os(&a), n);',
+    )
+    # `{name}` captures from scope and consumes NO argument, so it must not be
+    # counted as a slot. Counting it would shift every argument after it.
+    expect_fix(
+        "a-named-placeholder-is-not-a-slot",
+        "eprintln!(\"lp: {prog} '{}' at {n}\", a);",
+        'eprintln!("lp: {prog} {} at {n}", quoteaf_os(&a));',
+    )
+    # An argument that is a CALL may already be a rendering. `cal`'s
+    # `shown(arg)` is `escape_unprintable(..)`, so wrapping it would escape the
+    # backslashes a second time and print \\012 where the name held a newline.
+    expect_fix(
+        "declines-a-name-that-is-a-call-result",
+        "eprintln!(\"cal: '{}'\", shown(arg));",
         None,
+    )
+    # `'{:?}'` is not this defect: `Debug` escapes the value already. Stripping
+    # the quotes would leave a placeholder the rewrite had not repaired.
+    expect_fix(
+        "declines-a-quoted-slot-with-a-format-spec",
+        "eprintln!(\"seq: near '{:?}'\", tok);",
+        None,
+    )
+    # A brace escape consumes nothing and must not be read as a slot.
+    expect_fix(
+        "brace-escapes-are-not-slots",
+        "eprintln!(\"aws: {{json}} '{}'\", a);",
+        'eprintln!("aws: {{json}} {}", quoteaf_os(&a));',
     )
     expect_fix(
         "declines-string-literal-arg",
@@ -1537,6 +1817,56 @@ def selftest() -> int:
             "file instead of blanking it and the line numbers no longer point "
             "at the line a reader opens."
         )
+
+    # 14. The rewriter reaches `format!`, which means reaching a call that is
+    #     an EXPRESSION rather than a statement. Every case in section 9 is
+    #     anchored at both ends of its line; none of these is, and all of them
+    #     are shapes I fixed by hand in `rsync` and `nftables` before making
+    #     the tool do it -- twice being the point at which an ad-hoc transform
+    #     should stop being ad-hoc.
+    expect_fix(
+        "format-inside-a-match-arm",
+        "        _ => Err(format!(\"unknown family '{s}'\")),",
+        '        _ => Err(format!("unknown family {}", quoteaf_os(&s))),',
+    )
+    expect_fix(
+        "format-inside-a-closure-with-a-tail",
+        "    .map_err(|e| format!(\"read '{}': {e}\", path.display()))?;",
+        '    .map_err(|e| format!("read {}: {e}", quoteaf_os(&path)))?;',
+    )
+    #     `.display()` comes OFF rather than being wrapped. `quoteaf_os(&x.display())`
+    #     does not compile -- `std::path::Display` is not `AsRef<OsStr>` -- so a
+    #     fixer that kept it would emit code that fails to build, and the lossy
+    #     rendering is half of what is being repaired anyway.
+    expect_fix(
+        "renderer-comes-off-rather-than-being-wrapped",
+        'return Err(format!("no input from \'{}\'", list.to_string_lossy()));',
+        'return Err(format!("no input from {}", quoteaf_os(&list)));',
+    )
+    #     The colon form, which nothing rewrote before: the placeholder count
+    #     does not change, only the argument, so it is the one shape with no
+    #     renumbering hazard at all.
+    expect_fix(
+        "colon-form-swaps-the-argument-only",
+        'let m = format!("scp: {}: {e}", src.display());',
+        'let m = format!("scp: {}: {e}", quotef_os(&src));',
+    )
+    #     An inline capture next to a quoted one takes no positional slot, so
+    #     appending is still safe -- this is the check that let 59 nftables
+    #     lines be rewritten rather than refused.
+    expect_fix(
+        "an-inline-capture-alongside-does-not-renumber",
+        "    .ok_or_else(|| format!(\"table '{name}' missing in family {family}\"))",
+        '    .ok_or_else(|| format!("table {} missing in family {family}", quoteaf_os(&name)))',
+    )
+    #     And the literal hazard, which the paren scanner reintroduced and the
+    #     old regex had bought with `_ARM_ATOM`: a match arm whose PATTERN is a
+    #     string containing the macro's own text.
+    expect_fix(
+        "format-after-an-arm-pattern-holding-the-macro-text",
+        "        \"a format!(\" => Err(format!(\"tool: got '{w}'\")),",
+        '        "a format!(" => Err(format!("tool: got {}", quoteaf_os(&w))),',
+    )
 
     for f in failures:
         print(f"selftest FAIL {f}")

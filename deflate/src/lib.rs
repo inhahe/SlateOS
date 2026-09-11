@@ -789,7 +789,7 @@ pub fn inflate_stream(data: &[u8], limit: usize) -> InflateStream<'_> {
     }
 }
 
-impl<'a> InflateStream<'a> {
+impl InflateStream<'_> {
     /// Pull decompressed bytes into `out`.
     ///
     /// Returns the number of bytes written, which is `out.len()` when there
@@ -1000,7 +1000,7 @@ pub fn zlib_inflate_stream(data: &[u8], limit: usize) -> Result<ZlibInflateStrea
     })
 }
 
-impl<'a> ZlibInflateStream<'a> {
+impl ZlibInflateStream<'_> {
     /// Pull decompressed bytes, exactly like [`InflateStream::read`].
     ///
     /// The Adler-32 checksum is fed incrementally with each chunk returned.

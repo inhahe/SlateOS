@@ -289,9 +289,9 @@ fn parse_url(url: &str) -> Result<ParsedUrl, WgetError> {
     // that a later edit could get wrong.
     let (host, port) = match host_port.rsplit_once(':') {
         Some((host, port_str)) => {
-            let port: u16 = port_str
-                .parse()
-                .map_err(|_| WgetError::InvalidUrl(format!("invalid port number '{port_str}'")))?;
+            let port: u16 = port_str.parse().map_err(|_| {
+                WgetError::InvalidUrl(format!("invalid port number {}", quoteaf_os(port_str)))
+            })?;
             (host, port)
         }
         None => (host_port, 80),
@@ -544,9 +544,9 @@ fn parse_status_line(line: &str) -> Result<HttpStatus, WgetError> {
         .ok_or_else(|| WgetError::InvalidResponse("missing status code".to_string()))?;
     let reason = parts.next().unwrap_or("").to_string();
 
-    let code: u16 = code_str
-        .parse()
-        .map_err(|_| WgetError::InvalidResponse(format!("invalid status code '{code_str}'")))?;
+    let code: u16 = code_str.parse().map_err(|_| {
+        WgetError::InvalidResponse(format!("invalid status code {}", quoteaf_os(code_str)))
+    })?;
 
     Ok(HttpStatus { code, reason })
 }
@@ -673,7 +673,10 @@ impl ChunkedDecoder {
                     }
 
                     let chunk_size = usize::from_str_radix(hex_trimmed, 16).map_err(|_| {
-                        WgetError::ChunkedDecodeError(format!("invalid chunk size '{hex_trimmed}'"))
+                        WgetError::ChunkedDecodeError(format!(
+                            "invalid chunk size {}",
+                            quoteaf_os(hex_trimmed)
+                        ))
                     })?;
 
                     self.line_buf.clear();
@@ -829,26 +832,29 @@ fn parse_args() -> Result<Options, WgetError> {
             "--max-redirect" => {
                 let val = value(&mut it, "--max-redirect requires a number")?;
                 max_redirects = val.parse().map_err(|_| {
-                    WgetError::InvalidUrl(format!("invalid redirect count '{val}'"))
+                    WgetError::InvalidUrl(format!("invalid redirect count {}", quoteaf_os(&val)))
                 })?;
             }
             "--timeout" => {
                 let val = value(&mut it, "--timeout requires a number")?;
-                timeout_secs = val
-                    .parse()
-                    .map_err(|_| WgetError::InvalidUrl(format!("invalid timeout '{val}'")))?;
+                timeout_secs = val.parse().map_err(|_| {
+                    WgetError::InvalidUrl(format!("invalid timeout {}", quoteaf_os(&val)))
+                })?;
             }
             "--tries" => {
                 let val = value(&mut it, "--tries requires a number")?;
-                tries = val
-                    .parse()
-                    .map_err(|_| WgetError::InvalidUrl(format!("invalid retry count '{val}'")))?;
+                tries = val.parse().map_err(|_| {
+                    WgetError::InvalidUrl(format!("invalid retry count {}", quoteaf_os(&val)))
+                })?;
             }
             "--user-agent" => {
                 user_agent = value(&mut it, "--user-agent requires a string")?;
             }
             s if s.starts_with('-') => {
-                return Err(WgetError::InvalidUrl(format!("unknown option '{s}'")));
+                return Err(WgetError::InvalidUrl(format!(
+                    "unknown option {}",
+                    quoteaf_os(s)
+                )));
             }
             other => {
                 // Positional argument: the URL.

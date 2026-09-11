@@ -441,7 +441,7 @@ fn deactivate_swap(device: &str, verbose: bool) {
     match libcall::swapoff(&path) {
         Ok(()) => {
             if verbose {
-                println!("swapoff: {device}: deactivated");
+                println!("swapoff: {}: deactivated", quotef_os(device));
             }
         }
         Err(e) => {

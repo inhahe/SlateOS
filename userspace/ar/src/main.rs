@@ -469,7 +469,7 @@ fn parse_header_field(field: &[u8]) -> Result<u64, String> {
         return Ok(0);
     }
     s.parse::<u64>()
-        .map_err(|e| format!("bad numeric field '{s}': {e}"))
+        .map_err(|e| format!("bad numeric field {}: {e}", quoteaf_os(s)))
 }
 
 /// Parse an octal field from an archive header.
@@ -480,7 +480,7 @@ fn parse_header_octal(field: &[u8]) -> Result<u32, String> {
     if s.is_empty() {
         return Ok(0);
     }
-    u32::from_str_radix(s, 8).map_err(|e| format!("bad octal field '{s}': {e}"))
+    u32::from_str_radix(s, 8).map_err(|e| format!("bad octal field {}: {e}", quoteaf_os(s)))
 }
 
 /// Decode a BSD extended name (`#1/N` format).
@@ -1197,13 +1197,16 @@ fn parse_ar_args(args: &[String]) -> Result<(ArOptions, String, Vec<String>), St
             'b' | 'i' => {
                 i += 1;
                 if i >= args.len() - 1 {
-                    return Err(format!("'{ch}' requires a member name argument"));
+                    return Err(format!(
+                        "{} requires a member name argument",
+                        quoteaf_os(ch.to_string())
+                    ));
                 }
                 break;
             }
             '-' => {} // allow leading dash
             _ => {
-                return Err(format!("unknown flag: '{ch}'"));
+                return Err(format!("unknown flag: {}", quoteaf_os(ch.to_string())));
             }
         }
     }
@@ -1261,7 +1264,10 @@ fn run_ar(args: &[String]) -> Result<(), String> {
         'q' => ar_quick_append(&opts, &archive_path, &member_files),
         'p' => ar_print(&opts, &archive_path, &member_files),
         's' => ar_update_symtab(&archive_path),
-        _ => Err(format!("unknown operation: '{}'", opts.operation)),
+        _ => Err(format!(
+            "unknown operation: {}",
+            quoteaf_os(opts.operation.to_string())
+        )),
     }
 }
 
@@ -1271,8 +1277,8 @@ fn ar_replace(opts: &ArOptions, archive_path: &str, member_files: &[String]) -> 
 
     for file_path in member_files {
         let member_name = member_basename(file_path);
-        let file_data =
-            fs::read(file_path).map_err(|e| format!("cannot read '{file_path}': {e}"))?;
+        let file_data = fs::read(file_path)
+            .map_err(|e| format!("cannot read {}: {e}", quoteaf_os(file_path)))?;
 
         let file_mtime = if opts.deterministic {
             0
@@ -1319,12 +1325,14 @@ fn ar_replace(opts: &ArOptions, archive_path: &str, member_files: &[String]) -> 
     }
 
     let serialized = archive.serialize(opts.write_symtab);
-    fs::write(archive_path, serialized).map_err(|e| format!("cannot write '{archive_path}': {e}"))
+    fs::write(archive_path, serialized)
+        .map_err(|e| format!("cannot write {}: {e}", quoteaf_os(archive_path)))
 }
 
 /// `ar d` — delete members.
 fn ar_delete(opts: &ArOptions, archive_path: &str, member_names: &[String]) -> Result<(), String> {
-    let data = fs::read(archive_path).map_err(|e| format!("cannot read '{archive_path}': {e}"))?;
+    let data = fs::read(archive_path)
+        .map_err(|e| format!("cannot read {}: {e}", quoteaf_os(archive_path)))?;
     let mut archive = Archive::parse(&data)?;
 
     for name in member_names {
@@ -1339,12 +1347,14 @@ fn ar_delete(opts: &ArOptions, archive_path: &str, member_names: &[String]) -> R
     }
 
     let serialized = archive.serialize(opts.write_symtab);
-    fs::write(archive_path, serialized).map_err(|e| format!("cannot write '{archive_path}': {e}"))
+    fs::write(archive_path, serialized)
+        .map_err(|e| format!("cannot write {}: {e}", quoteaf_os(archive_path)))
 }
 
 /// `ar t` — list members.
 fn ar_list(opts: &ArOptions, archive_path: &str) -> Result<(), String> {
-    let data = fs::read(archive_path).map_err(|e| format!("cannot read '{archive_path}': {e}"))?;
+    let data = fs::read(archive_path)
+        .map_err(|e| format!("cannot read {}: {e}", quoteaf_os(archive_path)))?;
     let archive = Archive::parse(&data)?;
 
     let stdout = io::stdout();
@@ -1372,7 +1382,8 @@ fn ar_list(opts: &ArOptions, archive_path: &str) -> Result<(), String> {
 
 /// `ar x` — extract members.
 fn ar_extract(opts: &ArOptions, archive_path: &str, member_names: &[String]) -> Result<(), String> {
-    let data = fs::read(archive_path).map_err(|e| format!("cannot read '{archive_path}': {e}"))?;
+    let data = fs::read(archive_path)
+        .map_err(|e| format!("cannot read {}: {e}", quoteaf_os(archive_path)))?;
     let archive = Archive::parse(&data)?;
 
     let extract_all = member_names.is_empty();
@@ -1385,7 +1396,7 @@ fn ar_extract(opts: &ArOptions, archive_path: &str, member_names: &[String]) -> 
             eprintln!("x - {}", member.header.name);
         }
         fs::write(&member.header.name, &member.data)
-            .map_err(|e| format!("cannot write '{}': {e}", member.header.name))?;
+            .map_err(|e| format!("cannot write {}: {e}", quoteaf_os(&member.header.name)))?;
     }
 
     Ok(())
@@ -1401,8 +1412,8 @@ fn ar_quick_append(
 
     for file_path in member_files {
         let member_name = member_basename(file_path);
-        let file_data =
-            fs::read(file_path).map_err(|e| format!("cannot read '{file_path}': {e}"))?;
+        let file_data = fs::read(file_path)
+            .map_err(|e| format!("cannot read {}: {e}", quoteaf_os(file_path)))?;
 
         let file_mtime = if opts.deterministic {
             0
@@ -1428,12 +1439,14 @@ fn ar_quick_append(
     }
 
     let serialized = archive.serialize(opts.write_symtab);
-    fs::write(archive_path, serialized).map_err(|e| format!("cannot write '{archive_path}': {e}"))
+    fs::write(archive_path, serialized)
+        .map_err(|e| format!("cannot write {}: {e}", quoteaf_os(archive_path)))
 }
 
 /// `ar p` — print member contents to stdout.
 fn ar_print(opts: &ArOptions, archive_path: &str, member_names: &[String]) -> Result<(), String> {
-    let data = fs::read(archive_path).map_err(|e| format!("cannot read '{archive_path}': {e}"))?;
+    let data = fs::read(archive_path)
+        .map_err(|e| format!("cannot read {}: {e}", quoteaf_os(archive_path)))?;
     let archive = Archive::parse(&data)?;
 
     let stdout = io::stdout();
@@ -1456,10 +1469,12 @@ fn ar_print(opts: &ArOptions, archive_path: &str, member_names: &[String]) -> Re
 
 /// Update the symbol table of an existing archive (used by `ranlib` and `ar s`).
 fn ar_update_symtab(archive_path: &str) -> Result<(), String> {
-    let data = fs::read(archive_path).map_err(|e| format!("cannot read '{archive_path}': {e}"))?;
+    let data = fs::read(archive_path)
+        .map_err(|e| format!("cannot read {}: {e}", quoteaf_os(archive_path)))?;
     let archive = Archive::parse(&data)?;
     let serialized = archive.serialize(true);
-    fs::write(archive_path, serialized).map_err(|e| format!("cannot write '{archive_path}': {e}"))
+    fs::write(archive_path, serialized)
+        .map_err(|e| format!("cannot write {}: {e}", quoteaf_os(archive_path)))
 }
 
 // ============================================================================
@@ -1469,7 +1484,7 @@ fn ar_update_symtab(archive_path: &str) -> Result<(), String> {
 /// Load an existing archive, or create a new empty one.
 fn load_or_create_archive(path: &str, silent: bool) -> Result<Archive, String> {
     if Path::new(path).exists() {
-        let data = fs::read(path).map_err(|e| format!("cannot read '{path}': {e}"))?;
+        let data = fs::read(path).map_err(|e| format!("cannot read {}: {e}", quoteaf_os(path)))?;
         Archive::parse(&data)
     } else {
         if !silent {
@@ -1619,7 +1634,8 @@ fn run_strip(args: &[String]) -> Result<(), String> {
     let (opts, files) = parse_strip_args(args)?;
 
     for file_path in &files {
-        let data = fs::read(file_path).map_err(|e| format!("cannot read '{file_path}': {e}"))?;
+        let data = fs::read(file_path)
+            .map_err(|e| format!("cannot read {}: {e}", quoteaf_os(file_path)))?;
 
         let stripped = strip_elf(&data, &opts)?;
 
@@ -1644,7 +1660,7 @@ fn run_strip(args: &[String]) -> Result<(), String> {
         };
 
         fs::write(output_path, &stripped)
-            .map_err(|e| format!("cannot write '{output_path}': {e}"))?;
+            .map_err(|e| format!("cannot write {}: {e}", quoteaf_os(output_path)))?;
 
         // Restore timestamps if requested
         // Note: standard Rust doesn't provide set_file_times; on Slate OS this

@@ -386,7 +386,7 @@ fn find_processes_for_port(port: u16, protocol: &str) -> Result<Vec<ProcessMatch
         "tcp6" => "/proc/net/tcp6",
         "udp" => "/proc/net/udp",
         "udp6" => "/proc/net/udp6",
-        other => return Err(format!("unknown namespace '{other}'")),
+        other => return Err(format!("unknown namespace {}", quoteaf_os(other))),
     };
 
     let content =

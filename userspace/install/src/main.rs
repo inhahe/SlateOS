@@ -424,10 +424,10 @@ fn resolve_user(name: &str) -> Result<u32, String> {
         if fields.len() >= 3 && fields[0] == name {
             return fields[2]
                 .parse::<u32>()
-                .map_err(|_| format!("invalid UID for user '{name}'"));
+                .map_err(|_| format!("invalid UID for user {}", quoteaf_os(name)));
         }
     }
-    Err(format!("unknown user '{name}'"))
+    Err(format!("unknown user {}", quoteaf_os(name)))
 }
 
 /// Look up a group in /etc/group, return GID
@@ -447,10 +447,10 @@ fn resolve_group(name: &str) -> Result<u32, String> {
         if fields.len() >= 3 && fields[0] == name {
             return fields[2]
                 .parse::<u32>()
-                .map_err(|_| format!("invalid GID for group '{name}'"));
+                .map_err(|_| format!("invalid GID for group {}", quoteaf_os(name)));
         }
     }
-    Err(format!("unknown group '{name}'"))
+    Err(format!("unknown group {}", quoteaf_os(name)))
 }
 
 // ── Syscall wrappers ───────────────────────────────────────────────
@@ -615,7 +615,7 @@ fn create_ancestors(path: &Path, verbose: bool) -> Result<(), String> {
 /// Create one directory and give it `mode`, reporting it under `-v`.
 fn create_dir_at(path: &Path, mode: u32, verbose: bool) -> Result<(), String> {
     fs::create_dir(path)
-        .map_err(|e| format!("cannot create directory '{}': {e}", path.display()))?;
+        .map_err(|e| format!("cannot create directory {}: {e}", quoteaf_os(path)))?;
 
     if verbose {
         println!("install: creating directory {}", quoteaf_os(path));
@@ -626,7 +626,7 @@ fn create_dir_at(path: &Path, mode: u32, verbose: bool) -> Result<(), String> {
 
 fn set_mode(path: &Path, mode: u32) -> Result<(), String> {
     sys_chmod(&path.to_string_lossy(), mode)
-        .map_err(|e| format!("cannot set mode on '{}': {e}", path.display()))
+        .map_err(|e| format!("cannot set mode on {}: {e}", quoteaf_os(path)))
 }
 
 /// Create a `-d` target: ancestors at [`ANCESTOR_MODE`], the target itself at
@@ -684,7 +684,7 @@ fn install_file(src: &Path, dst: &Path, args: &Args) -> Result<(), String> {
     ));
 
     // Read source
-    let data = fs::read(src).map_err(|e| format!("cannot read '{}': {e}", src.display()))?;
+    let data = fs::read(src).map_err(|e| format!("cannot read {}: {e}", quoteaf_os(src)))?;
 
     // Write to temp
     let mut tmp_file =
@@ -698,7 +698,7 @@ fn install_file(src: &Path, dst: &Path, args: &Args) -> Result<(), String> {
     // If rename fails (cross-device), fall back to copy+delete
     if fs::rename(&temp_name, dst).is_err() {
         fs::copy(&temp_name, dst)
-            .map_err(|e| format!("cannot copy to '{}': {e}", dst.display()))?;
+            .map_err(|e| format!("cannot copy to {}: {e}", quoteaf_os(dst)))?;
         let _ = fs::remove_file(&temp_name);
     }
 
@@ -716,7 +716,7 @@ fn install_file(src: &Path, dst: &Path, args: &Args) -> Result<(), String> {
             None => u32::MAX,
         };
         sys_chown(&dst.to_string_lossy(), uid, gid)
-            .map_err(|e| format!("cannot set ownership on '{}': {e}", dst.display()))?;
+            .map_err(|e| format!("cannot set ownership on {}: {e}", quoteaf_os(dst)))?;
     }
 
     // Preserve timestamps
@@ -809,7 +809,7 @@ fn run() -> Result<(), String> {
             let src_path = PathBuf::from(src);
             let filename = src_path
                 .file_name()
-                .ok_or_else(|| format!("cannot determine filename from '{src}'"))?;
+                .ok_or_else(|| format!("cannot determine filename from {}", quoteaf_os(src)))?;
             let dst = td.join(filename);
             install_file(&src_path, &dst, &args)?;
         }

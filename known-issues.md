@@ -36,6 +36,49 @@ freely. See `roadmap.md` → "Three-Agent Parallel Execution" rule 3, and
 
 ---
 
+## TD-B-DIFF-HARNESSES-HAVE-NO-PER-CASE-BOUND-AND-ORPHAN-ACROSS-WSL (lane B, 2026-09-11)
+
+**What.** None of the 50-odd `scripts/<name>-diff.sh` harnesses bounds an
+individual case. One subject that does not terminate stops the whole run, and
+the processes survive every kill available from the Windows side.
+
+**How it showed up.** `DIFF_PKG=awk bash scripts/awk-diff.sh` reached
+
+    awk 'NR == 1 {getline; print "got", $0} {print "main", $0}'
+
+and stopped. The standalone `awk` hangs on `getline` (that pair is now retired).
+Two separate attempts left an `awk` process running inside WSL for 35 and 25
+minutes; both were still alive long after the invoking shell was gone, and were
+found with `ps -eo pid,ppid,etime,args` and killed by PID after confirming each
+one's argv and parent.
+
+**Why `run-timeout.py` does not cover it, which is the part worth knowing.**
+That runner is the tree's answer to exactly this, and `CLAUDE.md` says to use it
+for anything that might hang. It works by putting the child in a Windows **Job
+Object** with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. But `diff-wsl.sh` re-execs
+the harness *inside WSL*, so the processes that actually hang are Linux-side and
+are not in that job. Killing the Windows side tears down `wsl.exe` and leaves
+the real work running. **A process-tree killer does not cross the WSL
+boundary** — worth knowing for any tooling here that shells into WSL, not just
+these harnesses.
+
+**The proper fix.** A bound on the far side of the boundary, where the processes
+actually are: each case invoked under `timeout` inside WSL. The clean place is
+`diff-wsl.sh`'s `$bindir` construction — four `ln -s` calls that build
+`$bindir/{ours,gnu}/NAME` — since every harness reaches its subject through
+those links, so wrapping there fixes all 50 at once with no harness edited.
+
+**The trap in that fix, which is why it is not done yet.** Those are symlinks
+named after the utility *on purpose*: `argv[0]` has to be the bare word, or
+every diagnostic's `prog: ` prefix changes and every harness starts reporting
+false differences in its error messages. `timeout N /path/to/real` makes
+`argv[0]` the full path. A wrapper has to preserve the bare name — `timeout`
+uses `execvp`, so `PATH=<dir> exec timeout N NAME "$@"` does preserve it, but
+that also rewrites `PATH` for the subject, which matters for any utility that
+spawns another (`xargs`, `awk`'s `system()`, `find -exec`). Getting this wrong
+is a silent, tree-wide change to what 50 harnesses measure, so it wants doing
+deliberately with the two-probe rule rather than in passing.
+
 ## TD-B-INSTALL-REIMPLEMENTS-A-BACKUP-POLICY-COREUTILS-ALREADY-HAS (lane B, 2026-09-11)
 
 **In short:** `userspace/install` has its own backup handling, and
@@ -64818,6 +64861,47 @@ number is different** — not by a constant factor either: 12→16, 24→48,
 3036→4112. Both exit 0. `du` prints nothing but sizes and paths, so a `du` that
 gets the sizes wrong and drops a directory has no correct output left; there is
 nothing else in it to be right about.
+
+**19 -> 18 (2026-09-11): `awk`, which never finishes.**
+`DIFF_PKG=awk bash scripts/awk-diff.sh`. **coreutils: 171 passed, 0 differed,
+13 differ on purpose.** The standalone's run has no pass count, because it
+never finished:
+
+    awk 'NR == 1 {getline; print "got", $0} {print "main", $0}'
+
+fed three lines, GNU prints `got b` / `main b` / `main c` and exits 0. The
+standalone **hangs forever** — killed at a 5-second bound with no output, twice,
+having also been left running for 35 minutes by an earlier attempt. `getline` is
+one of awk's basic constructs, and a hang is worse than a crash: no diagnostic,
+no exit status, and a process nobody notices.
+
+In the cases it reached before that, **21 differed**, and they are not edge
+cases:
+
+| construct | GNU | standalone |
+|---|---|---|
+| range pattern `/b/,/c/` | `b` `c` | **parse error** — `unexpected token in expression: Comma` |
+| `{NF = 2; print}` | `alice 30` | `alice 30 red` — assigning `NF` does not rebuild the record |
+| array as a function parameter | `set` | *(empty)* — **arrays are not passed by reference**, so no awk program that fills an array in a function works |
+| `gsub(/x*/, "-")` on `Alpha1` | `-A-l-p-h-a-1-` | `-------` — **the line is replaced wholesale**; empty-match handling destroys the data |
+| bare `length` | `6 6 2` | ` 6 2` — `length` with no argument yields nothing |
+| `BEGIN {FS = ""}` on `a` | `1 a` | `3 ` — a one-character line reported as three fields |
+| `length("héllo")` | `5` | `8` |
+| `atan2(1, 1)` | `0.7854` | `undefined function: atan2` |
+| `ORS = "\0"` | NUL separators | the two characters backslash-zero |
+
+Also wrong: `RS = ""` paragraph mode, `CONVFMT`, `OFMT`, strnum comparison,
+`split` with a regex, `sub` with an escaped `&`, the arithmetic operators, and
+`substr`/`index`/`toupper` on non-ASCII.
+
+*A note on the run, since it cost an hour.* No `*-diff.sh` harness bounds an
+individual case, and `run-timeout.py` — which exists for exactly this — does not
+help here either: the harness re-execs into WSL, so the hung processes are Linux
+side and outside the Windows Job Object that runner relies on. Killing the
+Windows-side job left `awk` running in WSL for 35 minutes. Recorded as
+`TD-B-DIFF-HARNESSES-HAVE-NO-PER-CASE-BOUND-AND-ORPHAN-ACROSS-WSL`; the fix is
+a bound inside the harness, on the far side of the boundary, rather than around
+it.
 
 **WHY THE SURVEY KEPT SAYING "STANDALONE AHEAD", AND IT WAS NOT BAD LUCK
 (2026-09-11, fixed).** Every entry above that records an inverted verdict has

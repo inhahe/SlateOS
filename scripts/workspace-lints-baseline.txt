@@ -30,7 +30,6 @@ services/udpget
 userspace/acpi
 userspace/arp
 userspace/at
-userspace/awk
 userspace/backup
 userspace/base64
 userspace/blkid

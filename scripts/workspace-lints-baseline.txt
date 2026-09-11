@@ -39,7 +39,6 @@ userspace/chpasswd
 userspace/chroot
 userspace/cmp
 userspace/column
-userspace/comm
 userspace/cpio
 userspace/crond
 userspace/crontab

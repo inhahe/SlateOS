@@ -64783,6 +64783,28 @@ lint programme above is still worth doing; it is not a substitute for a
 differential, and two of its three crates so far were duplicates that a
 differential then deleted.
 
+**30 -> 29 (2026-09-11): `comm`, the second "close" pair to come apart.**
+`DIFF_PKG=comm bash scripts/comm-diff.sh`, subject confirmed by `--version`:
+
+**coreutils 197 passed, 0 differed. The standalone 104 passed, 93 differed.**
+
+| | cases | defect |
+|---|---|---|
+| `--total` missing | 49 | GNU's summary line (`1	1	2	total`) is unimplemented, so half the suite dies at `unrecognized option '--total'`. |
+| missing second line | 25 | on unsorted input GNU prints `comm: file 1 is not in sorted order` **and** `comm: input is not in sorted order`; only the first is printed. |
+| **empty `--output-delimiter`** | **4** | `--output-delimiter=` means **NUL** to GNU, which emits ` ` separators. The standalone emits *nothing*, so columns 1, 2 and 3 become indistinguishable — the output stops carrying the answer. Both exit 0. |
+| accepts what GNU refuses | 4 | a repeated `--output-delimiter` is `comm: multiple output delimiters specified` in GNU; the standalone takes the last one and exits 0. |
+| `(os error N)` | 7 | `comm: nosuch.txt: No such file or directory (os error 2)`. One of these also reports the *wrong* failure — it opens the files before validating the options, so a doubled delimiter on two missing files is reported as the missing file. |
+| **refuses non-UTF-8** | 2 | `comm bad1.txt bad2.txt` → `read error: stream did not contain valid UTF-8`, exit 1, no output. GNU compares the bytes and succeeds. |
+| **false disorder alarm** | 2 | `comm dis.txt dis.txt` — the same unsorted file twice — exits 1 with two order complaints. GNU exits 0: comparing a file against itself makes every comparison equal, so no disorder is ever observed. The output bytes are identical; only the verdict differs. |
+
+**The non-UTF-8 refusal has now appeared in two consecutive standalones**, with
+the same wording, on programs that have no business decoding their input:
+`expand` places whitespace and `comm` compares lines. That is worth recording as
+a property of the standalone family rather than as two coincidences — it
+predicts the same defect in the remaining 29 and it is exactly the defect
+CLAUDE.md item 7 names. The coreutils half passes these cases.
+
 **31 -> 30 (2026-09-11): `expand`, the pair the broken knob was hiding.**
 This is the pair that read as a **dead heat** — 216 passed both ways — until
 `DIFF_PKG` was made to cross the WSL boundary (entry below). With the knob

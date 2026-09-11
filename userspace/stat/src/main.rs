@@ -542,7 +542,7 @@ fn parse_stat_args(args: &[String]) -> Result<StatOpts, String> {
         } else if let Some(fmt) = arg.strip_prefix("--format=") {
             opts.format = Some(fmt.to_string());
         } else if arg.starts_with('-') && arg.len() > 1 {
-            return Err(format!("unrecognized option: '{arg}'"));
+            return Err(format!("unrecognized option: {}", quoteaf_os(arg)));
         } else {
             opts.files.push(arg.clone());
         }
@@ -621,9 +621,13 @@ fn apply_stat_format(fmt: &str, st: &KernelStat, name: &str, link_target: &str) 
                 'N' => {
                     // Quoted file name, with -> target for symlinks
                     if !link_target.is_empty() {
-                        out.push_str(&format!("'{name}' -> '{link_target}'"));
+                        out.push_str(&format!(
+                            "{} -> {}",
+                            quoteaf_os(name),
+                            quoteaf_os(link_target)
+                        ));
                     } else {
-                        out.push_str(&format!("'{name}'"));
+                        out.push_str(&quoteaf_os(name).to_string());
                     }
                 }
                 'o' => {
@@ -1025,7 +1029,7 @@ fn parse_touch_stamp(s: &str) -> Result<i64, String> {
         let sec_str = &s[dot_pos + 1..];
         let sec: u32 = sec_str
             .parse()
-            .map_err(|_| format!("invalid seconds in timestamp: '{sec_str}'"))?;
+            .map_err(|_| format!("invalid seconds in timestamp: {}", quoteaf_os(sec_str)))?;
         if sec > 59 {
             return Err(format!("seconds out of range: {sec}"));
         }
@@ -1035,7 +1039,7 @@ fn parse_touch_stamp(s: &str) -> Result<i64, String> {
     };
 
     if main_part.len() < 8 || !main_part.bytes().all(|b| b.is_ascii_digit()) {
-        return Err(format!("invalid timestamp format: '{s}'"));
+        return Err(format!("invalid timestamp format: {}", quoteaf_os(s)));
     }
 
     let (year, rest) = match main_part.len() {
@@ -1059,7 +1063,7 @@ fn parse_touch_stamp(s: &str) -> Result<i64, String> {
             (ccyy, &main_part[4..])
         }
         _ => {
-            return Err(format!("invalid timestamp length: '{s}'"));
+            return Err(format!("invalid timestamp length: {}", quoteaf_os(s)));
         }
     };
 
@@ -1099,18 +1103,18 @@ fn parse_date_string(s: &str) -> Result<i64, String> {
     let date_part = parts.first().copied().unwrap_or("");
     let date_fields: Vec<&str> = date_part.split('-').collect();
     if date_fields.len() != 3 {
-        return Err(format!("invalid date format: '{s}'"));
+        return Err(format!("invalid date format: {}", quoteaf_os(s)));
     }
 
     let year: u32 = date_fields[0]
         .parse()
-        .map_err(|_| format!("invalid year in '{s}'"))?;
+        .map_err(|_| format!("invalid year in {}", quoteaf_os(s)))?;
     let month: u32 = date_fields[1]
         .parse()
-        .map_err(|_| format!("invalid month in '{s}'"))?;
+        .map_err(|_| format!("invalid month in {}", quoteaf_os(s)))?;
     let day: u32 = date_fields[2]
         .parse()
-        .map_err(|_| format!("invalid day in '{s}'"))?;
+        .map_err(|_| format!("invalid day in {}", quoteaf_os(s)))?;
 
     let (hour, minute, second) = if parts.len() > 1 {
         let time_part = parts[1];
@@ -1635,7 +1639,10 @@ fn canonicalize_path(path: &str, mode: CanonMode) -> Result<String, String> {
                                     resolved = normalize_path(&resolved);
                                 }
                                 Err(e) => {
-                                    return Err(format!("cannot read symlink '{path_str}': {e}"));
+                                    return Err(format!(
+                                        "cannot read symlink {}: {e}",
+                                        quoteaf_os(&path_str)
+                                    ));
                                 }
                             }
                         }
@@ -1645,10 +1652,16 @@ fn canonicalize_path(path: &str, mode: CanonMode) -> Result<String, String> {
                         let is_last = idx == abs.components().count() - 1;
                         match mode {
                             CanonMode::CanonicalizeExisting => {
-                                return Err(format!("'{path_str}': no such file or directory"));
+                                return Err(format!(
+                                    "{}: no such file or directory",
+                                    quoteaf_os(&path_str)
+                                ));
                             }
                             CanonMode::Canonicalize if !is_last => {
-                                return Err(format!("'{path_str}': no such file or directory"));
+                                return Err(format!(
+                                    "{}: no such file or directory",
+                                    quoteaf_os(&path_str)
+                                ));
                             }
                             _ => {
                                 // Missing or CanonicalizeMissing: keep going textually.
@@ -1932,7 +1945,7 @@ fn parse_mkfifo_args(args: &[String]) -> Result<MkfifoOpts, String> {
         } else if let Some(val) = arg.strip_prefix("--mode=") {
             opts.mode = parse_octal_mode(val)?;
         } else if arg.starts_with('-') && arg.len() > 1 {
-            return Err(format!("unrecognized option: '{arg}'"));
+            return Err(format!("unrecognized option: {}", quoteaf_os(arg)));
         } else {
             opts.files.push(arg.clone());
         }
@@ -1956,9 +1969,9 @@ fn parse_octal_mode(s: &str) -> Result<u32, String> {
         return Ok(0);
     }
     if !trimmed.bytes().all(|b| b.is_ascii_digit() && b <= b'7') {
-        return Err(format!("invalid mode: '{s}'"));
+        return Err(format!("invalid mode: {}", quoteaf_os(s)));
     }
-    u32::from_str_radix(trimmed, 8).map_err(|e| format!("invalid mode '{s}': {e}"))
+    u32::from_str_radix(trimmed, 8).map_err(|e| format!("invalid mode {}: {e}", quoteaf_os(s)))
 }
 
 fn run_mkfifo(opts: &MkfifoOpts) -> bool {

@@ -21,7 +21,7 @@
 // expect_used, panic, indexing_slicing, arithmetic_side_effects) are already
 // set to warn at workspace scope, so they still alert without blocking builds.
 
-use quoting::quotef_os;
+use quoting::{quoteaf_os, quotef_os};
 use std::env;
 use std::io::{self, Write};
 use std::process;
@@ -713,9 +713,9 @@ fn parse_args() -> Result<Args, WhoisError> {
                 let val = argv.get(i).ok_or_else(|| {
                     WhoisError::InvalidArgument(format!("{arg} requires a value"))
                 })?;
-                port = val
-                    .parse::<u16>()
-                    .map_err(|_| WhoisError::InvalidArgument(format!("invalid port: '{val}'")))?;
+                port = val.parse::<u16>().map_err(|_| {
+                    WhoisError::InvalidArgument(format!("invalid port: {}", quoteaf_os(val)))
+                })?;
             }
             "--no-referral" => {
                 no_referral = true;

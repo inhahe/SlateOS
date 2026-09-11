@@ -56,7 +56,7 @@ use coreutils::errmsg::strerror;
 use coreutils::fnmatch::{Flags, fnmatch};
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::human::{Opts, default_block_size, human_readable};
-use coreutils::quote::{os_bytes, quote, quoteaf, quotef};
+use coreutils::quote::{os_bytes, quote, quoteaf, quoteaf_os, quotef};
 #[cfg(unix)]
 use coreutils::stdfd::{self, Stream};
 // Only [`RealTree`] turns a byte path back into an `OsString`, and it is the
@@ -989,9 +989,10 @@ fn long_key(name: &str) -> u8 {
 }
 
 fn unimplemented(spelling: &str) -> Refusal {
-    Refusal::from_getopt(
-        &DU.usage_referring(format!("option '{spelling}' is not implemented by this du")),
-    )
+    Refusal::from_getopt(&DU.usage_referring(format!(
+        "option {} is not implemented by this du",
+        quoteaf_os(spelling)
+    )))
 }
 
 fn help_text() -> String {
@@ -2184,7 +2185,7 @@ mod tests {
             let refusal = parse(&["-t", big]).err().unwrap();
             assert_eq!(
                 refusal.lines,
-                vec![format!("du: -t argument '{big}' too large")]
+                vec![format!("du: -t argument {} too large", quoteaf_os(big))]
             );
         }
     }

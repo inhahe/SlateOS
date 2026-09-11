@@ -20,7 +20,7 @@
 //! padded to 512-byte boundaries. Archives are terminated by two consecutive
 //! zero blocks.
 
-use quoting::{escape_os, quoteaf};
+use quoting::{escape_os, quoteaf, quoteaf_os};
 use std::env;
 use std::ffi::OsStr;
 use std::fs::{self, File, Metadata};
@@ -276,7 +276,11 @@ fn parse_args() -> Result<Options, String> {
             other => {
                 if let Some(rest) = other.strip_prefix("--strip-components=") {
                     strip_components = rest.parse::<usize>().map_err(|e| {
-                        format!("--strip-components: invalid number '{}': {}", rest, e)
+                        format!(
+                            "--strip-components: invalid number {}: {}",
+                            quoteaf_os(rest),
+                            e
+                        )
                     })?;
                 } else if let Some(rest) = other.strip_prefix("--exclude=") {
                     excludes.push(rest.to_string());
@@ -625,7 +629,10 @@ fn sanitize_member_name(raw: &str) -> Result<String, String> {
         parts.push(component);
     }
     if parts.is_empty() {
-        return Err(format!("refusing to extract '{}': empty member name", raw));
+        return Err(format!(
+            "refusing to extract {}: empty member name",
+            quoteaf_os(raw)
+        ));
     }
     Ok(parts.join("/"))
 }

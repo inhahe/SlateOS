@@ -121,7 +121,10 @@ fn b64_decode(input: &str, alphabet: &[u8; 64]) -> Result<Vec<u8>, String> {
             0xFF
         };
         if val == 0xFF {
-            return Err(format!("invalid character '{}' at position {pos}", ch));
+            return Err(format!(
+                "invalid character {} at position {pos}",
+                quoteaf_os(ch.to_string())
+            ));
         }
         accum = (accum << 6) | val as u32;
         bits += 6;
@@ -235,7 +238,10 @@ fn b32_decode(input: &str, alphabet: &[u8; 32]) -> Result<Vec<u8>, String> {
             0xFF
         };
         if val == 0xFF {
-            return Err(format!("invalid character '{}' at position {pos}", ch));
+            return Err(format!(
+                "invalid character {} at position {pos}",
+                quoteaf_os(ch.to_string())
+            ));
         }
         accum = (accum << 5) | val as u64;
         bits += 5;

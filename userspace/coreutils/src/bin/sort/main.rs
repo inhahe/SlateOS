@@ -410,7 +410,7 @@ fn read_files0(list: &OsString) -> Result<Vec<OsString>, String> {
     // drop the trailing one rather than let it produce an empty final name.
     let body = bytes.strip_suffix(b"\0").unwrap_or(&bytes);
     if body.is_empty() {
-        return Err(format!("no input from '{}'", list.to_string_lossy()));
+        return Err(format!("no input from {}", quoteaf_os(list)));
     }
     let mut names = Vec::new();
     for (index, name) in body.split(|&c| c == 0).enumerate() {

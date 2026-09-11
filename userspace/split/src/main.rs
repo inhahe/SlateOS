@@ -130,7 +130,10 @@ fn take_value<'a>(
     }
     *i += 1;
     if *i >= args.len() {
-        return Err(format!("split: option '{flag}' requires an argument"));
+        return Err(format!(
+            "split: option {} requires an argument",
+            quoteaf_os(flag)
+        ));
     }
     Ok(&args[*i])
 }

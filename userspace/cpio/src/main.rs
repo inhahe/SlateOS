@@ -20,7 +20,7 @@
 //! boundary). The archive is terminated by a trailer entry whose filename is
 //! `TRAILER!!!`.
 
-use quoting::quotef_os;
+use quoting::{quoteaf_os, quotef_os};
 use std::env;
 use std::fs::{self, File, Metadata};
 use std::io::{self, BufRead, Read, Write};
@@ -566,7 +566,7 @@ fn get_devminor(_meta: &Metadata) -> u32 {
 /// Read the target of a symlink. Returns the target as bytes.
 fn read_symlink_target(path: &Path) -> Result<Vec<u8>, String> {
     let target =
-        fs::read_link(path).map_err(|e| format!("read symlink '{}': {}", path.display(), e))?;
+        fs::read_link(path).map_err(|e| format!("read symlink {}: {}", quoteaf_os(path), e))?;
     Ok(target.to_str().unwrap_or("").as_bytes().to_vec())
 }
 
@@ -638,14 +638,14 @@ fn strip_leading_slash(path: &str) -> &str {
 fn build_entry(filepath: &str) -> Result<CpioEntry, String> {
     let path = Path::new(filepath);
     let symlink_meta =
-        fs::symlink_metadata(path).map_err(|e| format!("stat '{}': {}", filepath, e))?;
+        fs::symlink_metadata(path).map_err(|e| format!("stat {}: {}", quoteaf_os(filepath), e))?;
 
     let is_symlink = symlink_meta.is_symlink();
 
     let file_data = if is_symlink {
         read_symlink_target(path)?
     } else if symlink_meta.is_file() {
-        fs::read(path).map_err(|e| format!("read '{}': {}", filepath, e))?
+        fs::read(path).map_err(|e| format!("read {}: {}", quoteaf_os(filepath), e))?
     } else {
         Vec::new()
     };
@@ -767,7 +767,9 @@ fn copy_out(opts: &Options) -> Result<(), String> {
     let output_path = opts.archive_file.as_ref().or(opts.output_file.as_ref());
 
     let mut writer: Box<dyn Write> = if let Some(path) = output_path {
-        Box::new(File::create(path).map_err(|e| format!("cannot create '{}': {}", path, e))?)
+        Box::new(
+            File::create(path).map_err(|e| format!("cannot create {}: {}", quoteaf_os(path), e))?,
+        )
     } else {
         Box::new(io::stdout().lock())
     };
@@ -913,7 +915,7 @@ fn set_permissions(path: &Path, mode: u32) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
     let perms = std::fs::Permissions::from_mode(mode & 0o7777);
     fs::set_permissions(path, perms)
-        .map_err(|e| format!("set permissions on '{}': {}", path.display(), e))
+        .map_err(|e| format!("set permissions on {}: {}", quoteaf_os(&path), e))
 }
 
 #[cfg(not(unix))]
@@ -930,9 +932,9 @@ fn set_mtime(path: &Path, mtime: u32) -> Result<(), String> {
     let file = fs::OpenOptions::new()
         .write(true)
         .open(path)
-        .map_err(|e| format!("open '{}' for mtime: {}", path.display(), e))?;
+        .map_err(|e| format!("open {} for mtime: {}", quoteaf_os(path), e))?;
     file.set_modified(time)
-        .map_err(|e| format!("set mtime on '{}': {}", path.display(), e))
+        .map_err(|e| format!("set mtime on {}: {}", quoteaf_os(path), e))
 }
 
 /// Extract or list the cpio archive.
@@ -941,7 +943,7 @@ fn copy_in(opts: &Options) -> Result<(), String> {
     let input_path = opts.archive_file.as_ref().or(opts.input_file.as_ref());
 
     let mut reader: Box<dyn Read> = if let Some(path) = input_path {
-        Box::new(File::open(path).map_err(|e| format!("cannot open '{}': {}", path, e))?)
+        Box::new(File::open(path).map_err(|e| format!("cannot open {}: {}", quoteaf_os(path), e))?)
     } else {
         Box::new(io::stdin().lock())
     };
@@ -999,7 +1001,7 @@ fn copy_in(opts: &Options) -> Result<(), String> {
             S_IFDIR => {
                 if opts.make_directories || filename == "." {
                     if let Err(e) = fs::create_dir_all(&dest) {
-                        let msg = format!("cpio: mkdir '{}': {}", dest.display(), e);
+                        let msg = format!("cpio: mkdir {}: {}", quoteaf_os(&dest), e);
                         eprintln!("{}", msg);
                         errors.push(msg);
                     } else {
@@ -1018,7 +1020,7 @@ fn copy_in(opts: &Options) -> Result<(), String> {
                     && !parent.exists()
                     && let Err(e) = fs::create_dir_all(parent)
                 {
-                    let msg = format!("cpio: mkdir '{}': {}", parent.display(), e);
+                    let msg = format!("cpio: mkdir {}: {}", quoteaf_os(parent), e);
                     eprintln!("{}", msg);
                     errors.push(msg);
                     continue;
@@ -1038,7 +1040,7 @@ fn copy_in(opts: &Options) -> Result<(), String> {
                 match File::create(&dest) {
                     Ok(mut file) => {
                         if let Err(e) = file.write_all(&entry.data) {
-                            let msg = format!("cpio: write '{}': {}", dest.display(), e);
+                            let msg = format!("cpio: write {}: {}", quoteaf_os(&dest), e);
                             eprintln!("{}", msg);
                             errors.push(msg);
                         } else {
@@ -1049,7 +1051,7 @@ fn copy_in(opts: &Options) -> Result<(), String> {
                         }
                     }
                     Err(e) => {
-                        let msg = format!("cpio: create '{}': {}", dest.display(), e);
+                        let msg = format!("cpio: create {}: {}", quoteaf_os(&dest), e);
                         eprintln!("{}", msg);
                         errors.push(msg);
                     }
@@ -1073,8 +1075,12 @@ fn copy_in(opts: &Options) -> Result<(), String> {
                         let _ = fs::remove_file(&dest);
                     }
                     if let Err(e) = std::os::unix::fs::symlink(&target, &dest) {
-                        let msg =
-                            format!("cpio: symlink '{}' -> '{}': {}", dest.display(), target, e);
+                        let msg = format!(
+                            "cpio: symlink {} -> {}: {}",
+                            quoteaf_os(&dest),
+                            quoteaf_os(&target),
+                            e
+                        );
                         eprintln!("{}", msg);
                         errors.push(msg);
                     }
@@ -1126,7 +1132,7 @@ fn pass_through(opts: &Options) -> Result<(), String> {
     if !dest_base.exists() {
         if opts.make_directories {
             fs::create_dir_all(&dest_base)
-                .map_err(|e| format!("mkdir '{}': {}", dest_base.display(), e))?;
+                .map_err(|e| format!("mkdir {}: {}", quoteaf_os(&dest_base), e))?;
         } else {
             return Err(format!(
                 "destination '{}' does not exist (use -d to create)",
@@ -1151,7 +1157,7 @@ fn pass_through(opts: &Options) -> Result<(), String> {
         let symlink_meta = match fs::symlink_metadata(src) {
             Ok(m) => m,
             Err(e) => {
-                let msg = format!("cpio: stat '{}': {}", filepath, e);
+                let msg = format!("cpio: stat {}: {}", quoteaf_os(filepath), e);
                 eprintln!("{}", msg);
                 errors.push(msg);
                 continue;
@@ -1181,7 +1187,7 @@ fn pass_through(opts: &Options) -> Result<(), String> {
             if opts.make_directories
                 && let Err(e) = fs::create_dir_all(&dest)
             {
-                let msg = format!("cpio: mkdir '{}': {}", dest.display(), e);
+                let msg = format!("cpio: mkdir {}: {}", quoteaf_os(&dest), e);
                 eprintln!("{}", msg);
                 errors.push(msg);
             }
@@ -1205,7 +1211,7 @@ fn pass_through(opts: &Options) -> Result<(), String> {
                             }
                         }
                         if let Err(e) = std::os::unix::fs::symlink(&target, &dest) {
-                            let msg = format!("cpio: symlink '{}': {}", dest.display(), e);
+                            let msg = format!("cpio: symlink {}: {}", quoteaf_os(&dest), e);
                             eprintln!("{}", msg);
                             errors.push(msg);
                         }
@@ -1220,7 +1226,7 @@ fn pass_through(opts: &Options) -> Result<(), String> {
                     }
                 }
                 Err(e) => {
-                    let msg = format!("cpio: readlink '{}': {}", src.display(), e);
+                    let msg = format!("cpio: readlink {}: {}", quoteaf_os(src), e);
                     eprintln!("{}", msg);
                     errors.push(msg);
                 }
@@ -1232,7 +1238,7 @@ fn pass_through(opts: &Options) -> Result<(), String> {
                 && !parent.exists()
                 && let Err(e) = fs::create_dir_all(parent)
             {
-                let msg = format!("cpio: mkdir '{}': {}", parent.display(), e);
+                let msg = format!("cpio: mkdir {}: {}", quoteaf_os(parent), e);
                 eprintln!("{}", msg);
                 errors.push(msg);
                 continue;
@@ -1257,7 +1263,12 @@ fn pass_through(opts: &Options) -> Result<(), String> {
                     }
                 }
                 Err(e) => {
-                    let msg = format!("cpio: copy '{}' -> '{}': {}", filepath, dest.display(), e);
+                    let msg = format!(
+                        "cpio: copy {} -> {}: {}",
+                        quoteaf_os(filepath),
+                        quoteaf_os(&dest),
+                        e
+                    );
                     eprintln!("{}", msg);
                     errors.push(msg);
                 }

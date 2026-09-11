@@ -516,7 +516,7 @@ fn run_tput() -> Result<(), String> {
                 }
             }
             _ if argv[i].starts_with('-') => {
-                return Err(format!("unknown option '{}'", argv[i]));
+                return Err(format!("unknown option {}", quoteaf_os(&argv[i])));
             }
             _ => {
                 let name = argv[i].clone();

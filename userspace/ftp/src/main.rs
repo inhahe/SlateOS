@@ -297,13 +297,13 @@ fn get_cwd() -> Result<String, FtpError> {
 /// Change the local working directory.
 fn change_dir(path: &str) -> Result<(), FtpError> {
     env::set_current_dir(path)
-        .map_err(|e| FtpError::IoError(format!("chdir to '{path}' failed: {e}")))
+        .map_err(|e| FtpError::IoError(format!("chdir to {} failed: {e}", quoteaf_os(path))))
 }
 
 /// Return the size of a file in bytes (also verifies it exists/is readable).
 fn file_size(path: &str) -> Result<u64, FtpError> {
-    let meta =
-        fs::metadata(path).map_err(|e| FtpError::IoError(format!("stat '{path}' failed: {e}")))?;
+    let meta = fs::metadata(path)
+        .map_err(|e| FtpError::IoError(format!("stat {} failed: {e}", quoteaf_os(path))))?;
     Ok(meta.len())
 }
 
@@ -311,10 +311,10 @@ fn file_size(path: &str) -> Result<u64, FtpError> {
 fn list_directory(path: &str) -> Result<Vec<String>, FtpError> {
     let mut names = Vec::new();
     let read_dir = fs::read_dir(path)
-        .map_err(|e| FtpError::IoError(format!("read_dir '{path}' failed: {e}")))?;
+        .map_err(|e| FtpError::IoError(format!("read_dir {} failed: {e}", quoteaf_os(path))))?;
     for entry in read_dir {
-        let dir_entry =
-            entry.map_err(|e| FtpError::IoError(format!("read_dir '{path}' failed: {e}")))?;
+        let dir_entry = entry
+            .map_err(|e| FtpError::IoError(format!("read_dir {} failed: {e}", quoteaf_os(path))))?;
         // std::fs::read_dir never yields "." or ".." entries.
         names.push(dir_entry.file_name().to_string_lossy().into_owned());
     }
@@ -1385,7 +1385,10 @@ impl FtpSession {
             Ok(f) => f,
             Err(e) => {
                 tcp_close(data_handle);
-                return Err(FtpError::IoError(format!("open '{local}' failed: {e}")));
+                return Err(FtpError::IoError(format!(
+                    "open {} failed: {e}",
+                    quoteaf_os(local)
+                )));
             }
         };
 

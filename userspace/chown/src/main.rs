@@ -513,8 +513,8 @@ struct OwnerSpec {
 fn parse_owner_spec(spec: &str, db: &Db) -> Result<OwnerSpec, String> {
     if let Some(group_name) = spec.strip_prefix(':') {
         // `:GROUP` -- change group only
-        let gid =
-            resolve_gid(group_name, db).ok_or_else(|| format!("unknown group: '{group_name}'"))?;
+        let gid = resolve_gid(group_name, db)
+            .ok_or_else(|| format!("unknown group: {}", quoteaf_os(group_name)))?;
         return Ok(OwnerSpec {
             uid: None,
             gid: Some(gid),
@@ -526,8 +526,8 @@ fn parse_owner_spec(spec: &str, db: &Db) -> Result<OwnerSpec, String> {
         let owner_str = &spec[..colon_pos];
         let group_str = &spec[colon_pos + 1..];
 
-        let uid =
-            resolve_uid(owner_str, db).ok_or_else(|| format!("unknown user: '{owner_str}'"))?;
+        let uid = resolve_uid(owner_str, db)
+            .ok_or_else(|| format!("unknown user: {}", quoteaf_os(owner_str)))?;
 
         let gid = if group_str.is_empty() {
             // `OWNER:` -- set group to the owner's *primary* group, which is
@@ -547,7 +547,7 @@ fn parse_owner_spec(spec: &str, db: &Db) -> Result<OwnerSpec, String> {
         } else {
             Some(
                 resolve_gid(group_str, db)
-                    .ok_or_else(|| format!("unknown group: '{group_str}'"))?,
+                    .ok_or_else(|| format!("unknown group: {}", quoteaf_os(group_str)))?,
             )
         };
 
@@ -558,7 +558,7 @@ fn parse_owner_spec(spec: &str, db: &Db) -> Result<OwnerSpec, String> {
     }
 
     // Plain `OWNER` -- change owner only
-    let uid = resolve_uid(spec, db).ok_or_else(|| format!("unknown user: '{spec}'"))?;
+    let uid = resolve_uid(spec, db).ok_or_else(|| format!("unknown user: {}", quoteaf_os(spec)))?;
     Ok(OwnerSpec {
         uid: Some(uid),
         gid: None,
@@ -577,7 +577,7 @@ fn parse_from_filter(spec: &str, db: &Db) -> Result<(Option<u32>, Option<u32>), 
         } else {
             Some(
                 resolve_uid(owner_str, db)
-                    .ok_or_else(|| format!("unknown user in --from: '{owner_str}'"))?,
+                    .ok_or_else(|| format!("unknown user in --from: {}", quoteaf_os(owner_str)))?,
             )
         };
 
@@ -586,15 +586,15 @@ fn parse_from_filter(spec: &str, db: &Db) -> Result<(Option<u32>, Option<u32>), 
         } else {
             Some(
                 resolve_gid(group_str, db)
-                    .ok_or_else(|| format!("unknown group in --from: '{group_str}'"))?,
+                    .ok_or_else(|| format!("unknown group in --from: {}", quoteaf_os(group_str)))?,
             )
         };
 
         Ok((uid, gid))
     } else {
         // Just an owner, no group filter.
-        let uid =
-            resolve_uid(spec, db).ok_or_else(|| format!("unknown user in --from: '{spec}'"))?;
+        let uid = resolve_uid(spec, db)
+            .ok_or_else(|| format!("unknown user in --from: {}", quoteaf_os(spec)))?;
         Ok((Some(uid), None))
     }
 }

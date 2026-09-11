@@ -431,7 +431,7 @@ fn zip_extract_entry(data: &[u8], entry: &ZipEntry) -> Result<Vec<u8>, String> {
                      refusing to expand it",
                     entry.name
                 ),
-                other => format!("zip: '{}': {other}", entry.name),
+                other => format!("zip: {}: {other}", quoteaf_os(&entry.name)),
             })?
         }
         other => {
@@ -1073,7 +1073,10 @@ fn run_zip(opts: &ZipOptions) -> Result<(), String> {
         let path = Path::new(source);
 
         if !path.exists() {
-            errors.push(format!("zip: {source}: No such file or directory"));
+            errors.push(format!(
+                "zip: {}: No such file or directory",
+                quotef_os(source)
+            ));
             continue;
         }
 

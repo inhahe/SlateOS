@@ -113,6 +113,17 @@ IGNORE = {
     # can never be "fixed", so the count could never reach zero, and a ratchet
     # with an unreachable floor stops being read.
     "userspace/coreutils/tests/diagnostics_quote_names.rs": "the detector's own fixtures",
+    # All seven sites are `format!("'{ch}'")` building the NAME of a terminal
+    # symbol -- `Symbol::Terminal(..)`, `terminals.insert(..)`, `prec_tag` --
+    # where `'a'` is yacc's own spelling for a character-literal token. The
+    # quotes are grammar syntax, not decoration on a message, and rewriting
+    # them changes which symbols a grammar matches.
+    #
+    # This is the false positive the `format!` widening was always going to
+    # have, and it is here rather than in the baseline because a baseline
+    # entry says only that a site exists: these can never reach zero, and a
+    # ratchet with an unreachable floor stops being read.
+    "userspace/yacc/src/main.rs": "'{ch}' is a yacc terminal name, not a diagnostic",
 }
 
 # The macros that build a message somebody will read.

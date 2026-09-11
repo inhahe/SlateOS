@@ -866,7 +866,7 @@ fn format_json(dt: &DateTime, epoch_sec: i64) -> String {
 /// Falls back to reading from a proc-style metadata file if std metadata
 /// is not available (which may happen on our custom target).
 fn file_mtime(path: &str) -> Result<(i64, i64), String> {
-    let meta = fs::metadata(path).map_err(|e| format!("cannot stat '{path}': {e}"))?;
+    let meta = fs::metadata(path).map_err(|e| format!("cannot stat {}: {e}", quoteaf_os(path)))?;
 
     // Try std::time::SystemTime.
     match meta.modified() {
@@ -880,7 +880,10 @@ fn file_mtime(path: &str) -> Result<(i64, i64), String> {
                 }
             }
         }
-        Err(e) => Err(format!("cannot get modification time of '{path}': {e}")),
+        Err(e) => Err(format!(
+            "cannot get modification time of {}: {e}",
+            quoteaf_os(path)
+        )),
     }
 }
 

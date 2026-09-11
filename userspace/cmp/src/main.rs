@@ -30,7 +30,7 @@
 //! - 1: files differ
 //! - 2: error occurred
 
-use quoting::quoteaf_os;
+use quoting::{quoteaf_os, quotef_os};
 use std::env;
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -255,7 +255,7 @@ fn open_input(path: &str) -> Result<Box<dyn Read>, String> {
     } else {
         File::open(path)
             .map(|f| Box::new(f) as Box<dyn Read>)
-            .map_err(|e| format!("cmp: {path}: {e}"))
+            .map_err(|e| format!("cmp: {}: {e}", quotef_os(path)))
     }
 }
 

@@ -945,16 +945,16 @@ fn print_usage() {
 fn parse_bus_dev(s: &str) -> Result<(u16, u16), String> {
     let (bus_str, dev_str) = s
         .split_once(':')
-        .ok_or_else(|| format!("expected <bus>:<dev>, got '{s}'"))?;
+        .ok_or_else(|| format!("expected <bus>:<dev>, got {}", quoteaf_os(s)))?;
 
     let bus = bus_str
         .trim()
         .parse::<u16>()
-        .map_err(|_| format!("invalid bus number: '{bus_str}'"))?;
+        .map_err(|_| format!("invalid bus number: {}", quoteaf_os(bus_str)))?;
     let dev = dev_str
         .trim()
         .parse::<u16>()
-        .map_err(|_| format!("invalid device number: '{dev_str}'"))?;
+        .map_err(|_| format!("invalid device number: {}", quoteaf_os(dev_str)))?;
 
     Ok((bus, dev))
 }
@@ -964,14 +964,14 @@ fn parse_bus_dev(s: &str) -> Result<(u16, u16), String> {
 fn parse_vendor_product(s: &str) -> Result<(Option<u16>, Option<u16>), String> {
     let (v_str, p_str) = s
         .split_once(':')
-        .ok_or_else(|| format!("expected <vendor>:<product>, got '{s}'"))?;
+        .ok_or_else(|| format!("expected <vendor>:<product>, got {}", quoteaf_os(s)))?;
 
     let vendor = if v_str.trim().is_empty() {
         None
     } else {
         Some(
             u16::from_str_radix(v_str.trim(), 16)
-                .map_err(|_| format!("invalid vendor ID: '{v_str}'"))?,
+                .map_err(|_| format!("invalid vendor ID: {}", quoteaf_os(v_str)))?,
         )
     };
 
@@ -980,7 +980,7 @@ fn parse_vendor_product(s: &str) -> Result<(Option<u16>, Option<u16>), String> {
     } else {
         Some(
             u16::from_str_radix(p_str.trim(), 16)
-                .map_err(|_| format!("invalid product ID: '{p_str}'"))?,
+                .map_err(|_| format!("invalid product ID: {}", quoteaf_os(p_str)))?,
         )
     };
 

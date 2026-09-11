@@ -386,7 +386,12 @@ fn parse_rule(line: &str) -> Result<Rule, String> {
     let action = match c.next_tok() {
         Some("permit") => RuleAction::Permit,
         Some("deny") => RuleAction::Deny,
-        Some(other) => return Err(format!("expected 'permit' or 'deny', got '{other}'")),
+        Some(other) => {
+            return Err(format!(
+                "expected 'permit' or 'deny', got {}",
+                quoteaf_os(other)
+            ));
+        }
         None => return Err("expected 'permit' or 'deny'".to_string()),
     };
 
@@ -488,7 +493,7 @@ fn parse_rule(line: &str) -> Result<Rule, String> {
 
     // There should be nothing left.
     if let Some(tok) = c.peek() {
-        return Err(format!("unexpected token '{tok}'"));
+        return Err(format!("unexpected token {}", quoteaf_os(tok)));
     }
 
     Ok(Rule {

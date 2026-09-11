@@ -257,7 +257,10 @@ fn parse_userspec(spec: &str, db: &Db) -> Result<(Option<u32>, Option<u32>), Str
         let uid = if user_part.is_empty() {
             None
         } else {
-            Some(resolve_uid(user_part, db).ok_or_else(|| format!("invalid user: '{user_part}'"))?)
+            Some(
+                resolve_uid(user_part, db)
+                    .ok_or_else(|| format!("invalid user: {}", quoteaf_os(user_part)))?,
+            )
         };
 
         let gid = if group_part.is_empty() {
@@ -265,14 +268,15 @@ fn parse_userspec(spec: &str, db: &Db) -> Result<(Option<u32>, Option<u32>), Str
         } else {
             Some(
                 resolve_gid(group_part, db)
-                    .ok_or_else(|| format!("invalid group: '{group_part}'"))?,
+                    .ok_or_else(|| format!("invalid group: {}", quoteaf_os(group_part)))?,
             )
         };
 
         Ok((uid, gid))
     } else {
         // No colon -- just a user.
-        let uid = resolve_uid(spec, db).ok_or_else(|| format!("invalid user: '{spec}'"))?;
+        let uid =
+            resolve_uid(spec, db).ok_or_else(|| format!("invalid user: {}", quoteaf_os(spec)))?;
         Ok((Some(uid), None))
     }
 }
@@ -285,7 +289,8 @@ fn parse_group_list(list: &str, db: &Db) -> Result<Vec<u32>, String> {
         if item.is_empty() {
             continue;
         }
-        let gid = resolve_gid(item, db).ok_or_else(|| format!("invalid group: '{item}'"))?;
+        let gid =
+            resolve_gid(item, db).ok_or_else(|| format!("invalid group: {}", quoteaf_os(item)))?;
         gids.push(gid);
     }
     Ok(gids)
@@ -346,7 +351,7 @@ fn parse_args(args: &[String], db: &Db) -> Result<Options, String> {
 
         // Unknown long option.
         if arg.starts_with("--") {
-            return Err(format!("unrecognized option: '{arg}'"));
+            return Err(format!("unrecognized option: {}", quoteaf_os(arg)));
         }
 
         // First non-option argument is the newroot.
@@ -425,7 +430,10 @@ fn validate_newroot(path: &str) -> Result<(), String> {
                     "cannot change root directory to '{path}': \
                          permission denied"
                 )),
-                _ => Err(format!("cannot change root directory to '{path}': {e}")),
+                _ => Err(format!(
+                    "cannot change root directory to {}: {e}",
+                    quoteaf_os(path)
+                )),
             }
         }
     }

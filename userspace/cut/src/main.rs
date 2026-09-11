@@ -80,7 +80,7 @@ fn parse_ranges(list: &str) -> Result<Vec<Range>, String> {
             // "-M" form: from 1 to M.
             let m: usize = rest
                 .parse()
-                .map_err(|_| format!("invalid range: '{token}'"))?;
+                .map_err(|_| format!("invalid range: {}", quoteaf_os(token)))?;
             if m == 0 {
                 return Err(format!(
                     "fields and positions are numbered from 1: '{token}'"
@@ -91,7 +91,7 @@ fn parse_ranges(list: &str) -> Result<Vec<Range>, String> {
             // "N-" form: from N to end.
             let n: usize = rest
                 .parse()
-                .map_err(|_| format!("invalid range: '{token}'"))?;
+                .map_err(|_| format!("invalid range: {}", quoteaf_os(token)))?;
             if n == 0 {
                 return Err(format!(
                     "fields and positions are numbered from 1: '{token}'"
@@ -105,24 +105,24 @@ fn parse_ranges(list: &str) -> Result<Vec<Range>, String> {
             // "N-M" form.
             let n: usize = token[..dash_pos]
                 .parse()
-                .map_err(|_| format!("invalid range: '{token}'"))?;
+                .map_err(|_| format!("invalid range: {}", quoteaf_os(token)))?;
             let m: usize = token[dash_pos + 1..]
                 .parse()
-                .map_err(|_| format!("invalid range: '{token}'"))?;
+                .map_err(|_| format!("invalid range: {}", quoteaf_os(token)))?;
             if n == 0 || m == 0 {
                 return Err(format!(
                     "fields and positions are numbered from 1: '{token}'"
                 ));
             }
             if n > m {
-                return Err(format!("invalid decreasing range: '{token}'"));
+                return Err(format!("invalid decreasing range: {}", quoteaf_os(token)));
             }
             Range { start: n, end: m }
         } else {
             // Single number "N".
             let n: usize = token
                 .parse()
-                .map_err(|_| format!("invalid range: '{token}'"))?;
+                .map_err(|_| format!("invalid range: {}", quoteaf_os(token)))?;
             if n == 0 {
                 return Err(format!(
                     "fields and positions are numbered from 1: '{token}'"

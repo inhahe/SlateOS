@@ -278,7 +278,7 @@ fn parse_args(args: &[OsString]) -> Result<Config, String> {
                         let b = piece
                             .trim()
                             .parse::<u32>()
-                            .map_err(|e| format!("invalid baud rate '{piece}': {e}"))?;
+                            .map_err(|e| format!("invalid baud rate {}: {e}", quoteaf_os(piece)))?;
                         cfg.baud_rates.push(b);
                     }
                 }

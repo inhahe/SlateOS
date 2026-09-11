@@ -651,7 +651,7 @@ impl PkgConfig {
     /// Add a new repository. Returns error if name already exists.
     fn add_repo(&mut self, name: &str, url: &str, priority: u32) -> Result<(), String> {
         if self.repos.iter().any(|r| r.name == name) {
-            return Err(format!("repository '{name}' already exists"));
+            return Err(format!("repository {} already exists", quoteaf_os(name)));
         }
         self.repos.push(RepoConfig {
             name: name.to_string(),
@@ -667,7 +667,7 @@ impl PkgConfig {
         let initial_len = self.repos.len();
         self.repos.retain(|r| r.name != name);
         if self.repos.len() == initial_len {
-            return Err(format!("repository '{name}' not found"));
+            return Err(format!("repository {} not found", quoteaf_os(name)));
         }
         Ok(())
     }
@@ -680,7 +680,7 @@ impl PkgConfig {
                 return Ok(());
             }
         }
-        Err(format!("repository '{name}' not found"))
+        Err(format!("repository {} not found", quoteaf_os(name)))
     }
 }
 
@@ -1730,7 +1730,10 @@ impl PackageHooks {
                     ))
                 }
             }
-            Err(e) => Err(format!("failed to execute hook '{}': {e}", command)),
+            Err(e) => Err(format!(
+                "failed to execute hook {}: {e}",
+                quoteaf_os(command)
+            )),
         }
     }
 }
@@ -3536,7 +3539,7 @@ fn fetch_url(url: &str) -> Result<Vec<u8>, String> {
     let client = HttpClient::new();
     let request = client
         .get(url)
-        .map_err(|e| format!("invalid URL '{url}': {e}"))?
+        .map_err(|e| format!("invalid URL {}: {e}", quoteaf_os(url)))?
         .header("Accept", "*/*")
         .build();
 
@@ -3757,11 +3760,14 @@ fn parse_pkg_archive(data: &[u8]) -> Result<(PackageManifest, PkgFileBlobs), Str
 
         let (hash, size_str) = header_line
             .split_once(' ')
-            .ok_or_else(|| format!("malformed file entry header: '{header_line}'"))?;
+            .ok_or_else(|| format!("malformed file entry header: {}", quoteaf_os(header_line)))?;
 
-        let size: usize = size_str
-            .parse()
-            .map_err(|e| format!("invalid file size in entry '{header_line}': {e}"))?;
+        let size: usize = size_str.parse().map_err(|e| {
+            format!(
+                "invalid file size in entry {}: {e}",
+                quoteaf_os(header_line)
+            )
+        })?;
 
         // Read the file data
         if pos + size > files_section.len() {
@@ -4267,7 +4273,13 @@ fn parse_snapshot(text: &str) -> Result<Vec<SnapshotEntry>, String> {
         let name = parts[0].to_string();
         let version = match Version::parse(parts[1]) {
             Some(v) => v,
-            None => return Err(format!("invalid version '{}' for {}", parts[1], name)),
+            None => {
+                return Err(format!(
+                    "invalid version {} for {}",
+                    quoteaf_os(parts[1]),
+                    name
+                ));
+            }
         };
         let explicit = parts[2] == "yes";
         let manifest_hash = if parts.len() >= 4 {

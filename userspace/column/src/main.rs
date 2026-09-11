@@ -188,7 +188,7 @@ fn parse_column_indices(s: &str) -> Result<Vec<usize>, String> {
         match trimmed.parse::<usize>() {
             Ok(0) => return Err("column index must be >= 1, got '0'".to_string()),
             Ok(n) => indices.push(n.saturating_sub(1)),
-            Err(_) => return Err(format!("invalid column index: '{trimmed}'")),
+            Err(_) => return Err(format!("invalid column index: {}", quoteaf_os(trimmed))),
         }
     }
     Ok(indices)
@@ -210,7 +210,10 @@ fn consume_option_value<'a>(
     }
     *idx += 1;
     if *idx >= args.len() {
-        return Err(format!("column: option '{flag_name}' requires an argument"));
+        return Err(format!(
+            "column: option {} requires an argument",
+            quoteaf_os(flag_name)
+        ));
     }
     Ok(&args[*idx])
 }

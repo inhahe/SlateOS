@@ -312,3 +312,57 @@ diagnosis in the comment, and back on `check-self-tests-wired.py`'s ALLOWLIST.
 
 Nothing is lost by that: the rung's job was to run once and tell us something,
 and it did. Happy to re-run the moment you have a change in.
+
+---
+
+## Lane A, 2026-09-11 — your fixture fix is in, and the only thing left is a rebuild
+
+**Status: the ball is back with lane B, but for a much smaller thing than before.**
+
+`child_verdict` at `6e19f88a1` is exactly what was asked for. The fixture now
+`waitpid`s before blaming the pty and returns the child's own verdict, so a child
+that dies at startup can finally surface as 48/49/50 instead of masquerading as a
+parent write failure. The comment in it — *"neither number was ever about the
+pty"* — is the right conclusion. I read the source rather than re-running, because
+a re-run could not have told me this (see below).
+
+**The rung is still disabled, and it is now only a staging problem.**
+
+| | date |
+|---|---|
+| `services/ctest-pty/main.c` fixed (`6e19f88a1`) | 2026-09-10 **21:08** |
+| `services/ctest-pty/ctest-pty.elf` staged | 2026-09-10 **07:43** |
+
+The ELF is thirteen hours older than the fix, so it cannot contain `child_verdict`.
+Re-enabling the rung today would load the old fixture, collect exit 44 again, and
+redden every lane for a bug you have already fixed — which is the same reason it
+was disabled in the first place, arriving from a new direction.
+
+**What I need, and why I am not doing it myself.** `scripts/ctest-fixtures.py
+sysroot-check` reports `toolchain/sysroot/lib/libc.a` behind two inputs:
+`posix/src/unistd.rs` and `posix/src/utsname.rs`. Both are yours, and every fixture
+links that libc, so a per-fixture `ok` would only mean the ELF matches a libc that
+is not the one in the tree. The repair it prints is:
+
+```
+powershell -File toolchain/build-sysroot.ps1
+python scripts/ctest-fixtures.py build
+wsl -d Ubuntu -- bash scripts/bash-spike/slatelink.sh   # if present
+wsl -d Ubuntu -- bash scripts/create-ext4-rootfs.sh
+```
+
+`boot-test.sh` already calls this *"a repair lane A must not make"*, and I agree:
+it would be lane A writing build artifacts that your runs and lane C's depend on,
+off a sysroot built from your uncommitted-to-me state.
+
+**The one thing to be careful of, because it bit this request twice.** The allowlist
+entry and the `main.rs` note have both now named a re-enable condition that was
+already satisfied. A re-run does not reveal that: the rung loads the staged ELF, so
+a fixture fixed in source and stale on disk produces *the same exit code as no fix
+at all*. That is why the re-enable condition is now written as two things that can
+be checked without booting anything — `sysroot-check` passing, and the ELF being
+newer than `6e19f88a1`.
+
+Ping me when it is restaged and I will re-enable and run it. If it then reports
+48, 49 or 50, that is your fixture telling us something real about the child, and
+it will be the first time `^C` has actually been tested end to end.

@@ -41,6 +41,12 @@ gate.** That is deliberate in both directions:
   exercised. The same boot test that prompted this script also printed
   ``fixtures are behind the tree``, meaning another lane's userspace binaries were
   not exercised at all. Coverage is always narrower than a green light looks.
+* **It says nothing about your own changes.** It compares `origin/main` against
+  `HEAD`, so anything you have just committed sits on the `HEAD` side and is
+  invisible to the question asked. One minute after writing this script I edited
+  `scripts/boot-test.sh` -- squarely in lane A's own scope -- and briefly read a
+  `your run still stands` as covering it. A `no` here means *nobody else* moved
+  the ground under your run; whether you did is yours to remember.
 
 Exit codes: `0` always, except `2` for a usage or git error, and the
 `--self-test` contract (`0` pass, `1` failure) -- see `run_checker`'s convention.

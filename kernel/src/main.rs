@@ -2627,9 +2627,25 @@ extern "C" fn kernel_main() -> ! {
     // anti-starvation line is gone from this run -- and it let the child exit
     // sooner, which moved the symptom from 47 to 44 without changing the cause.
     //
-    // RE-ENABLE when the fixture reaps before reporting a write failure, or
-    // otherwise lets a child startup failure surface as 48/49/50. Reported to
-    // lane B; tracked in
+    // THAT CONDITION IS NOW MET, and the rung still cannot be re-enabled. Lane B
+    // landed `child_verdict` at 6e19f88a1 (2026-09-10 21:08): the fixture reaps
+    // first and returns the child's own verdict, falling back to 44 only when the
+    // child is genuinely alive. Read in services/ctest-pty/main.c rather than
+    // inferred from a run.
+    //
+    // What blocks it now is the STAGED BINARY, which is not the same question.
+    // services/ctest-pty/ctest-pty.elf is dated 2026-09-10 07:43 and the fix is 13
+    // hours later, so the ELF this rung would load cannot contain the new logic --
+    // re-enabling collects 44 from the old fixture and reddens every lane for a bug
+    // that is already fixed. Restaging means rebuilding the sysroot (libc.a is
+    // behind lane B's posix/src/unistd.rs and utsname.rs) and relinking under
+    // services/**, which boot-test.sh calls "a repair lane A must not make".
+    //
+    // RE-ENABLE when `scripts/ctest-fixtures.py sysroot-check` passes AND
+    // services/ctest-pty/ctest-pty.elf is newer than 6e19f88a1 -- both checkable in
+    // one command. Check rather than assume: the re-enable condition written here
+    // has now been satisfied twice while the rung stayed off for another reason.
+    // Asked of lane B in
     // `requests/b-a-run-the-ctest-pty-fixture-so-a-synthesised-ctrl-c-is-finally-tested.md`.
     //
     // {

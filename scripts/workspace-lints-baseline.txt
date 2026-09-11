@@ -72,7 +72,6 @@ userspace/hwclock
 userspace/iconv
 userspace/indexer
 userspace/install
-userspace/iostat
 userspace/ip
 userspace/join
 userspace/journalctl

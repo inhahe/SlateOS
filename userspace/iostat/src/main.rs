@@ -223,14 +223,18 @@ fn parse_cpu_line(rest: &str) -> Option<CpuStats> {
         .split_whitespace()
         .filter_map(|s| s.parse().ok())
         .collect();
-    if vals.len() < 4 {
+    // A slice pattern rather than `len() < 4` followed by four indexes. The
+    // check and the indexing were correct together, but only together -- the
+    // pattern makes the requirement part of the match instead of something a
+    // later edit has to remember.
+    let [user, nice, system, idle, ..] = vals.as_slice() else {
         return None;
-    }
+    };
     Some(CpuStats {
-        user: vals[0],
-        nice: vals[1],
-        system: vals[2],
-        idle: vals[3],
+        user: *user,
+        nice: *nice,
+        system: *system,
+        idle: *idle,
         iowait: vals.get(4).copied().unwrap_or(0),
         irq: vals.get(5).copied().unwrap_or(0),
         softirq: vals.get(6).copied().unwrap_or(0),
@@ -289,18 +293,23 @@ fn read_disk_stats() -> Vec<DiskStats> {
 
     for line in content.lines() {
         let fields: Vec<&str> = line.split_whitespace().collect();
-        if fields.len() < 14 {
+        let [major_s, minor_s, name_s, rest @ ..] = fields.as_slice() else {
+            continue;
+        };
+        // 14 is the classic /proc/diskstats width; kernels since 4.18 append
+        // more columns, so this is a minimum rather than an equality.
+        if rest.len() < 11 {
             continue;
         }
-        let major: u32 = match fields[0].parse() {
+        let major: u32 = match major_s.parse() {
             Ok(v) => v,
             Err(_) => continue,
         };
-        let minor: u32 = match fields[1].parse() {
+        let minor: u32 = match minor_s.parse() {
             Ok(v) => v,
             Err(_) => continue,
         };
-        let name = fields[2].to_string();
+        let name = (*name_s).to_string();
         let sector_size = read_sector_size(&name);
 
         let parse_u64 =
@@ -369,8 +378,8 @@ fn compute_basic(
     } else {
         0.0
     };
-    let read_bytes = d_rd_sectors * current.sector_size;
-    let write_bytes = d_wr_sectors * current.sector_size;
+    let read_bytes = d_rd_sectors.saturating_mul(current.sector_size);
+    let write_bytes = d_wr_sectors.saturating_mul(current.sector_size);
 
     // Same guard for the byte rates, which divide by the same interval.
     let per_sec = |bytes: u64, scale: f64| {
@@ -385,16 +394,16 @@ fn compute_basic(
         DisplayUnit::MegaBytes => (
             per_sec(read_bytes, 1_048_576.0),
             per_sec(write_bytes, 1_048_576.0),
-            current.rd_sectors * current.sector_size / 1_048_576,
-            current.wr_sectors * current.sector_size / 1_048_576,
+            current.rd_sectors.saturating_mul(current.sector_size) / 1_048_576,
+            current.wr_sectors.saturating_mul(current.sector_size) / 1_048_576,
         ),
         // KB and Human both use KB for the rate column; Human formatting
         // is applied at display time for totals.
         _ => (
             per_sec(read_bytes, 1024.0),
             per_sec(write_bytes, 1024.0),
-            current.rd_sectors * current.sector_size / 1024,
-            current.wr_sectors * current.sector_size / 1024,
+            current.rd_sectors.saturating_mul(current.sector_size) / 1024,
+            current.wr_sectors.saturating_mul(current.sector_size) / 1024,
         ),
     };
 
@@ -453,12 +462,14 @@ fn compute_extended(current: &DiskStats, prev: Option<&DiskStats>, interval: f64
     let rrqm_per_s = d_rd_merges as f64 / interval;
     let wrqm_per_s = d_wr_merges as f64 / interval;
 
-    let r_mb_per_s = (d_rd_sectors * current.sector_size) as f64 / 1_048_576.0 / interval;
-    let w_mb_per_s = (d_wr_sectors * current.sector_size) as f64 / 1_048_576.0 / interval;
+    let r_mb_per_s =
+        (d_rd_sectors.saturating_mul(current.sector_size)) as f64 / 1_048_576.0 / interval;
+    let w_mb_per_s =
+        (d_wr_sectors.saturating_mul(current.sector_size)) as f64 / 1_048_576.0 / interval;
 
     // Merge percentages: what fraction of I/Os were merged.
-    let total_rd = d_rd_ios + d_rd_merges;
-    let total_wr = d_wr_ios + d_wr_merges;
+    let total_rd = d_rd_ios.saturating_add(d_rd_merges);
+    let total_wr = d_wr_ios.saturating_add(d_wr_merges);
     let pct_rrqm = if total_rd > 0 {
         d_rd_merges as f64 / total_rd as f64 * 100.0
     } else {
@@ -492,18 +503,18 @@ fn compute_extended(current: &DiskStats, prev: Option<&DiskStats>, interval: f64
 
     // Average request sizes in KB.
     let rareq_sz = if d_rd_ios > 0 {
-        (d_rd_sectors * current.sector_size) as f64 / 1024.0 / d_rd_ios as f64
+        (d_rd_sectors.saturating_mul(current.sector_size)) as f64 / 1024.0 / d_rd_ios as f64
     } else {
         0.0
     };
     let wareq_sz = if d_wr_ios > 0 {
-        (d_wr_sectors * current.sector_size) as f64 / 1024.0 / d_wr_ios as f64
+        (d_wr_sectors.saturating_mul(current.sector_size)) as f64 / 1024.0 / d_wr_ios as f64
     } else {
         0.0
     };
 
     // Average service time (approximate: total busy / total completed I/Os).
-    let total_ios = d_rd_ios + d_wr_ios;
+    let total_ios = d_rd_ios.saturating_add(d_wr_ios);
     let svctm = if total_ios > 0 {
         d_io_ticks as f64 / total_ios as f64
     } else {
@@ -553,8 +564,19 @@ fn format_human(kb: u64) -> String {
 }
 
 /// Print the CPU statistics header and values.
-fn print_cpu(pct: &CpuPct) {
+fn print_cpu(pct: Option<&CpuPct>) {
     println!("avg-cpu:  %user   %nice %system %iowait  %steal   %idle");
+    let Some(pct) = pct else {
+        // Six question marks rather than six zeroes. A row of 0.00 is what an
+        // idle machine looks like; this is what an unreadable /proc/stat looks
+        // like, and they were the same output until now.
+        println!(
+            "       {:>7} {:>7} {:>7} {:>7} {:>7} {:>7}",
+            "?", "?", "?", "?", "?", "?"
+        );
+        println!();
+        return;
+    };
     println!(
         "       {:>7.2} {:>7.2} {:>7.2} {:>7.2} {:>7.2} {:>7.2}",
         pct.user, pct.nice, pct.system, pct.iowait, pct.steal, pct.idle,
@@ -794,7 +816,10 @@ fn read_uptime_secs() -> f64 {
 /// Generate and display one report (one "snapshot").
 fn display_report(
     config: &Config,
-    current_cpu: &CpuStats,
+    // `None` when `/proc/stat` could not be read. It is NOT a zeroed
+    // `CpuStats`: that prints as 0.00 in every column, which is a claim that
+    // the machine is idle rather than an admission that nothing was measured.
+    current_cpu: Option<&CpuStats>,
     prev_cpu: &CpuStats,
     current_disks: &[DiskStats],
     prev_disks: &[DiskStats],
@@ -802,10 +827,12 @@ fn display_report(
 ) {
     maybe_print_timestamp(config);
 
-    // CPU section.
-    let cpu_delta = current_cpu.delta(prev_cpu);
-    let cpu_total_delta = cpu_delta.total();
-    let cpu_pct = cpu_delta.percentages(cpu_total_delta);
+    // CPU section. `None` propagates to the printer, which says so.
+    let cpu_pct = current_cpu.map(|c| {
+        let d = c.delta(prev_cpu);
+        let total = d.total();
+        d.percentages(total)
+    });
 
     let show_cpu = !config.disk_only;
     let show_disk = !config.cpu_only;
@@ -838,7 +865,7 @@ fn display_report(
         }
         print_json_report(
             config,
-            if show_cpu { Some(&cpu_pct) } else { None },
+            if show_cpu { cpu_pct.as_ref() } else { None },
             &basics,
             &extended_stats,
         );
@@ -847,7 +874,7 @@ fn display_report(
 
     // Plain text output.
     if show_cpu {
-        print_cpu(&cpu_pct);
+        print_cpu(cpu_pct.as_ref());
     }
 
     if show_disk {
@@ -881,13 +908,13 @@ fn run(config: &Config) {
     let mut prev_cpu = CpuStats::default();
     let prev_disks_empty: Vec<DiskStats> = Vec::new();
 
-    let current_cpu = read_cpu_stats().unwrap_or_default();
+    let current_cpu = read_cpu_stats();
     let all_disks = read_disk_stats();
     let filtered = filter_devices(&all_disks, config);
 
     display_report(
         config,
-        &current_cpu,
+        current_cpu.as_ref(),
         &prev_cpu,
         &filtered,
         &prev_disks_empty,
@@ -900,7 +927,19 @@ fn run(config: &Config) {
         None => return,
     };
 
-    prev_cpu = current_cpu;
+    // Only advance the baseline on a successful read. A failed one must not
+
+    // destroy the last known sample -- the next good read then deltas against
+
+    // it, which understates the rate over the skipped interval but is far
+
+    // better than deltaing against zeroes, which would report the whole
+
+    // counter as if it happened in one interval.
+
+    if let Some(c) = current_cpu {
+        prev_cpu = c;
+    }
     let mut prev_disks = all_disks;
     let mut iteration = 1u32;
 
@@ -914,22 +953,34 @@ fn run(config: &Config) {
 
         std::thread::sleep(std::time::Duration::from_secs_f64(interval));
 
-        let current_cpu = read_cpu_stats().unwrap_or_default();
+        let current_cpu = read_cpu_stats();
         let all_disks = read_disk_stats();
         let filtered = filter_devices(&all_disks, config);
 
         display_report(
             config,
-            &current_cpu,
+            current_cpu.as_ref(),
             &prev_cpu,
             &filtered,
             &prev_disks,
             interval,
         );
 
-        prev_cpu = current_cpu;
+        // Only advance the baseline on a successful read. A failed one must not
+
+        // destroy the last known sample -- the next good read then deltas against
+
+        // it, which understates the rate over the skipped interval but is far
+
+        // better than deltaing against zeroes, which would report the whole
+
+        // counter as if it happened in one interval.
+
+        if let Some(c) = current_cpu {
+            prev_cpu = c;
+        }
         prev_disks = all_disks;
-        iteration += 1;
+        iteration = iteration.saturating_add(1);
     }
 }
 
@@ -990,9 +1041,12 @@ fn main() {
     // Collect positional arguments (interval, count) separately.
     let mut positionals: Vec<String> = Vec::new();
 
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
+    // An iterator rather than an index: `args[i]` can panic and `i += 1`
+    // can overflow, and the options that consume a following argument need
+    // a cursor, which `Iterator::next` is.
+    let mut it = args.iter().skip(1);
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
             "-c" => config.cpu_only = true,
             "-d" => config.disk_only = true,
             "-x" | "--extended" => config.extended = true,
@@ -1008,12 +1062,11 @@ fn main() {
                 process::exit(0);
             }
             "-p" => {
-                i += 1;
-                if i >= args.len() {
+                let Some(value) = it.next() else {
                     eprintln!("error: -p requires a device name");
                     process::exit(1);
-                }
-                config.filter_devices.push(args[i].clone());
+                };
+                config.filter_devices.push(value.clone());
             }
             other => {
                 // Might be a positional (interval or count).
@@ -1025,7 +1078,6 @@ fn main() {
                 positionals.push(other.to_string());
             }
         }
-        i += 1;
     }
 
     // Parse positional arguments: [interval [count]].
@@ -1060,7 +1112,15 @@ fn main() {
 #[cfg(test)]
 // A test that unwraps is asserting the call succeeded, and a panic names the
 // line. CLAUDE.md allows these in test modules.
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+//
+// `float_cmp` is allowed here and the reason is specific rather than general:
+// every expected value in these tests is exactly representable. 15/2 is 7.5;
+// 200 sectors * 512 / 1024 is 100; 2048 * 512 / 1048576 is 1. The divisors are
+// powers of two and the numerators are small integers, so the arithmetic is
+// exact and `assert_eq!` is the right assertion. Replacing them with an
+// epsilon comparison would weaken a test that currently pins the exact value a
+// wrong unit conversion would change.
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
 mod tests {
     use super::*;
 

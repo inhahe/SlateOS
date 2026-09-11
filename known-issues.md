@@ -64780,6 +64780,26 @@ lint programme above is still worth doing; it is not a substitute for a
 differential, and two of its three crates so far were duplicates that a
 differential then deleted.
 
+**21 -> 20 (2026-09-11): `du`, whose every number is wrong.**
+`DIFF_PKG=du bash scripts/du-diff.sh`:
+
+**coreutils 188 passed, 0 differed. The standalone 3 passed, 185 differed.**
+
+The whole of it is visible in the first case, `du t`:
+
+| GNU | standalone |
+|---|---|
+| 4 → `t/empty` | *(absent)* |
+| 12 → `t/sub/deep` | 16 → `t/sub/deep` |
+| 24 → `t/sub` | 48 → `t/sub` |
+| 3036 → `t` | 4112 → `t` |
+
+**An empty directory is missing from the listing**, and **every remaining
+number is different** — not by a constant factor either: 12→16, 24→48,
+3036→4112. Both exit 0. `du` prints nothing but sizes and paths, so a `du` that
+gets the sizes wrong and drops a directory has no correct output left; there is
+nothing else in it to be right about.
+
 **22 -> 21 (2026-09-11): `df`, which passes NOTHING and colours a pipe.**
 `DIFF_PKG=df bash scripts/df-diff.sh`:
 

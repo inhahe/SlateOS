@@ -47,7 +47,6 @@ userspace/dbus
 userspace/diff
 userspace/diskutil
 userspace/dmesg
-userspace/du
 userspace/env
 userspace/fdisk
 userspace/file

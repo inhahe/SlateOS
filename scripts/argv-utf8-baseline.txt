@@ -58,7 +58,6 @@ userspace/dig/src/main.rs:argv-as-string
 userspace/diskutil/src/main.rs:argv-as-string
 userspace/dmesg/src/main.rs:argv-as-string
 userspace/dmidecode/src/main.rs:argv-as-string
-userspace/du/src/main.rs:argv-as-string
 userspace/efibootmgr/src/main.rs:argv-as-string
 userspace/eject/src/main.rs:argv-as-string
 userspace/env/src/main.rs:argv-as-string

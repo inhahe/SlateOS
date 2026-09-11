@@ -715,14 +715,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "du"
-version = "0.1.0"
-dependencies = [
- "quoting",
- "scratchdir",
-]
-
-[[package]]
 name = "earlyoom"
 version = "0.1.0"
 dependencies = [

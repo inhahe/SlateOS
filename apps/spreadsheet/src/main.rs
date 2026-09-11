@@ -22,6 +22,7 @@
 //! Uses the guitk library for UI rendering.
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
@@ -4890,24 +4891,26 @@ impl SpreadsheetApp {
         let sheet = self.active_sheet();
 
         // Header background
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
+        self.palette.push_surface(
+            cmds,
+            0.0,
             y,
-            width: self.window_width,
-            height: COL_HEADER_HEIGHT,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+            self.window_width,
+            COL_HEADER_HEIGHT,
+            0.0,
+            Surface::Card,
+        );
 
         // Top-left corner cell
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
+        self.palette.push_surface(
+            cmds,
+            0.0,
             y,
-            width: ROW_HEADER_WIDTH,
-            height: COL_HEADER_HEIGHT,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::ZERO,
-        });
+            ROW_HEADER_WIDTH,
+            COL_HEADER_HEIGHT,
+            0.0,
+            Surface::Card,
+        );
 
         // Column labels, in two bands.
         //
@@ -5493,14 +5496,15 @@ impl SpreadsheetApp {
     /// anywhere the click test would not find it.
     fn render_sheet_tabs(&self, cmds: &mut Vec<RenderCommand>) {
         // Tab bar background
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: self.tab_top(),
-            width: self.window_width,
-            height: SHEET_TAB_HEIGHT,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            cmds,
+            0.0,
+            self.tab_top(),
+            self.window_width,
+            SHEET_TAB_HEIGHT,
+            0.0,
+            Surface::Card,
+        );
 
         let mut rects = self.sheet_tab_rects();
         for (idx, sheet) in self.sheets.iter().enumerate() {
@@ -5550,14 +5554,8 @@ impl SpreadsheetApp {
 
         // "+" button for new sheet — the one rect past the last sheet.
         let Some(plus) = rects.next() else { return };
-        cmds.push(RenderCommand::FillRect {
-            x: plus.x,
-            y: plus.y,
-            width: plus.w,
-            height: plus.h,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        self.palette
+            .push_surface(cmds, plus.x, plus.y, plus.w, plus.h, 4.0, Surface::Card);
         cmds.push(RenderCommand::Text {
             x: plus.x + 8.0,
             y: plus.y + 5.0,
@@ -5652,23 +5650,25 @@ impl SpreadsheetApp {
     /// [`ScrollbarGeometry`], which is the whole point — see its doc comment.
     fn render_scrollbars(&self, cmds: &mut Vec<RenderCommand>) {
         for bar in [self.vertical_scrollbar(), self.horizontal_scrollbar()] {
-            cmds.push(RenderCommand::FillRect {
-                x: bar.track.x,
-                y: bar.track.y,
-                width: bar.track.w,
-                height: bar.track.h,
-                color: self.palette.mantle,
-                corner_radii: CornerRadii::ZERO,
-            });
+            self.palette.push_surface(
+                cmds,
+                bar.track.x,
+                bar.track.y,
+                bar.track.w,
+                bar.track.h,
+                0.0,
+                Surface::ControlTrack,
+            );
             if let Some(thumb) = bar.thumb {
-                cmds.push(RenderCommand::FillRect {
-                    x: thumb.x,
-                    y: thumb.y,
-                    width: thumb.w,
-                    height: thumb.h,
-                    color: self.palette.surface1,
-                    corner_radii: CornerRadii::all(4.0),
-                });
+                self.palette.push_surface(
+                    cmds,
+                    thumb.x,
+                    thumb.y,
+                    thumb.w,
+                    thumb.h,
+                    4.0,
+                    Surface::ControlTrack,
+                );
             }
         }
     }
@@ -5834,14 +5834,8 @@ impl SpreadsheetApp {
         });
 
         // Background
-        cmds.push(RenderCommand::FillRect {
-            x: dlg_x,
-            y: dlg_y,
-            width: dlg_w,
-            height: dlg_h,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::all(8.0),
-        });
+        self.palette
+            .push_surface(cmds, dlg_x, dlg_y, dlg_w, dlg_h, 8.0, Surface::Card);
 
         // Border
         cmds.push(RenderCommand::StrokeRect {
@@ -5889,14 +5883,15 @@ impl SpreadsheetApp {
                         max_width: None,
                         overflow: TextOverflow::Clip,
                     });
-                    cmds.push(RenderCommand::FillRect {
-                        x: rect.x,
-                        y: rect.y,
-                        width: rect.w,
-                        height: rect.h,
-                        color: self.palette.surface0,
-                        corner_radii: CornerRadii::all(3.0),
-                    });
+                    self.palette.push_surface(
+                        cmds,
+                        rect.x,
+                        rect.y,
+                        rect.w,
+                        rect.h,
+                        3.0,
+                        Surface::Card,
+                    );
                     // Which field the next keystroke goes into. Two identical
                     // boxes with a caret in neither is a dialog that cannot be
                     // used without typing something to find out.
@@ -5928,14 +5923,15 @@ impl SpreadsheetApp {
                         FindControl::ReplaceAll => "Replace All",
                         _ => "Find Next",
                     };
-                    cmds.push(RenderCommand::FillRect {
-                        x: rect.x,
-                        y: rect.y,
-                        width: rect.w,
-                        height: rect.h,
-                        color: self.palette.surface0,
-                        corner_radii: CornerRadii::all(4.0),
-                    });
+                    self.palette.push_surface(
+                        cmds,
+                        rect.x,
+                        rect.y,
+                        rect.w,
+                        rect.h,
+                        4.0,
+                        Surface::Card,
+                    );
                     cmds.push(RenderCommand::Text {
                         x: rect.x + 8.0,
                         y: rect.y + 5.0,
@@ -9673,6 +9669,10 @@ mod tests {
         let plus = app
             .render_commands()
             .iter()
+            // Filled under the Cards theme and outlined under Borders, and the
+            // outline is drawn half a line inside the rectangle asked for -- so
+            // it is matched on its un-inset width and handed back at its
+            // un-inset position, which is where the click has to land.
             .find_map(|c| match c {
                 RenderCommand::FillRect {
                     x,
@@ -9688,6 +9688,23 @@ mod tests {
                         y: *y,
                         w: *width,
                         h: *height,
+                    })
+                }
+                RenderCommand::StrokeRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    line_width,
+                    ..
+                } if (*width + *line_width - SHEET_ADD_BUTTON_WIDTH).abs() < 0.01
+                    && (*y - line_width / 2.0 - last.y).abs() < 0.01 =>
+                {
+                    Some(Rect {
+                        x: x - line_width / 2.0,
+                        y: y - line_width / 2.0,
+                        w: width + line_width,
+                        h: height + line_width,
                     })
                 }
                 _ => None,

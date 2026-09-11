@@ -62,6 +62,47 @@ impl<T> CommandSink for guitk::frame::Frame<T> {
     }
 }
 
+/// The rectangle a surface command was asked for, whichever way it was drawn.
+///
+/// A filled surface is drawn at the rectangle given; an outlined one is stroked
+/// half a line *inside* it, so its command reports a position one half-pixel in
+/// and a size one pixel smaller. Tests that identify a box by its geometry --
+/// "the tab at this x", "the row under this text" -- need the rectangle the
+/// caller asked for, not the one the stroke occupies.
+///
+/// Extracted because the same three lines were being written into a fifth app's
+/// test: jsonviewer, kanban, netmanager and spreadsheet each had a helper that
+/// matched `FillRect` by colour and stopped finding anything once the box
+/// became an outline.
+///
+/// Returns `None` for commands that are not rectangles.
+#[must_use]
+pub fn logical_rect(cmd: &guitk::render::RenderCommand) -> Option<(f32, f32, f32, f32)> {
+    match *cmd {
+        guitk::render::RenderCommand::FillRect {
+            x,
+            y,
+            width,
+            height,
+            ..
+        } => Some((x, y, width, height)),
+        guitk::render::RenderCommand::StrokeRect {
+            x,
+            y,
+            width,
+            height,
+            line_width,
+            ..
+        } => Some((
+            x - line_width / 2.0,
+            y - line_width / 2.0,
+            width + line_width,
+            height + line_width,
+        )),
+        _ => None,
+    }
+}
+
 /// What a box *is*, which is what a draw site knows.
 ///
 /// Deliberately not a list of shades. A caller that knew it wanted `surface1`
@@ -407,6 +448,21 @@ mod tests {
                     "negative stroke: {width}x{height}"
                 );
             }
+        }
+    }
+
+    /// `logical_rect` gives back the rectangle asked for, both ways round.
+    #[test]
+    fn a_logical_rect_is_the_rectangle_that_was_asked_for() {
+        for style in [SurfaceStyle::Borders, SurfaceStyle::Cards] {
+            let mut tree = RenderTree::new();
+            styled(style).draw_surface(&mut tree, 10.0, 20.0, 100.0, 40.0, 4.0, Surface::Card);
+            let rects: Vec<_> = tree.commands.iter().filter_map(logical_rect).collect();
+            assert_eq!(
+                rects,
+                [(10.0, 20.0, 100.0, 40.0)],
+                "under {style:?} the rectangle came back changed"
+            );
         }
     }
 

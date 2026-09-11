@@ -15,6 +15,7 @@
 //! Slate OS syscalls; stubbed with representative data for initial development.
 
 use appearance::Palette;
+use appearance::Surface;
 #[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]
@@ -1308,14 +1309,15 @@ fn render_sidebar(tree: &mut RenderTree, app: &PartitionManagerApp) {
     let bottom = geom.bottom;
 
     // Sidebar background
-    tree.push(RenderCommand::FillRect {
-        x: geom.left,
-        y: top,
-        width: geom.width,
-        height: geom.height(),
-        color: app.palette.mantle,
-        corner_radii: CornerRadii::ZERO,
-    });
+    app.palette.push_surface(
+        tree,
+        geom.left,
+        top,
+        geom.width,
+        geom.height(),
+        0.0,
+        Surface::Sidebar,
+    );
 
     // "Disks" header
     tree.push(RenderCommand::Text {
@@ -1591,14 +1593,8 @@ fn render_disk_map(tree: &mut RenderTree, app: &PartitionManagerApp) {
     }
 
     // "Unallocated" in legend
-    tree.push(RenderCommand::FillRect {
-        x: lx,
-        y: legend_y,
-        width: 10.0,
-        height: 10.0,
-        color: app.palette.surface0,
-        corner_radii: CornerRadii::all(2.0),
-    });
+    app.palette
+        .push_surface(tree, lx, legend_y, 10.0, 10.0, 2.0, Surface::Card);
     tree.push(RenderCommand::Text {
         x: lx + 14.0,
         y: legend_y,
@@ -2421,14 +2417,15 @@ fn render_queue_panel(tree: &mut RenderTree, app: &PartitionManagerApp) {
     let panel_width = geom.width;
 
     // Background
-    tree.push(RenderCommand::FillRect {
-        x: left,
-        y: geom.panel_top,
-        width: panel_width,
-        height: geom.height(),
-        color: app.palette.surface0,
-        corner_radii: CornerRadii::ZERO,
-    });
+    app.palette.push_surface(
+        tree,
+        left,
+        geom.panel_top,
+        panel_width,
+        geom.height(),
+        0.0,
+        Surface::Card,
+    );
 
     // Top border
     tree.push(RenderCommand::Line {
@@ -2641,14 +2638,8 @@ fn render_create_partition_dialog(tree: &mut RenderTree, app: &PartitionManagerA
     });
 
     // Background
-    tree.push(RenderCommand::FillRect {
-        x: dx,
-        y: dy,
-        width: dw,
-        height: dh,
-        color: app.palette.surface0,
-        corner_radii: CornerRadii::all(8.0),
-    });
+    app.palette
+        .push_surface(tree, dx, dy, dw, dh, 8.0, Surface::Card);
 
     tree.push(RenderCommand::StrokeRect {
         x: dx,
@@ -2930,14 +2921,15 @@ fn render_format_dialog(tree: &mut RenderTree, app: &PartitionManagerApp) {
     });
 
     // Background
-    tree.push(RenderCommand::FillRect {
-        x: dx,
-        y: dy,
-        width: DIALOG_WIDTH,
-        height: DIALOG_HEIGHT,
-        color: app.palette.surface0,
-        corner_radii: CornerRadii::all(8.0),
-    });
+    app.palette.push_surface(
+        tree,
+        dx,
+        dy,
+        DIALOG_WIDTH,
+        DIALOG_HEIGHT,
+        8.0,
+        Surface::Panel,
+    );
 
     tree.push(RenderCommand::StrokeRect {
         x: dx,

@@ -35,6 +35,7 @@
 #![allow(clippy::struct_excessive_bools)]
 
 use appearance::Palette;
+use appearance::Surface;
 use core::num::NonZeroUsize;
 
 use guitk::Color;
@@ -1904,14 +1905,8 @@ impl QrApp {
 
     fn render_input_panel(&self, cmds: &mut Vec<RenderCommand>, y: f32, height: f32) {
         // Panel background
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y,
-            width: LEFT_PANEL_WIDTH,
-            height,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(cmds, 0.0, y, LEFT_PANEL_WIDTH, height, 0.0, Surface::Card);
 
         // Right border
         cmds.push(RenderCommand::Line {
@@ -1995,14 +1990,8 @@ impl QrApp {
         });
         cy += 16.0;
 
-        cmds.push(RenderCommand::FillRect {
-            x: lx,
-            y: cy,
-            width: max_w,
-            height: 60.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
+        self.palette
+            .push_surface(cmds, lx, cy, max_w, 60.0, CORNER_RADIUS, Surface::Card);
         cmds.push(RenderCommand::StrokeRect {
             x: lx,
             y: cy,
@@ -2072,14 +2061,8 @@ impl QrApp {
                 break;
             }
 
-            cmds.push(RenderCommand::FillRect {
-                x: lx,
-                y: cy,
-                width: max_w,
-                height: 24.0,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::all(CORNER_RADIUS),
-            });
+            self.palette
+                .push_surface(cmds, lx, cy, max_w, 24.0, CORNER_RADIUS, Surface::Card);
 
             // Mode indicator
             let mode_color = match entry.mode {
@@ -2140,14 +2123,8 @@ impl QrApp {
             });
             *cy += 14.0;
 
-            cmds.push(RenderCommand::FillRect {
-                x: lx,
-                y: *cy,
-                width: max_w,
-                height: 24.0,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::all(CORNER_RADIUS),
-            });
+            self.palette
+                .push_surface(cmds, lx, *cy, max_w, 24.0, CORNER_RADIUS, Surface::Card);
             let disp = if value.is_empty() {
                 format!("Enter {label}...")
             } else {
@@ -2213,14 +2190,8 @@ impl QrApp {
             });
             *cy += 14.0;
 
-            cmds.push(RenderCommand::FillRect {
-                x: lx,
-                y: *cy,
-                width: max_w,
-                height: 22.0,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::all(CORNER_RADIUS),
-            });
+            self.palette
+                .push_surface(cmds, lx, *cy, max_w, 22.0, CORNER_RADIUS, Surface::Card);
             let disp = if value.is_empty() {
                 format!("Enter {label}...")
             } else {
@@ -2280,14 +2251,15 @@ impl QrApp {
             let px = lx + (max_w - placeholder_w) / 2.0;
             let py = cy + 40.0;
 
-            cmds.push(RenderCommand::FillRect {
-                x: px,
-                y: py,
-                width: placeholder_w,
-                height: placeholder_h,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::all(8.0),
-            });
+            self.palette.push_surface(
+                cmds,
+                px,
+                py,
+                placeholder_w,
+                placeholder_h,
+                8.0,
+                Surface::Card,
+            );
             cmds.push(RenderCommand::StrokeRect {
                 x: px,
                 y: py,
@@ -2462,14 +2434,8 @@ impl QrApp {
         height: f32,
     ) {
         // Panel background
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width,
-            height,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(cmds, x, y, width, height, 0.0, Surface::Card);
 
         // Left border
         cmds.push(RenderCommand::Line {

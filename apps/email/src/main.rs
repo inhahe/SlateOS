@@ -28,6 +28,7 @@
 #![allow(clippy::similar_names)]
 
 use appearance::Palette;
+use appearance::Surface;
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -2509,14 +2510,8 @@ impl EmailApp {
         });
 
         // Header
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width,
-            height: header_h,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(&mut cmds, 0.0, 0.0, width, header_h, 0.0, Surface::Card);
         cmds.push(RenderCommand::Text {
             x: 16.0,
             y: 14.0,
@@ -2551,14 +2546,8 @@ impl EmailApp {
         }
 
         // Search bar
-        cmds.push(RenderCommand::FillRect {
-            x: 120.0,
-            y: 10.0,
-            width: 300.0,
-            height: 28.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(6.0),
-        });
+        self.palette
+            .push_surface(&mut cmds, 120.0, 10.0, 300.0, 28.0, 6.0, Surface::Card);
         let search_text = if self.search_query.is_empty() {
             "Search mail...".to_string()
         } else {
@@ -2748,14 +2737,8 @@ impl EmailApp {
 
         // Status bar
         let sy = height - status_h;
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: sy,
-            width,
-            height: status_h,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(&mut cmds, 0.0, sy, width, status_h, 0.0, Surface::Card);
         let total_msgs: u32 = self
             .mailboxes
             .iter()
@@ -2810,14 +2793,15 @@ impl EmailApp {
             let is_unread = !msg.flags.seen;
 
             if is_sel {
-                cmds.push(RenderCommand::FillRect {
-                    x: x + 4.0,
-                    y: ry,
-                    width: w - 8.0,
-                    height: row_h - 2.0,
-                    color: self.palette.surface0,
-                    corner_radii: CornerRadii::all(4.0),
-                });
+                self.palette.push_surface(
+                    cmds,
+                    x + 4.0,
+                    ry,
+                    w - 8.0,
+                    row_h - 2.0,
+                    4.0,
+                    Surface::Card,
+                );
             }
 
             // Unread indicator
@@ -2952,14 +2936,8 @@ impl EmailApp {
                 if lx + lw > x + max_w {
                     break;
                 }
-                cmds.push(RenderCommand::FillRect {
-                    x: lx,
-                    y: ry + 54.0,
-                    width: lw,
-                    height: 14.0,
-                    color: self.palette.surface1,
-                    corner_radii: CornerRadii::all(3.0),
-                });
+                self.palette
+                    .push_surface(cmds, lx, ry + 54.0, lw, 14.0, 3.0, Surface::Card);
                 cmds.push(RenderCommand::Text {
                     x: lx + 5.0,
                     y: ry + 55.0,
@@ -2979,14 +2957,8 @@ impl EmailApp {
 
     fn render_reading_pane(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, _h: f32) {
         // Separator line
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: 1.0,
-            height: _h,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(cmds, x, y, 1.0, _h, 0.0, Surface::Card);
 
         let msg = if let Some(m) = self
             .selected_message
@@ -3091,14 +3063,8 @@ impl EmailApp {
         py += 24.0;
 
         // Separator
-        cmds.push(RenderCommand::FillRect {
-            x: px,
-            y: py,
-            width: max_w,
-            height: 1.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(cmds, px, py, max_w, 1.0, 0.0, Surface::Card);
         py += 12.0;
 
         // Body preview

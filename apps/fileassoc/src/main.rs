@@ -7,6 +7,7 @@
 //! Uses the guitk library for rendering. Dark theme (Catppuccin Mocha).
 
 use appearance::Palette;
+use appearance::Surface;
 use std::collections::BTreeMap;
 use std::process::ExitCode;
 
@@ -2209,14 +2210,8 @@ impl FileAssocUI {
         // something that does not look like it should.
         if !l.search.is_empty() {
             let r = l.search;
-            frame.push(RenderCommand::FillRect {
-                x: r.x,
-                y: r.y,
-                width: r.w,
-                height: r.h,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            self.palette
+                .push_surface(frame, r.x, r.y, r.w, r.h, 4.0, Surface::Card);
             if self.search_focused {
                 frame.push(RenderCommand::StrokeRect {
                     x: r.x,
@@ -2295,14 +2290,15 @@ impl FileAssocUI {
 
     /// Render the category sidebar.
     fn draw_sidebar(&self, frame: &mut Frame, l: &Layout) {
-        frame.push(RenderCommand::FillRect {
-            x: l.sidebar.x,
-            y: l.sidebar.y,
-            width: l.sidebar.w,
-            height: l.sidebar.h,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            frame,
+            l.sidebar.x,
+            l.sidebar.y,
+            l.sidebar.w,
+            l.sidebar.h,
+            0.0,
+            Surface::Sidebar,
+        );
 
         // Everything in the sidebar is cut to the sidebar, so a category row
         // that falls off the bottom of a short window loses its hit box with
@@ -2430,14 +2426,15 @@ impl FileAssocUI {
         // the last row while a click there still selects nothing.
         frame.hit(Target::Table, l.table);
 
-        frame.push(RenderCommand::FillRect {
-            x: l.table_header.x,
-            y: l.table_header.y,
-            width: l.table_header.w,
-            height: l.table_header.h,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            frame,
+            l.table_header.x,
+            l.table_header.y,
+            l.table_header.w,
+            l.table_header.h,
+            0.0,
+            Surface::Card,
+        );
 
         let header_y = l.table_header.y + (l.table_header.h - FONT_SIZE_SMALL).max(0.0) / 2.0;
         for (x, title) in l
@@ -2586,14 +2583,15 @@ impl FileAssocUI {
     /// Render the right-side details panel for the selected file type.
     fn draw_details_panel(&self, frame: &mut Frame, l: &Layout) {
         let panel = l.details;
-        frame.push(RenderCommand::FillRect {
-            x: panel.x,
-            y: panel.y,
-            width: panel.w,
-            height: panel.h,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            frame,
+            panel.x,
+            panel.y,
+            panel.w,
+            panel.h,
+            0.0,
+            Surface::Card,
+        );
         frame.push(RenderCommand::Line {
             x1: panel.x,
             y1: panel.y,
@@ -2808,14 +2806,7 @@ impl FileAssocUI {
             color: Color::rgba(0, 0, 0, 100),
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
-        frame.push(RenderCommand::FillRect {
-            x: d.x,
-            y: d.y,
-            width: d.w,
-            height: d.h,
-            color: pal.surface0,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
+        pal.push_surface(frame, d.x, d.y, d.w, d.h, CORNER_RADIUS, Surface::Card);
         frame.push(RenderCommand::FillRect {
             x: d.x,
             y: d.y,
@@ -2994,14 +2985,8 @@ impl FileAssocUI {
                 max_width: Some(r.w),
                 overflow: TextOverflow::Ellipsis,
             });
-            frame.push(RenderCommand::FillRect {
-                x: r.x,
-                y: r.y,
-                width: r.w,
-                height: r.h,
-                color: self.palette.mantle,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            self.palette
+                .push_surface(frame, r.x, r.y, r.w, r.h, 4.0, Surface::Card);
             let focused = self.new_field == *field;
             if focused {
                 frame.push(RenderCommand::StrokeRect {

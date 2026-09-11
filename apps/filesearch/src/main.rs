@@ -27,6 +27,7 @@
 #![allow(clippy::similar_names)]
 
 use appearance::Palette;
+use appearance::Surface;
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -1290,14 +1291,8 @@ impl FileSearchApp {
         });
 
         // Header with search bar
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width,
-            height: header_h,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(&mut cmds, 0.0, 0.0, width, header_h, 0.0, Surface::Card);
 
         // App title
         cmds.push(RenderCommand::Text {
@@ -1314,14 +1309,15 @@ impl FileSearchApp {
         // Search input
         let search_x = 16.0;
         let search_w = width - 32.0;
-        cmds.push(RenderCommand::FillRect {
-            x: search_x,
-            y: 28.0,
-            width: search_w,
-            height: 28.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(6.0),
-        });
+        self.palette.push_surface(
+            &mut cmds,
+            search_x,
+            28.0,
+            search_w,
+            28.0,
+            6.0,
+            Surface::Card,
+        );
 
         let search_text = if self.criteria.query.is_empty() {
             "Search files...".to_string()
@@ -1344,14 +1340,15 @@ impl FileSearchApp {
         });
 
         // Search mode indicator
-        cmds.push(RenderCommand::FillRect {
-            x: search_x + search_w - 80.0,
-            y: 30.0,
-            width: 68.0,
-            height: 24.0,
-            color: self.palette.surface1,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        self.palette.push_surface(
+            &mut cmds,
+            search_x + search_w - 80.0,
+            30.0,
+            68.0,
+            24.0,
+            4.0,
+            Surface::Card,
+        );
         cmds.push(RenderCommand::Text {
             x: search_x + search_w - 72.0,
             y: 36.0,
@@ -1393,14 +1390,8 @@ impl FileSearchApp {
 
         // Status bar
         let sy = height - status_h;
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: sy,
-            width,
-            height: status_h,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(&mut cmds, 0.0, sy, width, status_h, 0.0, Surface::Card);
         cmds.push(RenderCommand::Text {
             x: 12.0,
             y: sy + 6.0,
@@ -1446,14 +1437,8 @@ impl FileSearchApp {
         for cat in &categories {
             let is_sel = self.criteria.category_filter == Some(*cat);
             if is_sel {
-                cmds.push(RenderCommand::FillRect {
-                    x: x + 4.0,
-                    y: fy,
-                    width: w - 8.0,
-                    height: 22.0,
-                    color: self.palette.surface0,
-                    corner_radii: CornerRadii::all(4.0),
-                });
+                self.palette
+                    .push_surface(cmds, x + 4.0, fy, w - 8.0, 22.0, 4.0, Surface::Card);
             }
             cmds.push(RenderCommand::Text {
                 x: x + 12.0,
@@ -1502,14 +1487,8 @@ impl FileSearchApp {
         for sf in &sizes {
             let is_sel = self.criteria.size_filter == *sf;
             if is_sel {
-                cmds.push(RenderCommand::FillRect {
-                    x: x + 4.0,
-                    y: fy,
-                    width: w - 8.0,
-                    height: 22.0,
-                    color: self.palette.surface0,
-                    corner_radii: CornerRadii::all(4.0),
-                });
+                self.palette
+                    .push_surface(cmds, x + 4.0, fy, w - 8.0, 22.0, 4.0, Surface::Card);
             }
             cmds.push(RenderCommand::Text {
                 x: x + 12.0,
@@ -1617,14 +1596,15 @@ impl FileSearchApp {
 
             let is_sel = self.selected_result == Some(display_idx);
             if is_sel {
-                cmds.push(RenderCommand::FillRect {
-                    x: x + 2.0,
-                    y: ry,
-                    width: w - 4.0,
-                    height: row_h - 2.0,
-                    color: self.palette.surface0,
-                    corner_radii: CornerRadii::all(4.0),
-                });
+                self.palette.push_surface(
+                    cmds,
+                    x + 2.0,
+                    ry,
+                    w - 4.0,
+                    row_h - 2.0,
+                    4.0,
+                    Surface::Card,
+                );
             }
 
             let cy = ry + 6.0;
@@ -1708,14 +1688,8 @@ impl FileSearchApp {
 
     fn render_preview(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, h: f32) {
         // Separator
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: 1.0,
-            height: h,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(cmds, x, y, 1.0, h, 0.0, Surface::Card);
 
         let entry = if let Some(e) = self.selected_entry() {
             e
@@ -1821,14 +1795,8 @@ impl FileSearchApp {
 
         let actions = ["Open", "Open Location", "Copy Path", "Properties"];
         for action in &actions {
-            cmds.push(RenderCommand::FillRect {
-                x: px,
-                y: py,
-                width: max_w,
-                height: 24.0,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            self.palette
+                .push_surface(cmds, px, py, max_w, 24.0, 4.0, Surface::Card);
             cmds.push(RenderCommand::Text {
                 x: px + 10.0,
                 y: py + 5.0,

@@ -14,6 +14,7 @@
 //! Uses the guitk library for rendering.
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
@@ -1274,14 +1275,8 @@ impl WeatherApp {
     fn render_title_bar(&self, cmds: &mut Vec<RenderCommand>, y: f32) -> f32 {
         let title_height = 50.0;
 
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y,
-            width: self.width,
-            height: title_height,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(cmds, 0.0, y, self.width, title_height, 0.0, Surface::Card);
 
         // App title
         cmds.push(RenderCommand::Text {
@@ -1331,14 +1326,15 @@ impl WeatherApp {
             let is_active = *view == self.active_view;
 
             if is_active {
-                cmds.push(RenderCommand::FillRect {
-                    x: tx - 4.0,
-                    y: y + 8.0,
-                    width: text_width + 24.0,
-                    height: 30.0,
-                    color: self.palette.surface0,
-                    corner_radii: CornerRadii::all(6.0),
-                });
+                self.palette.push_surface(
+                    cmds,
+                    tx - 4.0,
+                    y + 8.0,
+                    text_width + 24.0,
+                    30.0,
+                    6.0,
+                    Surface::Selected,
+                );
             }
 
             cmds.push(RenderCommand::Text {
@@ -1409,14 +1405,8 @@ impl WeatherApp {
         });
 
         // Card background
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: card_w,
-            height: card_h,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(12.0),
-        });
+        self.palette
+            .push_surface(cmds, x, y, card_w, card_h, 12.0, Surface::Card);
 
         let inner_x = x + 20.0;
         let inner_y = y + 16.0;
@@ -1578,14 +1568,8 @@ impl WeatherApp {
         let item_gap = 8.0;
 
         // Card
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: strip_w,
-            height: strip_h,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(12.0),
-        });
+        self.palette
+            .push_surface(cmds, x, y, strip_w, strip_h, 12.0, Surface::Card);
 
         // Section label
         cmds.push(RenderCommand::Text {
@@ -1618,14 +1602,15 @@ impl WeatherApp {
             }
 
             // Item background
-            cmds.push(RenderCommand::FillRect {
-                x: ix,
-                y: scroll_y + 4.0,
-                width: item_w,
-                height: scroll_h - 8.0,
-                color: self.palette.surface1,
-                corner_radii: CornerRadii::all(8.0),
-            });
+            self.palette.push_surface(
+                cmds,
+                ix,
+                scroll_y + 4.0,
+                item_w,
+                scroll_h - 8.0,
+                8.0,
+                Surface::Card,
+            );
 
             // Hour label
             cmds.push(RenderCommand::Text {
@@ -1842,14 +1827,8 @@ impl WeatherApp {
         let table_h = header_h + self.daily.len() as f32 * row_h + 16.0;
 
         // Card
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: table_w,
-            height: table_h,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(12.0),
-        });
+        self.palette
+            .push_surface(cmds, x, y, table_w, table_h, 12.0, Surface::Card);
 
         // Section label
         cmds.push(RenderCommand::Text {
@@ -2010,14 +1989,8 @@ impl WeatherApp {
         let aq = AirQuality::from_aqi(self.current.aqi);
 
         // Card
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: card_w,
-            height: card_h,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(12.0),
-        });
+        self.palette
+            .push_surface(cmds, x, y, card_w, card_h, 12.0, Surface::Card);
 
         // Section label
         cmds.push(RenderCommand::Text {
@@ -2210,14 +2183,15 @@ impl WeatherApp {
         for day in &self.daily {
             // Day card
             let card_h = 100.0;
-            cmds.push(RenderCommand::FillRect {
-                x: padding,
-                y: cy,
-                width: self.width - padding * 2.0,
-                height: card_h,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::all(10.0),
-            });
+            self.palette.push_surface(
+                cmds,
+                padding,
+                cy,
+                self.width - padding * 2.0,
+                card_h,
+                10.0,
+                Surface::Card,
+            );
 
             cmds.push(RenderCommand::Text {
                 x: padding + 16.0,
@@ -2344,14 +2318,15 @@ impl WeatherApp {
             let severity_color = alert.severity.color(&self.palette);
 
             // Card background
-            cmds.push(RenderCommand::FillRect {
-                x: padding,
-                y: cy,
-                width: self.width - padding * 2.0,
-                height: card_h,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::all(10.0),
-            });
+            self.palette.push_surface(
+                cmds,
+                padding,
+                cy,
+                self.width - padding * 2.0,
+                card_h,
+                10.0,
+                Surface::Card,
+            );
 
             // Severity stripe
             cmds.push(RenderCommand::FillRect {
@@ -2550,14 +2525,15 @@ impl WeatherApp {
         for (label, value) in &settings_items {
             let row_h = 50.0;
 
-            cmds.push(RenderCommand::FillRect {
-                x: padding,
-                y: cy,
-                width: self.width - padding * 2.0,
-                height: row_h,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::all(8.0),
-            });
+            self.palette.push_surface(
+                cmds,
+                padding,
+                cy,
+                self.width - padding * 2.0,
+                row_h,
+                8.0,
+                Surface::Card,
+            );
 
             cmds.push(RenderCommand::Text {
                 x: padding + 16.0,
@@ -3740,6 +3716,34 @@ mod tests {
         }
     }
 
+    /// The alert card's rectangle, however the theme drew it.
+    ///
+    /// Filled under Cards, outlined under Borders, and the outline reports a
+    /// rectangle half a line smaller than the one asked for -- `logical_rect`
+    /// undoes that. The 10px corner is what tells an alert card from the
+    /// full-width title strip above it, which is also a card and also wide;
+    /// colour used to make that distinction and cannot any more, because under
+    /// Borders every card is the same outline.
+    fn alert_card(app: &WeatherApp, pal: &Palette) -> Option<(f32, f32)> {
+        app.render_commands().into_iter().find_map(|c| {
+            let (_, y, w, h) = appearance::logical_rect(&c)?;
+            let (paints_a_card, radius) = match &c {
+                RenderCommand::FillRect {
+                    color,
+                    corner_radii,
+                    ..
+                } => (*color == pal.surface0, corner_radii.top_left),
+                RenderCommand::StrokeRect {
+                    color,
+                    corner_radii,
+                    ..
+                } => (*color == pal.border, corner_radii.top_left),
+                _ => (false, 0.0),
+            };
+            (paints_a_card && w > 400.0 && (radius - 10.0).abs() < 0.01).then_some((y, h))
+        })
+    }
+
     #[test]
     fn an_alert_card_grows_to_hold_its_description() {
         let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
@@ -3758,19 +3762,9 @@ mod tests {
         let long = app_with_alert(&"Secure loose objects outdoors. ".repeat(40));
 
         let card_height = |app: &WeatherApp| -> f32 {
-            // The card background is the widest fill in the alerts view.
-            app.render_commands()
-                .into_iter()
-                .find_map(|c| match c {
-                    RenderCommand::FillRect {
-                        width,
-                        height,
-                        color,
-                        ..
-                    } if color == pal.surface0 && width > 400.0 => Some(height),
-                    _ => None,
-                })
+            alert_card(app, &pal)
                 .expect("the alerts view drew no card")
+                .1
         };
 
         // The floor covers two lines, so growth is only observable past it.
@@ -3791,16 +3785,9 @@ mod tests {
             .iter()
             .map(|(y, _)| y + ALERT_BODY_LINE_HEIGHT)
             .fold(f32::MIN, f32::max);
-        let card_top = long
-            .render_commands()
-            .into_iter()
-            .find_map(|c| match c {
-                RenderCommand::FillRect {
-                    y, width, color, ..
-                } if color == pal.surface0 && width > 400.0 => Some(y),
-                _ => None,
-            })
-            .expect("the alerts view drew no card");
+        let card_top = alert_card(&long, &pal)
+            .expect("the alerts view drew no card")
+            .0;
         assert!(
             body_bottom <= card_top + long_h,
             "the description ends at {body_bottom}, past the bottom of its card"

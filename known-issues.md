@@ -74356,6 +74356,13 @@ form. It is also the only one whose absence cost something.
 
 ## TD-A-PRISTINE-STATE-CAN-BE-TOO-BIG-FOR-THE-STACK — `with_pristine` puts two whole tables in the caller's frame
 
+**Status: RESOLVED 2026-08-23** in `71d7148ad`. Re-verified 2026-09-11:
+`fs::selftest::with_pristine_swapped` exists at `selftest.rs:199`, `net::bridge`
+uses it, and `pristine_bridges()` builds the substitute on the heap one `Bridge`
+at a time. This line exists because the entry already said **Fixed in
+`71d7148ad`** and that spelling is invisible to a search for a status -- see the
+note at the end.
+
 **In short:** the same fix moves a fresh copy of a module's state *in* and
 the saved copy *out*, both by value, so two of them sit in the calling
 function's stack frame at once. For the `Vec`-backed tables this is nothing.
@@ -74391,6 +74398,38 @@ reads the size back out of rustc's E0308 ("expected an array with a size of
 0, found one with a size of N"). One `cargo check` yields every table's size
 at once. Across the 25 converted at the time, `net::bridge` was the only one
 over 16 KiB and the next largest was 1280 bytes.
+
+### Why this entry needed a second status line, 2026-09-11
+
+It already had one: **Fixed in `71d7148ad`**. That is a *fifth* spelling of
+"resolved" in these documents, alongside `**Status:** RESOLVED`, `— FIXED
+<date>` in the heading, `### Resolution`, and `DONE`. Sweeping lane-A entries for
+what is still open therefore gave a different answer each time the regex improved:
+
+| rule | open | what it really measured |
+|---|---|---|
+| no resolved marker in the **heading** | 23 | headings, not entries |
+| …or in the first 12 lines of the body | 15 | a window, not the body |
+| …or anywhere in the body | 9 | four spellings, not five |
+| after reading the nine | **6** | the entries |
+
+Three of the nine were already done: this one, `TD-A-FS-SELFTESTS-NEVER-RUN`, and
+`TD-A-AN-ABSENT-OPERAND-DEFAULTS-TO-A-LIVE-OBJECT-ID`. Each cost a fresh
+investigation to establish that, and the 273-line first one nearly cost a
+re-opening.
+
+This is the same finding as `TD-A-REQUEST-STATUS-HAS-NO-CHECKED-SHAPE-SO-EVERY-READER-COUNTS-DIFFERENTLY`,
+which was filed this morning about `requests/` after four measurements of *that*
+population gave four numbers. It is not a `requests/` problem. It is what happens
+to any status field that nothing checks: every reader writes their own search, and
+every search is a different question wearing the same name.
+
+**A one-off measurement cannot fix this and neither can a better regex.** The fix
+is a checked shape — a `**Status:**` line in a known position whose first word
+comes from a closed vocabulary — ratcheted at the current population so nothing
+has to be back-filled at once. `scripts/check-design-decisions-bands.py` already
+does exactly this for `**Lane:**` fields one document over, and for the same stated
+reason: a field nothing checks is a field that drifts.
 
 ## TD-A-FORMAT-SIZE-PRINTED-A-TWO-DIGIT-TENTHS — `format_size(2047)` read "1.10 KiB"
 
@@ -131146,6 +131185,47 @@ answer instead of one answer per reader.
 
 **Until then, the honest method is to read the request and ask whether the tree already
 answers it** — which is what found all four of the above, and what no grep found.
+
+### 2026-09-11, later — it is not a `requests/` problem, and the fix is bigger than a gate
+
+The same thing happened four more times the same day, in **this** file. Sweeping
+lane-A entries for what is still open gave 23, then 15, then 9, then 6 as the
+search improved, and three of the nine survivors turned out to be finished work:
+`TD-A-FS-SELFTESTS-NEVER-RUN`, `TD-A-AN-ABSENT-OPERAND-DEFAULTS-TO-A-LIVE-OBJECT-ID`
+and `TD-A-PRISTINE-STATE-CAN-BE-TOO-BIG-FOR-THE-STACK`. The last of those already
+said **Fixed in `71d7148ad`** — a *fifth* spelling, after `**Status:** RESOLVED`,
+`— FIXED <date>` in the heading, `### Resolution`, and `DONE`.
+
+So the diagnosis generalises: any status field nothing checks produces one number
+per reader. What changed today is that I measured the corpus before building the
+gate, and **the measurement argued against building it**:
+
+| | count |
+|---|---|
+| `## TD-*` / `## B-*` entries in this file | **415** |
+| carrying a `**Status:**` line within 9 lines of the heading | **68** |
+| not | **347** (84%) |
+
+At 84% non-compliance a ratchet would not be enforcing a convention that drifted;
+it would be **introducing** one, in a document lane B writes more of than lane A,
+and every one of their future entries would start failing a gate they never agreed
+to. That is a cross-lane authoring decision and not a lane-A gate, which is the
+same conclusion this entry reached in the morning for `requests/` — now with a
+number instead of an instinct.
+
+**What to do with it instead.** The proposal stands and is cheap *if the lanes want
+it*: `**Status:**` on its own line within N lines of the heading, first word from
+`OPEN | BLOCKED | DONE | DECLINED | WITHDRAWN`, ratcheted at 347 so nothing is
+back-filled at once. It needs agreement first, so it belongs in front of the
+operator and the other two lanes rather than in a gate. Until then the honest
+method is unchanged and is what found all three finished entries above: **read the
+entry and ask whether the tree already answers it.**
+
+*(One measurement in this note is deliberately not quoted: a per-lane breakdown of
+the 347. It came from splitting each id on `-` and taking the second field, which
+yields `A` for `TD-A-FOO` and `E` for `B-EXT4-DIR`, so it produced thirty "lanes"
+including a backtick and the digit 1. The 415/68/347 split is sound; the
+attribution was not, and an unsound number next to a sound one devalues both.)*
 
 ## TD-A-I-MERGED-TO-MAIN-HAVING-TESTED-ONLY-THE-PRE-MERGE-STATE (lane A, 2026-09-11) — **process miss, remediated; a cheap tool is proposed**
 

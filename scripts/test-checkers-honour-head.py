@@ -109,9 +109,17 @@ def remove(root: str, rel: str) -> None:
 # the real `scripts/`. Omitting it does not degrade the fixture, it stops the
 # checker starting at all.
 # `rustlex.py` joins these because check-read-defaults imports it now.
+# `selftestflag.py` joins them because sixteen checkers import it since the
+# 2026-09-10 flag sweep -- including quote-names, which gate 8 exercises. I
+# added the import to those sixteen and not the entry here, and every gate 8
+# case then failed with `got 1, want 0`: the checker died of
+# ModuleNotFoundError inside the fixture and the harness read a non-zero exit
+# as a finding. That is the failure mode the paragraph above describes, three
+# comments up, happening again for the third support module in a row.
+#
 # A checker copied into a fixture repo without its support modules fails
 # on import, which every case would report as the checker refusing.
-SUPPORT = ("gittree.py", "gitenv.py", "rustlex.py")
+SUPPORT = ("gittree.py", "gitenv.py", "rustlex.py", "selftestflag.py")
 
 
 def new_repo(tmp: str, name: str, checkers: tuple[str, ...]) -> str:

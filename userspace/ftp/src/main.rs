@@ -1730,6 +1730,54 @@ impl FtpSession {
 // ============================================================================
 
 /// Read a line from stdin, returning `None` on EOF.
+/// The username and password to log in with, or `None` if input ended.
+///
+/// # The distinction this exists to keep
+///
+/// `read_line` answers `None` for EOF and for a read error, and `Some("")` when
+/// the user pressed Enter. Those mean opposite things at a login prompt:
+///
+///   * `Some("")` -- "use the default", which for FTP is anonymous. Correct,
+///     and what the old code did.
+///   * `None` -- there is nobody there to ask. NOT a blank credential.
+///
+/// All three call sites wrote `.unwrap_or_default()`, which made them the same.
+/// For the username that turned Ctrl-D into an anonymous login; for the
+/// password it produced an empty string that `session.login` then sent as a
+/// PASS command. A server logging failed attempts recorded a blank-password
+/// login the user never made.
+///
+/// `ask_pass` is a parameter so the decision can be tested without a terminal:
+/// the branch that matters is which of None/Some("") reaches the wire.
+fn credentials(
+    user: Option<String>,
+    ask_pass: impl FnOnce() -> Option<String>,
+) -> Option<(String, String)> {
+    // `?` here is the fix: no name means no login, rather than an empty name
+    // that becomes the anonymous default.
+    let user = user?;
+    let user = if user.is_empty() {
+        "anonymous".to_string()
+    } else {
+        user
+    };
+    let pass = if user == "anonymous" {
+        "user@slateos".to_string()
+    } else {
+        ask_pass()?
+    };
+    Some((user, pass))
+}
+
+/// Prompt for both, reading from the terminal.
+fn prompt_credentials(name: Option<String>) -> Option<(String, String)> {
+    let user = match name {
+        Some(n) => Some(n),
+        None => read_line("Name: "),
+    };
+    credentials(user, || read_password("Password: "))
+}
+
 fn read_line(prompt: &str) -> Option<String> {
     print!("{prompt}");
     let _ = io::stdout().flush();
@@ -1779,19 +1827,10 @@ fn execute_command(session: &mut FtpSession, cmd: Command) -> Result<bool, FtpEr
             session.connect(&host, port)?;
             // Auto-login with anonymous if no explicit user command follows.
             if session.is_connected() {
-                // Prompt for username.
-                let user = read_line("Name: ").unwrap_or_default();
-                let user = if user.is_empty() {
-                    "anonymous".to_string()
-                } else {
-                    user
-                };
-                let pass = if user == "anonymous" {
-                    "user@slateos".to_string()
-                } else {
-                    read_password("Password: ").unwrap_or_default()
-                };
-                session.login(&user, &pass)?;
+                match prompt_credentials(None) {
+                    Some((user, pass)) => session.login(&user, &pass)?,
+                    None => println!("ftp: login aborted, no input."),
+                }
             }
         }
         Command::Close => {
@@ -1813,21 +1852,10 @@ fn execute_command(session: &mut FtpSession, cmd: Command) -> Result<bool, FtpEr
             if !session.is_connected() {
                 return Err(FtpError::NotConnected);
             }
-            let user = match name {
-                Some(n) => n,
-                None => read_line("Name: ").unwrap_or_default(),
-            };
-            let user = if user.is_empty() {
-                "anonymous".to_string()
-            } else {
-                user
-            };
-            let pass = if user == "anonymous" {
-                "user@slateos".to_string()
-            } else {
-                read_password("Password: ").unwrap_or_default()
-            };
-            session.login(&user, &pass)?;
+            match prompt_credentials(name) {
+                Some((user, pass)) => session.login(&user, &pass)?,
+                None => println!("ftp: login aborted, no input."),
+            }
         }
         Command::Cd { path } => {
             session.cmd_cd(&path)?;
@@ -1988,20 +2016,13 @@ fn main() {
         match session.connect(host, cli.port) {
             Ok(()) => {
                 if cli.auto_login {
-                    // Prompt for username.
-                    let user = read_line("Name: ").unwrap_or_default();
-                    let user = if user.is_empty() {
-                        "anonymous".to_string()
-                    } else {
-                        user
-                    };
-                    let pass = if user == "anonymous" {
-                        "user@slateos".to_string()
-                    } else {
-                        read_password("Password: ").unwrap_or_default()
-                    };
-                    if let Err(e) = session.login(&user, &pass) {
-                        eprintln!("Login failed: {e}");
+                    match prompt_credentials(None) {
+                        Some((user, pass)) => {
+                            if let Err(e) = session.login(&user, &pass) {
+                                eprintln!("Login failed: {e}");
+                            }
+                        }
+                        None => eprintln!("ftp: login aborted, no input."),
                     }
                 }
             }
@@ -2025,8 +2046,64 @@ fn main() {
 // ============================================================================
 
 #[cfg(test)]
+// The `panic!`s below are assertions, not failures: they sit inside closures
+// that the code under test must never call, so reaching one IS the test
+// failing and the message names which invariant broke. CLAUDE.md allows panic
+// in test modules for this.
+#[allow(clippy::panic)]
 mod tests {
     use super::*;
+
+    // -- login credentials ----------------------------------------------------
+
+    #[test]
+    fn a_named_user_is_asked_for_a_password() {
+        let got = credentials(Some("alice".to_string()), || Some("hunter2".to_string()));
+        assert_eq!(got, Some(("alice".to_string(), "hunter2".to_string())));
+    }
+
+    #[test]
+    fn pressing_enter_at_the_name_prompt_means_anonymous() {
+        // `Some("")` is a user who answered, choosing the default. FTP's
+        // default is anonymous with an e-mail address as the password, and no
+        // password prompt follows.
+        let got = credentials(Some(String::new()), || {
+            panic!("anonymous must not be asked for a password")
+        });
+        assert_eq!(
+            got,
+            Some(("anonymous".to_string(), "user@slateos".to_string()))
+        );
+    }
+
+    #[test]
+    fn end_of_input_at_the_name_prompt_is_not_anonymous() {
+        // THE FIRST HALF OF THE BUG. `None` is EOF or a read error -- nobody
+        // is there to answer. `.unwrap_or_default()` made it `""`, which the
+        // next line turned into an anonymous login the user never asked for.
+        let got = credentials(None, || panic!("must not reach the password prompt"));
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn end_of_input_at_the_password_prompt_sends_nothing() {
+        // THE SECOND HALF, AND THE WORSE ONE. This returned `""` and the
+        // caller passed it to `session.login`, which sends it as a PASS
+        // command: a blank-password login attempt the user never made, logged
+        // as such by the server.
+        let got = credentials(Some("alice".to_string()), || None);
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn an_empty_password_can_still_be_given_deliberately() {
+        // `Some("")` from the password prompt is a user who pressed Enter.
+        // That is a real answer and is passed through -- the fix is about
+        // `None`, and conflating the two in the other direction would be the
+        // same mistake mirrored.
+        let got = credentials(Some("alice".to_string()), || Some(String::new()));
+        assert_eq!(got, Some(("alice".to_string(), String::new())));
+    }
 
     // ---- Reply parsing ----
 

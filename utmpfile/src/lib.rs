@@ -17,6 +17,31 @@
 //! split on `:`, which cannot parse a binary record — so its user list was
 //! always empty, and it fell back to inventing a session from `$USER`.
 //!
+//! # The record layout
+//!
+//! | Offset | Size | Field         |
+//! |--------|------|---------------|
+//! | 0      | 2    | ut_type (i16) |
+//! | 2      | 2    | padding       |
+//! | 4      | 4    | ut_pid (u32)  |
+//! | 8      | 32   | ut_line       |
+//! | 40     | 4    | ut_id         |
+//! | 44     | 32   | ut_user       |
+//! | 76     | 256  | ut_host       |
+//! | 332    | 4    | ut_exit       |
+//! | 336    | 4    | ut_session    |
+//! | 340    | 4    | ut_tv_sec     |
+//! | 344    | 4    | ut_tv_usec    |
+//! | 348    | 16   | ut_addr_v6    |
+//! | 364    | 20   | unused        |
+//! | = 384 bytes total              |
+//!
+//! Lifted from `userspace/last`, whose copy of this table was CORRECT ABOUT THE
+//! PADDING AT OFFSET 2 while this crate's code read four bytes there. The
+//! documentation of the fourth copy named the thing the shared implementation
+//! got wrong, which is an argument for moving prose to where the code is rather
+//! than for keeping four of each.
+//!
 //! # Why the fields are `Vec<u8>` and not `String`
 //!
 //! `who` decoded them with `String::from_utf8_lossy`. CLAUDE.md names that
@@ -40,17 +65,26 @@
 pub const RECORD_SIZE: usize = 384;
 
 // Field offsets within a record. These are the x86_64 `struct utmpx` layout.
-const UT_TYPE_OFFSET: usize = 0;
-const UT_PID_OFFSET: usize = 4;
-const UT_LINE_OFFSET: usize = 8;
-const UT_LINE_SIZE: usize = 32;
-const UT_ID_OFFSET: usize = 40;
-const UT_ID_SIZE: usize = 4;
-const UT_USER_OFFSET: usize = 44;
-const UT_USER_SIZE: usize = 32;
-const UT_HOST_OFFSET: usize = 76;
-const UT_HOST_SIZE: usize = 256;
-const UT_TV_SEC_OFFSET: usize = 340;
+//
+// PUBLIC because they are the format, not an implementation detail: `RECORD_SIZE`
+// has always been public for the same reason. A caller building a fixture needs
+// to lay bytes out at exactly these positions, and the alternative is each test
+// re-declaring the table this crate exists to hold once.
+pub const UT_TYPE_OFFSET: usize = 0;
+pub const UT_PID_OFFSET: usize = 4;
+pub const UT_LINE_OFFSET: usize = 8;
+pub const UT_LINE_SIZE: usize = 32;
+pub const UT_ID_OFFSET: usize = 40;
+pub const UT_ID_SIZE: usize = 4;
+pub const UT_USER_OFFSET: usize = 44;
+pub const UT_USER_SIZE: usize = 32;
+pub const UT_HOST_OFFSET: usize = 76;
+pub const UT_HOST_SIZE: usize = 256;
+pub const UT_EXIT_OFFSET: usize = 332;
+pub const UT_SESSION_OFFSET: usize = 336;
+pub const UT_TV_SEC_OFFSET: usize = 340;
+pub const UT_TV_USEC_OFFSET: usize = 344;
+pub const UT_ADDR_OFFSET: usize = 348;
 
 /// `ut_type` for an unused slot.
 pub const EMPTY: i32 = 0;
@@ -91,6 +125,18 @@ pub struct Record {
     pub pid: i32,
     /// `ut_tv.tv_sec` as Unix epoch seconds, or 0 if it was negative.
     pub login_time: u64,
+    /// `ut_tv.tv_usec`, the microseconds part of the timestamp.
+    pub login_usec: u32,
+    /// `ut_exit`, the two `short`s a DEAD_PROCESS record carries: the
+    /// terminating signal in the low half and the exit status in the high one.
+    /// `last` prints it; nothing else reads it yet.
+    pub exit_status: u32,
+    /// `ut_session`, the session id.
+    pub session: u32,
+    /// `ut_addr_v6`: four words holding an IPv4 address in the first, or a
+    /// whole IPv6 address. Kept raw because the two are told apart by whether
+    /// the last three are zero, which is the caller's business.
+    pub addr_v6: [u32; 4],
 }
 
 impl Record {
@@ -99,6 +145,31 @@ impl Record {
     pub fn is_user_session(&self) -> bool {
         self.record_type == USER_PROCESS
     }
+}
+
+/// `ut_type` is a `short`, not an int.
+///
+/// It was read as a little-endian i32 until 2026-09-10, which is `ut_type`
+/// PLUS the two padding bytes the C struct puts before `ut_pid`. That agrees
+/// with a 2-byte read only while the padding is zero -- true of every record
+/// this tree writes, and not a property of the format. `posix::utmpx::Utmpx`
+/// declares `ut_type: i16` and `userspace/last` read it as a u16, so this
+/// crate was the odd one out among three statements of the same field.
+///
+/// Widened to i32 on the way out so callers keep comparing against the
+/// constants without a cast.
+fn read_type(data: &[u8], offset: usize) -> Option<i32> {
+    let end = offset.checked_add(2)?;
+    let slice = data.get(offset..end)?;
+    let arr: [u8; 2] = slice.try_into().ok()?;
+    Some(i32::from(i16::from_le_bytes(arr)))
+}
+
+fn read_u32_le(data: &[u8], offset: usize) -> Option<u32> {
+    let end = offset.checked_add(4)?;
+    let slice = data.get(offset..end)?;
+    let arr: [u8; 4] = slice.try_into().ok()?;
+    Some(u32::from_le_bytes(arr))
 }
 
 fn read_i32_le(data: &[u8], offset: usize) -> Option<i32> {
@@ -142,7 +213,7 @@ pub fn parse(data: &[u8]) -> Vec<Record> {
             break;
         };
 
-        let Some(record_type) = read_i32_le(rec, UT_TYPE_OFFSET) else {
+        let Some(record_type) = read_type(rec, UT_TYPE_OFFSET) else {
             break;
         };
         let Some(pid) = read_i32_le(rec, UT_PID_OFFSET) else {
@@ -163,6 +234,19 @@ pub fn parse(data: &[u8]) -> Vec<Record> {
         let Some(tv_sec) = read_i32_le(rec, UT_TV_SEC_OFFSET) else {
             break;
         };
+        let login_usec = read_u32_le(rec, UT_TV_USEC_OFFSET).unwrap_or(0);
+        let exit_status = read_u32_le(rec, UT_EXIT_OFFSET).unwrap_or(0);
+        let session = read_u32_le(rec, UT_SESSION_OFFSET).unwrap_or(0);
+        let mut addr_v6 = [0u32; 4];
+        for (i, slot) in addr_v6.iter_mut().enumerate() {
+            // `chunk` walks the four words without computing an offset: the
+            // record is known to be RECORD_SIZE long so every read is in
+            // bounds, and an `unwrap_or(0)` here would be unreachable rather
+            // than a discarded failure -- which is a distinction this crate
+            // exists to keep, so it is better not to write one at all.
+            let chunk = UT_ADDR_OFFSET.saturating_add(i.saturating_mul(4));
+            *slot = read_u32_le(rec, chunk).unwrap_or(0);
+        }
 
         records.push(Record {
             record_type,
@@ -174,6 +258,10 @@ pub fn parse(data: &[u8]) -> Vec<Record> {
             // tv_sec is signed but holds a positive epoch time. A negative one
             // is a corrupt record, and 0 is the only honest reading of it.
             login_time: u64::try_from(tv_sec).unwrap_or(0),
+            login_usec,
+            exit_status,
+            session,
+            addr_v6,
         });
 
         offset = offset.saturating_add(RECORD_SIZE);
@@ -323,6 +411,49 @@ mod tests {
         assert_eq!(got.len(), 1, "a dead record is still a record");
         assert!(!got[0].is_user_session());
         assert_eq!(count_user_sessions(&data), 0);
+    }
+
+    #[test]
+    fn ut_type_is_read_as_two_bytes_not_four() {
+        // THE BUG THIS PINS. `ut_type` is a `short` and the C struct puts two
+        // padding bytes after it, before `ut_pid` at offset 4. Reading a
+        // little-endian i32 there is ut_type PLUS the padding, which agrees
+        // with the truth only while the padding is zero -- a property of the
+        // writers this tree happens to have, not of the format.
+        //
+        // `posix::utmpx::Utmpx` declares `ut_type: i16` and `userspace/last`
+        // read a u16, so this crate was the odd one out among three statements
+        // of one field.
+        let mut data = record(USER_PROCESS, 1, b"tty1", b"", b"alice", b"", 0);
+        data[2] = 0xAB;
+        data[3] = 0xCD;
+        let got = parse(&data);
+        assert_eq!(
+            got[0].record_type, USER_PROCESS,
+            "padding after ut_type must not change the type"
+        );
+        assert!(got[0].is_user_session());
+    }
+
+    #[test]
+    fn the_tail_of_the_record_is_carried() {
+        // exit, session, the microseconds and the address were readable only
+        // by `userspace/last`, which had its own copy of the layout for them.
+        let mut data = record(DEAD_PROCESS, 42, b"pts/3", b"ts/3", b"bob", b"h", 1000);
+        data[UT_EXIT_OFFSET..UT_EXIT_OFFSET + 4].copy_from_slice(&9u32.to_le_bytes());
+        data[UT_SESSION_OFFSET..UT_SESSION_OFFSET + 4].copy_from_slice(&7u32.to_le_bytes());
+        data[UT_TV_USEC_OFFSET..UT_TV_USEC_OFFSET + 4].copy_from_slice(&500u32.to_le_bytes());
+        data[UT_ADDR_OFFSET..UT_ADDR_OFFSET + 4].copy_from_slice(&0x0100_007Fu32.to_le_bytes());
+        let r = &parse(&data)[0];
+        assert_eq!(r.exit_status, 9);
+        assert_eq!(r.session, 7);
+        assert_eq!(r.login_usec, 500);
+        assert_eq!(r.addr_v6[0], 0x0100_007F);
+        assert_eq!(
+            r.addr_v6[1..],
+            [0, 0, 0],
+            "an IPv4 address leaves the rest zero"
+        );
     }
 
     #[test]

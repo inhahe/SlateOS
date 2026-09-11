@@ -6,26 +6,99 @@
 # which separates "absent" from "could not read"; adding a line here to turn a
 # red --check green is the defect itself.
 #
-# The entries below are the ones that survived inspection on 2026-09-10 -- all
+# TWO KINDS OF ENTRY LIVE HERE AND THEY ARE NOT EQUALLY VOUCHED FOR.
+#
+# The `read_to_string` entries were inspected one at a time on 2026-09-10: all
 # of them report or display, none rewrites the file it read. The four that DID
 # rewrite (sudo/visudo, xdg, hostnamectl, ntpd) are fixed and are not here.
-# Being pinned means "known and not destructive", not "correct".
+#
+# The rest arrived the same day when the gate was widened to see env::var and
+# local fallible functions, and they were pinned AS A SET, not read one by one.
+# Sampling them found real defects -- `ftp` turning a failed password read into
+# an empty password it then sends, `stty` reading a 0x0 terminal when the ioctl
+# fails, `crontab` taking an empty username. Those are recorded in
+# known-issues.md as TD-B-EIGHTY-THREE-DISCARDED-FAILURES-ARE-PINNED-UNREAD.
+#
+# So: being pinned means "known", and for the first group also "not
+# destructive". It has never meant "correct".
 #
 #     python scripts/check-read-defaults.py --update-baseline
 #
+acpi: read_sysfs_string(&path.join("manufacturer")).unwrap_or_default()
+acpi: read_sysfs_string(&path.join("model_name")).unwrap_or_default()
+acpi: read_sysfs_string(&path.join("policy")).unwrap_or_default()
+acpi: read_sysfs_string(&path.join("serial_number")).unwrap_or_default()
+acpi: read_sysfs_string(&path.join("status")).unwrap_or_default()
+acpi: read_sysfs_string(&path.join("technology")).unwrap_or_default()
+acpi: read_sysfs_string(&path.join("type")).unwrap_or_default()
+coreutils: sprintf(b"%.6g", &[Value::Num(n)], b"%.6g").unwrap_or_default()
+coreutils: std::env::var("TARGET").unwrap_or_default()
+cpupower: read_sysfs_string(&format!("{}/scaling_available_frequencies", base)) .unwrap_or_default()
+cpupower: read_sysfs_string(&format!("{}/scaling_available_governors", base)).unwrap_or_default()
+crontab: current_username().unwrap_or_default()
+diskutil: read_file(&format!("{dev_path}/device/model")).unwrap_or_default()
+diskutil: read_file(&format!("{dev_path}/device/serial")).unwrap_or_default()
+dmesg: extract_json_string(line, "level").unwrap_or_default()
+dmesg: extract_json_string(line, "msg").unwrap_or_default()
+dmesg: extract_json_string(line, "service").unwrap_or_default()
+efibootmgr: read_efi_var("BootOrder").unwrap_or_default()
 eject: fs::read_to_string(format!("{sys_path}/device/model")) .unwrap_or_default()
 eject: fs::read_to_string(format!("{sys_path}/device/vendor")) .unwrap_or_default()
 eject: fs::read_to_string(format!("{sys_path}/removable")) .unwrap_or_default()
 fuser: fs::read_to_string("/etc/passwd").unwrap_or_default()
 fuser: fs::read_to_string(format!("/proc/{pid}/comm")) .unwrap_or_default()
 fuser: fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default()
+hostname: read_hostname().unwrap_or_default()
 hwinfo: fs::read_to_string("/proc/cpuinfo").unwrap_or_default()
 hwinfo: fs::read_to_string(path) .unwrap_or_default()
+install: std::env::var("TARGET").unwrap_or_default()
+ldd: strtab_get(dynstr, vn_file).unwrap_or_default()
+ldd: strtab_get(dynstr, vna_name).unwrap_or_default()
+ldd: strtab_get(strtab, name_off).unwrap_or_default()
+ldd: strtab_get(strtab, name_off).unwrap_or_default()  [2]
+losetup: std::env::var("TARGET").unwrap_or_default()
+lsblk: read_file(&format!("{dev_path}/device/model")).unwrap_or_default()
+lsblk: read_file(&format!("{dev_path}/device/serial")).unwrap_or_default()
+lspci: read_file(&format!("{dev_path}/driver/name")).unwrap_or_default()
+lsusb: read_attr(&format!("{dev_path}/bMaxPower")).unwrap_or_default()
+lsusb: read_attr(&format!("{dev_path}/bcdUSB")).unwrap_or_default()
+lsusb: read_attr(&format!("{dev_path}/manufacturer")).unwrap_or_default()
+lsusb: read_attr(&format!("{dev_path}/product")).unwrap_or_default()
+lsusb: read_attr(&format!("{dev_path}/serial")).unwrap_or_default()
+lsusb: read_attr(&format!("{dev_path}/speed")).unwrap_or_default()
+lsusb: read_attr(&format!("{path}/bMaxPower")).unwrap_or_default()
+lsusb: read_attr(&format!("{path}/bcdUSB")).unwrap_or_default()
+lsusb: read_attr(&format!("{path}/manufacturer")).unwrap_or_default()
+lsusb: read_attr(&format!("{path}/product")).unwrap_or_default()
+lsusb: read_attr(&format!("{path}/serial")).unwrap_or_default()
+lsusb: read_attr(&format!("{path}/speed")).unwrap_or_default()
+man: extract_name_line(page.source).unwrap_or_default()
+mktemp: gid_to_name(egid).unwrap_or_default()
+mktemp: gid_to_name(gid).unwrap_or_default()
+mktemp: uid_to_name(euid).unwrap_or_default()
+mktemp: uid_to_name(uid).unwrap_or_default()
+monctl: read_file(&format!("{base}/modes")).unwrap_or_default()
+monctl: read_file(&format!("{base}/status")).unwrap_or_default()
 netstat: fs::read_to_string(format!("/proc/{pid}/comm")) .unwrap_or_default()
-newgrp: fs::read_to_string("/etc/group").unwrap_or_default()
-newgrp: fs::read_to_string("/etc/gshadow").unwrap_or_default()
+newgrp: std::fs::read_to_string("/etc/group").unwrap_or_default()
+newgrp: std::fs::read_to_string("/etc/gshadow").unwrap_or_default()
+objdump: parse_symbols(data, hdr, ss, sections).unwrap_or_default()
+oils: std::env::var("TARGET").unwrap_or_default()
+oils: std::env::var_os("PATH").unwrap_or_default()
+passwd: text(raw, idx).unwrap_or_default()
+pkg: extract_string(line, "\"desc\":\"").unwrap_or_default()
 pkg: fs::read_to_string(path) .unwrap_or_default()
-tuned: fs::read_to_string(ACTIVE_PROFILE) .unwrap_or_default()
+powerctl: read_file(&format!("{base}/type")).unwrap_or_default()
+rfkill: read_sysfs(&base.join("type")).unwrap_or_default()
+sha256sum: std::env::var("TARGET").unwrap_or_default()
+shell: std::env::var("TARGET").unwrap_or_default()
+stat: do_readlink(file).unwrap_or_default()
+thermald: read_file_string(&tp_type_path).unwrap_or_default()
+tuned: std::fs::read_to_string(ACTIVE_PROFILE) .unwrap_or_default()
+udevd: read_sysfs_attr(&event.devpath, attr_name).unwrap_or_default()
+udevd: read_sysfs_attr(&event.devpath, attr_name).unwrap_or_default()  [2]
 udisks: fs::read_to_string(path) .unwrap_or_default()
-upower: fs::read_to_string(p) .unwrap_or_default()
+update-alternatives: std::env::var("TARGET").unwrap_or_default()
+updatedb: std::env::var("TARGET").unwrap_or_default()
+upower: std::fs::read_to_string(p) .unwrap_or_default()
 who: fs::read_to_string(entry.path()).unwrap_or_default()

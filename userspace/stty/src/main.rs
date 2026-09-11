@@ -526,19 +526,26 @@ fn render_cc_all(t: &Termios) -> String {
 }
 
 /// Print a brief summary of current settings (default mode).
-fn print_summary(t: &Termios, ws: &Winsize) {
+/// `"; rows R; columns C"`, or nothing at all when the size is not known.
+///
+/// GNU stty omits these fields when TIOCGWINSZ fails rather than printing
+/// zeroes, and zeroes are what `unwrap_or_default()` produced here: a summary
+/// reading `rows 0; columns 0` for a terminal that simply would not say.
+fn size_fields(ws: Option<&Winsize>) -> String {
+    match ws {
+        Some(w) => format!("; rows {}; columns {}", w.ws_row, w.ws_col),
+        None => String::new(),
+    }
+}
+
+fn print_summary(t: &Termios, ws: Option<&Winsize>) {
     let ispeed = baud_decode(t.c_ispeed);
     let ospeed = baud_decode(t.c_ospeed);
+    let size = size_fields(ws);
     if ispeed == ospeed {
-        println!(
-            "speed {ispeed} baud; rows {}; columns {}",
-            ws.ws_row, ws.ws_col
-        );
+        println!("speed {ispeed} baud{size}");
     } else {
-        println!(
-            "ispeed {ispeed} baud; ospeed {ospeed} baud; rows {}; columns {}",
-            ws.ws_row, ws.ws_col
-        );
+        println!("ispeed {ispeed} baud; ospeed {ospeed} baud{size}");
     }
 
     // Line settings that differ from a typical sane default.
@@ -596,12 +603,13 @@ fn print_summary(t: &Termios, ws: &Winsize) {
 }
 
 /// Print all settings in human-readable form (`--all`).
-fn print_all(t: &Termios, ws: &Winsize) {
+fn print_all(t: &Termios, ws: Option<&Winsize>) {
     let ispeed = baud_decode(t.c_ispeed);
     let ospeed = baud_decode(t.c_ospeed);
     println!(
-        "speed {ispeed} baud; rows {}; columns {}; line = {};",
-        ws.ws_row, ws.ws_col, t.c_line
+        "speed {ispeed} baud{}; line = {};",
+        size_fields(ws),
+        t.c_line
     );
     if ispeed != ospeed {
         println!("ispeed {ispeed} baud; ospeed {ospeed} baud;");
@@ -1269,13 +1277,16 @@ fn run(fd: i32, action: Action) -> Result<(), String> {
     match action {
         Action::Summary => {
             let t = tcgets(fd)?;
-            let ws = tiocgwinsz(fd).unwrap_or_default();
-            print_summary(&t, &ws);
+            // A size we could not read is not reported as a size. Unlike the
+            // write paths this need not fail the command: the terminal settings
+            // are the point of the summary and they were read fine.
+            let ws = tiocgwinsz(fd).ok();
+            print_summary(&t, ws.as_ref());
         }
         Action::All => {
             let t = tcgets(fd)?;
-            let ws = tiocgwinsz(fd).unwrap_or_default();
-            print_all(&t, &ws);
+            let ws = tiocgwinsz(fd).ok();
+            print_all(&t, ws.as_ref());
         }
         Action::Save => {
             let t = tcgets(fd)?;
@@ -1290,18 +1301,30 @@ fn run(fd: i32, action: Action) -> Result<(), String> {
             println!("{} {}", ws.ws_row, ws.ws_col);
         }
         Action::SetRows(n) => {
-            let mut ws = tiocgwinsz(fd).unwrap_or_default();
+            // `?`, NOT `unwrap_or_default()`. This is a read-modify-write: the
+            // struct is read, one field is changed, and the WHOLE struct goes
+            // back. Starting from zeros meant `stty row N` also set the
+            // other dimension and both pixel sizes to zero -- destroying what it
+            // could not read, which is the defect this gate exists for.
+            let mut ws = tiocgwinsz(fd)?;
             ws.ws_row = n;
             tiocswinsz(fd, &ws)?;
         }
         Action::SetCols(n) => {
-            let mut ws = tiocgwinsz(fd).unwrap_or_default();
+            // `?`, NOT `unwrap_or_default()`. This is a read-modify-write: the
+            // struct is read, one field is changed, and the WHOLE struct goes
+            // back. Starting from zeros meant `stty col N` also set the
+            // other dimension and both pixel sizes to zero -- destroying what it
+            // could not read, which is the defect this gate exists for.
+            let mut ws = tiocgwinsz(fd)?;
             ws.ws_col = n;
             tiocswinsz(fd, &ws)?;
         }
         Action::Apply(tokens) => {
             let mut t = tcgets(fd)?;
-            let mut ws = tiocgwinsz(fd).unwrap_or_default();
+            // Also a read-modify-write: `rows=`/`cols=` tokens change one field
+            // of this and `tiocswinsz` writes all of it back.
+            let mut ws = tiocgwinsz(fd)?;
             let mut ws_changed = false;
 
             for token in tokens {
@@ -1398,6 +1421,37 @@ fn main() {
 )]
 mod tests {
     use super::*;
+
+    // -- window size reporting ------------------------------------------------
+
+    #[test]
+    fn a_known_size_is_reported() {
+        let ws = Winsize {
+            ws_row: 24,
+            ws_col: 80,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        assert_eq!(size_fields(Some(&ws)), "; rows 24; columns 80");
+    }
+
+    #[test]
+    fn a_size_that_could_not_be_read_is_omitted_not_zeroed() {
+        // `unwrap_or_default()` produced a Winsize of all zeros, so the
+        // summary said "rows 0; columns 0" -- a size no terminal has, printed
+        // as though it had been measured. GNU stty omits the fields.
+        assert_eq!(size_fields(None), "");
+    }
+
+    #[test]
+    fn a_genuinely_zero_size_is_still_reported() {
+        // A terminal CAN report 0x0 -- a pty whose size was never set does.
+        // That is a measurement and it prints, which is exactly why the
+        // unknown case had to stop using the same value to mean "no answer".
+        let ws = Winsize::default();
+        assert_eq!(size_fields(Some(&ws)), "; rows 0; columns 0");
+        assert_ne!(size_fields(Some(&ws)), size_fields(None));
+    }
 
     // ---- baud rate encoding / decoding ----
 

@@ -1,6 +1,29 @@
 #!/usr/bin/env python3
-"""Find `read_to_string(...).unwrap_or_default()` -- a read whose failure is
-indistinguishable from an empty file.
+"""Find `.unwrap_or_default()` on a call that returns Option or Result to say
+it could not find out.
+
+## Three families, one defect
+
+    fs::read_to_string(path).unwrap_or_default()   a file read
+    env::var("USER").unwrap_or_default()           an environment lookup
+    read_cpu_stats().unwrap_or_default()           a local fallible function
+
+The third was added on 2026-09-10 after `userspace/iostat` was found printing
+
+    avg-cpu:  %user   %nice %system %iowait  %steal   %idle
+              0.00    0.00    0.00    0.00    0.00    0.00
+
+on a machine whose /proc/stat could not be read at all. `read_cpu_stats`
+returns Option precisely to say so, and both callers discarded it. THE DEFECT
+WAS IDENTICAL TO THE ONE THIS GATE EXISTS FOR AND ONE CALL DEEPER THAN ITS
+PATTERN COULD SEE -- a checker that recognises only the spelling of the first
+instance it was written for passes, and the passing means nothing.
+
+Only functions DEFINED IN THE FILE BEING SCANNED are considered, and only those
+whose signature says they can fail: the return type is read from the definition
+rather than guessed from the name. Method calls (`x.get(..)`) are excluded, and
+that exclusion is the difference between 39 findings and 171 -- one local
+`fn get(..) -> Option<T>` otherwise implicates every slice in the file.
 
 ## What it looks for, and why only this shape
 
@@ -99,10 +122,68 @@ MIN_READS = 120
 
 
 
+# The standard-library calls whose failure means the outside world could not be
+# consulted. A CLOSED LIST, not a heuristic: every name here is one whose Err or
+# None says "I could not find out", and whose `unwrap_or_default()` therefore
+# turns that into a value indistinguishable from a real reading.
+#
+# `env::var` earns its place twice over -- an absent variable becoming an empty
+# string is how six programs came to take the caller's identity from the
+# environment (TD-B-FIVE-PROGRAMS-STILL-TAKE-THE-CALLERS-IDENTITY...).
+#
+# `fs::read` (bytes) is DELIBERATELY ABSENT and stays absent. The docstring
+# above gives the reason and names the crate that relies on it: the text
+# version's failure is reachable without unusual permissions because one bad
+# byte anywhere empties the whole file, and `userspace/pwdb` reads bytes for
+# precisely that reason. I added `read` to this tuple while widening the gate,
+# did not notice I was reversing a documented decision, and took it back out
+# when the docstring said so. A closed list is only safe if the reasons for
+# each absence are written next to it.
+STD_READERS = (
+    "read_to_string",
+    "read_link",
+    "read_dir",
+    "metadata",
+    "symlink_metadata",
+    "canonicalize",
+)
+
+_ARGS = r"(?:[^()]|\([^()]*\))*"
+_TAIL = r"\s*(?:\n\s*)?\.unwrap_or_default\s*\(\s*\)"
+
 PATTERN = re.compile(
-    r"(?:fs::)?read_to_string\s*\((?:[^()]|\([^()]*\))*\)\s*(?:\n\s*)?\.unwrap_or_default\s*\(\s*\)",
+    r"(?:std::)?(?:fs::)?(?:" + "|".join(STD_READERS) + r")\s*\(" + _ARGS + r"\)" + _TAIL,
     re.S,
 )
+ENV_PATTERN = re.compile(
+    r"(?:std::)?env::var(?:_os)?\s*\(" + _ARGS + r"\)" + _TAIL,
+    re.S,
+)
+
+# A function DEFINED IN THIS FILE returning Option<..> or Result<..>.
+#
+# WHY THIS HALF EXISTS. `userspace/iostat` read /proc/stat through
+# `read_cpu_stats() -> Option<CpuStats>` and both callers wrote
+# `.unwrap_or_default()`, so an unreadable /proc/stat printed as a CPU that was
+# 0.00% busy in every column -- a perfectly idle machine. The defect was
+# identical to the one this gate was written for and one call deeper than its
+# pattern could see, so the gate passed the file for a year.
+LOCAL_FALLIBLE = re.compile(
+    r"^\s*(?:pub\s+)?fn\s+(\w+)\s*\([^)]*\)\s*->\s*(?:Option|Result)\s*<", re.M
+)
+
+
+def local_pattern(name: str) -> re.Pattern:
+    """`name(..).unwrap_or_default()`, and NOT `x.name(..)`.
+
+    The negative lookbehind is the whole difference between 39 findings and
+    171. A file that happens to define any local `fn get(..) -> Option<T>`
+    otherwise makes every `slice.get(a..b).unwrap_or_default()` in it look like
+    a discarded read -- and slicing with a default IS legitimate, which is how
+    a gate becomes noise and then becomes bypassed. Caught by sampling twelve
+    of the 171 before writing any of this down.
+    """
+    return re.compile(r"(?<![.\w])" + re.escape(name) + r"\s*\(" + _ARGS + r"\)" + _TAIL, re.S)
 
 
 class Scan(NamedTuple):
@@ -241,13 +322,32 @@ def survey(tree: gittree.Tree) -> Scan:
         # the floor blind to precisely the failure it exists to catch.
         reads += body.count("read_to_string")
         seen: dict[str, int] = {}
-        for m in PATTERN.finditer(body):
+
+        def record(m: re.Match) -> None:
             call = " ".join(original[m.start() : m.end()].split())
             key = f"{crate}: {call}"
             seen[key] = seen.get(key, 0) + 1
             if seen[key] > 1:
-                key = f"{key}  #{seen[key]}"
+                # `[2]`, NOT `#2`. `read_baseline` strips everything after a
+                # `#` as a comment, so a `#2` suffix was eaten on the way back
+                # in and every second-and-later occurrence of an identical call
+                # looked new FOREVER -- unpinnable by construction. Ten entries
+                # in this file were in that state the moment the gate widened
+                # enough to find duplicates.
+                key = f"{key}  [{seen[key]}]"
             found.append(key)
+
+        for m in PATTERN.finditer(body):
+            record(m)
+        for m in ENV_PATTERN.finditer(body):
+            record(m)
+        # Only functions this file defines, and only those whose signature
+        # SAYS they can fail. The return type is read from the definition
+        # rather than guessed from the name, so `read_config` that returns a
+        # plain String is not accused of anything.
+        for name in {m.group(1) for m in LOCAL_FALLIBLE.finditer(body)}:
+            for m in local_pattern(name).finditer(body):
+                record(m)
     return Scan(sorted(found), files, reads)
 
 
@@ -283,10 +383,21 @@ HEADER = """\
 # which separates "absent" from "could not read"; adding a line here to turn a
 # red --check green is the defect itself.
 #
-# The entries below are the ones that survived inspection on 2026-09-10 -- all
+# TWO KINDS OF ENTRY LIVE HERE AND THEY ARE NOT EQUALLY VOUCHED FOR.
+#
+# The `read_to_string` entries were inspected one at a time on 2026-09-10: all
 # of them report or display, none rewrites the file it read. The four that DID
 # rewrite (sudo/visudo, xdg, hostnamectl, ntpd) are fixed and are not here.
-# Being pinned means "known and not destructive", not "correct".
+#
+# The rest arrived the same day when the gate was widened to see env::var and
+# local fallible functions, and they were pinned AS A SET, not read one by one.
+# Sampling them found real defects -- `ftp` turning a failed password read into
+# an empty password it then sends, `stty` reading a 0x0 terminal when the ioctl
+# fails, `crontab` taking an empty username. Those are recorded in
+# known-issues.md as TD-B-EIGHTY-THREE-DISCARDED-FAILURES-ARE-PINNED-UNREAD.
+#
+# So: being pinned means "known", and for the first group also "not
+# destructive". It has never meant "correct".
 #
 #     python scripts/check-read-defaults.py --update-baseline
 #
@@ -330,6 +441,28 @@ def _self_test() -> int:
         if not ok:
             print(f"          got  {got!r}")
             print(f"          want {want!r}")
+
+    # A KEY MUST SURVIVE THE ROUND TRIP INTO THE BASELINE AND BACK.
+    #
+    # `read_baseline` strips everything after a `#` as a comment, so the
+    # duplicate marker `#2` was eaten on the way back in: the second and every
+    # later occurrence of an identical call could never be pinned, and was
+    # reported NEW on every run forever. Ten entries were in that state the
+    # moment the gate widened enough to find duplicates. The marker is `[2]`
+    # now, and these are the cases that would have caught it.
+    def baseline_roundtrip(key: str) -> str:
+        return key.split("#", 1)[0].strip()
+
+    expect(
+        "a duplicate marker survives the baseline's comment stripping",
+        baseline_roundtrip("crate: f().unwrap_or_default()  [2]"),
+        "crate: f().unwrap_or_default()  [2]",
+    )
+    expect(
+        "...where the old `#2` marker was eaten by it",
+        baseline_roundtrip("crate: f().unwrap_or_default()  #2"),
+        "crate: f().unwrap_or_default()",
+    )
 
     # `strip_noise`'s own fixtures live in `scripts/rustlex.py` beside the
     # function, because a caller's suite proves the caller reads the lexer
@@ -430,8 +563,8 @@ def _self_test() -> int:
            any(f.startswith("delta") for f in scan.found), False)
     expect("...two identical calls in one crate stay distinct",
            sum(1 for f in scan.found if f.startswith("alpha")), 2)
-    expect("...and the second is numbered",
-           any(f.endswith("#2") for f in scan.found), True)
+    expect("...and the second is numbered `[2]`, not `#2`",
+           any(f.endswith("[2]") for f in scan.found), True)
     expect("only .rs files are read", scan.files, 4)
     # Three, not four: `gamma`'s is inside a comment and `delta`'s is below
     # `#[cfg(test)]`, and BOTH are removed before the count. That is the right
@@ -546,17 +679,26 @@ def main() -> int:
 
     if new:
         print(
-            f"\n{len(new)} NEW read_to_string(..).unwrap_or_default():\n"
-            "A failed read is indistinguishable from an empty file here. If the\n"
-            "caller rewrites what it read, the file is replaced by whatever was\n"
-            "parsed from nothing.\n",
+            f"\n{len(new)} NEW discarded failure(s) -- `.unwrap_or_default()` on a\n"
+            "call that returns Option or Result to say it could not find out:\n"
+            "\n"
+            "The default is then indistinguishable from a real answer. An empty\n"
+            "string reads as an empty file, a zeroed struct reads as an idle\n"
+            "machine, and a missing username reads as nobody. None of those is\n"
+            "what happened; what happened is that the question went unanswered.\n",
             file=sys.stderr,
         )
         for f in new:
             print(f"  {f}", file=sys.stderr)
         print(
-            "\nUse `optionalfile::read_or_empty`, which separates a file that is\n"
-            "absent from one that could not be read. See its module docs.",
+            "\nFor a FILE read, `optionalfile::read_or_empty` separates a file\n"
+            "that is absent from one that could not be read. See its module docs.\n"
+            "\n"
+            "For anything else -- a local `fn x() -> Option<T>`, an ioctl, an\n"
+            "environment lookup -- there is no helper and there should not be:\n"
+            "keep the Option and let the caller print `?`, skip the row, or\n"
+            "refuse. `userspace/iostat` prints six question marks where it used\n"
+            "to print six zeroes, which is the whole of the fix.",
             file=sys.stderr,
         )
         sys.stdout.flush()

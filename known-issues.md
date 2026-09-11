@@ -36,6 +36,96 @@ freely. See `roadmap.md` → "Three-Agent Parallel Execution" rule 3, and
 
 ---
 
+## TD-B-FTP-ECHOES-THE-PASSWORD-IT-ASKS-FOR (lane B, 2026-09-10)
+
+**In short:** `ftp` prompts `Password: ` and the characters appear on screen as
+they are typed. Anyone looking at the terminal, and anything capturing it,
+sees the password.
+
+**Where.** `userspace/ftp/src/main.rs`, `read_password`, which is three lines
+and entirely honest about itself:
+
+    fn read_password(prompt: &str) -> Option<String> {
+        // In a real terminal we would disable echo here. For now, just read a line.
+        read_line(prompt)
+    }
+
+The comment is accurate and the user never sees it. That is the whole of the
+issue: the program's behaviour and its self-description disagree only from
+outside.
+
+**The proper fix.** Clear `ECHO` in the terminal's `c_lflag` for the duration
+of the read and restore it afterwards, including on the error path -- a
+password prompt that leaves echo off after a failure is its own bug. `posix`
+has `tcgetattr`/`tcsetattr`; `userspace/passwd` and `userspace/su` need the
+same thing, so it belongs in a small shared helper rather than three copies.
+
+**Until then** the prompt should say so rather than look like a normal
+password prompt, which is a one-line change and is NOT what this entry asks
+for -- it asks for echo suppression. Noted because a warning that becomes
+permanent is how a workaround outlives the thing it was working around.
+
+**Found while fixing** the discarded-failure defect in the same function's
+caller, which is the second time today that reading one line closely turned up
+something beside it.
+
+## TD-B-EIGHTY-THREE-DISCARDED-FAILURES-ARE-PINNED-UNREAD (lane B, 2026-09-10)
+
+**In short:** `check-read-defaults` was widened to see two more spellings of the
+defect it already catches, and found 83 more sites. They are pinned in the
+baseline **as a set**, not inspected one at a time, so the ratchet holds the
+line while the triage happens. Sampling them found real defects, listed below.
+The 16 original `read_to_string` entries were inspected individually and are
+not part of this.
+
+**What the widening added.** `env::var(..).unwrap_or_default()`, and
+`local_fn(..).unwrap_or_default()` where the function is defined in the same
+file and its signature says it returns `Option` or `Result`. The return type is
+read from the definition rather than guessed from the name, and method calls
+are excluded — a file defining any local `fn get(..) -> Option<T>` otherwise
+implicates every slice in it, which is the difference between 39 findings and
+171.
+
+**The three worth fixing first**, from a sample of twelve:
+
+| Site | What the default means |
+|---|---|
+| `ftp/src/main.rs:1792,1828,2001` | `read_password("Password: ").unwrap_or_default()` — **a failed password read becomes an empty password, which is then sent.** |
+| `stty/src/main.rs:1272-1304` (5×) | `tiocgwinsz(fd).unwrap_or_default()` — an ioctl failure becomes a 0×0 terminal, and the caller then computes a layout for it. |
+| `crontab/src/main.rs:669` | `current_username().unwrap_or_default()` — an empty username, in the field that decides whose crontab is edited. |
+
+Also `hostname` (empty hostname), `stat` (empty symlink target), `udevd` and
+`thermald` (empty sysfs attributes), `mktemp` (empty user and group names),
+`efibootmgr` (empty boot order).
+
+**A separate finding from the same sample, not part of this entry's debt:**
+`userspace/last` carries a FOURTH copy of the utmp record parser
+(`extract_string(data, offset + UT_USER_OFFSET, ..)`). who, uptime and w were
+converted to the `utmpfile` crate earlier today and `last` was missed because
+it reads `/var/log/wtmp` rather than `/var/run/utmp` — the same format under a
+different path, so a grep for the path could not find it. Its fields are
+`String` via the same lossy decode that was removed from `who`.
+
+**The proper fix** is per-site and mostly small: keep the `Option` and let the
+caller print `?`, skip the row, or refuse. `userspace/iostat` prints six
+question marks where it printed six zeroes, which is the whole shape of it.
+**Trigger: fix them in batches by crate, dropping each from the baseline as it
+goes.** The baseline may only shrink, so the count is the progress bar.
+
+**Progress: 95 -> 84.** `ftp`'s six are fixed (2026-09-10) -- the three
+`read_line("Name: ")` and three `read_password("Password: ")` sites now
+distinguish end-of-input from an empty answer, so a closed stdin aborts the
+login instead of sending a blank password.
+
+`stty`'s five followed, and three of them were a READ-MODIFY-WRITE rather than
+a display: `stty rows 40` read the Winsize, set one field, and wrote the whole
+struct back, so a failed TIOCGWINSZ set the terminal to 40 rows and zero
+columns and discarded both pixel dimensions. That is the same shape as
+sudo/visudo rewriting /etc/sudoers from an empty read -- the fifth instance of
+the family, in a terminal instead of a file. **Worth grepping the remaining 84
+for the same pattern before working through them in order: a discarded read
+that is then written back is a different severity from one that is printed.**
+
 ## TD-B-WHO-S-W-MODE-CANNOT-BE-REACHED-BY-ANY-INVOCATION (lane B, 2026-09-10)
 
 **In short:** `who` contains a complete `w` — the header line with uptime and

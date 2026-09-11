@@ -1,0 +1,16 @@
+# coreutils bins that never read `argv`, and so silently ignore every
+# option they are given.
+#
+# Written by `scripts/check-argv-ignored.py --update-baseline`. A RATCHET: this
+# file only ever shrinks. A name here is a program that answers a different
+# question from the one it was asked, with exit 0.
+#
+# Do NOT add a name to turn a red --check green. Every entry is a program to
+# finish or to replace, and each one carries the measurement that says so.
+
+
+date    # scripts/date-diff.sh: 3 of 121 cases pass. `date -d @0` prints
+        #   the CURRENT time. B-COREUTILS-DATE-SILENTLY-IGNORES-EVERY-ARGUMENT.
+uptime  # `uptime -s` prints the uptime duration where GNU prints the boot
+        #   TIME, and `uptime --nosuchoption` exits 0.
+        #   B-COREUTILS-UPTIME-SILENTLY-IGNORES-EVERY-ARGUMENT.

@@ -113,6 +113,43 @@ directory — `--target-dir` per `DIFF_PKG` entry — after which the symlink ca
 point at the right one deliberately rather than at whatever survived. Until then
 the survey's column says "coreutils half only", which is the truth.
 
+## B-COREUTILS-UPTIME-SILENTLY-IGNORES-EVERY-ARGUMENT (lane B, 2026-09-11)
+
+The same defect as `date` below, in the other bin that has it:
+
+    $ uptime -s
+    ours   up 00:26                     <- the uptime DURATION
+    GNU    2026-09-11 19:24:28          <- the boot TIME
+
+    $ uptime -p
+    ours   up 00:26
+    GNU    up 26 minutes
+
+    $ uptime --nosuchoption ; echo $?
+    ours   up 00:26
+           0
+
+`userspace/coreutils/src/bin/uptime.rs` is 231 lines that read `/proc/uptime`
+and print it. Its header says so — *"Usage: uptime"* — and it parses nothing.
+The bare form differs too: GNU prints the time of day, the user count and three
+load averages, and ours prints none of them.
+
+`-s` is the one that matters most, because the two answers are not even the same
+*kind* of thing: a script asking when the machine booted gets how long it has
+been up, in a different format, with exit 0.
+
+**Not retired, and the standalone is the better half here** — it carries `-p`,
+`-s`, `-r`, `--json` and `--raw`. As with `date`, §1005's answer is to port into
+`coreutils` and then delete the crate.
+
+**No harness was written for this pair, deliberately.** `uptime`'s output *is*
+the current moment: the time of day and three load averages that change
+continuously. Only `-s` (the boot time) is stable, so a differential could
+compare one case and the refusals. The evidence above is three direct
+measurements instead, which is proportionate to a program with three options —
+and the general prevention now lives in `scripts/check-argv-ignored.py` rather
+than in a harness per program.
+
 ## B-COREUTILS-DATE-SILENTLY-IGNORES-EVERY-ARGUMENT (lane B, 2026-09-11)
 
 `userspace/coreutils/src/bin/date.rs` parses **no arguments at all**. It reads

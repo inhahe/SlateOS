@@ -3729,7 +3729,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] wg/wg-quick: WireGuard VPN (tunnel setup/teardown, key generation, peer management, 502 lines)
   - [x] earlyoom: early OOM daemon (memory/swap threshold monitoring, process selection, 410 lines)
   - [x] zramctl/zram-generator: compressed RAM management (compression algorithms, auto-setup, 492 lines)
-  - [x] avahi-daemon/avahi-browse/avahi-resolve/avahi-publish/avahi-autoipd/avahi-set-host-name: mDNS/DNS-SD (service discovery, RFC 3927, 5182 lines, 192 tests)
+  - [ ] avahi-daemon/avahi-browse/avahi-resolve/avahi-publish/avahi-autoipd/avahi-set-host-name: mDNS/DNS-SD service discovery, RFC 3927 — **unchecked 2026-09-11.** The crate that carried this mark was deleted under design-decisions.md 1006: it answered mDNS questions from a hardcoded table and sent no packets, so `avahi-resolve slateos-host.local` printed an IP address as a fact about the network it had not measured. The REAL responder is line 2965 (kernel/src/net/mdns.rs, RFC 6762/6763, dual-stack multicast) and it has no syscall surface, so no userspace client can reach it yet — see requests/b-a-mdns-has-no-syscall-surface-and-userspace-had-a-simulation-instead.md. Two `[x]` marks for one feature were the tell that one of them was not the thing.
   - [x] cups (10 personalities): CUPS printing system (printers, jobs, PPD options, admin, 5338 lines)
   - [x] bluetoothctl/hciconfig/hcitool/btmon/rfcomm: Bluetooth management (device discovery, pairing, A2DP, 809 lines)
   - [x] fc-list/fc-match/fc-cache/fc-cat/fc-query/fc-scan/fc-validate/fc-conflist: fontconfig font management (font discovery, matching, caching, 582 lines)

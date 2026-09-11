@@ -104,7 +104,6 @@ userspace/ip/src/main.rs:argv-as-string
 userspace/ipcalc/src/main.rs:argv-as-string
 userspace/iptables/src/main.rs:argv-as-string
 userspace/irqbalance/src/main.rs:argv-as-string
-userspace/join/src/main.rs:argv-as-string
 userspace/journalctl/src/main.rs:argv-as-string
 userspace/jq/src/main.rs:argv-as-string
 userspace/kill/src/main.rs:argv-as-string

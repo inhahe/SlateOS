@@ -1306,13 +1306,6 @@ name = "irqbalance"
 version = "0.1.0"
 
 [[package]]
-name = "join"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "journalctl"
 version = "0.1.0"
 

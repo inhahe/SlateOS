@@ -153,6 +153,21 @@ os_case --o
 run_case --proc
 run_case --hard
 
+# --- the two aliases that appear in no help text and no man page ----------------
+# `--sysname` and `--release` are in GNU's longopts[] and reachable, and were
+# found only by asking its binary for its own table: `uname --=x`, where the
+# empty prefix matches every entry so the ambiguity message lists the whole
+# table in declaration order. A table missing them is the dangerous direction --
+# `--r` is then unrecognised here and accepted there.
+run_case --sysname
+run_case --release
+run_case --s
+run_case --r
+run_case --sys
+run_case --rel
+run_case --=x
+run_case --sysname --release
+
 # --- CANONICAL ORDER: every pairing, both ways round ----------------------------
 # If these agree in one order and differ in the other, the implementation is
 # appending as it parses rather than emitting a fixed field order.

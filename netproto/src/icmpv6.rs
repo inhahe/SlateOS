@@ -17,9 +17,9 @@
 //! (who to trust, when to retransmit, cache eviction) belongs to the daemon
 //! that owns per-link state, not here.
 
+use crate::MacAddr;
 use crate::checksum;
 use crate::ipv6::{self, Ipv6Addr};
-use crate::MacAddr;
 
 /// IPv6 next-header value for ICMPv6.
 pub const NH_ICMPV6: u8 = 58;
@@ -152,7 +152,7 @@ pub fn write_neighbor_solicitation(
     out[..total].fill(0);
     out[0] = TYPE_NEIGHBOR_SOLICITATION;
     out[1] = 0; // code
-                // out[2..4] checksum placeholder, out[4..8] reserved
+    // out[2..4] checksum placeholder, out[4..8] reserved
     out[8..24].copy_from_slice(target);
     write_llad_option(out, 24, OPT_SOURCE_LINK_ADDR, src_mac)?;
     let csum = checksum(src, dst, &out[..total]);
@@ -179,7 +179,7 @@ pub fn write_neighbor_advertisement(
     out[..total].fill(0);
     out[0] = TYPE_NEIGHBOR_ADVERTISEMENT;
     out[1] = 0; // code
-                // out[2..4] checksum placeholder
+    // out[2..4] checksum placeholder
     out[4] = flags; // R/S/O bits; remaining 3 reserved bytes stay zero
     out[8..24].copy_from_slice(target);
     write_llad_option(out, 24, OPT_TARGET_LINK_ADDR, target_mac)?;
@@ -206,7 +206,7 @@ pub fn write_router_solicitation(
     out[..total].fill(0);
     out[0] = TYPE_ROUTER_SOLICITATION;
     out[1] = 0; // code
-                // out[2..4] checksum placeholder, out[4..8] reserved
+    // out[2..4] checksum placeholder, out[4..8] reserved
     write_llad_option(out, 8, OPT_SOURCE_LINK_ADDR, src_mac)?;
     let csum = checksum(src, dst, &out[..total]);
     out[2..4].copy_from_slice(&csum.to_be_bytes());
@@ -315,7 +315,9 @@ mod tests {
         let sn = solicited_node_multicast(&target);
         assert_eq!(
             sn,
-            [0xFF, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01, 0xFF, 0xAD, 0xBE, 0xEF]
+            [
+                0xFF, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01, 0xFF, 0xAD, 0xBE, 0xEF
+            ]
         );
     }
 
@@ -361,8 +363,7 @@ mod tests {
         let target = src;
         let mut buf = [0u8; 64];
         let flags = NA_FLAG_SOLICITED | NA_FLAG_OVERRIDE;
-        let n =
-            write_neighbor_advertisement(&mut buf, &src, &dst, &target, flags, &MAC_B).unwrap();
+        let n = write_neighbor_advertisement(&mut buf, &src, &dst, &target, flags, &MAC_B).unwrap();
         assert_eq!(n, 32);
         let parsed = parse_neighbor_advertisement(&buf[..n], &src, &dst).unwrap();
         assert_eq!(parsed.target, target);
@@ -400,15 +401,8 @@ mod tests {
         let src = link_local_from_mac(&MAC_A);
         let dst = ALL_NODES_LINK_LOCAL;
         let mut buf = [0u8; 64];
-        let n = write_neighbor_advertisement(
-            &mut buf,
-            &src,
-            &dst,
-            &src,
-            NA_FLAG_SOLICITED,
-            &MAC_A,
-        )
-        .unwrap();
+        let n = write_neighbor_advertisement(&mut buf, &src, &dst, &src, NA_FLAG_SOLICITED, &MAC_A)
+            .unwrap();
         // Parsing an advertisement as a solicitation fails on the type check.
         assert!(parse_neighbor_solicitation(&buf[..n], &src, &dst).is_none());
         assert!(parse_neighbor_advertisement(&buf[..8], &src, &dst).is_none());
@@ -420,8 +414,7 @@ mod tests {
         let src = link_local_from_mac(&MAC_A);
         let dst = ALL_NODES_LINK_LOCAL;
         let mut buf = [0u8; 64];
-        let n =
-            write_neighbor_advertisement(&mut buf, &src, &dst, &src, 0, &MAC_A).unwrap();
+        let n = write_neighbor_advertisement(&mut buf, &src, &dst, &src, 0, &MAC_A).unwrap();
         buf[25] = 0; // corrupt the option length; re-checksum so parse reaches the walk
         buf[2..4].copy_from_slice(&[0, 0]); // zero the field before recomputing
         let csum = checksum(&src, &dst, &buf[..n]);

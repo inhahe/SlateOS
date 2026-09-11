@@ -6,10 +6,10 @@
 //! accumulated with [`crate::checksum::accumulate`] and folded together with
 //! the header + payload.
 
+use crate::Ipv4Addr;
 use crate::checksum;
 use crate::ipv4::{self, PROTO_UDP};
 use crate::ipv6::{self, Ipv6Addr};
-use crate::Ipv4Addr;
 
 /// Length of the fixed UDP header (src port, dst port, length, checksum).
 pub const HEADER_LEN: usize = 8;
@@ -72,7 +72,11 @@ impl<'a> Datagram<'a> {
                 return None;
             }
         }
-        Some(Datagram { src_port, dst_port, payload: &buf[HEADER_LEN..length] })
+        Some(Datagram {
+            src_port,
+            dst_port,
+            payload: &buf[HEADER_LEN..length],
+        })
     }
 
     /// Parse a UDP datagram carried in an IPv6 packet. Identical to [`parse`]
@@ -98,7 +102,11 @@ impl<'a> Datagram<'a> {
         if checksum::internet_continue(sum, &buf[..length]) != 0 {
             return None;
         }
-        Some(Datagram { src_port, dst_port, payload: &buf[HEADER_LEN..length] })
+        Some(Datagram {
+            src_port,
+            dst_port,
+            payload: &buf[HEADER_LEN..length],
+        })
     }
 }
 
@@ -239,12 +247,8 @@ mod tests {
     }
 
     // fe80::1 and fe80::2 link-local addresses for the v6 round-trip tests.
-    const A6: Ipv6Addr = [
-        0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-    ];
-    const B6: Ipv6Addr = [
-        0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2,
-    ];
+    const A6: Ipv6Addr = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+    const B6: Ipv6Addr = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2];
 
     #[test]
     fn write_v6_then_parse_v6_roundtrips() {

@@ -51,7 +51,12 @@ impl<'a> Echo<'a> {
         }
         let id = u16::from_be_bytes([buf[4], buf[5]]);
         let seq = u16::from_be_bytes([buf[6], buf[7]]);
-        Some(Echo { is_request, id, seq, data: &buf[HEADER_LEN..] })
+        Some(Echo {
+            is_request,
+            id,
+            seq,
+            data: &buf[HEADER_LEN..],
+        })
     }
 }
 
@@ -59,12 +64,22 @@ impl<'a> Echo<'a> {
 /// number of bytes written, or `None` if `out` cannot hold the header plus
 /// `data`. The checksum is computed over the whole message.
 #[must_use]
-pub fn write_echo(out: &mut [u8], is_request: bool, id: u16, seq: u16, data: &[u8]) -> Option<usize> {
+pub fn write_echo(
+    out: &mut [u8],
+    is_request: bool,
+    id: u16,
+    seq: u16,
+    data: &[u8],
+) -> Option<usize> {
     let total = HEADER_LEN.checked_add(data.len())?;
     if out.len() < total {
         return None;
     }
-    out[0] = if is_request { TYPE_ECHO_REQUEST } else { TYPE_ECHO_REPLY };
+    out[0] = if is_request {
+        TYPE_ECHO_REQUEST
+    } else {
+        TYPE_ECHO_REPLY
+    };
     out[1] = 0; // code
     out[2] = 0; // checksum placeholder
     out[3] = 0;

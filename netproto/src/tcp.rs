@@ -7,10 +7,10 @@
 //! state. Options (data offset > 5) are tolerated and exposed as a borrowed
 //! slice rather than decoded.
 
+use crate::Ipv4Addr;
 use crate::checksum;
 use crate::ipv4::{self, PROTO_TCP};
 use crate::ipv6::{self, Ipv6Addr};
-use crate::Ipv4Addr;
 
 /// Minimum TCP header length (no options), in bytes.
 pub const MIN_HEADER_LEN: usize = 20;

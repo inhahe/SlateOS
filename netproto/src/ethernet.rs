@@ -38,7 +38,12 @@ impl<'a> Frame<'a> {
         dst.copy_from_slice(&buf[0..6]);
         src.copy_from_slice(&buf[6..12]);
         let ethertype = u16::from_be_bytes([buf[12], buf[13]]);
-        Some(Frame { dst, src, ethertype, payload: &buf[HEADER_LEN..] })
+        Some(Frame {
+            dst,
+            src,
+            ethertype,
+            payload: &buf[HEADER_LEN..],
+        })
     }
 
     /// True if `dst` is the broadcast address.

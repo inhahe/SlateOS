@@ -191,8 +191,16 @@ impl<'a> Message<'a> {
     #[must_use]
     pub fn answers(&self) -> Answers<'a> {
         match self.answers_start() {
-            Some(off) => Answers { buf: self.buf, off, remaining: self.ancount },
-            None => Answers { buf: self.buf, off: 0, remaining: 0 },
+            Some(off) => Answers {
+                buf: self.buf,
+                off,
+                remaining: self.ancount,
+            },
+            None => Answers {
+                buf: self.buf,
+                off: 0,
+                remaining: 0,
+            },
         }
     }
 
@@ -300,7 +308,8 @@ impl<'a> Iterator for Answers<'a> {
             self.buf[after_name + 6],
             self.buf[after_name + 7],
         ]);
-        let rdlen = u16::from_be_bytes([self.buf[after_name + 8], self.buf[after_name + 9]]) as usize;
+        let rdlen =
+            u16::from_be_bytes([self.buf[after_name + 8], self.buf[after_name + 9]]) as usize;
         let rd_end = match fixed_end.checked_add(rdlen) {
             Some(e) if e <= self.buf.len() => e,
             _ => return stop(self),
@@ -308,7 +317,12 @@ impl<'a> Iterator for Answers<'a> {
         let rdata = &self.buf[fixed_end..rd_end];
         self.off = rd_end;
         self.remaining -= 1;
-        Some(Answer { atype, class, ttl, rdata })
+        Some(Answer {
+            atype,
+            class,
+            ttl,
+            rdata,
+        })
     }
 }
 

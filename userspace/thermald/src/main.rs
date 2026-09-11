@@ -24,7 +24,13 @@ const _PROC_TEMP: &str = "/sys/class/hwmon";
 struct ThermalZone {
     id: u32,
     zone_type: String,
-    temp_mc: i64, // millicelsius
+    /// Millicelsius, or `None` when the sensor did not answer.
+    ///
+    /// It was `i64` with `.unwrap_or(0)`, and zero is not a neutral value for
+    /// a temperature: the classifier asks `temp >= trip`, so a zone whose
+    /// sensor could not be read compared as colder than every trip point and
+    /// reported OK. A missed alarm, spelled as good news.
+    temp_mc: Option<i64>,
     trip_points: Vec<TripPoint>,
     policy: String,
     _mode: String,
@@ -122,6 +128,17 @@ impl Default for ThermalConfig {
 }
 
 // ── Temperature formatting ─────────────────────────────────────────────
+/// A zone's temperature for display, or a phrase that is not a temperature.
+///
+/// `None` prints "temperature unavailable" rather than a number, because every
+/// number here is a plausible reading and there is no spelling of 0 that a
+/// reader would take as "the sensor did not answer".
+fn zone_temp_text(t: Option<i64>) -> String {
+    match t {
+        Some(v) => format_temp(v),
+        None => "temperature unavailable".to_string(),
+    }
+}
 
 fn format_temp(mc: i64) -> String {
     let celsius = mc as f64 / 1000.0;
@@ -194,7 +211,7 @@ fn read_thermal_zones() -> Vec<ThermalZone> {
         let base = entry.path();
         let zone_type =
             read_file_string(&base.join("type")).unwrap_or_else(|| "unknown".to_string());
-        let temp_mc = read_file_i64(&base.join("temp")).unwrap_or(0);
+        let temp_mc = read_file_i64(&base.join("temp"));
         let policy =
             read_file_string(&base.join("policy")).unwrap_or_else(|| "step_wise".to_string());
         let mode = read_file_string(&base.join("mode")).unwrap_or_else(|| "enabled".to_string());
@@ -232,8 +249,19 @@ fn read_thermal_zones() -> Vec<ThermalZone> {
                 "critical" => TripType::Critical,
                 _ => continue,
             };
-            let tp_temp = read_file_i64(&tp_temp_path).unwrap_or(0);
+            // A TRIP POINT WITH NO TEMPERATURE IS NOT A TRIP POINT AT ZERO.
+            // This defaulted to 0, and the comparison is `temp >= trip`, so an
+            // unreadable trip point was crossed by every zone above freezing --
+            // the opposite error to the one above, and a permanent false alarm
+            // rather than a missed one. One we cannot read is dropped: it
+            // cannot be evaluated, and inventing either answer is worse than
+            // admitting there is a trip point we did not see.
+            let Some(tp_temp) = read_file_i64(&tp_temp_path) else {
+                continue;
+            };
             let tp_hyst_path = base.join(format!("trip_point_{}_hyst", tp_id));
+            // Hysteresis genuinely defaults to zero: sysfs omits the file for a
+            // trip point with none, and "no hysteresis" is what that means.
             let tp_hyst = read_file_i64(&tp_hyst_path).unwrap_or(0);
 
             trip_points.push(TripPoint {
@@ -383,31 +411,36 @@ fn cmd_status() {
 
     println!("Thermal Zones:");
     for z in &zones {
-        let status = if z
-            .trip_points
-            .iter()
-            .any(|tp| tp.trip_type == TripType::Critical && z.temp_mc >= tp.temp_mc)
-        {
-            "CRITICAL"
-        } else if z
-            .trip_points
-            .iter()
-            .any(|tp| tp.trip_type == TripType::Passive && z.temp_mc >= tp.temp_mc)
-        {
-            "THROTTLING"
-        } else {
-            "OK"
+        // A zone that did not answer is UNKNOWN, not OK. "OK" is a claim that
+        // the temperature was read and found below every trip point.
+        let status = match z.temp_mc {
+            None => "UNKNOWN",
+            Some(t)
+                if z.trip_points
+                    .iter()
+                    .any(|tp| tp.trip_type == TripType::Critical && t >= tp.temp_mc) =>
+            {
+                "CRITICAL"
+            }
+            Some(t)
+                if z.trip_points
+                    .iter()
+                    .any(|tp| tp.trip_type == TripType::Passive && t >= tp.temp_mc) =>
+            {
+                "THROTTLING"
+            }
+            Some(_) => "OK",
         };
         println!(
             "  zone{}: {} {} [{}] (policy: {})",
             z.id,
             z.zone_type,
-            format_temp(z.temp_mc),
+            zone_temp_text(z.temp_mc),
             status,
             z.policy
         );
         for tp in &z.trip_points {
-            let active = if z.temp_mc >= tp.temp_mc {
+            let active = if z.temp_mc.is_some_and(|t| t >= tp.temp_mc) {
                 " [ACTIVE]"
             } else {
                 ""
@@ -446,7 +479,7 @@ fn cmd_zones() {
             "{:<6} {:<20} {:>10} {:>8} {}",
             format!("zone{}", z.id),
             z.zone_type,
-            format_temp(z.temp_mc),
+            zone_temp_text(z.temp_mc),
             z.trip_points.len(),
             z.policy
         );
@@ -525,7 +558,7 @@ fn run_daemon_mode(args: &[String]) {
             "thermald: monitoring zone{} ({}) at {}",
             z.id,
             z.zone_type,
-            format_temp(z.temp_mc)
+            zone_temp_text(z.temp_mc)
         );
     }
 
@@ -676,7 +709,7 @@ mod tests {
             ThermalZone {
                 id: 0,
                 zone_type: "x86_pkg_temp".to_string(),
-                temp_mc: 45000,
+                temp_mc: Some(45000),
                 trip_points: vec![
                     TripPoint {
                         id: 0,
@@ -697,7 +730,7 @@ mod tests {
             ThermalZone {
                 id: 1,
                 zone_type: "acpitz".to_string(),
-                temp_mc: 40000,
+                temp_mc: Some(40000),
                 trip_points: vec![
                     TripPoint {
                         id: 0,
@@ -778,6 +811,47 @@ mod tests {
                 "thermal zones reported without a /sys/class/thermal to read them from"
             );
         }
+    }
+
+    /// Zero is not a neutral temperature, and both directions were wrong.
+    #[test]
+    fn a_sensor_that_did_not_answer_is_unknown_not_ok() {
+        let trips = vec![TripPoint {
+            id: 0,
+            trip_type: TripType::Critical,
+            temp_mc: 90_000,
+            _hysteresis: 0,
+        }];
+        let unknown = ThermalZone {
+            id: 9,
+            zone_type: "x86_pkg_temp".to_string(),
+            temp_mc: None,
+            trip_points: trips.clone(),
+            policy: "step_wise".to_string(),
+            _mode: "enabled".to_string(),
+        };
+        // The display says so rather than printing a number.
+        assert_eq!(zone_temp_text(unknown.temp_mc), "temperature unavailable");
+        // ...and no trip point reads as crossed, which is what the old `0`
+        // produced by accident while also claiming the zone was OK.
+        assert!(
+            !unknown
+                .trip_points
+                .iter()
+                .any(|tp| unknown.temp_mc.is_some_and(|t| t >= tp.temp_mc))
+        );
+
+        // A zone that DID answer still classifies normally.
+        let hot = ThermalZone {
+            temp_mc: Some(95_000),
+            ..unknown.clone()
+        };
+        assert!(
+            hot.trip_points
+                .iter()
+                .any(|tp| hot.temp_mc.is_some_and(|t| t >= tp.temp_mc)),
+            "95C must cross a 90C critical trip point"
+        );
     }
 
     #[test]

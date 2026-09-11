@@ -3,4 +3,8 @@ name = "nftables"
 version = "0.1.0"
 edition = "2024"
 description = "SlateOS nftables utility"
+# Ruleset names reach these diagnostics straight from argv. A name holding a
+# newline forges a line of nft's own stderr; one holding a quote breaks out
+# of the hand-written quotes that used to be here. See `userspace/quoting`.
 [dependencies]
+quoting = { path = "../quoting" }

@@ -37,7 +37,7 @@
 # a macro nobody had thought to look in. An empty ratchet is a claim
 # about the detector as much as about the code.
 #
-# 467 sites across 79 files.
+# 408 sites across 78 files.
 
 init/servicebus/src/main.rs:1
 userspace/apparmor/src/main.rs:4
@@ -83,7 +83,6 @@ userspace/lsmod/src/main.rs:1
 userspace/lsusb/src/main.rs:6
 userspace/mktemp/src/main.rs:2
 userspace/nc/src/main.rs:10
-userspace/nftables/src/main.rs:59
 userspace/nmap/src/main.rs:1
 userspace/nproc/src/main.rs:4
 userspace/nslookup/src/main.rs:4

@@ -1901,6 +1901,9 @@ dependencies = [
 [[package]]
 name = "nftables"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "nim"

@@ -39,6 +39,7 @@
 #![allow(clippy::wildcard_imports)]
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
@@ -1481,14 +1482,15 @@ impl SlidesApp {
         let mut cmds: Vec<RenderCommand> = Vec::with_capacity(256);
 
         // Background fill the entire window.
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: self.window_width,
-            height: self.window_height,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            &mut cmds,
+            0.0,
+            0.0,
+            self.window_width,
+            self.window_height,
+            0.0,
+            Surface::Card,
+        );
 
         match self.view {
             ViewMode::Edit => self.render_edit_mode(&mut cmds),

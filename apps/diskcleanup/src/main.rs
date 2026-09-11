@@ -1655,14 +1655,8 @@ impl CleanupUI {
 
         // Alternating row background.
         if index.is_multiple_of(2) {
-            tree.push(RenderCommand::FillRect {
-                x: 0.0,
-                y,
-                width,
-                height: ROW_HEIGHT,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::ZERO,
-            });
+            self.palette
+                .push_surface(tree, 0.0, y, width, ROW_HEIGHT, 0.0, Surface::Card);
         }
 
         // The drawn square, centred inside the *hit* rectangle rather than

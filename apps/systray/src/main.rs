@@ -14,6 +14,7 @@
 //! Uses the guitk library for all rendering.
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 // The calendar popup's date arithmetic comes from the shared civil-date
 // module rather than a local copy. See known-issues.md
@@ -1078,14 +1079,15 @@ impl SystemTray {
         let mut tree = RenderTree::new();
 
         // Render tray bar background
-        tree.push(RenderCommand::FillRect {
-            x: self.tray_x,
-            y: self.tray_y,
-            width: self.tray_width,
-            height: TRAY_HEIGHT,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        self.palette.push_surface(
+            &mut tree,
+            self.tray_x,
+            self.tray_y,
+            self.tray_width,
+            TRAY_HEIGHT,
+            4.0,
+            Surface::Panel,
+        );
 
         // Render each visible icon
         let mut offset_x = self.tray_x;
@@ -2113,14 +2115,15 @@ impl SystemTray {
         let fill_width = width * fill_fraction;
 
         // Track background
-        tree.push(RenderCommand::FillRect {
+        pal.push_surface(
+            tree,
             x,
-            y: track_y,
+            track_y,
             width,
-            height: SLIDER_TRACK_HEIGHT,
-            color: pal.surface0,
-            corner_radii: CornerRadii::all(SLIDER_TRACK_HEIGHT / 2.0),
-        });
+            SLIDER_TRACK_HEIGHT,
+            SLIDER_TRACK_HEIGHT / 2.0,
+            Surface::ControlTrack,
+        );
 
         // Track fill (active portion)
         if fill_width > 0.0 {
@@ -3115,7 +3118,13 @@ mod tests {
                     color,
                     ..
                 } if (height - SLIDER_TRACK_HEIGHT).abs() < 0.01
-                    && color == tray.palette.surface0 =>
+                    // Asked of the palette rather than named: a control's
+                    // groove is `Surface::ControlTrack`, and which shade that
+                    // is belongs to the theme, not to this test. It was
+                    // `surface0` here and `surface1` or `surface2` in the next
+                    // app along -- the variance the conversion removed.
+                    && Some(color)
+                        == tray.palette.surface_paint(Surface::ControlTrack).fill =>
                 {
                     Some(Rect::new(x, y, width, height))
                 }

@@ -4,6 +4,7 @@
 //! user tracking, message history, and a multi-panel chat UI.
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -1905,14 +1906,8 @@ impl IrcClientApp {
     }
 
     fn render_title_bar(&self, cmds: &mut Vec<RenderCommand>) {
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: self.width,
-            height: 30.0,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(cmds, 0.0, 0.0, self.width, 30.0, 0.0, Surface::Card);
 
         // Connection status
         cmds.push(RenderCommand::FillRect {
@@ -2394,14 +2389,8 @@ impl IrcClientApp {
     }
 
     fn render_nick_list(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, h: f32) {
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: w,
-            height: h,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(cmds, x, y, w, h, 0.0, Surface::Card);
 
         cmds.push(RenderCommand::Line {
             x1: x,
@@ -2466,14 +2455,8 @@ impl IrcClientApp {
     }
 
     fn render_input(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, h: f32) {
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: w,
-            height: h,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(cmds, x, y, w, h, 0.0, Surface::Card);
 
         cmds.push(RenderCommand::Line {
             x1: x,
@@ -2485,14 +2468,15 @@ impl IrcClientApp {
         });
 
         // Input field
-        cmds.push(RenderCommand::FillRect {
-            x: x + 8.0,
-            y: y + 6.0,
-            width: w - 16.0,
-            height: h - 12.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        self.palette.push_surface(
+            cmds,
+            x + 8.0,
+            y + 6.0,
+            w - 16.0,
+            h - 12.0,
+            4.0,
+            Surface::Card,
+        );
 
         let display_text = if self.input_text.is_empty() {
             "Type a message... (/help for commands)".to_string()

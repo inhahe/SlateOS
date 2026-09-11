@@ -1,5 +1,7 @@
 #!/bin/sh
-# Twenty-two gates at the push boundary. Any one of them aborts the push.
+# Every gate below aborts the push. The list and the `# Gate N` sections are
+# compared by scripts/test-pre-push-gates.py, so neither can drift from the
+# other -- and there is deliberately no count here to drift from both.
 #
 #   1. Refuse to publish the operator's private files (`todo2.txt`).
 #   2. Refuse to publish a command name that nothing can produce an executable
@@ -37,16 +39,37 @@
 #      one spelling of its flag.
 #
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
-# were implemented, and it was wrong again the moment gate 13 was written --
-# and again at 19, and again at 22, which is four times out of four recent
-# additions. The list is what test-pre-push-gates.py compares against the
-# `# Gate N` sections, so a missing entry is a red tree for every lane rather
-# than a cosmetic lapse. If you are adding a gate: the count word, this list,
-# the section, and the bypass are four edits, and the suite checks all four.
-# the section and the bypass landed in `0ab4b55bc` and this list did not.
+# were implemented; wrong again the moment gate 13 was written, when the
+# section and the bypass landed in `0ab4b55bc` and this list did not; and
+# wrong again at 19 and at 22. FOUR OUT OF FOUR RECENT ADDITIONS -- lane A
+# counted that and it is worth having, because a note that stops at the second
+# instance reads as though the problem was dealt with.
+#
+# Adding a gate is THREE edits: this list, the `# Gate N` section, and the
+# bypass variable. scripts/test-pre-push-gates.py checks all three against each
+# other.
+#
+# It was four until tonight. The fourth was a count word at the top of this
+# header -- "Twenty-two gates at the push boundary" -- and every one of the
+# four failures above was that word disagreeing with the list. Lane A's
+# argument for deleting rather than deriving it: the list earns its place
+# because each line says what its gate refuses, which is information no
+# generated number carries, while the count is a hand-maintained checksum OF
+# that list. A derived count printed at run time would still be a number nobody
+# reads at review time. The comparison that actually catches a missing gate is
+# list-against-sections, and that is unaffected.
+#
+# It caught all four failures -- every time, AFTERWARDS. Nothing ran it at the
+# push boundary: gate 20 pairs `scripts/<name>.py` with `scripts/test-<name>.py`
+# and this file is `scripts/hooks/pre-push`, which that pattern cannot match.
+# So four gate additions in a row shipped a wrong count and each was found by a
+# boot test or by another lane. Gate 20 runs the six `test-pre-push-*.py`
+# suites now when this file is in the push, which is why editing it is slower
+# and why the count is no longer something the next person finds out about from
+# lane A.
+#
 # A list in a comment beside the code it lists is a second copy that rots. It
-# is short enough to be worth keeping, so it is *checked* --
-# scripts/test-pre-push-gates.py, which is what caught both -- rather than
+# is short enough to be worth keeping, so it is *checked* rather than
 # trusted.)
 #
 # Each has a full comment above it, further down; each has its own bypass
@@ -674,19 +697,71 @@ if [ "$skip_suites" != "1" ]; then
     # `git diff` does not understand `--not --remotes`; that is rev-list
     # syntax, so the commits are listed first and then asked for their paths.
     # shellcheck disable=SC2086
-    changed_scripts=$(git rev-list $pushed_shas --not --remotes="$remote_name"                           2>/dev/null                       | xargs -r git diff-tree --no-commit-id --name-only -r                           2>/dev/null                       | grep -E '^scripts/[^/]+\.py$' | sort -u)
+    changed_scripts=$(git rev-list $pushed_shas --not --remotes="$remote_name"                           2>/dev/null                       | xargs -r git diff-tree --no-commit-id --name-only -r                           2>/dev/null                       | grep -E '^scripts/' | sort -u)
+    # PAIRED BY STEM, NOT BY EXTENSION.
+    #
+    # `scripts/foo.py`, `scripts/foo.sh` and an extensionless `scripts/hooks/foo`
+    # all pair with `scripts/test-foo.py`. The selector above used to be
+    # `^scripts/[^/]+\.py$`, which silently excluded every shell script and
+    # everything a directory deeper -- and an excluded file is indistinguishable
+    # from one with no suite, so nothing ever said so.
+    #
+    # Three subjects were in that position. `scripts/hooks/pre-push`, which I
+    # found and fixed by adding a case for `scripts/hooks/pre-push`; then
+    # `boot-test.sh` and `bootstrap-worktree.sh`, which lane A found immediately
+    # afterwards and which that case did nothing for. An enumeration needing one
+    # entry per instance misses the next one BY CONSTRUCTION, and this hook has
+    # now demonstrated that twice within an hour.
+    #
+    # Deriving the name fails closed: a script with no paired suite finds no
+    # file and takes the existing no-suite path.
     for f in $changed_scripts; do
         base=$(basename "$f")
         case "$base" in
             test-*) continue ;;   # a suite is not its own subject
         esac
-        suite="${repo_root:-.}/scripts/test-$base"
+        stem="${base%.*}"
+        suite="${repo_root:-.}/scripts/test-$stem.py"
         [ -f "$suite" ] || continue
-        suites_ran="$suites_ran $base"
-        if ! run_checker "suite-$base" "$py" "$suite"; then
+        case " $suites_ran " in
+            *" $stem "*) continue ;;   # already run for a sibling path
+        esac
+        suites_ran="$suites_ran $stem"
+        if ! run_checker "suite-$stem" "$py" "$suite"; then
             suites_failed=1
         fi
     done
+
+    # THIS FILE HAS SIX SUITES, WHICH IS NOT A PAIRING.
+    #
+    # The loop above finds one suite per subject by stem. This hook's suites are
+    # a prefix family -- test-pre-push-gates, -fmt-gate, -doclinks-gate,
+    # -identity-gate, -unixhalf-gate, -run-checker -- so it needs its own rule
+    # rather than a name. `test-pre-push.py` does not exist, so the stem rule
+    # finds nothing here and the two cannot double-run.
+    #
+    # That is why the header's gate count has been wrong FOUR TIMES -- before
+    # gate 9, again at 13, again at 19, and again at 22 tonight, which lane A
+    # had to find and fix for me. `test-pre-push-gates.py` caught every one of
+    # them, and a comment forty lines above says so; nothing ran it at the
+    # boundary, so it caught them all afterwards.
+    #
+    # The pairing is by prefix rather than by name because the six do not
+    # follow `test-<basename>`: the subject is `pre-push` and they are
+    # `test-pre-push-gates`, `-fmt-gate`, `-doclinks-gate`, `-identity-gate`,
+    # `-unixhalf-gate` and `-run-checker`.
+    # shellcheck disable=SC2086
+    if git rev-list $pushed_shas --not --remotes="$remote_name" 2>/dev/null         | xargs -r git diff-tree --no-commit-id --name-only -r 2>/dev/null         | grep -q '^scripts/hooks/pre-push$'
+    then
+        for suite in "${repo_root:-.}"/scripts/test-pre-push-*.py; do
+            [ -f "$suite" ] || continue
+            sbase=$(basename "$suite")
+            suites_ran="$suites_ran $sbase"
+            if ! run_checker "suite-$sbase" "$py" "$suite"; then
+                suites_failed=1
+            fi
+        done
+    fi
     # Say what was run, or that nothing was. A gate that decided internally it
     # had nothing to do appears in the `ran:` tally exactly like one that
     # passed -- lane A's TD-B-A-GATE-THAT-PASSES-BY-SKIPPING-IS-REPORTED-AS-

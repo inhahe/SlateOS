@@ -42,26 +42,19 @@ import sys
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOOK = os.path.join(REPO_ROOT, "scripts", "hooks", "pre-push")
 
-# Spelled-out counts, because that is how the header writes it.
+# NUMBER_WORDS lived here, mapping "twenty-two" to 22 so the header's count
+# could be compared with the list. The count is gone, so the table is too.
 #
-# It runs well past the current gate count on purpose. It used to stop at
-# `twelve`, which was exactly how many gates there were -- so adding gate 13
-# and correctly updating the header to "Thirteen" produced the failure
-# `the count 'thirteen' is a number word`, which reads as a malformed header
-# and is in fact a complete and correct one. A ceiling pinned to today's count
-# is a second copy of that count, and it rots the same way the header does;
-# the difference is that this copy rots into a *false* finding, which is worse
-# than a missed one, because the author's first move is to distrust the change
-# they just made rather than the table.
-NUMBER_WORDS = {
-    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
-    "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
-    "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16,
-    "seventeen": 17, "eighteen": 18, "nineteen": 19, "twenty": 20,
-    "twenty-one": 21, "twenty-two": 22, "twenty-three": 23, "twenty-four": 24,
-    "twenty-five": 25, "twenty-six": 26, "twenty-seven": 27,
-    "twenty-eight": 28, "twenty-nine": 29, "thirty": 30,
-}
+# Its own comment is worth keeping, because the lesson outlived the table: the
+# map used to stop at `twelve`, which was exactly how many gates existed -- so
+# adding gate 13 and CORRECTLY writing "Thirteen" produced the failure
+# `the count 'thirteen' is a number word`. A ceiling pinned to today's count is
+# a second copy of that count, and it rots into a FALSE finding, which is worse
+# than a missed one: the author's first move is to distrust the change they
+# just made rather than the table.
+#
+# That is the same shape as the count itself -- a second copy of a fact -- one
+# level up. Deleting the count deleted both.
 
 # `^#   4. ...` -- an entry in the header's numbered list.
 #
@@ -131,23 +124,29 @@ def test_the_hook_exists_and_is_a_shell_script(text):
     check("pre-push runs under set -u", "\nset -u\n" in text, True)
 
 
-def test_the_header_count_matches_the_numbered_list(text):
-    """The rot that prompted this file: "Seven gates" over eight of them."""
-    # `[\w-]`, not `\w`: English writes "twenty-one" with a hyphen, and a
-    # pattern that cannot match one reports "the header states a count" as
-    # FALSE rather than reporting a wrong count -- so the twenty-first gate
-    # looked like a hook with no header at all. Lane A hit the identical defect
-    # in an alias pattern of theirs the same morning; a character class is a
-    # claim about the language, and `\w` claims English has no hyphens.
-    m = re.search(r"^# ([\w-]+) gates at the push boundary", text, re.MULTILINE)
-    if not check("the header states a count", m is not None, True):
-        return
-    word = m.group(1).lower()
-    if not check(f"the count {word!r} is a number word", word in NUMBER_WORDS, True):
-        return
-    entries = [int(n) for n in HEADER_ENTRY_RE.findall(text)]
-    check("the stated count matches the numbered list",
-          NUMBER_WORDS[word], len(entries))
+def test_the_header_states_no_count(text):
+    """The count word is GONE, and this keeps it gone.
+
+    This test used to assert that "Twenty-two gates at the push boundary"
+    matched the length of the numbered list. It caught that disagreement four
+    times -- before gate 9, at 13, at 19 and at 22 -- which is four out of four
+    recent additions, and every catch was after the fact because nothing ran
+    this suite at the push boundary until gate 20 learned to.
+
+    The word was a hand-maintained checksum of a list that is itself checked
+    against the `# Gate N` sections. Deleting it removes a thing that can be
+    wrong without removing anything that can be known: the list says what each
+    gate refuses, which no count carries, and the list-against-sections
+    comparison is what actually catches a missing gate.
+
+    Asserting its ABSENCE rather than simply dropping the old test is the
+    difference between a decision and a gap. Re-adding a count would otherwise
+    be silent, and the next person to add one would inherit all four failures
+    again.
+    """
+    m = re.search(r"^# [\w-]+ gates at the push boundary", text, re.MULTILINE)
+    check("the header states no gate count for the list to disagree with",
+          m is None, True)
 
 
 def test_the_numbered_list_matches_the_implemented_gates(text):

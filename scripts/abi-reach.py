@@ -87,6 +87,29 @@ PLUMBING = frozenset({
 })
 
 
+#: Entries a reader will otherwise chase. Printed with the report rather than kept in a
+#: document, because the moment someone needs this is the moment they are looking at the
+#: output -- and the first thing I did with my own report was chase an entry that was
+#: fine and tell another lane their closed request was still open.
+EXPECTED_NOTES = [
+    "  Two clusters above are EXPECTED. Check them off before investigating:",
+    "",
+    "    ipc::memfd, ipc::epoll, ipc::inotify, ipc::futex -- Linux-specific APIs.",
+    "      design.txt mandates channel IPC with capability transfer as the primary",
+    "      mechanism, explicitly not file descriptors, so having no native number is",
+    "      the design and not a gap.",
+    "",
+    "    net::socket, net::netstack_client -- there is no native SYS_SOCKET/BIND/CONNECT",
+    "      at all; the only native socket numbers are SYS_SOCKETPAIR_*, which is AF_UNIX",
+    "      local IPC. But native libc reaches the network through the Linux MULTIPLEXED",
+    "      socketcall interface (posix/src/linux_net.rs), so sockets WORK and there is no",
+    "      symptom. That makes this unlike the four instances this tool was built for,",
+    "      where libc had no number and failed silently. Whether the native ABI should",
+    "      have its own socket numbers is an open design question -- design.txt does not",
+    "      say -- and not a defect to fix off the back of this report.",
+]
+
+
 def read(path: pathlib.Path) -> str:
     return rustscan.production_only(path.read_text(encoding="utf-8", errors="replace"))
 
@@ -181,6 +204,9 @@ def report(strict: bool = False) -> int:
             names = ", ".join(shims[:4]) + (f" +{len(shims) - 4}" if len(shims) > 4 else "")
             print(f"    {mod}")
             print(f"        via {names}")
+        print()
+        for line in EXPECTED_NOTES:
+            print(line)
         print()
     else:
         print("  Every module a Linux shim reaches is also reached by some native")

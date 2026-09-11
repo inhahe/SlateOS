@@ -66,7 +66,6 @@ userspace/efibootmgr/src/main.rs:argv-as-string
 userspace/eject/src/main.rs:argv-as-string
 userspace/env/src/main.rs:argv-as-string
 userspace/env/src/main.rs:env-as-string
-userspace/expand/src/main.rs:argv-as-string
 userspace/file/src/main.rs:argv-as-string
 userspace/findmnt/src/main.rs:argv-as-string
 userspace/finger/src/main.rs:argv-as-string

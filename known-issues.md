@@ -64783,6 +64783,43 @@ lint programme above is still worth doing; it is not a substitute for a
 differential, and two of its three crates so far were duplicates that a
 differential then deleted.
 
+**31 -> 30 (2026-09-11): `expand`, the pair the broken knob was hiding.**
+This is the pair that read as a **dead heat** — 216 passed both ways — until
+`DIFF_PKG` was made to cross the WSL boundary (entry below). With the knob
+working, `DIFF_PKG=expand bash scripts/expand-diff.sh`, each run's subject
+confirmed by binary hash and `--version` rather than assumed:
+
+**coreutils 216 passed, 0 differed. The standalone 90 passed, 126 differed.**
+
+The survey had called this one "close — read both", and on its own terms it was
+right: 873 lines against 712, two option names either side. Every one of the
+126 is invisible to a line count.
+
+| | cases | defect |
+|---|---|---|
+| `-t` specs wrongly **rejected** | 49 | `-t '1 3 5'` and `-t '1,3 5'` — blank-separated stop lists, which POSIX and GNU both accept — are refused as `invalid tab stop specification`. So is an empty `-t ''`. |
+| **wrong column, exit 0** | **29** | With an explicit multi-stop list the text lands one column right of where GNU puts it: `-t 1,3,5` on a leading tab emits **two** spaces where GNU emits **one**. Both exit 0 and the output looks plausible. Placing text in a column is the entire job of this program. |
+| `-N` shorthand rejected | 19 | `expand -4`, and `-1` … `-9`, `-16` — the historic spelling, still accepted by GNU — die with `invalid option -- '4'`. |
+| long options | 11 | `--tab` (an unambiguous abbreviation of `--tabs`) is unrecognised; so are `--initial=4`, `--help=x`, `--version=x`. |
+| **refuses non-UTF-8 input** | 2 | `expand badbytes.txt` → `stream did not contain valid UTF-8`, exit 1, **no output at all**. GNU passes the bytes through untouched. Same for a byte off a pipe. |
+| accepts what GNU refuses | 5 | `-t 4 -t 2`, `-t 4 -t 4`, `-t +4,6`, `-t +2,+4`, `-t +2 -t +4` all exit 0. GNU refuses each: `tab sizes must be ascending`, `'+' specifier only allowed with the last value`. |
+| `(os error N)` in diagnostics | 9 | `expand: nosuch.txt: No such file or directory (os error 2)`; `expand: .: Is a directory (os error 21)`. Rust's `io::Error` Display leaking into a user-facing sentence. |
+| missing second line | 2 | `expand -it` and `expand --tabs` omit `Try 'expand --help' for more information.` |
+
+**The non-UTF-8 refusal is the one that would have shipped a data bug.**
+`expand` is a whitespace tool: it has no business decoding the bytes between the
+tabs, and a Latin-1 file, a file with one stray byte, or anything binary-ish
+comes back as an error with no output. That is CLAUDE.md self-review item 7 —
+"never force UTF-8 on … pipe data" — as a whole-file refusal rather than as
+`from_utf8_lossy` corruption. It cannot be seen by reading the option list,
+which is why the survey scored this pair as close.
+
+**The wrong-column family is the one that would have shipped quietly.** 29 cases
+where both sides exit 0, neither prints anything, and the columns do not line
+up. A harness comparing `od -An -c` byte for byte is the only reason they were
+seen at all; any comparison that normalised whitespace would have called them
+equal, and whitespace is the output.
+
 **THE KNOB THAT SELECTS THE SUBJECT WAS NOT REACHING THE SUBJECT
 (2026-09-11, fixed).** `DIFF_PKG=<pkg>` — the override every entry above uses
 to point a coreutils harness at the standalone half instead — was being

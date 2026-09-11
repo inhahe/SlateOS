@@ -64730,10 +64730,7 @@ Four representative defects:
 
 | case | GNU | standalone |
 |---|---|---|
-| `-z -f1` | `p
-q  p
-r ` | `p
-q ` — **a record is dropped** |
+| `-z -f1` | `p\nq\0 p\nr\0` | `p\nq\0` — **a record is dropped** |
 | `+2` (traditional skip-chars) | works | treated as a FILENAME: *No such file or directory* |
 | `--group=both` | one blank line between groups | two |
 | `--group=b` | accepts the unambiguous abbreviation | rejects it |
@@ -64792,7 +64789,7 @@ differential then deleted.
 |---|---|---|
 | `--total` missing | 49 | GNU's summary line (`1	1	2	total`) is unimplemented, so half the suite dies at `unrecognized option '--total'`. |
 | missing second line | 25 | on unsorted input GNU prints `comm: file 1 is not in sorted order` **and** `comm: input is not in sorted order`; only the first is printed. |
-| **empty `--output-delimiter`** | **4** | `--output-delimiter=` means **NUL** to GNU, which emits ` ` separators. The standalone emits *nothing*, so columns 1, 2 and 3 become indistinguishable — the output stops carrying the answer. Both exit 0. |
+| **empty `--output-delimiter`** | **4** | `--output-delimiter=` means **NUL** to GNU, which emits `\0` separators. The standalone emits *nothing*, so columns 1, 2 and 3 become indistinguishable — the output stops carrying the answer. Both exit 0. |
 | accepts what GNU refuses | 4 | a repeated `--output-delimiter` is `comm: multiple output delimiters specified` in GNU; the standalone takes the last one and exits 0. |
 | `(os error N)` | 7 | `comm: nosuch.txt: No such file or directory (os error 2)`. One of these also reports the *wrong* failure — it opens the files before validating the options, so a doubled delimiter on two missing files is reported as the missing file. |
 | **refuses non-UTF-8** | 2 | `comm bad1.txt bad2.txt` → `read error: stream did not contain valid UTF-8`, exit 1, no output. GNU compares the bytes and succeeds. |

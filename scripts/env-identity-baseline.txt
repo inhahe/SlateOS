@@ -22,11 +22,6 @@ logger: env::var("LOGNAME")
 logger: env::var("USER")
 lp: env::var("USER")
 lp: env::var("USER")  [2]
-mesg: env::var("TTY")
-mesg: env::var("TTY")  [2]
-mesg: env::var("USER")
-mesg: env::var("USER")  [2]
-mesg: env::var("USER")  [3]
 mktemp: env::var("LOGNAME")
 mktemp: env::var("USER")
 screen: env::var("USER")

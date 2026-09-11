@@ -12,6 +12,10 @@
 
 #![cfg_attr(not(test), no_main)]
 
+// `#[cfg(not(test))]` to match its only consumer: `main` is gated that way,
+// and it became the last user of `env` when the `env::var` identity reads
+// were replaced with the real lookups.
+#[cfg(not(test))]
 use std::env;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
@@ -146,29 +150,15 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
 // Mesg implementation
 // ---------------------------------------------------------------------------
 
-/// Get the current terminal device path. Kept for the future code path
-/// that will switch the state file to a per-tty location; the current
-/// implementation uses a single shared state file.
-#[allow(dead_code)]
-fn get_tty() -> Option<PathBuf> {
-    // Try standard env var first
-    if let Ok(tty) = env::var("TTY") {
-        return Some(PathBuf::from(tty));
-    }
-
-    // Try /dev/tty
-    if PathBuf::from("/dev/tty").exists() {
-        return Some(PathBuf::from("/dev/tty"));
-    }
-
-    None
-}
-
 /// Check if the current terminal allows messages
 fn get_mesg_status() -> MesgState {
     // In a real OS, check the terminal's group-write permission bit
     // For now, read from a state file
-    let state_file = get_mesg_state_path();
+    let Some(state_file) = get_mesg_state_path() else {
+        // Cannot tell who we are, so there is no per-user setting to consult.
+        // `Yes` is the Unix default for a terminal nobody has configured.
+        return MesgState::Yes;
+    };
     if let Ok(content) = std::fs::read_to_string(&state_file) {
         match content.trim() {
             "n" => return MesgState::No,
@@ -180,7 +170,11 @@ fn get_mesg_status() -> MesgState {
 }
 
 fn set_mesg_status(allow: bool) -> io::Result<()> {
-    let state_file = get_mesg_state_path();
+    let Some(state_file) = get_mesg_state_path() else {
+        return Err(io::Error::other(
+            "cannot determine who you are, and the setting is per-user",
+        ));
+    };
     // Ensure parent directory exists
     if let Some(parent) = state_file.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -188,9 +182,55 @@ fn set_mesg_status(allow: bool) -> io::Result<()> {
     std::fs::write(&state_file, if allow { "y\n" } else { "n\n" })
 }
 
-fn get_mesg_state_path() -> PathBuf {
-    let user = env::var("USER").unwrap_or_else(|_| "unknown".to_string());
-    PathBuf::from(format!("/var/run/mesg/{user}"))
+/// The caller's login name, or `None` if this build cannot determine it.
+///
+/// # Why not `$USER`
+///
+/// Three things were keyed on it, and one is the trust model of `write`: the
+/// message header. `USER=root write victim` printed **"Message from root@..."**
+/// on the victim's terminal. Sender spoofing is the whole of what a
+/// terminal-messaging tool must not permit.
+///
+/// The other two: `/var/run/mesg/<user>` decides WHOSE message-acceptance
+/// setting is read and written, so `USER=alice mesg n` turned alice's messages
+/// off; and `/var/run/talk/<from>-<to>` names the conversation file.
+fn current_username() -> Option<String> {
+    let uid = authlib::identity::caller_uid()?;
+    userdb::UserDb::load(userdb::DEFAULT_PATH)
+        .ok()
+        .and_then(|db| db.find_uid(uid).and_then(userdb::Record::username))
+}
+
+/// The terminal this process is on, or `None` where there is not one.
+#[cfg(unix)]
+fn current_tty() -> Option<String> {
+    unsafe extern "C" {
+        fn ttyname(fd: i32) -> *const std::ffi::c_char;
+    }
+    // SAFETY: `ttyname` takes a descriptor and returns either null or a
+    // pointer to a NUL-terminated string in static storage, valid until the
+    // next call. The bytes are copied out before anything else runs.
+    let bytes = unsafe {
+        let ptr = ttyname(0);
+        if ptr.is_null() {
+            return None;
+        }
+        std::ffi::CStr::from_ptr(ptr).to_bytes().to_vec()
+    };
+    String::from_utf8(bytes).ok()
+}
+
+#[cfg(not(unix))]
+fn current_tty() -> Option<String> {
+    None
+}
+
+/// Where this user's message-acceptance setting lives, or `None` if we cannot
+/// tell who this user is -- in which case there is no setting, rather than an
+/// `unknown` file shared by every unidentifiable caller.
+fn get_mesg_state_path() -> Option<PathBuf> {
+    let user = current_username()?;
+    Some(PathBuf::from(format!("/var/run/mesg/{user}")))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -276,8 +316,9 @@ fn run_write(
     writer: &mut dyn Write,
     err_writer: &mut dyn Write,
 ) -> Result<i32, io::Error> {
-    let from_user = env::var("USER").unwrap_or_else(|_| "unknown".to_string());
-    let from_tty = env::var("TTY").unwrap_or_else(|_| "?".to_string());
+    // `?` for a sender with no terminal is honest: the recipient sees that
+    // the sender's terminal is unknown, which is true.
+    let from_tty = current_tty().unwrap_or_else(|| "?".to_string());
 
     // Check if target user accepts messages
     if !check_user_mesg(target_user) {
@@ -302,6 +343,22 @@ fn run_write(
     let msg_file = PathBuf::from(format!("/var/run/messages/{target_user}"));
 
     // Header
+    // THE HEADER IS AN IDENTITY CLAIM MADE TO SOMEBODY ELSE'S TERMINAL, and
+    // it is not made unless it can be made truthfully. This was `$USER`, so
+    // `USER=root write victim` announced itself as root on the victim's
+    // screen -- sender spoofing, which is the whole of what a
+    // terminal-messaging tool must not permit.
+    //
+    // Checked HERE rather than on entry so that "is not logged in" is still
+    // reported first, as real `write` does: whether the recipient exists is
+    // the caller's question, and it is answerable without knowing who asked.
+    let Some(from_user) = current_username() else {
+        writeln!(
+            err_writer,
+            "write: cannot determine who you are, and the message says who it is from; refusing"
+        )?;
+        return Ok(1);
+    };
     let header = format!(
         "\r\nMessage from {from_user}@{from_tty} on {} ...\r\n",
         tty_path.display()
@@ -351,7 +408,15 @@ fn run_talk(
     writer: &mut dyn Write,
     err_writer: &mut dyn Write,
 ) -> Result<i32, io::Error> {
-    let from_user = env::var("USER").unwrap_or_else(|_| "unknown".to_string());
+    // Same as `write`: this names the sender to the other party and also
+    // names the conversation file under /var/run/talk.
+    let Some(from_user) = current_username() else {
+        writeln!(
+            err_writer,
+            "talk: cannot determine who you are, and the invitation says who it is from; refusing"
+        )?;
+        return Ok(1);
+    };
 
     // Check if target user is available
     if !check_user_mesg(target_user) {

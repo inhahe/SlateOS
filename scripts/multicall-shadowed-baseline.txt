@@ -37,7 +37,6 @@
 # stays green, the entries stay right, and only the reasoning goes.
 
 chown:chmod
-chpasswd:passwd
 cron:at
 cron:crontab
 pv:fuser

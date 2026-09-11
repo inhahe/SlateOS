@@ -64730,10 +64730,7 @@ Four representative defects:
 
 | case | GNU | standalone |
 |---|---|---|
-| `-z -f1` | `p
-q  p
-r ` | `p
-q ` — **a record is dropped** |
+| `-z -f1` | `p\nq\0 p\nr\0` | `p\nq\0` — **a record is dropped** |
 | `+2` (traditional skip-chars) | works | treated as a FILENAME: *No such file or directory* |
 | `--group=both` | one blank line between groups | two |
 | `--group=b` | accepts the unambiguous abbreviation | rejects it |
@@ -64793,9 +64790,8 @@ found.
 
 | | cases | defect |
 |---|---|---|
-| **PANIC on a non-UTF-8 argv** | **24** | `printf 'a b
-' \| xargs argv café` — with `café` in Latin-1 — aborts with `thread 'main' panicked at library/std/src/env.rs:878: called Result::unwrap()`, **exit 134**. It is `std::env::args()` unwrapping, and it is a crash rather than an error. `xargs`'s entire job is handing arbitrary bytes to another program; GNU passes the byte through and exits 0. This is CLAUDE.md self-review item 7 and the `unwrap_used` lint in one place, in the program least entitled to assume its input is text. |
-| **`` and `` are not whitespace** | **40** | GNU splits arguments on vertical tab and form feed; the standalone keeps them inside the argument, so `a b` yields the argument `a` instead of `a`, and ` a` yields two arguments where GNU yields one. Exit 0 both ways — **the executed command silently receives different arguments**. |
+| **PANIC on a non-UTF-8 argv** | **24** | `printf 'a b\n' | xargs argv café` — with `café` in Latin-1 — aborts with `thread 'main' panicked at library/std/src/env.rs:878: called Result::unwrap()`, **exit 134**. It is `std::env::args()` unwrapping, and it is a crash rather than an error. `xargs`'s entire job is handing arbitrary bytes to another program; GNU passes the byte through and exits 0. This is CLAUDE.md self-review item 7 and the `unwrap_used` lint in one place, in the program least entitled to assume its input is text. |
+| **`\v` and `\f` are not whitespace** | **40** | GNU splits arguments on vertical tab and form feed; the standalone keeps them inside the argument, so `\013a b` yields the argument `\va` instead of `a`, and `\013\014 a` yields two arguments where GNU yields one. Exit 0 both ways — **the executed command silently receives different arguments**. |
 | `-E` / `--eof` unimplemented | 69 | the logical-EOF marker, the option that stops `xargs` at a sentinel line. |
 | message shape | 42 | `unterminated single quote` for GNU's `unmatched single quote; by default quotes are special to xargs unless you use the -0 option` — GNU's sentence names the fix, and the exit status differs too (125 against 1). |
 | accepts what GNU refuses | 11 | a quote left open across a newline is accepted as a literal; and `-s 25` with a 30-byte argument **runs anyway** where GNU refuses with `argument line too long` — the one option whose whole purpose is to impose a limit. |
@@ -64934,7 +64930,7 @@ most balanced one: it is the one that most reliably conceals a landslide.
 |---|---|---|
 | `--total` missing | 49 | GNU's summary line (`1	1	2	total`) is unimplemented, so half the suite dies at `unrecognized option '--total'`. |
 | missing second line | 25 | on unsorted input GNU prints `comm: file 1 is not in sorted order` **and** `comm: input is not in sorted order`; only the first is printed. |
-| **empty `--output-delimiter`** | **4** | `--output-delimiter=` means **NUL** to GNU, which emits ` ` separators. The standalone emits *nothing*, so columns 1, 2 and 3 become indistinguishable — the output stops carrying the answer. Both exit 0. |
+| **empty `--output-delimiter`** | **4** | `--output-delimiter=` means **NUL** to GNU, which emits `\0` separators. The standalone emits *nothing*, so columns 1, 2 and 3 become indistinguishable — the output stops carrying the answer. Both exit 0. |
 | accepts what GNU refuses | 4 | a repeated `--output-delimiter` is `comm: multiple output delimiters specified` in GNU; the standalone takes the last one and exits 0. |
 | `(os error N)` | 7 | `comm: nosuch.txt: No such file or directory (os error 2)`. One of these also reports the *wrong* failure — it opens the files before validating the options, so a doubled delimiter on two missing files is reported as the missing file. |
 | **refuses non-UTF-8** | 2 | `comm bad1.txt bad2.txt` → `read error: stream did not contain valid UTF-8`, exit 1, no output. GNU compares the bytes and succeeds. |

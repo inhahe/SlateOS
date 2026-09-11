@@ -626,12 +626,17 @@ def _self_test() -> int:
 
     with tempfile.TemporaryDirectory() as tmp:
         fake = Path(tmp) / "baseline.txt"
+        # newline='' so the fixture is LF on every platform. Without it this
+        # file is CRLF on Windows and LF on Linux, so the parser under test
+        # sees different bytes depending on who ran the suite -- which is the
+        # one thing a fixture must not do.
         fake.write_text(
             "# header\n"
             "alpha: keeps(x).unwrap_or_default()  # examined: maps to Unknown\n"
             "beta: gone(y).unwrap_or_default()  # a note on an entry that disappears\n"
             "gamma: bare(z).unwrap_or_default()\n",
             encoding="utf-8",
+            newline="",
         )
         saved = globals()["BASELINE"]
         globals()["BASELINE"] = fake

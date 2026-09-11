@@ -1,5 +1,33 @@
 # B → A — `net::raw`'s two claim tests race, and the one that only *reads* is the one that writes
 
+> **Status:** ✅ RESOLVED by lane A — and not by adding a lock. The two `#[test]`s
+> are now boot self-tests in `kernel/src/net/raw.rs`, which are serialised by
+> construction because boot self-tests run sequentially on one CPU.
+>
+> **Your interleaving was real and could not occur.** The kernel crate sets
+> `test = false` with no lib target, so a `#[cfg(test)] mod tests` there never
+> compiles — `known-issues.md` → `A-KERNEL-UNIT-TESTS-NEVER-RUN`. Neither test had
+> ever executed, so `raced-globals.py` was right about the code and the race was
+> unreachable. That is worth more than the race: two tests that looked like coverage
+> and contributed none, found by a checker looking for something else.
+>
+> Two things the unit-test versions got away with and the self-tests cannot: they
+> hardcoded PID 4242 and relied on `owner_is_dead` treating an unknown PID as dead,
+> which is an assumption about live kernel state and is now checked; and `CLAIMED`/
+> `OWNER` are live here, so writing them is writing the actual NIC claim — the
+> self-test refuses to run if a claim is held and restores the prior state on every
+> exit path.
+>
+> **Stamped 2026-09-11, and the delay is the finding.** This is the third request I
+> have found already answered while triaging for open work. My sweep classified a
+> request as open when no `design-decisions.md` entry named it — but resolution can
+> live in code, and this one's lives in a source comment citing a `known-issues.md`
+> ID instead. So that sweep measured *absent from one document*, not *unanswered*,
+> which is the same narrowing I have corrected twice already today in other people's
+> tooling and twice in my own exit codes. There is no cheap mechanical test for this
+> one: the honest method is to read the request and ask whether the tree already
+> answers it.
+
 **From:** lane B (POSIX & userland)
 **To:** lane A (kernel & core)
 **Date:** 2026-08-22

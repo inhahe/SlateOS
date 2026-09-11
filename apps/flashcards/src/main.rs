@@ -20,6 +20,7 @@
 //! - Three sample decks pre-loaded
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent};
 use guitk::kv;
@@ -1770,14 +1771,15 @@ impl FlashcardsApp {
 
         // Search bar
         let search_y = top + 44.0;
-        cmds.push(RenderCommand::FillRect {
-            x: Self::PADDING,
-            y: search_y,
-            width: content_w * 0.6,
-            height: 28.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        self.palette.push_surface(
+            cmds,
+            Self::PADDING,
+            search_y,
+            content_w * 0.6,
+            28.0,
+            4.0,
+            Surface::Card,
+        );
         let search_display = match (self.search_active, self.search_query.is_empty()) {
             (true, true) => String::from("Type to filter..."),
             (false, true) => String::from("Search [/]"),
@@ -2029,14 +2031,15 @@ impl FlashcardsApp {
             max_width: Some(200.0),
             overflow: TextOverflow::Ellipsis,
         });
-        cmds.push(RenderCommand::FillRect {
-            x: Self::PADDING + 16.0,
-            y: field_y + 20.0,
-            width: field_w,
-            height: 36.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        self.palette.push_surface(
+            cmds,
+            Self::PADDING + 16.0,
+            field_y + 20.0,
+            field_w,
+            36.0,
+            4.0,
+            Surface::Card,
+        );
         cmds.push(RenderCommand::Text {
             x: Self::PADDING + 24.0,
             y: field_y + 30.0,
@@ -2068,14 +2071,15 @@ impl FlashcardsApp {
             max_width: Some(200.0),
             overflow: TextOverflow::Ellipsis,
         });
-        cmds.push(RenderCommand::FillRect {
-            x: Self::PADDING + 16.0,
-            y: back_y + 20.0,
-            width: field_w,
-            height: 36.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        self.palette.push_surface(
+            cmds,
+            Self::PADDING + 16.0,
+            back_y + 20.0,
+            field_w,
+            36.0,
+            4.0,
+            Surface::Card,
+        );
         cmds.push(RenderCommand::Text {
             x: Self::PADDING + 24.0,
             y: back_y + 30.0,
@@ -2107,14 +2111,15 @@ impl FlashcardsApp {
             max_width: Some(200.0),
             overflow: TextOverflow::Ellipsis,
         });
-        cmds.push(RenderCommand::FillRect {
-            x: Self::PADDING + 16.0,
-            y: tags_y + 20.0,
-            width: field_w,
-            height: 36.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        self.palette.push_surface(
+            cmds,
+            Self::PADDING + 16.0,
+            tags_y + 20.0,
+            field_w,
+            36.0,
+            4.0,
+            Surface::Card,
+        );
         cmds.push(RenderCommand::Text {
             x: Self::PADDING + 24.0,
             y: tags_y + 30.0,
@@ -2154,14 +2159,15 @@ impl FlashcardsApp {
         let done = session.current_pos as f32;
         let progress_w = content_w;
         let progress_h = 8.0;
-        cmds.push(RenderCommand::FillRect {
-            x: Self::PADDING,
-            y: top,
-            width: progress_w,
-            height: progress_h,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        self.palette.push_surface(
+            cmds,
+            Self::PADDING,
+            top,
+            progress_w,
+            progress_h,
+            4.0,
+            Surface::ControlTrack,
+        );
         if total > 0.0 {
             let filled = (done / total) * progress_w;
             if filled > 0.0 {
@@ -2212,14 +2218,15 @@ impl FlashcardsApp {
         let card_y = top + 50.0;
         let card_h = 260.0;
 
-        cmds.push(RenderCommand::FillRect {
-            x: Self::PADDING + 40.0,
-            y: card_y,
-            width: content_w - 80.0,
-            height: card_h,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(12.0),
-        });
+        self.palette.push_surface(
+            cmds,
+            Self::PADDING + 40.0,
+            card_y,
+            content_w - 80.0,
+            card_h,
+            12.0,
+            Surface::Card,
+        );
         cmds.push(RenderCommand::StrokeRect {
             x: Self::PADDING + 40.0,
             y: card_y,
@@ -2351,14 +2358,15 @@ impl FlashcardsApp {
     ) {
         let cx = self.width / 2.0;
 
-        cmds.push(RenderCommand::FillRect {
-            x: Self::PADDING + 60.0,
-            y: top,
-            width: content_w - 120.0,
-            height: 280.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(12.0),
-        });
+        self.palette.push_surface(
+            cmds,
+            Self::PADDING + 60.0,
+            top,
+            content_w - 120.0,
+            280.0,
+            12.0,
+            Surface::Card,
+        );
 
         cmds.push(RenderCommand::Text {
             x: cx - 80.0,
@@ -2485,14 +2493,8 @@ impl FlashcardsApp {
 
         for (i, (label, value, color)) in stats.iter().enumerate() {
             let x = Self::PADDING + (i as f32) * (col_w + 16.0);
-            cmds.push(RenderCommand::FillRect {
-                x,
-                y: stats_y,
-                width: col_w,
-                height: 70.0,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::all(8.0),
-            });
+            self.palette
+                .push_surface(cmds, x, stats_y, col_w, 70.0, 8.0, Surface::Card);
             cmds.push(RenderCommand::Text {
                 x: x + 12.0,
                 y: stats_y + 10.0,
@@ -2543,14 +2545,8 @@ impl FlashcardsApp {
 
         for (i, (label, value, color)) in stats2.iter().enumerate() {
             let x = Self::PADDING + (i as f32) * (col_w + 16.0);
-            cmds.push(RenderCommand::FillRect {
-                x,
-                y: row2_y,
-                width: col_w,
-                height: 70.0,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::all(8.0),
-            });
+            self.palette
+                .push_surface(cmds, x, row2_y, col_w, 70.0, 8.0, Surface::Card);
             cmds.push(RenderCommand::Text {
                 x: x + 12.0,
                 y: row2_y + 10.0,

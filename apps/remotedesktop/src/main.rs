@@ -21,6 +21,7 @@
 //! representative data for initial development.
 
 use appearance::Palette;
+use appearance::Surface;
 #[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]
@@ -1821,14 +1822,15 @@ impl RemoteDesktopApp {
 
         // Fullscreen indicator
         if self.fullscreen {
-            cmds.push(RenderCommand::FillRect {
-                x: self.window_width - 120.0,
-                y: 8.0,
-                width: 80.0,
-                height: 22.0,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            self.palette.push_surface(
+                cmds,
+                self.window_width - 120.0,
+                8.0,
+                80.0,
+                22.0,
+                4.0,
+                Surface::Card,
+            );
             cmds.push(RenderCommand::Text {
                 x: self.window_width - 112.0,
                 y: 12.0,
@@ -1922,14 +1924,15 @@ impl RemoteDesktopApp {
             .and_then(|i| self.profiles.get(i))
             .map_or(QualityPreset::Auto, |p| p.quality);
 
-        cmds.push(RenderCommand::FillRect {
-            x: self.window_width - 140.0,
-            y: y + 6.0,
-            width: 120.0,
-            height: 24.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        self.palette.push_surface(
+            cmds,
+            self.window_width - 140.0,
+            y + 6.0,
+            120.0,
+            24.0,
+            4.0,
+            Surface::Card,
+        );
         cmds.push(RenderCommand::Text {
             x: self.window_width - 132.0,
             y: y + 10.0,
@@ -2459,14 +2462,15 @@ impl RemoteDesktopApp {
         cy += 22.0;
 
         for mapping in &profile.input.key_mappings {
-            cmds.push(RenderCommand::FillRect {
-                x: px,
-                y: cy,
-                width: pw.min(400.0),
-                height: FIELD_HEIGHT,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            self.palette.push_surface(
+                cmds,
+                px,
+                cy,
+                pw.min(400.0),
+                FIELD_HEIGHT,
+                4.0,
+                Surface::Card,
+            );
             cmds.push(RenderCommand::Text {
                 x: px + 10.0,
                 y: cy + 6.0,
@@ -2803,14 +2807,8 @@ impl RemoteDesktopApp {
         pw: f32,
     ) {
         // Background card
-        cmds.push(RenderCommand::FillRect {
-            x: px,
-            y: ty,
-            width: pw,
-            height: TRANSFER_ITEM_HEIGHT,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(6.0),
-        });
+        self.palette
+            .push_surface(cmds, px, ty, pw, TRANSFER_ITEM_HEIGHT, 6.0, Surface::Card);
 
         // Direction arrow
         let arrow = match transfer.direction {
@@ -2970,14 +2968,8 @@ impl RemoteDesktopApp {
         hy: f32,
         pw: f32,
     ) {
-        cmds.push(RenderCommand::FillRect {
-            x: px,
-            y: hy,
-            width: pw,
-            height: HISTORY_ITEM_HEIGHT,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(6.0),
-        });
+        self.palette
+            .push_surface(cmds, px, hy, pw, HISTORY_ITEM_HEIGHT, 6.0, Surface::Card);
 
         // Status dot
         let status_color = if entry.success {
@@ -3305,14 +3297,15 @@ fn render_field_row(
         max_width: Some(FIELD_LABEL_WIDTH),
         overflow: TextOverflow::Ellipsis,
     });
-    cmds.push(RenderCommand::FillRect {
-        x: x + FIELD_LABEL_WIDTH,
+    pal.push_surface(
+        cmds,
+        x + FIELD_LABEL_WIDTH,
         y,
-        width: 260.0,
-        height: FIELD_HEIGHT,
-        color: pal.surface0,
-        corner_radii: CornerRadii::all(4.0),
-    });
+        260.0,
+        FIELD_HEIGHT,
+        4.0,
+        Surface::Card,
+    );
     cmds.push(RenderCommand::Text {
         x: x + FIELD_LABEL_WIDTH + 8.0,
         y: y + 6.0,
@@ -3336,14 +3329,7 @@ fn render_button(
     label: &str,
     color: Color,
 ) {
-    cmds.push(RenderCommand::FillRect {
-        x,
-        y,
-        width: w,
-        height: h,
-        color: pal.surface0,
-        corner_radii: CornerRadii::all(6.0),
-    });
+    pal.push_surface(cmds, x, y, w, h, 6.0, Surface::Card);
     cmds.push(RenderCommand::StrokeRect {
         x,
         y,

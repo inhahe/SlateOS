@@ -260,7 +260,7 @@ pub const LIGHT_BORDER: Color = LIGHT_TEXT;
 use settingsfile::yaml_enum;
 
 pub mod surface;
-pub use surface::{CommandSink, Surface, SurfacePaint};
+pub use surface::{CommandSink, Surface, SurfacePaint, logical_rect};
 
 // ============================================================================
 // Theme mode

@@ -64819,6 +64819,41 @@ number is different** — not by a constant factor either: 12→16, 24→48,
 gets the sizes wrong and drops a directory has no correct output left; there is
 nothing else in it to be right about.
 
+**WHY THE SURVEY KEPT SAYING "STANDALONE AHEAD", AND IT WAS NOT BAD LUCK
+(2026-09-11, fixed).** Every entry above that records an inverted verdict has
+the same cause, and it is structural rather than statistical.
+
+`dup-bins-survey.py` counted **one file** of `coreutils` — `src/bin/<name>.rs`
+— against the standalone's **entire crate**. `coreutils` deliberately factors
+shared behaviour into modules; the standalone crates duplicate it inline. So
+the comparison read a factored implementation's *leaf* against a copy-pasted
+one's *whole*.
+
+`sha256sum` shows it plainly. The bin was counted at 210 lines against 1538 —
+a rout. It is 210 lines **because** `--check`, the option table, the three
+checksum-file formats, the name escaping and the exit statuses live in
+`digest.rs`, 1363 lines, a port of upstream's `digest.c` shared with `md5sum`.
+Counted properly the row is **5067 against 1538**, and the option tally goes
+from 0/14 to 4/4.
+
+The survey's own docstring had always said the scrape "cannot see an option
+that is parsed by a shared helper". What nobody drew is that **the blindness is
+one-sided**, and therefore a bias with a direction rather than noise. Every
+`tee`, `dd`, `date`, `ps`, `uptime` style verdict was produced by it.
+
+Fixed by following `coreutils::<mod>` from the bin and `crate::<mod>` from each
+module reached, to a fixed point. **The corrected table is nearly the opposite
+of the old one**: `coreutils` is the larger half on 17 of the 19 remaining
+pairs — `date` 257→1913, `uptime` 231→1887, `ps` 351→2007, `uname` 681→2337,
+`hostname` 1075→2731, `env` 767→4261, `free` 1901→5395.
+
+**Two pairs are now isolated and deserve the attention the other seventeen were
+absorbing: `diff` (414 vs 1541) and `patch` (892 vs 2183).** Their numbers did
+not move at all, because those two coreutils bins reach no shared modules. They
+are genuinely the thinner half, they are the pairs where deleting the
+standalone could destroy the better program, and neither has a harness. Do not
+touch either without writing one.
+
 **22 -> 21 (2026-09-11): `df`, which passes NOTHING and colours a pipe.**
 `DIFF_PKG=df bash scripts/df-diff.sh`:
 

@@ -591,8 +591,19 @@ fn collect_process_files(
         None => return Vec::new(), // Process disappeared
     };
 
-    let uid = read_uid(pid).unwrap_or(0);
-    let user = uid_to_name(uid);
+    // A PROCESS WHOSE OWNER COULD NOT BE READ IS NOT ROOT'S.
+    //
+    // This was `.unwrap_or(0)`, and `uid_to_name(0)` is "root", so a
+    // `/proc/<pid>/status` that could not be read -- the process exited
+    // mid-scan, or this caller may not look at it -- was listed as owned by
+    // the superuser. `lsof` is what somebody runs to answer "who has this
+    // open", and the answer it gave for "I could not tell" was the single
+    // most alarming name available.
+    let uid = read_uid(pid);
+    let user = match uid {
+        Some(u) => uid_to_name(u),
+        None => "?".to_string(),
+    };
 
     // Apply filters.
     if let Some(ref filter_cmd) = config.filter_command
@@ -602,8 +613,16 @@ fn collect_process_files(
     }
 
     if let Some(ref filter_user) = config.filter_user {
-        // Try matching by name or numeric UID.
-        if user != *filter_user && uid.to_string() != *filter_user {
+        // `-u <who>` selects one user's files. A process whose owner is
+        // unknown is not that user -- it is nobody we can name -- so it is
+        // excluded rather than matched. Excluding is the direction that cannot
+        // put somebody else's open file under a name: including it would let
+        // `lsof -u root` list files the superuser may never have opened.
+        let matches = match uid {
+            Some(u) => user == *filter_user || u.to_string() == *filter_user,
+            None => false,
+        };
+        if !matches {
             return Vec::new();
         }
     }

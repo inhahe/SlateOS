@@ -526,8 +526,29 @@ fn print_row(cur: &Snapshot, prev: Option<&Snapshot>, interval: u64, config: &Co
     let divisor = if prev.is_some() {
         if interval == 0 { 1 } else { interval }
     } else {
-        // First report: rates since boot. Compute uptime from /proc/uptime.
-        read_uptime_secs().unwrap_or(1).max(1)
+        // First report: rates since boot, so the divisor is the uptime.
+        //
+        // THIS USED TO DEFAULT TO 1 SECOND, and it is a DIVISOR: an unreadable
+        // /proc/uptime meant every since-boot counter was divided by one, so
+        // the "rate" printed was the raw total. On a machine up for a day that
+        // is wrong by a factor of 86,400 -- and it is the first line anyone
+        // sees, because typing `vmstat` with no arguments produces exactly
+        // this report and nothing else.
+        //
+        // There is no number to substitute. A rate needs an interval, and
+        // "I do not know how long this machine has been up" means there is no
+        // interval, not that it is one second.
+        match read_uptime_secs() {
+            Some(secs) => secs.max(1),
+            None => {
+                // Skip this row rather than abort the run: in `vmstat 1 5` the
+                // reports after the first are interval-based and still
+                // computable, so killing them would throw away the part that
+                // works. One diagnostic, no fabricated row.
+                eprintln!("vmstat: cannot read /proc/uptime, so the since-boot rates are omitted");
+                return;
+            }
+        }
     };
 
     // Process counts.
@@ -703,7 +724,13 @@ fn run_default_json(config: &Config) -> i32 {
         }
     };
 
-    let uptime = read_uptime_secs().unwrap_or(1).max(1);
+    // Same divisor, same reasoning as the table above: dividing a since-boot
+    // counter by a fabricated one-second uptime prints the total and calls it
+    // a rate.
+    let Some(uptime) = read_uptime_secs().map(|s| s.max(1)) else {
+        eprintln!("vmstat: cannot read /proc/uptime, so rates since boot cannot be computed");
+        return 1;
+    };
     let swap_used = snap.mem.swap_total.saturating_sub(snap.mem.swap_free);
     let (us, sy, id, wa, st) = cpu_percentages(&snap.stat.cpu);
 

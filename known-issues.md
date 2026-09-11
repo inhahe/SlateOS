@@ -129671,6 +129671,32 @@ be reached, and the two implementations can drift apart with nothing noticing.
 | `userspace/sysstat` | `iostat` | `userspace/iostat` |
 | `userspace/who` | `w` | `userspace/w` |
 
+**`chpasswd:passwd` scoped 2026-09-10, attempted, and reverted.** The verdict
+is clear and the work is not small.
+
+*The verdict:* `userspace/passwd` is the producer and the better one — 2,083
+lines and 61 tests to chpasswd's 755 live lines and 31 — and it implements
+every operation the shadowing branch did (`-l -u -d -e -S`). chpasswd's extra
+flags (`--encrypted`, `--md5`, `--sha512`) are **chpasswd's own**, not
+passwd's; comparing flag sets across a multicall binary mixes both
+personalities and makes the shadow look richer.
+
+*Why it is not a two-line change:* removing the alias leaves a one-variant
+enum — the shape of the removed thing left behind, which the next reader will
+reasonably add a second variant to. Doing it properly touches the
+`Personality` enum, `detect_personality`, the `Config` field, the argument
+`match`, `print_help`, `print_version`, the `run_*` dispatch and six tests.
+Attempted across several dependent steps; the failures cascaded and it was
+reverted. Tree clean, 31 and 61 tests pass.
+
+*What the attempt established for whoever finishes it:* the `-l/-u/-d/-e/-S`
+arm is the only personality-specific parsing — everything else is shared
+password-file machinery that stays. And the non-UTF-8-username property does
+**not** need moving: `userspace/passwd` already has `not_text` and
+`an_argument_that_is_not_text_is_a_name_and_not_a_crash`, at lines 1591 and
+1612. I nearly duplicated them because I searched for them and piped the search
+through `head -6`, which cut the output above line 1591.
+
 **A second `who` existed and it was the thin one — deleted 2026-09-10.**
 `coreutils/src/bin/who.rs` was 359 lines with 17 tests against
 `userspace/who`'s 1,691 and 53, and it **ignored its arguments entirely**

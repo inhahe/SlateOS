@@ -14,10 +14,108 @@
 # There is exactly one legitimate reason a number here may go UP: the
 # detector was corrected and now sees sites it used to miss. That is a
 # commit which changes `quote-names.py` and no `.rs` file under the
-# scanned roots, and it has happened once -- 2026-08-23, when calls that
-# rustfmt had wrapped onto two lines turned out to be invisible, hiding
-# 71 real sites. If a number rises in a commit that also edits code, the
-# code is what raised it.
+# scanned roots. If a number rises in a commit that also edits code,
+# the code is what raised it.
 #
-# 0 sites across 0 files.
+# It has happened three times.
+#
+#   2026-08-23  Calls rustfmt had wrapped onto two lines were invisible.
+#               71 sites.
+#   2026-09-10  `{}` with the name in the argument list counted as well
+#               as `{name}` captured inline. 224 sites.
+#   2026-09-11  The gate matched `eprintln!` and, in one predicate of
+#               three, `println!`. It never matched `format!`. A message
+#               does not stop being a message because it is assembled
+#               before it is printed: 398 of the sites this found are
+#               inside `Err(..)`, `map_err(..)` or `ok_or(..)`. Found
+#               because efibootmgr was given three diagnostics of one
+#               shape in one commit and this gate refused one of them.
+#               507 sites, and the ledger had been at ZERO.
+#
+# That last line is the one to read twice. This file said the tree was
+# clean the day before, and the tree was not clean; it was unexamined in
+# a macro nobody had thought to look in. An empty ratchet is a claim
+# about the detector as much as about the code.
+#
+# 507 sites across 80 files.
 
+init/servicebus/src/main.rs:1
+userspace/apparmor/src/main.rs:4
+userspace/ar/src/main.rs:20
+userspace/arp/src/main.rs:1
+userspace/at/src/main.rs:5
+userspace/awk/src/main.rs:2
+userspace/base64/src/main.rs:2
+userspace/capsh/src/main.rs:3
+userspace/chown/src/main.rs:7
+userspace/chpasswd/src/main.rs:1
+userspace/chroot/src/main.rs:6
+userspace/cmp/src/main.rs:1
+userspace/column/src/main.rs:2
+userspace/coreutils/src/bin/cal.rs:4
+userspace/coreutils/src/bin/du.rs:1
+userspace/coreutils/src/bin/renice.rs:1
+userspace/coreutils/src/bin/sort/main.rs:1
+userspace/coreutils/src/bin/tar.rs:1
+userspace/cpio/src/main.rs:20
+userspace/crontab/src/main.rs:6
+userspace/curl/src/main.rs:7
+userspace/cut/src/main.rs:6
+userspace/date/src/main.rs:2
+userspace/dbus/src/main.rs:11
+userspace/dd/src/main.rs:10
+userspace/dhcpcd/src/main.rs:3
+userspace/dig/src/main.rs:4
+userspace/doas/src/main.rs:2
+userspace/ftp/src/main.rs:5
+userspace/ftpd/src/main.rs:11
+userspace/fuser/src/main.rs:1
+userspace/getty/src/main.rs:1
+userspace/hexdump/src/main.rs:2
+userspace/hostnamectl/src/main.rs:1
+userspace/iconv/src/main.rs:1
+userspace/inetd/src/main.rs:6
+userspace/install/src/main.rs:11
+userspace/iptables/src/main.rs:35
+userspace/jq/src/main.rs:5
+userspace/lex/src/main.rs:4
+userspace/lsmod/src/main.rs:1
+userspace/lsusb/src/main.rs:6
+userspace/mktemp/src/main.rs:2
+userspace/nc/src/main.rs:10
+userspace/nftables/src/main.rs:59
+userspace/nmap/src/main.rs:1
+userspace/nproc/src/main.rs:4
+userspace/nslookup/src/main.rs:4
+userspace/oils/src/arith.rs:1
+userspace/oils/src/interp.rs:16
+userspace/oils/tests/cli_options.rs:1
+userspace/oils/tests/redirect_dup.rs:4
+userspace/ping/src/main.rs:7
+userspace/pkg/src/main.rs:8
+userspace/plymouth/src/main.rs:1
+userspace/polkit/src/main.rs:1
+userspace/pv/src/main.rs:18
+userspace/rsync/src/main.rs:40
+userspace/sed/src/main.rs:1
+userspace/seq/src/main.rs:1
+userspace/sftp/src/main.rs:4
+userspace/shuf/src/main.rs:19
+userspace/sort/src/main.rs:3
+userspace/split/src/main.rs:1
+userspace/stat/src/main.rs:16
+userspace/strings/src/main.rs:1
+userspace/stty/src/main.rs:11
+userspace/sudo/src/main.rs:1
+userspace/swapon/src/main.rs:2
+userspace/tar/src/main.rs:2
+userspace/telnet/src/main.rs:7
+userspace/tput/src/main.rs:1
+userspace/tr/src/main.rs:1
+userspace/traceroute/src/main.rs:3
+userspace/useradd/src/main.rs:13
+userspace/vi/src/main.rs:2
+userspace/wget/src/main.rs:7
+userspace/whois/src/main.rs:1
+userspace/yacc/src/main.rs:7
+userspace/zip/src/main.rs:2

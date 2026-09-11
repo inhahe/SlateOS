@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS at — schedule one-time command execution at a specified time"
 [dependencies]
+# Job specifications and time words come from argv, and job file names come
+# from the at spool directory.
+quoting = { path = "../quoting" }
 userdb = { path = "../userdb" }
 authlib = { path = "../authlib" }
 cronspool = { path = "../../cronspool" }

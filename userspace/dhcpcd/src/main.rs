@@ -33,6 +33,7 @@
 // log/trace formatting).
 #![allow(dead_code)]
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs;
 use std::io::{self};
@@ -1462,8 +1463,12 @@ fn error_log(msg: &str) {
 
 /// Run the full DHCP client state machine.
 fn run_dhcp(cfg: &Config) -> Result<(), String> {
-    let mac = read_mac(&cfg.interface)
-        .ok_or_else(|| format!("cannot read MAC for interface '{}'", cfg.interface))?;
+    let mac = read_mac(&cfg.interface).ok_or_else(|| {
+        format!(
+            "cannot read MAC for interface {}",
+            quoteaf_os(&cfg.interface)
+        )
+    })?;
 
     debug_log(cfg, &format!("interface: {}", cfg.interface));
     debug_log(cfg, &format!("MAC: {}", mac_to_string(&mac)));
@@ -1768,9 +1773,9 @@ fn run_dhcp(cfg: &Config) -> Result<(), String> {
 /// Release the current lease.
 fn release_lease(cfg: &Config) -> Result<(), String> {
     let lease = read_lease_file(&cfg.interface)
-        .ok_or_else(|| format!("no lease file for '{}'", cfg.interface))?;
+        .ok_or_else(|| format!("no lease file for {}", quoteaf_os(&cfg.interface)))?;
     let mac = read_mac(&cfg.interface)
-        .ok_or_else(|| format!("cannot read MAC for '{}'", cfg.interface))?;
+        .ok_or_else(|| format!("cannot read MAC for {}", quoteaf_os(&cfg.interface)))?;
 
     let xid = generate_xid();
     let pkt = build_release(xid, &mac, lease.ip_address, lease.server_id);

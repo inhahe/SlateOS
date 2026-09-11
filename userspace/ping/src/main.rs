@@ -19,6 +19,7 @@
 //! ping --json <host>           JSON output per reply
 //! ```
 
+use quoting::quoteaf_os;
 use std::env;
 use std::io::{self, Write};
 use std::process;
@@ -354,7 +355,9 @@ fn parse_args() -> Result<Options, String> {
                 let val = argv
                     .get(i)
                     .ok_or_else(|| "-c requires a count value".to_string())?;
-                let count: u64 = val.parse().map_err(|_| format!("invalid count: '{val}'"))?;
+                let count: u64 = val
+                    .parse()
+                    .map_err(|_| format!("invalid count: {}", quoteaf_os(val)))?;
                 if count == 0 {
                     return Err("count must be greater than 0".to_string());
                 }
@@ -367,7 +370,7 @@ fn parse_args() -> Result<Options, String> {
                     .ok_or_else(|| "-i requires an interval value".to_string())?;
                 let secs: f64 = val
                     .parse()
-                    .map_err(|_| format!("invalid interval: '{val}'"))?;
+                    .map_err(|_| format!("invalid interval: {}", quoteaf_os(val)))?;
                 if secs < 0.0 {
                     return Err("interval must be non-negative".to_string());
                 }
@@ -380,7 +383,7 @@ fn parse_args() -> Result<Options, String> {
                     .ok_or_else(|| "-W requires a timeout value".to_string())?;
                 let secs: f64 = val
                     .parse()
-                    .map_err(|_| format!("invalid timeout: '{val}'"))?;
+                    .map_err(|_| format!("invalid timeout: {}", quoteaf_os(val)))?;
                 if secs <= 0.0 {
                     return Err("timeout must be positive".to_string());
                 }
@@ -393,7 +396,7 @@ fn parse_args() -> Result<Options, String> {
                     .ok_or_else(|| "-s requires a size value".to_string())?;
                 let size: u16 = val
                     .parse()
-                    .map_err(|_| format!("invalid payload size: '{val}'"))?;
+                    .map_err(|_| format!("invalid payload size: {}", quoteaf_os(val)))?;
                 opts.payload_size = size;
             }
             "-t" => {
@@ -401,7 +404,9 @@ fn parse_args() -> Result<Options, String> {
                 let val = argv
                     .get(i)
                     .ok_or_else(|| "-t requires a TTL value".to_string())?;
-                let ttl: u32 = val.parse().map_err(|_| format!("invalid TTL: '{val}'"))?;
+                let ttl: u32 = val
+                    .parse()
+                    .map_err(|_| format!("invalid TTL: {}", quoteaf_os(val)))?;
                 if ttl == 0 || ttl > 255 {
                     return Err("TTL must be between 1 and 255".to_string());
                 }
@@ -413,7 +418,7 @@ fn parse_args() -> Result<Options, String> {
             "-4" => { /* IPv4 is the default; accept and ignore. */ }
             "--json" => opts.json = true,
             other if other.starts_with('-') => {
-                return Err(format!("unknown option: '{other}'"));
+                return Err(format!("unknown option: {}", quoteaf_os(other)));
             }
             _ => {
                 positionals.push(arg.clone());
@@ -616,8 +621,8 @@ fn run() -> Result<(), String> {
     let ip_str: String;
 
     if is_ipv4_address(&opts.host) {
-        ip_addr =
-            parse_ipv4(&opts.host).ok_or_else(|| format!("invalid IP address: '{}'", opts.host))?;
+        ip_addr = parse_ipv4(&opts.host)
+            .ok_or_else(|| format!("invalid IP address: {}", quoteaf_os(&opts.host)))?;
         ip_str = opts.host.clone();
     } else {
         // Hostname: resolve via DNS syscall.

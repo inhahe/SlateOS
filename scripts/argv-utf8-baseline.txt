@@ -39,7 +39,6 @@ userspace/chown/src/main.rs:argv-as-string
 userspace/chroot/src/main.rs:argv-as-string
 userspace/cmp/src/main.rs:argv-as-string
 userspace/column/src/main.rs:argv-as-string
-userspace/comm/src/main.rs:argv-as-string
 userspace/coredumpctl/src/main.rs:argv-as-string
 userspace/coreutils/src/bin/diff.rs:argv-as-string
 userspace/coreutils/src/bin/logger.rs:argv-as-string
@@ -51,11 +50,9 @@ userspace/crond/src/main.rs:argv-as-string
 userspace/crontab/src/main.rs:argv-as-string
 userspace/ctags/src/main.rs:argv-as-string
 userspace/curl/src/main.rs:argv-as-string
-userspace/cut/src/main.rs:argv-as-string
 userspace/date/src/main.rs:argv-as-string
 userspace/dbus/src/main.rs:argv-as-string
 userspace/dc/src/main.rs:argv-as-string
-userspace/dd/src/main.rs:argv-as-string
 userspace/df/src/main.rs:argv-as-string
 userspace/dhcpcd/src/main.rs:argv-as-string
 userspace/diff/src/main.rs:argv-as-string
@@ -68,7 +65,6 @@ userspace/efibootmgr/src/main.rs:argv-as-string
 userspace/eject/src/main.rs:argv-as-string
 userspace/env/src/main.rs:argv-as-string
 userspace/env/src/main.rs:env-as-string
-userspace/expand/src/main.rs:argv-as-string
 userspace/file/src/main.rs:argv-as-string
 userspace/findmnt/src/main.rs:argv-as-string
 userspace/finger/src/main.rs:argv-as-string
@@ -76,7 +72,6 @@ userspace/fio/src/main.rs:argv-as-string
 userspace/firejail/src/main.rs:argv-as-string
 userspace/flock/src/main.rs:argv-as-string
 userspace/fmt/src/main.rs:argv-as-string
-userspace/fold/src/main.rs:argv-as-string
 userspace/free/src/main.rs:argv-as-string
 userspace/fsck/src/main.rs:argv-as-string
 userspace/ftp/src/main.rs:argv-as-string
@@ -149,7 +144,6 @@ userspace/nano/src/main.rs:argv-as-string
 userspace/nc/src/main.rs:argv-as-string
 userspace/netstat/src/main.rs:argv-as-string
 userspace/nftables/src/main.rs:argv-as-string
-userspace/nl/src/main.rs:argv-as-string
 userspace/nmap/src/main.rs:argv-as-string
 userspace/nologin/src/main.rs:argv-as-string
 userspace/nproc/src/main.rs:argv-as-string
@@ -183,7 +177,6 @@ userspace/scp/src/main.rs:argv-as-string
 userspace/screen/src/main.rs:argv-as-string
 userspace/sed/src/main.rs:argv-as-string
 userspace/selinux/src/main.rs:argv-as-string
-userspace/seq/src/main.rs:argv-as-string
 userspace/service/src/main.rs:argv-as-string
 userspace/sftp/src/main.rs:argv-as-string
 userspace/sha256sum/src/main.rs:argv-as-string
@@ -207,20 +200,17 @@ userspace/systemctl/src/main.rs:argv-as-string
 userspace/tac/src/main.rs:argv-as-string
 userspace/tar/src/main.rs:argv-as-string
 userspace/tcpdump/src/main.rs:argv-as-string
-userspace/tee/src/main.rs:argv-as-string
 userspace/telnet/src/main.rs:argv-as-string
 userspace/thermald/src/main.rs:argv-as-string
 userspace/timeout/src/main.rs:argv-as-string
 userspace/top/src/main.rs:argv-as-string
 userspace/tput/src/main.rs:argv-as-string
-userspace/tr/src/main.rs:argv-as-string
 userspace/traceroute/src/main.rs:argv-as-string
 userspace/tsort/src/main.rs:argv-as-string
 userspace/tuned/src/main.rs:argv-as-string
 userspace/udevd/src/main.rs:argv-as-string
 userspace/udisks/src/main.rs:argv-as-string
 userspace/uname/src/main.rs:argv-as-string
-userspace/uniq/src/main.rs:argv-as-string
 userspace/unshare/src/main.rs:argv-as-string
 userspace/update-alternatives/src/main.rs:argv-as-string
 userspace/updatedb/src/main.rs:argv-as-string

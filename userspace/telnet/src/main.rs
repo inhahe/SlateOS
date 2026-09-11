@@ -45,6 +45,7 @@
 // DoS risk; buffer indices come from the kernel read() return value.
 #![allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 
+use quoting::quoteaf_os;
 use std::env;
 use std::process;
 use std::sync::{
@@ -395,7 +396,7 @@ fn resolve_host(hostname: &str) -> Result<u32, String> {
     if hostname == "localhost" {
         return Ok(0x7F00_0001);
     }
-    dns_resolve(hostname).map_err(|e| format!("cannot resolve '{hostname}': error {e}"))
+    dns_resolve(hostname).map_err(|e| format!("cannot resolve {}: error {e}", quoteaf_os(hostname)))
 }
 
 // ============================================================================
@@ -961,7 +962,7 @@ fn run_escape_mode(session: &mut Session) -> bool {
         }
         EscapeCmd::Unknown(ref s) => {
             if !s.is_empty() {
-                let msg = format!("?Invalid command '{s}'\r\n");
+                let msg = format!("?Invalid command {}\r\n", quoteaf_os(s));
                 stdout_write(msg.as_bytes());
             }
         }
@@ -1265,11 +1266,11 @@ fn parse_args() -> Result<CliOptions, String> {
                     .ok_or_else(|| "-w requires a timeout in seconds".to_string())?;
                 let secs: u64 = val
                     .parse()
-                    .map_err(|_| format!("invalid timeout '{val}'"))?;
+                    .map_err(|_| format!("invalid timeout {}", quoteaf_os(val)))?;
                 connect_timeout_ms = secs.saturating_mul(1000);
             }
             other if other.starts_with('-') => {
-                return Err(format!("unknown option '{other}'"));
+                return Err(format!("unknown option {}", quoteaf_os(other)));
             }
             _ => {
                 positionals.push(argv[i].clone());
@@ -1285,7 +1286,7 @@ fn parse_args() -> Result<CliOptions, String> {
     let port = if positionals.len() >= 2 {
         positionals[1]
             .parse::<u16>()
-            .map_err(|_| format!("invalid port '{}'", positionals[1]))?
+            .map_err(|_| format!("invalid port {}", quoteaf_os(&positionals[1])))?
     } else {
         23
     };
@@ -1329,9 +1330,10 @@ fn parse_escape_char(s: &str) -> Result<u8, String> {
     }
     // Try 0xNN hex.
     if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-        return u8::from_str_radix(hex, 16).map_err(|_| format!("invalid escape character '{s}'"));
+        return u8::from_str_radix(hex, 16)
+            .map_err(|_| format!("invalid escape character {}", quoteaf_os(s)));
     }
-    Err(format!("invalid escape character '{s}'"))
+    Err(format!("invalid escape character {}", quoteaf_os(s)))
 }
 
 // ============================================================================

@@ -10,6 +10,7 @@
 
 #![deny(clippy::all)]
 
+use quoting::quoteaf_os;
 use std::collections::HashMap;
 use std::fmt;
 use std::io::{self, BufRead};
@@ -31,7 +32,7 @@ impl Ipv4Cidr {
         let (addr_str, prefix_len) = if let Some(pos) = s.find('/') {
             let pl: u8 = s[pos + 1..]
                 .parse()
-                .map_err(|_| format!("invalid prefix length in '{s}'"))?;
+                .map_err(|_| format!("invalid prefix length in {}", quoteaf_os(s)))?;
             if pl > 32 {
                 return Err(format!("prefix length {pl} > 32"));
             }
@@ -76,13 +77,13 @@ impl fmt::Display for Ipv4Cidr {
 fn parse_ipv4_addr(s: &str) -> Result<[u8; 4], String> {
     let parts: Vec<&str> = s.split('.').collect();
     if parts.len() != 4 {
-        return Err(format!("invalid IPv4 address '{s}'"));
+        return Err(format!("invalid IPv4 address {}", quoteaf_os(s)));
     }
     let mut addr = [0u8; 4];
     for (i, part) in parts.iter().enumerate() {
         addr[i] = part
             .parse()
-            .map_err(|_| format!("invalid octet '{part}' in '{s}'"))?;
+            .map_err(|_| format!("invalid octet {} in {}", quoteaf_os(part), quoteaf_os(s)))?;
     }
     Ok(addr)
 }
@@ -99,7 +100,7 @@ impl Ipv6Cidr {
         let (addr_str, prefix_len) = if let Some(pos) = s.rfind('/') {
             let pl: u8 = s[pos + 1..]
                 .parse()
-                .map_err(|_| format!("invalid prefix length in '{s}'"))?;
+                .map_err(|_| format!("invalid prefix length in {}", quoteaf_os(s)))?;
             if pl > 128 {
                 return Err(format!("prefix length {pl} > 128"));
             }
@@ -156,7 +157,10 @@ fn parse_ipv6_addr(s: &str) -> Result<[u8; 16], String> {
 
     let parts: Vec<&str> = s.split("::").collect();
     if parts.len() > 2 {
-        return Err(format!("invalid IPv6 address '{s}': multiple ::"));
+        return Err(format!(
+            "invalid IPv6 address {}: multiple ::",
+            quoteaf_os(s)
+        ));
     }
 
     let left_groups: Vec<&str> = if parts[0].is_empty() {
@@ -181,14 +185,17 @@ fn parse_ipv6_addr(s: &str) -> Result<[u8; 16], String> {
         ));
     }
     if total > 8 {
-        return Err(format!("invalid IPv6 address '{s}': too many groups"));
+        return Err(format!(
+            "invalid IPv6 address {}: too many groups",
+            quoteaf_os(s)
+        ));
     }
 
     let zero_fill = 8 - total;
 
     for (i, grp) in left_groups.iter().enumerate() {
-        let val =
-            u16::from_str_radix(grp, 16).map_err(|_| format!("invalid IPv6 group '{grp}'"))?;
+        let val = u16::from_str_radix(grp, 16)
+            .map_err(|_| format!("invalid IPv6 group {}", quoteaf_os(grp)))?;
         let bytes = val.to_be_bytes();
         addr[i * 2] = bytes[0];
         addr[i * 2 + 1] = bytes[1];
@@ -196,8 +203,8 @@ fn parse_ipv6_addr(s: &str) -> Result<[u8; 16], String> {
 
     let right_start = left_groups.len() + zero_fill;
     for (i, grp) in right_groups.iter().enumerate() {
-        let val =
-            u16::from_str_radix(grp, 16).map_err(|_| format!("invalid IPv6 group '{grp}'"))?;
+        let val = u16::from_str_radix(grp, 16)
+            .map_err(|_| format!("invalid IPv6 group {}", quoteaf_os(grp)))?;
         let bytes = val.to_be_bytes();
         let idx = right_start + i;
         addr[idx * 2] = bytes[0];
@@ -254,7 +261,7 @@ impl Protocol {
             "icmp" => Ok(Self::Icmp),
             "icmpv6" | "ipv6-icmp" => Ok(Self::Icmpv6),
             "all" => Ok(Self::All),
-            _ => Err(format!("unknown protocol '{s}'")),
+            _ => Err(format!("unknown protocol {}", quoteaf_os(s))),
         }
     }
 
@@ -290,16 +297,18 @@ impl PortSpec {
         if let Some(pos) = s.find(':') {
             let lo: u16 = s[..pos]
                 .parse()
-                .map_err(|_| format!("invalid port '{}'", &s[..pos]))?;
+                .map_err(|_| format!("invalid port {}", quoteaf_os(&s[..pos])))?;
             let hi: u16 = s[pos + 1..]
                 .parse()
-                .map_err(|_| format!("invalid port '{}'", &s[pos + 1..]))?;
+                .map_err(|_| format!("invalid port {}", quoteaf_os(&s[pos + 1..])))?;
             if lo > hi {
                 return Err(format!("port range {lo}:{hi} is invalid (lo > hi)"));
             }
             Ok(Self::Range(lo, hi))
         } else {
-            let port: u16 = s.parse().map_err(|_| format!("invalid port '{s}'"))?;
+            let port: u16 = s
+                .parse()
+                .map_err(|_| format!("invalid port {}", quoteaf_os(s)))?;
             Ok(Self::Single(port))
         }
     }
@@ -376,7 +385,7 @@ impl ConnState {
             "RELATED" => Ok(Self::Related),
             "INVALID" => Ok(Self::Invalid),
             "UNTRACKED" => Ok(Self::Untracked),
-            _ => Err(format!("unknown state '{s}'")),
+            _ => Err(format!("unknown state {}", quoteaf_os(s))),
         }
     }
 
@@ -444,11 +453,14 @@ impl LimitSpec {
     fn parse_rate(s: &str) -> Result<(u32, LimitUnit), String> {
         let parts: Vec<&str> = s.split('/').collect();
         if parts.len() != 2 {
-            return Err(format!("invalid limit rate '{s}' (expected N/unit)"));
+            return Err(format!(
+                "invalid limit rate {} (expected N/unit)",
+                quoteaf_os(s)
+            ));
         }
         let rate: u32 = parts[0]
             .parse()
-            .map_err(|_| format!("invalid rate number '{}'", parts[0]))?;
+            .map_err(|_| format!("invalid rate number {}", quoteaf_os(parts[0])))?;
         let unit = match parts[1].to_ascii_lowercase().as_str() {
             "s" | "sec" | "second" => LimitUnit::Second,
             "m" | "min" | "minute" => LimitUnit::Minute,
@@ -781,7 +793,10 @@ impl ChainPolicy {
         match s.to_ascii_uppercase().as_str() {
             "ACCEPT" => Ok(Self::Accept),
             "DROP" => Ok(Self::Drop),
-            _ => Err(format!("invalid policy '{s}' (must be ACCEPT or DROP)")),
+            _ => Err(format!(
+                "invalid policy {} (must be ACCEPT or DROP)",
+                quoteaf_os(s)
+            )),
         }
     }
 }
@@ -849,7 +864,7 @@ impl TableName {
             "nat" => Ok(Self::Nat),
             "mangle" => Ok(Self::Mangle),
             "raw" => Ok(Self::Raw),
-            _ => Err(format!("unknown table '{s}'")),
+            _ => Err(format!("unknown table {}", quoteaf_os(s))),
         }
     }
 
@@ -903,14 +918,26 @@ impl Table {
     fn get_chain(&self, name: &str) -> Result<&Chain, String> {
         self.find_chain(name)
             .map(|i| &self.chains[i])
-            .ok_or_else(|| format!("chain '{name}' not found in table '{}'", self.name))
+            .ok_or_else(|| {
+                format!(
+                    "chain {} not found in table {}",
+                    quoteaf_os(name),
+                    quoteaf_os(self.name.to_string())
+                )
+            })
     }
 
     fn get_chain_mut(&mut self, name: &str) -> Result<&mut Chain, String> {
         let table_name = self.name.as_str().to_string();
         self.find_chain(name)
             .map(move |i| &mut self.chains[i])
-            .ok_or_else(|| format!("chain '{name}' not found in table '{table_name}'"))
+            .ok_or_else(|| {
+                format!(
+                    "chain {} not found in table {}",
+                    quoteaf_os(name),
+                    quoteaf_os(&table_name)
+                )
+            })
     }
 }
 
@@ -1187,11 +1214,10 @@ impl ArgParser {
                     command = Some("replace".to_string());
                     chain_name = Some(self.expect_arg("chain name")?);
                     let pos_str = self.expect_arg("rule number")?;
-                    insert_pos = Some(
-                        pos_str
-                            .parse()
-                            .map_err(|_| format!("invalid rule number '{pos_str}'"))?,
-                    );
+                    insert_pos =
+                        Some(pos_str.parse().map_err(|_| {
+                            format!("invalid rule number {}", quoteaf_os(&pos_str))
+                        })?);
                 }
                 "-L" | "--list" => {
                     command = Some("list".to_string());
@@ -1321,7 +1347,7 @@ impl ArgParser {
                     return Err("help requested".to_string());
                 }
                 other => {
-                    return Err(format!("unknown option '{other}'"));
+                    return Err(format!("unknown option {}", quoteaf_os(other)));
                 }
             }
             negate_next = false;
@@ -1412,7 +1438,7 @@ impl ArgParser {
                 chain: chain_name.ok_or("chain name required")?,
                 rule,
             }),
-            other => Err(format!("unknown command '{other}'")),
+            other => Err(format!("unknown command {}", quoteaf_os(other))),
         }
     }
 
@@ -1543,7 +1569,7 @@ impl ArgParser {
                             let burst_str = self.expect_arg("burst count")?;
                             burst = burst_str
                                 .parse()
-                                .map_err(|_| format!("invalid burst '{burst_str}'"))?;
+                                .map_err(|_| format!("invalid burst {}", quoteaf_os(&burst_str)))?;
                         }
                         _ => break,
                     }
@@ -1559,7 +1585,7 @@ impl ArgParser {
                     Err("-m comment requires --comment".to_string())
                 }
             }
-            other => Err(format!("unknown match module '{other}'")),
+            other => Err(format!("unknown match module {}", quoteaf_os(other))),
         }
     }
 }
@@ -1803,7 +1829,7 @@ fn execute_command(fw: &mut Firewall, cmd: Command) -> Result<String, String> {
         Command::NewChain { table, chain } => {
             let tbl = fw.get_table_mut(&table);
             if tbl.find_chain(&chain).is_some() {
-                return Err(format!("chain '{chain}' already exists"));
+                return Err(format!("chain {} already exists", quoteaf_os(&chain)));
             }
             tbl.chains.push(Chain::new_user(&chain));
             Ok(String::new())
@@ -1813,12 +1839,18 @@ fn execute_command(fw: &mut Firewall, cmd: Command) -> Result<String, String> {
             if let Some(cname) = chain {
                 let idx = tbl
                     .find_chain(&cname)
-                    .ok_or_else(|| format!("chain '{cname}' not found"))?;
+                    .ok_or_else(|| format!("chain {} not found", quoteaf_os(&cname)))?;
                 if tbl.chains[idx].builtin {
-                    return Err(format!("cannot delete built-in chain '{cname}'"));
+                    return Err(format!(
+                        "cannot delete built-in chain {}",
+                        quoteaf_os(&cname)
+                    ));
                 }
                 if !tbl.chains[idx].rules.is_empty() {
-                    return Err(format!("cannot delete non-empty chain '{cname}'"));
+                    return Err(format!(
+                        "cannot delete non-empty chain {}",
+                        quoteaf_os(&cname)
+                    ));
                 }
                 // Check no other chain references this one
                 for ch in &tbl.chains {
@@ -1857,7 +1889,10 @@ fn execute_command(fw: &mut Firewall, cmd: Command) -> Result<String, String> {
             let tbl = fw.get_table_mut(&table);
             let ch = tbl.get_chain_mut(&chain)?;
             if !ch.builtin {
-                return Err(format!("cannot set policy on user-defined chain '{chain}'"));
+                return Err(format!(
+                    "cannot set policy on user-defined chain {}",
+                    quoteaf_os(&chain)
+                ));
             }
             ch.policy = Some(policy);
             Ok(String::new())
@@ -1870,12 +1905,15 @@ fn execute_command(fw: &mut Firewall, cmd: Command) -> Result<String, String> {
             let tbl = fw.get_table_mut(&table);
             let idx = tbl
                 .find_chain(&old_name)
-                .ok_or_else(|| format!("chain '{old_name}' not found"))?;
+                .ok_or_else(|| format!("chain {} not found", quoteaf_os(&old_name)))?;
             if tbl.chains[idx].builtin {
-                return Err(format!("cannot rename built-in chain '{old_name}'"));
+                return Err(format!(
+                    "cannot rename built-in chain {}",
+                    quoteaf_os(&old_name)
+                ));
             }
             if tbl.find_chain(&new_name).is_some() {
-                return Err(format!("chain '{new_name}' already exists"));
+                return Err(format!("chain {} already exists", quoteaf_os(&new_name)));
             }
             tbl.chains[idx].name = new_name.clone();
             // Also update any jump targets pointing to the old name
@@ -2069,14 +2107,14 @@ fn parse_counter_bracket(s: &str) -> Result<(u64, u64), String> {
     let s = s.trim_start_matches('[').trim_end_matches(']');
     let parts: Vec<&str> = s.split(':').collect();
     if parts.len() != 2 {
-        return Err(format!("invalid counter format '{s}'"));
+        return Err(format!("invalid counter format {}", quoteaf_os(s)));
     }
     let pkts: u64 = parts[0]
         .parse()
-        .map_err(|_| format!("invalid packet count '{}'", parts[0]))?;
+        .map_err(|_| format!("invalid packet count {}", quoteaf_os(parts[0])))?;
     let bytes_val: u64 = parts[1]
         .parse()
-        .map_err(|_| format!("invalid byte count '{}'", parts[1]))?;
+        .map_err(|_| format!("invalid byte count {}", quoteaf_os(parts[1])))?;
     Ok((pkts, bytes_val))
 }
 

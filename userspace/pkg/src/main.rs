@@ -1662,7 +1662,9 @@ impl ConfigFileTracker {
         if dst.exists() && Self::must_preserve(dst, old_hash) {
             // Either the user edited it, or we cannot show that they did not.
             // Both keep the file that is there.
-            let new_path = PathBuf::from(format!("{}.pkg-new", dst.display()));
+            // Byte-wise: `dst.display()` is lossy, so this deployed the
+            // replacement to a name that was not the one printed below.
+            let new_path = quoting::with_suffix(dst, b".pkg-new");
             cas.deploy_hardlink(hash, &new_path)?;
             let why = if old_hash.is_empty() {
                 "no recorded checksum for the installed version"

@@ -37,46 +37,5 @@
 # a macro nobody had thought to look in. An empty ratchet is a claim
 # about the detector as much as about the code.
 #
-# 223 sites across 41 files.
+# 0 sites across 0 files.
 
-userspace/arp/src/main.rs:1
-userspace/at/src/main.rs:5
-userspace/awk/src/main.rs:2
-userspace/chpasswd/src/main.rs:1
-userspace/coreutils/src/bin/cal.rs:4
-userspace/coreutils/src/bin/renice.rs:1
-userspace/coreutils/src/bin/tar.rs:1
-userspace/crontab/src/main.rs:6
-userspace/dbus/src/main.rs:11
-userspace/dd/src/main.rs:10
-userspace/dhcpcd/src/main.rs:3
-userspace/dig/src/main.rs:4
-userspace/ftpd/src/main.rs:11
-userspace/hexdump/src/main.rs:2
-userspace/hostnamectl/src/main.rs:1
-userspace/iconv/src/main.rs:1
-userspace/inetd/src/main.rs:6
-userspace/install/src/main.rs:1
-userspace/iptables/src/main.rs:35
-userspace/jq/src/main.rs:5
-userspace/lex/src/main.rs:4
-userspace/nc/src/main.rs:10
-userspace/nmap/src/main.rs:1
-userspace/nproc/src/main.rs:4
-userspace/nslookup/src/main.rs:4
-userspace/oils/src/arith.rs:1
-userspace/oils/src/interp.rs:16
-userspace/oils/tests/cli_options.rs:1
-userspace/oils/tests/redirect_dup.rs:4
-userspace/ping/src/main.rs:7
-userspace/sed/src/main.rs:1
-userspace/seq/src/main.rs:1
-userspace/shuf/src/main.rs:19
-userspace/strings/src/main.rs:1
-userspace/stty/src/main.rs:11
-userspace/swapon/src/main.rs:1
-userspace/telnet/src/main.rs:7
-userspace/tr/src/main.rs:1
-userspace/traceroute/src/main.rs:3
-userspace/useradd/src/main.rs:13
-userspace/vi/src/main.rs:2

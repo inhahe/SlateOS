@@ -13,6 +13,9 @@ description = "SlateOS DNS lookup utility"
 # module docs and known-issues.md
 # `TD-B-THE-POSIX-RLIB-IS-A-SECOND-LIBC-WITH-EVERY-SYSCALL-STUBBED-OUT`.
 [dependencies]
+# Domain names come from argv and from the response, where a label is any
+# byte string the server chose.
+quoting = { path = "../quoting" }
 randrange = { path = "../../randrange" }
 
 # Inherit the workspace lint configuration. This crate had none at all: it was

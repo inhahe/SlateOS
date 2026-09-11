@@ -651,6 +651,17 @@ fn create_target_dir(path: &Path, mode: u32, verbose: bool) -> Result<(), String
 
 // ── Install file ───────────────────────────────────────────────────
 
+/// `dst` with the backup suffix appended.
+///
+/// A thin wrapper over [`quoting::with_suffix`], kept so the tests below have
+/// a name to address and so the reason lives somewhere a reader of this file
+/// will meet it: this was `format!("{}{}", dst.display(), suffix)`, and
+/// `display()` is lossy, so on a destination whose name is not UTF-8 the
+/// rename targeted a name the user never had.
+fn backup_name(dst: &Path, suffix: &str) -> PathBuf {
+    quoting::with_suffix(dst, suffix.as_bytes())
+}
+
 fn install_file(src: &Path, dst: &Path, args: &Args) -> Result<(), String> {
     // Compare mode: skip if files are identical
     if args.compare && files_are_same(src, dst) {
@@ -659,9 +670,14 @@ fn install_file(src: &Path, dst: &Path, args: &Args) -> Result<(), String> {
 
     // Backup existing file
     if args.backup && dst.exists() {
-        let backup_path = format!("{}{}", dst.display(), args.backup_suffix);
-        fs::rename(dst, &backup_path)
-            .map_err(|e| format!("cannot backup '{}' to '{backup_path}': {e}", dst.display()))?;
+        let backup_path = backup_name(dst, &args.backup_suffix);
+        fs::rename(dst, &backup_path).map_err(|e| {
+            format!(
+                "cannot backup {} to {}: {e}",
+                quoteaf_os(dst),
+                quoteaf_os(&backup_path)
+            )
+        })?;
     }
 
     // Create parent directories if -D
@@ -838,6 +854,68 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- The backup name --
+    //
+    // WHAT THESE CANNOT TEST, said plainly because the gap is the interesting
+    // part: the defect `backup_name` fixes only shows on a destination whose
+    // name is not valid UTF-8, and `os_bytes` is documented lossy on a Windows
+    // host, which is where this suite runs. So none of these would fail
+    // against the `format!("{}{}", dst.display(), suffix)` they replaced.
+    //
+    // They pin the contract that makes the target behaviour right — the suffix
+    // is APPENDED to the whole name, byte for byte, never inserted before an
+    // extension and never normalised — and they would catch a rewrite that
+    // changed that. The non-UTF-8 case is exercised by the target, not here,
+    // and claiming otherwise would be worse than admitting it.
+
+    #[test]
+    fn the_suffix_is_appended_to_the_whole_name() {
+        assert_eq!(
+            backup_name(Path::new("/etc/hosts"), "~"),
+            Path::new("/etc/hosts~")
+        );
+        // After the extension, not before it: `a.conf` becomes `a.conf~`,
+        // which is what every other `install` does and what a glob for `*~`
+        // expects.
+        assert_eq!(backup_name(Path::new("a.conf"), "~"), Path::new("a.conf~"));
+        assert_eq!(
+            backup_name(Path::new("/tmp/x.tar.gz"), ".bak"),
+            Path::new("/tmp/x.tar.gz.bak")
+        );
+    }
+
+    #[test]
+    fn an_empty_suffix_leaves_the_name_alone() {
+        // `--suffix=` is accepted by the parser, and the result must be the
+        // destination itself rather than something adjacent to it. The rename
+        // is then a no-op onto itself, which is the caller's problem to
+        // notice; inventing a name here would hide it.
+        assert_eq!(
+            backup_name(Path::new("/etc/hosts"), ""),
+            Path::new("/etc/hosts")
+        );
+    }
+
+    #[test]
+    fn a_name_with_spaces_and_dots_is_not_normalised() {
+        // A path is bytes: no trimming, no collapsing of `..`, no case work.
+        assert_eq!(
+            backup_name(Path::new("/tmp/two words..odd "), "~"),
+            Path::new("/tmp/two words..odd ~")
+        );
+    }
+
+    #[test]
+    fn a_multibyte_name_survives_the_round_trip() {
+        // Valid UTF-8 that is not ASCII round-trips exactly on every host,
+        // which is the most of this function's contract a Windows host can
+        // actually check.
+        assert_eq!(
+            backup_name(Path::new("/tmp/café.txt"), "~"),
+            Path::new("/tmp/café.txt~")
+        );
+    }
 
     // -- Mode parsing --
     //

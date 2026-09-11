@@ -6140,6 +6140,50 @@ pub extern "C" fn utimes(path: *const u8, times: *const Timeval) -> i32 {
     }
 }
 
+/// `utimes` on the symlink itself rather than on what it points at.
+///
+/// Identical to [`utimes`] but for the final component: if `path` names a
+/// symbolic link, the link's own timestamps are stamped and its target is left
+/// alone. That is the whole of the difference, and it is the difference that
+/// matters to an archiver — `tar` and `cpio` restore a symlink's times without
+/// wanting to touch the file it names, which may not even exist yet.
+///
+/// The plumbing was already here: [`set_times_path_ex`]'s `no_follow` argument
+/// was written for this function and its doc comment names it. Only the entry
+/// point was missing, which is why `grep lutimes` over `posix/` finds a hit
+/// and a link does not.
+///
+/// Measured need: one of the twenty undefined symbols in upstream CMake's link
+/// against our libc — see `scripts/cmake-spike/README.md`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn lutimes(path: *const u8, times: *const Timeval) -> i32 {
+    if path.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    if !times.is_null() {
+        // SAFETY: caller contract — `times` points to two valid Timevals.
+        let a = unsafe { times.read() };
+        let m = unsafe { times.add(1).read() };
+        if !timeval_usec_valid(a.tv_usec) || !timeval_usec_valid(m.tv_usec) {
+            errno::set_errno(errno::EINVAL);
+            return -1;
+        }
+    }
+    #[cfg(target_os = "none")]
+    {
+        let now = wall_clock_ns();
+        // SAFETY: `times` was validated above; non-null implies two valid
+        // Timevals.
+        let (a_ns, m_ns) = unsafe { utimes_pair_to_kernel(times, now) };
+        set_times_path_ex(path, a_ns, m_ns, true)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        0
+    }
+}
+
 /// Set file access and modification times on an open fd.
 ///
 /// The kernel `SYS_FS_SET_TIMES` is path-based, so we resolve the fd to its

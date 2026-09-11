@@ -69,6 +69,49 @@ const probe = script + `
     sep: document.getElementById('sep').innerHTML.includes('overlay0'),
     strip: document.getElementById('allsurf').innerHTML.includes(MARK),
   };
+  // The border role must reach the examples: in the border theme it carries the
+  // structure the fills used to, so it is the single most load-bearing value.
+  cur = withLadder(PRESETS.brd);
+  cur.bord = MARK;
+  render();
+  globalThis.__bord = document.getElementById('fp').innerHTML.includes(MARK);
+
+  // The decided preset must exist and must be flat -- nothing shaded.
+  const b = PRESETS.brd;
+  globalThis.__brd = !!b && b.main === '#000000' && b.sec1 === b.acc &&
+                     b.ladder.s0 === b.ladder.s1;
+
+  // There must be a worked link example. The palette gives a link and a caption
+  // one colour, so the underline is the only thing telling them apart -- a claim
+  // that cannot be judged if nothing on the page is actually a link.
+  cur = withLadder(PRESETS.brd);
+  cur.link = MARK;
+  render();
+  {
+    const h = document.getElementById('fp').innerHTML;
+    const underlines = (h.match(/text-decoration:\s*underline/g) || []).length;
+    // Every clickable thing must be underlined AND carry the link colour --
+    // colour alone fails WCAG 1.4.1, and an underline alone loses the fast cue.
+    // Counting them catches the failure that actually happened: "Learn more"
+    // was underlined and "Show report" was not.
+    globalThis.__link = {
+      underlines,
+      colourReaches: h.includes(MARK),
+      // no clickable left on the old accent: the link colour is separate now
+      allMarked: underlines >= 3,
+    };
+  }
+
+  // The plan's role table must be live, not a hardcoded copy that drifts away
+  // from the controls -- it is the first thing read on the page.
+  cur = withLadder(PRESETS.brd);
+  cur.bord = MARK;
+  render();
+  globalThis.__plan = {
+    live: document.getElementById('plan_roles').innerHTML.includes(MARK.toUpperCase()),
+    rows: (document.getElementById('plan_roles').innerHTML.match(/<tr>/g) || []).length,
+  };
+
   // The pane-vs-pane table must exist and must react to a pane change.
   cur = withLadder(PRESETS.cur); render();
   const psBefore = document.getElementById('panesep').innerHTML;
@@ -102,8 +145,11 @@ const note = store['fp_note'] ? store['fp_note'].innerHTML : '';
 const checks = [
   ['full-page section rendered', fp.length > 2000],
   ['three windows, drawn twice each', (fp.match(/class="win"/g) || []).length === 6],
-  ['shaded column present', fp.includes('shaded (today)')],
-  ['bordered column present', fp.includes('with borders')],
+  ['bordered column present', fp.includes('borders (the default)')],
+  ['cards column present', fp.includes('cards (optional theme)')],
+  // Borders are the decision as of 2026-09-11, so they lead. If the columns
+  // ever swap back, the page is showing the optional theme as the primary one.
+  ['borders lead the cards', fp.indexOf('borders (the default)') < fp.indexOf('cards (optional theme)')],
   ['a context menu is drawn', fp.includes('class="menu"')],
   ['no unresolved template literal', !fp.includes('${')],
   ['no literal "undefined" leaked into markup', !fp.includes('undefined')],
@@ -177,6 +223,24 @@ if (!global.__ink) bad++;
   console.log((psOk ? 'ok    ' : 'FAIL  ') + 'pane-vs-pane table has 5 steps and reacts (' +
               ps.rows + ' rows, reacts:' + !!ps.reacts + ')');
   if (!psOk) bad++;
+}
+console.log((global.__bord ? 'ok    ' : 'FAIL  ') + 'the border colour reaches the examples');
+if (!global.__bord) bad++;
+console.log((global.__brd ? 'ok    ' : 'FAIL  ') + 'the decided preset is present and flat');
+if (!global.__brd) bad++;
+{
+  const pl = global.__plan || {};
+  const ok = pl.live && pl.rows === 7;
+  console.log((ok ? 'ok    ' : 'FAIL  ') + 'the plan role table is live (' + pl.rows + ' rows, live:' +
+              !!pl.live + ')');
+  if (!ok) bad++;
+}
+{
+  const l = global.__link || {};
+  const ok = l.allMarked && l.colourReaches;
+  console.log((ok ? 'ok    ' : 'FAIL  ') + 'every link is underlined and takes the link colour (' +
+              l.underlines + ' underlined, colour reaches:' + !!l.colourReaches + ')');
+  if (!ok) bad++;
 }
 console.log('populated ids: ' + Object.keys(store).filter(k => store[k].innerHTML).join(', '));
 process.exit(bad ? 1 : 0);

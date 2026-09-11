@@ -3347,6 +3347,22 @@ enum StderrTarget {
 /// the shell said.
 #[cfg(test)]
 mod stderr_tee {
+    // `missing_const_for_thread_local` asks for the `const { ... }` initializer
+    // that is already written below. On rustc 1.95 the lint is inverted: it
+    // fires on initializers that ARE const blocks and stays silent on the ones
+    // that are not, so it has no true positives to lose. The workspace lint
+    // table allows it with the measurements; this crate needs its own because
+    // `#![deny(clippy::all)]` at lib.rs:1 is a SOURCE attribute and beats the
+    // table's command-line flag.
+    //
+    // An inner attribute on the module, because an attribute on a macro
+    // *invocation* is ignored and this is the smallest item enclosing it —
+    // the same placement `gui/font/src/phase.rs` arrived at independently.
+    #![allow(
+        clippy::missing_const_for_thread_local,
+        reason = "clippy 1.95 false positive: the initializer already is a const block"
+    )]
+
     use std::cell::RefCell;
     use std::sync::Once;
 

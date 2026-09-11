@@ -403,6 +403,37 @@ cast_sign_loss = "allow"
 cast_precision_loss = "allow"
 cast_possible_wrap = "allow"
 
+# missing_const_for_thread_local: a false positive with NO true positives on
+# rustc/clippy 1.95, and the sixth independent rediscovery of it is what put it
+# here rather than in a seventh `#[allow]`.
+#
+# The lint asks for a `const { ... }` initializer. On this toolchain it fires
+# on the initializers that ALREADY ARE const blocks, and stays silent on the
+# ones that are not. Measured in a standalone crate: `RefCell<Vec<u8>>`,
+# `RefCell<u32>`, a bare `u32` and a `Vec<u8>` were all flagged with `const`
+# written, while a genuinely non-const `ScratchDir::new("cwd")` was not. So
+# suppressing it discards nothing — there is no case on 1.95 where obeying it
+# would change any code.
+#
+# It was suppressed five times independently before this, each with its own
+# comment: userspace/ssh-interop, gui/toolkit/src/signal.rs,
+# gui/compositor/src/present/host.rs, gui/font/src/phase.rs and
+# gui/settingsfile/src/lib.rs. The sixth site — userspace/oils — had none, so
+# `cargo clippy -p oils` was red and stayed red, which is what an enumeration
+# needing one entry per instance does: it misses the next one by construction.
+# Those five are now redundant and can go whenever their owners are in the
+# file; leaving them costs nothing but a duplicate explanation.
+#
+# THIS TABLE DOES NOT REACH A CRATE THAT DENIES IN SOURCE. `userspace/oils`
+# has `#![deny(clippy::all)]` at lib.rs:1, and a source attribute beats the
+# command-line flag this table becomes, so oils still needed its own `#[allow]`
+# and still would if this entry were the only one. Worth knowing before
+# assuming a workspace-scope suppression covers everything.
+#
+# REMOVE THIS when the toolchain moves past 1.95 and re-check: the lint is a
+# real one and its true positives are worth having once it can find them.
+missing_const_for_thread_local = "allow"
+
 # verbose_bit_mask / verbose_file_reads: stylistic preferences.
 verbose_bit_mask = "allow"
 

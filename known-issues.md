@@ -36,6 +36,97 @@ freely. See `roadmap.md` → "Three-Agent Parallel Execution" rule 3, and
 
 ---
 
+## TD-B-INSTALL-REIMPLEMENTS-A-BACKUP-POLICY-COREUTILS-ALREADY-HAS (lane B, 2026-09-11)
+
+**In short:** `userspace/install` has its own backup handling, and
+`userspace/coreutils/src/backup.rs` has a complete, correct one that `cp`, `mv`
+and `ln` already share. The separate copy is missing most of what GNU's
+`install` actually does, and got the one thing it does implement wrong until
+today.
+
+**What coreutils' has and install's does not:**
+
+| | coreutils `backup.rs` | `userspace/install` |
+|---|---|---|
+| simple backups (`file~`) | yes | yes |
+| numbered backups (`file.~1~`) | yes | **no** |
+| `--backup=CONTROL` | yes | **no** — only the bare `-b` |
+| `$VERSION_CONTROL` | yes | **no** |
+| `$SIMPLE_BACKUP_SUFFIX` | yes | **no** — only `-S` |
+| suffix type | `Vec<u8>` | `String` |
+
+So `install --backup=numbered` and `VERSION_CONTROL=numbered install …` both
+silently make a simple backup, overwriting the previous one. GNU makes a new
+`.~N~` each time; ours destroys the older copy, which is the opposite of what
+someone asking for numbered backups wants.
+
+**Why the suffix type matters too.** `install` reads `-S` into a `String`,
+which means `env::args()`, which panics on a non-UTF-8 argument. coreutils
+takes it as `&OsStr` and keeps it as bytes. A suffix is a filename fragment and
+this filesystem allows any byte but `/` and NUL.
+
+**The fix is not to port the missing features into install.** GNU's `install`
+*is* part of coreutils; ours is a separate crate that duplicates a policy
+module sitting a directory away. Either it becomes a `coreutils/src/bin`
+personality — which is where the roadmap's own §1005 "coreutils is the one
+home" ruling points — or `backup.rs` moves somewhere both can reach, as
+`quoting::with_suffix` just did for the one byte-level primitive all of them
+needed.
+
+**How it was found:** repairing the lossy `format!("{}{}", dst.display(), …)`
+in install's backup path, then looking for the same shape elsewhere and finding
+that the correct byte-wise implementation had existed in `backup.rs` the whole
+time.
+
+## TD-B-INSTALLS-BACKUP-RENAMES-TO-A-PATH-IT-INVENTED (lane B, 2026-09-11) -- FIXED 2026-09-11
+
+**FIXED** with the `os_bytes`/`os_from_bytes` pair the entry named, factored
+into `backup_name(dst, suffix)` so the reasoning has somewhere to live and the
+contract has something to test.
+
+**The part the entry did not anticipate, and it is about the tests rather than
+the fix.** The defect only shows on a destination whose name is not valid
+UTF-8, and `os_bytes` is documented as lossy on a Windows *host* -- which is
+where this suite runs. So **none of the four new tests would fail against the
+broken code**. They pin what makes the target behaviour right (the suffix is
+appended to the whole name, byte for byte, never before an extension and never
+normalised) and they would catch a rewrite that changed it, but they cannot
+reach the case the function exists for.
+
+That is stated in the test module rather than left for someone to discover,
+because a suite that looks like it covers a fix and does not is worse than one
+that admits the gap. The non-UTF-8 case is exercised by the target.
+
+
+**In short:** `install --backup` moves the existing destination aside before
+writing the new file. It builds the backup's name with
+
+    let backup_path = format!("{}{}", dst.display(), args.backup_suffix);
+
+`Path::display()` is **lossy**: any byte in `dst` that is not valid UTF-8 comes
+out as U+FFFD. So on a destination whose name is not UTF-8, the rename targets
+a path that is not `dst` plus a suffix — it is a *different name*, one the user
+never had. The original file is moved somewhere they did not ask for and cannot
+easily find, and `install` reports success.
+
+**Why it is not hypothetical here.** This filesystem's rule is "any byte except
+`/` and NUL", which is the whole reason CLAUDE.md item 7 exists. A name
+arriving from a tarball, a foreign filesystem or a script is routinely not
+UTF-8.
+
+**Where:** `userspace/install/src/main.rs`, in the `--backup` path just above
+the `fs::rename`.
+
+**The fix** is to build the name as bytes rather than as text: take
+`dst.as_os_str()`, append the suffix, and turn it back into an `OsString`
+without ever going through `String`. `userspace/quoting` already exposes
+`os_bytes` and `os_from_bytes` for exactly this round trip, and
+`coreutils/src/bin/tar.rs` uses that pair.
+
+**Found** while repairing the diagnostic on the very next line, which
+interpolated the same `dst.display()` into a message. The message was the
+flagged defect; the rename beside it is the one that moves a file.
+
 ## TD-B-FOUR-MORE-PROGRAMS-SUBSTITUTE-INVENTED-DATA-ON-A-FAILED-READ (lane B, 2026-09-11) -- CLOSED 2026-09-11
 
 **CLOSED.** All three real entries are fixed: `acl` and `blockdev` on
@@ -64426,6 +64517,411 @@ pass over `b'X'` byte literals was needed for the same reason in reverse — a
 bare scan credited `tr` with `-A -F -X -Z`, which are `for b in b'A'..=b'Z'`
 expanding `[:upper:]`, not flags.
 
+**39 -> 38 (2026-09-11): `fold`.** The first pair retired under §1005, and the
+method is worth repeating because reading alone would not have decided it.
+The survey called this one "close -- read both", with the standalone 483 lines
+against coreutils' 874 and **no option unique to either side**, so an options
+diff had nothing to say.
+
+A behavioural differential did. Both binaries were built and run against GNU
+coreutils 9.4 over 18 cases: **coreutils agreed 18/18, the standalone 14/18.**
+The four are all user-visible and none is a missing option:
+
+| case | GNU and coreutils | standalone |
+|---|---|---|
+| `-w 0` | refuses, *invalid number of columns* | silently folds to one character per line |
+| legacy `-5` | `abcde` / `fghij` | *invalid option -- '5'* |
+| multibyte `-w 4` on three `é` | `éé` / `é` | all three on one line |
+| a `
+` in the line | resets the column | breaks the line |
+
+The `-w 0` row is the one that matters most: a silent wrong answer where GNU
+refuses is worse than a missing feature, because nothing downstream can tell.
+
+`userspace/fold` deleted. Two side-effects worth noting: the lint-exemption
+list fell 128 -> 127 without anyone fixing a warning, because the crate that
+was exempt is gone; and gate 24 stayed green, because `fold` is still a name
+the tree produces — it tracks the NAME, not the crate, which is exactly the
+distinction that made it worth building.
+
+**One observation about the remaining 38.** Every duplicated pair builds two
+binaries with the same file name into the same target directory, so the second
+`cargo build` silently overwrites the first. Which implementation you get
+depends on build order. That is not a new finding — §1005 describes the tools
+"alternating non-deterministically between two implementations" — but it is
+worth knowing that it reproduces locally in seconds.
+
+**38 -> 37 (2026-09-11): `cut`.** The survey called this one "close -- read
+both" as well, 843 standalone lines against coreutils' 1515. The differential
+(`scripts/dup-differential.py`, written for exactly this) ran 36 cases:
+**coreutils agreed with GNU 36/36, the standalone 24/36.**
+
+Counted honestly, the 12 split two ways. **Seven are message wording only** --
+both refuse, both exit 1, only the text differs -- and are a divergence rather
+than a defect. **Five are wrong answers:**
+
+| case | GNU and coreutils | standalone |
+|---|---|---|
+| `-b 1-3` on `ab` | passes the bytes through | **refuses the whole stream**: "did not contain valid UTF-8" |
+| `-c 1` on `éé` | the first byte | the first character |
+| `--output-delimiter` with `-b` ranges | `ab-de` | `abde`, delimiter dropped |
+| `-f 2` on a CRLF line | keeps the `
+` | strips it |
+| `-d ''` | works | refuses |
+
+The first is the one that settles it. `cut -b` is BYTE mode, and the standalone
+forces UTF-8 on the stream, so the flag whose entire purpose is byte-oriented
+work fails on binary input — CLAUDE.md item 7 in the one place it matters most.
+
+`userspace/cut` deleted; three ledgers moved with it (lint exemptions 127 ->
+126, argv-utf8 223 -> 222, collisions 38 -> 37) without anyone fixing a
+warning.
+
+**37 -> 36 (2026-09-11): `seq`.** One of the five names the survey's FIRST
+version ranked backwards, so it is exactly where reading had already proved
+unreliable. 41 cases: **coreutils 41/41 against GNU, the standalone 28/41.**
+
+Five of the thirteen are message wording. **Eight are wrong answers**, and two
+of those would change what a script does:
+
+| case | GNU and coreutils | standalone |
+|---|---|---|
+| `seq 5 2` | **nothing** — a descending range with the default `+1` step is empty | counts backwards: `5 4 3 2` |
+| `seq -f %03g 1 3` | `001 002 003` | `1 2 3` — the option is accepted and ignored |
+| `seq -f %.2f 1 3` | `1.00 2.00 3.00` | `1 2 3` |
+| `seq -f '%g%%' 1 2` | `1%` | `1%%` |
+| `seq -f %d 1 3` | refuses: not a float format | prints anyway |
+| `seq 0x1 0x3` | `1 2 3` | refuses |
+| `seq nan` | refuses, exit 1 | exit 0, no output |
+
+`seq 5 2` is the one to read twice. `for i in $(seq $start $end)` is the
+commonest use of this program, and with `start > end` GNU runs the loop zero
+times while ours runs it *backwards*. Nothing in the script says which it got.
+
+The `-f` rows are §1006's shape in miniature: the option is parsed, stored, and
+advertised in `--help` as "use printf-style FORMAT", and does not reach the
+output.
+
+`userspace/seq` deleted; lint exemptions 126 -> 125, argv-utf8 222 -> 221,
+collisions 37 -> 36.
+
+**The tool grew a bound because of this pair.** `seq 1 inf` and `seq 1 0 5`
+are the natural ways to ask a number generator to misbehave, and the first run
+hung on them. `dup-differential.py` now caps each case at 5 s and 1 MiB and
+records a timeout as its own outcome — so a side that hangs where the other
+answers is a visible difference rather than a stuck harness. A differential
+that cannot survive the inputs it exists to try is not one.
+
+**36 -> 35 (2026-09-11): `tr`.** Also one of the five the survey first ranked
+backwards -- it had credited `tr` with flags `-A -F -X -Z` that were really
+`b'A'..=b'Z'` inside a character-class expansion. 46 cases: **coreutils 46/46,
+the standalone 38/46.**
+
+Five of the eight are message wording. The other **three are one defect wearing
+three hats**: GNU refuses, ours succeeds.
+
+| invocation | GNU and coreutils | standalone |
+|---|---|---|
+| `tr abc ''` | *when not truncating set1, string2 must be non-empty*, exit 1 | passes `abc` through, exit 0 |
+| `tr abc '[:upper:]'` | *misaligned `[:upper:]` construct*, exit 1 | outputs `ABC`, exit 0 |
+| `tr a b c` | *extra operand 'c'*, exit 1 | outputs `bbc`, exit 0 — the third operand is ignored |
+
+The third is the one a person hits. An extra operand is a typo, and GNU stops;
+ours produces output that looks entirely reasonable. The second is subtler and
+worse for portability: `[:upper:]` in SET2 is only valid opposite `[:lower:]`
+in SET1, so a script that works here fails on any real system.
+
+**Worth noting against the previous two.** `cut` and `seq` were too STRICT in
+places (`cut -b` refusing non-UTF-8) and too lax in others. `tr` is uniformly
+too lax: every difference is a malformed invocation accepted. Three pairs in,
+the standalone implementations are not wrong in one characteristic way -- they
+are wrong in whatever way nobody tested.
+
+`userspace/tr` deleted; lint exemptions 125 -> 124, argv-utf8 221 -> 220,
+collisions 36 -> 35.
+
+**35 -> 34 (2026-09-11): `nl`.** The last of the five the survey first ranked
+backwards, and the worst pair so far: 43 cases, **coreutils 43/43, the
+standalone 21/43** — under half, with the DEFAULT invocation among the
+failures.
+
+Seven of the 22 are message wording. The other **fifteen are five distinct
+defects**, two of which are total:
+
+| defect | effect |
+|---|---|
+| unnumbered lines | emits a literal **tab** where GNU pads the field with spaces. Plain `nl` on any file containing a blank line produces different bytes. |
+| `-l N` | **no output at all**, at every value tried. The option is accepted and the program prints nothing. |
+| section delimiters `\:`, `\:\:`, `\:\:\:` | not recognised. GNU consumes the delimiter line and RESTARTS numbering; ours prints it as a line and keeps counting. |
+| a byte that is not UTF-8 | **no output at all** |
+| a CRLF line | the `
+` is stripped |
+
+`-l` deserves the emphasis. It is not mis-implemented, it is inert *and*
+destructive: the program consumes its input, prints nothing, and exits. Any
+pipeline using it loses the data silently.
+
+The unnumbered-line defect is the one that would be noticed last and hurt
+longest, because the output looks right in a terminal — a tab and seven spaces
+land in the same column — and is wrong to `diff`, to `cut -f`, and to anything
+counting bytes.
+
+`userspace/nl` deleted; lint exemptions 124 -> 123, argv-utf8 220 -> 219,
+collisions 35 -> 34.
+
+**All five of the originally-misranked names are now decided** (`nl`, `split`,
+`seq`, `comm`, `tr` — `split` and `comm` by the survey's corrected ranking,
+`seq`, `tr` and `nl` by differential). Every one of the three put to a
+differential went to coreutils, and none of the deciding differences was a
+missing option — which is what the survey measures.
+
+**A correction to the method, found after four retirements (2026-09-11).**
+`scripts/` already holds **59 differential harnesses** — `nl-diff.sh`,
+`cut-diff.sh`, `uniq-diff.sh` and the rest — and they cover **half the
+remaining pairs**. I wrote `dup-differential.py` without looking for them.
+
+They are better at the same job:
+
+* far more cases — `nl-diff.sh` has 222 against my 43, `uniq-diff.sh` 273;
+* `od -An -c`, so whitespace is exact. That decided `nl`: a literal tab where
+  GNU pads with spaces. Its own comment says a comparison that collapsed
+  whitespace "would agree with almost every wrong implementation";
+* both sides inside WSL under one `argv[0]`, because the Windows host's
+  coreutils are MSYS2's and word every diagnostic differently;
+* **a reference built from GNU 9.4 source**, because WSL's installed coreutils
+  is Ubuntu's patched `9.4-3ubuntu6.1` — §726's point that a green run against
+  it certifies agreement with Debian rather than with GNU;
+* and they are parameterised: `OURS=/path/to/binary ./scripts/uniq-diff.sh`,
+  which is exactly the question I wrote a new tool to ask.
+
+`dup-differential.py` compares against `wsl -e <name>` — the patched build —
+so its numbers are agreement with Ubuntu's coreutils and not with GNU.
+
+**Why the four verdicts still stand.** In each pair the coreutils side scored
+100% against that same reference while the standalone scored 52–88%, and every
+deciding difference was structural rather than a wording or packaging detail:
+`seq` counting backwards where GNU prints nothing, `nl -l` printing nothing at
+all, `tr` accepting an extra operand, `cut -b` refusing a non-UTF-8 stream. A
+reference that were systematically wrong could not have produced a perfect
+score for one side. That is internal consistency, not a built reference, which
+is why this is written down rather than waved away.
+
+**The rule going forward:** use `scripts/<name>-diff.sh` where one exists
+(awk, cmp, comm, dd, df, du, expand, join, paste, sed, sort, split, tar, tee,
+tsort, uniq, wc, xargs) and `dup-differential.py` only for the eighteen that
+have none. Writing a real harness for those eighteen would be better than
+either.
+
+**34 -> 33 (2026-09-11): `uniq`, and the first decided with the PROPER
+harness.** `DIFF_PKG=uniq bash scripts/uniq-diff.sh` — the tree's own
+`uniq-diff.sh`, 273 cases, `od -An -c`, and a GNU 9.4 reference built from
+source rather than Ubuntu's patched package.
+
+**coreutils 273 passed, 0 differed. The standalone 134 passed, 139 differed** —
+more than half the cases.
+
+`DIFF_PKG` is the knob `diff-wsl.sh` grew for exactly this, after
+`calc-diff.sh` once "reported 95 passed, 105 differed" and three bugs were
+written up against a `bc` nobody intends to ship, because the output-filename
+collision let the wrong binary win. Overriding it points a harness written for
+coreutils at the standalone instead, which is the whole question §1005 asks.
+
+Four representative defects:
+
+| case | GNU | standalone |
+|---|---|---|
+| `-z -f1` | `p
+q  p
+r ` | `p
+q ` — **a record is dropped** |
+| `+2` (traditional skip-chars) | works | treated as a FILENAME: *No such file or directory* |
+| `--group=both` | one blank line between groups | two |
+| `--group=b` | accepts the unambiguous abbreviation | rejects it |
+
+The `-z -f1` row is silent data loss, which is the worst outcome available to a
+filter: fewer records out than in, exit 0, nothing said.
+
+**This is the method working as corrected.** The four pairs before it were
+decided with `dup-differential.py` against Ubuntu's patched coreutils; this one
+used the built GNU reference and far more cases, and reached the same kind of
+verdict much more strongly. For the eighteen names that have a `<name>-diff.sh`,
+`DIFF_PKG=<name>` is the whole procedure.
+
+**33 -> 32 (2026-09-11): `tee`, and the survey was wrong in the dangerous
+direction.** It ranked this pair **"standalone ahead"** — the only such verdict
+tested so far — on the strength of three options only the standalone mentions.
+Behaviour: **coreutils 71 passed 0 differed; the standalone 34 passed 37
+differed.**
+
+That is the failure mode the entry above warns about for the survey's first
+version, still live in the current one: an options count can say the standalone
+is ahead when it is behind on half the cases, and acting on it deletes the
+better implementation.
+
+Of the 37, seventeen are Rust's `io::Error` leaking `(os error 2)` into
+diagnostics where GNU prints only the `strerror` text — the file trees match
+exactly, so those are wording. The rest are real:
+
+| invocation | GNU | standalone |
+|---|---|---|
+| `--output-error=exit-n` | accepts the unambiguous abbreviation and writes the file | refuses, **writes nothing** |
+| `tee --output-error out` | `--output-error`'s argument is OPTIONAL, so `out` is the file — writes it | consumes `out` as the mode, fails, writes nothing |
+| `--output-error=e` | *ambiguous argument* | *invalid* — no ambiguity concept at all |
+
+**The uncomfortable part, and the reason this is worth more than one line.**
+Two ticks earlier I brought `userspace/tee` under the lint policy and added six
+tests to it. One of the sites I repaired is the `--output-error` argument
+handling: I replaced a bound-check-then-index with `let Some(next) =
+args.get(i)`, which made it provably non-panicking — and left it *behaviourally
+wrong*, because GNU's argument there is optional and ours consumes the next
+operand unconditionally. My own tests passed, because I wrote them against the
+behaviour rather than against GNU.
+
+A lint pass proves a program cannot crash. It says nothing about whether the
+program is right, and it is easy to come away feeling otherwise. The 129-crate
+lint programme above is still worth doing; it is not a substitute for a
+differential, and two of its three crates so far were duplicates that a
+differential then deleted.
+
+**30 -> 29 (2026-09-11): `comm`, the second "close" pair to come apart.**
+`DIFF_PKG=comm bash scripts/comm-diff.sh`, subject confirmed by `--version`:
+
+**coreutils 197 passed, 0 differed. The standalone 104 passed, 93 differed.**
+
+| | cases | defect |
+|---|---|---|
+| `--total` missing | 49 | GNU's summary line (`1	1	2	total`) is unimplemented, so half the suite dies at `unrecognized option '--total'`. |
+| missing second line | 25 | on unsorted input GNU prints `comm: file 1 is not in sorted order` **and** `comm: input is not in sorted order`; only the first is printed. |
+| **empty `--output-delimiter`** | **4** | `--output-delimiter=` means **NUL** to GNU, which emits ` ` separators. The standalone emits *nothing*, so columns 1, 2 and 3 become indistinguishable — the output stops carrying the answer. Both exit 0. |
+| accepts what GNU refuses | 4 | a repeated `--output-delimiter` is `comm: multiple output delimiters specified` in GNU; the standalone takes the last one and exits 0. |
+| `(os error N)` | 7 | `comm: nosuch.txt: No such file or directory (os error 2)`. One of these also reports the *wrong* failure — it opens the files before validating the options, so a doubled delimiter on two missing files is reported as the missing file. |
+| **refuses non-UTF-8** | 2 | `comm bad1.txt bad2.txt` → `read error: stream did not contain valid UTF-8`, exit 1, no output. GNU compares the bytes and succeeds. |
+| **false disorder alarm** | 2 | `comm dis.txt dis.txt` — the same unsorted file twice — exits 1 with two order complaints. GNU exits 0: comparing a file against itself makes every comparison equal, so no disorder is ever observed. The output bytes are identical; only the verdict differs. |
+
+**The non-UTF-8 refusal has now appeared in two consecutive standalones**, with
+the same wording, on programs that have no business decoding their input:
+`expand` places whitespace and `comm` compares lines. That is worth recording as
+a property of the standalone family rather than as two coincidences — it
+predicts the same defect in the remaining 29 and it is exactly the defect
+CLAUDE.md item 7 names. The coreutils half passes these cases.
+
+**31 -> 30 (2026-09-11): `expand`, the pair the broken knob was hiding.**
+This is the pair that read as a **dead heat** — 216 passed both ways — until
+`DIFF_PKG` was made to cross the WSL boundary (entry below). With the knob
+working, `DIFF_PKG=expand bash scripts/expand-diff.sh`, each run's subject
+confirmed by binary hash and `--version` rather than assumed:
+
+**coreutils 216 passed, 0 differed. The standalone 90 passed, 126 differed.**
+
+The survey had called this one "close — read both", and on its own terms it was
+right: 873 lines against 712, two option names either side. Every one of the
+126 is invisible to a line count.
+
+| | cases | defect |
+|---|---|---|
+| `-t` specs wrongly **rejected** | 49 | `-t '1 3 5'` and `-t '1,3 5'` — blank-separated stop lists, which POSIX and GNU both accept — are refused as `invalid tab stop specification`. So is an empty `-t ''`. |
+| **wrong column, exit 0** | **29** | With an explicit multi-stop list the text lands one column right of where GNU puts it: `-t 1,3,5` on a leading tab emits **two** spaces where GNU emits **one**. Both exit 0 and the output looks plausible. Placing text in a column is the entire job of this program. |
+| `-N` shorthand rejected | 19 | `expand -4`, and `-1` … `-9`, `-16` — the historic spelling, still accepted by GNU — die with `invalid option -- '4'`. |
+| long options | 11 | `--tab` (an unambiguous abbreviation of `--tabs`) is unrecognised; so are `--initial=4`, `--help=x`, `--version=x`. |
+| **refuses non-UTF-8 input** | 2 | `expand badbytes.txt` → `stream did not contain valid UTF-8`, exit 1, **no output at all**. GNU passes the bytes through untouched. Same for a byte off a pipe. |
+| accepts what GNU refuses | 5 | `-t 4 -t 2`, `-t 4 -t 4`, `-t +4,6`, `-t +2,+4`, `-t +2 -t +4` all exit 0. GNU refuses each: `tab sizes must be ascending`, `'+' specifier only allowed with the last value`. |
+| `(os error N)` in diagnostics | 9 | `expand: nosuch.txt: No such file or directory (os error 2)`; `expand: .: Is a directory (os error 21)`. Rust's `io::Error` Display leaking into a user-facing sentence. |
+| missing second line | 2 | `expand -it` and `expand --tabs` omit `Try 'expand --help' for more information.` |
+
+**The non-UTF-8 refusal is the one that would have shipped a data bug.**
+`expand` is a whitespace tool: it has no business decoding the bytes between the
+tabs, and a Latin-1 file, a file with one stray byte, or anything binary-ish
+comes back as an error with no output. That is CLAUDE.md self-review item 7 —
+"never force UTF-8 on … pipe data" — as a whole-file refusal rather than as
+`from_utf8_lossy` corruption. It cannot be seen by reading the option list,
+which is why the survey scored this pair as close.
+
+**The wrong-column family is the one that would have shipped quietly.** 29 cases
+where both sides exit 0, neither prints anything, and the columns do not line
+up. A harness comparing `od -An -c` byte for byte is the only reason they were
+seen at all; any comparison that normalised whitespace would have called them
+equal, and whitespace is the output.
+
+**THE KNOB THAT SELECTS THE SUBJECT WAS NOT REACHING THE SUBJECT
+(2026-09-11, fixed).** `DIFF_PKG=<pkg>` — the override every entry above uses
+to point a coreutils harness at the standalone half instead — was being
+**dropped at the WSL boundary**, and the run came back green anyway.
+
+    DIFF_PKG=no-such-package-at-all ./scripts/expand-diff.sh
+    216 passed, 0 differed, 2 differ on purpose
+
+216 passing cases for a package that does not exist. `diff-wsl.sh` re-execs
+every harness inside WSL, and environment variables do not cross that boundary
+by themselves, so the re-exec rebuilt the environment from a written-out list
+of four names — `OURS VERBOSE DIFF_GNU_DIR DIFF_GNU_CACHE`. `DIFF_PKG` was not
+on it. The far side then applied its own default of `coreutils` and measured
+the half nobody asked about.
+
+**Why this is the worst possible failure for the §1005 work.** Both runs of a
+pair measured the same binary, so every pair scores a **perfect tie** no matter
+how far apart the halves really are — and a tie reads as "the two are
+equivalent, delete either", which is the one conclusion that can delete the
+better half. `expand` is the proof: it reported *216 / 216, a dead heat* both
+ways, and with the knob fixed it reports **216 passed / 0 differed** for
+coreutils against **90 passed / 126 differed** for the standalone.
+
+**The seven retirements already made are NOT affected, and that is checked
+rather than assumed.** A contaminated pair of runs measures one binary twice
+and therefore *must* print the same numbers twice; the harnesses are
+deterministic. Every retirement above recorded two different numbers — `dd`
+339/0 against 8/331, `tee` 71/0 against 34/37, `uniq` 273/0 against 134/139 —
+and no single subject can produce both halves of any of those. The asymmetry
+itself is the evidence the swap happened.
+
+**The general defect, which this tree has now hit four times:** an enumeration
+that needs one entry per instance misses the next instance BY CONSTRUCTION, and
+misses it silently. The fix does not add `DIFF_PKG` to the list; it removes the
+list. Every `DIFF_`-prefixed name found in the environment now crosses, so a
+knob added later crosses without anyone remembering. Taking the names from the
+*environment* rather than from the shell is also exactly the right cut: a knob
+a harness writes into itself is set again on the far side and need not travel,
+while an operator's override exists only on this side and is lost if it does
+not.
+
+Guarded by `scripts/test-diff-forward.sh`, which is built on the two-probe
+rule, because for a forwarded variable "the value crossed" and "the value was
+dropped and the default did the same thing" look identical in green. So it sets
+`DIFF_PKG` to values that *must* refuse — a package that does not exist, and a
+package that exists with no such binary — and requires both to fail. It scores
+4/4 against the fix and 2/4 against the old code, failing exactly the two
+refusal probes.
+
+*(Written POSIX, not bash: `diff-wsl.sh` declares `shell=sh` and two harnesses
+are `#!/bin/sh`, so the obvious `${!DIFF_@}` — which works when tried, because
+it is tried under bash — would have broken them. shellcheck said so.)*
+
+**32 -> 31 (2026-09-11): `dd`, and the survey's second inversion.** Ranked
+**"standalone ahead"** on 21 option names the standalone mentions and coreutils
+does not. `DIFF_PKG=dd bash scripts/dd-diff.sh`:
+
+**coreutils 339 passed, 0 differed. The standalone 8 passed, 331 differed.**
+
+It passes eight of 339. Three defect families, sorted by what they cost:
+
+| | cases | defect |
+|---|---|---|
+| **`bs=` operands** | **102** | `bs=1k`, `bs=1KB`, `bs=1x2`, `bs=2x3x4` all **fail with exit 1** where GNU succeeds. Size suffixes and multiplier products are core `dd` syntax — `dd bs=1M` is the commonest invocation of this program and it errors. |
+| summary line | 195 | prints `11 bytes (11 B, 11 B) copied` where GNU prints `11 bytes copied`. GNU only adds the parenthesised sizes at 1000 bytes and up, and never prints the same rendering twice. |
+| summary line | ⊂195 | `10000 bytes` renders as `(10 kB, 10 KiB)`; GNU says `(10 kB, 9.8 KiB)`. 10000 bytes is 9.77 KiB, so the IEC divisor is 1000 instead of 1024. |
+
+**What it gets right is worth stating too.** In all 195 summary-only cases the
+copied bytes and the exit code are identical — checked by splitting each case's
+stdout from its stderr rather than assumed. `dd` copies correctly and *reports*
+wrongly, in the line that is its entire feedback.
+
+**Two inversions out of two tested.** `tee` and `dd` were the survey's only
+"standalone ahead" verdicts put to a harness, and both were wrong — 37/71 and
+331/339 against. The heuristic counts option names MENTIONED in the source; a
+program can mention `bs` and not implement its suffixes. Ten such verdicts
+remain untested (`date`, `diff`, `env`, `free`, `hostname`, `kill`, `logger`,
+`patch`, `ps`, `sha256sum`, `uname`) and none of them should be acted on
+without a differential — acting on that verdict deletes the better half.
+
 **Still open — the proper fix.** One name, one program. For each of the
 remaining 41: pick the implementation that is under test and maintained, make
 sure nothing in the other is worth keeping (the standalone ones are older but
@@ -126867,6 +127363,59 @@ used *only* in exempt positions, which is the property that actually matters.
 **Also found in the same survey:** `overlay1` and `overlay2` are declared and
 used **zero** times anywhere in `gui` or `apps`. They are dead palette rungs.
 
+## TD-C-BORDER-CONVERSION-IN-PROGRESS — 991 DRAW SITES STILL CHOOSE THEIR OWN FILL
+
+**Date:** 2026-09-11. **Lane:** C.
+**Where:** `gui/**` and `apps/**`; run `python gui/appearance/survey-fills.py` for
+the current count and classification.
+
+**In short:** the decision to outline boxes rather than fill them (§829) is
+built, switchable and previewable, but the ~991 places that actually draw a box
+have not moved yet. Until they do, the setting changes the preview and little
+else. Nothing is broken; the desktop looks exactly as it did.
+
+**Done, and on `main`:**
+
+1. `appearance` carries the decided palette, with `link` and `border` as roles
+   of their own.
+2. `appearance::surface` is the single decision point: a `Surface` enum naming
+   *what a box is*, and `Palette::surface_paint` / `draw_surface` turning that
+   into a fill, an outline, or both, per `SurfaceStyle`.
+3. Settings → Themes offers "Outlined" / "Filled" with a live preview, and the
+   setting persists as `theme.surface_style`.
+
+**Left:** the draw sites. The survey classifies them by what the surrounding
+code calls them:
+
+| what it looks like | count | share |
+|---|---|---|
+| `Card` | 674 | 68% |
+| `Selected` | 158 | 16% |
+| `ControlTrack` | 68 | 7% |
+| `Sidebar` | 55 | 6% |
+| `Panel` | 36 | 4% |
+
+**Two things about that table, both learned by getting it wrong first.**
+
+The `ControlTrack` row is the reason this cannot be a blind sweep. A switch
+track, a scrollbar trough and a progress groove **stay filled in both themes** —
+outlined instead, a switch track reads as an empty box rather than as the off
+half of a control. Sixty-eight sites would have been silently broken.
+
+And the first run of the survey reported **1,090** sites, with a doc comment in
+`palette_check.rs` classified as a control track. Two faults: it matched inside
+comments, and it read a fixed ±6-line window, which runs into the *next* draw
+site and attributes that site's role and naming words to this one. Scoping the
+lookup to the literal's own braces and skipping comment lines removed 99 false
+positives and moved `ControlTrack` from 96 to 68. **The classification is a
+starting point for review, not an answer** — that is why the survey prints
+samples, and why the conversion should land in reviewable batches rather than
+one commit.
+
+**If never finished:** the desktop keeps the filled look, the new setting is
+mostly inert, and the palette carries two roles (`link`, `border`) that only the
+preview uses. Nothing degrades; it simply does not arrive.
+
 ## TD-C-THE-ACCESSIBILITY-CONFIG-IS-A-DEAD-PARALLEL-COPY
 
 **Date:** 2026-09-09. **Lane:** C.
@@ -129553,7 +130102,7 @@ than a note was checking the roadmap and finding mDNS marked done TWICE: once
 for the kernel responder with the real multicast addresses, once for this. Two
 `[x]` entries for one feature is the tell.
 
-## TD-B-HALF-THE-TREE-IS-NOT-SUBJECT-TO-THE-LINT-POLICY (lane B, 2026-09-10) — ratcheted, 134 open
+## TD-B-HALF-THE-TREE-IS-NOT-SUBJECT-TO-THE-LINT-POLICY (lane B, 2026-09-10) — ratcheted, 128 open
 
 **In short:** CLAUDE.md requires `#![deny(clippy::all, clippy::pedantic)]` in
 every crate plus five defensive lints in non-test code. **134 of 256 crates**
@@ -129594,6 +130143,53 @@ indistinguishable from one with nothing to say.
 
 **The work, when someone does it:** pick a crate, add the two lines, fix what
 it reports. The count may only fall.
+
+**134 -> 129.** `uname` and `tee` were done on 2026-09-11 (`userspace/tee` was
+then deleted the same day as a duplicate -- see the pair log below, and the
+note there about what that says for this programme) (the other three came
+off earlier). Both were small — 2 and 8 non-test warnings — and both turned out
+to have **no tests at all**, which the count had no way to show. So the job is
+not one thing but two: satisfy the lints, and leave behind something that
+proves the crate still does what it did. They have 3 and 6 tests now.
+
+Two findings worth more than the warnings:
+
+* **`uname` indexed `&args[1..]`.** A program can be started with an EMPTY
+  argument vector — `execve` takes it from the caller and nothing requires a
+  program name in it — so that slice panicked before a single option was read.
+  Reachable by a caller rather than by a user, which is why no amount of
+  command-line testing would have found it.
+* **`tee` sliced `&buf[..n]`** on the result of `Read::read`. That one cannot
+  panic, because `Read` promises `n <= buf.len()`; it is now checked anyway,
+  because a reader that broke the promise would have `tee` copy stale buffer
+  bytes it never read into every output file, and stopping is better than that.
+
+**`expand` (2026-09-11), and the interesting part is that it had no bug.** 24
+warnings, and a full behavioural diff against GNU coreutils 9.4 — six tab-stop
+values including `0`, `-1` and one too large for `usize` — matched byte for
+byte on stdout and on exit code. So the lints bought no defect here, and the
+work was still worth doing for the one structural change they prompted:
+
+`TabStops::Regular` now holds a `NonZeroUsize` instead of a `usize`. The parser
+already rejected 0, and `next_tab_stop`'s `col / interval` four functions away
+had to trust that. The type carries it now, so the division cannot panic
+however the value arrived — and `col / *interval` uses
+`impl Div<NonZeroUsize> for usize`, which is documented as never panicking, so
+the proof is the type's rather than a comment's.
+
+That is the shape worth repeating: the lint could not be satisfied honestly
+without making the invariant explicit, and making it explicit removed the need
+for the invariant to be remembered.
+
+10 tests added — it had none, like the two before it. Three crates in and all
+three had no tests at all, which is starting to look less like a coincidence
+than like what "not subject to the lint policy" selected for.
+
+**The house style, measured before following it:** of 50 covered crates only 9
+use a crate-level `#![allow(clippy::arithmetic_side_effects, ...)]`. The other
+41 fixed the warnings. So the blanket is for genuinely bounded, pervasive
+arithmetic — `ar`'s archive offsets, with its rationale written down — and not
+the default answer.
 
 **A worked example, with the real number.** `userspace/at` (1,900 lines) was
 put through it on 2026-09-10. With the test module exempted the way the covered

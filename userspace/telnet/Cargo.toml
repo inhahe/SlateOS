@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS telnet client"
 [dependencies]
+# Host names come from argv and option and banner text comes off the
+# connection.
+quoting = { path = "../quoting" }
 
 [lints]
 workspace = true

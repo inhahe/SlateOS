@@ -14,6 +14,7 @@
 
 #![cfg_attr(not(test), no_main)]
 
+use quoting::quoteaf_os;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 #[cfg(not(test))]
 use std::env;
@@ -591,7 +592,7 @@ impl<'a> RegexParser<'a> {
             );
             sub.parse()
         } else {
-            Err(format!("undefined name '{}' in regex", name))
+            Err(format!("undefined name {} in regex", quoteaf_os(&name)))
         }
     }
 
@@ -1799,9 +1800,8 @@ fn run() -> Result<i32, String> {
     }
 
     let input = match &cli.input_file {
-        Some(path) => {
-            fs::read_to_string(path).map_err(|e| format!("cannot read '{}': {}", path, e))?
-        }
+        Some(path) => fs::read_to_string(path)
+            .map_err(|e| format!("cannot read {}: {}", quoteaf_os(path), e))?,
         None => {
             let mut buf = String::new();
             io::stdin()
@@ -1828,11 +1828,11 @@ fn run() -> Result<i32, String> {
     if cli.output_file.is_none() && cli.input_file.is_some() {
         // Write to file.
         fs::write(output_path, &c_source)
-            .map_err(|e| format!("cannot write '{}': {}", output_path, e))?;
+            .map_err(|e| format!("cannot write {}: {}", quoteaf_os(output_path), e))?;
         eprintln!("lex: wrote {}", output_path);
     } else if cli.output_file.is_some() {
         fs::write(output_path, &c_source)
-            .map_err(|e| format!("cannot write '{}': {}", output_path, e))?;
+            .map_err(|e| format!("cannot write {}: {}", quoteaf_os(output_path), e))?;
         eprintln!("lex: wrote {}", output_path);
     } else {
         // stdout

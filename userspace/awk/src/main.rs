@@ -10,6 +10,7 @@
 // as both a statement and inside expressions for piping).
 #![allow(clippy::enum_variant_names)]
 
+use quoting::{quoteaf, quoteaf_os};
 use std::collections::HashMap;
 use std::env;
 use std::fs;
@@ -688,7 +689,7 @@ impl Lexer {
                     self.tokens.push(Token::Comma);
                 }
                 _ => {
-                    return Err(format!("unexpected character: '{}'", char::from(b)));
+                    return Err(format!("unexpected character: {}", quoteaf(&[b])));
                 }
             }
         }
@@ -748,9 +749,9 @@ impl Lexer {
             }
         }
         let s = String::from_utf8_lossy(&self.src[start..self.pos]).to_string();
-        let val: f64 = s
-            .parse()
-            .map_err(|e: std::num::ParseFloatError| format!("bad number '{s}': {e}"))?;
+        let val: f64 = s.parse().map_err(|e: std::num::ParseFloatError| {
+            format!("bad number {}: {e}", quoteaf_os(&s))
+        })?;
         self.tokens.push(Token::Number(val));
         Ok(())
     }

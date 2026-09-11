@@ -43,6 +43,7 @@
 
 #![deny(clippy::all)]
 
+use quoting::quoteaf_os;
 use std::env;
 use std::ffi::OsString;
 use std::fs;
@@ -807,7 +808,10 @@ fn cmd_useradd(argv: &[OsString]) -> i32 {
 
     // Check for duplicates.
     if db.find_user(&username).is_some() {
-        write_stderr(&format!("useradd: user '{}' already exists", username));
+        write_stderr(&format!(
+            "useradd: user {} already exists",
+            quoteaf_os(&username)
+        ));
         return 1;
     }
 
@@ -850,7 +854,7 @@ fn cmd_useradd(argv: &[OsString]) -> i32 {
                 Err(_) => match db.find_group(g) {
                     Some(ge) => ge.gid,
                     None => {
-                        write_stderr(&format!("useradd: group '{}' does not exist", g));
+                        write_stderr(&format!("useradd: group {} does not exist", quoteaf_os(g)));
                         return 1;
                     }
                 },
@@ -942,7 +946,10 @@ fn cmd_useradd(argv: &[OsString]) -> i32 {
     // Add user to supplementary groups.
     for gname in &opts.supp_groups {
         if db.find_group(gname).is_none() {
-            write_stderr(&format!("useradd: group '{}' does not exist", gname));
+            write_stderr(&format!(
+                "useradd: group {} does not exist",
+                quoteaf_os(gname)
+            ));
             return 1;
         }
         db.add_to_group(&username, gname);
@@ -1023,7 +1030,10 @@ fn cmd_userdel(argv: &[OsString]) -> i32 {
             if opts.force {
                 return 0;
             }
-            write_stderr(&format!("userdel: user '{}' does not exist", username));
+            write_stderr(&format!(
+                "userdel: user {} does not exist",
+                quoteaf_os(&username)
+            ));
             return 1;
         }
     };
@@ -1203,7 +1213,10 @@ fn cmd_usermod(argv: &[OsString]) -> i32 {
 
     // Find the user.
     if db.find_user(&username).is_none() {
-        write_stderr(&format!("usermod: user '{}' does not exist", username));
+        write_stderr(&format!(
+            "usermod: user {} does not exist",
+            quoteaf_os(&username)
+        ));
         return 1;
     }
 
@@ -1214,7 +1227,10 @@ fn cmd_usermod(argv: &[OsString]) -> i32 {
             return 1;
         }
         if new_name != &username && db.find_user(new_name).is_some() {
-            write_stderr(&format!("usermod: user '{}' already exists", new_name));
+            write_stderr(&format!(
+                "usermod: user {} already exists",
+                quoteaf_os(new_name)
+            ));
             return 1;
         }
     }
@@ -1235,7 +1251,7 @@ fn cmd_usermod(argv: &[OsString]) -> i32 {
             Err(_) => match db.find_group(g) {
                 Some(ge) => Some(ge.gid),
                 None => {
-                    write_stderr(&format!("usermod: group '{}' does not exist", g));
+                    write_stderr(&format!("usermod: group {} does not exist", quoteaf_os(g)));
                     return 1;
                 }
             },
@@ -1247,7 +1263,10 @@ fn cmd_usermod(argv: &[OsString]) -> i32 {
     if opts.supp_groups_set {
         for gname in &opts.supp_groups {
             if db.find_group(gname).is_none() {
-                write_stderr(&format!("usermod: group '{}' does not exist", gname));
+                write_stderr(&format!(
+                    "usermod: group {} does not exist",
+                    quoteaf_os(gname)
+                ));
                 return 1;
             }
         }
@@ -1265,7 +1284,10 @@ fn cmd_usermod(argv: &[OsString]) -> i32 {
     }
 
     let Some(record) = db.users.find_mut(&username) else {
-        write_stderr(&format!("usermod: user '{}' does not exist", username));
+        write_stderr(&format!(
+            "usermod: user {} does not exist",
+            quoteaf_os(&username)
+        ));
         return 1;
     };
 
@@ -1418,7 +1440,10 @@ fn cmd_groupadd(argv: &[OsString]) -> i32 {
         if opts.force {
             return 0;
         }
-        write_stderr(&format!("groupadd: group '{}' already exists", groupname));
+        write_stderr(&format!(
+            "groupadd: group {} already exists",
+            quoteaf_os(&groupname)
+        ));
         return 1;
     }
 
@@ -1503,7 +1528,10 @@ fn cmd_groupdel(argv: &[OsString]) -> i32 {
     let group = match db.find_group(&groupname) {
         Some(g) => g.clone(),
         None => {
-            write_stderr(&format!("groupdel: group '{}' does not exist", groupname));
+            write_stderr(&format!(
+                "groupdel: group {} does not exist",
+                quoteaf_os(&groupname)
+            ));
             return 1;
         }
     };
@@ -1601,7 +1629,10 @@ fn cmd_groupmod(argv: &[OsString]) -> i32 {
     let group_idx = match db.groups.iter().position(|g| g.name == groupname) {
         Some(i) => i,
         None => {
-            write_stderr(&format!("groupmod: group '{}' does not exist", groupname));
+            write_stderr(&format!(
+                "groupmod: group {} does not exist",
+                quoteaf_os(&groupname)
+            ));
             return 1;
         }
     };
@@ -1613,7 +1644,10 @@ fn cmd_groupmod(argv: &[OsString]) -> i32 {
             return 1;
         }
         if new_name != &groupname && db.find_group(new_name).is_some() {
-            write_stderr(&format!("groupmod: group '{}' already exists", new_name));
+            write_stderr(&format!(
+                "groupmod: group {} already exists",
+                quoteaf_os(new_name)
+            ));
             return 1;
         }
     }

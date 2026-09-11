@@ -73,31 +73,39 @@
 </style>
 
 <header>
-  <h1>Contrast explorer — main / secondary / accent on a shaded card</h1>
-  <p>Live WCAG contrast for every text colour against whatever is actually behind it. The card sits inside a wider
-     unshaded page area that carries the same three text roles, so you can see both at once. Presets are the real
-     palette values from <code>gui/appearance/src/lib.rs</code>; “A” and “B” are my proposals for
-     <code>open-questions.md</code> → C-Q10. <b>Worth knowing before you pick:</b> the greyest card
-     (SURFACE2) tops out at 9.71 : 1 even against pure black, so A is reachable but needs genuinely
-     dark ink; and B <i>cannot</i> fix secondary or accent on its own — at today's grey they need a
-     card lighter than the page itself.</p>
+  <h1>The plan &mdash; borders by default, shaded cards as an optional theme</h1>
+  <p>This page opens on the <b>decided</b> palette, not the shipped one. C&#8209;Q10 was answered on
+     2026&#8209;09&#8209;11: boxes are told apart by a line around them rather than by a fill, on a plain
+     background, and the grey-filled look survives as a theme that can be switched on.
+     <code>design-decisions.md</code> §829 and §830 carry the reasoning. Everything below is live &mdash;
+     every colour is editable and every example, table and verdict follows it, so this is the place to
+     retune before the conversion starts rather than after. The earlier presets are kept so the
+     superseded palette can still be compared against.</p>
 </header>
 
 <div class="wrap">
   <div class="panel">
-    <h2>Preset</h2>
+    <h2>Earlier options &mdash; kept as history</h2>
     <div class="presets">
-      <button data-p="cur" class="on">Current</button>
+      <button data-p="cur">Current (superseded)</button>
       <button data-p="a">A — darken greys</button>
       <button data-p="b">B — lighten cards</button>
     </div>
 
-    <h2>Operator&rsquo;s palette (2026-09-09) &mdash; which way should the card ladder go?</h2>
+    <h2>Card-ladder options (2026-09-09) &mdash; asked and answered</h2>
     <div class="presets">
       <button data-p="op1">1 &mdash; surface0 only</button>
       <button data-p="op2">2 &mdash; page + one card</button>
       <button data-p="op3">3 &mdash; deepest card, ladder ascends</button>
     </div>
+
+    <h2>Decided &mdash; 2026-09-11</h2>
+    <div class="presets">
+      <button data-p="brd" class="on">Borders (the default)</button>
+    </div>
+    <p class="note" style="margin-top:6px">Borders are the decision; the shaded cards stay as an
+       optional theme, which is why both columns are still drawn below. In this preset the panes are
+       deliberately all one colour &mdash; nothing is shaded, so the ladder has nothing to say.</p>
 
     <h2>Colours</h2>
     <div class="row"><label>Main text</label><input type="color" id="c_main"><input type="text" id="t_main"></div>
@@ -105,6 +113,8 @@
     <div class="row"><label>Secondary (subtext1)</label><input type="color" id="c_sec1"><input type="text" id="t_sec1"></div>
     <div class="row"><label>Accent text</label><input type="color" id="c_acc"><input type="text" id="t_acc"></div>
     <div class="row"><label>Disabled / hint (overlay0)</label><input type="color" id="c_ovl"><input type="text" id="t_ovl"></div>
+    <div class="row"><label>Link</label><input type="color" id="c_link"><input type="text" id="t_link"></div>
+    <div class="row"><label>Border (unselected)</label><input type="color" id="c_bord"><input type="text" id="t_bord"></div>
     <div class="row"><label>Page (unshaded)</label><input type="color" id="c_page"><input type="text" id="t_page"></div>
     <div class="row"><label>Card being measured</label><input type="color" id="c_card"><input type="text" id="t_card"></div>
     <p class="note" style="margin-top:6px">Feeds the preview at the top and the contrast table &mdash; it is
@@ -154,6 +164,63 @@
          <code>mantle</code> (353) and <code>crust</code> (285) are <em>lighter</em> than the page. A palette
          naming one card colour has to say what becomes of the other four. Anything below 4.5 is marked.</p>
       <div id="allsurf"></div>
+    </div>
+
+    <div class="panel" style="margin-top:18px">
+      <h2>The plan, in full &mdash; what is decided, what is not, and what changes in the code</h2>
+
+      <h3 style="font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:#666;margin:2px 0 6px">Decided</h3>
+      <table>
+        <thead><tr><th>role</th><th>value</th><th>where you see it</th></tr></thead>
+        <tbody id="plan_roles"></tbody>
+      </table>
+      <p class="note">One blue-green does three jobs &mdash; the selected border, secondary text, and a switch
+         that is on. It <b>replaces</b> the old blue accent rather than joining it: every blue-green dark enough
+         to clear 4.5 lands 1.19&ndash;1.74 from <code>#0036A3</code>, which is not a second colour.</p>
+
+      <h3 style="font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:#666;margin:14px 0 6px">Still open &mdash; three things this decision did not settle</h3>
+      <ol class="note" style="margin-top:0">
+        <li><b>Colouring the card theme so everything clears 4.50.</b> Your words, and still true. It is now an
+            <em>optional theme</em> rather than the default, which lowers the urgency without removing it &mdash;
+            switch the two example columns below to compare. Tracked as
+            <code>TD-C-THIRTEEN-LIGHT-ACCENTS-STILL-FAIL-ON-CARDS</code>.</li>
+        <li><s><b><code>subtext0</code> has been given the same value as <code>subtext1</code>.</b></s>
+            <b>Settled 2026-09-11 (&sect;831):</b> they share a <em>value</em> but stay two <em>roles</em>. The
+            expensive thing was never the constant, it is the 1,087 places that name <code>subtext0</code> and the
+            161 that name <code>subtext1</code> &mdash; so keeping both names makes splitting them later a
+            one-line change instead of a hunt. The same now holds for the accent, which is what makes the
+            question below cheap to reverse.</li>
+        <li><s><b>A link and a caption are now the same colour.</b></s>
+            <b>Settled 2026-09-11 (&sect;832):</b> links have their own colour, <code>#0036A3</code>, and are
+            <u>always underlined</u>. Both, not either &mdash; WCAG&nbsp;1.4.1 forbids colour as the only
+            indicator, so the underline is the load-bearing half and the colour is the fast half. The same review
+            found that only one of the three clickable things in these mock-ups had been underlined, which is the
+            failure the rule exists to prevent; the checker now counts underlines rather than asking whether one
+            exists.</li>
+      </ol>
+
+      <h3 style="font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:#666;margin:14px 0 6px">What the conversion actually touches</h3>
+      <p class="note" style="margin-top:0">Counted, not estimated &mdash;
+         <code>grep</code> across <code>gui/</code> and <code>apps/</code>:</p>
+      <table>
+        <thead><tr><th>what</th><th class="num">count</th><th>treatment</th></tr></thead>
+        <tbody>
+          <tr><td><code>FillRect</code> literals naming a surface role</td><td class="num">766</td>
+              <td>route through one helper</td></tr>
+          <tr><td>helper calls (<code>fill_rounded</code>, <code>fill_rect</code>&hellip;) naming one</td><td class="num">26</td>
+              <td>route through one helper</td></tr>
+          <tr><td>surface-role mentions in total, across 376 files</td><td class="num">2,365</td>
+              <td>mostly borders, text and tests &mdash; untouched</td></tr>
+        </tbody>
+      </table>
+      <p class="note">So it is about <b>790 draw sites</b>, not the 1,713 quoted earlier &mdash; that figure counted
+         every mention of a surface role, including the ones that were already borders. The shape of the change is
+         <em>not</em> &ldquo;replace each fill with a border&rdquo;, because the shaded look has to keep working:
+         each site stops choosing a fill and instead names <em>what it is</em> &mdash; a card, a selected row, a
+         control track &mdash; and one place decides how that is drawn in the active theme. Two consequences worth
+         knowing: the fills that are genuinely <b>control chrome</b> (a switch track, a scrollbar, a progress
+         groove) stay fills in <em>both</em> themes and must be classified out by hand rather than swept, and the
+         shade ladder cannot be deleted, only stop being the default.</p>
     </div>
 
     <div class="panel" style="margin-top:18px">
@@ -263,6 +330,40 @@ const PRESETS = {
   //     alone; it only helps main text.
   b:   { main:'#4C4F69', sec:'#686B80', sec1:'#5C5F77', acc:'#1D62EC', page:'#EFF1F5', card:'#E6E9EF' },
 
+  // ---- DECIDED 2026-09-11: borders are the default, cards become an optional theme ------------
+  //
+  // Operator's specification, verbatim: default border black, background white or off-white,
+  // selected border a blue-green "not too bright", subtext1 the same colour as the selected
+  // border, toggle-on the same colour again.
+  //
+  // Two things follow from that spec rather than being chosen freely:
+  //
+  //   * The blue-green REPLACES the blue accent, it does not join it. Selected-border,
+  //     toggle-on and subtext1 are precisely the accent's roles, and every blue-green that
+  //     clears 4.5 lands 1.19-1.74 from #0036A3 -- at or below the 1.30 this page calls
+  //     "barely distinct". Keeping both would have put two indistinguishable blues in one
+  //     palette.
+  //   * subtext0 gets the same value as subtext1. They were 1.10 apart in the shipped
+  //     palette, which is "one colour" by this page's own reading, so there was never a
+  //     second grey to preserve. Flagged rather than assumed -- subtext0 has 1087 uses to
+  //     subtext1's 161, so if these should differ, subtext0 is the one that matters.
+  //
+  // #00688B is the pick, revised 2026-09-11 on the operator's "make it more bluish, either
+  // cerulean or cyan". Hue 195 and fully saturated, so it is unmistakably cerulean rather
+  // than the teal it replaced (hue 173): 6.26 on white, 5.54 on the off-white page, 3.35
+  // from black.
+  //
+  // The two obvious spellings of the ask do not survive contact with the floor, which is
+  // why this is not simply "cerulean":
+  //   * classic cerulean #007BA7 reaches only 4.23 on the off-white page -- it passes on
+  //     pure white and fails on the background we actually use.
+  //   * pure cyan #00FFFF is 1.25 on white. It is not a text colour at any size.
+  // #00688B is the most saturated cerulean that still clears the floor with real margin.
+  brd: { main:'#000000', sec:'#00688B', sec1:'#00688B', acc:'#00688B', link:'#0036A3', ovl:'#9CA0B0',
+         page:'#EFF1F5', card:'#EFF1F5',
+         ladder: { mantle:'#EFF1F5', crust:'#EFF1F5', s0:'#EFF1F5', s1:'#EFF1F5', s2:'#CCD0DA' },
+         borders: true },
+
   // ---- the operator's palette, 2026-09-09 (answers C-Q10) -------------------------------------
   //
   //   Main text  #000000   Secondary text  #373739   Accent text  #0036A3
@@ -309,12 +410,19 @@ const PRESETS = {
 const SHIPPED_LADDER = { mantle:'#E6E9EF', crust:'#DCE0E8', s0:'#CCD0DA', s1:'#BCC0CC', s2:'#ACB0BE' };
 
 const $ = id => document.getElementById(id);
-const KEYS = ['main','sec','sec1','acc','ovl','page','card'];
+const KEYS = ['main','sec','sec1','acc','link','ovl','bord','page','card'];
 // overlay0 was missing from this tool entirely until 2026-09-09, though the
 // palette declares it and the tree uses it 829 times -- more than surface1.
 // Its absence is why the ink tables looked easier to satisfy than the real
 // palette is. Presets that predate it inherit the shipped value.
-const INK_DEFAULTS = { ovl: '#9CA0B0' };
+// `bord` is the default (unselected) border. It is a role of its own rather
+// than surface2 borrowed: once borders carry the structure, the line is doing
+// the job the fill used to, and it has to be settable independently of the
+// shade ladder -- which in the border theme is flat.
+// `link` is its own role rather than the accent reused. Per §831: when two
+// roles converge, change the values and leave the names alone -- and these two
+// have now diverged again, which is exactly the case that rule was written for.
+const INK_DEFAULTS = { ovl: '#9CA0B0', bord: '#000000', link: '#0036A3' };
 // The five panes, in ladder order. Kept separate from KEYS because they live on
 // `cur.ladder` rather than on `cur` -- and because until 2026-09-09 they were
 // not editable at all, which is the bug this fixes: the examples read the
@@ -325,7 +433,7 @@ const LKEYS = ['mantle','crust','s0','s1','s2'];
 // `a` and `b` did not, and used to fall through to SHIPPED_LADDER at each read
 // site -- which is exactly what made them un-editable.
 const withLadder = pre => ({ ...INK_DEFAULTS, ...pre, ladder: { ...(pre.ladder || SHIPPED_LADDER) } });
-let cur = withLadder(PRESETS.cur);
+let cur = withLadder(PRESETS.brd);
 // Whether to chip each element with the pane it is drawn from.
 let showTags = true;
 
@@ -369,10 +477,15 @@ function renderFullPages() {
   // outline colour -- the selected row uses the accent rather than a shade,
   // because with no fill available it is the only thing left to select with.
   const surf = (b, shade, edge) => b
-    ? `background:transparent;border:1px solid ${edge || L.s2};`
+    ? `background:transparent;border:1px solid ${edge || cur.bord};`
     : `background:${shade};border:1px solid transparent;`;
 
   const T1 = `color:${ink}`, T2 = `color:${dim}`, TA = `color:${acc}`;
+  // A link is marked twice over, and deliberately. The colour alone would not
+  // do: WCAG 1.4.1 forbids colour as the *only* visual means of conveying
+  // information, so a reader who cannot separate two blues would have nothing
+  // left. The underline is the load-bearing half; the colour is the fast half.
+  const TL = `color:${cur.link};text-decoration:underline`;
 
   // A chip naming the pane an element is drawn from. In the bordered column the
   // fill is gone, so it names the border instead -- which is the honest answer
@@ -391,23 +504,23 @@ function renderFullPages() {
                                      : `background:${L.crust};`}">
           ${tag(b ? 'base' : 'crust')}
           ${['System', 'Network', 'Personalisation', 'Accounts'].map((n, i) =>
-            `<div class="nav" style="${i === 1 ? surf(b, L.s1, acc) : ''}${i === 1 ? T1 : T2}">${n}` +
+            `<div class="nav" style="${i === 1 ? surf(b, L.s1, acc) : ''}${T1}">${n}` +
             `${i === 1 ? tagF(b, 'surface1', 'accent') : ''}</div>`
           ).join('')}
         </div>
         <div class="cnt">
-          <div class="sec" style="${T2}">Wi-Fi</div>
+          <div class="sec" style="${T1}">Wi-Fi</div>
           <div class="r" style="${surf(b, L.s0)}">
             <div class="g"><div style="${T1}">Home network</div>
               <div class="t2s" style="${T2}">Connected &middot; 5 GHz &middot; strong</div></div>
-            <div style="${TA}">Disconnect</div>${tagF(b, 'surface0')}
+            <div style="${TL}">Disconnect</div>${tagF(b, 'surface0')}
           </div>
           <div class="r" style="${surf(b, L.s0)}">
             <div class="g"><div style="${T1}">Guest</div>
               <div class="t2s" style="${T2}">Saved network</div></div>
             <div style="color:${off}">Forget</div>${tag('overlay0')}
           </div>
-          <div class="sec" style="${T2}">Options</div>
+          <div class="sec" style="${T1}">Options</div>
           <div class="r" style="${surf(b, L.s0)}">
             <div class="g"><div style="${T1}">Connect automatically</div></div>
             <div class="sw" style="background:${acc}"><i style="right:2px"></i></div>
@@ -415,6 +528,14 @@ function renderFullPages() {
           <div class="r" style="${surf(b, L.s0)}">
             <div class="g"><div style="${T1}">Metered connection</div></div>
             <div class="sw" style="background:${L.s2}"><i style="left:2px"></i></div>${tag('surface2')}
+          </div>
+          <!-- A real link, deliberately next to a caption in the same colour. This is the
+               one thing the palette cannot currently distinguish: with accent and subtext1
+               holding one value, only the underline separates a thing you can click from a
+               thing you can merely read. -->
+          <div class="t2s" style="${T2};margin:2px 0 9px">
+            Your traffic is visible to the network operator.
+            <span style="${TL}">Learn more</span>
           </div>
           <div style="margin-top:11px">
             <span class="btn" style="background:${acc};color:${page}">Save</span>
@@ -434,7 +555,7 @@ function renderFullPages() {
                                      : `background:${L.crust};`}">
           ${tag(b ? 'base' : 'crust')}
           ${['Home', 'Documents', 'Pictures', 'Downloads'].map((n, i) =>
-            `<div class="nav" style="${i === 1 ? surf(b, L.s1, acc) : ''}${i === 1 ? T1 : T2}">${n}` +
+            `<div class="nav" style="${i === 1 ? surf(b, L.s1, acc) : ''}${T1}">${n}` +
             `${i === 1 ? tagF(b, 'surface1', 'accent') : ''}</div>`
           ).join('')}
         </div>
@@ -482,7 +603,7 @@ function renderFullPages() {
              border-radius:9px;padding:11px 13px;margin-top:13px;box-shadow:0 6px 16px rgba(0,0,0,.16)">
           <div style="font-weight:600;${T1}">Backup finished${tag(b ? 'base' : 'mantle')}</div>
           <div class="t2s" style="${T2}">4,812 files &middot; 2.1 GB &middot; 3 min 14 s</div>
-          <div class="t2s" style="margin-top:5px;${TA}">Show report</div>
+          <div class="t2s" style="margin-top:5px;${TL}">Show report</div>
         </div>
       </div>
     </div>`;
@@ -493,8 +614,8 @@ function renderFullPages() {
     ['A dialog and a notification, over a window', dialog],
   ];
   $('fp').innerHTML = shots.map(([name, make]) =>
-    `<div><h3>${name} &mdash; shaded (today)</h3>${make(false)}</div>` +
-    `<div><h3>&hellip; the same, with borders</h3>${make(true)}</div>`
+    `<div><h3>${name} &mdash; borders (the default)</h3>${make(true)}</div>` +
+    `<div><h3>&hellip; the same, cards (optional theme)</h3>${make(false)}</div>`
   ).join('');
 
   $('fp_note').innerHTML =
@@ -684,6 +805,21 @@ function render() {
   renderAllSurfaces();
   renderUseCases();
   renderFullPages();
+
+  // The plan's role table, driven from the live controls so it cannot drift
+  // from what the rest of the page is showing.
+  $('plan_roles').innerHTML = [
+    ['main text', cur.main, 'row titles, sidebar entries, section headings'],
+    ['secondary text', cur.sec1, 'the small print under a row'],
+    ['selected border / toggle on', cur.acc, 'the outline round the selected thing'],
+    ['link', cur.link, 'anything you can click through to — always underlined too'],
+    ['border, unselected', cur.bord, 'every other outline'],
+    ['background', cur.page, 'behind everything'],
+    ['disabled / hint', cur.ovl, 'switched-off controls only'],
+  ].map(([role, hex, where]) =>
+    `<tr><td>${role}</td><td><span style="display:inline-block;width:11px;height:11px;border:1px solid ` +
+    `rgba(0,0,0,.3);border-radius:2px;background:${hex};vertical-align:middle;margin-right:6px"></span>` +
+    `<code>${hex.toUpperCase()}</code></td><td>${where}</td></tr>`).join('');
 
   // Pane against pane. The question this answers is not "can you read on it"
   // but "is this a different colour at all" -- six named rungs are only six

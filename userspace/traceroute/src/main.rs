@@ -17,6 +17,7 @@
 //! traceroute --json <host>         JSON output
 //! ```
 
+use quoting::quoteaf_os;
 use std::env;
 use std::io::{self, Write};
 use std::process;
@@ -360,7 +361,7 @@ fn parse_numeric_arg<T: std::str::FromStr>(
         .get(*i)
         .ok_or_else(|| format!("{flag} requires a value"))?;
     val.parse::<T>()
-        .map_err(|_| format!("invalid value for {flag}: '{val}'"))
+        .map_err(|_| format!("invalid value for {flag}: {}", quoteaf_os(val)))
 }
 
 fn parse_args() -> Result<Options, String> {
@@ -417,7 +418,7 @@ fn parse_args() -> Result<Options, String> {
             "-I" => opts.use_icmp = true,
             "--json" => opts.json = true,
             other if other.starts_with('-') => {
-                return Err(format!("unknown option: '{other}'"));
+                return Err(format!("unknown option: {}", quoteaf_os(other)));
             }
             _ => {
                 positionals.push(arg.clone());
@@ -619,8 +620,8 @@ fn run() -> Result<(), String> {
     let ip_str: String;
 
     if is_ipv4_address(&opts.host) {
-        ip_addr =
-            parse_ipv4(&opts.host).ok_or_else(|| format!("invalid IP address: '{}'", opts.host))?;
+        ip_addr = parse_ipv4(&opts.host)
+            .ok_or_else(|| format!("invalid IP address: {}", quoteaf_os(&opts.host)))?;
         ip_str = opts.host.clone();
     } else {
         // Hostname: resolve via DNS syscall.

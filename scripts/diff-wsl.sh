@@ -124,7 +124,7 @@
 # | `DIFF_PKG`       | `coreutils` | the cargo package(s) to build from; more than one for a harness whose subjects do not share a crate |
 # | `DIFF_BINS`      | `$DIFF_PROG`, or empty if `DIFF_EXAMPLES` is set | the `--bin` names to build; more than one for a harness that compares a family |
 # | `DIFF_EXAMPLES`  | (none) | `--example` names to build, for a harness whose subject is a test instrument rather than a shipped utility. `extfloat-probe` is one: it exposes a *library* to a C reference, and a `src/bin/*.rs` would be installed into the image |
-# | `DIFF_FORWARD`   | (none) | extra environment variable names to carry across the re-exec, beyond `OURS` and `VERBOSE` |
+# | `DIFF_FORWARD`   | (none) | extra environment variable names to carry across the re-exec. Every `DIFF_*` knob above already crosses on its own, as do `OURS` and `VERBOSE`; this is for a name that matches neither pattern |
 # | `DIFF_REF`       | (none) | candidate paths for the reference, tried in order, instead of looking on `PATH`. `echo` needs this: `command -v echo` finds the shell builtin, which is not what is being compared. Single-binary harnesses only |
 # | `DIFF_GNU_SOURCE`| (none) | a coreutils version (`9.4`) to fetch, build and compare against, *instead of* the installed binary. See "Why a built reference" below |
 # | `DIFF_GNU_DIR`   | (none) | an already-built `coreutils-N/src` to use instead of building one. The escape hatch for `DIFF_GNU_SOURCE`; ignored without it |
@@ -326,11 +326,56 @@ if ! command -v wslpath >/dev/null 2>&1; then
   # options -- `--cases`, `--flip`, `--keep` -- would otherwise lose them at the
   # WSL boundary and silently run its defaults.
   diff_argc=$#
-  # `DIFF_GNU_DIR` and `DIFF_GNU_CACHE` are carried unconditionally, unlike
-  # `DIFF_GNU_SOURCE`: the version is written *in* the harness and so is set
-  # again on the far side, while these two are the operator's overrides and
-  # exist only in the environment this side of the boundary.
-  for diff_v in OURS VERBOSE DIFF_GNU_DIR DIFF_GNU_CACHE $DIFF_FORWARD; do
+  # EVERY `DIFF_*` knob crosses, rather than a hand-written subset of them.
+  #
+  # The subset was wrong, and it could not fail loudly. `DIFF_PKG` -- the knob
+  # that chooses WHICH HALF of a duplicate pair is the subject -- was not on
+  # the list, so setting it on the Windows side was dropped here and the far
+  # side quietly used its default of `coreutils`. The run then came back GREEN
+  # and about a binary nobody asked for:
+  #
+  #     DIFF_PKG=no-such-package-at-all ./scripts/expand-diff.sh
+  #     216 passed, 0 differed, 2 differ on purpose
+  #
+  # -- a full pass for a package that does not exist. The consequence is worse
+  # than a wasted run. Comparing a pair this way makes the two halves look
+  # IDENTICAL however far apart they really are, because both runs measured the
+  # same binary; and two halves that agree read as "either may be deleted",
+  # which is the direction that deletes the better one. `dd`'s two halves differ on
+  # 331 cases of 339 and would have shown as a tie.
+  #
+  # The general defect, which this file now stops repeating: an enumeration
+  # that needs one entry per knob misses the NEXT knob by construction, and
+  # misses it silently. So the names are no longer written down -- every
+  # `DIFF_`-prefixed variable in the environment crosses, and a knob added
+  # later crosses without anyone having to remember this line.
+  #
+  # `DIFF_VIA_WSL` is appended AFTER this loop on purpose. It is the one name
+  # here that is not a knob but an assertion about which side we are on, so
+  # the far side must hear it from this code and not from whatever the caller
+  # happened to export.
+  #
+  # The names are taken from the ENVIRONMENT rather than from the shell, and
+  # that is the whole distinction the old comment was reaching for. A knob a
+  # harness writes into itself (`DIFF_PROG`, `DIFF_GNU_SOURCE`, `DIFF_NEED`) is
+  # a plain shell variable and is set again on the far side, so it does not
+  # need to cross. A knob the OPERATOR set exists only in the environment this
+  # side of the boundary, and if it does not cross it is gone. Enumerating the
+  # environment therefore carries exactly the overrides and nothing else.
+  #
+  # POSIX `sh`, not bash: this file declares `shell=sh` and two harnesses are
+  # `#!/bin/sh`, so `${!DIFF_@}` -- which reads correctly and works when tried
+  # under bash -- would have broken them. `env` plus `sed` is the portable
+  # spelling of the same question.
+  #
+  # The four explicit names stay in front of the enumerated ones even though
+  # two of them would be enumerated anyway. `OURS` and `VERBOSE` do not match
+  # the prefix; `DIFF_GNU_DIR` and `DIFF_GNU_CACHE` are the two knobs already
+  # known to work, and listing them means a failure of the enumeration cannot
+  # quietly take away something that was working. Naming a variable twice is
+  # harmless -- `env A=1 A=1` is one assignment.
+  diff_env_names=$(env | sed -n 's/^\(DIFF_[A-Za-z_][A-Za-z0-9_]*\)=.*$/\1/p' | sort -u)
+  for diff_v in OURS VERBOSE DIFF_GNU_DIR DIFF_GNU_CACHE $diff_env_names $DIFF_FORWARD; do
     eval "set -- \"\$@\" \"$diff_v=\${$diff_v:-}\""
   done
   # Tells the far side that it is the far side. It cannot work this out for

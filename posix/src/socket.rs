@@ -293,6 +293,30 @@ pub struct In6Addr {
     pub s6_addr: [u8; 16],
 }
 
+/// `in6addr_any` — the IPv6 wildcard address, all sixteen bytes zero.
+///
+/// This is a VARIABLE and not a macro, which is why its absence is a link
+/// error rather than a compile error: `<netinet/in.h>` declares it `extern`
+/// and every program that binds an IPv6 listening socket references it.
+/// `IN6ADDR_ANY_INIT` is the macro form and needs nothing from us.
+///
+/// Measured need: one of the twenty undefined symbols in upstream CMake's link
+/// against our libc — see `scripts/cmake-spike/README.md`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub static in6addr_any: In6Addr = In6Addr { s6_addr: [0; 16] };
+
+/// `in6addr_loopback` — `::1`.
+///
+/// Added beside `in6addr_any` although only that one was in the measured set.
+/// The two are declared together in `<netinet/in.h>`, defined together in every
+/// libc, and used together; shipping one of a pair because one of a pair was
+/// the symbol that happened to be reported is how the next link fails on the
+/// other.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub static in6addr_loopback: In6Addr = In6Addr {
+    s6_addr: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+};
+
 /// IPv6 socket address.
 ///
 /// Layout matches Linux `struct sockaddr_in6` (28 bytes):
@@ -6804,12 +6828,226 @@ pub extern "C" fn sockatmark(fd: i32) -> i32 {
 }
 
 // ---------------------------------------------------------------------------
+// sendmmsg / recvmmsg — one call, several messages
+// ---------------------------------------------------------------------------
+
+/// Return from `recvmmsg` as soon as one message has arrived, rather than
+/// waiting for `vlen` of them.
+pub const MSG_WAITFORONE: i32 = 0x10000;
+
+/// One entry of the array `sendmmsg`/`recvmmsg` walk: a message and the byte
+/// count that call produced for it.
+#[repr(C)]
+pub struct Mmsghdr {
+    /// The message itself.
+    pub msg_hdr: Msghdr,
+    /// Bytes transferred for this message. Written by both calls.
+    pub msg_len: u32,
+}
+
+/// Send several messages with one call.
+///
+/// Returns the number of messages sent, which **may be fewer than `vlen`** —
+/// that is the API's contract and not a shortcut here: Linux stops at the
+/// first message that fails and reports how many went before it. `-1` is
+/// returned only when the *first* message fails, because there is then no
+/// partial success to report and `errno` is the only answer available.
+///
+/// Each entry's `msg_len` is set to the byte count for that message, which is
+/// the whole reason a caller uses this in preference to a loop of `sendmsg`:
+/// it wants the per-message counts back without writing the loop.
+///
+/// # Safety
+///
+/// `msgvec` must point to `vlen` valid `Mmsghdr` values, each holding a
+/// `Msghdr` that satisfies [`sendmsg`]'s contract.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn sendmmsg(fd: i32, msgvec: *mut Mmsghdr, vlen: u32, flags: i32) -> i32 {
+    if msgvec.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    let mut sent: i32 = 0;
+    for i in 0..vlen {
+        // SAFETY: caller guarantees `vlen` valid entries; `i < vlen`.
+        let slot = unsafe { &mut *msgvec.add(i as usize) };
+        // SAFETY: forwarding this function's own contract for one message.
+        let n = unsafe { sendmsg(fd, &raw const slot.msg_hdr, flags) };
+        if n < 0 {
+            // A failure after at least one success is reported as the count,
+            // with errno left as the failing call set it. Reporting -1 here
+            // would tell the caller nothing was sent when some was, and the
+            // messages already gone cannot be unsent.
+            return if sent == 0 { -1 } else { sent };
+        }
+        slot.msg_len = u32::try_from(n).unwrap_or(u32::MAX);
+        sent = sent.saturating_add(1);
+    }
+    sent
+}
+
+/// Receive several messages with one call.
+///
+/// Returns the number of messages received, which may be fewer than `vlen`.
+///
+/// **Only the first receive blocks.** The rest are issued with
+/// `MSG_DONTWAIT`, so this returns what has actually arrived instead of
+/// waiting for the array to fill. That is within the contract — a caller must
+/// already handle a short count, because a timeout or an error can cause one —
+/// and it is the behaviour `MSG_WAITFORONE` asks for, which is the flag the
+/// callers that reach for this call tend to pass anyway.
+///
+/// **A non-null `timeout` is refused with `EINVAL`.** We have no way to bound
+/// the first, blocking receive, and the alternative is worse than an error: a
+/// caller that asked to wait 100 ms would wait for ever, on a call it chose
+/// specifically because it wanted a bound. `EINVAL` is a documented answer;
+/// blocking past a deadline is not.
+///
+/// # Safety
+///
+/// `msgvec` must point to `vlen` valid `Mmsghdr` values, each holding a
+/// `Msghdr` that satisfies [`recvmsg`]'s contract.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn recvmmsg(
+    fd: i32,
+    msgvec: *mut Mmsghdr,
+    vlen: u32,
+    flags: i32,
+    timeout: *mut crate::stat::Timespec,
+) -> i32 {
+    if msgvec.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    if !timeout.is_null() {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    let mut got: i32 = 0;
+    for i in 0..vlen {
+        // SAFETY: caller guarantees `vlen` valid entries; `i < vlen`.
+        let slot = unsafe { &mut *msgvec.add(i as usize) };
+        let this_flags = if got == 0 {
+            flags & !MSG_WAITFORONE
+        } else {
+            (flags & !MSG_WAITFORONE) | MSG_DONTWAIT
+        };
+        // SAFETY: forwarding this function's own contract for one message.
+        let n = unsafe { recvmsg(fd, &raw mut slot.msg_hdr, this_flags) };
+        if n < 0 {
+            return if got == 0 { -1 } else { got };
+        }
+        slot.msg_len = u32::try_from(n).unwrap_or(u32::MAX);
+        got = got.saturating_add(1);
+        if flags & MSG_WAITFORONE != 0 {
+            break;
+        }
+    }
+    got
+}
+
+// ---------------------------------------------------------------------------
 // Tests — pure logic functions only (no syscalls needed)
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- The IPv6 address constants --
+
+    #[test]
+    fn in6addr_any_is_the_wildcard_and_loopback_is_one() {
+        assert_eq!(in6addr_any.s6_addr, [0u8; 16]);
+        let mut want = [0u8; 16];
+        want[15] = 1;
+        assert_eq!(in6addr_loopback.s6_addr, want);
+        // They are distinct storage, not two names for one object: binding to
+        // the wildcard and connecting to loopback are opposite intentions.
+        assert_ne!(in6addr_any.s6_addr, in6addr_loopback.s6_addr);
+    }
+
+    // -- recvmmsg's refusals, which happen before any syscall --
+
+    #[test]
+    fn recvmmsg_refuses_a_timeout_it_cannot_honour() {
+        // Ignoring the timeout would make a caller that asked to wait 100 ms
+        // wait for ever, on the one call it chose because it wanted a bound.
+        let mut ts = crate::stat::Timespec {
+            tv_sec: 0,
+            tv_nsec: 1,
+        };
+        let mut slot = zeroed_mmsghdr();
+        // SAFETY: `msgvec` points to one valid Mmsghdr; the call returns on
+        // the timeout check before touching it.
+        let rc = unsafe { recvmmsg(-1, &raw mut slot, 1, 0, &raw mut ts) };
+        assert_eq!(rc, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn both_batch_calls_reject_a_null_vector() {
+        // SAFETY: a null `msgvec` is exactly what is under test; both return
+        // before dereferencing it.
+        unsafe {
+            assert_eq!(
+                recvmmsg(-1, core::ptr::null_mut(), 1, 0, core::ptr::null_mut()),
+                -1
+            );
+            assert_eq!(errno::get_errno(), errno::EFAULT);
+            assert_eq!(sendmmsg(-1, core::ptr::null_mut(), 1, 0), -1);
+            assert_eq!(errno::get_errno(), errno::EFAULT);
+        }
+    }
+
+    #[test]
+    fn a_zero_length_batch_transfers_nothing_and_succeeds() {
+        // `vlen == 0` is not an error: there is nothing to send and nothing
+        // went wrong. Returning -1 would make an empty batch indistinguishable
+        // from a failed one.
+        let mut slot = zeroed_mmsghdr();
+        // SAFETY: `msgvec` is valid; `vlen` is 0 so no entry is read.
+        unsafe {
+            assert_eq!(sendmmsg(-1, &raw mut slot, 0, 0), 0);
+            assert_eq!(recvmmsg(-1, &raw mut slot, 0, 0, core::ptr::null_mut()), 0);
+        }
+    }
+
+    #[test]
+    fn mmsghdr_matches_the_c_layout() {
+        // `scripts/check-libc-abi.py` compares this against a real
+        // <sys/socket.h> with zig, and skips the comparison on a machine with
+        // no zig on PATH -- which is every Windows machine here, i.e. the one
+        // I am on. This pins the same numbers portably so the skip is not the
+        // only thing standing between a wrong offset and the image.
+        //
+        // `struct mmsghdr { struct msghdr msg_hdr; unsigned int msg_len; }`.
+        // The second field is `unsigned int` and NOT `size_t`: on x86-64 the
+        // wrong guess changes nothing about where the field starts and changes
+        // the stride of the array, so it would corrupt every entry after the
+        // first and look correct for a batch of one.
+        assert_eq!(core::mem::size_of::<Msghdr>(), 56);
+        assert_eq!(core::mem::align_of::<Mmsghdr>(), 8);
+        assert_eq!(core::mem::size_of::<Mmsghdr>(), 64);
+        assert_eq!(core::mem::offset_of!(Mmsghdr, msg_hdr), 0);
+        assert_eq!(core::mem::offset_of!(Mmsghdr, msg_len), 56);
+        assert_eq!(core::mem::size_of_val(&zeroed_mmsghdr().msg_len), 4);
+    }
+
+    fn zeroed_mmsghdr() -> Mmsghdr {
+        Mmsghdr {
+            msg_hdr: Msghdr {
+                msg_name: core::ptr::null_mut(),
+                msg_namelen: 0,
+                msg_iov: core::ptr::null_mut(),
+                msg_iovlen: 0,
+                msg_control: core::ptr::null_mut(),
+                msg_controllen: 0,
+                msg_flags: 0,
+            },
+            msg_len: 0,
+        }
+    }
 
     // -- Byte-order tests --
 

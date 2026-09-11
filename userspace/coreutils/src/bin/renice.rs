@@ -114,7 +114,7 @@ use std::process::ExitCode;
 
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{Error, Program};
-use coreutils::quote::{escape_unprintable, os_bytes};
+use coreutils::quote::{escape_unprintable, os_bytes, quoteaf_os};
 use coreutils::stdfd::{self, Stream};
 
 /// `renice`'s name and the status its usage errors carry.
@@ -320,7 +320,7 @@ fn scan(args: &[OsString], posixly_correct: bool) -> Result<Request, Error> {
     }
 
     let Some(value) = strtol_whole(&os_bytes(word)) else {
-        return Err(RENICE.usage_referring(format!("invalid priority '{}'", shown(word))));
+        return Err(RENICE.usage_referring(format!("invalid priority {}", quoteaf_os(word))));
     };
 
     Ok(Request::Run {

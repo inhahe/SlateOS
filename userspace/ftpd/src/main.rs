@@ -50,6 +50,7 @@
 #![deny(clippy::all)]
 #![allow(clippy::manual_range_contains)]
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fmt;
 use std::fs::{self, File, Metadata, OpenOptions};
@@ -487,43 +488,55 @@ fn parse_config_file(path: &str) -> Result<Config, FtpdError> {
 
         match key {
             "port" => {
-                cfg.port = value
-                    .parse()
-                    .map_err(|_| FtpdError::Config(format!("{path}: invalid port '{value}'")))?;
+                cfg.port = value.parse().map_err(|_| {
+                    FtpdError::Config(format!("{path}: invalid port {}", quoteaf_os(value)))
+                })?;
             }
             "pasv_min" => {
                 cfg.pasv_min = value.parse().map_err(|_| {
-                    FtpdError::Config(format!("{path}: invalid pasv_min '{value}'"))
+                    FtpdError::Config(format!("{path}: invalid pasv_min {}", quoteaf_os(value)))
                 })?;
             }
             "pasv_max" => {
                 cfg.pasv_max = value.parse().map_err(|_| {
-                    FtpdError::Config(format!("{path}: invalid pasv_max '{value}'"))
+                    FtpdError::Config(format!("{path}: invalid pasv_max {}", quoteaf_os(value)))
                 })?;
             }
             "max_connections" => {
                 cfg.max_connections = value.parse().map_err(|_| {
-                    FtpdError::Config(format!("{path}: invalid max_connections '{value}'"))
+                    FtpdError::Config(format!(
+                        "{path}: invalid max_connections {}",
+                        quoteaf_os(value)
+                    ))
                 })?;
             }
             "rate_limit" => {
                 cfg.rate_limit = value.parse().map_err(|_| {
-                    FtpdError::Config(format!("{path}: invalid rate_limit '{value}'"))
+                    FtpdError::Config(format!("{path}: invalid rate_limit {}", quoteaf_os(value)))
                 })?;
             }
             "idle_timeout" => {
                 cfg.idle_timeout = value.parse().map_err(|_| {
-                    FtpdError::Config(format!("{path}: invalid idle_timeout '{value}'"))
+                    FtpdError::Config(format!(
+                        "{path}: invalid idle_timeout {}",
+                        quoteaf_os(value)
+                    ))
                 })?;
             }
             "allow_anonymous" => {
                 cfg.allow_anonymous = parse_bool(value).ok_or_else(|| {
-                    FtpdError::Config(format!("{path}: invalid allow_anonymous '{value}'"))
+                    FtpdError::Config(format!(
+                        "{path}: invalid allow_anonymous {}",
+                        quoteaf_os(value)
+                    ))
                 })?;
             }
             "anonymous_only" => {
                 cfg.anonymous_only = parse_bool(value).ok_or_else(|| {
-                    FtpdError::Config(format!("{path}: invalid anonymous_only '{value}'"))
+                    FtpdError::Config(format!(
+                        "{path}: invalid anonymous_only {}",
+                        quoteaf_os(value)
+                    ))
                 })?;
             }
             "anon_root" => {
@@ -531,7 +544,10 @@ fn parse_config_file(path: &str) -> Result<Config, FtpdError> {
             }
             "chroot_users" => {
                 cfg.chroot_users = parse_bool(value).ok_or_else(|| {
-                    FtpdError::Config(format!("{path}: invalid chroot_users '{value}'"))
+                    FtpdError::Config(format!(
+                        "{path}: invalid chroot_users {}",
+                        quoteaf_os(value)
+                    ))
                 })?;
             }
             "banner" => {
@@ -539,7 +555,7 @@ fn parse_config_file(path: &str) -> Result<Config, FtpdError> {
             }
             "server_ip" => {
                 cfg.server_ip = parse_ip_str(value).ok_or_else(|| {
-                    FtpdError::Config(format!("{path}: invalid server_ip '{value}'"))
+                    FtpdError::Config(format!("{path}: invalid server_ip {}", quoteaf_os(value)))
                 })?;
             }
             _ => {
@@ -1488,7 +1504,7 @@ impl<'a> FtpSession<'a> {
                 ),
                 _ => log_debug(
                     &self.config,
-                    &format!("failed login for '{username}': {outcome:?}"),
+                    &format!("failed login for {}: {outcome:?}", quoteaf_os(&username)),
                 ),
             }
             // 421 rather than 530 when rate limited, because RFC 959's 530 is

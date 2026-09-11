@@ -4,3 +4,5 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS DNS lookup utility"
 [dependencies]
+# Domain names come from argv and from the server's response.
+quoting = { path = "../quoting" }

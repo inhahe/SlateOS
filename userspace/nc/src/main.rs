@@ -23,6 +23,7 @@
 #![deny(clippy::all)]
 #![allow(clippy::manual_range_contains)] // clearer as explicit comparisons in some spots
 
+use quoting::quoteaf_os;
 use std::env;
 use std::io::{self, Read, Write};
 use std::process;
@@ -543,7 +544,7 @@ fn resolve_host(hostname: &str) -> Result<u32, String> {
         // then `expect`ed: a constant that cannot fail to parse should not have
         // a parse step to fail.
         "localhost" => Ok(u32::from_be_bytes([127, 0, 0, 1])),
-        _ => Err(format!("cannot resolve '{hostname}'")),
+        _ => Err(format!("cannot resolve {}", quoteaf_os(hostname))),
     }
 }
 
@@ -733,7 +734,7 @@ fn parse_args() -> Result<Options, String> {
                     .ok_or_else(|| "-w requires a timeout value".to_string())?;
                 let secs: u64 = val
                     .parse()
-                    .map_err(|_| format!("invalid timeout: '{val}'"))?;
+                    .map_err(|_| format!("invalid timeout: {}", quoteaf_os(val)))?;
                 timeout_secs = Some(secs);
             }
             "-s" => {
@@ -748,7 +749,7 @@ fn parse_args() -> Result<Options, String> {
                     .ok_or_else(|| "-p requires a source port".to_string())?;
                 let port: u16 = val
                     .parse()
-                    .map_err(|_| format!("invalid source port: '{val}'"))?;
+                    .map_err(|_| format!("invalid source port: {}", quoteaf_os(val)))?;
                 source_port = Some(port);
             }
             "-e" => {
@@ -780,7 +781,7 @@ fn parse_args() -> Result<Options, String> {
                     }
                 }
                 if !consumed {
-                    return Err(format!("unknown option: '{other}'"));
+                    return Err(format!("unknown option: {}", quoteaf_os(other)));
                 }
             }
         }
@@ -805,7 +806,7 @@ fn parse_args() -> Result<Options, String> {
         host = String::new();
         port = port_str
             .parse::<u16>()
-            .map_err(|_| format!("invalid port: '{port_str}'"))?;
+            .map_err(|_| format!("invalid port: {}", quoteaf_os(port_str)))?;
         port_end = port;
     } else if scan {
         mode = Mode::Scan;
@@ -817,17 +818,17 @@ fn parse_args() -> Result<Options, String> {
         if let Some((start, end)) = port_range.split_once('-') {
             port = start
                 .parse::<u16>()
-                .map_err(|_| format!("invalid port range start: '{start}'"))?;
+                .map_err(|_| format!("invalid port range start: {}", quoteaf_os(start)))?;
             port_end = end
                 .parse::<u16>()
-                .map_err(|_| format!("invalid port range end: '{end}'"))?;
+                .map_err(|_| format!("invalid port range end: {}", quoteaf_os(end)))?;
             if port_end < port {
                 return Err(format!("invalid port range: {port}-{port_end}"));
             }
         } else {
             port = port_range
                 .parse::<u16>()
-                .map_err(|_| format!("invalid port: '{port_range}'"))?;
+                .map_err(|_| format!("invalid port: {}", quoteaf_os(port_range)))?;
             port_end = port;
         }
     } else {
@@ -839,7 +840,7 @@ fn parse_args() -> Result<Options, String> {
         host = client_host.clone();
         port = port_str
             .parse::<u16>()
-            .map_err(|_| format!("invalid port: '{port_str}'"))?;
+            .map_err(|_| format!("invalid port: {}", quoteaf_os(port_str)))?;
         port_end = port;
     }
 
@@ -1515,7 +1516,7 @@ fn run_exec(handle: u64, cmd: &str) -> Result<(), String> {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .map_err(|e| format!("nc: failed to exec '{cmd}': {e}"))?;
+        .map_err(|e| format!("nc: failed to exec {}: {e}", quoteaf_os(cmd)))?;
 
     let child_stdin = child.stdin.take();
     let child_stdout = child.stdout.take();

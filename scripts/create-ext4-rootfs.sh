@@ -1084,6 +1084,16 @@ else
         scripts/pkgconf-spike/run.sh
     spike_rebuild_if_behind "$ROOT_DIR/build/spike/make-slateos.elf" \
         scripts/make-spike/run.sh
+    # CMake is deliberately NOT in this list, and the reason is its cost rather
+    # than any difference in principle. The other four relink objects that are
+    # already built; cmake's spike re-runs a full cross configure and build of
+    # a C++ tree, which is minutes rather than the 83 s all four of those take
+    # together. A pass that quietly turns every image build into a CMake build
+    # is a pass people learn to skip with NO_SPIKE_REBUILD=1, and then it
+    # protects none of the five.
+    #
+    # The staleness gate below still refuses a stale binary, so this costs
+    # visibility, not safety: the failure names the one command to run.
     # CPython's interpreter and its stdlib zip are separate artifacts with
     # separate staleness rules (the zip's are content-based: an `encodings`
     # package must be present and no member may be deflated).  Only the
@@ -1224,6 +1234,66 @@ if [ -e "$MAKE_SLATE" ]; then
 else
     echo "[rootfs] NOTE: $MAKE_SLATE not found — /bin/make will be absent"
     echo "[rootfs]       (build it with: wsl -d Ubuntu -- bash scripts/make-spike/run.sh)"
+fi
+
+# --- CMake 4.4.3, likewise linked against OUR OWN libc ------------------------
+# The fifth port and the first that is C++.  Upstream CMake, unmodified,
+# cross-configures and builds against zig's musl headers and links -nostdlib
+# against our libc.a plus zig's C++ runtime with zero missing and zero duplicate
+# symbols — after the twenty libc symbols its first link named were implemented.
+# See scripts/cmake-spike/README.md.  None of the twenty came from libc++ or the
+# C++ ABI, which is what design-decisions.md §73 predicted from a toy
+# translation unit and this is the first program of real size to test.
+#
+# TWO artifacts, mandatory together, exactly as CPython below is:
+#
+#   /bin/cmake               the binary
+#   /share/cmake-4.4/        Modules and Templates, the module tree
+#
+# The binary alone is INERT, and not subtly: `cmake --version` itself fails.
+#
+#     CMake Error: Could not find CMAKE_ROOT !!!
+#     Modules directory not found in <prefix>/share/cmake-4.4
+#
+# That was measured, not assumed — a host cmake copied into an empty directory
+# prints exactly that.  `CMAKE_DATA_DIR` is compiled in as `/share/cmake-4.4`
+# and resolved against the prefix derived from argv[0], so a binary at
+# /bin/cmake looks at /share/cmake-4.4 and nowhere else.
+#
+# `Help/` is deliberately not staged: 12 MB of `--help-module` documentation
+# that nothing needs to configure a build.  Modules and Templates are 6 MB.
+#
+# NOT staged as ctest or cpack.  The build produces those too, and each is
+# another 22 MB binary for a name nothing on this image invokes yet.  A name
+# added back when it is implemented, per §1006 — the same ruling that deleted
+# our own fabricating `cmake/ctest/cpack` reimplementation, which is why
+# /bin/cmake is free for the real one.
+CMAKE_SLATE="$ROOT_DIR/build/spike/cmake-slateos.elf"
+CMAKE_DATA="$ROOT_DIR/build/spike/cmake-data"
+CMAKE_STALE=0
+if [ -e "$CMAKE_SLATE" ] && [ -d "$CMAKE_DATA/share" ]; then
+    cp -L "$CMAKE_SLATE" "$STAGE/bin/cmake"
+    mkdir -p "$STAGE/share"
+    cp -r "$CMAKE_DATA/share/." "$STAGE/share/"
+    echo "[rootfs] staged CMake 4.4.3 (linked against our libc.a): /bin/cmake" \
+         "+ $(find "$CMAKE_DATA" -type f | wc -l) module files"
+    if [ -e "$ROOT_DIR/toolchain/sysroot/lib/libc.a" ] \
+       && [ "$ROOT_DIR/toolchain/sysroot/lib/libc.a" -nt "$CMAKE_SLATE" ]; then
+        echo "[rootfs] WARNING: cmake-slateos.elf is OLDER than the sysroot libc.a — it links a"
+        echo "[rootfs]          stale libc and proves nothing about the current one. Rebuild it:"
+        echo "[rootfs]            wsl -d Ubuntu -- bash scripts/cmake-spike/run.sh"
+        CMAKE_STALE=1
+    fi
+elif [ -e "$CMAKE_SLATE" ]; then
+    # The half-staged case gets its own message, because it is the one that
+    # would otherwise ship a cmake that cannot print its own version.
+    echo "[rootfs] NOTE: $CMAKE_SLATE exists but $CMAKE_DATA/share does not —"
+    echo "[rootfs]       staging NEITHER. A cmake without its module tree fails at"
+    echo "[rootfs]       --version, so half of this pair is worse than none of it."
+    echo "[rootfs]       (rebuild both with: wsl -d Ubuntu -- bash scripts/cmake-spike/run.sh)"
+else
+    echo "[rootfs] NOTE: $CMAKE_SLATE not found — /bin/cmake will be absent"
+    echo "[rootfs]       (build it with: wsl -d Ubuntu -- bash scripts/cmake-spike/run.sh)"
 fi
 
 # --- CPython 3.12.3, likewise linked against OUR OWN libc ---------------------
@@ -1693,6 +1763,23 @@ fi
 # rebuild command, and the command is the only part of the message that actually
 # helps whoever hit the error.  A table-driven version would have to carry that
 # string anyway, and would put the reader one indirection further from it.
+if [ "$CMAKE_STALE" -gt 0 ]; then
+    if [ "${ALLOW_STALE_FIXTURES:-0}" = "1" ]; then
+        echo "[rootfs] WARNING: cmake-slateos.elf is stale (see above);" \
+             "continuing because ALLOW_STALE_FIXTURES=1"
+    else
+        echo "[rootfs] ERROR: build/spike/cmake-slateos.elf is STALE."
+        echo "[rootfs]        It links an older libc.a than the one in the sysroot, so"
+        echo "[rootfs]        /bin/cmake on the image would be built against a libc that is"
+        echo "[rootfs]        no longer in the build. Rebuild it:"
+        echo "[rootfs]          wsl -d Ubuntu -- bash scripts/cmake-spike/run.sh"
+        echo "[rootfs]        That rebuilds the module tree beside it, which must match:"
+        echo "[rootfs]        a cmake without /share/cmake-4.4 fails at --version."
+        echo "[rootfs]        Or set ALLOW_STALE_FIXTURES=1 to build the image anyway."
+        exit 1
+    fi
+fi
+
 if [ "$MAKE_STALE" -gt 0 ]; then
     if [ "${ALLOW_STALE_FIXTURES:-0}" = "1" ]; then
         echo "[rootfs] WARNING: make-slateos.elf is stale (see above);" \

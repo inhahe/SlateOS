@@ -8,6 +8,9 @@ description = "SlateOS hostnamectl utility"
 scratchdir = { path = "../scratchdir" }
 
 [dependencies]
+# The host name is read from the kernel and set from argv; neither is
+# constrained to be printable.
+quoting = { path = "../quoting" }
 # Reading a file whose absence is normal but whose unreadability is not;
 # see that crate's docs for the four programs that each wrote it wrong.
 optionalfile = { path = "../../optionalfile" }

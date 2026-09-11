@@ -120,7 +120,7 @@ use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use coreutils::getopt::{Error, Opt, Program, Takes};
-use coreutils::quote::{escape_unprintable, os_bytes};
+use coreutils::quote::{escape_unprintable, os_bytes, quoteaf_os};
 use coreutils::stdfd::{self, Stream};
 
 // ------------------------------------------------------------- the tables ---
@@ -765,7 +765,7 @@ fn ul_strtou64(s: &[u8]) -> Result<u64, NumErr> {
 /// [`size_error`], which is the same sentence with the opposite rule.
 fn num_error(msg: &str, arg: &OsStr, e: NumErr) -> Error {
     match e {
-        NumErr::Invalid => fail(format!("{msg}: '{}'", shown(arg))),
+        NumErr::Invalid => fail(format!("{msg}: {}", quoteaf_os(arg))),
         NumErr::Range => fail(format!(
             "{msg}: '{}': {}",
             shown(arg),
@@ -782,7 +782,7 @@ fn num_error(msg: &str, arg: &OsStr, e: NumErr) -> Error {
 /// two sentences are otherwise identical, which is why the difference is worth
 /// a function of its own rather than a flag.
 fn size_error(msg: &str, arg: &OsStr, e: NumErr) -> Error {
-    fail(format!("{msg}: '{}': {}", shown(arg), e.strerror()))
+    fail(format!("{msg}: {}: {}", quoteaf_os(arg), e.strerror()))
 }
 
 /// `str2num_or_err`, of which `strtos32_or_err` is the `INT32_MIN..=INT32_MAX`
@@ -969,7 +969,7 @@ fn parse_reform_year(arg: &OsStr) -> Result<i32, Error> {
             return Ok(val);
         }
     }
-    Err(fail(format!("invalid --reform value: '{}'", shown(arg))))
+    Err(fail(format!("invalid --reform value: {}", quoteaf_os(arg))))
 }
 
 /// `colormode_or_err`. An absent value means `auto`; an empty one is an error,
@@ -983,7 +983,7 @@ fn colormode_or_err(arg: &OsStr) -> Result<ColorMode, Error> {
     } else if bytes.eq_ignore_ascii_case(b"always") {
         Ok(ColorMode::Always)
     } else {
-        Err(fail(format!("unsupported color mode: '{}'", shown(arg))))
+        Err(fail(format!("unsupported color mode: {}", quoteaf_os(arg))))
     }
 }
 

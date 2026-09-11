@@ -72063,3 +72063,220 @@ kernel has a capability system and `capsh --drop all` is named in
 they do in the meantime, and the answer is "refuse audibly" rather than
 "pretend" or "vanish".
 
+## 829. Borders carry the structure; shaded cards become an optional theme
+
+**Date:** 2026-09-11
+**Lane:** C
+**Decided by:** Operator (Claude built the comparison page and laid out the options; the operator chose borders and specified the colours)
+
+**In short:** boxes on screen were told apart by filling them with slightly
+different greys. They will now be told apart by drawing a line around them
+instead, on a plain background. The grey-filled look stays available as a theme
+someone can switch on. The operator also fixed the colours: black lines and
+black headings, a muted blue-green for secondary text, for the line around the
+selected thing, and for a switch that is on.
+
+**The specification, as given**
+
+| role | value |
+|---|---|
+| border, unselected | black |
+| background | white or off-white |
+| border, selected | a blue-green, "not too bright" |
+| secondary text (`subtext1`) | the same blue-green |
+| toggle switch, on | the same blue-green |
+
+**Two things follow from that spec rather than being chosen freely, and both
+are recorded because they change the palette beyond what was asked.**
+
+1. **The blue-green replaces the blue accent; it does not join it.**
+   Selected-border, toggle-on and secondary-text *are* the accent's roles. Every
+   blue-green dark enough to clear 4.5 : 1 lands **1.19–1.74** from the existing
+   `#0036A3` — at or below the 1.30 that reads as "barely distinct". Keeping
+   both would have put two indistinguishable blues in one palette, which is the
+   §826 flattening again in a different pair.
+2. **`subtext0` takes the same value as `subtext1`.** They were **1.10** apart
+   in the shipped palette — "one colour" by the measure the explorer uses — so
+   there was no second grey to preserve. Worth flagging rather than burying:
+   `subtext0` has **1,087** uses to `subtext1`'s **161**, so if these two should
+   in fact differ, `subtext0` is the one that carries the weight.
+
+**The colour is `#00688B`** — revised the same day, on "make it more bluish,
+either cerulean or cyan". Hue 195 and fully saturated, so it reads as cerulean
+rather than the teal first proposed (hue 173): 6.26 : 1 on white, 5.54 on the
+off-white page, 3.35 from black.
+
+Neither obvious spelling of the ask survives the floor, which is why the value
+is not simply "cerulean" or "cyan":
+
+| candidate | on the off-white page | |
+|---|---|---|
+| classic cerulean `#007BA7` | **4.23** | passes on pure white, fails on the page we use |
+| pure cyan `#00FFFF` | **1.25** | not a text colour at any size |
+| **`#00688B`** | **5.54** | the most saturated cerulean that clears the floor with margin |
+
+The operator can retune it live; the explorer carries it as the
+`Borders (the default)` preset.
+
+**Why this is the right shape, beyond being what was asked.** The operator's
+mother supplied the argument without meaning to. She wanted the selected menu
+item and the selected settings row to match, and under shaded cards they cannot:
+selection there is a *step*, not a colour — a thing lifts one rung above
+whatever it sits on, and those two sit on different things. Making them match
+means `surface0 = surface1`, which erases the distinction between a selected
+settings row and an unselected one. **A border does not have that problem**: an
+outline means "selected" and means it identically everywhere, because it does
+not depend on what is underneath. That is a property shades cannot be given.
+
+**What this costs, honestly.** Up to 1,713 draw sites currently pick a fill.
+The conversion is mechanical but wide, and the shaded theme has to keep working
+throughout, which means the ladder cannot simply be deleted.
+
+**What is still open.** The card theme's contrast. The operator's own words:
+"I guess we still have to figure out how to color them so that contrast is
+always >= 4.50." That is unchanged by this decision and is now scoped to an
+optional theme rather than the default, which lowers its urgency without
+removing it. `TD-C-THIRTEEN-LIGHT-ACCENTS-STILL-FAIL-ON-CARDS` is part of the
+same problem.
+
+**Supersedes** the open half of §826. The inks chosen there were chosen against
+a shaded background; `main` survives unchanged at `#000000`, `page` survives at
+`#EFF1F5`, and the accent and secondary roles are replaced by the above.
+
+## 830. Headings take main text; only descriptions take the secondary colour
+
+**Date:** 2026-09-11
+**Lane:** C
+**Decided by:** Operator
+
+**In short:** in the mock-ups, the sidebar entries ("System", "Personalisation")
+and the section headings ("Wi-Fi", "Options") were drawn in the same colour as
+the small print underneath each row. The operator asked for those to split:
+headings and sidebar entries in black, descriptions in the blue-green.
+
+**Why it matters more than it looks.** It is what makes the palette's text
+roles *legible as a hierarchy* rather than merely distinct as values. Before the
+split there were two ink colours doing three jobs — heading, title and
+description all reading at one weight in the sidebar and section rows — and the
+only thing separating a heading from a caption was type size. After it, colour
+and size agree instead of one carrying the whole load.
+
+It also uses the separation the new palette actually has. Black to `#0F6E63` is
+**3.43**, comfortably past "distinct"; the pair it replaces (`subtext0` to
+`subtext1`) was **1.10**, which is one colour. The hierarchy the old palette
+could not express is now expressible, so expressing it costs nothing.
+
+**Open, and flagged rather than assumed:** with the accent and `subtext1` now
+the same value, a link and a caption are the same colour. In a bordered design
+that is defensible — selection and state are carried by the outline, not by ink
+— but "Disconnect" and "Connected, 5 GHz, strong" sitting in one row at one
+colour is the case to look at first if it reads wrong.
+
+## 831. Roles that share a value stay separate roles
+
+**Date:** 2026-09-11
+**Lane:** C
+**Decided by:** Operator (Claude had framed the shared value as an open question; the operator pointed out it need not be one)
+
+**In short:** two of the palette's text colours are now the same colour. The
+question was whether to merge them into one. The answer is no — keep both
+names, let them hold the same value. Changing one of them back later is then a
+one-line edit instead of a hunt through a thousand places that say the wrong
+name.
+
+**The operator's argument, which is simply correct.** A palette role is a level
+of indirection. The expensive thing is never the constant, it is the call sites:
+`subtext0` is named at **1,087** places and `subtext1` at **161**. Merging them
+means rewriting 161 call sites now *and* losing the record of which places meant
+"the quieter one" — so a later split would have to reconstruct that by reading
+all 1,248. Keeping both names costs one unused-looking constant and makes the
+reversal a single line.
+
+**What I verified before agreeing, because it could have cut the other way.**
+If the two roles had ever been visibly different, equalising them would be
+destroying real information. They never have been:
+
+| | separation |
+|---|---|
+| upstream Latte, `#6C6F85` vs `#5C5F77` | 1.27 |
+| Mocha (dark mode), `#A6ADC8` vs `#BAC2DE` | 1.26 |
+| after §826, `#3D3D3F` vs `#373739` | 1.10 |
+
+Every one of those is at or below the 1.30 that reads as "barely distinct", and
+the last is "one colour". So the values were already effectively equal in both
+modes and always had been; making it explicit changes nothing anyone could see.
+
+**The caveat that follows from the same fact, and it bounds the future work.**
+Because the two were never distinguishable, *nobody has ever been able to check
+a call site by looking at it*. The 1,087/161 split records what each author
+believed the role meant, never corrected by eye. So the reversibility this
+decision buys is real but not total: a future split gets the palette change for
+free, and should still review the **161** `subtext1` sites — the smaller set —
+rather than trusting them. That is a bounded afternoon, not an audit of 1,248.
+
+**The corollary matters more than the decision.** The same reasoning applies to
+the accent, which §829 gave `subtext1`'s value. `accent` stays its own role too.
+That is what makes the open link-versus-caption question cheap: if an underline
+turns out not to be enough to separate something you can click from something
+you can only read, giving the accent back a value of its own is one line, and
+every one of its call sites is already labelled `accent` rather than having been
+rewritten to say `subtext1`.
+
+**Stated as a rule, since it will come up again:** when two roles converge on
+one value, change the *values* and leave the *names* alone. Deleting a role is
+only correct when the distinction itself is wrong, not when the current palette
+happens not to use it.
+
+## 832. A link is marked twice: its own colour, and an underline
+
+**Date:** 2026-09-11
+**Lane:** C
+**Decided by:** Operator (spotted the ambiguity in the mock-up and asked for links to be distinguishable; Claude chose the specific colour and added the underline requirement)
+
+**In short:** in a notification reading "4,812 files · 2.1 GB · 3 min 14 s" with
+"Show report" underneath, there was no way to tell that the second line can be
+clicked and the first cannot — they were the same colour with no other
+difference. Links now have a colour of their own *and* are always underlined.
+
+**What the operator saw.** §829 had given the accent the same value as secondary
+text, and the notification's action was drawn in it with nothing else to mark
+it. Their judgement — "they should be separate colors or have some other
+indication that something is a link" — is the one this entry acts on.
+
+**Why the answer is both, not either.** The operator offered the two as
+alternatives. Colour alone is not one, because **WCAG 1.4.1 (Use of Color)**
+forbids colour as the *only* visual means of conveying information: a reader who
+cannot separate two blues would be left with nothing. So the underline is the
+load-bearing half and is not optional. The distinct colour is the fast half —
+it is what makes a link findable by glance rather than by scanning for
+underscores — so it is worth having as well, not instead.
+
+**The colour is `#0036A3`**, which is the accent the operator themselves chose
+on 2026-09-09 (§826). It returns to exactly the job it is good at while the
+cerulean keeps the roles §829 named for it — selected border, secondary text,
+toggle-on. Measured against what it has to be told apart from:
+
+| against | ratio | |
+|---|---|---|
+| the page `#EFF1F5` | 9.03 | comfortably readable |
+| secondary text `#00688B` | 1.63 | distinct |
+| main text `#000000` | 2.06 | distinct |
+
+That balance is the reason for this value rather than a more separated one.
+Pushing further from the cerulean walks *toward* black — `#0A2E7A` reaches 1.99
+from secondary but falls to 1.68 from main text, at which point a link starts
+reading as body copy. `#0036A3` is near the best joint separation available.
+
+**This is §831 immediately earning its keep.** That entry kept `accent` a
+separate role when it happened to share `subtext1`'s value, precisely so this
+reversal would be one line. It was: the link takes its own value and every call
+site that already said "accent" was untouched. Had the two been merged a day
+ago, this would have meant finding, among every use of the shared value, the
+subset that was a link.
+
+**A defect the same review caught.** Of the three clickable things in the
+mock-up, only one had been underlined — "Learn more" in the settings window —
+while "Show report" and "Disconnect" had nothing. That is the failure mode the
+rule is written against, arriving within a day of the rule. The check now counts
+underlines rather than asserting one exists, so a single marked link cannot
+stand in for all of them.

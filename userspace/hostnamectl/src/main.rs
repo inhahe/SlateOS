@@ -11,6 +11,7 @@
 
 #![deny(clippy::all)]
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
@@ -281,7 +282,10 @@ fn set_hostname(name: &str) -> io::Result<()> {
         if !ch.is_ascii_alphanumeric() && ch != '-' && ch != '.' {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!("invalid character in hostname: '{ch}'"),
+                format!(
+                    "invalid character in hostname: {}",
+                    quoteaf_os(ch.to_string())
+                ),
             ));
         }
     }

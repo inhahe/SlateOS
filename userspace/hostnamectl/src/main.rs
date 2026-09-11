@@ -606,86 +606,6 @@ fn show_status_json() {
 // Personality: hostname
 // ============================================================================
 
-fn cmd_hostname(args: &[String]) {
-    let mut fqdn = false;
-    let mut short = false;
-    let mut domain_flag = false;
-    let mut ip_flag = false;
-
-    let mut new_hostname: Option<String> = None;
-
-    for arg in args {
-        match arg.as_str() {
-            "-h" | "--help" => {
-                println!("Usage: hostname [options] [hostname]");
-                println!();
-                println!("Options:");
-                println!("  -f, --fqdn      Display the FQDN");
-                println!("  -s, --short     Display the short hostname");
-                println!("  -d, --domain    Display the DNS domain");
-                println!("  -i, --ip-address  Display host IP address");
-                println!("  -h, --help      Show this help");
-                println!("  -V, --version   Show version");
-                process::exit(0);
-            }
-            "-V" | "--version" => {
-                println!("hostname {VERSION}");
-                process::exit(0);
-            }
-            "-f" | "--fqdn" | "--long" => fqdn = true,
-            "-s" | "--short" => short = true,
-            "-d" | "--domain" => domain_flag = true,
-            "-i" | "--ip-address" => ip_flag = true,
-            s if !s.starts_with('-') => {
-                new_hostname = Some(s.to_string());
-            }
-            other => {
-                eprintln!("hostname: unknown option: {other}");
-                process::exit(1);
-            }
-        }
-    }
-
-    if let Some(name) = new_hostname {
-        if let Err(e) = set_hostname(&name) {
-            eprintln!("hostname: {e}");
-            process::exit(1);
-        }
-        return;
-    }
-
-    if fqdn {
-        println!("{}", get_fqdn());
-    } else if short {
-        let hostname = get_hostname();
-        println!("{}", hostname.split('.').next().unwrap_or(&hostname));
-    } else if domain_flag {
-        let fqdn_str = get_fqdn();
-        if let Some(dot_pos) = fqdn_str.find('.') {
-            println!("{}", &fqdn_str[dot_pos + 1..]);
-        }
-    } else if ip_flag {
-        // Try to resolve hostname to IP via /etc/hosts.
-        let hostname = get_hostname();
-        if let Ok(content) = fs::read_to_string("/etc/hosts") {
-            for line in content.lines() {
-                let line = line.trim();
-                if line.is_empty() || line.starts_with('#') {
-                    continue;
-                }
-                let fields: Vec<&str> = line.split_whitespace().collect();
-                if fields.len() >= 2 && fields[1..].contains(&&*hostname) {
-                    println!("{}", fields[0]);
-                    return;
-                }
-            }
-        }
-        println!("127.0.0.1");
-    } else {
-        println!("{}", get_hostname());
-    }
-}
-
 // ============================================================================
 // Personality: domainname
 // ============================================================================
@@ -775,7 +695,6 @@ fn main() {
     let rest: Vec<String> = args.into_iter().skip(1).collect();
 
     match prog_name.as_str() {
-        "hostname" => cmd_hostname(&rest),
         "domainname" | "nisdomainname" | "ypdomainname" => cmd_domainname(&rest),
         "dnsdomainname" => cmd_dnsdomainname(&rest),
         _ => cmd_hostnamectl(&rest),

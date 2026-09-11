@@ -106,6 +106,88 @@ So the safeguard I announced was not the one I applied, which is worse than the
 first error, and the correction belongs here rather than in a commit message
 nobody will grep.
 
+## TD-B-RESOLVECTLS-HOST-REPORTS-A-SERVER-IT-NEVER-CONTACTED (lane B, 2026-09-11)
+
+**In short:** `resolvectl`'s `host` personality prints which DNS server answered
+and how long the query took. It contacts no DNS server and times nothing. The
+server name is read out of `/etc/resolv.conf` and the query time is the literal
+`0`, while the actual lookup goes through `to_socket_addrs()` — the system
+resolver.
+
+**Where.** `userspace/resolvectl/src/main.rs`, `cmd_host`, verbose path:
+
+    ;; Query time: 0 msec
+    ;; SERVER: <first server in resolv.conf>#53
+
+and `resolve_hostname`, which is `to_socket_addrs()` with a hardcoded
+`localhost` fallback. `reverse_lookup` beside it is a `match` on a handful of
+literal addresses under a comment reading "Simplified reverse lookup".
+
+**Why it is not urgent, and why it is still here.** `host` is *unreachable*:
+nothing in the tree produces an executable by that name, so no user can run it
+today. It sits in the unreachable ledger
+(`TD-B-ONE-HUNDRED-AND-SEVENTY-TWO-COMMAND-NAMES-NOBODY-CAN-RUN`), and the
+resolution for that ledger is to **give the name a producer** — which would
+ship this defect to users the day it happens. So the entry exists to make sure
+that whoever gives `host` a producer fixes the body first, rather than
+discovering afterwards that the tool they just published invents its evidence.
+
+**The proper fix** is the one `userspace/nslookup` already implements: build a
+real DNS query per RFC 1035, send it to the chosen server over UDP, and report
+the server and elapsed time that actually applied. Failing that, do not print a
+`SERVER:` line at all — an omitted field is honest and a wrong one is not.
+
+**Found** while removing `resolvectl`'s `nslookup` personality (2026-09-11),
+which had the identical defect and *was* shadowing a real implementation.
+
+## TD-B-ONE-HUNDRED-AND-SEVENTY-TWO-COMMAND-NAMES-NOBODY-CAN-RUN (lane B, 2026-09-11)
+
+**In short:** 172 command names are implemented in `userspace/` as multicall
+personalities — `gunzip`, `zcat`, `factor`, `printenv`, `setcap`, eleven
+SELinux tools — and nothing installs an executable under any of those names.
+The code is finished, tested, and unreachable. A further 11 names are worse:
+they are answered to by two different programs at once.
+
+**Why the number jumped from 51 on 2026-09-11.** It did not. The detector was
+blind. `scripts/multicall-aliases.py` recognised a dispatch arm only when it
+mapped to an enum literally named `Personality`, so the 8 crates that call
+theirs `Mode` and the one that calls it `InvokedAs` were invisible. Widening it
+to key on the *scrutinee* — is the matched variable the program's own
+invocation name? — took the ledger from 51 to 172 and the shadowing ledger from
+2 to 11. No source changed in that commit, so all 130 were reachable before it.
+
+**UPDATE 2026-09-11: the shadowing ledger is empty.** All 11 entries are
+cleared — the 9 below plus `chown:chmod` and the two `cron` ones. Six were
+deleted as the weaker copy, two after PORTING what they had that the reachable
+copy lacked (`free` gained `-l/--lohi`, `--tebi` and the GNU long forms;
+`crontab` gained `-i`), and `userspace/cron` went entirely: 2,508 lines whose
+every entry point was shadowed, unreachable, or an outright refusal. The
+unreachable ledger stands at 169.
+
+**The 9 new shadowed pairs were the urgent half**, because a shadowed name is
+two implementations that can disagree with the winner picked by packaging:
+
+| Shadowing crate | Name | Who really provides it |
+|---|---|---|
+| `userspace/nologin` | `true`, `false` | coreutils |
+| `userspace/nproc` | `tty`, `logname` | coreutils |
+| `userspace/fuser` | `lsof` | `userspace/lsof` |
+| `userspace/hostnamectl` | `hostname` | `userspace/hostname` |
+| `userspace/resolvectl` | `nslookup` | `userspace/nslookup` |
+| `userspace/swapon` | `free` | `userspace/free` |
+| `userspace/useradd` | `newgrp` | `userspace/newgrp` |
+
+`nologin` answering to `true` and `false` is the one to look at first: those
+two run in nearly every shell script on the system, and `nologin`'s job is to
+*refuse* and exit non-zero.
+
+**The fix per name is a decision, not a patch.** Either the personality is
+deleted (the name belongs to whoever performs the operation — §1019), or the
+name gets a real producer, preferably its own crate so it gets its own
+capability identity. Both ledgers may only shrink, so the count is the
+progress bar — with the caveat this entry exists to record: the count is only
+a progress bar while the instrument holds still.
+
 ## TD-B-CRONTAB-SIGNALS-A-RELOAD-NOBODY-LISTENS-FOR (lane B, 2026-09-11)
 
 **In short:** `crontab` writes a file at `/run/crond/reload` after editing a

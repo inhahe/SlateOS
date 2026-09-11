@@ -477,14 +477,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cron"
-version = "0.1.0"
-dependencies = [
- "civildate",
- "cronspool",
-]
-
-[[package]]
 name = "crond"
 version = "0.1.0"
 dependencies = [

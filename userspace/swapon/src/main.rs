@@ -38,22 +38,6 @@ struct SwapEntry {
     priority: i32,
 }
 
-/// Memory information from /proc/meminfo.
-struct MemInfo {
-    mem_total: u64,
-    mem_free: u64,
-    mem_available: u64,
-    buffers: u64,
-    cached: u64,
-    swap_total: u64,
-    swap_free: u64,
-    shmem: u64,
-    /// Mirrors the `/proc/meminfo` vocabulary the real `swapon` must consume;
-    /// parsed and carried, not yet displayed.
-    #[allow(dead_code)]
-    sreclaimable: u64,
-}
-
 /// Fstab entry.
 struct FstabEntry {
     device: String,
@@ -98,36 +82,6 @@ fn parse_proc_swaps() -> Vec<SwapEntry> {
     entries
 }
 
-fn parse_meminfo() -> MemInfo {
-    // Through `procinfo`, which is the same parse this did by hand: split on
-    // the colon, trim, strip the `kB`. The difference is that `parse_kib`
-    // refuses a unit it does not recognise instead of stripping what it knows
-    // and parsing whatever is left -- so a hypothetical `16 MB` reads as
-    // absent rather than as 16 KiB, which is the same number in the same font
-    // and off by 1024.
-    //
-    // Absent stays 0 here, as it did before, because every field this uses is
-    // one `gen_meminfo` publishes. The four it does not publish
-    // (CommitLimit, Committed_AS, HighTotal, LowTotal) are not read by this
-    // program, and `procinfo`'s doc explains why they must not be defaulted.
-    let m = procinfo::ProcFs::new()
-        .memory()
-        .ok()
-        .flatten()
-        .unwrap_or_default();
-    MemInfo {
-        mem_total: m.total_kib.unwrap_or(0),
-        mem_free: m.free_kib.unwrap_or(0),
-        mem_available: m.available_kib.unwrap_or(0),
-        buffers: m.buffers_kib.unwrap_or(0),
-        cached: m.cached_kib.unwrap_or(0),
-        swap_total: m.swap_total_kib.unwrap_or(0),
-        swap_free: m.swap_free_kib.unwrap_or(0),
-        shmem: m.shmem_kib.unwrap_or(0),
-        sreclaimable: m.sreclaimable_kib.unwrap_or(0),
-    }
-}
-
 fn parse_fstab() -> Vec<FstabEntry> {
     let content = match read_file(FSTAB_PATH) {
         Some(c) => c,
@@ -170,38 +124,6 @@ fn is_swap_active(device: &str) -> bool {
 // ============================================================================
 // Size formatting
 // ============================================================================
-
-/// Format a value in KiB to human-readable.
-fn format_size_human(kb: u64) -> String {
-    if kb >= 1_073_741_824 {
-        // TiB
-        let tib = kb as f64 / 1_073_741_824.0;
-        format!("{tib:.1}Ti")
-    } else if kb >= 1_048_576 {
-        // GiB
-        let gib = kb as f64 / 1_048_576.0;
-        format!("{gib:.1}Gi")
-    } else if kb >= 1024 {
-        // MiB
-        let mib = kb as f64 / 1024.0;
-        format!("{mib:.1}Mi")
-    } else {
-        format!("{kb}K")
-    }
-}
-
-/// Format a value in KiB to bytes, MiB, or GiB depending on unit.
-fn format_size_unit(kb: u64, unit: &str) -> String {
-    match unit {
-        "bytes" | "b" => format!("{}", kb * 1024),
-        "kilo" | "k" => format!("{kb}"),
-        "mega" | "m" => format!("{}", kb / 1024),
-        "giga" | "g" => format!("{}", kb / 1_048_576),
-        "tera" | "t" => format!("{}", kb / 1_073_741_824),
-        "human" | "h" => format_size_human(kb),
-        _ => format!("{kb}"),
-    }
-}
 
 // ============================================================================
 // Personality: swapon
@@ -536,189 +458,6 @@ fn deactivate_swap(device: &str, verbose: bool) {
 // Personality: free
 // ============================================================================
 
-fn cmd_free(args: &[String]) {
-    let mut unit = "kilo".to_string();
-    let mut wide = false;
-    let mut total_line = false;
-    let mut lohi = false;
-    let mut count: Option<u32> = None;
-    let mut seconds: Option<u64> = None;
-
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "-h" | "--human" => unit = "human".to_string(),
-            "-b" | "--bytes" => unit = "bytes".to_string(),
-            "-k" | "--kilo" | "--kibi" => unit = "kilo".to_string(),
-            "-m" | "--mega" | "--mebi" => unit = "mega".to_string(),
-            "-g" | "--giga" | "--gibi" => unit = "giga".to_string(),
-            "--tera" | "--tebi" => unit = "tera".to_string(),
-            "-w" | "--wide" => wide = true,
-            "-t" | "--total" => total_line = true,
-            "-l" | "--lohi" => lohi = true,
-            "-c" | "--count" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("free: -c requires an argument");
-                    process::exit(1);
-                }
-                count = Some(args[i].parse().unwrap_or_else(|_| {
-                    eprintln!("free: invalid count: {}", args[i]);
-                    process::exit(1);
-                }));
-            }
-            "-s" | "--seconds" => {
-                i += 1;
-                if i >= args.len() {
-                    eprintln!("free: -s requires an argument");
-                    process::exit(1);
-                }
-                seconds = Some(args[i].parse().unwrap_or_else(|_| {
-                    eprintln!("free: invalid seconds: {}", args[i]);
-                    process::exit(1);
-                }));
-            }
-            "--help" => {
-                println!("Usage: free [options]");
-                println!();
-                println!("Display amount of free and used memory in the system.");
-                println!();
-                println!("Options:");
-                println!("  -b, --bytes     Show output in bytes");
-                println!("  -k, --kilo      Show output in kibibytes (default)");
-                println!("  -m, --mega      Show output in mebibytes");
-                println!("  -g, --giga      Show output in gibibytes");
-                println!("  --tera          Show output in tebibytes");
-                println!("  -h, --human     Show human-readable output");
-                println!("  -w, --wide      Wide output (separate buffers/cache)");
-                println!("  -t, --total     Show total line");
-                println!("  -l, --lohi      Show low/high memory statistics");
-                println!("  -s N, --seconds N  Repeat every N seconds");
-                println!("  -c N, --count N    Repeat N times (with -s)");
-                println!("  --help          Show this help");
-                println!("  --version       Show version");
-                process::exit(0);
-            }
-            "--version" => {
-                println!("free {VERSION}");
-                process::exit(0);
-            }
-            other => {
-                eprintln!("free: unknown option: {other}");
-                process::exit(1);
-            }
-        }
-        i += 1;
-    }
-
-    let iterations = count.unwrap_or(if seconds.is_some() { u32::MAX } else { 1 });
-
-    for iter in 0..iterations {
-        if iter > 0 {
-            if let Some(s) = seconds {
-                std::thread::sleep(std::time::Duration::from_secs(s));
-            }
-            println!(); // Blank line between iterations.
-        }
-        display_free(&unit, wide, total_line, lohi);
-    }
-}
-
-fn display_free(unit: &str, wide: bool, total_line: bool, lohi: bool) {
-    let info = parse_meminfo();
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-
-    let used = info
-        .mem_total
-        .saturating_sub(info.mem_free)
-        .saturating_sub(info.buffers)
-        .saturating_sub(info.cached);
-    let buff_cache = info.buffers + info.cached;
-    let swap_used = info.swap_total.saturating_sub(info.swap_free);
-
-    let fmt = |v: u64| format_size_unit(v, unit);
-
-    if wide {
-        let _ = writeln!(
-            out,
-            "{:>16} {:>12} {:>12} {:>12} {:>12} {:>12} {:>12}",
-            "", "total", "used", "free", "shared", "buffers", "cache"
-        );
-        let _ = writeln!(
-            out,
-            "{:<16} {:>12} {:>12} {:>12} {:>12} {:>12} {:>12}",
-            "Mem:",
-            fmt(info.mem_total),
-            fmt(used),
-            fmt(info.mem_free),
-            fmt(info.shmem),
-            fmt(info.buffers),
-            fmt(info.cached)
-        );
-    } else {
-        let _ = writeln!(
-            out,
-            "{:>16} {:>12} {:>12} {:>12} {:>12} {:>12} {:>12}",
-            "", "total", "used", "free", "shared", "buff/cache", "available"
-        );
-        let _ = writeln!(
-            out,
-            "{:<16} {:>12} {:>12} {:>12} {:>12} {:>12} {:>12}",
-            "Mem:",
-            fmt(info.mem_total),
-            fmt(used),
-            fmt(info.mem_free),
-            fmt(info.shmem),
-            fmt(buff_cache),
-            fmt(info.mem_available)
-        );
-    }
-
-    if lohi {
-        // Low memory = total, High memory = 0 for flat memory model.
-        let _ = writeln!(
-            out,
-            "{:<16} {:>12} {:>12} {:>12}",
-            "Low:",
-            fmt(info.mem_total),
-            fmt(used),
-            fmt(info.mem_free)
-        );
-        let _ = writeln!(
-            out,
-            "{:<16} {:>12} {:>12} {:>12}",
-            "High:",
-            fmt(0),
-            fmt(0),
-            fmt(0)
-        );
-    }
-
-    let _ = writeln!(
-        out,
-        "{:<16} {:>12} {:>12} {:>12}",
-        "Swap:",
-        fmt(info.swap_total),
-        fmt(swap_used),
-        fmt(info.swap_free)
-    );
-
-    if total_line {
-        let total_total = info.mem_total + info.swap_total;
-        let total_used = used + swap_used;
-        let total_free = info.mem_free + info.swap_free;
-        let _ = writeln!(
-            out,
-            "{:<16} {:>12} {:>12} {:>12}",
-            "Total:",
-            fmt(total_total),
-            fmt(total_used),
-            fmt(total_free)
-        );
-    }
-}
-
 // ============================================================================
 // Entry point
 // ============================================================================
@@ -744,7 +483,6 @@ fn main() {
 
     match prog_name.as_str() {
         "swapoff" => cmd_swapoff(&rest),
-        "free" => cmd_free(&rest),
         _ => cmd_swapon(&rest),
     }
 }
@@ -832,62 +570,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_format_size_human() {
-        assert_eq!(format_size_human(512), "512K");
-        assert_eq!(format_size_human(1024), "1.0Mi");
-        assert_eq!(format_size_human(1536), "1.5Mi");
-        assert_eq!(format_size_human(1048576), "1.0Gi");
-        assert_eq!(format_size_human(2097152), "2.0Gi");
-        assert_eq!(format_size_human(1073741824), "1.0Ti");
-    }
-
-    #[test]
-    fn test_format_size_unit_bytes() {
-        assert_eq!(format_size_unit(1, "bytes"), "1024");
-        assert_eq!(format_size_unit(1024, "bytes"), "1048576");
-    }
-
-    #[test]
-    fn test_format_size_unit_kilo() {
-        assert_eq!(format_size_unit(1024, "kilo"), "1024");
-        assert_eq!(format_size_unit(0, "kilo"), "0");
-    }
-
-    #[test]
-    fn test_format_size_unit_mega() {
-        assert_eq!(format_size_unit(1024, "mega"), "1");
-        assert_eq!(format_size_unit(2048, "mega"), "2");
-        assert_eq!(format_size_unit(512, "mega"), "0"); // truncated
-    }
-
-    #[test]
-    fn test_format_size_unit_giga() {
-        assert_eq!(format_size_unit(1048576, "giga"), "1");
-        assert_eq!(format_size_unit(0, "giga"), "0");
-    }
-
-    #[test]
-    fn test_format_size_unit_tera() {
-        assert_eq!(format_size_unit(1073741824, "tera"), "1");
-    }
-
-    #[test]
-    fn test_format_size_unit_human() {
-        assert_eq!(format_size_unit(1024, "human"), "1.0Mi");
-        assert_eq!(format_size_unit(1048576, "human"), "1.0Gi");
-    }
-
-    #[test]
-    fn test_parse_meminfo_values() {
-        // parse_meminfo reads from /proc/meminfo which may not exist in test env.
-        // Just verify the function doesn't panic.
-        let info = parse_meminfo();
-        // Values should be >= 0 (they're u64).
-        let _ = info.mem_total;
-        let _ = info.mem_free;
-    }
-
-    #[test]
     fn test_parse_proc_swaps() {
         // parse_proc_swaps reads from /proc/swaps which may not exist.
         // Just verify it doesn't panic and returns a vec.
@@ -928,25 +610,6 @@ mod tests {
     }
 
     #[test]
-    fn test_mem_info_defaults() {
-        let info = MemInfo {
-            mem_total: 16777216,
-            mem_free: 8388608,
-            mem_available: 12582912,
-            buffers: 524288,
-            cached: 3145728,
-            swap_total: 8388608,
-            swap_free: 8388608,
-            shmem: 262144,
-            sreclaimable: 131072,
-        };
-
-        let used = info.mem_total - info.mem_free - info.buffers - info.cached;
-        assert_eq!(used, 4718592); // 16M - 8M - 512K - 3M
-        assert_eq!(info.swap_total - info.swap_free, 0);
-    }
-
-    #[test]
     fn test_fstab_entry() {
         let entry = FstabEntry {
             device: "/dev/sda2".to_string(),
@@ -958,21 +621,6 @@ mod tests {
         };
         assert_eq!(entry.fstype, "swap");
         assert_eq!(entry.mountpoint, "none");
-    }
-
-    #[test]
-    fn test_format_size_boundary() {
-        // Exactly at boundary values.
-        assert_eq!(format_size_human(0), "0K");
-        assert_eq!(format_size_human(1), "1K");
-        assert_eq!(format_size_human(1023), "1023K");
-    }
-
-    #[test]
-    fn test_format_size_large_values() {
-        // Very large swap (e.g., 64 TiB).
-        let huge = 64u64 * 1073741824;
-        assert!(format_size_human(huge).contains("Ti"));
     }
 
     #[test]

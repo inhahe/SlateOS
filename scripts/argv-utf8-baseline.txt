@@ -47,7 +47,6 @@ userspace/coreutils/src/bin/patch.rs:argv-as-string
 userspace/coreutils/src/bin/ps.rs:argv-as-string
 userspace/cpio/src/main.rs:argv-as-string
 userspace/cpupower/src/main.rs:argv-as-string
-userspace/cron/src/main.rs:argv-as-string
 userspace/crond/src/main.rs:argv-as-string
 userspace/crontab/src/main.rs:argv-as-string
 userspace/ctags/src/main.rs:argv-as-string

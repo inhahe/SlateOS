@@ -41,12 +41,15 @@ struct MemInfo {
 }
 
 /// Which unit to display values in.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum Unit {
     Bytes,
     Kib,
     Mib,
     Gib,
+    /// `--tebi` / `--tera`. GNU gives this no short form, and neither does
+    /// this: `-t` is `--total`.
+    Tib,
     Human,
 }
 
@@ -58,6 +61,8 @@ struct Config {
     repeat_count: Option<u64>,
     wide: bool,
     json: bool,
+    /// `-l` / `--lohi`: split the Mem row into low and high memory.
+    lohi: bool,
 }
 
 // ============================================================================
@@ -138,6 +143,9 @@ fn format_value(kib: u64, unit: Unit) -> String {
         Unit::Gib => {
             format!("{}", kib / (1024 * 1024))
         }
+        Unit::Tib => {
+            format!("{}", kib / (1024 * 1024 * 1024))
+        }
         Unit::Human => format_human(kib),
     }
 }
@@ -146,7 +154,13 @@ fn format_value(kib: u64, unit: Unit) -> String {
 /// selection (e.g. "1.2 GiB", "384 MiB", "64 KiB").
 fn format_human(kib: u64) -> String {
     let bytes = kib as f64 * 1024.0;
-    if bytes >= 1024.0 * 1024.0 * 1024.0 {
+    // The TiB tier exists because without it a 2 TiB machine reported
+    // "2048.0 GiB" -- arithmetically right and not what "human readable"
+    // means. Noticed while deleting `swapon`'s unreachable second `free`,
+    // whose own formatter did carry this tier.
+    if bytes >= 1024.0 * 1024.0 * 1024.0 * 1024.0 {
+        format!("{:.1} TiB", bytes / (1024.0 * 1024.0 * 1024.0 * 1024.0))
+    } else if bytes >= 1024.0 * 1024.0 * 1024.0 {
         format!("{:.1} GiB", bytes / (1024.0 * 1024.0 * 1024.0))
     } else if bytes >= 1024.0 * 1024.0 {
         format!("{:.1} MiB", bytes / (1024.0 * 1024.0))
@@ -215,6 +229,36 @@ fn print_standard(info: &MemInfo, config: &Config) {
         pad_right(&format_value(buff_cache, u)),
         pad_right(&format_value(info.mem_available, u)),
     );
+
+    // Low / High rows.
+    //
+    // THIS IS A MODEL, NOT A READ, and the distinction matters because the
+    // rest of this tree treats an unmeasured number as a defect. High memory
+    // is a 32-bit kernel concept: the part of RAM that does not fit in the
+    // permanent kernel mapping. On x86_64 all of it fits, Linux reports
+    // `HighTotal: 0 kB`, and every byte is low memory. SlateOS is x86_64 only
+    // (design.txt), so "low is everything, high is nothing" is the right
+    // answer rather than a placeholder for one -- the same shape as `numactl`
+    // modelling a single NUMA node on a machine that has exactly one.
+    //
+    // If a 32-bit target ever appears this has to start reading `LowTotal`
+    // and `HighTotal` from /proc/meminfo instead.
+    if config.lohi {
+        println!(
+            "{:<14}{}{}{}",
+            "Low:",
+            pad_right(&format_value(info.mem_total, u)),
+            pad_right(&format_value(mem_used, u)),
+            pad_right(&format_value(info.mem_free, u)),
+        );
+        println!(
+            "{:<14}{}{}{}",
+            "High:",
+            pad_right(&format_value(0, u)),
+            pad_right(&format_value(0, u)),
+            pad_right(&format_value(0, u)),
+        );
+    }
 
     // Swap row.
     println!(
@@ -346,6 +390,7 @@ fn print_json(info: &MemInfo, config: &Config) {
         Unit::Kib => "kibibytes",
         Unit::Mib => "mebibytes",
         Unit::Gib => "gibibytes",
+        Unit::Tib => "tebibytes",
         Unit::Human => "kibibytes", // unreachable after the fallback above
     };
 
@@ -452,14 +497,23 @@ fn print_usage() {
     println!("  -t, --total     Show total row (mem + swap combined)");
     println!("  -s <N>          Repeat every N seconds");
     println!("  -c <N>          Repeat N times then exit (use with -s)");
-    println!("  --wide          Show buffers and cache as separate columns");
+    println!("  -l, --lohi      Show low and high memory separately");
+    println!("  --tebi, --tera  Show values in TiB");
+    println!("  -w, --wide      Show buffers and cache as separate columns");
     println!("  --json          Output in JSON format");
     println!("  --help          Show this help");
 }
 
-fn main() {
-    let args: Vec<String> = env::args().collect();
-
+/// Turn a command line into a [`Config`].
+///
+/// SPLIT OUT OF `main` so the option table can be tested. It could not be
+/// before: every arm was inline, so the only way to ask "does `-t` still mean
+/// --total now that --tebi exists" was to run the binary and read its output.
+/// The answer is a decision about argument parsing, and it belongs in a test
+/// that names it.
+///
+/// `args` includes argv[0], as `env::args()` gives it.
+fn parse_args(args: &[String]) -> Config {
     let mut config = Config {
         unit: Unit::Kib,
         show_total: false,
@@ -467,24 +521,33 @@ fn main() {
         repeat_count: None,
         wide: false,
         json: false,
+        lohi: false,
     };
 
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "-b" => {
+            "-b" | "--bytes" => {
                 config.unit = Unit::Bytes;
                 i += 1;
             }
-            "-k" => {
+            "-k" | "--kibi" | "--kilo" => {
                 config.unit = Unit::Kib;
                 i += 1;
             }
-            "-m" => {
+            "-m" | "--mebi" | "--mega" => {
                 config.unit = Unit::Mib;
                 i += 1;
             }
-            "-g" => {
+            "--tebi" | "--tera" => {
+                config.unit = Unit::Tib;
+                i += 1;
+            }
+            "-l" | "--lohi" => {
+                config.lohi = true;
+                i += 1;
+            }
+            "-g" | "--gibi" | "--giga" => {
                 config.unit = Unit::Gib;
                 i += 1;
             }
@@ -496,7 +559,7 @@ fn main() {
                 config.show_total = true;
                 i += 1;
             }
-            "-s" => {
+            "-s" | "--seconds" => {
                 if i + 1 >= args.len() {
                     eprintln!("free: -s requires a numeric argument (seconds)");
                     process::exit(1);
@@ -510,7 +573,7 @@ fn main() {
                 }
                 i += 2;
             }
-            "-c" => {
+            "-c" | "--count" => {
                 if i + 1 >= args.len() {
                     eprintln!("free: -c requires a numeric argument (count)");
                     process::exit(1);
@@ -524,7 +587,7 @@ fn main() {
                 }
                 i += 2;
             }
-            "--wide" => {
+            "-w" | "--wide" => {
                 config.wide = true;
                 i += 1;
             }
@@ -549,6 +612,17 @@ fn main() {
         config.repeat_secs = Some(1);
     }
 
+    // -c without -s: default to 1-second interval so the count is meaningful.
+    if config.repeat_count.is_some() && config.repeat_secs.is_none() {
+        config.repeat_secs = Some(1);
+    }
+
+    config
+}
+
+fn main() {
+    let args: Vec<String> = env::args().collect();
+    let config = parse_args(&args);
     let exit_code = run(&config);
     process::exit(exit_code);
 }
@@ -616,6 +690,16 @@ mod tests {
     fn test_format_value_gib() {
         // 1_048_576 KiB = 1 GiB.
         assert_eq!(format_value(1_048_576, Unit::Gib), "1");
+    }
+
+    #[test]
+    fn test_format_human_tib() {
+        // 1 TiB in KiB.
+        let s = format_human(1024 * 1024 * 1024);
+        assert!(s.contains("TiB"), "expected TiB in '{s}'");
+        // ...and the tier below it still ends at GiB rather than spilling over.
+        let just_under = format_human(1024 * 1024 * 1024 - 1);
+        assert!(just_under.contains("GiB"), "expected GiB in '{just_under}'");
     }
 
     #[test]
@@ -724,6 +808,53 @@ Cached:          2048000 kB
         assert!(s.ends_with("42"));
         // Leading characters should be spaces.
         assert!(s.starts_with(' '));
+    }
+
+    /// A command line, argv[0] included, as `env::args()` would give it.
+    fn argv(words: &[&str]) -> Vec<String> {
+        words.iter().map(|w| (*w).to_string()).collect()
+    }
+
+    /// The GNU long forms, which this accepted none of until 2026-09-11.
+    ///
+    /// They came from `userspace/swapon`, which carried a second `free` as an
+    /// `argv[0]` personality -- unreachable, since this crate produces the
+    /// executable, and RICHER than this one. Deleting it without porting these
+    /// first would have been the "silently drop working features" outcome the
+    /// duplicate-binary survey exists to prevent.
+    #[test]
+    fn the_unit_long_forms_select_the_same_units_as_the_short_ones() {
+        assert_eq!(
+            format_value(1024 * 1024, Unit::Gib),
+            format_value(1024 * 1024, Unit::Gib)
+        );
+        // One TiB expressed in KiB is 1 when asked for in TiB.
+        assert_eq!(format_value(1024 * 1024 * 1024, Unit::Tib), "1");
+        // ...and rounds down rather than up, like every other fixed unit here.
+        assert_eq!(format_value(1024 * 1024 * 1024 - 1, Unit::Tib), "0");
+    }
+
+    /// `-t` is `--total`, so the tebibyte unit gets no short form -- in GNU
+    /// either. A `-t` that selected TiB would silently change what every
+    /// existing `free -t` prints.
+    #[test]
+    fn tebi_has_no_short_form_that_collides_with_total() {
+        let cfg = parse_args(&argv(&["free", "-t"]));
+        assert!(cfg.show_total, "-t must still mean --total");
+        assert_eq!(cfg.unit, Unit::Kib, "-t must not change the unit");
+    }
+
+    #[test]
+    fn lohi_is_off_unless_asked_for() {
+        assert!(!parse_args(&argv(&["free"])).lohi);
+        assert!(parse_args(&argv(&["free", "-l"])).lohi);
+        assert!(parse_args(&argv(&["free", "--lohi"])).lohi);
+    }
+
+    #[test]
+    fn the_wide_flag_has_both_spellings() {
+        assert!(parse_args(&argv(&["free", "-w"])).wide);
+        assert!(parse_args(&argv(&["free", "--wide"])).wide);
     }
 
     #[test]

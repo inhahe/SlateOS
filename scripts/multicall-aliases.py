@@ -193,6 +193,51 @@ _CHAIN = re.compile(
     r'\s*=>\s*(?:Some\(|Ok\()?Personality::'
 )
 _LITERAL = re.compile(r'"([a-z][a-z0-9_.+-]{0,20})"')
+# `match <name-var> { "atq" => .., "batch" => .. }` -- the third dispatch shape.
+#
+# `_CHAIN` above catches a match whose arms map to `Personality::`, and that
+# name is hardcoded because a type literally called `Personality` needs no
+# corroboration. `userspace/at` calls its enum `InvokedAs`, so all four of its
+# personalities -- atq, atrm, batch, atd -- were invisible to this gate, which
+# is the enum NAME being an enumeration with one entry in it.
+#
+# The corroboration here is the scrutinee instead of the type: the thing being
+# matched has to be a variable `name_vars` says holds this program's own
+# invocation name. That is the same standard `_COMPARE` already meets, and it
+# is stronger than a type name, because it follows the assignment chain rather
+# than trusting what somebody called the enum.
+_MATCH_HEAD = r"\bmatch\s+{var}\s*(?:\.\s*(?:as_str|as_ref|as_deref|trim)\s*\(\s*\))*\s*\{{"
+_ARM = re.compile(r'((?:"[a-z][a-z0-9_.+-]{0,20}"\s*\|\s*)*"[a-z][a-z0-9_.+-]{0,20}")\s*=>')
+
+
+def match_arm_literals(chunk: str, var: str) -> set[str]:
+    """String-literal arms of a `match` on `var`, and only that match.
+
+    Brace-matched over `strip_noise` output so a `{` inside a string or comment
+    cannot end the block early -- and so a SECOND, unrelated match later in the
+    same function is not swept in, which reading to the end of the chunk would
+    do.
+    """
+    head = re.search(_MATCH_HEAD.format(var=re.escape(var)), chunk)
+    if head is None:
+        return set()
+    masked = rustlex.strip_noise(chunk)
+    open_at = masked.find("{", head.end() - 1)
+    if open_at < 0:
+        return set()
+    depth, j = 0, open_at
+    while j < len(masked):
+        if masked[j] == "{":
+            depth += 1
+        elif masked[j] == "}":
+            depth -= 1
+            if depth == 0:
+                break
+        j += 1
+    names: set[str] = set()
+    for arm in _ARM.findall(chunk[open_at:j]):
+        names |= set(_LITERAL.findall(arm))
+    return names
 _NAMEVAR = (
     r"basename|base_name|prog_name|progname|program|arg0|argv0|invoked|"
     r"invoked_as|exe_name|cmd_name|self_name"
@@ -341,6 +386,7 @@ def invocation_aliases(text: str, crate: str) -> set[str]:
                         rf'{re.escape(var)}\s*==\s*"([a-z][a-z0-9_.+-]{{0,20}})"',
                         chunk)
                 )
+                names |= match_arm_literals(chunk, var)
     return {n for n in names if n != crate and n not in IGNORE}
 
 
@@ -456,6 +502,39 @@ fn main() { let basename = std::env::args().next().unwrap();
     bare = 'fn f(s: &str) -> bool { let lower = s.to_lowercase(); lower == "ls" }'
     expect("a comparison with no argv[0] extraction anywhere is ignored",
            invocation_aliases(bare, "whatever"), set())
+
+    # THE THIRD DISPATCH SHAPE: a match whose arms map to an enum that is not
+    # called `Personality`. `userspace/at` calls its enum `InvokedAs` and was
+    # invisible here -- all four of atq, atrm, batch and atd -- for as long as
+    # this gate has existed, because `_CHAIN` requires the literal text
+    # `Personality::`. Widening it found nine shadowing pairs in one run,
+    # among them `nologin` answering to `true` and to `false`.
+    invoked_as = """fn detect(argv0: &str) -> InvokedAs {
+    let basename = Path::new(argv0).file_stem().and_then(|s| s.to_str()).unwrap_or(argv0);
+    match basename {
+        "atq" => InvokedAs::Atq,
+        "atrm" | "atrem" => InvokedAs::Atrm,
+        _ => InvokedAs::At,
+    }
+}
+"""
+    expect("a match arm mapping to any enum is dispatch when the scrutinee is the name",
+           invocation_aliases(invoked_as, "at"), {"atq", "atrm", "atrem"})
+
+    # ...and the scrutinee is what corroborates it. A match on something that
+    # is not the invocation name is ordinary parsing, however many string arms
+    # it has, and this tree is full of those.
+    other_match = """fn parse(argv0: &str, field: &str) -> Kind {
+    let _basename = Path::new(argv0).file_stem();
+    match field {
+        "size" => Kind::Size,
+        "mtime" => Kind::Mtime,
+        _ => Kind::Other,
+    }
+}
+"""
+    expect("a match on a variable that is not the invocation name is ignored",
+           invocation_aliases(other_match, "find"), set())
 
     # A crate never shadows itself.
     expect("a crate answering to its own name reports nothing",

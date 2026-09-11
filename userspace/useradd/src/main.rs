@@ -644,13 +644,6 @@ impl Args {
 // Output helpers
 // ============================================================================
 
-fn write_stdout(msg: &str) {
-    let stdout = io::stdout();
-    let mut handle = stdout.lock();
-    let _ = handle.write_all(msg.as_bytes());
-    let _ = handle.write_all(b"\n");
-}
-
 fn write_stderr(msg: &str) {
     let stderr = io::stderr();
     let mut handle = stderr.lock();
@@ -1669,44 +1662,6 @@ fn cmd_groupmod(argv: &[OsString]) -> i32 {
 // newgrp
 // ============================================================================
 
-fn cmd_newgrp(argv: &[OsString]) -> i32 {
-    // See `cmd_groupdel`: a group name is text.
-    let groupname = match argv.first().and_then(|g| g.to_str()) {
-        Some(g) => g.to_string(),
-        None => {
-            // No group specified: reset to user's default group.
-            write_stdout("newgrp: resetting to default group");
-            return 0;
-        }
-    };
-
-    let db = Database::load();
-
-    // Validate the group exists.
-    let group = match db.find_group(&groupname) {
-        Some(g) => g,
-        None => {
-            write_stderr(&format!("newgrp: group '{}' does not exist", groupname));
-            return 1;
-        }
-    };
-
-    // In a full implementation, we would use SYS_SETGID to change the
-    // effective group ID and potentially SYS_INITGROUPS to initialize
-    // the supplementary group list, then exec a new shell. For now,
-    // report what would happen.
-    write_stdout(&format!(
-        "newgrp: switching to group '{}' (gid={})",
-        group.name, group.gid
-    ));
-
-    // On Slate OS, we would invoke:
-    //   syscall(SYS_SETGID, group.gid)
-    //   syscall(SYS_EXEC, shell_path, ...)
-    // For now, just exit success indicating the group was validated.
-    0
-}
-
 // ============================================================================
 // Personality detection and dispatch
 // ============================================================================
@@ -1727,7 +1682,6 @@ fn usage_all() {
     write_stderr("  groupadd - add a group");
     write_stderr("  groupdel - delete a group");
     write_stderr("  groupmod - modify a group");
-    write_stderr("  newgrp   - change effective group");
 }
 
 fn main() {
@@ -1749,7 +1703,6 @@ fn main() {
         "groupadd" => cmd_groupadd(&rest),
         "groupdel" => cmd_groupdel(&rest),
         "groupmod" => cmd_groupmod(&rest),
-        "newgrp" => cmd_newgrp(&rest),
         _ => {
             write_stderr(&format!("unknown personality: {}", personality));
             usage_all();
@@ -2098,7 +2051,6 @@ mod tests {
         assert_eq!(detect_personality("useradd"), "useradd");
         assert_eq!(detect_personality("userdel"), "userdel");
         assert_eq!(detect_personality("groupadd"), "groupadd");
-        assert_eq!(detect_personality("newgrp"), "newgrp");
     }
 
     #[test]

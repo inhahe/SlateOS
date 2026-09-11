@@ -813,9 +813,10 @@ unreadable file is REPLACED by whatever was parsed from nothing.
 
 Use \`optionalfile::read_or_empty\`, which returns Ok("") only for NotFound and
 an error for everything else. Do NOT add a line to
-scripts/read-defaults-baseline.txt to turn this green -- every entry there is a
-site that reports or displays, none rewrites the file it read, and that is what
-makes them tolerable rather than correct.
+scripts/read-defaults-baseline.txt to turn this green. That file records what
+is KNOWN, never what is correct: its read_to_string entries were inspected one
+at a time and none of them rewrites the file it read, and the rest were pinned
+as a set when the gate widened and include defects nobody has fixed yet.
 EOF
     exit 1
 fi

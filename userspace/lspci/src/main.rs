@@ -18,6 +18,7 @@
 //! lspci --json             JSON output
 //! ```
 
+use quoting::quotef_os;
 use std::env;
 use std::fs;
 use std::process;
@@ -231,8 +232,36 @@ fn scan_sysfs() -> Vec<PciDevice> {
             None => continue,
         };
 
-        let vendor_id = read_hex_file(&format!("{dev_path}/vendor")).unwrap_or(0) as u16;
-        let device_id = read_hex_file(&format!("{dev_path}/device")).unwrap_or(0) as u16;
+        // THE IDENTITY IS REQUIRED; THE REST HAS REAL ZEROES.
+        //
+        // `vendor` and `device` are what the tool exists to report, and every
+        // real PCI device has both files. `.unwrap_or(0)` turned an unreadable
+        // one into the ID 0000, which is not a valid PCI vendor and which the
+        // renderer below prints as "Unknown vendor 0000" -- a sentence
+        // asserting the device reports 0000, when what happened is that we did
+        // not find out. A device that vanished mid-scan (hot-unplug is the
+        // usual cause) is not a device with a strange vendor.
+        //
+        // The slot is still known -- the directory name gave it -- so the
+        // refusal names it and the scan continues with the other devices.
+        let (Some(vendor_id), Some(device_id)) = (
+            read_hex_file(&format!("{dev_path}/vendor")),
+            read_hex_file(&format!("{dev_path}/device")),
+        ) else {
+            eprintln!(
+                "lspci: {}: cannot read the device identity, skipping",
+                quotef_os(&name)
+            );
+            continue;
+        };
+        let vendor_id = vendor_id as u16;
+        let device_id = device_id as u16;
+
+        // These four keep their `unwrap_or(0)`, and that is not an oversight:
+        // 0 is a legitimate value for every one of them. PCI class 00 is
+        // "Unclassified device", revision 00 is a first revision, IRQ 0 means
+        // no line-based interrupt is assigned, and a subsystem ID of 0000 is
+        // what a card without a subsystem reports.
         let class_val = read_hex_file(&format!("{dev_path}/class")).unwrap_or(0) as u32;
         let revision = read_hex_file(&format!("{dev_path}/revision")).unwrap_or(0) as u8;
         let subsys_vendor =
@@ -269,7 +298,7 @@ fn scan_sysfs() -> Vec<PciDevice> {
     }
 
     // Sort by BDF.
-    devices.sort_by(|a, b| (a.bus, a.device, a.function).cmp(&(b.bus, b.device, b.function)));
+    devices.sort_by_key(|d| (d.bus, d.device, d.function));
 
     devices
 }
@@ -734,5 +763,63 @@ fn main() {
                 println!("\tKernel driver in use: {}", dev.driver);
             }
         }
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `parse_bdf` decides whether a sysfs directory is a PCI slot at all, and
+    /// every device the scan reports goes through it. It had no test.
+    #[test]
+    fn a_slot_is_parsed_with_or_without_a_domain() {
+        // The plain BB:DD.F form.
+        assert_eq!(parse_bdf("00:1f.3"), Some((0x00, 0x1f, 3)));
+        // ...and the domain-qualified one sysfs actually uses.
+        assert_eq!(parse_bdf("0000:00:1f.3"), Some((0x00, 0x1f, 3)));
+        // A non-zero domain still yields the bus, not the domain.
+        assert_eq!(parse_bdf("0001:0a:05.1"), Some((0x0a, 0x05, 1)));
+    }
+
+    /// Anything that is not a slot must be refused rather than guessed at:
+    /// `/sys/bus/pci/devices` holds only device directories today, but the
+    /// scan skips on `None`, so this is what keeps a stray entry out.
+    #[test]
+    fn something_that_is_not_a_slot_is_refused() {
+        for junk in [
+            "", "drivers", "00:1f", "00:1f.", "zz:1f.3", "00:zz.3", "00:1f.z",
+        ] {
+            assert_eq!(parse_bdf(junk), None, "{junk:?} is not a slot");
+        }
+    }
+
+    /// The renderer distinguishes a known vendor from an unknown one, so the
+    /// lookup has to return the empty string rather than a placeholder.
+    #[test]
+    fn an_unknown_vendor_id_has_no_name() {
+        assert_eq!(vendor_name(0x8086), "Intel Corporation");
+        assert!(vendor_name(0x0000).is_empty());
+        assert!(vendor_name(0xFFFF).is_empty());
+    }
+
+    /// A class byte pair with no entry must not borrow a neighbour's name.
+    ///
+    /// `class_name` answers "Unknown device" rather than "" -- unlike
+    /// `vendor_name`, which answers "". I asserted the empty string here and
+    /// the test said otherwise, which is the test doing its job: the two
+    /// lookups beside each other in this file disagree about how to say "I
+    /// have no entry for this", and the renderer has to know which is which.
+    #[test]
+    fn an_unknown_class_says_so_rather_than_guessing() {
+        assert_eq!(class_name(0x03, 0x00), "VGA compatible controller");
+        assert_eq!(class_name(0xFE, 0xFE), "Unknown device");
+        // A known class with an unknown subclass falls back to the class,
+        // which is a real answer and not a guess at the subclass.
+        assert_eq!(class_name(0x0D, 0x77), "Wireless controller");
     }
 }

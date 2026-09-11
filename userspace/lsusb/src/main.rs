@@ -306,6 +306,66 @@ fn parent_sysfs_name(name: &str) -> String {
 }
 
 /// Scan `/sys/bus/usb/devices/` for USB devices.
+/// Read one device's attributes out of its sysfs directory.
+///
+/// ONE COPY OF THIS. It was written twice -- in `scan_sysfs` over the whole
+/// bus and in `scan_single_sysfs` for `-D <path>` -- identical but for the
+/// name of the path variable. Twenty-five duplicated lines are twenty-five
+/// lines where a repair can land in one copy and not the other, which is not
+/// hypothetical here: `logname`'s environment-trusting bug was fixed in
+/// `coreutils` and left standing in the copy inside `nproc`.
+///
+/// The `idVendor` check stays in the callers. It is what decides whether a
+/// sysfs directory is a USB device at all -- interface directories like
+/// `1-2:1.0` have no `idVendor` -- and the two callers do different things
+/// with the answer: skip this entry, or return nothing at all.
+fn read_device(dev_path: &str, name: String) -> UsbDevice {
+    let vendor_id = read_hex_u16(&format!("{dev_path}/idVendor"));
+    let product_id = read_hex_u16(&format!("{dev_path}/idProduct"));
+    let manufacturer = read_attr(&format!("{dev_path}/manufacturer")).unwrap_or_default();
+    let product = read_attr(&format!("{dev_path}/product")).unwrap_or_default();
+    let serial = read_attr(&format!("{dev_path}/serial")).unwrap_or_default();
+    let device_class = read_hex_u8(&format!("{dev_path}/bDeviceClass"));
+    let device_subclass = read_hex_u8(&format!("{dev_path}/bDeviceSubClass"));
+    let device_protocol = read_hex_u8(&format!("{dev_path}/bDeviceProtocol"));
+    let usb_version = read_attr(&format!("{dev_path}/bcdUSB")).unwrap_or_default();
+    let speed = read_attr(&format!("{dev_path}/speed")).unwrap_or_default();
+    let num_configurations = read_attr(&format!("{dev_path}/bNumConfigurations"))
+        .and_then(|s| s.parse::<u8>().ok())
+        .unwrap_or(0);
+    let num_interfaces = read_attr(&format!("{dev_path}/bNumInterfaces"))
+        .and_then(|s| s.trim().parse::<u8>().ok())
+        .unwrap_or(0);
+    let max_power = read_attr(&format!("{dev_path}/bMaxPower")).unwrap_or_default();
+    let bus = read_attr(&format!("{dev_path}/busnum"))
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(0);
+    let devnum = read_attr(&format!("{dev_path}/devnum"))
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(0);
+    let parent_name = parent_sysfs_name(&name);
+
+    UsbDevice {
+        bus,
+        devnum,
+        vendor_id,
+        product_id,
+        manufacturer,
+        product,
+        serial,
+        device_class,
+        device_subclass,
+        device_protocol,
+        usb_version,
+        speed,
+        num_configurations,
+        num_interfaces,
+        max_power,
+        sysfs_name: name,
+        parent_name,
+    }
+}
+
 fn scan_sysfs() -> Vec<UsbDevice> {
     let mut devices = Vec::new();
     let usb_path = "/sys/bus/usb/devices";
@@ -331,52 +391,7 @@ fn scan_sysfs() -> Vec<UsbDevice> {
             continue;
         }
 
-        let vendor_id = read_hex_u16(&vendor_path);
-        let product_id = read_hex_u16(&format!("{dev_path}/idProduct"));
-        let manufacturer = read_attr(&format!("{dev_path}/manufacturer")).unwrap_or_default();
-        let product = read_attr(&format!("{dev_path}/product")).unwrap_or_default();
-        let serial = read_attr(&format!("{dev_path}/serial")).unwrap_or_default();
-        let device_class = read_hex_u8(&format!("{dev_path}/bDeviceClass"));
-        let device_subclass = read_hex_u8(&format!("{dev_path}/bDeviceSubClass"));
-        let device_protocol = read_hex_u8(&format!("{dev_path}/bDeviceProtocol"));
-        let usb_version = read_attr(&format!("{dev_path}/bcdUSB")).unwrap_or_default();
-        let speed = read_attr(&format!("{dev_path}/speed")).unwrap_or_default();
-        let num_configurations = read_attr(&format!("{dev_path}/bNumConfigurations"))
-            .and_then(|s| s.parse::<u8>().ok())
-            .unwrap_or(0);
-        let num_interfaces = read_attr(&format!("{dev_path}/bNumInterfaces"))
-            .and_then(|s| s.trim().parse::<u8>().ok())
-            .unwrap_or(0);
-        let max_power = read_attr(&format!("{dev_path}/bMaxPower")).unwrap_or_default();
-
-        let bus = read_attr(&format!("{dev_path}/busnum"))
-            .and_then(|s| s.parse::<u16>().ok())
-            .unwrap_or(0);
-        let devnum = read_attr(&format!("{dev_path}/devnum"))
-            .and_then(|s| s.parse::<u16>().ok())
-            .unwrap_or(0);
-
-        let parent_name = parent_sysfs_name(&name);
-
-        devices.push(UsbDevice {
-            bus,
-            devnum,
-            vendor_id,
-            product_id,
-            manufacturer,
-            product,
-            serial,
-            device_class,
-            device_subclass,
-            device_protocol,
-            usb_version,
-            speed,
-            num_configurations,
-            num_interfaces,
-            max_power,
-            sysfs_name: name,
-            parent_name,
-        });
+        devices.push(read_device(&dev_path, name));
     }
 
     // Sort by bus, then device number.
@@ -399,50 +414,7 @@ fn scan_single_sysfs(path: &str) -> Vec<UsbDevice> {
         .unwrap_or("")
         .to_string();
 
-    let vendor_id = read_hex_u16(&vendor_path);
-    let product_id = read_hex_u16(&format!("{path}/idProduct"));
-    let manufacturer = read_attr(&format!("{path}/manufacturer")).unwrap_or_default();
-    let product = read_attr(&format!("{path}/product")).unwrap_or_default();
-    let serial = read_attr(&format!("{path}/serial")).unwrap_or_default();
-    let device_class = read_hex_u8(&format!("{path}/bDeviceClass"));
-    let device_subclass = read_hex_u8(&format!("{path}/bDeviceSubClass"));
-    let device_protocol = read_hex_u8(&format!("{path}/bDeviceProtocol"));
-    let usb_version = read_attr(&format!("{path}/bcdUSB")).unwrap_or_default();
-    let speed = read_attr(&format!("{path}/speed")).unwrap_or_default();
-    let num_configurations = read_attr(&format!("{path}/bNumConfigurations"))
-        .and_then(|s| s.parse::<u8>().ok())
-        .unwrap_or(0);
-    let num_interfaces = read_attr(&format!("{path}/bNumInterfaces"))
-        .and_then(|s| s.trim().parse::<u8>().ok())
-        .unwrap_or(0);
-    let max_power = read_attr(&format!("{path}/bMaxPower")).unwrap_or_default();
-    let bus = read_attr(&format!("{path}/busnum"))
-        .and_then(|s| s.parse::<u16>().ok())
-        .unwrap_or(0);
-    let devnum = read_attr(&format!("{path}/devnum"))
-        .and_then(|s| s.parse::<u16>().ok())
-        .unwrap_or(0);
-    let parent_name = parent_sysfs_name(&name);
-
-    devices.push(UsbDevice {
-        bus,
-        devnum,
-        vendor_id,
-        product_id,
-        manufacturer,
-        product,
-        serial,
-        device_class,
-        device_subclass,
-        device_protocol,
-        usb_version,
-        speed,
-        num_configurations,
-        num_interfaces,
-        max_power,
-        sysfs_name: name,
-        parent_name,
-    });
+    devices.push(read_device(path, name));
 
     devices
 }

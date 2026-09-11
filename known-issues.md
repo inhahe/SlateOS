@@ -188,7 +188,17 @@ capability identity. Both ledgers may only shrink, so the count is the
 progress bar — with the caveat this entry exists to record: the count is only
 a progress bar while the instrument holds still.
 
-## TD-B-CRONTAB-SIGNALS-A-RELOAD-NOBODY-LISTENS-FOR (lane B, 2026-09-11)
+## TD-B-CRONTAB-SIGNALS-A-RELOAD-NOBODY-LISTENS-FOR (lane B, 2026-09-11) -- FIXED 2026-09-11
+
+**FIXED by deleting the write,** which is the option this entry named as
+the better default. One thing the entry did not know when it was filed, and
+which settles it rather than merely favouring it: implementing the watcher
+could not have helped either. `crond` sleeps to the next MINUTE BOUNDARY
+and reloads when it wakes, and cron's granularity is one minute -- so the
+earliest a newly added job can run is exactly the moment the daemon
+re-reads the spool. An instant reload would notice the change sooner and
+still run nothing sooner.
+
 
 **In short:** `crontab` writes a file at `/run/crond/reload` after editing a
 crontab, meaning "daemon, re-read the spool". `crond` has no reload watcher —
@@ -262,6 +272,44 @@ permanent is how a workaround outlives the thing it was working around.
 **Found while fixing** the discarded-failure defect in the same function's
 caller, which is the second time today that reading one line closely turned up
 something beside it.
+
+## TD-B-ONE-HUNDRED-AND-FORTY-THREE-DISCARDED-FAILURES-NO-GATE-LOOKS-AT (lane B, 2026-09-11)
+
+**In short:** `check-read-defaults` catches `.unwrap_or_default()` on a call
+that could fail. `.unwrap_or(0)` is the same defect with a literal in place of
+`Default`, and nothing looks for it. There are **143 such sites in 24 crates**,
+against 68 in the ledger that is watched.
+
+**How it surfaced.** `userspace/acpi` had seven sites pinned in the read-defaults
+ledger. Reading all seven found them fine — `status` maps its empty string
+straight to `BatteryStatus::Unknown`, and the descriptive fields print only when
+non-empty, which is right for an absent sysfs attribute. The real defect in that
+file was one line the gate cannot see: `read_sysfs_i64(&path.join("temp"))
+.unwrap_or(0)`, so a thermal zone whose sensor did not answer printed `0.0
+degrees C` — and for a thermal sensor zero reads as very cool. Fixed
+2026-09-11.
+
+**DO NOT WIDEN THE GATE TO `.unwrap_or(<literal>)` WITHOUT READING A SAMPLE
+FIRST.** That was my first instinct and the sample says it is wrong. The 143
+are at least two unlike populations:
+
+| Family | Example | Is the default wrong? |
+|---|---|---|
+| Reads of the world | `read_sysfs_u32(&path.join("cur_state")).unwrap_or(0)`, `get_file_mtime(p).unwrap_or(0)` | Usually yes — same as the pinned ledger |
+| Parsers over a buffer | `read_u16_le(buf, 16).unwrap_or(0)`, `read_u32_le(data, base).unwrap_or(0)` | A truncated ELF/DNS packet field becomes 0. A defect, but a different question with a different fix |
+| Documented defaults | `parse_size(value).unwrap_or(4096)` | No — 4096 is the stated default for a missing config value |
+
+The buffer parsers dominate the count (`gdb` 32, `dig` 20, `file` 6, `readelf`
+6 are mostly these), so a naive widening would bury the world-read family under
+them and pin a large number of sites whose correct treatment has not been
+decided. `check-read-defaults`' own docstring records what that costs: the
+lookbehind that separated 39 findings from 171 exists because "a gate becomes
+noise and then becomes bypassed".
+
+**The proper next step** is to widen only the FIRST family — a literal default
+on a call that reads the world — which means the std readers and local
+functions that touch the filesystem, not every local function returning
+`Option`. Measure the count for that subset alone before pinning anything.
 
 ## TD-B-EIGHTY-THREE-DISCARDED-FAILURES-ARE-PINNED-UNREAD (lane B, 2026-09-10)
 

@@ -38,7 +38,6 @@
 
 cron:at
 cron:crontab
-hostnamectl:hostname
 resolvectl:nslookup
 swapon:free
 useradd:newgrp

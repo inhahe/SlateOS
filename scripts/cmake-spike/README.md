@@ -1,7 +1,18 @@
 # cmake-spike — does upstream CMake link against SlateOS's libc?
 
-**Almost. Twenty symbols short, all of them real libc, and fourteen of the
-twenty are the same trivial thing.**
+**Yes, as of 2026-09-11.** It was twenty symbols short when first run; the
+twenty are implemented and the link is now clean.
+
+| | first run | after the twenty |
+|---|---|---|
+| undefined symbols | 20 | **0** |
+| duplicate symbols | 0 | **0** |
+| link exit | 1 | **0** |
+| binary | none | 22,519,240-byte static `ET_EXEC` |
+
+Closing the first twenty revealed **no second layer** — worth stating, because a
+linker stops reporting a symbol once it resolves, so a gap behind a gap is
+invisible until the one in front of it closes. Here there was nothing behind.
 
 Run `./run.sh` from WSL to reproduce. It is the "try the port before you write a
 line" step from `roadmap-detailed.md`'s *Porting vs. Reimplementing* policy,
@@ -17,17 +28,9 @@ compiled with `zig c++` against zig's musl headers, then linked `-nostdlib`
 against `toolchain/sysroot/lib/libc.a` plus zig's `libc++`, `libc++abi`,
 `libunwind` and `libcompiler_rt`.
 
-| | result |
-|---|---|
-| configure | **0** |
-| build | **0** — 19 static archives |
-| undefined symbols | **20** |
-| **duplicate** symbols | **0** |
-| link exit | 1 |
-
 Configure and the full build both succeed on a cross toolchain with no source
-changes. The link does not, and the twenty names it is missing are the whole
-finding:
+changes — 19 static archives, on the first attempt. The link did not, and the
+twenty names it was missing were the finding:
 
 | | symbols |
 |---|---|
@@ -62,6 +65,17 @@ rootfs rung, not as a port.
 
 Nor does it say anything about `gcc`, the remaining unmeasured quarter of that
 roadmap item.
+
+## The size, which is the one number that nearly stopped this being a port
+
+Unstripped the binary is **274,724,488 bytes** — mostly `debug_info`, against a
+384 MB image. `--strip-debug` brings it to **22,519,240** and `--strip-all` to
+15,337,672. `run.sh` stages the `--strip-debug` form, matching how CPython is
+staged (design-decisions.md §344): the 7 MB difference is the symbol table, and
+that is what turns a fault address on the serial console into a function name.
+
+An artifact that cannot be staged is not a port, so this number is reported by
+`run.sh` on every run rather than being discovered once.
 
 ## Two findings from getting configure to run at all
 

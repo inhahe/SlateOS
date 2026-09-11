@@ -156,25 +156,6 @@ fn read_all_boot_entries() -> Vec<BootEntry> {
     entries
 }
 
-fn generate_default_entries() -> Vec<BootEntry> {
-    vec![
-        BootEntry {
-            num: 0,
-            active: true,
-            label: "Slate OS".to_string(),
-            path: "HD(1,GPT)/EFI/slateos/bootx64.efi".to_string(),
-            _optional: String::new(),
-        },
-        BootEntry {
-            num: 1,
-            active: true,
-            label: "UEFI Shell".to_string(),
-            path: "HD(1,GPT)/EFI/Shell/Shell.efi".to_string(),
-            _optional: String::new(),
-        },
-    ]
-}
-
 // ============================================================================
 // Output
 // ============================================================================
@@ -391,12 +372,29 @@ fn cmd_efibootmgr(args: &[String]) {
     let mut entries = read_all_boot_entries();
     let mut boot_order = read_boot_order();
 
-    // If no real EFI, use defaults.
+    // NO EFI MEANS NO BOOT ENTRIES, AND SAYING SO.
+    //
+    // This used to substitute two invented ones -- "Slate OS" at
+    // HD(1,GPT)/EFI/slateos/bootx64.efi and "UEFI Shell" at
+    // HD(1,GPT)/EFI/Shell/Shell.efi -- with a BootOrder of 0000,0001 to match,
+    // and print them as the machine's boot configuration. Somebody debugging
+    // why a machine will not boot would have read that and concluded the
+    // entries were fine. A test asserted the labels, which is a test
+    // certifying that the program fabricates.
+    //
+    // The two cases are told apart because they need different words: a system
+    // without efivarfs cannot have boot entries, and one with an empty
+    // efivarfs has none. Neither is "here are two".
     if entries.is_empty() {
-        entries = generate_default_entries();
-        boot_order = BootOrder {
-            entries: vec![0, 1],
-        };
+        if std::path::Path::new(EFIVARS_DIR).is_dir() {
+            eprintln!("efibootmgr: no boot entries are defined in {EFIVARS_DIR}");
+        } else {
+            eprintln!(
+                "efibootmgr: EFI variables are not available on this system \
+({EFIVARS_DIR} does not exist)"
+            );
+        }
+        process::exit(1);
     }
 
     // Handle modifications.
@@ -463,14 +461,6 @@ mod tests {
         assert_eq!(c.num, 0);
         assert!(c.active);
         assert_eq!(c.label, "Test");
-    }
-
-    #[test]
-    fn test_generate_defaults() {
-        let entries = generate_default_entries();
-        assert_eq!(entries.len(), 2);
-        assert!(entries[0].active);
-        assert_eq!(entries[0].label, "Slate OS");
     }
 
     #[test]

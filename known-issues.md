@@ -97,9 +97,29 @@ them:
 | `stty/src/main.rs:1272-1304` (5×) | `tiocgwinsz(fd).unwrap_or_default()` — an ioctl failure becomes a 0×0 terminal, and the caller then computes a layout for it. |
 | ~~`crontab/src/main.rs:669`~~ | **THIS ENTRY WAS WRONG.** I wrote it from a sample without reading the surrounding code. The empty username only ever accompanied `Action::Help`, which prints usage and touches no spool file — the line above it said so, and the real path already used `ok_or_else`. Corrected 2026-09-11; the field is `Option<String>` now so the next action added cannot inherit the trap. |
 
-Also `hostname` (empty hostname), `stat` (empty symlink target), `udevd` and
-`thermald` (empty sysfs attributes), `mktemp` (empty user and group names),
-`efibootmgr` (empty boot order).
+Also `stat` (empty symlink target), and `udevd` and `thermald`, both fixed
+2026-09-11.
+
+**Three more of the names above were re-read in context on 2026-09-11 and two
+are defensible**, which is the same correction as `crontab`'s and is why the
+whole list should be read before it is worked:
+
+* `hostname` — `read_hostname()` returns `Err` only when BOTH
+  /proc/sys/kernel/hostname and /etc/hostname are absent, empty or unreadable,
+  so `Err` already means "no hostname is configured". The caller is
+  `--boot-set`, whose job is to ensure one exists. Defensible.
+* `mktemp` (the `id` personality) — the three `uid_to_name`/`gid_to_name`
+  defaults are tested with `is_empty()` on the very next line and print
+  `uid=1000` without a name, which is what real `id` does for an unresolvable
+  uid. Defensible.
+* `efibootmgr` — NOT defensible, and worse than the entry said. The discarded
+  read was the small half; the crate substituted two INVENTED boot entries
+  ("Slate OS" and "UEFI Shell", with plausible device paths) whenever no real
+  ones were found, and printed them as the machine's boot configuration. A test
+  asserted the labels. Fixed 2026-09-11: it refuses, and says whether efivarfs
+  is absent or merely empty. The `unwrap_or_default()` on BootOrder stays
+  baselined — with the fabrication gone it leads to that refusal rather than to
+  an invented answer.
 
 **A separate finding from the same sample, not part of this entry's debt:**
 `userspace/last` carries a FOURTH copy of the utmp record parser

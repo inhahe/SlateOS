@@ -3839,6 +3839,43 @@ check_gates_are_wired() {
 
 check_gates_are_wired
 
+# The merge-readiness advisory's own cases.
+#
+# Only the SELF-TEST is registered here, never the tool. The tool reports on
+# what the other two lanes have landed in origin/main, so wiring it as a gate
+# would let their activity refuse this lane's build -- and a gate three agents
+# want out of the way is worse than no gate. It exits 0 always, by design.
+#
+# Its classifier is worth pinning all the same, because it answers "does this
+# merge invalidate your suite run?" and a wrong `no` is the expensive direction:
+# it tells a lane to skip a re-test it needed. The cases encode the lane/path
+# map, including the two that are easy to get backwards -- `kernel/src/net` is
+# lane A's and not lane C's, and `scripts/boot-test.sh` is lane A's own rather
+# than shared machinery.
+check_merge_readiness_selftest() {
+    local py
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== Merge-readiness self-test: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    if ! run_checker merge-readiness-selftest "$py" \
+            "$PROJECT_ROOT/scripts/merge-readiness.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  scripts/merge-readiness.py fails its own" >&2
+        echo "cases, so its lane/path classification is wrong.  It is advisory and" >&2
+        echo "cannot fail a build on its own -- which is exactly why a silent error" >&2
+        echo "in it would persist: the only thing that ever checks it is this." >&2
+        return 1
+    fi
+}
+
+check_merge_readiness_selftest
+
 # The third way a gate can be inert, and the last of the triad.
 #
 #   check-gates-can-refuse   -- CAN this gate ever say no?

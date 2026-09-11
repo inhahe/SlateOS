@@ -697,7 +697,7 @@ impl ExprParser {
                 Ok(ExprValue::Int(if val.is_null_or_zero() { 1 } else { 0 }))
             }
             None => Err("missing operand".to_string()),
-            Some(tok) => Err(format!("syntax error near '{:?}'", tok)),
+            Some(tok) => Err(format!("syntax error near {tok:?}")),
         }
     }
 }

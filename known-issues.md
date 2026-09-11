@@ -36,6 +36,37 @@ freely. See `roadmap.md` → "Three-Agent Parallel Execution" rule 3, and
 
 ---
 
+## TD-B-INSTALLS-BACKUP-RENAMES-TO-A-PATH-IT-INVENTED (lane B, 2026-09-11)
+
+**In short:** `install --backup` moves the existing destination aside before
+writing the new file. It builds the backup's name with
+
+    let backup_path = format!("{}{}", dst.display(), args.backup_suffix);
+
+`Path::display()` is **lossy**: any byte in `dst` that is not valid UTF-8 comes
+out as U+FFFD. So on a destination whose name is not UTF-8, the rename targets
+a path that is not `dst` plus a suffix — it is a *different name*, one the user
+never had. The original file is moved somewhere they did not ask for and cannot
+easily find, and `install` reports success.
+
+**Why it is not hypothetical here.** This filesystem's rule is "any byte except
+`/` and NUL", which is the whole reason CLAUDE.md item 7 exists. A name
+arriving from a tarball, a foreign filesystem or a script is routinely not
+UTF-8.
+
+**Where:** `userspace/install/src/main.rs`, in the `--backup` path just above
+the `fs::rename`.
+
+**The fix** is to build the name as bytes rather than as text: take
+`dst.as_os_str()`, append the suffix, and turn it back into an `OsString`
+without ever going through `String`. `userspace/quoting` already exposes
+`os_bytes` and `os_from_bytes` for exactly this round trip, and
+`coreutils/src/bin/tar.rs` uses that pair.
+
+**Found** while repairing the diagnostic on the very next line, which
+interpolated the same `dst.display()` into a message. The message was the
+flagged defect; the rename beside it is the one that moves a file.
+
 ## TD-B-FOUR-MORE-PROGRAMS-SUBSTITUTE-INVENTED-DATA-ON-A-FAILED-READ (lane B, 2026-09-11) -- CLOSED 2026-09-11
 
 **CLOSED.** All three real entries are fixed: `acl` and `blockdev` on

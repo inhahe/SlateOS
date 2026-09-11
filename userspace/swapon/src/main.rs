@@ -331,7 +331,8 @@ fn activate_swap(device: &str, priority: Option<i32>, discard: bool, verbose: bo
         Ok(()) => {
             if verbose {
                 println!(
-                    "swapon: {device}: activated{}",
+                    "swapon: {}: activated{}",
+                    quotef_os(device),
                     priority
                         .map(|p| format!(" (priority {p})"))
                         .unwrap_or_default()

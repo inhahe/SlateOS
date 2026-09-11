@@ -4,6 +4,7 @@
 //! editing commands (substitution, deletion, insertion, etc.), and writes the
 //! result to stdout. Includes a built-in basic/extended regex engine.
 
+use quoting::quoteaf;
 use std::cell::Cell;
 use std::env;
 use std::fs;
@@ -729,7 +730,7 @@ fn parse_one_command(bytes: &[u8], pos: &mut usize, extended: bool) -> Result<Se
             Command::Group(group_cmds)
         }
         other => {
-            return Err(format!("unknown command: '{}'", char::from(other)));
+            return Err(format!("unknown command: {}", quoteaf(&[other])));
         }
     };
 

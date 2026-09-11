@@ -359,7 +359,16 @@ def self_test() -> int:
     # So: take the real file, confirm the gate is quiet on it, inject one reach
     # into its self-test body, and require the gate to find exactly that. In
     # memory -- the file is never written.
-    subject = pathlib.Path("kernel/src/sockact.rs")
+    # Script-relative first: this file is in `scripts/`, so its grandparent is the
+    # repository root by construction, whatever the caller's working directory is.
+    # The CWD-relative form is kept as a fallback for a tree laid out differently.
+    # This case FAILS rather than skips when the subject is missing, so it must not
+    # depend on an ambient assumption: the cost of being wrong is a red tree for
+    # every lane, raised by a self-test rather than by a defect.
+    here = pathlib.Path(__file__).resolve().parent.parent
+    subject = here / "kernel/src/sockact.rs"
+    if not subject.is_file():
+        subject = pathlib.Path("kernel/src/sockact.rs")
     if not subject.is_file():
         print("  SKIP  mutation case: kernel/src/sockact.rs not found")
         print("        (run from the repository root; this case is the only one")

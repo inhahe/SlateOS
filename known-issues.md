@@ -512,6 +512,32 @@ on a call that reads the world — which means the std readers and local
 functions that touch the filesystem, not every local function returning
 `Option`. Measure the count for that subset alone before pinning anything.
 
+**DONE 2026-09-11, and the subset is small: 18 sites in 7 crates**, against 143
+for the unscoped pattern. The filter is transitive — a local function reads the
+world if its body does, or if it calls one that does — which keeps
+`read_sysfs_u32` and `get_file_mtime` and drops the buffer parsers
+(`read_u16_le(buf, 16)`) that dominate the raw count.
+
+All 18 were READ rather than pinned, which is what a population this size is
+for. Fixed: `lspci` (an unreadable `vendor` became PCI ID 0000, printed as
+"Unknown vendor 0000"), `acpi` and `thermald` (a sensor that did not answer
+became 0 degrees and the classifier called the zone OK), `lsof` (a process
+whose uid could not be read was attributed to ROOT), `vmstat` (an unreadable
+`/proc/uptime` became a 1-second DIVISOR, so since-boot rates printed as raw
+totals — wrong by 86,400 on a machine up for a day).
+
+Left alone deliberately, with the reason recorded at each site: `ar`'s mtime
+(zero is already its `-D` deterministic value), `acpi`'s `cur_state`/`max_state`
+and `lspci`'s class/revision/IRQ/subsystem (zero is a legitimate reading for
+every one), `ntpd`'s drift (a missing drift file means zero drift, which is
+what ntpd itself assumes).
+
+**No gate was built for this subset, and that is the recommendation.** Eighteen
+sites, now all either fixed or annotated, is a population where a ratchet would
+cost more than it caught — and the interesting half, deciding whether a literal
+default is wrong, is exactly the judgement a regex cannot make. The larger 143
+stays unpinned for the reason above.
+
 ## TD-B-EIGHTY-THREE-DISCARDED-FAILURES-ARE-PINNED-UNREAD (lane B, 2026-09-10)
 
 **In short:** `check-read-defaults` was widened to see two more spellings of the

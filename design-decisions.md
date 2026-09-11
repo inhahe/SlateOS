@@ -72101,11 +72101,22 @@ are recorded because they change the palette beyond what was asked.**
    `subtext0` has **1,087** uses to `subtext1`'s **161**, so if these two should
    in fact differ, `subtext0` is the one that carries the weight.
 
-**The blue-green is `#0F6E63`** — 6.12 : 1 on white, 5.41 on the off-white page,
-and 3.43 from black. Among the candidates that stayed dark enough to read as
-"not too bright" it has the widest separation from main text, which is what
-keeps a caption from reading as a heading. The operator can retune it live; the
-explorer now carries it as the `Borders (the default)` preset.
+**The colour is `#00688B`** — revised the same day, on "make it more bluish,
+either cerulean or cyan". Hue 195 and fully saturated, so it reads as cerulean
+rather than the teal first proposed (hue 173): 6.26 : 1 on white, 5.54 on the
+off-white page, 3.35 from black.
+
+Neither obvious spelling of the ask survives the floor, which is why the value
+is not simply "cerulean" or "cyan":
+
+| candidate | on the off-white page | |
+|---|---|---|
+| classic cerulean `#007BA7` | **4.23** | passes on pure white, fails on the page we use |
+| pure cyan `#00FFFF` | **1.25** | not a text colour at any size |
+| **`#00688B`** | **5.54** | the most saturated cerulean that clears the floor with margin |
+
+The operator can retune it live; the explorer carries it as the
+`Borders (the default)` preset.
 
 **Why this is the right shape, beyond being what was asked.** The operator's
 mother supplied the argument without meaning to. She wanted the selected menu

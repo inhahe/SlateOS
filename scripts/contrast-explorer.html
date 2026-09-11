@@ -188,9 +188,12 @@
             grey to keep. But <code>subtext0</code> has <b>1,087</b> uses to <code>subtext1</code>'s <b>161</b>,
             so if these should differ, that is the one that carries the weight.</li>
         <li><b>A link and a caption are now the same colour.</b> The accent and <code>subtext1</code> hold one
-            value, so &ldquo;Disconnect&rdquo; and &ldquo;Connected &middot; 5&nbsp;GHz &middot; strong&rdquo; sit
-            in one row at one colour. Defensible when the outline carries selection, but it is the first thing to
-            look at if the examples read wrong.</li>
+            value, so the only thing separating something you can click from something you can merely read is the
+            underline. There is now a worked case to judge it by: in the settings window, <em>&ldquo;Your traffic
+            is visible to the network operator. <span style="text-decoration:underline">Learn more</span>&rdquo;</em>
+            puts a link inside a caption of its own colour. Defensible when the outline carries selection and
+            state, but it is the first thing to look at if the examples read wrong &mdash; and the cheapest fix,
+            if it does, is to give the accent back a value of its own.</li>
       </ol>
 
       <h3 style="font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:#666;margin:14px 0 6px">What the conversion actually touches</h3>
@@ -342,10 +345,18 @@ const PRESETS = {
   //     second grey to preserve. Flagged rather than assumed -- subtext0 has 1087 uses to
   //     subtext1's 161, so if these should differ, subtext0 is the one that matters.
   //
-  // #0F6E63 is the pick: 6.12 on white, 5.41 on the off-white page, and 3.43 from black --
-  // the widest separation from main text among the candidates that stayed dark enough to
-  // read as "not too bright".
-  brd: { main:'#000000', sec:'#0F6E63', sec1:'#0F6E63', acc:'#0F6E63', ovl:'#9CA0B0',
+  // #00688B is the pick, revised 2026-09-11 on the operator's "make it more bluish, either
+  // cerulean or cyan". Hue 195 and fully saturated, so it is unmistakably cerulean rather
+  // than the teal it replaced (hue 173): 6.26 on white, 5.54 on the off-white page, 3.35
+  // from black.
+  //
+  // The two obvious spellings of the ask do not survive contact with the floor, which is
+  // why this is not simply "cerulean":
+  //   * classic cerulean #007BA7 reaches only 4.23 on the off-white page -- it passes on
+  //     pure white and fails on the background we actually use.
+  //   * pure cyan #00FFFF is 1.25 on white. It is not a text colour at any size.
+  // #00688B is the most saturated cerulean that still clears the floor with real margin.
+  brd: { main:'#000000', sec:'#00688B', sec1:'#00688B', acc:'#00688B', ovl:'#9CA0B0',
          page:'#EFF1F5', card:'#EFF1F5',
          ladder: { mantle:'#EFF1F5', crust:'#EFF1F5', s0:'#EFF1F5', s1:'#EFF1F5', s2:'#CCD0DA' },
          borders: true },
@@ -506,6 +517,14 @@ function renderFullPages() {
           <div class="r" style="${surf(b, L.s0)}">
             <div class="g"><div style="${T1}">Metered connection</div></div>
             <div class="sw" style="background:${L.s2}"><i style="left:2px"></i></div>${tag('surface2')}
+          </div>
+          <!-- A real link, deliberately next to a caption in the same colour. This is the
+               one thing the palette cannot currently distinguish: with accent and subtext1
+               holding one value, only the underline separates a thing you can click from a
+               thing you can merely read. -->
+          <div class="t2s" style="${T2};margin:2px 0 9px">
+            Your traffic is visible to the network operator.
+            <span style="${TA};text-decoration:underline">Learn more</span>
           </div>
           <div style="margin-top:11px">
             <span class="btn" style="background:${acc};color:${page}">Save</span>

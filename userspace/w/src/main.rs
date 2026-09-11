@@ -18,7 +18,6 @@
 // protocol's terminology.
 #![allow(dead_code, clippy::enum_variant_names)]
 
-use std::env;
 use std::io::{self, Write};
 use std::path::PathBuf;
 
@@ -51,24 +50,29 @@ fn detect_personality(argv0: &str) -> Personality {
 
 #[derive(Debug, Clone)]
 struct UtmpEntry {
-    user: String,
-    tty: String,
-    host: String,
+    /// Username as it appears in utmp. NOT necessarily UTF-8: our names allow
+    /// every byte except `/` and NUL, and decoding lossily would map two
+    /// different users onto one string.
+    user: Vec<u8>,
+    tty: Vec<u8>,
+    host: Vec<u8>,
     login_time: u64,
     pid: u32,
     idle_secs: u64,
-    what: String,
+    what: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
 struct UserInfo {
-    username: String,
-    real_name: String,
-    home_dir: String,
-    shell: String,
-    office: String,
-    office_phone: String,
-    home_phone: String,
+    username: Vec<u8>,
+    real_name: Vec<u8>,
+    /// `None` when the recorded home directory is not UTF-8; see
+    /// [`read_passwd_gecos`].
+    home_dir: Option<String>,
+    shell: Vec<u8>,
+    office: Vec<u8>,
+    office_phone: Vec<u8>,
+    home_phone: Vec<u8>,
     plan: Option<String>,
     project: Option<String>,
     mail_status: MailStatus,
@@ -191,86 +195,130 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
 // System information gathering
 // ---------------------------------------------------------------------------
 
+/// The sessions recorded in `/var/run/utmp`, or none if it cannot be read.
+///
+/// WHAT THIS REPLACED, because the shape is worth keeping in view: it opened
+/// the file with `read_to_string` and split each line on `:`, expecting
+/// `user:tty:host:time:pid:what`. utmp is binary -- 384-byte records, which
+/// `posix` declares and `who` and `uptime` both read correctly -- so the parse
+/// matched nothing, EVERY TIME, and the function fell through to
+///
+///     if entries.is_empty() && let Ok(user) = env::var("USER")
+///
+/// and pushed a session for whoever `$USER` named, on a tty called "console",
+/// with a login time of 0. So `w` always showed exactly one user, always the
+/// caller, always invented -- and `USER=root w` said root was logged in.
+///
+/// There is no fallback now. If utmp cannot be read or holds no sessions, the
+/// answer is that we do not know of any, which prints as no rows. A list of
+/// logged-in users is not somewhere to guess.
 fn read_utmp_entries() -> Vec<UtmpEntry> {
-    // In a real OS, read from /var/run/utmp binary file
-    // For now, synthesize from /var/run/utmp text file or fallback
-    let mut entries = Vec::new();
+    let Ok(data) = std::fs::read("/var/run/utmp") else {
+        return Vec::new();
+    };
 
-    if let Ok(content) = std::fs::read_to_string("/var/run/utmp") {
-        for line in content.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            // Format: user:tty:host:login_time:pid:what
-            let fields: Vec<&str> = line.split(':').collect();
-            if fields.len() >= 4 {
-                entries.push(UtmpEntry {
-                    user: fields[0].to_string(),
-                    tty: fields[1].to_string(),
-                    host: fields.get(2).unwrap_or(&"").to_string(),
-                    login_time: fields.get(3).and_then(|s| s.parse().ok()).unwrap_or(0),
-                    pid: fields.get(4).and_then(|s| s.parse().ok()).unwrap_or(0),
-                    idle_secs: 0,
-                    what: fields.get(5).unwrap_or(&"-").to_string(),
-                });
-            }
-        }
-    }
-
-    // If no utmp entries, try to show current user
-    if entries.is_empty()
-        && let Ok(user) = env::var("USER")
-    {
-        entries.push(UtmpEntry {
-            user,
-            tty: "console".to_string(),
-            host: String::new(),
-            login_time: 0,
-            pid: std::process::id(),
+    utmpfile::parse(&data)
+        .into_iter()
+        .filter(utmpfile::Record::is_user_session)
+        .map(|r| UtmpEntry {
+            user: r.user,
+            tty: r.tty,
+            host: r.host,
+            login_time: r.login_time,
+            pid: u32::try_from(r.pid).unwrap_or(0),
             idle_secs: 0,
-            what: "-".to_string(),
-        });
-    }
-
-    entries
+            // utmp has no WHAT field; real `w` derives it from the session
+            // leader's /proc/PID/cmdline. This has always printed "-" -- the
+            // text parse that would have filled it never matched a line -- so
+            // "-" is what it prints, and now says only what is true.
+            what: b"-".to_vec(),
+        })
+        .collect()
 }
 
-fn read_passwd_gecos(username: &str) -> (String, String, String, String, String) {
-    // Returns (real_name, home_dir, shell, office, office_phone)
-    if let Ok(content) = std::fs::read_to_string("/etc/passwd") {
-        for line in content.lines() {
-            let fields: Vec<&str> = line.split(':').collect();
-            if fields.len() >= 7 && fields[0] == username {
-                let gecos = fields[4];
-                let gecos_parts: Vec<&str> = gecos.split(',').collect();
-                let real_name = gecos_parts.first().unwrap_or(&username).to_string();
-                let office = gecos_parts.get(1).unwrap_or(&"").to_string();
-                let office_phone = gecos_parts.get(2).unwrap_or(&"").to_string();
+/// `(real_name, home_dir, shell, office, office_phone)` for `username`.
+///
+/// Reads `/etc/passwd` as BYTES and compares the name byte-for-byte. It used
+/// `read_to_string`, so a passwd file containing one non-UTF-8 byte anywhere
+/// -- in any user's GECOS comment, not necessarily this one's -- failed the
+/// whole read and every lookup silently returned the defaults.
+///
+/// `home_dir` is `None` when it is not valid UTF-8, because the only use for
+/// it here is building a `PathBuf` for `.plan` and `.project`, and this crate
+/// is built for a host target where a path cannot be made from arbitrary
+/// bytes. Refusing to open a file we cannot name is honest; guessing at the
+/// name is not.
+/// What `/etc/passwd` says about one user.
+///
+/// A named struct rather than a five-element tuple because four of the five
+/// were `String` and the call sites destructured them positionally -- swapping
+/// `office` and `office_phone` would have compiled and printed a phone number
+/// under Office.
+struct PasswdFields {
+    real_name: Vec<u8>,
+    /// `None` when the recorded home directory is not UTF-8; see the note on
+    /// [`read_passwd_gecos`].
+    home_dir: Option<String>,
+    shell: Vec<u8>,
+    office: Vec<u8>,
+    office_phone: Vec<u8>,
+}
 
-                return (
-                    real_name,
-                    fields[5].to_string(),
-                    fields[6].to_string(),
-                    office,
-                    office_phone,
-                );
-            }
+impl PasswdFields {
+    /// What an unknown user looks like: the name we were asked about, and
+    /// nothing else claimed.
+    fn defaults_for(username: &[u8]) -> Self {
+        Self {
+            real_name: username.to_vec(),
+            home_dir: None,
+            shell: Vec::new(),
+            office: Vec::new(),
+            office_phone: Vec::new(),
         }
     }
-    (
-        username.to_string(),
-        String::new(),
-        String::new(),
-        String::new(),
-        String::new(),
-    )
+}
+
+fn read_passwd_gecos(username: &[u8]) -> PasswdFields {
+    let Ok(content) = std::fs::read("/etc/passwd") else {
+        return PasswdFields::defaults_for(username);
+    };
+
+    for line in content.split(|&b| b == b'\n') {
+        let fields: Vec<&[u8]> = line.split(|&b| b == b':').collect();
+        if fields.len() >= 7 && fields.first() == Some(&username) {
+            let gecos: Vec<&[u8]> = fields
+                .get(4)
+                .map_or_else(Vec::new, |g| g.split(|&b| b == b',').collect());
+            let part = |n: usize| gecos.get(n).map_or_else(Vec::new, |b| b.to_vec());
+            let real_name = if gecos.first().is_some_and(|f| !f.is_empty()) {
+                part(0)
+            } else {
+                username.to_vec()
+            };
+            return PasswdFields {
+                real_name,
+                home_dir: fields
+                    .get(5)
+                    .and_then(|b| str::from_utf8(b).ok())
+                    .map(str::to_owned),
+                shell: fields.get(6).map_or_else(Vec::new, |b| b.to_vec()),
+                office: part(1),
+                office_phone: part(2),
+            };
+        }
+    }
+
+    PasswdFields::defaults_for(username)
 }
 
 fn get_user_info(username: &str) -> UserInfo {
-    let (real_name, home_dir, shell, office, office_phone) = read_passwd_gecos(username);
+    // The name arrives from argv, which this crate already holds as `String`.
+    // Everything downstream of the passwd lookup is bytes.
+    let pw = read_passwd_gecos(username.as_bytes());
 
-    // Read .plan file
+    // Read .plan file. `home_dir` is None when it is not UTF-8, so there is no
+    // path to build and no file to read -- see read_passwd_gecos.
+    let home_dir = pw.home_dir.clone().unwrap_or_default();
     let plan = if !home_dir.is_empty() {
         let plan_path = PathBuf::from(&home_dir).join(".plan");
         std::fs::read_to_string(plan_path).ok()
@@ -301,17 +349,20 @@ fn get_user_info(username: &str) -> UserInfo {
 
     let sessions = read_utmp_entries()
         .into_iter()
-        .filter(|e| e.user == username)
+        .filter(|e| e.user == username.as_bytes())
         .collect();
 
     UserInfo {
-        username: username.to_string(),
-        real_name,
-        home_dir,
-        shell,
-        office,
-        office_phone,
-        home_phone: String::new(),
+        username: username.as_bytes().to_vec(),
+        real_name: pw.real_name,
+        home_dir: pw.home_dir,
+        shell: pw.shell,
+        office: pw.office,
+        office_phone: pw.office_phone,
+        // /etc/passwd's GECOS has a fourth comma-separated field for the home
+        // phone. It was never read and is not read now; leaving it empty says
+        // "not known" rather than "not present".
+        home_phone: Vec::new(),
         plan,
         project,
         mail_status,
@@ -423,7 +474,7 @@ fn run_w(cfg: &Config, writer: &mut dyn Write) -> io::Result<()> {
     } else {
         entries
             .iter()
-            .filter(|e| cfg.users.iter().any(|u| u == &e.user))
+            .filter(|e| cfg.users.iter().any(|u| u.as_bytes() == e.user.as_slice()))
             .collect()
     };
 
@@ -449,36 +500,42 @@ fn run_w(cfg: &Config, writer: &mut dyn Write) -> io::Result<()> {
 
     // Output entries
     for entry in &entries {
+        // The columns are written rather than formatted because the
+        // fields are bytes. Same widths, same order, same single space
+        // between columns as the `{:<8} {:<10}` strings these replace.
         if cfg.short_format {
-            writeln!(
-                writer,
-                "{:<8} {:<10} {} {}",
-                truncate_str(&entry.user, 8),
-                truncate_str(&entry.tty, 10),
-                format_idle(entry.idle_secs),
-                &entry.what
-            )?;
+            write_col(writer, &entry.user, 8)?;
+            writer.write_all(b" ")?;
+            write_col(writer, &entry.tty, 10)?;
+            write!(writer, " {} ", format_idle(entry.idle_secs))?;
+            writer.write_all(&entry.what)?;
+            writeln!(writer)?;
         } else if cfg.from_field {
-            writeln!(
+            write_col(writer, &entry.user, 8)?;
+            writer.write_all(b" ")?;
+            write_col(writer, &entry.tty, 8)?;
+            writer.write_all(b" ")?;
+            write_col(writer, &entry.host, 16)?;
+            write!(
                 writer,
-                "{:<8} {:<8} {:<16} {:<8} {} {}",
-                truncate_str(&entry.user, 8),
-                truncate_str(&entry.tty, 8),
-                truncate_str(&entry.host, 16),
+                " {:<8} {} ",
                 format_login_time(entry.login_time),
-                format_idle(entry.idle_secs),
-                &entry.what
+                format_idle(entry.idle_secs)
             )?;
+            writer.write_all(&entry.what)?;
+            writeln!(writer)?;
         } else {
-            writeln!(
+            write_col(writer, &entry.user, 8)?;
+            writer.write_all(b" ")?;
+            write_col(writer, &entry.tty, 10)?;
+            write!(
                 writer,
-                "{:<8} {:<10} {:<8} {} {}",
-                truncate_str(&entry.user, 8),
-                truncate_str(&entry.tty, 10),
+                " {:<8} {} ",
                 format_login_time(entry.login_time),
-                format_idle(entry.idle_secs),
-                &entry.what
+                format_idle(entry.idle_secs)
             )?;
+            writer.write_all(&entry.what)?;
+            writeln!(writer)?;
         }
     }
 
@@ -494,18 +551,22 @@ fn run_finger(cfg: &Config, writer: &mut dyn Write) -> io::Result<()> {
             "Login     Name              Tty      Idle  Login Time   Office     Office Phone"
         )?;
         for entry in &entries {
-            let (real_name, _, _, office, phone) = read_passwd_gecos(&entry.user);
-            writeln!(
+            let pw = read_passwd_gecos(&entry.user);
+            write_col(writer, &entry.user, 9)?;
+            writer.write_all(b" ")?;
+            write_col(writer, &pw.real_name, 17)?;
+            writer.write_all(b" ")?;
+            write_col(writer, &entry.tty, 8)?;
+            write!(
                 writer,
-                "{:<9} {:<17} {:<8} {} {:<12} {:<10} {}",
-                truncate_str(&entry.user, 9),
-                truncate_str(&real_name, 17),
-                truncate_str(&entry.tty, 8),
+                " {} {:<12} ",
                 format_idle(entry.idle_secs),
-                format_login_time(entry.login_time),
-                truncate_str(&office, 10),
-                truncate_str(&phone, 12),
+                format_login_time(entry.login_time)
             )?;
+            write_col(writer, &pw.office, 10)?;
+            writer.write_all(b" ")?;
+            write_col(writer, &pw.office_phone, 12)?;
+            writeln!(writer)?;
         }
         return Ok(());
     }
@@ -523,32 +584,36 @@ fn run_finger(cfg: &Config, writer: &mut dyn Write) -> io::Result<()> {
 
         if cfg.short_format && !cfg.long_format {
             // Short format
-            writeln!(
-                writer,
-                "Login: {:<20} Name: {}",
-                info.username, info.real_name
-            )?;
+            writer.write_all(b"Login: ")?;
+            write_col(writer, &info.username, 20)?;
+            writer.write_all(b" Name: ")?;
+            writer.write_all(&info.real_name)?;
+            writeln!(writer)?;
         } else {
             // Long format
             if idx > 0 {
                 writeln!(writer)?;
             }
-            writeln!(
+            writer.write_all(b"Login: ")?;
+            write_col(writer, &info.username, 20)?;
+            writer.write_all(b" Name: ")?;
+            writer.write_all(&info.real_name)?;
+            writeln!(writer)?;
+            writer.write_all(b"Directory: ")?;
+            write_col(
                 writer,
-                "Login: {:<20} Name: {}",
-                info.username, info.real_name
+                info.home_dir.as_deref().unwrap_or("").as_bytes(),
+                22,
             )?;
-            writeln!(
-                writer,
-                "Directory: {:<22} Shell: {}",
-                info.home_dir, info.shell
-            )?;
+            writer.write_all(b" Shell: ")?;
+            writer.write_all(&info.shell)?;
+            writeln!(writer)?;
             if !info.office.is_empty() || !info.office_phone.is_empty() {
-                writeln!(
-                    writer,
-                    "Office: {:<24} Office Phone: {}",
-                    info.office, info.office_phone
-                )?;
+                writer.write_all(b"Office: ")?;
+                write_col(writer, &info.office, 24)?;
+                writer.write_all(b" Office Phone: ")?;
+                writer.write_all(&info.office_phone)?;
+                writeln!(writer)?;
             }
 
             // Login sessions
@@ -558,7 +623,9 @@ fn run_finger(cfg: &Config, writer: &mut dyn Write) -> io::Result<()> {
                 for session in &info.login_sessions {
                     write!(writer, "On since ")?;
                     write!(writer, "{}", format_login_time(session.login_time))?;
-                    writeln!(writer, " on {}", session.tty)?;
+                    writer.write_all(b" on ")?;
+                    writer.write_all(&session.tty)?;
+                    writeln!(writer)?;
                 }
             }
 
@@ -598,7 +665,7 @@ fn run_pinky(cfg: &Config, writer: &mut dyn Write) -> io::Result<()> {
         } else {
             entries
                 .iter()
-                .filter(|e| cfg.users.iter().any(|u| u == &e.user))
+                .filter(|e| cfg.users.iter().any(|u| u.as_bytes() == e.user.as_slice()))
                 .collect()
         };
 
@@ -609,47 +676,56 @@ fn run_pinky(cfg: &Config, writer: &mut dyn Write) -> io::Result<()> {
             )?;
         }
         for entry in &entries {
-            let (real_name, _, _, _, _) = read_passwd_gecos(&entry.user);
-            writeln!(
+            let pw = read_passwd_gecos(&entry.user);
+            write_col(writer, &entry.user, 8)?;
+            writer.write_all(b" ")?;
+            write_col(writer, &pw.real_name, 20)?;
+            writer.write_all(b" ")?;
+            write_col(writer, &entry.tty, 8)?;
+            write!(
                 writer,
-                "{:<8} {:<20} {:<8} {} {:<12} {}",
-                truncate_str(&entry.user, 8),
-                truncate_str(&real_name, 20),
-                truncate_str(&entry.tty, 8),
+                " {} {:<12} ",
                 format_idle(entry.idle_secs),
-                format_login_time(entry.login_time),
-                &entry.host,
+                format_login_time(entry.login_time)
             )?;
+            writer.write_all(&entry.host)?;
+            writeln!(writer)?;
         }
     } else {
         // Long format for specified users
         for username in &cfg.users {
             let info = get_user_info(username);
-            writeln!(
+            writer.write_all(b"Login name: ")?;
+            write_col(writer, &info.username, 28)?;
+            writer.write_all(b" In real life: ")?;
+            writer.write_all(&info.real_name)?;
+            writeln!(writer)?;
+            writer.write_all(b"Directory: ")?;
+            // An un-namable home directory prints as empty rather than as a
+            // guess at what the bytes might have said.
+            write_col(
                 writer,
-                "Login name: {:<28} In real life: {}",
-                info.username, info.real_name
+                info.home_dir.as_deref().unwrap_or("").as_bytes(),
+                29,
             )?;
-            writeln!(
-                writer,
-                "Directory: {:<29} Shell: {}",
-                info.home_dir, info.shell
-            )?;
+            writer.write_all(b" Shell: ")?;
+            writer.write_all(&info.shell)?;
+            writeln!(writer)?;
             if info.login_sessions.is_empty() {
                 writeln!(writer, "Never logged in.")?;
             } else {
                 for session in &info.login_sessions {
-                    writeln!(
+                    write!(
                         writer,
-                        "On since {} on {}{}",
-                        format_login_time(session.login_time),
-                        session.tty,
-                        if session.host.is_empty() {
-                            String::new()
-                        } else {
-                            format!(" from {}", session.host)
-                        }
+                        "On since {} on ",
+                        format_login_time(session.login_time)
                     )?;
+                    writer.write_all(&session.tty)?;
+                    if !session.host.is_empty() {
+                        writer.write_all(b" from ")?;
+                        writer.write_all(&session.host)?;
+                    }
+                    writeln!(writer)?;
                 }
             }
             if !cfg.no_plan {
@@ -666,12 +742,28 @@ fn run_pinky(cfg: &Config, writer: &mut dyn Write) -> io::Result<()> {
     Ok(())
 }
 
-fn truncate_str(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        s[..max].to_string()
+/// `bytes`, cut to at most `max` bytes.
+///
+/// This took a `&str` and did `s[..max]`, which PANICS when `max` falls inside
+/// a multi-byte character -- a user called "café" crashed `w` at a width of 3.
+/// Cutting bytes cannot panic. It can split a character, which shows as one
+/// replacement glyph in the terminal and is what every C tool here does.
+fn truncate_bytes(bytes: &[u8], max: usize) -> &[u8] {
+    bytes.get(..max).unwrap_or(bytes)
+}
+
+/// Write `bytes` cut to `width` and padded with spaces to `width`.
+///
+/// The `{:<8}` formatting this replaces needs a `str`, which is the whole
+/// reason the fields used to be decoded. Padding counts BYTES, as the C tools
+/// do -- a column is a column of the file, not of grapheme clusters.
+fn write_col(writer: &mut dyn Write, bytes: &[u8], width: usize) -> io::Result<()> {
+    let shown = truncate_bytes(bytes, width);
+    writer.write_all(shown)?;
+    for _ in shown.len()..width {
+        writer.write_all(b" ")?;
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -741,7 +833,12 @@ fn print_version(personality: Personality) {
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
 pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
-    let args: Vec<String> = env::args().collect();
+    // Fully qualified rather than imported: `main` is the only user of it, and
+    // this crate is `no_main` under cfg(test), so a `use std::env;` at the top
+    // is genuinely unused in the test build and warns there. That warning is
+    // how I learned nothing else in the file reads the environment any more --
+    // the $USER fallback was the last caller.
+    let args: Vec<String> = std::env::args().collect();
 
     let cfg = match parse_args(&args) {
         Ok(c) => c,
@@ -992,18 +1089,52 @@ mod tests {
     }
 
     #[test]
-    fn test_truncate_str_short() {
-        assert_eq!(truncate_str("hello", 10), "hello");
+    fn truncation_leaves_a_short_value_alone() {
+        assert_eq!(truncate_bytes(b"hello", 10), b"hello");
+        assert_eq!(truncate_bytes(b"hello", 5), b"hello");
     }
 
     #[test]
-    fn test_truncate_str_exact() {
-        assert_eq!(truncate_str("hello", 5), "hello");
+    fn truncation_cuts_a_long_value() {
+        assert_eq!(truncate_bytes(b"hello world", 5), b"hello");
     }
 
     #[test]
-    fn test_truncate_str_long() {
-        assert_eq!(truncate_str("hello world", 5), "hello");
+    fn truncation_in_the_middle_of_a_character_does_not_panic() {
+        // THE REASON THIS TAKES BYTES. `truncate_str` did `s[..max]` on a
+        // &str, which panics when max lands inside a multi-byte character --
+        // so a user called "café" crashed `w` at any width that split the é.
+        // Cutting bytes cannot panic; it can split a character, which is one
+        // replacement glyph in the terminal and what the C tools do too.
+        assert_eq!(truncate_bytes("café".as_bytes(), 4), b"caf\xc3");
+        assert_eq!(truncate_bytes(b"caf\xff\xfe", 4), b"caf\xff");
+    }
+
+    #[test]
+    fn a_column_pads_to_its_width_and_never_past_it() {
+        let mut out = Vec::new();
+        write_col(&mut out, b"ab", 5).unwrap();
+        assert_eq!(out, b"ab   ");
+
+        let mut out = Vec::new();
+        write_col(&mut out, b"abcdefgh", 3).unwrap();
+        assert_eq!(
+            out, b"abc",
+            "an over-long value is cut, not allowed to shove the row"
+        );
+
+        let mut out = Vec::new();
+        write_col(&mut out, b"", 3).unwrap();
+        assert_eq!(out, b"   ");
+    }
+
+    #[test]
+    fn a_non_utf8_username_reaches_the_column_intact() {
+        // The whole point of the change: this used to be decoded with
+        // from_utf8_lossy somewhere between utmp and the terminal.
+        let mut out = Vec::new();
+        write_col(&mut out, b"caf\xe9", 6).unwrap();
+        assert_eq!(out, b"caf\xe9  ");
     }
 
     #[test]

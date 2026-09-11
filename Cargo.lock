@@ -3175,6 +3175,9 @@ dependencies = [
 [[package]]
 name = "w"
 version = "0.1.0"
+dependencies = [
+ "utmpfile",
+]
 
 [[package]]
 name = "wall"

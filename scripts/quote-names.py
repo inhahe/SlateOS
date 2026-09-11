@@ -133,6 +133,23 @@ IGNORE = {
     # entry says only that a site exists: these can never reach zero, and a
     # ratchet with an unreachable floor stops being read.
     "userspace/yacc/src/main.rs": "'{ch}' is a yacc terminal name, not a diagnostic",
+    # `osh` is a bash-compatible shell and these are bash's own message texts,
+    # character for character. Quoting the name would close the hole and would
+    # be a visible divergence in the one program whose purpose is not to
+    # diverge -- which is an operator decision here, not mine: §78
+    # (`OSH_BASH_COMPAT`) and §79 (`OSH_UID`) are both the operator choosing
+    # how this shell should differ from bash.
+    #
+    # Raised as B-Q12 with a recommendation. Exempted rather than baselined
+    # because a baseline entry would read as "a defect we have not got to yet",
+    # and what these actually are is a question nobody has answered.
+    #
+    # Two things that are NOT the reason, because both look like it: the values
+    # are already text, not raw bytes (`format!` needs `Display`, which byte
+    # strings do not implement), so no byte fidelity is at stake; and one of the
+    # sixteen interpolates a fixed `"-d"`/`"-t"` and is not a name at all.
+    "userspace/oils/src/interp.rs": "bash's own message text -- B-Q12",
+    "userspace/oils/src/arith.rs": "bash's own message text -- B-Q12",
 }
 
 # The macros that build a message somebody will read.

@@ -37,7 +37,7 @@
 # a macro nobody had thought to look in. An empty ratchet is a claim
 # about the detector as much as about the code.
 #
-# 36 sites across 12 files.
+# 19 sites across 10 files.
 
 userspace/awk/src/main.rs:1
 userspace/coreutils/src/bin/cal.rs:4
@@ -45,8 +45,6 @@ userspace/coreutils/src/bin/renice.rs:1
 userspace/coreutils/src/bin/tar.rs:1
 userspace/install/src/main.rs:1
 userspace/jq/src/main.rs:4
-userspace/oils/src/arith.rs:1
-userspace/oils/src/interp.rs:16
 userspace/sed/src/main.rs:1
 userspace/seq/src/main.rs:1
 userspace/shuf/src/main.rs:4

@@ -261,6 +261,34 @@ _INTERPOLATED_NAME = re.compile(
 # own cases, not the gate, and must not count as wiring.
 _SELFTEST_FLAG = re.compile(r"--self-?test\b")
 
+#: A derived path that names a test SUITE rather than a gate.
+#:
+#: `scripts/test-<name>.py` is this repo's suite convention -- 35 of them -- and a
+#: suite is not a gate, so a call that runs one was never in scope. pre-push gate 20
+#: pairs each pushed script with its suite and so builds the path from a variable BY
+#: DESIGN. It cannot spell that out: the name depends on what is being pushed.
+#:
+#: Matched on the TEMPLATE, not on an enumeration of call sites, so a second
+#: suite-runner needs no entry here. Everything else interpolated stays a finding --
+#: see THE CONSERVATIVE DIRECTION above, whose argument this does not weaken. A
+#: suite-runner being out of scope is a different claim from 'unresolvable calls are
+#: tolerable', and only the first is being made.
+#:
+#: The docstring's method-5 story is this one repeated: that resolver and a hook line
+#: were written on different lanes, met on main, and the next lane to boot ate the
+#: refusal -- 'neither change was wrong on its own'. It happened again on 2026-09-11
+#: with lane B's gate 20, and the fix is the same shape: teach the resolver the call
+#: shape that actually exists rather than soften the verdict.
+def _names_a_suite(text: str) -> bool:
+    """Whether `text` builds a path to a test SUITE out of a variable.
+
+    Two conditions rather than one regex, because the regex needed a quote class and
+    a dollar class and broke twice in the writing. This reads, and it is the same
+    test: the path goes to `scripts/test-...`, and the filename is assembled at run
+    time.
+    """
+    return "scripts/test-" in text and bool(_INTERPOLATED_NAME.search(text))
+
 
 def _executable_lines(text: str) -> list[str]:
     """Comment-free lines with `\\`-continuations joined onto one line."""
@@ -287,6 +315,11 @@ def analyse(path: Path) -> tuple[set[str], set[str], list[str]]:
     runs: set[str] = set()
     selftested: set[str] = set()
     unresolved: list[str] = []
+    # Variables deliberately left unbound because their value names a SUITE. The call
+    # that uses one carries no `scripts/test-` text itself -- gate 20's is
+    # `run_checker "suite-$sbase" "$py" "$suite"` -- so the exclusion has to be
+    # remembered from the assignment or the call looks like an unresolvable mystery.
+    suite_vars: set[str] = set()
 
     for line in _executable_lines(text):
         # Track `var=<...>.py` bindings for any script, not just check-*.py:
@@ -295,9 +328,34 @@ def analyse(path: Path) -> tuple[set[str], set[str], list[str]]:
         # call we failed to understand.
         m = _ASSIGN.match(line)
         if m:
-            hit = _ANY_SCRIPT.search(m.group(2))
-            if hit:
-                bound[m.group(1)] = hit.group(0)
+            # The SAME interpolation guard as the call branch below, and it was
+            # missing here until 2026-09-11. The comment there spells out the failure
+            # exactly -- "extraction *succeeding* on a fragment: `$g.py` yields
+            # `g.py`" -- and then this branch extracted a fragment unguarded.
+            #
+            # Lane B generalised pre-push gate 20 from literal script paths to a
+            # derived one:
+            #
+            #     stem="${base%.*}"
+            #     suite="${repo_root:-.}/scripts/test-$stem.py"
+            #
+            # `_ANY_SCRIPT` found `stem.py` in that value, bound it to `suite`, and a
+            # later call on `"$suite"` resolved to a file that has never existed --
+            # so this gate refused the build over an unwired gate called `stem.py`.
+            # "I cannot resolve this path" became "there is a gate nothing runs",
+            # which is an unknown reported as a finding rather than as an unknown.
+            #
+            # A binding whose value is assembled at run time is one this file cannot
+            # follow, so it binds nothing and the call that uses it is reported
+            # unresolved by the branch below -- noise, not silence, and not invention.
+            # Same exclusion as the call branch below, and for the same reason.
+            if _names_a_suite(m.group(2)):
+                suite_vars.add(m.group(1))
+                continue
+            if not _INTERPOLATED_NAME.search(m.group(2)):
+                hit = _ANY_SCRIPT.search(m.group(2))
+                if hit:
+                    bound[m.group(1)] = hit.group(0)
 
         if not _CALL.search(line):
             continue
@@ -319,6 +377,14 @@ def analyse(path: Path) -> tuple[set[str], set[str], list[str]]:
         # away on that basis. Report and move on -- a name assembled at run
         # time is a name this file cannot know, and the conservative direction
         # for an unknown is noise, not silence.
+        # A suite-runner is out of scope: suites are not gates. pre-push gate 20
+        # pairs each pushed script with `scripts/test-<stem>.py` and therefore builds
+        # the name from a variable by design -- it cannot spell out a path that
+        # depends on what is being pushed.
+        if _names_a_suite(line) or any(
+            re.search(r"\$\{?" + re.escape(v) + r"\}?", line) for v in suite_vars
+        ):
+            continue
         if _INTERPOLATED_NAME.search(line):
             unresolved.append(
                 f"{path.name}: a variable is spliced into the script's "

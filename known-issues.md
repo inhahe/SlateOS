@@ -130314,3 +130314,68 @@ is the direction the name implies — `is_mounted() == false` means "go ahead", 
 `is_allowed() == false` means "deny" and is safe. Filtering to bool functions whose
 *false* answer is permissive (mounted, busy, locked, in_use, protected, exists, …)
 returned exactly one, which is the one fixed above.
+
+## TD-A-THE-BENCHMARK-BUDGETS-NEVER-FIRE-IN-A-BOOT-TEST (lane A, 2026-09-10) — **open**
+
+**In short:** the kernel's micro-benchmarks each carry a cycle budget, so a change that
+makes something twice as slow is supposed to fail the build. They do not run during a
+boot test — the boot finishes first and the benchmarks are still queued — so the
+budgets have never refused anything. A gate that exists and cannot fire reads exactly
+like a gate with nothing to report.
+
+### What is true
+
+`kernel/src/bench.rs` scores results against explicit budgets, e.g.
+`score("tcp_checksum_v4", &result, 2000)` and `score("tcp_checksum_v6", &result, 2200)`.
+The budgets are real, the comparison is real, and the failure path works.
+
+But `bench::run_all` is deferred to a background kernel task so init can start
+immediately — a deliberate and correct decision for boot latency. The boot test waits
+for its success marker, which arrives first. Measured on the run of 2026-09-10: the
+serial log holds **8 `[bench]` lines, all from the bench infrastructure self-test**, and
+no occurrence of `tcp_checksum_v4` or `tcp_checksum_v6` at all.
+
+### Why it matters now rather than in the abstract
+
+It was found while adopting `netproto`'s checksum helpers into
+`kernel/src/net/checksum.rs`. That module exists *because* duplicated copies of the
+data loop got different unrolling decisions and produced a 34% gap that was misread as
+a protocol difference — so moving the loop across a crate boundary is a codegen change
+of exactly the class the budgets would be expected to catch.
+
+The budget was the reason I believed the migration was safe to try. Checking whether it
+would actually fire is what stopped me shipping it unmeasured, and the migration now
+rests on `#[inline]` in another crate plus a comment on each side of the boundary. That
+is the whole protection, and it is weaker than a number.
+
+### The shape, which is the part worth keeping
+
+This is the third form of one failure seen on 2026-09-10, and they have different
+causes and the same outcome:
+
+| | exists | does not run |
+|---|---|---|
+| a gate | `check-read-defaults.py` | nothing invoked it |
+| a refusal | `pre-push`'s `REFUSING` blocks | set a variable nothing read |
+| a budget | `tcp_checksum_v4` vs 2000 cycles | the boot ends before it runs |
+
+Lane C hit a fourth on 2026-09-09 (§826 changed four colour constants; only the edited
+crate was tested, and a dependent crate's suite sat red on main), and raised it as
+`open-questions.md` → C-Q11, *"should something build every crate before a merge?"*
+They suggested adding this as a second instance with no lane boundary in it, which is
+right: two data points with different causes and the same outcome argue for a general
+answer rather than two local fixes.
+
+### Options
+
+* **Run the benchmarks synchronously in the boot test only**, gated on a flag the
+  harness sets. Keeps boot latency for real boots, makes the budgets real under test.
+  *Cost:* a boot-test-only code path, which is a thing that can itself rot unobserved.
+* **Have the boot test wait for a second marker** emitted after `run_all` completes.
+  *Cost:* lengthens every run by the benchmark suite's duration.
+* **Move the budgets out of the boot path** into a host-side check over recorded
+  history, beside `bench/boot-history.jsonl`. *Cost:* needs the numbers to be recorded,
+  which they currently are not.
+
+Not chosen yet. Whichever it is, the property to preserve is the one the budgets were
+written for: a number that refuses, rather than a number that is printed.

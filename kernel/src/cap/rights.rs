@@ -254,6 +254,63 @@ impl Rights {
             | Self::SET_HOSTNAME.0,
     );
 
+    /// What the init process is granted on [`ResourceType::File`].
+    ///
+    /// The [`INIT_PROCESS`](Self::INIT_PROCESS) mechanism applied to the second
+    /// of init's three class-wide grants. Same reasoning, and it is written out
+    /// again rather than shared — see the note below on why that duplication is
+    /// the mechanism rather than an oversight.
+    ///
+    /// Identical to `INIT_PROCESS` today, because both list every declared right,
+    /// so **this changes no behaviour**. What it changes is who decides next time:
+    /// with `ALL` a new right reached init on all three classes the instant the bit
+    /// existed, which is how `SET_HOSTNAME` came to be held by PID 1 while
+    /// `design-decisions.md` §927 recorded that nothing held it.
+    ///
+    /// Not a narrowing, deliberately. `pcb::has_capability_type` consults no
+    /// resource id, so omitting a right here would silently deny every
+    /// `File`-typed query for it — and which queries actually occur is a question
+    /// needing evidence rather than a guess. `design-decisions.md` §930.
+    pub const INIT_FILE: Self = Self(
+        Self::READ.0
+            | Self::WRITE.0
+            | Self::EXECUTE.0
+            | Self::CREATE.0
+            | Self::DELETE.0
+            | Self::METADATA.0
+            | Self::TRANSFER.0
+            | Self::DUPLICATE.0
+            | Self::WAIT.0
+            | Self::SIGNAL.0
+            | Self::IO_REALTIME.0
+            | Self::DEBUG.0
+            | Self::SET_CREDENTIALS.0
+            | Self::MEMORY_LOCK.0
+            | Self::SET_HOSTNAME.0,
+    );
+
+    /// What the init process is granted on [`ResourceType::Socket`].
+    ///
+    /// The third of init's class-wide grants; see [`INIT_FILE`](Self::INIT_FILE),
+    /// whose reasoning applies unchanged.
+    pub const INIT_SOCKET: Self = Self(
+        Self::READ.0
+            | Self::WRITE.0
+            | Self::EXECUTE.0
+            | Self::CREATE.0
+            | Self::DELETE.0
+            | Self::METADATA.0
+            | Self::TRANSFER.0
+            | Self::DUPLICATE.0
+            | Self::WAIT.0
+            | Self::SIGNAL.0
+            | Self::IO_REALTIME.0
+            | Self::DEBUG.0
+            | Self::SET_CREDENTIALS.0
+            | Self::MEMORY_LOCK.0
+            | Self::SET_HOSTNAME.0,
+    );
+
     /// No rights.
     #[allow(dead_code)] // public API; convenience constant for capability creation
     pub const NONE: Self = Self(0);
@@ -378,14 +435,18 @@ const _: () = {
 const _: () = {
     assert!(
         Rights::DISTINCT.len() == 15,
-        "a right was added or removed. Decide whether the init process should \
-         hold it: add it to Rights::INIT_PROCESS if so, leave it out if not, \
-         and then bump this count. Do not bump the count alone — that is the \
+        "a right was added or removed. Decide, SEPARATELY FOR EACH OF THE THREE \
+         CLASSES init is granted, whether it should hold the new right: add it \
+         to Rights::INIT_PROCESS, Rights::INIT_FILE and Rights::INIT_SOCKET as \
+         appropriate, leave it out of the ones it does not belong in, and only \
+         then bump this count. Do not bump the count alone — that is the \
          decision this assertion exists to make someone take. \
-         AND NOTE WHAT THIS DOES NOT COVER: init's File and Socket grants in \
-         main.rs still use Rights::ALL, which is u64::MAX, so a right intended \
-         for either of those classes reaches init whatever you do here. \
-         Leaving INIT_PROCESS alone is not the same as withholding the right. \
+         Three lists rather than one is deliberate: a single constant derived \
+         from DISTINCT would re-create the wildcard, since a new right would \
+         join it automatically and nobody would be asked. The duplication IS \
+         the mechanism. Resist deduplicating it. \
+         Leaving a list alone is not the same as withholding the right — it is \
+         the same keystrokes as not having noticed, which is why this fires. \
          See known-issues.md -> \
          TD-A-A-NEW-RIGHT-IS-GRANTED-BEFORE-ANYONE-DECIDES-WHO-HOLDS-IT."
     );
@@ -402,6 +463,14 @@ const _: () = {
     assert!(
         Rights::INIT_PROCESS.0 & !declared == 0,
         "Rights::INIT_PROCESS sets a bit that is not a declared right"
+    );
+    assert!(
+        Rights::INIT_FILE.0 & !declared == 0,
+        "Rights::INIT_FILE sets a bit that is not a declared right"
+    );
+    assert!(
+        Rights::INIT_SOCKET.0 & !declared == 0,
+        "Rights::INIT_SOCKET sets a bit that is not a declared right"
     );
 };
 

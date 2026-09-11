@@ -2674,6 +2674,7 @@ mod tests {
             if let RenderCommand::Text {
                 text,
                 max_width: Some(limit),
+                overflow: TextOverflow::Ellipsis,
                 ..
             } = c
             {

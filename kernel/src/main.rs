@@ -9590,10 +9590,15 @@ extern "C" fn kernel_main() -> ! {
     // and needs broad access.  Child processes will receive restricted
     // subsets of these capabilities.
     let init_caps: &[(cap::ResourceType, u64, cap::Rights)] = &[
-        // Filesystem: full access (read, write, create, delete, metadata).
-        (cap::ResourceType::File, 0, cap::Rights::ALL),
-        // Network: full access (connect, bind, send, recv).
-        (cap::ResourceType::Socket, 0, cap::Rights::ALL),
+        // Filesystem and network: every right that is DECLARED, which is not the
+        // same as every right that will ever exist. `ALL` is `u64::MAX`, so until
+        // 2026-09-11 a right added for any purpose reached init on these two
+        // classes the instant its bit existed — no behaviour change here today,
+        // because both constants list all fifteen declared rights, but the next
+        // right does not arrive unasked. The `Process` grant below was converted
+        // first, on 2026-09-10, and its comment carries the full argument.
+        (cap::ResourceType::File, 0, cap::Rights::INIT_FILE),
+        (cap::ResourceType::Socket, 0, cap::Rights::INIT_SOCKET),
         // Process management: spawn and manage children.
         // `INIT_PROCESS`, not `ALL`: a wildcard grant cannot tell "every right
         // that exists" from "every right that will ever exist", so with `ALL`

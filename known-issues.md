@@ -129427,12 +129427,27 @@ failure and just as quiet. The pin is what makes the decision compulsory.
 Verified by planting a sixteenth right — `cargo check` exits 101 with the
 message — and by confirming the tree builds clean again after removing it.
 
-**Still open, deliberately: the `File` and `Socket` init grants still use
-`Rights::ALL`.** The same argument applies and the same remedy would work. They
-were left because a new right is far more likely to be process-scoped, and
-changing three grants in one boot test makes a moved verdict harder to
-attribute. Whoever takes them should reuse the `INIT_PROCESS` shape rather than
-inventing a second one.
+**FIXED 2026-09-11 for `File` and `Socket` too, so this entry is now closed.**
+`Rights::INIT_FILE` and `Rights::INIT_SOCKET` enumerate the fifteen declared
+rights, the `DISTINCT.len()` pin names all three lists, and the grant site holds
+no `Rights::ALL`. `design-decisions.md` §930 records the one real choice in it:
+the lists contain *every* declared right, so init's authority today is unchanged.
+A narrowed subset is a genuine tightening and a separate change, because
+`has_capability_type` consults no resource id, so a right left out would silently
+deny a live query instead of failing loudly.
+
+**The deferral reason had expired rather than been resolved.** It was *"changing
+three grants in one boot test makes a moved verdict harder to attribute"* — which
+stopped applying the moment the `Process` grant landed and was verified on its
+own, a day earlier. Worth keeping as a shape: a deferral justified by *concurrency
+with another change* goes stale silently when that change lands, unlike one
+justified by a missing prerequisite, which announces itself by staying missing.
+Nothing was watching for it. It was found by re-reading the entry.
+
+Verified as §928 was: a sixteenth right planted, `cargo check -p kernel` refusing
+with **exit 101** and the pin's new message, then exit 0 again once it was
+removed. A compile-time assertion that has never fired is indistinguishable from
+one that cannot.
 
 **In short:** the kernel hands out permissions as tokens, and the most privileged
 process is given "all of them" as a wildcard rather than as a list. So the moment

@@ -2511,6 +2511,7 @@ mod tests {
                     font_size,
                     font_weight,
                     max_width: Some(max_width),
+                    overflow: TextOverflow::Ellipsis,
                     ..
                 } = c
                 else {

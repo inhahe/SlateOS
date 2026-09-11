@@ -686,36 +686,60 @@ fn to_ascii_lower(s: &[u8]) -> Vec<u8> {
 // best-effort: failures are silently ignored so filesystem operations are
 // never blocked by indexer issues.
 
-/// Check if the indexer is initialized and has been rebuilt at least once.
-fn is_live() -> bool {
-    let idx = INDEX.lock();
-    idx.stats.initialized && idx.stats.rebuild_count > 0
+impl IndexInner {
+    /// True once `init` has run and at least one rebuild has completed.
+    ///
+    /// Takes no lock: callers already hold the guard, which is the point -- this
+    /// used to be a free function that locked for itself, so every indexed write
+    /// paid two acquisitions to answer one question, and the pair was not atomic.
+    fn is_live(&self) -> bool {
+        self.stats.initialized && self.stats.rebuild_count > 0
+    }
 }
 
-/// Check if a path is within a configured watch directory.
-///
-/// Returns false if the path is in an excluded directory.
-fn is_watched(path: &Path) -> bool {
-    let idx = INDEX.lock();
-    if idx.config.watch_dirs.is_empty() {
-        return false;
-    }
-
-    // Check exclusions first.  The canonical subtree predicate avoids
-    // /sys matching /system and tolerates a trailing slash. See fs::pathutil.
-    for excl in &idx.config.exclude_dirs {
-        if crate::fs::pathutil::path_in_subtree(path, excl) {
+impl IndexConfig {
+    /// Whether `path` falls inside a watched directory and outside every excluded one.
+    fn watches(&self, path: &Path) -> bool {
+        if self.watch_dirs.is_empty() {
             return false;
         }
-    }
 
-    // Check if within any watch dir.
-    for dir in &idx.config.watch_dirs {
-        if crate::fs::pathutil::path_in_subtree(path, dir) {
-            return true;
+        // Check exclusions first.  The canonical subtree predicate avoids
+        // /sys matching /system and tolerates a trailing slash. See fs::pathutil.
+        for excl in &self.exclude_dirs {
+            if crate::fs::pathutil::path_in_subtree(path, excl) {
+                return false;
+            }
         }
+
+        // Check if within any watch dir.
+        for dir in &self.watch_dirs {
+            if crate::fs::pathutil::path_in_subtree(path, dir) {
+                return true;
+            }
+        }
+        false
     }
-    false
+}
+
+/// Whether the indexer should act on a change to `path`, decided under one lock.
+fn should_index(path: &Path) -> bool {
+    let idx = INDEX.lock();
+    idx.is_live() && idx.config.watches(path)
+}
+
+/// The two watch answers a rename needs, from a single consistent read.
+///
+/// `None` means the index is not live and the rename is of no interest. Returning
+/// both booleans together matters beyond the saved acquisitions: the old and new
+/// paths are now judged against the *same* configuration, so a reconfigure between
+/// them can no longer remove an entry without adding its replacement.
+fn rename_targets(old_path: &Path, new_path: &Path) -> Option<(bool, bool)> {
+    let idx = INDEX.lock();
+    if !idx.is_live() {
+        return None;
+    }
+    Some((idx.config.watches(old_path), idx.config.watches(new_path)))
 }
 
 /// Called by VFS when a file is created or modified.
@@ -724,7 +748,7 @@ fn is_watched(path: &Path) -> bool {
 /// been initialized or rebuilt, or if the path is outside watch dirs.
 pub fn on_file_changed(path: impl AsRef<Path>) {
     let path = path.as_ref();
-    if !is_live() || !is_watched(path) {
+    if !should_index(path) {
         return;
     }
     // add_entry calls Vfs::stat internally — the VFS lock must NOT be
@@ -737,7 +761,7 @@ pub fn on_file_changed(path: impl AsRef<Path>) {
 /// Removes the entry (and children for directories) from the index.
 pub fn on_file_deleted(path: impl AsRef<Path>) {
     let path = path.as_ref();
-    if !is_live() || !is_watched(path) {
+    if !should_index(path) {
         return;
     }
     remove_entry(path);
@@ -748,15 +772,15 @@ pub fn on_file_deleted(path: impl AsRef<Path>) {
 /// Removes the old path and adds the new path.
 pub fn on_file_renamed(old_path: impl AsRef<Path>, new_path: impl AsRef<Path>) {
     let (old_path, new_path) = (old_path.as_ref(), new_path.as_ref());
-    if !is_live() {
+    let Some((old_watched, new_watched)) = rename_targets(old_path, new_path) else {
         return;
-    }
+    };
     // Remove old entry if it was watched.
-    if is_watched(old_path) {
+    if old_watched {
         remove_entry(old_path);
     }
     // Add new entry if it's now in a watched directory.
-    if is_watched(new_path) {
+    if new_watched {
         let _ = add_entry(new_path);
     }
 }

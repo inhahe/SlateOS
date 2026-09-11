@@ -1405,27 +1405,99 @@ pub struct MatchRule {
     pub arg0: Option<String>,
 }
 
+/// Render a match-rule value the way the D-Bus specification requires.
+///
+/// Values are single-quoted, and a literal `'` cannot appear inside single
+/// quotes at all: the escape is to close the quote, write a backslash-escaped
+/// quote, and reopen — `'` becomes `'\''`, exactly as in a POSIX shell.
+///
+/// The quotes are unconditional. A bare value is legal D-Bus for most
+/// characters, but `arg0` carries an arbitrary string from a message payload
+/// and a bare one containing a comma would end the part.
+fn quote_match_value(v: &str) -> String {
+    let mut out = String::with_capacity(v.len() + 2);
+    out.push('\'');
+    for ch in v.chars() {
+        if ch == '\'' {
+            // Close, emit an escaped quote outside the quoting, reopen.
+            out.push_str("'\\''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// Split a match rule into its `key=value` parts, honouring quoting.
+///
+/// `rule_str.split(',')` was doing this, which treats a comma INSIDE a quoted
+/// value as a separator. `arg0='a,b'` therefore parsed as `arg0='a` plus a
+/// second part `b'` — and because unknown keys are ignored for forward
+/// compatibility, that second part was silently discarded and the rule matched
+/// `a` instead of `a,b`. A match rule that matches more messages than the
+/// client asked for is the wrong direction for a bus to fail in.
+///
+/// Outside quotes a backslash escapes the next character; inside quotes every
+/// character is literal, which is what makes `'\''` mean one apostrophe.
+fn split_rule_parts(rule_str: &str) -> Vec<(String, String)> {
+    let mut parts: Vec<(String, String)> = Vec::new();
+    let mut key: Option<String> = None;
+    let mut cur = String::new();
+    let mut quoted = false;
+    let mut chars = rule_str.chars();
+
+    // End the part being read. A part with no `=` in it is dropped, which is
+    // what happens to an unknown key too -- the D-Bus rule is that a bus
+    // ignores what it does not understand in a match rule, so that new keys
+    // can be added without breaking old daemons.
+    fn flush(key: &mut Option<String>, cur: &mut String, parts: &mut Vec<(String, String)>) {
+        if let Some(k) = key.take() {
+            parts.push((k, std::mem::take(cur)));
+        }
+        cur.clear();
+    }
+
+    while let Some(ch) = chars.next() {
+        if quoted {
+            if ch == '\'' {
+                quoted = false;
+            } else {
+                cur.push(ch);
+            }
+            continue;
+        }
+        match ch {
+            '\'' => quoted = true,
+            '\\' => {
+                if let Some(esc) = chars.next() {
+                    cur.push(esc);
+                }
+            }
+            ',' => flush(&mut key, &mut cur, &mut parts),
+            '=' if key.is_none() => {
+                key = Some(cur.trim().to_string());
+                cur.clear();
+            }
+            _ => cur.push(ch),
+        }
+    }
+    flush(&mut key, &mut cur, &mut parts);
+    parts
+}
+
 impl MatchRule {
     /// Parse a match rule string like "type='signal',interface='org.foo',member='Bar'".
+    ///
+    /// # Errors
+    ///
+    /// [`DbusError::ProtocolError`] if `type=` names a message type that does
+    /// not exist.
     pub fn parse(rule_str: &str) -> Result<Self, DbusError> {
         let mut rule = MatchRule::default();
 
-        for part in rule_str.split(',') {
-            let part = part.trim();
-            if part.is_empty() {
-                continue;
-            }
-            let eq_pos = part.find('=').ok_or_else(|| {
-                DbusError::ProtocolError(format!("invalid match rule part: {part}"))
-            })?;
-            let key = part[..eq_pos].trim();
-            let mut val = part[eq_pos + 1..].trim();
-
-            // Strip quotes
-            if val.starts_with('\'') && val.ends_with('\'') && val.len() >= 2 {
-                val = &val[1..val.len() - 1];
-            }
-
+        for (key, value) in split_rule_parts(rule_str) {
+            let (key, val) = (key.as_str(), value.as_str());
             match key {
                 "type" => {
                     rule.msg_type = Some(match val {
@@ -1524,28 +1596,28 @@ impl MatchRule {
                 MSG_SIGNAL => "signal",
                 _ => "unknown",
             };
-            parts.push(format!("type='{name}'"));
+            parts.push(format!("type={}", quote_match_value(name)));
         }
         if let Some(ref s) = self.sender {
-            parts.push(format!("sender='{s}'"));
+            parts.push(format!("sender={}", quote_match_value(s)));
         }
         if let Some(ref i) = self.interface {
-            parts.push(format!("interface='{i}'"));
+            parts.push(format!("interface={}", quote_match_value(i)));
         }
         if let Some(ref m) = self.member {
-            parts.push(format!("member='{m}'"));
+            parts.push(format!("member={}", quote_match_value(m)));
         }
         if let Some(ref p) = self.path {
-            parts.push(format!("path='{p}'"));
+            parts.push(format!("path={}", quote_match_value(p)));
         }
         if let Some(ref ns) = self.path_namespace {
-            parts.push(format!("path_namespace='{ns}'"));
+            parts.push(format!("path_namespace={}", quote_match_value(ns)));
         }
         if let Some(ref d) = self.destination {
-            parts.push(format!("destination='{d}'"));
+            parts.push(format!("destination={}", quote_match_value(d)));
         }
         if let Some(ref a) = self.arg0 {
-            parts.push(format!("arg0='{a}'"));
+            parts.push(format!("arg0={}", quote_match_value(a)));
         }
         parts.join(",")
     }
@@ -3666,6 +3738,53 @@ mod tests {
         let rule = MatchRule::parse("type='signal',interface='org.test'").unwrap();
         assert_eq!(rule.msg_type, Some(MSG_SIGNAL));
         assert_eq!(rule.interface.as_deref(), Some("org.test"));
+    }
+
+    #[test]
+    fn a_comma_inside_a_value_is_not_a_separator() {
+        // `split(',')` made this two parts: `arg0='a` and `b'`. The second was
+        // dropped as an unknown key -- unknown keys are ignored for forward
+        // compatibility -- so the rule silently matched `a` and therefore
+        // matched messages the client never asked for.
+        let rule = MatchRule::parse("type='signal',arg0='a,b'").unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(rule.msg_type, Some(MSG_SIGNAL));
+        assert_eq!(rule.arg0.as_deref(), Some("a,b"));
+    }
+
+    #[test]
+    fn an_apostrophe_in_a_value_survives_both_directions() {
+        // The D-Bus escape for `'` inside a quoted value is to close the
+        // quote, emit a backslash-escaped quote, and reopen.
+        assert_eq!(quote_match_value("x'y"), r"'x'\''y'");
+        let parsed = MatchRule::parse(r"arg0='x'\''y'").unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(parsed.arg0.as_deref(), Some("x'y"));
+    }
+
+    #[test]
+    fn every_value_round_trips_through_to_rule_string() {
+        // `RemoveMatch` finds the rule to delete by comparing `to_rule_string`
+        // output, so a value that does not survive the round trip is a rule
+        // the client cannot remove -- or, worse, one whose serialisation
+        // collides with a different rule of theirs and removes that instead.
+        for awkward in ["a,b", "x'y", "'", ",", "a'b,c'd", "", "plain"] {
+            let mut rule = MatchRule {
+                msg_type: Some(MSG_SIGNAL),
+                ..MatchRule::default()
+            };
+            rule.arg0 = Some(awkward.to_string());
+            rule.interface = Some(awkward.to_string());
+            let text = rule.to_rule_string();
+            let back = MatchRule::parse(&text).unwrap_or_else(|e| panic!("{text}: {e}"));
+            assert_eq!(back.arg0.as_deref(), Some(awkward), "arg0 via {text}");
+            assert_eq!(
+                back.interface.as_deref(),
+                Some(awkward),
+                "interface via {text}"
+            );
+            assert_eq!(back.msg_type, Some(MSG_SIGNAL), "type via {text}");
+            // And it must be stable, because that is what the comparison uses.
+            assert_eq!(back.to_rule_string(), text);
+        }
     }
 
     #[test]

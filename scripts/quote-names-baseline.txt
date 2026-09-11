@@ -37,7 +37,7 @@
 # a macro nobody had thought to look in. An empty ratchet is a claim
 # about the detector as much as about the code.
 #
-# 183 sites across 38 files.
+# 175 sites across 38 files.
 
 userspace/arp/src/main.rs:1
 userspace/at/src/main.rs:5
@@ -47,7 +47,7 @@ userspace/coreutils/src/bin/cal.rs:4
 userspace/coreutils/src/bin/renice.rs:1
 userspace/coreutils/src/bin/tar.rs:1
 userspace/crontab/src/main.rs:6
-userspace/dbus/src/main.rs:11
+userspace/dbus/src/main.rs:3
 userspace/dd/src/main.rs:10
 userspace/dhcpcd/src/main.rs:3
 userspace/dig/src/main.rs:4

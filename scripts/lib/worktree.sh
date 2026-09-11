@@ -183,6 +183,33 @@ SLATE_COREUTILS_VERSION="9.5"
 SLATE_COREUTILS_SHA256="cd328edeac92f6a665de9f323c93b712af1858bc2e0d88f3f7100469470a1b8a"
 SLATE_COREUTILS_TARBALL="$SLATE_ZIG_CACHE/coreutils-$SLATE_COREUTILS_VERSION.tar.xz"
 
+# Upstream CMake, the sixth port's source and the first that is C++ rather than
+# C. It is the remaining unproven quarter of the roadmap's
+# `gcc, cmake, make, pkg-config (via POSIX layer)` item.
+#
+# 4.4.3 and not the 3.x line because that is the version two packagers who
+# compute their own digests carry. Attested, and NOT by the distfiles server,
+# which vouching for its own bytes is not a check:
+#
+#   Gentoo  dev-build/cmake/Manifest — and this is the strong one, because it
+#           is two *different functions* over the same artifact rather than a
+#           second copy of one digest, which is the standard the coreutils pin
+#           above sets. Its DIST line gives size 13288228, SHA512
+#           fd7ef7ca…f2d48 and BLAKE2B d30fc821…2601ad. All three were verified
+#           against the downloaded tarball by recomputing them, not by eye.
+#   Arch    packaging/packages/cmake pins pkgver=4.4.3, corroborating the
+#           version though not independently the bytes.
+#
+# Buildroot also pins 4.4.3 and is deliberately NOT counted: its cmake.hash
+# opens with the comment `From https://cmake.org/files/v4.4/...`, so its sha256
+# is a copy of upstream's own digest rather than an independent computation.
+# That distinction is the whole point of the rule and is easy to miss, because
+# the hash does match.
+SLATE_CMAKE_VERSION="4.4.3"
+SLATE_CMAKE_SHA256="c46400618b4f1f2b43507f24fb22f3ae830c3416cf23b776e16e1d413aa892f0"
+# shellcheck disable=SC2034
+SLATE_CMAKE_TARBALL="$SLATE_ZIG_CACHE/cmake-$SLATE_CMAKE_VERSION.tar.gz"
+
 # Scratch, keyed by worktree. The hard-coded paths were only half the problem:
 # these scripts also wrote fixed names like /tmp/libc_syms.txt and
 # /tmp/bash_needs.txt, and they hand results to each other through those files
@@ -449,6 +476,15 @@ slate_ensure_coreutils_src() {
         "$SLATE_WORK/coreutils-spike" "/tmp/coreutils-spike-$SLATE_LANE" "$SLATE_SPIKE")" || return 1
 }
 
+# The CMake counterpart. This is the whole cost of adding a sixth port now that
+# `slate_ensure_src` exists, which is the argument the refactor was making.
+slate_ensure_cmake_src() {
+    SLATE_CMAKE_TARBALL="$(slate_ensure_src cmake "$SLATE_CMAKE_VERSION" \
+        "$SLATE_CMAKE_SHA256" \
+        "https://github.com/Kitware/CMake/releases/download/v$SLATE_CMAKE_VERSION/cmake-$SLATE_CMAKE_VERSION.tar.gz" \
+        "$SLATE_WORK/cmake-spike" "/tmp/cmake-spike-$SLATE_LANE" "$SLATE_SPIKE")" || return 1
+}
+
 slate_make_zig_wrappers() {
     slate_ensure_zig || return 1
     if [ ! -x "$SLATE_ZIG" ]; then
@@ -457,10 +493,52 @@ slate_make_zig_wrappers() {
         return 1
     fi
     SLATE_CC="/tmp/zigcc-$SLATE_LANE"
+    SLATE_CXX="/tmp/zigcxx-$SLATE_LANE"
     SLATE_AR="/tmp/zigar-$SLATE_LANE"
     SLATE_RANLIB="/tmp/zigranlib-$SLATE_LANE"
     printf '#!/bin/sh\nexec "%s" cc --target=x86_64-linux-musl "$@"\n' "$SLATE_ZIG" >"$SLATE_CC"
+    # `zig cc` and `zig c++` are the same binary; the difference is the driver
+    # mode, which selects the C++ header search path and links libc++. The C
+    # half was pinned here for a year before anyone noticed the C++ half came
+    # with it — see design-decisions.md §73.
+    printf '#!/bin/sh\nexec "%s" c++ --target=x86_64-linux-musl "$@"\n' "$SLATE_ZIG" >"$SLATE_CXX"
     printf '#!/bin/sh\nexec "%s" ar "$@"\n' "$SLATE_ZIG" >"$SLATE_AR"
     printf '#!/bin/sh\nexec "%s" ranlib "$@"\n' "$SLATE_ZIG" >"$SLATE_RANLIB"
-    chmod +x "$SLATE_CC" "$SLATE_AR" "$SLATE_RANLIB"
+    chmod +x "$SLATE_CC" "$SLATE_CXX" "$SLATE_AR" "$SLATE_RANLIB"
+}
+
+# Print the archives zig supplies for C++ ITSELF — libc++, libc++abi, libunwind
+# and compiler_rt — one per line, for a `-nostdlib` link that brings SlateOS's
+# libc instead of zig's musl.
+#
+# DISCOVERED, NOT HARD-CODED. zig builds these from source on first use into
+# content-addressed cache directories, so their paths contain a hash that
+# changes with the zig version, the target and the flags. Writing those paths
+# down would produce a script that works on the machine it was written on and
+# fails on the next one with a "no such file" naming a directory nobody can
+# explain. Asking the driver is the only spelling that stays true: a trivial
+# program is compiled to warm the cache, and `-v` reports the link it would
+# perform.
+#
+# zig's own `libc.a` is deliberately filtered out — replacing it with ours is
+# the entire point of the exercise, and linking both would report the duplicate
+# symbols rather than the missing ones.
+slate_zig_cxx_runtime() {
+    slate_make_zig_wrappers || return 1
+    local t
+    t="$(mktemp -d)" || return 1
+    printf 'int main(){return 0;}\n' >"$t/probe.cpp"
+    local out
+    out="$("$SLATE_ZIG" c++ --target=x86_64-linux-musl -std=c++17 -static -v \
+        -o "$t/probe" "$t/probe.cpp" 2>&1)"
+    rm -rf "$t"
+    local libs
+    libs="$(printf '%s' "$out" | tr ' ' '\n' | grep -E '\.a$' | grep -v '/libc\.a$' | sort -u)"
+    if [ -z "$libs" ]; then
+        echo "worktree.sh: zig c++ -v named no C++ runtime archives." >&2
+        echo "             Without them a C++ link reports every libc++ symbol" >&2
+        echo "             as missing, which reads as 'our libc is incomplete'." >&2
+        return 1
+    fi
+    printf '%s\n' "$libs"
 }

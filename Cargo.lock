@@ -563,13 +563,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dd"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "deflate"
 version = "0.1.0"
 dependencies = [

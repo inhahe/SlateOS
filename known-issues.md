@@ -64783,6 +64783,33 @@ lint programme above is still worth doing; it is not a substitute for a
 differential, and two of its three crates so far were duplicates that a
 differential then deleted.
 
+**32 -> 31 (2026-09-11): `dd`, and the survey's second inversion.** Ranked
+**"standalone ahead"** on 21 option names the standalone mentions and coreutils
+does not. `DIFF_PKG=dd bash scripts/dd-diff.sh`:
+
+**coreutils 339 passed, 0 differed. The standalone 8 passed, 331 differed.**
+
+It passes eight of 339. Three defect families, sorted by what they cost:
+
+| | cases | defect |
+|---|---|---|
+| **`bs=` operands** | **102** | `bs=1k`, `bs=1KB`, `bs=1x2`, `bs=2x3x4` all **fail with exit 1** where GNU succeeds. Size suffixes and multiplier products are core `dd` syntax — `dd bs=1M` is the commonest invocation of this program and it errors. |
+| summary line | 195 | prints `11 bytes (11 B, 11 B) copied` where GNU prints `11 bytes copied`. GNU only adds the parenthesised sizes at 1000 bytes and up, and never prints the same rendering twice. |
+| summary line | ⊂195 | `10000 bytes` renders as `(10 kB, 10 KiB)`; GNU says `(10 kB, 9.8 KiB)`. 10000 bytes is 9.77 KiB, so the IEC divisor is 1000 instead of 1024. |
+
+**What it gets right is worth stating too.** In all 195 summary-only cases the
+copied bytes and the exit code are identical — checked by splitting each case's
+stdout from its stderr rather than assumed. `dd` copies correctly and *reports*
+wrongly, in the line that is its entire feedback.
+
+**Two inversions out of two tested.** `tee` and `dd` were the survey's only
+"standalone ahead" verdicts put to a harness, and both were wrong — 37/71 and
+331/339 against. The heuristic counts option names MENTIONED in the source; a
+program can mention `bs` and not implement its suffixes. Ten such verdicts
+remain untested (`date`, `diff`, `env`, `free`, `hostname`, `kill`, `logger`,
+`patch`, `ps`, `sha256sum`, `uname`) and none of them should be acted on
+without a differential — acting on that verdict deletes the better half.
+
 **Still open — the proper fix.** One name, one program. For each of the
 remaining 41: pick the implementation that is under test and maintained, make
 sure nothing in the other is worth keeping (the standalone ones are older but

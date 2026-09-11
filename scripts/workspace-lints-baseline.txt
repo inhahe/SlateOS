@@ -46,7 +46,6 @@ userspace/crontab
 userspace/ctags
 userspace/date
 userspace/dbus
-userspace/dd
 userspace/df
 userspace/diff
 userspace/diskutil

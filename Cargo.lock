@@ -171,6 +171,9 @@ version = "0.1.0"
 [[package]]
 name = "blockdev"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "bootctl"

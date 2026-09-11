@@ -131799,6 +131799,50 @@ A number this entry opened by calling unfirable has now moved twice under delibe
 change, in both directions on both accelerators, and the remaining list is three
 specific things rather than ten.
 
+### Correction: the 42× write/read gap is a cache hit against a write-through, by design
+
+The note above presents `vfs_throughput_16k_write` at 128 973 ns against
+`vfs_throughput_16k_read` at 3 079 ns as *"42× reads for identical data on an identical
+path"*, and concludes *"the write path does something per call the read path does
+not."* **The paths are not identical and the conclusion does not follow.**
+
+`Vfs::read_file_routed` serves a stable-identity regular file **from the shared page
+cache** — `design-decisions.md` §38, stated in its own doc comment: *"served from the
+page cache, sharing one copy with `mmap` and byte-range `read(2)`."* The benchmark
+reads the same file 100 times, so every iteration after the first is a warm cache hit,
+which is exactly what 5.3 GB/s means. The write path invalidates that cache and writes
+through to the filesystem. Comparing them measures the cache, not the write path.
+
+So there is no asymmetry to explain. A 42× gap between a memory read and a filesystem
+write is the architecture working.
+
+**What I actually checked before getting there, and it is worth keeping**, because the
+suspicious line is still suspicious-looking to the next reader:
+`write_file_resolved` calls `history::try_auto_record(path)` before every write,
+documented as *"save the old content before overwriting … record_version reads the
+file through VFS internally."* A full read on every write would be a real defect. It
+is not one: `try_auto_record` opens with `if !is_auto_version_enabled() { return; }`,
+so with auto-versioning off it costs an atomic load.
+
+### What survives as a genuine question
+
+`vfs_throughput_16k_write` is **2.6× over its own budget** — 128 973 ns measured
+against 50 000 ns, or 127 MB/s against 327 MB/s. That stands on its own without any
+reference to the read side.
+
+And the accelerator ratio says what kind of cost it is: **3.77×**, beside the 4.2×
+median, so it scales with CPU emulation and is therefore kernel work rather than device
+I/O. If 127 MB/s were the emulated disk's ceiling the ratio would sit near 1.0, the way
+`isr_latency`'s does at 1.07×. So the question is a real one about the write path's CPU
+cost, and it is not answered by "the virtual disk is slow".
+
+### The lesson, which is the same one as the budgets
+
+I reached for the most striking comparison available — 42× — and it was striking
+because it spanned a cache boundary. The ratio that was actually diagnostic was the
+dull one already in hand: 3.77× versus 1.07× tells you whether a cost is the kernel's
+or the host's, and it would have told me nothing about reads at all.
+
 ## TD-A-REQUEST-STATUS-HAS-NO-CHECKED-SHAPE-SO-EVERY-READER-COUNTS-DIFFERENTLY (lane A, 2026-09-11) — **open**
 
 **In short:** the `requests/` dropbox is how the three lanes hand work to each other,

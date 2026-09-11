@@ -273,6 +273,36 @@ permanent is how a workaround outlives the thing it was working around.
 caller, which is the second time today that reading one line closely turned up
 something beside it.
 
+## TD-B-SUDOS-AUDIT-LOG-RECORDS-THE-TTY-THE-CALLER-NAMED (lane B, 2026-09-11)
+
+**In short:** `sudo`'s audit log has a `TTY=` field, and the value comes from
+the caller's `$TTY` environment variable. A user can therefore choose what
+terminal the log says they ran the command from.
+
+**Where.** `userspace/sudo/src/main.rs`, `current_tty`:
+
+    env::var_os("TTY").unwrap_or_else(|| OsString::from("unknown"))
+
+used only by `log_command`, at four call sites.
+
+**Why it is bounded, and why it is still worth fixing.** The value is escaped
+where it is written, so it cannot forge whole log lines — only the contents of
+one field. And it is an audit record, not an authorization input: nothing
+branches on it. So this is log integrity, not privilege escalation, which is
+why it is an entry rather than a same-day fix.
+
+It is still the same family as the two that *were* escalation:
+`current_username` (`$USER` chose which sudoers rules applied and which
+credential cache was consulted) and `current_hostname` (`$HOSTNAME` chose the
+host half of the rules), both fixed 2026-09-11. An audit log is read precisely
+when someone is working out what happened, and a field the subject could set is
+one that says nothing at exactly that moment.
+
+**The proper fix** is `ttyname(0)`, which is what real sudo uses and what
+`posix` already exposes — not `$TTY`, which no other Unix consults for this.
+The existing docstring's care about `var_os` versus `var` stays relevant: a tty
+name is a path under `/dev` and may not be UTF-8.
+
 ## TD-B-ONE-HUNDRED-AND-FORTY-THREE-DISCARDED-FAILURES-NO-GATE-LOOKS-AT (lane B, 2026-09-11)
 
 **In short:** `check-read-defaults` catches `.unwrap_or_default()` on a call

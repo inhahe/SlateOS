@@ -473,6 +473,25 @@ pub unsafe extern "C" fn strtod(nptr: *const u8, endptr: *mut *const u8) -> f64 
 /// # Safety
 ///
 /// `nptr` must be a valid null-terminated string.
+/// `strtof` in an explicit locale.
+///
+/// We have exactly one locale, so this is `strtof` and the handle is ignored —
+/// the same wrapper musl writes, for the same reason. The decimal point is `.`
+/// in the C locale and there is no other locale here in which it could be `,`.
+///
+/// # Safety
+///
+/// `nptr` must be a valid null-terminated string.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn strtof_l(
+    nptr: *const u8,
+    endptr: *mut *const u8,
+    _loc: crate::locale::LocaleT,
+) -> f32 {
+    // SAFETY: forwarding this function's own contract.
+    unsafe { strtof(nptr, endptr) }
+}
+
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn strtof(nptr: *const u8, endptr: *mut *const u8) -> f32 {
     let mut acc = crate::decfloat::DigitCollector::new();

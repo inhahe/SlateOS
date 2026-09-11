@@ -2778,12 +2778,166 @@ pub unsafe extern "C" fn wcsftime(
 }
 
 // ---------------------------------------------------------------------------
+// POSIX 2008 locale-parameterised classification
+// ---------------------------------------------------------------------------
+//
+// `iswalpha_l(wc, loc)` is `iswalpha(wc)` evaluated in an explicit locale
+// rather than in the thread's current one. **We have exactly one locale**, so
+// the two are the same function and the argument is ignored — which is not a
+// shortcut but what musl does, for the same reason: musl supports only the C
+// locale, so its `_l` forms are wrappers of one line each.
+//
+// Ignoring the argument is honest here in a way it would not be elsewhere in
+// this tree. `newlocale` already returns a single tag for every request
+// (`locale.rs`), so there is no second locale a caller could have obtained and
+// no distinction being discarded. If a real locale ever lands, these become
+// the fourteen places that must learn about it, which is why they are together
+// and why this comment names them as a set.
+//
+// Measured need: upstream CMake 4.4.3 links against our libc with exactly
+// twenty undefined symbols and these are fourteen of them — the single largest
+// group, and the cheapest. See `scripts/cmake-spike/README.md`.
+
+/// `iswalnum` in an explicit locale. See the note above on why `_loc` is unused.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn iswalnum_l(wc: WcharT, _loc: crate::locale::LocaleT) -> i32 {
+    iswalnum(wc)
+}
+
+/// `iswalpha` in an explicit locale.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn iswalpha_l(wc: WcharT, _loc: crate::locale::LocaleT) -> i32 {
+    iswalpha(wc)
+}
+
+/// `iswblank` in an explicit locale.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn iswblank_l(wc: WcharT, _loc: crate::locale::LocaleT) -> i32 {
+    iswblank(wc)
+}
+
+/// `iswcntrl` in an explicit locale.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn iswcntrl_l(wc: WcharT, _loc: crate::locale::LocaleT) -> i32 {
+    iswcntrl(wc)
+}
+
+/// `iswdigit` in an explicit locale.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn iswdigit_l(wc: WcharT, _loc: crate::locale::LocaleT) -> i32 {
+    iswdigit(wc)
+}
+
+/// `iswgraph` in an explicit locale.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn iswgraph_l(wc: WcharT, _loc: crate::locale::LocaleT) -> i32 {
+    iswgraph(wc)
+}
+
+/// `iswlower` in an explicit locale.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn iswlower_l(wc: WcharT, _loc: crate::locale::LocaleT) -> i32 {
+    iswlower(wc)
+}
+
+/// `iswprint` in an explicit locale.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn iswprint_l(wc: WcharT, _loc: crate::locale::LocaleT) -> i32 {
+    iswprint(wc)
+}
+
+/// `iswpunct` in an explicit locale.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn iswpunct_l(wc: WcharT, _loc: crate::locale::LocaleT) -> i32 {
+    iswpunct(wc)
+}
+
+/// `iswspace` in an explicit locale.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn iswspace_l(wc: WcharT, _loc: crate::locale::LocaleT) -> i32 {
+    iswspace(wc)
+}
+
+/// `iswupper` in an explicit locale.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn iswupper_l(wc: WcharT, _loc: crate::locale::LocaleT) -> i32 {
+    iswupper(wc)
+}
+
+/// `iswxdigit` in an explicit locale.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn iswxdigit_l(wc: WcharT, _loc: crate::locale::LocaleT) -> i32 {
+    iswxdigit(wc)
+}
+
+/// `towlower` in an explicit locale.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn towlower_l(wc: WcharT, _loc: crate::locale::LocaleT) -> WcharT {
+    towlower(wc)
+}
+
+/// `towupper` in an explicit locale.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn towupper_l(wc: WcharT, _loc: crate::locale::LocaleT) -> WcharT {
+    towupper(wc)
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
+
+    // -- POSIX 2008 locale-parameterised classification --
+
+    /// Code points chosen to hit every branch the classifiers have: a letter,
+    /// a capital, a digit, a space, a tab, punctuation, a control character,
+    /// a hex letter, a Latin-1 accent, a CJK ideograph and NUL. Written as
+    /// numbers rather than character literals so nothing here depends on this
+    /// file's own encoding.
+    const CLASSIFY_PROBES: [WcharT; 11] = [
+        0x61, 0x5A, 0x37, 0x20, 0x09, 0x2E, 0x07, 0x66, 0x00E9, 0x4E2D, 0x00,
+    ];
+
+    #[test]
+    fn locale_variants_agree_with_their_counterparts() {
+        // The `_l` forms exist because POSIX spells them that way, not because
+        // they do anything different here. If one ever stops agreeing with its
+        // counterpart that is a typo, not a locale.
+        let l: crate::locale::LocaleT = 1; // the only handle newlocale returns
+        for wc in CLASSIFY_PROBES {
+            assert_eq!(iswalnum_l(wc, l), iswalnum(wc), "iswalnum {wc:#x}");
+            assert_eq!(iswalpha_l(wc, l), iswalpha(wc), "iswalpha {wc:#x}");
+            assert_eq!(iswblank_l(wc, l), iswblank(wc), "iswblank {wc:#x}");
+            assert_eq!(iswcntrl_l(wc, l), iswcntrl(wc), "iswcntrl {wc:#x}");
+            assert_eq!(iswdigit_l(wc, l), iswdigit(wc), "iswdigit {wc:#x}");
+            assert_eq!(iswgraph_l(wc, l), iswgraph(wc), "iswgraph {wc:#x}");
+            assert_eq!(iswlower_l(wc, l), iswlower(wc), "iswlower {wc:#x}");
+            assert_eq!(iswprint_l(wc, l), iswprint(wc), "iswprint {wc:#x}");
+            assert_eq!(iswpunct_l(wc, l), iswpunct(wc), "iswpunct {wc:#x}");
+            assert_eq!(iswspace_l(wc, l), iswspace(wc), "iswspace {wc:#x}");
+            assert_eq!(iswupper_l(wc, l), iswupper(wc), "iswupper {wc:#x}");
+            assert_eq!(iswxdigit_l(wc, l), iswxdigit(wc), "iswxdigit {wc:#x}");
+            assert_eq!(towlower_l(wc, l), towlower(wc), "towlower {wc:#x}");
+            assert_eq!(towupper_l(wc, l), towupper(wc), "towupper {wc:#x}");
+        }
+    }
+
+    #[test]
+    fn the_locale_handle_is_ignored_rather_than_dereferenced() {
+        // A caller may pass LC_GLOBAL_LOCALE, a handle from newlocale, or --
+        // wrongly -- anything at all. None of those may change the answer and
+        // none may crash: there is no locale object behind the handle to
+        // dereference, which is exactly why ignoring it is safe here and
+        // would not be in a libc that had one.
+        for l in [0usize, 1, usize::MAX] {
+            assert_eq!(iswalpha_l(0x71, l), iswalpha(0x71));
+            assert_eq!(towupper_l(0x71, l), towupper(0x71));
+        }
+    }
 
     // -- UTF-8 internal helpers --
 

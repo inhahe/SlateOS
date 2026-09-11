@@ -3412,12 +3412,135 @@ pub extern "C" fn pthread_getaffinity_np(
 }
 
 // ---------------------------------------------------------------------------
+// Per-thread scheduling parameters
+// ---------------------------------------------------------------------------
+
+/// Report a thread's scheduling policy and parameters.
+///
+/// **This reports the scheduler we have, which is not the one POSIX
+/// describes.** Every thread runs under `SCHED_OTHER` at priority 0, because
+/// that is what `sched_getscheduler` already reports for every process
+/// (`sched.rs`) — our scheduler has no priority classes to distinguish. A
+/// caller asking this question gets a true answer about this system rather
+/// than a plausible answer about a system with priorities.
+///
+/// Returns 0, or `EFAULT` if either output pointer is null. POSIX's pthread
+/// functions return the error number rather than setting `errno`, which is the
+/// convention the rest of this file follows.
+///
+/// Measured need: one of the twenty undefined symbols in upstream CMake's link
+/// against our libc — see `scripts/cmake-spike/README.md`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_getschedparam(
+    _thread: PthreadT,
+    policy: *mut i32,
+    param: *mut crate::sched::SchedParam,
+) -> i32 {
+    if policy.is_null() || param.is_null() {
+        return errno::EFAULT;
+    }
+    // SAFETY: both pointers verified non-null above; `SchedParam` is repr(C)
+    // and the caller owns storage for one.
+    unsafe {
+        *policy = crate::sched::SCHED_OTHER;
+        *param = crate::sched::SchedParam::default();
+    }
+    0
+}
+
+/// Set a thread's scheduling policy and parameters.
+///
+/// Accepts `SCHED_OTHER` at priority 0 and **refuses everything else with
+/// `EINVAL`**, rather than accepting a request it cannot carry out.
+///
+/// That choice is the point of this function. A silent success would tell a
+/// caller its real-time thread is running at the priority it asked for, when
+/// nothing in the scheduler distinguishes that thread from any other — and a
+/// program that believes it has a priority it does not have makes worse
+/// decisions than one that knows it cannot have one. `EINVAL` is a documented
+/// answer to `pthread_setschedparam`; a false yes is not.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_setschedparam(
+    _thread: PthreadT,
+    policy: i32,
+    param: *const crate::sched::SchedParam,
+) -> i32 {
+    if param.is_null() {
+        return errno::EFAULT;
+    }
+    // SAFETY: verified non-null above; `SchedParam` is repr(C).
+    let requested = unsafe { (*param).sched_priority };
+    if policy != crate::sched::SCHED_OTHER || requested != 0 {
+        return errno::EINVAL;
+    }
+    0
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn getschedparam_reports_the_scheduler_we_have() {
+        let mut policy = -1i32;
+        let mut param = crate::sched::SchedParam::default();
+        assert_eq!(pthread_getschedparam(0, &raw mut policy, &raw mut param), 0);
+        assert_eq!(policy, crate::sched::SCHED_OTHER);
+        assert_eq!(param.sched_priority, 0);
+    }
+
+    #[test]
+    fn getschedparam_refuses_a_null_output() {
+        let mut param = crate::sched::SchedParam::default();
+        let mut policy = 0i32;
+        assert_eq!(
+            pthread_getschedparam(0, core::ptr::null_mut(), &raw mut param),
+            errno::EFAULT
+        );
+        assert_eq!(
+            pthread_getschedparam(0, &raw mut policy, core::ptr::null_mut()),
+            errno::EFAULT
+        );
+    }
+
+    #[test]
+    fn setschedparam_refuses_a_priority_it_cannot_deliver() {
+        // The important one. Accepting this would tell a caller its real-time
+        // thread runs at priority 50 when nothing in the scheduler
+        // distinguishes it from any other thread -- and a program that
+        // believes it has a priority it does not have makes worse decisions
+        // than one that knows it cannot have one.
+        let rt = crate::sched::SchedParam {
+            sched_priority: 50,
+            ..crate::sched::SchedParam::default()
+        };
+        assert_eq!(
+            pthread_setschedparam(0, crate::sched::SCHED_FIFO, &raw const rt),
+            errno::EINVAL
+        );
+        // Same policy, priority it cannot give either.
+        assert_eq!(
+            pthread_setschedparam(0, crate::sched::SCHED_OTHER, &raw const rt),
+            errno::EINVAL
+        );
+    }
+
+    #[test]
+    fn setschedparam_accepts_the_one_request_it_can_satisfy() {
+        let plain = crate::sched::SchedParam::default();
+        assert_eq!(
+            pthread_setschedparam(0, crate::sched::SCHED_OTHER, &raw const plain),
+            0
+        );
+        assert_eq!(
+            pthread_setschedparam(0, crate::sched::SCHED_OTHER, core::ptr::null()),
+            errno::EFAULT
+        );
+    }
     use core::sync::atomic::{AtomicI32, Ordering};
 
     // =======================================================================

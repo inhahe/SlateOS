@@ -38,7 +38,6 @@ cpupower: read_sysfs_string(&format!("{}/scaling_available_governors", base)).un
 diskutil: read_file(&format!("{dev_path}/device/model")).unwrap_or_default()
 diskutil: read_file(&format!("{dev_path}/device/serial")).unwrap_or_default()
 dmesg: extract_json_string(line, "level").unwrap_or_default()
-dmesg: extract_json_string(line, "msg").unwrap_or_default()
 dmesg: extract_json_string(line, "service").unwrap_or_default()
 efibootmgr: read_efi_var("BootOrder").unwrap_or_default()
 eject: fs::read_to_string(format!("{sys_path}/device/model")) .unwrap_or_default()

@@ -53,7 +53,6 @@ diskutil: read_file(&format!("{dev_path}/device/model")).unwrap_or_default()  # 
 diskutil: read_file(&format!("{dev_path}/device/serial")).unwrap_or_default()  # examined 2026-09-11: as above
 dmesg: extract_json_string(line, "level").unwrap_or_default()  # examined 2026-09-11: "" reaches LogLevel::from_str and becomes Unknown
 dmesg: extract_json_string(line, "service").unwrap_or_default()  # examined 2026-09-11: an optional field; absent means the line came from the kernel rather than a service
-efibootmgr: read_efi_var("BootOrder").unwrap_or_default()  # examined 2026-09-11: display only -- the modification paths write nothing at all, which is TD-B-EFIBOOTMGR-MODIFIES-NOTHING
 eject: fs::read_to_string(format!("{sys_path}/device/model")) .unwrap_or_default()  # examined 2026-09-11: descriptive only; the eject decision is guarded by `removable`, which is an Option
 eject: fs::read_to_string(format!("{sys_path}/device/vendor")) .unwrap_or_default()  # examined 2026-09-11: as above
 fuser: fs::read_to_string("/etc/passwd").unwrap_or_default()  # examined 2026-09-11: uid_to_name falls back to the numeric uid, which is what real fuser prints

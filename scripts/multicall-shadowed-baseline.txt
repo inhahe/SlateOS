@@ -40,8 +40,6 @@ cron:at
 cron:crontab
 fuser:lsof
 hostnamectl:hostname
-nologin:false
-nologin:true
 nproc:logname
 nproc:tty
 resolvectl:nslookup

@@ -1,12 +1,20 @@
 //! Slate OS nologin shell.
 //!
-//! Multi-personality binary providing:
-//! - **nologin** — politely refuse a login
-//! - **false** — do nothing, unsuccessfully
-//! - **true** — do nothing, successfully
+//! Displays a message and exits non-zero. It is the shell given to system
+//! accounts that should not have interactive logins.
 //!
-//! `nologin` displays a message and exits non-zero, used as the shell for
-//! system accounts that should not have interactive logins.
+//! # It used to answer to `true` and `false` as well
+//!
+//! `argv[0]` chose between three personalities, and two of them were
+//! `process::exit(0)` and `process::exit(1)`. Neither could run --
+//! `coreutils` produces both names -- and neither should: GNU's `true` and
+//! `false` accept `--help` and `--version`, and these ignored every argument.
+//!
+//! Of all the shadowed names in the tree this pair was worth removing first.
+//! `true` and `false` run in nearly every shell script on the system, and the
+//! program shadowing them exists to REFUSE and exit non-zero. Had packaging
+//! ever installed this copy as `/bin/true`, every `while true` and every
+//! `cmd || true` on the machine would have changed meaning.
 
 #![deny(clippy::all)]
 
@@ -49,38 +57,12 @@ fn cmd_nologin(args: &[String]) {
     process::exit(1);
 }
 
-fn cmd_false(_args: &[String]) {
-    process::exit(1);
-}
-
-fn cmd_true(_args: &[String]) {
-    process::exit(0);
-}
-
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    let prog_name = {
-        let s = args.first().map(|s| s.as_str()).unwrap_or("nologin");
-        let bytes = s.as_bytes();
-        let mut last_sep = 0;
-        for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' {
-                last_sep = i + 1;
-            }
-        }
-        let base = &s[last_sep..];
-        let base = base.strip_suffix(".exe").unwrap_or(base);
-        base.to_string()
-    };
-
+    // No personality probe: this binary is `nologin` under every name.
     let rest: Vec<String> = args.into_iter().skip(1).collect();
-
-    match prog_name.as_str() {
-        "false" => cmd_false(&rest),
-        "true" => cmd_true(&rest),
-        _ => cmd_nologin(&rest),
-    }
+    cmd_nologin(&rest);
 }
 
 // ============================================================================

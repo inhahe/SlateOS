@@ -1205,17 +1205,33 @@ struct ScoreEntry {
     /// reports `min` because it is the least contaminated estimate of the
     /// code's cost, but that makes every entry look equally trustworthy when
     /// they are not: a benchmark whose mean sits at 1.05x its min took a clean
-    /// measurement on nearly every iteration, whereas one at 6x (measured:
-    /// `dashboard_api_status`, 160.4ms mean against a 24.4ms min) was
-    /// interrupted on most of them, so its min is whichever iteration happened
-    /// to dodge the interference. Those two entries cannot share a regression
-    /// threshold, and today they do.
+    /// measurement on nearly every iteration, whereas one at 9x (measured:
+    /// `vfs_write_256`, median mean/min 9.04x across all 32 unperturbed release
+    /// TCG runs in `bench/history.jsonl`) was interrupted on most of them, so its
+    /// min is whichever iteration happened to dodge the interference. Those two
+    /// entries cannot share a regression threshold, and today they do.
+    ///
+    /// The example used to be `dashboard_api_status` at "160.4ms mean against a
+    /// 24.4ms min". It is now 1.63x, against a 1.61x median across all
+    /// benchmarks -- ordinary -- and its absolute cost is 59us rather than 24.4ms,
+    /// so the benchmark changed by some 400x in between. Replaced 2026-09-11
+    /// because a reader chasing that example goes looking for a pathological case
+    /// and finds a clean one. `vfs_write_256` is the better illustration anyway:
+    /// holding at 9x across 32 runs makes it plainly a property of the benchmark
+    /// rather than one unlucky boot, which is the distinction drawn below.
     ///
     /// `scripts/bench-history.py` needs a per-benchmark noise scale to size its
     /// band, and the alternative source — the spread of the same benchmark
     /// across past runs — requires several recorded runs before it says
-    /// anything, of which there are currently three. `mean/min` is available
-    /// from a single boot. See `known-issues.md →
+    /// anything. **That was once the deciding argument and is no longer: there
+    /// are 146 recorded runs as of 2026-09-11, 32 of them unperturbed release
+    /// TCG, where this comment said "currently three".** The alternative is
+    /// available now, and whoever sizes that band should use it rather than
+    /// inheriting this sentence.
+    ///
+    /// `mean/min` is still worth carrying for the reason that outlived the count:
+    /// it is available from a *single* boot, which is what a run has to judge
+    /// itself by before any window exists. See `known-issues.md →
     /// TD-BENCH-COMPARATOR-NEEDS-PER-BENCHMARK-VARIANCE`.
     mean_ns: u64,
     /// Iterations the mean was taken over; a mean over 50 samples and one over

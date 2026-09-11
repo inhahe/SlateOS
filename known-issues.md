@@ -131683,6 +131683,122 @@ like a win from every angle except the one that matters. The allocation removed 
 unchanged control — and this is the opposite: an artifact that would cost real
 precision to silence.)*
 
+### Classifying the ten by accelerator ratio, and a 42× read/write asymmetry
+
+The cheap test established earlier — a cost larger under hardware virtualisation than
+under emulation is the hypervisor, not work — applied to the over-budget set and its
+neighbours. Ratio is TCG median ÷ WHPX median, so **> 1 means WHPX is faster**:
+
+| benchmark | WHPX | TCG | ratio | class |
+|---|---|---|---|---|
+| `io_ring_nop` | 7 | 76 | 10.79× | compute-bound |
+| `vfs_throughput_16k_read` | 3 079 | 26 355 | 8.56× | compute-bound |
+| `vfs_stat_root` | 894 | 3 769 | 4.21× | compute-bound |
+| `vfs_throughput_16k_write` | 128 973 | 486 212 | 3.77× | compute-bound |
+| `isr_latency` | 42 264 | 45 197 | **1.07×** | **hypervisor-bound** |
+| `hpet_read` | 13 476 | 448 | **0.03×** | **hypervisor-bound** |
+
+**`isr_latency` is a third artifact.** At 1.07× it barely moves between the two
+accelerators, which is the signature of a cost the host pays rather than the kernel —
+unsurprising for a measurement of real interrupt delivery. Its 3.5×-over-budget
+verdict is therefore not a kernel finding on either surface available here, and it
+joins `net_arp_lookup` and `net_ns_arp_lookup`. That leaves the "eight real gaps" at
+**five**.
+
+**`vfs_throughput_16k_write` is NOT an artifact**, which was my guess and was wrong.
+At 3.77× it sits beside the 4.2× median, so it is genuine kernel work and worth
+optimising. Recorded because the guess was reasonable — a file write under
+virtualisation *could* be dominated by device emulation — and one ratio settled it in
+a second.
+
+### The asymmetry, which is the real lead
+
+The same function benchmarks both directions on the same 16 KiB file:
+
+| | WHPX | throughput |
+|---|---|---|
+| `vfs_throughput_16k_read` | 3 079 ns | ~5.3 GB/s |
+| `vfs_throughput_16k_write` | 128 973 ns | ~127 MB/s |
+
+**Writes cost 42× reads for identical data on an identical path.** A read at 5.3 GB/s
+is plainly served from memory; a write at 127 MB/s is not. So the write path does
+something per call the read path does not — re-allocating or extending the file,
+journalling, or not caching at all. `Vfs::write_file` is called with the whole 16 KiB
+in one go, so it is not chunking overhead.
+
+That asymmetry is a better starting point than the budget. The budget says 2.6× over
+50 000 ns; the asymmetry says the write path costs 42× the read path for the same
+bytes, which is the kind of gap that usually has one cause rather than a diffuse
+2.6%-here-and-there.
+
+Two incidental defects noticed in the same function and not fixed, since they are
+documentation rather than behaviour:
+
+* Its doc says *"Benchmark VFS sequential write throughput (4 KiB chunks)"* and the
+  code writes 16 KiB **in a single call**. The "(4 KiB chunks)" describes a benchmark
+  this is not.
+* It runs as `vfs_write_16k` and scores as `vfs_throughput_16k_write` — another
+  instance of the documented name-divergence that `MEASUREMENTS` exists to track.
+
+### Measured on TCG, where these budgets mean something: two of the three now meet them
+
+The recorded next step was to measure the remaining OVER endpoints under TCG, because
+under WHPX their budgets are mostly comparing against a 13.5 µs VM exit. Done — one
+unperturbed release TCG run at `cf2ec96c1`, against the median of the 32 pre-change
+TCG rows:
+
+| benchmark | pre-change | after | change | budget | verdict |
+|---|---|---|---|---|---|
+| `dashboard_api_status` | 384 112 | **10 551** | **−97.3%** | 10 000 | 1.06× over |
+| `dashboard_api_health` | 382 458 | **6 192** | **−98.4%** | 15 000 | **PASS** |
+| `dashboard_api_metrics` | 466 312 | **90 709** | **−80.5%** | 55 000 | 1.65× over |
+
+So `sched::task_count` took `dashboard_api_health` under its budget and
+`dashboard_api_status` to within 6% of it. The improvement is larger here than the
+55–74% measured under WHPX, which makes sense: the cost removed was a heap allocation
+plus a per-task copy, and both are more expensive under emulation than under hardware
+virtualisation.
+
+**`over_target` on this run: 13**, the lowest of the last six TCG rows
+(20, 15, 17, 18, 14, 13). Suggestive rather than conclusive on its own, since TCG's
+`over_target` has always swung 13–21; it is worth reading only beside the two
+endpoints that demonstrably crossed.
+
+### And the surface matters per benchmark, demonstrated twice over
+
+| benchmark | WHPX verdict | TCG verdict | better surface |
+|---|---|---|---|
+| `dashboard_api_status` | 1.65× over | **1.06× over** | TCG — WHPX charges 13.5 µs for the clock |
+| `vfs_stat_root` | **1.28× over** | 4.19× over | WHPX — TCG inflates compute 4.2× |
+
+The same change, the same budgets, opposite conclusions about which surface to trust —
+and the reason is legible in each case rather than a matter of preference.
+`dashboard_api_status` reads a timer, so WHPX overstates it; `vfs_stat_root` is pure
+compute at a 4.21× accelerator ratio, so TCG overstates it. **A single
+"run the benchmarks under X" policy would be wrong for one of these two no matter which
+X is chosen**, which is the per-benchmark-surface argument arriving for the third time,
+now with a table instead of an assertion.
+
+### What the ten have become
+
+Of the ten over budget when this started:
+
+* **3 are hypervisor artifacts** — `net_arp_lookup`, `net_ns_arp_lookup`, `isr_latency`
+  — identified by accelerator ratio and not kernel findings on either surface here.
+* **2 now meet their budgets** — `dashboard_api_metrics` under WHPX,
+  `dashboard_api_health` under TCG.
+* **1 is within 6%** — `dashboard_api_status` on TCG.
+* **1 is localised** — `vfs_stat_deep`, where the cost is procfs traversal rather than
+  path resolution, proven by `vfs_stat_3comp` meeting its budget with *more*
+  components.
+* **3 remain open and real**: `vfs_throughput_16k_write` (the 42× write/read
+  asymmetry), `vfs_stat_root` (4.19× on TCG, 1.28× on WHPX), `dashboard_api_metrics`
+  (1.65× on TCG).
+
+A number this entry opened by calling unfirable has now moved twice under deliberate
+change, in both directions on both accelerators, and the remaining list is three
+specific things rather than ten.
+
 ## TD-A-REQUEST-STATUS-HAS-NO-CHECKED-SHAPE-SO-EVERY-READER-COUNTS-DIFFERENTLY (lane A, 2026-09-11) — **open**
 
 **In short:** the `requests/` dropbox is how the three lanes hand work to each other,

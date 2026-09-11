@@ -65,6 +65,8 @@ use std::fs::{self, File, Metadata};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
+use quoting::{quoteaf_os, quotef_os};
+
 // ============================================================================
 // Constants
 // ============================================================================
@@ -264,13 +266,13 @@ use sha2::Sha256;
 
 fn sha256_file(path: &Path) -> Result<[u8; 32], String> {
     let mut file =
-        File::open(path).map_err(|e| format!("cannot open '{}': {e}", path.display()))?;
+        File::open(path).map_err(|e| format!("cannot open {}: {e}", quoteaf_os(path)))?;
     let mut hasher = Sha256::new();
     let mut buf = [0u8; COPY_BUF_SIZE];
     loop {
         let n = file
             .read(&mut buf)
-            .map_err(|e| format!("read '{}': {e}", path.display()))?;
+            .map_err(|e| format!("read {}: {e}", quoteaf_os(path)))?;
         if n == 0 {
             break;
         }
@@ -434,18 +436,18 @@ fn set_file_permissions(path: &Path, mode: u32) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
     let perms = fs::Permissions::from_mode(mode);
     fs::set_permissions(path, perms)
-        .map_err(|e| format!("set permissions on '{}': {e}", path.display()))
+        .map_err(|e| format!("set permissions on {}: {e}", quoteaf_os(&path)))
 }
 
 #[cfg(not(unix))]
 fn set_file_permissions(path: &Path, mode: u32) -> Result<(), String> {
     let readonly = (mode & 0o200) == 0;
     let mut perms = fs::metadata(path)
-        .map_err(|e| format!("read metadata '{}': {e}", path.display()))?
+        .map_err(|e| format!("read metadata {}: {e}", quoteaf_os(path)))?
         .permissions();
     perms.set_readonly(readonly);
     fs::set_permissions(path, perms)
-        .map_err(|e| format!("set permissions on '{}': {e}", path.display()))
+        .map_err(|e| format!("set permissions on {}: {e}", quoteaf_os(path)))
 }
 
 fn set_file_mtime(path: &Path, mtime_secs: u64) -> Result<(), String> {
@@ -455,7 +457,7 @@ fn set_file_mtime(path: &Path, mtime_secs: u64) -> Result<(), String> {
         use std::os::unix::ffi::OsStrExt;
 
         let c_path = CString::new(path.as_os_str().as_bytes())
-            .map_err(|_| format!("invalid path '{}': contains null byte", path.display()))?;
+            .map_err(|_| format!("invalid path {}: contains null byte", quoteaf_os(&path)))?;
 
         let times: [i64; 4] = [
             mtime_secs as i64,
@@ -530,13 +532,13 @@ fn scan_tree_inner(
     entries: &mut Vec<FileEntry>,
 ) -> Result<(), String> {
     let read_dir =
-        fs::read_dir(current).map_err(|e| format!("read dir '{}': {e}", current.display()))?;
+        fs::read_dir(current).map_err(|e| format!("read dir {}: {e}", quoteaf_os(current)))?;
 
     for entry in read_dir {
-        let entry = entry.map_err(|e| format!("read dir entry in '{}': {e}", current.display()))?;
+        let entry = entry.map_err(|e| format!("read dir entry in {}: {e}", quoteaf_os(current)))?;
         let path = entry.path();
         let meta =
-            fs::symlink_metadata(&path).map_err(|e| format!("stat '{}': {e}", path.display()))?;
+            fs::symlink_metadata(&path).map_err(|e| format!("stat {}: {e}", quoteaf_os(&path)))?;
 
         let rel = path
             .strip_prefix(root)
@@ -948,14 +950,14 @@ fn build_block_signatures(
     path: &Path,
     block_size: usize,
 ) -> Result<HashMap<u32, Vec<u64>>, String> {
-    let mut file = File::open(path).map_err(|e| format!("open '{}': {e}", path.display()))?;
+    let mut file = File::open(path).map_err(|e| format!("open {}: {e}", quoteaf_os(path)))?;
     let mut map: HashMap<u32, Vec<u64>> = HashMap::new();
     let mut buf = vec![0u8; block_size];
     let mut offset: u64 = 0;
 
     loop {
         let n = read_full(&mut file, &mut buf)
-            .map_err(|e| format!("read '{}': {e}", path.display()))?;
+            .map_err(|e| format!("read {}: {e}", quoteaf_os(path)))?;
         if n == 0 {
             break;
         }
@@ -979,12 +981,12 @@ fn delta_transfer(
     let dst_sigs = build_block_signatures(dst_path, DELTA_BLOCK_SIZE)?;
 
     let mut src =
-        File::open(src_path).map_err(|e| format!("open '{}': {e}", src_path.display()))?;
+        File::open(src_path).map_err(|e| format!("open {}: {e}", quoteaf_os(src_path)))?;
     let mut dst = fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open(dst_path)
-        .map_err(|e| format!("open '{}' for delta: {e}", dst_path.display()))?;
+        .map_err(|e| format!("open {} for delta: {e}", quoteaf_os(dst_path)))?;
 
     let mut src_buf = [0u8; DELTA_BLOCK_SIZE];
     let mut dst_buf = [0u8; DELTA_BLOCK_SIZE];
@@ -994,7 +996,7 @@ fn delta_transfer(
 
     loop {
         let src_n = read_full(&mut src, &mut src_buf)
-            .map_err(|e| format!("read '{}': {e}", src_path.display()))?;
+            .map_err(|e| format!("read {}: {e}", quoteaf_os(src_path)))?;
         if src_n == 0 {
             break;
         }
@@ -1010,7 +1012,7 @@ fn delta_transfer(
                     use std::io::Seek;
                     let _ = dst.seek(std::io::SeekFrom::Start(offset));
                     let dst_n = read_full(&mut dst, &mut dst_buf[..src_n])
-                        .map_err(|e| format!("read '{}': {e}", dst_path.display()))?;
+                        .map_err(|e| format!("read {}: {e}", quoteaf_os(dst_path)))?;
                     if dst_n == src_n && dst_buf[..src_n] == src_buf[..src_n] {
                         matched = true;
                         break;
@@ -1022,9 +1024,9 @@ fn delta_transfer(
         if !matched {
             use std::io::Seek;
             dst.seek(std::io::SeekFrom::Start(offset))
-                .map_err(|e| format!("seek '{}': {e}", dst_path.display()))?;
+                .map_err(|e| format!("seek {}: {e}", quoteaf_os(dst_path)))?;
             dst.write_all(&src_buf[..src_n])
-                .map_err(|e| format!("write '{}': {e}", dst_path.display()))?;
+                .map_err(|e| format!("write {}: {e}", quoteaf_os(dst_path)))?;
             bytes_written = bytes_written.wrapping_add(src_n as u64);
         }
 
@@ -1061,9 +1063,9 @@ fn full_copy(
     stats: &mut RsyncStats,
 ) -> Result<u64, String> {
     let mut src =
-        File::open(src_path).map_err(|e| format!("open '{}': {e}", src_path.display()))?;
+        File::open(src_path).map_err(|e| format!("open {}: {e}", quoteaf_os(src_path)))?;
     let mut dst =
-        File::create(dst_path).map_err(|e| format!("create '{}': {e}", dst_path.display()))?;
+        File::create(dst_path).map_err(|e| format!("create {}: {e}", quoteaf_os(dst_path)))?;
 
     let mut buf = [0u8; COPY_BUF_SIZE];
     let mut written: u64 = 0;
@@ -1072,12 +1074,12 @@ fn full_copy(
     loop {
         let n = src
             .read(&mut buf)
-            .map_err(|e| format!("read '{}': {e}", src_path.display()))?;
+            .map_err(|e| format!("read {}: {e}", quoteaf_os(src_path)))?;
         if n == 0 {
             break;
         }
         dst.write_all(&buf[..n])
-            .map_err(|e| format!("write '{}': {e}", dst_path.display()))?;
+            .map_err(|e| format!("write {}: {e}", quoteaf_os(dst_path)))?;
         written = written.wrapping_add(n as u64);
 
         if show_progress && file_size > 0 {
@@ -1109,7 +1111,7 @@ fn transfer_file(
     stats: &mut RsyncStats,
 ) -> Result<u64, String> {
     let src_meta =
-        fs::metadata(src_path).map_err(|e| format!("stat '{}': {e}", src_path.display()))?;
+        fs::metadata(src_path).map_err(|e| format!("stat {}: {e}", quoteaf_os(src_path)))?;
     let file_size = src_meta.len();
     stats.bytes_total = stats.bytes_total.wrapping_add(file_size);
 
@@ -1149,17 +1151,22 @@ fn transfer_file(
 
 #[cfg(target_family = "unix")]
 fn copy_symlink(src: &Path, dst: &Path, dry_run: bool) -> Result<(), String> {
-    let target = fs::read_link(src).map_err(|e| format!("readlink '{}': {e}", src.display()))?;
+    let target = fs::read_link(src).map_err(|e| format!("readlink {}: {e}", quoteaf_os(&src)))?;
     if dry_run {
         return Ok(());
     }
     if dst.exists() || dst.symlink_metadata().is_ok() {
         fs::remove_file(dst)
             .or_else(|_| fs::remove_dir(dst))
-            .map_err(|e| format!("remove '{}': {e}", dst.display()))?;
+            .map_err(|e| format!("remove {}: {e}", quoteaf_os(&dst)))?;
     }
-    std::os::unix::fs::symlink(&target, dst)
-        .map_err(|e| format!("symlink '{}' -> '{}': {e}", dst.display(), target.display()))
+    std::os::unix::fs::symlink(&target, dst).map_err(|e| {
+        format!(
+            "symlink {} -> {}: {e}",
+            quoteaf_os(&dst),
+            quoteaf_os(&target)
+        )
+    })
 }
 
 #[cfg(not(target_family = "unix"))]
@@ -1214,7 +1221,7 @@ fn sync_file_entry(
         && !parent.exists()
     {
         fs::create_dir_all(parent)
-            .map_err(|e| format!("create dir '{}': {e}", parent.display()))?;
+            .map_err(|e| format!("create dir {}: {e}", quoteaf_os(parent)))?;
     }
 
     transfer_file(src_path, dst_path, cfg, stats)?;
@@ -1252,7 +1259,7 @@ fn sync_symlink_entry(
 
     if cfg.itemize {
         let src_meta = fs::symlink_metadata(src_path)
-            .map_err(|e| format!("stat '{}': {e}", src_path.display()))?;
+            .map_err(|e| format!("stat {}: {e}", quoteaf_os(src_path)))?;
         let flags = compute_itemize(src_path, dst_path, &src_meta, 'L');
         let msg = format!("{} {display_path}\n", flags.format());
         write_stdout(msg.as_bytes());
@@ -1301,7 +1308,7 @@ fn delete_extraneous(
                 let _ = fs::remove_dir(&entry.full_path);
             } else {
                 fs::remove_file(&entry.full_path)
-                    .map_err(|e| format!("delete '{}': {e}", entry.full_path.display()))?;
+                    .map_err(|e| format!("delete {}: {e}", quoteaf_os(&entry.full_path)))?;
             }
         }
         stats.files_deleted += 1;
@@ -1316,7 +1323,7 @@ fn sync_one(
     stats: &mut RsyncStats,
 ) -> Result<(), String> {
     let src_meta = fs::symlink_metadata(src_path)
-        .map_err(|e| format!("stat '{}': {e}", src_path.display()))?;
+        .map_err(|e| format!("stat {}: {e}", quoteaf_os(src_path)))?;
 
     if src_meta.is_file() {
         return sync_file_entry(src_path, dst_base, &src_meta, "", cfg, stats);
@@ -1342,7 +1349,7 @@ fn sync_one(
 
     if !cfg.dry_run {
         fs::create_dir_all(dst_base)
-            .map_err(|e| format!("create dir '{}': {e}", dst_base.display()))?;
+            .map_err(|e| format!("create dir {}: {e}", quoteaf_os(dst_base)))?;
     }
 
     let src_entries = scan_tree(
@@ -1376,7 +1383,7 @@ fn sync_one(
                 }
                 if !cfg.dry_run {
                     fs::create_dir_all(&dst_entry_path)
-                        .map_err(|e| format!("create dir '{}': {e}", dst_entry_path.display()))?;
+                        .map_err(|e| format!("create dir {}: {e}", quoteaf_os(&dst_entry_path)))?;
                 }
                 stats.dirs_created += 1;
             }
@@ -1458,7 +1465,7 @@ fn rsync_run(args: &[String]) -> i32 {
             let dir_name = match src_path.file_name() {
                 Some(n) => n,
                 None => {
-                    let msg = format!("rsync: cannot determine name for '{source}'\n");
+                    let msg = format!("rsync: cannot determine name for {}\n", quoteaf_os(source));
                     write_stderr(msg.as_bytes());
                     had_error = true;
                     continue;
@@ -1809,9 +1816,9 @@ fn scp_copy_file(
     cfg: &ScpConfig,
     stats: &mut ScpStats,
 ) -> Result<(), String> {
-    let src_meta = fs::metadata(src).map_err(|e| format!("scp: {}: {e}", src.display()))?;
+    let src_meta = fs::metadata(src).map_err(|e| format!("scp: {}: {e}", quotef_os(src)))?;
     if src_meta.is_dir() {
-        return Err(format!("scp: {}: is a directory (use -r)", src.display()));
+        return Err(format!("scp: {}: is a directory (use -r)", quotef_os(src)));
     }
     let file_size = src_meta.len();
 
@@ -1827,8 +1834,8 @@ fn scp_copy_file(
             .map_err(|e| format!("scp: cannot create {}: {e}", parent.display()))?;
     }
 
-    let mut reader = File::open(src).map_err(|e| format!("scp: {}: {e}", src.display()))?;
-    let mut writer = File::create(dst).map_err(|e| format!("scp: {}: {e}", dst.display()))?;
+    let mut reader = File::open(src).map_err(|e| format!("scp: {}: {e}", quotef_os(src)))?;
+    let mut writer = File::create(dst).map_err(|e| format!("scp: {}: {e}", quotef_os(dst)))?;
 
     let mut buf = [0u8; COPY_BUF_SIZE];
     let file_name = src
@@ -1880,7 +1887,7 @@ fn scp_copy_directory(
     stats: &mut ScpStats,
 ) -> Result<(), String> {
     if !cfg.recursive {
-        return Err(format!("scp: {}: is a directory (use -r)", src.display()));
+        return Err(format!("scp: {}: is a directory (use -r)", quotef_os(src)));
     }
     if cfg.verbose {
         let msg = format!("d {}\n", dst.display());
@@ -1900,7 +1907,7 @@ fn scp_copy_directory(
         let dst_child = dst.join(entry.file_name());
         let ft = entry
             .file_type()
-            .map_err(|e| format!("scp: {}: {e}", entry_path.display()))?;
+            .map_err(|e| format!("scp: {}: {e}", quotef_os(&entry_path)))?;
 
         if ft.is_dir() {
             scp_copy_directory(&entry_path, &dst_child, cfg, stats)?;
@@ -1980,7 +1987,7 @@ fn scp_run(args: &[String]) -> i32 {
         let src_path = PathBuf::from(&src_str);
 
         if !src_path.exists() {
-            let msg = format!("scp: {}: No such file or directory\n", src_path.display());
+            let msg = format!("scp: {}: No such file or directory\n", quotef_os(&src_path));
             write_stderr(msg.as_bytes());
             stats.errors = stats.errors.saturating_add(1);
             continue;
@@ -1999,7 +2006,7 @@ fn scp_run(args: &[String]) -> i32 {
         let src_meta = match fs::symlink_metadata(&src_path) {
             Ok(m) => m,
             Err(e) => {
-                let msg = format!("scp: {}: {e}\n", src_path.display());
+                let msg = format!("scp: {}: {e}\n", quotef_os(&src_path));
                 write_stderr(msg.as_bytes());
                 stats.errors = stats.errors.saturating_add(1);
                 continue;

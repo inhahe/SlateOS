@@ -381,11 +381,17 @@ fn build_inode_to_pid_map() -> HashMap<u64, (u32, String)> {
             Err(_) => continue,
         };
 
-        // Read the process command name.
-        let comm = fs::read_to_string(format!("/proc/{pid}/comm"))
-            .unwrap_or_default()
-            .trim()
-            .to_string();
+        // The process command name, or `?` where it could not be read.
+        //
+        // `.unwrap_or_default()` printed a blank name in the PID/Program
+        // column, which reads as a process with no name rather than as one
+        // that exited between the directory listing and this read -- the
+        // ordinary case on a busy machine. `userspace/fuser` prints `?` in the
+        // same column for the same reason.
+        let comm = match fs::read_to_string(format!("/proc/{pid}/comm")) {
+            Ok(text) => text.trim().to_string(),
+            Err(_) => "?".to_string(),
+        };
 
         // Scan the fd directory for socket inodes.
         let fd_path = format!("/proc/{pid}/fd");

@@ -242,6 +242,60 @@ def crate_sources(crate: Path) -> list[Path]:
     return sorted(src.rglob("*.rs")) if src.is_dir() else []
 
 
+_MODREF = re.compile(r"\b(?:coreutils|crate)::([a-z][a-z0-9_]*)")
+
+
+def coreutils_modules(seeds: list[Path]) -> list[Path]:
+    """The `coreutils` modules a bin reaches, transitively.
+
+    ## Why this exists: the comparison was unfair by construction
+
+    Until this was added, a row compared **one file** of `coreutils` --
+    `src/bin/<name>.rs` -- against the standalone's **entire crate**. But
+    `coreutils` deliberately factors shared behaviour into modules and the
+    standalone crates do not, so the thing being counted on one side was a leaf
+    and on the other a whole program.
+
+    `sha256sum` is the clearest case. Its bin is 210 lines against the
+    standalone's 1538, which reads as a rout. The bin is 210 lines *because*
+    `--check`, the option table, the three checksum-file formats, the name
+    escaping and the exit statuses all live in `digest.rs` -- 1363 lines, a port
+    of upstream's `digest.c`, shared with `md5sum`. Counting it, the row is
+    1573 against 1538 plus whatever `getopt.rs` contributes.
+
+    **This is the mechanism behind every "standalone ahead" verdict**, including
+    the two that were put to a harness and came back inverted. `tee` and `dd`
+    were not ranked wrongly by bad luck; they were ranked wrongly by a
+    comparison that reads a factored implementation's leaf and a copy-pasted
+    one's entirety. The module docstring already said the scrape "cannot see an
+    option that is parsed by a shared helper" -- what it did not draw is that
+    the blindness is one-sided, and therefore a bias rather than noise.
+
+    ## How
+
+    Follow `coreutils::<mod>` from the bin and `crate::<mod>` from each module
+    reached, to a fixed point. A textual scrape, like everything else here: it
+    will follow a name inside a comment or a string, and that is the harmless
+    direction -- it counts a module the bin might not use, where the previous
+    behaviour was to count none of them at all.
+    """
+    src = USERSPACE / "coreutils" / "src"
+    found: dict[Path, None] = {}
+    queue = list(seeds)
+    while queue:
+        path = queue.pop()
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for name in set(_MODREF.findall(text)):
+            for cand in (src / f"{name}.rs", src / name / "mod.rs"):
+                if cand.is_file() and cand not in found:
+                    found[cand] = None
+                    queue.append(cand)
+    return sorted(found)
+
+
 def read(paths: list[Path]) -> tuple[set[str], int]:
     """The option set and the line count for one side of a pair.
 
@@ -289,6 +343,9 @@ def main() -> int:
         st_paths = crate_sources(USERSPACE / name)
         if not cu_paths or not st_paths:
             continue
+        # The shared modules the bin reaches, without which this row compares a
+        # leaf file against a whole crate. See `coreutils_modules`.
+        cu_paths = cu_paths + coreutils_modules(cu_paths)
         cu_opts, cu_lines = read(cu_paths)
         st_opts, st_lines = read(st_paths)
         rows.append((name, cu_lines, st_lines, cu_opts, st_opts))

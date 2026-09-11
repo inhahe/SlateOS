@@ -273,7 +273,40 @@ permanent is how a workaround outlives the thing it was working around.
 caller, which is the second time today that reading one line closely turned up
 something beside it.
 
-## TD-B-IDENTITY-FROM-THE-ENVIRONMENT-A-FAMILY-NOT-AN-INCIDENT (lane B, 2026-09-11)
+## TD-B-IDENTITY-FROM-THE-ENVIRONMENT-A-FAMILY-NOT-AN-INCIDENT (lane B, 2026-09-11) -- CLOSED 2026-09-11
+
+**CLOSED. The population is zero.** Every read of an identity variable is
+gone from `userspace/`, `posix/`, `services/` and `init/`, and
+`scripts/check-env-identity.py` (pre-push gate 23) holds it there with an
+EMPTY baseline -- so it refuses any new one outright rather than comparing
+against a list of permitted sites.
+
+**Twelve programs, and they were not all the same thing.** Recording the
+split matters more than the count, because treating them alike is how a
+real finding gets buried in a list of tidy-ups:
+
+| Severity | Programs | Why |
+|---|---|---|
+| Escalation | `sudo` (`$USER` keyed the credential cache -- no password), `login` (`$TTY` defaulted to `console`, passing securetty) | a caller-set value defeated an access control |
+| Cross-user action | `screen` (attach to another user's sessions), `lp` (`lprm` cancelled another user's job), `mesg`/`wall` (sender spoofing, one to a terminal and one to every terminal) | the value chose WHOSE thing was acted on |
+| Broken outright | `at` (the fallback was a PID, so the daemon refused every job it had accepted) | not a security bug at all |
+| Misleading default | `logger`, `firejail`, `ssh`, `chroot`, `mktemp` | the read was legitimate or harmless; the FALLBACK named `root` |
+
+**The fallback was its own defect, separate from the read.** Five of the
+twelve fell back to the literal `root` for a caller the build could not
+identify -- in the system log, on every sandbox, as the remote login name
+`ssh` reached for. An unidentifiable caller is not root; it is
+unidentifiable. `firejail`'s test still records an earlier repair of the
+same fallback whose original comment read "Should return at least
+\"root\" as fallback" -- the defect pinned as the contract.
+
+**What made it findable:** every one had a correct implementation beside
+it. `sudo`'s `effective_uid` already read `getuid(2)` under a note saying
+"The fallback was the caller's to set" while the username two lines away
+read `$USER`. `wall`'s `get_tty` read the real descriptor while the name
+in the same banner came from the environment. `mktemp`'s environment step
+sat between two correct answers.
+
 
 **In short:** Four times now, a program has taken a value that decides an
 authorization outcome from an environment variable the caller sets. Three were

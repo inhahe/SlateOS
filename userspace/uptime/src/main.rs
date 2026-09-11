@@ -208,44 +208,22 @@ fn count_users() -> u32 {
     0
 }
 
-/// Parse utmp file for user session count.
+/// The number of users logged in now, or `None` if utmp cannot be read.
 ///
-/// The utmp record format on Linux x86_64 is 384 bytes per entry. We look for
-/// records with ut_type == 7 (USER_PROCESS) to count logged-in users.
+/// The record layout lives in `utmpfile`, which is what `who` reads too. It
+/// was duplicated here -- 384, the ut_type offset and USER_PROCESS all
+/// restated -- and a third program had its own, wrong, idea of the same
+/// format.
 ///
-/// On Slate OS the utmp format may differ; this function degrades gracefully by
-/// returning `None` if the file is too small or does not parse.
+/// BEHAVIOUR CHANGE, and it is invisible: this used to return `None` for a
+/// file shorter than one record, and now returns `Some(0)`, because a utmp
+/// that READ FINE and holds no whole record describes nobody rather than
+/// refusing to say. The sole caller returns 0 for `None` and for `Some(0)`
+/// alike, so nothing observable moved -- which is the only reason it is a
+/// footnote instead of its own commit.
 fn read_utmp_user_count(path: &str) -> Option<u32> {
     let data = fs::read(path).ok()?;
-
-    // Standard Linux utmp record size for x86_64.
-    const UTMP_RECORD_SIZE: usize = 384;
-    // Offset of ut_type field (i32, little-endian).
-    const UT_TYPE_OFFSET: usize = 0;
-    // USER_PROCESS type value.
-    const USER_PROCESS: i32 = 7;
-
-    if data.len() < UTMP_RECORD_SIZE {
-        return None;
-    }
-
-    let mut count: u32 = 0;
-    let mut offset = 0;
-
-    while offset + UTMP_RECORD_SIZE <= data.len() {
-        // Read ut_type as a little-endian i32.
-        let type_bytes = data.get(offset + UT_TYPE_OFFSET..offset + UT_TYPE_OFFSET + 4)?;
-        let ut_type =
-            i32::from_le_bytes([type_bytes[0], type_bytes[1], type_bytes[2], type_bytes[3]]);
-
-        if ut_type == USER_PROCESS {
-            count = count.saturating_add(1);
-        }
-
-        offset += UTMP_RECORD_SIZE;
-    }
-
-    Some(count)
+    u32::try_from(utmpfile::count_user_sessions(&data)).ok()
 }
 
 // ============================================================================

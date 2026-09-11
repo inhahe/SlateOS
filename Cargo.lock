@@ -3102,6 +3102,7 @@ name = "uptime"
 version = "0.1.0"
 dependencies = [
  "procinfo",
+ "utmpfile",
 ]
 
 [[package]]
@@ -3128,6 +3129,10 @@ dependencies = [
  "pwdb",
  "scratchdir",
 ]
+
+[[package]]
+name = "utmpfile"
+version = "0.1.0"
 
 [[package]]
 name = "vi"

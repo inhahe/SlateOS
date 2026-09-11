@@ -23,6 +23,8 @@ use std::process;
 
 const VERSION: &str = "0.1.0";
 const CGROUP_ROOT: &str = "/sys/fs/cgroup";
+/// Where the kernel lists its controllers.
+const PROC_CGROUPS: &str = "/proc/cgroups";
 
 // ============================================================================
 // Data structures
@@ -133,89 +135,6 @@ fn list_cgroups_recursive(base: &Path, prefix: &str, result: &mut Vec<CgroupInfo
             }
         }
     }
-}
-
-fn generate_default_subsystems() -> Vec<SubsysInfo> {
-    vec![
-        SubsysInfo {
-            name: "cpu".to_string(),
-            _hierarchy: 0,
-            num_cgroups: 1,
-            enabled: true,
-        },
-        SubsysInfo {
-            name: "cpuset".to_string(),
-            _hierarchy: 0,
-            num_cgroups: 1,
-            enabled: true,
-        },
-        SubsysInfo {
-            name: "io".to_string(),
-            _hierarchy: 0,
-            num_cgroups: 1,
-            enabled: true,
-        },
-        SubsysInfo {
-            name: "memory".to_string(),
-            _hierarchy: 0,
-            num_cgroups: 1,
-            enabled: true,
-        },
-        SubsysInfo {
-            name: "pids".to_string(),
-            _hierarchy: 0,
-            num_cgroups: 1,
-            enabled: true,
-        },
-        SubsysInfo {
-            name: "rdma".to_string(),
-            _hierarchy: 0,
-            num_cgroups: 1,
-            enabled: false,
-        },
-        SubsysInfo {
-            name: "hugetlb".to_string(),
-            _hierarchy: 0,
-            num_cgroups: 1,
-            enabled: true,
-        },
-        SubsysInfo {
-            name: "misc".to_string(),
-            _hierarchy: 0,
-            num_cgroups: 1,
-            enabled: false,
-        },
-    ]
-}
-
-fn generate_default_cgroups() -> Vec<CgroupInfo> {
-    vec![
-        CgroupInfo {
-            path: PathBuf::from("system.slice"),
-            controllers: vec![
-                "cpu".to_string(),
-                "memory".to_string(),
-                "io".to_string(),
-                "pids".to_string(),
-            ],
-            _frozen: false,
-        },
-        CgroupInfo {
-            path: PathBuf::from("user.slice"),
-            controllers: vec![
-                "cpu".to_string(),
-                "memory".to_string(),
-                "io".to_string(),
-                "pids".to_string(),
-            ],
-            _frozen: false,
-        },
-        CgroupInfo {
-            path: PathBuf::from("init.scope"),
-            controllers: vec!["cpu".to_string(), "memory".to_string()],
-            _frozen: false,
-        },
-    ]
 }
 
 // ============================================================================
@@ -818,13 +737,26 @@ fn cmd_lscgroup(args: &[String]) {
 
     let mut cgroups = Vec::new();
     let root = Path::new(CGROUP_ROOT);
-    if root.is_dir() {
-        list_cgroups_recursive(root, "", &mut cgroups);
-    }
 
-    if cgroups.is_empty() {
-        cgroups = generate_default_cgroups();
+    // NO HIERARCHY MEANS NO CGROUPS, AND SAYING SO.
+    //
+    // This substituted `generate_default_cgroups()`: `system.slice`,
+    // `user.slice` and `init.scope`, each with a controller list. Those are
+    // systemd's names, SlateOS does not run systemd, and the machine this ran
+    // on had no cgroup hierarchy at all -- so `lscgroup` printed three groups
+    // that have never existed anywhere on the system, and a script asking
+    // whether a group is present got yes.
+    //
+    // The two cases are told apart because they need different words: a system
+    // with no cgroup filesystem cannot have cgroups, and one with an empty
+    // hierarchy has none. Neither is "here are three".
+    if !root.is_dir() {
+        eprintln!(
+            "lscgroup: {CGROUP_ROOT} does not exist -- cgroups are not available on this system"
+        );
+        process::exit(1);
     }
+    list_cgroups_recursive(root, "", &mut cgroups);
 
     // Filter by controller if specified.
     let filter_controller = filter_ctrl
@@ -879,7 +811,13 @@ fn cmd_lssubsys(args: &[String]) {
         }
     }
 
-    let subsystems = read_subsystems();
+    let subsystems = match read_subsystems() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("lssubsys: {e}");
+            process::exit(1);
+        }
+    };
 
     let stdout = io::stdout();
     let mut out = stdout.lock();
@@ -898,31 +836,40 @@ fn cmd_lssubsys(args: &[String]) {
     }
 }
 
-fn read_subsystems() -> Vec<SubsysInfo> {
-    // Try reading from /proc/cgroups.
-    if let Ok(data) = fs::read_to_string("/proc/cgroups") {
-        let mut result = Vec::new();
-        for line in data.lines().skip(1) {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 4 {
-                let name = parts[0].to_string();
-                let _hierarchy = parts[1].parse().unwrap_or(0);
-                let num_cgroups = parts[2].parse().unwrap_or(0);
-                let enabled = parts[3] == "1";
-                result.push(SubsysInfo {
-                    name,
-                    _hierarchy,
-                    num_cgroups,
-                    enabled,
-                });
-            }
-        }
-        if !result.is_empty() {
-            return result;
+/// The controllers the kernel reports, or `Err` saying why there are none.
+///
+/// # What this replaced
+///
+/// An unreadable `/proc/cgroups` returned `generate_default_subsystems()`:
+/// eight controllers -- cpu, cpuset, io, memory, pids, rdma, hugetlb, misc --
+/// six of them flagged enabled, each claiming one cgroup. None of it was read
+/// from anywhere. `lssubsys` answers "what resource controls does this kernel
+/// have", and on a machine with no cgroup support at all it answered with a
+/// plausible Linux box.
+///
+/// An EMPTY list is a different answer and still a real one: the file exists,
+/// it lists nothing, and the caller prints nothing. Only an unreadable file is
+/// `Err`, because that is the case where we do not know.
+fn read_subsystems() -> Result<Vec<SubsysInfo>, String> {
+    let data =
+        fs::read_to_string(PROC_CGROUPS).map_err(|e| format!("cannot read {PROC_CGROUPS}: {e}"))?;
+    let mut result = Vec::new();
+    for line in data.lines().skip(1) {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 4 {
+            let name = parts[0].to_string();
+            let _hierarchy = parts[1].parse().unwrap_or(0);
+            let num_cgroups = parts[2].parse().unwrap_or(0);
+            let enabled = parts[3] == "1";
+            result.push(SubsysInfo {
+                name,
+                _hierarchy,
+                num_cgroups,
+                enabled,
+            });
         }
     }
-
-    generate_default_subsystems()
+    Ok(result)
 }
 
 // ============================================================================
@@ -1012,24 +959,6 @@ mod tests {
     }
 
     #[test]
-    fn test_default_subsystems() {
-        let ss = generate_default_subsystems();
-        assert!(ss.len() >= 6);
-        assert!(ss.iter().any(|s| s.name == "cpu"));
-        assert!(ss.iter().any(|s| s.name == "memory"));
-        assert!(ss.iter().any(|s| s.name == "pids"));
-    }
-
-    #[test]
-    fn test_default_cgroups() {
-        let cgs = generate_default_cgroups();
-        assert_eq!(cgs.len(), 3);
-        assert_eq!(cgs[0].path, PathBuf::from("system.slice"));
-        assert_eq!(cgs[1].path, PathBuf::from("user.slice"));
-        assert_eq!(cgs[2].path, PathBuf::from("init.scope"));
-    }
-
-    #[test]
     fn test_cgroup_info_clone() {
         let info = CgroupInfo {
             path: PathBuf::from("test.slice"),
@@ -1079,23 +1008,15 @@ mod tests {
 
     #[test]
     fn test_read_subsystems() {
-        let ss = read_subsystems();
-        assert!(!ss.is_empty());
-    }
-
-    #[test]
-    fn test_subsys_enabled_count() {
-        let ss = generate_default_subsystems();
-        let enabled: Vec<_> = ss.iter().filter(|s| s.enabled).collect();
-        assert!(enabled.len() >= 4);
-    }
-
-    #[test]
-    fn test_default_cgroup_controllers() {
-        let cgs = generate_default_cgroups();
-        for cg in &cgs {
-            assert!(!cg.controllers.is_empty());
-            assert!(cg.controllers.contains(&"cpu".to_string()));
+        // EITHER ANSWER IS CORRECT AND THE POINT IS THAT THEY DIFFER. On a
+        // host with /proc/cgroups this reads it; on one without -- this test
+        // runner, among others -- it must say it could not find out rather
+        // than hand back a controller list nobody read. It used to assert
+        // `!is_empty()`, which passed only because the failure path invented
+        // eight controllers, so the test certified the fabrication.
+        match read_subsystems() {
+            Ok(list) => assert!(list.iter().all(|s| !s.name.is_empty())),
+            Err(e) => assert!(e.contains(PROC_CGROUPS), "unexpected error: {e}"),
         }
     }
 

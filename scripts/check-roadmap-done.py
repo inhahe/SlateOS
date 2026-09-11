@@ -194,6 +194,107 @@ def real_names(tree: gittree.Tree) -> set[str]:
     return names
 
 
+# A Rust module path in parentheses on an `[x]` line: `(fs::bench)`,
+# `(notify::read_events)`. This is the shape lane A's sections use, where lane
+# B's is a command name before a colon -- measured by lane A on 2026-09-11:
+# 3,025 `[x]` lines, of which only 26 name a repo path and 415 carry a distinct
+# module path. Two lanes, two conventions, one file.
+MODPATH = re.compile(r"\(([a-z_][a-z0-9_]*(?:::[a-z_][a-z0-9_]*)+)\)")
+
+# Where those paths are rooted. Lane A's tree; this file only ever reads it.
+MODROOT = "kernel/src"
+
+
+def kernel_modules(tree: gittree.Tree) -> tuple[set[str], set[str]]:
+    """`(full paths, bare module names)` for every module under `kernel/src`.
+
+    A full path is `::`-joined and rooted at `kernel/src` -- `fs::notify` for
+    `kernel/src/fs/notify.rs` or `kernel/src/fs/notify/mod.rs`. The bare set is
+    every individual segment, which the elision rule below needs.
+    """
+    full: set[str] = set()
+    bare: set[str] = set()
+    for rel in tree.files_under(MODROOT):
+        if not rel.endswith(".rs"):
+            continue
+        parts = rel[len(MODROOT) + 1:].removesuffix(".rs").split("/")
+        if parts and parts[-1] in ("mod", "lib", "main"):
+            parts = parts[:-1]
+        if not parts:
+            continue
+        full.add("::".join(parts))
+        bare.update(parts)
+    return full, bare
+
+
+def modpath_resolves(path: str, full: set[str], bare: set[str]) -> bool:
+    """Whether a roadmap module path names something real.
+
+    Three ways, and the second and third are not slack -- they are the
+    convention. Lane A measured this and reported the rule, having first written
+    the strict version and had it call `notify::read_events` missing when it is
+    `kernel/src/fs/notify.rs` line 439 and entirely real:
+
+      1. the whole path is a module -- `fs::bench`;
+      2. the path minus its last segment is, because the last segment is often
+         a FUNCTION or TYPE rather than a module -- `notify::read_events`;
+      3. the leading segments may be ELIDED, so the remainder need only appear
+         as a module somewhere under `kernel/src`. The roadmap writes
+         `notify::read_events` for what is really `fs::notify::read_events`.
+
+    Rule 3 is why the bare-name set exists. One false positive in 415 is the
+    rate at which a gate gets switched off, so the elision rule matters more
+    than it looks.
+    """
+    if path in full:
+        return True
+    head, _, _ = path.rpartition("::")
+    if head and head in full:
+        return True
+    # Elided leading segments: any suffix of the path that is itself a known
+    # path, or -- for a two-segment `mod::item` -- the module alone.
+    segs = path.split("::")
+    for i in range(len(segs)):
+        tail = "::".join(segs[i:])
+        if tail in full:
+            return True
+        if len(segs) - i > 1 and "::".join(segs[i:-1]) in full:
+            return True
+    return segs[0] in bare or (len(segs) > 1 and segs[-2] in bare)
+
+
+def modpath_sightings(text: str) -> list[tuple[int, str, str]]:
+    """Every `[x]` module path in `text`, resolved or not.
+
+    Separate from the violation list so the pass message can report how many
+    paths were actually examined. "0 violations" out of 415 and "0 violations"
+    out of 0 print the same word otherwise, and the second one means the regex
+    stopped matching.
+    """
+    out: list[tuple[int, str, str]] = []
+    for n, line in enumerate(text.splitlines(), start=1):
+        if "- [x]" not in line:
+            continue
+        for path in MODPATH.findall(line):
+            out.append((n, path, line.strip()))
+    return out
+
+
+def modpath_violations(
+    text: str, full: set[str], bare: set[str]
+) -> list[tuple[int, str, str]]:
+    """`(line, path, source line)` for every `[x]` module path that resolves to
+    nothing under `kernel/src`."""
+    out: list[tuple[int, str, str]] = []
+    for n, line in enumerate(text.splitlines(), start=1):
+        if "- [x]" not in line:
+            continue
+        for path in MODPATH.findall(line):
+            if not modpath_resolves(path, full, bare):
+                out.append((n, path, line.strip()))
+    return out
+
+
 def violations(
     text: str, tree: gittree.Tree | None = None, known: set[str] | None = None
 ) -> list[tuple[int, str, str]]:
@@ -313,6 +414,56 @@ def selftest() -> int:
                 if got != want:
                     failures.append(f"{label}: want flagged={want}, got {got}\n    {line}")
 
+            # -- lane A's module-path shape -------------------------------
+            #
+            # The fixture mirrors the real thing: `fs/notify.rs` nested under a
+            # directory, plus a top-level module, because the elision rule is
+            # only exercised when the path's head is NOT at the root.
+            mod_full = {"fs", "fs::notify", "fs::bench", "sched"}
+            mod_bare = {"fs", "notify", "bench", "sched"}
+            mod_cases = [
+                ("  - [x] thing (fs::notify)", False, "the whole path is a module"),
+                ("  - [x] thing (fs::bench)", False, "ditto, sibling module"),
+                # Rule 2: the last segment is a function, not a module.
+                ("  - [x] thing (fs::notify::read_events)", False,
+                 "path minus its last segment is a module"),
+                # Rule 3, and THE FALSE POSITIVE LANE A HIT with the strict
+                # resolver: the roadmap writes `notify::read_events` for what is
+                # really `fs::notify::read_events`. One bad call in 415 is the
+                # rate at which a gate gets switched off.
+                ("  - [x] thing (notify::read_events)", False,
+                 "leading segments elided, last segment a function"),
+                ("  - [x] thing (notify::nosuchfn)", False,
+                 "elided head resolves; the leaf need not be a module"),
+                # The defect it is for.
+                ("  - [x] thing (nosuchmod::whatever)", True,
+                 "neither the path, its head, nor any segment is a module"),
+                ("  - [x] thing (ghost::one::two)", True,
+                 "nothing in it resolves at any depth"),
+                # Not claimed done, so not this gate's business.
+                ("  - [ ] thing (nosuchmod::whatever)", False,
+                 "an open entry claims nothing"),
+                # A single segment in parentheses is not a path, and matching it
+                # would flag every parenthesised word in the file.
+                ("  - [x] thing (notes)", False, "one segment is not a path"),
+            ]
+            for line, want, label in mod_cases:
+                checked += 1
+                got = bool(modpath_violations(line, mod_full, mod_bare))
+                if got != want:
+                    failures.append(
+                        f"module path, {label}: want flagged={want}, got {got}"
+                        f"\n    {line}")
+
+            # The sighting count is what the pass message reports, so it has to
+            # count paths rather than lines.
+            checked += 1
+            two = "  - [x] a (fs::notify) and b (sched::run)\n  - [ ] c (x::y)\n"
+            if len(modpath_sightings(two)) != 2:
+                failures.append(
+                    f"modpath_sightings counted {len(modpath_sightings(two))},"
+                    " want 2 (both on the [x] line, none from the [ ] line)")
+
             # Line numbers must point at the line a reader will open.
             checked += 1
             doc = "intro\n\n  - [x] realcrate: fine\n  - [x] ghostcrate: not fine\n"
@@ -392,6 +543,17 @@ def main() -> int:
                 )
                 return 2
             found = violations(text, known=known)
+            # Lane A's shape, checked in the same pass over the same file.
+            # Deliberately NOT a second script: two ratchets counting adjacent
+            # populations is how "N remain" stops meaning anything, and lane A
+            # asked for exactly one so it would not be duplicated.
+            mod_full, mod_bare = kernel_modules(tree)
+            mod_found = (
+                modpath_violations(text, mod_full, mod_bare)
+                if len(mod_full) >= 100
+                else None
+            )
+            mod_total = len(mod_full)
     except (gittree.GitTreeError, OSError) as e:
         # Loud and non-zero: a checker that cannot read its subject must not
         # report the clean answer, because "no violations" is byte-identical to
@@ -400,6 +562,46 @@ def main() -> int:
         return 2
 
     names = sorted({name for _n, name, _s in found})
+
+    # -- lane A's module paths, judged before the name ratchet ----------------
+    #
+    # NO BASELINE, and that is the point rather than an omission. A baseline
+    # exists to hold a backlog, and lane A measured this population before
+    # asking for the check: 415 distinct module paths on `[x]` lines, all 415
+    # resolving. An empty backlog needs no allowance, and giving it one would
+    # only create somewhere to put the first failure.
+    #
+    # The floor is the usual refusal: a tree with almost no kernel modules
+    # would make every path look fabricated, and an empty answer about an empty
+    # subject is not a verdict.
+    if mod_found is None:
+        print(
+            f"check-roadmap-done: only {mod_total} module(s) found under"
+            f" {MODROOT}/ — refusing to judge the module paths, since that is a"
+            " broken checkout rather than a roadmap full of invented ones.",
+            file=sys.stderr,
+        )
+        return 2
+    if mod_found:
+        print(
+            f"{len(mod_found)} roadmap entr"
+            f"{'y' if len(mod_found) == 1 else 'ies'} marked `[x]` name"
+            f"{'s' if len(mod_found) == 1 else ''} a Rust module path that"
+            f" resolves to nothing under {MODROOT}/:\n",
+            file=sys.stderr,
+        )
+        for n, path, line in mod_found[:40]:
+            print(f"  roadmap.md:{n}: ({path})", file=sys.stderr)
+            print(f"      {line[:100]}", file=sys.stderr)
+        if len(mod_found) > 40:
+            print(f"  … and {len(mod_found) - 40} more", file=sys.stderr)
+        print(
+            "\nThe path may elide leading segments and may end in a function or"
+            "\ntype, so all three of those resolve. One that resolves by none of"
+            "\nthem names a module nobody wrote, or one that has since moved.",
+            file=sys.stderr,
+        )
+        return 1
 
     if "--update-baseline" in args:
         write_baseline(names)
@@ -422,9 +624,15 @@ def main() -> int:
         print(f"fixed: {f} now resolves — run --update-baseline to record it")
 
     if not new_names:
+        # The module-path population is named in the pass line, not just in the
+        # failure. A gate that says nothing when it passes cannot be told from
+        # one that did not run -- which is how a checker goes quietly blind
+        # after a refactor moves what it was reading.
+        mod_seen = len({p for _n, p, _s in modpath_sightings(text)})
         print(
             f"ok — {len(names)} known unresolved, 0 new ({present} crates,"
-            f" {len(fixed)} improved)"
+            f" {len(fixed)} improved); {mod_seen} module path(s) all resolve"
+            f" against {mod_total} module(s) under {MODROOT}/"
         )
         return 0
 

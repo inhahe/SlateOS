@@ -44,6 +44,16 @@ impl CommandSink for RenderTree {
     }
 }
 
+/// So that `&mut receiver` is the right call shape whether the receiver is an
+/// owned `Vec` or already a `&mut` binding. Without this the converted call
+/// sites would have to know which they were looking at, and they cannot -- the
+/// two are spelled identically at the point of use.
+impl<S: CommandSink + ?Sized> CommandSink for &mut S {
+    fn emit(&mut self, cmd: guitk::render::RenderCommand) {
+        (**self).emit(cmd);
+    }
+}
+
 impl<T> CommandSink for guitk::frame::Frame<T> {
     fn emit(&mut self, cmd: guitk::render::RenderCommand) {
         // Through `push`, never into the buffer behind it: this one maintains

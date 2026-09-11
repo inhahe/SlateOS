@@ -21,6 +21,7 @@
 #![allow(dead_code, clippy::too_many_arguments)]
 
 use appearance::Palette;
+use appearance::Surface;
 #[allow(unused_imports)]
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -1547,14 +1548,15 @@ impl RecordingIndicator {
             color: Color::rgba(0, 0, 0, 120),
             corner_radii: CornerRadii::all(SMALL_RADIUS),
         });
-        cmds.push(RenderCommand::FillRect {
-            x: self.x,
-            y: self.y,
-            width: indicator_width,
-            height: indicator_height,
-            color: pal.crust,
-            corner_radii: CornerRadii::all(SMALL_RADIUS),
-        });
+        pal.push_surface(
+            &mut cmds,
+            self.x,
+            self.y,
+            indicator_width,
+            indicator_height,
+            SMALL_RADIUS,
+            Surface::Card,
+        );
 
         // Recording dot (blinks)
         if self.blink_on {
@@ -2308,14 +2310,15 @@ impl ScreenRecorderApp {
         let mut cmds = Vec::new();
 
         // Sidebar background
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: SIDEBAR_WIDTH,
-            height: self.window_height,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            &mut cmds,
+            0.0,
+            0.0,
+            SIDEBAR_WIDTH,
+            self.window_height,
+            0.0,
+            Surface::Sidebar,
+        );
 
         // App title
         cmds.push(RenderCommand::Text {
@@ -2351,14 +2354,15 @@ impl ScreenRecorderApp {
 
             // Highlight background for active/hovered
             if is_active {
-                cmds.push(RenderCommand::FillRect {
-                    x: 4.0,
+                self.palette.push_surface(
+                    &mut cmds,
+                    4.0,
                     y,
-                    width: SIDEBAR_WIDTH - 8.0,
-                    height: item_height - 2.0,
-                    color: self.palette.surface0,
-                    corner_radii: CornerRadii::all(SMALL_RADIUS),
-                });
+                    SIDEBAR_WIDTH - 8.0,
+                    item_height - 2.0,
+                    SMALL_RADIUS,
+                    Surface::Selected,
+                );
                 // Active indicator bar
                 cmds.push(RenderCommand::FillRect {
                     x: 0.0,
@@ -2369,14 +2373,15 @@ impl ScreenRecorderApp {
                     corner_radii: CornerRadii::all(1.5),
                 });
             } else if is_hovered {
-                cmds.push(RenderCommand::FillRect {
-                    x: 4.0,
+                self.palette.push_surface(
+                    &mut cmds,
+                    4.0,
                     y,
-                    width: SIDEBAR_WIDTH - 8.0,
-                    height: item_height - 2.0,
-                    color: self.palette.surface1,
-                    corner_radii: CornerRadii::all(SMALL_RADIUS),
-                });
+                    SIDEBAR_WIDTH - 8.0,
+                    item_height - 2.0,
+                    SMALL_RADIUS,
+                    Surface::Selected,
+                );
             }
 
             let text_color = if is_active {
@@ -2456,14 +2461,15 @@ impl ScreenRecorderApp {
         let mut cmds = Vec::new();
 
         // Toolbar background
-        cmds.push(RenderCommand::FillRect {
-            x: SIDEBAR_WIDTH,
-            y: 0.0,
-            width: self.window_width - SIDEBAR_WIDTH,
-            height: TOOLBAR_HEIGHT,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            &mut cmds,
+            SIDEBAR_WIDTH,
+            0.0,
+            self.window_width - SIDEBAR_WIDTH,
+            TOOLBAR_HEIGHT,
+            0.0,
+            Surface::Sidebar,
+        );
 
         // Bottom border
         cmds.push(RenderCommand::Line {
@@ -2514,14 +2520,15 @@ impl ScreenRecorderApp {
             } else {
                 "Pause"
             };
-            cmds.push(RenderCommand::FillRect {
-                x: btn_x,
-                y: btn_y,
-                width: 80.0,
-                height: BUTTON_HEIGHT,
-                color: self.palette.surface1,
-                corner_radii: CornerRadii::all(SMALL_RADIUS),
-            });
+            self.palette.push_surface(
+                &mut cmds,
+                btn_x,
+                btn_y,
+                80.0,
+                BUTTON_HEIGHT,
+                SMALL_RADIUS,
+                Surface::Card,
+            );
             cmds.push(RenderCommand::Text {
                 x: btn_x + 14.0,
                 y: btn_y + 9.0,
@@ -2593,14 +2600,15 @@ impl ScreenRecorderApp {
         let preview_w = width - PADDING * 2.0;
         let preview_h = height * 0.55;
 
-        cmds.push(RenderCommand::FillRect {
-            x: cx,
-            y: cy,
-            width: preview_w,
-            height: preview_h,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
+        self.palette.push_surface(
+            &mut cmds,
+            cx,
+            cy,
+            preview_w,
+            preview_h,
+            CORNER_RADIUS,
+            Surface::Card,
+        );
         cmds.push(RenderCommand::StrokeRect {
             x: cx,
             y: cy,
@@ -2656,14 +2664,8 @@ impl ScreenRecorderApp {
     fn render_annotation_toolbar(&self, x: f32, y: f32, width: f32) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
 
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width,
-            height: 40.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(SMALL_RADIUS),
-        });
+        self.palette
+            .push_surface(&mut cmds, x, y, width, 40.0, SMALL_RADIUS, Surface::Card);
 
         let tools = AnnotationTool::all();
         let tool_btn_w: f32 = 80.0;
@@ -2963,14 +2965,15 @@ impl ScreenRecorderApp {
             }
 
             // Thumbnail placeholder
-            cmds.push(RenderCommand::FillRect {
-                x: list_x + 8.0,
-                y: entry_y + 8.0,
-                width: 72.0,
-                height: 44.0,
-                color: self.palette.surface1,
-                corner_radii: CornerRadii::all(3.0),
-            });
+            self.palette.push_surface(
+                &mut cmds,
+                list_x + 8.0,
+                entry_y + 8.0,
+                72.0,
+                44.0,
+                3.0,
+                Surface::ControlTrack,
+            );
 
             // Name
             cmds.push(RenderCommand::Text {
@@ -3042,14 +3045,15 @@ impl ScreenRecorderApp {
             let track_h: f32 = 40.0;
 
             // Track background
-            cmds.push(RenderCommand::FillRect {
-                x: track_x,
-                y: track_y,
-                width: track_w,
-                height: track_h,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::all(SMALL_RADIUS),
-            });
+            self.palette.push_surface(
+                &mut cmds,
+                track_x,
+                track_y,
+                track_w,
+                track_h,
+                SMALL_RADIUS,
+                Surface::ControlTrack,
+            );
 
             // Trimmed region highlight
             let start_frac = trim.start_fraction() as f32;
@@ -3057,14 +3061,15 @@ impl ScreenRecorderApp {
             let sel_x = track_x + track_w * start_frac;
             let sel_w = track_w * (end_frac - start_frac);
 
-            cmds.push(RenderCommand::FillRect {
-                x: sel_x,
-                y: track_y,
-                width: sel_w,
-                height: track_h,
-                color: self.palette.surface1,
-                corner_radii: CornerRadii::ZERO,
-            });
+            self.palette.push_surface(
+                &mut cmds,
+                sel_x,
+                track_y,
+                sel_w,
+                track_h,
+                0.0,
+                Surface::ControlTrack,
+            );
 
             // Start handle
             cmds.push(RenderCommand::FillRect {
@@ -3144,14 +3149,15 @@ impl ScreenRecorderApp {
                 overflow: TextOverflow::Ellipsis,
             });
 
-            cmds.push(RenderCommand::FillRect {
-                x: track_x + 110.0,
-                y: btn_y,
-                width: 80.0,
-                height: BUTTON_HEIGHT,
-                color: self.palette.surface1,
-                corner_radii: CornerRadii::all(SMALL_RADIUS),
-            });
+            self.palette.push_surface(
+                &mut cmds,
+                track_x + 110.0,
+                btn_y,
+                80.0,
+                BUTTON_HEIGHT,
+                SMALL_RADIUS,
+                Surface::ControlTrack,
+            );
             cmds.push(RenderCommand::Text {
                 x: track_x + 126.0,
                 y: btn_y + 9.0,
@@ -3274,14 +3280,8 @@ impl ScreenRecorderApp {
             overflow: TextOverflow::Ellipsis,
         });
         cy += 18.0;
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y: cy,
-            width,
-            height: 30.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(SMALL_RADIUS),
-        });
+        self.palette
+            .push_surface(&mut cmds, x, cy, width, 30.0, SMALL_RADIUS, Surface::Card);
         cmds.push(RenderCommand::Text {
             x: x + 8.0,
             y: cy + 8.0,
@@ -3306,14 +3306,8 @@ impl ScreenRecorderApp {
             overflow: TextOverflow::Ellipsis,
         });
         cy += 18.0;
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y: cy,
-            width,
-            height: 30.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(SMALL_RADIUS),
-        });
+        self.palette
+            .push_surface(&mut cmds, x, cy, width, 30.0, SMALL_RADIUS, Surface::Card);
         cmds.push(RenderCommand::Text {
             x: x + 8.0,
             y: cy + 8.0,
@@ -3361,14 +3355,15 @@ impl ScreenRecorderApp {
         let mut cy = y;
 
         for binding in &self.hotkeys {
-            cmds.push(RenderCommand::FillRect {
+            self.palette.push_surface(
+                &mut cmds,
                 x,
-                y: cy,
+                cy,
                 width,
-                height: row_height - 4.0,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::all(SMALL_RADIUS),
-            });
+                row_height - 4.0,
+                SMALL_RADIUS,
+                Surface::Card,
+            );
 
             // Action label
             cmds.push(RenderCommand::Text {
@@ -3383,14 +3378,15 @@ impl ScreenRecorderApp {
             });
 
             // Keybinding display
-            cmds.push(RenderCommand::FillRect {
-                x: x + width - 140.0,
-                y: cy + 4.0,
-                width: 130.0,
-                height: 24.0,
-                color: self.palette.surface1,
-                corner_radii: CornerRadii::all(3.0),
-            });
+            self.palette.push_surface(
+                &mut cmds,
+                x + width - 140.0,
+                cy + 4.0,
+                130.0,
+                24.0,
+                3.0,
+                Surface::Card,
+            );
             cmds.push(RenderCommand::Text {
                 x: x + width - 132.0,
                 y: cy + 9.0,
@@ -3535,14 +3531,15 @@ impl ScreenRecorderApp {
 
             // Type badge
             let type_label = if sched.one_shot { "Once" } else { "Repeat" };
-            cmds.push(RenderCommand::FillRect {
-                x: x + width - 60.0,
-                y: cy + 10.0,
-                width: 50.0,
-                height: 20.0,
-                color: self.palette.surface1,
-                corner_radii: CornerRadii::all(3.0),
-            });
+            self.palette.push_surface(
+                &mut cmds,
+                x + width - 60.0,
+                cy + 10.0,
+                50.0,
+                20.0,
+                3.0,
+                Surface::Card,
+            );
             cmds.push(RenderCommand::Text {
                 x: x + width - 52.0,
                 y: cy + 13.0,
@@ -3586,14 +3583,15 @@ impl ScreenRecorderApp {
 
         let bar_y = self.window_height - STATUS_BAR_HEIGHT;
 
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: bar_y,
-            width: self.window_width,
-            height: STATUS_BAR_HEIGHT,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            &mut cmds,
+            0.0,
+            bar_y,
+            self.window_width,
+            STATUS_BAR_HEIGHT,
+            0.0,
+            Surface::Card,
+        );
 
         // Top border
         cmds.push(RenderCommand::Line {
@@ -3670,14 +3668,8 @@ impl ScreenRecorderApp {
         let cx = self.window_width / 2.0 - 50.0;
         let cy = self.window_height / 2.0 - 50.0;
 
-        cmds.push(RenderCommand::FillRect {
-            x: cx,
-            y: cy,
-            width: 100.0,
-            height: 100.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(50.0),
-        });
+        self.palette
+            .push_surface(&mut cmds, cx, cy, 100.0, 100.0, 50.0, Surface::Card);
         cmds.push(RenderCommand::StrokeRect {
             x: cx,
             y: cy,

@@ -18,6 +18,7 @@
 //! Uses the guitk library for UI rendering.
 
 use appearance::Palette;
+use appearance::Surface;
 use std::collections::HashMap;
 
 use guitk::color::Color;
@@ -2286,24 +2287,26 @@ impl PodcastApp {
 
     fn render_sidebar(&self, cmds: &mut Vec<RenderCommand>) {
         // Sidebar background.
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: SIDEBAR_WIDTH,
-            height: self.height,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            cmds,
+            0.0,
+            0.0,
+            SIDEBAR_WIDTH,
+            self.height,
+            0.0,
+            Surface::Sidebar,
+        );
 
         // Sidebar border.
-        cmds.push(RenderCommand::FillRect {
-            x: SIDEBAR_WIDTH - 1.0,
-            y: 0.0,
-            width: 1.0,
-            height: self.height,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            cmds,
+            SIDEBAR_WIDTH - 1.0,
+            0.0,
+            1.0,
+            self.height,
+            0.0,
+            Surface::Sidebar,
+        );
 
         let indent: f32 = 16.0;
 
@@ -2579,14 +2582,15 @@ impl PodcastApp {
         let item_h: f32 = 28.0;
 
         if selected {
-            cmds.push(RenderCommand::FillRect {
-                x: x - 4.0,
+            self.palette.push_surface(
+                cmds,
+                x - 4.0,
                 y,
-                width: item_w + 8.0,
-                height: item_h,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::all(6.0),
-            });
+                item_w + 8.0,
+                item_h,
+                6.0,
+                Surface::Selected,
+            );
             // Accent bar.
             cmds.push(RenderCommand::FillRect {
                 x: x - 4.0,
@@ -2782,14 +2786,8 @@ impl PodcastApp {
         title: &str,
     ) {
         // Header background.
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y: 0.0,
-            width,
-            height: HEADER_HEIGHT,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(cmds, x, 0.0, width, HEADER_HEIGHT, 0.0, Surface::Card);
 
         cmds.push(RenderCommand::Text {
             x: x + 16.0,
@@ -2804,14 +2802,8 @@ impl PodcastApp {
     }
 
     fn render_filter_bar(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32) {
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width,
-            height: TOOLBAR_HEIGHT,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(cmds, x, y, width, TOOLBAR_HEIGHT, 0.0, Surface::Card);
 
         let pill_y = y + 4.0;
         for (filter, pill_x, label_width) in self.filter_pills(x) {
@@ -2819,14 +2811,15 @@ impl PodcastApp {
             let selected = self.episode_filter == filter;
 
             if selected {
-                cmds.push(RenderCommand::FillRect {
-                    x: pill_x,
-                    y: pill_y,
-                    width: label_width,
-                    height: CATEGORY_PILL_HEIGHT,
-                    color: self.palette.surface1,
-                    corner_radii: CornerRadii::all(14.0),
-                });
+                self.palette.push_surface(
+                    cmds,
+                    pill_x,
+                    pill_y,
+                    label_width,
+                    CATEGORY_PILL_HEIGHT,
+                    14.0,
+                    Surface::Selected,
+                );
             }
 
             cmds.push(RenderCommand::Text {
@@ -2865,14 +2858,15 @@ impl PodcastApp {
     ) {
         // Row background.
         if selected {
-            cmds.push(RenderCommand::FillRect {
+            self.palette.push_surface(
+                cmds,
                 x,
                 y,
                 width,
-                height: EPISODE_ROW_HEIGHT,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::all(8.0),
-            });
+                EPISODE_ROW_HEIGHT,
+                8.0,
+                Surface::Selected,
+            );
         }
 
         // Status dot.
@@ -2943,14 +2937,15 @@ impl PodcastApp {
             let bar_w = width - 40.0;
             let progress = episode.progress_pct() / 100.0;
 
-            cmds.push(RenderCommand::FillRect {
-                x: x + 28.0,
-                y: bar_y,
-                width: bar_w,
-                height: 3.0,
-                color: self.palette.surface1,
-                corner_radii: CornerRadii::all(1.5),
-            });
+            self.palette.push_surface(
+                cmds,
+                x + 28.0,
+                bar_y,
+                bar_w,
+                3.0,
+                1.5,
+                Surface::ControlTrack,
+            );
             cmds.push(RenderCommand::FillRect {
                 x: x + 28.0,
                 y: bar_y,
@@ -2974,14 +2969,15 @@ impl PodcastApp {
         });
 
         // Bottom separator.
-        cmds.push(RenderCommand::FillRect {
-            x: x + 12.0,
-            y: y + EPISODE_ROW_HEIGHT - 1.0,
-            width: width - 24.0,
-            height: 1.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            cmds,
+            x + 12.0,
+            y + EPISODE_ROW_HEIGHT - 1.0,
+            width - 24.0,
+            1.0,
+            0.0,
+            Surface::Card,
+        );
     }
 
     fn render_episode_detail(
@@ -3074,14 +3070,8 @@ impl PodcastApp {
         // gap between the two pills was whatever the difference happened to be
         // rather than 8 px.
         let status_w = text::padded_width(status_label, 8.0, 11.0, FontWeightHint::Bold);
-        cmds.push(RenderCommand::FillRect {
-            x: pad,
-            y: detail_y,
-            width: status_w,
-            height: 22.0,
-            color: self.palette.surface1,
-            corner_radii: CornerRadii::all(11.0),
-        });
+        self.palette
+            .push_surface(cmds, pad, detail_y, status_w, 22.0, 11.0, Surface::Card);
         cmds.push(RenderCommand::Text {
             x: pad + 8.0,
             y: detail_y + 4.0,
@@ -3093,14 +3083,15 @@ impl PodcastApp {
             overflow: TextOverflow::Ellipsis,
         });
         let dl_badge_x = pad + status_w + 8.0;
-        cmds.push(RenderCommand::FillRect {
-            x: dl_badge_x,
-            y: detail_y,
-            width: text::padded_width(dl_label, 8.0, 11.0, FontWeightHint::Bold),
-            height: 22.0,
-            color: self.palette.surface1,
-            corner_radii: CornerRadii::all(11.0),
-        });
+        self.palette.push_surface(
+            cmds,
+            dl_badge_x,
+            detail_y,
+            text::padded_width(dl_label, 8.0, 11.0, FontWeightHint::Bold),
+            22.0,
+            11.0,
+            Surface::Card,
+        );
         cmds.push(RenderCommand::Text {
             x: dl_badge_x + 8.0,
             y: detail_y + 4.0,
@@ -3114,14 +3105,8 @@ impl PodcastApp {
         detail_y += 36.0;
 
         // Divider.
-        cmds.push(RenderCommand::FillRect {
-            x: pad,
-            y: detail_y,
-            width: text_w,
-            height: 1.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(cmds, pad, detail_y, text_w, 1.0, 0.0, Surface::Card);
         detail_y += 16.0;
 
         // Description.
@@ -3150,14 +3135,8 @@ impl PodcastApp {
 
         // Notes section.
         if episode.notes.has_content() {
-            cmds.push(RenderCommand::FillRect {
-                x: pad,
-                y: detail_y,
-                width: text_w,
-                height: 1.0,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::ZERO,
-            });
+            self.palette
+                .push_surface(cmds, pad, detail_y, text_w, 1.0, 0.0, Surface::Card);
             detail_y += 16.0;
 
             cmds.push(RenderCommand::Text {
@@ -3187,14 +3166,8 @@ impl PodcastApp {
 
             // Bookmarks.
             for bm in &episode.notes.bookmarks {
-                cmds.push(RenderCommand::FillRect {
-                    x: pad,
-                    y: detail_y,
-                    width: 60.0,
-                    height: 20.0,
-                    color: self.palette.surface1,
-                    corner_radii: CornerRadii::all(4.0),
-                });
+                self.palette
+                    .push_surface(cmds, pad, detail_y, 60.0, 20.0, 4.0, Surface::Card);
                 cmds.push(RenderCommand::Text {
                     x: pad + 6.0,
                     y: detail_y + 3.0,
@@ -3273,14 +3246,15 @@ impl PodcastApp {
 
             // Row background (alternating).
             if idx % 2 == 0 {
-                cmds.push(RenderCommand::FillRect {
-                    x: content_x + 8.0,
-                    y: row_y,
-                    width: content_w - 16.0,
-                    height: row_h,
-                    color: self.palette.surface0,
-                    corner_radii: CornerRadii::all(6.0),
-                });
+                self.palette.push_surface(
+                    cmds,
+                    content_x + 8.0,
+                    row_y,
+                    content_w - 16.0,
+                    row_h,
+                    6.0,
+                    Surface::Card,
+                );
             }
 
             // Index number.
@@ -3352,14 +3326,8 @@ impl PodcastApp {
         let bar_h: f32 = 20.0;
         let usage_pct = self.disk_usage_pct() / 100.0;
 
-        cmds.push(RenderCommand::FillRect {
-            x: bar_x,
-            y: info_y,
-            width: bar_w,
-            height: bar_h,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        self.palette
+            .push_surface(cmds, bar_x, info_y, bar_w, bar_h, 4.0, Surface::Card);
         cmds.push(RenderCommand::FillRect {
             x: bar_x,
             y: info_y,
@@ -3434,14 +3402,15 @@ impl PodcastApp {
 
                 // Progress bar.
                 let prog_y = info_y + 20.0;
-                cmds.push(RenderCommand::FillRect {
-                    x: bar_x,
-                    y: prog_y,
-                    width: bar_w - 80.0,
-                    height: 6.0,
-                    color: self.palette.surface1,
-                    corner_radii: CornerRadii::all(3.0),
-                });
+                self.palette.push_surface(
+                    cmds,
+                    bar_x,
+                    prog_y,
+                    bar_w - 80.0,
+                    6.0,
+                    3.0,
+                    Surface::ControlTrack,
+                );
                 cmds.push(RenderCommand::FillRect {
                     x: bar_x,
                     y: prog_y,
@@ -3470,14 +3439,8 @@ impl PodcastApp {
         info_y += 16.0;
 
         // Downloaded episodes list.
-        cmds.push(RenderCommand::FillRect {
-            x: bar_x,
-            y: info_y,
-            width: bar_w,
-            height: 1.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(cmds, bar_x, info_y, bar_w, 1.0, 0.0, Surface::Card);
         info_y += 12.0;
 
         cmds.push(RenderCommand::Text {
@@ -3612,14 +3575,15 @@ impl PodcastApp {
             });
 
             // Separator.
-            cmds.push(RenderCommand::FillRect {
-                x: content_x + 16.0,
-                y: row_y + row_h - 1.0,
-                width: content_w - 32.0,
-                height: 1.0,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::ZERO,
-            });
+            self.palette.push_surface(
+                cmds,
+                content_x + 16.0,
+                row_y + row_h - 1.0,
+                content_w - 32.0,
+                1.0,
+                0.0,
+                Surface::Card,
+            );
 
             row_y += row_h;
         }
@@ -3757,14 +3721,8 @@ impl PodcastApp {
         accent: Color,
     ) {
         // Card background.
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width,
-            height,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(12.0),
-        });
+        self.palette
+            .push_surface(cmds, x, y, width, height, 12.0, Surface::Card);
 
         // Accent bar at top.
         cmds.push(RenderCommand::FillRect {
@@ -3815,14 +3773,15 @@ impl PodcastApp {
 
         // Search input field.
         let input_y = HEADER_HEIGHT + 12.0;
-        cmds.push(RenderCommand::FillRect {
-            x: pad,
-            y: input_y,
-            width: text_w,
-            height: SEARCH_BAR_HEIGHT,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(8.0),
-        });
+        self.palette.push_surface(
+            cmds,
+            pad,
+            input_y,
+            text_w,
+            SEARCH_BAR_HEIGHT,
+            8.0,
+            Surface::Card,
+        );
         cmds.push(RenderCommand::StrokeRect {
             x: pad,
             y: input_y,
@@ -4003,24 +3962,19 @@ impl PodcastApp {
         let bar_y = self.height - NOW_PLAYING_HEIGHT;
 
         // Background.
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: bar_y,
-            width: self.width,
-            height: NOW_PLAYING_HEIGHT,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            cmds,
+            0.0,
+            bar_y,
+            self.width,
+            NOW_PLAYING_HEIGHT,
+            0.0,
+            Surface::Card,
+        );
 
         // Top border.
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: bar_y,
-            width: self.width,
-            height: 1.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(cmds, 0.0, bar_y, self.width, 1.0, 0.0, Surface::Card);
 
         // Progress bar across the top.
         let progress = if self.playback_duration_secs > 0 {
@@ -4090,14 +4044,15 @@ impl PodcastApp {
 
         // Skip back button.
         let back = rect_of(PlayerControl::SkipBack);
-        cmds.push(RenderCommand::FillRect {
-            x: back.x,
-            y: back.y,
-            width: back.width,
-            height: back.height,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(18.0),
-        });
+        self.palette.push_surface(
+            cmds,
+            back.x,
+            back.y,
+            back.width,
+            back.height,
+            18.0,
+            Surface::Card,
+        );
         cmds.push(RenderCommand::Text {
             x: back.x + 6.0,
             y: back.y + 9.0,
@@ -4137,14 +4092,15 @@ impl PodcastApp {
 
         // Skip forward button.
         let fwd = rect_of(PlayerControl::SkipForward);
-        cmds.push(RenderCommand::FillRect {
-            x: fwd.x,
-            y: fwd.y,
-            width: fwd.width,
-            height: fwd.height,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(18.0),
-        });
+        self.palette.push_surface(
+            cmds,
+            fwd.x,
+            fwd.y,
+            fwd.width,
+            fwd.height,
+            18.0,
+            Surface::Card,
+        );
         cmds.push(RenderCommand::Text {
             x: fwd.x + 4.0,
             y: fwd.y + 9.0,
@@ -4175,14 +4131,15 @@ impl PodcastApp {
 
         // Speed indicator, which is also the button that cycles it.
         let speed = rect_of(PlayerControl::Speed);
-        cmds.push(RenderCommand::FillRect {
-            x: speed.x,
-            y: speed.y,
-            width: speed.width,
-            height: speed.height,
-            color: self.palette.surface1,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        self.palette.push_surface(
+            cmds,
+            speed.x,
+            speed.y,
+            speed.width,
+            speed.height,
+            4.0,
+            Surface::Card,
+        );
         cmds.push(RenderCommand::Text {
             x: speed.x + 6.0,
             y: speed.y + 4.0,

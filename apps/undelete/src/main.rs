@@ -51,6 +51,7 @@
 #![allow(clippy::cognitive_complexity)]
 
 use appearance::Palette;
+use appearance::Surface;
 #[allow(unused_imports)]
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -2879,14 +2880,15 @@ impl UndeleteApp {
         let bar_x = card_w * 0.7 + PADDING;
         let bar_w = card_w * 0.25;
         let bar_y = y + 22.0;
-        cmds.push(RenderCommand::FillRect {
-            x: bar_x,
-            y: bar_y,
-            width: bar_w,
-            height: PROGRESS_HEIGHT,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::all(PROGRESS_HEIGHT / 2.0),
-        });
+        self.palette.push_surface(
+            cmds,
+            bar_x,
+            bar_y,
+            bar_w,
+            PROGRESS_HEIGHT,
+            PROGRESS_HEIGHT / 2.0,
+            Surface::ControlTrack,
+        );
         let fill_w = bar_w * (part.usage_percent() / 100.0);
         let bar_color = if part.usage_percent() > 90.0 {
             self.palette.red
@@ -2984,14 +2986,15 @@ impl UndeleteApp {
         // Progress bar
         let bar_y = center_y + 32.0;
         let bar_w = self.width - PADDING * 4.0;
-        cmds.push(RenderCommand::FillRect {
-            x: PADDING * 2.0,
-            y: bar_y,
-            width: bar_w,
-            height: 12.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(6.0),
-        });
+        self.palette.push_surface(
+            cmds,
+            PADDING * 2.0,
+            bar_y,
+            bar_w,
+            12.0,
+            6.0,
+            Surface::ControlTrack,
+        );
         let fill = bar_w * self.engine.progress.overall_progress;
         if fill > 0.0 {
             cmds.push(RenderCommand::FillRect {
@@ -3080,14 +3083,8 @@ impl UndeleteApp {
 
     fn render_category_sidebar(&self, cmds: &mut Vec<RenderCommand>, y: f32, height: f32) {
         // Sidebar background
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y,
-            width: SIDEBAR_WIDTH,
-            height,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(cmds, 0.0, y, SIDEBAR_WIDTH, height, 0.0, Surface::Sidebar);
 
         // "Categories" label
         cmds.push(RenderCommand::Text {
@@ -3105,14 +3102,15 @@ impl UndeleteApp {
         let all_y = y + 36.0;
         let all_selected = self.active_category_filter.is_none();
         if all_selected {
-            cmds.push(RenderCommand::FillRect {
-                x: 4.0,
-                y: all_y,
-                width: SIDEBAR_WIDTH - 8.0,
-                height: 28.0,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::all(SMALL_RADIUS),
-            });
+            self.palette.push_surface(
+                cmds,
+                4.0,
+                all_y,
+                SIDEBAR_WIDTH - 8.0,
+                28.0,
+                SMALL_RADIUS,
+                Surface::Selected,
+            );
         }
         cmds.push(RenderCommand::Text {
             x: PADDING,
@@ -3141,14 +3139,15 @@ impl UndeleteApp {
             let count = stats.by_category.get(cat).copied().unwrap_or(0);
 
             if is_selected {
-                cmds.push(RenderCommand::FillRect {
-                    x: 4.0,
-                    y: item_y,
-                    width: SIDEBAR_WIDTH - 8.0,
-                    height: 28.0,
-                    color: self.palette.surface0,
-                    corner_radii: CornerRadii::all(SMALL_RADIUS),
-                });
+                self.palette.push_surface(
+                    cmds,
+                    4.0,
+                    item_y,
+                    SIDEBAR_WIDTH - 8.0,
+                    28.0,
+                    SMALL_RADIUS,
+                    Surface::Selected,
+                );
             }
 
             // Category color indicator
@@ -3183,14 +3182,15 @@ impl UndeleteApp {
 
         // Confidence filter section
         let conf_y = all_y + 32.0 + (FileCategory::ALL.len() as f32) * 28.0 + PADDING;
-        cmds.push(RenderCommand::FillRect {
-            x: PADDING,
-            y: conf_y,
-            width: SIDEBAR_WIDTH - PADDING * 2.0,
-            height: 1.0,
-            color: self.palette.surface1,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            cmds,
+            PADDING,
+            conf_y,
+            SIDEBAR_WIDTH - PADDING * 2.0,
+            1.0,
+            0.0,
+            Surface::Sidebar,
+        );
 
         cmds.push(RenderCommand::Text {
             x: PADDING,
@@ -3255,14 +3255,8 @@ impl UndeleteApp {
 
         // Column headers
         let header_y = y;
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y: header_y,
-            width,
-            height: 28.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(cmds, x, header_y, width, 28.0, 0.0, Surface::Card);
 
         // Drawn as cells rather than with `Table::header`, because a heading
         // here is not a fixed label: the sorted column gains a direction arrow
@@ -3487,14 +3481,15 @@ impl UndeleteApp {
         );
 
         // Bottom separator
-        cmds.push(RenderCommand::FillRect {
+        self.palette.push_surface(
+            cmds,
             x,
-            y: y + ITEM_HEIGHT - 1.0,
+            y + ITEM_HEIGHT - 1.0,
             width,
-            height: 1.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::ZERO,
-        });
+            1.0,
+            0.0,
+            Surface::Card,
+        );
     }
 
     fn render_preview_panel(
@@ -3506,24 +3501,12 @@ impl UndeleteApp {
         height: f32,
     ) {
         // Panel background
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width,
-            height,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(cmds, x, y, width, height, 0.0, Surface::Card);
 
         // Left border
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: 1.0,
-            height,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(cmds, x, y, 1.0, height, 0.0, Surface::Card);
 
         if let Some(file) = self.selected_file() {
             self.render_file_preview(cmds, file, x, y, width);
@@ -3599,14 +3582,8 @@ impl UndeleteApp {
         cy += 64.0;
 
         // Separator
-        cmds.push(RenderCommand::FillRect {
-            x: inner_x,
-            y: cy,
-            width: inner_w,
-            height: 1.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(cmds, inner_x, cy, inner_w, 1.0, 0.0, Surface::Card);
         cy += 12.0;
 
         // Metadata rows
@@ -3699,14 +3676,15 @@ impl UndeleteApp {
         });
         cy += 18.0;
 
-        cmds.push(RenderCommand::FillRect {
-            x: inner_x,
-            y: cy,
-            width: inner_w,
-            height: PROGRESS_HEIGHT,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(PROGRESS_HEIGHT / 2.0),
-        });
+        self.palette.push_surface(
+            cmds,
+            inner_x,
+            cy,
+            inner_w,
+            PROGRESS_HEIGHT,
+            PROGRESS_HEIGHT / 2.0,
+            Surface::ControlTrack,
+        );
         let pct = f32::from(file.recovery_percent) / 100.0;
         let fill_w = inner_w * pct;
         if fill_w > 0.0 {
@@ -3734,14 +3712,8 @@ impl UndeleteApp {
         cy += 24.0;
 
         // Source description
-        cmds.push(RenderCommand::FillRect {
-            x: inner_x,
-            y: cy,
-            width: inner_w,
-            height: 1.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(cmds, inner_x, cy, inner_w, 1.0, 0.0, Surface::Card);
         cy += 12.0;
 
         cmds.push(RenderCommand::Text {
@@ -3780,14 +3752,15 @@ impl UndeleteApp {
             cy += 18.0;
 
             let hex_str = format_hex_preview(&file.preview_bytes, 16);
-            cmds.push(RenderCommand::FillRect {
-                x: inner_x,
-                y: cy,
-                width: inner_w,
-                height: 60.0,
-                color: self.palette.crust,
-                corner_radii: CornerRadii::all(SMALL_RADIUS),
-            });
+            self.palette.push_surface(
+                cmds,
+                inner_x,
+                cy,
+                inner_w,
+                60.0,
+                SMALL_RADIUS,
+                Surface::Card,
+            );
             cmds.push(RenderCommand::Text {
                 x: inner_x + 6.0,
                 y: cy + 6.0,
@@ -3804,24 +3777,12 @@ impl UndeleteApp {
     fn render_results_footer(&self, cmds: &mut Vec<RenderCommand>) {
         let y = self.height - FOOTER_HEIGHT - STATUS_BAR_HEIGHT;
 
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y,
-            width: self.width,
-            height: FOOTER_HEIGHT,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(cmds, 0.0, y, self.width, FOOTER_HEIGHT, 0.0, Surface::Card);
 
         // Separator
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y,
-            width: self.width,
-            height: 1.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(cmds, 0.0, y, self.width, 1.0, 0.0, Surface::Card);
 
         // Selection info
         let selected = self.engine.selected_count();
@@ -3894,14 +3855,15 @@ impl UndeleteApp {
     fn render_status_bar(&self, cmds: &mut Vec<RenderCommand>) {
         let y = self.height - STATUS_BAR_HEIGHT;
 
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
+        self.palette.push_surface(
+            cmds,
+            0.0,
             y,
-            width: self.width,
-            height: STATUS_BAR_HEIGHT,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::ZERO,
-        });
+            self.width,
+            STATUS_BAR_HEIGHT,
+            0.0,
+            Surface::Card,
+        );
 
         let stats = self.engine.stats();
         let mode_str = self.engine.scan_mode.display_name();
@@ -3943,14 +3905,15 @@ impl UndeleteApp {
             .sum();
 
         // Summary card
-        cmds.push(RenderCommand::FillRect {
-            x: PADDING,
-            y: content_y,
-            width: self.width - PADDING * 2.0,
-            height: 80.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
+        self.palette.push_surface(
+            cmds,
+            PADDING,
+            content_y,
+            self.width - PADDING * 2.0,
+            80.0,
+            CORNER_RADIUS,
+            Surface::Card,
+        );
 
         cmds.push(RenderCommand::Text {
             x: PADDING * 2.0,
@@ -4027,14 +3990,8 @@ impl UndeleteApp {
         let row_w = self.width - PADDING * 2.0;
 
         // Row background
-        cmds.push(RenderCommand::FillRect {
-            x: PADDING,
-            y,
-            width: row_w,
-            height: 40.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(SMALL_RADIUS),
-        });
+        self.palette
+            .push_surface(cmds, PADDING, y, row_w, 40.0, SMALL_RADIUS, Surface::Card);
 
         // Status indicator
         let status_color = if result.success {
@@ -4127,14 +4084,15 @@ impl UndeleteApp {
 
     fn render_header(&self, cmds: &mut Vec<RenderCommand>, title: &str) {
         // Header background
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: self.width,
-            height: HEADER_HEIGHT,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            cmds,
+            0.0,
+            0.0,
+            self.width,
+            HEADER_HEIGHT,
+            0.0,
+            Surface::Card,
+        );
 
         // Header shadow
         cmds.push(RenderCommand::BoxShadow {
@@ -4183,14 +4141,15 @@ impl UndeleteApp {
         });
 
         // Bottom border
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: HEADER_HEIGHT - 1.0,
-            width: self.width,
-            height: 1.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            cmds,
+            0.0,
+            HEADER_HEIGHT - 1.0,
+            self.width,
+            1.0,
+            0.0,
+            Surface::Card,
+        );
     }
 
     fn render_button(

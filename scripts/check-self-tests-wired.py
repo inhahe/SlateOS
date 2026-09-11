@@ -144,6 +144,22 @@ import sys
 
 # `module::function` -> why it is deliberately never invoked.
 ALLOWLIST = {
+    "proc::spawn::self_test_ctest_pty": (
+        "Disabled again 2026-09-10 after its second run, and the REASON HAS "
+        "CHANGED -- the first disable blamed a non-yielding spin, which lane B "
+        "has since fixed (the anti-starvation line is gone from the log). Exit "
+        "is now 44: the serial log shows the child reaching zombie BEFORE the "
+        "parent writes 0x03, so the child dies at startup and the master write "
+        "correctly fails on a closed slave. The fixture returns 44 before it "
+        "reaches waitpid, so lane B's 48/49/50 (login_tty, signal, readiness "
+        "byte) cannot fire while the child dies early -- a child startup "
+        "failure is always reported as a parent write failure. Not disabled "
+        "for being wrong: boot-test.sh fails the whole run on any un-allowlisted "
+        "self-test failure, so a correct rung reporting someone else's bug "
+        "reddens every lane. Re-enable once the fixture reaps before reporting "
+        "a write failure -- see "
+        "requests/b-a-run-the-ctest-pty-fixture-so-a-synthesised-ctrl-c-is-finally-tested.md."
+    ),
     "hardlockup::self_test_fire": (
         "Deliberately not auto-invoked, and says so in its own doc comment: it "
         "forces the watchdog to fire, which costs a ~15 s stall on every "

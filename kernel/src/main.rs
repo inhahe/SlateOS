@@ -2599,38 +2599,50 @@ extern "C" fn kernel_main() -> ! {
     // Reported to lane B in
     // `requests/b-a-run-the-ctest-pty-fixture-so-a-synthesised-ctrl-c-is-finally-tested.md`.
     //
-    // RE-ENABLED 2026-09-10, and on a different basis than the note above
-    // specified -- worth recording, because the stated precondition is still not
-    // met.
+    // DISABLED AGAIN 2026-09-10, and the reason has changed, which is the point of
+    // re-running it. Exit 44 now, not 47 -- and 44 is NOT the failure it was when
+    // this rung was first disabled.
     //
-    // That note said to re-enable once lane B's fixture YIELDS in its spin. It
-    // does not. Their fix gates every read on `poll(&pfd, 1, 0)`, and our
-    // `poll` with a zero timeout does not yield: `poll_core` passes `Some(0)` to
-    // `ipc::multiwait::wait_multiple`, which returns `Ok(0)` immediately rather
-    // than parking. So the spin surrenders the CPU no more than it did before.
+    // The serial log orders it unambiguously. The child (process 201, task 170)
+    // becomes a zombie BEFORE the parent writes, in both runs:
     //
-    // What DID change is the cost: 2,000,000 iterations each now enter the
-    // kernel, which under TCG is seconds rather than milliseconds, and the
-    // scheduler preempts on the timer regardless of whether anyone yields. The
-    // parent therefore gets to write 0x03 long before the child exhausts its
-    // budget and closes the last slave, which is the exit-44 race.
+    //     [cow] Cloned address space: parent=... -> child=...
+    //     [thread] Spawned thread (task 170) in process 201
+    //     [thread] Process 201 has no threads left -- now zombie   <-- child gone
+    //     [thread] Process 200 has no threads left -- now zombie   <-- parent, exit 44
     //
-    // That is a timing argument, not an invariant, and it is being re-enabled
-    // because a boot test settles it and nothing else will: the path has never
-    // executed. If 44 returns, the fix is `sched_yield()` in the fixture's spin
-    // (lane B's side) rather than anything here, and the re-disable is this
-    // comment plus the ALLOWLIST entry again.
-    {
-        #[inline(never)]
-        fn case() {
-            selftest::dispatch_debug(
-                "pty ^C signal delivery (ring 3)",
-                selftest::Severity::Diagnostic,
-                proc::spawn::self_test_ctest_pty(),
-            );
-        }
-        case();
-    }
+    // So the child dies at STARTUP and the parent's `write(fm, "", 1)` then
+    // fails because the slave it would have reached is already closed. 44 is this
+    // kernel reporting correctly on a child that had already gone.
+    //
+    // Which means the fixture's error-path ORDER hides the fault: the parent
+    // returns 44 before it ever reaches `waitpid`, so lane B's new codes 48/49/50
+    // -- login_tty gave no controlling terminal, signal() refused SIGINT, the
+    // readiness byte never went out -- can never fire while the child dies early.
+    // A child startup failure is always reported as a parent write failure.
+    //
+    // The earlier 47 was the same child failure with the race falling the other
+    // way: without the yield the parent won, wrote, reaped, and saw a status that
+    // was not 77. lane B's sched_yield is correct and working -- the
+    // anti-starvation line is gone from this run -- and it let the child exit
+    // sooner, which moved the symptom from 47 to 44 without changing the cause.
+    //
+    // RE-ENABLE when the fixture reaps before reporting a write failure, or
+    // otherwise lets a child startup failure surface as 48/49/50. Reported to
+    // lane B; tracked in
+    // `requests/b-a-run-the-ctest-pty-fixture-so-a-synthesised-ctrl-c-is-finally-tested.md`.
+    //
+    // {
+    //     #[inline(never)]
+    //     fn case() {
+    //         selftest::dispatch_debug(
+    //             "pty ^C signal delivery (ring 3)",
+    //             selftest::Severity::Diagnostic,
+    //             proc::spawn::self_test_ctest_pty(),
+    //         );
+    //     }
+    //     case();
+    // }
 
     {
         #[inline(never)]

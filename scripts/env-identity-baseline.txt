@@ -32,6 +32,5 @@ mktemp: env::var("USER")
 screen: env::var("USER")
 screen: env::var("USER")  [2]
 ssh: env::var("USER")
-sudo: env::var_os("TTY")
 wall: env::var("LOGNAME")
 wall: env::var("USER")

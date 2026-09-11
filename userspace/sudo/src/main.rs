@@ -2395,14 +2395,52 @@ fn current_gid() -> u32 {
 
 /// Get the current tty name.
 ///
-/// `var_os`, not `var`: a tty name is a path under `/dev`, and `var` reports a
-/// non-UTF-8 value as `Err(NotUnicode)`, which is indistinguishable here from
-/// unset — so the log would record `TTY=unknown` for a terminal that has a
-/// perfectly good name. An audit log that quietly says "unknown" is worse than
-/// one that says something awkward, because only the first is silent about it.
-/// The value is escaped at the point it is written; see [`log_command`].
+/// The terminal this command was run from, for the audit record.
+///
+/// # It used to be `$TTY`
+///
+///     env::var_os("TTY").unwrap_or_else(|| OsString::from("unknown"))
+///
+/// so the subject of the audit record chose what the record said about them.
+/// Bounded -- the value is escaped where it is written, so it could not forge
+/// whole log lines, and nothing branches on it -- which is why this was an
+/// entry in `known-issues.md` rather than a same-day fix after the `$USER` and
+/// `$HOSTNAME` repairs. It is still the family those two belonged to, and an
+/// audit log is read precisely when somebody is working out what happened.
+///
+/// `ttyname(0)` is what real sudo uses. The argument the old comment made for
+/// `var_os` over `var` survives the change and is why the bytes are not put
+/// through UTF-8: a tty name is a path under `/dev`, and this OS allows any
+/// byte but `/` and NUL in one.
+#[cfg(unix)]
 fn current_tty() -> OsString {
-    env::var_os("TTY").unwrap_or_else(|| OsString::from("unknown"))
+    unsafe extern "C" {
+        fn ttyname(fd: i32) -> *const std::ffi::c_char;
+    }
+    // SAFETY: `ttyname` takes a descriptor and returns either null or a
+    // pointer to a NUL-terminated string in static storage, valid until the
+    // next call to it. The bytes are copied out before anything else runs.
+    let bytes = unsafe {
+        let ptr = ttyname(0);
+        if ptr.is_null() {
+            // Null is "descriptor 0 is not a terminal", which is a real
+            // answer and a different one from "there is a terminal and I
+            // could not name it". `none` rather than `unknown` says which.
+            return OsString::from("none");
+        }
+        std::ffi::CStr::from_ptr(ptr).to_bytes().to_vec()
+    };
+    // Bytes all the way, which is the reason this returned `OsString` in the
+    // first place: a tty name is a path under /dev and may hold any byte but
+    // `/` and NUL.
+    std::os::unix::ffi::OsStringExt::from_vec(bytes)
+}
+
+/// The host build has no `ttyname`, and inventing a terminal for an audit
+/// record is the defect this function was just repaired for.
+#[cfg(not(unix))]
+fn current_tty() -> OsString {
+    OsString::from("unknown")
 }
 
 /// The working directory, for the `PWD=` field of the audit log.
@@ -4690,6 +4728,22 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
             &["alice".to_string()],
         );
         assert!(result.is_some());
+    }
+
+    /// `$TTY` must not name the terminal the audit record blames.
+    #[test]
+    fn the_environment_cannot_name_the_terminal_in_the_log() {
+        // SAFETY: single-threaded test and the variable is removed again
+        // below; `set_var` is unsafe in edition 2024 only because a concurrent
+        // reader would be UB.
+        unsafe {
+            std::env::set_var("TTY", "attacker-chosen");
+        }
+        let answer = current_tty();
+        unsafe {
+            std::env::remove_var("TTY");
+        }
+        assert_ne!(answer, OsString::from("attacker-chosen"));
     }
 
     /// `$USER` must not reach the name sudo authorises, authenticates and

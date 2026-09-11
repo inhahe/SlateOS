@@ -4336,8 +4336,44 @@ fn test_dispatch_setgroups() -> KernelResult<()> {
 
     let task_id = sched::current_task_id();
     let Some(pid) = thread::owner_process(task_id) else {
+        // NOT a skip, as of 2026-09-10. A ring-0 test task has no owning process,
+        // and that is a fact to ASSERT on rather than a reason to decline to run --
+        // the construction `test_dispatch_uts_name` uses for 1072/1073.
+        //
+        // This printed SKIPPED and returned Ok, so the cases below had never run on
+        // any of the 25 recorded boots while the suite above reported PASSED.
+        // `check-boot-skips` refused the build over it, which is the gate doing
+        // exactly what it is for: a section that always skips is not covered by the
+        // PASS printed above it.
+        //
+        // The count passed is ABOVE NGROUPS_MAX (65536), so the request is invalid
+        // in a way the handler checks AFTER identifying its caller. Requiring
+        // NoSuchProcess rather than InvalidArgument pins three facts at once: 1067
+        // is wired, the handler identifies its caller, and it does so BEFORE reading
+        // the arguments -- so it cannot tell a caller with no process which group
+        // counts would have been acceptable.
+        let probe = dispatch(
+            SYS_PROCESS_SETGROUPS,
+            &SyscallArgs {
+                arg0: 65_537,
+                arg1: 0,
+                arg2: 0,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0,
+            },
+        );
+        if probe.value != SyscallResult::err(KernelError::NoSuchProcess).value {
+            serial_println!(
+                "[syscall]   FAIL: {} with no owning process returned {}, expected NoSuchProcess ({})",
+                SYS_PROCESS_SETGROUPS,
+                probe.value,
+                SyscallResult::err(KernelError::NoSuchProcess).value
+            );
+            return Err(KernelError::InternalError);
+        }
         serial_println!(
-            "[syscall]   setgroups (1067 registered): OK — the group-list cases SKIPPED (no owning process to hold a group list)"
+            "[syscall]   setgroups (1067): OK -- a caller with no process is refused before its arguments are read (count 65537 > NGROUPS_MAX would be InvalidArgument if the order were reversed)"
         );
         return Ok(());
     };
@@ -4443,8 +4479,42 @@ fn test_dispatch_chroot() -> KernelResult<()> {
 
     let task_id = sched::current_task_id();
     let Some(pid) = thread::owner_process(task_id) else {
+        // NOT a skip, as of 2026-09-10. A ring-0 test task has no owning process,
+        // and that is a fact to ASSERT on rather than a reason to decline to run --
+        // the construction `test_dispatch_uts_name` uses for 1072/1073.
+        //
+        // This printed SKIPPED and returned Ok, so the cases below had never run on
+        // any of the 25 recorded boots while the suite above reported PASSED.
+        // `check-boot-skips` refused the build over it, which is the gate doing
+        // exactly what it is for: a section that always skips is not covered by the
+        // PASS printed above it.
+        //
+        // A null path pointer is invalid, and the handler reads it only after the
+        // caller lookup and the capability gate. NoSuchProcess shows the lookup ran
+        // first; InvalidArgument or PermissionDenied here would mean a caller with
+        // no process had reached argument handling or the capability check.
+        let probe = dispatch(
+            SYS_PROCESS_CHROOT,
+            &SyscallArgs {
+                arg0: 0,
+                arg1: 0,
+                arg2: 0,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0,
+            },
+        );
+        if probe.value != SyscallResult::err(KernelError::NoSuchProcess).value {
+            serial_println!(
+                "[syscall]   FAIL: {} with no owning process returned {}, expected NoSuchProcess ({})",
+                SYS_PROCESS_CHROOT,
+                probe.value,
+                SyscallResult::err(KernelError::NoSuchProcess).value
+            );
+            return Err(KernelError::InternalError);
+        }
         serial_println!(
-            "[syscall]   chroot (1068 registered): OK — the root-dir case SKIPPED (no owning process to hold a root directory)"
+            "[syscall]   chroot (1068): OK -- a caller with no process is refused before the path is read"
         );
         return Ok(());
     };
@@ -4655,8 +4725,47 @@ fn test_dispatch_itimer() -> KernelResult<()> {
 
     let task_id = sched::current_task_id();
     if thread::owner_process(task_id).is_none() {
+        // NOT a skip, as of 2026-09-10. A ring-0 test task has no owning process,
+        // and that is a fact to ASSERT on rather than a reason to decline to run --
+        // the construction `test_dispatch_uts_name` uses for 1072/1073.
+        //
+        // This printed SKIPPED and returned Ok, so the cases below had never run on
+        // any of the 25 recorded boots while the suite above reported PASSED.
+        // `check-boot-skips` refused the build over it, which is the gate doing
+        // exactly what it is for: a section that always skips is not covered by the
+        // PASS printed above it.
+        //
+        // itimer's order is the REVERSE of setgroups' and chroot's, and asserting it
+        // is how that stays true. `sys_itimer_set` refuses `which != ITIMER_REAL`
+        // BEFORE the caller lookup, which the ITIMER_VIRTUAL case above covers. So
+        // this passes a VALID which (ITIMER_REAL = 0) and requires NoSuchProcess --
+        // the only way to reach the caller lookup, and the half the skip never ran.
+        //
+        // The divergence is defensible: setgroups withholds which COUNTS are
+        // acceptable, and `which` is three public constants. But it is a divergence,
+        // so it is pinned rather than assumed.
+        let probe = dispatch(
+            SYS_ITIMER_SET,
+            &SyscallArgs {
+                arg0: 0,
+                arg1: 0,
+                arg2: 0,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0,
+            },
+        );
+        if probe.value != SyscallResult::err(KernelError::NoSuchProcess).value {
+            serial_println!(
+                "[syscall]   FAIL: {} with no owning process returned {}, expected NoSuchProcess ({})",
+                SYS_ITIMER_SET,
+                probe.value,
+                SyscallResult::err(KernelError::NoSuchProcess).value
+            );
+            return Err(KernelError::InternalError);
+        }
         serial_println!(
-            "[syscall]   itimer (1069/1070 registered, ITIMER_VIRTUAL refused by both): OK -- arming SKIPPED (no owning process to own a timer)"
+            "[syscall]   itimer (1069/1070): OK -- ITIMER_VIRTUAL refused, and a caller with no process is refused after the which check (the reverse of setgroups' order, pinned deliberately)"
         );
         return Ok(());
     }

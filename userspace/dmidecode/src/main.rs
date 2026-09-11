@@ -77,14 +77,31 @@ fn type_name(t: u8) -> &'static str {
 // DMI data reading
 // ============================================================================
 
-fn read_dmi_tables() -> Vec<DmiEntry> {
-    // Try sysfs first.
-    let table_data = match fs::read("/sys/firmware/dmi/tables/DMI") {
-        Ok(d) => d,
-        Err(_) => return generate_default_entries(),
-    };
+/// The SMBIOS/DMI entries, or `Err` describing why there are none.
+///
+/// # What this replaced
+///
+/// `Err(_) => return generate_default_entries()`, whose own comment read
+/// "Generate plausible default entries when DMI tables aren't available".
+/// It produced a BIOS vendor, a system manufacturer and model, a release date
+/// of 01/01/2026, and A SERIAL NUMBER -- "SN-00000001", with "BSN-00000001"
+/// for the baseboard.
+///
+/// A serial number is an identity claim about one specific physical machine,
+/// and it is the field asset tracking reads. Every machine running this
+/// reported the same one. The numeric half was `vec![0; 18]` and `vec![1; 27]`,
+/// so a reader of the structured fields got 0x01010101 as a size or a count.
+///
+/// `dmidecode` answers "what hardware is this". There is no useful default for
+/// that question, and real dmidecode says so -- it exits non-zero with "No
+/// SMBIOS nor DMI entry point found".
+/// Where the kernel exposes the raw SMBIOS table.
+const DMI_TABLE_PATH: &str = "/sys/firmware/dmi/tables/DMI";
 
-    parse_smbios_tables(&table_data)
+fn read_dmi_tables() -> Result<Vec<DmiEntry>, String> {
+    let table_data =
+        fs::read(DMI_TABLE_PATH).map_err(|e| format!("cannot read {DMI_TABLE_PATH}: {e}"))?;
+    Ok(parse_smbios_tables(&table_data))
 }
 
 fn parse_smbios_tables(data: &[u8]) -> Vec<DmiEntry> {
@@ -138,86 +155,6 @@ fn parse_smbios_tables(data: &[u8]) -> Vec<DmiEntry> {
     }
 
     entries
-}
-
-fn generate_default_entries() -> Vec<DmiEntry> {
-    // Generate plausible default entries when DMI tables aren't available.
-    vec![
-        // BIOS Information.
-        DmiEntry {
-            entry_type: TYPE_BIOS,
-            handle: 0,
-            length: 18,
-            data: vec![0; 18],
-            strings: vec![
-                "Slate OS".to_string(),
-                "Slate OS BIOS".to_string(),
-                "01/01/2026".to_string(),
-            ],
-        },
-        // System Information.
-        DmiEntry {
-            entry_type: TYPE_SYSTEM,
-            handle: 1,
-            length: 27,
-            data: vec![1; 27],
-            strings: vec![
-                "Slate OS Project".to_string(),
-                "Slate OS System".to_string(),
-                "1.0".to_string(),
-                "SN-00000001".to_string(),
-            ],
-        },
-        // Baseboard.
-        DmiEntry {
-            entry_type: TYPE_BASEBOARD,
-            handle: 2,
-            length: 8,
-            data: vec![2; 8],
-            strings: vec![
-                "Slate OS Project".to_string(),
-                "Slate OS Baseboard".to_string(),
-                "1.0".to_string(),
-                "BSN-00000001".to_string(),
-            ],
-        },
-        // Chassis.
-        DmiEntry {
-            entry_type: TYPE_CHASSIS,
-            handle: 3,
-            length: 13,
-            data: vec![3; 13],
-            strings: vec!["Slate OS Project".to_string(), "Desktop".to_string()],
-        },
-        // Processor.
-        DmiEntry {
-            entry_type: TYPE_PROCESSOR,
-            handle: 4,
-            length: 28,
-            data: vec![4; 28],
-            strings: vec!["CPU0".to_string(), "Slate OS Processor".to_string()],
-        },
-        // Physical Memory Array.
-        DmiEntry {
-            entry_type: TYPE_PHYS_MEMORY,
-            handle: 16,
-            length: 15,
-            data: vec![16; 15],
-            strings: Vec::new(),
-        },
-        // Memory Device.
-        DmiEntry {
-            entry_type: TYPE_MEMORY_DEVICE,
-            handle: 17,
-            length: 28,
-            data: vec![17; 28],
-            strings: vec![
-                "DIMM0".to_string(),
-                "DDR4".to_string(),
-                "Unknown".to_string(),
-            ],
-        },
-    ]
 }
 
 // ============================================================================
@@ -369,7 +306,13 @@ fn cmd_biosdecode(args: &[String]) {
         }
     }
 
-    let entries = read_dmi_tables();
+    let entries = match read_dmi_tables() {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("biosdecode: {e}");
+            process::exit(1);
+        }
+    };
     let stdout = io::stdout();
     let mut out = stdout.lock();
 
@@ -449,7 +392,13 @@ fn cmd_dmidecode(args: &[String]) {
         i += 1;
     }
 
-    let entries = read_dmi_tables();
+    let entries = match read_dmi_tables() {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("dmidecode: {e}");
+            process::exit(1);
+        }
+    };
 
     // String keyword lookup.
     if let Some(ref keyword) = opts.string_filter {
@@ -669,24 +618,44 @@ mod tests {
         assert_eq!(get_string(&entry, 5), "Not Specified");
     }
 
-    #[test]
-    fn test_generate_defaults() {
-        let entries = generate_default_entries();
-        assert!(!entries.is_empty());
-        assert!(entries.iter().any(|e| e.entry_type == TYPE_BIOS));
-        assert!(entries.iter().any(|e| e.entry_type == TYPE_SYSTEM));
+    /// Two entries to look strings up in.
+    ///
+    /// THIS DATA USED TO BE IN THE PROGRAM. `generate_default_entries` built
+    /// it and `read_dmi_tables` returned it whenever /sys/firmware/dmi could
+    /// not be read, so a machine with no DMI reported a BIOS vendor, a model
+    /// and a serial number that belonged to nothing. Two tests here used it as
+    /// convenient fixture data, which is the only honest use it ever had, so
+    /// it lives here now -- the same move sysstat made with its invented
+    /// network interface.
+    fn fixture_entries() -> Vec<DmiEntry> {
+        vec![
+            DmiEntry {
+                entry_type: TYPE_BIOS,
+                handle: 0,
+                length: 18,
+                data: vec![0; 18],
+                strings: vec!["ACME BIOS Co".to_string(), "2.1".to_string()],
+            },
+            DmiEntry {
+                entry_type: TYPE_SYSTEM,
+                handle: 1,
+                length: 27,
+                data: vec![0; 27],
+                strings: vec!["ACME Computers".to_string(), "Model X".to_string()],
+            },
+        ]
     }
 
     #[test]
     fn test_lookup_string() {
-        let entries = generate_default_entries();
+        let entries = fixture_entries();
         assert!(!lookup_string(&entries, "bios-vendor").is_empty());
         assert!(!lookup_string(&entries, "system-manufacturer").is_empty());
     }
 
     #[test]
     fn test_lookup_string_unknown() {
-        let entries = generate_default_entries();
+        let entries = fixture_entries();
         assert_eq!(lookup_string(&entries, "nonexistent-key"), "Unknown");
     }
 

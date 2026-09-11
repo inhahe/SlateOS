@@ -36,6 +36,44 @@ freely. See `roadmap.md` → "Three-Agent Parallel Execution" rule 3, and
 
 ---
 
+## TD-B-FOUR-MORE-PROGRAMS-SUBSTITUTE-INVENTED-DATA-ON-A-FAILED-READ (lane B, 2026-09-11)
+
+**In short:** `efibootmgr` and `dmidecode` were each found inventing data when
+their real source could not be read. Grepping for the shape that produced them
+-- a function named `generate_default_*` or `fallback_*` returning constructed
+records rather than reading anything -- turns up four more, each called on a
+read failure and each with a test asserting the invented content.
+
+| Crate | Function | What it substitutes |
+|---|---|---|
+| `userspace/acl` | `generate_default_acl` | an owner, a group and an ACL for a file whose real ACL could not be read |
+| `userspace/blockdev` | `generate_default_info(device)` | geometry and size for a block device |
+| `userspace/cgroup` | `generate_default_subsystems`, `generate_default_cgroups` | the cgroup hierarchy |
+| `userspace/numactl` | `fallback_topology` | the machine's NUMA layout |
+
+**Why this is not the read-defaults ledger.** That gate matches
+`.unwrap_or_default()` on a fallible call. These are a named function returning
+a literal, which no pattern in that gate can see -- `efibootmgr` was found
+through its `unwrap_or_default` by luck, and the fabrication beside it was the
+larger half. `scripts/audit-cli-fabrication.py` does not catch them either: it
+exonerates a whole crate on any single I/O marker, and every one of these
+crates genuinely reads its real source first.
+
+**The severity is not uniform and the list should be read before it is
+worked.** `dmidecode`'s was the worst found so far -- it invented a SERIAL
+NUMBER, `SN-00000001`, identical on every machine, in the field asset tracking
+reads. `numactl`'s and `cgroup`'s describe machine state that scheduling
+decisions are made from. `blockdev`'s geometry could be used to compute an
+offset. `acl`'s is a permissions claim about a specific file.
+
+**The fix is the one applied to efibootmgr and dmidecode:** delete the
+generator, return a `Result`, and let the caller say which of "the source is
+absent" and "the source could not be read" happened. Where a test used the
+invented records as fixture data -- two did in `dmidecode` -- the data moves
+into the test module, which is the only honest use it ever had.
+
+**Trigger: one crate per tick, worst first.** Each is self-contained.
+
 ## TD-B-FTP-ECHOES-THE-PASSWORD-IT-ASKS-FOR (lane B, 2026-09-10)
 
 **In short:** `ftp` prompts `Password: ` and the characters appear on screen as

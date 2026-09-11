@@ -159,6 +159,23 @@ ENV_PATTERN = re.compile(
     r"(?:std::)?env::var(?:_os)?\s*\(" + _ARGS + r"\)" + _TAIL,
     re.S,
 )
+# `fs::read` -- ONLY with its module qualifier.
+#
+# It is missing from STD_READERS above, and the reason is that the names there
+# go in unqualified: a bare `read` alternative would match `buf.read(..)` and
+# `sock.read(..)`, every one of which is a method call and none of which is
+# this defect. Requiring the `fs::` makes it unambiguous, and `read_to_string`
+# is not swept up because the `(` has to follow `read` directly.
+#
+# It reached this list the long way. `oils/src/interp.rs` has
+# `std::fs::read(&path).unwrap_or_default()` in `fc -e`, which reads back the
+# file the user just edited and RUNS it; the gate only saw it because oils also
+# defines a local `fn read`, and the local half's lookbehind did not exclude a
+# `::` prefix. The site was real, the reason it was reported was not.
+QUALIFIED_PATTERN = re.compile(
+    r"(?:std::)?fs::read\s*\(" + _ARGS + r"\)" + _TAIL,
+    re.S,
+)
 
 # A function DEFINED IN THIS FILE returning Option<..> or Result<..>.
 #
@@ -182,8 +199,8 @@ LOCAL_FALLIBLE = re.compile(
 )
 
 
-def local_pattern(name: str) -> re.Pattern:
-    """`name(..).unwrap_or_default()`, and NOT `x.name(..)`.
+def local_pattern(names: set[str]) -> re.Pattern | None:
+    """`name(..).unwrap_or_default()` for ANY of `names`, and NOT `x.name(..)`.
 
     The negative lookbehind is the whole difference between 39 findings and
     171. A file that happens to define any local `fn get(..) -> Option<T>`
@@ -191,8 +208,36 @@ def local_pattern(name: str) -> re.Pattern:
     a discarded read -- and slicing with a default IS legitimate, which is how
     a gate becomes noise and then becomes bypassed. Caught by sampling twelve
     of the 171 before writing any of this down.
+
+    # One pattern for all the names, not one pattern each
+
+    This took a `str` and the caller ran it once per name, which is a full scan
+    of the file per locally-defined fallible function. That was affordable only
+    because the scanner could not see most of the code: when `rustlex.live_code`
+    stopped truncating at the first `#[cfg(test)] mod`, `oils/src/interp.rs`
+    went from 3,181 visible lines to 67,968 and from a handful of local fallible
+    functions to 262 -- and `--check` went from 19.6 seconds to over eight
+    minutes. Every lane pays that on every push.
+
+    An alternation scans once for all of them. The results are identical: a span
+    begins with exactly one of the names, and `record` reads only the match
+    offsets. Longest-first ordering keeps a name that is a prefix of another
+    (`read` before `read_all`) from matching first and forcing a backtrack
+    through the rest of the pattern.
     """
-    return re.compile(r"(?<![.\w])" + re.escape(name) + r"\s*\(" + _ARGS + r"\)" + _TAIL, re.S)
+    if not names:
+        return None
+    alts = "|".join(re.escape(n) for n in sorted(names, key=len, reverse=True))
+    # THE LOOKBEHIND DOES NOT EXCLUDE `:`, and that was tried. The thought was
+    # that a qualified path is not the local function -- but `Self::f(..)` is
+    # exactly the local function, written the way an associated function has to
+    # be written. Adding `:` dropped `pkg: Self::extract_string(..)`, a real
+    # pinned finding, silently and in the shrinking direction. A qualified
+    # std call reaching this pattern is instead de-duplicated by span in
+    # `record`, which fixes the attribution without losing anything.
+    return re.compile(
+        r"(?<![.\w])(?:" + alts + r")\s*\(" + _ARGS + r"\)" + _TAIL, re.S
+    )
 
 
 class Scan(NamedTuple):
@@ -255,8 +300,18 @@ def survey(tree: gittree.Tree) -> Scan:
         # the floor blind to precisely the failure it exists to catch.
         reads += body.count("read_to_string")
         seen: dict[str, int] = {}
+        # One site is one finding, however many patterns reach it. Every
+        # pattern ends at the same `.unwrap_or_default()`, so its end offset
+        # identifies the site: `std::fs::read(p).unwrap_or_default()` is found
+        # by the qualified reader AND, in a file that defines its own `fn
+        # read`, by the local half. The specific patterns run first, so the
+        # first to arrive is the one that names the cause correctly.
+        ends: set[int] = set()
 
         def record(m: re.Match) -> None:
+            if m.end() in ends:
+                return
+            ends.add(m.end())
             call = " ".join(original[m.start() : m.end()].split())
             key = f"{crate}: {call}"
             seen[key] = seen.get(key, 0) + 1
@@ -274,12 +329,16 @@ def survey(tree: gittree.Tree) -> Scan:
             record(m)
         for m in ENV_PATTERN.finditer(body):
             record(m)
+        for m in QUALIFIED_PATTERN.finditer(body):
+            record(m)
         # Only functions this file defines, and only those whose signature
         # SAYS they can fail. The return type is read from the definition
         # rather than guessed from the name, so `read_config` that returns a
         # plain String is not accused of anything.
-        for name in {m.group(1) for m in LOCAL_FALLIBLE.finditer(body)}:
-            for m in local_pattern(name).finditer(body):
+        local_names = {m.group(1) for m in LOCAL_FALLIBLE.finditer(body)}
+        local_re = local_pattern(local_names)
+        if local_re is not None:
+            for m in local_re.finditer(body):
                 record(m)
     return Scan(sorted(found), files, reads)
 

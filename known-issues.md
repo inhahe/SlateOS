@@ -113,6 +113,69 @@ directory — `--target-dir` per `DIFF_PKG` entry — after which the symlink ca
 point at the right one deliberately rather than at whatever survived. Until then
 the survey's column says "coreutils half only", which is the truth.
 
+## B-COREUTILS-DATE-SILENTLY-IGNORES-EVERY-ARGUMENT (lane B, 2026-09-11)
+
+`userspace/coreutils/src/bin/date.rs` parses **no arguments at all**. It reads
+the clock, formats it one way, and prints it — whatever it was asked for.
+
+    $ date -d @0
+    ours   Fri Sep 11 23:45:44 UTC 2026     <- the current time
+    GNU    Thu Jan  1 00:00:00 UTC 1970
+
+Both exit 0. This is worse than an unimplemented option, and worse than the
+refusing stub §1006 forbids: **a refusal tells the caller it did not get what it
+asked for.** This answers a different question confidently. `date -d @0 +%s` in a
+script does not fail, it returns today.
+
+`scripts/date-diff.sh`, written 2026-09-11: **3 of 121 cases pass.** The three
+are the ones where the answer happens not to depend on the arguments.
+
+The file's own header says so plainly — *"Usage: date. Prints the current UTC
+date and time in a simple format. (No timezone support yet — always UTC.)"* —
+so this is not a hidden defect, it is an unfinished program that was never
+finished. What makes it worth an entry is that **it is the half §1005 would
+keep**, and the half the image ships.
+
+**The fix is the port described below, not a patch here.**
+
+## TD-B-DATE-IS-THE-SECOND-PAIR-THE-STANDALONE-WINS (lane B, 2026-09-11)
+
+`scripts/date-diff.sh`, 121 cases against a GNU coreutils 9.4 built from source:
+
+| half | passed | differed |
+|---|---|---|
+| `coreutils` | **3** | 118 |
+| standalone | **52** | 69 |
+
+Seventeen times as many passes. After `diff` (43 against 21) this is the second
+pair where the standalone is clearly the better half, and by a much wider
+margin. §1005 keeps `coreutils` as the one home, so the resolution is to **port
+the standalone into `coreutils/src/bin/date.rs` and then delete the crate** —
+not to delete the crate now.
+
+**What the standalone still gets wrong, which is the work list for that port:**
+
+| | cases | what |
+|---|---|---|
+| format specifiers | 30 | `%C`, `%g`, `%G`, `%V`, `%U`, `%W` (century and the ISO week-year family) and `%:z`/`%::z` (the extended zone forms) all differ while both sides exit 0. |
+| options absent | 20 | `--date=` (the `--opt=value` form — `-d X` works and `--date=X` does not), `--uct`, `--rfc-822`, `--rfc-2822`, `--rfc-3339`, `--reference=`, `-f`/`--file`. |
+| the `-d` language | 11 | `05:06:07`, `Mar 4 2021`, `4 March 2021`, a trailing `UTC`, a trailing `+0200`, `now`, `today` — all refused, all accepted by GNU. |
+| message shape | 7 | |
+| accepts what GNU refuses | 1 | `-d @0 -r stamped.txt`; GNU rejects the combination. |
+
+The 20 missing options are mostly the same `--opt=value`/abbreviation family
+that `uname` and `env` were fixed for by routing through `coreutils::getopt`, so
+a port should start there rather than end there.
+
+**A note on the harness: it has no "now" cases, deliberately.** `date` with no
+arguments prints the current time, and the two sides run milliseconds apart;
+when the second ticks between them the harness reports a difference that is a
+property of the clock. Every case is a function of its arguments — `-d @<epoch>`,
+`-d <fixed string>`, `-r <file with a stamped mtime>` — with `TZ` pinned to UTC.
+That covers the formatter completely, since `date -d @0 +%F` exercises the same
+code as `date +%F`. What it does not cover is reading the clock, which is one
+line.
+
 ## B-HOSTNAME-RESOLVES-THE-DOMAIN-WITHOUT-ETC-HOSTS (lane B, 2026-09-11)
 
 `hostname -d` and `hostname -f` answer from the resolver's search domain and

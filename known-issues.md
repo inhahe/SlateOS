@@ -131935,6 +131935,57 @@ six steps individually is the only thing that will name the dominant one, and
 43 µs on an in-memory write is worth naming: every file write in the kernel pays it,
 not just this benchmark.
 
+### Five candidates eliminated by reading, and the two-clocks fact that explains the dashboard
+
+Narrowing the ~43 µs fixed cost of `Vfs::write_file` by reading rather than measuring.
+None of these is the cause, and recording that is most of the value — each one looks
+plausible enough to cost someone an hour:
+
+| candidate | why it is not the cost |
+|---|---|
+| the data copy | 64× the data costs 2.95× the time, so the bulk is fixed, not per-byte |
+| `history::try_auto_record` | documented as reading the old file before every write — but opens with `if !is_auto_version_enabled() { return; }` |
+| `invalidate_identity` | `BTreeMap::range(lo..=hi)` over *that file's* pages, k=1 here; returns early when `ino == 0` or cache unpopulated |
+| `memfs::child_ino` | `children.get(name)` — a map lookup, not the linear scan the name suggests |
+| `touch_modified` | reaches the clock, but the **cheap** one — see below |
+
+### The two clocks, which differ by four orders of magnitude under WHPX
+
+This is worth knowing independently of the write path, because the choice is invisible
+at the call site:
+
+| call | resolves to | WHPX cost |
+|---|---|---|
+| `hrtimer::now_ns()` | `hpet::elapsed_ns()` when HPET is available — an **MMIO read**, i.e. a VM exit | **~13 500 ns** |
+| `timekeeping::clock_realtime()` → `clock_monotonic()` | `bench::rdtsc()` — a register read | tens of cycles |
+
+`memfs`'s `touch_modified` → `vfs::metadata_now_ns` → `clock_realtime`, so **every file
+write stamps its mtime from the TSC and pays nothing for it.** `net::dashboard`'s
+`api_status` calls `hrtimer::now_ns()` and pays 13.5 µs — which is the whole of the
+finding recorded earlier in this entry, now with its mechanism named: not "the dashboard
+reads a clock" but "the dashboard reads the *other* clock".
+
+Nothing here argues for changing either call. `hrtimer::now_ns()` prefers the HPET for
+good reasons — it is the calibration-independent source, and the TSC path is a fallback
+that needs `bench::calibrate_tsc()` to have run. The useful output is that **"reads a
+clock" is not a cost estimate in this kernel**, and a reviewer seeing a timestamp in a
+hot path has to look at which one.
+
+### What is left, and why it needs measurement rather than more reading
+
+`intercept::pre_write`, `enforce_quota_write`, the two `check_writable`s (one in
+`ipc::namespace`, one in `fs::vfs`), `resolve_write_path`, `walk`, `cache_identity`, and
+the quota charge. Reading has taken this as far as it goes: each of those either
+early-returns or does a small lookup when read in isolation, and yet together they cost
+~43 µs more than `stat` does over the same resolve.
+
+That is exactly the shape a phase breakdown settles and reading does not, and the
+suite's idiom for it is `bench_vfs_readdir_breakdown` plus the `#[inline(never)] pub fn
+bench_*` convention. **One caution for whoever builds it:** timing a *copy* of
+`write_file_resolved`'s body would measure the copy, not the path — the same
+two-lists-that-must-agree failure this file records in several other places. Instrument
+the real function or expose it, rather than reimplementing it beside a stopwatch.
+
 ## TD-A-REQUEST-STATUS-HAS-NO-CHECKED-SHAPE-SO-EVERY-READER-COUNTS-DIFFERENTLY (lane A, 2026-09-11) — **open**
 
 **In short:** the `requests/` dropbox is how the three lanes hand work to each other,

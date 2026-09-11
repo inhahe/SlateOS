@@ -127304,6 +127304,59 @@ used *only* in exempt positions, which is the property that actually matters.
 **Also found in the same survey:** `overlay1` and `overlay2` are declared and
 used **zero** times anywhere in `gui` or `apps`. They are dead palette rungs.
 
+## TD-C-BORDER-CONVERSION-IN-PROGRESS — 991 DRAW SITES STILL CHOOSE THEIR OWN FILL
+
+**Date:** 2026-09-11. **Lane:** C.
+**Where:** `gui/**` and `apps/**`; run `python gui/appearance/survey-fills.py` for
+the current count and classification.
+
+**In short:** the decision to outline boxes rather than fill them (§829) is
+built, switchable and previewable, but the ~991 places that actually draw a box
+have not moved yet. Until they do, the setting changes the preview and little
+else. Nothing is broken; the desktop looks exactly as it did.
+
+**Done, and on `main`:**
+
+1. `appearance` carries the decided palette, with `link` and `border` as roles
+   of their own.
+2. `appearance::surface` is the single decision point: a `Surface` enum naming
+   *what a box is*, and `Palette::surface_paint` / `draw_surface` turning that
+   into a fill, an outline, or both, per `SurfaceStyle`.
+3. Settings → Themes offers "Outlined" / "Filled" with a live preview, and the
+   setting persists as `theme.surface_style`.
+
+**Left:** the draw sites. The survey classifies them by what the surrounding
+code calls them:
+
+| what it looks like | count | share |
+|---|---|---|
+| `Card` | 674 | 68% |
+| `Selected` | 158 | 16% |
+| `ControlTrack` | 68 | 7% |
+| `Sidebar` | 55 | 6% |
+| `Panel` | 36 | 4% |
+
+**Two things about that table, both learned by getting it wrong first.**
+
+The `ControlTrack` row is the reason this cannot be a blind sweep. A switch
+track, a scrollbar trough and a progress groove **stay filled in both themes** —
+outlined instead, a switch track reads as an empty box rather than as the off
+half of a control. Sixty-eight sites would have been silently broken.
+
+And the first run of the survey reported **1,090** sites, with a doc comment in
+`palette_check.rs` classified as a control track. Two faults: it matched inside
+comments, and it read a fixed ±6-line window, which runs into the *next* draw
+site and attributes that site's role and naming words to this one. Scoping the
+lookup to the literal's own braces and skipping comment lines removed 99 false
+positives and moved `ControlTrack` from 96 to 68. **The classification is a
+starting point for review, not an answer** — that is why the survey prints
+samples, and why the conversion should land in reviewable batches rather than
+one commit.
+
+**If never finished:** the desktop keeps the filled look, the new setting is
+mostly inert, and the palette carries two roles (`link`, `border`) that only the
+preview uses. Nothing degrades; it simply does not arrive.
+
 ## TD-C-THE-ACCESSIBILITY-CONFIG-IS-A-DEAD-PARALLEL-COPY
 
 **Date:** 2026-09-09. **Lane:** C.

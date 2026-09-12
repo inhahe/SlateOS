@@ -36,6 +36,8 @@ struct PsArgs {
     /// them. `?` and `-` both mean "no controlling terminal" and both arrive
     /// here as `?`.
     select_ttys: Option<Vec<String>>,
+    /// `-l`: the long format.
+    long_format: bool,
 }
 
 /// Parse ps's argv.  BSD-style and POSIX-style flags are accepted via
@@ -109,6 +111,7 @@ fn parse_args(args: &[String]) -> Result<Request, String> {
                 match c {
                     'e' | 'A' => out.all_procs = true,
                     'f' => out.full_format = true,
+                    'l' => out.long_format = true,
                     't' => {
                         let glued: String = rest.by_ref().collect();
                         let list = if glued.is_empty() {
@@ -495,6 +498,22 @@ struct ProcInfo {
     user: String,
     /// procps' `C` column: integer percent of CPU over the process's life.
     cpu_pct: u64,
+    /// `-l`'s `S`: the one-character state.
+    state: String,
+    /// `-l`'s `F`: `(flags >> 6) & 7`, in octal. Measured -- a default task
+    /// carries `flags` 4194560 and procps prints `4`.
+    flag: u64,
+    /// `-l`'s `PRI`. **`stat`'s priority PLUS 60**, which is measured, not
+    /// derived: with nice 0, 5, 10 and 19 procps prints 80, 85, 90 and 99
+    /// while the file says 20, 25, 30 and 39.
+    pri: i64,
+    /// `-l`'s `NI`.
+    nice: i64,
+    /// `-l`'s `SZ`: virtual size in 4096-byte pages.
+    size_pages: u64,
+    /// `-l`'s `WCHAN`, truncated to six characters as procps does. `-` when
+    /// the process is running rather than blocked.
+    wchan: String,
     /// procps' `STIME`: `HH:MM` if the process started today, else `MMM DD`.
     stime: String,
     tty: String,
@@ -573,7 +592,30 @@ fn run_main() -> ExitCode {
             let _ = writeln!(out, "{}", render_row(&titles, &parsed.columns));
         }
     } else if !parsed.no_header {
-        if parsed.full_format {
+        if parsed.long_format {
+            // ADDR and SZ ABUT WITH NO SEPARATOR. Every other pair here is
+            // joined by one space; these two are not, and the gap in the
+            // header is SZ's own right-padding. Computed from the column
+            // offsets of a measured line rather than counted by eye --
+            // `ADDR SZ` and `-   701` both occupy exactly columns 37-43.
+            let _ = writeln!(
+                out,
+                "{:<1} {:<1} {:>5} {:>7} {:>7} {:>2} {:>3} {:>3} {:<4}{:>3} {:<6} {:<8} {:>8} CMD",
+                "F",
+                "S",
+                "UID",
+                "PID",
+                "PPID",
+                "C",
+                "PRI",
+                "NI",
+                "ADDR",
+                "SZ",
+                "WCHAN",
+                "TTY",
+                "TIME"
+            );
+        } else if parsed.full_format {
             let _ = writeln!(
                 out,
                 "{:<8} {:>7} {:>7} {:>2} {:>5} {:<8} {:>8} CMD",
@@ -593,11 +635,18 @@ fn run_main() -> ExitCode {
 
     let mut matched = false;
     for pid in pids {
+        // `-e`/`-A` OVERRIDES every selection, in either order. Measured:
+        // `ps -e -p 2`, `ps -p 2 -e`, `ps -e -u root` and `ps -e -t ?` all
+        // list every process, so "show all" is not one filter among several
+        // -- it cancels them. Without this, `-e -p 2` printed one row here
+        // against procps' two.
+        let select = !parsed.all_procs;
         // `-p` selects; without it every process is shown.
-        if parsed
-            .select_pids
-            .as_ref()
-            .is_some_and(|w| !w.contains(&pid))
+        if select
+            && parsed
+                .select_pids
+                .as_ref()
+                .is_some_and(|w| !w.contains(&pid))
         {
             continue;
         }
@@ -609,7 +658,7 @@ fn run_main() -> ExitCode {
                 .columns
                 .iter()
                 .any(|s| COLUMNS.get(s.col).is_some_and(|c| c.name == "args"));
-        let Ok(Some(info)) = read_one(&procfs, pid, wants_cmdline, &ctx) else {
+        let Ok(Some(info)) = read_one(&procfs, pid, wants_cmdline, parsed.long_format, &ctx) else {
             // A process that exits between the listing and the read is the
             // normal case for anything walking /proc, not a failure.
             continue;
@@ -617,19 +666,21 @@ fn run_main() -> ExitCode {
         // `-t` matches on the RENDERED terminal, which is the same string the
         // TTY column prints -- so `ps -t ?` and the `?` a reader sees in the
         // table cannot disagree.
-        if parsed
-            .select_ttys
-            .as_ref()
-            .is_some_and(|w| !w.contains(&info.tty))
+        if select
+            && parsed
+                .select_ttys
+                .as_ref()
+                .is_some_and(|w| !w.contains(&info.tty))
         {
             continue;
         }
         // `-u` filters on a value only the read can supply, so unlike `-p` it
         // cannot skip the read first.
-        if parsed
-            .select_uids
-            .as_ref()
-            .is_some_and(|w| !w.contains(&info.uid))
+        if select
+            && parsed
+                .select_uids
+                .as_ref()
+                .is_some_and(|w| !w.contains(&info.uid))
         {
             continue;
         }
@@ -642,6 +693,25 @@ fn run_main() -> ExitCode {
                 .map(|spec| info.cell(COLUMNS.get(spec.col), pid32))
                 .collect();
             let _ = writeln!(out, "{}", render_row(&cells, &parsed.columns));
+        } else if parsed.long_format {
+            let _ = writeln!(
+                out,
+                "{:<1} {:<1} {:>5} {:>7} {:>7} {:>2} {:>3} {:>3} {:<4}{:>3} {:<6} {:<8} {:>8} {}",
+                info.flag,
+                info.state,
+                info.uid,
+                pid32,
+                info.ppid,
+                info.cpu_pct,
+                info.pri,
+                info.nice,
+                "-",
+                info.size_pages,
+                info.wchan,
+                info.tty,
+                info.time_str,
+                info.comm
+            );
         } else if parsed.full_format {
             let _ = writeln!(
                 out,
@@ -669,9 +739,12 @@ fn run_main() -> ExitCode {
     // header. Measured. Without `-p` an empty table is not an error -- there
     // is always at least this process -- so the status only turns on a
     // selection that matched nothing.
-    if (parsed.select_pids.is_some()
-        || parsed.select_uids.is_some()
-        || parsed.select_ttys.is_some())
+    // A selection that matched nothing exits 1 -- but only when there WAS a
+    // selection, and `-e` means there was not.
+    if !parsed.all_procs
+        && (parsed.select_pids.is_some()
+            || parsed.select_uids.is_some()
+            || parsed.select_ttys.is_some())
         && !matched
     {
         return ExitCode::FAILURE;
@@ -700,6 +773,7 @@ fn read_one(
     procfs: &procinfo::ProcFs,
     pid: u64,
     full: bool,
+    long: bool,
     ctx: &ListCtx,
 ) -> std::io::Result<Option<ProcInfo>> {
     let Some(stat) = procfs.process_stat(pid)? else {
@@ -731,6 +805,16 @@ fn read_one(
         ppid: u32::try_from(stat.ppid).unwrap_or(0),
         uid,
         user: ctx.user_name(uid),
+        state: char::from(stat.state).to_string(),
+        flag: (stat.flags >> 6) & 7,
+        pri: stat.priority.saturating_add(60),
+        nice: stat.nice,
+        size_pages: stat.vsize_bytes / 4096,
+        wchan: if long {
+            read_wchan(procfs, pid)
+        } else {
+            String::new()
+        },
         cpu_pct: cpu_percent(
             stat.utime_ticks,
             stat.stime_ticks,
@@ -847,6 +931,22 @@ impl ListCtx {
         let fmt: &[u8] = if same_day { b"%H:%M" } else { b"%b%d" };
         String::from_utf8(strftime(fmt, &started)).unwrap_or_default()
     }
+}
+
+/// `/proc/<pid>/wchan`, as `-l` prints it.
+///
+/// procps truncates to six characters -- `do_wait` shows as `do_wai` -- and
+/// prints `-` for a process that is running rather than blocked, which the
+/// kernel reports as `0`. Read only under `-l`, because it is a third open
+/// per process.
+fn read_wchan(procfs: &procinfo::ProcFs, pid: u64) -> String {
+    let raw = procfs.process_wchan(pid).ok().flatten().unwrap_or_default();
+    let text = procinfo::display_bytes(&raw);
+    let text = text.trim();
+    if text.is_empty() || text == "0" {
+        return "-".to_string();
+    }
+    text.chars().take(6).collect()
 }
 
 /// procps' `C` column: integer percent of CPU used over the process's life.

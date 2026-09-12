@@ -117633,6 +117633,23 @@ finding does*. Here the "guard" is an exit status, and the fact it had not
 checked was whether the thing I actually ran succeeded. Arriving from a third
 direction is the argument for writing it down.
 
+**A third instance, and the mildest: `git push`'s own printed range can
+UNDERSTATE what landed.** Observed twice on 2026-09-12. The log said
+
+```
+793ae7fcc..c29318365  lane-b -> lane-b
+PUSH_EXIT=0
+```
+
+and `git ls-remote` immediately afterwards reported `3963ae04d` — one commit
+further on, made while the 32 pre-push gates were still running. One
+`lane-b -> lane-b` line in the log, so it was one push, not two. The mechanism
+is not asserted here because it was not measured; what was measured is that
+**the range git prints is not proof of what is on the server.** The direction
+is safe — more landed than was reported, never less — but it means a push log
+cannot answer "did my last commit go up?". `git ls-remote` can, and is the
+instrument that cannot answer from a local cache.
+
 **The rule.** Never pipe a command whose exit status you intend to believe.
 
 **The sharper form, from lane A on 2026-09-12 — piping is dangerous even when

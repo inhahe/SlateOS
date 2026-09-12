@@ -56928,3 +56928,40 @@ then the remedy is to run
 
 by hand immediately after editing the hook, which is what found the 2026-09-12
 instance and its two hidden layers.
+
+
+--------------------------------------------------------------------------------
+DEFERRED: coreutils `diff`'s parser exits instead of returning, so no refusal
+can be unit-tested. (lane B, 2026-09-12)
+--------------------------------------------------------------------------------
+
+WHAT IS WRONG. `parse_args` in userspace/coreutils/src/bin/diff.rs calls
+`process::exit(2)` directly on an invalid option, an invalid context length and
+a missing `--width` argument. A unit test cannot drive any of those: the process
+leaves. So the thirteen tests in that file all prove the parser ACCEPTS things,
+and nothing proves it REFUSES anything -- the two-probe rule is unsatisfiable
+there as written.
+
+WHY IT IS NEW. This arrived with the port from `userspace/diff` on 2026-09-12.
+The implementation it replaced returned a `DiffArgs` struct and could be asked
+about bad input; the one that replaced it wins on behaviour (43 passed / 64
+differed against 21 / 86 on the same 107 cases) and loses on testability. Both
+halves of a duplicate are witnesses, and this is the part of the losing witness
+that did not survive.
+
+THE PROPER FIX. `parse_args` returns `Result<ParseResult, String>` (or a small
+error enum) and `main` does the printing and the exiting. That is the shape the
+retired implementation had and the shape the rest of coreutils uses -- see
+`patch.rs`'s `parse_args -> Result<Options, String>`, which is why its refusals
+ARE unit-tested. Roughly a dozen call sites inside one function.
+
+WHY DEFERRED. Doing it inside the port would have mixed a behaviour-preserving
+move with a behaviour-changing refactor, and the port's whole claim is that the
+differential number did not move: 43/64 before, 43/64 after. A refactor in the
+same commit makes that claim unverifiable, because a regression in either could
+hide the other.
+
+TRIGGER. Do it the next time anything in that parser is touched for any reason,
+or before adding an option to it -- whichever comes first. The cost of waiting
+is that a refusal regression there is invisible to `cargo test` and visible only
+to `scripts/diff-diff.sh`, which needs WSL and does not run in a hook.

@@ -2527,6 +2527,46 @@ extern "C" fn kernel_main() -> ! {
     }
 
     {
+        #[inline(never)]
+        fn case() {
+            // The ELF constructor/destructor walks, end to end in ring 3. Lane B's
+            // fixture, staged in answer to
+            // requests/a-b-crt-init-array-consumer-must-be-c-not-cpp.md; the walks
+            // themselves live in posix/src/crt.rs and have existed for weeks
+            // without a single program to walk over.
+            //
+            // Worth running for one property above all: the fixture's main
+            // deliberately returns 7, and only a destructor can turn that into 42.
+            // Success therefore has to be PRODUCED by the .fini_array walk rather
+            // than merely survive it, so a build where that walk silently does
+            // nothing cannot pass. A fixture whose main returned 42 directly would
+            // read identically in this log and prove half as much.
+            //
+            // C and not C++ on purpose: a C++ translation unit emits .init_array
+            // but no .fini_array at all -- its destructors go through
+            // __cxa_atexit/__cxa_finalize -- so a C++ fixture would have exercised
+            // one walk, left the other exactly as unproven as it was, and closed an
+            // entry that names both.
+            //
+            // Cannot hang, structurally: no read, no sleep, no thread, and every
+            // diagnostic is an unbuffered write(2) because the verdict is reached
+            // inside exit()'s atexit chain where stdio is never flushed. The kernel
+            // side is bounded at 8000 yields regardless.
+            //
+            // Diagnostic, like the rungs above -- but severity governs the KERNEL
+            // and not the HARNESS (design-decisions.md 914): a failure here still
+            // reddens every lane's boot test, so this rung stays on lane-a until a
+            // green run, exactly as the alternate-stack rung above it did.
+            selftest::dispatch_debug(
+                "ELF constructor/destructor walks (ring 3)",
+                selftest::Severity::Diagnostic,
+                proc::spawn::self_test_ctest_initfini(),
+            );
+        }
+        case();
+    }
+
+    {
         // The hostname round trip, and the only place in the tree that grants
         // `(Process, SET_HOSTNAME)`.
         //

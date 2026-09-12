@@ -860,6 +860,16 @@ pub fn quote_suffix(suffix: &[u8], ctx: Ctx) -> Vec<u8> {
         // apostrophe still ends the construct, and here `\'` is the correct
         // spelling for it (in `'…'` it is not, which is why these two cases
         // cannot share code).
+        //
+        // This arm preserves UTF-8 validity, which [`quote_suffix_str`] relies
+        // on when it says its `None` "cannot happen for a `&str` input". Adding
+        // a fourth context put that claim on a fourth arm, so it is worth
+        // stating why it still holds: the only byte inserted is `\` (ASCII),
+        // and it is inserted only *before* `\` or `'`, which are themselves
+        // ASCII and so can never be UTF-8 continuation bytes. Inserting an ASCII
+        // byte ahead of a continuation byte would split a character in half;
+        // that cannot arise here because no continuation byte is ever a match
+        // target. Same reasoning as `lf_to_crlf` going byte-wise.
         Ctx::DollarSingle => {
             let mut out = Vec::with_capacity(suffix.len());
             for &b in suffix {

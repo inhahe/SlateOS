@@ -9193,6 +9193,181 @@ pub fn self_test_ctest_altstack() -> KernelResult<()> {
     Ok(())
 }
 
+/// Run `ctest-initfini` in ring 3: the ELF constructor/destructor walks, end to end.
+///
+/// **This rung is the first program in the tree whose `.preinit_array`,
+/// `.init_array` and `.fini_array` boundary symbols are non-null**, so it is the
+/// first time `posix/src/crt.rs`'s walks execute over anything at all. It closes
+/// the half of `known-issues.md` → `D-CRT-INIT-ARRAY` that four host unit tests
+/// could not: those pass arrays the test itself built to functions the test
+/// itself called, and every one of them would still pass if the linker never
+/// defined `__init_array_start`, if `__libc_start_main` never called
+/// `run_constructors`, or if `atexit(run_destructors)` were dropped. The walk had
+/// only ever been proven to be a correct *no-op*.
+///
+/// # Why the fixture is C, which is the whole point of it
+///
+/// Measured with our own codegen flags (`-mcmodel=large -fno-pic -fno-pie`,
+/// `--target=x86_64-linux-musl -static`, zig 0.16.0):
+///
+/// | consumer | `.init_array` | `.fini_array` |
+/// |---|---|---|
+/// | C++, global object with a destructor | 1 entry | **section absent entirely** |
+/// | C, `__attribute__((constructor))`/`((destructor))` | 1 entry | 1 entry |
+///
+/// A C++ program never populates `.fini_array`; its destructors are registered at
+/// run time by `__cxa_atexit` and run by `__cxa_finalize`. That is the C++ ABI,
+/// not a zig or musl artifact. A C++ fixture would therefore exercise the
+/// `.init_array` walk, leave the `.fini_array` walk exactly as unproven as it was,
+/// and let an entry naming the two together read as closed — a false completion
+/// reached by doing everything right. The likeliest first consumer is C++
+/// (Oils/YSH), so that was the probable path rather than a corner case.
+/// Requested in `requests/a-b-crt-init-array-consumer-must-be-c-not-cpp.md`.
+///
+/// # Why 42 cannot happen by accident
+///
+/// **The fixture's `main` deliberately returns 7.** Only a destructor can turn
+/// that into 42, so success is something the `.fini_array` walk has to actively
+/// *produce* rather than merely survive. A fixture whose `main` returned 42
+/// directly would look identical in the log and prove half as much.
+pub fn self_test_ctest_initfini() -> KernelResult<()> {
+    let Some(ctest_elf) = pathz_test_elf("ctest-initfini", "ctest-initfini")? else {
+        return Ok(());
+    };
+
+    serial_println!(
+        "[spawn] Running ELF constructor/destructor walks (ring 3, C, native ABI) integration \
+         test ({} bytes ELF)...",
+        ctest_elf.len()
+    );
+
+    /// Returned only when every walk ran, in the order the ABI specifies.
+    const EXPECTED: i32 = 42;
+
+    let argv: &[&[u8]] = &[b"ctest-initfini"];
+    let envp: &[&[u8]] = &[];
+    let options = SpawnOptions {
+        name: "ctest-initfini",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &[],
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+
+    let result = match spawn_process(&ctest_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!("[spawn]   FAIL: ctest-initfini spawn returned {:?}", e);
+            return Err(e);
+        }
+    };
+
+    // Bounded: the fixture writes a handful of markers and exits. It has no
+    // read, no sleep and no thread, so exhausting this ceiling means it stopped
+    // progressing rather than that it is waiting for something.
+    let mut became_zombie = false;
+    for _ in 0..8000 {
+        if pcb::state(result.pid) == Some(pcb::ProcessState::Zombie) {
+            became_zombie = true;
+            break;
+        }
+        crate::sched::yield_now();
+    }
+
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+
+    thread::on_thread_exit(result.task_id);
+    pcb::destroy(result.pid);
+
+    if !became_zombie || state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: ctest-initfini (ring 3) — expected Zombie, got {:?}. This fixture \
+             does no I/O beyond unbuffered write(2) and never blocks, so a non-zombie state is \
+             not a fixture waiting on something: either a constructor faulted before main, or \
+             the atexit chain did not terminate",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    if exit_code != Some(EXPECTED) {
+        // The legend below is mirrored from `services/ctest-initfini/main.c`,
+        // which says so in its own header. Each code names one walk, so the
+        // exit status localises the failure without needing the fixture's
+        // output — which matters because the verdict is reached inside a
+        // destructor, i.e. from within exit()'s atexit chain, where stdio is
+        // never flushed.
+        let hint = match exit_code {
+            Some(7) => {
+                " — constructors ran, main ran, and NOTHING overrode main's status, so the \
+                 `.fini_array` walk never executed. This is precisely the C++ shape the fixture \
+                 was made C to be able to detect, and it is the single most likely real failure: \
+                 `.init_array` and `.fini_array` are separate walks over separately synthesised \
+                 boundary symbols, so the init half working says nothing about the fini half"
+            }
+            Some(8) => {
+                " — `.init_array` did not run: main was entered with no constructor having \
+                 recorded anything. Either `__libc_start_main` is not calling `run_constructors`, \
+                 or `__init_array_start`/`__init_array_end` resolved to null the way they do on a \
+                 host build"
+            }
+            Some(9) => {
+                " — `.init_array` ran but `.preinit_array` did not. Separate sections with \
+                 separately synthesised boundary symbols, so one walking correctly is not \
+                 evidence about the other; this code exists because that is exactly the \
+                 assumption that would otherwise be made"
+            }
+            Some(31) => {
+                " — the first recorded event was not the preinit entry. `.preinit_array` must run \
+                 before `.init_array`, so this is an ordering fault between the two walks rather \
+                 than a missing walk"
+            }
+            Some(32) => {
+                " — the constructors ran out of order. Ascending priority is the ABI, and a walk \
+                 that runs them backwards will look correct in any test that registers only one"
+            }
+            Some(33) => {
+                " — the recorded sequence has the wrong length: some entry ran twice, or one that \
+                 should have run did not, without either walk being absent outright"
+            }
+            Some(34) => {
+                " — the destructors ran in constructor order rather than reversed. `.fini_array` \
+                 is walked backwards, and this is the failure a fixture with a single destructor \
+                 cannot see at all"
+            }
+            Some(30) => {
+                " — the sequence did not match for a reason the fixture's own checks could not \
+                 classify. The serial log above carries the observed order: every diagnostic goes \
+                 out through unbuffered write(2) as it happens, precisely so a failing run still \
+                 shows what it did"
+            }
+            _ => "",
+        };
+        serial_println!(
+            "[spawn]   FAIL: ctest-initfini (ring 3) — reached Zombie but exit code was {:?}, \
+             expected {}{hint}. See services/ctest-initfini/main.c, whose header carries this \
+             same legend",
+            exit_code,
+            EXPECTED
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    serial_println!(
+        "[spawn]   ELF constructor/destructor walks (ring 3, native ABI: `.preinit_array` before \
+         `.init_array`, constructors in ascending priority order, `.fini_array` walked in \
+         reverse — and main's deliberate failing status overridden only by a destructor, so this \
+         OK could not have been produced without the fini walk running): OK"
+    );
+    Ok(())
+}
+
 /// Run `ctest-hostname` in ring 3, holding the one grant of `SET_HOSTNAME`.
 ///
 /// **This rung exists to make the grant exist.** `SYS_HOSTNAME_SET` (1072) and

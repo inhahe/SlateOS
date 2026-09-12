@@ -1632,6 +1632,56 @@ fn remove_quotes(s: &str) -> String {
 /// it when it learns to parse quotes, and when everything is on it this
 /// function and [`remove_quotes`] both go away in favour of a real argv.
 /// See `known-issues.md` → `TD-KSHELL-COMMANDS-TAKE-A-FLAT-STRING-NOT-ARGV`.
+/// Whether the shell can represent `raw_args` after quote removal.
+///
+/// Returns `false`, after printing a diagnostic, when dequoting would produce
+/// bytes that are not valid UTF-8 — which `$'\xff'` is designed to do, and
+/// which the command dispatcher cannot yet carry: `dispatch` takes `&str`.
+///
+/// **The refusal is the point**, and it is the same trade [`path_arg_as_str`]
+/// makes one layer down. Without it the two dequoting paths fail differently
+/// and both fail silently:
+///
+/// | path | used by | what it did |
+/// |---|---|---|
+/// | [`remove_quotes`] | ~740 commands | `String::from_utf8(…).unwrap_or_else(…)` returned the line **undecoded**, so `echo $'\xff'` printed `$'\xff'` |
+/// | [`split_words`] | the 10 on [`command_parses_own_quotes`] | `String::from_utf8(word).ok()` **dropped the word**, so `touch $'re\xffport.txt'` ran `touch` with no argument at all |
+///
+/// Dropping an argument is the worse of the two: it changes the command's
+/// arity, so the command runs and does something *else* rather than doing
+/// nothing. Both sites carry a comment calling the failure unreachable, and
+/// both comments were correct until `$'…'` decoding landed — the scanner can
+/// now produce a byte no `str` can hold, which is the entire purpose of the
+/// construct. Checking here, once, before either path is taken, is what makes
+/// the two agree.
+///
+/// This disappears on its own when the dispatcher takes `&[u8]`
+/// (`TD-KSHELL-LINE-EDITOR-IS-UTF8`, stage (c)). Until then a user who types
+/// a byte the shell cannot carry is told so, rather than watching the command
+/// quietly do the wrong thing.
+/// Strips a second time rather than threading the bytes through to the
+/// dequoting below. That is one extra pass over one command line, on a path
+/// that is about to spawn or interpret a command; threading it would fold this
+/// check into the branch it exists to precede, and the reason it sits *before*
+/// the branch is that both arms of that branch get it wrong in different ways.
+/// Clarity wins a trade this lopsided, and no measurement suggested otherwise.
+fn args_are_representable(cmd: &str, raw_args: &str) -> bool {
+    let bytes = shellquote::strip_quotes(raw_args.as_bytes());
+    if core::str::from_utf8(&bytes).is_ok() {
+        return true;
+    }
+    // Names the construct, because it is the only way to reach this: nothing
+    // else can put a non-UTF-8 byte into a word. "Your argument is invalid"
+    // with no cause leaves the user re-reading a line that looks correct.
+    shell_println!(
+        "{}: this argument needs a byte that no command can be given yet \
+         (produced by a $\'...\' escape). The shell carries command lines \
+         as text, so the byte cannot survive the call; nothing has been run.",
+        cmd
+    );
+    false
+}
+
 fn command_parses_own_quotes(cmd: &str) -> bool {
     matches!(
         cmd,
@@ -7458,6 +7508,15 @@ fn dispatch_with_input(line: &str, input: &[u8]) {
     let cmd = parts.next().unwrap_or("");
     let raw_args = parts.next().unwrap_or("").trim();
 
+    // Checked before the branch on purpose: the two dequoting paths below
+    // fail differently on a non-UTF-8 word (one returns the line undecoded,
+    // the other drops the word), and both fail silently. See
+    // `args_are_representable`.
+    if !args_are_representable(cmd, raw_args) {
+        set_exit(1);
+        return;
+    }
+
     // Same quote-removal boundary as `dispatch` — a pipeline stage is a
     // command like any other, and `cat f | grep 'a b'` must see the same
     // argument bytes as `grep 'a b' f`. The fallback arm below re-enters
@@ -7577,6 +7636,15 @@ fn dispatch(line: &str) {
     let mut parts = line.splitn(2, ' ');
     let cmd = parts.next().unwrap_or("");
     let raw_args = parts.next().unwrap_or("").trim();
+
+    // Checked before the branch on purpose: the two dequoting paths below
+    // fail differently on a non-UTF-8 word (one returns the line undecoded,
+    // the other drops the word), and both fail silently. See
+    // `args_are_representable`.
+    if !args_are_representable(cmd, raw_args) {
+        set_exit(1);
+        return;
+    }
 
     // Quote removal happens here, and only here. It used to happen line-wide
     // in `expand_braces`, before the line was parsed at all, which deleted the

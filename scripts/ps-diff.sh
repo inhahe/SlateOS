@@ -212,28 +212,63 @@ run_case -Af
 # the option exists. Declared with the reason naming WHICH option, so that
 # implementing one turns its case into an XPASS rather than leaving a stale
 # blanket excuse covering nine cases.
+# `-l` is a fixed column set, measured so the eventual implementation has
+# something to match rather than a name to guess from:
+#
+#   F S   UID     PID    PPID  C PRI  NI ADDR SZ WCHAN  TTY          TIME CMD
+#   4 R     0       1       0  0  80   0 -  2093 -      ?        00:00:00 ps
+#
+# The UID is NUMERIC here -- `0`, where `-f` prints `root` for the same
+# process in the same listing. Two format options, two renderings of one
+# field, and the obvious shared helper would get one of them wrong.
 xfail_case "-l (long format) is not implemented here" -l
 xfail_case "-l (long format) is not implemented here" -el
 xfail_case "-l (long format) is not implemented here" -efl
-xfail_case "-u (user-oriented format) is not implemented here" -u
-xfail_case "-p (select by PID) is not implemented here" -p 1
+# `-u` is SELECTION BY USER, not a format, and the reason here said
+# otherwise until it was measured. SysV `ps -u root` prints the DEFAULT
+# columns for that user's processes; the user-oriented format is BSD `u`
+# with no dash, which is a different option that happens to share a
+# letter. `userspace/ps` documents "-u [user] User-oriented format" and
+# so conflates them -- which is worth knowing before porting it in, since
+# porting the standalone's `-u` would import the conflation.
+#
+# `ps -u` with no list exits 1.
+# Bare `-u` with no list is NOT the error it looks like. procps prints the
+# BSD user-oriented header -- `USER PID %CPU %MEM VSZ RSS TTY STAT START
+# TIME COMMAND` -- on STDOUT with an empty stderr and exits 1. So it falls
+# back to the `ps u` format with nothing selected, and matching it means
+# implementing that format, not fixing this option. We print an error and
+# the usage instead.
+#
+# Declared after measuring, not from the exit status: both sides exit 1 and
+# a harness comparing only the status would have called this agreement.
+xfail_case "bare -u needs the BSD user-oriented format, which is not implemented" -u
+run_case -u root
+run_case -u 0
+run_case -u root,daemon
+run_case -u nosuchuser
+run_case -u 99999
+run_case -p 1
 xfail_case "-o (output column selection) is not implemented here" -o pid
 xfail_case "-o (output column selection) is not implemented here" -o pid,comm
 xfail_case "-o (output column selection) is not implemented here" -o comm=
-xfail_case "--no-header is not implemented here" --no-header
-xfail_case "--no-header is not implemented here" -e --no-header
+run_case --no-header
+run_case -e --no-header
 
 # --- refusals ----------------------------------------------------------------
 run_case --nosuchoption
 run_case -Q
-# These three refuse on both sides but for different reasons, and the reason
-# is the message. We reject `-o` and `-p` as unimplemented options; procps
-# accepts them and then rejects the ARGUMENT. Same exit status, different
-# complaint -- which is honest to record rather than to paper over, because
-# the day `-o` is implemented these must start comparing the argument error.
+# `-o` still refuses on both sides for DIFFERENT reasons: we reject the option,
+# procps accepts it and rejects the column name. Same exit status, different
+# complaint, and it stays declared until `-o` exists.
+#
+# `-p` used to be in this group and has left it. That is what these per-option
+# reasons are for: implementing `-p` turned its three cases into real
+# comparisons instead of leaving a collective excuse covering an option that
+# had since been written.
 xfail_case "we reject -o itself; procps rejects the column name" -o nosuchcolumn
-xfail_case "we reject -p itself; procps rejects the PID" -p notanumber
-xfail_case "we reject -p itself; procps reports no matching process" -p 999999
+run_case -p notanumber
+run_case -p 999999
 
 # `-X` and `-h` are NOT unknown options, and putting them in the list above was
 # my error rather than a finding. Both are real procps options this build does

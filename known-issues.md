@@ -64240,7 +64240,7 @@ the work. Note that if `open-questions.md` → B-Q7 is answered in favour of the
 standing §8 — standalone crates canonical, `coreutils/src/bin/*` retired — then
 this crate's 86 binaries do not need linting at all; they need porting into 45
 new crates that inherit the workspace lints by construction. That is a further
-reason not to start here until B-Q7 lands.
+reason not to start here until B-Q7 lands. **B-Q7 landed on 2026-09-07** (§1005: coreutils is the one home), so that reason has expired — left in place rather than deleted because the paragraph above it is still the right way to think about the work, and only its last clause went stale.
 
 **If never fixed:** no regression — the exposure is exactly what it has been
 since the crates were written. But the lints exist because this codebase has no
@@ -66923,9 +66923,13 @@ is duplicated. Concretely:
    kernel grants permissions per file, so one file answering to `w`, `finger`
    and `pinky` must hold the union of what all three need.
 
-**Blocked on nothing, but sequence it after `open-questions.md` → B-Q7**, which
+**UNBLOCKED since 2026-09-07 and this paragraph did not say so until
+2026-09-12.** It read "sequence it after `open-questions.md` → B-Q7, which
 decides whether `userspace/<tool>` crates or `coreutils` is the home for this
-family. Doing it first would mean doing it twice.
+family." B-Q7 was answered five days before that was noticed: §1005,
+`Decided by: Operator`, **coreutils is the one home** and the duplicate crate
+is deleted. So the sequencing advice was sound and its precondition had been
+met; the entry just went on giving it. Nothing here is waiting on anything.
 
 **How to see it** (once built):
 
@@ -68413,14 +68417,29 @@ diff  logger  patch  ps
 
 `fetch` and `sh` were the last two unblocked ones and are now done, which is
 what took the count from seven to four — `sh` carried two findings, argv and
-the environment. **Everything remaining is blocked on B-Q7**, so there is no
-unblocked work left in this entry; a reader looking for the next thing to do
-should look elsewhere until that question is answered. `diff`, `logger`,
-`patch` and `ps` each have a second implementation of the same utility outside
-`userspace/coreutils/` (`userspace/diff/`, `userspace/logger/`,
-`userspace/patch/`, `userspace/ps/`), so converting one of them means first
-deciding which copy is the real one — `open-questions.md` → **B-Q7** — and doing
-it before that is answered means doing it twice.
+the environment.
+
+**This paragraph used to say "Everything remaining is blocked on B-Q7, so
+there is no unblocked work left in this entry; a reader looking for the next
+thing to do should look elsewhere." B-Q7 was answered on 2026-09-07 and the
+sentence stood for five days after.** §1005, `Decided by: Operator`:
+**coreutils is the one home**, the better half of each duplicate pair survives
+inside it, the duplicate crate is deleted. So the decision these four were
+waiting on has been made, and "look elsewhere" was sending readers away from
+work that was ready.
+
+`diff`, `logger`, `patch` and `ps` each have a second implementation outside
+`userspace/coreutils/`. Under §1005 that is no longer a question, it is a
+measurement: run the pair's harness, keep the better half inside coreutils,
+delete the crate. As of 2026-09-12 `diff` and `patch` are done, `ps` is
+measured (coreutils' 22 passed / 0 differed against the standalone's 0 / 12),
+and `logger` is the one genuine hold-out — not on B-Q7, but on **B-Q14**,
+because its two implementations disagree about *where a logged message goes*,
+which a differential test cannot settle.
+
+`scripts/check-stale-blockers.py` now cross-references answered questions as
+well as landed requests, so the next sentence of this shape is caught by a
+gate rather than by someone wandering past.
 
 The live count is whatever `python scripts/argv-utf8.py --check` prints; the
 baseline shrinks by one line per conversion and never grows, so this paragraph
@@ -117615,6 +117634,47 @@ checked was whether the thing I actually ran succeeded. Arriving from a third
 direction is the argument for writing it down.
 
 **The rule.** Never pipe a command whose exit status you intend to believe.
+
+**The sharper form, from lane A on 2026-09-12 — piping is dangerous even when
+you do not want the status, because the status is the only thing separating
+"no matches" from "no input".** They held a merge for forty minutes on this:
+
+```bash
+git show origin/main:userspace/procinfo/src/lib.rs | grep -c trim_comm
+# 0
+```
+
+`procinfo` is a top-level crate; `userspace/procinfo` does not exist. `git
+show` failed with `fatal: …does not exist` on **stderr**, the pipe discarded
+it, `rc=128` went unread, and `grep -c` faithfully counted zero matches in an
+empty stream. The output was a truthful answer to a question that had not been
+asked, and it was indistinguishable from the true answer to the intended one.
+
+So the failure is not confined to `$?`. **Two zeros with different meanings
+arrive down the same pipe and only one of them is visible.** The check had
+been run *specifically to be careful*, which is the recurring part: every
+instance of this family is someone verifying something.
+
+**Why that is not a coincidence, and the counter-habit that follows.** A
+casual command has nothing to pipe into — you run `git show` and read it. The
+pipe appears the moment you start **filtering, counting, extracting**, which
+is what verification *is*. So the construct that destroys the distinction
+between "no matches" and "no input" is introduced by the act of being
+rigorous, and most reliably by whoever is being most rigorous. Every instance
+so far was someone building an instrument rather than cutting a corner.
+
+So the rule is not "avoid pipes", which would forbid most checks. It is:
+
+> **When a check reduces something to a number, ask what that number does
+> when the input is ABSENT rather than empty.**
+
+`grep -c` cannot tell you. `wc -l` cannot. `| head -1` cannot. All three are
+the natural last stage of a careful check, and all three report the same value
+for "I looked and found nothing" as for "I never looked at all". Where the
+difference matters, check the thing exists first, or read the status — not
+because the status is interesting, but because it is the only surviving
+witness that the input was real.
+
 For a backgrounded run, redirect instead, and read the status explicitly:
 
 ```bash
@@ -131184,8 +131244,38 @@ Two measured examples:
   all. Every *real* option it lacked, coreutils has: `--peta`, `--pebi`,
   `--si`, `--line`, `--committed`, `--version`. It also sat in
   `argv-utf8-baseline.txt` as `argv-as-string`.
-* **`ps`** -- **MEASURED 2026-09-12, and it is the first pair the pass count
-  does not decide.** `scripts/ps-diff.sh` pins the process table in a PID
+* **`ps`** -- **SETTLED 2026-09-12: coreutils' wins, 12 to 0.** The entry
+  below is kept because it was right when written and stopped being right four
+  hours later, which is the more useful record.
+
+      coreutils ps    12 passed,  0 differed, 15 differ on purpose
+      userspace/ps     0 passed, 12 differed, 15 differ on purpose
+
+  Same harness, same cases, opposite results. The reversal is not a change in
+  the standalone: it is that coreutils' `ps` was given procps' column set and
+  a parser that refuses what it cannot honour, both of which it was missing
+  this morning. **A pair verdict is a statement about two implementations on a
+  given day, and the losing half of this one was two fixable defects away from
+  winning.**
+
+  **The standalone scored 0 XPASS**, which is the sharper half of the result.
+  It implements `-l`, `-u`, `-o`, `-p` and `--no-header` -- five real procps
+  options coreutils' refuses -- and not one of them produced procps' output.
+  Every case declared "not implemented here" for coreutils' *also* differed
+  for the implementation that has it. This is `free` again: 23 options
+  advertised against 2 is not 21 options that agree.
+
+  **What that means for the retirement is "merge, not pick".** Deleting
+  `userspace/ps` outright loses five options that exist, however wrongly they
+  render; §1005 says the better half survives *inside coreutils*, which here
+  means porting them in and then retiring the crate, as `diff` was ported. The
+  harness measures each one independently, and each is declared by name in
+  `ps-diff.sh` so implementing `-o` turns three cases into XPASS rather than
+  disappearing into a collective excuse.
+
+  **The original entry, from before the fixes:**
+
+  `scripts/ps-diff.sh` pins the process table in a PID
   namespace with its own `/proc` and compares both against procps-ng:
 
       coreutils ps     0 passed, 26 differed

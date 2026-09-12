@@ -54,6 +54,9 @@
 #      `# Resolved`, where the operator does not read.
 #  30. Refuse a diff harness that does work before sourcing the preamble, which a
 #      re-exec under `timeout` then performs twice.
+#  31. Refuse a gate that runs differently here than in `boot-test.sh` without
+#      the difference being declared, so that this hook's own report cannot be
+#      read as evidence the boot check was pre-run.
 #
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented; wrong again the moment gate 13 was written, when the
@@ -3549,6 +3552,9 @@ fi
 # gate 16 (`libc-abi`) made it 16 on 2026-09-09, gate 17 (`cfg-unix`) made
 # it 17 on 2026-09-10, gate 18 (`crate-names`) made it 18 the same day, and
 # gate 19 (`gate-call-sites`) made it 19 also on 2026-09-10;
+# gate 31 (`invocation-parity`) made it 31 on 2026-09-12, wired into this file
+# rather than `boot-test.sh` because this file is lane B's and that one is lane
+# A's -- `check-gates-are-wired` scans both, so either satisfies it;
 # and gates 27-30 (`one-libc`, `shell-callables`, `open-questions`,
 # `diff-preamble-order`) made it 30 on 2026-09-12 -- widened in after six trunk
 # reds in one night, four of which were gates this hook did not run.  The advisory
@@ -3866,6 +3872,59 @@ if [ "$diffpre_failed" != "0" ]; then
 pre-push: REFUSING to push — a diff harness does work before it sources the preamble.
 diff-wsl.sh re-execs each harness under timeout to bound it, and a re-exec
 restarts the script from the top -- so that work happens TWICE, silently.
+EOF
+    exit 1
+fi
+
+# Gate 31 -- invocation-parity.  Two files naming one gate with two argument
+# lists are two gates wearing one name, and the hook's own report is where that
+# gets believed: lane A read `cfg-unix` in a push's gate list and concluded the
+# boot check had been pre-run, when the push had checked 62 crates on default
+# targets against boot-test's whole workspace with --all-targets.  A widened hook
+# that repeats that is worse than a narrow one, because the reassurance is what
+# does the damage.
+#
+# It does NOT demand the two invocations match -- four of the shared gates differ
+# today and are right to, the hook passing --head <sha> because it judges the
+# pushed commits.  It demands that each difference be declared with a reason, and
+# it refuses a declaration that has stopped being true.
+#
+# Wired here and not only in boot-test.sh because this file is lane B's, and a
+# gate about the parity of these two files should be enforced from the side that
+# can act on it without a cross-lane edit.
+parity="${repo_root:-.}/scripts/check-gate-invocation-parity.py"
+skip_parity=0
+# Bypass: ALLOW_GATE_INVOCATION_DRIFT=1 git push origin <branch>
+if [ "${ALLOW_GATE_INVOCATION_DRIFT:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_GATE_INVOCATION_DRIFT=1 set — skipping the invocation-parity gate." >&2
+    skip_parity=1
+fi
+[ -n "$py" ] || skip_parity=1
+[ -f "$parity" ] || skip_parity=1
+note_gate invocation-parity "$skip_parity"
+parity_failed=0
+if [ "$skip_parity" != "1" ]; then
+    # The checker before its verdict, as every gate here does: a clean report
+    # from a broken scanner reads exactly like a clean tree.  This one earned
+    # that the hard way -- its first version parsed zero invocations out of this
+    # file, because the hook keeps its script paths in shell locals, and
+    # reported perfect parity across an empty set.
+    if ! run_checker invocation-parity-selftest "$py" "$parity" --self-test; then
+        echo "pre-push: check-gate-invocation-parity.py FAILED ITS OWN SELF-TEST — its verdict is not trustworthy." >&2
+        parity_failed=1
+    else
+        if ! run_checker invocation-parity "$py" "$parity"; then
+            parity_failed=1
+        fi
+    fi
+fi
+if [ "$parity_failed" != "0" ]; then
+    cat >&2 <<EOF
+pre-push: REFUSING to push — a gate runs differently here than in boot-test.sh.
+Either the narrower run is deliberate, in which case name it in NARROWER in
+check-gate-invocation-parity.py with the reason, or the two have drifted.  This
+hook reports the gate as having run, and a reader has no other way to learn it
+checked less.
 EOF
     exit 1
 fi

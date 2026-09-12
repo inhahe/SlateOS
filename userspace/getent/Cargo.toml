@@ -4,3 +4,13 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS getent utility"
 [dependencies]
+
+# One `/etc/passwd` and `/etc/group` reader, shared with `id`, `chown`, `su`,
+# `doas` and the login path. This program parsed both itself, which cost it a
+# `read_to_string` that failed on the whole file for one non-UTF-8 byte (a
+# GECOS field in Latin-1 made `getent passwd alice` answer "no such user")
+# and a `parse().unwrap_or(0)` that reported a malformed uid as ROOT.
+#
+# Safe to depend on under §768: `pwdb` has NO dependencies and its API takes
+# bytes, the same exemption `quoting` and `utmpfile` hold.
+pwdb = { path = "../pwdb" }

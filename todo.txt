@@ -57154,3 +57154,234 @@ TRIGGER. Next tick that picks up duplicate-pair work. Nothing blocks it. Note
 that `logger`, the third pair, is NOT harness work -- it is open-questions
 B-Q14, a design fork about where a logged message goes, which a differential
 test cannot answer.
+
+--------------------------------------------------------------------------
+DONE 2026-09-12: the four `ps` options are implemented. Entry kept for what
+it records about HOW, and for the three things still declared.
+(lane B, 2026-09-12)
+
+ALL FOUR LANDED THE SAME DAY THE ENTRY WAS WRITTEN -- `-o`, `-t`, `-l` and
+the `-u`/`-p`/`--no-header` set before them. `scripts/ps-diff.sh` reports
+48 passed, 0 differed, 8 differ on purpose. The instruction below not to
+port them from the deleted crate was followed: every one was written
+against a measurement of procps, and three of those measurements were not
+what the option's name suggests --
+
+  * `-u` is SELECTION by user, not the user-oriented format (that is BSD
+    `u`, no dash). The deleted crate conflated them and porting it would
+    have imported the conflation.
+  * `-t pts/0` is ACCEPTED when nothing is on that terminal: the test is
+    whether the terminal exists, so it exits 1 by the no-match path while
+    `-t nosuchtty` exits 1 by the error path. Same status, different
+    complaint.
+  * `-e` OVERRIDES every selection, in either order. Found only by testing
+    `-el -p 2`.
+
+STILL DECLARED, and none of them is a defect in an option:
+
+  * `-l` with `-f` is a MERGED format -- UID widened and named, STIME
+    inserted, CMD carrying the full command line. A third format, not a
+    combination rule.
+  * bare `-u` and bare `-t` fall back to BSD formats this build does not
+    have. Two options, one gap.
+  * `-X` (register format) and `-h` (suppress header, exits 1 silently)
+    are real procps options this build refuses.
+
+AND ONE LIMIT OF THE HARNESS, worth knowing before writing another:
+`-l` prints SZ, the virtual size of the SUBJECT, and every case has `ps`
+reporting on `ps` -- a different binary on each side. Ours said 920 where
+procps said 2093 and neither was wrong. The fix was a second process:
+`sleep 5 &` before the exec, so PID 2 is the same binary on both sides,
+and `-p 2` points both at it. Any future column that describes the
+subject rather than the system needs the same treatment.
+
+--- the original entry follows ---
+
+FOUR REAL `ps` OPTIONS STILL MISSING, AFTER RETIRING THE CRATE THAT HAD THEM
+
+WHAT. `userspace/ps` is deleted (§1005, and measured: coreutils' scores 22
+passed / 0 differed against the standalone's 0 / 12). Of its nine options,
+three were ported in first (`-p`, `--no-header`, `-u`) and two were inventions
+procps rejects outright (`--reverse`, `--json`, both `error: unknown gnu long
+option`). Four are real procps options this build still refuses:
+
+    -l        long format: F S UID PID PPID C PRI NI ADDR SZ WCHAN TTY TIME CMD
+    -o        output column selection, including `-o comm=` to suppress a title
+    -t        select by controlling terminal
+    --sort    sort by a named column
+
+DO NOT PORT THEM FROM THE DELETED CRATE, and this is the whole reason for the
+note. The crate scored **0 XPASS** on the harness: every case declared "not
+implemented here" for coreutils ALSO differed for the implementation that had
+it. Its `-l`, `-o`, `-t` and `--sort` do not produce procps' output, so
+porting the code would import a second wrong rendering rather than a feature.
+Write them against measurements, which is what the harness is for. The code is
+recoverable from git if it is ever worth reading, but read it as a hint about
+structure, never as a reference for output.
+
+TWO MEASUREMENTS ALREADY BANKED, in `scripts/ps-diff.sh`:
+
+  * `-l`'s column set, with its UID printed NUMERICALLY -- `0` where `-f`
+    prints `root` for the same process in the same listing. The obvious shared
+    helper gets one of the two wrong.
+  * `-l` needs a `flags` field (the `F` column) that `procinfo::Stat` does not
+    currently parse, and a `WCHAN` that is `-` in every case measured so far.
+    Adding the field to `procinfo` is the first step and is a change to a
+    shared crate.
+
+ALSO NOT IMPLEMENTED, and separately declared: bare `-u` (procps falls back to
+the BSD user-oriented format with nothing selected and exits 1), `-X` (register
+format), `-h` (suppress header, exits 1 silently).
+
+TRIGGER. Any tick picking up coreutils option work. `-o` is the highest value
+-- it is the one that makes the others expressible -- and the largest.
+
+--------------------------------------------------------------------------
+TWO GREP FEATURES FROM THE OPERATOR'S TOOL REMAIN (lane B, 2026-09-12)
+
+CONTEXT. `requests/a-b-the-operators-grep-has-features-ours-lacks-...` asked
+for nine novel features from the operator's own grep (design-decisions §919,
+an operator decision of 2026-09-07). Six are in, under spellings that differ
+from the ones the request proposed -- `--near` not `--proximity`,
+`--every-pattern` not `--all-patterns`, `--escape-control`,
+`--keep-color-escapes`, `--exclude-path`. One is measured NOT APPLICABLE (see
+the request). These two remain.
+
+1. `--dotall`: `.` matches newline, reading the whole file at once.
+
+   SMALLER THAN THE PARAGRAPH THIS REPLACES, and both of its claims were
+   wrong. I wrote them from greps of the source; measuring settled both.
+
+   WRONG 1: "`userspace/ere` has no dot-matches-newline mode at all -- grep
+   for `dot_all` there returns nothing." The name is absent; the CAPABILITY is
+   not. `Inst::Any` is guarded only by `f.sp < input.len()` and `c.is_some()`
+   -- no newline exclusion anywhere. The engine has always been dotall. `.`
+   does not cross lines in `grep` because `grep` hands it ONE LINE AT A TIME,
+   so the newline never reaches the matcher. Demonstrated with machinery that
+   already exists:
+
+       $ grep -z -o 'alpha.*beta' file      # -z makes the whole file one record
+       alpha
+       two
+       three beta<NUL>
+
+   byte-identical to GNU's. A search for a spelling concluded absence; a test
+   of the behaviour found the feature.
+
+   WRONG 2: "a match can span lines, so `-n`, `-C`, `--only-matching` and the
+   byte offsets all need to decide what they report." They do not, because the
+   operator's tool does not report lines under `--dotall` at all. Measured
+   against `grep.65.py`:
+
+       --dotall alpha.*beta        the MATCH, three lines of it:
+                                     file:alpha
+                                     two
+                                     three beta
+       --dotall -n alpha.*beta     the same -- `-n` is IGNORED
+       --dotall -C 1 alpha.*beta   the same -- context is IGNORED
+       --dotall alpha              file:alpha  -- not the containing line
+       --dotall -l alpha.*beta     file        -- `-l` still works
+
+   So `--dotall` is `-o` semantics over a whole-file regex, and the design
+   questions I invented do not arise.
+
+   WHAT IS ACTUALLY LEFT is one grep-side change: `line_sep()` currently
+   serves BOTH input and output (newline, or NUL under `-z`), and `--dotall`
+   needs them split -- whole-file input, newline output, `-o`-style printing.
+   The whole-file read already exists for `--every-pattern` and `--near`
+   (`reader.read_to_end`), so there is precedent to follow rather than
+   machinery to invent.
+
+2. NOT REMAINING -- I was wrong an hour ago and this paragraph is the
+   correction. Persistent colour config (`--set-colors`, `--remember`) was
+   DELIBERATELY DECLINED by design-decisions 1008, and the substantive half of
+   it was built:
+
+     * the colour NAMES are in -- `fn=brightgreen` works where GNU wants
+       `fn=92` -- so `--set-colors brightgreen brightblack ...` is expressible
+       today as `GREP_COLORS='fn=92:se=90:...'` or by name.
+     * the FILE is not, on purpose: "a shell profile already persists an
+       environment variable, and osh reads /etc/profile, ~/.bash_profile,
+       ~/.bashrc and $BASH_ENV -- verified in userspace/oils/src/main.rs, not
+       assumed. A config file that duplicates the profile would be a second
+       place for the same setting to be wrong."
+
+   I listed it as remaining work, and proposed deciding where the file should
+   live, without reading 1008 -- which had already answered both. That is the
+   failure 1008's own "Where this came from" paragraph describes: a decision
+   living in a file nobody has a reason to re-read. It cost an hour's plan
+   rather than an hour's code only because the scaffolding comment in
+   `grep.rs` cites the section number.
+
+TRIGGER. Either is unblocked. `--dotall` is the larger and needs the design
+answer measured from the operator's tool first; the colour config is the
+smaller and only needs a location decided.
+
+--------------------------------------------------------------------------
+`ed`'s TESTS CANNOT EXERCISE `a`, `i` OR `c` UNTIL `Editor` TAKES ITS INPUT
+(lane B, 2026-09-12) -- DONE the same day; see the RESOLVED block at the end
+
+WHY THIS IS HERE. `Editor::new` does `stdin().lock()`, so every editor built
+in a test holds the process's real standard input. The commands whose text
+comes from stdin -- `a`, `i`, `c` -- therefore read the TEST RUNNER's stdin
+when executed from a test. With `/dev/null` that returns EOF and is harmless;
+with an open pipe carrying nothing, which is what a hook or a CI runner hands
+you, the read never returns and the global lock is never released, so every
+other test in the binary blocks behind it.
+
+That is not hypothetical: it cost two fifteen-minute stalls of
+`cargo test -p coreutils` on 2026-09-12, reported as "20 of 93 groups" with
+four tests "running for over 60 seconds". Measured on the built binary:
+
+    stdin = /dev/null       73 passed in 0.01s
+    stdin = pipe, no data   hangs until killed
+
+Fixed for now by removing the single `0a` from the shuffle list in
+`a_mark_follows_its_line_wherever_the_line_goes`. The option table's own
+comment already said `a` and `i` are excluded elsewhere "because their text
+comes from stdin" -- the knowledge was in the file and that loop did not have
+it.
+
+THE PROPER FIX is for `Editor` to take its input as a parameter rather than
+locking the process's: `Editor::new(opts, input: impl BufRead)`, with `main`
+passing `stdin().lock()` and tests passing a `&[u8]`. That makes `a`, `i` and
+`c` testable at all -- they are currently untested, which is the real cost --
+and removes the global lock from the test path entirely, so the parallel test
+threads stop serialising on it.
+
+It also removes the hazard the `after` helper documents in prose ("two live
+editors in one thread deadlock"), because the deadlock is a property of the
+shared lock rather than of the editor.
+
+TRIGGER. Next time anything in `ed`'s editor construction is touched, or the
+first time someone wants a test for `a`/`i`/`c`. Nothing blocks it.
+
+RESOLVED 2026-09-12, and it found a bug, which is the point of the entry.
+
+`Editor` now carries `input: Box<dyn BufRead>`. `Editor::new` still measures
+`file_driven` off the real stdin and passes `stdin().lock()`; the new
+`Editor::with_input(opts, input, file_driven)` takes both as parameters. The
+tests build every editor through `editor_reading` / `editor_driven_by`, so
+nothing in the suite touches the process's stdin any more. Proof it is gone:
+the ed test binary run with an OPEN PIPE on stdin -- the exact condition that
+used to hang it -- now exits 0 in 0s, with the `0a` case restored to
+`a_mark_follows_its_line_wherever_the_line_goes`.
+
+THE BUG. `c` with no text -- a `c` followed immediately by `.` -- left the
+current line at `lo - 1` where GNU leaves it at `lo` clamped to the new
+length. Measured against GNU ed 1.20.1 on one/two/three: `2c` then `.` gives
+current 2 there and gave 1 here. Empty-text `c` is exactly `d`, and `d` in
+this same file already had the right formula six hundred lines away. The
+defect was three years' worth of unreachable: no test could execute a `c`.
+That is the argument for the refactor, stated as a measurement rather than as
+a principle -- untestable code is not merely unverified, it is where the bugs
+actually were.
+
+A SECOND MISTAKE WORTH KEEPING. The first measurement of GNU's behaviour ran
+`.=` AFTER `,p` in the same script. `,p` leaves the current line on the last
+line it printed, so `.=` reported the buffer length every time; five cases
+came back 4, 4, 4, 4, 3 and I nearly recorded line counts as current-line
+answers. Same shape as the other near-misses this week: the probe ran
+correctly and answered a narrower question than the one asked. The habit that
+catches it is to check whether a probe can distinguish the cases it is meant
+to -- four identical answers to four different questions is the tell.

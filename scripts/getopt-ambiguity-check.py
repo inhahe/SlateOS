@@ -555,6 +555,16 @@ INTENTIONAL_EXTRAS: dict[str, dict[str, str]] = {
             "--p resolves to --perl-regexp in GNU and a second p option would "
             "break that abbreviation."
         ),
+        "dotall": (
+            "design-decisions.md 1008: match the whole file at once so `.` "
+            "crosses newlines, printing the match rather than the line. GNU "
+            "has no equivalent -- `-z` is the nearest thing and changes the "
+            "record separator rather than the dot. Safe under the prefix rule: "
+            "GNU's long options beginning with d are --devices, --directories "
+            "and --dereference-recursive, none of which begins do, so --do "
+            "resolves here and is unknown there today, and --d stays ambiguous "
+            "in both."
+        ),
         "every-pattern": (
             "design-decisions.md 1008: the operator's grep conjoins patterns "
             "where GNU's repeated -e alternates. Opposite meanings on identical "

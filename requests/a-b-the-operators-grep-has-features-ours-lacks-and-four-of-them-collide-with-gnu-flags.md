@@ -1,6 +1,73 @@
 # A → B — the operator's own `grep` has features ours lacks, and four of them collide with GNU flag meanings
 
-**From:** Lane A. **To:** Lane B. **Filed:** 2026-09-09. **Status:** open.
+**From:** Lane A. **To:** Lane B. **Filed:** 2026-09-09.
+**Status:** MOSTLY CONSUMED by lane B — six of the nine novel features are in,
+one is measured NOT APPLICABLE, one is deliberately declined, one remains. Details below; this line said
+"open" for three days after most of it had landed.
+
+## What lane B actually built, and under which spellings (2026-09-12 audit)
+
+The spellings proposed here were not the ones used, which is why searching the
+source for `--proximity` finds nothing and the request looked untouched:
+
+| Feature | Proposed here | Implemented as | State |
+|---|---|---|---|
+| proximity matching | `--proximity NUM` | **`--near NUM`** | done |
+| conjunction | `--all-patterns` | **`--every-pattern`** | done |
+| window-scoped output | (part of proximity) | `near_eligible_lines` | done |
+| control chars escaped | — | **`--escape-control`** | done |
+| pass through existing ANSI | `--allow-match-colors` | **`--keep-color-escapes`** | done |
+| path-suffix excludes | `--x_paths` | **`--exclude-path`** | done |
+| **"your path became the regex" warning** | — | — | **not applicable, measured** |
+| `--dotall` | `--dotall` | — | remains |
+| colour names | (part of `--set-colors`) | **`GREP_COLORS` by name** | done |
+| persistent colour *file* | `--remember` | — | **declined, §1008** |
+
+### The warning is not applicable here, and that is a measurement
+
+The operator's grep treats **the first non-option argument as the regex
+always**, even when every pattern came from `-e`. That is what makes the
+failure silent: the path becomes the regex, matches nothing, and the exit
+status is an honest "no matches".
+
+GNU's convention does not have that shape. With `-e` present, every positional
+is a FILE. Measured on both, same files, same arguments:
+
+```
+$ grep -e math -e logic a.txt b.txt      # ours
+a.txt:math here
+b.txt:logic here
+$ grep -e math -e logic a.txt b.txt      # GNU
+a.txt:math here
+b.txt:logic here
+```
+
+So there is no path-becomes-regex case to warn about; the argument convention
+prevents it. Porting the warning would mean porting a guard against a bug we
+cannot have, and it would have to fire on a shape that is *correct* here.
+
+This is the one item singled out above as most worth keeping — "a guard
+against a silent wrong answer, which is the class of bug this project cares
+most about". It is exactly that, **in their tool**. The reason it does not
+transfer is that the defect it guards against is created by an argument
+convention we do not share, and that is only visible if you run both.
+
+### What remains
+
+`--dotall` is the only one left. It is not a small addition: `userspace/ere`
+has no dot-matches-newline mode and `grep` is line-based
+(`read_until(sep, ...)`), so it needs a flag in the engine plus whole-file
+matching with multi-line reporting — two crates. Recorded in `todo.txt`.
+
+The colour config is **not** outstanding: §1008 built the colour NAMES, which
+are the substance, and declined the file on the grounds that a shell profile
+already persists an environment variable and `osh` reads it. I listed it as
+remaining here before reading that, which is the same failure §1008 itself
+names — a decision in a file nobody re-reads.
+
+---
+
+*(original request follows)*
 **Action needed from B:** port the operator's grep features into
 `userspace/`'s `grep`. The feature inventory and the collision analysis are
 below, so this should not need re-deriving.

@@ -712,9 +712,10 @@ pub struct StatCounters {
     /// `btime`: the wall-clock second at which the system booted.
     ///
     /// Not a counter, and the reason this struct is named for its file. Two
-    /// other programs read `/proc/stat` for this one number
-    /// (`userspace/uptime`, `userspace/hwclock`) and each parses the file
-    /// itself.
+    /// other programs read `/proc/stat` for this one number and each parsed
+    /// the file itself: `userspace/hwclock`, which still does, and
+    /// `userspace/uptime`, retired 2026-09-12. `coreutils`'s `ps` reads it
+    /// through this field, which is what it is for.
     pub boot_time: Option<u64>,
 }
 
@@ -1089,6 +1090,20 @@ impl ProcFs {
             .and_then(|c| ProcessStat::parse(&c)))
     }
 
+    /// `/proc/<pid>/wchan`: the kernel symbol the process is blocked in.
+    ///
+    /// Raw bytes, untrimmed. `ps -l` truncates this to six characters and
+    /// prints `-` when it reads `0`, which is what a RUNNING process reports
+    /// -- so an empty-looking answer here means "not blocked", not "could not
+    /// read".
+    ///
+    /// # Errors
+    ///
+    /// As [`ProcFs::process_stat`].
+    pub fn process_wchan(&self, pid: u64) -> io::Result<Option<Vec<u8>>> {
+        self.read_optional(&format!("{pid}/wchan"))
+    }
+
     /// `/proc/<pid>/statm`, parsed.
     ///
     /// # Errors
@@ -1138,7 +1153,8 @@ impl ProcFs {
 /// produces plausible numbers.
 ///
 /// It lives here because it was a private `const PAGE_SIZE_KB: u64 = 16;` in
-/// both `userspace/htop` and `userspace/ps`, which is one copy per program of
+/// both `userspace/htop` and `userspace/ps` (the latter retired 2026-09-12),
+/// which was one copy per program of
 /// a fact about the kernel. Both were right; nothing made them stay right.
 pub const PAGE_SIZE_KIB: u64 = 16;
 
@@ -1175,6 +1191,13 @@ pub struct ProcessStat {
     /// Zero means no controlling terminal. Decoding it into `tty7` or
     /// `pts/3` is a presentation question and deliberately not answered here.
     pub tty_nr: i64,
+    /// `flags`: the kernel's per-task flag word, stat field 9.
+    ///
+    /// Raw. `ps -l`'s `F` column is `(flags >> 6) & 7` printed in octal, which
+    /// is measured rather than derived: a default task has `flags` 4194560,
+    /// and procps prints `4`. Whoever wants a different projection of the same
+    /// word should take it from here rather than re-reading the file.
+    pub flags: u64,
     /// User-mode time in ticks.
     pub utime_ticks: u64,
     /// Kernel-mode time in ticks.
@@ -1256,6 +1279,7 @@ impl ProcessStat {
             pgrp: at(2),
             session: at(3),
             tty_nr: at_i(4),
+            flags: at(6),
             utime_ticks: at(11),
             stime_ticks: at(12),
             priority: at_i(15),

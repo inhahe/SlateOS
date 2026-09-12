@@ -149,7 +149,6 @@ userspace/plymouth/src/main.rs:to_str-unwrap
 userspace/polkit/src/main.rs:argv-as-string
 userspace/powerctl/src/main.rs:argv-as-string
 userspace/prlimit/src/main.rs:argv-as-string
-userspace/ps/src/main.rs:argv-as-string
 userspace/pstree/src/main.rs:argv-as-string
 userspace/pv/src/main.rs:argv-as-string
 userspace/readelf/src/main.rs:argv-as-string
@@ -192,7 +191,6 @@ userspace/unshare/src/main.rs:argv-as-string
 userspace/update-alternatives/src/main.rs:argv-as-string
 userspace/updatedb/src/main.rs:argv-as-string
 userspace/upower/src/main.rs:argv-as-string
-userspace/uptime/src/main.rs:argv-as-string
 userspace/useradm/src/main.rs:argv-as-string
 userspace/vi/src/main.rs:argv-as-string
 userspace/vi/src/main.rs:to_str-unwrap

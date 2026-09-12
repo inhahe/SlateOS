@@ -8,7 +8,7 @@
 //! | Reader | Layout | Result |
 //! |---|---|---|
 //! | `userspace/who` | 384-byte records, every field | correct |
-//! | `userspace/uptime` | 384-byte records, `ut_type` only | correct, and a second copy of the offsets |
+//! | `userspace/uptime` | 384-byte records, `ut_type` only | correct; crate retired 2026-09-12 |
 //! | `userspace/w` | **colon-separated text** | never matches anything |
 //!
 //! `posix/src/linux_utmp_types.rs` already declares `UTMPX_RECORD_SIZE = 384`

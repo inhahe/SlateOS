@@ -64343,7 +64343,7 @@ the work. Note that if `open-questions.md` → B-Q7 is answered in favour of the
 standing §8 — standalone crates canonical, `coreutils/src/bin/*` retired — then
 this crate's 86 binaries do not need linting at all; they need porting into 45
 new crates that inherit the workspace lints by construction. That is a further
-reason not to start here until B-Q7 lands.
+reason not to start here until B-Q7 lands. **B-Q7 landed on 2026-09-07** (§1005: coreutils is the one home), so that reason has expired — left in place rather than deleted because the paragraph above it is still the right way to think about the work, and only its last clause went stale.
 
 **If never fixed:** no regression — the exposure is exactly what it has been
 since the crates were written. But the lints exist because this codebase has no
@@ -67026,9 +67026,13 @@ is duplicated. Concretely:
    kernel grants permissions per file, so one file answering to `w`, `finger`
    and `pinky` must hold the union of what all three need.
 
-**Blocked on nothing, but sequence it after `open-questions.md` → B-Q7**, which
+**UNBLOCKED since 2026-09-07 and this paragraph did not say so until
+2026-09-12.** It read "sequence it after `open-questions.md` → B-Q7, which
 decides whether `userspace/<tool>` crates or `coreutils` is the home for this
-family. Doing it first would mean doing it twice.
+family." B-Q7 was answered five days before that was noticed: §1005,
+`Decided by: Operator`, **coreutils is the one home** and the duplicate crate
+is deleted. So the sequencing advice was sound and its precondition had been
+met; the entry just went on giving it. Nothing here is waiting on anything.
 
 **How to see it** (once built):
 
@@ -68516,14 +68520,29 @@ diff  logger  patch  ps
 
 `fetch` and `sh` were the last two unblocked ones and are now done, which is
 what took the count from seven to four — `sh` carried two findings, argv and
-the environment. **Everything remaining is blocked on B-Q7**, so there is no
-unblocked work left in this entry; a reader looking for the next thing to do
-should look elsewhere until that question is answered. `diff`, `logger`,
-`patch` and `ps` each have a second implementation of the same utility outside
-`userspace/coreutils/` (`userspace/diff/`, `userspace/logger/`,
-`userspace/patch/`, `userspace/ps/`), so converting one of them means first
-deciding which copy is the real one — `open-questions.md` → **B-Q7** — and doing
-it before that is answered means doing it twice.
+the environment.
+
+**This paragraph used to say "Everything remaining is blocked on B-Q7, so
+there is no unblocked work left in this entry; a reader looking for the next
+thing to do should look elsewhere." B-Q7 was answered on 2026-09-07 and the
+sentence stood for five days after.** §1005, `Decided by: Operator`:
+**coreutils is the one home**, the better half of each duplicate pair survives
+inside it, the duplicate crate is deleted. So the decision these four were
+waiting on has been made, and "look elsewhere" was sending readers away from
+work that was ready.
+
+`diff`, `logger`, `patch` and `ps` each have a second implementation outside
+`userspace/coreutils/`. Under §1005 that is no longer a question, it is a
+measurement: run the pair's harness, keep the better half inside coreutils,
+delete the crate. As of 2026-09-12 `diff` and `patch` are done, `ps` is
+measured (coreutils' 22 passed / 0 differed against the standalone's 0 / 12),
+and `logger` is the one genuine hold-out — not on B-Q7, but on **B-Q14**,
+because its two implementations disagree about *where a logged message goes*,
+which a differential test cannot settle.
+
+`scripts/check-stale-blockers.py` now cross-references answered questions as
+well as landed requests, so the next sentence of this shape is caught by a
+gate rather than by someone wandering past.
 
 The live count is whatever `python scripts/argv-utf8.py --check` prints; the
 baseline shrinks by one line per conversion and never grows, so this paragraph
@@ -73449,7 +73468,7 @@ written on the dev machine, so none exists.
 
 ### Where
 
-`userspace/coreutils/src/bin/touch.rs` → `stamp_path`. Two arms:
+`userspace/coreutils/src/fsattr.rs` → `set_times`. **Moved there by `cf63fda74`**, “one path-based timestamp write, in `coreutils::fsattr`”; this entry said `touch.rs` → `stamp_path` until 2026-09-12, by which time neither the file nor the function was where it pointed. Found by `check-stale-blockers.py`'s third pass, which flagged this entry because `touch.rs` had moved under it — the pass's first catch after it was written. Two arms:
 
 | Arm | How it stamps | Reaches |
 |---|---|---|
@@ -73994,6 +74013,95 @@ Next on the list, unchanged: the decompressors (`fs/zstd.rs` 299, `fs/xz.rs`
 144, `fs/compress.rs` 110, `fs/sevenz.rs` 92, `fs/bzip2.rs` 88), the wire
 parsers (`net/tcp.rs` 182, `net/ssh.rs` 104, `net/tls.rs` 99,
 `net/firewall.rs` 87), then `fs/fat.rs` 140 and `fs/ext4/driver.rs` 104.
+
+## B-ED-TESTS-READ-THE-REAL-STDIN-AND-HUNG-THE-WHOLE-SUITE (lane B, 2026-09-12) — FIXED (properly, later the same day)
+
+**In short:** `cargo test -p coreutils` stopped after 20 of its 93 test groups
+and sat there until killed, twice in one afternoon. The cause was one line in
+one `ed` test: it ran the editor's `a` (append) command, which reads its text
+from **standard input** — the *test runner's* standard input. When that is a
+pipe with nothing on it, the read never returns, and because `Editor::new`
+holds `stdin().lock()` the whole binary's other tests queue behind it forever.
+
+**Measured on the built test binary, with no `cargo` involved:**
+
+```text
+stdin = /dev/null       73 passed in 0.01s
+stdin = pipe, no data   hangs until killed
+```
+
+**I diagnosed it wrong twice first, and the way it misled is the part worth
+keeping.** The symptom is
+
+```text
+test tests::copy_duplicates_a_range_and_may_copy_into_itself has been running
+for over 60 seconds
+```
+
+printed for *four* tests at once — which is exactly what CPU starvation looks
+like. The first occurrence had the machine at 88% with another lane's boot
+test running, so I wrote it off as contention, recorded "a starved test and a
+hung one are spelled the same way in that output", and moved on. That sentence
+was true and it is what stopped me looking. The third occurrence had the CPU at
+34% and no QEMU, which is the only reason it got examined.
+
+**The file already knew.** The comment on `ed`'s option table says `a` and `i`
+are excluded from that list "because their text comes from stdin". The
+knowledge was thirty lines from the loop that used `0a` anyway.
+
+**The fix** was to drop `0a` from
+`a_mark_follows_its_line_wherever_the_line_goes`. Its other four shuffles —
+`1d`, `1m$`, `1t0`, `1,2j` — are four independent ways of moving text above the
+marked line, which is the property under test, so no coverage was lost.
+Verified both directions on the same rebuilt binary: hangs before, 73 tests in
+0.01s after, identical stdin. `cargo test -p coreutils` now completes at 93
+groups, 0 failures.
+
+**The proper fix landed the same day, and it found a bug.** `Editor` now
+carries `input: Box<dyn BufRead>`; `new` still measures `file_driven` off the
+real stdin and passes `stdin().lock()`, while `with_input(opts, input,
+file_driven)` takes both as parameters. Every editor in the tests comes from
+`editor_reading`/`editor_driven_by`, so the suite no longer touches the
+process's stdin, and `0a` is back in the shuffle list carrying its own input.
+Proof the hang is gone rather than avoided: the ed test binary run with an
+**open pipe** on stdin — the exact condition that hung it — exits 0 in 0s.
+
+The bug it exposed: `c` with no text — a `c` followed at once by `.` — left
+the current line at `lo - 1`, where GNU leaves it at `lo` clamped to the new
+length. Measured against GNU ed 1.20.1 on one/two/three, `2c` then `.` gives
+current 2 there and gave 1 here. Empty-text `c` is exactly `d`, and `d` in
+this same file already had the right formula six hundred lines up. **No test
+could reach it**, which is the whole argument for the refactor stated as a
+measurement instead of a principle: untestable code is not merely unverified,
+it is where the defect actually was.
+
+**Blast radius, checked rather than assumed.** `scripts/hooks/pre-push` runs
+`cargo test -p posix --lib`, not coreutils, so a push was never exposed.
+
+**A correction to this entry.** It used to end "a sweep of every built test
+binary for the same defect found no second instance." **No finished sweep had
+said that when it was written** — the first attempt was killed for a false
+positive and the second was stopped for cost, so the sentence recorded an
+expectation in the past tense. It has now actually been run, as
+`scripts/stdin-hang-sweep.sh`: **84 test binaries across coreutils' bins and
+`posix`, 0 stdin hangs, 0 too slow to judge.** `ed` was the only instance.
+
+**Three ways the sweep was wrong before it was right**, all worth keeping
+because each is a different species of the same mistake — a check that ran
+correctly and answered a narrower question than the one asked:
+
+| Version | What it did | Why it was wrong |
+|---|---|---|
+| 1 | one 6-second timeout | flagged `apps/automator`, which runs 160 tests in 12.8s. **Slow is not stuck.** A stdin hang is a *difference between two conditions*; a checker that measures one cannot see it. |
+| 2 | `( sleep 40 \| timeout 35 "$f" )` over all 1677 binaries | the subshell waits for `sleep` too, so every binary cost a flat 40s whether or not it exited instantly — 8+ hours for a 4-minute question. `< <(sleep 40)` holds the pipe open without being waited on: 0s for a non-reader, a refusal at the deadline for a reader. |
+| 3 | newest `name-*.exe` per name | `deps/` holds **both** the test harness and the plain binary under that pattern, so "newest wins" picked the non-harness about half the time — including for `ed`, the binary the sweep exists for, which it duly reported as having *no tests*. Walking candidates newest-first and taking the first that lists some took coverage from 48 names to 84. |
+
+The last of those is the sharpest: the detector had just been shown catching a
+planted reader, and then silently skipped its own motivating case. **A green
+self-test says the mechanism works, not that it was pointed at anything.** The
+sweep now ships that self-test (`--selftest`, which plants one binary that
+reads stdin and one that does not, and requires exactly one to be caught) and
+still needed a separate check that its *input set* was the intended one.
 
 ## B-TEST-FIXTURES-SHARE-TEMP-PATHS-ACROSS-CONCURRENT-RUNS (lane B, 2026-08-22) — lane B's half FIXED, lane C's half FILED
 
@@ -117717,7 +117825,65 @@ finding does*. Here the "guard" is an exit status, and the fact it had not
 checked was whether the thing I actually ran succeeded. Arriving from a third
 direction is the argument for writing it down.
 
+**A third instance, and the mildest: `git push`'s own printed range can
+UNDERSTATE what landed.** Observed twice on 2026-09-12. The log said
+
+```
+793ae7fcc..c29318365  lane-b -> lane-b
+PUSH_EXIT=0
+```
+
+and `git ls-remote` immediately afterwards reported `3963ae04d` — one commit
+further on, made while the 32 pre-push gates were still running. One
+`lane-b -> lane-b` line in the log, so it was one push, not two. The mechanism
+is not asserted here because it was not measured; what was measured is that
+**the range git prints is not proof of what is on the server.** The direction
+is safe — more landed than was reported, never less — but it means a push log
+cannot answer "did my last commit go up?". `git ls-remote` can, and is the
+instrument that cannot answer from a local cache.
+
 **The rule.** Never pipe a command whose exit status you intend to believe.
+
+**The sharper form, from lane A on 2026-09-12 — piping is dangerous even when
+you do not want the status, because the status is the only thing separating
+"no matches" from "no input".** They held a merge for forty minutes on this:
+
+```bash
+git show origin/main:userspace/procinfo/src/lib.rs | grep -c trim_comm
+# 0
+```
+
+`procinfo` is a top-level crate; `userspace/procinfo` does not exist. `git
+show` failed with `fatal: …does not exist` on **stderr**, the pipe discarded
+it, `rc=128` went unread, and `grep -c` faithfully counted zero matches in an
+empty stream. The output was a truthful answer to a question that had not been
+asked, and it was indistinguishable from the true answer to the intended one.
+
+So the failure is not confined to `$?`. **Two zeros with different meanings
+arrive down the same pipe and only one of them is visible.** The check had
+been run *specifically to be careful*, which is the recurring part: every
+instance of this family is someone verifying something.
+
+**Why that is not a coincidence, and the counter-habit that follows.** A
+casual command has nothing to pipe into — you run `git show` and read it. The
+pipe appears the moment you start **filtering, counting, extracting**, which
+is what verification *is*. So the construct that destroys the distinction
+between "no matches" and "no input" is introduced by the act of being
+rigorous, and most reliably by whoever is being most rigorous. Every instance
+so far was someone building an instrument rather than cutting a corner.
+
+So the rule is not "avoid pipes", which would forbid most checks. It is:
+
+> **When a check reduces something to a number, ask what that number does
+> when the input is ABSENT rather than empty.**
+
+`grep -c` cannot tell you. `wc -l` cannot. `| head -1` cannot. All three are
+the natural last stage of a careful check, and all three report the same value
+for "I looked and found nothing" as for "I never looked at all". Where the
+difference matters, check the thing exists first, or read the status — not
+because the status is interesting, but because it is the only surviving
+witness that the input was real.
+
 For a backgrounded run, redirect instead, and read the status explicitly:
 
 ```bash
@@ -122388,6 +122554,52 @@ rather than a rider on a rebooted test.
 ---
 
 ## TD-B-A-CARGO-RUN-IN-THIS-TREE-IS-82-PERCENT-ONE-REPEATED-WARNING (lane B, 2026-09-04)
+
+### Re-measured 2026-09-12 -- the scale is gone, the mechanism is not explained
+
+Flagged by `check-stale-blockers.py`'s third pass because `Cargo.toml` had moved
+under it. What the re-read found:
+
+**The population collapsed.** Measured with `git ls-tree` at both revisions,
+not estimated:
+
+| | 2026-09-04 | 2026-09-12 |
+|---|---:|---:|
+| workspace manifests | 2,950 | **412** |
+| under `userspace/` | 2,757 | **208** |
+| members with no `[lints]` | 2,733 | **168** |
+
+So the entry's central argument -- that fixing this means "a 2,733-file commit
+the operator's answer may largely revert" -- is no longer about 2,733 files.
+The stub consolidation happened; §1005 and §1006 took most of those crates into
+`coreutils`.
+
+**And the symptom did not reproduce, in four probes:**
+
+* today's full `cargo test -p coreutils` log: **247 KB, 0 occurrences** (the
+  entry measured 5.02 MB and 8,166);
+* `cargo metadata --no-deps` and `cargo tree --workspace`: 0 stderr lines;
+* `cargo check -p quoting` -- a member that **survived** and still has no
+  `[lints]` -- 0 occurrences, under *both* toolchains.
+
+**WHAT IS NOT ESTABLISHED, stated plainly so nobody reads the above as a fix.**
+Why it fired 8,166 times on 2026-09-04 is unexplained. Deletion cannot be the
+whole answer: `userspace/acl` had no `[lints]` then, still has none, and does
+not warn now. Something about the invocation shape or the toolchain differs and
+I did not isolate it. **This entry is therefore NOT closed**, and the warning
+may return the moment whatever suppresses it changes.
+
+**A mistake worth keeping, because it nearly became the finding.** My first
+three probes all ran the *Windows* cargo (1.95.0, 2026-03-21). The entry
+measured a `--only linux` run -- the **WSL** toolchain, cargo 1.98.0
+(2026-08-05). Two different compilers six months apart, and I was about to
+write "not reproducible today" on the strength of the one that may never have
+emitted the lint at all. It only came out because the version string was worth
+checking. *Same shape as the rest of this week: the probe ran correctly and
+answered a narrower question than the one asked -- here, "does THIS cargo warn"
+in place of "does the cargo that warned still warn".* Re-running it under WSL
+1.98.0 gave the same answer, which is the only reason the paragraph above is
+allowed to say "under both toolchains".
 
 **In short:** Every `cargo build`/`clippy`/`test` in this workspace prints the
 same warning about two thousand times, once per crate, and that one warning is
@@ -127528,6 +127740,48 @@ half done.
 
 ## B-CTEST-FIXTURES-CANNOT-FIND-THE-FASTPY-CHECKOUT-AFTER-THE-E-DRIVE-MIGRATION (lane B, 2026-09-07)
 
+**Status: FIXED 2026-09-10, both halves; verified again 2026-09-12.**
+`scripts/ctest-fixtures.py` and `scripts/create-ext4-rootfs.sh` try the
+pre-migration `D:` location **last** — after `$FASTPY_DIR`, `$PYTHONPATH` and a
+real sibling, so a genuine sibling always wins — and **announce** it when they
+use it, because a lookup that quietly picks a checkout the caller did not
+choose is its own failure. `scripts/boot-test.sh` had the same dead fallback
+and is lane A's; handed over in
+`requests/b-a-the-fastpy-sibling-lookup-has-been-dead-since-the-e-migration.md`,
+which lane A closed the same day.
+
+Verified with no environment set at all, rather than read off the diff:
+
+```text
+$ env -u FASTPY_DIR -u PYTHONPATH python -c "...; print(_fastpy_dir())"
+[ctest] fastpy: using D:\visual studio projects\fastpy
+        (no sibling at E:\visual studio projects\fastpy)
+D:\visual studio projects\fastpy
+```
+
+**The workaround below is obsolete. Do not set `FASTPY_DIR` by hand.**
+
+**Why this entry was wrong, which is the part worth keeping.** It concluded
+"the proper fix is a decision, not a patch" and declined to act, on the
+grounds that teaching the search the `D:` location would "encode a migration
+that is supposed to be finished". That reasoning does not survive contact with
+the facts: the migration *is* finished — for `os`. It was never begun for
+fastpy. The global `CLAUDE.md` records fastpy, `Python Agent`, `orchestrator2`
+and `backup` as still living under `D:\visual studio projects`, and says so as
+current fact rather than as history. So the option was never "hard-code a
+stale path"; it was "read the documented one", which is a patch and needs
+nobody's standing.
+
+The entry turned a lookup into a governance question and then filed itself
+under "no lane may decide this". It cost four days of every lane setting an
+environment variable by hand, and cost lane A a boot test on 2026-09-10
+(`ModuleNotFoundError: No module named compiler`). **Declining to act is an
+act**, and "no lane has standing" deserves the same evidence as any other
+claim — here, one line of an instruction file that was already loaded every
+session would have refuted it.
+
+*The description below is kept in the tense it was written in.*
+
 **In short:** the script that builds the ring-3 C test fixtures needs a second
 repository (fastpy) to do the cross-compile. It looks for that repository *next
 to this one*. The 2026-09-06 move put this repository on `E:` and left fastpy on
@@ -131287,8 +131541,57 @@ Two measured examples:
   all. Every *real* option it lacked, coreutils has: `--peta`, `--pebi`,
   `--si`, `--line`, `--committed`, `--version`. It also sat in
   `argv-utf8-baseline.txt` as `argv-as-string`.
-* **`ps`** -- **MEASURED 2026-09-12, and it is the first pair the pass count
-  does not decide.** `scripts/ps-diff.sh` pins the process table in a PID
+* **`ps`** -- **SETTLED 2026-09-12: coreutils' wins, 12 to 0.** The entry
+  below is kept because it was right when written and stopped being right four
+  hours later, which is the more useful record.
+
+      coreutils ps    12 passed,  0 differed, 15 differ on purpose
+      userspace/ps     0 passed, 12 differed, 15 differ on purpose
+
+  Same harness, same cases, opposite results. The reversal is not a change in
+  the standalone: it is that coreutils' `ps` was given procps' column set and
+  a parser that refuses what it cannot honour, both of which it was missing
+  this morning. **A pair verdict is a statement about two implementations on a
+  given day, and the losing half of this one was two fixable defects away from
+  winning.**
+
+  **The standalone scored 0 XPASS**, which is the sharper half of the result.
+  It implements `-l`, `-u`, `-o`, `-p` and `--no-header` -- five real procps
+  options coreutils' refuses -- and not one of them produced procps' output.
+  Every case declared "not implemented here" for coreutils' *also* differed
+  for the implementation that has it. This is `free` again: 23 options
+  advertised against 2 is not 21 options that agree.
+
+  **RETIRED 2026-09-12. `userspace/ps` is deleted; coreutils' `ps` is the one
+  `ps`.** Final measurement before the delete: **22 passed, 0 differed, 10
+  differ on purpose** for coreutils', against **0 passed, 12 differed** for the
+  standalone on the same cases.
+
+  **What the loser knew, measured option by option rather than counted.** Its
+  nine options split three ways:
+
+  | | |
+  |---|---|
+  | ported in first | `-p`, `--no-header`, `-u` |
+  | real procps options, still missing here | `-l`, `-o`, `-t`, `--sort` |
+  | **inventions** | `--reverse`, `--json` |
+
+  `--reverse` and `--json` both draw `error: unknown gnu long option` from
+  procps — checked, not assumed, because `free`'s standalone advertised
+  `--json` too and it was the one thing that looked like a feature. The four
+  real ones are genuine capability and are **not** ported from that crate:
+  measured, its implementations of them do not match procps either (0 XPASS),
+  so porting the code would import a second wrong rendering. They are written
+  fresh against measurements, one at a time, and each is declared by name in
+  `ps-diff.sh`. `todo.txt` carries the entry.
+
+  `DIFF_PKG=ps bash scripts/ps-diff.sh` now fails loudly with "has no
+  Cargo.toml anywhere under … — is DIFF_PKG right?", which is correct: there
+  is no second `ps` to measure.
+
+  **The original entry, from before the fixes:**
+
+  `scripts/ps-diff.sh` pins the process table in a PID
   namespace with its own `/proc` and compares both against procps-ng:
 
       coreutils ps     0 passed, 26 differed
@@ -131359,8 +131662,62 @@ Two measured examples:
   one. Recorded here rather than filed as a checker change, because the
   cheaper instrument already exists.
 
-* **`logger`** — **not a measurement question at all, and a harness cannot
-  settle it.** `dup-bins-survey` lists it as "no harness — write one", which is
+* **`uptime`** — **RETIRED 2026-09-12. coreutils 40 passed / 0 differed
+  against the standalone's 20 / 20**, same cases, `scripts/uptime-diff.sh`.
+
+  The standalone is the best-performing loser of the seven: it passes half the
+  cases rather than none. What it fails is a pair of clusters, and both are the
+  kind a from-scratch implementation gets wrong — every uptime at or past a day
+  boundary (86400, 86460, 172800, 259200, 604800), and every user count except
+  one (0, 2 and 12 all wrong, 1 right). Those are exactly the two places
+  procps' own rules are counter-intuitive: `up 1 day, 0 min` rather than
+  `1 day, 00:00`, and `0 user` SINGULAR.
+
+  Its three unique options — `-r`, `--raw`, `--json` — are all inventions.
+  Measured, not taken from the note that already said so: procps answers
+  `invalid option -- 'r'` and `unrecognized option '--raw'` / `'--json'`.
+  Nothing to port.
+
+* **`logger` had a separate bug, fixed 2026-09-12, independent of B-Q14.**
+  Its parser ended in `_ => message_parts.push(arg)`, so an unrecognised
+  option **became the message**: `logger -Q` logged the string `-Q` and
+  exited 0 where util-linux prints `logger: invalid option -- 'Q'` and
+  exits 1. Worse than `ps` discarding one, because the wrong thing is not
+  dropped — it is written to the system log and kept. Refusing an option
+  you do not implement is right under either answer to B-Q14.
+
+  **The sweep that found it, kept because it is worth re-running and is
+  not wired anywhere.** After fixing the same shape in `ps`, every
+  coreutils bin was run with an option no utility has:
+
+  ```bash
+  cargo build -p coreutils --target x86_64-pc-windows-gnu
+  B=target/x86_64-pc-windows-gnu/debug
+  for n in $(ls userspace/coreutils/src/bin/*.rs | sed 's|.*/||; s|\.rs$||'); do
+    [ -x "$B/$n.exe" ] || continue
+    "$B/$n.exe" --no-such-option-xyzzy >/dev/null 2>&1 </dev/null || continue
+    echo "$n accepted it"
+  done
+  ```
+
+  83 tested, 6 accepted. Five are CORRECT and were checked against the
+  real binaries rather than assumed — `echo`, `expr`, `printf`, `test` and
+  `true` all treat it as text or an operand and exit 0, and ours agree.
+  `logger` was the only defect.
+
+  **Deliberately not made into a gate.** It needs all 83 binaries built,
+  which is too heavy for `pre-push`, and the only place that already
+  builds them is `scripts/boot-test.sh`, which is lane A's file. Writing
+  a checker nobody runs is the shape this tree spent 2026-09-12 digging
+  out of — `check-diff-preamble-order.py` sat unwired and red-treed
+  `main`. A recipe that works is better than a gate that does not run.
+
+  A *pattern* sweep would not have found it: `grep "_ => {}"` matches 25
+  files in that directory and most are state machines. Running the
+  program answers the question the pattern only approximates.
+
+* **`logger`'s pair question** — **not a measurement question at all, and a
+  harness cannot settle it.** `dup-bins-survey` lists it as "no harness — write one", which is
   the wrong instrument here. coreutils' `logger` writes its message to
   **stdout**; `userspace/logger` sends it to the `/dev/log` socket or appends
   to a file, the way util-linux does, with 23 options against 2. A
@@ -131935,7 +132292,7 @@ in a state where all three lanes' boot tests refuse to build — found only by
 whoever next waits nineteen minutes for it.
 
 
-## TD-B-A-GATE-THAT-PASSES-BY-SKIPPING-IS-REPORTED-AS-HAVING-RUN (lane B, 2026-09-10)
+## ~~TD-B-A-GATE-THAT-PASSES-BY-SKIPPING-IS-REPORTED-AS-HAVING-RUN~~ (lane B, 2026-09-10) -- CLOSED 2026-09-12
 
 **In short:** the pre-push hook prints a list of the gates that ran. A gate that
 decided internally it could not do its job -- because a tool it needs is absent
@@ -132032,10 +132389,50 @@ says so, which is how it was confirmed end to end. Any agent session older than
 your change is in the same position until it restarts. The variable is
 `D:\utils\zig-x86_64-windows-0.16.0\zig.exe`.
 
-**Not done, and deliberately left to you:** the heading above is yours, so lane A
-has not struck it through. `check-libc-abi.py` is also still wired only in
-pre-push and not in the boot test; widening a gate scoped to `posix/src` is your
-call, not lane A's.
+### Lane B closing it, 2026-09-12 -- both items lane A left, answered
+
+**Struck through**, as lane A asked and could not do itself.
+
+**The gate genuinely runs in this session**, measured rather than assumed:
+`python scripts/check-libc-abi.py` prints `OK (77 types checked against musl,
+0 mismatches)` and exits 0. Not a skip -- and the count has grown from the 76
+recorded above, so the oracle is tracking new types rather than sitting still.
+
+**The `skipped: libc-abi` that appears in this lane's push output is the OTHER
+kind, and is correct.** The hook scopes it -- `touches posix/src/
+scripts/check-libc-abi.py || skip_abi=1` -- and this session's commits are in
+`userspace/` and `scripts/`. Two-probed on real data rather than read off the
+source, because "a gate says it skipped" is exactly the sentence this entry
+exists to distrust:
+
+```text
+rev-list over this session's commits -- scripts/     -> 0246592b6  (non-empty)
+rev-list over this session's commits -- posix/src/   -> (empty)
+```
+
+**The widening question: NO, not yet, and the reason is this entry's own.**
+Adding `check-libc-abi.py` to the boot test would today put it in an
+environment where **its prerequisite is absent** -- lane A's session has no
+`zig` on `PATH` and no `FASTPY_ZIG`, which the addendum above says in its own
+words. The result would be a second place reporting a gate it did not run:
+the defect this entry is about, reproduced rather than extended. A gate is
+only worth widening into an environment that can satisfy it.
+
+**So the blocker is not the wiring, it is zig's discoverability**, and that is
+a sharper thing to fix than "should this gate run in two places". TRIGGER for
+revisiting: widen it the moment `zig` is reachable without a hand-set
+per-session variable -- on `PATH`, or found by the checker the way
+`ctest-fixtures.py` now finds fastpy. `find_zig`'s docstring argues against the
+hard-coded `D:/utils` path on the grounds that "a checker that reaches into one
+machine's layout stops being a checker on any other", and unlike the fastpy
+case that argument survives scrutiny: the documented zig path carries a version
+number (`zig-x86_64-windows-0.16.0`) and would go stale at the next upgrade,
+where fastpy's location is a standing project fact recorded in `CLAUDE.md`.
+Not every absent lookup is the same absent lookup.
+
+**Still true and still not fixed by any of this:** a checker that exits 3 while
+its prerequisite is present skips exactly as quietly as one that cannot run.
+What changed is that the tally says so.
 
 **Also unaddressed, and worth stating so it is not mistaken for covered:** this
 makes a self-skip *visible*, it cannot tell a correct skip from a lazy one. A
@@ -137447,3 +137844,90 @@ Verified the wiring gate *sees* it rather than trusting its exit 0, since a pass
 and a silent skip are the same observation: self-tests defined went 1319 -> 1320,
 run at boot 1317 -> 1318, reachable from nothing 0.
 
+
+## B-SIX-PROGRAMS-READ-ETC-GROUP-AS-TEXT-AND-ASK-THE-WRONG-MEMBERSHIP-QUESTION (lane B, 2026-09-12) -- `doas` FIXED, five open
+
+**In short:** six programs parse `/etc/group` by hand instead of using the
+shared reader. Two things go wrong. First, they read it with `read_to_string`,
+which fails on the **whole file** if any single byte in it is not valid text --
+and on this OS a group name may contain any byte but `/` and NUL, so one odd
+group name switches off group handling everywhere. Second, they ask only
+whether the group's *member list* names you, and that list deliberately leaves
+out everyone whose **main group** it already is. So the people most obviously
+in a group are the ones reported as not in it.
+
+**Why the second half is the dangerous one.** In `doas` -- the program that
+decides whether you may run a command as root -- the rule language has both
+`permit :wheel` and `deny :wheel`. Answering "not a member" when someone *is*
+one makes `permit` merely unhelpful, but makes **`deny` fail open**: the rule
+stops applying to exactly the accounts most likely to be in the group, and the
+caller falls through to whatever `permit` comes next.
+
+That is the same inversion `read_group_entries`' own doc comment was written to
+warn about after lane A found it in `mkfs` and `fsck` -- *"for a check guarding
+a privileged action, 'I do not know' and 'it is safe' must not be the same
+value"*. The comment guarded the error path. The bug was in the success path,
+eight lines below it.
+
+**Measured, not assumed:** `id -nG` on this machine lists the primary group
+(`inhahe adm cdrom sudo dip plugdev users docker`, with `inhahe` the login
+group). `pwdb::Group::members`' own doc says the fourth field omits primary
+members, and `pwdb::group_list` is built to put the primary gid back.
+
+### Where
+
+| Program | Reads | Status |
+|---|---|---|
+| `userspace/doas` | `read_to_string("/etc/group")`, members only | **FIXED 2026-09-12** |
+| `userspace/getent` | `read_to_string` x7, and `parse().unwrap_or(0)` | **passwd/group FIXED 2026-09-12**; its five other databases still read as text |
+| `userspace/install` | `read_to_string`, `resolve_group` | open |
+| `userspace/loginctl` | `read_to_string(GROUP_FILE)` | open |
+| `userspace/mktemp` | `read_to_string` | open |
+| `userspace/newgrp` | `read_to_string(...).unwrap_or_default()` | open |
+
+`newgrp` is the worst of the remaining five: `unwrap_or_default()` turns an
+unreadable *or* non-text group file into an **empty group table**, which is the
+unreadable-means-empty conflation in its purest form.
+
+### The fix, as applied to `doas`
+
+`pwdb` already does this correctly and has no dependencies, so it is exempt
+under §768 the way `quoting` and `utmpfile` are. The two files are read as
+**bytes** by the caller rather than through `pwdb::Db::from_files`, because
+that helper does `unwrap_or_default()` and would reintroduce the very
+conflation being removed. Membership is then `group_list(name, primary_gid)`,
+which is what `id -G` prints.
+
+The lookup was also split into a pure `user_in_group_in(passwd, group, user,
+group_name)` taking bytes, because none of this was testable before: the build
+host has neither file, so every existing test either skipped itself or
+exercised the "cannot read" arm. Six tests now cover supplementary membership,
+**primary** membership, a non-member, an absent group, an absent caller, and a
+group name that is not UTF-8 -- each asserting its own fixture really has the
+property it is named for, so none can pass vacuously.
+
+### `getent` had a second defect the others do not
+
+`uid: fields[2].parse().unwrap_or(0)` -- and the same for gid. A
+`/etc/passwd` line whose uid field is not a number was reported as **uid 0**,
+which is root. glibc's `fgetpwent` rejects such a line and so does `pwdb`, so
+moving onto it fixed this at the same time. There is a test.
+
+Its non-UTF-8 case is also the most likely to be hit in practice: a person's
+name in the GECOS field, written in Latin-1, is the ordinary way a byte that is
+not valid UTF-8 gets into `/etc/passwd`. The arm was `Err(_) => Vec::new()`, so
+one such account made `getent passwd alice` answer **"no such user"**, exit 2,
+for every account on the system -- a wrong answer rather than an error.
+
+**Five of `getent`'s seven databases are still read as text** -- `hosts`,
+`services`, `protocols`, `networks`, `shadow`. `pwdb` does not cover those
+formats, so they need their own byte parsing rather than a shared reader, and
+that is a separate change.
+
+### What is deliberately NOT changed
+
+`None` still means "no answer" and is still distinct from "no members". The
+three-way result is now: absent group is `Some(false)` (nobody is in a group
+that does not exist -- an answer, not an absence), absent caller is `None`
+(their primary gid is unknowable and primary membership counts), otherwise the
+list is consulted.

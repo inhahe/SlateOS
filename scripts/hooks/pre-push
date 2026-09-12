@@ -45,6 +45,15 @@
 #      0x7F -- in a tracked text file.
 #  26. Refuse a coreutils bin that never reads `argv`, and so silently
 #      ignores every option it is given.
+#  27. Refuse a crate that reaches a stateful part of `posix` as a Rust
+#      dependency, which gives the process a second libc with the syscalls
+#      stubbed out rather than the one it links.
+#  28. Refuse a command substitution that calls a name nothing in reach defines,
+#      which exits 127 and yields the empty string that a guard then swallows.
+#  29. Refuse an `open-questions.md` whose structure puts an open question below
+#      `# Resolved`, where the operator does not read.
+#  30. Refuse a diff harness that does work before sourcing the preamble, which a
+#      re-exec under `timeout` then performs twice.
 #
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented; wrong again the moment gate 13 was written, when the
@@ -3539,20 +3548,28 @@ fi
 # 14 the same day, gate 15 (`release-staleness`) made it 15 on 2026-09-07, and
 # gate 16 (`libc-abi`) made it 16 on 2026-09-09, gate 17 (`cfg-unix`) made
 # it 17 on 2026-09-10, gate 18 (`crate-names`) made it 18 the same day, and
-# gate 19 (`gate-call-sites`) made it 19 also on 2026-09-10; if
+# gate 19 (`gate-call-sites`) made it 19 also on 2026-09-10;
+# and gates 27-30 (`one-libc`, `shell-callables`, `open-questions`,
+# `diff-preamble-order`) made it 30 on 2026-09-12 -- widened in after six trunk
+# reds in one night, four of which were gates this hook did not run.  The advisory
+# `stale-blockers` wired in the same day is deliberately NOT numbered here: every
+# entry in that list begins "Refuse to publish", and it never refuses.  An earlier
+# version of this very comment claimed those five were gates 20-24, which was wrong
+# -- 20 through 26 were already taken -- and is the reason the count is stated
+# against the list rather than from memory.  If
 # you add a gate, bump both.
 #
 # A refusing gate exits before this, so the tally is not a claim that the push
 # passed — only a record of what was asked.
 # ---------------------------------------------------------------------------
-n_ran=0
-n_skipped=0
-for _g in $gates_ran; do n_ran=$((n_ran + 1)); done
-for _g in $gates_skipped; do n_skipped=$((n_skipped + 1)); done
-
-echo "pre-push: $n_ran gate(s) ran, $n_skipped skipped." >&2
-[ "$n_ran" -gt 0 ] && echo "  ran:    ${gates_ran# }" >&2
-[ "$n_skipped" -gt 0 ] && echo "  skipped: ${gates_skipped# }" >&2
+# THE TALLY MOVED TO THE END OF THE FILE (2026-09-12).  It used to print here, and
+# seven `note_gate` calls come after this point -- control-bytes, and the five gates
+# widened in on 2026-09-12 -- so it was reporting a subset as though it were the set.
+# The comment above says the tally is "only a record of what was asked"; it was a
+# record of what was asked before this line, which is a different claim and not one
+# anyone reading the output could have known to make.  I relied on this summary
+# earlier the same night: I read `cfg-unix` in its `ran:` list and concluded the boot
+# test's check had been pre-run, which was wrong for a second reason as well.
 
 # ---------------------------------------------------------------------------
 # The halt notice. NOT a gate: it prints and allows.
@@ -3717,6 +3734,7 @@ fi
 # Each carries a named bypass for the case where a push must go out and the gate is
 # the wrong judge of it -- the same shape as the existing gates above.
 # ---------------------------------------------------------------------------
+# Gate 27 — one-libc.  A second libc with every syscall stubbed is not a libc.
 onelibc="${repo_root:-.}/scripts/check-one-libc-per-process.py"
 skip_onelibc=0
 # Bypass: ALLOW_SECOND_LIBC=1 git push origin <branch>
@@ -3751,6 +3769,7 @@ EOF
     exit 1
 fi
 
+# Gate 28 — shell-callables.  A callee nothing defines exits 127 and yields "".
 shcall="${repo_root:-.}/scripts/check-shell-callables.py"
 skip_shcall=0
 # Bypass: ALLOW_UNRESOLVED_CALLEE=1 git push origin <branch>
@@ -3784,6 +3803,7 @@ EOF
     exit 1
 fi
 
+# Gate 29 — open-questions.  A question filed below `# Resolved` was not asked.
 openq="${repo_root:-.}/scripts/check-open-questions.py"
 skip_openq=0
 # Bypass: ALLOW_OPEN_QUESTIONS_SHAPE=1 git push origin <branch>
@@ -3817,6 +3837,7 @@ EOF
     exit 1
 fi
 
+# Gate 30 — diff-preamble-order.  A re-exec repeats whatever ran before the source.
 diffpre="${repo_root:-.}/scripts/check-diff-preamble-order.py"
 skip_diffpre=0
 # Bypass: ALLOW_DIFF_PREAMBLE_ORDER=1 git push origin <branch>
@@ -3929,5 +3950,18 @@ if [ "$skip" -eq 0 ] && [ -f "$repo_root/scripts/check-lane-signals.py" ]; then
         :
     fi
 fi
+
+# ---------------------------------------------------------------------------
+# The gate tally, printed here because here is after every gate.  See the note
+# where it used to live, above gate 19's history.
+# ---------------------------------------------------------------------------
+n_ran=0
+n_skipped=0
+for _g in $gates_ran; do n_ran=$((n_ran + 1)); done
+for _g in $gates_skipped; do n_skipped=$((n_skipped + 1)); done
+
+echo "pre-push: $n_ran gate(s) ran, $n_skipped skipped." >&2
+[ "$n_ran" -gt 0 ] && echo "  ran:    ${gates_ran# }" >&2
+[ "$n_skipped" -gt 0 ] && echo "  skipped: ${gates_skipped# }" >&2
 
 exit 0

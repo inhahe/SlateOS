@@ -24,20 +24,41 @@
 //!
 //! `scripts/check-argv-ignored.py` is the gate that now refuses the next one.
 //!
-//! # What is implemented, and what is still missing
+//! # The default line, and a blocker that did not exist
 //!
-//! `-p` and `-s` are exact. The **default line is not**: procps prints
-//! ` 20:48:41 up  1:21,  1 user,  load average: 0.10, 0.10, 0.09` and this
-//! prints only the `up …` part.
+//! `-p` and `-s` have been exact for a while. The default line was not: it
+//! printed only the `up …` part, against procps'
+//! ` 20:48:41 up  1:21,  1 user,  load average: 0.10, 0.10, 0.09`.
 //!
-//! The missing pieces are the time of day, the load averages and the user
-//! count. The first two are cheap — the clock and `/proc/loadavg` — but the
-//! user count is read from `utmp`, and **this tree has no utmp reader**: there
-//! is no `who`, and no shared module for it. Printing a plausible number
-//! instead of a measured one is exactly the defect this file was just repaired
-//! for, so the field is absent rather than invented. Recorded in
-//! `known-issues.md` as the remaining half of
-//! `B-COREUTILS-UPTIME-SILENTLY-IGNORES-EVERY-ARGUMENT`.
+//! The three missing fields are now present. The note that used to stand here
+//! said the user count could not be done because **"this tree has no utmp
+//! reader: there is no `who`, and no shared module for it"** — and every
+//! clause of that was false when it was written. `utmpfile` is a workspace
+//! crate with no dependencies; `userspace/who` exists; and `who`, `last` and
+//! `finger` were all already using it. The field was omitted for a reason
+//! nobody had checked, which is a worse failure than the invented number it
+//! was trying to avoid: an invented value gets caught by a differential test,
+//! and a missing one justified by a false premise gets copied forward.
+//!
+//! The `up …` field itself was also wrong in three ways that only a
+//! measurement finds — see `format_uptime_line`. `uptime` under an hour is
+//! `up 59 min`, not `up 00:59`.
+//!
+//! # What is NOT compared, and why it took two experiments to find out
+//!
+//! On a systemd host the reference does not read `utmp` at all. `uptime` links
+//! `libsystemd` and asks logind, so emptying `/run/utmp` inside the namespace
+//! leaves the count at `1` while `who`, which does read `utmp`, drops to `0`.
+//! A first pass concluded from that the field was unpinnable and could never
+//! be compared.
+//!
+//! It can. Bind an empty directory over `/run/systemd` as well and procps
+//! falls back to `utmp`, at which point the count is a fixture like every
+//! other field — which is how the `%2d` width and the singular `0 user` below
+//! were measured rather than guessed. The first experiment answered a
+//! narrower question than the one being asked.
+//!
+//! SlateOS has no logind, so `utmp` is the correct source there regardless.
 //!
 //! # Why procps and not GNU
 //!
@@ -253,7 +274,22 @@ fn run_main() -> ExitCode {
             }
         },
         _ => {
-            println!("{}", format_uptime_line(total_secs));
+            let clock = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .ok()
+                .and_then(|d| i64::try_from(d.as_secs()).ok())
+                .and_then(time_of_day);
+            let Some(clock) = clock else {
+                // The time of day is the first field, so there is no honest
+                // line to print without it. `-p` and `-s` are unaffected and
+                // are handled above.
+                diag!("uptime: cannot read the clock");
+                return ExitCode::FAILURE;
+            };
+            println!(
+                "{}",
+                status_line(&clock, total_secs, user_count(), load_averages())
+            );
             ExitCode::SUCCESS
         }
     }
@@ -281,6 +317,21 @@ fn uptime_seconds(content: &str) -> Option<f64> {
 /// The empty case is folded in with it: `up (unknown)` was the right shape but
 /// still exited 0 and still printed to stdout, so a caller could not act on it
 /// either.
+/// The `up …` field, in procps' spelling.
+///
+/// Three of the rules here are not what a from-scratch implementation writes,
+/// and all three were measured against procps-ng 4.0.4 with `/proc/uptime`
+/// bind-mounted to a fixture rather than recalled:
+///
+/// | seconds | procps | what this used to print |
+/// |---|---|---|
+/// | 3599 | `up 59 min` | `up 00:59` |
+/// | 3600 | `up  1:00` | `up 01:00` |
+/// | 86400 | `up 1 day, 0 min` | `up 1 day, 00:00` |
+///
+/// So: under an hour it is `N min` and not a clock at all; at an hour and over
+/// the hour is **space**-padded to width two, not zero-padded; and the day
+/// prefix does not change either rule for the remainder.
 fn format_uptime_line(total_secs: f64) -> String {
     let (days, hours, mins) = split_uptime(total_secs);
     let mut out = String::from("up ");
@@ -288,8 +339,75 @@ fn format_uptime_line(total_secs: f64) -> String {
         let suffix = if days == 1 { "" } else { "s" };
         out.push_str(&format!("{days} day{suffix}, "));
     }
-    out.push_str(&format!("{hours:02}:{mins:02}"));
+    if hours > 0 {
+        out.push_str(&format!("{hours:2}:{mins:02}"));
+    } else {
+        out.push_str(&format!("{mins} min"));
+    }
     out
+}
+
+/// procps' whole default line, from values the caller has already gathered.
+///
+/// Pure on purpose: every row of the measurement table is then a unit test
+/// rather than a property of the machine the suite happens to run on. The
+/// clock, `/proc/loadavg` and `utmp` are read by the caller.
+///
+/// The field widths are measured, and one of them is a trap:
+///
+/// | users | procps |
+/// |---|---|
+/// | 0 | `,  0 user` |
+/// | 1 | `,  1 user` |
+/// | 2 | `,  2 users` |
+/// | 12 | `, 12 users` |
+///
+/// **Zero is singular.** The obvious `if n == 1 { "" } else { "s" }` prints
+/// `0 users` and is wrong for the one value most likely to occur on a machine
+/// with nobody logged in. The count is `%2d`, which is why one space precedes
+/// `12` and two precede `1` -- writing the literal as two spaces and `%d`
+/// agrees on every single-digit count and diverges at ten.
+fn status_line(clock: &str, total_secs: f64, users: u64, load: (f64, f64, f64)) -> String {
+    let (one, five, fifteen) = load;
+    let plural = if users > 1 { "s" } else { "" };
+    let up = format_uptime_line(total_secs);
+    format!(
+        " {clock} {up}, {users:2} user{plural},  \
+         load average: {one:.2}, {five:.2}, {fifteen:.2}"
+    )
+}
+
+/// `%H:%M:%S` in the local zone, as procps prints it.
+fn time_of_day(now_secs: i64) -> Option<String> {
+    let zone = Zone::from_env();
+    let tm = zone.local(now_secs, 0);
+    String::from_utf8(strftime(b"%H:%M:%S", &tm)).ok()
+}
+
+/// The three load averages, or zeros.
+///
+/// Zeros rather than a diagnostic because that is what procps does: measured
+/// with `/proc/loadavg` bound to an empty file and to a line of prose, it
+/// printed `load average: 0.00, 0.00, 0.00` and exited 0 both times. An
+/// unreadable load average is not an error in this program.
+///
+/// Parsing is `procinfo::LoadAvg`, not a fourth hand-rolled reader in this
+/// crate -- see `TD-B-FIFTY-PROC-READERS-DUPLICATE-WHAT-PROCINFO-ALREADY-PARSES`.
+fn load_averages() -> (f64, f64, f64) {
+    fs::read("/proc/loadavg")
+        .ok()
+        .and_then(|data| procinfo::LoadAvg::parse(&data))
+        .map_or((0.0, 0.0, 0.0), |la| (la.one, la.five, la.fifteen))
+}
+
+/// Logged-in sessions, from `utmp`.
+///
+/// Zero when the file is absent or unreadable, which is also what procps
+/// reports for an empty one. `/var/run/utmp` is the path `userspace/who` uses.
+fn user_count() -> u64 {
+    fs::read("/var/run/utmp").map_or(0, |data| {
+        u64::try_from(utmpfile::count_user_sessions(&data)).unwrap_or(0)
+    })
 }
 
 /// Break a total-seconds count into `(days, hours, mins)` for display.
@@ -309,6 +427,77 @@ fn split_uptime(total_secs: f64) -> (u64, u64, u64) {
 #[allow(clippy::unwrap_used, clippy::panic, clippy::float_cmp)]
 mod tests {
     use super::*;
+
+    /// Every row measured against procps-ng 4.0.4 with `/proc/uptime`
+    /// bind-mounted to a fixture inside `unshare -mUr`.
+    ///
+    /// The three rows this file used to get wrong are 3599, 3600 and 86400:
+    /// under an hour procps does not print a clock at all, at an hour it pads
+    /// with a SPACE, and the day prefix changes neither rule.
+    #[test]
+    fn uptime_field_matches_measured_procps() {
+        let cases: &[(f64, &str)] = &[
+            (5.0, "up 0 min"),
+            (59.0, "up 0 min"),
+            (60.0, "up 1 min"),
+            (61.0, "up 1 min"),
+            (3599.0, "up 59 min"),
+            (3600.0, "up  1:00"),
+            (3660.0, "up  1:01"),
+            (86399.0, "up 23:59"),
+            (86400.0, "up 1 day, 0 min"),
+            (90000.0, "up 1 day,  1:00"),
+            (172_800.0, "up 2 days, 0 min"),
+            (259_200.0, "up 3 days, 0 min"),
+        ];
+        for (secs, want) in cases {
+            assert_eq!(&format_uptime_line(*secs), want, "at {secs} seconds");
+        }
+    }
+
+    /// Measured by emptying `/run/utmp` AND masking `/run/systemd` so procps
+    /// falls back to utmp -- without the second mount the count is logind's
+    /// and does not move.
+    ///
+    /// Zero is SINGULAR. `if n == 1 { "" } else { "s" }` gets every row here
+    /// right except the first, which is the one a machine with nobody logged
+    /// in prints.
+    #[test]
+    fn user_field_is_two_wide_and_zero_is_singular() {
+        let load = (0.0, 0.0, 0.0);
+        let got = |n| status_line("09:02:30", 3660.0, n, load);
+        assert!(got(0).contains(",  0 user,"), "{}", got(0));
+        assert!(got(1).contains(",  1 user,"), "{}", got(1));
+        assert!(got(2).contains(",  2 users,"), "{}", got(2));
+        // The one that separates `%2d` from a literal two spaces plus `%d`.
+        assert!(got(12).contains(", 12 users,"), "{}", got(12));
+    }
+
+    /// A whole line, byte for byte, against a measured sample.
+    #[test]
+    fn status_line_matches_a_measured_sample() {
+        assert_eq!(
+            status_line("09:02:30", 3660.0, 12, (0.0, 0.01, 0.0)),
+            " 09:02:30 up  1:01, 12 users,  load average: 0.00, 0.01, 0.00"
+        );
+        assert_eq!(
+            status_line("08:59:34", 5.0, 1, (0.01, 0.02, 0.03)),
+            " 08:59:34 up 0 min,  1 user,  load average: 0.01, 0.02, 0.03"
+        );
+    }
+
+    /// procps prints two decimals whatever the magnitude; measured with
+    /// `/proc/loadavg` pinned to `12.34 123.45 0.07`.
+    #[test]
+    fn load_average_is_two_decimals_at_any_magnitude() {
+        let line = status_line("09:00:00", 3660.0, 1, (12.34, 123.45, 0.07));
+        assert!(
+            line.ends_with("load average: 12.34, 123.45, 0.07"),
+            "{line}"
+        );
+        let rounded = status_line("09:00:00", 3660.0, 1, (0.5, 1.05, 10.0));
+        assert!(rounded.ends_with("load average: 0.50, 1.05, 10.00"), "{rounded}");
+    }
 
     /// The old `line(&str) -> Option<String>`, recomposed.
     ///
@@ -459,21 +648,23 @@ mod tests {
 
     #[test]
     fn format_basic_seconds() {
-        // 60 seconds -> "up 00:01".
-        assert_eq!(line("60.0 30.0"), Some("up 00:01".to_string()));
+        // 60 seconds is `up 1 min`, NOT `up 00:01`. Measured against
+        // procps-ng 4.0.4; under an hour it does not print a clock.
+        assert_eq!(line("60.0 30.0"), Some("up 1 min".to_string()));
     }
 
     #[test]
     fn format_one_day_singular() {
         let s = format!("{} 0", 86400);
-        assert_eq!(line(&s), Some("up 1 day, 00:00".to_string()));
+        assert_eq!(line(&s), Some("up 1 day, 0 min".to_string()));
     }
 
     #[test]
     fn format_two_days_plural() {
         let total = 2 * 86400 + 3 * 3600 + 5 * 60;
         let s = format!("{total} 0");
-        assert_eq!(line(&s), Some("up 2 days, 03:05".to_string()));
+        // Space-padded, not zero-padded: procps prints ` 3:05`.
+        assert_eq!(line(&s), Some("up 2 days,  3:05".to_string()));
     }
 
     #[test]
@@ -503,17 +694,17 @@ mod tests {
 
     #[test]
     fn format_just_seconds_no_idle() {
-        assert_eq!(line("120"), Some("up 00:02".to_string()));
+        assert_eq!(line("120"), Some("up 2 min".to_string()));
     }
 
     #[test]
     fn format_multiple_whitespace() {
-        assert_eq!(line("60.0   30.0"), Some("up 00:01".to_string()));
+        assert_eq!(line("60.0   30.0"), Some("up 1 min".to_string()));
     }
 
     #[test]
     fn format_zero_seconds() {
-        assert_eq!(line("0 0"), Some("up 00:00".to_string()));
+        assert_eq!(line("0 0"), Some("up 0 min".to_string()));
     }
 
     #[test]

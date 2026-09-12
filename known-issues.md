@@ -414,7 +414,7 @@ Related and cheaper: the diagnostics for a bad option *value* — `-n 0`,
 nothing — differ from GNU's wording in 10 of the 15 remaining failures. The
 exit statuses already agree, so this is sentences rather than behaviour.
 
-## B-COREUTILS-UPTIME-SILENTLY-IGNORES-EVERY-ARGUMENT — FIXED 2026-09-11, one half remaining
+## B-COREUTILS-UPTIME-SILENTLY-IGNORES-EVERY-ARGUMENT — FIXED 2026-09-11, default line completed 2026-09-12
 
 The same defect as `date` below, in the other bin that has it:
 
@@ -452,21 +452,48 @@ reports `fixed: uptime now reads argv` and its baseline is down to one entry.
 than inherited from the crate being replaced. Implementing the standalone's
 options would have been implementing an invention.
 
-**THE HALF THAT REMAINS** is the default line. procps prints
-` 20:48:41 up  1:21,  1 user,  load average: 0.10, 0.10, 0.09` and this prints
-only the `up …` part. The time of day and the load averages are cheap — the
-clock and `/proc/loadavg` — but **the user count comes from `utmp`, and this
-tree has no utmp reader**: there is no `who` bin and no shared module. Printing
-a plausible number rather than a measured one is the exact defect this file was
-just repaired for, so the field is absent rather than invented.
+**THE OTHER HALF — DONE 2026-09-12, and both reasons given for deferring it
+were wrong.** The default line now prints all four fields.
 
-**No harness was written for this pair, deliberately.** `uptime`'s output *is*
-the current moment: the time of day and three load averages that change
-continuously. Only `-s` (the boot time) is stable, so a differential could
-compare one case and the refusals. The evidence above is three direct
-measurements instead, which is proportionate to a program with three options —
-and the general prevention now lives in `scripts/check-argv-ignored.py` rather
-than in a harness per program.
+*Wrong reason 1: "the user count comes from `utmp`, and this tree has no utmp
+reader: there is no `who` bin and no shared module."* The shared module clause
+is simply false — `utmpfile` is a workspace crate with **no dependencies**,
+exposing `parse(&[u8])` and `count_user_sessions(&[u8])`, and `userspace/who`,
+`userspace/last` and `userspace/finger` were all already using it. The `who`
+clause is true only under a reading it did not state: there is no *coreutils
+bin* named `who`, but `userspace/who` exists. So the field was omitted for a
+blocker that could have been disproved by one `grep`, and the paragraph was
+persuasive because its *conclusion* — do not invent a number — was right.
+**A false premise defending a correct conclusion is the hardest kind to
+notice**, and it survived a month.
+
+*Wrong reason 2: "no harness was written for this pair, deliberately …
+`uptime`'s output IS the current moment."* That was true of the technique
+available when it was written and stopped being true when `scripts/df-diff.sh`
+and then `scripts/free-diff.sh` established per-case `unshare -mUr` with the
+inputs bind-mounted. `/proc/uptime` and `/proc/loadavg` pin exactly like
+`/proc/meminfo`. Only the time-of-day field genuinely moves.
+
+Even the user count pins, which took two experiments to establish. On this
+host `uptime` links `libsystemd` and asks logind, so emptying `/run/utmp`
+changes nothing while `who` drops to zero — from which a first pass concluded
+the field was uncomparable. Masking `/run/systemd` as well makes procps fall
+back to `utmp`, and the count becomes a fixture. **The first experiment
+answered a narrower question than the one being asked** and its answer looked
+like a general one.
+
+That mattered, because the measurement it enabled contradicted what a careful
+implementation would have written. procps prints `,  0 user` — **singular at
+zero** — so `if n == 1 { "" } else { "s" }` is wrong for precisely the value a
+machine with nobody logged in reports. The count is `%2d`, which is
+indistinguishable from a two-space literal plus `%d` at every single-digit
+count and diverges at ten.
+
+The `up …` field was wrong too, in three ways, and had unit tests asserting
+each: `up 00:59` where procps prints `up 59 min`, `up 01:00` where it prints
+`up  1:00` (space-padded), and `up 1 day, 00:00` where it prints
+`up 1 day, 0 min`. **Six tests encoded the unmeasured format**, which is why it
+survived; they now carry the measurements.
 
 ## B-COREUTILS-DATE-SILENTLY-IGNORES-EVERY-ARGUMENT — FIXED 2026-09-11
 

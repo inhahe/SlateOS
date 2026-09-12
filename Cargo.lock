@@ -408,6 +408,7 @@ dependencies = [
  "quoting",
  "scratchdir",
  "sha2",
+ "utmpfile",
 ]
 
 [[package]]

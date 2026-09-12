@@ -2166,6 +2166,9 @@ version = "0.1.0"
 [[package]]
 name = "prlimit"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "proc-macro2"

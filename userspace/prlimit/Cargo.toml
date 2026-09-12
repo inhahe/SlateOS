@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS prlimit utility"
 [dependencies]
+# One rendering of caller-supplied text in a diagnostic: the rejected
+# resource name and the command that could not be run both come off argv.
+quoting = { path = "../quoting" }

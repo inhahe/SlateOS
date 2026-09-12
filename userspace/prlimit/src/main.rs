@@ -42,6 +42,14 @@ unsafe fn syscall4(_nr: u64, _a1: u64, _a2: u64, _a3: u64, _a4: u64) -> i64 {
     -38 // ENOSYS
 }
 
+/// A limit as the kernel wants it. `RLIM_INFINITY` is `u64::MAX`.
+fn raw_limit(v: &LimitValue) -> u64 {
+    match v {
+        LimitValue::Unlimited => u64::MAX,
+        LimitValue::Value(n) => *n,
+    }
+}
+
 /// `prlimit64`'s resource limit pair, as the kernel expects it.
 #[repr(C)]
 struct RLimit64 {
@@ -489,6 +497,7 @@ fn cmd_prlimit(args: &[String]) {
     let mut filter_resources: Vec<Resource> = Vec::new();
     let mut set_operations: Vec<(Resource, LimitValue, LimitValue)> = Vec::new();
     let mut output_cols: Option<String> = None;
+    let mut command: Vec<String> = Vec::new();
 
     let mut i = 0;
     while i < args.len() {
@@ -559,18 +568,65 @@ fn cmd_prlimit(args: &[String]) {
                         )
                         .unwrap_or(LimitValue::Unlimited);
                         set_operations.push((res, soft, hard));
+                    } else {
+                        // Used to fall out of the `if` and be forgotten, so
+                        // `prlimit --nofil=10 cmd` set nothing and said
+                        // nothing.
+                        eprintln!(
+                            "prlimit: {}: unknown resource",
+                            quoting::quoteaf(name.as_bytes())
+                        );
+                        process::exit(1);
                     }
                 } else if let Some(res) = parse_resource_name(rest) {
                     filter_resources.push(res);
+                } else {
+                    eprintln!(
+                        "prlimit: {}: unknown resource",
+                        quoting::quoteaf(rest.as_bytes())
+                    );
+                    process::exit(1);
                 }
             }
-            _ => {}
+            // The first non-option ends the options and begins the command,
+            // as it does for `flock`. Everything after it, dashes and all,
+            // belongs to the command being run.
+            _ => {
+                command = args.get(i..).unwrap_or(&[]).to_vec();
+                break;
+            }
         }
         i += 1;
     }
 
     let target_pid = pid.unwrap_or(process::id());
     let _ = output_cols; // Reserved for future column filtering.
+
+    // A command was given: apply the limits to *this* process, which the
+    // child inherits, then run it. That is what `prlimit` does when it is
+    // handed a command rather than a `--pid`, and this build used to drop
+    // the command entirely -- `prlimit --nofile=10 echo ran` printed
+    // nothing where the reference prints `ran`.
+    if let Some(program) = command.first() {
+        for (res, soft, hard) in &set_operations {
+            // pid 0 is the calling process.
+            if let Err(errno) = set_rlimit(0, res.number(), raw_limit(soft), raw_limit(hard)) {
+                eprintln!("prlimit: cannot set {}: errno {}", res.name(), -errno);
+                process::exit(1);
+            }
+        }
+        let rest = command.get(1..).unwrap_or(&[]);
+        match process::Command::new(program).args(rest).status() {
+            Ok(status) => process::exit(status.code().unwrap_or(1)),
+            Err(e) => {
+                eprintln!(
+                    "prlimit: failed to execute {}: {e}",
+                    quoting::quoteaf(program.as_bytes())
+                );
+                process::exit(1);
+            }
+        }
+    }
 
     // Handle set operations.
     let mut failed = false;
@@ -579,11 +635,9 @@ fn cmd_prlimit(args: &[String]) {
             // This used to print the line below and stop -- no syscall, no
             // change, exit 0. A caller could set a limit, be told it was
             // set, and run with the old one.
-            let raw = |v: &LimitValue| match v {
-                LimitValue::Unlimited => u64::MAX,
-                LimitValue::Value(n) => *n,
-            };
-            if let Err(errno) = set_rlimit(target_pid, res.number(), raw(soft), raw(hard)) {
+            if let Err(errno) =
+                set_rlimit(target_pid, res.number(), raw_limit(soft), raw_limit(hard))
+            {
                 eprintln!(
                     "prlimit: cannot set {} for PID {}: errno {}",
                     res.name(),

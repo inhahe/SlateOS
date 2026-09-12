@@ -6059,7 +6059,104 @@ check_orphan_modules() {
     exit 1
 }
 
+
 check_orphan_modules
+
+# ---------------------------------------------------------------------------
+# check-diff-preamble-order.py -- lane B's gate, wired at their request
+# (2026-09-12).  It was pushed unwired, which check-gates-are-wired caught; the
+# edit is here because boot-test.sh is lane A's file, and the DECISION was theirs
+# because running another lane's gate can fail on that lane's tree.  They verified
+# it clean on their unmerged tree -- the one fact this lane had no way to obtain --
+# before saying yes.
+#
+# What it enforces, recorded because whoever reads this next will not know:
+# diff-wsl.sh bounds each harness by re-execing it under `timeout`, and a re-exec
+# restarts the script from the top, so anything a harness does BEFORE sourcing the
+# preamble runs TWICE, silently.  The gate refuses that ordering.  One harness
+# legitimately works before the source -- df-diff.sh, which execs itself under
+# `unshare` behind an exported guard flag -- and is baselined by name.
+# ---------------------------------------------------------------------------
+check_diff_preamble_order() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== Diff preamble order check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Checking that no diff harness works before sourcing the preamble ==="
+    # Self-test first, beside the gate's own call, so a scanner that has stopped
+    # scanning is reported as one rather than reporting zero offenders. This is the
+    # shape check-gates-are-wired asked for, and it is the failure mode that matters
+    # most for a gate whose clean result is indistinguishable from a broken one.
+    if ! run_checker diff-preamble-order-selftest "$py" \
+                     "$PROJECT_ROOT/scripts/check-diff-preamble-order.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  check-diff-preamble-order.py FAILED ITS OWN" >&2
+        echo "SELF-TEST, so its verdict on the harnesses is not trustworthy -- a clean" >&2
+        echo "report from a broken scanner reads exactly like a clean tree." >&2
+        exit 1
+    fi
+    if run_checker diff-preamble-order "$py" \
+                   "$PROJECT_ROOT/scripts/check-diff-preamble-order.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  A diff harness does work before it sources" >&2
+    echo "the preamble.  diff-wsl.sh re-execs each harness under \`timeout\` to bound" >&2
+    echo "it, and a re-exec restarts the script from the top -- so that work happens" >&2
+    echo "TWICE, and silently, which is the failure this refuses." >&2
+    echo "" >&2
+    echo "Move the work after the preamble source, or -- if it genuinely must run" >&2
+    echo "first, as df-diff.sh's self-exec under \`unshare\` does -- baseline it by" >&2
+    echo "name with that reasoning, the way df-diff.sh is." >&2
+    exit 1
+}
+
+check_diff_preamble_order
+
+# ---------------------------------------------------------------------------
+# check-stale-blockers.py -- ADVISORY.  Run WITHOUT --strict, on purpose.
+#
+# It cross-references each known-issues entry against the status line of every
+# requests/*.md it cites, and reports entries whose stated blocker has already
+# landed -- a note still saying "waiting on X" after X shipped.  Non-strict it
+# prints the report and exits 0; `--strict` exits 1 and would red the trunk
+# immediately, because there are currently 6 such entries and two of them belong
+# to a third lane.
+#
+# A gate that cannot fail is normally the thing this tree spends its time removing,
+# so the reason this one is wired that way is written down rather than left to be
+# guessed.  The 6 are a real backlog, not false positives: lane B cleared one on
+# 2026-09-11 whose blocker had reported LANDED since 2026-09-07.  Lane B owns the
+# count and will switch this to --strict themselves when it reaches 0.  If it is
+# still printing 6 in a week, that is the thing to ask about -- and this comment is
+# here so that question is askable by someone who was not in the conversation.
+# ---------------------------------------------------------------------------
+check_stale_blockers() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== Stale-blocker report: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Reporting known-issues entries whose blocker already landed (advisory) ==="
+    # No `--strict`, and no `exit 1` below: this one informs, it does not refuse.
+    run_checker stale-blockers "$py" \
+                "$PROJECT_ROOT/scripts/check-stale-blockers.py" || true
+    return 0
+}
+
+check_stale_blockers
 
 # Refuse to build when any script in scripts/ has a shellcheck finding at
 # severity `warning` or worse.

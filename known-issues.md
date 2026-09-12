@@ -16043,6 +16043,31 @@ kernel address and writes there, so no CoW *fault* can occur. The protection is 
 mechanism, same guarantee — and had it merely *checked* writability and returned an error,
 the bug would be worse than a halt: a silent write into a frame another process shares.
 
+**The narrowed search is now also done, and it found no candidate.** Of the whole kernel,
+60 files do raw mutable pointer writes; only **three** of those also handle user addresses
+(`idt.rs` and `proc/pcb.rs`, which are the fault *resolvers* rather than faulters, and
+`syscall/linux.rs`). `linux.rs` contains exactly three raw writes, and every one writes
+through an HHDM address to a physical frame rather than through a user mapping:
+
+| site | enclosing fn | why CoW cannot apply |
+|---|---|---|
+| 50727 | `self_test_madvise_dontneed` | self-test, page deliberately faulted in first |
+| 51014 | `self_test_process_vm_cross_as` | self-test, same |
+| 12504 | `linux_file_mmap_fill` | **production**, but the frame comes from `frame::alloc_frame_zeroed()` immediately above — freshly allocated, exclusively owned, not yet mapped |
+
+So no production path writes into a user frame without either pre-validating CoW or owning
+the frame outright. That **supports this entry's own hypothesis** that the June fault was a
+transient intermediate-edit state rather than committed code.
+
+**Treat that as support, not proof, and here is precisely why.** The search was bounded by
+what greps can see: it looked for `from_raw_parts_mut`, `write_volatile` and `as *mut u8`,
+and for files that also mention a user-address symbol. A write through a pointer passed
+into a helper, built by arithmetic this pattern does not match, or reached via a trait
+object would not appear. Today alone, five single-line or bare-identifier patterns of mine
+missed multi-line or indirect forms, so the base rate for this kind of sweep missing
+something is not low. The WATCH should stay armed; what has changed is that the diagnostic
+in `idt.rs` is now the *only* thing expected to find this, rather than one of two.
+
 **So if the unvalidated path exists, it is not one of these four.** It would be a raw
 write through a user pointer that bypasses `mm::user` entirely. That is where to look next,
 and it is a narrower search than "any kernel write path".

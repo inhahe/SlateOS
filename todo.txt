@@ -57254,3 +57254,42 @@ the request). These two remain.
 TRIGGER. Either is unblocked. `--dotall` is the larger and needs the design
 answer measured from the operator's tool first; the colour config is the
 smaller and only needs a location decided.
+
+--------------------------------------------------------------------------
+`ed`'s TESTS CANNOT EXERCISE `a`, `i` OR `c` UNTIL `Editor` TAKES ITS INPUT
+(lane B, 2026-09-12)
+
+WHY THIS IS HERE. `Editor::new` does `stdin().lock()`, so every editor built
+in a test holds the process's real standard input. The commands whose text
+comes from stdin -- `a`, `i`, `c` -- therefore read the TEST RUNNER's stdin
+when executed from a test. With `/dev/null` that returns EOF and is harmless;
+with an open pipe carrying nothing, which is what a hook or a CI runner hands
+you, the read never returns and the global lock is never released, so every
+other test in the binary blocks behind it.
+
+That is not hypothetical: it cost two fifteen-minute stalls of
+`cargo test -p coreutils` on 2026-09-12, reported as "20 of 93 groups" with
+four tests "running for over 60 seconds". Measured on the built binary:
+
+    stdin = /dev/null       73 passed in 0.01s
+    stdin = pipe, no data   hangs until killed
+
+Fixed for now by removing the single `0a` from the shuffle list in
+`a_mark_follows_its_line_wherever_the_line_goes`. The option table's own
+comment already said `a` and `i` are excluded elsewhere "because their text
+comes from stdin" -- the knowledge was in the file and that loop did not have
+it.
+
+THE PROPER FIX is for `Editor` to take its input as a parameter rather than
+locking the process's: `Editor::new(opts, input: impl BufRead)`, with `main`
+passing `stdin().lock()` and tests passing a `&[u8]`. That makes `a`, `i` and
+`c` testable at all -- they are currently untested, which is the real cost --
+and removes the global lock from the test path entirely, so the parallel test
+threads stop serialising on it.
+
+It also removes the hazard the `after` helper documents in prose ("two live
+editors in one thread deadlock"), because the deadlock is a property of the
+shared lock rather than of the editor.
+
+TRIGGER. Next time anything in `ed`'s editor construction is touched, or the
+first time someone wants a test for `a`/`i`/`c`. Nothing blocks it.

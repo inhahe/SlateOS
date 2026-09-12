@@ -3813,13 +3813,36 @@ mod tests {
         // This is the property the parallel array exists for. Each case is a
         // different way of moving text above the marked line; in every one of
         // them `'c` still names `gamma`.
-        for shuffle in [
-            &b"1d"[..],
-            &b"1m$"[..],
-            &b"1t0"[..],
-            &b"1,2j"[..],
-            &b"0a"[..],
-        ] {
+        // `0a` IS NOT HERE, and its absence is the fix for a hang rather than
+        // a gap in coverage.
+        //
+        // `a` takes its text from STDIN. `Editor::new` holds `stdin().lock()`,
+        // so executing it here reads the real standard input of the test
+        // process -- and when that is an open pipe with nothing on it, which
+        // is what a hook or a CI runner hands you, the read never returns and
+        // the global lock is never released. Every other test in this binary
+        // then blocks behind it.
+        //
+        // Measured on the built test binary:
+        //
+        //     stdin = /dev/null            73 passed in 0.01s
+        //     stdin = pipe, no data        hangs until killed
+        //
+        // That is what made `cargo test -p coreutils` sit at 20 of 93 groups
+        // for fifteen minutes twice today. I first recorded it as machine
+        // contention, because the symptom -- "has been running for over 60
+        // seconds" -- is what starvation looks like too. The CPU being at 34%
+        // on the third occurrence is what made me look again.
+        //
+        // The comment on the option table below already said `a` and `i` are
+        // excluded from that list "because their text comes from stdin". The
+        // knowledge was in the file; this loop just did not have it.
+        //
+        // The four remaining shuffles are four independent ways of moving text
+        // above the marked line, which is the property under test. Testing `a`
+        // itself needs `Editor` to take its input as a parameter instead of
+        // locking the process's -- recorded in todo.txt.
+        for shuffle in [&b"1d"[..], &b"1m$"[..], &b"1t0"[..], &b"1,2j"[..]] {
             let mut e = editor_with(&all);
             assert!(e.execute(b"3kc").is_ok());
             assert!(e.execute(shuffle).is_ok());

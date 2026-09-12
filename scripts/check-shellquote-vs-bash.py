@@ -10,34 +10,47 @@ Requires WSL; see `bashprobe.py` for why that keeps it out of the boot test.
 can drift away from the Rust it claims to model, and a drifted copy reports
 "0 disagreements" about a scanner that no longer exists -- worse than no
 checker, because it looks like evidence.  `assert_port_matches_rust()` reads
-`shellquote.rs` and refuses to run if the one table that is easy to get
-silently wrong -- the set of characters a backslash may escape inside
-double quotes -- differs from the set below.  It cannot prove the whole port
-is faithful; it can and does stop the failure mode that actually happens,
-which is a rule being changed in the Rust and not here.
+`shellquote.rs` and refuses to run unless three things still hold: the set of
+quoting contexts is the set `scan()` models, the escape alphabet is the one
+ported, and the whole of what is ported still hashes to `PORTED_DIGEST`.
+
+That third layer replaced a single `DQ_ESCAPABLE` regex on 2026-09-12, after
+lane A showed what a one-table guard buys.  They gave the Rust scanner a
+fourth context, `Ctx::DollarSingle`, so that `echo $'hi'` stopped printing
+`$hi`.  The change does not touch `DQ_ESCAPABLE`, so the guard passed, the
+port kept three contexts, and any `$'...'` case would have been graded against
+semantics that no longer shipped.  The alphabet had been serving as a proxy
+for "the scanner" and quietly stopped being one.  See
+`requests/a-b-shellquote-port-has-drifted-and-the-guard-cannot-see-it.md`.
 
 WHAT THIS GATE DOES NOT GRADE, STATED PLAINLY
 ---------------------------------------------
-It does not grade the scanner.  Measured, not assumed: replacing the
-`Ctx::Single` arm's `let structural = b == b'\''` with `let structural =
-false` -- a scanner in which a single-quoted string can never close -- leaves
-this file printing `0 failure(s)`, exiting 0, and passing its own self-test
-25/25.  Nothing here executes a line of Rust; `scan()` below is a hand port,
-so a defect in the real scanner changes nothing this file can see.
+It does not grade the scanner, and the digest does not change that -- it
+changes only whether a moved scanner is noticed.  Nothing here executes a line
+of Rust; `scan()` below is a hand port, so a *defect* in the real scanner is
+still something this file cannot see.  What it can now see is that the real
+scanner has moved, which is the difference between "wrong answer" and "answer
+about the wrong question".
 
-That is not a hole to be plugged here, because it is already covered where it
-belongs: `shellquote.rs::self_test()` runs those rungs at boot, and the
-mutation above fails the rung at shellquote.rs:568.  The boot test is what
-grades the implementation.  This gate exists for the question the rungs
-*cannot* answer -- whether what they assert is what a real shell does, since a
-rung whose expectation was transcribed wrongly is confidently, permanently
-green.  Naming that split is the point: the file's own name implies it grades
-`shellquote.rs`, and for a long time its entire tether to that file was one
-regex for `DQ_ESCAPABLE`.
+Measured, not assumed, both before and after.  Replacing the `Ctx::Single`
+arm's `let structural = b == b'\''` with `let structural = false` -- a scanner
+in which a single-quoted string can never close -- used to leave this file
+printing `0 failure(s)`, exiting 0, and passing its own self-test.  As of the
+digest it refuses to run at all, naming the change as a rule inside an
+existing context.  Refusing is not grading: this file still cannot tell you
+that mutation is *wrong*, only that it is not what was ported.
+
+Telling you it is wrong is already covered where it belongs:
+`shellquote.rs::self_test()` runs those rungs at boot, and the mutation above
+fails the rung at shellquote.rs:568.  The boot test is what grades the
+implementation.  This gate exists for the question the rungs *cannot* answer
+-- whether what they assert is what a real shell does, since a rung whose
+expectation was transcribed wrongly is confidently, permanently green.
 
 So, concretely, this file answers four questions and no others:
 
-  1. does the Rust's escape alphabet still match the ported one
+  1. is the Rust scanner still the one ported here -- contexts, escape
+     alphabet, and the digest of all three ported regions
      (`assert_port_matches_rust`);
   2. is every rung of the three graded functions either checked here or
      explicitly excused (`assert_every_rung_is_accounted_for`) -- the check
@@ -52,6 +65,7 @@ So, concretely, this file answers four questions and no others:
      the port, which is weaker than bash and is labelled as such below.
 """
 import contextlib
+import hashlib
 import io
 import pathlib
 import re
@@ -65,9 +79,129 @@ DQ_ESCAPABLE = set(b'"\\$`\n')
 
 RUST = pathlib.Path(__file__).resolve().parent.parent / "kernel" / "src" / "shellquote.rs"
 
+# The quoting contexts `scan()` below models.  Kept as a set so the guard can
+# say WHICH context appeared rather than only that something changed.
+PORTED_CTX = {"Unquoted", "Single", "Double"}
 
-def assert_port_matches_rust(src: str | None = None):
-    """Refuse to run if the Rust's escape alphabet is not the one ported.
+# The three declarations in `shellquote.rs` that this file hand-ports.  Named
+# regions rather than the whole file: the rest of `shellquote.rs` is consumers
+# of the scanner (`find_bare`, `quote_word`, `self_test`) which this file
+# either ports separately or does not claim to model at all, and pinning them
+# would fire on edits that cannot affect a single result here.
+PORTED_REGIONS = (
+    "pub enum Ctx",
+    "const DQ_ESCAPABLE",
+    "impl Iterator for QuoteScan",
+)
+
+# sha256 of those three regions, comment-stripped and whitespace-collapsed.
+#
+# WHY A DIGEST AND NOT A THIRD HAND-PICKED TABLE.  Until 2026-09-12 the entire
+# tether between this file and `shellquote.rs` was the `DQ_ESCAPABLE` regex,
+# and lane A demonstrated what that buys: they gave the Rust scanner a fourth
+# context, `Ctx::DollarSingle`, so that `echo $'hi'` stopped printing `$hi`.
+# The change does not touch `DQ_ESCAPABLE`.  So the guard passed, the port kept
+# three contexts, and every `$'...'` case would have been graded against
+# semantics that no longer shipped -- `0 failure(s)` about the wrong scanner,
+# filed as `requests/a-b-shellquote-port-has-drifted-and-the-guard-cannot-
+# see-it.md`.  The alphabet had been serving as a proxy for "the scanner" and
+# quietly stopped being one; a proxy is exactly what a digest is not.
+#
+# The cost is honest and worth naming: an edit to a trailing comment inside
+# these regions fires this guard, because the stripper drops whole-line
+# comments only and does not parse Rust string literals to find the others.
+# Re-blessing is one command (`--print-digest`) and a re-read of `scan()`,
+# which is the re-read the drift above shows is needed anyway.
+PORTED_DIGEST = "c6e289003e50b572e592c6a6e36ef6c142d38aa7a4ca3891a8804e5f1ec1cf55"
+PORTED_DIGEST_READ_FROM = "kernel/src/shellquote.rs @ 3650a966c, 2026-09-12"
+
+# Char and string literals, removed before brace counting so that a `b'{'` in
+# the Rust cannot unbalance the region extractor.  Rust lifetimes (`'_`, `'a`)
+# look like unterminated char literals and therefore do not match, which is the
+# behaviour wanted -- `impl Iterator for QuoteScan<'_> {` must keep its brace.
+_RUST_LITERAL = re.compile(r"b?'(?:\\.|[^'\\])*'|b?\"(?:\\.|[^\"\\])*\"")
+
+
+def _normalise(lines: list[str]) -> str:
+    """Drop whole-line comments and attributes; collapse runs of whitespace."""
+    kept = []
+    for line in lines:
+        bare = line.strip()
+        if not bare or bare.startswith("//") or bare.startswith("#["):
+            continue
+        kept.append(" ".join(bare.split()))
+    return "\n".join(kept)
+
+
+def _region(src: str, header: str) -> list[str] | None:
+    """The declaration introduced by `header`, as a list of source lines.
+
+    Brace-delimited declarations run to their matching close brace; a `const`
+    runs to the first line whose scrubbed form ends in `;`.
+    """
+    lines = src.splitlines()
+    start = None
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith(header):
+            start = i
+            break
+    if start is None:
+        return None
+    scrubbed = _RUST_LITERAL.sub("_", lines[start])
+    if "{" not in scrubbed:
+        for j in range(start, len(lines)):
+            if _RUST_LITERAL.sub("_", lines[j]).rstrip().endswith(";"):
+                return lines[start : j + 1]
+        return None
+    depth = 0
+    for j in range(start, len(lines)):
+        text = _RUST_LITERAL.sub("_", lines[j])
+        depth += text.count("{") - text.count("}")
+        if depth == 0:
+            return lines[start : j + 1]
+    return None
+
+
+def ported_source(src: str) -> tuple[str, str | None]:
+    """The normalised text of every ported region, and the first one missing."""
+    chunks = []
+    for header in PORTED_REGIONS:
+        lines = _region(src, header)
+        if lines is None:
+            return "", header
+        chunks.append(_normalise(lines))
+    return "\n".join(chunks), None
+
+
+def ported_digest(src: str) -> str:
+    text, missing = ported_source(src)
+    if missing is not None:
+        return ""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _ctx_variants(src: str) -> set[str] | None:
+    lines = _region(src, "pub enum Ctx")
+    if lines is None:
+        return None
+    body = _normalise(lines)
+    inner = body[body.index("{") + 1 : body.rindex("}")]
+    return {v.strip() for v in inner.split(",") if v.strip()}
+
+
+def assert_port_matches_rust(src: str | None = None, expect: str | None = None):
+    """Refuse to run if the Rust scanner is not the one ported below.
+
+    Three layers, most specific first, because a digest mismatch says only
+    that something changed and a reader needs to know *what*:
+
+      1. the set of quoting contexts (`enum Ctx`) -- the drift that actually
+         happened, and the one whose message can name the missing context;
+      2. the escape alphabet (`DQ_ESCAPABLE`) -- the rule easiest to get
+         silently wrong, and the only thing this guard checked before;
+      3. the digest of all three ported regions -- complete where the first
+         two are proxies. A rule changed *inside* an existing context passes
+         both of the above and cannot pass this.
 
     `src` is injectable so the self-test can drive this against a fixture
     rather than against the real `shellquote.rs`. That is not a convenience:
@@ -85,6 +219,38 @@ def assert_port_matches_rust(src: str | None = None):
             src = RUST.read_text(encoding="utf-8")
         except OSError as e:
             raise SystemExit(f"cannot read {RUST}: {e}") from e
+    expect = PORTED_DIGEST if expect is None else expect
+
+    # --- 1. the contexts ----------------------------------------------------
+    theirs_ctx = _ctx_variants(src)
+    if theirs_ctx is None:
+        raise SystemExit(
+            "`pub enum Ctx` was renamed or reshaped in shellquote.rs.\n"
+            "  This checker's port can no longer be shown to match it, so its\n"
+            "  verdict would be about a scanner that is not the one shipping."
+        )
+    if theirs_ctx != PORTED_CTX:
+        gained = sorted(theirs_ctx - PORTED_CTX)
+        lost = sorted(PORTED_CTX - theirs_ctx)
+        detail = []
+        if gained:
+            detail.append(
+                "  shellquote.rs has quoting context(s) this file does not "
+                "model: " + ", ".join(gained) + "\n"
+                "    Any input reaching one of them is graded here against\n"
+                "    semantics that no longer ship, and reported as agreement."
+            )
+        if lost:
+            detail.append(
+                "  this file models context(s) shellquote.rs no longer has: "
+                + ", ".join(lost)
+            )
+        raise SystemExit(
+            "PORT HAS DRIFTED -- every result below would be about the wrong "
+            "scanner.\n" + "\n".join(detail)
+        )
+
+    # --- 2. the escape alphabet --------------------------------------------
     m = re.search(r"const DQ_ESCAPABLE: \[u8; \d+\] = \[([^\]]*)\];", src)
     if not m:
         raise SystemExit(
@@ -103,6 +269,29 @@ def assert_port_matches_rust(src: str | None = None):
             "scanner.\n"
             f"  shellquote.rs: {sorted(theirs)}\n"
             f"  this file    : {sorted(DQ_ESCAPABLE)}"
+        )
+
+    # --- 3. the whole of what is ported ------------------------------------
+    text, missing = ported_source(src)
+    if missing is not None:
+        raise SystemExit(
+            f"`{missing}` was renamed or reshaped in shellquote.rs.\n"
+            "  This checker's port can no longer be shown to match it, so its\n"
+            "  verdict would be about a scanner that is not the one shipping."
+        )
+    got = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    if got != expect:
+        raise SystemExit(
+            "PORT HAS DRIFTED -- every result below would be about the wrong "
+            "scanner.\n"
+            "  The contexts and the escape alphabet still match, so the change\n"
+            "  is a rule INSIDE one of them. Those are the changes the two\n"
+            "  checks above cannot see, and are why this third one exists.\n"
+            f"  ported regions: {', '.join(PORTED_REGIONS)}\n"
+            f"  shellquote.rs : {got}\n"
+            f"  recorded here : {expect}  (read from {PORTED_DIGEST_READ_FROM})\n"
+            "  Re-read `scan()` against the port, then re-bless with\n"
+            "    python scripts/check-shellquote-vs-bash.py --print-digest"
         )
 
 
@@ -729,21 +918,80 @@ def _selftest() -> int:
             rc = fn(*a)
         return rc, buf.getvalue()
 
-    # --- the port-drift guard, in both directions. ------------------------
-    same = "const DQ_ESCAPABLE: [u8; 5] = [b'\"', b'\\\\', b'$', b'`', b'\\n'];"
-    try:
-        assert_port_matches_rust(same)
-    except SystemExit as exc:
-        check(f"a matching Rust table passes ({exc})", False)
-    else:
-        check("a matching Rust table passes", True)
+    # --- the port-drift guard, in every direction it can go wrong. --------
+    #
+    # Driven entirely through fixtures this file carries, never against the
+    # real `shellquote.rs` -- see `assert_port_matches_rust`'s docstring for
+    # why a lane-B self-test must not read a lane-A file.
+    def fixture(ctx=None, alphabet=None, body=None, comment="// the scanner"):
+        variants = "Unquoted,\n    Single,\n    Double," if ctx is None else ctx
+        table = (
+            "const DQ_ESCAPABLE: [u8; 5] = [b'\"', b'\\\\', b'$', b'`', b'\\n'];"
+            if alphabet is None else alphabet
+        )
+        inner = "        self.i += 1;" if body is None else body
+        return (
+            "pub enum Ctx {\n"
+            f"    {variants}\n"
+            "}\n"
+            "\n"
+            f"{table}\n"
+            "\n"
+            f"    {comment}\n"
+            "impl Iterator for QuoteScan<'_> {\n"
+            "    fn next(&mut self) -> Option<Tok> {\n"
+            f"{inner}\n"
+            "    }\n"
+            "}\n"
+        )
 
-    # The drift this exists for: a rule changed in the Rust and not here.
-    # `\n` dropped from the alphabet is the realistic shape of it, because it
-    # is the member a reader is least likely to remember is there.
+    baseline = fixture()
+    blessed = ported_digest(baseline)
+    check("the fixture's three regions are found and digested",
+          len(blessed) == 64 and blessed != hashlib.sha256(b"").hexdigest())
+
+    try:
+        assert_port_matches_rust(baseline, expect=blessed)
+    except SystemExit as exc:
+        check(f"a matching Rust scanner passes ({exc})", False)
+    else:
+        check("a matching Rust scanner passes", True)
+
+    # 1. THE DRIFT THAT ACTUALLY HAPPENED, 2026-09-12: lane A added a fourth
+    #    quoting context (`Ctx::DollarSingle`, for `$'...'`) and nothing here
+    #    could see it, because the change does not touch `DQ_ESCAPABLE`.
+    try:
+        assert_port_matches_rust(
+            fixture(ctx="Unquoted,\n    Single,\n    Double,\n    DollarSingle,"),
+            expect=blessed,
+        )
+    except SystemExit as exc:
+        check("a context the port does not model is refused",
+              "PORT HAS DRIFTED" in str(exc))
+        check("...and the refusal names the context rather than only the fact",
+              "DollarSingle" in str(exc))
+    else:
+        check("a context the port does not model is refused", False)
+
+    # ...and the other direction, which is not the same failure: a port that
+    # models MORE than the Rust grades cases the Rust cannot reach. Worth
+    # refusing, but the message must not accuse the Rust of hiding something.
+    try:
+        assert_port_matches_rust(
+            fixture(ctx="Unquoted,\n    Single,"), expect=blessed)
+    except SystemExit as exc:
+        check("a context the Rust no longer has is refused too",
+              "PORT HAS DRIFTED" in str(exc) and "Double" in str(exc))
+    else:
+        check("a context the Rust no longer has is refused too", False)
+
+    # 2. The drift this file was already guarded against: a rule changed in
+    #    the Rust and not here. `\n` dropped from the alphabet is the
+    #    realistic shape of it, because it is the member a reader is least
+    #    likely to remember is there.
     drifted = "const DQ_ESCAPABLE: [u8; 4] = [b'\"', b'\\\\', b'$', b'`'];"
     try:
-        assert_port_matches_rust(drifted)
+        assert_port_matches_rust(fixture(alphabet=drifted), expect=blessed)
     except SystemExit as exc:
         check("a drifted Rust table is refused", "PORT HAS DRIFTED" in str(exc))
         check("...and the refusal prints both sides, not just a verdict",
@@ -751,16 +999,66 @@ def _selftest() -> int:
     else:
         check("a drifted Rust table is refused", False)
 
-    # The other way the guard can go blind: the constant is renamed or
-    # reshaped, the regex matches nothing, and a silent `theirs == set()`
-    # would compare empty against empty if the code were written carelessly.
+    # 3. THE CASE NEITHER OF THE ABOVE CAN SEE, and the reason the digest
+    #    exists: a rule changed INSIDE an existing context. The contexts match,
+    #    the alphabet matches, and the scanner is a different scanner.
     try:
-        assert_port_matches_rust("const DQ_ESC: [u8; 0] = [];")
+        assert_port_matches_rust(
+            fixture(body="        self.i = self.i.wrapping_sub(1);"),
+            expect=blessed,
+        )
     except SystemExit as exc:
-        check("a renamed constant is refused rather than read as empty",
-              "renamed or reshaped" in str(exc))
+        check("a rule changed inside a context is refused",
+              "PORT HAS DRIFTED" in str(exc))
+        check("...and the refusal says it is an inside-a-context change",
+              "INSIDE one of them" in str(exc))
     else:
-        check("a renamed constant is refused rather than read as empty", False)
+        check("a rule changed inside a context is refused", False)
+
+    # ...but NOT on a comment or an attribute, which is what the normaliser is
+    # for. Without this the guard is noise, and a noisy guard gets bypassed --
+    # which costs more than the drift it was added to catch.
+    try:
+        assert_port_matches_rust(
+            fixture(comment="// rewritten comment, same scanner"),
+            expect=blessed,
+        )
+    except SystemExit as exc:
+        check(f"a comment-only change does NOT fire the guard ({exc})", False)
+    else:
+        check("a comment-only change does NOT fire the guard", True)
+
+    # 4. The ways the guard can go blind: a declaration renamed, so the
+    #    extractor matches nothing and a carelessly-written check would
+    #    compare empty against empty and pass.
+    for renamed, label in (
+        ("pub enum QuoteCtx", "enum Ctx"),
+        ("const DQ_ESC", "DQ_ESCAPABLE"),
+        ("impl Iterator for Scanner", "the scanner impl"),
+    ):
+        broken = fixture()
+        broken = broken.replace(
+            {"pub enum QuoteCtx": "pub enum Ctx",
+             "const DQ_ESC": "const DQ_ESCAPABLE",
+             "impl Iterator for Scanner": "impl Iterator for QuoteScan"}[renamed],
+            renamed, 1)
+        try:
+            assert_port_matches_rust(broken, expect=blessed)
+        except SystemExit as exc:
+            check(f"a renamed {label} is refused rather than read as empty",
+                  "renamed or reshaped" in str(exc))
+        else:
+            check(f"a renamed {label} is refused rather than read as empty",
+                  False)
+
+    # 5. And the extractor itself: a `{` inside a byte literal must not
+    #    unbalance the region, or the impl would end early and the digest
+    #    would be taken over a fragment -- green having inspected a third of
+    #    what it names.
+    braced = fixture(body="        if b == b'{' { self.i += 1; }")
+    lines = _region(braced, "impl Iterator for QuoteScan")
+    check("a `{` inside a byte literal does not truncate the region",
+          lines is not None and lines[-1].strip() == "}" and len(lines) == 5)
 
     # --- the bash-free tables, on the real data. --------------------------
     rc, _ = quietly(score_delim, DELIM)
@@ -1001,7 +1299,33 @@ def main():
     return 1 if fails else 0
 
 
+def _print_digest() -> int:
+    """Re-bless `PORTED_DIGEST` -- after re-reading `scan()`, not instead of it.
+
+    Deliberately prints rather than rewrites this file. A guard that can
+    silence itself in one command is a guard that gets silenced; the digest has
+    to be pasted in by whoever has just looked at what changed.
+    """
+    try:
+        src = RUST.read_text(encoding="utf-8")
+    except OSError as e:
+        raise SystemExit(f"cannot read {RUST}: {e}") from e
+    text, missing = ported_source(src)
+    if missing is not None:
+        raise SystemExit(f"`{missing}` is not in {RUST}; nothing to digest.")
+    variants = _ctx_variants(src) or set()
+    print(f"contexts in shellquote.rs : {', '.join(sorted(variants))}")
+    print(f"contexts modelled here    : {', '.join(sorted(PORTED_CTX))}")
+    print(f"normalised ported source  : {len(text)} bytes over "
+          f"{len(PORTED_REGIONS)} region(s)")
+    print()
+    print('PORTED_DIGEST = "%s"' % hashlib.sha256(text.encode("utf-8")).hexdigest())
+    return 0
+
+
 if __name__ == "__main__":
+    if "--print-digest" in sys.argv[1:]:
+        sys.exit(_print_digest())
     if "--self-test" in sys.argv[1:] or "--selftest" in sys.argv[1:]:
         sys.exit(_selftest())
     sys.exit(main())

@@ -58,6 +58,15 @@ struct FilePatch {
     old_path: String,
     new_path: String,
     hunks: Vec<Hunk>,
+    /// The `---` and `+++` lines exactly as they appeared, timestamps and all.
+    ///
+    /// Kept because GNU echoes them back when it cannot find the target, and a
+    /// reconstruction would not match: the timestamps come from the patch file
+    /// rather than from the filesystem.
+    header_lines: Vec<String>,
+    /// 1-based input line of this file's first hunk header, which is the number
+    /// GNU names in `can't find file to patch at input line N`.
+    first_hunk_line: usize,
 }
 
 #[derive(Default)]
@@ -211,11 +220,12 @@ fn parse_patch(input: &str) -> Vec<FilePatch> {
             .is_some_and(|l| l.starts_with("+++ "));
         if line_i.starts_with("--- ") && next_starts_with_plus {
             let old_path = parse_file_path(line_i, "--- ");
-            let new_path = parse_file_path(
-                lines.get(i.saturating_add(1)).copied().unwrap_or(""),
-                "+++ ",
-            );
+            let plus_line = lines.get(i.saturating_add(1)).copied().unwrap_or("");
+            let new_path = parse_file_path(plus_line, "+++ ");
+            let header_lines = vec![line_i.to_string(), plus_line.to_string()];
             i = i.saturating_add(2);
+            // `i` now indexes the first hunk header; GNU counts from one.
+            let first_hunk_line = i.saturating_add(1);
 
             let mut hunks: Vec<Hunk> = Vec::new();
 
@@ -272,6 +282,8 @@ fn parse_patch(input: &str) -> Vec<FilePatch> {
                 old_path,
                 new_path,
                 hunks,
+                header_lines,
+                first_hunk_line,
             });
         } else {
             i = i.saturating_add(1);
@@ -494,6 +506,104 @@ fn main() {
             None => raw_path.clone(),
         };
 
+        // Read the original file (or start empty for new files).
+        let original = if fp.old_path == "/dev/null" && !opts.reverse {
+            String::new()
+        } else {
+            match fs::read_to_string(&file_path) {
+                Ok(s) => s,
+                Err(e) => {
+                    if fp.old_path == "/dev/null" {
+                        String::new()
+                    } else {
+                        // GNU's whole block, on STDOUT, measured:
+                        //
+                        //   can't find file to patch at input line 3
+                        //   Perhaps you used the wrong -p or --strip option?
+                        //   The text leading up to this was:
+                        //   --------------------------
+                        //   |--- a/base.txt	<stamp>
+                        //   |+++ new.txt	<stamp>
+                        //   --------------------------
+                        //   File to patch:
+                        //   Skip this patch? [y]
+                        //   Skipping patch.
+                        //   1 out of 1 hunk ignored
+                        //
+                        // and exit 1, with NOTHING on stderr. This build wrote
+                        // `can't open file X` to stderr and exited 1 with no
+                        // further detail, which tells a reader the file is
+                        // missing but not the thing they actually need -- that
+                        // `-p` is probably wrong.
+                        //
+                        // The two prompts are printed and not asked. GNU asks
+                        // them on a terminal; with stdin elsewhere it takes the
+                        // defaults, and every case in the harness runs that way.
+                        // Echoing them keeps the transcript identical without
+                        // pretending to have read an answer. `e` is unused here
+                        // for the same reason GNU does not print it: which errno
+                        // stopped the open is not what went wrong.
+                        let _ = e;
+                        let mut out = Stream::stdout();
+                        let mut block = String::new();
+                        block.push_str(&format!(
+                            "can't find file to patch at input line {}
+",
+                            fp.first_hunk_line
+                        ));
+                        block.push_str(
+                            "Perhaps you used the wrong -p or --strip option?
+",
+                        );
+                        block.push_str(
+                            "The text leading up to this was:
+",
+                        );
+                        block.push_str(
+                            "--------------------------
+",
+                        );
+                        for h in &fp.header_lines {
+                            block.push_str(&format!(
+                                "|{h}
+"
+                            ));
+                        }
+                        block.push_str(
+                            "--------------------------
+",
+                        );
+                        block.push_str(
+                            "File to patch: 
+",
+                        );
+                        block.push_str(
+                            "Skip this patch? [y] 
+",
+                        );
+                        block.push_str(
+                            "Skipping patch.
+",
+                        );
+                        let n = fp.hunks.len();
+                        let plural = if n == 1 { "hunk" } else { "hunks" };
+                        block.push_str(&format!(
+                            "{n} out of {n} {plural} ignored
+"
+                        ));
+                        let _ = out.write_all(block.as_bytes());
+                        any_failed = true;
+                        continue;
+                    }
+                }
+            }
+        };
+
+        // ANNOUNCED ONLY AFTER THE TARGET IS FOUND. GNU prints nothing when it
+        // cannot find the file to patch -- it goes straight to `can't find file
+        // to patch at input line N`. Emitting the progress line first left us
+        // one line ahead of GNU on every missing-target case, which is the
+        // whole of what still differed after the diagnostic above was written.
         // PROGRESS GOES TO STDOUT, not stderr. Measured against GNU patch
         // 2.7.6 rather than assumed, both ways round:
         //
@@ -514,24 +624,6 @@ fn main() {
             let mut out = Stream::stdout();
             let _ = out.write_all(line.as_bytes());
         }
-
-        // Read the original file (or start empty for new files).
-        let original = if fp.old_path == "/dev/null" && !opts.reverse {
-            String::new()
-        } else {
-            match fs::read_to_string(&file_path) {
-                Ok(s) => s,
-                Err(e) => {
-                    if fp.old_path == "/dev/null" {
-                        String::new()
-                    } else {
-                        diag!("patch: can't open file {file_path}: {e}");
-                        any_failed = true;
-                        continue;
-                    }
-                }
-            }
-        };
 
         let mut lines: Vec<String> = original.lines().map(|l| l.to_string()).collect();
         let mut offset: i64 = 0;

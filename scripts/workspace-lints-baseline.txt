@@ -90,7 +90,6 @@ userspace/nproc
 userspace/nslookup
 userspace/ntpd
 userspace/passwd
-userspace/patch
 userspace/pgrep
 userspace/ping
 userspace/pkg

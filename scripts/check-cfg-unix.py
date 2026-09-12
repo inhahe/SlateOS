@@ -52,6 +52,33 @@ Usage
 
 Exit codes: 0 pass (or skipped for want of the target), 1 a compile failure,
 2 the checker could not run.
+
+WHAT THIS IS NOT: the boot test's cfg(unix) check.
+
+They shared the name `cfg-unix` until 2026-09-12 and check different populations, which
+caused a false inference: a `cfg-unix` pass in a pre-push `ran:` list was read as meaning
+the boot test's check had been pre-run. It had not.
+
+    this script        the crates that CONTAIN a `#[cfg(unix)]` block -- 62, derived by
+                       scanning, see `crates_with_unix_code` -- and only their DEFAULT
+                       targets. `cargo check --target <unix> -p c1 -p c2 ...`
+
+    boot-test.sh       does not call this script for its main check. It runs `cargo`
+                       directly with `--all-targets --exclude kernel`: the whole
+                       workspace on a unix target, test targets included. So it also
+                       catches ordinary clippy denials in test code that no
+                       Windows-target build compiles, which is strictly more than a
+                       cfg(unix) check.
+
+A pass here therefore does not predict a pass there. The concrete case: a denial in the
+test target of `apps/launcher`, a crate with no `#[cfg(unix)]` code at all, so it is not
+in this script's crate list and never compiled here -- and `--all-targets` would not help,
+because the crate is absent from the list rather than present with the wrong targets.
+
+This is also the correction to a claim on record. Lane B asked for test-module coverage in
+`requests/b-a-the-cfg-unix-gate-skips-every-test-module.md`; lane A answered "taken in
+full, both call sites at once". True of boot-test.sh, false here: this script never gained
+`--all-targets` and does not accept it.
 """
 
 from __future__ import annotations

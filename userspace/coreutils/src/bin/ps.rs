@@ -26,6 +26,8 @@ struct PsArgs {
     /// the same as an empty list -- an empty selection would match nothing and
     /// `-p` with no valid PID is a syntax error before it gets here.
     select_pids: Option<Vec<u64>>,
+    /// `-u`: show only processes with these effective UIDs.
+    select_uids: Option<Vec<u32>>,
 }
 
 /// Parse ps's argv.  BSD-style and POSIX-style flags are accepted via
@@ -99,6 +101,17 @@ fn parse_args(args: &[String]) -> Result<Request, String> {
                 match c {
                     'e' | 'A' => out.all_procs = true,
                     'f' => out.full_format = true,
+                    'u' => {
+                        let glued: String = rest.by_ref().collect();
+                        let list = if glued.is_empty() {
+                            let next = args.get(i).cloned().unwrap_or_default();
+                            i = i.saturating_add(1);
+                            next
+                        } else {
+                            glued
+                        };
+                        out.select_uids = Some(parse_user_list(&list)?);
+                    }
                     'p' => {
                         // `-p` takes a list, and it may be glued on (`-p1`) or
                         // be the next argument (`-p 1`). procps accepts both.
@@ -122,6 +135,59 @@ fn parse_args(args: &[String]) -> Result<Request, String> {
         // covered by `parse_bare_args_ignored`.
     }
     Ok(Request::List(out))
+}
+
+/// `-u`'s argument: user names or numeric UIDs, separated by commas or spaces.
+///
+/// # Errors
+///
+/// A name with no passwd entry. Numbers are NOT checked for existence, which
+/// is measured rather than assumed: `ps -u 99999` does not complain, it
+/// selects nothing and exits 1 through the no-match path. So a number is a
+/// UID, and only a name can fail to resolve.
+fn parse_user_list(list: &str) -> Result<Vec<u32>, String> {
+    // Only a NAME needs the passwd file, so `-u 0` must not open it. The
+    // pre-scan is what keeps that true while still handing the database in as
+    // a plain parameter -- the first attempt passed a closure that returned
+    // `&Db` on demand, which the borrow checker refuses outright because the
+    // reference escapes the `FnMut` body.
+    let db = list
+        .split([',', ' '])
+        .filter(|f| !f.is_empty())
+        .any(|f| f.parse::<u32>().is_err())
+        .then(pwdb::Db::load);
+    parse_user_list_with(list, db.as_ref())
+}
+
+/// The half of `parse_user_list` that does not read the filesystem.
+///
+/// Split out because the obvious unit test -- `-u root` resolves to 0 -- is
+/// not a test of this code. It passes under WSL and FAILED on the Windows
+/// host, where `Db::load` finds no `/etc/passwd`, so every name is "does not
+/// exist". The assertion was about the machine wearing the shape of one about
+/// the parser, and it would have passed in every environment where the answer
+/// did not matter.
+///
+/// `None` means the caller decided no name was present and did not open the
+/// passwd file; a name reaching here with `None` in hand is "does not exist",
+/// which is the same answer an empty database would give.
+fn parse_user_list_with(list: &str, db: Option<&pwdb::Db>) -> Result<Vec<u32>, String> {
+    let missing = || "error: user name does not exist".to_string();
+    let mut out = Vec::new();
+    for field in list.split([',', ' ']).filter(|f| !f.is_empty()) {
+        if let Ok(uid) = field.parse::<u32>() {
+            out.push(uid);
+            continue;
+        }
+        let user = db
+            .and_then(|d| d.user_by_name(field.as_bytes()))
+            .ok_or_else(missing)?;
+        out.push(user.uid);
+    }
+    if out.is_empty() {
+        return Err(missing());
+    }
+    Ok(out)
 }
 
 /// `-p`'s argument: PIDs separated by commas or spaces.
@@ -169,6 +235,10 @@ For more details see ps(1).
 struct ProcInfo {
     comm: String,
     ppid: u32,
+    /// The raw effective UID. It left this struct when the `STAT` column did
+    /// and came back for `-u`, which selects on the number rather than the
+    /// name -- `ps -u 0` and `ps -u root` must pick the same processes.
+    uid: u32,
     /// The UID resolved through `/etc/passwd`, or the number if it does not
     /// resolve. procps prints `root`, not `0`.
     ///
@@ -281,6 +351,15 @@ fn run_main() -> ExitCode {
             // normal case for anything walking /proc, not a failure.
             continue;
         };
+        // `-u` filters on a value only the read can supply, so unlike `-p` it
+        // cannot skip the read first.
+        if parsed
+            .select_uids
+            .as_ref()
+            .is_some_and(|w| !w.contains(&info.uid))
+        {
+            continue;
+        }
         let pid32 = u32::try_from(pid).unwrap_or(0);
 
         if parsed.full_format {
@@ -310,7 +389,7 @@ fn run_main() -> ExitCode {
     // header. Measured. Without `-p` an empty table is not an error -- there
     // is always at least this process -- so the status only turns on a
     // selection that matched nothing.
-    if parsed.select_pids.is_some() && !matched {
+    if (parsed.select_pids.is_some() || parsed.select_uids.is_some()) && !matched {
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
@@ -365,6 +444,7 @@ fn read_one(
     Ok(Some(ProcInfo {
         comm,
         ppid: u32::try_from(stat.ppid).unwrap_or(0),
+        uid,
         user: ctx.user_name(uid),
         cpu_pct: cpu_percent(
             stat.utime_ticks,
@@ -492,6 +572,8 @@ fn format_cpu_time(utime: u64, stime: u64) -> String {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
+    /// A newline, built rather than escaped.
+    const NL: &str = "\n";
     use super::*;
 
     fn s(items: &[&str]) -> Vec<String> {
@@ -598,6 +680,60 @@ mod tests {
             let err = parse_args(&s(&["-p", bad])).expect_err(bad);
             assert_eq!(err, "error: process ID list syntax error", "for {bad:?}");
         }
+    }
+
+    /// `-u` takes names OR numbers, and only a name can fail to resolve.
+    ///
+    /// Measured: `ps -u 99999` does not complain about the uid, it selects
+    /// nothing and exits 1 through the no-match path. So a number is taken as
+    /// a UID without being checked to exist, and rejecting one would refuse a
+    /// command line procps accepts.
+    #[test]
+    fn dash_u_takes_names_or_numbers() {
+        assert_eq!(listed(&["-u", "0"]).select_uids, Some(vec![0]));
+        assert_eq!(listed(&["-u0"]).select_uids, Some(vec![0]));
+        // A uid that exists as a number but matches nothing is NOT an error.
+        assert_eq!(listed(&["-u", "99999"]).select_uids, Some(vec![99999]));
+    }
+
+    /// Name resolution, against a passwd file built here rather than the
+    /// host's.
+    ///
+    /// This test began as `-u root` through `parse_args`, which passed under
+    /// WSL and failed on the Windows host for want of `/etc/passwd`. An
+    /// assertion about the machine is not an assertion about the parser, and
+    /// the giveaway is that it would have held in every environment where the
+    /// answer did not matter.
+    #[test]
+    fn dash_u_resolves_names_through_the_passwd_database() {
+        let passwd =
+            format!("root:x:0:0:root:/root:/bin/sh{NL}bin:x:1:1:bin:/bin:/sbin/nologin{NL}");
+        let db = pwdb::Db::from_bytes(passwd.as_bytes(), b"");
+        let get = Some(&db);
+        assert_eq!(parse_user_list_with("root", get), Ok(vec![0]));
+        assert_eq!(parse_user_list_with("bin", get), Ok(vec![1]));
+        // Name and number must select identically.
+        assert_eq!(
+            parse_user_list_with("root", get),
+            parse_user_list_with("0", get)
+        );
+        assert_eq!(parse_user_list_with("root,bin", get), Ok(vec![0, 1]));
+        // A number is never looked up, so it resolves with no passwd entry.
+        assert_eq!(parse_user_list_with("99999", get), Ok(vec![99999]));
+        for bad in ["nosuchuser", "", "root,nosuchuser"] {
+            assert_eq!(
+                parse_user_list_with(bad, get),
+                Err("error: user name does not exist".to_string()),
+                "for {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn dash_u_rejects_a_name_that_does_not_resolve() {
+        let err = parse_args(&s(&["-u", "nosuchuser"])).expect_err("no such user");
+        assert_eq!(err, "error: user name does not exist");
+        assert!(parse_args(&s(&["-u", ""])).is_err());
     }
 
     #[test]

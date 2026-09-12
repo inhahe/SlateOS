@@ -233,8 +233,21 @@ xfail_case "-l (long format) is not implemented here" -efl
 # porting the standalone's `-u` would import the conflation.
 #
 # `ps -u` with no list exits 1.
-xfail_case "-u (select by effective user) is not implemented here" -u
-xfail_case "-u (select by effective user) is not implemented here" -u root
+# Bare `-u` with no list is NOT the error it looks like. procps prints the
+# BSD user-oriented header -- `USER PID %CPU %MEM VSZ RSS TTY STAT START
+# TIME COMMAND` -- on STDOUT with an empty stderr and exits 1. So it falls
+# back to the `ps u` format with nothing selected, and matching it means
+# implementing that format, not fixing this option. We print an error and
+# the usage instead.
+#
+# Declared after measuring, not from the exit status: both sides exit 1 and
+# a harness comparing only the status would have called this agreement.
+xfail_case "bare -u needs the BSD user-oriented format, which is not implemented" -u
+run_case -u root
+run_case -u 0
+run_case -u root,daemon
+run_case -u nosuchuser
+run_case -u 99999
 run_case -p 1
 xfail_case "-o (output column selection) is not implemented here" -o pid
 xfail_case "-o (output column selection) is not implemented here" -o pid,comm

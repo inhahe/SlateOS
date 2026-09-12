@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS system log daemon — JSON-lines log aggregation and query"
 [dependencies]
+# One journal-record escaper, shared with every other writer. A log message
+# is attacker-shaped text: unescaped, a quote ends the field and a newline
+# ends the record, so two copies drifting apart is a forged-entry bug rather
+# than a formatting one. No dependencies, `&str` in and `String` out, so
+# §768 exempt.
+journalrec = { path = "../journalrec" }
 # It interpolates `level` into "warning: unknown level {}, using 'info'".
 # That value is an argv word, so it is whatever the user typed and not text
 # this program chose.

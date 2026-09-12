@@ -114,25 +114,6 @@ fn is_leap_year(y: i64) -> bool {
 // JSON helpers (minimal, no dependency)
 // ============================================================================
 
-/// Escape a string for JSON output.
-fn json_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 8);
-    for ch in s.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if c < '\x20' => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
-            }
-            c => out.push(c),
-        }
-    }
-    out
-}
-
 /// A structured log entry.
 #[derive(Debug, Clone)]
 struct LogEntry {
@@ -154,14 +135,21 @@ impl LogEntry {
         parts.push(format!("\"ts\":{}", self.timestamp));
         parts.push(format!(
             "\"time\":\"{}\"",
-            json_escape(&format_timestamp(self.timestamp))
+            journalrec::escape(&format_timestamp(self.timestamp))
         ));
-        parts.push(format!("\"level\":\"{}\"", json_escape(&self.level)));
-        parts.push(format!("\"service\":\"{}\"", json_escape(&self.service)));
-        parts.push(format!("\"msg\":\"{}\"", json_escape(&self.message)));
+        parts.push(format!("\"level\":\"{}\"", journalrec::escape(&self.level)));
+        parts.push(format!(
+            "\"service\":\"{}\"",
+            journalrec::escape(&self.service)
+        ));
+        parts.push(format!("\"msg\":\"{}\"", journalrec::escape(&self.message)));
 
         for (k, v) in &self.extra {
-            parts.push(format!("\"{}\":\"{}\"", json_escape(k), json_escape(v)));
+            parts.push(format!(
+                "\"{}\":\"{}\"",
+                journalrec::escape(k),
+                journalrec::escape(v)
+            ));
         }
 
         format!("{{{}}}", parts.join(","))

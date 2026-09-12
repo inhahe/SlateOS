@@ -216,24 +216,27 @@ xfail_case "-l (long format) is not implemented here" -l
 xfail_case "-l (long format) is not implemented here" -el
 xfail_case "-l (long format) is not implemented here" -efl
 xfail_case "-u (user-oriented format) is not implemented here" -u
-xfail_case "-p (select by PID) is not implemented here" -p 1
+run_case -p 1
 xfail_case "-o (output column selection) is not implemented here" -o pid
 xfail_case "-o (output column selection) is not implemented here" -o pid,comm
 xfail_case "-o (output column selection) is not implemented here" -o comm=
-xfail_case "--no-header is not implemented here" --no-header
-xfail_case "--no-header is not implemented here" -e --no-header
+run_case --no-header
+run_case -e --no-header
 
 # --- refusals ----------------------------------------------------------------
 run_case --nosuchoption
 run_case -Q
-# These three refuse on both sides but for different reasons, and the reason
-# is the message. We reject `-o` and `-p` as unimplemented options; procps
-# accepts them and then rejects the ARGUMENT. Same exit status, different
-# complaint -- which is honest to record rather than to paper over, because
-# the day `-o` is implemented these must start comparing the argument error.
+# `-o` still refuses on both sides for DIFFERENT reasons: we reject the option,
+# procps accepts it and rejects the column name. Same exit status, different
+# complaint, and it stays declared until `-o` exists.
+#
+# `-p` used to be in this group and has left it. That is what these per-option
+# reasons are for: implementing `-p` turned its three cases into real
+# comparisons instead of leaving a collective excuse covering an option that
+# had since been written.
 xfail_case "we reject -o itself; procps rejects the column name" -o nosuchcolumn
-xfail_case "we reject -p itself; procps rejects the PID" -p notanumber
-xfail_case "we reject -p itself; procps reports no matching process" -p 999999
+run_case -p notanumber
+run_case -p 999999
 
 # `-X` and `-h` are NOT unknown options, and putting them in the list above was
 # my error rather than a finding. Both are real procps options this build does

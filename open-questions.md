@@ -1551,6 +1551,71 @@ needs in the meantime, which is faster than a request queue.
 *Raised by lane A 2026-09-12 after lane B flagged the mismatch. Lane A is not a neutral
 party here and offers no recommendation between the first two options.*
 
+## B-Q13 — [B] Two trailing questions the operator asked in their answers, which nobody had picked up — Status: OPEN
+
+**In short:** the operator's answers arrive in
+`open-questions-answers.txt` in the integration tree — untracked, on no branch,
+named by no script. Lane A found it by accident in `git status` five days late.
+Two of the answers end with a question back to us, and neither had been recorded
+anywhere. They are reproduced verbatim below so the operator can see we read
+them rather than paraphrased them.
+
+### 1. Randomisation shapes
+
+> *(answering the 2026-09-05 question about the test machine's random numbers)*
+> "A. By the way, can and should we provide sophisticated randomization options
+> such as bell curve, etc.?"
+
+**Can:** yes, and cheaply. A normal (bell-curve) draw is a short transform of
+two uniform draws, and the same is true of the other common shapes —
+exponential, Poisson, a weighted pick. None needs kernel support beyond the
+uniform source that already exists; they are arithmetic on top of it.
+
+**Should — and this is the part worth the operator's judgement.** Where they go
+decides whether they are useful or a liability:
+
+| where | good for | bad for |
+|---|---|---|
+| a library every program can call | simulations, test data, jitter/backoff | nothing much |
+| the kernel's random syscall | — | **security.** A non-uniform source is the wrong thing for keys, nonces or ASLR, and putting it beside the uniform one invites picking the wrong one |
+
+**Recommendation:** a userspace library, deliberately *not* reachable through
+the same call as cryptographic randomness. The two have opposite requirements —
+one wants a named, reproducible-from-a-seed distribution, the other must never
+be reproducible — and a single API offering both is a footgun rather than a
+convenience.
+
+*What changes if never answered:* nothing breaks. No program in the tree wants
+a bell curve today; this is a capability question, not a defect.
+
+### 2. Is "I want the best thing regardless of effort" in SlateOS's CLAUDE.md?
+
+> *(answering B-Q7)* "...I generally want the best thing regardless of how much
+> more work it might take (and by the way, is this in Slate OS's claude.md? If
+> not, it should be)"
+
+**Checked, and the answer is "yes, but not in the file you probably mean."**
+
+* `E:\visual studio projects\CLAUDE.md` — **has it, in full**, as *"What I
+  Optimize For: The End Result, Not Time or Risk"*.
+* `E:\visual studio projects\os\CLAUDE.md` — **does not mention it at all.**
+
+The first file covers SlateOS: its own header says it lives at the drive root
+rather than in `os/` so that one copy serves all three lane accounts, because a
+user-level rule would otherwise need three copies kept in step by hand. So the
+rule **is in force**, and every lane reads it.
+
+**We have deliberately not copied it into `os/CLAUDE.md`**, and want the
+operator's ruling rather than guessing. Duplicating it would create exactly the
+drift the parent file was written to prevent — two statements of one rule, which
+is the shape this tree has spent a lot of effort removing elsewhere. The
+alternative, if the operator wants `os/CLAUDE.md` to stand alone, is a one-line
+pointer to the parent file rather than a second copy.
+
+*What changes if never answered:* nothing. The rule is already being followed;
+this is about where it is written down.
+
+
 # Resolved
 
 **The body above holds OPEN questions only.** When the operator answers one,

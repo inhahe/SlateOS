@@ -19,7 +19,9 @@
 
 use std::collections::BTreeMap;
 use std::env;
+use std::fs;
 use std::io::{self, BufRead, Write};
+use std::path::{Path, PathBuf};
 use std::process;
 
 // ============================================================================
@@ -1156,25 +1158,120 @@ fn run_cat_journal(out: &mut dyn Write) -> io::Result<i32> {
 // systemd-cgls
 // ============================================================================
 
+// ── cgroups, read rather than invented ─────────────────────────────
+
+/// The cgroup v2 mount point.
+///
+/// `systemd-cgls` shows the unified hierarchy. v1 controllers live in
+/// per-controller subdirectories of this same path and are not what this
+/// walks; on a v2 system there are none.
+const CGROUP_ROOT: &str = "/sys/fs/cgroup";
+
+/// A cgroup's child cgroups: its subdirectories, sorted.
+///
+/// Sorted because `read_dir` yields the filesystem's order, and a tree that
+/// reorders itself between runs cannot be diffed against an earlier one.
+fn cgroup_children(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut kids: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    kids.sort();
+    kids
+}
+
+/// The pids listed in a cgroup's `cgroup.procs`.
+///
+/// An interior cgroup usually has none of its own: v2 forbids processes in a
+/// node that has controller-enabled children.
+fn cgroup_procs(dir: &Path) -> Vec<u32> {
+    let Ok(text) = fs::read_to_string(dir.join("cgroup.procs")) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter_map(|l| l.trim().parse::<u32>().ok())
+        .collect()
+}
+
+/// How `systemd-cgls` labels a process: its command line, with the NULs that
+/// separate the arguments rendered as spaces.
+///
+/// Bytes, not text. A command line is whatever `execve` was handed and need
+/// not be UTF-8, and `from_utf8_lossy` here would put replacement characters
+/// into a listing someone reads to identify a process.
+fn pid_command(pid: u32) -> Vec<u8> {
+    if let Ok(raw) = fs::read(format!("/proc/{pid}/cmdline")) {
+        let parts: Vec<&[u8]> = raw.split(|b| *b == 0).filter(|p| !p.is_empty()).collect();
+        if !parts.is_empty() {
+            return parts.join(&b' ');
+        }
+    }
+    // A kernel thread has an empty cmdline; `comm` is what it has instead.
+    fs::read(format!("/proc/{pid}/comm"))
+        .map(|mut c| {
+            while c.last() == Some(&b'\n') {
+                c.pop();
+            }
+            c
+        })
+        .unwrap_or_default()
+}
+
+/// One cgroup's name as it should appear in the tree.
+///
+/// `to_str` rather than `to_string_lossy`: a name that is not UTF-8 is shown
+/// in its escaped debug form, which is unambiguous, instead of having its
+/// bytes replaced by U+FFFD.
+fn cgroup_label(dir: &Path) -> String {
+    let name = dir.file_name().unwrap_or(dir.as_os_str());
+    name.to_str()
+        .map_or_else(|| format!("{name:?}"), ToString::to_string)
+}
+
+/// Print `dir`'s children and processes, `systemd-cgls` style.
+fn print_cgroup_tree(out: &mut dyn Write, dir: &Path, prefix: &str) -> io::Result<()> {
+    let kids = cgroup_children(dir);
+    let procs = cgroup_procs(dir);
+    let total = kids.len().saturating_add(procs.len());
+    let mut seen = 0usize;
+
+    for pid in procs {
+        seen = seen.saturating_add(1);
+        let stem = if seen == total { "└─" } else { "├─" };
+        write!(out, "{prefix}{stem}{pid} ")?;
+        out.write_all(&pid_command(pid))?;
+        writeln!(out)?;
+    }
+    for kid in kids {
+        seen = seen.saturating_add(1);
+        let last = seen == total;
+        writeln!(
+            out,
+            "{prefix}{}{}",
+            if last { "└─" } else { "├─" },
+            cgroup_label(&kid)
+        )?;
+        let deeper = format!("{prefix}{}", if last { "  " } else { "│ " });
+        print_cgroup_tree(out, &kid, &deeper)?;
+    }
+    Ok(())
+}
+
 fn run_cgls(out: &mut dyn Write) -> io::Result<i32> {
+    // This used to print a fixed tree -- `init.scope`, `dbus.service`, pids
+    // 1 and 100 -- for every machine, having read nothing. The hierarchy is
+    // a directory tree, so there was never a reason to invent it.
+    let root = Path::new(CGROUP_ROOT);
+    if !root.is_dir() {
+        writeln!(out, "systemd-cgls: {CGROUP_ROOT} is not a directory")?;
+        return Ok(1);
+    }
     writeln!(out, "Control group /:")?;
-    writeln!(out, "├─init.scope")?;
-    writeln!(out, "│ └─1 /sbin/init")?;
-    writeln!(out, "├─system.slice")?;
-    writeln!(out, "│ ├─dbus.service")?;
-    writeln!(out, "│ │ └─100 /usr/bin/dbus")?;
-    writeln!(out, "│ ├─network.service")?;
-    writeln!(out, "│ │ └─200 /usr/bin/network")?;
-    writeln!(out, "│ ├─sshd.service")?;
-    writeln!(out, "│ │ └─300 /usr/bin/sshd")?;
-    writeln!(out, "│ ├─logd.service")?;
-    writeln!(out, "│ │ └─400 /usr/bin/logd")?;
-    writeln!(out, "│ └─cron.service")?;
-    writeln!(out, "│   └─500 /usr/bin/cron")?;
-    writeln!(out, "└─user.slice")?;
-    writeln!(out, "  └─user-1000.slice")?;
-    writeln!(out, "    └─session-1.scope")?;
-    writeln!(out, "      └─1000 bash")?;
+    print_cgroup_tree(out, root, "")?;
     Ok(0)
 }
 
@@ -2992,13 +3089,53 @@ mod tests {
 
     // --- systemd-cgls ---
 
+    /// The old test here asserted that the output contained `system.slice`
+    /// and `user.slice` on any machine, which was true only because those
+    /// names were hardcoded. A test that pins a fabrication in place is
+    /// worse than no test: it makes the lie look verified.
     #[test]
-    fn test_cgls() {
+    fn a_host_without_cgroups_is_told_so_rather_than_shown_a_tree() {
+        // No `/sys/fs/cgroup` on the machine this suite runs on.
         let (out, code) = capture(|buf| run_cgls(buf));
-        assert_eq!(code, 0);
-        assert!(out.contains("Control group /"));
-        assert!(out.contains("system.slice"));
-        assert!(out.contains("user.slice"));
+        assert_eq!(code, 1, "{out}");
+        assert!(out.contains("not a directory"), "{out}");
+        assert!(!out.contains("system.slice"), "{out}");
+    }
+
+    #[test]
+    fn the_tree_is_the_directories_that_are_actually_there() {
+        let scratch = scratchdir::ScratchDir::new("cgls-tree");
+        let root = scratch.path("root");
+        fs::create_dir_all(root.join("system.slice").join("dbus.service")).expect("fixture");
+        fs::write(
+            root.join("system.slice")
+                .join("dbus.service")
+                .join("cgroup.procs"),
+            "4242\n",
+        )
+        .expect("fixture");
+
+        let mut buf: Vec<u8> = Vec::new();
+        print_cgroup_tree(&mut buf, &root, "").expect("write");
+        let out = String::from_utf8(buf).expect("ascii fixture");
+
+        assert!(out.contains("system.slice"), "{out}");
+        assert!(out.contains("dbus.service"), "{out}");
+        assert!(out.contains("4242"), "{out}");
+        // The discriminating half: the old code printed `user.slice` for
+        // every machine, so a tree that does not contain one it was not
+        // given is the whole point.
+        assert!(!out.contains("user.slice"), "{out}");
+        assert!(!out.contains("init.scope"), "{out}");
+    }
+
+    #[test]
+    fn a_cgroup_with_no_procs_file_contributes_no_pids() {
+        let scratch = scratchdir::ScratchDir::new("cgls-empty");
+        let root = scratch.path("root");
+        fs::create_dir_all(root.join("lonely.slice")).expect("fixture");
+        assert!(cgroup_procs(&root.join("lonely.slice")).is_empty());
+        assert_eq!(cgroup_children(&root).len(), 1);
     }
 
     // --- systemd-cgtop ---

@@ -8,3 +8,8 @@ description = "SlateOS systemctl utility"
 # ours. Pure formatting over `quoting`, no I/O, so §768 exempt.
 usageerror = { path = "../usageerror" }
 procinfo = { path = "../../procinfo" }
+
+# A unique temp directory per test, for the cgroup tree fixture. The walker
+# takes a root precisely so it can be pointed at one.
+[dev-dependencies]
+scratchdir = { path = "../scratchdir" }

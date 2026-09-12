@@ -66923,6 +66923,68 @@ SlateOS write also reads back and hashes the old contents. The indexer belongs i
 caveat: it is a second component ext4 does not have. Adding it is part of this decision and
 not a separate task.
 
+## 932. A fact that matters gets two independent witnesses, or the source says it has one
+
+**Date:** 2026-09-12 · **Decided by:** Claude (autonomous) · **Lane:** A
+
+**In short:** when something important is true, arrange for two separate parts of the
+system to say so, derived different ways, and compare them. When that is not possible,
+write in the source that this fact has only one witness. A claim nothing can contradict
+is not verified — it is merely unchallenged, and those look identical from the outside.
+
+**Where this came from.** A single night's work across lanes A and B produced roughly a
+dozen real defects. Reviewing how each was actually caught, essentially none came from
+anyone examining one source more carefully. Every one came from **two producers of the
+same fact disagreeing**:
+
+| the fact | witness 1 | witness 2 | what the disagreement exposed |
+|---|---|---|---|
+| what `$'...'` means | our scanner | real bash | `echo $'hi'` printed `$hi` |
+| the ANSI-C `\c` rule | our decoder | real bash | the closing quote eaten, a word boundary lost |
+| which scanner ships | `shellquote.rs` | a Python port + digest | a port grading bash against semantics that had stopped shipping |
+| CRLF in the tree | `shell-crlf` (`.sh` only) | `check-eol` (all declared text) | 1 file reported, 247 present |
+| the machine's hostname | `fs::nameservice` | `/proc` and `/sys` | a third store nothing else read |
+| where the domain read fails | a ring-0 rung | a ring-3 fixture | the failure is not in the kernel's read path |
+| which exit codes exist | the fixture's legend | its `return`/`FAIL` sites | code 24 documented and produced by nothing |
+| which repository a checker reads | `cwd` | `GIT_DIR` | three ways to name one repo, silently agreeing until they did not |
+
+**The failures that hid all had one witness.** Three greps for an exit code that all asked
+*how is it named or returned* shared a population and missed the `FAIL(n)` macro carrying
+seventeen codes — one opinion in three costumes, and the repetition raised confidence
+without raising coverage. `shell-crlf` was the only opinion about CRLF until `check-eol`
+disagreed with it. `localhost`, `???` and `localdomain` are each *the store says one thing,
+the display says another*, with nothing comparing them.
+
+**The decision.** For any fact a gate or a doc asserts:
+
+1. **Prefer a second producer derived differently.** Not a second pattern over the same
+   text — a different *kind* of source. A doc against an implementation. Our output against
+   a reference implementation's. An internal reader against a ring-3 one. A generated
+   table against the thing that consumes it.
+2. **Reconcile them mechanically**, so the disagreement surfaces without a reader. This is
+   the advantage over "show your working": showing the command lets a reader spot the gap;
+   reconciling two enumerations catches it when nobody is looking.
+3. **When there is genuinely only one witness, say so in the source.** Name what would
+   have to be true for it to be wrong. The sentence that would have prevented three
+   successive layers of one bug tonight was *"in production the CWD, the ambient
+   repository and `ROOT` are the same, so nothing here distinguishes them."*
+
+**The alternative, and why it loses.** The obvious response to a missed defect is a more
+thorough single check — a better regex, a wider scan, more care. Every instance above
+defeats that: the misses were not careless, and several were made *while* their author was
+deliberately being rigorous. A single source cannot report the population it did not
+consider, because its output is a faithful answer to the question actually asked.
+Thoroughness improves the answer; only a second witness can question the question.
+
+**What this costs.** Two producers is more code and a reconciliation that can itself be
+wrong — a port that drifts from the thing it ports is a real hazard and bit us tonight,
+which is why the digest that pins it exists. The cost is real and is accepted: a drifted
+second witness fails loudly, while a missing one fails silently and indefinitely.
+
+**What it does not mean.** Not every fact needs two witnesses. Most do not matter enough,
+and a queue padded with ceremony trains people to skip it. This applies where a wrong
+answer is *invisible* — where the failure mode is a green report rather than an error.
+
 ## 758. `/proc` gets a crate of its own, and its readers return "not exported" and "could not read" as two different answers
 
 **Lane:** B

@@ -368,3 +368,42 @@ is now written down, which is the main harm — a target nobody can hit teaches 
 ignore targets. The benchmark-honesty half is being fixed regardless of the answer: a
 benchmark called `vfs_write_256` should state whether its number includes the history
 work, and that is not a policy question.
+
+## [A] Should the write benchmarks run with the file indexer on or off? — deferred 2026-09-11
+
+**Trigger to promote, or to just do it:** the versioning A/B landing in
+`bench/history.jsonl`. Until then, changing the indexer's state would throw away
+comparability with the 152 records already taken under the current one.
+
+**In short:** the system has a file indexer (the thing that makes "find files named
+X" fast). It is currently switched on during the performance measurements — but not
+on purpose. A self-test switches it on, never switches it off, and the measurements
+run afterwards. So every timed file write also pays to index the file, and whether it
+does depends on which self-test happened to run first.
+
+**The half that needs nobody's decision.** Inheriting this from test ordering is wrong
+however you answer the rest, and the fix is for the benchmark to set the state it wants
+explicitly. That is mine to do.
+
+**The half that is a real question.** Which state:
+
+* **Off** — *What changes:* the `vfs_write_*` numbers drop and become comparable with
+  the Linux ext4 figures `performance-targets.md` measures them against, since no
+  indexer runs there. They stop describing what a SlateOS machine actually does.
+* **On, deliberately** — *What changes:* the numbers stay where they are and start
+  being honest about including indexing; the ext4 comparison needs the caveat the
+  read/write row already carries for auto-versioning.
+* **Both, as separate series** — *What changes:* two numbers per write size instead of
+  one, and the difference is itself the indexing cost. More scorecard, and the budgets
+  have to say which one they bind.
+
+**Why it cannot be settled before the A/B:** whichever is chosen, the change steps every
+`vfs_write_*` series at one commit. The history ratchets would read that step as a
+regression, and the A/B it would interfere with is the measurement that motivated looking
+at the write path in the first place. Measure, then change.
+
+**If it is never answered:** the numbers stay as they are and keep quietly including
+indexing. The concrete harm is small and specific: the ext4 comparison is wrong by the
+cost of an index insertion plus a path resolution, on top of being wrong by the cost of
+the version record — two unlike-for-unlike errors stacked in the same row, one of which
+is already annotated there.

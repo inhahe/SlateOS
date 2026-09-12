@@ -4,3 +4,15 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS flock utility"
 [dependencies]
+# getopt's usage diagnostics, spelled once. The wording is not ours -- it is
+# what `getopt_long` prints and what both GNU coreutils and util-linux repeat
+# verbatim -- so every program here has to render it identically. Pure
+# formatting over `quoting`, no I/O, so §768 exempt.
+usageerror = { path = "../usageerror" }
+# One rendering of a file name inside a diagnostic. `lockfile -mu` reports a
+# removal it could not perform, and a lock file's name is caller-chosen -- a
+# path may contain a newline, which printed raw lets whoever picked the name
+# forge lines on this program's own error stream. See design-decisions.md
+# §370. Safe under §768: `quoting` has no dependencies and its API takes
+# bytes, so it is a pure formatter, not a second libc.
+quoting = { path = "../quoting" }

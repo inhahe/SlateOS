@@ -37,6 +37,34 @@ fn detect_mode(argv0: &str) -> Mode {
 
 // ── nproc ──────────────────────────────────────────────────────────
 
+// ── Refusing a command line ────────────────────────────────────────
+
+/// The name this program was invoked as, derived exactly as `main` derives
+/// the prefix it puts on a diagnostic, so both lines of a two-line refusal
+/// name the same program.
+fn prog_name() -> String {
+    let argv0 = env::args().next().unwrap_or_else(|| "nproc".to_string());
+    let base = argv0.rsplit(['/', '\\']).next().unwrap_or(&argv0);
+    // The host build is `nproc.exe`; GNU prints `nproc`, and `detect_mode`
+    // already ignores the suffix when it dispatches on the same name.
+    base.strip_suffix(".exe").unwrap_or(base).to_string()
+}
+
+/// GNU's refusal for an option the program does not have.
+///
+/// The wording, and the rule that a short cluster is named one letter at a
+/// time, come from `usageerror` -- they are getopt's, they must be identical
+/// in every program here, and two crates had each re-derived them. The
+/// pointer line names the program because `main` prefixes only the first.
+fn unknown_option(name: &str, arg: &str) -> String {
+    usageerror::with_help_pointer(name, &usageerror::unknown_option(arg.as_bytes()))
+}
+
+/// GNU's refusal for an operand a program does not take.
+fn extra_operand(name: &str, arg: &str) -> String {
+    usageerror::with_help_pointer(name, &usageerror::extra_operand(arg.as_bytes()))
+}
+
 fn run_nproc() -> Result<(), String> {
     let argv: Vec<String> = env::args().collect();
     let mut all = false;
@@ -69,7 +97,13 @@ fn run_nproc() -> Result<(), String> {
                     .parse::<u32>()
                     .map_err(|_| format!("invalid number: {}", quoteaf_os(&argv[i])))?;
             }
-            _ => {}
+            // `nproc --zzq` used to print the CPU count and exit 0: the
+            // catch-all skipped anything it did not recognise. GNU takes no
+            // operands here at all, so both shapes are errors.
+            other if other.starts_with('-') && other.len() > 1 => {
+                return Err(unknown_option(&prog_name(), other));
+            }
+            other => return Err(extra_operand(&prog_name(), other)),
         }
         i += 1;
     }
@@ -160,6 +194,17 @@ fn run_arch() -> Result<(), String> {
         process::exit(0);
     }
 
+    // Anything else is an error: `arch` has no options and no operands, so
+    // it used to print the architecture whatever it was handed.
+    if let Some(arg) = argv.get(1) {
+        let name = prog_name();
+        return Err(if arg.starts_with('-') && arg.len() > 1 {
+            unknown_option(&name, arg)
+        } else {
+            extra_operand(&name, arg)
+        });
+    }
+
     // On our OS, always x86_64
     // Could read from uname data or /proc/cpuinfo
     let arch = get_arch();
@@ -211,6 +256,13 @@ fn run_pathchk() -> Result<(), String> {
                     i += 1;
                 }
                 break;
+            }
+            // An unknown option used to become a *path to check*, so
+            // `pathchk --zzq` validated a name of that spelling and exited
+            // 0. A path that really starts with a dash is still reachable,
+            // through the `--` arm above.
+            other if other.starts_with('-') && other.len() > 1 => {
+                return Err(unknown_option(&prog_name(), other));
             }
             _ => paths.push(argv[i].clone()),
         }
@@ -302,16 +354,20 @@ fn check_path(path: &str, portability: bool, posix_check: bool) -> Result<(), St
 
 fn run_users() -> Result<(), String> {
     let argv: Vec<String> = env::args().collect();
-    let utmp_file = if argv.len() > 1 && !argv[1].starts_with('-') {
-        argv[1].as_str()
-    } else {
-        if argv.len() > 1 && (argv[1] == "-h" || argv[1] == "--help") {
+    if let Some(arg) = argv.get(1) {
+        if arg == "-h" || arg == "--help" {
             eprintln!("Usage: users [UTMP_FILE]");
             eprintln!("Print the user names of users currently logged in.");
             process::exit(0);
         }
-        "/var/log/wtmp"
-    };
+        // A dashed word used to be silently dropped and the default file
+        // read instead, so `users --zzq` reported the logged-in users and
+        // exited 0. The single operand this does take is a utmp file.
+        if arg.starts_with('-') && arg.len() > 1 {
+            return Err(unknown_option(&prog_name(), arg));
+        }
+    }
+    let utmp_file = argv.get(1).map_or("/var/log/wtmp", String::as_str);
 
     // Read utmp/wtmp records (384 bytes each) and extract current users
     let mut users: Vec<String> = Vec::new();
@@ -372,9 +428,7 @@ fn run() -> Result<(), String> {
 
 fn main() {
     if let Err(e) = run() {
-        let prog = env::args().next().unwrap_or_else(|| "nproc".to_string());
-        let name = prog.rsplit(['/', '\\']).next().unwrap_or(&prog);
-        eprintln!("{name}: {e}");
+        eprintln!("{}: {e}", prog_name());
         process::exit(1);
     }
 }
@@ -386,6 +440,48 @@ mod tests {
     use super::*;
 
     // ── Personality detection ──
+
+    // ── Refusing a command line ──
+
+    /// Measured from GNU in the C locale, both lines, exactly.
+    #[test]
+    fn an_unknown_long_option_reads_as_gnu_prints_it() {
+        assert_eq!(
+            unknown_option("nproc", "--zzq-not-an-option"),
+            "unrecognized option '--zzq-not-an-option'\nTry 'nproc --help' for more information."
+        );
+    }
+
+    /// getopt names the offending letter, not the whole cluster.
+    #[test]
+    fn an_unknown_short_option_names_its_letter() {
+        assert_eq!(
+            unknown_option("nproc", "-q"),
+            "invalid option -- 'q'\nTry 'nproc --help' for more information."
+        );
+    }
+
+    #[test]
+    fn an_extra_operand_reads_as_gnu_prints_it() {
+        assert_eq!(
+            extra_operand("arch", "extra"),
+            "extra operand 'extra'\nTry 'arch --help' for more information."
+        );
+    }
+
+    /// The option text is argv, and argv may hold a newline. Pasted raw it
+    /// would let the caller append an invented line to this program's
+    /// stderr; the whole message must therefore still be exactly two lines.
+    #[test]
+    fn an_option_name_cannot_add_a_line_to_stderr() {
+        let msg = unknown_option("nproc", "--a\nnproc: /etc/shadow: Permission denied");
+        assert_eq!(
+            msg.matches('\n').count(),
+            1,
+            "escaped option text must not introduce a line: {msg}"
+        );
+        assert!(msg.ends_with("Try 'nproc --help' for more information."));
+    }
 
     #[test]
     fn test_detect_nproc() {

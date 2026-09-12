@@ -857,6 +857,10 @@ dependencies = [
 [[package]]
 name = "flock"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+ "usageerror",
+]
 
 [[package]]
 name = "flood"
@@ -1896,6 +1900,7 @@ name = "nproc"
 version = "0.1.0"
 dependencies = [
  "quoting",
+ "usageerror",
 ]
 
 [[package]]
@@ -3018,6 +3023,13 @@ dependencies = [
 [[package]]
 name = "upower"
 version = "0.1.0"
+
+[[package]]
+name = "usageerror"
+version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "useradd"

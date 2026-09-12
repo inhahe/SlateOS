@@ -98943,6 +98943,40 @@ to `cargo check`.
 compile" reads identically whether or not it looked at test targets, which is
 how this went unnoticed for as long as it did.
 
+**It runs `clippy` rather than `check` as of the same day, which closes the
+other half.** Every crate in this population carries
+`#![deny(clippy::all, clippy::pedantic)]`, so a clippy finding **is** a compile
+error on the target -- and `cargo check` does not run clippy. The gate was
+therefore reporting "the `#[cfg(unix)]` code compiles" without having asked the
+question that decides it. Lane A accepted exactly this argument for
+`boot-test.sh` on 2026-09-02
+(`requests/b-a-cfg-unix-gate-should-lint-as-well-as-compile.md`); the push gate
+kept `check` for ten days after, which is the gap this closes.
+
+Clippy **subsumes** check -- it runs the compiler front end and then the lints
+-- so this is one pass, not two. Cost, measured after an *identical* cache
+invalidation rather than by comparing two runs in different cache states:
+
+| | after touching a shared leaf crate |
+|---|---:|
+| `cargo check --all-targets` | 11 s |
+| `cargo clippy --all-targets` | 16 s |
+
+Five seconds on a hook that already runs for minutes. Two earlier attempts at
+this number were unusable and both looked plausible: the first reported "1
+error in 1 second" (cargo had rejected a CRLF in a package name and never ran),
+and the second had clippy *faster* than check, which is impossible -- clippy's
+artifacts were warm from a previous run and check's were not.
+
+**The lint fixture is the point.** A gate switched to clippy whose self-test
+only ever exercised plain compile errors would pass forever without
+demonstrating that clippy does anything. The fixture is `&Vec<i32>` inside
+`#[cfg(unix)]` -- `clippy::ptr_arg`: valid Rust that compiles, and a hard error
+under `deny(clippy::all)`. Both halves are asserted, because if the compile
+half ever stops holding the fixture has quietly become a plain compile error
+and proves nothing about linting. Verified by hand as well as by the suite:
+`rustc` exits 0, `clippy-driver` refuses.
+
 **A note on how that was checked, because it nearly was not.** The first run
 piped the output through `grep -c '^error'` and printed `0`, which is the same
 thing it would print if cargo had failed to start. The second run captured the
@@ -138493,3 +138527,56 @@ and would show no CPU row at all against an older kernel.
 
 Consolidating those three families would be tidiness rather than repair, and
 is not done for that reason.
+
+
+## B-A-DIFF-HARNESS-WHOSE-FIXTURE-DIES-REPORTS-TOTAL-AGREEMENT (lane B, 2026-09-12)
+
+**In short:** `scripts/ps-diff.sh` runs the same command through our binary and
+through procps and compares. On 2026-09-12 an edit of mine left the shared
+inner script malformed, so **neither** side ever reached `exec ps`. Both
+produced nothing. Nothing equals nothing, so the harness reported
+
+```text
+59 passed, 0 differed, 0 differ on purpose, 6 NO LONGER differ
+```
+
+-- a perfect score, from a run that measured nothing at all.
+
+**What caught it was the impossible XPASS.** Two of the six cases that suddenly
+agreed were `-X` and bare `-u`, which this build **does not implement**. They
+cannot legitimately match procps. A result that is too good is data.
+
+**So the declared divergences are the harness's liveness proof**, and that is
+worth stating because it was not designed in. A dead fixture makes everything
+agree; the only cases that can contradict an all-agree result are the ones
+expected to *differ*. `xfail_case` was introduced to stop a known difference
+being re-investigated -- it turns out to be the thing that distinguishes "both
+correct" from "both dead", and a harness whose xfail list ever empties loses
+that check with it.
+
+**`broken` did not fire**, and the reason is instructive: `compare()` refuses
+exit codes 127 and 125, because those are "command not found" and "cannot
+execute". A shell whose script has a syntax error exits **2**, having run
+nothing -- a code no rule was watching. The same shape as every other case this
+week where a check answered a narrower question than the one being asked.
+
+**How the malformation happened**, since it is the ordinary way and not an
+exotic one. A first edit was rejected (an apostrophe inside a single-quoted
+`sh -c` string ended the quote). The repair patched from the `if` to the first
+`     fi\n` -- which matched a `fi` belonging to the *rejected* edit still
+sitting in the file, leaving its tail behind. Two `done`/`fi` pairs, one `if`.
+The syntax check `bash -n` passed the OUTER script, because the damage was
+inside a quoted string that `bash -n` does not parse.
+
+### The fixture bug underneath, which was real
+
+`run_shared` spawns `sleep 5 &` and immediately `exec ps`. Between `fork` and
+`exec` the child is still **runnable** and still carrying the **shell's**
+memory map -- so a `ps` arriving in that window reports state `R` and a virtual
+size that is not the sleep's. One cause, two symptoms, and the reason
+`ps -l -p 2` flapped between runs rather than failing honestly: any change to
+either side's timing moved the race. Adding row buffering for `--sort` moved it.
+
+It now polls `/proc/2/stat` until the state is `S`, using the `read` builtin so
+it forks **nothing** -- a forked `awk` would take PID 3 and could itself be
+caught in the listing it is preparing.

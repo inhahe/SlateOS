@@ -1,0 +1,16 @@
+[package]
+name = "usageerror"
+version = "0.1.0"
+edition = "2024"
+description = "getopt's usage diagnostics, spelled once"
+
+[lints]
+workspace = true
+
+[dependencies]
+# The one rendering of caller-supplied text inside a diagnostic. An option
+# name comes off argv and an argv word may hold a newline, so it is escaped
+# rather than pasted. `quoting` has no dependencies and takes bytes, so this
+# crate stays a pure formatter over it -- §768's exemption, same as
+# `charwidth` and `utmpfile`.
+quoting = { path = "../quoting" }

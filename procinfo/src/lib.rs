@@ -1301,6 +1301,13 @@ pub struct ProcessStat {
     /// Zero means no controlling terminal. Decoding it into `tty7` or
     /// `pts/3` is a presentation question and deliberately not answered here.
     pub tty_nr: i64,
+    /// Foreground process group of the controlling terminal, stat field 8.
+    ///
+    /// `-1` when there is no controlling terminal. BSD `ps`'s `STAT` column
+    /// marks a process `+` when this equals its own [`Self::pgrp`] -- that is
+    /// what "in the foreground" means, and it cannot be derived from anything
+    /// already here.
+    pub tpgid: i64,
     /// `flags`: the kernel's per-task flag word, stat field 9.
     ///
     /// Raw. `ps -l`'s `F` column is `(flags >> 6) & 7` printed in octal, which
@@ -1389,6 +1396,7 @@ impl ProcessStat {
             pgrp: at(2),
             session: at(3),
             tty_nr: at_i(4),
+            tpgid: at_i(5),
             flags: at(6),
             utime_ticks: at(11),
             stime_ticks: at(12),

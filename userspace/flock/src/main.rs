@@ -33,6 +33,7 @@ enum LockType {
 // flock command
 // ============================================================================
 
+#[derive(Debug)]
 struct FlockOpts {
     lock_type: LockType,
     nonblock: bool,
@@ -45,7 +46,62 @@ struct FlockOpts {
     command: Vec<String>,
 }
 
-fn parse_flock_args(args: &[String]) -> FlockOpts {
+/// The `--help` text, extracted so `-h` and the `Try 'flock --help'`
+/// pointer on a refusal describe the same set of options.
+fn usage() {
+    println!("Usage: flock [options] <file|fd> [command ...]");
+    println!("       flock [options] <file|fd> -c command");
+    println!();
+    println!("Manage file locks from shell scripts.");
+    println!();
+    println!("Options:");
+    println!("  -s, --shared         Shared lock");
+    println!("  -x, --exclusive      Exclusive lock (default)");
+    println!("  -u, --unlock         Remove a lock");
+    println!("  -n, --nonblock       Fail rather than wait");
+    println!("  -w, --timeout SECS   Wait at most SECS seconds");
+    println!("  -o, --close          Close fd before running command");
+    println!("  -E, --conflict-exit N  Exit code on conflict (default 1)");
+    println!("  -v, --verbose        Verbose mode");
+    println!("  -h, --help           Show this help");
+    println!("  -V, --version        Show version");
+}
+
+/// Why `flock` or `lockfile` refused its command line.
+///
+/// Returned rather than printed so a test can prove the refusal happens at
+/// all: an unknown option used to become the *file to lock*, so `flock
+/// --list f` created a file called `--list.lock` in the working directory
+/// and locked it. `cmd_flock` renders this and exits 64 (`EX_USAGE`), which
+/// is what util-linux `flock` exits with for a bad option.
+#[derive(Debug, PartialEq, Eq)]
+enum UsageError {
+    /// An option this build does not know, as it appeared in argv.
+    ///
+    /// The whole word is kept rather than a parsed letter, because whether
+    /// it renders as `unrecognized option '--list'` or as `invalid option
+    /// -- 'Z'` is getopt's rule, not this parser's, and `usageerror` owns
+    /// it.
+    UnknownOption(String),
+    /// `-c` was given without exactly one command argument after it.
+    CommandArity,
+}
+
+impl UsageError {
+    /// The diagnostic body, without the `flock: ` prefix. The wording is
+    /// getopt's, shared with every other program here through `usageerror`
+    /// and measured rather than invented: `unrecognized option` for a long
+    /// one, `invalid option -- 'c'` for a short one, and they are not
+    /// interchangeable.
+    fn message(&self) -> String {
+        match self {
+            Self::UnknownOption(arg) => usageerror::unknown_option(arg.as_bytes()),
+            Self::CommandArity => "-c requires exactly one command argument".to_string(),
+        }
+    }
+}
+
+fn parse_flock_args(args: &[String]) -> Result<FlockOpts, UsageError> {
     let mut opts = FlockOpts {
         lock_type: LockType::Exclusive,
         nonblock: false,
@@ -59,27 +115,17 @@ fn parse_flock_args(args: &[String]) -> FlockOpts {
     };
 
     let mut i = 0;
-    let mut positional = Vec::new();
 
+    // Option processing stops at the first operand. util-linux passes a
+    // leading `+` to `getopt_long`, so the file name terminates the options
+    // and everything after it belongs to the command being run -- `flock f
+    // echo -n hi` gives `-n` to `echo`, and printed `hi` with no newline
+    // when measured. Reading it as `--nonblock` here would both change
+    // flock's own behaviour and silently drop a flag from the command.
     while i < args.len() {
         match args[i].as_str() {
             "-h" | "--help" => {
-                println!("Usage: flock [options] <file|fd> [command ...]");
-                println!("       flock [options] <file|fd> -c command");
-                println!();
-                println!("Manage file locks from shell scripts.");
-                println!();
-                println!("Options:");
-                println!("  -s, --shared         Shared lock");
-                println!("  -x, --exclusive      Exclusive lock (default)");
-                println!("  -u, --unlock         Remove a lock");
-                println!("  -n, --nonblock       Fail rather than wait");
-                println!("  -w, --timeout SECS   Wait at most SECS seconds");
-                println!("  -o, --close          Close fd before running command");
-                println!("  -E, --conflict-exit N  Exit code on conflict (default 1)");
-                println!("  -v, --verbose        Verbose mode");
-                println!("  -h, --help           Show this help");
-                println!("  -V, --version        Show version");
+                usage();
                 process::exit(0);
             }
             "-V" | "--version" => {
@@ -93,61 +139,64 @@ fn parse_flock_args(args: &[String]) -> FlockOpts {
             "-o" | "--close" => opts.close = true,
             "-v" | "--verbose" => opts.verbose = true,
             "-w" | "--timeout" | "--wait" => {
-                i += 1;
-                if i < args.len() {
-                    opts.timeout = args[i].parse().ok();
+                i = i.saturating_add(1);
+                if let Some(v) = args.get(i) {
+                    opts.timeout = v.parse().ok();
                 }
             }
             "-E" | "--conflict-exit" => {
-                i += 1;
-                if i < args.len() {
-                    opts.conflict_exit = args[i].parse().unwrap_or(1);
+                i = i.saturating_add(1);
+                if let Some(v) = args.get(i) {
+                    opts.conflict_exit = v.parse().unwrap_or(1);
                 }
             }
-            "-c" => {
-                // -c "command" — rest is a single shell command string.
-                i += 1;
-                if i < args.len() {
-                    opts.command =
-                        vec!["/bin/sh".to_string(), "-c".to_string(), args[i].to_string()];
-                }
+            // An explicit end-of-options marker: the next word is the file
+            // even if it begins with a dash.
+            "--" => {
+                i = i.saturating_add(1);
+                break;
             }
-            s if !s.starts_with('-') || positional.is_empty() => {
-                if s.starts_with('-') && !positional.is_empty() {
-                    // It's a flag for the command.
-                    opts.command.push(s.to_string());
-                    // Collect rest as command.
-                    i += 1;
-                    while i < args.len() {
-                        opts.command.push(args[i].to_string());
-                        i += 1;
-                    }
-                    break;
-                }
-                positional.push(s.to_string());
+            s if s.starts_with("--") => {
+                return Err(UsageError::UnknownOption(s.to_string()));
             }
-            _ => {
-                positional.push(args[i].to_string());
+            // A lone `-` is an operand, not an option, so it is excluded by
+            // the length test and falls through to the operand arm.
+            s if s.starts_with('-') && s.len() > 1 => {
+                return Err(UsageError::UnknownOption(s.to_string()));
             }
+            // The first operand: option processing ends here.
+            _ => break,
         }
-        i += 1;
+        i = i.saturating_add(1);
     }
 
-    // First positional is file or fd number.
-    if let Some(first) = positional.first() {
+    // First operand is the file, or an fd number.
+    if let Some(first) = args.get(i) {
         if let Ok(fd) = first.parse::<i32>() {
             opts.fd = Some(fd);
         } else {
             opts.file = Some(first.clone());
         }
+        i = i.saturating_add(1);
     }
 
-    // Remaining positionals are command.
-    if positional.len() > 1 && opts.command.is_empty() {
-        opts.command = positional[1..].to_vec();
+    // `-c` is positional, not an option: util-linux checks for it only in the
+    // word immediately after the operand, which is why `flock -c cmd file`
+    // reports `invalid option -- 'c'` while `flock file -c cmd` runs. It
+    // takes exactly one argument; two is an error rather than a join.
+    match args.get(i).map(String::as_str) {
+        Some("-c" | "--command") => match args.get(i.saturating_add(1)..).unwrap_or(&[]) {
+            [only] => {
+                opts.command = vec!["/bin/sh".to_string(), "-c".to_string(), only.clone()];
+            }
+            _ => return Err(UsageError::CommandArity),
+        },
+        // Anything else is the command verbatim, dashes and all.
+        Some(_) => opts.command = args.get(i..).unwrap_or(&[]).to_vec(),
+        None => {}
     }
 
-    opts
+    Ok(opts)
 }
 
 /// Advisory lock implementation using lock files.
@@ -224,7 +273,15 @@ fn release_lock(path: &str, verbose: bool) {
 }
 
 fn cmd_flock(args: &[String]) {
-    let opts = parse_flock_args(args);
+    let opts = match parse_flock_args(args) {
+        Ok(opts) => opts,
+        Err(why) => {
+            eprintln!("flock: {}", why.message());
+            eprintln!("Try 'flock --help' for more information.");
+            // EX_USAGE, as util-linux exits for a bad option.
+            process::exit(64);
+        }
+    };
 
     if opts.file.is_none() && opts.fd.is_none() {
         eprintln!("flock: no file or fd specified");
@@ -274,6 +331,7 @@ fn cmd_flock(args: &[String]) {
 // lockfile command
 // ============================================================================
 
+#[derive(Debug)]
 struct LockfileOpts {
     sleeptime: u64,
     retries: i32,
@@ -284,7 +342,7 @@ struct LockfileOpts {
     files: Vec<String>,
 }
 
-fn parse_lockfile_args(args: &[String]) -> LockfileOpts {
+fn parse_lockfile_args(args: &[String]) -> Result<LockfileOpts, UsageError> {
     let mut opts = LockfileOpts {
         sleeptime: 8,
         retries: -1, // -1 = infinite
@@ -343,11 +401,27 @@ fn parse_lockfile_args(args: &[String]) -> LockfileOpts {
             "-!" => opts.invert = true,
             "-ml" => opts.ml = true,
             "-mu" => {
-                // Remove mode — just delete lockfiles and exit.
-                for f in args.iter().skip(i + 1) {
-                    let _ = fs::remove_file(f);
+                // Unlock mode: the remaining words are the lock files to
+                // remove. A failure here used to be discarded and the exit
+                // status was 0 either way, so a script writing
+                // `lockfile -mu "$lock" || recover` never learned that the
+                // lock it thought it had dropped was still held.
+                let mut failed = 0usize;
+                for f in args.iter().skip(i.saturating_add(1)) {
+                    match fs::remove_file(f) {
+                        Ok(()) => {}
+                        // Already absent is the state unlocking wanted.
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(e) => {
+                            eprintln!(
+                                "lockfile: cannot remove {}: {e}",
+                                quoting::quotef(f.as_bytes())
+                            );
+                            failed = failed.saturating_add(1);
+                        }
+                    }
                 }
-                process::exit(0);
+                process::exit(i32::from(failed > 0));
             }
             s if s.starts_with('-')
                 && s.len() > 1
@@ -355,8 +429,18 @@ fn parse_lockfile_args(args: &[String]) -> LockfileOpts {
             {
                 opts.sleeptime = s[1..].parse().unwrap_or(8);
             }
-            s if !s.starts_with('-') => {
-                opts.files.push(s.to_string());
+            // Everything else beginning with a dash is an option this build
+            // does not have. It used to fall through to the arm below and
+            // become a *file to create*, so `lockfile --typo f` created a
+            // file named `--typo` and exited 0 -- reporting success for a
+            // command line it had not understood.
+            s if s.starts_with("--") => {
+                return Err(UsageError::UnknownOption(s.to_string()));
+            }
+            // A lone `-` is a file named `-`, not an option, so the length
+            // test lets it through to the operand arm.
+            s if s.starts_with('-') && s.len() > 1 => {
+                return Err(UsageError::UnknownOption(s.to_string()));
             }
             _ => {
                 opts.files.push(args[i].to_string());
@@ -365,11 +449,18 @@ fn parse_lockfile_args(args: &[String]) -> LockfileOpts {
         i += 1;
     }
 
-    opts
+    Ok(opts)
 }
 
 fn cmd_lockfile(args: &[String]) {
-    let opts = parse_lockfile_args(args);
+    let opts = match parse_lockfile_args(args) {
+        Ok(opts) => opts,
+        Err(why) => {
+            eprintln!("lockfile: {}", why.message());
+            eprintln!("Try 'lockfile --help' for more information.");
+            process::exit(64);
+        }
+    };
 
     if opts.files.is_empty() {
         eprintln!("lockfile: no files specified");
@@ -475,7 +566,7 @@ mod tests {
     #[test]
     fn test_parse_flock_shared() {
         let args = vec!["-s".to_string(), "/tmp/test".to_string()];
-        let opts = parse_flock_args(&args);
+        let opts = parse_flock_args(&args).expect("valid command line");
         assert_eq!(opts.lock_type, LockType::Shared);
         assert_eq!(opts.file, Some("/tmp/test".to_string()));
     }
@@ -483,42 +574,42 @@ mod tests {
     #[test]
     fn test_parse_flock_exclusive() {
         let args = vec!["-x".to_string(), "/tmp/test".to_string()];
-        let opts = parse_flock_args(&args);
+        let opts = parse_flock_args(&args).expect("valid command line");
         assert_eq!(opts.lock_type, LockType::Exclusive);
     }
 
     #[test]
     fn test_parse_flock_nonblock() {
         let args = vec!["-n".to_string(), "/tmp/test".to_string()];
-        let opts = parse_flock_args(&args);
+        let opts = parse_flock_args(&args).expect("valid command line");
         assert!(opts.nonblock);
     }
 
     #[test]
     fn test_parse_flock_timeout() {
         let args = vec!["-w".to_string(), "10".to_string(), "/tmp/test".to_string()];
-        let opts = parse_flock_args(&args);
+        let opts = parse_flock_args(&args).expect("valid command line");
         assert_eq!(opts.timeout, Some(10));
     }
 
     #[test]
     fn test_parse_flock_unlock() {
         let args = vec!["-u".to_string(), "/tmp/test".to_string()];
-        let opts = parse_flock_args(&args);
+        let opts = parse_flock_args(&args).expect("valid command line");
         assert_eq!(opts.lock_type, LockType::Unlock);
     }
 
     #[test]
     fn test_parse_flock_verbose() {
         let args = vec!["-v".to_string(), "/tmp/test".to_string()];
-        let opts = parse_flock_args(&args);
+        let opts = parse_flock_args(&args).expect("valid command line");
         assert!(opts.verbose);
     }
 
     #[test]
     fn test_parse_flock_fd() {
         let args = vec!["9".to_string()];
-        let opts = parse_flock_args(&args);
+        let opts = parse_flock_args(&args).expect("valid command line");
         assert_eq!(opts.fd, Some(9));
         assert!(opts.file.is_none());
     }
@@ -530,29 +621,170 @@ mod tests {
             "echo".to_string(),
             "hello".to_string(),
         ];
-        let opts = parse_flock_args(&args);
+        let opts = parse_flock_args(&args).expect("valid command line");
         assert_eq!(opts.file, Some("/tmp/lockfile".to_string()));
         assert_eq!(opts.command, vec!["echo", "hello"]);
+    }
+
+    /// Build an argv the way a shell would.
+    fn argv(words: &[&str]) -> Vec<String> {
+        words.iter().map(|w| (*w).to_string()).collect()
+    }
+
+    /// The bug that started this: an unknown option was not refused, it was
+    /// taken as the *file to lock*, so `flock --list f` created and locked a
+    /// file named `--list.lock` in the working directory. One was found
+    /// sitting in the repository root.
+    #[test]
+    fn an_unknown_long_option_is_refused_not_taken_as_the_file() {
+        let err = parse_flock_args(&argv(&["--list", "/tmp/t"])).unwrap_err();
+        assert_eq!(err, UsageError::UnknownOption("--list".to_string()));
+        assert_eq!(err.message(), "unrecognized option '--list'");
+    }
+
+    #[test]
+    fn an_unknown_short_option_is_refused_and_names_its_letter() {
+        let err = parse_flock_args(&argv(&["-Z", "/tmp/t"])).unwrap_err();
+        assert_eq!(err, UsageError::UnknownOption("-Z".to_string()));
+        assert_eq!(err.message(), "invalid option -- 'Z'");
+    }
+
+    /// Measured against util-linux: `flock -c cmd file` is rejected, because
+    /// `-c` is not in the option set getopt sees -- it is recognised only in
+    /// the word after the operand.
+    #[test]
+    fn dash_c_before_the_operand_is_an_invalid_option() {
+        let err = parse_flock_args(&argv(&["-c", "echo hi", "/tmp/t"])).unwrap_err();
+        assert_eq!(err, UsageError::UnknownOption("-c".to_string()));
+    }
+
+    #[test]
+    fn dash_c_after_the_operand_runs_the_shell() {
+        let opts = parse_flock_args(&argv(&["/tmp/t", "-c", "echo hi"])).expect("valid");
+        assert_eq!(opts.file, Some("/tmp/t".to_string()));
+        assert_eq!(opts.command, vec!["/bin/sh", "-c", "echo hi"]);
+    }
+
+    #[test]
+    fn long_command_form_is_accepted_after_the_operand() {
+        let opts = parse_flock_args(&argv(&["/tmp/t", "--command", "echo hi"])).expect("valid");
+        assert_eq!(opts.command, vec!["/bin/sh", "-c", "echo hi"]);
+    }
+
+    /// `flock f -c echo extra` is an error, not a join of the two words.
+    #[test]
+    fn dash_c_takes_exactly_one_argument() {
+        let two = parse_flock_args(&argv(&["/tmp/t", "-c", "echo", "extra"])).unwrap_err();
+        assert_eq!(two, UsageError::CommandArity);
+        let none = parse_flock_args(&argv(&["/tmp/t", "-c"])).unwrap_err();
+        assert_eq!(none, UsageError::CommandArity);
+        assert_eq!(none.message(), "-c requires exactly one command argument");
+    }
+
+    /// The option set stops at the operand. `flock f echo -n hi` prints `hi`
+    /// with no trailing newline under util-linux, which is only possible if
+    /// `-n` reached `echo` instead of setting flock's own --nonblock.
+    #[test]
+    fn a_dash_flag_after_the_operand_belongs_to_the_command() {
+        let opts = parse_flock_args(&argv(&["/tmp/t", "echo", "-n", "hi"])).expect("valid");
+        assert!(
+            !opts.nonblock,
+            "-n after the operand is echo's, not flock's"
+        );
+        assert_eq!(opts.command, vec!["echo", "-n", "hi"]);
+    }
+
+    /// And when the command *is* a dash word, it stays the command name --
+    /// util-linux reports `failed to execute -n` for this line.
+    #[test]
+    fn a_dash_word_can_be_the_command_name() {
+        let opts = parse_flock_args(&argv(&["/tmp/t", "-n", "echo", "after"])).expect("valid");
+        assert!(!opts.nonblock);
+        assert_eq!(opts.command, vec!["-n", "echo", "after"]);
+    }
+
+    #[test]
+    fn options_before_the_operand_still_bind_to_flock() {
+        let opts = parse_flock_args(&argv(&["-n", "-s", "/tmp/t", "echo"])).expect("valid");
+        assert!(opts.nonblock);
+        assert_eq!(opts.lock_type, LockType::Shared);
+        assert_eq!(opts.file, Some("/tmp/t".to_string()));
+        assert_eq!(opts.command, vec!["echo"]);
+    }
+
+    #[test]
+    fn double_dash_ends_the_options_so_a_dashed_file_can_be_locked() {
+        let opts = parse_flock_args(&argv(&["-n", "--", "-weird-name"])).expect("valid");
+        assert!(opts.nonblock);
+        assert_eq!(opts.file, Some("-weird-name".to_string()));
+    }
+
+    /// A lone `-` is an operand to getopt, not an option, so it must not be
+    /// mistaken for an unknown short option.
+    #[test]
+    fn a_lone_dash_is_an_operand() {
+        let opts = parse_flock_args(&argv(&["-"])).expect("valid");
+        assert_eq!(opts.file, Some("-".to_string()));
     }
 
     #[test]
     fn test_parse_flock_conflict_exit() {
         let args = vec!["-E".to_string(), "42".to_string(), "/tmp/test".to_string()];
-        let opts = parse_flock_args(&args);
+        let opts = parse_flock_args(&args).expect("valid command line");
         assert_eq!(opts.conflict_exit, 42);
     }
 
     #[test]
     fn test_parse_flock_close() {
         let args = vec!["-o".to_string(), "/tmp/test".to_string()];
-        let opts = parse_flock_args(&args);
+        let opts = parse_flock_args(&args).expect("valid command line");
         assert!(opts.close);
+    }
+
+    /// `lockfile`'s whole job is to create the files it is named, so an
+    /// unknown option falling through to the operand list is not a parsing
+    /// nicety -- it creates a file called `--typo` and exits 0.
+    #[test]
+    fn lockfile_refuses_an_unknown_long_option() {
+        let err = parse_lockfile_args(&argv(&["--typo", "lock"])).unwrap_err();
+        assert_eq!(err, UsageError::UnknownOption("--typo".to_string()));
+    }
+
+    #[test]
+    fn lockfile_refuses_an_unknown_short_option() {
+        let err = parse_lockfile_args(&argv(&["-q", "lock"])).unwrap_err();
+        assert_eq!(err, UsageError::UnknownOption("-q".to_string()));
+    }
+
+    /// The refusal must not swallow `-<N>`, which is how lockfile spells its
+    /// sleep interval -- the digit arm has to be tried before the dash arm.
+    #[test]
+    fn lockfile_still_reads_a_numeric_sleeptime() {
+        let opts = parse_lockfile_args(&argv(&["-5", "lock"])).expect("valid");
+        assert_eq!(opts.sleeptime, 5);
+        assert_eq!(opts.files, vec!["lock"]);
+    }
+
+    /// A lone dash names a file, so it must survive the refusal arms.
+    #[test]
+    fn lockfile_treats_a_lone_dash_as_a_file() {
+        let opts = parse_lockfile_args(&argv(&["-"])).expect("valid");
+        assert_eq!(opts.files, vec!["-"]);
+    }
+
+    #[test]
+    fn lockfile_keeps_its_real_options_working() {
+        let opts = parse_lockfile_args(&argv(&["-r", "3", "-!", "-ml", "a", "b"])).expect("valid");
+        assert_eq!(opts.retries, 3);
+        assert!(opts.invert);
+        assert!(opts.ml);
+        assert_eq!(opts.files, vec!["a", "b"]);
     }
 
     #[test]
     fn test_parse_lockfile_defaults() {
         let args = vec!["test.lock".to_string()];
-        let opts = parse_lockfile_args(&args);
+        let opts = parse_lockfile_args(&args).expect("valid command line");
         assert_eq!(opts.sleeptime, 8);
         assert_eq!(opts.retries, -1);
         assert_eq!(opts.locktimeout, 0);
@@ -564,42 +796,42 @@ mod tests {
     #[test]
     fn test_parse_lockfile_retries() {
         let args = vec!["-r".to_string(), "5".to_string(), "test.lock".to_string()];
-        let opts = parse_lockfile_args(&args);
+        let opts = parse_lockfile_args(&args).expect("valid command line");
         assert_eq!(opts.retries, 5);
     }
 
     #[test]
     fn test_parse_lockfile_sleeptime() {
         let args = vec!["-3".to_string(), "test.lock".to_string()];
-        let opts = parse_lockfile_args(&args);
+        let opts = parse_lockfile_args(&args).expect("valid command line");
         assert_eq!(opts.sleeptime, 3);
     }
 
     #[test]
     fn test_parse_lockfile_invert() {
         let args = vec!["-!".to_string(), "test.lock".to_string()];
-        let opts = parse_lockfile_args(&args);
+        let opts = parse_lockfile_args(&args).expect("valid command line");
         assert!(opts.invert);
     }
 
     #[test]
     fn test_parse_lockfile_locktimeout() {
         let args = vec!["-l".to_string(), "60".to_string(), "test.lock".to_string()];
-        let opts = parse_lockfile_args(&args);
+        let opts = parse_lockfile_args(&args).expect("valid command line");
         assert_eq!(opts.locktimeout, 60);
     }
 
     #[test]
     fn test_parse_lockfile_suspend() {
         let args = vec!["-s".to_string(), "30".to_string(), "test.lock".to_string()];
-        let opts = parse_lockfile_args(&args);
+        let opts = parse_lockfile_args(&args).expect("valid command line");
         assert_eq!(opts.suspend, 30);
     }
 
     #[test]
     fn test_parse_lockfile_multiple_files() {
         let args = vec!["a.lock".to_string(), "b.lock".to_string()];
-        let opts = parse_lockfile_args(&args);
+        let opts = parse_lockfile_args(&args).expect("valid command line");
         assert_eq!(opts.files.len(), 2);
     }
 }

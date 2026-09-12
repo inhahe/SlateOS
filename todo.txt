@@ -57203,12 +57203,16 @@ WHAT. `userspace/ps` is deleted (§1005, and measured: coreutils' scores 22
 passed / 0 differed against the standalone's 0 / 12). Of its nine options,
 three were ported in first (`-p`, `--no-header`, `-u`) and two were inventions
 procps rejects outright (`--reverse`, `--json`, both `error: unknown gnu long
-option`). Four are real procps options this build still refuses:
+option`). Four were real procps options this build refused. THREE ARE DONE (2026-09-12,
+written against the harness as this note asked, not ported):
 
-    -l        long format: F S UID PID PPID C PRI NI ADDR SZ WCHAN TTY TIME CMD
-    -o        output column selection, including `-o comm=` to suppress a title
-    -t        select by controlling terminal
-    --sort    sort by a named column
+    -l        DONE -- long format, including the merged `-l -f` rendering
+    -o        DONE -- output column selection, including `-o comm=`
+    -t        DONE -- select by controlling terminal
+    --sort    still refused; the one that remains
+
+The harness stands at 50 passed / 0 differed / 7 differ on purpose, from 0/26
+when the standalone was retired.
 
 DO NOT PORT THEM FROM THE DELETED CRATE, and this is the whole reason for the
 note. The crate scored **0 XPASS** on the harness: every case declared "not
@@ -57229,12 +57233,43 @@ TWO MEASUREMENTS ALREADY BANKED, in `scripts/ps-diff.sh`:
     Adding the field to `procinfo` is the first step and is a change to a
     shared crate.
 
-ALSO NOT IMPLEMENTED, and separately declared: bare `-u` (procps falls back to
-the BSD user-oriented format with nothing selected and exits 1), `-X` (register
-format), `-h` (suppress header, exits 1 silently).
+ALSO NOT IMPLEMENTED, and separately declared: bare `-u`, bare `-t`, `-h`
+(suppress header) and `-X` (register format).
 
-TRIGGER. Any tick picking up coreutils option work. `-o` is the highest value
--- it is the one that makes the others expressible -- and the largest.
+THREE OF THOSE FOUR ARE ONE GAP, measured 2026-09-12. They are not four
+missing options, they are **two missing FORMATS**, and the harness lists them
+separately only because each was found through its own flag:
+
+    ps -t      PID TTY STAT TIME COMMAND                     BSD default format
+    ps -h      the same columns, header suppressed           BSD default format
+    ps -u      USER PID %CPU %MEM VSZ RSS TTY STAT START
+               TIME COMMAND                                  BSD user-oriented
+    ps         PID TTY TIME CMD                              SysV default (ours)
+    ps u       identical to bare `-u`                        BSD user-oriented
+
+So implementing the BSD **default** format closes `-t` and `-h` together, and
+the BSD **user-oriented** format closes `-u`. `-X` is genuinely separate.
+
+`-h` is NOT an alias for `--no-header`, which was the obvious guess and is
+wrong: measured side by side in one shell, `-h` prints `Ss+` and `0:00` where
+`--no-header` prints `00:00:00`. The flag switches personality and suppresses
+the header; only the second half is what its name says.
+
+WHAT THE BSD `STAT` COLUMN NEEDS that our single-char `S` does not: the
+suffixes. `<` high priority, `N` low priority, `L` locked pages, `s` session
+leader, `l` multi-threaded, `+` foreground process group -- all derivable from
+`/proc/<pid>/stat` (session == pid, num_threads > 1, tpgid == pgrp, nice).
+That helper is the first step and is shared by both formats.
+
+`-h` "exits 1 silently" in the harness because the harness runs inside
+`unshare -pf --mount-proc` where nothing shares the terminal, so the selection
+matches nothing. On a normal terminal `ps -h` exits 0 -- the status is about
+the empty selection, not about the flag.
+
+TRIGGER. Any tick picking up coreutils option work. `-o` was the highest value
+-- it is the one that makes the others expressible -- and is done, which is
+what makes `--sort` worth doing now: it sorts by the same column names `-o`
+already knows, so the naming half is built.
 
 --------------------------------------------------------------------------
 TWO GREP FEATURES FROM THE OPERATOR'S TOOL REMAIN (lane B, 2026-09-12)

@@ -97,9 +97,63 @@ run_side() {
      #
      # With this, PID 2 is `sleep` on both sides: the same binary, the same
      # arguments, the same everything. `-p 2` then points both at it.
-     if [ -n "${PS_DIFF_SPAWN-}" ]; then sleep 5 & fi
+     if [ -n "${PS_DIFF_SPAWN-}" ]; then
+       sleep 5 &
+       # WAIT FOR IT TO BE SLEEPING before letting ps look. Between fork and
+       # exec the child is still RUNNABLE and still carrying the memory map of
+       # the shell, so a ps arriving in that window reports state R and the
+       # virtual size of the SHELL -- one cause for two symptoms, and why
+       # `-l -p 2` flapped between runs instead of failing honestly. Adding
+       # work to either ps moved the race.
+       #
+       # The poll forks NOTHING: read is a shell builtin and the redirection
+       # re-opens the file each turn. A forked awk here would take PID 3 and
+       # could itself be caught in the listing.
+       #
+       # No apostrophes in this comment: it lives inside a single-quoted
+       # sh -c string, and one would end the quote.
+       i=0
+       while [ "$i" -lt 2000 ]; do
+         if read -r _ _ st _ < /proc/2/stat 2>/dev/null && [ "$st" = S ]; then
+           break
+         fi
+         i=$((i + 1))
+       done
+     fi
      exec ps "$@"' _ "$@" < /dev/null
 }
+
+# LIVENESS: two empty outputs compare equal.
+#
+# On 2026-09-12 a malformed inner script meant NEITHER side reached `exec ps`.
+# Both produced nothing, nothing matched nothing, and this harness reported
+# "59 passed, 0 differed, 6 NO LONGER differ" -- a perfect score from a run
+# that measured nothing at all. What caught it was an impossible XPASS: `-X`
+# and bare `-u` are not implemented and cannot agree with procps.
+#
+# The namespace probe above could not have caught it. It runs `ps` DIRECTLY,
+# so it proves the namespace works and says nothing about `run_side`, which is
+# the path every case actually takes. A probe that does not exercise the thing
+# it is vouching for is the shape this tree keeps meeting.
+#
+# `broken` could not either: `compare()` refuses exit 127 and 125, which are
+# "not found" and "cannot execute". A shell whose script will not parse exits
+# **2**, having run nothing, and no rule was watching that.
+#
+# So: run the real path once, on both sides, and require each to say something.
+if [ "$ns" = yes ]; then
+  live_ours=$(run_side ours -e -o pid= 2>/dev/null)
+  live_gnu=$(run_side gnu -e -o pid= 2>/dev/null)
+  if [ -z "$live_ours" ] || [ -z "$live_gnu" ]; then
+    echo "ps-diff.sh: REFUSING to report." >&2
+    echo "  The fixture produced no output on at least one side, so every" >&2
+    echo "  comparison below would be empty against empty and would PASS." >&2
+    printf '  ours: [%s]
+  gnu:  [%s]
+' "$live_ours" "$live_gnu" >&2
+    exit 2
+  fi
+fi
 
 # A case whose subject is the spawned `sleep`, not `ps`.
 run_shared() {
@@ -338,7 +392,16 @@ run_case -e -t ?
 # `R` and `0:00` rather than `00:00:00` -- exactly as bare `-u` falls back to
 # the BSD user format. Two options, one shape, and neither is a defect in the
 # option: both need a format this build does not have.
-xfail_case "bare -t needs the BSD format, which is not implemented" -t
+# Bare `-t` is a FORMAT, not an empty selection: it prints the BSD default
+# columns for this terminal's processes. Measured byte for byte with `cat -A`:
+#
+#     "    PID TTY      STAT   TIME COMMAND"
+#      PID right in 7, TTY left in 8, STAT left in 4, TIME right in 6.
+#
+# TIME is BSD's, which is total minutes and seconds -- procps' own `bsdtime`
+# column renders 00:01:33 as 1:33 -- and STAT is the state letter plus the
+# modifiers `<N sl+`.
+run_shared -t
 run_case -o pid -o comm
 run_case -e -o pid,comm
 run_case --no-header
@@ -371,7 +434,21 @@ run_case -p 999999
 # failure is an assertion, and it is the only kind its own case passing never
 # tests.
 xfail_case "procps implements -X (register format); this build does not" -X
-xfail_case "procps implements -h (suppress header); this build does not" -h
+# `-h` is the same FORMAT with the header dropped -- that half is implemented
+# and agrees. What still differs is the SELECTION, and the rule has not been
+# established, so this stays declared rather than guessed at.
+#
+# Measured inside this harness's namespace:
+#
+#     ps        exit 0, header + 2 rows      (TTY `?` on both)
+#     ps -t     exit 0, header + 2 rows      agrees with ours
+#     ps -h     exit 1, NOTHING
+#
+# So `-h` selects something narrower than both plain `ps` and bare `-t`, in a
+# namespace where nothing has a controlling terminal. "It needs the
+# own-terminal selection" was the obvious reading and does not survive the
+# first line: plain `ps` uses that selection and still printed two rows.
+xfail_case "the BSD format agrees; -h's narrower SELECTION is not characterised" -h
 
 # --- help and version --------------------------------------------------------
 # NOT declared divergences without measuring. free-diff.sh shipped a `--help`
@@ -379,6 +456,32 @@ xfail_case "procps implements -h (suppress header); this build does not" -h
 # refusal when it is not one. A declared divergence is an assertion like any
 # other and is the only kind never tested by its own case passing.
 run_case --help
+
+# ---- --sort ------------------------------------------------------------
+#
+# Written against these measurements, not ported: the retired crate's `--sort`
+# scored 0 XPASS like the rest of it, so its output was a second wrong
+# rendering rather than a feature.
+#
+#   ps -e -o pid --sort=-pid     descending            exit 0
+#   ps -e -o pid --sort=+pid     ascending             exit 0
+#   ps -e -o pid --sort pid      the separated form    exit 0
+#   ps -e --sort=nosuchkey       "error: unknown sort specifier", exit 1
+#
+# The keys that matter are the ones where sorting the RENDERING gives a
+# different answer from sorting the value: `pid` ("10" before "9") and `stime`
+# (`14:32` today against `Sep12` last week).
+run_shared -e -o pid --sort=pid
+run_shared -e -o pid --sort=-pid
+run_shared -e -o pid --sort=+pid
+run_shared -e -o pid --sort pid
+run_shared -e -o pid,comm --sort=comm,-pid
+run_shared -e -o pid,ppid --sort=ppid,pid
+compare -e --sort=nosuchkey
+report 'ps -e --sort=nosuchkey [unknown key is an error, not an empty sort]'
+compare --sort
+report 'ps --sort [a --sort with no specifier]'
+
 
 printf '\n%d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
 if [ "$xpass" -gt 0 ]; then

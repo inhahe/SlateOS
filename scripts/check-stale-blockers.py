@@ -37,6 +37,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import gitenv
 import selftestflag
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -342,6 +343,17 @@ def main(argv=None):
         print("check-stale-blockers: no requests/ or known-issues.md here", file=sys.stderr)
         return 2
 
+    # A SCAN THAT READ ALMOST NOTHING IS REFUSED, which several gates in this
+    # tree already do and this one did not. The floors are deliberately far
+    # below the real figures -- 818 entries, 338 requests, 444 documents -- so
+    # they fire on a scan that broke, not on a tree that shrank. Without them
+    # the hostile-GIT_DIR failure above was a clean exit 0 over an empty set,
+    # and the summary line was the only thing that gave it away. A summary a
+    # human has to read is weaker than a status a hook can act on.
+    FLOOR_ENTRIES = 100
+    FLOOR_REQUESTS = 50
+    FLOOR_DOCUMENTS = 50
+
     resolved = request_states(requests_dir)
     text = issues.read_text(encoding="utf-8", errors="surrogateescape")
     hits = stale(text, resolved)
@@ -349,11 +361,21 @@ def main(argv=None):
     # Second pass: prose pointing at a script that is not there any more.
     import subprocess
 
+    # `cwd=` DOES NOT ANCHOR THE REPOSITORY, and neither does `git -C`. Both
+    # anchor the DIRECTORY; `GIT_DIR` still wins, and git sets `GIT_DIR` for
+    # every hook it runs -- which is one of the two places this gate is wired.
+    #
+    # Measured rather than argued: with a foreign `GIT_DIR` this reported
+    # "0 document(s) scanned for script references" and exited 0. It inspected
+    # nothing and said so in a sentence that reads like a clean tree. Lane A hit
+    # the same thing in check-shell-callables and passed the finding on; this is
+    # that grep coming back positive.
     listed = subprocess.run(
         ["git", "ls-files", "*.md", "*.txt"],
         capture_output=True,
         text=True,
         cwd=ROOT,
+        env=gitenv.clean_env(),
     ).stdout.split(chr(10))
     doc_texts = {}
     for name in listed:
@@ -399,6 +421,7 @@ def main(argv=None):
             capture_output=True,
             text=True,
             cwd=ROOT,
+            env=gitenv.clean_env(),
         ).stdout.strip()
         return bool(out)
 
@@ -433,6 +456,26 @@ def main(argv=None):
         "%d citation(s) of %d file(s) that do not exist."
         % (len(doc_texts), len(dangling), len(by_path))
     )
+
+    thin = []
+    if total < FLOOR_ENTRIES:
+        thin.append("known-issues entries: %d < %d" % (total, FLOOR_ENTRIES))
+    if len(resolved) < FLOOR_REQUESTS:
+        thin.append("request files: %d < %d" % (len(resolved), FLOOR_REQUESTS))
+    if len(doc_texts) < FLOOR_DOCUMENTS:
+        thin.append("documents: %d < %d" % (len(doc_texts), FLOOR_DOCUMENTS))
+    if thin:
+        print(
+            "check-stale-blockers: REFUSING a verdict -- this scan read far less "
+            "than the tree holds (%s)." % "; ".join(thin),
+            file=sys.stderr,
+        )
+        print(
+            "    Something stopped it reading rather than nothing being wrong. "
+            "A foreign GIT_DIR does exactly this.",
+            file=sys.stderr,
+        )
+        return 2
     if "--strict" in argv:
         return 1 if (hits or dangling) else 0
     return 0

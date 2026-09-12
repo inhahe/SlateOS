@@ -12956,14 +12956,24 @@ fn sys_prctl(args: &SyscallArgs) -> SyscallResult {
             // is implicitly the NUL terminator in Linux's storage).
             let nul = buf.iter().take(15).position(|&b| b == 0).unwrap_or(15);
             let name_bytes = &buf[..nul];
-            // We store comm as a Rust String, so non-UTF-8 input is
-            // rejected with EINVAL.  Linux would accept the raw bytes;
-            // documented as a known limitation in todo.txt — every
-            // userspace program we've seen sets ASCII comms so this
-            // is observationally equivalent.
-            if core::str::from_utf8(name_bytes).is_err() {
-                return linux_err(errno::EINVAL);
-            }
+            // No UTF-8 validation: Linux accepts the raw bytes and so do we.
+            //
+            // This used to reject non-UTF-8 with EINVAL, and the reason given
+            // was sound at the time — procfs decoded the name to a `str` and
+            // undecodable bytes rendered as the literal `???`, so refusing was
+            // better than storing something that would not read back. procfs
+            // now carries the name as bytes through `comm`, `stat` field 2,
+            // `status` Name: and `cmdline`, so there is nothing left to protect.
+            //
+            // Removing it also closes an asymmetry that made the check partly
+            // decorative: `execve` sets the same comm from `exe_path` or
+            // `argv[0]` straight through `sched::set_task_name`, which never
+            // validated. So bytes this arm refused could already arrive by the
+            // more common route, and the gate only ever caught the caller who
+            // asked politely. `set_task_name`'s own docstring names the
+            // principle — "rejecting it here rather than in the prctl handler
+            // covers every caller, present and future" — written above the one
+            // guard that was generalised, while this one stayed at the caller.
             // Install on the calling thread's scheduler task (its comm).
             // A missing task (kernel context) is a silent success — there
             // is nothing observable to name.

@@ -2364,8 +2364,7 @@ fn build_pid_status(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     // /proc/<pid>/comm and /proc/<pid>/stat field 2.  Use the shared helper so
     // all three surfaces agree (a tool cross-referencing Name: against comm
     // must see the same string).
-    let full_name =
-        core::str::from_utf8(task.name.get(..task.name_len).unwrap_or(&[])).unwrap_or("???");
+    let full_name = task.name.get(..task.name_len).unwrap_or(&[]);
     let name = comm_truncate(full_name);
 
     // Linux `State:` is "<char> (<word>)".  Mirror exactly the single-char
@@ -2391,7 +2390,11 @@ fn build_pid_status(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     // separators are a single tab, matching real /proc/<pid>/status.
     let mut s = String::with_capacity(512);
     // `write!` into a String is infallible; the Result is ignored on purpose.
-    let _ = writeln!(s, "Name:\t{name}");
+    // NOTE: the `Name:` line is deliberately NOT written here. It carries the
+    // task comm, which is raw bytes and need not be UTF-8, so it is emitted
+    // straight into the byte buffer at the end of this function. This `String`
+    // holds only the fields that are genuinely text; the other 22 writes are
+    // unchanged.
     // Umask: per-process file-creation mask, octal.  Bare scheduler tasks
     // (no PCB) inherit the kernel default 022.  Process-wide → proc_id.
     let umask = crate::proc::pcb::get_umask(proc_id).unwrap_or(0o022);
@@ -2503,7 +2506,15 @@ fn build_pid_status(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     let _ = writeln!(s, "voluntary_ctxt_switches:\t{}", task.nvcsw);
     let _ = writeln!(s, "nonvoluntary_ctxt_switches:\t{}", task.nivcsw);
 
-    s.into_bytes()
+    // `Name:` first, as Linux orders it, with the comm copied as bytes so a
+    // non-UTF-8 name survives instead of collapsing to a shared `???`.
+    let mut out =
+        alloc::vec::Vec::with_capacity(s.len().saturating_add(name.len()).saturating_add(8));
+    out.extend_from_slice(b"Name:\t");
+    out.extend_from_slice(name);
+    out.push(b'\n');
+    out.extend_from_slice(s.as_bytes());
+    out
 }
 
 /// `/proc/<pid>/cmdline` — full command line, Linux-exact format.
@@ -2554,8 +2565,10 @@ fn gen_pid_cmdline(task_id: u64) -> KernelResult<Vec<u8>> {
         .find(|t| t.id == task_id)
         .ok_or(KernelError::NotFound)?;
 
-    let name = core::str::from_utf8(task.name.get(..task.name_len).unwrap_or(&[])).unwrap_or("???");
-    let mut data = name.as_bytes().to_vec();
+    // No decode: the name is bytes on both sides of this function, and
+    // `/proc/<pid>/cmdline` is what `ps` reads, so a `???` here is the most
+    // visible of the five surfaces this bug had.
+    let mut data = task.name.get(..task.name_len).unwrap_or(&[]).to_vec();
     data.push(0);
     Ok(data)
 }
@@ -2662,15 +2675,8 @@ const TASK_COMM_LEN_MINUS_1: usize = 15;
 /// bytes), cutting on a UTF-8 char boundary so a multibyte sequence is never
 /// split.  Shared by `gen_pid_comm` and `build_pid_stat` so the two
 /// procfs surfaces always agree on the truncated name.
-fn comm_truncate(name: &str) -> &str {
-    if name.len() <= TASK_COMM_LEN_MINUS_1 {
-        return name;
-    }
-    let mut end = TASK_COMM_LEN_MINUS_1;
-    while end > 0 && !name.is_char_boundary(end) {
-        end = end.saturating_sub(1);
-    }
-    name.get(..end).unwrap_or("")
+fn comm_truncate(name: &[u8]) -> &[u8] {
+    name.get(..TASK_COMM_LEN_MINUS_1).unwrap_or(name)
 }
 
 /// Build a Linux 52-field stat line.
@@ -2687,8 +2693,7 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     // Field 2 (`comm`) must match `/proc/<pid>/comm` exactly, including the
     // 15-byte truncation — otherwise parsers that split on the last `)` and
     // size buffers to TASK_COMM_LEN disagree between the two files.
-    let full_name =
-        core::str::from_utf8(task.name.get(..task.name_len).unwrap_or(&[])).unwrap_or("???");
+    let full_name = task.name.get(..task.name_len).unwrap_or(&[]);
     let name = comm_truncate(full_name);
 
     let state_char = match task.state {
@@ -2799,11 +2804,17 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
     // cutime cstime priority nice=0 num_threads itrealvalue=0
     // starttime vsize rss rsslim <startcode..wchan=0> <nswap/cnswap=0>
     // exit_signal=17 processor <rt_priority..env_end=0> exit_code.
+    // Split around the comm so the name can be raw bytes. Field 2 is
+    // parenthesised precisely because it may contain anything, and Linux
+    // stores it as bytes; decoding it here rendered every undecodable name as
+    // the same literal `???`, which made two processes indistinguishable to
+    // anything that groups by name.
+    let mut out = alloc::vec::Vec::with_capacity(256);
+    out.extend_from_slice(format!("{} (", task.id).as_bytes());
+    out.extend_from_slice(name);
     let text = format!(
-        "{} ({}) {} {} {} {} 0 -1 0 {} {} {} {} {} {} {} {} {} 0 {} 0 {} {} {} {} \
+        ") {} {} {} {} 0 -1 0 {} {} {} {} {} {} {} {} {} 0 {} 0 {} {} {} {} \
          0 0 0 0 0 0 0 0 0 0 0 0 17 {} 0 0 0 0 0 0 0 0 0 0 0 0 {}\n",
-        task.id,
-        name,
         state_char,
         ppid,
         pgrp_sid,
@@ -2825,7 +2836,8 @@ fn build_pid_stat(task: &crate::sched::TaskInfo, proc_id: u64) -> Vec<u8> {
         processor,
         exit_code,
     );
-    text.into_bytes()
+    out.extend_from_slice(text.as_bytes());
+    out
 }
 
 /// Render a process's VMA list as Linux `/proc/<pid>/maps` lines.
@@ -3616,12 +3628,14 @@ fn gen_pid_comm(task_id: u64) -> KernelResult<Vec<u8>> {
     // process name.  Fall back to the process name only if there is no
     // scheduler task (e.g. a process record without a live task).
     let tasks = crate::sched::task_list();
-    let name: String = if let Some(task) = tasks.iter().find(|t| t.id == task_id) {
-        core::str::from_utf8(task.name.get(..task.name_len).unwrap_or(&[]))
-            .unwrap_or("???")
-            .to_string()
+    // Bytes, not `String`: the scheduler stores comm as raw bytes and `execve`
+    // writes it from `argv[0]` without validating UTF-8, so decoding here
+    // rendered any such name as the literal `???` — and `???` is a *constant*,
+    // so two processes with different unreadable names reported identically.
+    let name: alloc::vec::Vec<u8> = if let Some(task) = tasks.iter().find(|t| t.id == task_id) {
+        task.name.get(..task.name_len).unwrap_or(&[]).to_vec()
     } else if let Some(proc_name) = crate::proc::pcb::name(task_id) {
-        proc_name
+        proc_name.into_bytes()
     } else {
         return Err(KernelError::NotFound);
     };
@@ -3631,7 +3645,7 @@ fn gen_pid_comm(task_id: u64) -> KernelResult<Vec<u8>> {
     // truncate identically (char-boundary safe).
     let truncated = comm_truncate(&name);
 
-    let mut data = truncated.as_bytes().to_vec();
+    let mut data = truncated.to_vec();
     data.push(b'\n');
     Ok(data)
 }
@@ -15363,6 +15377,33 @@ pub fn self_test() -> KernelResult<()> {
     // fail on a machine that never had one.
     {
         let original = crate::fs::nameservice::get_domain();
+
+        // Print what the node ACTUALLY serves, before touching anything. This
+        // exists because a claim about this value crossed a lane boundary twice
+        // on 2026-09-12 and was never observed by either side: I told lane B the
+        // node serves `localdomain` because `init_defaults()` sets it and
+        // `gen_sys` calls `init_defaults()` first, and lane B's libc doc said the
+        // same. Both of us were reading the initialiser and inferring the node.
+        // The inference is probably right and has never been seen.
+        //
+        // It matters because `ctest-hostname` failed at check 13 for three boots,
+        // and an eleven-byte `localdomain` would have read back fine through the
+        // libc bug that was blamed for it — so either the value is not what we
+        // both said, or that bug was never the cause. Printing the store and the
+        // node side by side answers which, and costs one line.
+        //
+        // Both are printed even when they agree: a value nobody has looked at is
+        // not confirmed by a check that only speaks when it is wrong.
+        {
+            let served = fs.read_file(Path::new("/sys/kernel/domainname"))?;
+            serial_println!(
+                "[procfs]   domainname node = {} byte(s) {:?}, store = {:?}",
+                served.len(),
+                core::str::from_utf8(&served).unwrap_or("<not UTF-8>"),
+                original
+            );
+        }
+
         const PROBE: &str = "procfs-selftest-domain";
         let verdict = (|| -> KernelResult<()> {
             crate::fs::nameservice::set_domain(PROBE)?;
@@ -16148,11 +16189,12 @@ pub fn self_test() -> KernelResult<()> {
     // bytes, so strict parsers sizing buffers to TASK_COMM_LEN never overflow.
     {
         // Helper assertion first: comm_truncate caps at 15 on a boundary.
-        let long = "0123456789abcdefghij"; // 20 ASCII bytes
+        let long = b"0123456789abcdefghij"; // 20 ASCII bytes
         let cut = comm_truncate(long);
-        if cut.len() != 15 || cut != "0123456789abcde" {
+        if cut.len() != 15 || cut != b"0123456789abcde" {
             serial_println!(
-                "[procfs]   FAIL: comm_truncate(\"{long}\") = {:?} (len {}), want \"0123456789abcde\"",
+                "[procfs]   FAIL: comm_truncate({:?}) = {:?} (len {}), want b\"0123456789abcde\"",
+                long,
                 cut,
                 cut.len()
             );
@@ -16160,7 +16202,7 @@ pub fn self_test() -> KernelResult<()> {
         }
 
         let mut name = [0u8; 32];
-        name[..20].copy_from_slice(long.as_bytes());
+        name[..20].copy_from_slice(long);
         let synth = crate::sched::TaskInfo {
             id: 4243,
             name,
@@ -16193,7 +16235,7 @@ pub fn self_test() -> KernelResult<()> {
         let open = text.find('(').map_or(0, |i| i.saturating_add(1));
         let close = text.rfind(')').unwrap_or(open);
         let comm = text.get(open..close).unwrap_or("");
-        if comm != cut {
+        if comm.as_bytes() != cut {
             serial_println!(
                 "[procfs]   FAIL: stat comm field = {:?}, want truncated {:?}",
                 comm,
@@ -16209,7 +16251,7 @@ pub fn self_test() -> KernelResult<()> {
         let stext = core::str::from_utf8(&sdata).unwrap_or("");
         let name_line = stext.lines().next().unwrap_or("");
         let status_name = name_line.strip_prefix("Name:\t").unwrap_or("");
-        if status_name != cut {
+        if status_name.as_bytes() != cut {
             serial_println!(
                 "[procfs]   FAIL: status Name: field = {:?}, want truncated {:?}",
                 status_name,

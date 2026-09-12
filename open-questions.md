@@ -1524,6 +1524,63 @@ for this reason, so the harm is contained but it is the kind that compounds quie
 for what the undo history costs a single small write”, and this is it.*
 
 
+## A-Q12 — [A] Old USB sticks and camera cards show filenames as `????????`. Which alphabet should we assume they used?
+
+**In short:** filenames on FAT disks — USB sticks, SD cards, anything a camera or an
+older machine wrote — are stored as raw numbers, and the disk does not record which
+alphabet those numbers mean. A file called `RÉSUMÉ.TXT` is stored as bytes that mean
+`RÉSUMÉ` only if you already know which alphabet was in use. We currently guess "modern
+Unicode", that guess fails for every accented name, and we then print eight question
+marks. Worse, *every* such file prints the same eight question marks, so two different
+files look like one file and only the first can be opened. The question is what to assume
+instead.
+
+**Why we cannot just read it correctly.** There is nothing to read. The FAT format
+predates Unicode and stores short names in whatever "code page" the writing machine was
+configured for — a numbered alphabet, e.g. code page 437 for US machines, 850 for Western
+Europe, 932 for Japan. The number is not written to the disk. Newer disks usually also
+carry a long filename in Unicode and we use that when it is there; the problem is the
+short name, which is all that older or simpler devices write.
+
+**What happens today**, and it is a name collision rather than a display wart:
+`résumé.txt` and `naïve.txt` on such a disk both appear as `????????.???`, both answer to
+that name when opened, and the second is unreachable.
+
+**The options:**
+
+* **Assume code page 437** (the original IBM PC alphabet), the way Linux does by default.
+  *What changes:* accented names from US and most Western disks read correctly; names from
+  Greek, Cyrillic, Japanese or Hebrew machines read as the wrong letters — confidently and
+  silently, because 437 gives *an* answer for every byte.
+* **Assume code page 850** (Western Europe), which most European machines used.
+  *What changes:* the same, with the errors moved: better for European disks, worse for
+  US-era ones. There is no assumption that is right everywhere.
+* **Make it a setting**, defaulting to 437, changeable per mount.
+  *What changes:* nothing until someone sets it; a user who knows where their disk came
+  from can get correct names. Costs a mount option and a place to put it.
+* **Refuse to guess: show the undecodable bytes as visible escapes** (e.g. `r\xe9sum\xe9`).
+  *What changes:* no name is ever silently wrong and no two names collide, because the
+  escape is reversible. Names look ugly, and a user who knows the file is called `résumé`
+  has to recognise it in that form.
+
+**Recommendation.** Options 3 and 4 together: escapes as the default so nothing is ever
+silently wrong or collides, with a per-mount code page for someone who knows their disk.
+That ordering matters — the escape is the *correct* answer in the absence of information,
+and the code page is an optimisation for when the information exists. Doing 1 or 2 alone
+trades a visible failure for an invisible one, which is the trade this project has spent
+its effort undoing elsewhere.
+
+**If this is never answered:** nothing gets worse and nothing is corrupted — we do not
+write these names, only read them. The standing cost is that files with accented short
+names remain unopenable-by-name on affected media, and that two such files on one disk
+collide so only one is reachable. It is bounded and it does not grow.
+
+*Filed 2026-09-12 by lane A. The defect is `known-issues.md`
+`A-FAT-8-3-NAMES-DECODE-TO-QUESTION-MARKS-AND-COLLIDE-IN-LOOKUP`; the byte-clean plumbing
+it needs already exists (`DirEntry.name` since `D-VFS-PATHS-ARE-STR-NOT-BYTES`). Only the
+alphabet question is open, and it is a user-visible policy rather than an implementation
+detail, which is why it is here rather than decided in passing.*
+
 ## A-Q11: Who owns `scripts/hooks/pre-push`?  Two lanes each believed they did, and both edited it the same night
 
 **In short:** the tool that tells each agent which files it may edit does not mention

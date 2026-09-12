@@ -12457,6 +12457,48 @@ boots were all pre-build gates — inherited shellcheck, a misfiled open-questio
 clippy denial in another lane — so the base rate for "failed for an unrelated reason" is
 demonstrably high, but that is an impression and not a measurement of those 85.
 
+**[A] 2026-09-12 — TAKEN THE CHEAP ROUTE THIS ENTRY NAMED FIRST, AND THE SIGNATURE HAS NOT
+RECURRED IN 722 RECORDED BOOTS.** No stress run was needed: the data already existed in
+`bench/boot-history.jsonl`, which carries an `exceptions` field nobody had queried.
+
+| measurement | value |
+|---|---|
+| boot records | 722 |
+| non-host failures | 84 |
+| of those, reached the kernel (serial output) | **84** — pre-build gate failures never get a record |
+| failures with an exception captured | 6 |
+| page faults among them | 3 |
+| **matching `address=0x97`** | **0** |
+
+The three captured faults are at `0xffff80007fef4000`, `0x1000` and `0xffff80007feb0000` —
+none is the near-null read this entry describes.
+
+**Why the absence is meaningful rather than an artefact of missing instrumentation**, which
+is the question that decides whether any of the above counts. Only 10 of 722 records carry
+the `exceptions` key at all, which looks at first like sparse instrumentation. It is not:
+the key is written **only when an exception is parsed**, and all 10 that have it have a
+non-empty value. The test is whether the parser was live across the failure window, and it
+was — failures span 2026-08-17 to 2026-09-10 and the *earliest failure of all* already
+carries the key, with zero failures preceding it. So within that window, absence of the key
+means no exception was seen, not that none could have been.
+
+**And the self-test that provokes it does run**, checked rather than assumed: tonight's
+boot shows `spawn-test-glibc-pthread` as process 339 doing 4 threads, 40,000 mutex/futex
+ops and `pthread_join`, and `check-boot-skips` does not list it. A population of 700 boots
+says nothing if the test was skipping in all of them.
+
+**What this establishes, and what it does not.** At the observed July rate of 1 in 5, ~700
+boots would have produced on the order of a hundred recurrences; there are none. So the
+rate has collapsed and the defect was most likely fixed incidentally by teardown work in
+the interim. It does **not** identify a root cause, and the July occurrence predates the
+recorded window entirely — this is absence of recurrence, not a diagnosis. The honest
+status is a measured negative rather than a fix.
+
+*Worth noting for the next entry that reaches this state:* the route this took was already
+written down here — "a boot whose serial log is checked for the `address=0x97` signature" —
+and the cheaper version of it, querying a field the harness had been recording all along,
+was available for weeks. The 15-boot stress run was the option everyone remembered.
+
 *What would close this.* Either a boot whose serial log is checked for the `address=0x97`
 signature across the 85, or a deliberate stress run of
 `self_test_linux_real_glibc_pthread` — the old rate means ~15 boots would give better than
@@ -16389,6 +16431,67 @@ when `error & 4` (CPL3, ring-3 access). A *kernel-mode* (ring-0) write
 to a **present, read-only** user page (`error == 0x3`) therefore skips
 CoW resolution and falls straight through to "FATAL: Unrecoverable
 kernel page fault. Halting."
+
+**[A] 2026-09-12 — the syscall layer has no raw write through a user mapping, which
+completes the static half of this entry's own prescription.** The entry asks to *"identify
+the specific kernel write path that reaches a user COW page without pre-validating"*. With
+the four `mm/user.rs` primitives already audited clean (above), the only remaining way in
+is a **raw** pointer write that bypasses them. Enumerated:
+
+- `write_volatile` / `copy_nonoverlapping` / raw `*mut` stores across `kernel/src`: 174
+  sites in 53 files — overwhelmingly device MMIO (`ahci`, `apic`, `e1000`, `fb`, `drm`),
+  which write physical or HHDM addresses and cannot fault on a user page.
+- **Inside `kernel/src/syscall/`, where a user buffer is actually in scope: 10 sites.**
+  Every one writes either a *kernel local* (`ex2`, `frame_buf`, `buf` — each with a SAFETY
+  comment saying the regions are distinct locals) or an **HHDM address** obtained by
+  translating the target `pml4` (`linux.rs:51024`, which stamps a pattern through
+  `phys + hhdm` rather than through the user mapping, exactly as `copy_to_user_as` does).
+
+So no syscall path writes through a user virtual address in ring 0. Every user write in
+that layer goes through the four primitives, and those break CoW.
+
+**Stopping here deliberately, and the reason is proportionality rather than completeness.**
+What remains unaudited is raw writes *outside* `syscall/` that might target a user address —
+in `fs/`, `ipc/`, `proc/`. That is the long tail of the 174, it is mostly MMIO, and
+distinguishing "this address is user" from "this address is a device" needs reading each
+site rather than grepping. Against a defect that has produced **one** observation in June,
+has never appeared in 722 recorded boots, and whose signature is distinctive enough to
+recognise instantly if it recurs, that audit is disproportionate today.
+
+What would change that: a recurrence, or a cheap way to key the search on *user-address
+provenance* rather than on the write itself. The second is the interesting one and I do not
+have it — noting the gap rather than pretending the enumeration is finished.
+
+**[A] 2026-09-12 — checked the recorded boots for this signature, and the answer is WEAK
+EVIDENCE rather than reassurance. The distinction is the point of this note.**
+
+`bench/boot-history.jsonl` has captured every kernel exception across 722 boots. All 22 of
+them, in full: 15 deliberate breakpoints, 3 page faults (`error=0x2`, `0x0`, `0x2`), and
+one invalid opcode. **None with `error=0x3`** — the present/write/kernel combination this
+entry describes.
+
+**Why that is worth much less here than the identical measurement was for
+`B-PTHREAD-TEARDOWN-PF`.** That entry got a strong negative from the same data because its
+trigger is *known to run*: `spawn-test-glibc-pthread` executes every boot, verified in the
+serial log and absent from the skip ledger, so 700 boots at a 1-in-5 rate should have
+produced ~100 recurrences and produced none.
+
+This entry has no such trigger. The fault needs a kernel path that writes through a user
+pointer into a present, read-only COW page **without** first calling
+`mm::user::validate_user_write`. Whether any code path does that during a normal boot is
+exactly what is unknown — so zero occurrences is equally consistent with *the bug is gone*
+and with *nothing has ever exercised it*. The measurement cannot distinguish them.
+
+**So this is recorded as a null result, not a negative one.** The same query, the same
+population, the same zero — and it closes one entry while saying almost nothing about
+another, because the strength of an absence depends entirely on whether the thing that
+would produce it was running. An absence with no known trigger is not evidence; it is the
+shape of evidence.
+
+What *would* be evidence: a self-test that deliberately performs a ring-0 write through a
+user pointer into a `MAP_PRIVATE` file page that has not been touched since mapping, and
+asserts the write succeeds rather than halting. That is a rung, not a stress run, and it
+would convert this entry from WATCH to either fixed or reproducible in one boot.
 
 **Why it matters now:** the read-only page cache (§36) maps writable
 `MAP_PRIVATE` file pages **RO + COW** on first fault (so writes copy out
@@ -136991,7 +137094,63 @@ surprising cost under hardware virtualisation should suspect this before suspect
 own code — the tell is a cost that is *larger* under WHPX than under TCG, which is a VM
 exit and not work.
 
-### A-EXEC-WRITES-A-COMM-THAT-PRCTL-WOULD-REFUSE-AND-PROCFS-RENDERS-IT-AS-QUESTION-MARKS (lane A, 2026-09-12)
+### A-EXEC-WRITES-A-COMM-THAT-PRCTL-WOULD-REFUSE-AND-PROCFS-RENDERS-IT-AS-QUESTION-MARKS (lane A, 2026-09-12) — FIXED
+
+**FIXED 2026-09-12, the ABI surfaces.** `comm_truncate` takes and returns `&[u8]`; its
+UTF-8 char-boundary walk was deleted rather than ported, because Linux cuts `comm` at 16
+bytes flat so byte truncation is the more faithful behaviour and the function collapsed to
+one line. `gen_pid_cmdline` drops its decode entirely, `gen_pid_comm` carries bytes end to
+end, `build_pid_status` emits `Name:` straight into the byte buffer with its other 22
+writes untouched, and `build_pid_stat` splits around field 2 — which is parenthesised in
+the format precisely because it may contain anything.
+
+`PR_SET_NAME` no longer validates UTF-8. Its rejection was sound when written, and the
+reason it stopped being sound is worth keeping: procfs decoded to `str`, so refusing beat
+storing something that would not read back. procfs no longer decodes. Removing it also
+closed the asymmetry that made the check **partly decorative** — `execve` set the same comm
+through `set_task_name`, which never validated, so bytes this arm refused could already
+arrive by the more common route, and the gate only ever caught the caller who asked
+politely.
+
+**AMENDMENT: "all five surfaces" was wrong when written. There are nine, and four remain.**
+
+The fix covers the four procfs surfaces and `PR_GET_NAME`, which are the ABI — what
+userspace tools read. It does **not** cover four in-kernel shell task listings:
+
+```
+kshell.rs:8948, 9418, 9515, 9612
+    for info in &task_list { let name = core::str::from_utf8(...).unwrap_or("?"); ... }
+```
+
+Each iterates the scheduler's `task_list` and renders an undecodable comm as the literal
+`"?"` — the same collision constant one more time, so two processes with different
+unreadable names print identically in the shell's own `ps`-style output.
+
+**Why they were missed, which is the fourth time this specific mistake has appeared in
+this entry.** I enumerated the ABI: I grepped procfs, fixed what was there, and wrote
+"all five surfaces" from the population I had searched rather than from the population
+that has the defect. The kshell sites do not decode via `comm_truncate`, are not in
+`procfs.rs`, and use `"?"` rather than `"???"` — so every pattern that found the others
+missed these, and the phrase "all five" was an inference from a search, not a count.
+
+**Deliberately not fixed in the same change, and this is a judgement rather than an
+oversight.** The ABI surfaces and the shell display are different in kind: `/proc` is read
+by programs that match, group and kill by name, which is where a collision does damage;
+kshell's listing is read by a developer looking at a screen. Fixing the four shell sites
+means converting `shell_println!("{name}")` call sites to byte emission in a
+144,000-line file, which is the same restructure the procfs builders needed and deserves
+its own change and its own verification rather than riding along on this one.
+
+**What is true after this change**, stated so nobody has to re-derive it:
+
+| surface | status |
+|---|---|
+| `/proc/<pid>/comm` | bytes |
+| `/proc/<pid>/stat` field 2 | bytes |
+| `/proc/<pid>/status` `Name:` | bytes |
+| `/proc/<pid>/cmdline` | bytes |
+| `prctl(PR_GET_NAME)` | bytes (always was) |
+| `kshell` task listings (4 sites) | **still `"?"`** |
 
 **In short:** every running program has a short name the system shows in process
 listings. There is a check that stops a program *asking* for a name the system cannot
@@ -137058,7 +137217,195 @@ is "procfs to emit comm as raw bytes". Smaller than that entry implies:
 3. `PR_SET_NAME` then drops its UTF-8 validation, closing the tracked limitation, and the
    two paths agree.
 
+**SCOPE CORRECTED TWICE MORE, same day, and the second one is a real widening of the
+bug rather than bookkeeping.** Three estimates of one task, each wrong in the same way,
+recorded in full because the pattern is worth more than the number.
+
+| revision | claim | population measured | verdict |
+|---|---|---|---|
+| original | "three call sites and one helper" | that the *inputs* are already bytes | right conclusion, reasoning never reached the output |
+| correction 1 | "23 `write!` calls — a restructure" | *all* writes in `build_pid_status` | wrong: only one write carries the name, and it is the first |
+| correction 2 | this table | the decode itself (`unwrap_or("???")`) | four sites, not three — see below |
+
+**The widening: `/proc/<pid>/cmdline` is a fifth affected surface and this entry missed
+it.** `gen_pid_cmdline` decodes the same task name with the same
+`from_utf8(..).unwrap_or("???")` and emits `name.as_bytes()` with a NUL. So a process with
+a non-UTF-8 `argv[0]` reports `???` from `cmdline` too — and `cmdline` is what `ps` reads
+for the command line, which makes it the most-read of the five, not the least.
+
+**Why the enumeration missed it, which is the same defect as the estimates.** I listed the
+sites by grepping for `comm_truncate`, which finds three. The decode is a different
+population: `unwrap_or("???")` finds four. `gen_pid_cmdline` does not truncate — it has no
+reason to call the helper — so a search keyed on the helper could not contain it. I picked
+the population that matched my mental model of "the comm path" rather than the one that
+matched the defect.
+
+**What each site actually requires**, stated as mechanism so a reader can check the size
+rather than trust it:
+
+- `comm_truncate(&str) -> &str` becomes `(&[u8]) -> &[u8]`. Its char-boundary walk is
+  deleted, not ported: Linux cuts `comm` at 16 bytes flat, so byte truncation is *more*
+  faithful.
+- `gen_pid_cmdline` drops the decode entirely and copies `task.name.get(..task.name_len)`
+  before the NUL. It already returns `Vec<u8>`; this is two lines and needs no helper.
+- `gen_pid_comm` already builds a `Vec<u8>`; it drops the decode and pushes bytes.
+- `build_pid_status` carries the name in `writeln!(s, "Name:\t{name}")`, the **first** of 23
+  writes into a `String`, and returns `s.into_bytes()`. The name bytes are emitted first and
+  the untouched `String` appended after. **The other 22 writes do not change.**
+- `build_pid_stat` is a **single `format!`** with `name` as one argument inside `({})`,
+  returning `text.into_bytes()`. It splits into a prefix ending `" ("`, the name bytes, and
+  a suffix beginning `") "`.
+- `PR_SET_NAME` then drops its UTF-8 validation, and the exec path and the prctl path stop
+  disagreeing about what a name may contain.
+
+**The lesson, which is about corrections rather than about procfs.** A correction inherits
+the authority of having been checked, so a wrong one is harder to dislodge than the error
+it replaces — and mine turned a right-by-accident estimate into a wrong-by-measurement one
+that *read* as more rigorous because it carried a number. Every one of the three revisions
+measured a population adjacent to the question: inputs instead of the path, all writes
+instead of the writes carrying the name, the helper instead of the decode. None of the
+numbers was false.
+
+**Describing the mechanism instead of sizing it is the form that cannot fail this way.** A
+reader who doubts "split one `format!` into two" can check it in one command; a reader who
+doubts "23 writes" has to reconstruct which question it answered.
+
 **Interim behaviour is safe**, which is why this is debt and not an emergency: nothing is
 corrupted on disk, no privilege is involved, and the name is cosmetic to the kernel. What
 it costs is that monitoring tools cannot distinguish such processes, and that a process
 can *choose* to be indistinguishable by passing a non-UTF-8 `argv[0]`.
+
+### A-THE-DOMAIN-IS-EMPTY-AND-BOTH-LANES-SPENT-THREE-BOOTS-ASSUMING-OTHERWISE (lane A, 2026-09-12) — OBSERVED, and it closes ctest-hostname check 13
+
+**In short:** the system's network domain name is empty, and two lanes spent three boot
+cycles reasoning about it on the assumption that it was `localdomain`. Nobody had printed
+it. One line of output settled what a day of inference could not.
+
+**The measurement**, from the ring-0 procfs rung added for exactly this purpose:
+
+```
+[procfs]   domainname node = 1 byte(s) "\n", store = ""
+```
+
+**What it settles.** `ctest-hostname` failed at check 13 for three boots. Lane B
+diagnosed it correctly the first time — `read_kernel_name` returned `None` for both
+*could not read* and *read and is empty*, so an empty domain reported as `EIO`. They then
+**retracted that correct diagnosis**, on the grounds that the domain is never empty here.
+That premise was mine: I had read `init_defaults()` setting `domain: "localdomain"`, seen
+`gen_sys` call it before reading, and written to them that the node serves `localdomain`.
+It does not. The node serves one byte.
+
+So a value neither lane had observed produced: one false claim, one correct diagnosis
+withdrawn on the strength of it, and three boots. The failure was not analysis — both
+chains of reasoning were valid — it was that the premise was an inference wearing the
+clothes of a fact. `design-decisions.md` §932 is the general rule; this is the instance
+that cost the most.
+
+**Consequence for the `(none)` proposal: do not make it.** See below.
+
+**Before anyone makes the kernel serve `(none)` for an unset domain: this lane has
+already decided the opposite question, deliberately, and the two decisions collide.**
+
+`kernel/src/syscall/linux.rs` carries a self-test whose pass line reads:
+
+> `uname pure-read contract — no "" -> "localdomain" / "unknown" -> "localhost"
+> substitution (v6.6 kernel/sys.c::SYSCALL_DEFINE1(newuname): memcpy(&tmp, utsname(),
+> sizeof(tmp)))`
+
+It calls `set_domain("")`, asserts `uname`'s `domainname[0]` is `0x00` rather than `0x6c`
+(the `l` of a fabricated `localdomain`), and restores. Its own comment says the pre-batch
+behaviour "fabricated 11 bytes that no [caller asked for]". So **`uname` deliberately does
+not substitute a plausible value for an unset domain**, and that is pinned by a rung that
+would fail if anyone reintroduced it.
+
+That is the same argument as `localhost`, `???` and `localdomain` — reached independently
+in this lane, months earlier, and already enforced.
+
+**The collision.** Lane B and I agreed that procfs serving `localdomain` for an unset
+domain is a fabrication of exactly that kind, and that `(none)` — what Linux reports — is
+the honest answer. But if procfs starts serving `(none)` while `uname` continues to report
+empty, then **one value has two sources that disagree**, which is the defect that produced
+the third hostname store in `sysfs.rs` and is the reason the getter syscall was declined.
+Making procfs "honest" in isolation buys a display improvement and pays for it with a
+divergence.
+
+**Three coherent options, and the choice is not obvious:**
+
+1. **Change neither.** Both paths report what the store holds. Consistent, and "unset" is
+   reported as empty rather than as a name — which is *already* the distinguishable answer
+   the `(none)` change was meant to provide. Linux compatibility is the only loss.
+2. **Change both.** procfs and `uname` both substitute `(none)`. Matches Linux exactly,
+   and requires deleting a rung that exists specifically to prevent substitution — so the
+   deletion has to argue against that rung's stated reasoning, not merely around it.
+3. **Change procfs only.** Two sources, one value, disagreeing. Should not be done.
+
+**My reading, offered rather than acted on:** option 1 is already implemented and already
+satisfies the underlying goal, because empty *is* distinguishable from configured. The
+`(none)` proposal was aimed at `localdomain` being indistinguishable from a real
+configuration, and the fix for that is not to substitute a different constant — it is to
+stop substituting, which `uname` already does. If the observed value turns out to be
+`localdomain`, the question is why the two paths differ, not which constant to prefer.
+
+Deliberately not acted on: the observation boot has not reported yet, and the whole reason
+that boot exists is that both lanes had inferred this value rather than seen it.
+
+**Open, low value, and deliberately stopped.** `init_defaults()` sets `localdomain`, yet
+the store reads empty. Narrowed by inspection, then abandoned on purpose:
+
+- `nameservice::STATE` is created in exactly one place, `init_defaults()`, with
+  `domain: "localdomain"`. Nothing at boot calls it; only procfs's `gen_sys` and kshell do.
+- The `uname` pure-read rung is **not** the cause I first guessed. It calls
+  `init_defaults()` itself (`syscall/linux.rs:69341`) before capturing `saved_dom`, so it
+  captures `localdomain`, and every one of its failure paths restores. It passed, so it
+  restored faithfully.
+- That leaves something between that rung and this print, of which `ctest-hostname`'s own
+  save-and-restore around checks 13-21 is the only candidate I have identified.
+
+**Not pursued further, because nothing is broken.** An empty domain is a legitimate state —
+no NIS domain configured — `uname` and procfs agree on it, and the pure-read contract is
+satisfied. Settling *why* costs another 35-minute boot with an extra print, to explain a
+state that is correct. Recorded so the next person does not re-derive the three bullets
+above, and with the instrument already in the tree: the rung prints the value every boot,
+so anyone who wants the answer can bisect by adding one more print rather than starting
+from the question.
+
+### A-FAT-8-3-NAMES-DECODE-TO-QUESTION-MARKS-AND-COLLIDE-IN-LOOKUP (lane A, 2026-09-12)
+
+**In short:** FAT stores short filenames in a DOS codepage, not UTF-8. We decode them as
+UTF-8 and substitute `????????` when that fails — so any accented short name becomes the
+same eight question marks, and two different files answer to one name.
+
+**Where:** `kernel/src/fs/fat.rs`. `display_name()` (715) falls back to the 8.3 name when
+there is no long-name entry; `short_name()` (740) uses it **always**. Both decode with
+`core::str::from_utf8(..).unwrap_or("????????")` for the base and `"???"` for the
+extension.
+
+**Why it is not an edge case.** 8.3 names are codepage-encoded *by specification* —
+CP437/CP850 and friends — so a byte ≥ 0x80 is the normal representation of an accented
+character, not corruption. Any disk formatted or written by a DOS-era tool, a camera, or
+embedded firmware carries them.
+
+**The collision is in a matching path, which makes it worse than the procfs case.**
+`fat.rs:1892-1899`:
+
+```rust
+if e.display_name().eq_ignore_ascii_case(&target) { return true; }
+if e.long_name.is_some() { return e.short_name().eq_ignore_ascii_case(&target); }
+```
+
+So a lookup for the literal `????????.???` matches **every** entry whose short name failed
+to decode, and returns whichever comes first; and a file whose real short name is
+non-ASCII cannot be found by its real name at all. `A-EXEC-WRITES-A-COMM-...` manufactures
+collisions in a *display*; this one manufactures them in a *resolver*.
+
+**Proper fix:** the same shape as the comm work — keep the 8.3 field as the eleven bytes it
+is, compare bytes, and decode lossily only for display. `DirEntry.name` is already byte-
+clean since `D-VFS-PATHS-ARE-STR-NOT-BYTES`, so the destination type exists; what does not
+is a decision about *which codepage* to use for display, which is a real question and not
+one to answer in passing.
+
+**Found by enumerating the defect rather than the subsystem**, which is the only reason it
+surfaced: grepping `comm_truncate` found three sites in one file; grepping the literal
+`"???"` found four there, a fifth surface (`/proc/<pid>/cmdline`), this, and a *fixed*
+instance in `fs/ar.rs` whose comment records the same reasoning. A search keyed on the
+path being worked on cannot contain a defect in a different subsystem.

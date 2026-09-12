@@ -152,23 +152,61 @@ it is** — the third time today, after `uname -o` printing `SlateOS` and
 are now `xfail`s in the harness naming §371, so they are still run and an XPASS
 would report the divergence disappearing.
 
-## B-COREUTILS-STAT-F-FILESYSTEM-MODE-DIFFERS (lane B, 2026-09-11)
+## B-COREUTILS-STAT-F-FSID-HALVES-ARE-SWAPPED (lane B, 2026-09-11)
 
-With the §371 cases correctly attributed, **13 real differences remain** in
-`scripts/stat-diff.sh`, and nine of them are one family: `stat -f`, the
-filesystem-information mode.
+`stat -f -c %i` prints the filesystem id with its two 32-bit halves exchanged
+relative to GNU:
 
-    stat -f .            stat --file-system .       stat -f file.txt
-    stat -f -c %a .      stat -f -c %f .            stat -f -c %i .
-    stat -f -c %t .      stat -f -c %T .            stat -f -t .
+    GNU    68867c45465b201c
+    ours   465b201c68867c45
 
-Both sides read the *same* filesystem — the harness deliberately points both
-halves at one tree — so these are not environment differences. `%i` (filesystem
-ID), `%t`/`%T` (type in hex and by name) and `%a`/`%f` (free blocks, for an
-unprivileged caller and in total) disagree, and the whole-report and terse forms
-inherit it.
+The cause is that the two programs read different syscalls. GNU uses Linux
+`statfs`, whose `f_fsid` is `struct { int val[2]; }` and which it renders half
+by half; ours uses POSIX `statvfs`, whose `f_fsid` is a single `unsigned long`
+that glibc packs in the opposite order.
 
-The remaining 4 are diagnostic wording for a missing operand.
+**Deliberately not "fixed" here.** Swapping the halves would match glibc on
+Linux and could be *wrong on the target* — SlateOS's own `statvfs` is free to
+pack its id however it likes, and compensating for a glibc detail in the
+renderer would bake a host assumption into a program that does not run on the
+host. Whoever fixes this should first measure what SlateOS's `statvfs` returns;
+the fix is then one line in the `b'i'` arm.
+
+### Not defects, recorded so they are not re-filed
+
+**`%t` and `%T`** print `?` and `UNKNOWN` where GNU prints `ef53` and
+`ext2/ext3`. `stat.rs` documents this at the call site: *"`statvfs` carries no
+filesystem-type field, so there is nothing to print. GNU prints `?` here too on
+a kernel whose `statfs` lacks `f_type`; this is that same case, not a new
+one."* A consequence of the syscall choice, already known.
+
+**`%a` and `%f`** were listed here as disagreeing and **do not**. They were an
+artefact of the harness — see below — and now pass.
+
+## TD-B-A-HARNESS-MUST-NOT-WRITE-TO-THE-THING-IT-MEASURES (lane B, 2026-09-11)
+
+`scripts/stat-diff.sh` reported `stat -f -c %a` and `stat -f -c %f` as
+differences. They are free-block counts, and **the harness was consuming the
+blocks**: it captures each side's stdout and stderr to temporary files, so
+writing ours' output allocated blocks on the very filesystem GNU was about to
+be asked about, a few milliseconds later.
+
+Demonstrated rather than reasoned about:
+
+    %f before four mktemps and one write : 238861778
+    %f after                             : 238861777
+
+Fixed by putting the capture files on `/dev/shm` — tmpfs, a different
+filesystem from the fixtures, confirmed by their differing `%i`. The two cases
+now pass, which is the check that the diagnosis was right.
+
+**This is the second harness in a day to have put itself into its own
+measurement.** `env-diff.sh` had to stop handing the two sides different `PATH`
+values, because `env` prints its environment and the harness's scaffolding was
+in it. Same shape, different resource: *a harness may not appear in the answer
+it is collecting.* Worth checking for in any future harness whose subject
+reports on a shared resource — free space, memory, process counts, open file
+descriptors.
 
 ## TD-B-A-LINUX-TARGETED-HARNESS-CANNOT-MEASURE-A-SLATEOS-GATED-SUBJECT (lane B, 2026-09-11)
 
@@ -65374,8 +65412,11 @@ filed that as a defect and **it is not one**: it is design decision §371, taken
 deliberately because GNU's own quoting there is a `strstr` accident and because
 a file name must not be able to forge a line of `stat`'s own output. Those cases
 are now `xfail`s naming §371, and the honest score is **75 passed, 13 differed,
-19 differ on purpose**. Of the 13, nine are `stat -f` (the filesystem-information
-mode) and four are missing-operand wording.
+19 differ on purpose**. Of those, two more turned out to be the harness
+writing to the filesystem it was measuring, so the score is now **77 passed, 11
+differed, 19 differ on purpose** — seven `stat -f` cases (one real defect in
+`%i`, plus `%t`/`%T` which are a documented consequence of using `statvfs`) and
+four missing-operand wordings.
 
 **Two things about the harness worth keeping.**
 

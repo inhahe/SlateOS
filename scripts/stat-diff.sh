@@ -76,10 +76,29 @@ run_side() {
   diff_run timeout -k 2 20 env TZ=UTC LC_ALL=C.UTF-8 PATH="$bindir/$side" stat "$@"
 }
 
+# Where this harness puts its own scratch files, which is NOT the filesystem it
+# is measuring.
+#
+# `stat -f` reports free blocks, and the harness captures each side's output to
+# a file. Writing ours' output allocates blocks, so GNU -- run immediately after
+# -- sees a different free count and `%f`/`%a` differ by one. Demonstrated
+# rather than theorised:
+#
+#     %f before four mktemps and one write : 238861778
+#     %f after                             : 238861777
+#
+# So the capture files go on tmpfs, a different filesystem from the fixtures.
+# The general form, which is the same shape as `env-diff.sh` having to keep its
+# own `PATH` out of the subject's environment: **a harness must not write to the
+# thing it measures.**
+SCRATCH=/dev/shm
+[ -d "$SCRATCH" ] && [ -w "$SCRATCH" ] || SCRATCH=${TMPDIR:-/tmp}
+
 compare() {
   local o_out g_out o_err g_err o_rc g_rc
-  o_err=$(mktemp); g_err=$(mktemp)
-  local o_bin g_bin; o_bin=$(mktemp); g_bin=$(mktemp)
+  o_err=$(mktemp -p "$SCRATCH"); g_err=$(mktemp -p "$SCRATCH")
+  local o_bin g_bin
+  o_bin=$(mktemp -p "$SCRATCH"); g_bin=$(mktemp -p "$SCRATCH")
   run_side ours "$@" </dev/null >"$o_bin" 2>"$o_err"; o_rc=$?
   run_side gnu  "$@" </dev/null >"$g_bin" 2>"$g_err"; g_rc=$?
   o_out=$(od -An -c <"$o_bin"); g_out=$(od -An -c <"$g_bin")

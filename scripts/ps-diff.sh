@@ -58,10 +58,20 @@ pass=0; fail=0; xfail=0; xpass=0; masked=0; broken=0
 # are evidence or are masked.  The probe demands the namespace AND that PID 1
 # really is renumbered, because `unshare` succeeding while `--mount-proc`
 # quietly did nothing would leave the host's table visible.
+# The probe runs the command DIRECTLY rather than in a `$(…)`, which matters
+# for a reason that has nothing to do with this harness reading correctly.
+# `scripts/shell-callables.py` refuses a literal command substitution whose
+# callee it cannot resolve, because a missing callee makes `$(…)` exit 127 and
+# evaluate to the empty string -- and an empty string compared against "1" is
+# a perfectly ordinary-looking `ns=none`. The harness would then mask every
+# case and report it, which is honest, but it would be masking for a reason
+# the operator could not see. `free-diff.sh` and `df-diff.sh` both test the
+# command directly for the same reason. See known-issues ->
+# A-A-THE-LIBC-SHAPE-GATE-WAS-BORN-DEAD-AND-THE-WIRING-GATE-CALLS-IT-WIRED.
 ns=none
 if command -v unshare >/dev/null 2>&1 && command -v setsid >/dev/null 2>&1 \
-   && [ "$(setsid unshare -pf --mount-proc -Ur sh -c \
-            'exec ps -o pid= -p 1' </dev/null 2>/dev/null | tr -d ' ')" = "1" ]; then
+   && setsid unshare -pf --mount-proc -Ur sh -c \
+        'exec ps -o pid= -p 1' </dev/null 2>/dev/null | grep -q '^ *1 *$'; then
   ns=yes
 fi
 
@@ -208,11 +218,25 @@ run_case --no-header
 run_case -e --no-header
 
 # --- refusals ----------------------------------------------------------------
-run_case -X
 run_case --nosuchoption
+run_case -Q
 run_case -o nosuchcolumn
 run_case -p notanumber
 run_case -p 999999
+
+# `-X` and `-h` are NOT unknown options, and putting them in the list above was
+# my error rather than a finding. Both are real procps options this build does
+# not implement: `-X` is the register format and prints its own header before
+# exiting 1, and `-h` suppresses the header and exits 1 silently with no output
+# at all on either stream. We refuse both, which is right for an option we do
+# not have, and differs from a reference that has it.
+#
+# Measured before being declared, after `-ps` in uptime-diff.sh and `--help` in
+# free-diff.sh were both declared divergences that were never true. An expected
+# failure is an assertion, and it is the only kind its own case passing never
+# tests.
+xfail_case "procps implements -X (register format); this build does not" -X
+xfail_case "procps implements -h (suppress header); this build does not" -h
 
 # --- help and version --------------------------------------------------------
 # NOT declared divergences without measuring. free-diff.sh shipped a `--help`
@@ -220,7 +244,6 @@ run_case -p 999999
 # refusal when it is not one. A declared divergence is an assertion like any
 # other and is the only kind never tested by its own case passing.
 run_case --help
-run_case -h
 
 printf '\n%d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
 if [ "$xpass" -gt 0 ]; then

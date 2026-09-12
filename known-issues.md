@@ -131212,8 +131212,8 @@ Two measured examples:
   **Do not read "0 vs 0" as "neither is worth keeping."** Both fail against
   procps; only one of them is failing at the last step.
 
-* **`ps` also ignores every option it does not know, and `check-argv-ignored`
-  cannot see it.** Measured: `ps -X` prints the default listing at exit 0
+* **`ps` also ignored every option it did not know, and `check-argv-ignored`
+  could not see it — FIXED 2026-09-12.** Measured: `ps -X` printed the default listing at exit 0
   where procps exits 1, and `ps --help` prints the process table. The parser
   strips one `-` and then walks the string a character at a time:
 
@@ -131230,6 +131230,31 @@ Two measured examples:
   honours the options it knows and silently discards the rest — which is the
   same class of hole, one notch finer, and is the shape §1006 is about: a
   program that cannot do what it was asked should say so.
+
+  **The fix:** long options are matched whole, an unknown short option returns
+  `error: unsupported SysV option` and an unknown long one
+  `error: unknown gnu long option`, both at exit 1 — procps' own messages,
+  measured. `--help` prints procps' 170-byte help text, captured with
+  `cat -A` rather than retyped, because `uptime`'s help was missing a leading
+  blank line and a trailing reference line for exactly the reason that those
+  are invisible when you retype instead of measure.
+
+  **A test was holding the defect in place.** It was called
+  `parse_unknown_silently_ignored`, and its comment read "Preserves previous
+  behaviour — no error, no panic." It preserved `ps -Q` printing the process
+  table at exit 0. That is the third time this week a test has certified a bug
+  — after `uptime`'s six asserting an unmeasured `up …` format, and
+  `ctest-hostname`'s asserting that a personality name was extracted correctly
+  when nothing consumed it. **A test and a specification are the same artifact
+  right up until someone measures the reference**, and nothing in the test
+  itself says which one it is.
+
+  **The gap in `check-argv-ignored.py` is left open deliberately.** Extending
+  it from "reads argv at all" to "refuses what it cannot honour" is a much
+  harder static question — it would have to know each program's option set —
+  and the differential harnesses answer it directly for every program that has
+  one. Recorded here rather than filed as a checker change, because the
+  cheaper instrument already exists.
 
 * **`logger`** — **not a measurement question at all, and a harness cannot
   settle it.** `dup-bins-survey` lists it as "no harness — write one", which is

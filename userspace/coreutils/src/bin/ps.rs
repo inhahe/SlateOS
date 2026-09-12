@@ -7,6 +7,7 @@
 //! Reads from /proc filesystem. Each directory under /proc/<pid>/
 //! contains process information files: stat, cmdline, status.
 
+use coreutils::diag;
 use coreutils::stdfd;
 use std::env;
 use std::io::{self, Write};
@@ -23,20 +24,94 @@ struct PsArgs {
 /// the same clustered short-flag syntax used by the rest of these
 /// utilities.  Unknown short flags are silently ignored, matching the
 /// previous behaviour.
-fn parse_args(args: &[String]) -> PsArgs {
+/// What the command line asked for.
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+enum Request {
+    /// Print the table.
+    List(PsArgs),
+    /// `--help`.
+    Help,
+}
+
+/// Parse `ps`'s argv.
+///
+/// # Errors
+///
+/// An unknown option, short or long. procps distinguishes the two and so does
+/// this; the messages are its own, measured.
+///
+/// # What this used to do, and why a test was protecting it
+///
+/// The body was one loop with `_ => {}` at the bottom, and a test named
+/// `parse_unknown_silently_ignored` asserting that it stayed that way --
+/// "Preserves previous behaviour: no error, no panic." It preserved a defect.
+/// Measured against procps-ng:
+///
+/// | | procps | here, before |
+/// |---|---|---|
+/// | `ps -Q` | `error: unsupported SysV option`, exit 1 | the default table, exit 0 |
+/// | `ps --nosuchoption` | `error: unknown gnu long option`, exit 1 | the default table, exit 0 |
+/// | `ps --help` | usage, exit 0 | **the process table**, exit 0 |
+///
+/// The `--help` row is the one that shows how bad the shape was. There was no
+/// long-option branch at all: `--help` had its first `-` stripped and the rest
+/// was walked a character at a time, so it was read as `-h -e -l -p`, the `e`
+/// matched, and `ps --help` turned on "show all processes". Any long option
+/// containing `e`, `A` or `f` silently set that flag -- `--full` would have
+/// set `-f` by accident and `--version` would have set `-e`.
+///
+/// `scripts/check-argv-ignored.py` did not catch it and is not wrong to have
+/// missed it: that gate finds a program ignoring its command line ENTIRELY,
+/// which is the defect `uptime` had. This one read `argv`, honoured `-e` and
+/// `-f`, and discarded the rest -- the same hole one notch finer.
+///
+/// Found by `scripts/ps-diff.sh`.
+fn parse_args(args: &[String]) -> Result<Request, String> {
     let mut out = PsArgs::default();
     for arg in args {
+        // Long options are matched WHOLE. Splitting them into characters is
+        // what made `--help` mean `-e`.
+        if let Some(long) = arg.strip_prefix("--") {
+            if long == "help" {
+                return Ok(Request::Help);
+            }
+            return Err("error: unknown gnu long option".to_string());
+        }
         if let Some(flags) = arg.strip_prefix('-') {
             for c in flags.chars() {
                 match c {
                     'e' | 'A' => out.all_procs = true,
                     'f' => out.full_format = true,
-                    _ => {}
+                    _ => return Err("error: unsupported SysV option".to_string()),
                 }
             }
         }
+        // A bare operand is still ignored: procps takes PID lists in that
+        // position and this build does not implement them, so refusing here
+        // would reject a command line procps accepts. Unchanged, and still
+        // covered by `parse_bare_args_ignored`.
     }
-    out
+    Ok(Request::List(out))
+}
+
+/// procps-ng's `ps --help` with no topic, byte for byte.
+///
+/// Captured with `ps --help | cat -A`. The leading blank line is procps' and
+/// so is the trailing `For more details see ps(1).` -- `uptime`'s help text
+/// was missing exactly those two things for exactly the same reason, which is
+/// that they are invisible when you retype a help message instead of
+/// measuring it.
+fn help_text() -> &'static str {
+    "
+Usage:
+ ps [options]
+
+ Try 'ps --help <simple|list|output|threads|misc|all>'
+  or 'ps --help <s|l|o|t|m|a>'
+ for additional help text.
+
+For more details see ps(1).
+"
 }
 
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
@@ -62,7 +137,28 @@ fn main() -> ExitCode {
 
 fn run_main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
-    let parsed = parse_args(&args);
+    let parsed = match parse_args(&args) {
+        Ok(Request::List(p)) => p,
+        Ok(Request::Help) => {
+            print!("{}", help_text());
+            return ExitCode::SUCCESS;
+        }
+        Err(message) => {
+            // procps prints the error AND its whole usage, both on stderr,
+            // separated by a blank line -- which `help_text`'s leading newline
+            // supplies. Measured: `ps --nosuchoption 2>&1` is the message, an
+            // empty line, then the same 170 bytes `--help` prints.
+            //
+            // This is the opposite of the call made for `uptime`, whose
+            // upstream is also procps: there the shared `coreutils::getopt`
+            // formatter prints GNU's `Try '… --help'` hint for all 86 bins and
+            // changing it for one would make the other 85 wrong. `ps` does not
+            // go through that formatter, so matching costs nothing here.
+            diag!("{}", message);
+            eprint!("{}", help_text());
+            return ExitCode::FAILURE;
+        }
+    };
 
     let stdout = io::stdout();
     let mut out = stdout.lock();
@@ -191,51 +287,86 @@ mod tests {
 
     // ---------------- parse_args ----------------
 
+    /// The listing options, unwrapped. Every one of these was valid before and
+    /// still is; only the return type moved.
+    fn listed(args: &[&str]) -> PsArgs {
+        match parse_args(&s(args)) {
+            Ok(Request::List(p)) => p,
+            other => panic!("expected a listing request, got {other:?}"),
+        }
+    }
+
     #[test]
     fn parse_empty() {
-        assert_eq!(parse_args(&s(&[])), PsArgs::default());
+        assert_eq!(listed(&[]), PsArgs::default());
     }
 
     #[test]
     fn parse_dash_e() {
-        let a = parse_args(&s(&["-e"]));
+        let a = listed(&["-e"]);
         assert!(a.all_procs);
         assert!(!a.full_format);
     }
 
     #[test]
     fn parse_dash_a_uppercase_is_alias_for_e() {
-        let a = parse_args(&s(&["-A"]));
-        assert!(a.all_procs);
+        assert!(listed(&["-A"]).all_procs);
     }
 
     #[test]
     fn parse_dash_f() {
-        let a = parse_args(&s(&["-f"]));
+        let a = listed(&["-f"]);
         assert!(a.full_format);
         assert!(!a.all_procs);
     }
 
     #[test]
     fn parse_clustered_ef() {
-        let a = parse_args(&s(&["-ef"]));
+        let a = listed(&["-ef"]);
         assert!(a.all_procs);
         assert!(a.full_format);
     }
 
+    /// THIS TEST USED TO ASSERT THE BUG.
+    ///
+    /// It was called `parse_unknown_silently_ignored` and its comment read
+    /// "Preserves previous behaviour — no error, no panic." What it preserved
+    /// was `ps -Q` printing the whole process table and exiting 0 where procps
+    /// prints `error: unsupported SysV option` and exits 1. A test can hold a
+    /// defect in place as firmly as it holds a feature, and the only thing
+    /// distinguishing the two is whether anyone measured.
     #[test]
-    fn parse_unknown_silently_ignored() {
-        // Preserves previous behaviour — no error, no panic.
-        let a = parse_args(&s(&["-X"]));
-        assert!(!a.all_procs);
-        assert!(!a.full_format);
+    fn parse_unknown_short_option_is_refused() {
+        let err = parse_args(&s(&["-Q"])).expect_err("-Q is not an option here");
+        assert_eq!(err, "error: unsupported SysV option");
+        // Still refused when clustered behind valid flags, which is where a
+        // character-at-a-time parser is most likely to let one through.
+        assert!(parse_args(&s(&["-efQ"])).is_err());
+    }
+
+    /// `--help` USED TO PRINT THE PROCESS TABLE.
+    ///
+    /// There was no long-option branch: `--help` had one `-` stripped and the
+    /// rest was walked character by character, so it was read as `-h -e -l -p`
+    /// and the `e` matched. The bug is not that `--help` was unimplemented, it
+    /// is that a long option silently became whichever short flags its letters
+    /// happened to spell.
+    #[test]
+    fn long_options_are_matched_whole_not_letter_by_letter() {
+        assert_eq!(parse_args(&s(&["--help"])), Ok(Request::Help));
+        // The three that would have set a flag by accident.
+        for arg in ["--nosuchoption", "--full", "--version"] {
+            let err = parse_args(&s(&[arg])).expect_err(arg);
+            assert_eq!(err, "error: unknown gnu long option", "for {arg}");
+        }
     }
 
     #[test]
     fn parse_bare_args_ignored() {
-        // ps doesn't take positional arguments in our minimal build.
-        let a = parse_args(&s(&["1234"]));
-        assert_eq!(a, PsArgs::default());
+        // ps doesn't take positional arguments in our minimal build. procps
+        // reads a PID list here, so refusing would reject a command line the
+        // reference accepts -- deliberately unchanged.
+        assert_eq!(listed(&["1234"]), PsArgs::default());
     }
 
     // ---------------- format_tty ----------------

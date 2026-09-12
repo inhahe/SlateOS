@@ -4,5 +4,10 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS nproc/arch/pathchk/logname/users/tty - simple system info tools"
 [dependencies]
+# getopt's usage diagnostics, spelled once. The wording is not ours -- it is
+# what `getopt_long` prints and what both GNU coreutils and util-linux repeat
+# verbatim -- so every program here has to render it identically. Pure
+# formatting over `quoting`, no I/O, so §768 exempt.
+usageerror = { path = "../usageerror" }
 # Option words come from argv.
 quoting = { path = "../quoting" }

@@ -44,42 +44,25 @@ fn detect_mode(argv0: &str) -> Mode {
 /// name the same program.
 fn prog_name() -> String {
     let argv0 = env::args().next().unwrap_or_else(|| "nproc".to_string());
-    argv0
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(&argv0)
-        .to_string()
-}
-
-/// GNU's pointer line, which follows every usage error it prints.
-///
-/// It is part of the message rather than something `main` appends, because
-/// `main` prefixes only the first line with the program name and the other
-/// errors this crate returns are not usage errors and get no pointer.
-fn with_help_pointer(name: &str, body: String) -> String {
-    format!("{body}\nTry '{name} --help' for more information.")
+    let base = argv0.rsplit(['/', '\\']).next().unwrap_or(&argv0);
+    // The host build is `nproc.exe`; GNU prints `nproc`, and `detect_mode`
+    // already ignores the suffix when it dispatches on the same name.
+    base.strip_suffix(".exe").unwrap_or(base).to_string()
 }
 
 /// GNU's refusal for an option the program does not have.
 ///
-/// Measured in the C locale, where the quotes GNU shows are ASCII -- which
-/// is what `quoteaf` produces. The text comes from argv and an argv word
-/// may hold a newline, so it is escaped rather than pasted: printed raw it
-/// would let the caller append an invented line to this program's stderr.
+/// The wording, and the rule that a short cluster is named one letter at a
+/// time, come from `usageerror` -- they are getopt's, they must be identical
+/// in every program here, and two crates had each re-derived them. The
+/// pointer line names the program because `main` prefixes only the first.
 fn unknown_option(name: &str, arg: &str) -> String {
-    let body = if arg.starts_with("--") {
-        format!("unrecognized option {}", quoteaf_os(arg))
-    } else {
-        // getopt names the offending letter, not the whole cluster.
-        let c = arg.chars().nth(1).unwrap_or('-');
-        format!("invalid option -- {}", quoteaf_os(c.to_string()))
-    };
-    with_help_pointer(name, body)
+    usageerror::with_help_pointer(name, &usageerror::unknown_option(arg.as_bytes()))
 }
 
 /// GNU's refusal for an operand a program does not take.
 fn extra_operand(name: &str, arg: &str) -> String {
-    with_help_pointer(name, format!("extra operand {}", quoteaf_os(arg)))
+    usageerror::with_help_pointer(name, &usageerror::extra_operand(arg.as_bytes()))
 }
 
 fn run_nproc() -> Result<(), String> {
@@ -445,9 +428,7 @@ fn run() -> Result<(), String> {
 
 fn main() {
     if let Err(e) = run() {
-        let prog = env::args().next().unwrap_or_else(|| "nproc".to_string());
-        let name = prog.rsplit(['/', '\\']).next().unwrap_or(&prog);
-        eprintln!("{name}: {e}");
+        eprintln!("{}: {e}", prog_name());
         process::exit(1);
     }
 }

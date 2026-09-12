@@ -76,36 +76,26 @@ fn usage() {
 /// is what util-linux `flock` exits with for a bad option.
 #[derive(Debug, PartialEq, Eq)]
 enum UsageError {
-    /// A long option this build does not know: `--list`.
-    UnrecognizedLong(String),
-    /// A short option this build does not know: `-Z`.
-    InvalidShort(char),
+    /// An option this build does not know, as it appeared in argv.
+    ///
+    /// The whole word is kept rather than a parsed letter, because whether
+    /// it renders as `unrecognized option '--list'` or as `invalid option
+    /// -- 'Z'` is getopt's rule, not this parser's, and `usageerror` owns
+    /// it.
+    UnknownOption(String),
     /// `-c` was given without exactly one command argument after it.
     CommandArity,
 }
 
 impl UsageError {
     /// The diagnostic body, without the `flock: ` prefix. The wording is
-    /// util-linux's, measured rather than invented -- `getopt_long` prints
-    /// `unrecognized option` for a long one and `invalid option -- 'c'` for
-    /// a short one, and they are not interchangeable.
+    /// getopt's, shared with every other program here through `usageerror`
+    /// and measured rather than invented: `unrecognized option` for a long
+    /// one, `invalid option -- 'c'` for a short one, and they are not
+    /// interchangeable.
     fn message(&self) -> String {
         match self {
-            // `quoteaf` always quotes and C-escapes what it must, so an
-            // ordinary option renders `'--list'` -- byte for byte what a
-            // hand-written pair of quotes printed, and what GNU prints.
-            // The text comes from argv, and an argv word may hold a
-            // newline. Printed raw, an option whose name embeds one lets
-            // whoever wrote the command line append a second, invented
-            // line to this program's stderr, indistinguishable from one
-            // flock really wrote.
-            Self::UnrecognizedLong(opt) => {
-                format!("unrecognized option {}", quoting::quoteaf(opt.as_bytes()))
-            }
-            Self::InvalidShort(c) => format!(
-                "invalid option -- {}",
-                quoting::quoteaf(c.to_string().as_bytes())
-            ),
+            Self::UnknownOption(arg) => usageerror::unknown_option(arg.as_bytes()),
             Self::CommandArity => "-c requires exactly one command argument".to_string(),
         }
     }
@@ -167,13 +157,12 @@ fn parse_flock_args(args: &[String]) -> Result<FlockOpts, UsageError> {
                 break;
             }
             s if s.starts_with("--") => {
-                return Err(UsageError::UnrecognizedLong(s.to_string()));
+                return Err(UsageError::UnknownOption(s.to_string()));
             }
             // A lone `-` is an operand, not an option, so it is excluded by
             // the length test and falls through to the operand arm.
             s if s.starts_with('-') && s.len() > 1 => {
-                let c = s.chars().nth(1).unwrap_or('-');
-                return Err(UsageError::InvalidShort(c));
+                return Err(UsageError::UnknownOption(s.to_string()));
             }
             // The first operand: option processing ends here.
             _ => break,
@@ -446,13 +435,12 @@ fn parse_lockfile_args(args: &[String]) -> Result<LockfileOpts, UsageError> {
             // file named `--typo` and exited 0 -- reporting success for a
             // command line it had not understood.
             s if s.starts_with("--") => {
-                return Err(UsageError::UnrecognizedLong(s.to_string()));
+                return Err(UsageError::UnknownOption(s.to_string()));
             }
             // A lone `-` is a file named `-`, not an option, so the length
             // test lets it through to the operand arm.
             s if s.starts_with('-') && s.len() > 1 => {
-                let c = s.chars().nth(1).unwrap_or('-');
-                return Err(UsageError::InvalidShort(c));
+                return Err(UsageError::UnknownOption(s.to_string()));
             }
             _ => {
                 opts.files.push(args[i].to_string());
@@ -650,14 +638,14 @@ mod tests {
     #[test]
     fn an_unknown_long_option_is_refused_not_taken_as_the_file() {
         let err = parse_flock_args(&argv(&["--list", "/tmp/t"])).unwrap_err();
-        assert_eq!(err, UsageError::UnrecognizedLong("--list".to_string()));
+        assert_eq!(err, UsageError::UnknownOption("--list".to_string()));
         assert_eq!(err.message(), "unrecognized option '--list'");
     }
 
     #[test]
     fn an_unknown_short_option_is_refused_and_names_its_letter() {
         let err = parse_flock_args(&argv(&["-Z", "/tmp/t"])).unwrap_err();
-        assert_eq!(err, UsageError::InvalidShort('Z'));
+        assert_eq!(err, UsageError::UnknownOption("-Z".to_string()));
         assert_eq!(err.message(), "invalid option -- 'Z'");
     }
 
@@ -667,7 +655,7 @@ mod tests {
     #[test]
     fn dash_c_before_the_operand_is_an_invalid_option() {
         let err = parse_flock_args(&argv(&["-c", "echo hi", "/tmp/t"])).unwrap_err();
-        assert_eq!(err, UsageError::InvalidShort('c'));
+        assert_eq!(err, UsageError::UnknownOption("-c".to_string()));
     }
 
     #[test]
@@ -759,13 +747,13 @@ mod tests {
     #[test]
     fn lockfile_refuses_an_unknown_long_option() {
         let err = parse_lockfile_args(&argv(&["--typo", "lock"])).unwrap_err();
-        assert_eq!(err, UsageError::UnrecognizedLong("--typo".to_string()));
+        assert_eq!(err, UsageError::UnknownOption("--typo".to_string()));
     }
 
     #[test]
     fn lockfile_refuses_an_unknown_short_option() {
         let err = parse_lockfile_args(&argv(&["-q", "lock"])).unwrap_err();
-        assert_eq!(err, UsageError::InvalidShort('q'));
+        assert_eq!(err, UsageError::UnknownOption("-q".to_string()));
     }
 
     /// The refusal must not swallow `-<N>`, which is how lockfile spells its

@@ -1635,7 +1635,6 @@ fn run_notify(out: &mut dyn Write, args: &[String]) -> io::Result<i32> {
         writeln!(out, "  --reloading     Notify that service is reloading")?;
         writeln!(out, "  --stopping      Notify that service is stopping")?;
         writeln!(out, "  --status=TEXT   Set service status text")?;
-        writeln!(out, "  --pid=PID       Send from specific PID")?;
         writeln!(
             out,
             "  --booted        Check if system was booted with systemd"
@@ -1663,6 +1662,18 @@ fn run_notify(out: &mut dyn Write, args: &[String]) -> io::Result<i32> {
             booted = true;
         } else if arg.contains('=') && !arg.starts_with('-') {
             vars.push(arg.clone());
+        } else if arg.starts_with('-') {
+            // `--pid=PID` was in the help and parsed by nothing. It did not
+            // become a variable -- the arm above already excludes dashed
+            // words -- it fell off the end of this chain and was silently
+            // dropped, so `systemd-notify --pid=123 --ready` notified
+            // readiness and said nothing about the option it ignored.
+            writeln!(
+                out,
+                "systemd-notify: {}",
+                usageerror::unknown_option(arg.as_bytes())
+            )?;
+            return Ok(1);
         }
     }
 
@@ -2279,6 +2290,26 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A notification variable is `NAME=VALUE`; no environment variable
+    /// name starts with a dash. `--pid=123` used to be sent to the socket
+    /// as a variable literally named `--pid`, because the help advertised
+    /// an option nothing parsed.
+    #[test]
+    fn notify_refuses_a_dashed_word_instead_of_sending_it() {
+        let (out, code) = capture(|buf| run_notify(buf, &argv(&["--pid=123"])));
+        assert_eq!(code, 1, "{out}");
+        assert!(out.contains("unrecognized option"), "{out}");
+        assert!(!out.contains("READY"), "{out}");
+    }
+
+    #[test]
+    fn notify_still_sends_the_variables_it_is_given() {
+        let (out, code) = capture(|buf| run_notify(buf, &argv(&["--ready", "FOO=bar"])));
+        assert_eq!(code, 0, "{out}");
+        assert!(out.contains("FOO=bar"), "{out}");
+        assert!(out.contains("READY=1"), "{out}");
+    }
 
     // ── systemd-cat ──
 

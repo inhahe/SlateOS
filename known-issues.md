@@ -136638,27 +136638,141 @@ is "procfs to emit comm as raw bytes". Smaller than that entry implies:
 3. `PR_SET_NAME` then drops its UTF-8 validation, closing the tracked limitation, and the
    two paths agree.
 
-**SCOPE CORRECTION 2026-09-12, and the error is mine.** Point 2 above says "three call
-sites". That is true of where the *decode* happens and false as an estimate of the work. I
-verified the inputs are already bytes — `TaskInfo.name` is `[u8; 32]` with `name_len`,
-`sched::copy_task_name` returns bytes — and inferred the whole path was that cheap
-**without looking at the other end**. Measured since:
+**SCOPE CORRECTED TWICE MORE, same day, and the second one is a real widening of the
+bug rather than bookkeeping.** Three estimates of one task, each wrong in the same way,
+recorded in full because the pattern is worth more than the number.
 
-| function | how it emits | cost of a `&[u8]` name |
-|---|---|---|
-| `gen_pid_comm` | builds a `Vec<u8>` already | genuinely small |
-| `build_pid_status` | **23 `write!`/`writeln!` calls into a `String`**, name via `writeln!(s, "Name:\t{name}")` | its output assembly has to change |
-| `build_pid_stat` | assembles the 52-field line as text | same |
+| revision | claim | population measured | verdict |
+|---|---|---|---|
+| original | "three call sites and one helper" | that the *inputs* are already bytes | right conclusion, reasoning never reached the output |
+| correction 1 | "23 `write!` calls — a restructure" | *all* writes in `build_pid_status` | wrong: only one write carries the name, and it is the first |
+| correction 2 | this table | the decode itself (`unwrap_or("???")`) | four sites, not three — see below |
 
-So the helper and the decode sites are three edits; the two builders are a restructure. The
-work is still worth doing and still bounded — **the estimate was wrong, not the plan** — but
-anyone scheduling it from point 2 alone would be planning the wrong task.
+**The widening: `/proc/<pid>/cmdline` is a fifth affected surface and this entry missed
+it.** `gen_pid_cmdline` decodes the same task name with the same
+`from_utf8(..).unwrap_or("???")` and emits `name.as_bytes()` with a NUL. So a process with
+a non-UTF-8 `argv[0]` reports `???` from `cmdline` too — and `cmdline` is what `ps` reads
+for the command line, which makes it the most-read of the five, not the least.
 
-It is also the same shape as the defect this entry is about, which is why it is corrected
-here rather than quietly: a verified fact about one end, an inference about the whole,
-written as a single claim.
+**Why the enumeration missed it, which is the same defect as the estimates.** I listed the
+sites by grepping for `comm_truncate`, which finds three. The decode is a different
+population: `unwrap_or("???")` finds four. `gen_pid_cmdline` does not truncate — it has no
+reason to call the helper — so a search keyed on the helper could not contain it. I picked
+the population that matched my mental model of "the comm path" rather than the one that
+matched the defect.
+
+**What each site actually requires**, stated as mechanism so a reader can check the size
+rather than trust it:
+
+- `comm_truncate(&str) -> &str` becomes `(&[u8]) -> &[u8]`. Its char-boundary walk is
+  deleted, not ported: Linux cuts `comm` at 16 bytes flat, so byte truncation is *more*
+  faithful.
+- `gen_pid_cmdline` drops the decode entirely and copies `task.name.get(..task.name_len)`
+  before the NUL. It already returns `Vec<u8>`; this is two lines and needs no helper.
+- `gen_pid_comm` already builds a `Vec<u8>`; it drops the decode and pushes bytes.
+- `build_pid_status` carries the name in `writeln!(s, "Name:\t{name}")`, the **first** of 23
+  writes into a `String`, and returns `s.into_bytes()`. The name bytes are emitted first and
+  the untouched `String` appended after. **The other 22 writes do not change.**
+- `build_pid_stat` is a **single `format!`** with `name` as one argument inside `({})`,
+  returning `text.into_bytes()`. It splits into a prefix ending `" ("`, the name bytes, and
+  a suffix beginning `") "`.
+- `PR_SET_NAME` then drops its UTF-8 validation, and the exec path and the prctl path stop
+  disagreeing about what a name may contain.
+
+**The lesson, which is about corrections rather than about procfs.** A correction inherits
+the authority of having been checked, so a wrong one is harder to dislodge than the error
+it replaces — and mine turned a right-by-accident estimate into a wrong-by-measurement one
+that *read* as more rigorous because it carried a number. Every one of the three revisions
+measured a population adjacent to the question: inputs instead of the path, all writes
+instead of the writes carrying the name, the helper instead of the decode. None of the
+numbers was false.
+
+**Describing the mechanism instead of sizing it is the form that cannot fail this way.** A
+reader who doubts "split one `format!` into two" can check it in one command; a reader who
+doubts "23 writes" has to reconstruct which question it answered.
 
 **Interim behaviour is safe**, which is why this is debt and not an emergency: nothing is
 corrupted on disk, no privilege is involved, and the name is cosmetic to the kernel. What
 it costs is that monitoring tools cannot distinguish such processes, and that a process
 can *choose* to be indistinguishable by passing a non-UTF-8 `argv[0]`.
+
+### A-THE-DOMAIN-IS-EMPTY-AND-BOTH-LANES-SPENT-THREE-BOOTS-ASSUMING-OTHERWISE (lane A, 2026-09-12) — OBSERVED, and it closes ctest-hostname check 13
+
+**In short:** the system's network domain name is empty, and two lanes spent three boot
+cycles reasoning about it on the assumption that it was `localdomain`. Nobody had printed
+it. One line of output settled what a day of inference could not.
+
+**The measurement**, from the ring-0 procfs rung added for exactly this purpose:
+
+```
+[procfs]   domainname node = 1 byte(s) "\n", store = ""
+```
+
+**What it settles.** `ctest-hostname` failed at check 13 for three boots. Lane B
+diagnosed it correctly the first time — `read_kernel_name` returned `None` for both
+*could not read* and *read and is empty*, so an empty domain reported as `EIO`. They then
+**retracted that correct diagnosis**, on the grounds that the domain is never empty here.
+That premise was mine: I had read `init_defaults()` setting `domain: "localdomain"`, seen
+`gen_sys` call it before reading, and written to them that the node serves `localdomain`.
+It does not. The node serves one byte.
+
+So a value neither lane had observed produced: one false claim, one correct diagnosis
+withdrawn on the strength of it, and three boots. The failure was not analysis — both
+chains of reasoning were valid — it was that the premise was an inference wearing the
+clothes of a fact. `design-decisions.md` §932 is the general rule; this is the instance
+that cost the most.
+
+**Consequence for the `(none)` proposal: do not make it.** See below.
+
+**Before anyone makes the kernel serve `(none)` for an unset domain: this lane has
+already decided the opposite question, deliberately, and the two decisions collide.**
+
+`kernel/src/syscall/linux.rs` carries a self-test whose pass line reads:
+
+> `uname pure-read contract — no "" -> "localdomain" / "unknown" -> "localhost"
+> substitution (v6.6 kernel/sys.c::SYSCALL_DEFINE1(newuname): memcpy(&tmp, utsname(),
+> sizeof(tmp)))`
+
+It calls `set_domain("")`, asserts `uname`'s `domainname[0]` is `0x00` rather than `0x6c`
+(the `l` of a fabricated `localdomain`), and restores. Its own comment says the pre-batch
+behaviour "fabricated 11 bytes that no [caller asked for]". So **`uname` deliberately does
+not substitute a plausible value for an unset domain**, and that is pinned by a rung that
+would fail if anyone reintroduced it.
+
+That is the same argument as `localhost`, `???` and `localdomain` — reached independently
+in this lane, months earlier, and already enforced.
+
+**The collision.** Lane B and I agreed that procfs serving `localdomain` for an unset
+domain is a fabrication of exactly that kind, and that `(none)` — what Linux reports — is
+the honest answer. But if procfs starts serving `(none)` while `uname` continues to report
+empty, then **one value has two sources that disagree**, which is the defect that produced
+the third hostname store in `sysfs.rs` and is the reason the getter syscall was declined.
+Making procfs "honest" in isolation buys a display improvement and pays for it with a
+divergence.
+
+**Three coherent options, and the choice is not obvious:**
+
+1. **Change neither.** Both paths report what the store holds. Consistent, and "unset" is
+   reported as empty rather than as a name — which is *already* the distinguishable answer
+   the `(none)` change was meant to provide. Linux compatibility is the only loss.
+2. **Change both.** procfs and `uname` both substitute `(none)`. Matches Linux exactly,
+   and requires deleting a rung that exists specifically to prevent substitution — so the
+   deletion has to argue against that rung's stated reasoning, not merely around it.
+3. **Change procfs only.** Two sources, one value, disagreeing. Should not be done.
+
+**My reading, offered rather than acted on:** option 1 is already implemented and already
+satisfies the underlying goal, because empty *is* distinguishable from configured. The
+`(none)` proposal was aimed at `localdomain` being indistinguishable from a real
+configuration, and the fix for that is not to substitute a different constant — it is to
+stop substituting, which `uname` already does. If the observed value turns out to be
+`localdomain`, the question is why the two paths differ, not which constant to prefer.
+
+Deliberately not acted on: the observation boot has not reported yet, and the whole reason
+that boot exists is that both lanes had inferred this value rather than seen it.
+
+**Open, and mine:** `init_defaults()` sets `localdomain` and `gen_sys` calls it before
+reading, yet the store reads empty. Either something initialises `STATE` ahead of
+`init_defaults` — which then early-returns and never applies its defaults — or something
+empties it later and a restore does not take. One candidate not yet confirmed: the `uname`
+pure-read rung restores with `let _ = set_domain(&saved_dom)`, a discarded `Result`.
+Investigating. Recorded as a question, not a cause.

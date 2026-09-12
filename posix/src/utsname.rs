@@ -15,15 +15,36 @@
 //! | Field | Source | Fallback |
 //! |---|---|---|
 //! | `sysname` | `/proc/sys/kernel/ostype` | `Linux` |
-//! | `nodename` | `/proc/sys/kernel/hostname`, then `/etc/hostname` | the process-local name `gethostname()` reports |
+//! | `nodename` | `/proc/sys/kernel/hostname` | **none on the target — left empty** |
 //! | `release` | `/proc/sys/kernel/osrelease` | `6.6.0-slateos` |
 //! | `version` | `/proc/sys/kernel/version` | `#1 SMP` |
 //! | `machine` | compiled in — the kernel hardcodes it too | `x86_64` |
-//! | `domainname` | `/proc/sys/kernel/domainname` | the process-local name `getdomainname()` reports |
+//! | `domainname` | `/proc/sys/kernel/domainname` | **none on the target — left empty** |
 //!
-//! The fallbacks are byte-identical to the kernel's answers, so a build where
-//! procfs is not mounted degrades to the same values rather than inventing a
-//! second set.
+//! For the four *constant* fields the fallback is byte-identical to the
+//! kernel's answer, so a build where procfs is not mounted degrades to the
+//! same value rather than inventing a second set.
+//!
+//! **`nodename` and `domainname` have no fallback, and that is deliberate.**
+//! They are the two fields that are not constants: they name *this machine*,
+//! they change while it runs, and there is exactly one place that knows them.
+//! This table used to read "`/proc/sys/kernel/hostname`, then `/etc/hostname`"
+//! with "the process-local name `gethostname()` reports" as the fallback, and
+//! both halves have been removed from the code — `/etc/hostname` is the
+//! *persistent* name that the live one is set from at boot and nothing keeps
+//! the two in step afterwards, and the process-local buffer is initialised to
+//! the literal `"localhost"`, so a failed read returned a plausible machine
+//! name *successfully*. `services/ctest-hostname` found that on its first run.
+//!
+//! What is left is a field that is empty when the kernel cannot be asked. That
+//! is worse to look at and better to have: an empty `nodename` is visibly
+//! unanswered, where `localhost` is indistinguishable from a correct answer.
+//!
+//! The sentence above this one was stale for as long as the fix was: the code
+//! stopped consulting `/etc/hostname` and the table went on listing it. Found
+//! 2026-09-12 while answering lane A's question about whether that fallback
+//! still existed — it did not, and the document was the only thing still
+//! saying so.
 //!
 //! # Why `sysname` is `Linux` and not a name of our own
 //!
@@ -405,6 +426,46 @@ mod tests {
         // "Linux", not a name of our own: the only callers of uname() are
         // Linux binaries, and this tells them which personality they have.
         assert_eq!(field(&sample().sysname), b"Linux");
+    }
+
+    /// An unanswerable `nodename` is EMPTY, not plausible.
+    ///
+    /// This pins the half of the module doc's table that has no fallback, and
+    /// it is the half that used to lie. `/etc/hostname` and a process-local
+    /// buffer initialised to `"localhost"` both sat behind `nodename`, so a
+    /// `/proc` read that failed for any reason produced a real-looking machine
+    /// name and a success. `services/ctest-hostname` found that on its first
+    /// run, one layer above.
+    ///
+    /// Empty is worse to look at and better to have: it is visibly unanswered,
+    /// where `localhost` is indistinguishable from a correct answer. The test
+    /// is over `fill_from_files_or_local` rather than `uname` because the host
+    /// build keeps a process-local simulation for the other tests here, so
+    /// `uname` itself cannot show the target's behaviour.
+    #[test]
+    fn a_field_no_source_can_answer_is_left_empty_not_plausible() {
+        let mut field = [0u8; UTSNAME_LEN];
+        // A path nothing serves, and a `local` that reports it knows nothing --
+        // which is exactly what `copy_hostname` does on the target once the
+        // procfs read has already failed.
+        fill_from_files_or_local(&mut field, &[b"/proc/sys/kernel/nosuchfile\0"], |_| 0);
+        assert!(
+            field.iter().all(|b| *b == 0),
+            "an unanswerable nodename must be empty, not a plausible name"
+        );
+
+        // ...and the same call DOES fill the field when `local` has an answer,
+        // so the assertion above is about the empty case and not about the
+        // function being inert.
+        let mut field = [0u8; UTSNAME_LEN];
+        fill_from_files_or_local(&mut field, &[b"/proc/sys/kernel/nosuchfile\0"], |out| {
+            let name = b"answered";
+            if let Some(slot) = out.get_mut(..name.len()) {
+                slot.copy_from_slice(name);
+            }
+            name.len()
+        });
+        assert_eq!(field.get(..8), Some(&b"answered"[..]));
     }
 
     #[test]

@@ -4527,6 +4527,47 @@
 
 ## Judgment Calls
 
+### 2026-09-12 (lane A) - what is actually left, after following the references
+
+Not a judgment call, a planning note, recorded because I spent real time
+rediscovering it and the answer is not visible from the roadmap's checkboxes.
+
+  TCP/IP stack (roadmap 2859) reads as [-] but is COMPLETE on lane A's side:
+  101 checked subitems, and the single unchecked one is [C]'s 'move to
+  userspace service'. The parent is [-] because of lane C's dependency, not
+  because kernel work remains. Accurate, but easy to misread as open work.
+
+  Btrfs / F2FS / NTFS write sides (7287 / 7312 / 7346) are NOT unimplemented.
+  All three are read-only BY DESIGN, with decisions recorded: 215 (Btrfs),
+  216 (F2FS), 210 (NTFS, which also names the prerequisite - write support
+  stays out until $LogFile journalling exists). Starting one means overturning
+  a design decision, not filling a gap.
+
+  The GPU drivers are NOT open either, and I had to correct this paragraph
+  fifteen minutes after writing it by following one more reference. AMDGPU
+  (6541) is blocked on open-questions Q49 and i915/xe (6608) on Q50, both
+  operator decisions about HARDWARE rather than effort: QEMU emulates no
+  modern AMD part and none of its sixteen display devices is an Intel iGPU
+  (re-measured 2026-08-18), so there is nothing to write either driver
+  against. design-decisions 217 already rejected 'target Intel instead' for
+  that reason. NVIDIA is blocked more firmly still. The one AMD engine that
+  CAN be run - the ATI/AMD legacy display block, which QEMU emulates as
+  ati-vga - is already done to mode-set depth and exercised every boot.
+
+  SO: every LARGE item on this lane is done, settled by design, another
+  lane's, or waiting on the operator. What remains is small and specific -
+  and that is a real finding rather than a complaint, because it means the
+  next session should not go looking for a big task and conclude the roadmap
+  is stale when it does not find one.
+
+  The correction is left visible rather than edited away: I wrote the
+  original conclusion from two references and it needed a third. Following
+  ONE more link changed the answer, which is the same shape as everything
+  else recorded today.
+
+Re-verify rather than trust this if it matters: the roadmap and
+design-decisions are the authority and this is a dated reading of them.
+
 ### 2026-09-12 (lane A) - `$'\0'` drops the NUL; bash truncates the word
 
 WHAT I DECIDED. In `kernel/src/shellquote.rs`, a NUL produced by an ANSI-C

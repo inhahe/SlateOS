@@ -65235,6 +65235,37 @@ number is different** — not by a constant factor either: 12→16, 24→48,
 gets the sizes wrong and drops a directory has no correct output left; there is
 nothing else in it to be right about.
 
+**12 -> 11 (2026-09-11): `cal`, where our half is perfect and the other fails
+everything.** `scripts/cal-diff.sh`, written today, 105 cases against
+util-linux's `cal`.
+
+**coreutils 103 passed, 0 differed. The standalone 0 passed, 101 differed.**
+
+`cal` is pure computation — every byte is a function of the arguments and of a
+calendar reform that happened in 1752 — so a disagreement is always a defect in
+one side and never an environment difference. The coreutils half gets all of it:
+September 1752 missing its eleven days, 1900 not a leap year while 2000 is, the
+ISO and US week numberings, `-j` renumbering every cell, `--reform=julian`, the
+three-month and whole-year layouts.
+
+**The standalone fails every case, for two causes:**
+
+| | cases | defect |
+|---|---|---|
+| **no trailing padding** | ~94 | util-linux pads *every* line to the calendar's width. Measured on `cal 1 2021`: its line lengths are `20 20 20 20 20 20 20 20`, ours are `16 20 20 20 20 20 20 2` — the month title is not padded to width and the last week row is two bytes. That padding is exactly what makes `-3` and `-y` line up in columns, so the layout options cannot work without it. |
+| **ANSI escapes on a pipe** | 7 | today's cell is wrapped in `ESC[7m` … `ESC[0m` on non-terminal output, in every month that contains today. Same defect as the retired `df`: highlighting must be gated on the output being a terminal. |
+
+Neither is visible to a comparison that trims whitespace, which is why this
+harness compares `od -An -c`. In the collapsed report `cal 1 2021` renders
+*identically* on both sides and is still a difference.
+
+**Two of the harness's own `xfail`s were wrong, and it said so.** `-h` and
+`--help` were written as expected-to-differ on the assumption that help text is
+always ours; they came back XPASS, because coreutils' `cal` reproduces
+util-linux's help exactly. Corrected to ordinary cases. An exemption that has
+stopped being true is worth more as a noisy failure than as a quiet allowance —
+which is the argument for counting XPASS at all.
+
 **13 -> 12 (2026-09-11): `env`, and a harness that measured nothing first.**
 `scripts/env-diff.sh`, written today, 61 cases against a GNU coreutils 9.4 built
 from source.

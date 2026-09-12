@@ -213,13 +213,6 @@ name = "byteread"
 version = "0.1.0"
 
 [[package]]
-name = "cal"
-version = "0.1.0"
-dependencies = [
- "civildate",
-]
-
-[[package]]
 name = "calculator"
 version = "0.1.0"
 dependencies = [

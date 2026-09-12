@@ -131194,7 +131194,26 @@ Two measured examples:
   measure it.** This is the same entry that, five pairs running, ranked
   wrongly every time.
 
-So the answer is per command, and for some pairs it is "merge", not "pick".
+* **`logger`** — **not a measurement question at all, and a harness cannot
+  settle it.** `dup-bins-survey` lists it as "no harness — write one", which is
+  the wrong instrument here. coreutils' `logger` writes its message to
+  **stdout**; `userspace/logger` sends it to the `/dev/log` socket or appends
+  to a file, the way util-linux does, with 23 options against 2. A
+  differential harness would report that they disagree about everything, which
+  is already known and is the *premise* rather than the finding.
+
+  The stdout behaviour is deliberate — the module doc cites `CLAUDE.md`'s "No
+  binary logs. Text-based (JSON-lines) structured logging." I think that
+  misreads the rule: it governs the **format** a log is written in, not
+  **where** the log lives, and writing to stdout does not make a log textual,
+  it means there is no log. But it is a user-visible behaviour change either
+  way, so it is **`open-questions.md` B-Q14** rather than a judgment call.
+  Do not write the harness and do not delete either side until that is
+  answered.
+
+So the answer is per command, and for some pairs it is "merge", not "pick" —
+and for at least one it is neither, because the two implementations are
+answering different questions.
 
 **Nothing collides today**, because `scripts/create-ext4-rootfs.sh` stages
 neither -- no `userspace/` binary reaches `/bin` yet. The collision is latent

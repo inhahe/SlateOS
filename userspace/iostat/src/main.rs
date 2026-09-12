@@ -29,9 +29,19 @@ use std::process;
 // Constants
 // ============================================================================
 
-/// Default hardware sector size in bytes when `/sys/block/<dev>/queue/hw_sector_size`
-/// is unavailable.
-const DEFAULT_SECTOR_SIZE: u64 = 512;
+/// The size of a `/proc/diskstats` sector, in bytes.
+///
+/// **512, always.** This program used to read
+/// `/sys/block/<dev>/queue/hw_sector_size` and multiply by that, which is the
+/// DEVICE's sector size and is 4096 on a great many modern drives -- an
+/// eightfold over-report of every throughput column on such a drive. The block
+/// layer accounts in fixed 512-byte units whatever the device does, and
+/// `userspace/sysstat` in this same tree converted with `* 0.5` and was right.
+///
+/// One place, in `procinfo`, so the next reader cannot disagree with either.
+fn sector_bytes() -> u64 {
+    procinfo::DISKSTATS_SECTOR_BYTES
+}
 
 // ============================================================================
 // Data structures
@@ -127,11 +137,35 @@ struct DiskStats {
     io_cur: u64,
     io_ticks: u64,
     io_aveq: u64,
-    /// Hardware sector size in bytes (from sysfs, default 512).
-    sector_size: u64,
 }
 
 impl DiskStats {
+    /// This program's flat view of one [`procinfo::DiskStats`] record.
+    ///
+    /// `None` for a device whose name is not text: every one of this
+    /// program's outputs is a column of names, and a device it cannot print
+    /// is one it cannot report on. The counters keep their
+    /// `unwrap_or(0)` reading -- an absent column is a kernel that does not
+    /// publish it, which is zero activity rather than an error.
+    fn from_proc(d: &procinfo::DiskStats) -> Option<Self> {
+        Some(Self {
+            name: String::from_utf8(d.name.clone()).ok()?,
+            major: d.major.unwrap_or(0),
+            minor: d.minor.unwrap_or(0),
+            rd_ios: d.reads_completed.unwrap_or(0),
+            rd_merges: d.reads_merged.unwrap_or(0),
+            rd_sectors: d.sectors_read.unwrap_or(0),
+            rd_ticks: d.ms_reading.unwrap_or(0),
+            wr_ios: d.writes_completed.unwrap_or(0),
+            wr_merges: d.writes_merged.unwrap_or(0),
+            wr_sectors: d.sectors_written.unwrap_or(0),
+            wr_ticks: d.ms_writing.unwrap_or(0),
+            io_cur: d.ios_in_progress.unwrap_or(0),
+            io_ticks: d.ms_doing_io.unwrap_or(0),
+            io_aveq: d.weighted_ms.unwrap_or(0),
+        })
+    }
+
     /// Whether all I/O counters are zero.
     fn is_idle(&self) -> bool {
         self.rd_ios == 0
@@ -242,24 +276,6 @@ fn parse_cpu_line(rest: &str) -> Option<CpuStats> {
     })
 }
 
-/// Read the hardware sector size for a block device from sysfs.
-fn read_sector_size(dev_name: &str) -> u64 {
-    // For partitions (e.g. "sda1"), try the parent device ("sda") too.
-    let path = format!("/sys/block/{dev_name}/queue/hw_sector_size");
-    if let Some(val) = read_file(&path).and_then(|s| s.parse::<u64>().ok()) {
-        return val;
-    }
-    // Try stripping trailing digits to find the parent device.
-    let parent = dev_name.trim_end_matches(|c: char| c.is_ascii_digit());
-    if parent != dev_name && !parent.is_empty() {
-        let parent_path = format!("/sys/block/{parent}/queue/hw_sector_size");
-        if let Some(val) = read_file(&parent_path).and_then(|s| s.parse::<u64>().ok()) {
-            return val;
-        }
-    }
-    DEFAULT_SECTOR_SIZE
-}
-
 /// Check whether a device name looks like a partition (ends with digits and
 /// has a non-digit prefix that corresponds to a whole device).
 fn is_partition(name: &str) -> bool {
@@ -283,58 +299,20 @@ fn is_partition(name: &str) -> bool {
 }
 
 /// Read all block device stats from `/proc/diskstats`.
+///
+/// The layout is [`procinfo::DiskStats`]'s, not this program's. Three programs
+/// in this tree parsed the file privately -- `iostat`, `sysstat`, `vmstat` --
+/// and disagreed about what a sector is, which is the disagreement that
+/// mattered: see [`sector_bytes`].
 fn read_disk_stats() -> Vec<DiskStats> {
-    let content = match read_file("/proc/diskstats") {
-        Some(c) => c,
-        None => return Vec::new(),
+    let raw = match fs::read("/proc/diskstats") {
+        Ok(bytes) => bytes,
+        Err(_) => return Vec::new(),
     };
-
-    let mut devices = Vec::new();
-
-    for line in content.lines() {
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        let [major_s, minor_s, name_s, rest @ ..] = fields.as_slice() else {
-            continue;
-        };
-        // 14 is the classic /proc/diskstats width; kernels since 4.18 append
-        // more columns, so this is a minimum rather than an equality.
-        if rest.len() < 11 {
-            continue;
-        }
-        let major: u32 = match major_s.parse() {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let minor: u32 = match minor_s.parse() {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let name = (*name_s).to_string();
-        let sector_size = read_sector_size(&name);
-
-        let parse_u64 =
-            |idx: usize| -> u64 { fields.get(idx).and_then(|s| s.parse().ok()).unwrap_or(0) };
-
-        devices.push(DiskStats {
-            name,
-            major,
-            minor,
-            rd_ios: parse_u64(3),
-            rd_merges: parse_u64(4),
-            rd_sectors: parse_u64(5),
-            rd_ticks: parse_u64(6),
-            wr_ios: parse_u64(7),
-            wr_merges: parse_u64(8),
-            wr_sectors: parse_u64(9),
-            wr_ticks: parse_u64(10),
-            io_cur: parse_u64(11),
-            io_ticks: parse_u64(12),
-            io_aveq: parse_u64(13),
-            sector_size,
-        });
-    }
-
-    devices
+    procinfo::DiskStats::parse_all(&raw)
+        .iter()
+        .filter_map(DiskStats::from_proc)
+        .collect()
 }
 
 // ============================================================================
@@ -378,8 +356,8 @@ fn compute_basic(
     } else {
         0.0
     };
-    let read_bytes = d_rd_sectors.saturating_mul(current.sector_size);
-    let write_bytes = d_wr_sectors.saturating_mul(current.sector_size);
+    let read_bytes = d_rd_sectors.saturating_mul(sector_bytes());
+    let write_bytes = d_wr_sectors.saturating_mul(sector_bytes());
 
     // Same guard for the byte rates, which divide by the same interval.
     let per_sec = |bytes: u64, scale: f64| {
@@ -394,16 +372,16 @@ fn compute_basic(
         DisplayUnit::MegaBytes => (
             per_sec(read_bytes, 1_048_576.0),
             per_sec(write_bytes, 1_048_576.0),
-            current.rd_sectors.saturating_mul(current.sector_size) / 1_048_576,
-            current.wr_sectors.saturating_mul(current.sector_size) / 1_048_576,
+            current.rd_sectors.saturating_mul(sector_bytes()) / 1_048_576,
+            current.wr_sectors.saturating_mul(sector_bytes()) / 1_048_576,
         ),
         // KB and Human both use KB for the rate column; Human formatting
         // is applied at display time for totals.
         _ => (
             per_sec(read_bytes, 1024.0),
             per_sec(write_bytes, 1024.0),
-            current.rd_sectors.saturating_mul(current.sector_size) / 1024,
-            current.wr_sectors.saturating_mul(current.sector_size) / 1024,
+            current.rd_sectors.saturating_mul(sector_bytes()) / 1024,
+            current.wr_sectors.saturating_mul(sector_bytes()) / 1024,
         ),
     };
 
@@ -462,10 +440,8 @@ fn compute_extended(current: &DiskStats, prev: Option<&DiskStats>, interval: f64
     let rrqm_per_s = d_rd_merges as f64 / interval;
     let wrqm_per_s = d_wr_merges as f64 / interval;
 
-    let r_mb_per_s =
-        (d_rd_sectors.saturating_mul(current.sector_size)) as f64 / 1_048_576.0 / interval;
-    let w_mb_per_s =
-        (d_wr_sectors.saturating_mul(current.sector_size)) as f64 / 1_048_576.0 / interval;
+    let r_mb_per_s = (d_rd_sectors.saturating_mul(sector_bytes())) as f64 / 1_048_576.0 / interval;
+    let w_mb_per_s = (d_wr_sectors.saturating_mul(sector_bytes())) as f64 / 1_048_576.0 / interval;
 
     // Merge percentages: what fraction of I/Os were merged.
     let total_rd = d_rd_ios.saturating_add(d_rd_merges);
@@ -503,12 +479,12 @@ fn compute_extended(current: &DiskStats, prev: Option<&DiskStats>, interval: f64
 
     // Average request sizes in KB.
     let rareq_sz = if d_rd_ios > 0 {
-        (d_rd_sectors.saturating_mul(current.sector_size)) as f64 / 1024.0 / d_rd_ios as f64
+        (d_rd_sectors.saturating_mul(sector_bytes())) as f64 / 1024.0 / d_rd_ios as f64
     } else {
         0.0
     };
     let wareq_sz = if d_wr_ios > 0 {
-        (d_wr_sectors.saturating_mul(current.sector_size)) as f64 / 1024.0 / d_wr_ios as f64
+        (d_wr_sectors.saturating_mul(sector_bytes())) as f64 / 1024.0 / d_wr_ios as f64
     } else {
         0.0
     };
@@ -1140,8 +1116,55 @@ mod tests {
             io_cur: 0,
             io_ticks: 0,
             io_aveq: 0,
-            sector_size: 512,
         }
+    }
+
+    // -- /proc/diskstats and the size of a sector ----------------------------
+
+    #[test]
+    fn a_sector_is_512_bytes_not_the_devices_own() {
+        // This program read `/sys/block/<dev>/queue/hw_sector_size` and
+        // multiplied by it. That is the DEVICE's sector size, 4096 on a great
+        // many modern drives, and the block layer accounts in fixed 512-byte
+        // units whatever the device does -- so every throughput column was
+        // eight times too large on such a drive. Latent on the development
+        // host, where every device reports 512, which is why it survived.
+        assert_eq!(sector_bytes(), 512);
+        assert_eq!(sector_bytes(), procinfo::DISKSTATS_SECTOR_BYTES);
+    }
+
+    #[test]
+    fn throughput_is_sectors_times_512() {
+        // 2048 sectors is exactly 1 MiB at 512 bytes each. Under the old
+        // per-device reading on a 4K drive these would have been 8 and 16.
+        let prev = disk("sda", 0, 0, 0, 0);
+        let curr = disk("sda", 1, 2048, 1, 4096);
+        let out = compute_extended(&curr, Some(&prev), 1.0);
+        assert!(
+            (out.r_mb_per_s - 1.0).abs() < 1e-9,
+            "2048 sectors is 1 MiB, got {}",
+            out.r_mb_per_s
+        );
+        assert!(
+            (out.w_mb_per_s - 2.0).abs() < 1e-9,
+            "4096 sectors is 2 MiB, got {}",
+            out.w_mb_per_s
+        );
+    }
+
+    #[test]
+    fn a_device_whose_name_is_not_text_is_skipped_not_mangled() {
+        // Every output of this program is a column of names. A device it
+        // cannot print is one it cannot report on -- and the alternative,
+        // decoding lossily, would put a different name in the column from the
+        // one the kernel published.
+        let mut line = Vec::from(&b"   8       0 sd"[..]);
+        line.push(0xFF);
+        line.extend_from_slice(b" 12 3 456 78 9 10 1112 13 0 14 15\n");
+        let parsed = procinfo::DiskStats::parse_all(&line);
+        assert_eq!(parsed.len(), 1, "procinfo keeps it");
+        let only = parsed.first().expect("one record");
+        assert!(DiskStats::from_proc(only).is_none(), "iostat skips it");
     }
 
     // -- /proc/stat parsing ---------------------------------------------------

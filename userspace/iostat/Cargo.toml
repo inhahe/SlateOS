@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS I/O statistics utility"
 [dependencies]
+# One `/proc` parser. This program had its own `/proc/diskstats` reader, and
+# the thing it disagreed with the other two readers about was the size of a
+# sector -- it used the DEVICE's, where the kernel accounts in fixed 512-byte
+# units. See `sector_bytes`.
+procinfo = { path = "../../procinfo" }
 
 [lints]
 workspace = true

@@ -265,6 +265,27 @@ run_case -o stime
 run_case -o c
 run_case -o args
 run_case -o pid,ppid,user,comm
+
+# --- `-t`, select by controlling terminal ------------------------------------
+# Every process in this namespace has NO terminal, because `setsid` took it
+# away -- which is the same mount that makes the TTY column deterministic,
+# and it is what makes `?` the interesting value here rather than a corner.
+#
+# `-t pts/0` is ACCEPTED and matches nothing: procps tests whether the
+# terminal EXISTS, not whether anything is on it, so it exits 1 through the
+# no-match path rather than the error path. `-t nosuchtty` is the error.
+run_case -t ?
+run_case -t -
+run_case -t pts/0
+run_case -t nosuchtty
+run_case -t /dev/pts/0
+run_case -e -t ?
+
+# Bare `-t` falls back to a BSD format -- `PID TTY STAT TIME COMMAND`, with
+# `R` and `0:00` rather than `00:00:00` -- exactly as bare `-u` falls back to
+# the BSD user format. Two options, one shape, and neither is a defect in the
+# option: both need a format this build does not have.
+xfail_case "bare -t needs the BSD format, which is not implemented" -t
 run_case -o pid -o comm
 run_case -e -o pid,comm
 run_case --no-header

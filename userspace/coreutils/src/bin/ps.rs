@@ -32,6 +32,10 @@ struct PsArgs {
     /// than replaces, which is procps' behaviour: `-o pid -o comm` is the
     /// same as `-o pid,comm`.
     columns: Vec<Spec>,
+    /// `-t`: show only processes on these terminals, as `format_tty` renders
+    /// them. `?` and `-` both mean "no controlling terminal" and both arrive
+    /// here as `?`.
+    select_ttys: Option<Vec<String>>,
 }
 
 /// Parse ps's argv.  BSD-style and POSIX-style flags are accepted via
@@ -105,6 +109,17 @@ fn parse_args(args: &[String]) -> Result<Request, String> {
                 match c {
                     'e' | 'A' => out.all_procs = true,
                     'f' => out.full_format = true,
+                    't' => {
+                        let glued: String = rest.by_ref().collect();
+                        let list = if glued.is_empty() {
+                            let next = args.get(i).cloned().unwrap_or_default();
+                            i = i.saturating_add(1);
+                            next
+                        } else {
+                            glued
+                        };
+                        out.select_ttys = Some(parse_tty_list(&list)?);
+                    }
                     'o' => {
                         let glued: String = rest.by_ref().collect();
                         let list = if glued.is_empty() {
@@ -150,6 +165,54 @@ fn parse_args(args: &[String]) -> Result<Request, String> {
         // covered by `parse_bare_args_ignored`.
     }
     Ok(Request::List(out))
+}
+
+/// `-t`'s argument: terminal names, separated by commas or spaces.
+///
+/// # Errors
+///
+/// A name with no device behind it. procps' message, measured:
+/// `ps -t nosuchtty` prints `error: TTY could not be found` and exits 1,
+/// while `ps -t pts/0` is ACCEPTED even when no process is on it -- it simply
+/// matches nothing and exits 1 through the no-match path. So the test is
+/// whether the terminal exists, not whether anything is using it, which is
+/// why this asks the filesystem rather than the process table.
+///
+/// `?` and `-` both name the absence of a terminal and are not looked up.
+fn parse_tty_list(list: &str) -> Result<Vec<String>, String> {
+    parse_tty_list_with(list, &|name| {
+        std::path::Path::new("/dev").join(name).exists()
+    })
+}
+
+/// The half of `parse_tty_list` that does not touch the filesystem.
+///
+/// Split BEFORE writing the test rather than after one failed, because the
+/// obvious test -- `-t pts/0` is accepted -- is a statement about the machine.
+/// There is no `/dev` on the Windows host these tests run on, so every name
+/// would be "could not be found" and the assertion would hold in exactly the
+/// environments where it proves nothing. `-u root` taught this the other way
+/// round, by going red after it was written.
+fn parse_tty_list_with(list: &str, exists: &dyn Fn(&str) -> bool) -> Result<Vec<String>, String> {
+    let missing = || "error: TTY could not be found".to_string();
+    let mut out = Vec::new();
+    for field in list.split([',', ' ']).filter(|f| !f.is_empty()) {
+        if field == "?" || field == "-" {
+            out.push("?".to_string());
+            continue;
+        }
+        // `/dev/pts/0` for `pts/0`, `/dev/tty1` for `tty1`. procps accepts
+        // both the bare name and a `/dev/`-prefixed one.
+        let bare = field.strip_prefix("/dev/").unwrap_or(field);
+        if !exists(bare) {
+            return Err(missing());
+        }
+        out.push(bare.to_string());
+    }
+    if out.is_empty() {
+        return Err(missing());
+    }
+    Ok(out)
 }
 
 /// `-u`'s argument: user names or numeric UIDs, separated by commas or spaces.
@@ -551,6 +614,16 @@ fn run_main() -> ExitCode {
             // normal case for anything walking /proc, not a failure.
             continue;
         };
+        // `-t` matches on the RENDERED terminal, which is the same string the
+        // TTY column prints -- so `ps -t ?` and the `?` a reader sees in the
+        // table cannot disagree.
+        if parsed
+            .select_ttys
+            .as_ref()
+            .is_some_and(|w| !w.contains(&info.tty))
+        {
+            continue;
+        }
         // `-u` filters on a value only the read can supply, so unlike `-p` it
         // cannot skip the read first.
         if parsed
@@ -596,7 +669,11 @@ fn run_main() -> ExitCode {
     // header. Measured. Without `-p` an empty table is not an error -- there
     // is always at least this process -- so the status only turns on a
     // selection that matched nothing.
-    if (parsed.select_pids.is_some() || parsed.select_uids.is_some()) && !matched {
+    if (parsed.select_pids.is_some()
+        || parsed.select_uids.is_some()
+        || parsed.select_ttys.is_some())
+        && !matched
+    {
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
@@ -1057,6 +1134,37 @@ mod tests {
             err,
             "error: unknown user-defined format specifier \"nosuchcolumn\""
         );
+    }
+
+    /// `-t` against a `/dev` supplied by the test, not by the host.
+    ///
+    /// Measured from procps: `?` and `-` both mean "no terminal";
+    /// `-t pts/0` is ACCEPTED even with nothing on it, because the test is
+    /// whether the terminal exists rather than whether it is in use; and
+    /// `-t nosuchtty` is `error: TTY could not be found`.
+    #[test]
+    fn dash_t_accepts_a_terminal_that_exists_and_refuses_one_that_does_not() {
+        let dev = |name: &str| matches!(name, "pts/0" | "tty1");
+        let ok = |list: &str| parse_tty_list_with(list, &dev);
+        // The absence of a terminal, spelled two ways, normalised to one.
+        assert_eq!(ok("?"), Ok(vec!["?".to_string()]));
+        assert_eq!(ok("-"), Ok(vec!["?".to_string()]));
+        // Existing terminals, bare and /dev-prefixed, both normalise to bare
+        // so they can be compared against what the TTY column prints.
+        assert_eq!(ok("pts/0"), Ok(vec!["pts/0".to_string()]));
+        assert_eq!(ok("/dev/pts/0"), Ok(vec!["pts/0".to_string()]));
+        assert_eq!(
+            ok("pts/0,tty1"),
+            Ok(vec!["pts/0".to_string(), "tty1".to_string()])
+        );
+        // And the refusals.
+        for bad in ["nosuchtty", "", "pts/0,nosuchtty"] {
+            assert_eq!(
+                ok(bad),
+                Err("error: TTY could not be found".to_string()),
+                "for {bad:?}"
+            );
+        }
     }
 
     #[test]

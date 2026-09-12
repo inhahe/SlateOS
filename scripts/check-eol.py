@@ -264,6 +264,37 @@ import io
 import subprocess
 import sys
 import tempfile
+from pathlib import Path as _P
+sys.path.insert(0, str(_P(__file__).resolve().parent))
+import gitenv  # noqa: E402  (after the path insert, by necessity)
+
+# THE REPOSITORY THIS CHECKER IS ABOUT, named once and not inferred.
+#
+# IN PRODUCTION THIS CHANGES NO ANSWER, and that sentence is the reason the
+# whole class of defect below survived: under `pre-push` and under
+# `boot-test.sh` the process CWD, the ambient repository and `ROOT` are the
+# same directory. Three independent ways to name "which repository", agreeing
+# by accident, with nothing anywhere distinguishing them.
+#
+# On 2026-09-12 something finally made them differ -- the repo-safety suite,
+# which runs this self-test against a throwaway victim -- and one defect came
+# out in three layers, each fix exposing the next:
+#
+#   1. `git init` WROTE to the repository being pushed (`cwd=` loses to
+#      `GIT_DIR`, which git exports into every hook);
+#   2. `git ls-files` ENUMERATED whichever repository was ambient;
+#   3. `Path(name).read_bytes()` READ from whichever directory was current.
+#
+# A future reader will see the anchoring below as a no-op refactor, because in
+# every environment they are likely to run it in, it is one. It is not: it is
+# the difference between a tool that reports on a fixed subject and one whose
+# subject is chosen by its caller.
+#
+# THE FACT "WHICH REPOSITORY" HAS ONE WITNESS HERE, deliberately -- `__file__`
+# -- where it previously had three that were never reconciled. Where a fact
+# cannot have two independent witnesses, saying so is the next best thing;
+# unfalsifiable and labelled beats unfalsifiable and assumed.
+ROOT = _P(__file__).resolve().parent.parent
 from pathlib import Path
 
 # Measured 2026-09-04: `git ls-files` returns 13 908 paths. 500 is well below
@@ -296,8 +327,48 @@ def _git(args: list[str], stdin: bytes | None = None,
     # `.gitattributes` of its own. See `self_test`: the alignment fixtures used
     # to be two real files from this tree, and A-27 dissolved the distinction
     # they rested on.
+    #
+    # `cwd` ALONE DOES NOT ANCHOR GIT, and this file learned that the
+    # expensive way on 2026-09-12. `GIT_DIR` wins over the working directory,
+    # and **git sets `GIT_DIR` for every hook it runs** -- so the moment this
+    # checker was wired into `scripts/hooks/pre-push`, the self-test's
+    # `git init --quiet` in a temp directory re-initialised THE REPOSITORY
+    # BEING PUSHED and set `core.bare=true` on the shared config, which makes
+    # the `os` integration worktree answer "this operation must be run in a
+    # work tree" to every `status`, `merge` and `checkout`.
+    #
+    # It had been latent for days: run from `boot-test.sh` there is no
+    # `GIT_DIR` in the environment, so `cwd` worked and nothing broke. Wiring
+    # the same gate into a hook changed nothing about the checker and
+    # everything about where it points -- which is why `gitenv`'s own docstring
+    # calls this out, and why the remedy is to strip the bindings rather than
+    # to pass `cwd` more carefully.
+    #
+    # Stripped only when `cwd` is given: the real run has no `cwd` and MUST
+    # keep the repository context, because `git ls-files` there is the whole
+    # point.
+    # ANCHORED TO THE SCRIPT'S OWN REPOSITORY, ALWAYS. `cwd=None` used to mean
+    # "the ambient repository", which is right under a hook or under
+    # boot-test.sh -- and wrong everywhere else. The repo-safety detector runs
+    # this self-test against a throwaway VICTIM repository under the three
+    # environments a hook really produces, and three cases failed there because
+    # `git ls-files` enumerated the victim: no `scripts/all-diff.sh`, so the
+    # real-file assertions had nothing to assert about.
+    #
+    # Stripping the bindings stopped the DAMAGE; it did not stop the
+    # DEPENDENCE. A checker whose subject is decided by ambient environment
+    # answers a different question depending on who invoked it, which is the
+    # same defect one level up from the `git init` that started this.
+    #
+    # `ROOT` is derived from `__file__`, so `os-lane-a/scripts/check-eol.py`
+    # checks `os-lane-a` and nothing else can redirect it. In production this
+    # changes no answer -- ambient and ROOT are the same repository under both
+    # call sites -- which is exactly why it was invisible until something
+    # deliberately made them differ.
+    env = gitenv.clean_env()
     return subprocess.run(
-        ["git", *args], input=stdin, capture_output=True, check=False, cwd=cwd)
+        ["git", *args], input=stdin, capture_output=True, check=False,
+        cwd=cwd if cwd is not None else str(ROOT), env=env)
 
 
 def tracked_files() -> list[bytes]:
@@ -453,7 +524,16 @@ def read_and_scan(
     def one(p: bytes) -> tuple[bool, tuple[str, int, int, bool] | None]:
         name = p.decode("utf-8", "surrogateescape")
         try:
-            data = Path(name).read_bytes()
+            # RESOLVED AGAINST ROOT, not the process CWD. `git ls-files`
+            # returns paths relative to the repository, and reading them
+            # relatively makes the answer depend on where the caller
+            # happened to be standing. Third layer of one defect found on
+            # 2026-09-12: the `git init` that WROTE to the wrong repo, the
+            # `git ls-files` that ENUMERATED the wrong one, and this, which
+            # READ from the wrong one. Each fix exposed the next, because
+            # each layer had been covered by the accident that in production
+            # the CWD, the ambient repository and ROOT are all the same.
+            data = (ROOT / Path(name)).read_bytes()
         except OSError:
             # A tracked path that will not open is not a CR finding, and
             # pretending it is would misdescribe it. It is also not nothing:
@@ -594,8 +674,8 @@ def self_test() -> int:
             "left to the heuristic. Their absence means this is not the tree this\n"
             "gate was written for, which is a reason to stop rather than to pass.")
 
-    real = Path(sh.decode("utf-8", "surrogateescape")).read_bytes()
-    other = Path(rs.decode("utf-8", "surrogateescape")).read_bytes()
+    real = (ROOT / Path(sh.decode("utf-8", "surrogateescape"))).read_bytes()
+    other = (ROOT / Path(rs.decode("utf-8", "surrogateescape"))).read_bytes()
 
     # The whole pipeline, end to end, on a file this makes and deletes.
     #

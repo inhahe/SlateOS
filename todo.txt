@@ -56907,3 +56907,51 @@ these, the fix is to edit the help line to square brackets and delete the guard;
 gate will then agree, because it reads the brackets rather than a list of opinions.
 `speech listen <start|stop>` is **not** a candidate: its invented value was "start",
 which turned the microphone on.
+
+
+--------------------------------------------------------------------------------
+DEFERRED: the repo-safety suite runs only at boot, hours after the push that
+breaks things. (lane B, 2026-09-12)
+--------------------------------------------------------------------------------
+
+WHAT IS WRONG. `scripts/test-selftests-are-repo-safe.py` runs every self-test the
+push hook gates on against a throwaway victim repository, under the three
+environments a hook really produces. It is the only thing in the tree that can
+catch a self-test damaging the repository being pushed, and it has three
+incidents to its name -- 2026-08-29 (entire repository deleted and PUBLISHED),
+2026-09-04 (six fixture commits, stopped one refused push short of origin), and
+2026-09-12 (core.bare=true on the shared config, twice).
+
+It is wired into `scripts/boot-test.sh` and nothing else. So the detector for
+hook-environment damage never runs in a hook environment, and runs hours after
+the wiring commit that causes the damage. All three incidents were caught, or
+would have been, by something slower than the push that caused them.
+
+WHY IT IS NOT SIMPLY WIRED INTO pre-push. It costs 205 s measured here (285 s
+inside a full boot sweep). Every push paying that is how a gate gets bypassed,
+and `ALLOW_*` on a repo-destroying check is worse than not having it.
+
+THE PROPER FIX, which is the shape this tree already uses elsewhere --
+incremental at push, exhaustive at boot (see check-gate-invocation-parity's
+NARROWER table for the precedent and the rule that every difference must be
+declared): run the suite at push ONLY for the gates whose checker or whose
+`run_checker <name>-selftest` line is touched by the commits being pushed.
+That is nearly always zero gates and costs nothing; on the one push that wires
+a new gate into the hook it costs one gate's worth, which is about 6 s.
+
+WHY DEFERRED RATHER THAN BUILT NOW. Two reasons, and the second is the real one.
+It is new machinery in an area where I have already built one gate tonight that
+duplicated an existing better one (check-shell-crlf vs check-eol), and the
+correct instinct after that is to reach for the existing instrument rather than
+a new one. And the existing instrument works -- it caught all three layers of
+the 2026-09-12 defect within minutes when run deliberately. The gap is when it
+runs, not what it does.
+
+TRIGGER. Build it the next time a gate is wired into `scripts/hooks/pre-push` by
+anyone, or the moment a fourth incident happens -- whichever comes first. Until
+then the remedy is to run
+
+    python scripts/test-selftests-are-repo-safe.py
+
+by hand immediately after editing the hook, which is what found the 2026-09-12
+instance and its two hidden layers.

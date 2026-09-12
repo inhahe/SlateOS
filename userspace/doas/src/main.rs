@@ -588,6 +588,10 @@ fn evaluate_rules(
     target_name: &str,
     command: Option<&str>,
     command_args: &[OsString],
+    // The `PATH` a bare `cmd` spec resolves against -- see `command_matches`.
+    // Passed in rather than read here so the rule check and the eventual
+    // `exec` cannot disagree about which binary is meant.
+    dirs: &[&str],
 ) -> MatchResult {
     for rule in rules {
         match identity_matches(&rule.identity, caller_name) {
@@ -625,7 +629,7 @@ fn evaluate_rules(
         if let Some(ref cmd) = rule.cmd {
             match command {
                 Some(actual_cmd) => {
-                    if !command_matches(cmd, actual_cmd) {
+                    if !command_matches(cmd, actual_cmd, dirs) {
                         continue;
                     }
                 }
@@ -675,18 +679,32 @@ fn identity_matches(identity: &str, caller_name: &str) -> Option<bool> {
 
 /// Check whether a command specification matches the actual command being run.
 ///
-/// If the spec is an absolute path, it must match exactly. Otherwise, we
-/// compare just the basename so that `cmd pkg` matches `/usr/bin/pkg`.
-fn command_matches(spec: &str, actual: &str) -> bool {
-    if spec.starts_with('/') {
-        // Absolute path -- exact match required.
-        spec == actual
-    } else {
-        // Compare basenames.
-        let spec_base = spec.rsplit('/').next().unwrap_or(spec);
-        let actual_base = actual.rsplit('/').next().unwrap_or(actual);
-        spec_base == actual_base
+/// # The basename comparison this replaces was a privilege escalation
+///
+/// It was: an absolute spec had to match exactly, and **any other spec matched
+/// on the last path component alone**. So `permit alice cmd pkg` authorised
+///
+/// ```text
+/// doas /tmp/evil/pkg
+/// ```
+///
+/// because `pkg == pkg`. The caller chooses that path, and the binary runs as
+/// the target. `doas ./pkg` did it too, and with the old `resolve_command`
+/// reading the *caller's* `$PATH`, so did `PATH=/tmp/evil doas pkg`.
+///
+/// A bare spec is now resolved against [`target_path`] -- the `PATH` the
+/// target will actually run under -- and the whole path is compared. So
+/// `cmd pkg` still means `/usr/bin/pkg`, which is what anybody writing it
+/// meant, and means nothing else.
+///
+/// A spec naming a program that is not on that path matches nothing, which is
+/// the safe direction: a rule that cannot be resolved authorises nothing
+/// rather than authorising by name.
+fn command_matches(spec: &str, actual: &str, dirs: &[&str]) -> bool {
+    if spec.contains('/') {
+        return spec == actual;
     }
+    first_in_path(spec, dirs).is_some_and(|resolved| resolved == actual)
 }
 
 // ============================================================================
@@ -757,19 +775,16 @@ fn build_environment(
     let mut env_map: Vec<(OsString, OsString)> = if opts.keepenv {
         env::vars_os().collect()
     } else {
-        let mut base = Vec::new();
-        base.push(pair("HOME", &target.home));
-        base.push(pair("LOGNAME", &target.username));
-        base.push(pair(
-            "PATH",
-            if target.uid == 0 {
-                "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-            } else {
-                "/usr/local/bin:/usr/bin:/bin"
-            },
-        ));
-        base.push(pair("SHELL", &target.shell));
-        base.push(pair("USER", &target.username));
+        let mut base = vec![
+            pair("HOME", &target.home),
+            pair("LOGNAME", &target.username),
+            // The same value `command_matches` resolves a bare `cmd` spec
+            // against, so the rule check and the exec cannot disagree about
+            // which binary a name means.
+            pair("PATH", target_path(target.uid)),
+            pair("SHELL", &target.shell),
+            pair("USER", &target.username),
+        ];
 
         // Propagate TERM if the caller has it set. `var_os` for the same
         // reason: a terminal name this cannot decode is a reason to pass it
@@ -864,26 +879,53 @@ fn exec_command(
 
 /// Resolve a command name to an absolute path by searching PATH directories.
 /// Returns the first match found, or the original name if no match.
-fn resolve_command(command: &str) -> String {
-    // If it already contains a slash, it is a path -- use it directly.
+/// The `PATH` the target will run under, and the only one this program
+/// resolves a bare command name against.
+///
+/// **Not the caller's `$PATH`.** `resolve_command` used
+/// `env::var("PATH")`, so `PATH=/tmp/evil doas pkg` resolved to
+/// `/tmp/evil/pkg` -- a binary the caller chose, run as the target. The value
+/// here is the one this program was already going to hand the target in
+/// `build_environment`, so the rule now authorises the program that will
+/// actually run.
+fn target_path(uid: u32) -> &'static str {
+    if uid == 0 {
+        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    } else {
+        "/usr/local/bin:/usr/bin:/bin"
+    }
+}
+
+/// The directories of a `PATH`, in order, with empty entries dropped.
+///
+/// Splitting is separated from searching so that the search can be tested. The
+/// development host is Windows, where an absolute path begins with a drive
+/// letter and a colon -- so a test handing a real directory to a function that
+/// splits on `:` searched two fragments of it, found nothing, and failed in a
+/// way that read exactly like the production logic being wrong. The target has
+/// no drive letters; this seam is for the host and costs the target nothing.
+fn path_dirs(path: &str) -> Vec<&str> {
+    path.split(':').filter(|d| !d.is_empty()).collect()
+}
+
+/// The first executable named `command` in `dirs`, or `None`.
+fn first_in_path(command: &str, dirs: &[&str]) -> Option<String> {
+    for dir in dirs {
+        let candidate = format!("{dir}/{command}");
+        if fs::metadata(&candidate).is_ok() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn resolve_command(command: &str, dirs: &[&str]) -> String {
+    // If it already contains a slash, it is a path -- use it directly. The
+    // rule check below is what decides whether that path is allowed.
     if command.contains('/') {
         return command.to_string();
     }
-
-    let path_var = env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".to_string());
-
-    for dir in path_var.split(':') {
-        if dir.is_empty() {
-            continue;
-        }
-        let candidate = format!("{dir}/{command}");
-        if fs::metadata(&candidate).is_ok() {
-            return candidate;
-        }
-    }
-
-    // Fallback: return the bare name and let exec handle the error.
-    command.to_string()
+    first_in_path(command, dirs).unwrap_or_else(|| command.to_string())
 }
 
 // ============================================================================
@@ -1134,7 +1176,12 @@ fn main() {
     };
 
     // Resolve the command to a full path for rule matching.
-    let resolved_cmd = resolve_command(&command);
+    // One PATH for both: the target's. Resolving the request and checking the
+    // rule against different paths is how a rule ends up authorising a
+    // different binary from the one that runs.
+    let cmd_path = target_path(lookup_passwd_user(&args.target_user).map_or(u32::MAX, |e| e.uid));
+    let cmd_dirs = path_dirs(cmd_path);
+    let resolved_cmd = resolve_command(&command, &cmd_dirs);
 
     // Evaluate rules.
     let match_result = evaluate_rules(
@@ -1143,6 +1190,7 @@ fn main() {
         &args.target_user,
         Some(&resolved_cmd),
         &args.arguments,
+        &cmd_dirs,
     );
 
     let opts = match match_result {
@@ -1791,7 +1839,14 @@ mod tests {
     #[test]
     fn match_root_nopass() {
         let rules = sample_rules();
-        let result = evaluate_rules(&rules, "root", "root", Some("/bin/ls"), &[]);
+        let result = evaluate_rules(
+            &rules,
+            "root",
+            "root",
+            Some("/bin/ls"),
+            &[],
+            &path_dirs(target_path(0)),
+        );
         match result {
             MatchResult::Permit(opts) => assert!(opts.nopass),
             other => panic!("expected Permit, got {other:?}"),
@@ -1821,7 +1876,14 @@ permit alice
         )
         .expect("valid");
         assert_eq!(
-            evaluate_rules(&rules, "alice", "root", None, &[]),
+            evaluate_rules(
+                &rules,
+                "alice",
+                "root",
+                None,
+                &[],
+                &path_dirs(target_path(0))
+            ),
             MatchResult::Permit(RuleOptions::default()),
             "an unevaluable permit must not stop the rules after it"
         );
@@ -1835,7 +1897,14 @@ permit alice
         )
         .expect("valid");
         assert_eq!(
-            evaluate_rules(&rules, "alice", "root", None, &[]),
+            evaluate_rules(
+                &rules,
+                "alice",
+                "root",
+                None,
+                &[],
+                &path_dirs(target_path(0))
+            ),
             MatchResult::Unknown,
             "an unevaluable deny must stop evaluation, not be skipped"
         );
@@ -1844,21 +1913,42 @@ permit alice
     #[test]
     fn match_deny_bob() {
         let rules = sample_rules();
-        let result = evaluate_rules(&rules, "bob", "root", Some("/bin/ls"), &[]);
+        let result = evaluate_rules(
+            &rules,
+            "bob",
+            "root",
+            Some("/bin/ls"),
+            &[],
+            &path_dirs(target_path(0)),
+        );
         assert_eq!(result, MatchResult::Deny);
     }
 
     #[test]
     fn match_no_rule_for_unknown() {
         let rules = sample_rules();
-        let result = evaluate_rules(&rules, "charlie", "root", Some("/bin/ls"), &[]);
+        let result = evaluate_rules(
+            &rules,
+            "charlie",
+            "root",
+            Some("/bin/ls"),
+            &[],
+            &path_dirs(target_path(0)),
+        );
         assert_eq!(result, MatchResult::NoMatch);
     }
 
     #[test]
     fn match_alice_as_root() {
         let rules = sample_rules();
-        let result = evaluate_rules(&rules, "alice", "root", Some("/bin/ls"), &[]);
+        let result = evaluate_rules(
+            &rules,
+            "alice",
+            "root",
+            Some("/bin/ls"),
+            &[],
+            &path_dirs(target_path(0)),
+        );
         match result {
             MatchResult::Permit(opts) => assert!(opts.persist),
             other => panic!("expected Permit(persist), got {other:?}"),
@@ -1870,14 +1960,28 @@ permit alice
         // Alice's "as root" rule should NOT match when the target is "bob".
         // Her cmd rule has no "as" restriction, so it would match only for /usr/bin/pkg.
         let rules = sample_rules();
-        let result = evaluate_rules(&rules, "alice", "bob", Some("/bin/ls"), &[]);
+        let result = evaluate_rules(
+            &rules,
+            "alice",
+            "bob",
+            Some("/bin/ls"),
+            &[],
+            &path_dirs(target_path(0)),
+        );
         assert_eq!(result, MatchResult::NoMatch);
     }
 
     #[test]
     fn match_alice_cmd_pkg() {
         let rules = sample_rules();
-        let result = evaluate_rules(&rules, "alice", "root", Some("/usr/bin/pkg"), &[]);
+        let result = evaluate_rules(
+            &rules,
+            "alice",
+            "root",
+            Some("/usr/bin/pkg"),
+            &[],
+            &path_dirs(target_path(0)),
+        );
         // The "as root" rule matches first (it has no cmd restriction).
         match result {
             MatchResult::Permit(_) => {} // OK
@@ -1889,7 +1993,14 @@ permit alice
     fn match_alice_cmd_pkg_with_args() {
         let rules = sample_rules();
         let args = argv(&["install", "vim"]);
-        let result = evaluate_rules(&rules, "alice", "root", Some("/usr/bin/pkg"), &args);
+        let result = evaluate_rules(
+            &rules,
+            "alice",
+            "root",
+            Some("/usr/bin/pkg"),
+            &args,
+            &path_dirs(target_path(0)),
+        );
         // The "as root" rule (no cmd) matches first.
         match result {
             MatchResult::Permit(_) => {}
@@ -1902,7 +2013,14 @@ permit alice
         // Create rules where only the args-restricted rule is available.
         let rules = parse_config("permit alice cmd /usr/bin/pkg args install vim\n").unwrap();
         let args = argv(&["install", "emacs"]);
-        let result = evaluate_rules(&rules, "alice", "root", Some("/usr/bin/pkg"), &args);
+        let result = evaluate_rules(
+            &rules,
+            "alice",
+            "root",
+            Some("/usr/bin/pkg"),
+            &args,
+            &path_dirs(target_path(0)),
+        );
         assert_eq!(result, MatchResult::NoMatch);
     }
 
@@ -1910,14 +2028,28 @@ permit alice
     fn match_args_count_mismatch() {
         let rules = parse_config("permit alice cmd /usr/bin/pkg args install vim\n").unwrap();
         let args = argv(&["install"]);
-        let result = evaluate_rules(&rules, "alice", "root", Some("/usr/bin/pkg"), &args);
+        let result = evaluate_rules(
+            &rules,
+            "alice",
+            "root",
+            Some("/usr/bin/pkg"),
+            &args,
+            &path_dirs(target_path(0)),
+        );
         assert_eq!(result, MatchResult::NoMatch);
     }
 
     #[test]
     fn match_first_rule_wins() {
         let rules = parse_config("deny alice\npermit alice\n").unwrap();
-        let result = evaluate_rules(&rules, "alice", "root", Some("/bin/ls"), &[]);
+        let result = evaluate_rules(
+            &rules,
+            "alice",
+            "root",
+            Some("/bin/ls"),
+            &[],
+            &path_dirs(target_path(0)),
+        );
         assert_eq!(result, MatchResult::Deny);
     }
 
@@ -1925,24 +2057,75 @@ permit alice
     // Command matching tests
     // ========================================================================
 
+    /// A directory holding a real `pkg`, plus the `PATH` naming it. A bare
+    /// spec is resolved on the filesystem now, so a fabricated path resolves
+    /// to nothing and every test below it would pass for the wrong reason.
+    fn bindir() -> (ScratchDir, String, String) {
+        let dir = ScratchDir::new("doas_cmdmatch");
+        let path = dir.dir().to_string_lossy().to_string();
+        // Composed with `/`, exactly as `first_in_path` composes it. On the
+        // development host `ScratchDir::path` gives a backslash-separated
+        // string: `fs::metadata` accepts either, so the file is found and only
+        // the STRING comparison fails -- a host artifact that reads exactly
+        // like the production logic being wrong. On the target every path
+        // separator is `/` and the two spellings coincide.
+        let real = format!("{path}/pkg");
+        fs::write(&real, b"#!/bin/sh\n").expect("write fixture");
+        (dir, path, real)
+    }
+
     #[test]
     fn command_match_absolute_exact() {
-        assert!(command_matches("/usr/bin/pkg", "/usr/bin/pkg"));
+        let (_d, path, real) = bindir();
+        assert!(command_matches(&real, &real, &[path.as_str()]));
     }
 
     #[test]
     fn command_match_absolute_mismatch() {
-        assert!(!command_matches("/usr/bin/pkg", "/usr/bin/apt"));
+        let (_d, path, real) = bindir();
+        assert!(!command_matches(&real, "/usr/bin/apt", &[path.as_str()]));
     }
 
     #[test]
-    fn command_match_basename() {
-        assert!(command_matches("pkg", "/usr/bin/pkg"));
+    fn a_bare_spec_means_the_one_on_the_targets_path() {
+        let (_d, path, real) = bindir();
+        assert!(
+            command_matches("pkg", &real, &[path.as_str()]),
+            "the real one matches"
+        );
+    }
+
+    /// The escalation this replaced, kept as the thing that must stay false.
+    ///
+    /// `command_matches` compared the last path component alone, so
+    /// `permit alice cmd pkg` authorised `doas /tmp/evil/pkg` -- a binary the
+    /// caller put there, run as the target. `doas ./pkg` did it too, and with
+    /// `resolve_command` reading the CALLER's `$PATH`, so did
+    /// `PATH=/tmp/evil doas pkg`. Each of these was `true` before 2026-09-12.
+    #[test]
+    fn a_bare_spec_does_not_authorise_a_path_the_caller_chose() {
+        let (_d, path, _real) = bindir();
+        assert!(!command_matches("pkg", "/tmp/evil/pkg", &[path.as_str()]));
+        assert!(!command_matches("pkg", "./pkg", &[path.as_str()]));
+        assert!(!command_matches("pkg", "/home/alice/pkg", &[path.as_str()]));
+    }
+
+    #[test]
+    fn a_spec_naming_nothing_on_the_path_authorises_nothing() {
+        // The safe direction: a rule that cannot be resolved matches no
+        // command, rather than matching by name.
+        let (_d, path, _real) = bindir();
+        assert!(!command_matches(
+            "nosuchtool",
+            "/usr/bin/nosuchtool",
+            &[path.as_str()]
+        ));
     }
 
     #[test]
     fn command_match_basename_mismatch() {
-        assert!(!command_matches("apt", "/usr/bin/pkg"));
+        let (_d, path, real) = bindir();
+        assert!(!command_matches("apt", &real, &[path.as_str()]));
     }
 
     // ========================================================================
@@ -2278,14 +2461,40 @@ permit alice
 
     #[test]
     fn resolve_absolute_path() {
-        // An absolute path is returned as-is.
-        assert_eq!(resolve_command("/usr/bin/ls"), "/usr/bin/ls");
+        // An absolute path is returned as-is. Whether it is ALLOWED is
+        // `command_matches`' question, not this one's.
+        let p = path_dirs(target_path(0));
+        assert_eq!(resolve_command("/usr/bin/ls", &p), "/usr/bin/ls");
     }
 
     #[test]
     fn resolve_relative_path() {
         // A relative path containing a slash is returned as-is.
-        assert_eq!(resolve_command("./my_script"), "./my_script");
+        let p = path_dirs(target_path(0));
+        assert_eq!(resolve_command("./my_script", &p), "./my_script");
+    }
+
+    #[test]
+    fn a_bare_name_resolves_on_the_given_path_and_not_the_callers() {
+        // `resolve_command` read `env::var("PATH")`, so `PATH=/tmp/evil doas
+        // pkg` resolved to a binary the caller chose. The path is a parameter
+        // now, and this test is the only reason that is checkable.
+        let (_d, path, real) = bindir();
+        assert_eq!(resolve_command("pkg", &[path.as_str()]), real);
+        // Not found on the given path: the bare name is returned and the rule
+        // check refuses it, rather than exec picking something up elsewhere.
+        assert_eq!(resolve_command("pkg", &["/nonexistent"]), "pkg");
+    }
+
+    #[test]
+    fn the_target_path_is_the_one_the_target_will_run_under() {
+        // Same value the environment gets, so the rule check and the exec
+        // cannot disagree about which binary a bare name means.
+        assert!(target_path(0).contains("/sbin"), "root gets the sbin dirs");
+        assert!(
+            !target_path(1000).contains("/sbin"),
+            "an ordinary user does not"
+        );
     }
 
     // ========================================================================
@@ -2428,7 +2637,14 @@ users:x:100:alice,bob
         )
         .expect("config");
         let args = vec![OsString::from("install"), not_text()];
-        let result = evaluate_rules(&rules, "alice", "root", Some("/usr/bin/pkg"), &args);
+        let result = evaluate_rules(
+            &rules,
+            "alice",
+            "root",
+            Some("/usr/bin/pkg"),
+            &args,
+            &path_dirs(target_path(0)),
+        );
         assert!(
             matches!(result, MatchResult::NoMatch),
             "an argument the rule cannot name must not satisfy it"
@@ -2444,7 +2660,14 @@ users:x:100:alice,bob
 ",
         )
         .expect("config");
-        let result = evaluate_rules(&rules, "alice", "root", Some(""), &[]);
+        let result = evaluate_rules(
+            &rules,
+            "alice",
+            "root",
+            Some(""),
+            &[],
+            &path_dirs(target_path(0)),
+        );
         assert!(matches!(result, MatchResult::NoMatch));
     }
 

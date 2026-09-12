@@ -6534,15 +6534,60 @@ fn bench_vfs_write_breakdown() {
     let resolved_only = run("vfs_write_breakdown_resolved", 200, || {
         let _ = core::hint::black_box(Vfs::write_file_resolved(&resolved, &data));
     });
-    // No `ns` phase here, deliberately. `ipc::namespace::check_writable` opens with
-    // `if ns_fast_path_available() { return Ok(()); }` -- one atomic load, and its own
-    // comment says that deliberately skips `owner_process`'s THREAD_OWNERS lock
-    // because the process id is not needed when nothing is gated. Measured at 4 ns,
-    // which tripped the harness's BELOW-FLOOR check by sitting exactly on the
-    // 18-cycle empty-closure floor. The reading was correct, the phase was 0.009% of
-    // the total, and `vfs_stat_breakdown_ns` already covers this module above the
-    // floor -- so keeping it bought a permanent BELOW-FLOOR line every run for no
-    // information.
+    // RESTORED 2026-09-11, having been removed earlier the same day. It reads 4 ns --
+    // `ipc::namespace::check_writable` opens with
+    // `if ns_fast_path_available() { return Ok(()); }`, one atomic load -- which sits
+    // exactly on the 18-cycle empty-closure floor and therefore trips the harness's
+    // BELOW-FLOOR check on every run. I removed it for that reason. That was wrong.
+    //
+    // Two of this harness's own mechanisms disagree here, and the stronger one is not
+    // the one that prints:
+    //
+    //   * BELOW-FLOOR says a reading at the floor is suspect, and its own message
+    //     names the benign explanation. Cost of living with it: one informational
+    //     line per --bench run.
+    //   * test-bench-history.py's "no undeclared benchmark vanished between
+    //     consecutive records" says a recorded series must not stop being measured.
+    //     Cost of breaking it: the series' history is orphaned, and the records
+    //     cannot be regenerated -- each is a ~9-minute boot of a commit now past.
+    //
+    // bench/renamed-series.txt deliberately has no retirement syntax: a declared
+    // rename is excused only while its successor is being measured, because coverage
+    // lost silently is what the guard exists to stop. So the honest options were to
+    // restore this or to rename it onto a live series, and there is no live series it
+    // continues into.
+    //
+    // Left at one call rather than amortised over N: looping inside the closure would
+    // make the number mean "N calls", and this harness's rule is that a redefined
+    // benchmark needs a NEW name -- which would orphan this series all over again.
+    // Auto-versioning A/B. `/tmp` is on `history::should_auto_version`'s skip list
+    // and is mounted by `memfs::mount("/tmp")` (main.rs:1497) -- the SAME filesystem
+    // implementation as `/`, so the delta below isolates the version record rather
+    // than comparing two filesystems. Both files are created before either is timed,
+    // so neither window pays a create instead of an overwrite.
+    const TMP_PATH: &str = "/tmp/bench_write_breakdown.tmp";
+    let unversioned = if Vfs::write_file(TMP_PATH, &data).is_ok() {
+        Some(run("vfs_write_breakdown_unversioned", 200, || {
+            let _ = core::hint::black_box(Vfs::write_file(TMP_PATH, &data));
+        }))
+    } else {
+        // Say so. Without this the arm simply does not run, the series is not
+        // recorded, and the log contains nothing about it -- so a /tmp that is
+        // unmounted, read-only or full reads exactly like an A/B that was never
+        // interesting. Every other phase here opens with a SKIP line naming its
+        // reason; this one did not, and absence of a finding is not a clean result.
+        serial_println!(
+            "[bench]   vfs_write_breakdown: SKIP versioning A/B (cannot write {}) \
+             -- the unversioned arm is NOT measured in this run",
+            TMP_PATH,
+        );
+        None
+    };
+
+    let raw = crate::fs::path::Path::new(PATH);
+    let ns_only = run("vfs_write_breakdown_ns", 200, || {
+        let _ = core::hint::black_box(crate::ipc::namespace::check_writable(raw));
+    });
     let access_only = run("vfs_write_breakdown_access", 200, || {
         let _ = core::hint::black_box(crate::fs::vfs::check_path_access(
             &resolved,
@@ -6556,6 +6601,13 @@ fn bench_vfs_write_breakdown() {
     // The tail of `write_file_resolved`, which the first run showed holds 99% of
     // the cost. Every one of these is per-write and independent of the byte count,
     // which is why a 256-byte and a 16 KiB write cost nearly the same.
+    // The same quantity the A/B measures, obtained directly instead of by difference.
+    // `try_auto_record` is the call `write_file_resolved` makes, and it is `pub`, so
+    // there is no reason to infer it. Two routes to one number: if they disagree, the
+    // A/B has a confounder and that disagreement is the finding.
+    let history_only = run("vfs_write_breakdown_history", 200, || {
+        crate::fs::history::try_auto_record(&resolved);
+    });
     let quota_only = run("vfs_write_breakdown_quota", 200, || {
         // No black_box: these return unit, and clippy denies passing one to a
         // function. They all mutate global state, so the call cannot be elided.
@@ -6574,7 +6626,10 @@ fn bench_vfs_write_breakdown() {
         crate::fs::audit::log_ok(crate::fs::audit::AuditOp::Write, 0, &resolved);
     });
 
-    let named = access_only.min_ns.saturating_add(intercept_only.min_ns);
+    let named = ns_only
+        .min_ns
+        .saturating_add(access_only.min_ns)
+        .saturating_add(intercept_only.min_ns);
     let tail = quota_only
         .min_ns
         .saturating_add(notify_only.min_ns)
@@ -6590,10 +6645,11 @@ fn bench_vfs_write_breakdown() {
 
     serial_println!(
         "[bench]   vfs_write_breakdown: full {}ns, resolved {}ns (resolve {}ns), \
-         access {}ns + intercept {}ns = {}ns, remainder {}ns",
+         ns {}ns + access {}ns + intercept {}ns = {}ns, remainder {}ns",
         full.min_ns,
         resolved_only.min_ns,
         full.min_ns.saturating_sub(resolved_only.min_ns),
+        ns_only.min_ns,
         access_only.min_ns,
         intercept_only.min_ns,
         named,
@@ -6609,17 +6665,48 @@ fn bench_vfs_write_breakdown() {
         audit_only.min_ns,
         tail,
     );
+    // The residual is reported as what it is. It was previously described as
+    // "invalidate_negative_prefix plus memfs's own write -- nothing else is left",
+    // which was wrong in both halves: nine calls sit inside it, and it is not a cost.
     serial_println!(
-        "[bench]   vfs_write_breakdown: remainder {}ns is invalidate_negative_prefix \
-         (a scan of all 1024 dcache entries, each holding two PathBufs) plus \
-         memfs's own write -- nothing else is left",
+        "[bench]   vfs_write_breakdown: remainder {}ns is an UPPER BOUND on \
+         unmeasured work, not a measurement of it -- min(whole) - sum(min(parts)), \
+         and the minimum of a sum exceeds the sum of the minima unless every part \
+         peaks in the same iteration. It spans 9 calls: history (now measured, \
+         {}ns), check_writable, enforce_quota_write, resolve_mount, fs.lock, \
+         memfs's write_file, cache_identity, invalidate_identity, \
+         invalidate_negative_prefix",
         remainder,
+        history_only.min_ns,
     );
+    // The `ns` phase above times `ipc::namespace::check_writable`, which `write_file`
+    // calls -- NOT the `vfs::check_writable` that `write_file_resolved` calls. Two
+    // private functions one import apart share that name and both take `&Path` ->
+    // `KernelResult<()>`, so the wrong one was timed with no compile error. The phase
+    // is kept and relabelled rather than repointed, because renaming a recorded series
+    // trips the history guard; `vfs::check_writable` is in the residual list above.
+    if let Some(u) = unversioned.as_ref() {
+        serial_println!(
+            "[bench]   vfs_write_breakdown versioning A/B: root {}ns vs /tmp {}ns \
+             (delta {}ns, direct history phase {}ns) -- /tmp is skipped by \
+             should_auto_version. Every iteration writes the same 256 zero bytes, so \
+             the CAS dedupes and this UNDERSTATES varying-content cost",
+            full.min_ns,
+            u.min_ns,
+            full.min_ns.saturating_sub(u.min_ns),
+            history_only.min_ns,
+        );
+    }
 
     track("vfs_write_breakdown_full", &full);
     track("vfs_write_breakdown_resolved", &resolved_only);
+    track("vfs_write_breakdown_ns", &ns_only);
     track("vfs_write_breakdown_access", &access_only);
     track("vfs_write_breakdown_intercept", &intercept_only);
+    track("vfs_write_breakdown_history", &history_only);
+    if let Some(u) = unversioned.as_ref() {
+        track("vfs_write_breakdown_unversioned", u);
+    }
     track("vfs_write_breakdown_quota", &quota_only);
     track("vfs_write_breakdown_notify", &notify_only);
     track("vfs_write_breakdown_index", &index_only);
@@ -6627,6 +6714,7 @@ fn bench_vfs_write_breakdown() {
     track("vfs_write_breakdown_audit", &audit_only);
 
     let _ = Vfs::remove(PATH);
+    let _ = Vfs::remove(TMP_PATH);
 }
 
 fn bench_vfs_stat_breakdown() {

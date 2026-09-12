@@ -4,7 +4,7 @@
 # public items which no other file in the repository names.  57 of them, 113k
 # lines, were found the day this file was created; the list is a debt ledger,
 # not an allow-list, and the only edit it should ever receive is a deletion.
-# 45 remain.  Paid off so far: apps/explorer's columns.rs, thumbs.rs and
+# 38 remain.  Paid off so far: apps/explorer's columns.rs, thumbs.rs and
 # dropzone.rs — 5,611 lines between them — wired into the app that declared
 # them; then the desktop shell's focus_assist.rs, hotkeys.rs, osd.rs,
 # run_dialog.rs and window_rules.rs together with gui/toolkit's modal.rs; and
@@ -21,6 +21,19 @@
 # a baseline listing a module that is no longer an island pins nothing that is
 # wrong.  It just quietly stops describing the tree, and the count in this
 # header — the number anyone actually quotes — drifts away from the truth.
+#
+# SECOND BATCH, 2026-09-11, and the second time the stale direction went unacted on:
+# apps/settings' associations.rs, the desktop shell's blur.rs, display_settings.rs,
+# input_method.rs, login_screen.rs and mouse_settings.rs, and gui/toolkit's
+# filetypes.rs -- 6,655 lines between them, all reached by lane C's own later work.
+# `--check` had been naming all seven on every run. Pruned by lane A, which owns
+# neither the modules nor the debt: the deletion only tightens a ratchet, the file's
+# header says deletion is the only edit it should ever receive, and the gate itself
+# prints the line to delete. Nothing here is a judgement about lane C's code.
+#
+# Worth saying plainly, since the note above already said it once and it happened
+# again anyway: every stale line is a place a genuinely new island can hide, because
+# a reader who sees seven known-wrong entries stops trusting the other thirty-eight.
 #
 # `--check` fails on a module that is an island and is NOT listed here.  That
 # is the whole point: the count may fall, never rise.  A new module lands
@@ -47,25 +60,19 @@
 apps/imageviewer/src/video.rs
 apps/installer/src/grub.rs
 apps/procexplorer/src/features.rs
-apps/settings/src/associations.rs
 apps/sysinfo/src/hwquery.rs
 gui/compositor/src/server.rs
 gui/desktop/src/a11y.rs
 gui/desktop/src/about.rs
 gui/desktop/src/backup_settings.rs
 gui/desktop/src/bluetooth.rs
-gui/desktop/src/blur.rs
 gui/desktop/src/clipboard_viewer.rs
 gui/desktop/src/context_ext.rs
 gui/desktop/src/default_apps.rs
 gui/desktop/src/device_settings.rs
-gui/desktop/src/display_settings.rs
 gui/desktop/src/file_drop.rs
 gui/desktop/src/icons.rs
-gui/desktop/src/input_method.rs
 gui/desktop/src/language_settings.rs
-gui/desktop/src/login_screen.rs
-gui/desktop/src/mouse_settings.rs
 gui/desktop/src/multimon.rs
 gui/desktop/src/network_indicator.rs
 gui/desktop/src/network_settings.rs
@@ -81,7 +88,6 @@ gui/desktop/src/tray_dnd.rs
 gui/desktop/src/window_peek.rs
 gui/remote/src/reader.rs
 gui/toolkit/src/context_ext.rs
-gui/toolkit/src/filetypes.rs
 gui/toolkit/src/menubar.rs
 gui/toolkit/src/pathbar.rs
 gui/toolkit/src/signal.rs

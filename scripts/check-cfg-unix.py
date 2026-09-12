@@ -52,6 +52,33 @@ Usage
 
 Exit codes: 0 pass (or skipped for want of the target), 1 a compile failure,
 2 the checker could not run.
+
+WHAT THIS IS NOT: the boot test's cfg(unix) check.
+
+They shared the name `cfg-unix` until 2026-09-12 and check different populations, which
+caused a false inference: a `cfg-unix` pass in a pre-push `ran:` list was read as meaning
+the boot test's check had been pre-run. It had not.
+
+    this script        the crates that CONTAIN a `#[cfg(unix)]` block -- 62, derived by
+                       scanning, see `crates_with_unix_code` -- and only their DEFAULT
+                       targets. `cargo check --target <unix> -p c1 -p c2 ...`
+
+    boot-test.sh       does not call this script for its main check. It runs `cargo`
+                       directly with `--all-targets --exclude kernel`: the whole
+                       workspace on a unix target, test targets included. So it also
+                       catches ordinary clippy denials in test code that no
+                       Windows-target build compiles, which is strictly more than a
+                       cfg(unix) check.
+
+A pass here therefore does not predict a pass there. The concrete case: a denial in the
+test target of `apps/launcher`, a crate with no `#[cfg(unix)]` code at all, so it is not
+in this script's crate list and never compiled here -- and `--all-targets` would not help,
+because the crate is absent from the list rather than present with the wrong targets.
+
+This is also the correction to a claim on record. Lane B asked for test-module coverage in
+`requests/b-a-the-cfg-unix-gate-skips-every-test-module.md`; lane A answered "taken in
+full, both call sites at once". True of boot-test.sh, false here: this script never gained
+`--all-targets` and does not accept it.
 """
 
 from __future__ import annotations
@@ -85,6 +112,31 @@ def crates_with_unix_code() -> list[str]:
     workspace root is not a crate to check.
     """
     found: set[str] = set()
+    for name, src in candidate_crates():
+        for f in src.rglob("*.rs"):
+            if GATED.search(f.read_text(encoding="utf-8", errors="surrogateescape")):
+                found.add(name)
+                break
+    return sorted(found)
+
+
+def candidate_crates() -> list[tuple[str, pathlib.Path]]:
+    """Every crate this gate *could* check: (name, src dir), workspace-wide.
+
+    Exists to supply the DENOMINATOR. The gate checks the subset holding a unix-gated
+    block, and for a long time it reported only that subset's size -- "62 crates with
+    unix-gated code compile" -- which reads as a complete audit of the workspace and is
+    not one. Printing "62 of N" makes the scope visible without anyone having to be
+    bitten by it first.
+
+    Suggested by lane B, who hit the same shape from the other side: their
+    `getopt-ambiguity-check.py` printed "63 table(s) checked; 0 disagreement(s)" over a
+    tree of 85 bins and never named the 22 it skipped, because the coverage note lived
+    inside a branch only the push hook reached. Their phrasing is the one to keep -- *the
+    run that reads as a complete audit was the one run that said nothing about its own
+    gaps.*
+"""
+    out: list[tuple[str, pathlib.Path]] = []
     for tom in REPO.rglob("Cargo.toml"):
         parts = tom.parts
         if "target" in parts or ".git" in parts:
@@ -95,11 +147,8 @@ def crates_with_unix_code() -> list[str]:
         m = CRATE_NAME.search(tom.read_text(encoding="utf-8", errors="surrogateescape"))
         if not m:
             continue
-        for f in src.rglob("*.rs"):
-            if GATED.search(f.read_text(encoding="utf-8", errors="surrogateescape")):
-                found.add(m.group(1))
-                break
-    return sorted(found)
+        out.append((m.group(1), src))
+    return out
 
 
 def target_installed() -> bool:
@@ -212,7 +261,9 @@ def main() -> int:
         print(f"check-cfg-unix: {len(crates)} crate(s) checked against {TARGET}; it failed:\n")
         print(output[-8000:])
         return 1
-    print(f"check-cfg-unix: OK ({len(crates)} crates with unix-gated code compile for {TARGET})")
+    print(f"check-cfg-unix: OK ({len(crates)} of {len(candidate_crates())} workspace "
+          f"crate(s) hold unix-gated code and compile for {TARGET}; the other "
+          f"{len(candidate_crates()) - len(crates)} are NOT checked here -- boot-test.sh covers the workspace)")
     return 0
 
 

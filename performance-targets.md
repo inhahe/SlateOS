@@ -31,6 +31,88 @@ These subsystems are on the hot path for virtually every workload. Naive impleme
 | **Filesystem read/write** | All I/O | Compare to ext4 on Linux for sequential and random I/O throughput. Target: within 20% of Linux ext4. |
 | **Compositor frame** | Every display refresh | Must composite a full desktop in < 2ms at 4K to not miss 144Hz vsync. |
 
+#### A caveat on the compositor row: the instrument exists and asserts nothing
+
+*Added 2026-09-11 (lane A, from a finding by lane C), because this row names a
+quantified budget that something already measures on every frame and nothing compares
+against.*
+
+**There is an instrument.** `gui/compositor/src/lib.rs:2953` sets
+`last_frame_time_us` from the elapsed frame time, every frame. So the budget is not
+unmeasured.
+
+**The only assertion on it is `> 0`.** At `lib.rs:9766`:
+
+```rust
+assert!(compositor.frame_stats().last_frame_time_us > 0,
+        "the frame took no measurable time, so it did no work");
+```
+
+That is a test that the clock runs. Nothing anywhere compares the number to the 2 ms
+this row names. **That is worse than having no instrument**, and the reason is worth
+stating: a reader grepping for frame timing finds this, concludes the budget is
+covered, and stops looking. An instrument with a vacuous assertion is indistinguishable
+from coverage.
+
+*(A trap for whoever checks next: grepping `assert.*last_frame_time_us` returns nothing,
+because the `assert!(` is on the line above the expression. A single-line grep misses a
+multi-line macro. I briefly concluded the assertion did not exist.)*
+
+**And 2 ms at 4K is a host-hardware figure.** A QEMU run cannot be judged against it at
+all, so a ceiling derived from an emulated run would be meaningless and a ceiling
+derived from nothing would be `> 0` with more characters — a bound that cannot fire,
+which is harder to notice than no bound because it looks like diligence. Any ceiling
+added here must record the measurement it came from, beside it.
+
+**Where a real measurement would have to live**, since this was mis-scoped once
+already: `kernel/src/bench.rs` **cannot** measure it. The kernel is `no_std`, has no
+dependency on `gui/compositor`, and the compositor is its own userspace crate — so the
+suite that feeds `bench/history.jsonl` cannot reach it. Two homes that work, answering
+different questions:
+
+| Home | Answers | Does not answer |
+|---|---|---|
+| host criterion bench in `gui/compositor/benches/` | are we near 2 ms on real hardware | did this commit regress it |
+| ring-3 rung printing to serial, recorded into `history.jsonl` | did this commit regress it | are we near 2 ms |
+
+Tracked as `TD-C-THE-COMPOSITOR-FRAME-BUDGET-HAS-NO-INSTRUMENT` (lane C).
+
+#### A caveat on the read/write row: our write is not ext4's write
+
+*Added 2026-09-11 (lane A), because the row above specifies a comparison that is
+currently between two different operations, and a target that compares unlike things
+can never be met — which teaches people to ignore targets.*
+
+**Every write to an ordinary path also reads the old contents back and SHA-256-hashes
+them.** SlateOS keeps an automatic 16-deep version history per file;
+`vfs::write_file_resolved` calls `history::try_auto_record`, which on any path outside
+`/proc`, `/dev`, `/sys` and `/tmp` reads the file, hashes it, inserts into the
+content-addressed store and evicts past 16. `main.rs` enables this at `BOOT_OK`, before
+`bench::run_all`, so it is on for every measurement.
+
+ext4 on Linux does none of that. So "within 20% of Linux ext4" compares a versioned
+write against an unversioned one, and the gap grows with file size because the hash is
+per-byte: at 16 KiB there is 64× the hashing of a 256-byte write. (Corrected the same
+day: the benchmark runs are **release** builds — `--bench` implies release unless
+`--profile=debug` is given, and `boot-history.jsonl` confirms it — so the hash is
+optimised and its share of a small write is single-digit microseconds, not the tens I
+first argued from a debug-build comment that belongs to boot-time staging. The
+comparison below is still unlike-for-unlike; the size of the gap is what I got wrong.)
+`vfs_write_256` and
+`vfs_throughput_16k_write` are both over budget, and this is the leading candidate for
+why — I had previously recorded the 16k one as CPU-bound kernel write work on the
+strength of an accelerator ratio that hashing satisfies equally well.
+
+**What to do with the row until it is resolved.** Read it as a target for the write
+*plus* its version record, or measure against `/tmp`, which `should_auto_version` skips
+and which is the same `memfs` implementation — `bench_vfs_write_breakdown` now records
+both as `vfs_write_breakdown_unversioned` and `..._history` so the two can be separated
+host-side. Do not quietly compare the versioned number to a Linux figure.
+
+Whether every write *should* cost a read-back plus a hash is a policy question, not a
+measurement one: `design.txt` does not mention auto-versioning at all. It is in
+`deferred-questions.md` with a trigger, because it needs the cost figure above first.
+
 ### Benchmarking Protocol
 
 1. **Write the benchmark before or alongside the implementation**, not after. Use `criterion` for microbenchmarks. Put benchmarks in `bench/<subsystem>/`.

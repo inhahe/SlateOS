@@ -426,6 +426,11 @@ slate_ensure_src() {
 # network — and the hash is checked before anything reads the archive, because
 # what comes out of it is compiled into a binary we ship.
 slate_ensure_bash_src() {
+    # SLATE_BASH_TARBALL is this function's OUTPUT PARAMETER, named in the doc
+    # comment above and read by the spike scripts that source this
+    # file (e.g. `tar xf "$SLATE_BASH_TARBALL"`). shellcheck cannot follow a
+    # `source`, so it sees the write and never the read.
+    # shellcheck disable=SC2034
     SLATE_BASH_TARBALL="$(slate_ensure_src bash "$SLATE_BASH_VERSION" \
         "$SLATE_BASH_SHA256" \
         "https://ftp.gnu.org/gnu/bash/bash-$SLATE_BASH_VERSION.tar.gz" \
@@ -444,6 +449,11 @@ slate_ensure_bash_src() {
 # of the truncated download this pin exists to catch, and silently removing it
 # would erase the only copy of the bad bytes.
 slate_ensure_pkgconf_src() {
+    # SLATE_PKGCONF_TARBALL is this function's OUTPUT PARAMETER, named in the doc
+    # comment above and read by the spike scripts that source this
+    # file (e.g. `tar xf "$SLATE_PKGCONF_TARBALL"`). shellcheck cannot follow a
+    # `source`, so it sees the write and never the read.
+    # shellcheck disable=SC2034
     SLATE_PKGCONF_TARBALL="$(slate_ensure_src pkgconf "$SLATE_PKGCONF_VERSION" \
         "$SLATE_PKGCONF_SHA256" \
         "https://distfiles.ariadne.space/pkgconf/pkgconf-$SLATE_PKGCONF_VERSION.tar.xz" \
@@ -457,6 +467,11 @@ slate_ensure_pkgconf_src() {
 # "ensure make(1) is installed", which is a different and much more plausible
 # thing for a caller to want.
 slate_ensure_make_src() {
+    # SLATE_MAKE_TARBALL is this function's OUTPUT PARAMETER, named in the doc
+    # comment above and read by the spike scripts that source this
+    # file (e.g. `tar xf "$SLATE_MAKE_TARBALL"`). shellcheck cannot follow a
+    # `source`, so it sees the write and never the read.
+    # shellcheck disable=SC2034
     SLATE_MAKE_TARBALL="$(slate_ensure_src make "$SLATE_MAKE_VERSION" \
         "$SLATE_MAKE_SHA256" \
         "https://ftp.gnu.org/gnu/make/make-$SLATE_MAKE_VERSION.tar.gz" \
@@ -470,6 +485,11 @@ slate_ensure_make_src() {
 # the two details the pkgconf fetch originally lacked, which is how a 404 body
 # once became a permanent "cached tarball".
 slate_ensure_coreutils_src() {
+    # SLATE_COREUTILS_TARBALL is this function's OUTPUT PARAMETER, named in the doc
+    # comment above and read by the spike scripts that source this
+    # file (e.g. `tar xf "$SLATE_COREUTILS_TARBALL"`). shellcheck cannot follow a
+    # `source`, so it sees the write and never the read.
+    # shellcheck disable=SC2034
     SLATE_COREUTILS_TARBALL="$(slate_ensure_src coreutils "$SLATE_COREUTILS_VERSION" \
         "$SLATE_COREUTILS_SHA256" \
         "https://ftp.gnu.org/gnu/coreutils/coreutils-$SLATE_COREUTILS_VERSION.tar.xz" \
@@ -479,6 +499,11 @@ slate_ensure_coreutils_src() {
 # The CMake counterpart. This is the whole cost of adding a sixth port now that
 # `slate_ensure_src` exists, which is the argument the refactor was making.
 slate_ensure_cmake_src() {
+    # SLATE_CMAKE_TARBALL is this function's OUTPUT PARAMETER, named in the doc
+    # comment above and read by the spike scripts that source this
+    # file (e.g. `tar xf "$SLATE_CMAKE_TARBALL"`). shellcheck cannot follow a
+    # `source`, so it sees the write and never the read.
+    # shellcheck disable=SC2034
     SLATE_CMAKE_TARBALL="$(slate_ensure_src cmake "$SLATE_CMAKE_VERSION" \
         "$SLATE_CMAKE_SHA256" \
         "https://github.com/Kitware/CMake/releases/download/v$SLATE_CMAKE_VERSION/cmake-$SLATE_CMAKE_VERSION.tar.gz" \

@@ -10,6 +10,25 @@ killable unit — a Job Object on Windows, a process group on POSIX — so a
 timeout, a Ctrl-C, or this runner's own death tears down the whole tree
 atomically and nothing is ever orphaned. See `proctree.py` for the mechanism.
 
+ONE EXCEPTION, AND IT IS NOT HYPOTHETICAL: the guarantee stops at the WSL
+boundary. `wsl.exe` does not run the work as a Windows descendant -- it hands it
+to a separate Linux VM -- so nothing Linux-side is inside the Job Object. Killing
+the Windows side leaves it running. Lane B measured this: they killed the Windows
+half of a hung differential and found the `awk` it had spawned still going 35
+minutes later, filed as
+`TD-B-DIFF-HARNESSES-HAVE-NO-PER-CASE-BOUND-AND-ORPHAN-ACROSS-WSL`.
+
+So "nothing is ever orphaned" is true of everything this runner can see and false
+of anything that re-execs into WSL. If you wrap such a command, bound the Linux
+side itself -- `timeout(1)` inside the `wsl` invocation -- rather than relying on
+this runner, which cannot reach it.
+
+Which scripts are exposed, checked rather than guessed: the differential harnesses
+(`all-diff.sh`, `awk-diff.sh`, `bc-diff.sh`, `bashprobe.py` and the rest of that
+family) invoke WSL. **`boot-test.sh` does not** -- every `wsl` string in it is an
+echoed instruction telling the operator to rebuild the rootfs by hand, so the boot
+test this runner is most often pointed at is not affected.
+
 This module is the *streaming* front end to that: the child keeps this
 process's stdout and stderr, so its output appears live. For the batch case —
 feed stdin, capture the output, enforce a deadline — call

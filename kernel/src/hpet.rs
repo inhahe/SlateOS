@@ -445,6 +445,31 @@ pub fn ticks_to_ns(ticks: u64) -> u64 {
 ///
 /// Convenience function combining [`read_counter`] and [`ticks_to_ns`].
 /// Returns 0 if the HPET is not available.
+///
+/// # This is an MMIO read, and it is expensive under virtualisation
+///
+/// **Prefer [`crate::timekeeping::clock_monotonic`] (monotonic nanoseconds since
+/// boot) or [`crate::timekeeping::clock_realtime`] (wall clock) unless you
+/// specifically need the HPET counter itself.** Those read the TSC -- a register,
+/// tens of cycles. This reads a memory-mapped device register, which under hardware
+/// virtualisation is a **VM exit**.
+///
+/// The cost is not marginal and it is measured, not estimated. `journal::record`
+/// called this for a timestamp field documented as "monotonic nanoseconds since boot
+/// (from HPET or TSC)" -- a contract `clock_monotonic` satisfies equally. Switching it
+/// took that phase from **14,206 ns to 337 ns** (42x) and the whole 256-byte file write
+/// down 29%.
+///
+/// The diagnostic that identifies this class, because it is counter-intuitive: a cost
+/// that is **larger under hardware virtualisation than under emulation** is a VM exit,
+/// not work. The `hpet_read` benchmark's accelerator ratio is 0.03x -- it is ~30x
+/// *slower* with WHPX than with TCG, where the median benchmark is several times
+/// faster. Work does not behave that way; traps do.
+///
+/// Neither hot-path instance found so far was noticed by anyone reading a call site.
+/// Both were found by a measured number being implausible. Hence this note: the tree
+/// currently calls this function at 433 sites against 130 for the two cheap
+/// alternatives combined, and that ratio is what this paragraph exists to change.
 #[must_use]
 #[inline]
 pub fn elapsed_ns() -> u64 {

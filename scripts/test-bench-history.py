@@ -119,6 +119,59 @@ def capture(func, *args, **kwargs):
     return buf.getvalue(), result
 
 
+def test_declared_series_requires_reachability(bh, tmpdir):
+    """A series whose function `run_all` no longer calls is NOT declared.
+
+    `declared_series` excuses a vanished series when `bench.rs` still holds its
+    `score(`/`track(` call. That trusted the TEXT without asking whether the enclosing
+    function is still CALLED, so deleting one line from `run_all` and leaving the
+    function behind would stop the series being recorded, keep its `track(` text, and
+    have its disappearance excused -- the exact silent coverage loss this guard exists
+    to catch. Nothing else closes it: an uncalled `fn` is `dead_code`, a warning, and
+    this build emits about eighteen thousand of them.
+
+    Mutated from the REAL bench.rs rather than written against a synthetic file, so the
+    case cannot keep passing while the source grows a shape it no longer describes.
+    """
+    text = open(bh.BENCH_SOURCE, encoding="utf-8", errors="replace").read()
+    reach = bh.reachable_bench_fns(text)
+    check("run_all is found and is reachable from itself",
+          reach is not None and "run_all" in reach, True)
+
+    # Cut exactly one direct `bench_foo();` call out of run_all's body.
+    victim = None
+    for line in reach["run_all"].splitlines():
+        stripped = line.strip()
+        if stripped.startswith("bench_") and stripped.endswith("();"):
+            victim = (line, stripped[:-3])
+            break
+    check("run_all calls at least one bench_ function directly", victim is not None, True)
+    line, fn = victim
+
+    mutated = text.replace(line + chr(10), '', 1)
+    check("the mutation applied", mutated != text, True)
+    check("the cut function is no longer reachable", fn in bh.reachable_bench_fns(mutated),
+          False)
+
+    # And the series it records drop out of the declared set, so a removal of them is
+    # no longer excused. This is the half that matters: reachability is only useful
+    # here because `declared_series` consults it.
+    path = os.path.join(tmpdir, "mutated-bench.rs")
+    with open(path, "w", encoding="utf-8", newline="") as fh:
+        fh.write(mutated)
+    before = bh.declared_series(bh.BENCH_SOURCE)
+    after = bh.declared_series(path)
+    check("cutting one call removes at least one declared series",
+          len(after) < len(before), True)
+
+    # The unrestricted scan is what the old code did; it still sees the orphaned
+    # series, which is precisely why reachability was needed rather than a wider regex.
+    unrestricted = (set(bh.SCORE_CALL_RE.findall(mutated))
+                    | set(bh.TRACK_CALL_RE.findall(mutated)))
+    check("a text-only scan still sees the orphaned series, which is the defect",
+          len(unrestricted) > len(after), True)
+
+
 def test_parse_formats(bh, tmpdir):
     """Both SCORE line formats parse, including a log spanning the change."""
     # Pre-dispersion format. Records written before the kernel emitted

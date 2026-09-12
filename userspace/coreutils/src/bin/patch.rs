@@ -69,6 +69,8 @@ struct Options {
     dry_run: bool,
     silent: bool,
     backup: bool,
+    /// `-d DIR`: change to DIR before doing anything else.
+    directory: Option<String>,
     target_file: Option<String>,
 }
 
@@ -111,6 +113,16 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
             opts.silent = true;
         } else if a == "-b" || a == "--backup" {
             opts.backup = true;
+        } else if a == "-d" || a == "--directory" {
+            i = i.saturating_add(1);
+            match args.get(i) {
+                Some(v) => opts.directory = Some(v.clone()),
+                None => return Err("option requires an argument -- 'd'".to_string()),
+            }
+        } else if let Some(v) = a.strip_prefix("--directory=") {
+            opts.directory = Some(v.to_string());
+        } else if let Some(v) = a.strip_prefix("-d") {
+            opts.directory = Some(v.to_string());
         } else if a.starts_with('-') && a.len() > 1 && a != "-" {
             // GNU's two spellings, measured rather than guessed. A long option
             // is quoted and named in full; a short one is reported as the
@@ -402,6 +414,23 @@ fn main() {
             process::exit(2);
         }
     };
+
+    // `-d` CHANGES DIRECTORY BEFORE ANYTHING ELSE, including before the patch
+    // file named by `-i` is opened. Measured, because the order is the whole
+    // behaviour and the obvious implementation gets it backwards:
+    //
+    //     patch -i u.patch -p1 -d a
+    //     patch: **** Can't open patch file u.patch : No such file or directory
+    //
+    // `u.patch` sits beside `a/`, not inside it, so resolving `-i` first would
+    // succeed where GNU fails. A relative `-i` is relative to the DIRECTORY,
+    // not to where the user typed the command.
+    if let Some(dir) = &opts.directory {
+        if let Err(e) = env::set_current_dir(dir) {
+            diag!("patch: {dir}: {e}");
+            process::exit(2);
+        }
+    }
 
     // Read patch input.
     let patch_input = if let Some(ref path) = opts.patch_file {

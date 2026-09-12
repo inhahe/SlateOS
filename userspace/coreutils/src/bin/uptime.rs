@@ -488,7 +488,11 @@ mod tests {
             parse_args(&owned).expect("these are all valid option lists")
         };
         assert_eq!(argv(&["-p", "-s"]), Request::Since);
-        assert_eq!(argv(&["-s", "-p"]), Request::Since, "-sp must not be Pretty");
+        assert_eq!(
+            argv(&["-s", "-p"]),
+            Request::Since,
+            "-sp must not be Pretty"
+        );
         assert_eq!(argv(&["-ps"]), Request::Since);
         assert_eq!(argv(&["-sp"]), Request::Since);
         assert_eq!(argv(&["--since", "--pretty"]), Request::Since);
@@ -579,7 +583,10 @@ mod tests {
             "{line}"
         );
         let rounded = status_line("09:00:00", 3660.0, 1, (0.5, 1.05, 10.0));
-        assert!(rounded.ends_with("load average: 0.50, 1.05, 10.00"), "{rounded}");
+        assert!(
+            rounded.ends_with("load average: 0.50, 1.05, 10.00"),
+            "{rounded}"
+        );
     }
 
     /// The old `line(&str) -> Option<String>`, recomposed.

@@ -63,6 +63,8 @@ set -u
 # `calc`: the references are found per binary by the multi-binary branch of
 # `diff-wsl.sh`, which reports any it could not find in `DIFF_SKIPPED`.
 DIFF_PROG='calc'
+# Declared because every invocation above is bounded with it.
+DIFF_NEED=timeout
 DIFF_PKG="coreutils dc"
 DIFF_BINS="bc dc"
 DIFF_NO_REF=1
@@ -93,9 +95,22 @@ pass=0; fail=0; xfail=0; xpass=0
 # stderr file; `diff-wsl.sh` says why. It matters more here than in most
 # harnesses, because what is compared is only *whether* stderr was non-empty,
 # so one stray `Aborted` line is indistinguishable from a diagnostic.
+# Every invocation below is bounded, on both sides.
+#
+# The bound must be INSIDE the harness. `run-timeout.py` puts its child in a
+# Windows Job Object, and `wsl.exe` hands work to a separate VM, so nothing
+# Linux-side is a Windows descendant and the job cannot reach it -- an `awk`
+# harness lost 35 minutes to exactly that and the process survived every kill
+# available from the Windows side. Lane A has since narrowed that runner's
+# docstring to say so.
+#
+# The reference is wrapped too: a harness that bounded only our side would hang
+# on the day the reference was the buggy one.
+#
+# `bc` and `dc` are programming languages; `while(1);` terminates neither.
 run_side() {
   local side=$1 tool=$2; shift 2
-  diff_run env PATH="$bindir/$side:$PATH" "$@" "$tool"
+  diff_run timeout -k 2 30 env PATH="$bindir/$side:$PATH" "$@" "$tool"
 }
 
 # compare TOOL PROGRAM [VAR=VALUE...]

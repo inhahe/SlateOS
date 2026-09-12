@@ -41,6 +41,8 @@ set -u
 # Into WSL, build ours for Linux, find GNU's, and put both behind the one name
 # `ed` so `argv[0]` matches. See `scripts/diff-wsl.sh`.
 DIFF_PROG='ed'
+# Declared because every invocation above is bounded with it.
+DIFF_NEED=timeout
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 
@@ -87,6 +89,20 @@ done
 # The invocation goes through `$bindir/$side/ed`, a symlink whose *name* is
 # `ed` on both sides, so a diagnostic's `ed: ` prefix comes from the same
 # `argv[0]` and a difference in it is a difference in ed.
+# Every invocation below is bounded, on both sides.
+#
+# The bound must be INSIDE the harness. `run-timeout.py` puts its child in a
+# Windows Job Object, and `wsl.exe` hands work to a separate VM, so nothing
+# Linux-side is a Windows descendant and the job cannot reach it -- an `awk`
+# harness lost 35 minutes to exactly that and the process survived every kill
+# available from the Windows side. Lane A has since narrowed that runner's
+# docstring to say so.
+#
+# The reference is wrapped too: a harness that bounded only our side would hang
+# on the day the reference was the buggy one.
+#
+# `ed` is a programmed editor, so a script that never reaches `q` is ordinary
+# input rather than an exotic one.
 run_side() {
   local side=$1 dir=$2 kind=$3 script=$4 out=$5 err=$6; shift 6
   (
@@ -94,14 +110,14 @@ run_side() {
     case $kind in
       file)
         printf '%b' "$script" > .script
-        env PATH="$bindir/$side" ed "$@" < .script > "$out" 2> "$err"
+        timeout -k 2 30 env PATH="$bindir/$side" ed "$@" < .script > "$out" 2> "$err"
         ;;
       none)
-        env PATH="$bindir/$side" ed "$@" < /dev/null > "$out" 2> "$err"
+        timeout -k 2 30 env PATH="$bindir/$side" ed "$@" < /dev/null > "$out" 2> "$err"
         ;;
       *)
         # A real pipe, which is what makes `is_regular_file(stdin)` false.
-        printf '%b' "$script" | env PATH="$bindir/$side" ed "$@" > "$out" 2> "$err"
+        printf '%b' "$script" | timeout -k 2 30 env PATH="$bindir/$side" ed "$@" > "$out" 2> "$err"
         ;;
     esac
   )

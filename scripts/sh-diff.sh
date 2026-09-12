@@ -61,7 +61,7 @@ DIFF_PROG='sh'
 # same program with the argv[0] question settled by the symlink `diff-wsl.sh`
 # makes.
 DIFF_REF='/bin/dash /usr/bin/dash'
-DIFF_NEED='cat head tr wc sort sed seq od yes ls perl'
+DIFF_NEED='cat head tr wc sort sed seq od yes ls perl timeout'
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 
@@ -102,6 +102,22 @@ printf 'raw\n'                > "$template/$(printf 'b\xff')ad.txt"
 # `$(...)`: command substitution strips trailing newlines, and for a shell
 # script the presence of the last one decides whether the final command runs
 # at all when the file ends mid-word.
+# Every invocation below is bounded, on both sides.
+#
+# This is the harness where an unbounded subject is least exotic: `sh` runs
+# whatever it is handed, and `while :; do done` is a one-line non-terminating
+# program. The `awk` harness lost 35 minutes to exactly that, twice, and the
+# processes survived every kill available from the Windows side --
+# `run-timeout.py` puts its child in a Windows Job Object, and `wsl.exe` hands
+# work to a separate VM, so nothing Linux-side is a Windows descendant and the
+# job cannot reach it. Lane A has since narrowed that runner's docstring to say
+# so. The bound therefore has to be INSIDE the harness, on the far side of the
+# boundary, which is here.
+#
+# 30 seconds: no case here is more than a few lines of shell, so a subject still
+# running after half a minute is stuck rather than slow. The reference is
+# wrapped too -- a harness that bounded only our side would hang on the day the
+# reference was the buggy one.
 run_side() {
   local side=$1 dir=$2 kind=$3 script=$4 out=$5 err=$6; shift 6
   (
@@ -111,10 +127,10 @@ run_side() {
     case $kind in
       file)
         printf '%b' "$script" > .script
-        diff_run sh .script "$@" > "$out" 2> "$err"
+        diff_run timeout -k 2 30 sh .script "$@" > "$out" 2> "$err"
         ;;
       stdin)
-        printf '%b' "$script" | diff_run sh "$@" > "$out" 2> "$err"
+        printf '%b' "$script" | diff_run timeout -k 2 30 sh "$@" > "$out" 2> "$err"
         ;;
       *)
         # `printf -v`, not `$(printf …)`: command substitution strips every
@@ -122,7 +138,7 @@ run_side() {
         # program from the same text with the last newline removed.
         local body
         printf -v body '%b' "$script"
-        diff_run sh -c "$body" "$@" > "$out" 2> "$err"
+        diff_run timeout -k 2 30 sh -c "$body" "$@" > "$out" 2> "$err"
         ;;
     esac
   )

@@ -594,7 +594,7 @@ deliberately — so it is recorded here with the harness that will judge it.
 
 ## TD-B-DIFF-HARNESSES-HAVE-NO-PER-CASE-BOUND-AND-ORPHAN-ACROSS-WSL (lane B, 2026-09-11)
 
-**What.** 28 of the 59 `scripts/<name>-diff.sh` harnesses do not bound an
+**What.** 22 of the 59 `scripts/<name>-diff.sh` harnesses do not bound an
 individual case. One subject that does not terminate stops the whole run, and
 the processes survive every kill available from the Windows side.
 
@@ -613,11 +613,27 @@ solution to a problem already solved 31 times a few files away. **The actual
 fix is to copy the existing pattern into the 28 that lack it**, which needs no
 shared machinery touched and carries none of that risk.
 
-The 28 without a bound: `all`, `awk`, `calc`, `cat`, `csplit`, `cut`, `df`,
-`du`, `ed`, `expr`, `extfloat`, `find`, `head`, `interleave`, `ls`, `more`,
-`nl`, `od`, `sed`, `sh`, `sort`, `split`, `tar`, `test`, `tr`, `uniq`, `wc`,
-`xargs`. Several of those are interpreters (`awk`, `ed`, `sh`, `expr`, `calc`)
-where a non-terminating program is not an exotic input but a normal one.
+**Progress, 2026-09-12.** The six whose subject is a *language* are done —
+`awk`, `tar`, `sh`, `ed`, `expr` and `calc` — because that is where a
+non-terminating program is ordinary input rather than an exotic one:
+`while :; do done` is a one-line `sh` program and an `ed` script that never
+reaches `q` never ends. Each was verified to change no verdict — sh 217/0,
+ed 499/0, expr 177/0, calc 200/0, awk 171/0, tar 245/0.
+
+**Still unbounded (22):** `all`, `cat`, `csplit`, `cut`, `df`, `du`,
+`extfloat`, `find`, `head`, `interleave`, `ls`, `more`, `nl`, `od`, `sed`,
+`sort`, `split`, `test`, `tr`, `uniq`, `wc`, `xargs`. These are filters over
+small fixtures, where a hang means a defect rather than an input — lower
+risk, but not zero: `find` walks a tree and `test`'s harness drives `bash`.
+
+**Lane A has confirmed the scope from their side**, which is what makes the
+in-harness bound the only protection: `run-timeout.py`'s docstring promised
+that nothing is ever orphaned, and they have narrowed it to say the guarantee
+stops at the WSL boundary — `wsl.exe` hands work to a separate VM, so nothing
+Linux-side is a Windows descendant and the Job Object cannot reach it. They
+checked their own exposure rather than assuming: `boot-test.sh` never invokes
+WSL (every `wsl` string in it is an echoed instruction to the operator), so
+the exposed scripts are this differential family and `bashprobe.py`.
 
 *What made me assert it: I grepped `diff-wsl.sh` for `timeout`, found none,
 and concluded the family had no bound. The bound is in the harnesses, not the

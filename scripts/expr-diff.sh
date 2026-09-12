@@ -59,6 +59,8 @@
 set -u
 
 DIFF_PROG='expr'
+# Declared because every invocation above is bounded with it.
+DIFF_NEED=timeout
 # Not the installed binary: WSL's coreutils is Ubuntu's `9.4-3ubuntu6.1` and
 # carries behavioural patches, so a green run against it certifies agreement
 # with Debian rather than with GNU. See `diff-wsl.sh`'s "Why a built reference"
@@ -73,9 +75,23 @@ pass=0; fail=0; xfail=0; xpass=0
 # sed: expr runs no subprocess, so there is nothing else for it to need to find.
 # The single entry is the guarantee that the `expr` being run is the symlink and
 # not whatever else is installed.
+# Every invocation below is bounded, on both sides.
+#
+# The bound must be INSIDE the harness. `run-timeout.py` puts its child in a
+# Windows Job Object, and `wsl.exe` hands work to a separate VM, so nothing
+# Linux-side is a Windows descendant and the job cannot reach it -- an `awk`
+# harness lost 35 minutes to exactly that and the process survived every kill
+# available from the Windows side. Lane A has since narrowed that runner's
+# docstring to say so.
+#
+# The reference is wrapped too: a harness that bounded only our side would hang
+# on the day the reference was the buggy one.
+#
+# `expr` evaluates an expression, and its regex match (`:`) is the part that
+# can be made to run for a very long time on a short input.
 run_side() {
   local side=$1 out=$2 err=$3; shift 3
-  env PATH="$bindir/$side" expr "$@" >"$out" 2>"$err"
+  timeout -k 2 30 env PATH="$bindir/$side" expr "$@" >"$out" 2>"$err"
 }
 
 compare() {

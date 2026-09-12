@@ -179,6 +179,7 @@ name = "blockdev"
 version = "0.1.0"
 dependencies = [
  "quoting",
+ "usageerror",
 ]
 
 [[package]]
@@ -1523,6 +1524,9 @@ dependencies = [
 [[package]]
 name = "lscpu"
 version = "0.1.0"
+dependencies = [
+ "usageerror",
+]
 
 [[package]]
 name = "lsirq"
@@ -1533,6 +1537,7 @@ name = "lsmem"
 version = "0.1.0"
 dependencies = [
  "procinfo",
+ "usageerror",
 ]
 
 [[package]]

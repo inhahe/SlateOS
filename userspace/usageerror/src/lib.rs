@@ -79,6 +79,23 @@ pub fn extra_operand(arg: &[u8]) -> String {
 ///
 /// A bare `-` and the end-of-options `--` are operands, not options, and are
 /// not this function's business; the caller must exclude them first.
+///
+/// # Only for programs that have long options
+///
+/// The `--` prefix selects the long wording, which is right only if the
+/// program calls `getopt_long`. A program that calls plain `getopt` has no
+/// long options at all, so it reads `--zzq` as a *short cluster* and chokes
+/// on the first character: measured, `clear`, `tset`, `lsattr` and `getcap`
+/// all answer
+///
+/// ```text
+/// clear: invalid option -- '-'
+/// ```
+///
+/// to `clear --zzq`, naming the dash itself. Such a caller wants
+/// [`invalid_option`]`(b'-')`, not this function. There is no way to tell
+/// the two apart from the argument alone, which is why this is a caller's
+/// decision and is written down here rather than guessed at each site.
 #[must_use]
 pub fn unknown_option(arg: &[u8]) -> String {
     if arg.starts_with(b"--") {
@@ -131,6 +148,14 @@ mod tests {
     fn shape_selects_the_wording() {
         assert_eq!(unknown_option(b"--long"), "unrecognized option '--long'");
         assert_eq!(unknown_option(b"-s"), "invalid option -- 's'");
+    }
+
+    /// The shape a program with no long options wants. Measured from
+    /// `clear --zzq`, which reads the word as a short cluster and names the
+    /// dash it stopped on.
+    #[test]
+    fn a_program_without_long_options_names_the_dash() {
+        assert_eq!(invalid_option(b'-'), "invalid option -- '-'");
     }
 
     #[test]

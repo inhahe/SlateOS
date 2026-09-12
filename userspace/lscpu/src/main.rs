@@ -443,6 +443,21 @@ fn print_caches(out: &mut io::StdoutLock<'_>, info: &CpuInfo) {
 // CLI
 // ============================================================================
 
+/// Refuse an option this program does not have.
+///
+/// The wording is getopt's, shared through `usageerror` so every program
+/// here renders it identically. The status is **1**, measured rather than
+/// assumed: `lscpu`, `lsmem`, `prlimit` and `blkzone` all exit 1 for this,
+/// where util-linux's own `flock` exits 64 -- so it is per-tool, which is
+/// why `usageerror` does not choose it.
+fn refuse_unknown_option(prog: &str, arg: &str) -> ! {
+    eprintln!(
+        "{prog}: {}",
+        usageerror::with_help_pointer(prog, &usageerror::unknown_option(arg.as_bytes()))
+    );
+    process::exit(1);
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     let mut opts = LscpuOpts {
@@ -487,6 +502,12 @@ fn main() {
             "--offline" => opts.offline = true,
             "-x" | "--hex" => opts.hex = true,
             "-C" | "--caches" => opts.caches = true,
+            // Anything else beginning with a dash is an option this build
+            // does not have. It used to be skipped, so `lscpu --zzq` printed
+            // the CPU table and exited 0.
+            other if other.starts_with('-') && other.len() > 1 => {
+                refuse_unknown_option("lscpu", other);
+            }
             _ => {}
         }
         i += 1;

@@ -4,4 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS memory information display"
 [dependencies]
+# getopt's usage diagnostics, spelled once. The wording is not ours -- it is
+# what `getopt_long` prints and what util-linux repeats verbatim -- so every
+# program here has to render it identically. Pure formatting over `quoting`,
+# no I/O, so §768 exempt.
+usageerror = { path = "../usageerror" }
 procinfo = { path = "../../procinfo" }

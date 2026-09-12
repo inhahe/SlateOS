@@ -138581,7 +138581,7 @@ It now polls `/proc/2/stat` until the state is `S`, using the `read` builtin so
 it forks **nothing** -- a forked `awk` would take PID 3 and could itself be
 caught in the listing it is preparing.
 
-## B-SEVENTY-PROGRAMS-ACCEPT-AN-OPTION-THEY-DO-NOT-HAVE-AND-EXIT-ZERO (lane B, 2026-09-12) -- 12 of 70 FIXED
+## B-SEVENTY-PROGRAMS-ACCEPT-AN-OPTION-THEY-DO-NOT-HAVE-AND-EXIT-ZERO (lane B, 2026-09-12) -- 17 of 70 FIXED
 
 Found by `scripts/unknown-option-sweep.py`, which runs every binary in an
 empty directory with nothing but a bogus long option and looks at what it
@@ -138597,7 +138597,8 @@ outright, coreutils already had a correct `nohup`).
 **Seventy more accepted the option and exited 0** without a filesystem side
 effect. Eleven are fixed -- `nproc`, `arch`, `pathchk`, `users` (all one
 crate), `lscpu`, `lsmem`, `blkzone`, and `clear`, `tset`, `lsattr`,
-`getcap`, and `getopt`. The remaining 58 are listed below.
+`getcap`, `getopt`, and the five `systemd-*` personalities. The
+remaining 53 are listed below.
 
 `getopt` is worth singling out. It accepted an unknown option by making
 it the *optstring*, and fixing that surfaced a second, older defect:
@@ -138631,6 +138632,23 @@ but the sysstat package is not installed in the WSL reference environment and
 `apt-get` needs a password this session does not have. Their wording is
 therefore unmeasured, and guessing it is exactly what §371 forbids. Trigger to
 promote: sysstat available in the reference environment.
+
+### A neighbouring class, found while fixing this one: help that lies
+
+`systemd-cat --help` advertises `-p, --priority=PRIO` and
+`-t, --identifier=ID`. `run_cat_journal` takes no arguments and
+implements neither. `blockdev`'s parser accepted `--setfra`, consumed its
+value, and then reported `unknown operation`, because the option was in
+the parser's value-taking list and not in the executor's. Both are the
+same defect from the other side: not "an option we do not have is
+accepted", but "an option we advertise does not exist".
+
+It is sweepable the same way the first one was, and more cheaply, since
+it needs no reference implementation: parse each binary's own `--help`
+for the options it names, then check the parser recognises every one.
+Any disagreement is a defect in one direction or the other, and the
+program tells you both halves itself. Not started; noted here so the
+idea is not lost with the tick that had it.
 
 ### Most of what is left is blocked on a reference, not on effort
 
@@ -138677,7 +138695,7 @@ On a machine where `/dev/sda` exists it would have exited 0. It was found
 only because `blkzone`, its argv[0] sibling, was flagged and the crate was
 opened anyway. So the count of 70 is a floor, not a total.
 
-### Still open (58)
+### Still open (53)
 
 - `clipboard`
 - `coredumpctl`
@@ -138726,11 +138744,6 @@ opened anyway. So the count of 70 is a floor, not a total.
 - `rfkill-event (via rfkill)`
 - `sbkeysync (via sbctl)`
 - `sestatus (via selinux)`
-- `systemd-cat (via systemctl)`
-- `systemd-cgls (via systemctl)`
-- `systemd-cgtop (via systemctl)`
-- `systemd-escape (via systemctl)`
-- `systemd-path (via systemctl)`
 - `systemd-resolve (via resolvectl)`
 - `tapestat (via sysstat)`
 - `tuned-gui (via tuned)`

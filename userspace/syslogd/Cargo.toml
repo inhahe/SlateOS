@@ -8,3 +8,11 @@ description = "SlateOS system log daemon — JSON-lines log aggregation and quer
 # That value is an argv word, so it is whatever the user typed and not text
 # this program chose.
 quoting = { path = "../quoting" }
+
+# Tests only. `clean_file` rewrites the file it reads, so its tests need a real
+# path -- and a scratch directory that is removed on an unwind out of a failed
+# assertion, rather than a fixed name every concurrent copy of the suite would
+# share. See known-issues.md
+# `B-TEST-FIXTURES-SHARE-TEMP-PATHS-ACROSS-CONCURRENT-RUNS`.
+[dev-dependencies]
+scratchdir = { path = "../scratchdir" }

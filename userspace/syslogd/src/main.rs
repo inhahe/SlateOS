@@ -25,7 +25,7 @@
 //! syslogd clean [days]        Remove logs older than N days (default 30)
 //! ```
 
-use quoting::quoteaf_os;
+use quoting::{quoteaf_os, quotef_os};
 use std::env;
 use std::fs;
 use std::io::{self, Write};
@@ -584,41 +584,79 @@ fn cmd_rotate() {
     println!("  done");
 }
 
-fn cmd_clean(days: u64) {
-    let cutoff = now_secs().saturating_sub(days * 86400);
-    let path = log_file_path();
+/// What [`clean_file`] did, or that there was nothing to do.
+#[derive(Debug, PartialEq, Eq)]
+enum Cleaned {
+    /// The log does not exist. An absence, and the only one.
+    NoFile,
+    /// `removed` entries dropped, `kept` retained.
+    Trimmed { removed: usize, kept: usize },
+}
 
-    let content = match fs::read_to_string(&path) {
+/// Drop entries older than `cutoff` from the log at `path`, rewriting it.
+///
+/// A parameter rather than [`log_file_path`] so this is testable at all --
+/// this daemon had no tests before 2026-09-12, and the behaviour below is not
+/// something to ship on a reading.
+///
+/// # Errors
+///
+/// The log exists and could not be read or written. **That is not "no log
+/// file", which is what this used to print for every failure** -- including a
+/// log holding a byte that is not valid UTF-8, which `read_to_string` refuses
+/// wholesale. The operator would then believe there was nothing to clean while
+/// the file went on growing. Only `NotFound` is an absence.
+fn clean_file(path: &Path, cutoff: u64) -> Result<Cleaned, String> {
+    let content = match fs::read_to_string(path) {
         Ok(c) => c,
-        Err(_) => {
-            println!("No log file.");
-            return;
-        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Cleaned::NoFile),
+        Err(e) => return Err(format!("{}: {e}", quotef_os(path))),
     };
 
     let mut kept = Vec::new();
     let mut removed = 0usize;
-
     for line in content.lines() {
-        if let Some(entry) = LogEntry::from_json(line) {
-            if entry.timestamp >= cutoff {
-                kept.push(line.to_string());
-            } else {
-                removed += 1;
-            }
+        // A line this daemon cannot parse is KEPT, not dropped: it is somebody
+        // else's record, and a cleaner that deletes what it does not recognise
+        // is a cleaner that loses data on a format change.
+        if let Some(entry) = LogEntry::from_json(line)
+            && entry.timestamp < cutoff
+        {
+            removed += 1;
         } else {
             kept.push(line.to_string());
         }
     }
 
-    let new_content = kept.join("\n") + if kept.is_empty() { "" } else { "\n" };
-    if let Err(e) = fs::write(&path, new_content) {
-        eprintln!("error: {e}");
-        process::exit(1);
-    }
+    let new_content = kept.join(
+        "
+",
+    ) + if kept.is_empty() {
+        ""
+    } else {
+        "
+"
+    };
+    fs::write(path, new_content).map_err(|e| format!("{}: {e}", quotef_os(path)))?;
+    Ok(Cleaned::Trimmed {
+        removed,
+        kept: kept.len(),
+    })
+}
 
-    println!("  removed {removed} entries older than {days} days");
-    println!("  kept {} entries", kept.len());
+fn cmd_clean(days: u64) {
+    let cutoff = now_secs().saturating_sub(days * 86400);
+    match clean_file(&log_file_path(), cutoff) {
+        Ok(Cleaned::NoFile) => println!("No log file."),
+        Ok(Cleaned::Trimmed { removed, kept }) => {
+            println!("  removed {removed} entries older than {days} days");
+            println!("  kept {kept} entries");
+        }
+        Err(e) => {
+            eprintln!("syslogd: {e}");
+            process::exit(1);
+        }
+    }
 }
 
 // ============================================================================
@@ -828,5 +866,102 @@ fn main() {
             eprintln!("Run 'syslogd help' for usage.");
             process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+// CLAUDE.md allows the defensive lints inside `#[cfg(test)]`, where panicking
+// on bad data is the point.
+#[allow(clippy::unwrap_used, clippy::panic, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use scratchdir::ScratchDir;
+
+    /// The first tests this daemon has ever had. They exist because
+    /// `clean_file` REWRITES the file it reads, which is the shape that
+    /// destroyed data in `useradd` on the same day -- so "it looks right" is
+    /// not a standard it should be held to.
+    fn log_with(dir: &ScratchDir, lines: &[&str]) -> std::path::PathBuf {
+        let path = dir.path("messages.json");
+        fs::write(&path, lines.join("\n") + "\n").expect("write fixture");
+        path
+    }
+
+    /// One record in the shape `LogEntry::to_json` writes: the keys are `ts`
+    /// and `msg`, not `timestamp` and `message`. My first fixture used the
+    /// long names, which the parser files under `extra` while leaving
+    /// `timestamp` at 0 -- so every entry looked older than every cutoff and
+    /// the test reported 3 removed instead of 1. A fixture in a format the
+    /// program does not write tests nothing; this one is taken from `to_json`.
+    fn entry(ts: u64) -> String {
+        format!(r#"{{"ts":{ts},"level":"info","service":"t","msg":"m"}}"#)
+    }
+
+    #[test]
+    fn an_absent_log_is_the_one_absence() {
+        let dir = ScratchDir::new("syslogd_clean");
+        let got = clean_file(&dir.path("nothing-here.json"), 100);
+        assert_eq!(got, Ok(Cleaned::NoFile));
+    }
+
+    #[test]
+    fn a_log_that_cannot_be_read_is_an_error_not_an_absence() {
+        // A directory where the file should be: it exists, so this is not
+        // NotFound, and it cannot be read as text. Before 2026-09-12 this
+        // printed "No log file." and returned 0, so the operator believed
+        // there was nothing to clean.
+        let dir = ScratchDir::new("syslogd_clean");
+        let path = dir.path("messages.json");
+        fs::create_dir(&path).expect("mkdir");
+        assert!(clean_file(&path, 100).is_err());
+    }
+
+    #[test]
+    fn a_log_holding_bytes_that_are_not_utf8_is_an_error_not_an_absence() {
+        let dir = ScratchDir::new("syslogd_clean");
+        let path = dir.path("messages.json");
+        fs::write(&path, [0x7B, 0xFF, 0x7D, 0x0A]).expect("write");
+        assert!(
+            core::str::from_utf8(&fs::read(&path).unwrap()).is_err(),
+            "fixture must not be utf-8, or this test proves nothing"
+        );
+        assert!(clean_file(&path, 100).is_err());
+    }
+
+    #[test]
+    fn entries_older_than_the_cutoff_go_and_the_rest_stay() {
+        let dir = ScratchDir::new("syslogd_clean");
+        let path = log_with(&dir, &[&entry(50), &entry(150), &entry(250)]);
+        let got = clean_file(&path, 100).expect("clean");
+        assert_eq!(
+            got,
+            Cleaned::Trimmed {
+                removed: 1,
+                kept: 2
+            }
+        );
+
+        let after = fs::read_to_string(&path).expect("read back");
+        assert!(!after.contains("\"ts\":50"), "the old one is gone");
+        assert!(after.contains("\"ts\":150"));
+        assert!(after.contains("\"ts\":250"));
+    }
+
+    #[test]
+    fn a_line_this_daemon_cannot_parse_is_kept_rather_than_dropped() {
+        // It is somebody else's record. A cleaner that deletes what it does
+        // not recognise loses data the first time the format changes.
+        let dir = ScratchDir::new("syslogd_clean");
+        let path = log_with(&dir, &["not json at all", &entry(50), &entry(250)]);
+        let got = clean_file(&path, 100).expect("clean");
+        assert_eq!(
+            got,
+            Cleaned::Trimmed {
+                removed: 1,
+                kept: 2
+            }
+        );
+        let after = fs::read_to_string(&path).expect("read back");
+        assert!(after.contains("not json at all"));
     }
 }

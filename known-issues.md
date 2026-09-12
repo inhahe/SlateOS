@@ -138763,3 +138763,87 @@ opened anyway. So the count of 70 is a floor, not a total.
 - `turbostat (via cpupower)`
 - `ulimit (via prlimit)`
 - `update-grub (via grub2)`
+
+## B-THIRTY-FOUR-OPTIONS-ARE-ADVERTISED-BY-HELP-AND-READ-BY-NOTHING (lane B, 2026-09-12) -- tool landed, findings open
+
+The mirror image of the unknown-option class above, found by
+`scripts/check-help-vs-parser.py`. That sweep asks whether an option we do
+not have gets accepted; this one asks whether an option we *advertise*
+exists. It needs no reference implementation -- the program supplies both
+halves of the comparison -- which is why it is worth doing now, while two
+thirds of the other list waits on a reference environment.
+
+**34 options across 14 files.** The number began at 180 and every
+correction came from opening a file the tool had accused; the four
+false-positive classes and their fixes are in the tool's own commit
+message and docstring. Both remaining ambiguities fail toward silence, so
+34 is a floor.
+
+Two worked examples, both confirmed by hand:
+
+- `getfacl` advertises `-a/--access`, `-d/--default` and `-n/--numeric`
+  and parses none of them -- its match ends `_ => {}`. Fixing it means
+  either implementing the three or removing them from the help; the help
+  must stop claiming what the binary cannot do either way.
+- `blkzone` advertises `-o/--offset`, `-l/--length` and `-c/--count` and
+  parses none of those either.
+
+**`getfacl` also shows why the first sweep's count is a floor.** It has
+the unknown-option defect too -- `_ => {}` -- but never appeared in that
+list, because `getfacl --zzq` with no file operand exits 1 with "no files
+specified". It accepted the option and failed for an unrelated reason,
+exactly as `blockdev` did. Two independent confirmations of the same
+blind spot.
+
+### The 34
+
+```
+  userspace/acl/src/main.rs
+      --access             nowhere                from: -a, --access    Display access ACL only
+      --default            nowhere                from: -d, --default   Display default ACL only
+      --numeric            nowhere                from: -n, --numeric      Numeric UIDs/GIDs
+      -a                   nowhere                from: -a, --access    Display access ACL only
+      -d                   nowhere                from: -d, --default   Display default ACL only
+      -n                   nowhere                from: -n, --numeric      Numeric UIDs/GIDs
+  userspace/blockdev/src/main.rs
+      --count              nowhere                from: -c, --count NUM       Number of zones
+      --length             nowhere                from: -l, --length SECTORS  Number of sectors
+      --offset             nowhere                from: -o, --offset SECTOR   Start sector
+      -c                   nowhere                from: -c, --count NUM       Number of zones
+      -l                   nowhere                from: -l, --length SECTORS  Number of sectors
+      -o                   nowhere                from: -o, --offset SECTOR   Start sector
+  userspace/iptables/src/main.rs
+      --opts               nowhere                from: -m match --opts      Extended match module
+  userspace/irqbalance/src/main.rs
+      --banmod             nowhere                from: --banmod=MOD         Ban module IRQs
+  userspace/lscpu/src/main.rs
+      --bytes              nowhere                from: -B, --bytes        Print sizes in bytes
+      -B                   nowhere                from: -B, --bytes        Print sizes in bytes
+  userspace/lsmem/src/main.rs
+      -s                   nowhere                from: -s, --summary[=WHEN] Summary (auto, only, never)
+  userspace/objdump/src/main.rs
+      --radix              nowhere                from: --radix=N  Radix (8, 10, 16)
+      --start-address      nowhere                from: --start-address=ADDR
+      --stop-address       nowhere                from: --stop-address=ADDR
+  userspace/oils/src/main.rs
+      -C                   nowhere                from: -e -x -u -f -C …             Single-letter `set`
+      -e                   nowhere                from: -e -x -u -f -C …             Single-letter `set`
+      -f                   nowhere                from: -e -x -u -f -C …             Single-letter `set`
+      -u                   nowhere                from: -e -x -u -f -C …             Single-letter `set`
+      -x                   nowhere                from: -e -x -u -f -C …             Single-letter `set`
+  userspace/pstree/src/main.rs
+      --compact            nowhere                from: -c, --compact=no    Don't compact identical subt
+  userspace/systemctl/src/main.rs
+      --identifier         nowhere                from: -t, --identifier=ID  Set syslog identifier
+      --pid                nowhere                from: --pid=PID       Send from specific PID
+      --priority           nowhere                from: -p, --priority=PRIO  Set syslog priority (0-7)
+  userspace/vmstat/src/main.rs
+      --timestamp---       nowhere                from: ---timestamp---
+  userspace/wget/src/main.rs
+      --request            nowhere                from: ---request begin---
+      --response           nowhere                from: ---response begin---
+  userspace/xattr/src/main.rs
+      --encoding           nowhere                from: -e, --encoding ENC Encoding (text, hex, base64)
+  userspace/xdg/src/main.rs
+      --icon               nowhere                from: --icon
+```

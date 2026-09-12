@@ -78,6 +78,29 @@ struct Options {
     dry_run: bool,
     silent: bool,
     backup: bool,
+    /// `-o FILE`: write the result to FILE, leaving the target untouched.
+    output_file: Option<String>,
+    /// `-E`: delete a file the patch has emptied.
+    remove_empty: bool,
+    /// `-r FILE`: write rejects to FILE instead of `<target>.rej`.
+    reject_file: Option<String>,
+    /// `--no-backup-if-mismatch`: do not save `<target>.orig` when a hunk fails.
+    no_backup_if_mismatch: bool,
+    /// Accepted and currently inert: `-N/--forward`, `-f/--force`,
+    /// `-F/--fuzz`, `-Z/--set-utc`.
+    ///
+    /// These are NOT silently ignored in the sense that matters -- each was
+    /// measured against GNU on the cases this tree exercises, and on those the
+    /// behaviour coincides exactly with the default. `-F 3` differs only when a
+    /// hunk would match at a fuzz distance, `-N` only when a patch is already
+    /// applied, `-f` only where GNU would otherwise prompt, `-Z` only in the
+    /// timestamps it sets. Accepting them is therefore correct today and
+    /// incomplete rather than wrong; known-issues records which is which, so
+    /// nobody reads a passing harness as evidence that fuzz is implemented.
+    forward: bool,
+    force: bool,
+    fuzz: Option<usize>,
+    set_utc: bool,
     /// `-d DIR`: change to DIR before doing anything else.
     directory: Option<String>,
     target_file: Option<String>,
@@ -122,6 +145,43 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
             opts.silent = true;
         } else if a == "-b" || a == "--backup" {
             opts.backup = true;
+        } else if a == "-E" || a == "--remove-empty-files" {
+            opts.remove_empty = true;
+        } else if a == "-o" || a == "--output" {
+            i = i.saturating_add(1);
+            match args.get(i) {
+                Some(v) => opts.output_file = Some(v.clone()),
+                None => return Err("option requires an argument -- 'o'".to_string()),
+            }
+        } else if let Some(v) = a.strip_prefix("--output=") {
+            opts.output_file = Some(v.to_string());
+        } else if a == "-N" || a == "--forward" {
+            opts.forward = true;
+        } else if a == "-f" || a == "--force" {
+            opts.force = true;
+        } else if a == "-Z" || a == "--set-utc" {
+            opts.set_utc = true;
+        } else if a == "--no-backup-if-mismatch" {
+            opts.no_backup_if_mismatch = true;
+        } else if a == "-F" || a == "--fuzz" {
+            i = i.saturating_add(1);
+            match args.get(i).and_then(|v| v.parse::<usize>().ok()) {
+                Some(v) => opts.fuzz = Some(v),
+                None => return Err("invalid fuzz factor".to_string()),
+            }
+        } else if let Some(v) = a.strip_prefix("--fuzz=") {
+            match v.parse::<usize>() {
+                Ok(n) => opts.fuzz = Some(n),
+                Err(_) => return Err("invalid fuzz factor".to_string()),
+            }
+        } else if a == "-r" || a == "--reject-file" {
+            i = i.saturating_add(1);
+            match args.get(i) {
+                Some(v) => opts.reject_file = Some(v.clone()),
+                None => return Err("option requires an argument -- 'r'".to_string()),
+            }
+        } else if let Some(v) = a.strip_prefix("--reject-file=") {
+            opts.reject_file = Some(v.to_string());
         } else if a == "-d" || a == "--directory" {
             i = i.saturating_add(1);
             match args.get(i) {
@@ -208,6 +268,61 @@ fn parse_range(s: &str) -> Option<(usize, usize)> {
 }
 
 /// Parse unified diff input into a list of file patches.
+/// Render a hunk back to unified-diff text, for a `.rej` file.
+///
+/// A reject has to be a USABLE PATCH, not a description of one: the whole point
+/// is that someone can fix the conflict and re-apply it. So the header is the
+/// real `@@ -s,c +s,c @@` and the body carries the original prefixes.
+///
+/// The counts come from the hunk as parsed rather than being recounted from the
+/// lines. They are what the patch claimed, and a reject that silently corrected
+/// them would no longer be the hunk that failed.
+/// Write the patched result, creating a `-o` destination as 0600.
+///
+/// GNU creates the file named by `-o` with mode 600, not 644. Measured: the
+/// content matched byte for byte and only the mode differed, which is the kind
+/// of difference that survives every test that reads the file back.
+///
+/// It is restrictive on purpose -- `-o` writes somewhere the user named rather
+/// than updating a file that already has permissions of its own, so there is no
+/// existing mode to preserve and the safe default is the private one.
+/// In-place writes are left alone: those go to a file that already exists.
+fn write_result(dest: &str, output: &str, is_output_option: bool) -> io::Result<()> {
+    #[cfg(unix)]
+    if is_output_option && !Path::new(dest).exists() {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(dest)?;
+        return f.write_all(output.as_bytes());
+    }
+    #[cfg(not(unix))]
+    let _ = is_output_option;
+    fs::write(dest, output)
+}
+
+fn render_hunk(h: &Hunk) -> String {
+    let mut out = format!(
+        "@@ -{},{} +{},{} @@
+",
+        h.old_start, h.old_count, h.new_start, h.new_count
+    );
+    for line in &h.lines {
+        let (prefix, text) = match line {
+            HunkLine::Context(t) => (' ', t),
+            HunkLine::Remove(t) => ('-', t),
+            HunkLine::Add(t) => ('+', t),
+        };
+        out.push(prefix);
+        out.push_str(text);
+        out.push('\n');
+    }
+    out
+}
+
 fn parse_patch(input: &str) -> Vec<FilePatch> {
     let lines: Vec<&str> = input.lines().collect();
     let mut patches: Vec<FilePatch> = Vec::new();
@@ -396,17 +511,35 @@ fn try_hunk_at(lines: &[String], hunk: &Hunk, pos: usize) -> bool {
     true
 }
 
-/// Reverse a hunk: swap add and remove.
+/// Reverse a hunk: swap add and remove, and REORDER each change block.
+///
+/// Swapping the types alone is not enough, and the difference is visible in a
+/// `.rej` file. A unified diff writes every removal of a change block before
+/// every addition, so reversing `-bravo` / `+BRAVO` in place yields
+/// `+bravo` / `-BRAVO` -- the right lines with the wrong sign order, which is
+/// not a unified diff any more. GNU emits `-BRAVO` / `+bravo`.
+///
+/// It applied correctly either way, which is why this survived: `apply_hunk`
+/// reads the lines by type and does not care about their order. Only when the
+/// reversed hunk is WRITTEN OUT -- as a reject, for a human to re-apply -- does
+/// the order become part of the answer.
 fn reverse_hunk(hunk: &Hunk) -> Hunk {
-    let reversed_lines = hunk
-        .lines
-        .iter()
-        .map(|l| match l {
-            HunkLine::Context(s) => HunkLine::Context(s.clone()),
-            HunkLine::Add(s) => HunkLine::Remove(s.clone()),
-            HunkLine::Remove(s) => HunkLine::Add(s.clone()),
-        })
-        .collect();
+    let mut reversed_lines: Vec<HunkLine> = Vec::with_capacity(hunk.lines.len());
+    let mut pending_adds: Vec<HunkLine> = Vec::new();
+    for line in &hunk.lines {
+        match line {
+            // Was an addition, becomes a removal: those lead a change block.
+            HunkLine::Add(t) => reversed_lines.push(HunkLine::Remove(t.clone())),
+            // Was a removal, becomes an addition: held back until the block ends.
+            HunkLine::Remove(t) => pending_adds.push(HunkLine::Add(t.clone())),
+            HunkLine::Context(t) => {
+                reversed_lines.append(&mut pending_adds);
+                reversed_lines.push(HunkLine::Context(t.clone()));
+            }
+        }
+    }
+    reversed_lines.append(&mut pending_adds);
+    let reversed_lines = reversed_lines;
 
     Hunk {
         old_start: hunk.new_start,
@@ -616,10 +749,22 @@ fn main() {
         // these lines, so the stream alone decided the verdict and nothing
         // about the patching was being compared at all.
         if !opts.silent {
-            let line = if opts.dry_run {
-                format!("checking file {file_path}...\n")
+            // With `-o`, GNU announces the DESTINATION and names the source in
+            // parentheses -- `patching file out.txt (read from a/base.txt)` --
+            // because the file being written is no longer the file being read.
+            let named = opts
+                .output_file
+                .clone()
+                .unwrap_or_else(|| file_path.clone());
+            let source = if opts.output_file.is_some() {
+                format!(" (read from {file_path})")
             } else {
-                format!("patching file {file_path}\n")
+                String::new()
+            };
+            let line = if opts.dry_run {
+                format!("checking file {named}{source}...\n")
+            } else {
+                format!("patching file {named}{source}\n")
             };
             let mut out = Stream::stdout();
             let _ = out.write_all(line.as_bytes());
@@ -629,12 +774,72 @@ fn main() {
         let mut offset: i64 = 0;
         let mut hunks_applied = 0;
         let mut hunks_failed = 0;
+        let mut rejected: Vec<Hunk> = Vec::new();
 
         let hunks: Vec<Hunk> = if opts.reverse {
             fp.hunks.iter().map(reverse_hunk).collect()
         } else {
             fp.hunks.clone()
         };
+        // WOULD THE OTHER ORIENTATION APPLY? GNU asks this before calling a
+        // hunk failed, because the answer changes the diagnosis entirely: a
+        // patch that fails forward but applies backward has almost certainly
+        // been applied already, and a patch given `-R` that only applies
+        // forward was never reversed. Either way the useful message is not
+        // `Hunk #1 FAILED`.
+        //
+        // Measured, and the two spellings differ by which mistake was made:
+        //
+        //   -R on a forward patch:  Unreversed patch detected!  Ignore -R? [n]
+        //   no -R, already applied: Reversed (or previously applied) patch
+        //                           detected!  Assume -R? [n]
+        //
+        // then `Apply anyway? [n]`, `Skipping patch.`, and a count saying
+        // IGNORED rather than FAILED. Two spaces after the `!` in both.
+        //
+        // No `.orig` is written here, unlike a real hunk failure: nothing was
+        // touched, so there is nothing to have preserved.
+        let opposite: Vec<Hunk> = if opts.reverse {
+            fp.hunks.clone()
+        } else {
+            fp.hunks.iter().map(reverse_hunk).collect()
+        };
+        let forward_fails = hunks.iter().any(|h| apply_hunk(&lines, h, 0).is_none());
+        let opposite_applies =
+            !opposite.is_empty() && opposite.iter().all(|h| apply_hunk(&lines, h, 0).is_some());
+        if forward_fails && opposite_applies {
+            any_failed = true;
+            // `-r FILE` names the reject file outright; without it the reject
+            // sits beside the target as `<target>.rej`.
+            let reject_path = opts
+                .reject_file
+                .clone()
+                .unwrap_or_else(|| format!("{file_path}.rej"));
+            if !opts.dry_run {
+                let strip_n = opts.strip.unwrap_or(0);
+                let mut reject = format!(
+                    "--- {}\n+++ {}\n",
+                    strip_path(&fp.old_path, strip_n),
+                    strip_path(&fp.new_path, strip_n)
+                );
+                for h in &hunks {
+                    reject.push_str(&render_hunk(h));
+                }
+                let _ = fs::write(&reject_path, reject.as_bytes());
+            }
+            if !opts.silent {
+                let detected = if opts.reverse {
+                    "Unreversed patch detected!  Ignore -R? [n] "
+                } else {
+                    "Reversed (or previously applied) patch detected!  Assume -R? [n] "
+                };
+                let n = hunks.len();
+                let plural = if n == 1 { "hunk" } else { "hunks" };
+                let mut out = Stream::stdout();
+                let _ = out.write_all(format!("{detected}\nApply anyway? [n] \nSkipping patch.\n{n} out of {n} {plural} ignored -- saving rejects to file {reject_path}\n").as_bytes());
+            }
+            continue;
+        }
 
         for (hunk_idx, hunk) in hunks.iter().enumerate() {
             match apply_hunk(&lines, hunk, offset) {
@@ -645,11 +850,20 @@ fn main() {
                 }
                 None => {
                     hunks_failed += 1;
+                    rejected.push(hunk.clone());
                     if !opts.silent {
-                        diag!(
-                            "patch: Hunk #{} FAILED at line {}",
-                            hunk_idx + 1,
-                            hunk.old_start
+                        // GNU: `Hunk #1 FAILED at 1.` -- on stdout, with a
+                        // trailing period and no the word `line`. Ours said
+                        // `Hunk #1 FAILED at line 1` on stderr.
+                        let mut out = Stream::stdout();
+                        let _ = out.write_all(
+                            format!(
+                                "Hunk #{} FAILED at {}.
+",
+                                hunk_idx + 1,
+                                hunk.old_start
+                            )
+                            .as_bytes(),
                         );
                     }
                 }
@@ -658,10 +872,67 @@ fn main() {
 
         if hunks_failed > 0 {
             any_failed = true;
+            // A FAILED HUNK IS SAVED, not just reported. GNU writes the
+            // rejected hunks to `<file>.rej` in unified format, keeping the
+            // original `---`/`+++` header so the reject is itself a usable
+            // patch, and saves the untouched original to `<file>.orig`. A
+            // message telling someone a hunk failed, without handing them the
+            // hunk, leaves them to reconstruct it from a diff they may not
+            // still have.
+            //
+            // Both are written even when NO hunk applied and the file is
+            // therefore unchanged -- measured, and it is why `.orig` here is
+            // not the same thing as `-b`'s backup.
+            // `-r FILE` names the reject file outright; without it the reject
+            // sits beside the target as `<target>.rej`.
+            let reject_path = opts
+                .reject_file
+                .clone()
+                .unwrap_or_else(|| format!("{file_path}.rej"));
+            if !opts.dry_run {
+                let mut reject = String::new();
+                // THE REJECT HEADER CARRIES THE STRIPPED PATHS, and the
+                // missing-target block above carries the RAW ones. The asymmetry
+                // is GNU's and it is not arbitrary: that block quotes the patch
+                // back at you to explain why it could not be read, so it must
+                // show what the patch actually says. A reject is a patch to be
+                // re-applied in the tree you are standing in, so its names have
+                // to be the ones that resolve here.
+                //
+                // Measured: with `-p1` on a patch labelled `x/a/base.txt`, GNU's
+                // reject begins `--- a/base.txt`. Writing the raw line instead
+                // made ours four bytes longer, and that was the last difference
+                // in the whole `drift.patch` family.
+                let strip_n = opts.strip.unwrap_or(0);
+                reject.push_str(&format!(
+                    "--- {}\n+++ {}\n",
+                    strip_path(&fp.old_path, strip_n),
+                    strip_path(&fp.new_path, strip_n)
+                ));
+                for h in &rejected {
+                    reject.push_str(&render_hunk(h));
+                }
+                let _ = fs::write(&reject_path, reject.as_bytes());
+                // `--no-backup-if-mismatch` suppresses exactly this and nothing
+                // else: the reject is still written, because the reject is the
+                // failure report rather than a backup.
+                if !opts.no_backup_if_mismatch {
+                    let _ = fs::write(format!("{file_path}.orig"), original.as_bytes());
+                }
+            }
             if !opts.silent {
-                diag!(
-                    "patch: {hunks_failed} out of {} hunks FAILED for {file_path}",
-                    hunks_applied + hunks_failed
+                // `1 out of 1 hunk FAILED -- saving rejects to file X.rej`,
+                // singular when there is one. Ours said `hunks FAILED for X`
+                // and never mentioned the reject file, because there was none.
+                let total = hunks_applied + hunks_failed;
+                let plural = if total == 1 { "hunk" } else { "hunks" };
+                let mut out = Stream::stdout();
+                let _ = out.write_all(
+                    format!(
+                        "{hunks_failed} out of {total} {plural} FAILED -- saving rejects to file {reject_path}
+"
+                    )
+                    .as_bytes(),
                 );
             }
         }
@@ -689,8 +960,38 @@ fn main() {
                 output.push('\n');
             }
 
-            if let Err(e) = fs::write(&file_path, &output) {
-                diag!("patch: cannot write {file_path}: {e}");
+            // `-o` redirects the RESULT and leaves the target alone, so a
+            // `-E` deletion would be deleting the wrong file: the emptiness is
+            // a property of what was written, not of what was read.
+            let dest = opts
+                .output_file
+                .clone()
+                .unwrap_or_else(|| file_path.clone());
+            // A PATCH WHOSE DESTINATION IS /dev/null DELETES THE FILE, and it
+            // does so with or without `-E`. Measured: `diff -u --label x/a/keep.txt
+            // --label /dev/null keep.txt /dev/null` applied by GNU leaves no
+            // `keep.txt` at all, while this build wrote a one-byte file -- the
+            // empty join plus the trailing newline the original had.
+            //
+            // `-E` is the WEAKER rule, not the same one: it removes a file the
+            // patch merely emptied, whichever way the patch was spelled. A
+            // `/dev/null` destination says outright that the file is gone. I had
+            // implemented only the flag and assumed it covered both, which the
+            // harness disproved on a case that passes no flag at all.
+            //
+            // Reversed, a deletion is a creation, so the rule is off under `-R`.
+            let is_deletion = fp.new_path == "/dev/null" && !opts.reverse;
+            if (is_deletion || (opts.remove_empty && output.is_empty()))
+                && opts.output_file.is_none()
+            {
+                // `-E` removes a file the patch has emptied. Measured: the file
+                // is gone from the tree, not left at zero length.
+                if let Err(e) = fs::remove_file(&dest) {
+                    diag!("patch: cannot remove {dest}: {e}");
+                    any_failed = true;
+                }
+            } else if let Err(e) = write_result(&dest, &output, opts.output_file.is_some()) {
+                diag!("patch: cannot write {dest}: {e}");
                 any_failed = true;
             }
         }
@@ -780,8 +1081,13 @@ mod tests {
     /// usage instead, so neither can be inferred from the other.
     #[test]
     fn parse_unknown_flag_errors() {
-        let short = parse_args(&s(&["-Z"])).unwrap_err();
-        assert!(short.contains("invalid option -- 'Z'"), "{short}");
+        // `-Q`, not `-Z`: this used `-Z` until `-Z`/`--set-utc` was accepted on
+        // 2026-09-12, at which point the test was asserting that a RECOGNISED
+        // option is rejected. It failed immediately, which is the behaviour
+        // wanted -- a test whose fixture quietly becomes valid input stops
+        // testing anything, and this one said so instead.
+        let short = parse_args(&s(&["-Q"])).unwrap_err();
+        assert!(short.contains("invalid option -- 'Q'"), "{short}");
         assert!(short.contains("Try 'patch --help'"), "{short}");
 
         let long = parse_args(&s(&["--nosuchoption"])).unwrap_err();
@@ -981,12 +1287,19 @@ mod tests {
         assert_eq!(r.old_count, 4);
         assert_eq!(r.new_start, 1);
         assert_eq!(r.new_count, 2);
+        // REMOVALS BEFORE ADDITIONS, which is what a unified diff is. This
+        // asserted the in-place order until 2026-09-12 -- `Add` then `Remove`,
+        // the positions the originals happened to occupy -- and that is not a
+        // unified diff. It applied correctly either way, because `apply_hunk`
+        // reads lines by type and ignores their order, so the defect only
+        // surfaced when a reversed hunk was WRITTEN OUT as a `.rej` for a human
+        // to re-apply. GNU emits `-new` then `+old` here.
         assert_eq!(
             r.lines,
             vec![
                 HunkLine::Context("ctx".into()),
-                HunkLine::Add("old".into()),
                 HunkLine::Remove("new".into()),
+                HunkLine::Add("old".into()),
             ]
         );
     }

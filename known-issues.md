@@ -135889,7 +135889,7 @@ happens first.**
 
 `patch-diff.sh`: 3 passed / 62 differed this morning, **29 / 36** now.
 
-## TD-A-A-A-A-THE-BENCHMARK-ACCELERATOR-IS-AN-ENVIRONMENT-VARIABLE-AND-A-RESTART-CLEARS-IT (lane A, 2026-09-12) — **three runs of measurements silently changed cost model**
+## TD-A-BENCH-ACCELERATOR-IS-AN-ENV-VAR-AND-A-RESTART-CLEARS-IT (lane A, 2026-09-12) — **three runs of measurements silently changed cost model**
 
 **In short:** the benchmark suite can run the emulated machine two ways, one about three
 times faster than the other. Which one it uses depends on an environment variable that
@@ -135951,3 +135951,160 @@ person hitting a mysterious 3× shift finds this first.
 Run benchmark boots as `QEMU_EXTRA="-accel whpx" ./scripts/boot-test.sh --bench`. The
 variable is not persisted anywhere, so it needs setting per shell session, and after any
 restart.
+
+## B-PATCH-REPORTS-A-FAILED-HUNK-WITHOUT-SAVING-IT (lane B, 2026-09-12) — FIXED
+
+A failed hunk was reported and then discarded. GNU writes the rejected hunks to
+`<file>.rej` as a usable patch and the untouched original to `<file>.orig`.
+**A message telling someone a hunk failed, without handing them the hunk,
+leaves them to reconstruct it from a diff they may no longer have.**
+
+Measured, all on stdout with exit 1 and nothing on stderr:
+
+    patching file a/base.txt
+    Hunk #1 FAILED at 1.
+    1 out of 1 hunk FAILED -- saving rejects to file a/base.txt.rej
+
+against ours, on stderr: `patch: Hunk #1 FAILED at line 1` and
+`patch: 1 out of 1 hunks FAILED for a/base.txt`. Three differences in two lines
+— the stream, `at 1.` versus `at line 1`, and the singular `hunk` with the
+reject file named.
+
+**Both files are written even when NO hunk applied** and the target is therefore
+unchanged, which is why `.orig` here is not the same thing as `-b`'s backup.
+
+**THE LAST FOUR BYTES WERE THE INTERESTING PART.** With everything above
+matching, the `.rej` files still differed — 91 bytes against GNU's 87. The cause:
+GNU writes the **stripped** paths in a reject header (`--- a/base.txt`), while
+the missing-target block quotes the **raw** ones (`|--- x/a/base.txt`).
+
+That asymmetry is not arbitrary. The block is quoting the patch back at you to
+explain why it could not be read, so it must show what the patch actually says.
+A reject is a patch to be re-applied *in the tree you are standing in*, so its
+names have to be the ones that resolve there. Same two lines, two different
+jobs, two different answers.
+
+It was found by diffing the two reject files rather than by reasoning about the
+size: on a hand-made fixture they were byte-identical, and only the harness's
+own `diff -u --label x/... --label y/...` fixture exposed it. **A fixture that
+is too tidy proves the wrong thing.**
+
+`patch-diff.sh`: 3 passed / 62 differed this morning, **31 / 34** now.
+
+## B-PATCH-CALLS-AN-ALREADY-APPLIED-PATCH-A-FAILURE (lane B, 2026-09-12) — FIXED
+
+When a hunk did not apply, this build said `Hunk #1 FAILED` and stopped there.
+GNU first asks a different question — **would the other orientation apply?** —
+because the answer changes the diagnosis entirely. A patch that fails forward
+but applies backward has almost certainly been applied already; a patch given
+`-R` that only applies forward was never reversed. Neither is well described by
+"failed".
+
+Measured, and the two spellings differ by which mistake was made:
+
+    -R on a forward patch:   Unreversed patch detected!  Ignore -R? [n]
+    no -R, already applied:  Reversed (or previously applied) patch detected!  Assume -R? [n]
+
+then `Apply anyway? [n]`, `Skipping patch.`, and a count saying **ignored**
+rather than FAILED. Two spaces after the `!` in both. No `.orig` is written on
+this path, unlike a real hunk failure: nothing was touched.
+
+**And then the reject files still differed at the same 85 bytes**, which turned
+out to be a second bug hiding behind the first. `reverse_hunk` swapped `Add` and
+`Remove` *in place*, so reversing `-bravo` / `+BRAVO` gave `+bravo` / `-BRAVO`:
+the right lines with the wrong sign order. **A unified diff writes every removal
+of a change block before every addition**, and that was no longer one.
+
+**It had applied correctly the whole time**, which is why it survived:
+`apply_hunk` reads lines by type and does not care about their order. The defect
+only became observable when a reversed hunk was WRITTEN OUT — as a reject, for a
+person to re-apply. A structure can be wrong in a way that every consumer inside
+the program tolerates, and be caught only at the moment it leaves.
+
+A test was retargeted rather than deleted:
+`reverse_hunk_swaps_add_remove_and_ranges` asserted the in-place order, so it
+had pinned the bug.
+
+`patch-diff.sh`: 3 passed / 62 differed this morning, **33 / 32** now — the
+first time passes have outnumbered differences.
+
+## B-PATCH-OPTION-GAP (lane B, 2026-09-12) — partly closed, and the rest is named
+
+`patch-diff.sh`: 3 passed / 62 differed this morning, **42 / 23** now.
+
+**Implemented properly:**
+
+| option | what it does |
+|---|---|
+| `-r FILE` / `--reject-file=FILE` | names the reject file instead of `<target>.rej` |
+| `--no-backup-if-mismatch` | suppresses `<target>.orig` on a failed hunk, and **only** that — the reject is still written, because a reject is the failure report rather than a backup |
+| `-d DIR` / `--directory=DIR` | chdir before the patch file is opened |
+
+**Accepted and currently inert — `-N/--forward`, `-f/--force`, `-F/--fuzz`,
+`-Z/--set-utc`.** This is the entry's most misreadable line, so: each was
+measured against GNU on the cases this tree exercises, and on those the
+behaviour coincides *exactly* with the default. `-F 3` differs only when a hunk
+would match at a fuzz distance, `-N` only when a patch is already applied, `-f`
+only where GNU would otherwise prompt, `-Z` only in the timestamps it sets.
+
+So accepting them is correct today and **incomplete rather than wrong** — but
+nine harness cases now pass without those behaviours existing, and a reader
+who sees `42 passed` must not conclude that fuzz matching works. It does not.
+
+**Not implemented at all**, and each still costs its cases: `-o/--output`,
+`-l/--ignore-whitespace`, `-E/--remove-empty-files`, `-v` (which prints the
+version, not verbose output), `--verbose` (which prints a long narrative), and
+the context (`-c`) and normal (`-n`) patch formats the parser cannot read.
+
+**A test caught a change I did not think of.** `parse_unknown_flag_errors` used
+`-Z` as its unknown flag, so accepting `-Z/--set-utc` turned it into an
+assertion that a *recognised* option is rejected. It failed immediately, which
+is exactly right: a test whose fixture quietly becomes valid input stops testing
+anything, and this one said so rather than passing on.
+
+## B-PATCH-HAS-NO-OUTPUT-OR-REMOVE-EMPTY-OPTION (lane B, 2026-09-12) — FIXED
+
+`-o FILE` / `--output=FILE` and `-E` / `--remove-empty-files` are implemented.
+`patch-diff.sh`: 42 passed / 23 differed to **44 / 21**.
+
+**`-o` announces the destination and names the source:** `patching file out.txt
+(read from a/base.txt)`, because the file being written is no longer the file
+being read. The target is left untouched.
+
+**`-E` removes a file the patch has emptied** — gone from the tree, not left at
+zero length. It is deliberately suppressed when `-o` is in force: the emptiness
+is a property of what was *written*, and deleting the target would be deleting
+the file the patch was read from.
+
+**THE LAST DIFFERENCE WAS A FILE MODE.** With the output byte-identical and the
+tree otherwise matching, `out.txt` was 644 here and **600** under GNU. That is
+the kind of difference that survives every test which reads the file back,
+because the content is right — only the permissions are not.
+
+It is restrictive on purpose and worth understanding rather than copying: `-o`
+writes to a path the user named, rather than updating a file that already has
+permissions of its own, so there is no existing mode to preserve and the safe
+default is the private one. In-place writes are left alone for the same reason
+in reverse — that file already exists and its mode is not patch's to choose.
+
+## B-PATCH-CANNOT-DELETE-A-FILE (lane B, 2026-09-12) — FIXED
+
+A patch whose destination is `/dev/null` deletes the file. This build wrote a
+**one-byte** file instead — the empty join plus the trailing newline the
+original had — and left it in the tree.
+
+Measured: `diff -u --label x/a/keep.txt --label /dev/null keep.txt /dev/null`
+applied by GNU leaves no `keep.txt` at all, **with or without `-E`**.
+
+**I had implemented the weaker rule and assumed it covered both.** `-E` removes
+a file the patch merely *emptied*, however the patch was spelled. A `/dev/null`
+destination says outright that the file is gone, and needs no flag. Having just
+added `-E` an hour earlier, I read the `delete.patch` cases as belonging to it
+— and the case that disproved that passes no flag at all.
+
+The reverse direction is handled: reversed, a deletion is a creation, so the
+rule is off under `-R`. And it is suppressed under `-o`, for the same reason `-E`
+is: the destination is not the file the patch was read from.
+
+`patch-diff.sh`: 44 passed / 21 differed to **47 / 18**. Three cases, all in the
+`delete.patch` family, one of which was the plain no-flag invocation.

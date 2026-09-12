@@ -87,6 +87,12 @@ def recognised(text, opt):
         return True
     if '"%s="' % opt in text:
         return True
+    # ...and the accepted form may be one specific `name=value` literal
+    # rather than a prefix: `pstree` matches `"--compact=no"` and nothing
+    # else, so a search that requires the closing quote after `=` misses it.
+    # Ninth false positive.
+    if '"%s=' % opt in text:
+        return True
     # `starts_with("--suffix=")` / `strip_prefix("--suffix=")`
     if re.search(r'(?:starts_with|strip_prefix)\(\s*"%s' % re.escape(opt), text):
         return True

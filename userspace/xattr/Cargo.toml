@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS xattr utility"
 [dependencies]
+# One rendering of caller-supplied text in a diagnostic; the rejected
+# encoding name comes off the command line. See design-decisions.md §370.
+quoting = { path = "../quoting" }

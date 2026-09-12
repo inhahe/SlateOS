@@ -56,15 +56,73 @@ fn is_valid_xattr_name(name: &str) -> bool {
     valid_prefixes.iter().any(|p| name.starts_with(p))
 }
 
-fn format_value(value: &[u8], hex: bool, text_mode: bool) -> String {
-    if hex {
-        let hex_str: String = value.iter().map(|b| format!("{b:02x}")).collect();
-        format!("0x{hex_str}")
-    } else if text_mode || value.iter().all(|&b| (0x20..0x7f).contains(&b)) {
-        format!("\"{}\"", String::from_utf8_lossy(value))
-    } else {
-        let hex_str: String = value.iter().map(|b| format!("{b:02x}")).collect();
-        format!("0x{hex_str}")
+/// An `-e` argument.
+///
+/// `base64` is deliberately absent. `getfattr` has it, this build does not
+/// implement it, and its exact rendering -- attr(5) prefixes base64 values
+/// with `0s` -- is not something this session can verify, since neither
+/// `getfattr` nor `attr` is installed in the reference environment.
+/// Refusing it says what is true of this binary; the help no longer offers
+/// it.
+fn parse_encoding(spec: &str) -> Option<Encoding> {
+    match spec {
+        "text" => Some(Encoding::Text),
+        "hex" => Some(Encoding::Hex),
+        _ => None,
+    }
+}
+
+/// How `-e` was asked to render attribute values.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+enum Encoding {
+    /// Text when the value is exactly recoverable from it, hex otherwise.
+    /// What `getfattr` does with no `-e`, and what this always did.
+    #[default]
+    Auto,
+    /// Prefer text. Still falls back to hex for a value text cannot carry
+    /// exactly -- see `format_value`.
+    Text,
+    /// Always hex.
+    Hex,
+}
+
+/// The value as `0x` followed by its bytes. Always exact.
+fn hex_form(value: &[u8]) -> String {
+    let hex_str: String = value.iter().map(|b| format!("{b:02x}")).collect();
+    format!("0x{hex_str}")
+}
+
+/// The value as text, if text carries it back byte for byte.
+///
+/// Printable ASCII only, and not `"` or `\`, which the surrounding quotes
+/// could not survive. Everything else is `None` and renders as hex.
+fn exact_text(value: &[u8]) -> Option<&str> {
+    let ok = value
+        .iter()
+        .all(|&b| (0x20..0x7f).contains(&b) && b != b'"' && b != b'\\');
+    if !ok {
+        return None;
+    }
+    core::str::from_utf8(value).ok()
+}
+
+/// Render an attribute value.
+///
+/// # Why there is no `from_utf8_lossy` here
+///
+/// An extended attribute's value is arbitrary bytes, and `getfattr -d`
+/// output is the input to `setfattr --restore`. A value rendered with
+/// replacement characters restores as a *different* value -- silent
+/// corruption in the one path whose entire purpose is to reproduce what
+/// was there. This used to call `from_utf8_lossy` in the text branch. It
+/// was unreachable, because nothing passed `text_mode: true` outside a
+/// test; implementing `-e text` is exactly what would have reached it.
+fn format_value(value: &[u8], encoding: Encoding) -> String {
+    match encoding {
+        Encoding::Hex => hex_form(value),
+        Encoding::Auto | Encoding::Text => {
+            exact_text(value).map_or_else(|| hex_form(value), |t| format!("\"{t}\""))
+        }
     }
 }
 
@@ -199,7 +257,7 @@ fn match_chars(pat: &[char], txt: &[char], pi: usize, ti: usize) -> bool {
 fn cmd_getfattr(args: &[String]) {
     let mut names_only = false;
     let mut dump = false;
-    let mut hex = false;
+    let mut encoding = Encoding::Auto;
     let mut match_pattern: Option<String> = None;
     let mut specific_name: Option<String> = None;
     let mut recursive = false;
@@ -216,7 +274,7 @@ fn cmd_getfattr(args: &[String]) {
                 println!("Options:");
                 println!("  -d, --dump         Dump values of all attributes");
                 println!("  -n, --name NAME    Get specific attribute");
-                println!("  -e, --encoding ENC Encoding (text, hex, base64)");
+                println!("  -e, --encoding ENC  Encoding (text, hex)");
                 println!("  -m, --match PAT    Only attrs matching pattern");
                 println!("  -R, --recursive    Recurse into directories");
                 println!("  --only-values      Only print values");
@@ -230,11 +288,44 @@ fn cmd_getfattr(args: &[String]) {
             }
             "-d" | "--dump" => dump = true,
             "--only-values" => names_only = false,
-            "-e" => {
-                i += 1;
-                if i < args.len() && args[i] == "hex" {
-                    hex = true;
-                }
+            // `-e` used to consume its value and act on it only when it was
+            // exactly `hex`: `-e text` and `-e base64` were accepted and
+            // silently ignored, as was any typo. The long spelling was not
+            // parsed at all, so `--encoding hex` fell through to the operand
+            // list and became a path to query.
+            "-e" | "--encoding" => {
+                i = i.saturating_add(1);
+                let Some(raw) = args.get(i) else {
+                    let flag = args.get(i.saturating_sub(1)).map_or("-e", String::as_str);
+                    eprintln!(
+                        "getfattr: option {} requires an argument",
+                        quoting::quoteaf(flag.as_bytes())
+                    );
+                    process::exit(1);
+                };
+                encoding = match parse_encoding(raw) {
+                    Some(e) => e,
+                    None => {
+                        eprintln!(
+                            "getfattr: {}: unknown encoding",
+                            quoting::quoteaf(raw.as_bytes())
+                        );
+                        process::exit(1);
+                    }
+                };
+            }
+            s if s.starts_with("--encoding=") => {
+                let raw = s.trim_start_matches("--encoding=");
+                encoding = match parse_encoding(raw) {
+                    Some(e) => e,
+                    None => {
+                        eprintln!(
+                            "getfattr: {}: unknown encoding",
+                            quoting::quoteaf(raw.as_bytes())
+                        );
+                        process::exit(1);
+                    }
+                };
             }
             "-n" | "--name" => {
                 i += 1;
@@ -273,7 +364,7 @@ fn cmd_getfattr(args: &[String]) {
             for attr in &xattrs.attrs {
                 if attr.name == *name {
                     if let Some(ref val) = attr.value {
-                        let _ = writeln!(out, "{}={}", attr.name, format_value(val, hex, false));
+                        let _ = writeln!(out, "{}={}", attr.name, format_value(val, encoding));
                     } else {
                         let _ = writeln!(out, "{}", attr.name);
                     }
@@ -283,7 +374,7 @@ fn cmd_getfattr(args: &[String]) {
             for attr in &xattrs.attrs {
                 if dump || names_only {
                     if let Some(ref val) = attr.value {
-                        let _ = writeln!(out, "{}={}", attr.name, format_value(val, hex, false));
+                        let _ = writeln!(out, "{}={}", attr.name, format_value(val, encoding));
                     } else {
                         let _ = writeln!(out, "{}", attr.name);
                     }
@@ -407,6 +498,49 @@ fn main() {
 mod tests {
     use super::*;
 
+    // -- -e / --encoding --
+
+    #[test]
+    fn the_two_encodings_this_build_has_are_accepted() {
+        assert_eq!(parse_encoding("text"), Some(Encoding::Text));
+        assert_eq!(parse_encoding("hex"), Some(Encoding::Hex));
+    }
+
+    /// `base64` is `getfattr`'s and not this build's. Refusing says what is
+    /// true of this binary; accepting it and quietly rendering something
+    /// else would not.
+    #[test]
+    fn an_encoding_this_build_lacks_is_refused_not_ignored() {
+        assert_eq!(parse_encoding("base64"), None);
+        assert_eq!(parse_encoding("hexx"), None);
+        assert_eq!(parse_encoding(""), None);
+    }
+
+    /// The reason the lossy conversion had to go. `getfattr -d` output is
+    /// `setfattr --restore` input, so a value that does not survive the
+    /// round trip is a file restored with different contents.
+    #[test]
+    fn a_value_text_cannot_carry_is_rendered_as_hex() {
+        let not_utf8 = [0xffu8, 0xfe];
+        assert_eq!(format_value(&not_utf8, Encoding::Text), "0xfffe");
+
+        // Valid UTF-8, but the surrounding quotes could not survive it.
+        assert_eq!(format_value(b"a\"b", Encoding::Text), "0x612262");
+        assert_eq!(format_value(b"a\\b", Encoding::Text), "0x615c62");
+
+        // A control byte is not printable, so hex again.
+        assert_eq!(format_value(b"a\nb", Encoding::Text), "0x610a62");
+    }
+
+    #[test]
+    fn an_ordinary_value_still_reads_as_text() {
+        let quoted = format_value(b"hello", Encoding::Text);
+        assert!(quoted.starts_with(char::from(34)), "{quoted}");
+        assert!(quoted.contains("hello"), "{quoted}");
+        assert_eq!(format_value(b"hello", Encoding::Auto), quoted);
+        assert_eq!(format_value(b"hello", Encoding::Hex), "0x68656c6c6f");
+    }
+
     #[test]
     fn testxattr_namespace() {
         assert_eq!(xattr_namespace("user.mime_type"), "user");
@@ -428,21 +562,21 @@ mod tests {
     #[test]
     fn test_format_value_text() {
         let val = b"hello world";
-        let result = format_value(val, false, true);
+        let result = format_value(val, Encoding::Text);
         assert_eq!(result, "\"hello world\"");
     }
 
     #[test]
     fn test_format_value_hex() {
         let val = &[0xDE, 0xAD, 0xBE, 0xEF];
-        let result = format_value(val, true, false);
+        let result = format_value(val, Encoding::Hex);
         assert_eq!(result, "0xdeadbeef");
     }
 
     #[test]
     fn test_format_value_auto_hex() {
         let val = &[0x00, 0xFF, 0x01];
-        let result = format_value(val, false, false);
+        let result = format_value(val, Encoding::Auto);
         assert!(result.starts_with("0x"));
     }
 

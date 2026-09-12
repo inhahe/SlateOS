@@ -1305,70 +1305,77 @@ fn check_authorization(
 }
 
 /// Check if a username matches a user specification list.
+/// Evaluate a sudoers list in which **the last matching entry decides**.
+///
+/// # Why not the first
+///
+/// These lists are written to carve exceptions:
+///
+/// ```text
+/// alice  ALL, !secret = (ALL) ALL
+/// ```
+///
+/// Every one of them walked FORWARD and returned at the first match, so `ALL`
+/// answered before `!secret` was ever looked at and the rule applied on
+/// `secret` -- the one host the administrator had written it down to exclude.
+/// `runas_matches` used `.any()` and did not read `!` at all.
+///
+/// Real sudo resolves a list by the last match, which is why the idiom works
+/// there. This file already knew the rule and applied it one level up:
+/// `check_authorization` iterates privileges `.rev()` with the comment "last
+/// match wins, like real sudo". The lists inside them did the opposite.
+///
+/// Negation is handled here rather than in each caller's predicate, so a
+/// matcher cannot forget it -- which is how `runas_matches` came not to have
+/// it.
+fn list_matches<F>(specs: &[String], hit: F) -> bool
+where
+    F: Fn(&str) -> bool,
+{
+    let mut verdict = false;
+    for spec in specs {
+        let (negated, name) = spec
+            .strip_prefix('!')
+            .map_or((false, spec.as_str()), |rest| (true, rest));
+        if hit(name) {
+            verdict = !negated;
+        }
+    }
+    verdict
+}
+
+/// Does `name` name `target` directly, or through an alias that does?
+fn names_or_aliases(name: &str, target: &str, aliases: &HashMap<String, Vec<String>>) -> bool {
+    name == "ALL"
+        || name == target
+        || aliases
+            .get(name)
+            .is_some_and(|members| members.iter().any(|m| m == target || m == "ALL"))
+}
+
 fn user_matches(
     specs: &[String],
     username: &str,
     user_groups: &[String],
     aliases: &HashMap<String, Vec<String>>,
 ) -> bool {
-    for spec in specs {
-        if spec == "ALL" {
-            return true;
-        }
-        if spec == username {
-            return true;
-        }
-        // %group syntax.
-        if let Some(group) = spec.strip_prefix('%')
-            && user_groups.iter().any(|g| g == group)
-        {
-            return true;
-        }
-        // Alias reference.
-        if let Some(members) = aliases.get(spec.as_str()) {
-            if members.iter().any(|m| m == username || m == "ALL") {
-                return true;
-            }
-            // Check group members in alias.
-            for m in members {
-                if let Some(group) = m.strip_prefix('%')
-                    && user_groups.iter().any(|g| g == group)
-                {
-                    return true;
-                }
-            }
-        }
-        // Negation.
-        if let Some(negated) = spec.strip_prefix('!')
-            && negated == username
-        {
-            return false;
-        }
-    }
-    false
+    let in_group = |member: &str| {
+        member
+            .strip_prefix('%')
+            .is_some_and(|g| user_groups.iter().any(|have| have == g))
+    };
+    list_matches(specs, |name| {
+        names_or_aliases(name, username, aliases)
+            || in_group(name)
+            || aliases
+                .get(name)
+                .is_some_and(|members| members.iter().any(|m| in_group(m)))
+    })
 }
 
 /// Check if a hostname matches a host specification list.
 fn host_matches(specs: &[String], hostname: &str, aliases: &HashMap<String, Vec<String>>) -> bool {
-    for spec in specs {
-        if spec == "ALL" {
-            return true;
-        }
-        if spec == hostname {
-            return true;
-        }
-        if let Some(members) = aliases.get(spec.as_str())
-            && members.iter().any(|m| m == hostname || m == "ALL")
-        {
-            return true;
-        }
-        if let Some(negated) = spec.strip_prefix('!')
-            && negated == hostname
-        {
-            return false;
-        }
-    }
-    false
+    list_matches(specs, |name| names_or_aliases(name, hostname, aliases))
 }
 
 /// Check if target user/group matches a runas specification.
@@ -1378,12 +1385,11 @@ fn runas_matches(
     target_group: &str,
     aliases: &HashMap<String, Vec<String>>,
 ) -> bool {
-    let user_ok = runas.users.iter().any(|u| {
-        u == "ALL"
-            || u == target_user
-            || aliases
-                .get(u.as_str())
-                .is_some_and(|members| members.iter().any(|m| m == target_user || m == "ALL"))
+    // `list_matches`, not `.any()`: this read `!` as part of a name, so a
+    // `(ALL, !root)` runas spec let the caller run things AS root -- the one
+    // target it was written to forbid.
+    let user_ok = list_matches(&runas.users, |name| {
+        names_or_aliases(name, target_user, aliases)
     });
 
     // If no group constraint specified, only check user.
@@ -1391,12 +1397,8 @@ fn runas_matches(
         return user_ok;
     }
 
-    let group_ok = runas.groups.iter().any(|g| {
-        g == "ALL"
-            || g == target_group
-            || aliases
-                .get(g.as_str())
-                .is_some_and(|members| members.iter().any(|m| m == target_group || m == "ALL"))
+    let group_ok = list_matches(&runas.groups, |name| {
+        names_or_aliases(name, target_group, aliases)
     });
 
     user_ok && group_ok
@@ -5322,6 +5324,54 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
     fn host_match_exact() {
         let aliases = HashMap::new();
         assert!(host_matches(&["web1".to_string()], "web1", &aliases,));
+    }
+
+    /// A negation written after a broader entry is the whole point of the
+    /// idiom, and was unreachable: every list matcher walked forward and
+    /// returned at the first match, so `ALL` answered before `!secret` was
+    /// looked at. Asserted TRUE here on 2026-09-12 to prove it, before the
+    /// fix; it is the same three lines inverted.
+    #[test]
+    fn a_negated_host_after_all_is_honoured() {
+        let aliases = HashMap::new();
+        let specs = ["ALL".to_string(), "!secret".to_string()];
+        assert!(!host_matches(&specs, "secret", &aliases));
+        // ...and the rule still applies everywhere else.
+        assert!(host_matches(&specs, "web1", &aliases));
+    }
+
+    #[test]
+    fn a_negated_user_after_all_is_honoured() {
+        let aliases = HashMap::new();
+        let specs = ["ALL".to_string(), "!mallory".to_string()];
+        assert!(!user_matches(&specs, "mallory", &[], &aliases));
+        assert!(user_matches(&specs, "alice", &[], &aliases));
+    }
+
+    #[test]
+    fn a_negated_runas_target_is_honoured() {
+        // `runas_matches` used `.any()` and read `!` as part of a name, so
+        // `(ALL, !root)` permitted running things AS root -- the one target it
+        // was written to forbid.
+        let aliases = HashMap::new();
+        let runas = RunasSpec {
+            users: vec!["ALL".to_string(), "!root".to_string()],
+            groups: Vec::new(),
+        };
+        assert!(!runas_matches(&runas, "root", "", &aliases));
+        assert!(runas_matches(&runas, "backup", "", &aliases));
+    }
+
+    #[test]
+    fn order_decides_and_the_last_word_wins() {
+        // The rule this implements. Reversing the list reverses the answer,
+        // which is what "last match wins" means and what first-match-wins
+        // could not express.
+        let aliases = HashMap::new();
+        let deny_last = ["ALL".to_string(), "!secret".to_string()];
+        let allow_last = ["!secret".to_string(), "ALL".to_string()];
+        assert!(!host_matches(&deny_last, "secret", &aliases));
+        assert!(host_matches(&allow_last, "secret", &aliases));
     }
 
     #[test]

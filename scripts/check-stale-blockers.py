@@ -157,6 +157,19 @@ PLACEHOLDER_REF = re.compile(r'^scripts/(?:X|Y|N|FOO|NAME|SOMETHING)\.', re.I)
 # The window is asymmetric on purpose. A note that a file is gone almost
 # always follows the citation it corrects -- a blockquote under the claim, or
 # a sentence after it -- and rarely precedes it.
+# A scan that read almost nothing is refused rather than reported clean. The
+# floors sit far below the real figures so they fire on a scan that BROKE, not
+# on a tree that shrank.
+#
+# They are module-level so the selftest can assert the real tree stays above
+# them -- lane A's idea, and the half I had missed. A floor that drifts up to
+# meet a shrinking population is a ratchet running backwards: it would go on
+# passing while measuring less and less, which is the exact failure the floors
+# were added to prevent, one level up.
+FLOOR_ENTRIES = 100
+FLOOR_REQUESTS = 50
+FLOOR_DOCUMENTS = 50
+
 NOTE_BEFORE = 3
 NOTE_AFTER = 12
 
@@ -316,6 +329,43 @@ def dangling_selftest():
     return bad
 
 
+def floors_selftest():
+    """The real tree must stay comfortably above every floor.
+
+    Lane A's case, and the one I had missed. Without it a floor can be raised
+    past what it measures and the gate goes on passing while inspecting less and
+    less -- a ratchet running backwards. This is the only self-test case here
+    that reads the tree rather than a string literal, and it reads it for
+    exactly that reason: the claim being checked is about the real populations.
+
+    A tree that has genuinely shrunk below a floor fails this too, which is
+    correct -- it means the floor and the tree disagree and a person should look,
+    not that the floor should quietly follow the tree down.
+    """
+    requests_dir = ROOT / "requests"
+    issues = ROOT / "known-issues.md"
+    if not requests_dir.is_dir() or not issues.is_file():
+        print("ok   (floors not checked: no tree here)")
+        return 0
+    text = issues.read_text(encoding="utf-8", errors="surrogateescape")
+    entries_n = sum(1 for _ in entries(text))
+    requests_n = len(list(requests_dir.glob("*.md")))
+    docs_n = len(tracked_documents())
+    bad = 0
+    for name, actual, floor in (
+        ("known-issues entries", entries_n, FLOOR_ENTRIES),
+        ("request files", requests_n, FLOOR_REQUESTS),
+        ("documents", docs_n, FLOOR_DOCUMENTS),
+    ):
+        ok = actual > floor
+        bad += 0 if ok else 1
+        print(
+            "%-4s the real tree is above the %s floor (%d > %d)"
+            % ("ok" if ok else "FAIL", name, actual, floor)
+        )
+    return bad
+
+
 def selftest():
     bad = 0
     for name, body, resolved, want in SELFTEST:
@@ -326,10 +376,41 @@ def selftest():
         if not ok:
             print("       wanted %d hit(s), got %d" % (want, got))
     bad += dangling_selftest()
-    total = len(SELFTEST) + len(DANGLING_SELFTEST)
+    bad += floors_selftest()
+    total = len(SELFTEST) + len(DANGLING_SELFTEST) + 3
     print()
     print("check-stale-blockers selftest: %d case(s), %d failed" % (total, bad))
     return 1 if bad else 0
+
+
+def tracked_documents():
+    """Every tracked `.md`/`.txt` path, as git sees it.
+
+    One implementation, used by the scan and by the floors self-test. Two would
+    be two chances to get the environment wrong, and the environment is the
+    thing that went wrong here.
+    """
+    import subprocess
+
+    out = subprocess.run(
+        ["git", "ls-files", "*.md", "*.txt"],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+        env=gitenv.clean_env(),
+    ).stdout
+    return [n for n in out.split(chr(10)) if n.strip()]
+
+
+def document_texts():
+    """Map tracked document path -> contents, skipping what cannot be read."""
+    texts = {}
+    for name in tracked_documents():
+        try:
+            texts[name] = (ROOT / name).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+    return texts
 
 
 def main(argv=None):
@@ -350,9 +431,6 @@ def main(argv=None):
     # the hostile-GIT_DIR failure above was a clean exit 0 over an empty set,
     # and the summary line was the only thing that gave it away. A summary a
     # human has to read is weaker than a status a hook can act on.
-    FLOOR_ENTRIES = 100
-    FLOOR_REQUESTS = 50
-    FLOOR_DOCUMENTS = 50
 
     resolved = request_states(requests_dir)
     text = issues.read_text(encoding="utf-8", errors="surrogateescape")
@@ -370,22 +448,7 @@ def main(argv=None):
     # nothing and said so in a sentence that reads like a clean tree. Lane A hit
     # the same thing in check-shell-callables and passed the finding on; this is
     # that grep coming back positive.
-    listed = subprocess.run(
-        ["git", "ls-files", "*.md", "*.txt"],
-        capture_output=True,
-        text=True,
-        cwd=ROOT,
-        env=gitenv.clean_env(),
-    ).stdout.split(chr(10))
-    doc_texts = {}
-    for name in listed:
-        if not name.strip():
-            continue
-        f = ROOT / name
-        try:
-            doc_texts[name] = f.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
+    doc_texts = document_texts()
     dangling = dangling_references(doc_texts, lambda rel: (ROOT / rel).exists())
 
     for lineno, title, request in hits:

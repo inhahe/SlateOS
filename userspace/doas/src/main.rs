@@ -158,16 +158,49 @@ fn lookup_passwd_uid(uid: u32) -> Option<PasswdEntry> {
 // /etc/group parsing (for :group matching)
 // ============================================================================
 
-/// A single entry from `/etc/group`.
-#[derive(Clone, Debug, PartialEq)]
-struct GroupEntry {
-    name: String,
-    #[allow(dead_code)]
-    gid: u32,
-    members: Vec<String>,
+/// Whether `username` is in `group_name`, decided from the two database files
+/// given as bytes. `None` means the question has no answer.
+///
+/// A parameter rather than a path, so the interesting cases are testable at
+/// all: the build host has neither file, so every test of the old code either
+/// skipped itself or asserted the "cannot read" arm.
+///
+/// **PRIMARY GROUPS COUNT.** The old test looked only at the group's
+/// supplementary member list, which is the fourth field of `/etc/group` -- and
+/// that field deliberately does *not* repeat accounts whose login group this
+/// already is (`pwdb::Group::members` says so, and glibc agrees: measured,
+/// `id -nG` lists the primary group). So a caller whose primary group was
+/// `wheel` was reported as not being in `wheel`. For `permit :wheel` that
+/// merely withheld a grant. For `deny :wheel` **it failed open** -- the deny
+/// stopped applying to precisely the accounts most likely to be in the group,
+/// and the caller fell through to whatever permit came next. That is the same
+/// inversion this module's `read_group_entries` comment was written to warn
+/// about, sitting in the success path rather than the error path.
+///
+/// The three answers, and why each is what it is:
+///
+/// | Situation | Answer | Why |
+/// |---|---|---|
+/// | group is not in the file | `Some(false)` | nobody is a member of a group that does not exist -- an answer, not an absence |
+/// | caller is not in `/etc/passwd` | `None` | their primary gid is unknowable, and primary membership counts |
+/// | otherwise | `Some(list contains gid)` | `pwdb::group_list` is what `id -G` prints |
+fn user_in_group_in(
+    passwd: &[u8],
+    group: &[u8],
+    username: &[u8],
+    group_name: &[u8],
+) -> Option<bool> {
+    let db = pwdb::Db::from_bytes(passwd, group);
+    let Some(target) = db.group_by_name(group_name) else {
+        return Some(false);
+    };
+    let gid = target.gid;
+    let caller = db.user_by_name(username)?;
+    Some(db.group_list(username, caller.gid).contains(&gid))
 }
 
-/// Parse `/etc/group`, or `None` if it cannot be read.
+/// Whether a user is in the named group, or `None` if the question has no
+/// answer.
 ///
 /// **`None` is not an empty group file.** It was: an unreadable `/etc/group`
 /// returned `Vec::new()`, so every `:group` identity matched nobody. For a
@@ -179,43 +212,18 @@ struct GroupEntry {
 /// in the direction that grants. That is the shape lane A named on 2026-09-11
 /// after finding it in `mkfs` and `fsck`: for a check guarding a privileged
 /// action, "I do not know" and "it is safe" must not be the same value.
-fn read_group_entries() -> Option<Vec<GroupEntry>> {
-    let content = fs::read_to_string("/etc/group").ok()?;
-
-    Some(
-        content
-            .lines()
-            .filter(|line| !line.is_empty() && !line.starts_with('#'))
-            .filter_map(|line| {
-                let fields: Vec<&str> = line.split(':').collect();
-                let [name, _passwd, gid, members, ..] = fields.as_slice() else {
-                    return None;
-                };
-                let gid = gid.parse().ok()?;
-                let members = members
-                    .split(',')
-                    .map(|m| m.trim().to_string())
-                    .filter(|m| !m.is_empty())
-                    .collect();
-                Some(GroupEntry {
-                    name: (*name).to_string(),
-                    gid,
-                    members,
-                })
-            })
-            .collect(),
-    )
-}
-
-/// Whether a user is in the named group, or `None` if the group file cannot
-/// be read and the question therefore has no answer.
+///
+/// The files are read as **bytes**. `read_to_string` fails outright on a single
+/// non-UTF-8 byte anywhere in the file, and this filesystem allows every byte
+/// but `/` and NUL in a name -- so one group whose name is not UTF-8 used to
+/// report the whole file unreadable, disabling every `:group` rule at once.
+/// `pwdb::Db::from_files` is not used for the same reason it would be
+/// convenient: it does `unwrap_or_default()`, which is exactly the
+/// unreadable-means-empty conflation the paragraph above exists to prevent.
 fn user_in_group(username: &str, group_name: &str) -> Option<bool> {
-    let groups = read_group_entries()?;
-    Some(
-        groups
-            .iter()
-            .any(|g| g.name == group_name && g.members.iter().any(|m| m == username)),
-    )
+    let passwd = fs::read(pwdb::PASSWD_PATH).ok()?;
+    let group = fs::read(pwdb::GROUP_PATH).ok()?;
+    user_in_group_in(&passwd, &group, username.as_bytes(), group_name.as_bytes())
 }
 
 // ============================================================================
@@ -2296,6 +2304,81 @@ permit alice
         // A name that is not a group needs no group file, so the answer is
         // never `None` for this form -- which is what keeps an unreadable
         // /etc/group from disabling plain username rules too.
+    }
+
+    /// A two-file fixture for the membership tests.
+    ///
+    /// `carol`'s LOGIN group is wheel (gid 10), so `/etc/group` does not name
+    /// her in wheel's member field -- that field deliberately does not repeat
+    /// accounts whose primary group it already is. She is the case the old
+    /// implementation got wrong.
+    const PASSWD: &[u8] = b"alice:x:1000:1000::/home/alice:/bin/sh
+bob:x:1001:1001::/home/bob:/bin/sh
+carol:x:1002:10::/home/carol:/bin/sh
+";
+    const GROUP: &[u8] = b"wheel:x:10:alice
+users:x:100:alice,bob
+";
+
+    #[test]
+    fn a_supplementary_member_is_in_the_group() {
+        let got = user_in_group_in(PASSWD, GROUP, b"alice", b"wheel");
+        assert_eq!(got, Some(true));
+    }
+
+    #[test]
+    fn a_primary_member_is_in_the_group_though_the_member_field_omits_her() {
+        // The fixture has to actually omit her or this test proves nothing.
+        let text = core::str::from_utf8(GROUP).expect("fixture is utf-8");
+        assert!(!text.contains("carol"), "fixture must not list carol");
+        let got = user_in_group_in(PASSWD, GROUP, b"carol", b"wheel");
+        assert_eq!(got, Some(true), "a login group is a group you are in");
+    }
+
+    #[test]
+    fn a_non_member_is_not_in_the_group() {
+        let got = user_in_group_in(PASSWD, GROUP, b"bob", b"wheel");
+        assert_eq!(got, Some(false));
+    }
+
+    #[test]
+    fn a_group_that_does_not_exist_holds_nobody() {
+        // An answer, not an absence: `deny :typo` correctly applies to no one.
+        let got = user_in_group_in(PASSWD, GROUP, b"alice", b"nosuchgroup");
+        assert_eq!(got, Some(false));
+    }
+
+    #[test]
+    fn a_caller_absent_from_passwd_is_unknown_rather_than_false() {
+        // Their primary gid cannot be known and primary membership counts, so
+        // this is the `None` that skips a permit and refuses on a deny.
+        let got = user_in_group_in(PASSWD, GROUP, b"mallory", b"wheel");
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn one_group_name_that_is_not_utf8_does_not_disable_the_whole_file() {
+        // `read_to_string` returns Err for the ENTIRE file on one bad byte, and
+        // `.ok()?` turned that into "cannot read" -- so a single group nobody
+        // asked about disabled every `:group` rule at once. This filesystem
+        // allows every byte but `/` and NUL in a name, so such a group is legal.
+        let mut group = Vec::from(GROUP);
+        group.extend_from_slice(b"caf");
+        group.push(0xFF);
+        group.extend_from_slice(b":x:200:bob\n");
+        // Proof the fixture is what the test claims, so it cannot pass vacuously.
+        assert!(
+            core::str::from_utf8(&group).is_err(),
+            "fixture must not be utf-8"
+        );
+
+        let got = user_in_group_in(PASSWD, &group, b"alice", b"wheel");
+        assert_eq!(got, Some(true), "an unrelated odd group must not matter");
+
+        let mut odd = Vec::from(&b"caf"[..]);
+        odd.push(0xFF);
+        let got = user_in_group_in(PASSWD, &group, b"bob", &odd);
+        assert_eq!(got, Some(true), "and the odd group is itself usable");
     }
 
     // Group matching requires /etc/group, tested in integration tests.

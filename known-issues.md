@@ -137626,3 +137626,73 @@ surfaced: grepping `comm_truncate` found three sites in one file; grepping the l
 `"???"` found four there, a fifth surface (`/proc/<pid>/cmdline`), this, and a *fixed*
 instance in `fs/ar.rs` whose comment records the same reasoning. A search keyed on the
 path being worked on cannot contain a defect in a different subsystem.
+
+
+## B-SIX-PROGRAMS-READ-ETC-GROUP-AS-TEXT-AND-ASK-THE-WRONG-MEMBERSHIP-QUESTION (lane B, 2026-09-12) -- `doas` FIXED, five open
+
+**In short:** six programs parse `/etc/group` by hand instead of using the
+shared reader. Two things go wrong. First, they read it with `read_to_string`,
+which fails on the **whole file** if any single byte in it is not valid text --
+and on this OS a group name may contain any byte but `/` and NUL, so one odd
+group name switches off group handling everywhere. Second, they ask only
+whether the group's *member list* names you, and that list deliberately leaves
+out everyone whose **main group** it already is. So the people most obviously
+in a group are the ones reported as not in it.
+
+**Why the second half is the dangerous one.** In `doas` -- the program that
+decides whether you may run a command as root -- the rule language has both
+`permit :wheel` and `deny :wheel`. Answering "not a member" when someone *is*
+one makes `permit` merely unhelpful, but makes **`deny` fail open**: the rule
+stops applying to exactly the accounts most likely to be in the group, and the
+caller falls through to whatever `permit` comes next.
+
+That is the same inversion `read_group_entries`' own doc comment was written to
+warn about after lane A found it in `mkfs` and `fsck` -- *"for a check guarding
+a privileged action, 'I do not know' and 'it is safe' must not be the same
+value"*. The comment guarded the error path. The bug was in the success path,
+eight lines below it.
+
+**Measured, not assumed:** `id -nG` on this machine lists the primary group
+(`inhahe adm cdrom sudo dip plugdev users docker`, with `inhahe` the login
+group). `pwdb::Group::members`' own doc says the fourth field omits primary
+members, and `pwdb::group_list` is built to put the primary gid back.
+
+### Where
+
+| Program | Reads | Status |
+|---|---|---|
+| `userspace/doas` | `read_to_string("/etc/group")`, members only | **FIXED 2026-09-12** |
+| `userspace/getent` | `read_to_string` | open |
+| `userspace/install` | `read_to_string`, `resolve_group` | open |
+| `userspace/loginctl` | `read_to_string(GROUP_FILE)` | open |
+| `userspace/mktemp` | `read_to_string` | open |
+| `userspace/newgrp` | `read_to_string(...).unwrap_or_default()` | open |
+
+`newgrp` is the worst of the remaining five: `unwrap_or_default()` turns an
+unreadable *or* non-text group file into an **empty group table**, which is the
+unreadable-means-empty conflation in its purest form.
+
+### The fix, as applied to `doas`
+
+`pwdb` already does this correctly and has no dependencies, so it is exempt
+under §768 the way `quoting` and `utmpfile` are. The two files are read as
+**bytes** by the caller rather than through `pwdb::Db::from_files`, because
+that helper does `unwrap_or_default()` and would reintroduce the very
+conflation being removed. Membership is then `group_list(name, primary_gid)`,
+which is what `id -G` prints.
+
+The lookup was also split into a pure `user_in_group_in(passwd, group, user,
+group_name)` taking bytes, because none of this was testable before: the build
+host has neither file, so every existing test either skipped itself or
+exercised the "cannot read" arm. Six tests now cover supplementary membership,
+**primary** membership, a non-member, an absent group, an absent caller, and a
+group name that is not UTF-8 -- each asserting its own fixture really has the
+property it is named for, so none can pass vacuously.
+
+### What is deliberately NOT changed
+
+`None` still means "no answer" and is still distinct from "no members". The
+three-way result is now: absent group is `Some(false)` (nobody is in a group
+that does not exist -- an answer, not an absence), absent caller is `None`
+(their primary gid is unknowable and primary membership counts), otherwise the
+list is consulted.

@@ -20,6 +20,20 @@ description = "SlateOS doas - lightweight privilege elevation"
 quoting = { path = "../quoting" }
 authlib = { path = "../authlib" }
 
+# One `/etc/passwd` and `/etc/group` reader, shared with `id`, `chown`, `su`
+# and the login path. This program used to parse `/etc/group` itself, which
+# cost it two defects at once: `read_to_string` turned any non-UTF-8 byte
+# anywhere in the file into "cannot read", and the membership test looked only
+# at the supplementary member list -- so a caller whose PRIMARY group was the
+# named one did not match, and `deny :wheel` silently stopped applying to
+# exactly the people most likely to be in wheel.
+#
+# Safe to depend on under §768 (a Rust rlib must not become a second libc):
+# `pwdb` has NO dependencies at all and its API takes bytes, so it is a pure
+# record parser -- the same exemption `quoting`, `charwidth` and `utmpfile`
+# hold, and `chown`/`chroot` already moved onto it in §353's fallout.
+pwdb = { path = "../pwdb" }
+
 # Tests only: they build a real `$6$` entry with the same hasher `passwd` uses,
 # rather than pasting a constant that could drift away from it -- which is the
 # exact way this crate's own hash came to disagree with the system's.

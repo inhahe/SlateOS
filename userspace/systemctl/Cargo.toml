@@ -4,4 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS systemctl utility"
 [dependencies]
+# getopt's usage diagnostics, spelled once; the wording is getopt's, not
+# ours. Pure formatting over `quoting`, no I/O, so §768 exempt.
+usageerror = { path = "../usageerror" }
 procinfo = { path = "../../procinfo" }

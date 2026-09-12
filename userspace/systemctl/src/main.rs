@@ -1825,6 +1825,42 @@ fn print_systemctl_help(out: &mut dyn Write) -> io::Result<()> {
     Ok(())
 }
 
+/// Refuse an option this personality does not have.
+///
+/// systemd's tools print exactly one line -- no `Try --help` pointer -- and
+/// use both of getopt's wordings. Measured: `systemd-cat --zzq` gives
+/// `unrecognized option '--zzq'`, `systemd-cat -z` gives
+/// `invalid option -- 'z'`, and all five exit 1.
+fn refuse_unknown_option(prog: &str, arg: &str) -> i32 {
+    eprintln!("{prog}: {}", usageerror::unknown_option(arg.as_bytes()));
+    1
+}
+
+/// The first argument that is an option none of `known` covers.
+///
+/// `known` holds whole words (`--help`) and prefixes ending in `=`
+/// (`--suffix=`), which match either the prefixed form or the bare word. A
+/// lone `-` is an operand, and so is everything after `--`.
+fn first_unknown_option<'a>(args: &'a [String], known: &[&str]) -> Option<&'a String> {
+    let mut operands_only = false;
+    args.iter().find(|a| {
+        if operands_only {
+            return false;
+        }
+        if a.as_str() == "--" {
+            operands_only = true;
+            return false;
+        }
+        if !a.starts_with('-') || a.as_str() == "-" {
+            return false;
+        }
+        !known.iter().any(|k| match k.strip_suffix('=') {
+            Some(bare) => a.starts_with(k) || a.as_str() == bare,
+            None => a.as_str() == *k,
+        })
+    })
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     let argv0 = args.first().map(|s| s.as_str()).unwrap_or("systemctl");
@@ -1848,6 +1884,8 @@ fn main() {
             } else if rest.iter().any(|a| a == "--version") {
                 writeln!(out, "systemd-cat {}", VERSION).ok();
                 Ok(0)
+            } else if let Some(bad) = first_unknown_option(&rest, &["--help", "-h", "--version"]) {
+                Ok(refuse_unknown_option("systemd-cat", bad))
             } else {
                 run_cat_journal(&mut out)
             }
@@ -1862,6 +1900,8 @@ fn main() {
             } else if rest.iter().any(|a| a == "--version") {
                 writeln!(out, "systemd-cgls {}", VERSION).ok();
                 Ok(0)
+            } else if let Some(bad) = first_unknown_option(&rest, &["--help", "-h", "--version"]) {
+                Ok(refuse_unknown_option("systemd-cgls", bad))
             } else {
                 run_cgls(&mut out)
             }
@@ -1876,6 +1916,8 @@ fn main() {
             } else if rest.iter().any(|a| a == "--version") {
                 writeln!(out, "systemd-cgtop {}", VERSION).ok();
                 Ok(0)
+            } else if let Some(bad) = first_unknown_option(&rest, &["--help", "-h", "--version"]) {
+                Ok(refuse_unknown_option("systemd-cgtop", bad))
             } else {
                 run_cgtop(&mut out)
             }
@@ -1886,6 +1928,20 @@ fn main() {
             if rest.iter().any(|a| a == "--version") {
                 writeln!(out, "systemd-escape {}", VERSION).ok();
                 Ok(0)
+            } else if let Some(bad) = first_unknown_option(
+                &rest,
+                &[
+                    "--help",
+                    "-h",
+                    "--version",
+                    "-u",
+                    "--unescape",
+                    "-p",
+                    "--path",
+                    "--suffix=",
+                ],
+            ) {
+                Ok(refuse_unknown_option("systemd-escape", bad))
             } else {
                 run_escape(&mut out, &rest)
             }
@@ -1896,6 +1952,8 @@ fn main() {
             if rest.iter().any(|a| a == "--version") {
                 writeln!(out, "systemd-path {}", VERSION).ok();
                 Ok(0)
+            } else if let Some(bad) = first_unknown_option(&rest, &["--help", "-h", "--version"]) {
+                Ok(refuse_unknown_option("systemd-path", bad))
             } else {
                 run_path(&mut out, &rest)
             }
@@ -1938,6 +1996,65 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Refusing an option a personality does not have ──
+
+    fn argv(words: &[&str]) -> Vec<String> {
+        words.iter().map(|w| (*w).to_string()).collect()
+    }
+
+    #[test]
+    fn a_known_option_is_not_reported() {
+        let known = ["--help", "-h", "--version"];
+        assert!(first_unknown_option(&argv(&["--help"]), &known).is_none());
+        assert!(first_unknown_option(&argv(&["-h", "--version"]), &known).is_none());
+    }
+
+    #[test]
+    fn the_first_unknown_option_is_reported() {
+        let known = ["--help", "--version"];
+        let args = argv(&["--version", "--zzq", "--also-bad"]);
+        assert_eq!(
+            first_unknown_option(&args, &known).map(String::as_str),
+            Some("--zzq")
+        );
+    }
+
+    /// Operands are not options, however they are spelled.
+    #[test]
+    fn operands_are_never_reported() {
+        let known = ["--help"];
+        assert!(first_unknown_option(&argv(&["unit.service"]), &known).is_none());
+        // A lone dash is an operand -- conventionally stdin.
+        assert!(first_unknown_option(&argv(&["-"]), &known).is_none());
+        // And everything after `--` is one, dashes included.
+        assert!(first_unknown_option(&argv(&["--", "--zzq"]), &known).is_none());
+    }
+
+    /// `--suffix=` in the known list covers both `--suffix=x` and a bare
+    /// `--suffix`, which is how systemd-escape spells that option.
+    #[test]
+    fn a_prefix_entry_covers_its_valued_form() {
+        let known = ["--suffix="];
+        assert!(first_unknown_option(&argv(&["--suffix=service"]), &known).is_none());
+        assert!(first_unknown_option(&argv(&["--suffix"]), &known).is_none());
+        // But the prefix is `--suffix=`, not "anything starting with
+        // --suffix": `--suffixx` is a different word and is refused.
+        assert_eq!(
+            first_unknown_option(&argv(&["--suffixx"]), &known).map(String::as_str),
+            Some("--suffixx")
+        );
+    }
+
+    #[test]
+    fn the_refusal_reads_as_systemd_prints_it() {
+        // One line, no `Try --help` pointer, and both getopt wordings.
+        assert_eq!(
+            usageerror::unknown_option(b"--zzq"),
+            "unrecognized option '--zzq'"
+        );
+        assert_eq!(usageerror::unknown_option(b"-z"), "invalid option -- 'z'");
+    }
 
     // Helper to capture output.
     fn capture<F>(f: F) -> (String, i32)

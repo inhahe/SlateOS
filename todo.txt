@@ -57420,3 +57420,33 @@ answers. Same shape as the other near-misses this week: the probe ran
 correctly and answered a narrower question than the one asked. The habit that
 catches it is to check whether a probe can distinguish the cases it is meant
 to -- four identical answers to four different questions is the tell.
+
+## Judgment Calls
+
+### route's unknown-option behaviour: matching net-tools would mean two defects (lane B, 2026-09-12)
+
+`route --zzq` in this build prints the routing table and exits 0, saying
+nothing about the option. net-tools prints
+
+    route: unrecognized option '--zzq-not-an-option'
+        inet (DARPA Internet) inet6 (IPv6) ax25 (AMPR AX.25)
+        netrom (AMPR NET/ROM) rose (AMPR ROSE) ipx (Novell IPX)
+        ddp (Appletalk DDP) x25 (CCITT X.25)
+    Usage: route [-nNvee] [-FC] [<AF>]           List kernel routing tables
+
+and exits **0**. Measured, not remembered.
+
+Reproducing that exactly conflicts with two things this lane has spent
+the day fixing. The address-family list advertises ax25, netrom, rose,
+ipx, ddp and x25, none of which this build supports -- that is the
+"help that lies" class. And exiting 0 for an option it just rejected is
+the "reports success for something it refused" class; a script cannot
+detect the error at all.
+
+**Not yet decided.** The options are (a) reproduce net-tools exactly,
+under §371, and accept both; (b) take its wording for the first line,
+print our own usage, and exit 1; (c) leave it. My inclination is (b),
+which keeps the measured wording where the wording is the interface and
+diverges only where the reference is indefensible -- but it is a
+deliberate divergence from a measured reference, which is not a thing to
+do quietly at the end of a tick. Recorded here rather than guessed.

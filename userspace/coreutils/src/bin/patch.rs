@@ -112,7 +112,27 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
         } else if a == "-b" || a == "--backup" {
             opts.backup = true;
         } else if a.starts_with('-') && a.len() > 1 && a != "-" {
-            return Err(format!("unknown option: {a}"));
+            // GNU's two spellings, measured rather than guessed. A long option
+            // is quoted and named in full; a short one is reported as the
+            // single character, the way getopt does it:
+            //
+            //     patch: unrecognized option '--nosuchoption'
+            //     patch: invalid option -- 'Q'
+            //
+            // and both are followed by the `Try '... --help'` referral, which
+            // `patch` DOES print -- unlike `strings`, which shows its usage
+            // instead. The two were fixed the same night in opposite
+            // directions, which is the argument for measuring each program
+            // rather than carrying a house style between them.
+            let sentence = if a.starts_with("--") {
+                format!("unrecognized option \'{a}\'")
+            } else {
+                let ch = a.chars().nth(1).unwrap_or('?');
+                format!("invalid option -- \'{ch}\'")
+            };
+            return Err(format!(
+                "{sentence}\npatch: Try \'patch --help\' for more information."
+            ));
         } else {
             opts.target_file = Some(arg.clone());
         }
@@ -403,8 +423,23 @@ fn main() {
 
     let file_patches = parse_patch(&patch_input);
 
+    // EMPTY INPUT AND GARBAGE INPUT ARE DIFFERENT ANSWERS, and this build gave
+    // one. Measured against GNU patch 2.7.6:
+    //
+    //     empty file    exit 0, nothing on either stream
+    //     garbage       exit 2, `patch: **** Only garbage was found in the
+    //                   patch input.` on stderr
+    //
+    // Nothing to do is not an error -- a script that pipes a possibly-empty
+    // diff into `patch` is doing something reasonable, and answering 2 turns
+    // "there were no changes" into a build failure.
     if file_patches.is_empty() {
-        diag!("patch: no valid patches found in input");
+        // Whitespace-only counts as empty: GNU's reader skips blank lines
+        // before deciding it found nothing at all.
+        if patch_input.trim().is_empty() {
+            return;
+        }
+        diag!("patch: **** Only garbage was found in the patch input.");
         process::exit(2);
     }
 
@@ -616,10 +651,23 @@ mod tests {
         assert_eq!(o.target_file.as_deref(), Some("foo.txt"));
     }
 
+    /// GNU's wording, not ours, and the two spellings differ from each other.
+    ///
+    /// This asserted `contains("unknown option")` until 2026-09-12, which was
+    /// this build's own phrase and matched nothing upstream prints. The
+    /// referral is asserted too: `patch` prints one where `strings` shows its
+    /// usage instead, so neither can be inferred from the other.
     #[test]
     fn parse_unknown_flag_errors() {
-        let err = parse_args(&s(&["-Z"])).unwrap_err();
-        assert!(err.contains("unknown option"));
+        let short = parse_args(&s(&["-Z"])).unwrap_err();
+        assert!(short.contains("invalid option -- 'Z'"), "{short}");
+        assert!(short.contains("Try 'patch --help'"), "{short}");
+
+        let long = parse_args(&s(&["--nosuchoption"])).unwrap_err();
+        assert!(
+            long.contains("unrecognized option '--nosuchoption'"),
+            "{long}"
+        );
     }
 
     #[test]

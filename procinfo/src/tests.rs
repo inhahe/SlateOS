@@ -1134,9 +1134,13 @@ fn non_cpu_lines_are_ignored() {
     assert!(CpuTimes::parse_line(b"ctxt 999").is_none());
     assert!(CpuTimes::parse_line(b"").is_none());
     // `cpu` followed by something that is not a number is not `cpuN`.
-    assert!(CpuTimes::parse_line(b"cpufreq 1 2 3").is_none());
-    assert_eq!(CpuTimes::parse_line(b"cpu 1 2 3").unwrap().0, None);
-    assert_eq!(CpuTimes::parse_line(b"cpu7 1 2 3").unwrap().0, Some(7));
+    assert!(CpuTimes::parse_line(b"cpufreq 1 2 3 4").is_none());
+    // Four states, which is the fewest a real `cpu` line has ever carried.
+    // These fixtures had three, which was incidental to what this test is
+    // about -- which LABELS are recognised -- and stopped parsing when
+    // `parse_line` gained its floor. The widths changed; the test did not.
+    assert_eq!(CpuTimes::parse_line(b"cpu 1 2 3 4").unwrap().0, None);
+    assert_eq!(CpuTimes::parse_line(b"cpu7 1 2 3 4").unwrap().0, Some(7));
 }
 
 /// One bar for the whole machine beats no bars.
@@ -1393,4 +1397,23 @@ fn a_short_diskstats_line_is_not_a_device() {
     // positionally at all.
     assert!(DiskStats::parse_all(b"   8       0 sda 12 3").is_empty());
     assert!(DiskStats::parse_all(b"").is_empty());
+}
+
+#[test]
+fn a_truncated_cpu_line_is_not_a_cpu() {
+    // Four states is the fewest Linux has ever published. Fewer is a
+    // truncated line, and reading it as a CPU gives a wrong answer rather
+    // than a refusal: `cpu 100` would be 100% user.
+    assert!(CpuTimes::parse_line(b"cpu 100").is_none());
+    assert!(CpuTimes::parse_line(b"cpu").is_none());
+    // The oldest real format -- four states, no iowait -- still parses.
+    let (index, t) = CpuTimes::parse_line(b"cpu 100 200 300 400").expect("classic four");
+    assert_eq!(index, None);
+    assert_eq!(t.user, 100);
+    assert_eq!(t.idle, 400);
+    assert_eq!(t.iowait, 0, "a column the kernel did not publish is zero");
+    assert_eq!(t.total(), 1000);
+    // And a per-CPU line keeps its index.
+    let (index, _) = CpuTimes::parse_line(b"cpu7 1 2 3 4").expect("cpu7");
+    assert_eq!(index, Some(7));
 }

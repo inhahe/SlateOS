@@ -1608,6 +1608,15 @@ impl CpuTimes {
         } else {
             Some(parse_u64(rest)?)
         };
+        // The four classic states -- user, nice, system, idle -- are the
+        // fewest Linux has ever published on a `cpu` line. Tolerating fewer
+        // does not accept an older kernel, it accepts a TRUNCATED line, and
+        // the result is not a refusal but a wrong answer: `cpu 100` would read
+        // as a CPU that is 100% user. The leniency above is for columns the
+        // kernel added later; this is the floor it started from.
+        if fields.len() < 5 {
+            return None;
+        }
         let at = |i: usize| -> u64 { fields.get(i).and_then(|f| parse_u64(f)).unwrap_or(0) };
         Some((
             index,

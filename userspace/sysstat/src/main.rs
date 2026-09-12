@@ -118,22 +118,38 @@ struct CpuStat {
     irq: u64,
     softirq: u64,
     steal: u64,
+    /// Guest time. **Already counted in `user`**, so it is not part of
+    /// [`CpuStat::total`] -- kept because the struct mirrors the kernel's
+    /// line, and because a reader who does not see the column here may go
+    /// looking for it and add it back.
     guest: u64,
-    guest_nice: u64,
+    /// Niced guest time. Already counted in `nice`, as above.
+    _guest_nice: u64,
 }
 
 impl CpuStat {
+    /// Total jiffies across all states.
+    ///
+    /// **`guest` and `guest_nice` are deliberately absent.** The kernel counts
+    /// guest time INSIDE `user`, and niced guest time inside `nice`
+    /// (`account_guest_time` in `kernel/sched/cputime.c` adds to both), so a
+    /// total that adds them again counts that time twice. This did, which
+    /// inflated the denominator on any machine running virtual machines and
+    /// made every percentage this program prints -- user, system, and idle
+    /// alike -- proportionally too small.
+    ///
+    /// `procinfo::CpuTimes::total` is the same sum and says the same thing in
+    /// its field docs; `iostat` and `top` reach the right answer by not
+    /// parsing the two columns at all.
     fn total(&self) -> u64 {
         self.user
-            + self.nice
-            + self.system
-            + self.idle
-            + self.iowait
-            + self.irq
-            + self.softirq
-            + self.steal
-            + self.guest
-            + self.guest_nice
+            .saturating_add(self.nice)
+            .saturating_add(self.system)
+            .saturating_add(self.idle)
+            .saturating_add(self.iowait)
+            .saturating_add(self.irq)
+            .saturating_add(self.softirq)
+            .saturating_add(self.steal)
     }
 }
 
@@ -151,38 +167,38 @@ struct CpuUsage {
     idle: f64,
 }
 
-fn parse_cpu_line(line: &str) -> Option<CpuStat> {
-    let parts: Vec<&str> = line.split_whitespace().collect();
-    if parts.len() < 5 {
-        return None;
+impl CpuStat {
+    /// This program's view of one [`procinfo::CpuTimes`] record.
+    ///
+    /// `index` is `None` for the aggregate `cpu` line and `Some(n)` for
+    /// `cpuN`, which is how this program's `name` column is built -- it used
+    /// to keep the raw first field, so a line the kernel spelled differently
+    /// became a CPU with that name.
+    fn from_proc(index: Option<u64>, t: &procinfo::CpuTimes) -> Self {
+        Self {
+            name: index.map_or_else(|| "cpu".to_string(), |n| format!("cpu{n}")),
+            user: t.user,
+            nice: t.nice,
+            system: t.system,
+            idle: t.idle,
+            iowait: t.iowait,
+            irq: t.irq,
+            softirq: t.softirq,
+            steal: t.steal,
+            guest: t.guest,
+            _guest_nice: t.guest_nice,
+        }
     }
-    let name = parts.first()?.to_string();
-    if !name.starts_with("cpu") {
-        return None;
-    }
-    Some(CpuStat {
-        name,
-        user: parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0),
-        nice: parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0),
-        system: parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0),
-        idle: parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(0),
-        iowait: parts.get(5).and_then(|s| s.parse().ok()).unwrap_or(0),
-        irq: parts.get(6).and_then(|s| s.parse().ok()).unwrap_or(0),
-        softirq: parts.get(7).and_then(|s| s.parse().ok()).unwrap_or(0),
-        steal: parts.get(8).and_then(|s| s.parse().ok()).unwrap_or(0),
-        guest: parts.get(9).and_then(|s| s.parse().ok()).unwrap_or(0),
-        guest_nice: parts.get(10).and_then(|s| s.parse().ok()).unwrap_or(0),
-    })
 }
 
 fn read_cpu_stats() -> Vec<CpuStat> {
-    if let Some(lines) = read_file_lines("/proc/stat") {
-        let stats: Vec<CpuStat> = lines.iter().filter_map(|l| parse_cpu_line(l)).collect();
-        if !stats.is_empty() {
-            return stats;
-        }
-    }
-    Vec::new()
+    let Ok(raw) = std::fs::read("/proc/stat") else {
+        return Vec::new();
+    };
+    raw.split(|&b| b == b'\n')
+        .filter_map(procinfo::CpuTimes::parse_line)
+        .map(|(index, t)| CpuStat::from_proc(index, &t))
+        .collect()
 }
 
 fn compute_cpu_usage(prev: &CpuStat, curr: &CpuStat) -> CpuUsage {
@@ -1812,15 +1828,23 @@ mod tests {
     // CPU stat parsing
     // -----------------------------------------------------------------------
 
+    /// One `/proc/stat` cpu line, through the shared parser this program now
+    /// uses. These called a private `parse_cpu_line`; the layout is
+    /// `procinfo::CpuTimes`'s.
+    fn cpu(line: &str) -> Option<CpuStat> {
+        let mut owned = line.as_bytes().to_vec();
+        owned.push(b'\n');
+        procinfo::CpuTimes::parse_line(&owned).map(|(i, t)| CpuStat::from_proc(i, &t))
+    }
+
     #[test]
     fn test_parse_cpu_line_aggregate() {
-        let line = "cpu  50000 1000 20000 900000 5000 500 200 0 0 0";
-        let stat = parse_cpu_line(line).unwrap();
+        let stat = cpu("cpu  50000 1000 20000 900000 5000 500 200 0 0 0").expect("aggregate");
         assert_eq!(stat.name, "cpu");
         assert_eq!(stat.user, 50000);
         assert_eq!(stat.nice, 1000);
         assert_eq!(stat.system, 20000);
-        assert_eq!(stat.idle, 900000);
+        assert_eq!(stat.idle, 900_000);
         assert_eq!(stat.iowait, 5000);
         assert_eq!(stat.irq, 500);
         assert_eq!(stat.softirq, 200);
@@ -1829,36 +1853,43 @@ mod tests {
 
     #[test]
     fn test_parse_cpu_line_single_cpu() {
-        let line = "cpu0 25000 500 10000 450000 2500 250 100 0 0 0";
-        let stat = parse_cpu_line(line).unwrap();
+        let stat = cpu("cpu0 25000 500 10000 450000 2500 250 100 0 0 0").expect("cpu0");
         assert_eq!(stat.name, "cpu0");
         assert_eq!(stat.user, 25000);
     }
 
     #[test]
     fn test_parse_cpu_line_non_cpu() {
-        let line = "intr 12345 6789";
-        assert!(parse_cpu_line(line).is_none());
+        assert!(cpu("intr 12345 6789").is_none());
     }
 
     #[test]
     fn test_parse_cpu_line_too_short() {
-        let line = "cpu 100";
-        assert!(parse_cpu_line(line).is_none());
+        assert!(cpu("cpu 100").is_none());
     }
 
     #[test]
     fn test_parse_cpu_line_partial_fields() {
-        let line = "cpu 100 200 300 400 500";
-        let stat = parse_cpu_line(line).unwrap();
+        // An older kernel publishes fewer columns; the absent ones are zero,
+        // not a reason to drop the line.
+        let stat = cpu("cpu 100 200 300 400 500").expect("five columns is a cpu line");
         assert_eq!(stat.user, 100);
         assert_eq!(stat.nice, 200);
         assert_eq!(stat.system, 300);
         assert_eq!(stat.idle, 400);
         assert_eq!(stat.iowait, 500);
-        assert_eq!(stat.irq, 0); // not present, default
+        assert_eq!(stat.irq, 0);
     }
 
+    /// **This test used to certify the bug.** It asserted 1068 -- the eight
+    /// real states summing to 1067, plus the `guest` column added a second
+    /// time. The kernel counts guest time INSIDE `user`, so a total that adds
+    /// it again inflates the denominator and makes every percentage this
+    /// program prints proportionally too small on a machine running virtual
+    /// machines.
+    ///
+    /// The fixture keeps `guest: 1` deliberately: with guest at zero the two
+    /// answers coincide and the test would pass either way.
     #[test]
     fn test_cpu_stat_total() {
         let stat = CpuStat {
@@ -1872,9 +1903,9 @@ mod tests {
             softirq: 5,
             steal: 2,
             guest: 1,
-            guest_nice: 0,
+            _guest_nice: 0,
         };
-        assert_eq!(stat.total(), 1068);
+        assert_eq!(stat.total(), 1067);
     }
 
     #[test]

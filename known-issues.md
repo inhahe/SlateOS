@@ -138764,7 +138764,7 @@ opened anyway. So the count of 70 is a floor, not a total.
 - `ulimit (via prlimit)`
 - `update-grub (via grub2)`
 
-## B-THIRTY-FOUR-OPTIONS-ARE-ADVERTISED-BY-HELP-AND-READ-BY-NOTHING (lane B, 2026-09-12) -- tool landed, findings open
+## B-THIRTY-FOUR-OPTIONS-ARE-ADVERTISED-BY-HELP-AND-READ-BY-NOTHING (lane B, 2026-09-12) -- now 19, and one of them was worse than a missing option
 
 The mirror image of the unknown-option class above, found by
 `scripts/check-help-vs-parser.py`. That sweep asks whether an option we do
@@ -138795,7 +138795,48 @@ specified". It accepted the option and failed for an unrelated reason,
 exactly as `blockdev` did. Two independent confirmations of the same
 blind spot.
 
-### The 34
+### Progress, and the count's history
+
+**19 findings across 11 files** as of the `blkzone` deletion, from 34 when
+this was filed. Two of the drops were fixes and one was a fifth false
+positive:
+
+- `getfacl`'s `-a`, `-d` and `-n` are implemented rather than removed from
+  the help; all three were cheap and useful.
+- `blkzone` is **deleted**, see below.
+- `objdump`'s `--radix`, `--start-address` and `--stop-address` were never
+  broken: the parser holds `strip_prefix("start-address=")`, a de-dashed
+  name carrying its `=`, which the checker did not recognise.
+
+The count over the whole life of the tool: **180, 153, 74, 46, 34, 25, 19**.
+The first number is nine times the last, and every correction came from
+opening a file the tool had accused. Nobody should quote an untriaged
+number from this or any similar sweep.
+
+### `blkzone` was not a missing option, it was an invented answer
+
+Reading it to add the three options found that `blkzone report` printed two
+zones with hardcoded start/length/capacity/write-pointer values, for any
+device, on any machine, without opening anything -- a fabricated answer to a
+question about real hardware, in the format of a real answer. `reset`,
+`open`, `close` and `finish` printed `blkzone: reset on /dev/sda` and exited
+**0**, reporting a destructive zone operation as done when none was
+attempted.
+
+Deleted under §1005/§1006 rather than made to refuse. It was unreachable --
+in `multicall-aliases-baseline.txt`, so no build produced the name -- which
+means it was dead code that would have lied if anyone had wired it up.
+
+**This is a class, and it has been hit here before.** `read_file_acl` used
+to call `fs::metadata`, discard the result, and report owner `root`, group
+`root` and mode 0755 for every file. Both are the same defect: output that
+is shaped like a measurement and is not one. It is not cheaply sweepable --
+telling an invented constant from a real one needs a reader -- but 45
+comments in lane B say `stub`, `fake`, `placeholder` or `simulated`, and
+most are honest host-test shims. Worth a reader's pass, not a script's.
+
+### The 34, as filed
+
 
 ```
   userspace/acl/src/main.rs

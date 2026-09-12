@@ -57038,3 +57038,50 @@ free-diff.sh shipped with a `--help` xfail whose stated reason had never been
 true in the first place.
 
 TRIGGER. Next tick that picks up duplicate-pair work. Nothing blocks it.
+
+--------------------------------------------------------------------------
+SCOPED AND PROVEN FEASIBLE: scripts/ps-diff.sh (lane B, 2026-09-12)
+
+WHY THIS NEEDED SCOPING AT ALL. `ps` prints the process table, so unlike
+`free` and `uptime` there is no single file to bind-mount: its input is every
+process on the machine, and two runs a second apart legitimately differ. That
+is why it was left until last of the three remaining duplicate pairs.
+
+IT IS PINNABLE. A PID namespace with its own /proc gives a process table with
+exactly two entries in it, and the output is byte-identical across runs:
+
+    setsid unshare -pf --mount-proc -Ur sh -c "ps -ef" < /dev/null
+
+    UID          PID    PPID  C STIME TTY          TIME CMD
+    root           1       0  0 09:34 ?        00:00:00 sh -c ps -ef
+    root           2       1  0 09:34 ?        00:00:00 ps -ef
+
+Three separate things are doing work there and all three were measured:
+
+  * `-pf --mount-proc` is the pin. PIDs restart at 1 in the namespace, so the
+    PID and PPID columns are deterministic rather than whatever the host had.
+  * `setsid` pins the TTY column. Without it the column reads `pts/2` or
+    whatever terminal the harness happened to inherit, which differs between
+    an interactive run and a hook.
+  * `setsid` ALSO silences WSL's "your 131072x1 screen size is bogus" warning,
+    which goes to stderr and would otherwise land in every stderr comparison.
+    Worth knowing before writing that off as a difference in `ps`.
+
+THE ONE FIELD LEFT IS `STIME`, at minute granularity. Two runs in the same
+minute agree and two straddling a boundary differ by one. Use the tolerance
+comparison `scripts/uptime-diff.sh` already carries for the same reason --
+parse the field and allow a bounded difference -- rather than masking it,
+because a masked column tests nothing and `\d\d:\d\d` is matched just as well
+by the wrong zone as by the right answer.
+
+WHAT THE PAIR ACTUALLY IS. known-issues once recorded coreutils' `ps` as 405
+lines supporting `-e -f` against `userspace/ps`'s 1022 with full column
+selection, and concluded "the standalone plainly wins". Those numbers are
+STALE -- dup-bins-survey now measures 2007 and 1155 -- and that entry has been
+corrected to say so. Nobody knows which wins. That is the whole reason to
+write this.
+
+TRIGGER. Next tick that picks up duplicate-pair work. Nothing blocks it. Note
+that `logger`, the third pair, is NOT harness work -- it is open-questions
+B-Q14, a design fork about where a logged message goes, which a differential
+test cannot answer.

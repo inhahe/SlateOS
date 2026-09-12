@@ -136228,3 +136228,28 @@ Two tests were retargeted: `parse_invalid_p_value_errors` and
 `parse_invalid_pn_value_errors` both asserted `invalid strip count`, our phrase.
 
 `patch-diff.sh`: 49 passed / 16 differed to **51 / 14**.
+
+## B-PATCH-IGNORED-THE-TARGET-YOU-NAMED (lane B, 2026-09-12) — FIXED
+
+Three fixes, `patch-diff.sh` 51 passed / 14 differed to **56 / 9**.
+
+**An explicit target operand was parsed and then discarded.** `patch -i u.patch
+-p1 a/base.txt` patches `a/base.txt` whatever the patch says — that is the
+point of naming it. This build stored the operand in `target_file` and never
+read it, so the name was accepted and thrown away. Because the patch's own path
+did not resolve, the case failed with `can't find file to patch` while GNU
+patched happily. **An option that is parsed but unread is worse than one that is
+refused**: the refusal at least tells you.
+
+**`-s` suppresses the narration, not the outcome.** Measured: `patch -s` on a
+failing patch still prints `1 out of 1 hunk FAILED -- saving rejects to file
+X.rej`, while suppressing `patching file X` and the per-hunk lines. Ours
+suppressed everything, so a script running `patch -s` and reading stdout was
+told nothing at all about a failure. Silent means do not narrate the work; it
+does not mean hide that the work did not happen.
+
+**`-l`/`--ignore-whitespace` is accepted and inert**, on the same terms as
+`-N`/`-f`/`-F`/`-Z` above: it changes an answer only where a hunk differs from
+the target in whitespace alone, and no case in this tree does. Correct today,
+incomplete rather than wrong, and recorded so a passing harness is not read as
+evidence that whitespace-insensitive matching exists. It does not.

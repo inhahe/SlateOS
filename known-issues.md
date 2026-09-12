@@ -134783,3 +134783,69 @@ authorise me to baseline their module; lane C turned up and wired the module pro
 the question was answered by events and not by the operator. Moving a dead question into
 the live queue would spend the operator's attention on a decision that no longer exists,
 which is the failure `deferred-questions.md` was created to prevent.
+
+## TD-A-A-A-A-MEASURED-AUTO-VERSIONING-IS-HALF-A-SMALL-FILE-WRITE-AND-THE-TWO-ROUTES-DISAGREE (lane A, 2026-09-12) — **the A/B landed; read the accelerator caveat before using the numbers**
+
+**In short:** writing a small file costs about twice what it should, and roughly half of
+that is the automatic version history — reading the old contents back and checksumming
+them before the write. Measured, not inferred. But the measurement ran under emulation,
+and the cost structure differs enough between emulation and hardware virtualisation that
+the same change can look decisive under one and invisible under the other.
+
+### The numbers (run b6mifed3b, commit 2de15d6f6, **QEMU TCG**, release profile)
+
+| series | min ns | share of the write |
+|---|---|---|
+| `vfs_write_breakdown_full` (root, versioned) | 95,942 | — |
+| `vfs_write_breakdown_unversioned` (`/tmp`) | 47,892 | — |
+| **differential: versioning** | **48,050** | **50.1%** |
+| `vfs_write_breakdown_history` (direct) | 26,194 | 27.3% |
+| `vfs_write_breakdown_index` | 16,059 | 16.7% |
+| `vfs_write_breakdown_journal` | 616 | 0.6% |
+| `ns` / `access` / `intercept` / `quota` | 19 / 54 / 323 / 279 | under 1% combined |
+
+`vfs_write_256` in the same run: 95,356 ns. `vfs_read_256`: 9,223 ns — so a write costs
+**10.3× a read** of the same size.
+
+### The two routes disagree by 1.83×, and that was the designed outcome
+
+The benchmark measures versioning two ways on purpose, and its comment said a
+disagreement would itself be the finding. It disagrees: 48,050 differential against
+26,194 direct.
+
+The differential is an **upper** bound, because the `/tmp` arm differs by more than
+versioning: it is a separate `memfs` instance whose root directory holds a handful of
+entries, where `/` holds the whole staged OS tree. `child_ino` does a map lookup in the
+parent's children, so the root arm pays a deeper and colder lookup on every iteration.
+The direct phase is a **lower** bound for the opposite reason: it calls
+`try_auto_record` 200 times on identical content, so the content-addressed store dedupes
+and the version list sits at its 16-entry cap, exercising the eviction path rather than
+the insert path. True cost is between them.
+
+### The accelerator caveat, which is the part most likely to mislead
+
+**This run is TCG. Do not compare it to the WHPX figures in this file** — the same commit
+measures ~43,000 ns under WHPX and ~108,000 under TCG, so a cross-accelerator delta is
+meaningless. That is the straddling error this session produced three times.
+
+More subtly: the HPET finding recorded earlier — that `record_version` calls
+`hpet::elapsed_ns()`, the MMIO read whose removal took the journal phase from 14,206 ns
+to 337 — **cannot be confirmed or denied by this run.** `hpet_read`'s accelerator ratio
+is 0.03×: it is ~30× *slower* under WHPX, because there the MMIO access traps. Under TCG
+that read costs a few hundred nanoseconds, so it is a negligible part of this 26,194 and
+the figure is genuinely the read-back plus the SHA-256 plus the CAS.
+
+So both readings are true of different machines: under **WHPX** the clock read alone is
+~13,900 ns and dominates; under **TCG** it disappears and the hashing dominates. A fix
+that looks decisive on one accelerator can be invisible on the other, and neither number
+is the "real" one — real hardware is a third case nobody here has measured.
+
+### What is actionable
+
+1. `record_version`'s `hpet::elapsed_ns()` → `clock_monotonic()`. Same contract, same fix
+   as the journal. Worth ~13,900 ns under WHPX, ~nothing under TCG, and it is one line.
+2. The `index` phase at 16,059 ns is the second-largest component and is live **only
+   because a self-test left it live** — see the indexer entry. Whatever is decided there
+   changes this number by a sixth.
+3. Whether writes should carry version history at all is in `deferred-questions.md`. Its
+   promotion trigger was "a cost figure". This is that figure: **half the write**.

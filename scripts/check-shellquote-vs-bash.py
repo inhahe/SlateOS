@@ -354,6 +354,22 @@ OFFSET_RUNGS = [
 # thing people delete when it is inconvenient -- but it is only honest if the
 # reasons are real, so each is a property of the rung and not of our appetite.
 EXCUSED_RUNGS = {
+    "strip_quotes(ansi)":
+        "self_test section 10, the $'...' ANSI-C decode table. Its input is a "
+        "loop variable over 20 literal cases, so there is no single case to "
+        "ask bash about -- the same property that excuses strip_quotes(&q) "
+        "and strip_quotes(raw) above. The 20 literals ARE graded against "
+        "real bash 5.2.37, by a host harness built from lines 1-608 of "
+        "shellquote.rs (which have no crate:: dependencies and so compile "
+        "unmodified on the host): 31/33 of the wider sweep matched outright "
+        "and the two that did not were Windows argv mangling, re-checked "
+        "byte-exactly and matching. They are NOT in CASES yet because this "
+        "file's port has three quoting contexts and shellquote.rs now has "
+        "four -- adding them would fail against the port rather than against "
+        "bash, which is the opposite of what a bash-oracle table should "
+        "mean. See requests/a-b-shellquote-port-has-drifted-and-the-guard-"
+        "cannot-see-it.md; when the port learns Ctx::DollarSingle these move "
+        "into CASES and this excuse is deleted.",
     "strip_quotes(&q)":
         "inside the quote_word round-trip loop, so its input is a loop "
         "variable rather than a literal -- there is no fixed case to ask bash "

@@ -1148,8 +1148,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             // Adjacent constructs concatenate, as any quoting does.
             (b"$\'\\x41\'$\'\\x42\'", b"AB"),
         ];
-        for (input, want) in cases {
-            assert_eq!(strip_quotes(input).as_slice(), *want, "$'…' decode");
+        // Loop variable named distinctively: the coverage sweep in
+        // scripts/check-shellquote-vs-bash.py keys rungs by their exact call
+        // text, so a generic name like `input` would make this rung's entry
+        // there silently cover any future rung spelled the same way.
+        for (ansi, want) in cases {
+            assert_eq!(strip_quotes(ansi).as_slice(), *want, "$'…' decode");
         }
         // A space inside the construct is not a word separator, and the
         // construct is one word — the property that would break first if the

@@ -11,6 +11,7 @@
 //!   <priority> YYYY-MM-DDTHH:MM:SS TAG: MESSAGE
 
 use coreutils::diag;
+use coreutils::quote::quoteaf_os;
 use coreutils::stdfd;
 use std::env;
 use std::io::{self, BufRead, BufReader, Write};
@@ -184,7 +185,10 @@ fn parse_args(args: &[String]) -> Result<LoggerArgs, String> {
                 return Ok(rest.to_string());
             }
             let Some(v) = args.get(*i) else {
-                return Err(format!("option requires an argument -- '{letter}'"));
+                return Err(format!(
+                    "option requires an argument -- {}",
+                    quoteaf_os(letter.to_string())
+                ));
             };
             *i = i.saturating_add(1);
             Ok(v.clone())
@@ -197,7 +201,7 @@ fn parse_args(args: &[String]) -> Result<LoggerArgs, String> {
             // is to LOG the option text as the message.
             let name = long.split('=').next().unwrap_or(long);
             let _ = name;
-            return Err(format!("unrecognized option '{arg}'"));
+            return Err(format!("unrecognized option {}", quoteaf_os(arg)));
         }
         // NOT a loop over the cluster, deliberately. Both options this
         // implements take a value, so the first letter either consumes the
@@ -216,7 +220,12 @@ fn parse_args(args: &[String]) -> Result<LoggerArgs, String> {
         match c {
             't' => out.tag = take_value('t', &rest, &mut i)?,
             'p' => out.priority = take_value('p', &rest, &mut i)?,
-            other => return Err(format!("invalid option -- '{other}'")),
+            other => {
+                return Err(format!(
+                    "invalid option -- {}",
+                    quoteaf_os(other.to_string())
+                ));
+            }
         }
     }
     Ok(out)

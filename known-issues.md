@@ -134847,5 +134847,39 @@ is the "real" one — real hardware is a third case nobody here has measured.
 2. The `index` phase at 16,059 ns is the second-largest component and is live **only
    because a self-test left it live** — see the indexer entry. Whatever is decided there
    changes this number by a sixth.
+### Replicated, 2026-09-12 (run bssh17cpy, commit 24f11ef45, TCG/release)
+
+A second independent run, and the ratio holds while the absolutes do not:
+
+| | run 1 (2de15d6f6) | run 2 (24f11ef45) |
+|---|---|---|
+| `full` (root, versioned) | 95,942 | 107,025 |
+| `unversioned` (`/tmp`) | 47,892 | 56,607 |
+| **versioning share** | **50.1%** | **47.1%** |
+| direct `history` phase | 26,194 | 25,221 |
+
+Every absolute moved 6–18% between runs — including `unversioned`, which neither commit
+between them touches — so that drift is TCG run-to-run noise, not regression. The measured
+floor for this harness is a median of 1.099× pairwise under TCG with p90 1.750× and a third
+of observations exceeding 25%, so a 10% shift is well inside it. **Reading it as a
+regression would be the error this file documents repeatedly**, and the temptation was
+real: `vfs_write_256` rose 10.1% in the run that shipped a change intended to make writes
+faster.
+
+The *ratio* is the robust quantity, and for a structural reason rather than luck: both arms
+sit in the same run and move together, so noise largely divides out of a within-run
+comparison and does not divide out of a between-run one. That is the argument for having
+built this as an A/B in the first place.
+
+**And the indexer finding is now confirmed empirically, not just by reading.** The new
+scorecard line says `indexer live=true (initialized=true, rebuilds=1, entries=333)`.
+Exactly one rebuild — which is `index::self_test`'s, never reset — so the benchmark has
+indeed been measuring an indexed write by accident.
+
+The HPET substitution in `record_version` landed between these two runs and is invisible
+in them, as predicted: both are TCG, where that read costs ~450 ns rather than the ~13.5 µs
+it costs under WHPX. Confirming it needs a WHPX run, and the accelerator is not selectable
+— it is read from the guest's CPUID, by design.
+
 3. Whether writes should carry version history at all is in `deferred-questions.md`. Its
    promotion trigger was "a cost figure". This is that figure: **half the write**.

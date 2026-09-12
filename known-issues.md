@@ -136970,7 +136970,24 @@ its own change and its own verification rather than riding along on this one.
 | `/proc/<pid>/status` `Name:` | bytes |
 | `/proc/<pid>/cmdline` | bytes |
 | `prctl(PR_GET_NAME)` | bytes (always was) |
-| `kshell` task listings (4 sites) | **still `"?"`** |
+| `kshell` task listings (4 sites) | **escaped** (`escape_octal`) — see below |
+
+**The four kshell sites are done too, and the fix is different from the procfs one for a
+reason worth recording.** They feed a width-padded column (`{:<12}`), so emitting raw bytes
+would break the alignment every other row depends on. They use `fs::escape::escape_octal`
+instead: total over any byte sequence, lossless, invertible by `unescape_octal`, and pure
+printable ASCII — so distinct names stay distinct *and* the column still lines up.
+
+Deliberately **not** `from_utf8_lossy`: U+FFFD is many-to-one, so it would re-create the
+exact collision this entry is about in a different alphabet. That is the same choice lane B
+made for the four `/proc/<pid>/comm` consumers, and the same argument as
+`A-FAT-8-3-NAMES-DECODE-TO-QUESTION-MARKS`: escaping says which byte it was and is
+reversible; replacement is neither.
+
+One visible change for ordinary names: a comm containing a space now prints `\040`,
+because `escape_octal` escapes anything non-graphic. For a column-aligned listing that is
+the better behaviour — a space in a name would otherwise make the columns unparseable — and
+it matches how the tree already renders `/proc/mounts`.
 
 **In short:** every running program has a short name the system shows in process
 listings. There is a check that stops a program *asking* for a name the system cannot

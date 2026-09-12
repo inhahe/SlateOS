@@ -960,12 +960,14 @@ def cmd_build(only: str | None, force: bool = False) -> int:
     # building against one that is behind produces 70 binaries that test a
     # system this tree cannot build -- which is the whole of B-Q5. Fix it
     # first, then build on top of a sysroot that matches the source.
+    sysroot_rebuilt = False
     if not LIBC.is_file() or sysroot_staleness()[1]:
         if LIBC.is_file():
             mode, stale = sysroot_staleness()
             print(f"[ctest] sysroot: libc.a is behind {len(stale)} input(s) ({mode}); rebuilding before the fixtures.")
         if not _build_sysroot():
             return 1
+        sysroot_rebuilt = True
         mode, stale = sysroot_staleness()
         if stale:
             _report_sysroot_staleness(mode, stale)
@@ -1050,6 +1052,40 @@ def cmd_build(only: str | None, force: bool = False) -> int:
         print(f"[ctest] ERROR: no fixture matches --only {only!r}" if only
               else f"[ctest] ERROR: no fixtures found under {SERVICES}")
         return 1
+
+    # `--only` NARROWS WHAT YOU NAME. It must not narrow what stays true.
+    #
+    # Rebuilding the sysroot above makes every fixture in the tree older than
+    # the `libc.a` it links, not just the one named. Before this, `--only x`
+    # that happened to trigger a rebuild left the other 73 stale, exited 0, and
+    # the cost landed later in a repack that refused to write the image --
+    # reported by lane A after it cost them exactly that. A flag reached for to
+    # save time that silently invalidates everything else is worse than no flag:
+    # the failure is displaced from the command that caused it.
+    #
+    # Widening rather than refusing, because "make this fixture current" is what
+    # the user asked for and a fixture is not current against a sysroot nothing
+    # else was built against. Announced, because a command that quietly does 74
+    # times the work it was asked for is its own kind of surprise.
+    if only and sysroot_rebuilt:
+        widened = fixtures()
+        print(f"[ctest] --only {only!r} asked for {len(selected)} fixture(s), but the "
+              f"sysroot was rebuilt above.")
+        print(f"[ctest]        Every fixture links libc.a, so all {len(widened)} are now "
+              f"stale and the")
+        print("[ctest]        image repack would refuse. Building all of them instead of "
+              "leaving")
+        print("[ctest]        73 broken and exiting 0.")
+        selected = widened
+    elif only:
+        # Said even though nothing happened. "The sysroot was current, so the
+        # rest of the tree is unaffected" and "the sysroot was rebuilt and I
+        # said nothing" printed the same thing before -- which is the shape
+        # that cost lane A a build-plus-failed-repack cycle. The announcement
+        # is the fix; the cascade above is only the part that saves the second
+        # command.
+        print(f"[ctest] --only {only!r}: sysroot already current, so the other "
+              f"{len(fixtures()) - len(selected)} fixture(s) are unaffected.")
     rc, built, skipped = 0, 0, 0
     started = time.monotonic()
     # The preflight above proves fastpy *imports*; it cannot prove fastpy still

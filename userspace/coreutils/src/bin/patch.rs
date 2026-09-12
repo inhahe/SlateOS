@@ -67,6 +67,22 @@ struct FilePatch {
     /// 1-based input line of this file's first hunk header, which is the number
     /// GNU names in `can't find file to patch at input line N`.
     first_hunk_line: usize,
+    /// 1-based input line at which a hunk body ran out before supplying the
+    /// line counts its `@@` header promised, if one did.
+    ///
+    /// A TRUNCATED HUNK MUST NOT BE APPLIED. Before this existed the parser
+    /// took whatever body lines it found and applied them, so a patch whose
+    /// header promised four lines and delivered two removed `bravo` and wrote
+    /// the file out twenty bytes where it had been twenty-six -- a silent,
+    /// successful-looking corruption of the target from an input GNU refuses
+    /// outright. Measured: GNU prints `patching file X` to stdout, then
+    /// `malformed patch at line N` to stderr, exits 2, and leaves the file
+    /// byte-identical.
+    ///
+    /// Carried rather than reported at parse time because the order of the two
+    /// messages is observable: `patching file X` comes first, so the refusal
+    /// belongs in the apply loop after that line is printed.
+    malformed_at: Option<usize>,
 }
 
 #[derive(Default)]
@@ -352,15 +368,27 @@ fn parse_patch(input: &str) -> Vec<FilePatch> {
             let first_hunk_line = i.saturating_add(1);
 
             let mut hunks: Vec<Hunk> = Vec::new();
+            let mut malformed_at: Option<usize> = None;
 
             // Parse hunks for this file.
             while let Some(cur) = lines.get(i).copied() {
                 if cur.starts_with("@@ ") {
                     if let Some((os, oc, ns, nc)) = parse_hunk_header(cur) {
+                        let header_line = i.saturating_add(1);
                         i = i.saturating_add(1);
                         let mut hunk_lines: Vec<HunkLine> = Vec::new();
+                        // The counts the header promised, consumed as the body
+                        // supplies them. A body that supplies MORE is not an
+                        // error -- measured: GNU applies such a hunk and
+                        // ignores the surplus -- so the loop stops once both
+                        // are satisfied rather than reading to the next marker.
+                        let (mut old_left, mut new_left) = (oc, nc);
+                        let mut last_body_line = header_line;
 
-                        while let Some(line) = lines.get(i).copied() {
+                        while old_left > 0 || new_left > 0 {
+                            let Some(line) = lines.get(i).copied() else {
+                                break;
+                            };
                             if line.starts_with("@@ ")
                                 || line.starts_with("--- ")
                                 || line.starts_with("diff ")
@@ -370,18 +398,34 @@ fn parse_patch(input: &str) -> Vec<FilePatch> {
 
                             if let Some(rest) = line.strip_prefix('+') {
                                 hunk_lines.push(HunkLine::Add(rest.to_string()));
+                                new_left = new_left.saturating_sub(1);
                             } else if let Some(rest) = line.strip_prefix('-') {
                                 hunk_lines.push(HunkLine::Remove(rest.to_string()));
+                                old_left = old_left.saturating_sub(1);
                             } else if let Some(rest) = line.strip_prefix(' ') {
                                 hunk_lines.push(HunkLine::Context(rest.to_string()));
+                                old_left = old_left.saturating_sub(1);
+                                new_left = new_left.saturating_sub(1);
                             } else if line == "\\ No newline at end of file" {
-                                // Informational line from diff, skip.
+                                // Informational line from diff; it stands for
+                                // no line on either side, so it consumes
+                                // neither count.
                             } else {
                                 // Treat lines without prefix as context
                                 // (some patches have bare context lines).
                                 hunk_lines.push(HunkLine::Context(line.to_string()));
+                                old_left = old_left.saturating_sub(1);
+                                new_left = new_left.saturating_sub(1);
                             }
+                            last_body_line = i.saturating_add(1);
                             i = i.saturating_add(1);
+                        }
+
+                        // Short body: the header promised lines the file does
+                        // not contain. GNU names the last line it managed to
+                        // read, which is where a reader's eye has to go.
+                        if (old_left > 0 || new_left > 0) && malformed_at.is_none() {
+                            malformed_at = Some(last_body_line);
                         }
 
                         hunks.push(Hunk {
@@ -408,6 +452,7 @@ fn parse_patch(input: &str) -> Vec<FilePatch> {
                 hunks,
                 header_lines,
                 first_hunk_line,
+                malformed_at,
             });
         } else {
             i = i.saturating_add(1);
@@ -579,11 +624,11 @@ fn main() {
     // `u.patch` sits beside `a/`, not inside it, so resolving `-i` first would
     // succeed where GNU fails. A relative `-i` is relative to the DIRECTORY,
     // not to where the user typed the command.
-    if let Some(dir) = &opts.directory {
-        if let Err(e) = env::set_current_dir(dir) {
-            diag!("patch: {dir}: {e}");
-            process::exit(2);
-        }
+    if let Some(dir) = &opts.directory
+        && let Err(e) = env::set_current_dir(dir)
+    {
+        diag!("patch: {dir}: {e}");
+        process::exit(2);
     }
 
     // Read patch input.
@@ -715,10 +760,28 @@ fn main() {
 ",
                             fp.first_hunk_line
                         ));
-                        block.push_str(
+                        // TWO MESSAGES, not one, and which you get says which
+                        // mistake GNU thinks you made. Measured across `-p`
+                        // absent, `-p0` and `-p5`:
+                        //
+                        //   no -p at all -> "Perhaps you should have used the
+                        //                    -p or --strip option?"
+                        //   -p given, wrong -> "Perhaps you used the wrong -p
+                        //                       or --strip option?"
+                        //
+                        // This build always said the second, which tells a
+                        // reader who gave no `-p` to go and check the `-p`
+                        // they did not give. `opts.strip` is an Option for
+                        // exactly this reason: `None` is "not supplied", not
+                        // "supplied as zero", and `-p0` is a real and
+                        // different thing.
+                        block.push_str(if opts.strip.is_none() {
+                            "Perhaps you should have used the -p or --strip option?
+"
+                        } else {
                             "Perhaps you used the wrong -p or --strip option?
-",
-                        );
+"
+                        });
                         block.push_str(
                             "The text leading up to this was:
 ",
@@ -804,6 +867,22 @@ fn main() {
             let _ = out.write_all(line.as_bytes());
         }
 
+        // A HUNK THAT PROMISED MORE LINES THAN IT CARRIED IS NOT APPLIED.
+        // Refused here rather than at parse time because the order of the two
+        // messages is observable: GNU prints `patching file X` first and the
+        // refusal second. Exit is immediate and the target is untouched --
+        // applying the part that did arrive is what corrupted a file by
+        // twenty-six bytes to twenty before this existed.
+        //
+        // The trailing space and blank line are GNU's, not padding: its format
+        // is `malformed patch at line %lu: %s` with the line it could not read,
+        // which is empty here. Measured byte for byte rather than reconstructed
+        // from the shape, because the harness compares stderr exactly.
+        if let Some(at) = fp.malformed_at {
+            diag!("patch: **** malformed patch at line {at}:  \n");
+            process::exit(2);
+        }
+
         let mut lines: Vec<String> = original.lines().map(|l| l.to_string()).collect();
         let mut offset: i64 = 0;
         let mut hunks_applied = 0;
@@ -869,8 +948,19 @@ fn main() {
                 };
                 let n = hunks.len();
                 let plural = if n == 1 { "hunk" } else { "hunks" };
+                // Under `--dry-run` no reject file was written, so naming one
+                // sends the reader looking for a file that does not exist.
+                // The FAILED path a hundred lines down had already learned
+                // this; this path had not, because the two were written weeks
+                // apart and only the other one had a differential case. The
+                // same defect twice in one file is what a harness is for.
+                let reject_clause = if opts.dry_run {
+                    String::new()
+                } else {
+                    format!(" -- saving rejects to file {reject_path}")
+                };
                 let mut out = Stream::stdout();
-                let _ = out.write_all(format!("{detected}\nApply anyway? [n] \nSkipping patch.\n{n} out of {n} {plural} ignored -- saving rejects to file {reject_path}\n").as_bytes());
+                let _ = out.write_all(format!("{detected}\nApply anyway? [n] \nSkipping patch.\n{n} out of {n} {plural} ignored{reject_clause}\n").as_bytes());
             }
             continue;
         }
@@ -1439,5 +1529,119 @@ mod tests {
         let (new_lines, offset) = apply_hunk(&l, &h, 0).unwrap();
         assert_eq!(new_lines, vec!["a", "b", "c"]);
         assert_eq!(offset, 2); // 3 - 1
+    }
+
+    // ---------------- truncated and surplus hunk bodies ----------------
+
+    /// The header promises four lines on each side and the body carries two.
+    ///
+    /// This is the shape that silently corrupted a file: the parser read the
+    /// body until the next marker, found none, and applied what it had --
+    /// removing `bravo` and writing the target out at twenty bytes where it
+    /// had been twenty-six. GNU refuses the input and leaves the file
+    /// byte-identical, so the count is not advisory.
+    #[test]
+    fn a_hunk_body_shorter_than_its_header_is_malformed() {
+        let patch = concat!(
+            "--- x/a/base.txt~",
+            "+++ y/a/base.txt~",
+            "@@ -1,4 +1,4 @@~",
+            " alpha~",
+            "-bravo~",
+        );
+        let ps = parse_patch(&patch.replace('~', "\n"));
+        assert_eq!(ps.len(), 1);
+        // Line 5 is `-bravo`, the last line the parser managed to read, which
+        // is the line GNU names and the one a reader's eye has to go to.
+        assert_eq!(ps[0].malformed_at, Some(5));
+    }
+
+    /// The same shortfall one line earlier, so the reported line is not a
+    /// constant that happened to match.
+    #[test]
+    fn the_reported_line_is_where_the_body_ran_out() {
+        let patch = concat!(
+            "--- x/a/base.txt~",
+            "+++ y/a/base.txt~",
+            "@@ -1,4 +1,4 @@~",
+            " alpha~",
+        );
+        let ps = parse_patch(&patch.replace('~', "\n"));
+        assert_eq!(ps[0].malformed_at, Some(4));
+    }
+
+    /// A body carrying MORE than the header promised is not an error.
+    ///
+    /// Measured against GNU rather than assumed by symmetry with the case
+    /// above, and it is the one a symmetric fix would have got wrong: GNU
+    /// applies such a hunk and ignores the surplus. So the parser stops at the
+    /// counts instead of reading to the next marker, and the extra line is
+    /// left out of the hunk rather than absorbed as context -- absorbing it
+    /// made the hunk fail to match.
+    #[test]
+    fn a_hunk_body_longer_than_its_header_is_not_malformed() {
+        let patch = concat!(
+            "--- x/a/base.txt~",
+            "+++ y/a/base.txt~",
+            "@@ -1,4 +1,4 @@~",
+            " alpha~",
+            "-bravo~",
+            "+BRAVO~",
+            " charlie~",
+            " delta~",
+            " surplus~",
+        );
+        let ps = parse_patch(&patch.replace('~', "\n"));
+        assert_eq!(ps[0].malformed_at, None);
+        assert_eq!(ps[0].hunks.len(), 1);
+        // Five body lines consumed, not six: the counts were satisfied.
+        assert_eq!(ps[0].hunks[0].lines.len(), 5);
+    }
+
+    /// A well-formed hunk carries no marker, so the marker means something.
+    #[test]
+    fn a_complete_hunk_is_not_malformed() {
+        let patch = concat!(
+            "--- x/a/base.txt~",
+            "+++ y/a/base.txt~",
+            "@@ -1,2 +1,2 @@~",
+            " alpha~",
+            "-bravo~",
+            "+BRAVO~",
+        );
+        let ps = parse_patch(&patch.replace('~', "\n"));
+        assert_eq!(ps[0].malformed_at, None);
+    }
+
+    /// `no newline at end of file` stands for no line on either side, so it
+    /// must not be counted against the header -- counting it would make a
+    /// hunk that ends a file without a trailing newline look truncated.
+    ///
+    /// THE MARKER IS PLACED MID-HUNK, and the first version of this test did
+    /// not. Putting it after the last counted line made the test vacuous: the
+    /// body loop stops as soon as both counts are satisfied, so the marker was
+    /// never read and the rule under test never ran. Proved by mutation --
+    /// making the marker consume both counts left the test passing. Real
+    /// `diff` output puts it immediately after the line it applies to, which
+    /// for a changed last line is the REMOVAL, in the middle of the hunk.
+    #[test]
+    fn the_no_newline_marker_does_not_consume_a_line_count() {
+        let patch = concat!(
+            "--- x/a/nonl.txt~",
+            "+++ y/a/nonl.txt~",
+            "@@ -1,1 +1,1 @@~",
+            "-alpha~",
+            "$ No newline at end of file~",
+            "#ALPHA~",
+        );
+        let ps = parse_patch(
+            &patch
+                .replace('~', "\n")
+                .replace('#', "+")
+                .replace('$', "\\"),
+        );
+        assert_eq!(ps[0].malformed_at, None);
+        // Two counted lines, and the marker is not one of them.
+        assert_eq!(ps[0].hunks[0].lines.len(), 2);
     }
 }

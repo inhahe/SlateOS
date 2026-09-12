@@ -33,7 +33,6 @@ userspace/at
 userspace/backup
 userspace/base64
 userspace/blkid
-userspace/chown
 userspace/chpasswd
 userspace/chroot
 userspace/column
@@ -42,7 +41,6 @@ userspace/crond
 userspace/crontab
 userspace/ctags
 userspace/dbus
-userspace/diff
 userspace/diskutil
 userspace/dmesg
 userspace/fdisk
@@ -90,7 +88,6 @@ userspace/nproc
 userspace/nslookup
 userspace/ntpd
 userspace/passwd
-userspace/patch
 userspace/pgrep
 userspace/ping
 userspace/pkg

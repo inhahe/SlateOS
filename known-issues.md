@@ -624,6 +624,35 @@ and the same for `--dry-run`'s `checking file …`. Both of ours used stderr —
 | `coreutils` `patch` | 3 passed, 62 differed | **14 passed, 51 differed** |
 | `userspace/patch` | 3 passed, 62 differed | **17 passed, 48 differed** |
 
+**RETIRED 2026-09-12 (lane B) -- `userspace/patch` is deleted.**
+design-decisions.md 1005: coreutils is the one home, the better half of each
+duplicate pair survives inside it, and the duplicate crate is deleted. Measured
+the same day on the same 67 cases against the same GNU 2.7.6 reference, so the
+comparison is like-for-like rather than two runs of different vintages:
+
+| half | 2026-09-12 |
+|---|---|
+| `coreutils` `patch` | **64 passed, 0 differed**, 3 differ on purpose |
+| `userspace/patch` | **17 passed, 47 differed**, 3 differ on purpose |
+
+Checked before deleting rather than after, because a pair's row names one
+program and the crate behind it may be six (`stat-diff.sh`'s multicall hazard):
+no Cargo.toml anywhere depends on it, `multicall-aliases.py` finds it dispatches
+on no other name, and `create-ext4-rootfs.sh` stages neither half -- /bin holds
+hand-compiled C fixtures, not these crates. It WAS a workspace member: the
+`userspace/*` glob covers it, which a grep for the literal path does not show,
+and concluding orphan from that grep was a mistake caught before acting on it.
+
+**The one thing the loser had that the winner lacked was carried across first**:
+`--input` / `--input=FILE`, the long spelling of `-i`. Deleting the worse half
+means the better half ends up with everything, so a survey column reading "1
+only in the standalone" is a list of one to go and check, not a rounding error.
+
+Stale baseline entries removed through each gate's own `--update-baseline` /
+`--write-baseline` rather than by hand: `argv-utf8-baseline.txt` and
+`workspace-lints-baseline.txt` each lost exactly one line. A deleted crate whose
+baseline lines survive is a declaration that has stopped being true.
+
 Almost every case in `patch-diff.sh` produces one of these lines, so **the
 stream alone was deciding the verdict and nothing about the patching was being
 compared at all.** Eleven and fourteen cases respectively were hidden behind it.
@@ -66631,7 +66660,7 @@ live one:
 | Program | Alias | Who really provides it |
 |---|---|---|
 | `userspace/head` | `tail` | `coreutils`'s `tail` — and `tail-diff.sh` tests *that* one |
-| `userspace/chown` | `chmod` | `coreutils`'s `chmod` |
+| `userspace/chown` | `chmod` | `coreutils`'s `chmod` -- **crate retired 2026-09-12** |
 | `userspace/who` | `w` | `userspace/w` — see the entry below |
 | `userspace/pv` | `fuser` | `userspace/fuser` |
 | `userspace/sysstat` | `iostat` | `userspace/iostat` |

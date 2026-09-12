@@ -34,7 +34,6 @@ userspace/bootctl/src/main.rs:argv-as-string
 userspace/capsh/src/main.rs:argv-as-string
 userspace/cgroup/src/main.rs:argv-as-string
 userspace/chattr/src/main.rs:argv-as-string
-userspace/chown/src/main.rs:argv-as-string
 userspace/chroot/src/main.rs:argv-as-string
 userspace/column/src/main.rs:argv-as-string
 userspace/coredumpctl/src/main.rs:argv-as-string
@@ -51,7 +50,6 @@ userspace/curl/src/main.rs:argv-as-string
 userspace/dbus/src/main.rs:argv-as-string
 userspace/dc/src/main.rs:argv-as-string
 userspace/dhcpcd/src/main.rs:argv-as-string
-userspace/diff/src/main.rs:argv-as-string
 userspace/dig/src/main.rs:argv-as-string
 userspace/diskutil/src/main.rs:argv-as-string
 userspace/dmesg/src/main.rs:argv-as-string
@@ -143,7 +141,6 @@ userspace/nslookup/src/main.rs:argv-as-string
 userspace/ntpd/src/main.rs:argv-as-string
 userspace/numactl/src/main.rs:argv-as-string
 userspace/objdump/src/main.rs:argv-as-string
-userspace/patch/src/main.rs:argv-as-string
 userspace/perf/src/main.rs:argv-as-string
 userspace/pgrep/src/main.rs:argv-as-string
 userspace/ping/src/main.rs:argv-as-string

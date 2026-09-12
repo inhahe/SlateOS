@@ -47,11 +47,11 @@
 //! caller's* credentials -- the environment said `alice`, and every file the
 //! shell created was owned by whoever ran `su`.
 //!
-//! **Supplementary groups are not reset**, because `posix::setgroups` returns
-//! `ENOSYS` and asking for them would abort the exec. Today that leaks
-//! nothing, since `getgroups` reports none; it stops being nothing the moment
-//! the kernel grows the syscall. See `known-issues.md`
-//! (TD-B-USER-SWITCHING-PROGRAMS-CANNOT-RESET-SUPPLEMENTARY-GROUPS).
+//! **Supplementary groups are dropped** before the gid and uid change, since
+//! 2026-09-12. They are dropped rather than replaced by the target's own,
+//! because `userdb` stores memberships as names and nothing here resolves a
+//! name to a gid; dropping is the safe direction. See
+//! `authlib::identity::become_user`, which does it for all five programs.
 //!
 //! # Session tracking
 //!

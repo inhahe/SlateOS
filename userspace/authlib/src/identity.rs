@@ -25,24 +25,35 @@
 //! order in the child between fork and exec, which is why this is expressed as
 //! settings on a [`Command`] rather than as calls made here.
 //!
-//! # Supplementary groups are not reset, and that is not an oversight
+//! # Supplementary groups are dropped, and the order is the whole point
 //!
-//! [`become_user`] sets gid and uid and deliberately does not ask for groups.
-//! `posix::setgroups` returns `ENOSYS` on purpose -- the kernel implements it
-//! only in the Linux-ABI table and `posix/src/syscall.rs` has no native number
-//! for native libc to call, filed as
-//! `requests/b-a-no-syscall-sets-supplementary-groups-changes-root-or-changes-directory.md`.
-//! `std` would call it in the child, get `ENOSYS`, and abort before exec, so
-//! requesting it does not produce a more complete drop; it produces a program
-//! that cannot start a shell at all.
+//! [`become_user`] drops the supplementary groups, then sets gid, then sets
+//! uid, and it does all three itself rather than handing any of them to
+//! `Command::uid`/`Command::gid`. Each step sheds privilege the next one
+//! needs, so the sequence is not a style choice: `setgroups` after `setuid`
+//! fails with EPERM.
 //!
-//! Leaving them is the textbook privilege leak: a process holding the caller's
-//! supplementary groups that lowers only its uid still has every group the
-//! caller was in. It leaks nothing *today*, because `posix::getgroups` reports
-//! none and there is nothing to retain -- a fact about the current kernel and
-//! not a guarantee. Tracked in `known-issues.md` as
-//! TD-B-USER-SWITCHING-PROGRAMS-CANNOT-RESET-SUPPLEMENTARY-GROUPS. **When that
-//! request is answered, this file is the one that changes.**
+//! That is also why this is not a `pre_exec` closure bolted onto the existing
+//! `cmd.uid`/`cmd.gid` calls. `std` applies those in the child and runs
+//! `pre_exec` closures afterwards, so a `setgroups` added that way would run
+//! with the privilege already gone, fail, and abort the child -- converting a
+//! silent leak into a program that cannot start a shell at all.
+//!
+//! **They are dropped rather than replaced by the target user's own groups**,
+//! which is a deliberate half-measure. `userdb` records memberships as NAMES
+//! (`Record::groups` returns `Vec<String>`) and this tree has no name-to-gid
+//! resolver, so the target's groups cannot be expressed as the gid list the
+//! call takes. Dropping is the safe direction: a session with too few groups
+//! is refused work it should have been allowed, while one with too many holds
+//! authority its user never had. Building that resolver is the remaining half,
+//! tracked in `known-issues.md` under
+//! TD-B-USER-SWITCHING-PROGRAMS-CANNOT-RESET-SUPPLEMENTARY-GROUPS.
+//!
+//! Until 2026-09-12 the groups were left alone entirely, which is the textbook
+//! privilege leak -- a process holding the caller's supplementary groups that
+//! lowers only its uid still has every group the caller was in. It leaked
+//! nothing in practice, because `posix::getgroups` reports none, and that is a
+//! fact about the current kernel rather than a guarantee.
 
 use std::process::Command;
 
@@ -59,10 +70,10 @@ use std::process::Command;
 /// `u32::MAX` here would start a shell owned by an identity belonging to
 /// nobody.
 ///
-/// Supplementary groups are not reset. See the module documentation; that is
-/// the whole of what is missing, and it is missing everywhere at once rather
-/// than per-caller, which is why this function exists.
-///
+/// Supplementary groups are DROPPED here, before the gid and uid change, and
+/// the order is not optional -- each step sheds privilege the next one needs.
+/// They are dropped rather than set to the target's own, because `userdb`
+/// records memberships as names and this tree has no name-to-gid resolver.
 /// # Platforms
 ///
 /// A no-op off unix, because `CommandExt` does not exist there. The real
@@ -73,9 +84,52 @@ pub fn become_user(cmd: &mut Command, uid: u32, gid: u32) {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt as _;
-        // gid first: see the module doc. `std` will apply them in the child.
-        cmd.gid(gid);
-        cmd.uid(uid);
+        // ALL THREE STEPS HAPPEN HERE, and `cmd.uid`/`cmd.gid` are deliberately
+        // not used, which is the opposite of what this function did until
+        // 2026-09-12.
+        //
+        // `std` applies `uid`/`gid` in the child and then runs `pre_exec`
+        // closures, in that order. So a `setgroups` added as a closure would run
+        // *after* the process had already given up the privilege that
+        // `setgroups` requires, fail with EPERM, and abort the child -- turning
+        // a silent leak into `su` not working at all. Doing all three here keeps
+        // the ordering under this function's control.
+        //
+        // THE ORDER IS THE WHOLE POINT: groups, then gid, then uid. Each step
+        // sheds privilege the next one needs, so any other sequence either
+        // fails or silently keeps what it was supposed to drop.
+        //
+        // `setgroups(0, NULL)` DROPS the supplementary groups rather than
+        // setting the target's. That is a deliberate half-measure and the
+        // reason is a missing piece elsewhere: `userdb` records group
+        // memberships as NAMES and this tree has no name-to-gid resolver, so
+        // the target's own groups cannot be expressed as the gid list the call
+        // takes. Dropping is the safe direction -- a session with too few
+        // groups is refused work it should have been allowed, while one with
+        // too many holds authority its user never had. It is also a no-op
+        // today, because `posix::getgroups` reports none; that is a fact about
+        // the current kernel and not a guarantee, which is exactly why this is
+        // wired now rather than when it starts to matter.
+        let (uid, gid) = (uid, gid);
+        // SAFETY: `pre_exec` runs between `fork` and `exec` in the child, where
+        // only async-signal-safe work is permitted. All three calls are thin
+        // wrappers over a single syscall plus an errno store, and
+        // `Error::last_os_error` reads that errno without allocating. Nothing
+        // here takes a lock or touches the heap.
+        unsafe {
+            cmd.pre_exec(move || {
+                if posix::unistd::setgroups(0, core::ptr::null()) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if posix::unistd::setgid(gid) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if posix::unistd::setuid(uid) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
     }
     #[cfg(not(unix))]
     {

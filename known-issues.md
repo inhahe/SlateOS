@@ -130868,6 +130868,50 @@ is its own piece of work rather than a tail-end of this one.
 
 ## TD-B-USER-SWITCHING-PROGRAMS-CANNOT-RESET-SUPPLEMENTARY-GROUPS (lane B, 2026-09-10)
 
+**Status: HALF FIXED 2026-09-12, and the half that is left is a different
+piece of work.** `authlib::identity::become_user` now DROPS the supplementary
+groups before changing gid and uid, so the caller's groups no longer follow a
+user switch into the new session. That covers `su`, `doas`, `sudo`, `login`
+and `sshd` at once, which is why the call lives in `authlib`.
+
+Found by `scripts/check-stale-blockers.py`, written the same day after this
+shape cost three separate waits: the request this entry names has said
+`LANDED` since 2026-09-07.
+
+**Two things had to be got right, and the obvious implementation gets both
+wrong.**
+
+1. *The order is groups, then gid, then uid*, because each step sheds the
+   privilege the next one needs. `setgroups` after `setuid` fails with EPERM.
+2. *It cannot be a `pre_exec` closure added beside the existing `cmd.uid`/
+   `cmd.gid` calls.* `std` applies those in the child and runs `pre_exec`
+   closures **afterwards**, so a `setgroups` added that way runs with the
+   privilege already gone, fails, and aborts the child — turning a silent leak
+   into a program that cannot start a shell. All three calls therefore happen
+   inside one closure, and `Command::uid`/`gid` are deliberately unused.
+
+**The remaining half: there is no name-to-gid resolver.** The correct fix sets
+the *target's* groups, not none. `userdb::Record::groups` returns
+`Vec<String>` — names — and nothing in this tree maps a group name to a gid,
+so the list the syscall takes cannot be built. Dropping is the safe direction
+(too few groups means work refused that should have been allowed; too many
+means authority the user never had), but a user who belongs to `wheel` will
+not have it after `su - them` once memberships start being tracked. **The
+trigger for finishing this is a group database**: `/etc/group` parsing, or
+`userdb` growing a gid alongside each name.
+
+**A note on how this was verified, because the host build cannot see it.**
+The code is inside `#[cfg(unix)]`, and the dev host is Windows, so
+`cargo build --target x86_64-pc-windows-gnu` compiles none of it and a green
+host build proves nothing. Checked with
+`cargo check -p authlib --target x86_64-unknown-linux-gnu`, and then checked
+again by introducing a deliberate typo into the block and confirming the
+compiler reported it — because "it compiled" and "it was skipped" otherwise
+look identical. That hazard is its own entry:
+`B-DEV-HOST-IS-WINDOWS-SO-CFG-UNIX-CODE-IS-NEVER-COMPILED`.
+
+The description below is kept in the tense it was written in.
+
 **In short:** when a program switches to another user, it can now change that
 user's main identity for real, but it cannot clear the *extra* group
 memberships the original user had. Right now nobody has any extra groups, so

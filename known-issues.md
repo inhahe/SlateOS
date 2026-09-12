@@ -138832,10 +138832,14 @@ help-vs-parser sweep had pointed at for an unrelated reason.
 `systemd-cgls` printed a fixed cgroup tree (`init.scope` with pid 1,
 `dbus.service` with pid 100) on every machine, having opened nothing;
 it now walks `/sys/fs/cgroup`, which needs no ioctl and no privilege.
-`systemd-cgtop` **still** invents its numbers -- task counts, CPU
-percentages, memory figures -- and is the next one to fix; `cpu.stat` and
-`memory.current` are readable files, so it is tractable in the same way,
-but it needs two samples over an interval to have a percentage at all.
+`systemd-cgtop` printed five invented rows and now reports
+`pids.current` and `memory.current`, both `-` when unreadable rather than
+0 -- a group whose count is unknown is not a group with no processes.
+Its `%CPU` column is `-`, which is the correct answer rather than a gap:
+a percentage needs two samples and an interval, and one invocation has
+neither. Measured, `systemd-cgtop -n 1` prints `-` there too. Continuous
+mode is where the number would come from and is neither implemented nor
+claimed.
 
 **The `cgls` test is the cautionary half.** It asserted the output
 contained `system.slice` and `user.slice`, which was true on every

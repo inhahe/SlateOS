@@ -725,6 +725,33 @@ def test_caller_supplied_commit_wins_over_git(bh):
     check_true("no supplied commit falls back to git", clean["commit"])
 
 
+def test_a_mid_run_source_edit_is_recorded(bh):
+    """Absent, false and true must stay three distinct claims.
+
+    `commit`, `dirty` and `src_digest` are all read before the gates, and the
+    gate phase alone is ~25 minutes. An edit inside that window is compiled
+    while all three still describe the earlier tree, so the row attributes a
+    result to a commit that never contained it. That happened on 2026-09-12
+    and went unrecorded only because the run was killed for another reason.
+
+    Recorded even when false, unlike `src_digest`, which is omitted when it
+    could not be computed. The two rules look contradictory and are not: an
+    absent digest is unknown while an empty one is a value that groups every
+    failed row together, whereas an absent boolean would merge `this row
+    predates the check` with `this row was checked and was clean`."""
+    args = _Args()
+    args.src_changed_during_run = True
+    rec = bh.build_record(_serial(bh, S_PASS), "PASS", args)
+    check("a mid-run source edit is recorded",
+          rec["src_changed_during_run"], True)
+
+    clean = bh.build_record(_serial(bh, S_PASS), "PASS", _Args())
+    check("a run whose source held still says so explicitly",
+          clean["src_changed_during_run"], False)
+    check_true("and the key is present rather than absent, so it cannot be",
+               "src_changed_during_run" in clean)
+
+
 def test_an_uncomputable_source_digest_is_absent_not_empty(bh):
     """Absent means unknown; empty would be a value that every row shares.
 
@@ -767,6 +794,10 @@ class _Args:
     # that skips the new field -- it produces an AttributeError in every test
     # that builds a record at all. That is exactly how 034dffe2c broke the whole
     # suite with `free_gb_min`.
+    # Read off `args` by build_record, so this default is load-bearing for
+    # every test in the file, not just the ones below -- see the note above
+    # about 034dffe2c.
+    src_changed_during_run = False
     gates_seconds = None
     script_seconds = None
     # Same shape, and the same reason: a run whose floor check was disabled with

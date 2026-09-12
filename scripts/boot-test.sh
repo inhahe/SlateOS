@@ -2843,6 +2843,9 @@ print_bench_results() {
     if [ "${BT_DIRTY:-0}" = 1 ]; then
         bench_args+=(--dirty)
     fi
+    if [ "${BT_SRC_CHANGED:-0}" = "1" ]; then
+        bench_args+=(--src-changed-during-run)
+    fi
     # A probe run is recorded but never becomes a baseline. BENCH_EXPERIMENT
     # states the reason; QEMU_EXTRA implies one even when the caller forgot,
     # because a run under non-default emulator flags is no more reproducible
@@ -2997,6 +3000,9 @@ record_boot_outcome() {
     fi
     if [ "${BT_DIRTY:-0}" = 1 ]; then
         args+=(--dirty)
+    fi
+    if [ "${BT_SRC_CHANGED:-0}" = "1" ]; then
+        args+=(--src-changed-during-run)
     fi
     if [ -n "${BOOT_LABEL:-}" ]; then
         args+=(--label "$BOOT_LABEL")
@@ -7454,6 +7460,33 @@ if [ "$NO_BUILD" -eq 0 ]; then
     # spawns dozens of processes -- and it is also twenty minutes we would spend
     # before discovering the boot cannot run either.
     check_commit_headroom "before building"
+    # Re-take the source digest here, next to the compiler, and compare it with
+    # the one from the top of the run.  Everything identifying this row --
+    # --commit, --dirty, --src-digest -- was read before the gates, so an edit
+    # during the gate phase (~25 minutes) is compiled while all three still
+    # describe the earlier tree.  A row that misattributes a result to an
+    # innocent commit is worse than one that admits it does not know.
+    #
+    # Never fatal and never a refusal: a lane editing its own worktree is
+    # allowed.  Recording it as though it had not happened is not.
+    BT_SRC_CHANGED=0
+    if [ -n "$BT_SRC_DIGEST" ]; then
+        _bt_digest_now=""
+        if command -v python &>/dev/null; then
+            _bt_digest_now="$(python "$PROJECT_ROOT/scripts/src_digest.py" --root "$PROJECT_ROOT" 2>/dev/null || true)"
+        elif command -v python3 &>/dev/null; then
+            _bt_digest_now="$(python3 "$PROJECT_ROOT/scripts/src_digest.py" --root "$PROJECT_ROOT" 2>/dev/null || true)"
+        fi
+        # An unavailable second digest proves nothing and must not accuse.
+        if [ -n "$_bt_digest_now" ] && [ "$_bt_digest_now" != "$BT_SRC_DIGEST" ]; then
+            BT_SRC_CHANGED=1
+            echo "=== WARNING: source changed during this run ===" >&2
+            echo "  before gates: $BT_SRC_DIGEST" >&2
+            echo "  at build:     $_bt_digest_now" >&2
+            echo "  --commit/--dirty/--src-digest describe the earlier tree, so" >&2
+            echo "  this row is marked src_changed_during_run." >&2
+        fi
+    fi
     echo "=== Building kernel ==="
     # Timed, and recorded in bench/boot-history.jsonl alongside the QEMU window.
     #

@@ -1376,6 +1376,13 @@ def build_record(serial: Serial | None, verdict: str, args,
         # consumer that diffs against this row must say so; see
         # report_bench_absence() in boot-test.sh.
         "dirty": bool(args.dirty),
+        # Always recorded, like `dirty` and unlike `src_digest`. Omitting it
+        # when false would make three states into two: a row from before this
+        # check existed and a row that looked and found nothing would both be
+        # absent, and telling those apart is the entire point of recording it.
+        # `src_digest` is omitted when missing for the opposite reason -- there
+        # the alternative is an empty string, which is a *value* that groups.
+        "src_changed_during_run": bool(args.src_changed_during_run),
         "host": socket.gethostname(),
         "os": platform.system(),
         "verdict": verdict,
@@ -2251,6 +2258,13 @@ def main(argv=None) -> int:
     parser.add_argument("--dirty", action="store_true",
                         help="the tree had uncommitted changes at build time, "
                              "so --commit names an ancestor of what ran")
+    parser.add_argument("--src-changed-during-run", action="store_true",
+                        help="the source digest taken before the gates did not "
+                             "match the one taken at build time, so somebody "
+                             "edited the tree mid-run and NEITHER --commit nor "
+                             "--dirty describes what was compiled. Both are read "
+                             "before the build, and the gate phase alone is ~25 "
+                             "minutes of window.")
     parser.add_argument("--no-record", action="store_true",
                         help="classify and report, write nothing")
     parser.add_argument("--classify", action="store_true",

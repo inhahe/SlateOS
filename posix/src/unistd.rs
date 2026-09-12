@@ -1299,8 +1299,32 @@ pub(crate) fn set_stored_hostname_for_test(name: &[u8]) {
 /// happened.
 ///
 /// So the target arm reads one source and reports a failure as one, exactly as
-/// `current_hostname` now does. A genuinely unset domain still reads back as
-/// `(none)`, because that is what the kernel's node contains.
+/// `current_hostname` now does.
+///
+/// # What an unset domain actually reads back as, which is not what this said
+///
+/// This paragraph used to assert: *"A genuinely unset domain still reads back
+/// as `(none)`, because that is what the kernel's node contains."* **It does
+/// not.** `kernel/src/fs/nameservice.rs`'s `init_defaults` sets the domain to
+/// `"localdomain"`, so `/proc/sys/kernel/domainname` serves `localdomain` on
+/// every machine that has never set one. Verified against the source, 2026-09-12,
+/// after lane A read this doc and found it false.
+///
+/// **That is the worst shape of stale claim this tree has produced.** It is not
+/// a comment that fell behind its own code -- it is a confident assertion about
+/// **another lane's defaults**, written into my source and into
+/// `services/ctest-hostname`'s check-13 comment, in two places neither lane
+/// would ever read against the kernel. A doc about your own code gets corrected
+/// the next time someone edits the function. A doc about someone else's is
+/// corrected only by accident.
+///
+/// Lane A intends to change the kernel to serve `(none)`, which is what Linux
+/// does and what makes *unset* distinguishable from *configured* -- the same
+/// argument that removed `localhost` from `current_hostname`. This paragraph
+/// deliberately records what the kernel does **today** rather than what it is
+/// about to do, so that the change moves the doc rather than silently making it
+/// right. Nothing here compares the domain against the empty string, so either
+/// value is safe for this libc.
 #[cfg(target_os = "none")]
 fn current_domain(out: &mut [u8]) -> Option<usize> {
     read_kernel_name(b"/proc/sys/kernel/domainname\0", out)

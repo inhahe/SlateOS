@@ -307,8 +307,25 @@ int main(void)
 
     /* ---------------------------------------------------------------- *
      * 13. Baseline for the domain. Unlike the hostname an empty domain is
-     *     normal — Linux reports the literal "(none)" — so this checks
-     *     only that the call works.
+     *     normal, so this checks only that the call works and asserts
+     *     nothing about the value.
+     *
+     *     This comment used to add "Linux reports the literal (none)".
+     *     True of Linux and false of us: our kernel's init_defaults sets
+     *     the domain to "localdomain" (nameservice.rs), so an unset domain
+     *     reads back as that. The sentence was a claim about ANOTHER LANE'S
+     *     defaults sitting in a fixture comment, which is a place nobody
+     *     checks it against the source — lane A found it by reading my
+     *     libc, not by running anything. Lane A intends to change the
+     *     kernel to (none) for the same reason we deleted "localhost":
+     *     a plausible value makes unset indistinguishable from configured.
+     *
+     *     This check is deliberately value-blind, so it is correct either
+     *     way — and so is every other one: 17 and 18 compare against the
+     *     probe this fixture SET, and 21 restores whatever 13 read. No
+     *     check anywhere asserts the default. Checked before writing it
+     *     down, because the first version of this sentence hedged that
+     *     "17-21 would have to move" and that was a guess.
      * ---------------------------------------------------------------- */
     memset(orig_domain, 0, sizeof orig_domain);
     if (getdomainname(orig_domain, sizeof orig_domain - 1) != 0)

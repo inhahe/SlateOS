@@ -284,6 +284,55 @@ the pair.
 
 ## B-STRINGS-HAS-NO-DATA-SECTION-OPTION (lane B, 2026-09-11)
 
+**Status: FIXED 2026-09-12.** `strings -d` / `--data` scans only the
+initialised, loaded sections of an ELF64. `scripts/strings-diff.sh` goes from
+54 passed / 15 differed to 59 / 13, and the three cases that remain of the
+original two are the diagnostics half described below, which is separate work.
+
+**The rule was validated against binutils before a line was written**, not
+after: on `/bin/true`, scanning every section with `SHF_ALLOC` set and a type
+other than `SHT_NOBITS`, each as its own stream, yields **136** strings, and
+`strings -d` yields **136**. Both halves of that test are needed — `.bss` is
+`SHF_ALLOC` *and* `SHT_NOBITS`, so scanning it would read whatever the file
+holds at that offset, which is the next section.
+
+**Two things measured rather than assumed**, both of which the scoping note
+below asked for:
+
+| question | answer |
+|---|---|
+| what does binutils `-d` do to a non-object file? | nothing special — same output as the default |
+| does our default already match theirs? | yes: on an ELF, default = `-a` = 165 strings |
+
+So the fallback for anything that is not a parseable ELF64 is to scan the whole
+file, which is upstream's behaviour rather than a gap being papered over.
+
+**THE OFFSET WAS THE HALF THAT WAS EASY TO GET WRONG.** Each section is scanned
+as its own stream, so a naive implementation reports the offset *within the
+section* and every number under `-t` is wrong by the section's start. Nothing
+in the harness would have caught it: `-d elf.bin` prints identical strings
+either way. Three cases were added — `-d -t x`, `-d -t d`, `-d -n 8 -t x` — and
+then verified to fail when the base offset is removed, because a case that
+passes proves nothing until you have seen it fail.
+
+A test was narrowed rather than deleted:
+`the_object_file_options_are_refused_rather_than_ignored` becomes
+`an_unimplemented_object_file_option_is_refused_rather_than_ignored`. It lost
+one of its two subjects and kept the other, `--target`, which must still refuse
+— silently ignoring it would hand a caller output for the wrong architecture
+and look right. It now also asserts that `-d` IS accepted, so it fails if the
+refusal is ever quietly put back.
+
+Only ELF64 little-endian is parsed. A 32-bit or big-endian object is scanned
+whole: wrong, but wrong in the direction of printing more rather than less.
+Every offset and length out of the section table is range-checked with
+`checked_add` and `get` — an object file is attacker-chosen input like any
+other.
+
+`cargo test -p coreutils --bin strings`: 45 passed, 0 failed.
+
+The description below is kept in the tense it was written in.
+
 `strings -d` / `--data` is absent. GNU's `strings` scans only the *initialised,
 loaded* sections of an object file with it, which is the difference between
 listing the strings a program will actually have in memory and listing every

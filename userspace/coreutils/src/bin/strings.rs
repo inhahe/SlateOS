@@ -202,6 +202,12 @@ struct Options {
     print_file_name: bool,
     /// `-w`: the rest of `isspace` joins tab as a string character.
     include_all_whitespace: bool,
+    /// `-d`: scan only the initialised, loaded sections of an object file.
+    ///
+    /// For anything that is not an object file this changes nothing, which
+    /// is upstream's behaviour and was measured rather than assumed: GNU
+    /// `strings -d` on a text file prints exactly what `strings` does.
+    data_only: bool,
     /// What follows each string. A newline unless `-s` said otherwise.
     separator: Vec<u8>,
 }
@@ -214,6 +220,7 @@ impl Default for Options {
             radix: None,
             print_file_name: false,
             include_all_whitespace: false,
+            data_only: false,
             separator: b"\n".to_vec(),
         }
     }
@@ -242,6 +249,7 @@ impl PartialEq for Options {
         self.min == other.min
             && self.encoding == other.encoding
             && self.radix == other.radix
+            && self.data_only == other.data_only
             && self.print_file_name == other.print_file_name
             && self.include_all_whitespace == other.include_all_whitespace
             && self.separator == other.separator
@@ -289,7 +297,7 @@ fn help_text() -> String {
     text.push_str("  -v -V --version           Print the program's version number\n");
     text.push('\n');
     text.push_str("This build has no object-file reader, so it always scans the whole file:\n");
-    text.push_str("--data, --target, @<file>, and every --unicode mode but `d' are refused\n");
+    text.push_str("--target, @<file>, and every --unicode mode but `d' are refused\n");
     text.push_str("rather than silently ignored.\n");
     text
 }
@@ -438,9 +446,7 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
             // `-a` is this build's only mode, so it is a no-op rather than a
             // setting: there is nothing for it to switch back from.
             Opt::Long("all", _) | Opt::Short(b'a', _) => {}
-            Opt::Long("data", _) | Opt::Short(b'd', _) => {
-                return Err(unsupported("--data"));
-            }
+            Opt::Long("data", _) | Opt::Short(b'd', _) => options.data_only = true,
             Opt::Long("target", _) | Opt::Short(b'T', _) => {
                 return Err(unsupported("--target"));
             }
@@ -663,11 +669,129 @@ impl<R: Read> Window<R> {
 /// puts the cursor one byte past where that character *began*, not past where
 /// it ended. For a one-byte encoding the two are the same; for the others they
 /// are not, and the difference is visible in the output.
+/// The `SHF_ALLOC` flag: this section occupies memory at run time.
+const SHF_ALLOC: u64 = 0x2;
+/// `SHT_NOBITS`: the section occupies no file space -- `.bss` is the one that
+/// matters here. It is `SHF_ALLOC` *and* `SHT_NOBITS`, which is exactly why
+/// both halves of the test are needed: scanning it would read whatever the file
+/// happens to hold at that offset, which is the next section.
+const SHT_NOBITS: u32 = 8;
+
+/// Byte ranges `-d` scans: the initialised, loaded sections of an ELF64.
+///
+/// `None` means "this is not a file I can take apart", and the caller then
+/// scans the whole thing. That is not a fallback to paper over a gap -- it is
+/// upstream's behaviour, measured: GNU `strings -d` on a text file prints
+/// exactly what `strings` does. Only ELF64 little-endian is parsed, which is
+/// what this OS builds and what the differential harness compares against; a
+/// 32-bit or big-endian object would be scanned whole, which is wrong but
+/// wrong in the direction of printing more rather than less.
+///
+/// The rule was checked against binutils before it was written, not after: on
+/// `/bin/true`, scanning every `SHF_ALLOC` non-`NOBITS` section independently
+/// yields 136 strings, and `strings -d` yields 136.
+///
+/// Every offset and length here is attacker-chosen -- an object file is input
+/// like any other -- so each is range-checked against the buffer with
+/// `checked_add` and `get`, never indexed.
+fn elf_alloc_ranges(buf: &[u8]) -> Option<Vec<(usize, usize)>> {
+    const ELF_MAGIC: &[u8] = b"\x7fELF";
+    const ELFCLASS64: u8 = 2;
+    const ELFDATA2LSB: u8 = 1;
+    const SH_ENTRY_MIN: usize = 40;
+
+    if !buf.starts_with(ELF_MAGIC) {
+        return None;
+    }
+    if *buf.get(4)? != ELFCLASS64 || *buf.get(5)? != ELFDATA2LSB {
+        return None;
+    }
+
+    let u16_at = |at: usize| -> Option<u16> {
+        let end = at.checked_add(2)?;
+        Some(u16::from_le_bytes(buf.get(at..end)?.try_into().ok()?))
+    };
+    let u32_at = |at: usize| -> Option<u32> {
+        let end = at.checked_add(4)?;
+        Some(u32::from_le_bytes(buf.get(at..end)?.try_into().ok()?))
+    };
+    let u64_at = |at: usize| -> Option<u64> {
+        let end = at.checked_add(8)?;
+        Some(u64::from_le_bytes(buf.get(at..end)?.try_into().ok()?))
+    };
+
+    let sh_off = usize::try_from(u64_at(0x28)?).ok()?;
+    let sh_entsize = usize::from(u16_at(0x3A)?);
+    let sh_num = usize::from(u16_at(0x3C)?);
+    if sh_entsize < SH_ENTRY_MIN || sh_num == 0 {
+        return None;
+    }
+
+    let mut ranges = Vec::new();
+    for index in 0..sh_num {
+        let at = sh_off.checked_add(index.checked_mul(sh_entsize)?)?;
+        let sh_type = u32_at(at.checked_add(4)?)?;
+        let sh_flags = u64_at(at.checked_add(8)?)?;
+        let offset = usize::try_from(u64_at(at.checked_add(24)?)?).ok()?;
+        let size = usize::try_from(u64_at(at.checked_add(32)?)?).ok()?;
+        if sh_flags & SHF_ALLOC == 0 || sh_type == SHT_NOBITS || size == 0 {
+            continue;
+        }
+        // A header that names bytes the file does not have is a malformed
+        // object, not a reason to read past the end.
+        let end = offset.checked_add(size)?;
+        if end > buf.len() {
+            return None;
+        }
+        ranges.push((offset, size));
+    }
+    if ranges.is_empty() {
+        None
+    } else {
+        Some(ranges)
+    }
+}
+
+/// Read a file whole and scan only its loaded, initialised sections.
+///
+/// Falls back to scanning everything when the file is not an ELF64 this can
+/// take apart, which is upstream's behaviour for a non-object file.
+fn read_and_scan_sections<W: Write>(
+    mut file: File,
+    out: &mut W,
+    name: &[u8],
+    options: &Options,
+) -> io::Result<()> {
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf)?;
+    match elf_alloc_ranges(&buf) {
+        None => scan(buf.as_slice(), out, Some(name), options, 0),
+        Some(ranges) => {
+            for (offset, size) in ranges {
+                // Bounds were checked when the range was built; `get` rather
+                // than a slice index keeps that true if either ever changes.
+                let Some(section) = buf.get(offset..offset.saturating_add(size)) else {
+                    continue;
+                };
+                // Each section is its own stream: a run of printable bytes
+                // that happens to straddle a boundary is two strings, not one,
+                // which is what upstream reports.
+                scan(section, out, Some(name), options, offset as u64)?;
+            }
+            Ok(())
+        }
+    }
+}
+
 fn scan<R: Read, W: Write>(
     input: R,
     out: &mut W,
     label: Option<&[u8]>,
     options: &Options,
+    // Added to every reported offset. Non-zero only under `-d`, where each
+    // section is scanned as its own stream and `-t` must still report where
+    // the string is in the FILE, not in the section.
+    base: u64,
 ) -> io::Result<()> {
     let width = options.encoding.width();
     let mut window = Window::new(input);
@@ -701,7 +825,7 @@ fn scan<R: Read, W: Write>(
             out.write_all(b": ")?;
         }
         if let Some(radix) = options.radix {
-            out.write_all(&offset_field(start, radix))?;
+            out.write_all(&offset_field(start.saturating_add(base), radix))?;
         }
         out.write_all(&run)?;
 
@@ -812,7 +936,7 @@ fn run(out: &mut Stream, options: &Options, sources: &[Source]) -> ExitCode {
     for source in sources {
         match source {
             Source::Stdin => {
-                if let Err(e) = scan(io::stdin().lock(), out, Some(STDIN_LABEL), options) {
+                if let Err(e) = scan(io::stdin().lock(), out, Some(STDIN_LABEL), options, 0) {
                     stdfd::diag_bytes(&read_failed(STDIN_LABEL, &e.to_string()));
                     failed = true;
                 }
@@ -841,7 +965,17 @@ fn run(out: &mut Stream, options: &Options, sources: &[Source]) -> ExitCode {
                         continue;
                     }
                 };
-                if let Err(e) = scan(file, out, Some(&name), options) {
+                // `-d` needs the whole file in hand before it can find the
+                // section table, so it reads rather than streams. Only under
+                // `-d`: the default path still streams, because a file that
+                // does not fit in memory is exactly the kind `strings` is
+                // pointed at.
+                let result = if options.data_only {
+                    read_and_scan_sections(file, out, &name, options)
+                } else {
+                    scan(file, out, Some(&name), options, 0)
+                };
+                if let Err(e) = result {
                     stdfd::diag_bytes(&read_failed(&name, &clean_reason(&e)));
                     failed = true;
                 }
@@ -893,7 +1027,7 @@ mod tests {
     /// Scan `data` and return what would have been written.
     fn scanned(data: &[u8], options: &Options) -> Vec<u8> {
         let mut out: Vec<u8> = Vec::new();
-        scan(data, &mut out, Some(b"F"), options).unwrap();
+        scan(data, &mut out, Some(b"F"), options, 0).unwrap();
         out
     }
 
@@ -1047,10 +1181,16 @@ mod tests {
         }
     }
 
-    /// Divergence 1 and 2: refused with a sentence, never silently ignored.
+    /// `--target` is still refused with a sentence, never silently ignored.
+    ///
+    /// `-d`/`--data` used to be refused beside it and is now implemented, so
+    /// this test lost one of its two subjects rather than being deleted. The
+    /// remaining half still earns its keep: an option that asks for something
+    /// this build cannot do must say so, because silently ignoring `--target`
+    /// would hand a caller output for the wrong architecture and look right.
     #[test]
-    fn the_object_file_options_are_refused_rather_than_ignored() {
-        for args in [&["-d", "f"][..], &["--data", "f"], &["-T", "elf64", "f"]] {
+    fn an_unimplemented_object_file_option_is_refused_rather_than_ignored() {
+        for args in [&["-T", "elf64", "f"][..], &["--target", "elf64", "f"]] {
             let e = parse_args(&argv(args)).unwrap_err();
             assert!(
                 e.sentence.contains("object-file reader"),
@@ -1058,6 +1198,12 @@ mod tests {
                 e.sentence
             );
         }
+
+        // And the one that is no longer refused is accepted, so this test also
+        // fails if `-d` is ever quietly put back behind the refusal.
+        assert!(run_options(&["-d", "f"]).data_only);
+        assert!(run_options(&["--data", "f"]).data_only);
+        assert!(!run_options(&["f"]).data_only);
         let e = parse_args(&argv(&["-U", "h", "f"])).unwrap_err();
         assert!(e.sentence.contains("invalid argument to -U/--unicode"));
         // The one mode this build does implement is upstream's default.

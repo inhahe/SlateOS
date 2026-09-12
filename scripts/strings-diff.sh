@@ -202,6 +202,14 @@ run_case -a elf.bin
 run_case --all elf.bin
 run_case -d elf.bin
 run_case --data elf.bin
+# `-d` with an offset, which is the half of it that is easy to get wrong.
+# Each section is scanned as its own stream, so a naive implementation reports
+# the offset WITHIN the section and every number is wrong by the section's
+# start. These cases are the only thing that would catch that: `-d elf.bin`
+# alone prints the same strings either way.
+run_case -d -t x elf.bin
+run_case -d -t d elf.bin
+run_case -d -n 8 -t x elf.bin
 run_case -a -n 8 elf.bin
 
 # --- naming the file in the output --------------------------------------------------------------------

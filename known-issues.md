@@ -136228,3 +136228,80 @@ Two tests were retargeted: `parse_invalid_p_value_errors` and
 `parse_invalid_pn_value_errors` both asserted `invalid strip count`, our phrase.
 
 `patch-diff.sh`: 49 passed / 16 differed to **51 / 14**.
+
+### A-KSHELL-DOLLAR-SINGLE-QUOTE-LEAVES-A-STRAY-DOLLAR. `echo $'hi'` prints `$hi` — 2026-09-12 — LOGGED 2026-09-12 (lane A)
+
+**In short:** the shell understands the `$'...'` spelling well enough not to get
+confused by it, but not well enough to actually carry it out. Anything typed that way
+comes out with a stray dollar sign on the front and its escape codes unprocessed.
+
+**Where:** `kernel/src/shellquote.rs` — the `scan()` state machine has three contexts
+(`Unquoted`, `Single`, `Double`) and no notion of `$'`. A `$` in `Ctx::Unquoted` falls
+to the catch-all literal arm; the `'` after it then opens an ordinary single-quoted
+region. So `strip_quotes` removes the two quotes and keeps the `$`.
+
+**Measured**, with a host harness built from the real module (lines 1-608 have no
+`crate::` dependencies, so the scanner compiles on the host unmodified):
+
+| typed | kshell today | bash 5.2.37 |
+|---|---|---|
+| `$'hi'` | `$hi` | `hi` |
+| `$'a b'` | `$a b` | `a b` |
+| `$'x\x41y'` | `$x\x41y` | `xAy` |
+| `$'\n'` | `$\n` | a newline |
+
+Controls in the same run behave correctly, so this is specific to the construct and not
+a broken harness: `'plain'` -> `plain`, `"dq"` -> `dq`, `a\ b` -> `a b`.
+
+**Why it is a bug and not merely an unimplemented feature.** The 2026-08-24 note in
+`TD-KSHELL-LINE-EDITOR-IS-UTF8` says the expander's `$'` arm exists to *copy the
+construct through unchanged* and leave quote state alone — which it does correctly, and
+which fixed a real quoting-inversion bug. The intent was that decoding would happen
+later, after quote removal. **Nothing decodes.** So the construct is recognised, guarded,
+passed along — and then silently mangled at the end of the pipeline. A user who types
+`echo $'hi'` gets `$hi` with no error.
+
+**Three stale blockers found while confirming this, all of which say the work cannot be
+done yet, and all three premises are now false:**
+
+| claim | where | status |
+|---|---|---|
+| "needs an output path that can carry non-UTF-8 — `shell_write` takes `&str` and the capture buffer is a `String`" | `kshell.rs` doc comment on `interpret_echo_escapes` (~10264) | false: `SHELL_OUTPUT` is `Mutex<Option<Vec<u8>>>`, `capture_command -> Vec<u8>`, `shell_write_bytes` and `console::write_bytes` are the primitives |
+| "it cannot happen at all until the word path carries bytes end to end" | `kshell.rs` ~1213, the `$'` arm | false — and the comment sits **inside `expand_vars_bytes_inner(&[u8]) -> Option<Vec<u8>>`**, the very function whose signature disproves it |
+| "stages (b)+(c) are now gated on operator decision Q45" | `known-issues.md`, Correction 4 | answered 2026-08-21 as option B (§261); the entry already notes it read as blocked for three days after |
+
+This is the third time in this entry's history that a note saying "blocked" outlived the
+block. Stale reasoning outlives stale code because code gets exercised and prose does not.
+
+**Bash ground truth for the fix**, captured from 5.2.37 rather than recalled, because the
+awkward edges are where a confident misreading lands:
+
+| escape | result | note |
+|---|---|---|
+| \n \t \r \a \b \f \v | 0a 09 0d 07 08 0c 0b | one byte each |
+| \e, \E | 1b | both spellings |
+| \' , \" , \\ | 27, 22, 5c | |
+| \x41 | 41 | **1-2** hex digits: \x4 -> 04 |
+| \xg, \x | 5c 78 67, 5c 78 | no digits -> literal, backslash kept |
+| \101 | 41 | 1-3 **octal** digits, no leading 0 needed |
+| \777 | ff | wraps to a byte (511 & 0xFF) |
+| \0101 | 08 31 | \0 plus up to 3 more octal, then literal `1` |
+| \0 | NUL | |
+| \8, \q | 5c 38, 5c 71 | not an escape -> literal, backslash kept |
+| \cA | 01 | control-letter |
+| \uD | 0d | 1-4 hex, encoded **UTF-8** — so an escape can yield several bytes |
+
+**Design consequence.** `scan()` yields one `Tok` per input byte, and `\u`/`\U` can
+produce up to four output bytes, so the iterator needs a small pending-output buffer
+rather than a one-in-one-out map. Skipping input bytes is safe for the other callers:
+`split_bare_words` and `word_start_at` key only off *bare* whitespace, and a byte inside
+`$'...'` is never bare.
+
+**Also needed:** `Ctx` gains a `DollarSingle` variant, so `trailing_context` and
+`quote_suffix` need arms — inside `$'...'` a backslash *is* special, unlike `'...'`, so
+completion must escape differently there. The compiler will enumerate the sites.
+
+**Why this matters beyond tidiness:** option B (`design-decisions.md` §261) makes
+`$'\xff'` *the* way a user names a non-UTF-8 file, since the source line stays text.
+That is the whole user-visible payoff of `TD-KSHELL-LINE-EDITOR-IS-UTF8`, and it rests
+entirely on this construct working.

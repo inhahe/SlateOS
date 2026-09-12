@@ -131184,8 +131184,38 @@ Two measured examples:
   all. Every *real* option it lacked, coreutils has: `--peta`, `--pebi`,
   `--si`, `--line`, `--committed`, `--version`. It also sat in
   `argv-utf8-baseline.txt` as `argv-as-string`.
-* **`ps`** -- **MEASURED 2026-09-12, and it is the first pair the pass count
-  does not decide.** `scripts/ps-diff.sh` pins the process table in a PID
+* **`ps`** -- **SETTLED 2026-09-12: coreutils' wins, 12 to 0.** The entry
+  below is kept because it was right when written and stopped being right four
+  hours later, which is the more useful record.
+
+      coreutils ps    12 passed,  0 differed, 15 differ on purpose
+      userspace/ps     0 passed, 12 differed, 15 differ on purpose
+
+  Same harness, same cases, opposite results. The reversal is not a change in
+  the standalone: it is that coreutils' `ps` was given procps' column set and
+  a parser that refuses what it cannot honour, both of which it was missing
+  this morning. **A pair verdict is a statement about two implementations on a
+  given day, and the losing half of this one was two fixable defects away from
+  winning.**
+
+  **The standalone scored 0 XPASS**, which is the sharper half of the result.
+  It implements `-l`, `-u`, `-o`, `-p` and `--no-header` -- five real procps
+  options coreutils' refuses -- and not one of them produced procps' output.
+  Every case declared "not implemented here" for coreutils' *also* differed
+  for the implementation that has it. This is `free` again: 23 options
+  advertised against 2 is not 21 options that agree.
+
+  **What that means for the retirement is "merge, not pick".** Deleting
+  `userspace/ps` outright loses five options that exist, however wrongly they
+  render; §1005 says the better half survives *inside coreutils*, which here
+  means porting them in and then retiring the crate, as `diff` was ported. The
+  harness measures each one independently, and each is declared by name in
+  `ps-diff.sh` so implementing `-o` turns three cases into XPASS rather than
+  disappearing into a collective excuse.
+
+  **The original entry, from before the fixes:**
+
+  `scripts/ps-diff.sh` pins the process table in a PID
   namespace with its own `/proc` and compares both against procps-ng:
 
       coreutils ps     0 passed, 26 differed

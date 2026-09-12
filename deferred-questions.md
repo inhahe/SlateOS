@@ -328,47 +328,6 @@ corrected on its say-so (§229 — no correction is applied to any recorded valu
 The cost is a missed detection in a band no run has yet landed in, and the
 failure is now documented in `known-issues.md` with a script that reproduces it,
 so it cannot be rediscovered as a surprise.
-
-## [A] Should every file write keep an automatic undo history? — deferred 2026-09-11
-
-**Trigger to promote this into `open-questions.md`:** a number for what the undo history
-actually costs a single small write. The measurement is designed and cheap — see
-`known-issues.md` → `TD-A-A-A-EVERY-BENCHMARKED-WRITE-...-OLD-CONTENT` — and needs one
-boot, no new kernel hooks. Until it exists this is a decision waiting on the project, not
-on the operator.
-
-**In short:** SlateOS currently keeps an automatic undo history for files — the last 16
-versions of anything outside `/proc`, `/dev`, `/sys` and `/tmp`. The way it does that is
-that every time a program overwrites a file, the kernel first reads back the old contents
-and computes a checksum (a short fingerprint used to spot two identical versions and store
-them once). That is useful — it is what lets a user recover a file they clobbered — but it
-is not free, and it currently happens on *every* write to *every* ordinary file. It looks
-like it may be the single largest cost in writing a small file, possibly larger than the
-write itself. Nobody chose this: `design.txt` does not mention the feature, so there is no
-specified policy to appeal to.
-
-**The options, if the cost turns out to be large:**
-
-* **Keep it on for everything (status quo).**
-  *What changes:* nothing. Saving a file stays slower than it needs to be, and the
-  slowdown grows with file size, so saving a large file is affected most.
-* **On only where it is asked for** — a per-directory setting, off by default.
-  *What changes:* saving files gets faster everywhere; "restore previous version" stops
-  working except in directories someone turned it on for. A user who expected the history
-  to be there would find it missing.
-* **Keep it on everywhere but make it cheaper** — e.g. do the fingerprinting in the
-  background after the write returns rather than before it.
-  *What changes:* saving a file is fast *and* the history still works; the history entry
-  appears a moment after the save instead of during it, and a crash in that moment loses
-  the one version. More moving parts to get wrong.
-
-**If it is never answered:** nothing breaks and nothing gets worse with time. Writes stay
-as slow as they are now, and two benchmarks keep missing their targets for a reason that
-is now written down, which is the main harm — a target nobody can hit teaches people to
-ignore targets. The benchmark-honesty half is being fixed regardless of the answer: a
-benchmark called `vfs_write_256` should state whether its number includes the history
-work, and that is not a policy question.
-
 ## [A] Should the write benchmarks run with the file indexer on or off? — deferred 2026-09-11
 
 **Trigger to promote, or to just do it:** the versioning A/B landing in

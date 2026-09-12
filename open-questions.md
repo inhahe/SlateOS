@@ -1367,6 +1367,52 @@ depend on it.
 port needed the exact rule, and the manual's own example was not enough to
 derive it either.
 
+
+## A-Q10: Saving a file costs twice what it needs to. Do we keep the automatic undo history?
+
+**In short:** SlateOS keeps the last 16 versions of every file automatically, so a user
+can recover something they overwrote. To do that, each time a program saves a file the
+system first reads back what was there and computes a checksum of it (a short fingerprint
+used to notice when two versions are identical and store them once). That is now measured
+and it is not cheap: **it is about half the total cost of saving a small file.** Saving
+currently costs ten times as much as reading the same data. The question is whether that
+is a good trade.
+
+**The measurement**, so the figure can be checked rather than taken on trust. Writing 256
+bytes to an ordinary file: 95,942 ns. Writing the same bytes to `/tmp`, which is excluded
+from version history: 47,892 ns. Reading 256 bytes: 9,223 ns. Measured in one run under
+emulation (run `b6mifed3b`); under hardware virtualisation the absolute numbers are about
+half, and the share attributable to history is somewhat larger because a different part of
+it gets slower there. Either way it is the largest single component.
+
+**The options:**
+
+* **Keep it on everywhere (what happens today).**
+  *What changes:* nothing. Saving stays about twice as slow as it needs to be, and the
+  penalty grows with file size, so saving a large file is hit hardest.
+* **On only where it is asked for** — a per-directory setting, off by default.
+  *What changes:* saving gets roughly twice as fast everywhere; "restore previous version"
+  stops working except in directories someone turned it on for. A user who expected the
+  history to be there would find it missing, with no warning at the moment it mattered.
+* **Keep it on everywhere but do the work after the save returns**, in the background.
+  *What changes:* saving is fast *and* the history still works. The history entry appears a
+  moment after the save rather than during it, and a crash in that moment loses that one
+  version. More moving parts to get wrong, and the crash window is real rather than
+  theoretical.
+* **Keep it on, accept the cost, and fix the budget instead.**
+  *What changes:* nothing in behaviour; `performance-targets.md` stops comparing our
+  write speed against Linux's ext4, which does no versioning, and starts comparing like
+  with like. This is the option that admits the current target can never be met.
+
+**If this is never answered:** nothing breaks and nothing degrades over time. The standing
+cost is that two benchmarks keep missing their targets for a reason now written down, and
+an unmeetable target teaches people to ignore targets. The filesystem row in
+`performance-targets.md` already carries a note saying its comparison is unlike-for-unlike
+for this reason, so the harm is contained but it is the kind that compounds quietly.
+
+*Promoted from `deferred-questions.md` 2026-09-12: that entry's trigger was “a cost figure
+for what the undo history costs a single small write”, and this is it.*
+
 # Resolved
 
 **The body above holds OPEN questions only.** When the operator answers one,

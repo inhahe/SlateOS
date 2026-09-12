@@ -134843,3 +134843,103 @@ authorise me to baseline their module; lane C turned up and wired the module pro
 the question was answered by events and not by the operator. Moving a dead question into
 the live queue would spend the operator's attention on a decision that no longer exists,
 which is the failure `deferred-questions.md` was created to prevent.
+
+## TD-A-A-A-A-MEASURED-AUTO-VERSIONING-IS-HALF-A-SMALL-FILE-WRITE-AND-THE-TWO-ROUTES-DISAGREE (lane A, 2026-09-12) — **the A/B landed; read the accelerator caveat before using the numbers**
+
+**In short:** writing a small file costs about twice what it should, and roughly half of
+that is the automatic version history — reading the old contents back and checksumming
+them before the write. Measured, not inferred. But the measurement ran under emulation,
+and the cost structure differs enough between emulation and hardware virtualisation that
+the same change can look decisive under one and invisible under the other.
+
+### The numbers (run b6mifed3b, commit 2de15d6f6, **QEMU TCG**, release profile)
+
+| series | min ns | share of the write |
+|---|---|---|
+| `vfs_write_breakdown_full` (root, versioned) | 95,942 | — |
+| `vfs_write_breakdown_unversioned` (`/tmp`) | 47,892 | — |
+| **differential: versioning** | **48,050** | **50.1%** |
+| `vfs_write_breakdown_history` (direct) | 26,194 | 27.3% |
+| `vfs_write_breakdown_index` | 16,059 | 16.7% |
+| `vfs_write_breakdown_journal` | 616 | 0.6% |
+| `ns` / `access` / `intercept` / `quota` | 19 / 54 / 323 / 279 | under 1% combined |
+
+`vfs_write_256` in the same run: 95,356 ns. `vfs_read_256`: 9,223 ns — so a write costs
+**10.3× a read** of the same size.
+
+### The two routes disagree by 1.83×, and that was the designed outcome
+
+The benchmark measures versioning two ways on purpose, and its comment said a
+disagreement would itself be the finding. It disagrees: 48,050 differential against
+26,194 direct.
+
+The differential is an **upper** bound, because the `/tmp` arm differs by more than
+versioning: it is a separate `memfs` instance whose root directory holds a handful of
+entries, where `/` holds the whole staged OS tree. `child_ino` does a map lookup in the
+parent's children, so the root arm pays a deeper and colder lookup on every iteration.
+The direct phase is a **lower** bound for the opposite reason: it calls
+`try_auto_record` 200 times on identical content, so the content-addressed store dedupes
+and the version list sits at its 16-entry cap, exercising the eviction path rather than
+the insert path. True cost is between them.
+
+### The accelerator caveat, which is the part most likely to mislead
+
+**This run is TCG. Do not compare it to the WHPX figures in this file** — the same commit
+measures ~43,000 ns under WHPX and ~108,000 under TCG, so a cross-accelerator delta is
+meaningless. That is the straddling error this session produced three times.
+
+More subtly: the HPET finding recorded earlier — that `record_version` calls
+`hpet::elapsed_ns()`, the MMIO read whose removal took the journal phase from 14,206 ns
+to 337 — **cannot be confirmed or denied by this run.** `hpet_read`'s accelerator ratio
+is 0.03×: it is ~30× *slower* under WHPX, because there the MMIO access traps. Under TCG
+that read costs a few hundred nanoseconds, so it is a negligible part of this 26,194 and
+the figure is genuinely the read-back plus the SHA-256 plus the CAS.
+
+So both readings are true of different machines: under **WHPX** the clock read alone is
+~13,900 ns and dominates; under **TCG** it disappears and the hashing dominates. A fix
+that looks decisive on one accelerator can be invisible on the other, and neither number
+is the "real" one — real hardware is a third case nobody here has measured.
+
+### What is actionable
+
+1. `record_version`'s `hpet::elapsed_ns()` → `clock_monotonic()`. Same contract, same fix
+   as the journal. Worth ~13,900 ns under WHPX, ~nothing under TCG, and it is one line.
+2. The `index` phase at 16,059 ns is the second-largest component and is live **only
+   because a self-test left it live** — see the indexer entry. Whatever is decided there
+   changes this number by a sixth.
+### Replicated, 2026-09-12 (run bssh17cpy, commit 24f11ef45, TCG/release)
+
+A second independent run, and the ratio holds while the absolutes do not:
+
+| | run 1 (2de15d6f6) | run 2 (24f11ef45) |
+|---|---|---|
+| `full` (root, versioned) | 95,942 | 107,025 |
+| `unversioned` (`/tmp`) | 47,892 | 56,607 |
+| **versioning share** | **50.1%** | **47.1%** |
+| direct `history` phase | 26,194 | 25,221 |
+
+Every absolute moved 6–18% between runs — including `unversioned`, which neither commit
+between them touches — so that drift is TCG run-to-run noise, not regression. The measured
+floor for this harness is a median of 1.099× pairwise under TCG with p90 1.750× and a third
+of observations exceeding 25%, so a 10% shift is well inside it. **Reading it as a
+regression would be the error this file documents repeatedly**, and the temptation was
+real: `vfs_write_256` rose 10.1% in the run that shipped a change intended to make writes
+faster.
+
+The *ratio* is the robust quantity, and for a structural reason rather than luck: both arms
+sit in the same run and move together, so noise largely divides out of a within-run
+comparison and does not divide out of a between-run one. That is the argument for having
+built this as an A/B in the first place.
+
+**And the indexer finding is now confirmed empirically, not just by reading.** The new
+scorecard line says `indexer live=true (initialized=true, rebuilds=1, entries=333)`.
+Exactly one rebuild — which is `index::self_test`'s, never reset — so the benchmark has
+indeed been measuring an indexed write by accident.
+
+The HPET substitution in `record_version` landed between these two runs and is invisible
+in them, as predicted: both are TCG, where that read costs ~450 ns rather than the ~13.5 µs
+it costs under WHPX. Confirming it needs a WHPX run, and the accelerator is not selectable
+— it is read from the guest's CPUID, by design.
+
+3. Whether writes should carry version history at all is in `deferred-questions.md`. Its
+   promotion trigger was "a cost figure". This is that figure: **half the write**.

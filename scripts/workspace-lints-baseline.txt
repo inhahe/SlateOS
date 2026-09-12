@@ -41,7 +41,6 @@ userspace/crond
 userspace/crontab
 userspace/ctags
 userspace/dbus
-userspace/diff
 userspace/diskutil
 userspace/dmesg
 userspace/fdisk

@@ -297,17 +297,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "chown"
-version = "0.1.0"
-dependencies = [
- "modechange",
- "pwdb",
- "quoting",
- "scratchdir",
- "userdb",
-]
-
-[[package]]
 name = "chpasswd"
 version = "0.1.0"
 dependencies = [
@@ -594,13 +583,6 @@ dependencies = [
  "appearance",
  "guitk",
  "oswindow",
-]
-
-[[package]]
-name = "diff"
-version = "0.1.0"
-dependencies = [
- "quoting",
 ]
 
 [[package]]

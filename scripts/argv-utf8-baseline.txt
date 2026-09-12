@@ -50,7 +50,6 @@ userspace/curl/src/main.rs:argv-as-string
 userspace/dbus/src/main.rs:argv-as-string
 userspace/dc/src/main.rs:argv-as-string
 userspace/dhcpcd/src/main.rs:argv-as-string
-userspace/diff/src/main.rs:argv-as-string
 userspace/dig/src/main.rs:argv-as-string
 userspace/diskutil/src/main.rs:argv-as-string
 userspace/dmesg/src/main.rs:argv-as-string

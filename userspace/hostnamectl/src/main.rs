@@ -665,6 +665,20 @@ fn cmd_dnsdomainname(args: &[String]) {
                 println!("dnsdomainname {VERSION}");
                 process::exit(0);
             }
+            // Used to be skipped, so `dnsdomainname --zzq` printed the
+            // domain and exited 0.
+            other if other.starts_with('-') && other.len() > 1 => {
+                eprintln!(
+                    "dnsdomainname: {}",
+                    usageerror::unknown_option(other.as_bytes())
+                );
+                eprintln!("Usage: dnsdomainname");
+                // 255, measured. net-tools' `dnsdomainname` is a
+                // personality of its `hostname`, and that is what the whole
+                // family exits with for a bad option -- not 1, and not the
+                // 64 util-linux uses elsewhere.
+                process::exit(255);
+            }
             _ => {}
         }
     }

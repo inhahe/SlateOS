@@ -8,6 +8,8 @@ description = "SlateOS hostnamectl utility"
 scratchdir = { path = "../scratchdir" }
 
 [dependencies]
+# getopt's wording, shared. net-tools' `hostname` family uses it verbatim.
+usageerror = { path = "../usageerror" }
 # The host name is read from the kernel and set from argv; neither is
 # constrained to be printable.
 quoting = { path = "../quoting" }

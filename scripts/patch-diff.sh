@@ -296,7 +296,13 @@ run_case u.patch -p1 -s
 run_case u.patch -p1 --quiet
 run_case u.patch -p1 --silent
 run_case drift.patch -p1 -s
-run_case u.patch -p1 -v
+# `-v` IS `--version`, not verbose. Measured, because the name says the
+# opposite and the sibling utilities in this tree reinforce the wrong
+# reading: `strings -v` prints a version and `strings -V` does too, while
+# `patch -V` is `--version-control` and takes an argument, and `patch -h`
+# is not an option at all. So this case differs for the same reason
+# `--version` does, and is counted with it rather than as a failure.
+xfail_case "our version string, not the GNU project's" u.patch -p1 -v
 run_case u.patch -p1 --verbose
 
 # --- output redirection and directory -------------------------------------------

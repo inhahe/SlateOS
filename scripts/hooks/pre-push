@@ -57,6 +57,11 @@
 #  31. Refuse a gate that runs differently here than in `boot-test.sh` without
 #      the difference being declared, so that this hook's own report cannot be
 #      read as evidence the boot check was pre-run.
+#  32. Refuse a tracked text file that carries a carriage return on disk.
+#      Git normalises line endings on commit, so the pushed bytes are always
+#      clean and the damage lives only in the working tree -- which is where
+#      bash reads a script from. `check-eol.py`, already run by boot-test.sh;
+#      wired here so it is seen at the push that causes it, not a boot later.
 #
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented; wrong again the moment gate 13 was written, when the
@@ -3925,6 +3930,64 @@ Either the narrower run is deliberate, in which case name it in NARROWER in
 check-gate-invocation-parity.py with the reason, or the two have drifted.  This
 hook reports the gate as having run, and a reader has no other way to learn it
 checked less.
+EOF
+    exit 1
+fi
+
+# Gate 32 -- eol.  `scripts/check-eol.py`, run HERE as well as in boot-test.sh.
+#
+# Wired at push rather than rewritten: a gate for this already existed, wider
+# and better argued than the one lane B wrote to replace it.  `check-eol.py`
+# covers every tracked file; the replacement covered `*.sh`, and its author had
+# already rejected that scope in writing -- "a gate scoped to .sh would have
+# caught that single instance and stayed silent about the other twelve, which
+# is to say it would have reported the symptom and hidden the size of the
+# cause."  That was demonstrated rather than argued: lane B's tree held 246
+# CRLF files, two of them shared documents corrupted that same evening, and the
+# narrower gate called the tree clean.  It also missed a lone CR that the same
+# evening put into THIS FILE, because lone CRs were explicitly out of its scope.
+#
+# So the only thing that was actually missing was the TIMING.  check-eol ran
+# only in boot-test, which means CRLF was caught twenty-five minutes into a
+# boot instead of at the push that introduced it -- a real check, correctly
+# implemented, consulted at a moment when it could not see the thing it is for.
+# This wiring is that fix and nothing else.
+#
+# It reads the WORKING TREE, unlike every other gate here, and must: `text
+# eol=lf` installs a clean filter, so a file that is CRLF on disk and LF in the
+# index is *identical* to git.  `git status` is clean, `git diff` is empty, and
+# the bad bytes never reach a commit -- which is exactly why nothing points at
+# them.  A gate reading the pushed revision would be reading the one copy
+# guaranteed to be fine.
+eolchk="${repo_root:-.}/scripts/check-eol.py"
+skip_eol=0
+# Bypass: ALLOW_CRLF=1 git push origin <branch>
+if [ "${ALLOW_CRLF:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_CRLF=1 set - skipping the eol gate." >&2
+    skip_eol=1
+fi
+[ -n "$py" ] || skip_eol=1
+[ -f "$eolchk" ] || skip_eol=1
+note_gate eol "$skip_eol"
+eol_failed=0
+if [ "$skip_eol" != "1" ]; then
+    if ! run_checker eol-selftest "$py" "$eolchk" --self-test; then
+        echo "pre-push: check-eol.py FAILED ITS OWN SELF-TEST - its verdict is not trustworthy." >&2
+        eol_failed=1
+    else
+        if ! run_checker eol "$py" "$eolchk"; then
+            eol_failed=1
+        fi
+    fi
+fi
+if [ "$eol_failed" != "0" ]; then
+    cat >&2 <<EOF
+pre-push: REFUSING to push - a tracked text file carries a carriage return on
+disk.  Git normalises line endings on commit, so this is invisible in a diff
+and the pushed bytes are fine; the damage is in the working tree, which is
+where bash reads a script from.  check-eol.py prints the repair.
+To push anyway:
+    ALLOW_CRLF=1 git push origin ...
 EOF
     exit 1
 fi

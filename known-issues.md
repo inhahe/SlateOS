@@ -138022,6 +138022,21 @@ Now `fat::self_test_datetime()`, dispatched unconditionally beside the other
   the absolute values -- 1980-01-01 -> 315532800s and 2000-06-15T14:30Z ->
   961078200s -- which can only pass by being right.
 
+**Is the rest of the dead suite rotten too? Audited: no, and the reason is structural.**
+
+The wrong constant is an argument for auditing the other ~1,100 lines behind
+`if fat_ok`, which have also never run. Done, and the answer is that almost
+nothing there can rot the same way: the expectations are *self-referential*
+-- write N bytes and expect N back, set an attribute and read it back -- so
+both sides of every comparison come from the same source and cannot drift
+apart while unobserved. The only hand-written absolute left is the DOS epoch
+(315532800), checked and correct.
+
+That is what made the 2000-06-15 vector uniquely vulnerable: it is the one
+value a human typed from arithmetic done in their head. The flip side is that
+a round-trip is a mirror, so most of that suite would be weaker coverage than
+its length suggests even once it runs -- which is worth knowing before anyone
+spends a day giving the harness a FAT volume to unlock it.
 **On its first boot the rescued test failed -- and the code was right.**
 
 ```

@@ -1402,11 +1402,28 @@ fn parse_addr(s: &str) -> Option<u64> {
     }
 }
 
+/// Refuse an option this build does not have.
+///
+/// binutils is internally consistent about this, unlike net-tools:
+/// `objdump`, `nm` and `size` all print getopt's wording and exit 1, and
+/// all three were measured rather than assumed to agree.
+fn refuse_unknown(prog: &str, arg: &str) -> ! {
+    eprintln!("{prog}: {}", usageerror::unknown_option(arg.as_bytes()));
+    process::exit(1);
+}
+
 fn parse_objdump_args() -> ObjdumpOpts {
     let args: Vec<String> = env::args().skip(1).collect();
     let mut opts = ObjdumpOpts::default();
 
-    if args.is_empty() {
+    // `--help` is a request, not a mistake: it prints the same text and
+    // succeeds. Measured -- all three references exit 0 for `--help` and
+    // this build had no `--help` at all, so the word fell through every
+    // branch, was silently ignored, and the program exited 0 having done
+    // nothing. Adding the refusal below without this would have turned
+    // that into an error, which is worse than either.
+    let wants_help = args.iter().any(|a| a == "--help");
+    if args.is_empty() || wants_help {
         eprintln!("Usage: objdump <option(s)> <file(s)>");
         eprintln!("  -f  Display file header");
         eprintln!("  -h  Display section headers");
@@ -1421,7 +1438,7 @@ fn parse_objdump_args() -> ObjdumpOpts {
         eprintln!("  -j <section>  Restrict to section");
         eprintln!("  --start-address=ADDR");
         eprintln!("  --stop-address=ADDR");
-        process::exit(1);
+        process::exit(i32::from(!wants_help));
     }
 
     let mut i = 0;
@@ -1456,6 +1473,8 @@ fn parse_objdump_args() -> ObjdumpOpts {
                 opts.start_address = parse_addr(val);
             } else if let Some(val) = rest.strip_prefix("stop-address=") {
                 opts.stop_address = parse_addr(val);
+            } else {
+                refuse_unknown("objdump", arg);
             }
             i += 1;
             continue;
@@ -1491,7 +1510,9 @@ fn parse_objdump_args() -> ObjdumpOpts {
                         j = chars.len(); // consumed rest
                         continue;
                     }
-                    _ => {}
+                    // Used to be skipped, so an unknown letter in a
+                    // cluster was dropped and the rest still applied.
+                    c => refuse_unknown("objdump", &format!("-{c}")),
                 }
                 j += 1;
             }
@@ -1543,7 +1564,14 @@ fn parse_nm_args() -> NmOpts {
         ..NmOpts::default()
     };
 
-    if args.is_empty() {
+    // `--help` is a request, not a mistake: it prints the same text and
+    // succeeds. Measured -- all three references exit 0 for `--help` and
+    // this build had no `--help` at all, so the word fell through every
+    // branch, was silently ignored, and the program exited 0 having done
+    // nothing. Adding the refusal below without this would have turned
+    // that into an error, which is worse than either.
+    let wants_help = args.iter().any(|a| a == "--help");
+    if args.is_empty() || wants_help {
         eprintln!("Usage: nm [option(s)] [file(s)]");
         eprintln!("  -n  Sort by address");
         eprintln!("  -r  Reverse sort");
@@ -1554,7 +1582,7 @@ fn parse_nm_args() -> NmOpts {
         eprintln!("  -A  Print file name");
         eprintln!("  -S  Print symbol size");
         eprintln!("  -t <radix>  Output radix (d, o, x)");
-        process::exit(1);
+        process::exit(i32::from(!wants_help));
     }
 
     let mut i = 0;
@@ -1576,6 +1604,8 @@ fn parse_nm_args() -> NmOpts {
                         if let Some(c) = val.chars().next() {
                             opts.radix = c;
                         }
+                    } else {
+                        refuse_unknown("nm", arg);
                     }
                 }
             }
@@ -1612,7 +1642,9 @@ fn parse_nm_args() -> NmOpts {
                         j = chars.len();
                         continue;
                     }
-                    _ => {}
+                    // Used to be skipped, so an unknown letter in a
+                    // cluster was dropped and the rest still applied.
+                    c => refuse_unknown("nm", &format!("-{c}")),
                 }
                 j += 1;
             }
@@ -1654,7 +1686,14 @@ fn parse_size_args() -> SizeOpts {
         files: Vec::new(),
     };
 
-    if args.is_empty() {
+    // `--help` is a request, not a mistake: it prints the same text and
+    // succeeds. Measured -- all three references exit 0 for `--help` and
+    // this build had no `--help` at all, so the word fell through every
+    // branch, was silently ignored, and the program exited 0 having done
+    // nothing. Adding the refusal below without this would have turned
+    // that into an error, which is worse than either.
+    let wants_help = args.iter().any(|a| a == "--help");
+    if args.is_empty() || wants_help {
         eprintln!("Usage: size [option(s)] [file(s)]");
         eprintln!("  -A  SysV format");
         eprintln!("  -B  Berkeley format (default)");
@@ -1663,7 +1702,7 @@ fn parse_size_args() -> SizeOpts {
         eprintln!("  -o  Octal radix");
         eprintln!("  -x  Hex radix");
         eprintln!("  --radix=N  Radix (8, 10, 16)");
-        process::exit(1);
+        process::exit(i32::from(!wants_help));
     }
 
     let mut i = 0;
@@ -1679,6 +1718,8 @@ fn parse_size_args() -> SizeOpts {
                 opts.totals = true;
             } else if let Some(val) = rest.strip_prefix("radix=") {
                 opts.radix = val.parse().unwrap_or(10);
+            } else {
+                refuse_unknown("size", arg);
             }
             i += 1;
             continue;
@@ -1693,7 +1734,9 @@ fn parse_size_args() -> SizeOpts {
                     'd' => opts.radix = 10,
                     'o' => opts.radix = 8,
                     'x' => opts.radix = 16,
-                    _ => {}
+                    // Used to be skipped, so an unknown letter in a
+                    // cluster was dropped and the rest still applied.
+                    c => refuse_unknown("size", &format!("-{c}")),
                 }
             }
             i += 1;

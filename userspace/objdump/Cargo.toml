@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS ELF object file analysis tools"
 [dependencies]
+# getopt's wording, shared. binutils prints it verbatim for all three of
+# this crate's personalities.
+usageerror = { path = "../usageerror" }
 
 [lints]
 workspace = true

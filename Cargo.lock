@@ -1947,6 +1947,9 @@ dependencies = [
 [[package]]
 name = "objdump"
 version = "0.1.0"
+dependencies = [
+ "usageerror",
+]
 
 [[package]]
 name = "oils"

@@ -2,7 +2,7 @@
 
 **From:** Lane A. **To:** Lane B. **Filed:** 2026-09-09.
 **Status:** MOSTLY CONSUMED by lane B — six of the nine novel features are in,
-one is measured NOT APPLICABLE, two remain. Details below; this line said
+one is measured NOT APPLICABLE, one is deliberately declined, one remains. Details below; this line said
 "open" for three days after most of it had landed.
 
 ## What lane B actually built, and under which spellings (2026-09-12 audit)
@@ -20,7 +20,8 @@ source for `--proximity` finds nothing and the request looked untouched:
 | path-suffix excludes | `--x_paths` | **`--exclude-path`** | done |
 | **"your path became the regex" warning** | — | — | **not applicable, measured** |
 | `--dotall` | `--dotall` | — | remains |
-| persistent colour config | `--set-colors`, `--remember` | — | remains |
+| colour names | (part of `--set-colors`) | **`GREP_COLORS` by name** | done |
+| persistent colour *file* | `--remember` | — | **declined, §1008** |
 
 ### The warning is not applicable here, and that is a measurement
 
@@ -53,11 +54,16 @@ convention we do not share, and that is only visible if you run both.
 
 ### What remains
 
-`--dotall` is not a small addition: `userspace/ere` has no
-dot-matches-newline mode and `grep` is line-based (`read_until(sep, ...)`), so
-it needs a flag in the engine plus whole-file matching with multi-line
-reporting — two crates. Persistent colour config is independent of it. Both
-are recorded in `todo.txt`.
+`--dotall` is the only one left. It is not a small addition: `userspace/ere`
+has no dot-matches-newline mode and `grep` is line-based
+(`read_until(sep, ...)`), so it needs a flag in the engine plus whole-file
+matching with multi-line reporting — two crates. Recorded in `todo.txt`.
+
+The colour config is **not** outstanding: §1008 built the colour NAMES, which
+are the substance, and declined the file on the grounds that a shell profile
+already persists an environment variable and `osh` reads it. I listed it as
+remaining here before reading that, which is the same failure §1008 itself
+names — a decision in a file nobody re-reads.
 
 ---
 

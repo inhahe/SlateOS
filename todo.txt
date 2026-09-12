@@ -57201,16 +57201,26 @@ the request). These two remain.
    operator's tool answers it by reading the whole file and treating the match
    as belonging to the line it starts on. Measure that before building.
 
-2. Persistent colour config (`--set-colors`, `--remember`). Six independently
-   coloured elements saved to a config file beside the executable, read on
-   each run, overridable per invocation. GNU has only `GREP_COLORS` in the
-   environment. `grep.rs` already carries the `Colors` struct and comments at
-   lines 247 and 4832 describing the port; what is missing is the file.
+2. NOT REMAINING -- I was wrong an hour ago and this paragraph is the
+   correction. Persistent colour config (`--set-colors`, `--remember`) was
+   DELIBERATELY DECLINED by design-decisions 1008, and the substantive half of
+   it was built:
 
-   Independent of `--dotall`. Note that "beside the executable" is the
-   operator's Windows convention; on SlateOS the honest home is
-   `$XDG_CONFIG_HOME` or `/etc`, which is a small decision worth making
-   deliberately rather than by copying the path.
+     * the colour NAMES are in -- `fn=brightgreen` works where GNU wants
+       `fn=92` -- so `--set-colors brightgreen brightblack ...` is expressible
+       today as `GREP_COLORS='fn=92:se=90:...'` or by name.
+     * the FILE is not, on purpose: "a shell profile already persists an
+       environment variable, and osh reads /etc/profile, ~/.bash_profile,
+       ~/.bashrc and $BASH_ENV -- verified in userspace/oils/src/main.rs, not
+       assumed. A config file that duplicates the profile would be a second
+       place for the same setting to be wrong."
+
+   I listed it as remaining work, and proposed deciding where the file should
+   live, without reading 1008 -- which had already answered both. That is the
+   failure 1008's own "Where this came from" paragraph describes: a decision
+   living in a file nobody has a reason to re-read. It cost an hour's plan
+   rather than an hour's code only because the scaffolding comment in
+   `grep.rs` cites the section number.
 
 TRIGGER. Either is unblocked. `--dotall` is the larger and needs the design
 answer measured from the operator's tool first; the colour config is the

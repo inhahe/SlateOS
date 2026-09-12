@@ -25,6 +25,44 @@ success about the fixture it thought it was using.
   written into ``os/.git/config``, which all three worktrees read. Nothing
   reached origin only because an unrelated gate refused the push moments later.
 
+* **2026-09-12**, ``check-eol.py``: the same sequence a third time.
+  ``_git(["init", "--quiet"], cwd=<tmp>)`` with no ``env=``, under a hook that
+  sets ``GIT_DIR``, re-initialised the repository being pushed and set
+  ``core.bare=true`` on the shared config -- twice, on two pushes, before two
+  lanes traced it. It stopped there only because this self-test runs no
+  ``add`` and no ``commit``; the mechanism that set the flag is the mechanism
+  that deleted the tree in 2026-08-29.
+
+  **The checker did not change. Only where it points did.** ``check-eol.py``
+  had been wired into ``boot-test.sh`` for days and was harmless there, because
+  a boot test sets no ``GIT_DIR``. Wiring the identical gate into ``pre-push``
+  made a correct call site incorrect, with nothing in that commit touching the
+  checker at all. The two earlier incidents were new self-tests written by
+  someone who had not read ``gitenv.py``; this one was an existing self-test
+  moved into a new environment, which no amount of reading at write-time would
+  have prevented.
+
+  And a second defect underneath it, which THIS SUITE is what found: stripping
+  the bindings stopped the damage and left the *dependence*. The self-test still
+  enumerated the ambient repository via ``git ls-files``, so under the victim
+  repo here it failed three cases -- correct under a hook, correct under
+  boot-test, wrong anywhere else. Fixed by anchoring every ``git`` call at a
+  ``ROOT`` derived from ``__file__``. A checker whose subject is chosen by
+  ambient environment answers a different question depending on who invoked it.
+
+**WHEN THIS SUITE RUNS, WHICH IS THE HOLE IT STILL HAS.** It is wired into
+``boot-test.sh`` and nothing else, so *the detector for hook-environment damage
+never runs in a hook environment* -- and, more to the point, runs hours after
+the push-hook wiring that causes the damage. The gate list is discovered from
+the hook, so ``check-eol`` was covered from the moment it was wired; it would
+have said so at the next boot, after the shared config had already been
+rewritten twice. All three incidents were caught, or would have been, by
+something that runs later than the push that causes them. Running it by hand
+immediately after editing ``scripts/hooks/pre-push`` is the current remedy and
+it depends on someone remembering; ``todo.txt`` carries the cheaper standing
+fix and what would trigger building it.
+
+
 ``scripts/gitenv.py`` was written as the first post-mortem and documents the
 mechanism precisely. The second incident happened anyway, in a self-test
 written months later by someone who had not read it. That is the fact this

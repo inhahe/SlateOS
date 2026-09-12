@@ -98924,6 +98924,25 @@ tooling gap is real and worth closing — it is a push-time blind spot in exactl
 the class of code this entry exists for — but it is a ratchet to install, not a
 fire.
 
+**The ratchet is installed, 2026-09-12.** `check-cfg-unix.py` passes
+`--all-targets`, so the push gate now compiles the `#[cfg(unix)]` code inside
+`#[cfg(test)]` modules that it previously skipped. Measured after the change:
+60 of 412 workspace crates hold unix-gated code and all 60 compile clean for
+`x86_64-unknown-linux-gnu` with the flag, exit 0.
+
+**The self-test gained the case that was actually blind.** Its existing fixture
+put a unix-only compile error at module top level, which the gate caught before
+this change — so it demonstrated the gate working on the half that was never
+the problem. The new fixture puts the error inside a `#[cfg(test)] mod` and
+asserts *both* directions: the module does not compile without `--test` (so the
+flag is buying something) and the error IS caught with it (so the flag reaches
+test targets). `rustc --test` is to `rustc` what `cargo check --all-targets` is
+to `cargo check`.
+
+**And the summary line now names the flag.** A gate that prints "OK, 60 crates
+compile" reads identically whether or not it looked at test targets, which is
+how this went unnoticed for as long as it did.
+
 **A note on how that was checked, because it nearly was not.** The first run
 piped the output through `grep -c '^error'` and printed `0`, which is the same
 thing it would print if cargo had failed to start. The second run captured the

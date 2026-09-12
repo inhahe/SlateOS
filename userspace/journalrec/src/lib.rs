@@ -48,6 +48,36 @@ pub fn escape(s: &str) -> String {
     }
     out
 }
+/// The eight syslog priorities, in the spellings `journalctl` prints.
+///
+/// Indexed by the numeric priority, so `PRIORITY_NAMES[3]` is `err`.
+pub const PRIORITY_NAMES: [&str; 8] = [
+    "emerg", "alert", "crit", "err", "warning", "notice", "info", "debug",
+];
+
+/// A `-p` argument -- a number 0..=7 or a name -- as the canonical name.
+///
+/// The aliases are the ones `journalctl`'s own `Priority::from_name`
+/// accepts, because a record this writes has to be one that reader
+/// understands. Both tables are the same table; if one gains a spelling the
+/// other must too, and the test below is where that shows up.
+#[must_use]
+pub fn priority_name(spec: &str) -> Option<&'static str> {
+    let lower = spec.trim().to_ascii_lowercase();
+    let index = match lower.as_str() {
+        "emerg" | "emergency" | "0" => 0,
+        "alert" | "1" => 1,
+        "crit" | "critical" | "2" => 2,
+        "err" | "error" | "3" => 3,
+        "warning" | "warn" | "4" => 4,
+        "notice" | "5" => 5,
+        "info" | "6" => 6,
+        "debug" | "7" => 7,
+        _ => return None,
+    };
+    PRIORITY_NAMES.get(index).copied()
+}
+
 /// One journal record, in the fields `journalctl` reads.
 #[derive(Debug, Clone)]
 pub struct Record {
@@ -128,6 +158,39 @@ mod tests {
             r.to_json_line(),
             r#"{"ts":1716000000,"level":"info","service":"net.dhcp","msg":"lease renewed","pid":42}"#
         );
+    }
+
+    #[test]
+    fn a_priority_is_accepted_by_number_and_by_name() {
+        assert_eq!(priority_name("3"), Some("err"));
+        assert_eq!(priority_name("err"), Some("err"));
+        assert_eq!(priority_name("error"), Some("err"));
+        assert_eq!(priority_name("ERR"), Some("err"));
+        assert_eq!(priority_name(" warn "), Some("warning"));
+        assert_eq!(priority_name("0"), Some("emerg"));
+        assert_eq!(priority_name("7"), Some("debug"));
+    }
+
+    /// A value outside the set is `None` rather than a default. Silently
+    /// meaning `info` by `-p bogus` is the shape of defect this tree has
+    /// been pulling out of option parsers all week.
+    #[test]
+    fn an_unknown_priority_is_not_quietly_info() {
+        assert_eq!(priority_name("8"), None);
+        assert_eq!(priority_name("-1"), None);
+        assert_eq!(priority_name("chatty"), None);
+        assert_eq!(priority_name(""), None);
+    }
+
+    /// Every canonical name resolves to itself, so the table and the
+    /// resolver cannot disagree about what the eight are.
+    #[test]
+    fn the_canonical_names_round_trip() {
+        for (i, name) in PRIORITY_NAMES.iter().enumerate() {
+            assert_eq!(priority_name(name), Some(*name));
+            let n = alloc::format!("{i}");
+            assert_eq!(priority_name(&n), Some(*name));
+        }
     }
 
     /// A record with no pid omits the key rather than writing 0, which

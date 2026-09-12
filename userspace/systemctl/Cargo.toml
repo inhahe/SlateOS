@@ -4,6 +4,14 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS systemctl utility"
 [dependencies]
+# The one rendering of caller-supplied text in a diagnostic. A hand-written
+# pair of quotes round an interpolation looks fixed and is not: a value
+# containing a quote still breaks out. See design-decisions.md §370.
+quoting = { path = "../quoting" }
+# The journal record `systemd-cat` writes, and the escaper that keeps a log
+# line from forging entries around itself. Shared with `syslogd`, which
+# writes the same file.
+journalrec = { path = "../journalrec" }
 # getopt's usage diagnostics, spelled once; the wording is getopt's, not
 # ours. Pure formatting over `quoting`, no I/O, so §768 exempt.
 usageerror = { path = "../usageerror" }

@@ -16432,6 +16432,37 @@ to a **present, read-only** user page (`error == 0x3`) therefore skips
 CoW resolution and falls straight through to "FATAL: Unrecoverable
 kernel page fault. Halting."
 
+**[A] 2026-09-12 — checked the recorded boots for this signature, and the answer is WEAK
+EVIDENCE rather than reassurance. The distinction is the point of this note.**
+
+`bench/boot-history.jsonl` has captured every kernel exception across 722 boots. All 22 of
+them, in full: 15 deliberate breakpoints, 3 page faults (`error=0x2`, `0x0`, `0x2`), and
+one invalid opcode. **None with `error=0x3`** — the present/write/kernel combination this
+entry describes.
+
+**Why that is worth much less here than the identical measurement was for
+`B-PTHREAD-TEARDOWN-PF`.** That entry got a strong negative from the same data because its
+trigger is *known to run*: `spawn-test-glibc-pthread` executes every boot, verified in the
+serial log and absent from the skip ledger, so 700 boots at a 1-in-5 rate should have
+produced ~100 recurrences and produced none.
+
+This entry has no such trigger. The fault needs a kernel path that writes through a user
+pointer into a present, read-only COW page **without** first calling
+`mm::user::validate_user_write`. Whether any code path does that during a normal boot is
+exactly what is unknown — so zero occurrences is equally consistent with *the bug is gone*
+and with *nothing has ever exercised it*. The measurement cannot distinguish them.
+
+**So this is recorded as a null result, not a negative one.** The same query, the same
+population, the same zero — and it closes one entry while saying almost nothing about
+another, because the strength of an absence depends entirely on whether the thing that
+would produce it was running. An absence with no known trigger is not evidence; it is the
+shape of evidence.
+
+What *would* be evidence: a self-test that deliberately performs a ring-0 write through a
+user pointer into a `MAP_PRIVATE` file page that has not been touched since mapping, and
+asserts the write succeeds rather than halting. That is a rung, not a stress run, and it
+would convert this entry from WATCH to either fixed or reproducible in one boot.
+
 **Why it matters now:** the read-only page cache (§36) maps writable
 `MAP_PRIVATE` file pages **RO + COW** on first fault (so writes copy out
 of the shared frame), whereas the old private path mapped them

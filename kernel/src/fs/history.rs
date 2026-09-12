@@ -281,7 +281,24 @@ pub fn record_version(path: impl AsRef<Path>) -> KernelResult<Option<Hash256>> {
     // Store in CAS.
     let hash = crate::fs::cas::put(&data)?;
     let size = data.len() as u64;
-    let timestamp_ns = crate::hpet::elapsed_ns();
+    // `clock_monotonic`, not `hpet::elapsed_ns`, for the same reason and with the same
+    // evidence as `journal::record`. `VersionEntry::timestamp_ns` is documented as "HPET
+    // timestamp (nanoseconds since boot)" and `clock_monotonic` satisfies that contract
+    // -- it is monotonic nanoseconds since boot, from the TSC rather than the HPET.
+    //
+    // The HPET is an MMIO read, which under hardware virtualisation is a VM exit. When
+    // the identical substitution was made in `journal::record`, that phase went from
+    // 14,206 ns to 337 ns and the whole 256-byte file write dropped 29%. This call sits
+    // on the same path: `write_file_resolved` reaches it through `try_auto_record` on
+    // every write outside /proc, /dev, /sys and /tmp.
+    //
+    // WHAT THIS IS WORTH DEPENDS ON THE MACHINE, and that is worth knowing before anyone
+    // re-measures and concludes the change did nothing. `hpet_read`'s accelerator ratio
+    // is 0.03x -- about 30x *slower* under WHPX, where the access traps, than under TCG,
+    // where it does not. So expect roughly 13,900 ns under hardware virtualisation and a
+    // few hundred under emulation. The measured A/B that motivated this (run b6mifed3b)
+    // ran under TCG, so it cannot show this improvement at all.
+    let timestamp_ns = crate::timekeeping::clock_monotonic();
 
     // Add to history.
     let mut inner = HISTORY.lock();

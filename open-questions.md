@@ -1678,16 +1678,6 @@ pointer to the parent file rather than a second copy.
 this is about where it is written down.
 
 
-# Resolved
-
-**The body above holds OPEN questions only.** When the operator answers one,
-write it up in `design-decisions.md` as a `Decided by: Operator` entry,
-**delete the entry from the body**, and add one line here. That is the whole
-point of the file: it is scanned for what still needs a decision, so an
-answered question left in the body is pure cost — and, being older, it sorts
-*first*, right where it is most in the way. (Why this is not append-only:
-`design-decisions.md` §437.)
-
 ## B-Q14 — [B] `logger` writes to the terminal instead of to the log. Which of the two implementations survives? — Status: OPEN
 
 **In short:** `logger` is the command a shell script uses to record a line in
@@ -1755,6 +1745,16 @@ own. `logger` stays at 2 options and keeps printing to the terminal, and the
 duplicate pair stays in `dup-bins-survey`'s table as undecided. It only bites
 when something starts relying on the system log actually receiving what was
 sent to it.
+
+# Resolved
+
+**The body above holds OPEN questions only.** When the operator answers one,
+write it up in `design-decisions.md` as a `Decided by: Operator` entry,
+**delete the entry from the body**, and add one line here. That is the whole
+point of the file: it is scanned for what still needs a decision, so an
+answered question left in the body is pure cost — and, being older, it sorts
+*first*, right where it is most in the way. (Why this is not append-only:
+`design-decisions.md` §437.)
 
 ## Resolved — lane A
 

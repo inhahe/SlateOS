@@ -131415,7 +131415,7 @@ Two measured examples:
   B=target/x86_64-pc-windows-gnu/debug
   for n in $(ls userspace/coreutils/src/bin/*.rs | sed 's|.*/||; s|\.rs$||'); do
     [ -x "$B/$n.exe" ] || continue
-    "$B/$n.exe" --no-such-option-xyzzy >/dev/null 2>&1 </dev/null \n      || continue
+    "$B/$n.exe" --no-such-option-xyzzy >/dev/null 2>&1 </dev/null || continue
     echo "$n accepted it"
   done
   ```

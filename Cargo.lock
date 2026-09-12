@@ -504,14 +504,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "date"
-version = "0.1.0"
-dependencies = [
- "civildate",
- "quoting",
-]
-
-[[package]]
 name = "dbus"
 version = "0.1.0"
 dependencies = [

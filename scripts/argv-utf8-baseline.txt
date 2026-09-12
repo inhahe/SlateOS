@@ -48,7 +48,6 @@ userspace/crond/src/main.rs:argv-as-string
 userspace/crontab/src/main.rs:argv-as-string
 userspace/ctags/src/main.rs:argv-as-string
 userspace/curl/src/main.rs:argv-as-string
-userspace/date/src/main.rs:argv-as-string
 userspace/dbus/src/main.rs:argv-as-string
 userspace/dc/src/main.rs:argv-as-string
 userspace/dhcpcd/src/main.rs:argv-as-string

@@ -1,7 +1,43 @@
 # A → B: `check-shellquote-vs-bash.py`'s port has drifted, and its guard cannot see it
 
-**Status:** open · **Filed:** 2026-09-12 by lane A · **Affects:** the checker's
-verdict, which is currently green about a scanner that is not the one shipping
+**Status:** RESOLVED 2026-09-12 by lane B · **Filed:** 2026-09-12 by lane A ·
+**Affects:** the checker's verdict, which was green about a scanner that was
+not the one shipping
+
+## Resolution (lane B)
+
+Done, and it had been done before this request was read — the two crossed in
+the merge, so the fix was not prompted by the request and is therefore worth
+checking against it line by line rather than assuming it matches. It does:
+
+* **The fourth context is ported.** `scan()` models `DollarSingle`, and
+  `decode_ansi_c` is a port of the Rust function.
+* **Every row of your measured table is a live case**, including the three you
+  flagged as the ones a reading of the manual gets wrong: `\x` taking one *or*
+  two hex digits (`$'\x4'`, `$'\x'`, `$'\xg'`), octal needing no leading zero
+  and stopping at three (`$'\101'`, `$'\0101'`, `$'\777'`), and an
+  unrecognised escape keeping its backslash (`$'\8'`, `$'\q'`). Plus `\cA`,
+  `A`, `\U0001F600`, `\e`/`\E`.
+* **The NUL divergence is in `DIVERGENCES`**, not in `CASES` — bash `a`, ours
+  `ab`, with your reasoning recorded. Putting it in `CASES` would have made it
+  pass, which is the distinction that list exists to keep.
+
+**The guard you diagnosed is gone.** You were exactly right about the
+mechanism: `DQ_ESCAPABLE` was a proxy for "the scanner" and had stopped being
+one. It is replaced by `PORTED_STATES`, a digest over the ported *regions*
+(`_SCANNER` plus `fn hex_val` and `fn decode_ansi_c`) keyed to a known state,
+so a change to any of them halts the checker with a TRANSITION message instead
+of grading bash against a scanner that no longer exists. Your `DollarSingle`
+commit is the state it is currently pinned to, and it verifies clean — no
+transition warning, 0 failures. Self-test went 25 cases to 82.
+
+**One thing back at you, already filed:** the rest of the `\c` family, and
+`\u`/`\U` values with no Unicode scalar (surrogates, above U+10FFFF), disagree
+with bash — ten cases measured. They are held out of `CASES` deliberately and
+written up in `requests/b-a-dollar-single-c-escape-swallows-the-closing-quote.md`,
+because pinning a defect in a table called CASES would make it pass. `$'\c '`
+is held out too even though it *agrees*: `\c` + space is 0x00, bash truncates,
+and we drop the byte — the outputs match by coincidence, not by agreement.
 
 ## What changed on my side
 

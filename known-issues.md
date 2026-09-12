@@ -74014,6 +74014,65 @@ Next on the list, unchanged: the decompressors (`fs/zstd.rs` 299, `fs/xz.rs`
 parsers (`net/tcp.rs` 182, `net/ssh.rs` 104, `net/tls.rs` 99,
 `net/firewall.rs` 87), then `fs/fat.rs` 140 and `fs/ext4/driver.rs` 104.
 
+## B-ED-TESTS-READ-THE-REAL-STDIN-AND-HUNG-THE-WHOLE-SUITE (lane B, 2026-09-12) — FIXED
+
+**In short:** `cargo test -p coreutils` stopped after 20 of its 93 test groups
+and sat there until killed, twice in one afternoon. The cause was one line in
+one `ed` test: it ran the editor's `a` (append) command, which reads its text
+from **standard input** — the *test runner's* standard input. When that is a
+pipe with nothing on it, the read never returns, and because `Editor::new`
+holds `stdin().lock()` the whole binary's other tests queue behind it forever.
+
+**Measured on the built test binary, with no `cargo` involved:**
+
+```text
+stdin = /dev/null       73 passed in 0.01s
+stdin = pipe, no data   hangs until killed
+```
+
+**I diagnosed it wrong twice first, and the way it misled is the part worth
+keeping.** The symptom is
+
+```text
+test tests::copy_duplicates_a_range_and_may_copy_into_itself has been running
+for over 60 seconds
+```
+
+printed for *four* tests at once — which is exactly what CPU starvation looks
+like. The first occurrence had the machine at 88% with another lane's boot
+test running, so I wrote it off as contention, recorded "a starved test and a
+hung one are spelled the same way in that output", and moved on. That sentence
+was true and it is what stopped me looking. The third occurrence had the CPU at
+34% and no QEMU, which is the only reason it got examined.
+
+**The file already knew.** The comment on `ed`'s option table says `a` and `i`
+are excluded from that list "because their text comes from stdin". The
+knowledge was thirty lines from the loop that used `0a` anyway.
+
+**The fix** was to drop `0a` from
+`a_mark_follows_its_line_wherever_the_line_goes`. Its other four shuffles —
+`1d`, `1m$`, `1t0`, `1,2j` — are four independent ways of moving text above the
+marked line, which is the property under test, so no coverage was lost.
+Verified both directions on the same rebuilt binary: hangs before, 73 tests in
+0.01s after, identical stdin. `cargo test -p coreutils` now completes at 93
+groups, 0 failures.
+
+**The proper fix is in `todo.txt`:** `Editor` should take its input as a
+parameter rather than locking the process's. That would make `a`, `i` and `c`
+testable at all — they are currently untested, which is the real cost — and
+would take the global lock off the test path entirely.
+
+**Blast radius, checked rather than assumed.** `scripts/hooks/pre-push` runs
+`cargo test -p posix --lib`, not coreutils, so a push was never exposed. A
+sweep of every built test binary for the same defect found no second instance.
+
+**That sweep's first version reported one, and was wrong.** It used a single
+6-second timeout and flagged `apps/automator`, which runs 160 tests in 12.8
+seconds. Slow is not stuck. A stdin hang is a **difference between two
+conditions** — finishes under `/dev/null`, does not under a pipe — and a
+checker that measures only one of them cannot see it. The corrected sweep runs
+both and reports "too slow to judge" separately from "hangs".
+
 ## B-TEST-FIXTURES-SHARE-TEMP-PATHS-ACROSS-CONCURRENT-RUNS (lane B, 2026-08-22) — lane B's half FIXED, lane C's half FILED
 
 **In short:** a test that names its scratch directory after a fixed string, or

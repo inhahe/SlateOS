@@ -2066,14 +2066,14 @@ mod tests {
             .expect("the dialog translates to its own interior");
         let y = commands
             .iter()
-            .find_map(|cmd| match *cmd {
-                // Whichever way the theme drew it: a fill under Cards, an
-                // outline under Borders. The click this test checks has to land
-                // on the row as laid out, not on the stroke half a pixel inside
-                // it, so the rectangle comes back through `logical_rect`.
-                ref cmd => appearance::logical_rect(cmd)
+            // Whichever way the theme drew it: a fill under Cards, an outline
+            // under Borders. The click this test checks has to land on the row
+            // as laid out, not on the stroke half a pixel inside it, so the
+            // rectangle comes back through `logical_rect`.
+            .find_map(|cmd| {
+                appearance::logical_rect(cmd)
                     .filter(|(_, _, _, h)| (h - ROW_HEIGHT).abs() < 0.01)
-                    .map(|(_, y, _, _)| y),
+                    .map(|(_, y, _, _)| y)
             })
             .expect("the selected row draws a highlight");
         state.selected_index = restore;

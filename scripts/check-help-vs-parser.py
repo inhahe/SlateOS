@@ -57,6 +57,13 @@ def advertised(text):
         lit = m.group(1)
         if not HELPISH.match(lit):
             continue
+        # A help line documents something, so it has a description after the
+        # option. A literal that is nothing but the option is a fragment
+        # being *built*, not text being printed: `xdg` holds `"--icon "` and
+        # pushes it onto a command line when it expands a Desktop Entry `%i`
+        # field code. Tenth false positive.
+        if len(lit.split()) < 2:
+            continue
         # A usage synopsis like `[-RVadlp]` is a cluster, not a list of
         # separately-documented options; skip those bracketed runs.
         body = re.sub(r"\[[^\]]*\]", " ", lit)

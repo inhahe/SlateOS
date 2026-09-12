@@ -117615,6 +117615,27 @@ checked was whether the thing I actually ran succeeded. Arriving from a third
 direction is the argument for writing it down.
 
 **The rule.** Never pipe a command whose exit status you intend to believe.
+
+**The sharper form, from lane A on 2026-09-12 — piping is dangerous even when
+you do not want the status, because the status is the only thing separating
+"no matches" from "no input".** They held a merge for forty minutes on this:
+
+```bash
+git show origin/main:userspace/procinfo/src/lib.rs | grep -c trim_comm
+# 0
+```
+
+`procinfo` is a top-level crate; `userspace/procinfo` does not exist. `git
+show` failed with `fatal: …does not exist` on **stderr**, the pipe discarded
+it, `rc=128` went unread, and `grep -c` faithfully counted zero matches in an
+empty stream. The output was a truthful answer to a question that had not been
+asked, and it was indistinguishable from the true answer to the intended one.
+
+So the failure is not confined to `$?`. **Two zeros with different meanings
+arrive down the same pipe and only one of them is visible.** The check had
+been run *specifically to be careful*, which is the recurring part: every
+instance of this family is someone verifying something.
+
 For a backgrounded run, redirect instead, and read the status explicitly:
 
 ```bash

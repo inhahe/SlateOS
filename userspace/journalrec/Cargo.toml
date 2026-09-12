@@ -1,0 +1,10 @@
+[package]
+name = "journalrec"
+version = "0.1.0"
+edition = "2024"
+description = "One spelling of a journal record, shared by its writers"
+
+[lints]
+workspace = true
+
+[dependencies]

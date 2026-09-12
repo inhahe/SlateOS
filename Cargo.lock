@@ -2326,6 +2326,9 @@ dependencies = [
 [[package]]
 name = "route"
 version = "0.1.0"
+dependencies = [
+ "usageerror",
+]
 
 [[package]]
 name = "rssreader"

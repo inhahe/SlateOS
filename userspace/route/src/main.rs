@@ -834,8 +834,25 @@ fn main() {
                 idx += 1;
                 break;
             }
+            other if other.starts_with('-') && other.len() > 1 => {
+                // Used to `break` and fall through to printing the routing
+                // table, so `route --zzq` displayed the table and exited 0
+                // without a word about the option.
+                //
+                // net-tools' first line is getopt's, measured. What follows
+                // it there is a list of address families -- ax25, netrom,
+                // rose, ipx, ddp, x25 -- that this build does not support,
+                // and an exit status of **0**. Neither is reproduced: the
+                // first would advertise protocols we have not got, and the
+                // second means a script cannot tell the option was refused.
+                // See todo.txt, "route's unknown-option behaviour".
+                eprintln!("route: {}", usageerror::unknown_option(other.as_bytes()));
+                print_usage();
+                process::exit(1);
+            }
             _ => {
-                // Unknown flag before action — might just be display.
+                // A bare word here is an operand -- a target or an address
+                // family -- and belongs to the action that follows.
                 break;
             }
         }

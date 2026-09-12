@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS routing table management"
 [dependencies]
+# getopt's wording, shared. net-tools' `route` uses it verbatim for an
+# unrecognised option, unlike its own `ifconfig`, which does not.
+usageerror = { path = "../usageerror" }

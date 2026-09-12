@@ -57443,10 +57443,22 @@ ipx, ddp and x25, none of which this build supports -- that is the
 the "reports success for something it refused" class; a script cannot
 detect the error at all.
 
-**Not yet decided.** The options are (a) reproduce net-tools exactly,
-under §371, and accept both; (b) take its wording for the first line,
-print our own usage, and exit 1; (c) leave it. My inclination is (b),
-which keeps the measured wording where the wording is the interface and
-diverges only where the reference is indefensible -- but it is a
-deliberate divergence from a measured reference, which is not a thing to
-do quietly at the end of a tick. Recorded here rather than guessed.
+**Decided: (b)**, on 2026-09-12 by Claude (autonomous). The options
+were (a) reproduce net-tools exactly under §371 and accept both defects;
+(b) take its wording for the first line, print our own usage, and exit 1;
+(c) leave it.
+
+(b) keeps the measured wording where the wording *is* the interface --
+`route: unrecognized option '--zzq'` is what a user or a script's grep
+sees -- and diverges only in the two places the reference is
+indefensible. The address families are not ours to advertise, and §371's
+bug-for-bug rule exists so that measurements can be asserted, not so
+that a reference's defects become requirements. An exit status of 0 for
+a refused option is the exact class this lane removed from twenty other
+programs today; reinstating it here to match net-tools would make the
+suite inconsistent with itself.
+
+What it affects: `userspace/route/src/main.rs`, the arm that used to
+`break` on an unknown flag. The divergence is named in a comment there
+so nobody later "fixes" it back toward the reference without reading
+this. Easy to reverse if the operator prefers (a).

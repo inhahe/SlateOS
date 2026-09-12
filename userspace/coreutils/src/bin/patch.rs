@@ -761,8 +761,11 @@ fn main() {
             } else {
                 String::new()
             };
+            // No ellipsis on the dry-run line. GNU prints
+            // "checking file a/base.txt"; this build printed a trailing
+            // "..." that predates tonight and that nothing upstream produces.
             let line = if opts.dry_run {
-                format!("checking file {named}{source}...\n")
+                format!("checking file {named}{source}\n")
             } else {
                 format!("patching file {named}{source}\n")
             };
@@ -925,12 +928,21 @@ fn main() {
                 // singular when there is one. Ours said `hunks FAILED for X`
                 // and never mentioned the reject file, because there was none.
                 let total = hunks_applied + hunks_failed;
+                let reject_clause = if opts.dry_run {
+                    String::new()
+                } else {
+                    format!(" -- saving rejects to file {reject_path}")
+                };
                 let plural = if total == 1 { "hunk" } else { "hunks" };
                 let mut out = Stream::stdout();
                 let _ = out.write_all(
                     format!(
-                        "{hunks_failed} out of {total} {plural} FAILED -- saving rejects to file {reject_path}
-"
+                        // The reject clause is omitted under `--dry-run`,
+                        // because no reject file was written. GNU prints the
+                        // bare `1 out of 1 hunk FAILED` there, and naming a
+                        // file that does not exist would send the reader
+                        // looking for it.
+                        "{hunks_failed} out of {total} {plural} FAILED{reject_clause}\n"
                     )
                     .as_bytes(),
                 );

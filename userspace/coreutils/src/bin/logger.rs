@@ -160,26 +160,64 @@ impl Default for LoggerArgs {
 fn parse_args(args: &[String]) -> Result<LoggerArgs, String> {
     let mut out = LoggerArgs::default();
     let mut i: usize = 0;
+    let mut options_ended = false;
     while i < args.len() {
         let Some(arg) = args.get(i) else { break };
-        match arg.as_str() {
-            "-t" => {
-                i = i.saturating_add(1);
-                match args.get(i) {
-                    Some(v) => out.tag = v.clone(),
-                    None => return Err("option -t requires an argument".to_string()),
-                }
-            }
-            "-p" => {
-                i = i.saturating_add(1);
-                match args.get(i) {
-                    Some(v) => out.priority = v.clone(),
-                    None => return Err("option -p requires an argument".to_string()),
-                }
-            }
-            _ => out.message_parts.push(arg.clone()),
-        }
         i = i.saturating_add(1);
+
+        // `--` ends the options. Everything after it is message text, which is
+        // the only way to log a message that begins with a dash.
+        if !options_ended && arg == "--" {
+            options_ended = true;
+            continue;
+        }
+        // A bare `-` is a message, not an option, and always has been.
+        if options_ended || !arg.starts_with('-') || arg == "-" {
+            out.message_parts.push(arg.clone());
+            continue;
+        }
+
+        // An option's value may be glued on (`-tX`) or be the next argument
+        // (`-t X`). util-linux accepts both.
+        let take_value = |letter: char, rest: &str, i: &mut usize| -> Result<String, String> {
+            if !rest.is_empty() {
+                return Ok(rest.to_string());
+            }
+            let Some(v) = args.get(*i) else {
+                return Err(format!("option requires an argument -- '{letter}'"));
+            };
+            *i = i.saturating_add(1);
+            Ok(v.clone())
+        };
+
+        let body = arg.strip_prefix('-').unwrap_or(arg);
+        if let Some(long) = body.strip_prefix('-') {
+            // Long options. None is implemented; refusing is still right,
+            // because the alternative -- which this did until 2026-09-12 --
+            // is to LOG the option text as the message.
+            let name = long.split('=').next().unwrap_or(long);
+            let _ = name;
+            return Err(format!("unrecognized option '{arg}'"));
+        }
+        // NOT a loop over the cluster, deliberately. Both options this
+        // implements take a value, so the first letter either consumes the
+        // rest of the argument (`-tX`) or the next one (`-t X`) -- there is
+        // never a second letter to read. Clippy pointed out that the `while`
+        // this started as could not iterate twice; writing it as a loop would
+        // have implied a clustering rule that does not exist here.
+        let mut chars = body.chars();
+        let Some(c) = chars.next() else {
+            // A lone `-` is handled above as a message, so an empty body here
+            // cannot happen; treat it as a message rather than panicking.
+            out.message_parts.push(arg.clone());
+            continue;
+        };
+        let rest: String = chars.collect();
+        match c {
+            't' => out.tag = take_value('t', &rest, &mut i)?,
+            'p' => out.priority = take_value('p', &rest, &mut i)?,
+            other => return Err(format!("invalid option -- '{other}'")),
+        }
     }
     Ok(out)
 }
@@ -257,6 +295,80 @@ mod tests {
 
     fn s(items: &[&str]) -> Vec<String> {
         items.iter().map(|x| (*x).to_string()).collect()
+    }
+
+    /// AN UNKNOWN OPTION USED TO BECOME THE MESSAGE.
+    ///
+    /// `logger -Q` logged the string `-Q` at exit 0 -- so a script that
+    /// mistyped an option recorded the typo in the system log and reported
+    /// success. util-linux refuses, and the wording here is its own, measured:
+    ///
+    ///     logger: invalid option -- 'Q'
+    ///     logger: unrecognized option '--no-such-option-xyzzy'
+    ///     logger: option requires an argument -- 't'
+    ///
+    /// Found by sweeping all 83 coreutils bins with an unknown long option and
+    /// looking at which exited 0. Six did; five of those are correct -- `echo`,
+    /// `printf`, `expr`, `test` and `true` all treat it as text or an operand.
+    /// This one was the finding.
+    #[test]
+    fn an_unknown_option_is_refused_not_logged() {
+        assert_eq!(
+            parse_args(&s(&["-Q"])).unwrap_err(),
+            "invalid option -- 'Q'"
+        );
+        assert_eq!(
+            parse_args(&s(&["--no-such-option-xyzzy"])).unwrap_err(),
+            "unrecognized option '--no-such-option-xyzzy'"
+        );
+        // Clustered behind a valid flag, which is where a character-at-a-time
+        // loop is likeliest to let one through.
+        assert!(parse_args(&s(&["-t", "x", "-Q"])).is_err());
+        // A missing argument is its own message, not "invalid option".
+        assert_eq!(
+            parse_args(&s(&["-t"])).unwrap_err(),
+            "option requires an argument -- 't'"
+        );
+        assert_eq!(
+            parse_args(&s(&["-p"])).unwrap_err(),
+            "option requires an argument -- 'p'"
+        );
+    }
+
+    /// A message may still start with a dash -- after `--`, which is the only
+    /// way to say so once unknown options are refused.
+    #[test]
+    fn a_message_can_still_begin_with_a_dash() {
+        let a = parse_args(&s(&["--", "-dashmsg"])).expect("-- ends the options");
+        assert_eq!(a.message_parts, vec!["-dashmsg".to_string()]);
+        // A bare `-` was never an option and still is not.
+        let bare = parse_args(&s(&["-"])).expect("a bare dash is a message");
+        assert_eq!(bare.message_parts, vec!["-".to_string()]);
+        // Everything after `--` is message, including things that look like
+        // options we DO implement.
+        let after = parse_args(&s(&["--", "-t", "x"])).expect("all message");
+        assert_eq!(after.message_parts, vec!["-t".to_string(), "x".to_string()]);
+    }
+
+    /// An option's value may be glued on, which util-linux accepts and this
+    /// did not: `logger -tX hello` tags the line `X`.
+    #[test]
+    fn an_option_value_may_be_glued_or_separate() {
+        assert_eq!(parse_args(&s(&["-tX", "hi"])).expect("glued").tag, "X");
+        assert_eq!(
+            parse_args(&s(&["-t", "X", "hi"])).expect("separate").tag,
+            "X"
+        );
+        assert_eq!(
+            parse_args(&s(&["-pkern.err"])).expect("glued").priority,
+            "kern.err"
+        );
+        let both = parse_args(&s(&["-tX", "-pkern.err", "hi"])).expect("both");
+        assert_eq!(
+            (both.tag.as_str(), both.priority.as_str()),
+            ("X", "kern.err")
+        );
+        assert_eq!(both.message_parts, vec!["hi".to_string()]);
     }
 
     // ---------------- facility_code ----------------
@@ -409,16 +521,22 @@ mod tests {
         assert_eq!(a.priority, "kern.err");
     }
 
+    /// These two asserted only that the message CONTAINED `-t` / `-p`, which
+    /// was true of the old wording ("option -t requires an argument") and is
+    /// false of util-linux's ("option requires an argument -- 't'"). A
+    /// substring check on an unmeasured string passes for any message that
+    /// happens to mention the option, so it could not have caught the wording
+    /// being wrong in the first place. Pinned to the measured text instead.
     #[test]
     fn args_dash_t_missing_value_errors() {
         let err = parse_args(&s(&["-t"])).unwrap_err();
-        assert!(err.contains("-t"));
+        assert_eq!(err, "option requires an argument -- 't'");
     }
 
     #[test]
     fn args_dash_p_missing_value_errors() {
         let err = parse_args(&s(&["-p"])).unwrap_err();
-        assert!(err.contains("-p"));
+        assert_eq!(err, "option requires an argument -- 'p'");
     }
 
     #[test]

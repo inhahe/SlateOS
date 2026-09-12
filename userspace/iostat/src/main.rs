@@ -61,6 +61,26 @@ struct CpuStats {
 }
 
 impl CpuStats {
+    /// This program's view of one [`procinfo::CpuTimes`] record.
+    ///
+    /// `guest` and `guest_nice` are absent from this struct and that is
+    /// correct rather than an omission: the kernel counts guest time inside
+    /// `user`, so a total that added them would count it twice.
+    /// `userspace/sysstat` did, and its percentages were all too small on a
+    /// machine running virtual machines.
+    fn from_proc(t: &procinfo::CpuTimes) -> Self {
+        Self {
+            user: t.user,
+            nice: t.nice,
+            system: t.system,
+            idle: t.idle,
+            iowait: t.iowait,
+            irq: t.irq,
+            softirq: t.softirq,
+            steal: t.steal,
+        }
+    }
+
     /// Sum of all CPU time fields.
     fn total(&self) -> u64 {
         self.user
@@ -240,40 +260,13 @@ fn read_file(path: &str) -> Option<String> {
 
 /// Parse the aggregate `cpu` line from `/proc/stat`.
 fn read_cpu_stats() -> Option<CpuStats> {
-    let content = read_file("/proc/stat")?;
-    for line in content.lines() {
-        // The aggregate line starts with "cpu " (note the space -- per-CPU lines
-        // are "cpu0", "cpu1", etc. with no space before the digit).
-        if let Some(rest) = line.strip_prefix("cpu ") {
-            return parse_cpu_line(rest);
-        }
-    }
-    None
-}
-
-/// Parse whitespace-separated CPU time values from a `/proc/stat` cpu line.
-fn parse_cpu_line(rest: &str) -> Option<CpuStats> {
-    let vals: Vec<u64> = rest
-        .split_whitespace()
-        .filter_map(|s| s.parse().ok())
-        .collect();
-    // A slice pattern rather than `len() < 4` followed by four indexes. The
-    // check and the indexing were correct together, but only together -- the
-    // pattern makes the requirement part of the match instead of something a
-    // later edit has to remember.
-    let [user, nice, system, idle, ..] = vals.as_slice() else {
-        return None;
-    };
-    Some(CpuStats {
-        user: *user,
-        nice: *nice,
-        system: *system,
-        idle: *idle,
-        iowait: vals.get(4).copied().unwrap_or(0),
-        irq: vals.get(5).copied().unwrap_or(0),
-        softirq: vals.get(6).copied().unwrap_or(0),
-        steal: vals.get(7).copied().unwrap_or(0),
-    })
+    let raw = fs::read("/proc/stat").ok()?;
+    raw.split(|&b| b == b'\n')
+        .filter_map(procinfo::CpuTimes::parse_line)
+        // `None` is the aggregate `cpu` line; `Some(n)` is `cpuN`, and this
+        // program reports the machine rather than each core.
+        .find(|(index, _)| index.is_none())
+        .map(|(_, t)| CpuStats::from_proc(&t))
 }
 
 /// Check whether a device name looks like a partition (ends with digits and
@@ -1169,9 +1162,19 @@ mod tests {
 
     // -- /proc/stat parsing ---------------------------------------------------
 
+    /// One aggregate `cpu` line's counters, through the shared parser. The
+    /// tests below passed the text AFTER the label to a private
+    /// `parse_cpu_line`; `procinfo` takes the whole line, label included.
+    fn cpu(counters: &str) -> Option<CpuStats> {
+        let mut line = Vec::from(&b"cpu "[..]);
+        line.extend_from_slice(counters.as_bytes());
+        line.push(b'\n');
+        procinfo::CpuTimes::parse_line(&line).map(|(_, t)| CpuStats::from_proc(&t))
+    }
+
     #[test]
     fn a_cpu_line_parses_into_its_counters() {
-        let got = parse_cpu_line("100 20 30 400 5 0 1 0 0 0").unwrap();
+        let got = cpu("100 20 30 400 5 0 1 0 0 0").unwrap();
         assert_eq!(got.user, 100);
         assert_eq!(got.nice, 20);
         assert_eq!(got.system, 30);
@@ -1184,8 +1187,8 @@ mod tests {
     fn a_short_cpu_line_is_refused_rather_than_padded() {
         // A truncated /proc/stat read must not become a machine that was 100%
         // idle; the caller has a chain of sources and None lets it say so.
-        assert!(parse_cpu_line("1 2 3").is_none());
-        assert!(parse_cpu_line("").is_none());
+        assert!(cpu("1 2 3").is_none());
+        assert!(cpu("").is_none());
     }
 
     #[test]
@@ -1196,7 +1199,7 @@ mod tests {
         // `delta.total()`, so a mismatched pair cannot occur and asserting on
         // one would test a state the program cannot reach. My first version of
         // this test did exactly that and "failed" against correct code.
-        let same = parse_cpu_line("7 7 7 7 7 7 7 7 7 7").unwrap();
+        let same = cpu("7 7 7 7 7 7 7 7 7 7").unwrap();
         let d = same.delta(&same);
         assert_eq!(d.total(), 0);
         let p = d.percentages(d.total());
@@ -1209,8 +1212,8 @@ mod tests {
     fn a_counter_that_went_backwards_saturates_rather_than_wrapping() {
         // /proc counters reset when a device is re-enumerated. Wrapping would
         // turn a reset into billions of operations per second.
-        let now = parse_cpu_line("10 10 10 10 10 10 10 10 10 10").unwrap();
-        let before = parse_cpu_line("99 99 99 99 99 99 99 99 99 99").unwrap();
+        let now = cpu("10 10 10 10 10 10 10 10 10 10").unwrap();
+        let before = cpu("99 99 99 99 99 99 99 99 99 99").unwrap();
         let d = now.delta(&before);
         assert_eq!(d.user, 0);
         assert_eq!(d.idle, 0);

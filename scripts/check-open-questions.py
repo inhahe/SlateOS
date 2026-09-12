@@ -42,7 +42,9 @@ checker could not reach a verdict.
 
 from __future__ import annotations
 
+import hashlib
 import pathlib
+import subprocess
 import re
 import sys
 
@@ -331,11 +333,96 @@ def self_test() -> int:
            "# Open Questions\n\n## A-Q1 — [A] x? — Status: OPEN\n",
            "archive boundary")
 
+    # The answers-file matcher. Its first version compared whole headings and
+    # so reported nothing, which is why this is a function and not four lines.
+    _body = [(1, "## A-Q10 \u2014 [A] x? \u2014 Status: OPEN"),
+             (2, "## B-Q8 \u2014 [B] y?"),
+             (3, "## C-Q11: colon form (raised by lane C)")]
+    _ans = "A-Q10: do B" + "\n" + "Q46: c" + "\n" + "C-Q11: yes"
+    _got = answered_still_open(_ans, _body)
+    check("an answered id that is still open is reported", "A-Q10" in _got)
+    check("the colon heading form is matched too", "C-Q11" in _got)
+    check("an open question with no answer is not reported", "B-Q8" not in _got)
+    check("an answer for nothing open here is not reported", "Q46" not in _got)
+    check("a heading without ## does not yield an id",
+          answered_still_open("A-Q10: x", [(1, "A-Q10 no hashes")]) == [])
+
     if failures:
         print(f"\n{len(failures)} of {count} self-test(s) FAILED")
         return 1
     print(f"check-open-questions: self-test passed ({count} checks)")
     return 0
+
+
+NL_ = chr(10)
+ANSWERS = "open-questions-answers.txt"
+
+
+def answered_still_open(answers_text: str, open_idents: list) -> list:
+    """IDs the operator has answered that are still open in the queue.
+
+    Pure and separate from the I/O around it, because the first version did
+    this inline against `f.body` -- (line, full heading) pairs, not bare
+    identifiers -- so it matched nothing and said 'no answer matches a question
+    still open'. A silent no-match reads exactly like a true negative, which is
+    the defect this gate family exists to catch."""
+    answered = set(re.findall(
+        r"(?m)^([A-Za-z]*-?Q[0-9]+)\s*:", answers_text))
+    head = re.compile(r"^##\s+([A-Za-z]*-?Q[0-9]+)")
+    here = set()
+    for entry in open_idents:
+        text = entry[1] if isinstance(entry, tuple) else entry
+        found = head.match(text)
+        if found:
+            here.add(found.group(1))
+    return sorted(here & answered)
+
+def answers_notice(open_idents: list) -> None:
+    """Say so, once per lane, when the operator's answers file changes."""
+    try:
+        common = subprocess.run(
+            ["git", "rev-parse", "--git-common-dir"],
+            capture_output=True, text=True, check=True).stdout.strip()
+        common = pathlib.Path(common).resolve()
+        answers = common.parent / ANSWERS
+        if not answers.is_file():
+            return
+        raw = answers.read_bytes()
+        digest = hashlib.sha256(raw).hexdigest()[:16]
+        branch = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, check=True).stdout.strip()
+        mark = common / "coordination" / ("answers-seen-" + (branch or "detached"))
+        prev = mark.read_text(encoding="utf-8").strip() if mark.is_file() else ""
+        if prev == digest:
+            return
+
+        # Which answered IDs are still in the queue: the actionable half.
+        still_open = answered_still_open(
+            raw.decode("utf-8", "replace"), open_idents)
+
+        print("")
+        print("=== OPERATOR ANSWERS: %s has changed ===" % ANSWERS)
+        print("    %s" % answers)
+        if still_open:
+            print("    %d answer(s) for questions still open here: %s"
+                  % (len(still_open), ", ".join(still_open)))
+            print("    Move each to design-decisions.md (Decided by: Operator) and")
+            print("    remove it from open-questions.md.")
+        else:
+            print("    No answer in it matches a question still open on this branch.")
+        print("    This notice fires once per branch; it is recorded now.")
+        print("")
+        mark.parent.mkdir(parents=True, exist_ok=True)
+        # newline="": without it Windows writes CRLF here, so the digest read
+        # back never matches the one written and the notice repeats forever.
+        # check-text-mode-writes refuses the build over exactly this, and did.
+        # digest read back never matches the one written. check-text-mode-writes
+        # refuses the build over exactly this, and did.
+        mark.write_text(digest + NL_, encoding="utf-8", newline="")
+    except (OSError, subprocess.SubprocessError, UnicodeError):
+        # Silence, never a refusal: see this function's rationale.
+        return
 
 
 def main(argv: list[str]) -> int:
@@ -363,6 +450,8 @@ def main(argv: list[str]) -> int:
         for d in f.failures:
             print(f"  - {d}", file=sys.stderr)
         return 1
+
+    answers_notice(f.body)
 
     tail = (f", {len(f.warnings)} warning(s)" if f.warnings else ", no warnings")
     print(f"check-open-questions: OK ({len(f.body)} open, "

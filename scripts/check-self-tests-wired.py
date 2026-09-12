@@ -680,6 +680,11 @@ def main():
             continue
         (allowed if sym in ALLOWLIST else dead).append(sym)
 
+    # An entry naming a symbol the scan never found is inert, and inertness
+    # here is not harmless: the name stays exempt, so a future self-test that
+    # reuses it inherits an exemption written about something else.
+    stale_allowed = sorted(set(ALLOWLIST) - set(defs))
+
     if not args.quiet:
         print("self-tests defined: %d" % len(defs))
         print("  run at boot (reachable from %s):        %d" % (BOOT_ROOT, len(boot)))
@@ -687,6 +692,9 @@ def main():
               % ("/".join(manual_roots) or "-", len(manual)))
         print("  allowlisted as deliberately uncalled:   %d" % len(allowed))
         print("  reachable from nothing:                 %d" % len(dead))
+        if stale_allowed:
+            print("  allowlisted but not defined:            %d"
+                  % len(stale_allowed))
         if n_aliases:
             print("  (%d `pub use` re-export(s) followed)" % n_aliases)
 
@@ -771,6 +779,23 @@ def main():
         print("")
         for sym in allowed:
             print("  allowlisted: %s" % sym)
+
+    if stale_allowed:
+        print("", file=sys.stderr)
+        print("ERROR: %d ALLOWLIST entr(ies) name no self-test that exists:"
+              % len(stale_allowed), file=sys.stderr)
+        for sym in stale_allowed:
+            print("    %s" % sym, file=sys.stderr)
+        print("", file=sys.stderr)
+        print("An entry that matches nothing is not merely unused: the name stays",
+              file=sys.stderr)
+        print("exempt, so a future self-test reusing it is excused from being wired",
+              file=sys.stderr)
+        print("up by a line written about something else. Delete the entry, or",
+              file=sys.stderr)
+        print("correct it to the symbol's new name.", file=sys.stderr)
+        return 1
+
     return 0
 
 

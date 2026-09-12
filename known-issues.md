@@ -136573,7 +136573,7 @@ exit and not work.
 
 ### A-EXEC-WRITES-A-COMM-THAT-PRCTL-WOULD-REFUSE-AND-PROCFS-RENDERS-IT-AS-QUESTION-MARKS (lane A, 2026-09-12) — FIXED
 
-**FIXED 2026-09-12, all five surfaces.** `comm_truncate` takes and returns `&[u8]`; its
+**FIXED 2026-09-12, the ABI surfaces.** `comm_truncate` takes and returns `&[u8]`; its
 UTF-8 char-boundary walk was deleted rather than ported, because Linux cuts `comm` at 16
 bytes flat so byte truncation is the more faithful behaviour and the function collapsed to
 one line. `gen_pid_cmdline` drops its decode entirely, `gen_pid_comm` carries bytes end to
@@ -136588,6 +136588,46 @@ closed the asymmetry that made the check **partly decorative** — `execve` set 
 through `set_task_name`, which never validated, so bytes this arm refused could already
 arrive by the more common route, and the gate only ever caught the caller who asked
 politely.
+
+**AMENDMENT: "all five surfaces" was wrong when written. There are nine, and four remain.**
+
+The fix covers the four procfs surfaces and `PR_GET_NAME`, which are the ABI — what
+userspace tools read. It does **not** cover four in-kernel shell task listings:
+
+```
+kshell.rs:8948, 9418, 9515, 9612
+    for info in &task_list { let name = core::str::from_utf8(...).unwrap_or("?"); ... }
+```
+
+Each iterates the scheduler's `task_list` and renders an undecodable comm as the literal
+`"?"` — the same collision constant one more time, so two processes with different
+unreadable names print identically in the shell's own `ps`-style output.
+
+**Why they were missed, which is the fourth time this specific mistake has appeared in
+this entry.** I enumerated the ABI: I grepped procfs, fixed what was there, and wrote
+"all five surfaces" from the population I had searched rather than from the population
+that has the defect. The kshell sites do not decode via `comm_truncate`, are not in
+`procfs.rs`, and use `"?"` rather than `"???"` — so every pattern that found the others
+missed these, and the phrase "all five" was an inference from a search, not a count.
+
+**Deliberately not fixed in the same change, and this is a judgement rather than an
+oversight.** The ABI surfaces and the shell display are different in kind: `/proc` is read
+by programs that match, group and kill by name, which is where a collision does damage;
+kshell's listing is read by a developer looking at a screen. Fixing the four shell sites
+means converting `shell_println!("{name}")` call sites to byte emission in a
+144,000-line file, which is the same restructure the procfs builders needed and deserves
+its own change and its own verification rather than riding along on this one.
+
+**What is true after this change**, stated so nobody has to re-derive it:
+
+| surface | status |
+|---|---|
+| `/proc/<pid>/comm` | bytes |
+| `/proc/<pid>/stat` field 2 | bytes |
+| `/proc/<pid>/status` `Name:` | bytes |
+| `/proc/<pid>/cmdline` | bytes |
+| `prctl(PR_GET_NAME)` | bytes (always was) |
+| `kshell` task listings (4 sites) | **still `"?"`** |
 
 **In short:** every running program has a short name the system shows in process
 listings. There is a check that stops a program *asking* for a name the system cannot

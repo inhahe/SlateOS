@@ -122555,6 +122555,52 @@ rather than a rider on a rebooted test.
 
 ## TD-B-A-CARGO-RUN-IN-THIS-TREE-IS-82-PERCENT-ONE-REPEATED-WARNING (lane B, 2026-09-04)
 
+### Re-measured 2026-09-12 -- the scale is gone, the mechanism is not explained
+
+Flagged by `check-stale-blockers.py`'s third pass because `Cargo.toml` had moved
+under it. What the re-read found:
+
+**The population collapsed.** Measured with `git ls-tree` at both revisions,
+not estimated:
+
+| | 2026-09-04 | 2026-09-12 |
+|---|---:|---:|
+| workspace manifests | 2,950 | **412** |
+| under `userspace/` | 2,757 | **208** |
+| members with no `[lints]` | 2,733 | **168** |
+
+So the entry's central argument -- that fixing this means "a 2,733-file commit
+the operator's answer may largely revert" -- is no longer about 2,733 files.
+The stub consolidation happened; §1005 and §1006 took most of those crates into
+`coreutils`.
+
+**And the symptom did not reproduce, in four probes:**
+
+* today's full `cargo test -p coreutils` log: **247 KB, 0 occurrences** (the
+  entry measured 5.02 MB and 8,166);
+* `cargo metadata --no-deps` and `cargo tree --workspace`: 0 stderr lines;
+* `cargo check -p quoting` -- a member that **survived** and still has no
+  `[lints]` -- 0 occurrences, under *both* toolchains.
+
+**WHAT IS NOT ESTABLISHED, stated plainly so nobody reads the above as a fix.**
+Why it fired 8,166 times on 2026-09-04 is unexplained. Deletion cannot be the
+whole answer: `userspace/acl` had no `[lints]` then, still has none, and does
+not warn now. Something about the invocation shape or the toolchain differs and
+I did not isolate it. **This entry is therefore NOT closed**, and the warning
+may return the moment whatever suppresses it changes.
+
+**A mistake worth keeping, because it nearly became the finding.** My first
+three probes all ran the *Windows* cargo (1.95.0, 2026-03-21). The entry
+measured a `--only linux` run -- the **WSL** toolchain, cargo 1.98.0
+(2026-08-05). Two different compilers six months apart, and I was about to
+write "not reproducible today" on the strength of the one that may never have
+emitted the lint at all. It only came out because the version string was worth
+checking. *Same shape as the rest of this week: the probe ran correctly and
+answered a narrower question than the one asked -- here, "does THIS cargo warn"
+in place of "does the cargo that warned still warn".* Re-running it under WSL
+1.98.0 gave the same answer, which is the only reason the paragraph above is
+allowed to say "under both toolchains".
+
 **In short:** Every `cargo build`/`clippy`/`test` in this workspace prints the
 same warning about two thousand times, once per crate, and that one warning is
 **82% of the output by volume**. Nothing is broken by it; what is broken is

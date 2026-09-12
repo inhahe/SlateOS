@@ -186,8 +186,35 @@ def survey(syscall_dir: pathlib.Path = SYSCALL) -> dict:
     }
 
 
+#: Floors below which this tool REFUSES a verdict instead of reporting a clean one.
+#:
+#: Demonstrated, not imagined: drift `LINUX_ARM_RE` so it matches nothing and this tool
+#: prints "0 dispatched Linux shim(s)" followed by "Every module a Linux shim reaches is
+#: also reached by some native handler" -- its most reassuring sentence -- and exits 0.
+#: The summary does name the population, and that is how the gap was found; but as lane B
+#: put it after hitting the same thing in their own gate, **a summary a human has to read
+#: is weaker than a status a hook can act on**.
+#:
+#: Set to roughly a quarter of the real figures (369 dispatched shims, 330 native
+#: registrations as of 2026-09-12), so they fire on a scanner that broke rather than on a
+#: tree that shrank. A kernel that genuinely lost three quarters of its syscall table
+#: wants a human looking at it anyway.
+FLOOR_LINUX_ARMS = 100
+FLOOR_NATIVE_REGS = 100
+
+
 def report(strict: bool = False) -> int:
     s = survey()
+    if (len(s["linux_arms"]) < FLOOR_LINUX_ARMS
+            or len(s["native_regs"]) < FLOOR_NATIVE_REGS):
+        print(f"abi-reach: REFUSING a verdict -- {len(s['linux_arms'])} dispatched Linux "
+              f"shim(s) and {len(s['native_regs'])} native registration(s) is below the "
+              f"floors of {FLOOR_LINUX_ARMS}/{FLOOR_NATIVE_REGS}.", file=sys.stderr)
+        print("  This scan read far less than the tree holds, so its silence is not "
+              "evidence.", file=sys.stderr)
+        print("  Most likely a pattern in this file has drifted from linux.rs or "
+              "dispatch.rs.", file=sys.stderr)
+        return 2
     print(f"abi-reach: {len(s['linux_arms'])} dispatched Linux shim(s), "
           f"{len(s['native_regs'])} registered native handler(s).")
     print(f"  Linux shims reach {s['linux_reach_total']} distinct kernel call(s); "
@@ -332,6 +359,20 @@ def self_test() -> int:
         ptr = _write_tables(
             pathlib.Path(td), ptr_linux, ptr_handlers,
             "    handlers[SYS_HOSTNAME_SET as usize] = Some(handlers::sys_hostname_set);")
+    # The floor fires on a scan that read almost nothing. Asserted because the whole
+    # point of the floor is a case that cannot be checked by reading the report: a
+    # drifted pattern prints a clean verdict, and only a status can refuse it.
+    with tempfile.TemporaryDirectory() as td:
+        empty = _write_tables(pathlib.Path(td), "", "", "")
+    cases.append(("a scan finding no dispatched shims is below the floor",
+                  len(empty["linux_arms"]) < FLOOR_LINUX_ARMS, True))
+    cases.append(("...and no native registrations either",
+                  len(empty["native_regs"]) < FLOOR_NATIVE_REGS, True))
+    _real_now = survey()
+    cases.append(("while the real tree is comfortably above both",
+                  len(_real_now["linux_arms"]) >= FLOOR_LINUX_ARMS
+                  and len(_real_now["native_regs"]) >= FLOOR_NATIVE_REGS, True))
+
     cases.append(("a capability reached natively as a function pointer is not Linux-only",
                   "fs::nameservice::set_hostname" in ptr["only_linux"], False))
 

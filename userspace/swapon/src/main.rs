@@ -3,10 +3,21 @@
 //! Multi-personality binary providing:
 //! - **swapon** — enable swap space
 //! - **swapoff** — disable swap space
-//! - **free** — display memory and swap usage
 //!
-//! Reads `/proc/meminfo`, `/proc/swaps`, and `/etc/fstab` for system memory
-//! and swap configuration.
+//! Reads `/proc/swaps` and `/etc/fstab`.
+//!
+//! # What used to be claimed here
+//!
+//! Two more lines stood above until 2026-09-12: a **free** personality, and
+//! `/proc/meminfo` in the list of files read. Neither was true. There was a
+//! `Personality: free` section header further down with no code beneath it,
+//! and `/proc/meminfo` appeared nowhere in this crate but that sentence --
+//! it survived because it shared a sentence with two paths that are real.
+//!
+//! `free` is coreutils'. `userspace/free` was retired 2026-09-12 after
+//! measuring 0 of 48 cases against procps-ng 4.0.4 where coreutils' scores
+//! 48 of 48 (`scripts/free-diff.sh`). See `main` for why the name is now
+//! refused here rather than quietly falling through.
 
 #![deny(clippy::all)]
 
@@ -456,10 +467,6 @@ fn deactivate_swap(device: &str, verbose: bool) {
 }
 
 // ============================================================================
-// Personality: free
-// ============================================================================
-
-// ============================================================================
 // Entry point
 // ============================================================================
 
@@ -484,7 +491,40 @@ fn main() {
 
     match prog_name.as_str() {
         "swapoff" => cmd_swapoff(&rest),
-        _ => cmd_swapon(&rest),
+        "swapon" => cmd_swapon(&rest),
+        // An unrecognised argv[0] refuses instead of falling through to
+        // `cmd_swapon`, and the generality is the point.
+        //
+        // This crate's module doc advertised a `free` personality that was
+        // never written: a section header with no code under it, and a unit
+        // test asserting `free` was extracted correctly from argv[0] -- a
+        // value `main` then dropped, because the arm below used to be
+        // `_ => cmd_swapon(&rest)`. `cmd_swapon` with no arguments prints the
+        // SWAP SUMMARY and exits 0, so this binary installed as `free` would
+        // have answered a request for a memory report with a swap table and
+        // a success code. Wrong output under a success exit is the bug class
+        // that never gets filed, because it looks like an answer.
+        //
+        // The first fix was a hardcoded arm for that one name, refusing it.
+        // `scripts/multicall-aliases.py` rejected it at pre-push and was
+        // right: a dispatch arm for a name no crate, coreutils bin, or
+        // rootfs alias produces is a branch nothing can reach, and
+        // design-decisions §1019 says to delete the shadowing branch because
+        // the name belongs to whichever program performs the operation.
+        // `free` is coreutils' (`userspace/free` retired 2026-09-12 at 0 of
+        // 48 against procps-ng).
+        //
+        // But deleting that arm and restoring `_ => cmd_swapon` would put
+        // the silent-wrong-answer back, and worse, put it back INVISIBLY:
+        // the checker reads dispatch arms, so a catch-all makes this binary
+        // answer to every name on earth while declaring none of them. The
+        // hole was never `free` specifically. Refusing here closes it for
+        // all names at once and declares no name, so there is nothing for
+        // the checker to flag and nothing left to fall through.
+        other => {
+            eprintln!("swapon: unknown personality `{other}`; this binary is swapon/swapoff");
+            process::exit(1);
+        }
     }
 }
 
@@ -632,7 +672,23 @@ mod tests {
 
     #[test]
     fn test_personality_detection() {
-        // Test basename extraction logic.
+        // Basename extraction. Worth reading twice, because what these rows
+        // prove changed on 2026-09-12 without any of them changing.
+        //
+        // The `free` rows used to assert that a name this binary did NOTHING
+        // with was extracted correctly: `main`'s catch-all was
+        // `_ => cmd_swapon`, so the value was computed, checked here, and
+        // discarded. A test proving a fact no caller consumes reads as
+        // coverage and is not.
+        //
+        // `main` now dispatches `"swapon"` and `"swapoff"` explicitly and
+        // refuses everything else, which moves the weight onto the swapon
+        // and swapoff rows: those two names are the only ones where a wrong
+        // extraction changes behaviour rather than the wording of an error,
+        // and getting either wrong makes the binary refuse ITSELF. The
+        // `free` rows are now the negative case -- a name that must NOT
+        // resolve to a personality -- which is what they should have been
+        // all along.
         let test_cases = [
             ("/usr/sbin/swapon", "swapon"),
             ("/usr/sbin/swapoff", "swapoff"),

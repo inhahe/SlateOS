@@ -1165,8 +1165,48 @@ two implementations that can disagree with the winner picked by packaging:
 | `userspace/fuser` | `lsof` | `userspace/lsof` |
 | `userspace/hostnamectl` | `hostname` | `userspace/hostname` |
 | `userspace/resolvectl` | `nslookup` | `userspace/nslookup` |
-| `userspace/swapon` | `free` | coreutils |
 | `userspace/useradd` | `newgrp` | `userspace/newgrp` |
+
+**`userspace/swapon` / `free` left this table on 2026-09-12**, and it was
+never quite the same kind of entry as the rest. The others shadow a name with
+a *working* implementation and the question is which one should win. `swapon`
+shadowed `free` with **nothing**: its module doc advertised a `free`
+personality, there was a `Personality: free` section header with no code
+under it, and a unit test asserted that `free` was extracted correctly from
+`argv[0]` -- a value `main` then dropped on the floor, because the dispatch
+was `match { "swapoff" => …, _ => cmd_swapon }`. The name fell through to
+`cmd_swapon`, which with no arguments prints the **swap summary and exits 0**.
+
+So the hazard was not "two implementations disagree", it was "one of them
+answers a memory-report request with a swap table and a success code" --
+wrong output under a success exit, which is the class of bug that never gets
+filed because it looks like an answer. It was latent only because
+`create-ext4-rootfs.sh` stages neither `swapon` nor a `free` alias for it;
+`multicall-aliases.py` could not see it either, since that checker reads the
+dispatch and this claim lived only in prose.
+
+The first fix was an arm refusing that one name. `multicall-aliases.py`
+rejected it at pre-push and was right — per §1019 the shadowing branch is
+deleted, because the name belongs to whichever program performs the
+operation. But deleting it and restoring the catch-all would have put the
+silent wrong answer back *invisibly*: the checker reads dispatch arms, so a
+catch-all lets a binary answer to every name on earth while declaring none.
+`main` now dispatches `swapon` and `swapoff` explicitly and refuses anything
+else, which closes it for all names rather than for the one that was noticed.
+
+The module doc also lost a second false claim, found while fixing the first:
+it listed `/proc/meminfo` among the files read, a path appearing nowhere else
+in the crate. It survived by sharing a sentence with `/proc/swaps` and
+`/etc/fstab`, which are real.
+
+**Separately, `multicall-aliases.py` does not strip comments before looking
+for dispatch arms.** A comment in the new code reading ``the hardcoded
+`"free" => refuse` arm`` was counted as a personality: the checker reported
+169 personalities and 1 shadowed name, and rewording that one comment took it
+to 168 and 0 with no code change. The direction is safe — it over-reports, so
+it refuses pushes it should not rather than passing ones it should not — but
+the "168 unreachable" backlog figure counts prose, and anyone who quotes a
+match arm in a comment gets refused. Filed below.
 
 `nologin` answering to `true` and `false` is the one to look at first: those
 two run in nearly every shell script on the system, and `nologin`'s job is to

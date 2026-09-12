@@ -45,6 +45,15 @@
 #      0x7F -- in a tracked text file.
 #  26. Refuse a coreutils bin that never reads `argv`, and so silently
 #      ignores every option it is given.
+#  27. Refuse a crate that reaches a stateful part of `posix` as a Rust
+#      dependency, which gives the process a second libc with the syscalls
+#      stubbed out rather than the one it links.
+#  28. Refuse a command substitution that calls a name nothing in reach defines,
+#      which exits 127 and yields the empty string that a guard then swallows.
+#  29. Refuse an `open-questions.md` whose structure puts an open question below
+#      `# Resolved`, where the operator does not read.
+#  30. Refuse a diff harness that does work before sourcing the preamble, which a
+#      re-exec under `timeout` then performs twice.
 #
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented; wrong again the moment gate 13 was written, when the
@@ -3539,20 +3548,28 @@ fi
 # 14 the same day, gate 15 (`release-staleness`) made it 15 on 2026-09-07, and
 # gate 16 (`libc-abi`) made it 16 on 2026-09-09, gate 17 (`cfg-unix`) made
 # it 17 on 2026-09-10, gate 18 (`crate-names`) made it 18 the same day, and
-# gate 19 (`gate-call-sites`) made it 19 also on 2026-09-10; if
+# gate 19 (`gate-call-sites`) made it 19 also on 2026-09-10;
+# and gates 27-30 (`one-libc`, `shell-callables`, `open-questions`,
+# `diff-preamble-order`) made it 30 on 2026-09-12 -- widened in after six trunk
+# reds in one night, four of which were gates this hook did not run.  The advisory
+# `stale-blockers` wired in the same day is deliberately NOT numbered here: every
+# entry in that list begins "Refuse to publish", and it never refuses.  An earlier
+# version of this very comment claimed those five were gates 20-24, which was wrong
+# -- 20 through 26 were already taken -- and is the reason the count is stated
+# against the list rather than from memory.  If
 # you add a gate, bump both.
 #
 # A refusing gate exits before this, so the tally is not a claim that the push
 # passed — only a record of what was asked.
 # ---------------------------------------------------------------------------
-n_ran=0
-n_skipped=0
-for _g in $gates_ran; do n_ran=$((n_ran + 1)); done
-for _g in $gates_skipped; do n_skipped=$((n_skipped + 1)); done
-
-echo "pre-push: $n_ran gate(s) ran, $n_skipped skipped." >&2
-[ "$n_ran" -gt 0 ] && echo "  ran:    ${gates_ran# }" >&2
-[ "$n_skipped" -gt 0 ] && echo "  skipped: ${gates_skipped# }" >&2
+# THE TALLY MOVED TO THE END OF THE FILE (2026-09-12).  It used to print here, and
+# seven `note_gate` calls come after this point -- control-bytes, and the five gates
+# widened in on 2026-09-12 -- so it was reporting a subset as though it were the set.
+# The comment above says the tally is "only a record of what was asked"; it was a
+# record of what was asked before this line, which is a different claim and not one
+# anyone reading the output could have known to make.  I relied on this summary
+# earlier the same night: I read `cfg-unix` in its `ran:` list and concluded the boot
+# test's check had been pre-run, which was wrong for a second reason as well.
 
 # ---------------------------------------------------------------------------
 # The halt notice. NOT a gate: it prints and allows.
@@ -3688,6 +3705,185 @@ fi
 # byte added by one commit and removed by a later one is still caught -- the
 # same reasoning gate 1 uses for todo2.txt.
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# GATES WIDENED INTO THIS HOOK 2026-09-12, at lane B's request and with their
+# agreement on each one.
+#
+# WHY.  In one night the trunk went red six times and not one was caught at the
+# machine that wrote it: check-shell-callables (inherited through a merge),
+# scan-orphan-modules, check-open-questions (mine -- an entry filed into the
+# archive), check-cfg-unix, check-gates-are-wired, check-one-libc-per-process.
+# Four of the six were gates this hook did not run at all.  The cost is not the
+# red: these fire AFTER a full workspace build, so five boot runs died between 33
+# seconds and 27 minutes in, each one a measurement that had to be started again.
+#
+# COST, MEASURED on both machines rather than estimated.  Loaded (five cargo
+# processes, lane A) / idle (lane B): one-libc 5s/5s, shell-callables 7.2s/3s,
+# open-questions 0.5s/0s, diff-preamble-order ~1s/1s, stale-blockers ~0s/0s.
+# Design against the loaded figures, because a push during a build is the normal
+# case.  scan-orphan-modules is deliberately NOT here at 51.6s -- it stays a
+# boot-test gate, named in the source so the exclusion can be argued with.
+#
+# RUN UNCONDITIONALLY, with no `touches` guard and no time budget.  Both were
+# tempting and both reintroduce the thing this is fixing: a gate that did not run
+# is indistinguishable from a gate that passed, and a budget silently drops
+# exactly the slow gates nobody then runs until a boot test.  Ten seconds on every
+# push is the price of that not happening.
+#
+# Each carries a named bypass for the case where a push must go out and the gate is
+# the wrong judge of it -- the same shape as the existing gates above.
+# ---------------------------------------------------------------------------
+# Gate 27 — one-libc.  A second libc with every syscall stubbed is not a libc.
+onelibc="${repo_root:-.}/scripts/check-one-libc-per-process.py"
+skip_onelibc=0
+# Bypass: ALLOW_SECOND_LIBC=1 git push origin <branch>
+if [ "${ALLOW_SECOND_LIBC:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_SECOND_LIBC=1 set — skipping the one-libc gate." >&2
+    skip_onelibc=1
+fi
+[ -n "$py" ] || skip_onelibc=1
+[ -f "$onelibc" ] || skip_onelibc=1
+note_gate one-libc "$skip_onelibc"
+onelibc_failed=0
+if [ "$skip_onelibc" != "1" ]; then
+    # The checker before its verdict, as every gate here does: a clean report
+    # from a broken scanner reads exactly like a clean tree.
+    if ! run_checker one-libc-selftest "$py" "$onelibc" --self-test; then
+        echo "pre-push: check-one-libc-per-process.py FAILED ITS OWN SELF-TEST — its verdict is not trustworthy." >&2
+        onelibc_failed=1
+    else
+        if ! run_checker one-libc "$py" "$onelibc"; then
+            onelibc_failed=1
+        fi
+    fi
+fi
+if [ "$onelibc_failed" != "0" ]; then
+    cat >&2 <<EOF
+pre-push: REFUSING to push — a crate reached a stateful part of posix as a Rust dependency.
+A SlateOS program links the real libc already.  Reach stateful posix through
+its C symbols, not as a Rust dependency -- a Rust dep runs the stubbed second
+copy, not the libc the program links.  See design-decisions.md 768 and
+known-issues.md TD-B-THE-POSIX-RLIB-IS-A-SECOND-LIBC-WITH-EVERY-SYSCALL-STUBBED-OUT.
+EOF
+    exit 1
+fi
+
+# Gate 28 — shell-callables.  A callee nothing defines exits 127 and yields "".
+shcall="${repo_root:-.}/scripts/check-shell-callables.py"
+skip_shcall=0
+# Bypass: ALLOW_UNRESOLVED_CALLEE=1 git push origin <branch>
+if [ "${ALLOW_UNRESOLVED_CALLEE:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_UNRESOLVED_CALLEE=1 set — skipping the shell-callables gate." >&2
+    skip_shcall=1
+fi
+[ -n "$py" ] || skip_shcall=1
+[ -f "$shcall" ] || skip_shcall=1
+note_gate shell-callables "$skip_shcall"
+shcall_failed=0
+if [ "$skip_shcall" != "1" ]; then
+    # The checker before its verdict, as every gate here does: a clean report
+    # from a broken scanner reads exactly like a clean tree.
+    if ! run_checker shell-callables-selftest "$py" "$shcall" --self-test; then
+        echo "pre-push: check-shell-callables.py FAILED ITS OWN SELF-TEST — its verdict is not trustworthy." >&2
+        shcall_failed=1
+    else
+        if ! run_checker shell-callables "$py" "$shcall"; then
+            shcall_failed=1
+        fi
+    fi
+fi
+if [ "$shcall_failed" != "0" ]; then
+    cat >&2 <<EOF
+pre-push: REFUSING to push — a command substitution calls a name nothing in reach defines.
+At run time that substitution exits 127 and yields the empty string; if it is
+guarded by || or wrapped in if, the status is swallowed and the caller proceeds
+with an empty value believing it succeeded.
+EOF
+    exit 1
+fi
+
+# Gate 29 — open-questions.  A question filed below `# Resolved` was not asked.
+openq="${repo_root:-.}/scripts/check-open-questions.py"
+skip_openq=0
+# Bypass: ALLOW_OPEN_QUESTIONS_SHAPE=1 git push origin <branch>
+if [ "${ALLOW_OPEN_QUESTIONS_SHAPE:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_OPEN_QUESTIONS_SHAPE=1 set — skipping the open-questions gate." >&2
+    skip_openq=1
+fi
+[ -n "$py" ] || skip_openq=1
+[ -f "$openq" ] || skip_openq=1
+note_gate open-questions "$skip_openq"
+openq_failed=0
+if [ "$skip_openq" != "1" ]; then
+    # The checker before its verdict, as every gate here does: a clean report
+    # from a broken scanner reads exactly like a clean tree.
+    if ! run_checker open-questions-selftest "$py" "$openq" --self-test; then
+        echo "pre-push: check-open-questions.py FAILED ITS OWN SELF-TEST — its verdict is not trustworthy." >&2
+        openq_failed=1
+    else
+        if ! run_checker open-questions "$py" "$openq"; then
+            openq_failed=1
+        fi
+    fi
+fi
+if [ "$openq_failed" != "0" ]; then
+    cat >&2 <<EOF
+pre-push: REFUSING to push — open-questions.md is structurally wrong.
+Almost always a new question appended to the end, which puts it below
+'# Resolved' among the answered ones.  The operator reads from the top, so a
+question filed there is not a question that was asked.
+EOF
+    exit 1
+fi
+
+# Gate 30 — diff-preamble-order.  A re-exec repeats whatever ran before the source.
+diffpre="${repo_root:-.}/scripts/check-diff-preamble-order.py"
+skip_diffpre=0
+# Bypass: ALLOW_DIFF_PREAMBLE_ORDER=1 git push origin <branch>
+if [ "${ALLOW_DIFF_PREAMBLE_ORDER:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_DIFF_PREAMBLE_ORDER=1 set — skipping the diff-preamble-order gate." >&2
+    skip_diffpre=1
+fi
+[ -n "$py" ] || skip_diffpre=1
+[ -f "$diffpre" ] || skip_diffpre=1
+note_gate diff-preamble-order "$skip_diffpre"
+diffpre_failed=0
+if [ "$skip_diffpre" != "1" ]; then
+    # The checker before its verdict, as every gate here does: a clean report
+    # from a broken scanner reads exactly like a clean tree.
+    if ! run_checker diff-preamble-order-selftest "$py" "$diffpre" --self-test; then
+        echo "pre-push: check-diff-preamble-order.py FAILED ITS OWN SELF-TEST — its verdict is not trustworthy." >&2
+        diffpre_failed=1
+    else
+        if ! run_checker diff-preamble-order "$py" "$diffpre"; then
+            diffpre_failed=1
+        fi
+    fi
+fi
+if [ "$diffpre_failed" != "0" ]; then
+    cat >&2 <<EOF
+pre-push: REFUSING to push — a diff harness does work before it sources the preamble.
+diff-wsl.sh re-execs each harness under timeout to bound it, and a re-exec
+restarts the script from the top -- so that work happens TWICE, silently.
+EOF
+    exit 1
+fi
+
+# check-stale-blockers.py -- ADVISORY here exactly as in boot-test.sh: no
+# --strict, no refusal.  Wired in both places so the two cannot drift, which is
+# the parity lane B is writing a gate to enforce.  It reports known-issues entries
+# whose stated blocker has already landed; there are 6, two belonging to a third
+# lane, and lane B owns the count and will switch it to --strict at 0.
+staleblk="${repo_root:-.}/scripts/check-stale-blockers.py"
+skip_staleblk=0
+[ -n "$py" ] || skip_staleblk=1
+[ -f "$staleblk" ] || skip_staleblk=1
+note_gate stale-blockers "$skip_staleblk"
+if [ "$skip_staleblk" != "1" ]; then
+    run_checker stale-blockers "$py" "$staleblk" || true
+fi
+
 ctlbytes="${repo_root:-.}/scripts/check-control-bytes.py"
 skip_ctlbytes=0
 # Bypass: ALLOW_CONTROL_BYTES=1 git push origin <branch>
@@ -3754,5 +3950,18 @@ if [ "$skip" -eq 0 ] && [ -f "$repo_root/scripts/check-lane-signals.py" ]; then
         :
     fi
 fi
+
+# ---------------------------------------------------------------------------
+# The gate tally, printed here because here is after every gate.  See the note
+# where it used to live, above gate 19's history.
+# ---------------------------------------------------------------------------
+n_ran=0
+n_skipped=0
+for _g in $gates_ran; do n_ran=$((n_ran + 1)); done
+for _g in $gates_skipped; do n_skipped=$((n_skipped + 1)); done
+
+echo "pre-push: $n_ran gate(s) ran, $n_skipped skipped." >&2
+[ "$n_ran" -gt 0 ] && echo "  ran:    ${gates_ran# }" >&2
+[ "$n_skipped" -gt 0 ] && echo "  skipped: ${gates_skipped# }" >&2
 
 exit 0

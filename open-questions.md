@@ -1735,6 +1735,74 @@ pointer to the parent file rather than a second copy.
 this is about where it is written down.
 
 
+## B-Q14 — [B] `logger` writes to the terminal instead of to the log. Which of the two implementations survives? — Status: OPEN
+
+**In short:** `logger` is the command a shell script uses to record a line in
+the system log — `logger "backup finished"`. This tree has two of them and they
+do completely different things with that line. One **prints it to the screen**;
+the other **sends it to the system log** the way every other Unix does. One of
+the two is going to be deleted, and which one decides whether a script that logs
+a message ends up spraying text over a user's terminal. I do not think I should
+pick this one on my own, because it is a user-visible behaviour change either
+way and the argument for the current coreutils behaviour cites an architectural
+rule that I think it is misreading.
+
+**The two:**
+
+| | `coreutils`'s `logger` | `userspace/logger` |
+|---|---|---|
+| Where the message goes | **stdout** — the terminal | `/dev/log` socket, or appends to a log file |
+| Options | 2 (`-t`, `-p`) | 23 |
+| Upstream fidelity | none claimed | "Compatible with POSIX/BSD logger(1)" |
+
+**Why the stdout version exists, and why I think the reason is a
+misreading.** Its module doc says: *"Writes a syslog-style text line to stdout
+(our OS uses text-based logs, not binary syslog)."* The rule it is pointing at
+is real — `CLAUDE.md` says **"No binary logs. Text-based (JSON-lines)
+structured logging."** But that rule is about the **format** a log is written
+in, not about **where** a log lives. A text log still has a destination. Writing
+to stdout does not make the log textual; it means there is no log, and the
+message goes to whatever the caller's stdout happened to be.
+
+The practical difference: a cron job or init script that runs
+`logger "started"` expects silence on the terminal and a line in the log. With
+the stdout version it gets the opposite — nothing logged, and a line of noise
+in whatever captured that script's output.
+
+**Options:**
+
+**(a) Keep `userspace/logger`, delete coreutils'.** *What changes:* `logger
+"msg"` prints nothing and the line appears in the system log; 21 more options
+start working. Pro: matches every other Unix, so existing scripts behave as
+written. Con: it is the larger, less-reviewed implementation, and it needs a
+log destination to actually exist on SlateOS — if nothing is listening on
+`/dev/log`, messages go to a file append or are lost, which is a quieter
+failure than printing them.
+
+**(b) Keep coreutils', delete `userspace/logger`.** *What changes:* nothing
+today. Pro: the surviving code is small and reviewed, and while SlateOS has no
+log service, printing is at least visible. Con: `logger` does not log, which is
+the one thing its name promises, and the option surface stays at 2 of 23.
+
+**(c) Merge: coreutils' implementation, `userspace/logger`'s destination.**
+*What changes:* same as (a), but the code that survives is the small one, with
+socket/file output ported into it. Pro: keeps the reviewed implementation and
+fixes the destination. Con: the most work, and it needs the same decision about
+what to do when no log service is listening.
+
+**My recommendation is (c)**, with (a) as the fallback if the port is bigger
+than it looks. The thing I am least sure about — and the reason this is a
+question rather than a judgment call — is whether the operator intended
+`logger` to be a terminal tool on this OS. If that was deliberate, (b) is
+right and the module doc should say so in those words instead of citing the
+binary-logs rule.
+
+**If this is never answered:** nothing breaks and nothing gets worse on its
+own. `logger` stays at 2 options and keeps printing to the terminal, and the
+duplicate pair stays in `dup-bins-survey`'s table as undecided. It only bites
+when something starts relying on the system log actually receiving what was
+sent to it.
+
 # Resolved
 
 **The body above holds OPEN questions only.** When the operator answers one,

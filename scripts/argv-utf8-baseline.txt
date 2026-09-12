@@ -63,7 +63,6 @@ userspace/fio/src/main.rs:argv-as-string
 userspace/firejail/src/main.rs:argv-as-string
 userspace/flock/src/main.rs:argv-as-string
 userspace/fmt/src/main.rs:argv-as-string
-userspace/free/src/main.rs:argv-as-string
 userspace/fsck/src/main.rs:argv-as-string
 userspace/ftp/src/main.rs:argv-as-string
 userspace/ftpd/src/main.rs:argv-as-string

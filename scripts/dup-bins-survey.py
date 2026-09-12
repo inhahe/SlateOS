@@ -88,6 +88,7 @@ from __future__ import annotations
 
 import os
 import re
+import textwrap
 import sys
 from pathlib import Path
 
@@ -95,6 +96,43 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import rustlex  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
+
+# Names that collide WITHOUT being duplicates, and why.
+#
+# This survey pairs by NAME. That is the right way to find candidates and the
+# wrong way to decide one: two crates can share a name and implement different
+# programs, and every column here -- line counts, option sets, even a
+# differential harness -- would then be comparing things that were never
+# supposed to agree. Retiring one of them under design-decisions.md 1005 does
+# not remove a duplicate, it removes a capability.
+#
+# An entry is a DECLARATION, on the same terms as `NARROWER` in
+# check-gate-invocation-parity.py: it must carry the reason, and it is refused
+# once it stops being true. The check below is the weak one available -- that
+# both halves still exist -- because "are these the same program" is not
+# mechanically decidable. That limit is stated rather than papered over: this
+# table shifts the burden from "notice they differ" to "read the reason", which
+# is a smaller thing to get right, not a guarantee.
+NOT_DUPLICATES = {
+    "kill":
+        "DIFFERENT PROGRAMS. `coreutils/src/bin/kill.rs` is GNU's `kill` -- a "
+        "thin wrapper over POSIX `kill(2)` with -s/-n/-l/-L, doing signal "
+        "delivery. `userspace/kill` is a SlateOS-native terminator that sends "
+        "an IPC shutdown message first and falls back to SYS_PROCESS_KILL, and "
+        "it carries a `killall` personality with -i/--name/--wait/--timeout. "
+        "Those are not two implementations of one command; they are two "
+        "commands whose names collide. A differential against GNU `kill` would "
+        "measure the coreutils one fairly and the standalone not at all. "
+        "AND RETIRING THE STANDALONE WOULD DELETE THE ONLY `killall` IN THE "
+        "TREE: there is no coreutils/src/bin/killall.rs and no "
+        "userspace/killall crate. Note that multicall-aliases.py already "
+        "reports `kill -> killall -> NOTHING`, so that personality is "
+        "unreachable today -- which is a separate defect and not a reason to "
+        "delete the only code that implements it. Established 2026-09-12 by "
+        "reading both module docstrings, after six retirements had made "
+        "'collides, therefore duplicate' feel automatic.",
+}
+
 COREUTILS_BIN = ROOT / "userspace" / "coreutils" / "src" / "bin"
 USERSPACE = ROOT / "userspace"
 # Where the differential harnesses live.
@@ -382,10 +420,14 @@ def main() -> int:
     # glob above misses; they collide just the same.
     cu_names |= {p.name for p in COREUTILS_BIN.iterdir() if p.is_dir()}
 
-    names = sorted(
+    collisions = sorted(
         n for n in cu_names
         if (USERSPACE / n / "Cargo.toml").is_file()
     )
+    # Declared non-duplicates are held out of the table rather than ranked in
+    # it, so nothing invites a retirement that would delete a capability.
+    names = [n for n in collisions if n not in NOT_DUPLICATES]
+    stale_declarations = [n for n in NOT_DUPLICATES if n not in collisions]
     if args:
         names = [n for n in names if n in args]
 
@@ -406,6 +448,16 @@ def main() -> int:
         cu_opts, cu_lines = read(cu_paths)
         st_opts, st_lines = read(st_paths)
         rows.append((name, cu_lines, st_lines, cu_opts, st_opts))
+
+    if NOT_DUPLICATES:
+        held = [n for n in NOT_DUPLICATES if n in collisions]
+        print(f"{len(held)} name(s) collide WITHOUT being duplicates, held out "
+              f"of the table below:\n")
+        for n in sorted(held):
+            print(f"  {n}")
+            for line in textwrap.wrap(NOT_DUPLICATES[n], 74):
+                print(f"      {line}")
+        print()
 
     print(f"{len(rows)} colliding names\n")
     hdr = (f"{'name':<12} {'coreutils':>9} {'standalone':>10}  "
@@ -432,6 +484,15 @@ def main() -> int:
                 print(f"             only coreutils: {' '.join(sorted(only_cu))}")
             if only_sa:
                 print(f"             only standalone: {' '.join(sorted(only_sa))}")
+
+    if stale_declarations:
+        print()
+        for n in sorted(stale_declarations):
+            print(f"NOT_DUPLICATES names `{n}` and it no longer collides: either")
+            print( "  coreutils/src/bin or userspace/ has lost its half. A")
+            print( "  declaration outliving its subject is the failure this table")
+            print( "  exists to prevent, one level up. Delete the entry.")
+        return 1
 
     print(f"\n{with_harness} of {len(rows)} have a harness; "
           f"{len(rows) - with_harness} would need one written.")

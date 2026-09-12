@@ -1304,3 +1304,41 @@ fn two_different_invalid_names_do_not_collide() {
 fn a_truncated_sequence_at_the_end_terminates() {
     assert_eq!(display_bytes(b"ok\xe2\x82"), r"ok\xe2\x82");
 }
+
+/// `trim_comm` takes the trailing newline and NOTHING else.
+///
+/// Both halves are asserted, because the bug being fixed was `.trim()` doing
+/// more than the file format asks: a test that only checks the newline is
+/// removed passes just as well for the function that removes everything.
+#[test]
+fn trim_comm_strips_one_trailing_newline_only() {
+    assert_eq!(trim_comm(b"bash\n"), b"bash");
+    // No newline: unchanged.
+    assert_eq!(trim_comm(b"bash"), b"bash");
+    // Exactly one, not all of them.
+    assert_eq!(trim_comm(b"bash\n\n"), b"bash\n");
+    // Empty, and a lone newline.
+    assert_eq!(trim_comm(b""), b"");
+    assert_eq!(trim_comm(b"\n"), b"");
+}
+
+/// A LEADING space survives. `.trim()` removed it, and it is part of the name:
+/// Linux caps `comm` at 16 bytes and imposes nothing else on its contents.
+#[test]
+fn trim_comm_keeps_whitespace_that_belongs_to_the_name() {
+    assert_eq!(trim_comm(b" leading\n"), b" leading");
+    assert_eq!(trim_comm(b"inner space\n"), b"inner space");
+    // A trailing space is the name's too -- only the newline is the format's.
+    assert_eq!(trim_comm(b"trailing \n"), b"trailing ");
+    assert_eq!(trim_comm(b"\ttab\n"), b"\ttab");
+}
+
+/// The pairing the four consumers use: a name that is not UTF-8 survives as a
+/// visible escape rather than becoming the `?` that means "no such process".
+#[test]
+fn a_non_utf8_comm_renders_as_a_name_not_as_absence() {
+    let raw = b"bad\xffname\n";
+    assert_eq!(display_bytes(trim_comm(raw)), r"bad\xffname");
+    // And the valid case is untouched, so the escape path costs nothing.
+    assert_eq!(display_bytes(trim_comm(b"systemd\n")), "systemd");
+}

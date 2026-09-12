@@ -408,6 +408,7 @@ dependencies = [
  "quoting",
  "scratchdir",
  "sha2",
+ "utmpfile",
 ]
 
 [[package]]
@@ -881,13 +882,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "free"
-version = "0.1.0"
-dependencies = [
- "procinfo",
-]
-
-[[package]]
 name = "freecell"
 version = "0.1.0"
 dependencies = [
@@ -927,6 +921,7 @@ dependencies = [
 name = "fuser"
 version = "0.1.0"
 dependencies = [
+ "procinfo",
  "quoting",
 ]
 
@@ -1533,6 +1528,9 @@ dependencies = [
 [[package]]
 name = "lsns"
 version = "0.1.0"
+dependencies = [
+ "procinfo",
+]
 
 [[package]]
 name = "lsof"
@@ -1808,6 +1806,9 @@ dependencies = [
 [[package]]
 name = "netstat"
 version = "0.1.0"
+dependencies = [
+ "procinfo",
+]
 
 [[package]]
 name = "newgrp"
@@ -2006,6 +2007,7 @@ dependencies = [
 name = "perf"
 version = "0.1.0"
 dependencies = [
+ "procinfo",
  "quoting",
 ]
 

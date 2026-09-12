@@ -139,7 +139,32 @@ static char orig_domain[BUF];
 static int host_dirty;
 static int domain_dirty;
 
-/* Put back whatever we changed, best effort — we are already failing. */
+/*
+ * Put back whatever we changed, best effort — we are already failing.
+ *
+ * WHY THE DISCARDED RESULTS ARE SAFE HERE, which the self-review checklist
+ * asks for and this function did not carry. `restore()` has exactly ONE call
+ * site: the `FAIL(n)` macro below. It never runs on the success path, where
+ * each restore is instead done inline and checked — putting the domain back
+ * is check 21, and failing it fails the test. So a discarded status here is
+ * always a second failure during an already-failing exit, and the code the
+ * caller needs is the ORIGINAL one, not this.
+ *
+ * That justification was written after checking, because the first version of
+ * this comment asserted the opposite — that `restore()` also runs on success
+ * — and used it to argue for recording the status. One `grep` for the call
+ * site disproved it. A confident premise nobody checks is the defect this
+ * file's own history is made of.
+ *
+ * The shape to avoid is real, it is just not this one. Lane A's kernel `uname`
+ * rung sets the domain empty, asserts, and restores with a discarded `Result`
+ * on a path that then REPORTS SUCCESS — and the procfs domain store was
+ * afterwards observed empty on a booted system, holding that rung's test
+ * value. A test that writes global state, discards its restore's status, and
+ * passes is indistinguishable from one that never restored at all. The
+ * difference from this function is the exit code, and it is the whole
+ * difference.
+ */
 static void restore(void)
 {
     if (host_dirty)
@@ -327,8 +352,11 @@ int main(void)
      *
      *     This comment used to add "Linux reports the literal (none)".
      *     True of Linux and false of us: our kernel's init_defaults sets
-     *     the domain to "localdomain" (nameservice.rs), so an unset domain
-     *     reads back as that. The sentence was a claim about ANOTHER LANE'S
+     *     the domain to "localdomain" (nameservice.rs). Whether the node
+     *     SERVES that is a separate question and is NOT established -- check
+     *     13 once failed on a boot where eleven bytes would have read back
+     *     fine, which no one has reconciled. The initialiser is a fact; the
+     *     node's contents are an inference from it. The sentence was a claim about ANOTHER LANE'S
      *     defaults sitting in a fixture comment, which is a place nobody
      *     checks it against the source — lane A found it by reading my
      *     libc, not by running anything. Lane A intends to change the

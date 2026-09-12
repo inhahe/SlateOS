@@ -54,6 +54,20 @@ pwdb = { path = "../pwdb" }
 # means (it is `/etc/localtime`, not UTC). See `userspace/localtime`.
 localtime = { path = "../localtime" }
 
+# The logged-in user count in `uptime`'s default line. `uptime.rs` used to say
+# this tree "has no utmp reader: there is no `who`, and no shared module for
+# it", and omitted the field on that basis. All three halves of that were
+# wrong: `utmpfile` is a workspace crate and `userspace/who`, `userspace/last`
+# and `userspace/finger` already use it. The field was missing for a reason
+# that had not been checked.
+#
+# Safe to depend on under §768 (a Rust rlib must not become a second libc):
+# `utmpfile` has NO dependencies at all and its API takes bytes --
+# `parse(&[u8])`, `count_user_sessions(&[u8])` -- so the caller does the I/O
+# and the crate is a pure record parser, the same exemption `charwidth` and
+# `quoting` hold.
+utmpfile = { path = "../../utmpfile" }
+
 # `sed`'s `w`/`W`/`R` tests write to a real file, because those commands take a
 # file name as an argument and there is no way to exercise them otherwise. They
 # named that file `temp_dir()/sed-w-test` and friends — one fixed path per test,

@@ -1306,9 +1306,33 @@ pub(crate) fn set_stored_hostname_for_test(name: &[u8]) {
 /// This paragraph used to assert: *"A genuinely unset domain still reads back
 /// as `(none)`, because that is what the kernel's node contains."* **It does
 /// not.** `kernel/src/fs/nameservice.rs`'s `init_defaults` sets the domain to
-/// `"localdomain"`, so `/proc/sys/kernel/domainname` serves `localdomain` on
-/// every machine that has never set one. Verified against the source, 2026-09-12,
-/// after lane A read this doc and found it false.
+/// `"localdomain"`. Verified against the source, 2026-09-12, after lane A read
+/// this doc and found the old claim false.
+///
+/// **SETTLED 2026-09-12 BY OBSERVATION: the node serves the EMPTY STRING.**
+/// Lane A instrumented procfs and booted it:
+///
+/// ```text
+/// [procfs]   domainname node = 1 byte(s) "\n", store = ""
+/// ```
+///
+/// So the paragraph below was right to stop where it did. `localdomain` is
+/// what `init_defaults` *sets*, and the node serves `""` regardless -- the
+/// inference from initialiser to served value was false, and it was the only
+/// thing standing between two lanes and the right answer for three boots.
+///
+/// **This also settles `ctest-hostname` check 13 in the original direction.**
+/// The node served `"\n"`, so `read_kernel_name` got `n = 1`, trimmed to
+/// `len = 0`, and returned `None` -> `EIO` -> 13. The `kernel_name_len` fix
+/// below is what fixed it. My retraction of that diagnosis -- *"my empty fix
+/// cannot be it, because on lane A's kernel the domain is never empty"* -- was
+/// wrong, and it was wrong **because I took a peer's inference as a
+/// measurement**. It was labelled as fact in the sentence I read.
+///
+/// That is the lesson twice over, from both ends: a fact and an inference
+/// drawn from it, written in one sentence, are indistinguishable to the next
+/// reader -- and correct reasoning from a false premise produces a confident
+/// retraction of a correct answer.
 ///
 /// **That is the worst shape of stale claim this tree has produced.** It is not
 /// a comment that fell behind its own code -- it is a confident assertion about

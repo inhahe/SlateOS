@@ -414,7 +414,7 @@ Related and cheaper: the diagnostics for a bad option *value* — `-n 0`,
 nothing — differ from GNU's wording in 10 of the 15 remaining failures. The
 exit statuses already agree, so this is sentences rather than behaviour.
 
-## B-COREUTILS-UPTIME-SILENTLY-IGNORES-EVERY-ARGUMENT — FIXED 2026-09-11, one half remaining
+## B-COREUTILS-UPTIME-SILENTLY-IGNORES-EVERY-ARGUMENT — FIXED 2026-09-11, default line completed 2026-09-12
 
 The same defect as `date` below, in the other bin that has it:
 
@@ -452,21 +452,90 @@ reports `fixed: uptime now reads argv` and its baseline is down to one entry.
 than inherited from the crate being replaced. Implementing the standalone's
 options would have been implementing an invention.
 
-**THE HALF THAT REMAINS** is the default line. procps prints
-` 20:48:41 up  1:21,  1 user,  load average: 0.10, 0.10, 0.09` and this prints
-only the `up …` part. The time of day and the load averages are cheap — the
-clock and `/proc/loadavg` — but **the user count comes from `utmp`, and this
-tree has no utmp reader**: there is no `who` bin and no shared module. Printing
-a plausible number rather than a measured one is the exact defect this file was
-just repaired for, so the field is absent rather than invented.
+**THE OTHER HALF — DONE 2026-09-12, and both reasons given for deferring it
+were wrong.** The default line now prints all four fields.
 
-**No harness was written for this pair, deliberately.** `uptime`'s output *is*
-the current moment: the time of day and three load averages that change
-continuously. Only `-s` (the boot time) is stable, so a differential could
-compare one case and the refusals. The evidence above is three direct
-measurements instead, which is proportionate to a program with three options —
-and the general prevention now lives in `scripts/check-argv-ignored.py` rather
-than in a harness per program.
+*Wrong reason 1: "the user count comes from `utmp`, and this tree has no utmp
+reader: there is no `who` bin and no shared module."* The shared module clause
+is simply false — `utmpfile` is a workspace crate with **no dependencies**,
+exposing `parse(&[u8])` and `count_user_sessions(&[u8])`, and `userspace/who`,
+`userspace/last` and `userspace/finger` were all already using it. The `who`
+clause is true only under a reading it did not state: there is no *coreutils
+bin* named `who`, but `userspace/who` exists. So the field was omitted for a
+blocker that could have been disproved by one `grep`, and the paragraph was
+persuasive because its *conclusion* — do not invent a number — was right.
+**A false premise defending a correct conclusion is the hardest kind to
+notice**, and it survived a month.
+
+*Wrong reason 2: "no harness was written for this pair, deliberately …
+`uptime`'s output IS the current moment."* That was true of the technique
+available when it was written and stopped being true when `scripts/df-diff.sh`
+and then `scripts/free-diff.sh` established per-case `unshare -mUr` with the
+inputs bind-mounted. `/proc/uptime` and `/proc/loadavg` pin exactly like
+`/proc/meminfo`. Only the time-of-day field genuinely moves.
+
+Even the user count pins, which took two experiments to establish. On this
+host `uptime` links `libsystemd` and asks logind, so emptying `/run/utmp`
+changes nothing while `who` drops to zero — from which a first pass concluded
+the field was uncomparable. Masking `/run/systemd` as well makes procps fall
+back to `utmp`, and the count becomes a fixture. **The first experiment
+answered a narrower question than the one being asked** and its answer looked
+like a general one.
+
+That mattered, because the measurement it enabled contradicted what a careful
+implementation would have written. procps prints `,  0 user` — **singular at
+zero** — so `if n == 1 { "" } else { "s" }` is wrong for precisely the value a
+machine with nobody logged in reports. The count is `%2d`, which is
+indistinguishable from a two-space literal plus `%d` at every single-digit
+count and diverges at ten.
+
+The `up …` field was wrong too, in three ways, and had unit tests asserting
+each: `up 00:59` where procps prints `up 59 min`, `up 01:00` where it prints
+`up  1:00` (space-padded), and `up 1 day, 00:00` where it prints
+`up 1 day, 0 min`. **Six tests encoded the unmeasured format**, which is why it
+survived; they now carry the measurements.
+
+### Two findings from `scripts/uptime-diff.sh`, one upstream and one ours
+
+**procps-ng 4.0.4's `uptime -p` is wrong at every unit boundary, and we do not
+reproduce it.** Each level of its decomposition rolls over only when the
+remainder *exceeds* the unit, never when it equals it, so an exact boundary
+falls through to the unit below — and the last level has nothing below it:
+
+| `/proc/uptime` | procps-ng 4.0.4 | ours |
+|---|---|---|
+| 60 | `up ` — **empty** | `up 1 minute` |
+| 3600 | `up 60 minutes` | `up 1 hour` |
+| 3660 | `up 1 hour` — loses the minute | `up 1 hour, 1 minute` |
+| 86400 | `up 24 hours, 0 minutes` | `up 1 day` |
+| 90000 | `up 1 day, 60 minutes` | `up 1 day, 1 hour` |
+
+At exactly one minute of uptime it prints `up ` and stops. §371 makes
+bug-for-bug reproduction the default, but that default assumes the reference's
+answer is *an* answer; `up ` is not a wrong rendering of one minute, it is
+none. Declared in the harness as nine `xfail_uptime` cases with the sweep as
+the reason. **The earlier claim that `-p` was "verified interleaved against
+procps" is not withdrawn but is narrower than it reads: it compared the live
+uptime, which is one point, and generalised.**
+
+**`-s` is an early exit, not a flag — and our last-one-wins parse was wrong.**
+`uptime -sp` printed the pretty form here and the boot time in procps. The
+first repair inferred "flags resolved after the loop, `since` tested first",
+which fits `-ps` and `-sp` both printing the boot time and is still false. The
+discriminator is what `-s` does to arguments *after* it:
+
+    uptime -sV      -> boot time         the -V never runs
+    uptime -sXYZ    -> boot time, rc=0   no "invalid option -- 'X'"
+    uptime -s junk  -> boot time, rc=0   an operand, accepted
+    uptime -Vs      -> the version       whichever fires first wins
+
+So procps prints and leaves before the rest of argv is looked at. Two models
+fitted the first measurement and the cheap way to separate them was to feed
+the option something it should have rejected. **Found only because `-ps`
+XPASSed** — it was in the harness as a declared refusal, which it is not, and
+asking why put `-sp` in the harness. That is the third false xfail reason in
+two days, after `free --help`; a declared divergence is an assertion like any
+other, and the only kind never tested by its case passing.
 
 ## B-COREUTILS-DATE-SILENTLY-IGNORES-EVERY-ARGUMENT — FIXED 2026-09-11
 
@@ -1165,8 +1234,75 @@ two implementations that can disagree with the winner picked by packaging:
 | `userspace/fuser` | `lsof` | `userspace/lsof` |
 | `userspace/hostnamectl` | `hostname` | `userspace/hostname` |
 | `userspace/resolvectl` | `nslookup` | `userspace/nslookup` |
-| `userspace/swapon` | `free` | `userspace/free` |
 | `userspace/useradd` | `newgrp` | `userspace/newgrp` |
+
+**`userspace/swapon` / `free` left this table on 2026-09-12**, and it was
+never quite the same kind of entry as the rest. The others shadow a name with
+a *working* implementation and the question is which one should win. `swapon`
+shadowed `free` with **nothing**: its module doc advertised a `free`
+personality, there was a `Personality: free` section header with no code
+under it, and a unit test asserted that `free` was extracted correctly from
+`argv[0]` -- a value `main` then dropped on the floor, because the dispatch
+was `match { "swapoff" => …, _ => cmd_swapon }`. The name fell through to
+`cmd_swapon`, which with no arguments prints the **swap summary and exits 0**.
+
+So the hazard was not "two implementations disagree", it was "one of them
+answers a memory-report request with a swap table and a success code" --
+wrong output under a success exit, which is the class of bug that never gets
+filed because it looks like an answer. It was latent only because
+`create-ext4-rootfs.sh` stages neither `swapon` nor a `free` alias for it;
+`multicall-aliases.py` could not see it either, since that checker reads the
+dispatch and this claim lived only in prose.
+
+The first fix was an arm refusing that one name. `multicall-aliases.py`
+rejected it at pre-push and was right — per §1019 the shadowing branch is
+deleted, because the name belongs to whichever program performs the
+operation. But deleting it and restoring the catch-all would have put the
+silent wrong answer back *invisibly*: the checker reads dispatch arms, so a
+catch-all lets a binary answer to every name on earth while declaring none.
+`main` now dispatches `swapon` and `swapoff` explicitly and refuses anything
+else, which closes it for all names rather than for the one that was noticed.
+
+The module doc also lost a second false claim, found while fixing the first:
+it listed `/proc/meminfo` among the files read, a path appearing nowhere else
+in the crate. It survived by sharing a sentence with `/proc/swaps` and
+`/etc/fstab`, which are real.
+
+**Separately — `multicall-aliases.py` did not strip comments before looking
+for dispatch arms, and fixing that nearly did more damage than the bug.**
+A comment in the new code reading ``the hardcoded `"free" => refuse` arm`` was
+counted as a live personality: the checker reported 169 personalities and 1
+shadowed name and refused a push, then reported 168 and 0 when that one
+comment was reworded, with no code change. It was flagging a sentence about a
+branch that no longer existed.
+
+The obvious fix — run `rustlex.strip_noise(keep_literals=True)`, which exists
+for exactly this and whose docstring already diagnoses it as "the scan matches
+its own documentation" — **silently deleted three real personalities**:
+`crond:anacron`, `kill:killall`, `newgrp:sg`. Each was genuine code
+(`"sg" => sg_main(&rest)` is a dispatch arm), and each was being detected only
+because of prose. The corroborating pattern `_EXTRACTS_NAME` matched the token
+`argv[0]`, which is not Rust and can therefore only ever appear in a comment,
+while the code spelling it looked for — the contiguous `args.first()` — is
+broken over two lines by rustfmt in all three crates:
+
+    let prog_name = args
+        .first()
+
+So the gate was resting on comments for its evidence in those three cases, and
+blanking comments took the evidence away. **That is the dangerous direction:**
+the original bug over-reported and cost a push; this under-reported and would
+have let a real dispatch go unseen, which is the entire thing the gate exists
+to catch. It was found only by diffing the full personality list across the
+change — the summary line moved 168 → 165, an amount small enough to read as
+the intended fix. The checker's own self-test docstring says why that is the
+trap: *"a count is the one output where a detector that stopped seeing and a
+tree that got better are spelled identically."*
+
+Fixed by making `_EXTRACTS_NAME` whitespace-tolerant so corroboration comes
+from code, leaving `argv[0]` inert. Both halves now have self-test fixtures,
+and each was verified to fail against a mutant with its own half reverted —
+a fixture that passes with and without the fix proves nothing.
 
 `nologin` answering to `true` and `false` is the one to look at first: those
 two run in nearly every shell script on the system, and `nologin`'s job is to
@@ -131025,17 +131161,121 @@ other userspace crates, 39 names in both.
 **It does not cut one way, which is why this is a question and not a chore.**
 Two measured examples:
 
-* **`free`** -- `coreutils`'s is a 1876-line transcription of procps-ng 4.0.4,
-  measured against the real binary, and its own module doc lists the defects of
-  "the implementation this replaces": invented flags, wrong header widths,
-  `shared` hardcoded to zero, and `used = total - free - buffers - cached`
-  where upstream's is `MemTotal - MemAvailable`. **`userspace/free` still has
-  every one of them**, including that `used`. Here `coreutils` plainly wins.
-* **`ps`** -- `coreutils`'s is 405 lines and supports `-e -f`;
-  `userspace/ps` is 1022 lines with a full column selection. Here the
-  standalone plainly wins.
+* **`free`** -- **SETTLED 2026-09-12: `userspace/free` is deleted.** The
+  prediction below was written from the sources and was, for once, right --
+  but it was confirmed by measurement before anything was removed, not
+  instead of it. `scripts/free-diff.sh` pins `/proc/meminfo` inside a private
+  mount namespace and compares both against procps-ng 4.0.4:
+  **coreutils 48 passed / 0 differed; `userspace/free` 0 passed / 48
+  differed.** The most lopsided pair yet measured.
 
-So the answer is per command, and for some pairs it is "merge", not "pick".
+  The original reasoning, kept because it is the only one of the five that
+  the harness upheld: `coreutils`'s is a 1876-line transcription of procps-ng
+  4.0.4, and its own module doc lists the defects of "the implementation this
+  replaces": invented flags, wrong header widths, `shared` hardcoded to zero,
+  and `used = total - free - buffers - cached` where upstream's is
+  `MemTotal - MemAvailable`. `userspace/free` still had every one of them.
+
+  **What the loser knew that the winner did not: nothing.** Its whole unique
+  surface was one invented flag, `--json`, which procps-ng does not have and
+  which nothing in this tree consumed. It was deliberately not ported --
+  adding a flag upstream lacks would break the bug-for-bug property
+  `free-diff.sh` asserts, which is the thing that made the pair decidable at
+  all. Every *real* option it lacked, coreutils has: `--peta`, `--pebi`,
+  `--si`, `--line`, `--committed`, `--version`. It also sat in
+  `argv-utf8-baseline.txt` as `argv-as-string`.
+* **`ps`** -- **MEASURED 2026-09-12, and it is the first pair the pass count
+  does not decide.** `scripts/ps-diff.sh` pins the process table in a PID
+  namespace with its own `/proc` and compares both against procps-ng:
+
+      coreutils ps     0 passed, 26 differed
+      userspace/ps     0 passed, 26 differed
+
+  A tally says "tie". The content says otherwise, and this is why a harness
+  that only counts is not enough:
+
+      procps      UID          PID    PPID  C STIME TTY          TIME CMD
+                  root           1       0  0 13:39 ?        00:00:00 ps -f
+      standalone    UID      PID     PPID    C       STIME  TTY   TIME  CMD
+                      0        1        0    0       13:36  ?  00:00:00  ps
+      coreutils     UID   PID  PPID  STAT   TIME     CMD
+                      0     1     0  R      00:00:00 ps -f
+
+  The standalone has **the right column set** and gets the widths, the UID
+  resolution (`0` where procps prints `root`) and the `CMD` content wrong.
+  coreutils' has **the wrong columns entirely** -- no `C`, no `STIME`, no
+  `TTY`, and a `STAT` column procps does not put there. One is a formatting
+  problem; the other is a different report. So the old "the standalone plainly
+  wins" verdict survives measurement, which is notable given it was reached
+  from line counts that were themselves wrong by a factor of five.
+
+  **Do not read "0 vs 0" as "neither is worth keeping."** Both fail against
+  procps; only one of them is failing at the last step.
+
+* **`ps` also ignored every option it did not know, and `check-argv-ignored`
+  could not see it — FIXED 2026-09-12.** Measured: `ps -X` printed the default listing at exit 0
+  where procps exits 1, and `ps --help` prints the process table. The parser
+  strips one `-` and then walks the string a character at a time:
+
+      match c { 'e' | 'A' => all_procs = true, 'f' => full = true, _ => {} }
+
+  So `--help` is read as `-h -e -l -p`, the `e` matches, and any long option
+  containing `e`, `A` or `f` silently turns that flag on. `--full` would set
+  `-f` by accident and `--version` would set `-e`.
+
+  `scripts/check-argv-ignored.py` reports **0 bins ignore argv** with an empty
+  baseline, and it is not lying: `ps` *does* read `argv` and *does* honour
+  `-e` and `-f`. The gate catches a program that ignores its command line
+  **entirely**, which is the defect `uptime` had. It does not catch one that
+  honours the options it knows and silently discards the rest — which is the
+  same class of hole, one notch finer, and is the shape §1006 is about: a
+  program that cannot do what it was asked should say so.
+
+  **The fix:** long options are matched whole, an unknown short option returns
+  `error: unsupported SysV option` and an unknown long one
+  `error: unknown gnu long option`, both at exit 1 — procps' own messages,
+  measured. `--help` prints procps' 170-byte help text, captured with
+  `cat -A` rather than retyped, because `uptime`'s help was missing a leading
+  blank line and a trailing reference line for exactly the reason that those
+  are invisible when you retype instead of measure.
+
+  **A test was holding the defect in place.** It was called
+  `parse_unknown_silently_ignored`, and its comment read "Preserves previous
+  behaviour — no error, no panic." It preserved `ps -Q` printing the process
+  table at exit 0. That is the third time this week a test has certified a bug
+  — after `uptime`'s six asserting an unmeasured `up …` format, and
+  `ctest-hostname`'s asserting that a personality name was extracted correctly
+  when nothing consumed it. **A test and a specification are the same artifact
+  right up until someone measures the reference**, and nothing in the test
+  itself says which one it is.
+
+  **The gap in `check-argv-ignored.py` is left open deliberately.** Extending
+  it from "reads argv at all" to "refuses what it cannot honour" is a much
+  harder static question — it would have to know each program's option set —
+  and the differential harnesses answer it directly for every program that has
+  one. Recorded here rather than filed as a checker change, because the
+  cheaper instrument already exists.
+
+* **`logger`** — **not a measurement question at all, and a harness cannot
+  settle it.** `dup-bins-survey` lists it as "no harness — write one", which is
+  the wrong instrument here. coreutils' `logger` writes its message to
+  **stdout**; `userspace/logger` sends it to the `/dev/log` socket or appends
+  to a file, the way util-linux does, with 23 options against 2. A
+  differential harness would report that they disagree about everything, which
+  is already known and is the *premise* rather than the finding.
+
+  The stdout behaviour is deliberate — the module doc cites `CLAUDE.md`'s "No
+  binary logs. Text-based (JSON-lines) structured logging." I think that
+  misreads the rule: it governs the **format** a log is written in, not
+  **where** the log lives, and writing to stdout does not make a log textual,
+  it means there is no log. But it is a user-visible behaviour change either
+  way, so it is **`open-questions.md` B-Q14** rather than a judgment call.
+  Do not write the harness and do not delete either side until that is
+  answered.
+
+So the answer is per command, and for some pairs it is "merge", not "pick" —
+and for at least one it is neither, because the two implementations are
+answering different questions.
 
 **Nothing collides today**, because `scripts/create-ext4-rootfs.sh` stages
 neither -- no `userspace/` binary reaches `/bin` yet. The collision is latent

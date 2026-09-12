@@ -73,9 +73,19 @@ struct FuserResult {
 /// ordinary case on a busy machine, and it printed as a blank command in a
 /// table whose other columns were filled in. A blank cell reads as "this
 /// process has no name", which is not a thing.
+/// `fs::read`, not `read_to_string`, and the difference is visible to a user.
+///
+/// `read_to_string` fails on a name that is not UTF-8, and that failure landed
+/// on the same `"?"` as a process that had exited — which is what the `"?"` is
+/// documented above to mean. The kernel now carries `comm` as bytes end to
+/// end, so a name with an arbitrary byte in it is a thing that reaches here,
+/// and it is a different thing from an absent process.
+///
+/// `trim_comm` strips the trailing newline only: `.trim()` also ate a leading
+/// space, which is a legal part of a name.
 fn read_proc_comm(pid: u32) -> String {
-    match fs::read_to_string(format!("/proc/{pid}/comm")) {
-        Ok(text) => text.trim().to_string(),
+    match fs::read(format!("/proc/{pid}/comm")) {
+        Ok(raw) => procinfo::display_bytes(procinfo::trim_comm(&raw)),
         Err(_) => "?".to_string(),
     }
 }

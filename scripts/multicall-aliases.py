@@ -170,8 +170,39 @@ def read_shadow_baseline(tree: gittree.Tree) -> set[str] | None:
 
 # A file is only considered if it extracts its own invocation name at all.
 # Without this the `==` pattern below matches any string comparison in the tree.
+# Evidence that a file reads its own invocation name. It gates the comparison
+# shape below, which without it matches ordinary string handling everywhere.
+#
+# WHITESPACE-TOLERANT, and that is not tidiness. Written as the contiguous
+# literal `args.first()` it matched none of the three crates that actually do
+# this, because rustfmt breaks the chain over lines:
+#
+#     let prog_name = args
+#         .first()
+#
+# They were nonetheless reported, which is why nobody noticed: the ONLY thing
+# matching was `argv[0]` inside a nearby comment. `argv[0]` is not Rust -- it
+# cannot appear in code -- so that alternative can only ever match prose, and
+# it was carrying `crond:anacron`, `kill:killall` and `newgrp:sg` single
+# handed. Blanking comments for the shape scan removed the phantom personality
+# this pass was written to kill and silently took those three real ones with
+# it: 168 personalities became 165, and 67 crates 64.
+#
+# That is the dangerous direction. The bug being fixed over-reported and cost
+# a push; this under-reported and would have cost a real dispatch going
+# unseen, which is what the gate exists to prevent. Caught by diffing the full
+# personality list across the change rather than reading the summary line,
+# which moved by an amount small enough to look like the intended fix.
+#
+# `argv[0]` is kept only because corroboration now reads blanked text, where
+# it is inert -- a comment can no longer create a personality OR vouch for
+# one. Both halves of the evidence are code now.
 _EXTRACTS_NAME = re.compile(
-    r"argv\[0\]|file_stem|args\(\)\.next\(\)|args_os\(\)\.next\(\)|args\.first\(\)"
+    r"argv\[0\]"
+    r"|file_stem"
+    r"|args\(\)\s*\.\s*next\(\)"
+    r"|args_os\(\)\s*\.\s*next\(\)"
+    r"|args\s*\.\s*first\(\)"
 )
 # Two dispatch shapes are in use. The first is an explicit personality enum,
 # which carries every spelling in one arm:
@@ -362,6 +393,31 @@ def invocation_aliases(text: str, crate: str) -> set[str]:
     # repair; it now lives in `rustlex` because a second checker needed it and
     # wrote the naive version instead.
     text, _masked = rustlex.live_code(text)
+    # `live_code` removes test code "and nothing else" -- its own words -- so
+    # comments reach the scan below, and every pattern here is a *shape*
+    # (`"name" => Personality::X`, `basename == "name"`) that prose quoting
+    # that shape matches exactly.
+    #
+    # Measured, 2026-09-12: a comment in `userspace/swapon` reading
+    # ``the hardcoded `"free" => refuse` arm`` -- describing an arm that had
+    # just been DELETED -- was counted as a live personality. The checker
+    # reported 169 personalities and one shadowed name, refused a push over
+    # it, and went to 168 and zero when that one comment was reworded, with
+    # no code change. It was flagging a sentence about a branch that no
+    # longer existed.
+    #
+    # `keep_literals=True` because the names themselves are string literals;
+    # blanking those would blind the scan instead of sharpening it.
+    #
+    # `rustlex.strip_noise`'s docstring already diagnosed this exact failure
+    # for another query -- "the scan matches its own documentation" -- and
+    # this checker simply never called it. That is the second time a helper
+    # in `rustlex` existed and a checker went without it; `live_code`'s own
+    # comment records the first, where check-read-defaults had the bug and
+    # its repair was moved into `rustlex` precisely so the next caller would
+    # not rewrite the naive version. The next caller did not rewrite it -- it
+    # just never called it, which the move does not protect against.
+    text = rustlex.strip_noise(text, keep_literals=True)
     names: set[str] = set()
     # The enum arm needs no corroboration: a type literally named `Personality`
     # mapped from a string is invocation-name dispatch and nothing else. Demanding
@@ -539,6 +595,53 @@ fn main() { let basename = std::env::args().next().unwrap();
     # A crate never shadows itself.
     expect("a crate answering to its own name reports nothing",
            invocation_aliases(cron, "crond"), {"crontab"})
+
+    # THE SCAN READING ITS OWN DOCUMENTATION. A comment describing a dispatch
+    # arm has the same shape as the arm, and this gate counted one: a comment
+    # in `userspace/swapon` quoting an arm that had just been DELETED was
+    # reported as a live personality shadowing coreutils' `free`, and it
+    # refused a push over a sentence. Rewording that one comment moved the
+    # census from 169 to 168 with no code change.
+    #
+    # The fixture keeps a real arm alongside the quoted one, so a fix that
+    # blanks too much fails here rather than passing by finding nothing.
+    quoted = """
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let prog = args.first().map(|s| s.as_str()).unwrap_or("swapon");
+    // The first fix was a hardcoded `"free" => Personality::Free` arm.
+    /* also not code: "anacron" => Personality::Anacron, */
+    match prog {
+        "swapoff" => Personality::Swapoff,
+        _ => Personality::Swapon,
+    }
+}
+"""
+    expect("a comment quoting a dispatch arm is not a personality",
+           invocation_aliases(quoted, "swapon"), {"swapoff"})
+
+    # THE OTHER HALF, and the reason the fix above is not just `strip_noise`.
+    # Blanking comments removed the evidence that these files read their own
+    # name, because the evidence being matched was the token `argv[0]` -- which
+    # is not Rust and therefore only ever appeared in prose. rustfmt breaks the
+    # real extraction over two lines, so the contiguous `args.first()` the
+    # pattern looked for was never there. Three genuine personalities
+    # (`crond:anacron`, `kill:killall`, `newgrp:sg`) vanished silently.
+    #
+    # No comment anywhere in this fixture: if corroboration ever depends on
+    # prose again, this returns the empty set.
+    wrapped = """
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let prog_name = args
+        .first()
+        .map(|s| s.as_str())
+        .unwrap_or("crond");
+    let is_anacron = prog_name == "anacron";
+}
+"""
+    expect("a chain rustfmt broke over two lines still corroborates",
+           invocation_aliases(wrapped, "crond"), {"anacron"})
 
     print(f"multicall-aliases: self-test "
           f"{'FAILED' if failures else 'passed'} ({failures} failure(s))")

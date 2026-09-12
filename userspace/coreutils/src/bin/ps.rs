@@ -7,10 +7,13 @@
 //! Reads from /proc filesystem. Each directory under /proc/<pid>/
 //! contains process information files: stat, cmdline, status.
 
+use coreutils::diag;
 use coreutils::stdfd;
+use localtime::{Zone, strftime};
 use std::env;
 use std::io::{self, Write};
 use std::process::ExitCode;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Default)]
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
@@ -23,28 +26,114 @@ struct PsArgs {
 /// the same clustered short-flag syntax used by the rest of these
 /// utilities.  Unknown short flags are silently ignored, matching the
 /// previous behaviour.
-fn parse_args(args: &[String]) -> PsArgs {
+/// What the command line asked for.
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+enum Request {
+    /// Print the table.
+    List(PsArgs),
+    /// `--help`.
+    Help,
+}
+
+/// Parse `ps`'s argv.
+///
+/// # Errors
+///
+/// An unknown option, short or long. procps distinguishes the two and so does
+/// this; the messages are its own, measured.
+///
+/// # What this used to do, and why a test was protecting it
+///
+/// The body was one loop with `_ => {}` at the bottom, and a test named
+/// `parse_unknown_silently_ignored` asserting that it stayed that way --
+/// "Preserves previous behaviour: no error, no panic." It preserved a defect.
+/// Measured against procps-ng:
+///
+/// | | procps | here, before |
+/// |---|---|---|
+/// | `ps -Q` | `error: unsupported SysV option`, exit 1 | the default table, exit 0 |
+/// | `ps --nosuchoption` | `error: unknown gnu long option`, exit 1 | the default table, exit 0 |
+/// | `ps --help` | usage, exit 0 | **the process table**, exit 0 |
+///
+/// The `--help` row is the one that shows how bad the shape was. There was no
+/// long-option branch at all: `--help` had its first `-` stripped and the rest
+/// was walked a character at a time, so it was read as `-h -e -l -p`, the `e`
+/// matched, and `ps --help` turned on "show all processes". Any long option
+/// containing `e`, `A` or `f` silently set that flag -- `--full` would have
+/// set `-f` by accident and `--version` would have set `-e`.
+///
+/// `scripts/check-argv-ignored.py` did not catch it and is not wrong to have
+/// missed it: that gate finds a program ignoring its command line ENTIRELY,
+/// which is the defect `uptime` had. This one read `argv`, honoured `-e` and
+/// `-f`, and discarded the rest -- the same hole one notch finer.
+///
+/// Found by `scripts/ps-diff.sh`.
+fn parse_args(args: &[String]) -> Result<Request, String> {
     let mut out = PsArgs::default();
     for arg in args {
+        // Long options are matched WHOLE. Splitting them into characters is
+        // what made `--help` mean `-e`.
+        if let Some(long) = arg.strip_prefix("--") {
+            if long == "help" {
+                return Ok(Request::Help);
+            }
+            return Err("error: unknown gnu long option".to_string());
+        }
         if let Some(flags) = arg.strip_prefix('-') {
             for c in flags.chars() {
                 match c {
                     'e' | 'A' => out.all_procs = true,
                     'f' => out.full_format = true,
-                    _ => {}
+                    _ => return Err("error: unsupported SysV option".to_string()),
                 }
             }
         }
+        // A bare operand is still ignored: procps takes PID lists in that
+        // position and this build does not implement them, so refusing here
+        // would reject a command line procps accepts. Unchanged, and still
+        // covered by `parse_bare_args_ignored`.
     }
-    out
+    Ok(Request::List(out))
+}
+
+/// procps-ng's `ps --help` with no topic, byte for byte.
+///
+/// Captured with `ps --help | cat -A`. The leading blank line is procps' and
+/// so is the trailing `For more details see ps(1).` -- `uptime`'s help text
+/// was missing exactly those two things for exactly the same reason, which is
+/// that they are invisible when you retype a help message instead of
+/// measuring it.
+fn help_text() -> &'static str {
+    "
+Usage:
+ ps [options]
+
+ Try 'ps --help <simple|list|output|threads|misc|all>'
+  or 'ps --help <s|l|o|t|m|a>'
+ for additional help text.
+
+For more details see ps(1).
+"
 }
 
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 struct ProcInfo {
     comm: String,
-    state: String,
     ppid: u32,
-    uid: u32,
+    /// The UID resolved through `/etc/passwd`, or the number if it does not
+    /// resolve. procps prints `root`, not `0`.
+    ///
+    /// The raw `uid` and the process `state` used to be carried here too.
+    /// `state` was the `STAT` column this printed under `-f`, which procps
+    /// does not have there -- it belongs to `-l`, which this build does not
+    /// implement. Both are dropped rather than kept unread: a field nobody
+    /// reads is indistinguishable from one whose reader was deleted by
+    /// mistake, and `stat.state` is one line away if `-l` ever arrives.
+    user: String,
+    /// procps' `C` column: integer percent of CPU over the process's life.
+    cpu_pct: u64,
+    /// procps' `STIME`: `HH:MM` if the process started today, else `MMM DD`.
+    stime: String,
     tty: String,
     time_str: String,
     /// The `-f` command line, already rendered. Empty when `-f` was not asked
@@ -62,29 +151,69 @@ fn main() -> ExitCode {
 
 fn run_main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
-    let parsed = parse_args(&args);
+    let parsed = match parse_args(&args) {
+        Ok(Request::List(p)) => p,
+        Ok(Request::Help) => {
+            print!("{}", help_text());
+            return ExitCode::SUCCESS;
+        }
+        Err(message) => {
+            // procps prints the error AND its whole usage, both on stderr,
+            // separated by a blank line -- which `help_text`'s leading newline
+            // supplies. Measured: `ps --nosuchoption 2>&1` is the message, an
+            // empty line, then the same 170 bytes `--help` prints.
+            //
+            // This is the opposite of the call made for `uptime`, whose
+            // upstream is also procps: there the shared `coreutils::getopt`
+            // formatter prints GNU's `Try '… --help'` hint for all 86 bins and
+            // changing it for one would make the other 85 wrong. `ps` does not
+            // go through that formatter, so matching costs nothing here.
+            diag!("{}", message);
+            eprint!("{}", help_text());
+            return ExitCode::FAILURE;
+        }
+    };
 
     let stdout = io::stdout();
     let mut out = stdout.lock();
 
+    // procps' own field widths, derived from its output rather than chosen.
+    //
+    // Both header and rows go through the same format string, which is what
+    // makes them line up; `ps -f` is
+    //
+    //     {:<8} {:>7} {:>7} {:>2} {:>5} {:<8} {:>8} {}
+    //
+    // and the default is `{:>5} {:<8} {:>8} {}`. Each was checked against the
+    // column offsets of a measured line -- PID ends at 16, PPID at 24, C at
+    // 27, STIME spans 29-33, TTY starts at 35, TIME ends at 51, CMD starts at
+    // 53 -- because two samples are not enough to infer a width and this is
+    // the kind of thing that looks right until a field overflows.
+    //
+    // The default `PID` column is SEVEN wide, not five. I had it at five
+    // first, having counted it off the differential harness's own REPORT
+    // line -- which prefixes the output with `  ours (rc=0): ` and shifts
+    // every column. Measure the artifact, not a rendering of it:
+    // `ps | cat -A` settles it in one line.
     if parsed.full_format {
         let _ = writeln!(
             out,
-            "{:>5} {:>5} {:>5}  {:<6} {:<8} CMD",
-            "UID", "PID", "PPID", "STAT", "TIME"
+            "{:<8} {:>7} {:>7} {:>2} {:>5} {:<8} {:>8} CMD",
+            "UID", "PID", "PPID", "C", "STIME", "TTY", "TIME"
         );
     } else {
-        let _ = writeln!(out, "{:>5} {:<8} CMD", "PID", "TTY");
+        let _ = writeln!(out, "{:>7} {:<8} {:>8} CMD", "PID", "TTY", "TIME");
     }
 
     let procfs = procinfo::ProcFs::new();
+    let ctx = ListCtx::new(&procfs);
     let Ok(pids) = procfs.process_ids() else {
         // No /proc — nothing to show.
         return ExitCode::SUCCESS;
     };
 
     for pid in pids {
-        let Ok(Some(info)) = read_one(&procfs, pid, parsed.full_format) else {
+        let Ok(Some(info)) = read_one(&procfs, pid, parsed.full_format, &ctx) else {
             // A process that exits between the listing and the read is the
             // normal case for anything walking /proc, not a failure.
             continue;
@@ -94,11 +223,22 @@ fn run_main() -> ExitCode {
         if parsed.full_format {
             let _ = writeln!(
                 out,
-                "{:>5} {:>5} {:>5}  {:<6} {:<8} {}",
-                info.uid, pid32, info.ppid, info.state, info.time_str, info.cmd
+                "{:<8} {:>7} {:>7} {:>2} {:>5} {:<8} {:>8} {}",
+                info.user,
+                pid32,
+                info.ppid,
+                info.cpu_pct,
+                info.stime,
+                info.tty,
+                info.time_str,
+                info.cmd
             );
         } else {
-            let _ = writeln!(out, "{:>5} {:<8} {}", pid32, info.tty, info.comm);
+            let _ = writeln!(
+                out,
+                "{:>7} {:<8} {:>8} {}",
+                pid32, info.tty, info.time_str, info.comm
+            );
         }
     }
 
@@ -121,7 +261,12 @@ fn run_main() -> ExitCode {
 /// # Errors
 ///
 /// Any read error other than "no such file", which is `Ok(None)`.
-fn read_one(procfs: &procinfo::ProcFs, pid: u64, full: bool) -> std::io::Result<Option<ProcInfo>> {
+fn read_one(
+    procfs: &procinfo::ProcFs,
+    pid: u64,
+    full: bool,
+    ctx: &ListCtx,
+) -> std::io::Result<Option<ProcInfo>> {
     let Some(stat) = procfs.process_stat(pid)? else {
         return Ok(None);
     };
@@ -145,15 +290,108 @@ fn read_one(procfs: &procinfo::ProcFs, pid: u64, full: bool) -> std::io::Result<
     } else {
         String::new()
     };
+    let start_epoch = ctx.start_epoch(stat.starttime_ticks);
     Ok(Some(ProcInfo {
         comm,
-        state: char::from(stat.state).to_string(),
         ppid: u32::try_from(stat.ppid).unwrap_or(0),
-        uid,
+        user: ctx.user_name(uid),
+        cpu_pct: cpu_percent(
+            stat.utime_ticks,
+            stat.stime_ticks,
+            ctx.now_epoch.saturating_sub(start_epoch),
+        ),
+        stime: ctx.format_stime(start_epoch),
         tty: format_tty(i32::try_from(stat.tty_nr).unwrap_or(0)),
         time_str: format_cpu_time(stat.utime_ticks, stat.stime_ticks),
         cmd,
     }))
+}
+
+/// The things every row needs and no row should read for itself.
+///
+/// `/etc/passwd` and `/proc/stat`'s `btime` are the same for every process in
+/// a listing, so they are read once. A per-row lookup would reopen
+/// `/etc/passwd` for each of several hundred processes, and -- worse -- could
+/// see a different boot time partway down the table.
+struct ListCtx {
+    db: pwdb::Db,
+    zone: Zone,
+    /// `btime` from `/proc/stat`: the wall-clock second the system booted.
+    boot_epoch: i64,
+    /// Read once, so every `STIME` in one listing is judged against the same
+    /// "today".
+    now_epoch: i64,
+}
+
+impl ListCtx {
+    fn new(procfs: &procinfo::ProcFs) -> Self {
+        // `stat_counters`, not `stat`: `/proc/stat` is the whole-system file
+        // and `/proc/<pid>/stat` is the per-process one, and `ProcFs` has an
+        // accessor for each. `btime` lives on the former.
+        let boot_epoch = procfs
+            .stat_counters()
+            .ok()
+            .flatten()
+            .and_then(|st| st.boot_time)
+            .and_then(|b| i64::try_from(b).ok())
+            .unwrap_or(0);
+        let now_epoch = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .and_then(|d| i64::try_from(d.as_secs()).ok())
+            .unwrap_or(0);
+        Self {
+            db: pwdb::Db::load(),
+            zone: Zone::from_env(),
+            boot_epoch,
+            now_epoch,
+        }
+    }
+
+    /// When the process started, in epoch seconds.
+    fn start_epoch(&self, starttime_ticks: u64) -> i64 {
+        let secs_since_boot = starttime_ticks / procinfo::TICKS_PER_SEC;
+        self.boot_epoch
+            .saturating_add(i64::try_from(secs_since_boot).unwrap_or(0))
+    }
+
+    /// procps prints the NAME. A uid with no passwd entry keeps its number,
+    /// which is also what procps does -- it does not invent one, and inventing
+    /// one is the defect `uptime`'s user count was written to avoid.
+    fn user_name(&self, uid: u32) -> String {
+        self.db
+            .user_by_uid(uid)
+            .map_or_else(|| uid.to_string(), |u| procinfo::display_bytes(&u.name))
+    }
+
+    /// `HH:MM` when the process started today, `MMM DD` otherwise.
+    ///
+    /// Measured: a process started this morning prints `09:49`, one from
+    /// yesterday prints `Sep11` -- month abbreviation and a ZERO-PADDED day
+    /// with no space between them, five characters either way, which is why
+    /// the column is exactly five wide.
+    fn format_stime(&self, start_epoch: i64) -> String {
+        let started = self.zone.local(start_epoch, 0);
+        let now = self.zone.local(self.now_epoch, 0);
+        let same_day =
+            started.year == now.year && started.month == now.month && started.day == now.day;
+        let fmt: &[u8] = if same_day { b"%H:%M" } else { b"%b%d" };
+        String::from_utf8(strftime(fmt, &started)).unwrap_or_default()
+    }
+}
+
+/// procps' `C` column: integer percent of CPU used over the process's life.
+///
+/// Zero elapsed seconds yields 0 rather than a division by zero -- every
+/// process is younger than a second at some point, including `ps` itself,
+/// which is always in its own listing.
+fn cpu_percent(utime: u64, stime: u64, elapsed_secs: i64) -> u64 {
+    let elapsed = u64::try_from(elapsed_secs).unwrap_or(0);
+    if elapsed == 0 {
+        return 0;
+    }
+    let total_secs = utime.saturating_add(stime) / procinfo::TICKS_PER_SEC;
+    total_secs.saturating_mul(100) / elapsed
 }
 
 /// Format the `tty_nr` field from /proc/<pid>/stat.  Zero is "?" (no
@@ -191,51 +429,86 @@ mod tests {
 
     // ---------------- parse_args ----------------
 
+    /// The listing options, unwrapped. Every one of these was valid before and
+    /// still is; only the return type moved.
+    fn listed(args: &[&str]) -> PsArgs {
+        match parse_args(&s(args)) {
+            Ok(Request::List(p)) => p,
+            other => panic!("expected a listing request, got {other:?}"),
+        }
+    }
+
     #[test]
     fn parse_empty() {
-        assert_eq!(parse_args(&s(&[])), PsArgs::default());
+        assert_eq!(listed(&[]), PsArgs::default());
     }
 
     #[test]
     fn parse_dash_e() {
-        let a = parse_args(&s(&["-e"]));
+        let a = listed(&["-e"]);
         assert!(a.all_procs);
         assert!(!a.full_format);
     }
 
     #[test]
     fn parse_dash_a_uppercase_is_alias_for_e() {
-        let a = parse_args(&s(&["-A"]));
-        assert!(a.all_procs);
+        assert!(listed(&["-A"]).all_procs);
     }
 
     #[test]
     fn parse_dash_f() {
-        let a = parse_args(&s(&["-f"]));
+        let a = listed(&["-f"]);
         assert!(a.full_format);
         assert!(!a.all_procs);
     }
 
     #[test]
     fn parse_clustered_ef() {
-        let a = parse_args(&s(&["-ef"]));
+        let a = listed(&["-ef"]);
         assert!(a.all_procs);
         assert!(a.full_format);
     }
 
+    /// THIS TEST USED TO ASSERT THE BUG.
+    ///
+    /// It was called `parse_unknown_silently_ignored` and its comment read
+    /// "Preserves previous behaviour — no error, no panic." What it preserved
+    /// was `ps -Q` printing the whole process table and exiting 0 where procps
+    /// prints `error: unsupported SysV option` and exits 1. A test can hold a
+    /// defect in place as firmly as it holds a feature, and the only thing
+    /// distinguishing the two is whether anyone measured.
     #[test]
-    fn parse_unknown_silently_ignored() {
-        // Preserves previous behaviour — no error, no panic.
-        let a = parse_args(&s(&["-X"]));
-        assert!(!a.all_procs);
-        assert!(!a.full_format);
+    fn parse_unknown_short_option_is_refused() {
+        let err = parse_args(&s(&["-Q"])).expect_err("-Q is not an option here");
+        assert_eq!(err, "error: unsupported SysV option");
+        // Still refused when clustered behind valid flags, which is where a
+        // character-at-a-time parser is most likely to let one through.
+        assert!(parse_args(&s(&["-efQ"])).is_err());
+    }
+
+    /// `--help` USED TO PRINT THE PROCESS TABLE.
+    ///
+    /// There was no long-option branch: `--help` had one `-` stripped and the
+    /// rest was walked character by character, so it was read as `-h -e -l -p`
+    /// and the `e` matched. The bug is not that `--help` was unimplemented, it
+    /// is that a long option silently became whichever short flags its letters
+    /// happened to spell.
+    #[test]
+    fn long_options_are_matched_whole_not_letter_by_letter() {
+        assert_eq!(parse_args(&s(&["--help"])), Ok(Request::Help));
+        // The three that would have set a flag by accident.
+        for arg in ["--nosuchoption", "--full", "--version"] {
+            let err = parse_args(&s(&[arg])).expect_err(arg);
+            assert_eq!(err, "error: unknown gnu long option", "for {arg}");
+        }
     }
 
     #[test]
     fn parse_bare_args_ignored() {
-        // ps doesn't take positional arguments in our minimal build.
-        let a = parse_args(&s(&["1234"]));
-        assert_eq!(a, PsArgs::default());
+        // ps doesn't take positional arguments in our minimal build. procps
+        // reads a PID list here, so refusing would reject a command line the
+        // reference accepts -- deliberately unchanged.
+        assert_eq!(listed(&["1234"]), PsArgs::default());
     }
 
     // ---------------- format_tty ----------------

@@ -1,9 +1,0 @@
-[package]
-name = "strings"
-version = "0.1.0"
-edition = "2024"
-description = "SlateOS printable string finder in binary files"
-[dependencies]
-# File names come from argv, and the whole point of the program is printing
-# byte runs out of a binary.
-quoting = { path = "../quoting" }

@@ -113,6 +113,23 @@ directory — `--target-dir` per `DIFF_PKG` entry — after which the symlink ca
 point at the right one deliberately rather than at whatever survived. Until then
 the survey's column says "coreutils half only", which is the truth.
 
+## B-STRINGS-HAS-NO-DATA-SECTION-OPTION (lane B, 2026-09-11)
+
+`strings -d` / `--data` is absent. GNU's `strings` scans only the *initialised,
+loaded* sections of an object file with it, which is the difference between
+listing the strings a program will actually have in memory and listing every
+run of printable bytes in the file — including ones in debug info and symbol
+tables that never load.
+
+Both halves of the duplicate pair lacked it, so it survived the retirement of
+the standalone. `scripts/strings-diff.sh` covers it in three cases
+(`-d elf.bin`, `--data elf.bin`, alongside `-a`), all currently refusing.
+
+Related and cheaper: the diagnostics for a bad option *value* — `-n 0`,
+`-n -1`, `-n notanumber`, `-t q`, `-e q`, and each of those options given
+nothing — differ from GNU's wording in 10 of the 15 remaining failures. The
+exit statuses already agree, so this is sentences rather than behaviour.
+
 ## B-COREUTILS-UPTIME-SILENTLY-IGNORES-EVERY-ARGUMENT (lane B, 2026-09-11)
 
 The same defect as `date` below, in the other bin that has it:
@@ -65234,6 +65251,48 @@ number is different** — not by a constant factor either: 12→16, 24→48,
 3036→4112. Both exit 0. `du` prints nothing but sizes and paths, so a `du` that
 gets the sizes wrong and drops a directory has no correct output left; there is
 nothing else in it to be right about.
+
+**11 -> 10 (2026-09-11): `strings`, decided by one data-loss case.**
+`scripts/strings-diff.sh`, written today, 71 cases against GNU Binutils 2.42.
+
+**coreutils 54 passed, 15 differed. The standalone 46 passed, 23 differed.**
+
+Eight passes apart, which on its own is the kind of margin this file has twice
+declined to act on (`patch`, `hostname`). What decides it is that the margin is
+**qualitative as well**:
+
+| | coreutils | standalone |
+|---|---|---|
+| `-e S` (8-bit characters) | correct | **drops data** |
+| `-s` / `--output-separator` | present | absent (3 cases) |
+| `strings -` (stdin) | refuses as GNU does | exits 0 |
+
+The `-e S` case is the one that matters. That encoding exists to say "high bytes
+are printable", and on `café latte`:
+
+    GNU         café latte
+    standalone  latte
+
+It drops the high byte **and everything before it**, with exit 0. A tool run to
+find strings in a binary silently returns fewer of them, which is the failure
+mode that tool cannot have.
+
+**What BOTH halves get wrong, and so survives the retirement** — filed as
+`B-STRINGS-HAS-NO-DATA-SECTION-OPTION`:
+
+  * `-d`/`--data` is absent from both. GNU scans only the *initialised, loaded*
+    sections with it, which is the option's whole point on an object file.
+  * The diagnostics for a bad option *value* differ on 10 of coreutils' 15 —
+    `-n 0`, `-n -1`, `-n notanumber`, `-t q`, `-e q` and the bare forms. The
+    exit statuses agree; the sentences do not.
+
+**A note on the fixtures.** They are written with `printf` escapes from inside
+the harness rather than checked in, because every interesting case here is a
+byte that is not text — a run exactly at the length threshold, a NUL, a high
+byte, UTF-16. A checked-in fixture is a file some editor has had an opinion
+about. The one exception is a copy of `/bin/true`, present so that the default
+"scan only the loaded sections" rule is exercised against a real object file;
+a fixture that is not an object file hides that rule completely.
 
 **12 -> 11 (2026-09-11): `cal`, where our half is perfect and the other fails
 everything.** `scripts/cal-diff.sh`, written today, 105 cases against

@@ -50,6 +50,18 @@
 set -u
 cd "$(dirname "$0")/.." || exit 2
 
+# WHAT THIS READS, AND WHEN IT LIES: built test harnesses, not source. A
+# crate whose hang was fixed but which has not been rebuilt still hangs
+# here, and the sweep says the defect is present. The companion sweep,
+# scripts/unknown-option-sweep.py, refuses outright when any binary
+# predates its source -- it was about to publish a count taken over 85
+# stale binaries, three of them fixed the same day, because `cargo test`
+# and `cargo clippy` had been run on them and `cargo build` had not.
+#
+# This script has no such guard yet. It walks candidates newest-first, so
+# it at least uses the most recent harness per name, but "most recent" and
+# "current" are different claims. Rebuild before believing a finding:
+#   cargo test --workspace --no-run --target x86_64-pc-windows-gnu
 DEPS=${DEPS:-target/x86_64-pc-windows-gnu/debug/deps}
 OUT=${OUT:-build/stdin-hang.txt}
 BASE_CAP=${BASE_CAP:-60}   # longest baseline run we will wait out

@@ -4469,6 +4469,89 @@ pub fn init(device_name: &str) -> KernelResult<()> {
     Ok(())
 }
 
+/// `dos_datetime_to_ns` unit tests: pure computation, no disk.
+///
+/// Extracted from [`self_test`] on 2026-09-12. That suite is dispatched under
+/// `if fat_ok` and has never run on this harness -- the boot test mounts an
+/// in-memory root and attaches vda as a raw swap disk, so `init` fails and the
+/// whole suite is skipped. These checks need no volume, while
+/// `dos_datetime_to_ns` is used in production by the stat path to report the
+/// timestamps a user sees: a live function with no executing coverage.
+///
+/// The absolute values are the point. A `rtc_to_dos_datetime` ->
+/// `dos_datetime_to_ns` round-trip -- which is what `self_test` still has -- can
+/// pass while both directions are wrong in compensating ways. 1980-01-01 and
+/// 2000-06-15T14:30Z can only pass by being right.
+pub fn self_test_datetime() -> KernelResult<()> {
+    crate::serial_println!("[fat] Running dos_datetime_to_ns self-test...");
+
+    // Known epoch: 0 date -> 0 ns.
+    //
+    // Was `assert_eq!`, which panics. A self-test that halts the kernel reports
+    // nothing about the suites queued behind it, and this one now runs on every
+    // boot rather than never, so the failure mode matters. The dispatcher
+    // collects an `Err` and carries on.
+    let zero = dos_datetime_to_ns(0, 0);
+    if zero != 0 {
+        crate::serial_println!(
+            "[fat]   dos_datetime_to_ns FAILED: (0, 0) = {}, expected 0",
+            zero
+        );
+        return Err(KernelError::IoError);
+    }
+
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // 1980-01-01 00:00:00 — DOS epoch.
+            //   date = (1980-1980)<<9 | 1<<5 | 1 = 0x0021
+            //   time = 0
+            //   Expected: 315532800 seconds since Unix epoch = 315_532_800_000_000_000 ns.
+            let dos_epoch_date: u16 = (1 << 5) | 1;
+            let dos_epoch_ns = dos_datetime_to_ns(dos_epoch_date, 0);
+            // 1980-01-01T00:00:00Z = 315532800 seconds * 1e9.
+            let expected_dos_epoch_ns: u64 = 315_532_800_000_000_000;
+            if dos_epoch_ns != expected_dos_epoch_ns {
+                crate::serial_println!(
+                    "[fat]   dos_datetime_to_ns FAILED: DOS epoch = {}, expected {}",
+                    dos_epoch_ns,
+                    expected_dos_epoch_ns
+                );
+                return Err(KernelError::IoError);
+            }
+            Ok(())
+        }
+        case()?;
+    }
+
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // 2000-06-15 14:30:00.
+            //   date = (2000-1980)<<9 | 6<<5 | 15 = 20<<9 | 6<<5 | 15 = 10240 + 192 + 15 = 10447
+            //   time = 14<<11 | 30<<5 | 0 = 28672 + 960 = 29632
+            let y2k_date: u16 = (20 << 9) | (6 << 5) | 15;
+            let y2k_time: u16 = (14 << 11) | (30 << 5);
+            let y2k_ns = dos_datetime_to_ns(y2k_date, y2k_time);
+            // 2000-06-15T14:30:00Z = 961078200 seconds * 1e9.
+            let expected_y2k_ns: u64 = 961_078_200_000_000_000;
+            if y2k_ns != expected_y2k_ns {
+                crate::serial_println!(
+                    "[fat]   dos_datetime_to_ns FAILED: 2000-06-15 14:30 = {}, expected {}",
+                    y2k_ns,
+                    expected_y2k_ns
+                );
+                return Err(KernelError::IoError);
+            }
+            Ok(())
+        }
+        case()?;
+    }
+
+    crate::serial_println!("[fat] dos_datetime_to_ns self-test PASSED");
+    Ok(())
+}
+
 /// Self-test: verify we can read the directory and a file.
 // String formatting uses bounded operations.
 #[allow(clippy::arithmetic_side_effects)]
@@ -4655,63 +4738,6 @@ pub fn self_test() -> KernelResult<()> {
     // Clean up: remove the empty test directory.
     crate::fs::Vfs::rmdir("/TESTDIR")?;
     crate::serial_println!("[fat]   rmdir verified: TESTDIR removed");
-
-    // ---------------------------------------------------------------
-    // dos_datetime_to_ns unit tests (pure computation, no disk I/O)
-    // ---------------------------------------------------------------
-    crate::serial_println!("[fat]   Testing dos_datetime_to_ns...");
-
-    // Known epoch: 0 date → 0 ns.
-    assert_eq!(dos_datetime_to_ns(0, 0), 0);
-
-    {
-        #[inline(never)]
-        fn case() -> crate::error::KernelResult<()> {
-            // 1980-01-01 00:00:00 — DOS epoch.
-            //   date = (1980-1980)<<9 | 1<<5 | 1 = 0x0021
-            //   time = 0
-            //   Expected: 315532800 seconds since Unix epoch = 315_532_800_000_000_000 ns.
-            let dos_epoch_date: u16 = (1 << 5) | 1;
-            let dos_epoch_ns = dos_datetime_to_ns(dos_epoch_date, 0);
-            // 1980-01-01T00:00:00Z = 315532800 seconds * 1e9.
-            let expected_dos_epoch_ns: u64 = 315_532_800_000_000_000;
-            if dos_epoch_ns != expected_dos_epoch_ns {
-                crate::serial_println!(
-                    "[fat]   dos_datetime_to_ns FAILED: DOS epoch = {}, expected {}",
-                    dos_epoch_ns,
-                    expected_dos_epoch_ns
-                );
-                return Err(KernelError::IoError);
-            }
-            Ok(())
-        }
-        case()?;
-    }
-
-    {
-        #[inline(never)]
-        fn case() -> crate::error::KernelResult<()> {
-            // 2000-06-15 14:30:00.
-            //   date = (2000-1980)<<9 | 6<<5 | 15 = 20<<9 | 6<<5 | 15 = 10240 + 192 + 15 = 10447
-            //   time = 14<<11 | 30<<5 | 0 = 28672 + 960 = 29632
-            let y2k_date: u16 = (20 << 9) | (6 << 5) | 15;
-            let y2k_time: u16 = (14 << 11) | (30 << 5);
-            let y2k_ns = dos_datetime_to_ns(y2k_date, y2k_time);
-            // 2000-06-15T14:30:00Z = 961078200 seconds * 1e9.
-            let expected_y2k_ns: u64 = 961_078_200_000_000_000;
-            if y2k_ns != expected_y2k_ns {
-                crate::serial_println!(
-                    "[fat]   dos_datetime_to_ns FAILED: 2000-06-15 14:30 = {}, expected {}",
-                    y2k_ns,
-                    expected_y2k_ns
-                );
-                return Err(KernelError::IoError);
-            }
-            crate::serial_println!("[fat]   dos_datetime_to_ns verified");
-            Ok(())
-        }
-        case()?;
-    }
 
     // ---------------------------------------------------------------
     // FAT metadata integration test

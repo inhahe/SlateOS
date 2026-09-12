@@ -1598,6 +1598,15 @@ extern "C" fn kernel_main() -> ! {
             // Pure ext4 extent-placement regression guard (BUG-EXT4-SPARSE-READ) — no
             // disk needed, so unlike ext4::self_test() it runs on the diskless / non-FAT
             // Path-Z boot too, where the sparse fastpy ELFs on /mnt/tests are loaded.
+            // Pure DOS<->Unix time conversion: no volume, so unlike
+            // fat::self_test() it does not sit behind `fat_ok`.  It did until
+            // 2026-09-12, which meant the only tests for a function on the
+            // stat path had never once run.
+            selftest::dispatch_debug(
+                "fat datetime",
+                selftest::Severity::Diagnostic,
+                fs::fat::self_test_datetime(),
+            );
             selftest::dispatch_debug(
                 "ext4 pure",
                 selftest::Severity::Diagnostic,

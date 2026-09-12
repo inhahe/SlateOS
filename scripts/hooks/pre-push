@@ -3265,7 +3265,10 @@ fi
 # Lane B asked for test-module coverage in
 # requests/b-a-the-cfg-unix-gate-skips-every-test-module.md and lane A replied "taken in
 # full, both call sites at once".  That was true of boot-test.sh and FALSE of this one:
-# `check-cfg-unix.py` never gained `--all-targets` and does not accept the flag.
+# `check-cfg-unix.py` GAINED `--all-targets` on 2026-09-12, so the sentence above
+# is history: this gate now compiles the `#[cfg(unix)]` code inside `#[cfg(test)]`
+# modules that it used to skip, and its self-test carries a fixture that fails
+# without the flag and passes with it.
 cfgunix="${repo_root:-.}/scripts/check-cfg-unix.py"
 skip_cfgunix=0
 if [ "${ALLOW_UNCHECKED_CFG_UNIX:-0}" = "1" ]; then

@@ -85,6 +85,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -160,7 +161,21 @@ def target_installed() -> bool:
 
 
 def check(crates: list[str]) -> tuple[int, str]:
-    """`cargo check` them all at once. Returns (exit code, output).
+    """`cargo clippy` them all at once. Returns (exit code, output).
+
+    **`clippy`, not `check`, and the difference is not style.** Every crate
+    here carries `#![deny(clippy::all, clippy::pedantic)]`, so a clippy
+    finding IS a compile error on the target -- and `cargo check` does not
+    run clippy, so this gate said "the `#[cfg(unix)]` code compiles" while
+    never having asked the question that decides it. Lane A accepted exactly
+    this argument for `boot-test.sh` on 2026-09-02
+    (`requests/b-a-cfg-unix-gate-should-lint-as-well-as-compile.md`); the push
+    gate kept `check` for ten days after.
+    
+    Clippy SUBSUMES check -- it runs the compiler front end and then the lints
+    -- so this is one pass, not two. Measured on this tree, after an identical
+    cache invalidation: check 11s, clippy 16s. Five seconds on a push whose
+    hook already takes minutes.
 
     `--all-targets` because without it this gate skipped the population it
     exists for. A `#[cfg(unix)]` block inside a `#[cfg(test)]` module is
@@ -173,7 +188,7 @@ def check(crates: list[str]) -> tuple[int, str]:
     The self-test proves the flag is what makes the difference: the same
     fixture compiles clean without it and fails with it.
     """
-    args = ["cargo", "check", "--all-targets", "--target", TARGET]
+    args = ["cargo", "clippy", "--all-targets", "--target", TARGET]
     for c in crates:
         args += ["-p", c]
     proc = subprocess.run(
@@ -267,6 +282,45 @@ def self_test() -> int:
                     "caught with --test; --all-targets is not reaching test targets"
                 )
 
+            # AND THE SAME QUESTION FOR A LINT, which is what `clippy` buys
+            # over `check`. `&Vec<i32>` is `clippy::ptr_arg`: valid Rust that
+            # rustc compiles happily, and a hard error under this workspace's
+            # `deny(clippy::all)`. So the fixture must COMPILE and must FAIL
+            # clippy -- if the first half ever stops holding, the fixture has
+            # become a plain compile error and proves nothing about linting.
+            lsrc = (
+                "#[cfg(unix)]\n"
+                "pub fn only_on_unix(v: &Vec<i32>) -> usize { v.len() }\n"
+            )
+            lf = Path(tmp) / "probe_lint.rs"
+            lf.write_text(lsrc, encoding="utf-8", newline="")
+
+            def lint(driver: str) -> int:
+                return subprocess.run(
+                    [driver, "--crate-type", "lib", "--edition", "2021",
+                     "--target", TARGET, "-D", "clippy::all",
+                     "--out-dir", tmp, str(lf)],
+                    capture_output=True, text=True, timeout=600, check=False,
+                ).returncode
+
+            if shutil.which("clippy-driver") is None:
+                print("check-cfg-unix --self-test: clippy-driver absent; lint fixture skipped")
+            else:
+                # Each side once. Measured on this tree: rustc exits 0 (it
+                # accepts the `clippy::` tool lint and ignores it), and
+                # clippy-driver refuses with `ptr_arg`.
+                plain, linted = lint("rustc"), lint("clippy-driver")
+                if plain != 0:
+                    failures.append(
+                        "the lint fixture does not COMPILE, so it proves nothing "
+                        "about clippy -- it has become a plain compile error"
+                    )
+                if linted == 0:
+                    failures.append(
+                        "a deny-level clippy finding in cfg(unix) code was NOT "
+                        "caught; running clippy here is buying nothing"
+                    )
+
     for f in failures:
         print(f"check-cfg-unix --self-test: FAIL: {f}")
     if failures:
@@ -316,7 +370,7 @@ def main() -> int:
     # `#[cfg(test)]` modules, and a summary that does not name it reads the
     # same either way -- which is how the gap went unnoticed.
     print(f"check-cfg-unix: OK ({len(crates)} of {len(candidate_crates())} workspace "
-          f"crate(s) hold unix-gated code and compile for {TARGET} with "
+          f"crate(s) hold unix-gated code and pass clippy for {TARGET} with "
           f"--all-targets; the other "
           f"{len(candidate_crates()) - len(crates)} are NOT checked here -- boot-test.sh covers the workspace)")
     return 0

@@ -98943,6 +98943,40 @@ to `cargo check`.
 compile" reads identically whether or not it looked at test targets, which is
 how this went unnoticed for as long as it did.
 
+**It runs `clippy` rather than `check` as of the same day, which closes the
+other half.** Every crate in this population carries
+`#![deny(clippy::all, clippy::pedantic)]`, so a clippy finding **is** a compile
+error on the target -- and `cargo check` does not run clippy. The gate was
+therefore reporting "the `#[cfg(unix)]` code compiles" without having asked the
+question that decides it. Lane A accepted exactly this argument for
+`boot-test.sh` on 2026-09-02
+(`requests/b-a-cfg-unix-gate-should-lint-as-well-as-compile.md`); the push gate
+kept `check` for ten days after, which is the gap this closes.
+
+Clippy **subsumes** check -- it runs the compiler front end and then the lints
+-- so this is one pass, not two. Cost, measured after an *identical* cache
+invalidation rather than by comparing two runs in different cache states:
+
+| | after touching a shared leaf crate |
+|---|---:|
+| `cargo check --all-targets` | 11 s |
+| `cargo clippy --all-targets` | 16 s |
+
+Five seconds on a hook that already runs for minutes. Two earlier attempts at
+this number were unusable and both looked plausible: the first reported "1
+error in 1 second" (cargo had rejected a CRLF in a package name and never ran),
+and the second had clippy *faster* than check, which is impossible -- clippy's
+artifacts were warm from a previous run and check's were not.
+
+**The lint fixture is the point.** A gate switched to clippy whose self-test
+only ever exercised plain compile errors would pass forever without
+demonstrating that clippy does anything. The fixture is `&Vec<i32>` inside
+`#[cfg(unix)]` -- `clippy::ptr_arg`: valid Rust that compiles, and a hard error
+under `deny(clippy::all)`. Both halves are asserted, because if the compile
+half ever stops holding the fixture has quietly become a plain compile error
+and proves nothing about linting. Verified by hand as well as by the suite:
+`rustc` exits 0, `clippy-driver` refuses.
+
 **A note on how that was checked, because it nearly was not.** The first run
 piped the output through `grep -c '^error'` and printed `0`, which is the same
 thing it would print if cargo had failed to start. The second run captured the

@@ -701,8 +701,15 @@ fn parse_normal_patch(input: &str) -> Vec<FilePatch> {
         // `a` ADDS AFTER THE NAMED LINE, so its hunk starts at the line after.
         // `d` and `c` start at the line they name. Getting this wrong puts an
         // appended line one row too high, which still applies and is wrong.
+        // `a` adds AFTER the named line and removes nothing, which
+        // `apply_hunk` now handles uniformly for every dialect: an
+        // `old_count == 0` hunk inserts at `old_start` rather than at
+        // `old_start - 1`. This used to add one here to compensate for
+        // `apply_hunk` being wrong, which was right for normal diffs and left
+        // zero-context UNIFIED insertions broken -- the same fix in one
+        // dialect's parser instead of in the shared applier.
         let (old_start, old_count) = match action {
-            'a' => (os.saturating_add(1), 0),
+            'a' => (os, 0),
             _ => (os, oe.saturating_add(1).saturating_sub(os)),
         };
         let (new_start, new_count) = match action {
@@ -858,10 +865,28 @@ fn parse_file_path(line: &str, prefix: &str) -> String {
 /// or None if the hunk doesn't match the expected context.
 /// `offset` is the cumulative line offset from previous hunks.
 fn apply_hunk(lines: &[String], hunk: &Hunk, offset: i64) -> Option<(Vec<String>, i64)> {
+    // A HUNK THAT REMOVES NOTHING NAMES THE LINE TO INSERT *AFTER*, so its
+    // 0-based insertion point is `old_start` itself and the usual `- 1` is
+    // wrong. For delete and change, `old_start` is the first affected line and
+    // the `- 1` is right.
+    //
+    // Measured against GNU on a zero-context insertion, `diff -U0` of one added
+    // line, `@@ -1,0 +2 @@`:
+    //
+    //     GNU : a X b c
+    //     ours: X a b c        <- before this
+    //
+    // The retired `userspace/patch` crate had this fix and this one did not.
+    // It surfaced only because retiring the duplicate meant reading what the
+    // loser knew that the winner did not -- a `todo.txt` note from 2026-05-31
+    // recording the identical off-by-one, in the half that was about to be
+    // deleted. Nothing in `patch-diff.sh` used `-U0`, so 64 of 64 passing said
+    // nothing about it.
+    let insertion = hunk.old_count == 0;
     let target_start_signed = i64::try_from(hunk.old_start)
         .unwrap_or(i64::MAX)
         .saturating_add(offset)
-        .saturating_sub(1)
+        .saturating_sub(if insertion { 0 } else { 1 })
         .max(0);
     let target_start = usize::try_from(target_start_signed).unwrap_or(0);
 
@@ -2390,15 +2415,45 @@ mod tests {
         );
     }
 
-    /// `4a5` ADDS AFTER line four, so the hunk starts at five and removes
-    /// nothing. Starting it at four still applies and puts the line one row
-    /// too high -- a wrong answer that looks like a right one.
+    /// `4a5` ADDS AFTER line four and removes nothing, so the hunk NAMES four
+    /// and `apply_hunk` inserts at four rather than at three.
+    ///
+    /// THIS TEST PINNED THE BUG, not the contract. It used to assert
+    /// `old_start == 5`, because the parser added one here to compensate for
+    /// `apply_hunk` subtracting one from every hunk including insertions. That
+    /// was right for normal diffs and left zero-context UNIFIED insertions
+    /// broken -- `@@ -1,0 +2 @@` put the line one row too high, which GNU does
+    /// not. The compensation is gone and the applier handles `old_count == 0`
+    /// for every dialect.
+    ///
+    /// So it now asserts the parse AND the applied result. Asserting the
+    /// internal offset alone is what let a compensating pair of errors look
+    /// correct from inside: the two halves agreed with each other and with
+    /// nothing else.
     #[test]
-    fn append_starts_after_the_line_it_names() {
+    fn append_inserts_after_the_line_it_names() {
         let h = &parse_normal_patch(&ctx("4a5~> new~"))[0].hunks[0];
-        assert_eq!(h.old_start, 5);
+        assert_eq!(h.old_start, 4);
         assert_eq!(h.old_count, 0);
         assert_eq!(h.lines, vec![HunkLine::Add("new".into())]);
+
+        // The observable half: applied to five lines, `new` lands fifth.
+        let original = lines(&["1", "2", "3", "4", "5"]);
+        let (out, _) = apply_hunk(&original, h, 0).expect("a pure insertion applies");
+        assert_eq!(out, lines(&["1", "2", "3", "4", "new", "5"]));
+    }
+
+    /// The same rule through the UNIFIED door, which is the one that was
+    /// wrong: `diff -U0` of a single added line after line one.
+    #[test]
+    fn a_zero_context_unified_insertion_lands_where_gnu_puts_it() {
+        let ps = parse_patch(&ctx("--- x/f.txt~+++ y/f.txt~@@ -1,0 +2 @@~+X~"));
+        let h = &ps[0].hunks[0];
+        assert_eq!(h.old_count, 0, "a -U0 insertion removes nothing");
+        let (out, _) =
+            apply_hunk(&lines(&["a", "b", "c"]), h, 0).expect("a pure insertion applies");
+        // Measured against GNU patch 2.7.6: `a X b c`, not `X a b c`.
+        assert_eq!(out, lines(&["a", "X", "b", "c"]));
     }
 
     /// ...and `1,2d0` deletes without adding, so the NEW side is empty and

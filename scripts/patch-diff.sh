@@ -126,6 +126,16 @@ printf 'brand\nnew\n' > "$mk/created"
 printf 'alpha\nDIFFERENT\ncharlie\ndelta\n'             > "$mk/drift.txt"
 ( cd "$mk" && /usr/bin/diff -u --label x/a/base.txt --label y/a/base.txt \
     drift.txt base.new ) > "$patches/drift.patch" || true
+# A ZERO-CONTEXT insertion. `diff -U0` is the only shape in which a unified
+# hunk removes nothing, and `old_count == 0` means the header names the line
+# to insert AFTER rather than the first line it replaces. Nothing else here
+# uses -U0, so a whole 64-of-64 run said nothing about it -- ours put the
+# added line one row too high until 2026-09-12, and only the retirement of
+# `userspace/patch` surfaced it: a todo.txt entry recorded the identical
+# off-by-one, fixed in the crate that was about to be deleted and never in
+# the one that survived.
+( cd "$mk" && /usr/bin/diff -U0 --label x/a/base.txt --label y/a/base.txt \
+    base.txt base.new ) > "$patches/u0.patch" || true
 # Not a patch at all.
 printf 'this is not a patch\nnor is this\n'             > "$patches/garbage.patch"
 printf ''                                               > "$patches/empty.patch"
@@ -243,6 +253,7 @@ xfail_case() {
 
 # --- the three patch formats, applied straight --------------------------------
 run_case u.patch -p1
+run_case u0.patch -p1
 run_case c.patch -p1
 run_case n.patch a/base.txt
 run_case append.patch -p1

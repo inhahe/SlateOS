@@ -73468,7 +73468,7 @@ written on the dev machine, so none exists.
 
 ### Where
 
-`userspace/coreutils/src/bin/touch.rs` → `stamp_path`. Two arms:
+`userspace/coreutils/src/fsattr.rs` → `set_times`. **Moved there by `cf63fda74`**, “one path-based timestamp write, in `coreutils::fsattr`”; this entry said `touch.rs` → `stamp_path` until 2026-09-12, by which time neither the file nor the function was where it pointed. Found by `check-stale-blockers.py`'s third pass, which flagged this entry because `touch.rs` had moved under it — the pass's first catch after it was written. Two arms:
 
 | Arm | How it stamps | Reaches |
 |---|---|---|

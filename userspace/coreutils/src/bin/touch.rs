@@ -732,8 +732,6 @@ fn create_open(path: &Path) -> io::Result<File> {
         .open(path)
 }
 
-/// Write `times` to the file `path` names, without opening it for I/O.
-///
 /// Standard output as a [`File`] that will not be closed.
 ///
 /// [`File::set_times`] is the only route from `std` to `futimens`, and it is a

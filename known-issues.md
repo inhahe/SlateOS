@@ -136571,7 +136571,23 @@ surprising cost under hardware virtualisation should suspect this before suspect
 own code — the tell is a cost that is *larger* under WHPX than under TCG, which is a VM
 exit and not work.
 
-### A-EXEC-WRITES-A-COMM-THAT-PRCTL-WOULD-REFUSE-AND-PROCFS-RENDERS-IT-AS-QUESTION-MARKS (lane A, 2026-09-12)
+### A-EXEC-WRITES-A-COMM-THAT-PRCTL-WOULD-REFUSE-AND-PROCFS-RENDERS-IT-AS-QUESTION-MARKS (lane A, 2026-09-12) — FIXED
+
+**FIXED 2026-09-12, all five surfaces.** `comm_truncate` takes and returns `&[u8]`; its
+UTF-8 char-boundary walk was deleted rather than ported, because Linux cuts `comm` at 16
+bytes flat so byte truncation is the more faithful behaviour and the function collapsed to
+one line. `gen_pid_cmdline` drops its decode entirely, `gen_pid_comm` carries bytes end to
+end, `build_pid_status` emits `Name:` straight into the byte buffer with its other 22
+writes untouched, and `build_pid_stat` splits around field 2 — which is parenthesised in
+the format precisely because it may contain anything.
+
+`PR_SET_NAME` no longer validates UTF-8. Its rejection was sound when written, and the
+reason it stopped being sound is worth keeping: procfs decoded to `str`, so refusing beat
+storing something that would not read back. procfs no longer decodes. Removing it also
+closed the asymmetry that made the check **partly decorative** — `execve` set the same comm
+through `set_task_name`, which never validated, so bytes this arm refused could already
+arrive by the more common route, and the gate only ever caught the caller who asked
+politely.
 
 **In short:** every running program has a short name the system shows in process
 listings. There is a check that stops a program *asking* for a name the system cannot

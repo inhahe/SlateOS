@@ -10451,12 +10451,19 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##      scheduler task name via set_task_name(current_task_id, ...) from
 ##      the resolved exe_path/argv[0]. Pure exec_comm_basename helper +
 ##      7-case boot self-test ("[spawn] exec_comm_basename: all cases OK").
-##      Residual limitation: non-UTF-8 comm bytes are still rejected with
-##      EINVAL — the scheduler stores raw bytes, but the procfs surfaces
-##      lossily decode the task name to a str (invalid bytes render as
-##      "???"), so SET_NAME rejects rather than store something that won't
-##      read back faithfully. Linux keeps raw bytes. Closing it needs
-##      procfs to emit comm as raw bytes.
+##      Residual limitation CLOSED 2026-09-12: procfs now emits comm as
+##      raw bytes (comm, stat field 2, status Name:, and cmdline), so
+##      PR_SET_NAME no longer validates UTF-8 and Linux's raw-byte
+##      behaviour is matched. The trigger this entry named -- "closing it
+##      needs procfs to emit comm as raw bytes" -- is exactly what was
+##      done, so the entry predicted its own closure correctly.
+##      Note the limitation was also wider than recorded here: the same
+##      decode reached /proc/<pid>/cmdline, a FIFTH surface neither this
+##      entry nor known-issues listed, found only by enumerating the
+##      decode rather than the comm path. See known-issues
+##      A-EXEC-WRITES-A-COMM-THAT-PRCTL-WOULD-REFUSE-... for why the
+##      collision (every undecodable name becoming the same "???") was
+##      the defect rather than the mangling.
 ##  17. PERSONALITY — DONE as static PER_LINUX.  sys_personality
 ##      returns 0 (PER_LINUX) regardless of input.  Programs query
 ##      with personality(0xffff_ffff) to verify "are we Linux?";

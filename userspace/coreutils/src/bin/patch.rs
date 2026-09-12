@@ -208,6 +208,34 @@ fn parse_range(s: &str) -> Option<(usize, usize)> {
 }
 
 /// Parse unified diff input into a list of file patches.
+/// Render a hunk back to unified-diff text, for a `.rej` file.
+///
+/// A reject has to be a USABLE PATCH, not a description of one: the whole point
+/// is that someone can fix the conflict and re-apply it. So the header is the
+/// real `@@ -s,c +s,c @@` and the body carries the original prefixes.
+///
+/// The counts come from the hunk as parsed rather than being recounted from the
+/// lines. They are what the patch claimed, and a reject that silently corrected
+/// them would no longer be the hunk that failed.
+fn render_hunk(h: &Hunk) -> String {
+    let mut out = format!(
+        "@@ -{},{} +{},{} @@
+",
+        h.old_start, h.old_count, h.new_start, h.new_count
+    );
+    for line in &h.lines {
+        let (prefix, text) = match line {
+            HunkLine::Context(t) => (' ', t),
+            HunkLine::Remove(t) => ('-', t),
+            HunkLine::Add(t) => ('+', t),
+        };
+        out.push(prefix);
+        out.push_str(text);
+        out.push('\n');
+    }
+    out
+}
+
 fn parse_patch(input: &str) -> Vec<FilePatch> {
     let lines: Vec<&str> = input.lines().collect();
     let mut patches: Vec<FilePatch> = Vec::new();
@@ -629,6 +657,7 @@ fn main() {
         let mut offset: i64 = 0;
         let mut hunks_applied = 0;
         let mut hunks_failed = 0;
+        let mut rejected: Vec<Hunk> = Vec::new();
 
         let hunks: Vec<Hunk> = if opts.reverse {
             fp.hunks.iter().map(reverse_hunk).collect()
@@ -645,11 +674,20 @@ fn main() {
                 }
                 None => {
                     hunks_failed += 1;
+                    rejected.push(hunk.clone());
                     if !opts.silent {
-                        diag!(
-                            "patch: Hunk #{} FAILED at line {}",
-                            hunk_idx + 1,
-                            hunk.old_start
+                        // GNU: `Hunk #1 FAILED at 1.` -- on stdout, with a
+                        // trailing period and no the word `line`. Ours said
+                        // `Hunk #1 FAILED at line 1` on stderr.
+                        let mut out = Stream::stdout();
+                        let _ = out.write_all(
+                            format!(
+                                "Hunk #{} FAILED at {}.
+",
+                                hunk_idx + 1,
+                                hunk.old_start
+                            )
+                            .as_bytes(),
                         );
                     }
                 }
@@ -658,10 +696,57 @@ fn main() {
 
         if hunks_failed > 0 {
             any_failed = true;
+            // A FAILED HUNK IS SAVED, not just reported. GNU writes the
+            // rejected hunks to `<file>.rej` in unified format, keeping the
+            // original `---`/`+++` header so the reject is itself a usable
+            // patch, and saves the untouched original to `<file>.orig`. A
+            // message telling someone a hunk failed, without handing them the
+            // hunk, leaves them to reconstruct it from a diff they may not
+            // still have.
+            //
+            // Both are written even when NO hunk applied and the file is
+            // therefore unchanged -- measured, and it is why `.orig` here is
+            // not the same thing as `-b`'s backup.
+            let reject_path = format!("{file_path}.rej");
+            if !opts.dry_run {
+                let mut reject = String::new();
+                // THE REJECT HEADER CARRIES THE STRIPPED PATHS, and the
+                // missing-target block above carries the RAW ones. The asymmetry
+                // is GNU's and it is not arbitrary: that block quotes the patch
+                // back at you to explain why it could not be read, so it must
+                // show what the patch actually says. A reject is a patch to be
+                // re-applied in the tree you are standing in, so its names have
+                // to be the ones that resolve here.
+                //
+                // Measured: with `-p1` on a patch labelled `x/a/base.txt`, GNU's
+                // reject begins `--- a/base.txt`. Writing the raw line instead
+                // made ours four bytes longer, and that was the last difference
+                // in the whole `drift.patch` family.
+                let strip_n = opts.strip.unwrap_or(0);
+                reject.push_str(&format!(
+                    "--- {}\n+++ {}\n",
+                    strip_path(&fp.old_path, strip_n),
+                    strip_path(&fp.new_path, strip_n)
+                ));
+                for h in &rejected {
+                    reject.push_str(&render_hunk(h));
+                }
+                let _ = fs::write(&reject_path, reject.as_bytes());
+                let _ = fs::write(format!("{file_path}.orig"), original.as_bytes());
+            }
             if !opts.silent {
-                diag!(
-                    "patch: {hunks_failed} out of {} hunks FAILED for {file_path}",
-                    hunks_applied + hunks_failed
+                // `1 out of 1 hunk FAILED -- saving rejects to file X.rej`,
+                // singular when there is one. Ours said `hunks FAILED for X`
+                // and never mentioned the reject file, because there was none.
+                let total = hunks_applied + hunks_failed;
+                let plural = if total == 1 { "hunk" } else { "hunks" };
+                let mut out = Stream::stdout();
+                let _ = out.write_all(
+                    format!(
+                        "{hunks_failed} out of {total} {plural} FAILED -- saving rejects to file {reject_path}
+"
+                    )
+                    .as_bytes(),
                 );
             }
         }

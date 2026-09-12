@@ -1199,14 +1199,41 @@ it listed `/proc/meminfo` among the files read, a path appearing nowhere else
 in the crate. It survived by sharing a sentence with `/proc/swaps` and
 `/etc/fstab`, which are real.
 
-**Separately, `multicall-aliases.py` does not strip comments before looking
-for dispatch arms.** A comment in the new code reading ``the hardcoded
-`"free" => refuse` arm`` was counted as a personality: the checker reported
-169 personalities and 1 shadowed name, and rewording that one comment took it
-to 168 and 0 with no code change. The direction is safe — it over-reports, so
-it refuses pushes it should not rather than passing ones it should not — but
-the "168 unreachable" backlog figure counts prose, and anyone who quotes a
-match arm in a comment gets refused. Filed below.
+**Separately — `multicall-aliases.py` did not strip comments before looking
+for dispatch arms, and fixing that nearly did more damage than the bug.**
+A comment in the new code reading ``the hardcoded `"free" => refuse` arm`` was
+counted as a live personality: the checker reported 169 personalities and 1
+shadowed name and refused a push, then reported 168 and 0 when that one
+comment was reworded, with no code change. It was flagging a sentence about a
+branch that no longer existed.
+
+The obvious fix — run `rustlex.strip_noise(keep_literals=True)`, which exists
+for exactly this and whose docstring already diagnoses it as "the scan matches
+its own documentation" — **silently deleted three real personalities**:
+`crond:anacron`, `kill:killall`, `newgrp:sg`. Each was genuine code
+(`"sg" => sg_main(&rest)` is a dispatch arm), and each was being detected only
+because of prose. The corroborating pattern `_EXTRACTS_NAME` matched the token
+`argv[0]`, which is not Rust and can therefore only ever appear in a comment,
+while the code spelling it looked for — the contiguous `args.first()` — is
+broken over two lines by rustfmt in all three crates:
+
+    let prog_name = args
+        .first()
+
+So the gate was resting on comments for its evidence in those three cases, and
+blanking comments took the evidence away. **That is the dangerous direction:**
+the original bug over-reported and cost a push; this under-reported and would
+have let a real dispatch go unseen, which is the entire thing the gate exists
+to catch. It was found only by diffing the full personality list across the
+change — the summary line moved 168 → 165, an amount small enough to read as
+the intended fix. The checker's own self-test docstring says why that is the
+trap: *"a count is the one output where a detector that stopped seeing and a
+tree that got better are spelled identically."*
+
+Fixed by making `_EXTRACTS_NAME` whitespace-tolerant so corroboration comes
+from code, leaving `argv[0]` inert. Both halves now have self-test fixtures,
+and each was verified to fail against a mutant with its own half reverted —
+a fixture that passes with and without the fix proves nothing.
 
 `nologin` answering to `true` and `false` is the one to look at first: those
 two run in nearly every shell script on the system, and `nologin`'s job is to

@@ -35,6 +35,15 @@
 #     and take the first that actually lists some. That one fix took the
 #     coverage from 48 names to 84.
 #
+# IT WALKS BUILD ARTIFACTS, NOT SOURCE, so BUILD FIRST -- `cargo test --no-run`
+# for whatever you are sweeping. `deps/` keeps roughly nine stale binaries per
+# name, and a harness built before a fix still contains the defect: the first
+# run after this script was hardened reported a stdin hang in `ed`, correctly,
+# in a 73-test binary from before the 76-test fix. The sweep was right about
+# the binary and wrong about which binary. The test COUNT it prints beside each
+# hang is what makes that visible, and is there for exactly this reason --
+# check it against what you expect before believing a hit.
+#
 # Usage:
 #   scripts/stdin-hang-sweep.sh --selftest      prove it can both pass and refuse
 #   scripts/stdin-hang-sweep.sh [name ...]      default: coreutils' bins + posix
@@ -49,19 +58,44 @@ HOLD=${HOLD:-40}           # must exceed PROBE_CAP, or the pipe shuts first
 
 sweep() {
   local hung=0 slow=0 tested=0 skipped=0 name cand c f n start base rc
+  local absdeps scratch
   mkdir -p "$(dirname "$OUT")"
   : > "$OUT"
+  # Absolute, because everything below runs from a scratch directory.
+  absdeps=$(cd "$DEPS" 2>/dev/null && pwd) || { echo "no such DEPS: $DEPS"; return 2; }
+  # NOTHING RUNS IN THE REPOSITORY. The probe below hands `--list` to a
+  # candidate, and a candidate is not always a test harness -- `deps/` holds
+  # the plain utilities too. One of them took `--list` as work to do and left
+  # a `--list.lock` file in the repo root. It was harmless; the next one need
+  # not be, and `git status` is not a safety net for a program that overwrites
+  # rather than creates. A scratch cwd bounds whatever they decide to do.
+  scratch=$(mktemp -d) || return 2
   for name in "$@"; do
     f=""; n=0
-    for cand in $(ls -t "$DEPS"/"$name"-*.exe 2>/dev/null); do
-      c=$("$cand" --list 2>/dev/null </dev/null | grep -c ": test")
+    # NEWEST FIRST, and read line by line rather than word by word. A plain
+    # glob is ALPHABETICAL, and swapping `ls -t` for one cost a false report
+    # the first time this ran: it selected a stale `ed` harness with 73 tests
+    # -- the build from before that defect was fixed -- and duly found the
+    # defect in it. The sweep was right about the binary and wrong about which
+    # binary. The glob had been introduced to survive the SPACES this repo's
+    # own path contains, which unquoted `$(ls -t ...)` splits on; `while read`
+    # keeps the ordering and the spaces both.
+    while IFS= read -r cand; do
+      [ -f "$cand" ] || continue
+      # DO NOT EXECUTE A BINARY TO FIND OUT WHETHER IT IS A TEST HARNESS.
+      # libtest's own argument parser is compiled into every harness, so the
+      # string `--test-threads` is present in one and absent from a plain
+      # binary. Checked against the run-it-and-see answer over 36 binaries
+      # spanning 9 names: 36 agreements, 0 disagreements.
+      grep -q -a -F -e "--test-threads" "$cand" 2>/dev/null || continue
+      c=$( (cd "$scratch" && "$cand" --list 2>/dev/null </dev/null) | grep -c ": test")
       case "$c" in ''|0) continue;; esac
       f=$cand; n=$c; break
-    done
+    done < <(ls -t "$absdeps"/"$name"-*.exe 2>/dev/null)
     [ -n "$f" ] || { skipped=$((skipped+1)); continue; }
     tested=$((tested+1))
     start=$(date +%s)
-    timeout "$BASE_CAP" "$f" >/dev/null 2>&1 </dev/null
+    ( cd "$scratch" && exec timeout "$BASE_CAP" "$f" >/dev/null 2>&1 </dev/null )
     rc=$?
     base=$(( $(date +%s) - start ))
     # Anything whose ordinary run is already near the probe deadline cannot be
@@ -69,12 +103,13 @@ sweep() {
     if [ "$rc" = 124 ] || [ "$base" -ge $(( PROBE_CAP - 5 )) ]; then
       slow=$((slow+1)); echo "too slow to judge (${base}s baseline): $name" >> "$OUT"; continue
     fi
-    timeout "$PROBE_CAP" "$f" >/dev/null 2>&1 < <(sleep "$HOLD")
+    ( cd "$scratch" && exec timeout "$PROBE_CAP" "$f" >/dev/null 2>&1 < <(sleep "$HOLD") )
     if [ "$?" = 124 ]; then
       hung=$((hung+1))
       echo "STDIN HANG ($n tests, ${base}s baseline): $name  $f" >> "$OUT"
     fi
   done
+  rm -rf "$scratch"
   echo "binaries: $tested   stdin-hangs: $hung   too slow to judge: $slow   no tests: $skipped"
   cat "$OUT"
   [ "$hung" = 0 ]
@@ -87,28 +122,30 @@ selftest() {
   local d rc out
   command -v rustc >/dev/null || { echo "selftest needs rustc"; return 2; }
   d=$(mktemp -d) || return 2
+  # REAL libtest harnesses, built with `rustc --test`, not hand-written
+  # programs that imitate one. The sweep now pre-filters candidates on a
+  # string libtest compiles in, so a fake would be skipped and the self-test
+  # would pass by testing nothing -- which is the failure this whole file is
+  # about. Building the genuine article also exercises libtest's real `--list`
+  # output rather than my guess at its format.
   cat > "$d/hangfix.rs" <<'RS'
-fn main() {
-    if std::env::args().any(|a| a == "--list") {
-        println!("reads_stdin: test");
-        return;
-    }
+#[test]
+fn reads_stdin() {
     let mut s = String::new();
     let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut s);
 }
 RS
   cat > "$d/goodfix.rs" <<'RS'
-fn main() {
-    if std::env::args().any(|a| a == "--list") {
-        println!("no_stdin: test");
-    }
+#[test]
+fn no_stdin() {
+    assert_eq!(1 + 1, 2);
 }
 RS
-  rustc -O "$d/hangfix.rs" -o "$d/hangfix-aaaaaaaa.exe" 2>/dev/null || { rm -rf "$d"; return 2; }
-  rustc -O "$d/goodfix.rs" -o "$d/goodfix-bbbbbbbb.exe" 2>/dev/null || { rm -rf "$d"; return 2; }
+  rustc --test -O "$d/hangfix.rs" -o "$d/hangfix-aaaaaaaa.exe" 2>/dev/null || { rm -rf "$d"; return 2; }
+  rustc --test -O "$d/goodfix.rs" -o "$d/goodfix-bbbbbbbb.exe" 2>/dev/null || { rm -rf "$d"; return 2; }
   out=$(DEPS=$d OUT=$d/out.txt sweep hangfix goodfix nosuchname); rc=$?
-  rm -rf "$d"
   echo "$out"
+  rm -rf "$d"
   case "$out" in
     *"binaries: 2   stdin-hangs: 1   too slow to judge: 0   no tests: 1"*) ;;
     *) echo "SELFTEST FAILED: expected 2 binaries, 1 hang, 1 without tests"; return 1;;

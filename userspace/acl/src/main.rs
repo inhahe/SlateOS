@@ -177,6 +177,32 @@ fn uid_name(uid: u32) -> String {
         .unwrap_or_else(|| uid.to_string())
 }
 
+/// The name of the group `gid`, or the number if nothing names it.
+///
+/// # What this replaced
+///
+/// The group field went through [`uid_name`], which reads the *user*
+/// database: a file owned by group `adm` (gid 4) was reported as `lp`, the
+/// user whose uid is 4. It looks right on any machine where each account has
+/// a private group of the same number, which is most of them -- and it is
+/// wrong for every system group, which is where ACLs are actually used.
+///
+/// `userdb` cannot answer this. It is SlateOS's own account store and holds a
+/// user's primary gid, but no table of groups, so there is nothing in it to
+/// map 4 to a name. Group names live in `/etc/group`, which is `pwdb`'s half
+/// of the world, and an ACL group entry is a POSIX group by definition.
+fn gid_name(gid: u32) -> String {
+    gid_name_in(&pwdb::Db::load(), gid)
+}
+
+/// [`gid_name`] against a database the caller supplies, so it can be tested
+/// without an `/etc/group` on the machine running the test.
+fn gid_name_in(db: &pwdb::Db, gid: u32) -> String {
+    db.group_by_gid(gid)
+        .and_then(|g| String::from_utf8(g.name.clone()).ok())
+        .unwrap_or_else(|| gid.to_string())
+}
+
 /// The access ACL of `path`, or `Err` saying why there is none to report.
 ///
 /// # What this replaced
@@ -221,7 +247,7 @@ fn read_file_acl(path: &str) -> Result<FileAcl, String> {
     Ok(FileAcl {
         path: path.to_string(),
         owner: uid_name(uid),
-        group: uid_name(gid),
+        group: gid_name(gid),
         access,
         default: Vec::new(),
     })
@@ -448,6 +474,36 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Naming a gid ──
+
+    /// The exact confusion the group field used to make. On a real Debian
+    /// system uid 4 is `lp` and gid 4 is `adm`; the two databases are
+    /// unrelated and coincide only for private user groups.
+    #[test]
+    fn a_gid_is_named_from_the_group_file_not_the_user_file() {
+        let passwd = b"root:x:0:0::/root:/bin/sh\nlp:x:4:7::/var/spool/lpd:/bin/false\n";
+        let group = b"root:x:0:\nadm:x:4:alice\n";
+        let db = pwdb::Db::from_bytes(passwd, group);
+        assert_eq!(gid_name_in(&db, 4), "adm");
+        // And the wrong answer is a different string, so this would have
+        // failed against the old code rather than passing by coincidence.
+        assert_ne!(gid_name_in(&db, 4), "lp");
+    }
+
+    #[test]
+    fn an_unnamed_gid_reads_back_as_its_number() {
+        let db = pwdb::Db::from_bytes(b"", b"root:x:0:\n");
+        assert_eq!(gid_name_in(&db, 1234), "1234");
+    }
+
+    /// A group name is bytes and need not be UTF-8. Printing the number is
+    /// honest; `from_utf8_lossy` would invent characters nobody chose.
+    #[test]
+    fn a_non_utf8_group_name_falls_back_to_the_number() {
+        let db = pwdb::Db::from_bytes(b"", b"\xff\xfe:x:9:\n");
+        assert_eq!(gid_name_in(&db, 9), "9");
+    }
 
     #[test]
     fn test_perms_from_rwx() {

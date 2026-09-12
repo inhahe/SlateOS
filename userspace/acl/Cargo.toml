@@ -5,3 +5,9 @@ edition = "2024"
 description = "SlateOS acl utility"
 [dependencies]
 userdb = { path = "../userdb" }
+# `/etc/group`, for turning a gid into a group name. `userdb` is SlateOS's
+# own account store and has a user's primary gid but no table of groups, so
+# it cannot name one; the group field was going through the *user* lookup and
+# reporting `lp` for gid 4 instead of `adm`. An ACL group entry is a POSIX
+# group, and POSIX groups live here.
+pwdb = { path = "../pwdb" }

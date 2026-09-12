@@ -1413,6 +1413,96 @@ for this reason, so the harm is contained but it is the kind that compounds quie
 *Promoted from `deferred-questions.md` 2026-09-12: that entry's trigger was “a cost figure
 for what the undo history costs a single small write”, and this is it.*
 
+
+## A-Q11: Who owns `scripts/hooks/pre-push`?  Two lanes each believed they did, and both edited it the same night
+
+**In short:** the tool that tells each agent which files it may edit does not mention
+two files, and they are the two that sit between agents by nature: the script that runs
+before any agent uploads work, and the script every agent's code is checked by. Two of
+the three agents each concluded one of those files was theirs, and both edited it the
+same night. Nothing broke, by luck. **The part that is still a hazard after those two
+have stopped disagreeing: a third agent reading that tool would conclude it may edit
+either file freely.**
+
+The longer version: there is a script that runs automatically before any agent uploads work,
+and it decides whether the upload is allowed. Tonight two of the three agents each
+believed that file was theirs to edit, and both edited it within a few hours. Nothing
+broke, because their changes happened not to touch the same lines. The tool that is
+supposed to say who owns what does not mention the file at all.
+
+**The evidence.** `scripts/which-lane.py` is what every agent consults, and what a new
+session would consult:
+
+* Lane A owns `kernel/**`, `bench/**`, `toolchain/x86_64-slateos.json`,
+  `scripts/boot-test.sh`, `scripts/run-timeout.py`, `scripts/wedge-soak.sh`.
+* Lane B owns `posix/**`, `userspace/**`, `services/**`, `init/**`,
+  `toolchain/stubs/**`, `toolchain/build-sysroot.ps1`, `scripts/create-ext4-rootfs.sh`.
+* Lane C owns the `gui/**`, `apps/**`, `net*/**` families.
+
+Neither `scripts/hooks/pre-push` nor `scripts/coreutils-check.sh` appears in any lane's
+owns list or any lane's never-writes list: `grep -c 'hooks/pre-push\|coreutils-check'
+scripts/which-lane.py` returns **0**, in both lane A's tree and lane B's.
+
+Lane B states their own instructions enumerate their write scope as the seven paths above
+**plus `scripts/hooks/pre-push` and `scripts/coreutils-check.sh`**, and separately state
+that `scripts/boot-test.sh` is lane A's. That is the whole of their claim and they infer
+nothing further from it. Lane A's instructions name neither file; lane A inferred the
+hook from owning "the boot test", which was an inference and not a reading.
+
+**Why the omission is probably not random**, which is lane B's observation and the most
+useful thing either lane found here: the table enumerates *trees* — `kernel/**`,
+`posix/**`, `gui/**` — and these two files are not trees. A push hook every lane pushes
+through and a check script every lane's crates go through have no tree to belong to, so
+a tree-shaped table has nowhere to put them. That suggests the fix is a rule for
+cross-cutting files rather than two more entries.
+
+The omission is not a stale checkout. `git show origin/lane-b:scripts/which-lane.py`
+diffed against lane A's copy: identical. It is a gap in the shared table that two lanes
+filled with opposite answers.
+list. Lane B reports that their own private instructions name it as theirs; lane A
+inferred it from owning "the boot test". Their copy of `which-lane.py` is byte-identical
+to lane A's, so this is not a stale checkout — it is a gap in the shared table that two
+lanes filled with opposite answers.
+
+**What actually happened, since it is the reason this is worth your time.** Lane A made
+six edits to that file tonight (renaming a gate, widening it by five gates, moving its
+summary, correcting its inventory). Lane B made one, and flagged the mismatch rather
+than proceeding quietly. No collision occurred. `CLAUDE.md` names exactly this as "the
+most expensive failure mode in this arrangement", and the only thing that prevented it
+was which lines each happened to touch.
+
+**The options:**
+
+* **Assign it to lane B.**  *What changes:* lane A files a request for any hook change;
+  since lane A owns `boot-test.sh` and most gates are wired in both, many changes would
+  become two-lane handshakes.
+* **Assign it to lane A.**  *What changes:* the reverse, and it sits oddly with lane B's
+  own instructions, which they should not have to contradict to follow the table.
+* **Declare it shared, with a rule.**  *What changes:* both may edit it; the rule has to
+  say how (e.g. append-only per gate, as the shared documents already work), because
+  "shared" without a convention is what produced tonight.
+* **Answer the general case instead.**  *What changes:* `scripts/**` has roughly 120
+  files and the table names six of them. Whatever is decided for the hook, the same
+  ambiguity covers every unnamed script, and a rule for the directory would settle more
+  than one question.
+
+**If this is never answered:** the lanes keep editing it on opposite assumptions. The
+failure is silent and occasional — two lanes touching the same region in one night — and
+when it happens the loser's change disappears without either noticing, because git
+merges a non-overlapping edit cleanly and nobody is watching that file for intent.
+
+**What each lane is doing until this is answered**, recorded so the asymmetry is visible
+rather than looking like one lane conceding. Lane B continues to edit the file, because
+their instructions name it and they should not act against their own instructions on a
+peer's reading — and they announce each edit first, so a collision cannot happen
+unnoticed while this is open. Lane A has stopped, because nothing in lane A's
+instructions authorises it: the difference is not politeness, it is that one lane has a
+source and the other had an inference. Lane B has offered to make any hook change lane A
+needs in the meantime, which is faster than a request queue.
+
+*Raised by lane A 2026-09-12 after lane B flagged the mismatch. Lane A is not a neutral
+party here and offers no recommendation between the first two options.*
+
 # Resolved
 
 **The body above holds OPEN questions only.** When the operator answers one,

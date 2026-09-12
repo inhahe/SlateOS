@@ -969,6 +969,25 @@ fn parse_args() -> Args {
                 // First non-flag argument is the interface name.
                 // Subsequent bare arguments that look like IPs are treated as
                 // "set IP address".
+                // An option this build does not have is not an interface
+                // name. It used to become one -- `ifconfig --zzq` set the
+                // interface to `--zzq` and exited 0 -- because the first
+                // unrecognised word was taken as the interface and only the
+                // *second* was refused.
+                //
+                // net-tools does not use getopt's words here, and this is
+                // its own, measured: backtick-apostrophe quoting, British
+                // spelling, and a second line pointing at `--help`. The
+                // value is escaped rather than pasted, since an argv word
+                // may hold a newline.
+                if other.starts_with('-') && other.len() > 1 {
+                    eprintln!(
+                        "ifconfig: option `{}' not recognised.",
+                        quoting::escape(other.as_bytes())
+                    );
+                    eprintln!("ifconfig: `--help' gives usage information.");
+                    process::exit(1);
+                }
                 if result.iface.is_none() {
                     result.iface = Some(other.to_string());
                 } else if is_ipv4(other) {

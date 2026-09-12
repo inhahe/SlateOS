@@ -2611,7 +2611,7 @@ extern "C" fn kernel_main() -> ! {
     //     [thread] Process 201 has no threads left -- now zombie   <-- child gone
     //     [thread] Process 200 has no threads left -- now zombie   <-- parent, exit 44
     //
-    // So the child dies at STARTUP and the parent's `write(fm, "", 1)` then
+    // So the child dies at STARTUP and the parent's `write(fm, "\x03", 1)` then
     // fails because the slave it would have reached is already closed. 44 is this
     // kernel reporting correctly on a child that had already gone.
     //

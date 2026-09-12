@@ -134,17 +134,25 @@ PORTED_STATES = {
             "whole failure this guard exists to stop."
         ),
     ),
-    "57f03a1c87b5247c8f03a316b7c3148b84ce05b2e9874b4d2b70f503e73a51ba": _State(
-        regions=_SCANNER + ("const fn hex_val", "fn decode_ansi_c"),
+    "d3a64dc75a0a19652d62bd63aa357029eb14ecc707f65224154261765b2785c4": _State(
+        # `fn hex_val`, not `const fn hex_val`. Lane A dropped the `const` when
+        # `b - b'0'` tripped `arithmetic_side_effects` and the repair became
+        # `char::from(b).to_digit(16)`, which is not const. The shorter key
+        # also matches `const fn hex_val` as a substring, so it survives the
+        # `const` coming back -- a region key should name the thing, not its
+        # qualifiers.
+        regions=_SCANNER + ("fn hex_val", "fn decode_ansi_c"),
         ctx=frozenset({"Unquoted", "Single", "Double", "DollarSingle"}),
         label="CURRENT (four contexts, ANSI-C quoting)",
         note=(
-            "lane A's scanner at c13605f1a, read from origin/lane-a rather "
+            "lane A's scanner at 53c84786f, read from origin/lane-a rather "
             "than from a pasted description -- a transcription is exactly the "
             "failure mode this digest exists to catch, and manufacturing it "
-            "to prove the guard works would be silly. `hex_val` and "
-            "`decode_ansi_c` join the pinned regions because the decode table "
-            "is now part of what this file ports, and a table left outside "
+            "to prove the guard works would be silly. They sent the digest "
+            "too; it was recomputed here from their branch and agreed, which "
+            "is corroboration rather than a second copy of one number. "
+            "`hex_val` and `decode_ansi_c` are pinned because the decode "
+            "table is part of what this file ports, and a table left outside "
             "the digest is the 2026-09-12 defect one level down."
         ),
     ),
@@ -152,7 +160,7 @@ PORTED_STATES = {
 
 # The state the port below actually models.  Used for diagnosis when nothing
 # matches, and to decide whether a run needs the transition warning.
-CURRENT_DIGEST = "57f03a1c87b5247c8f03a316b7c3148b84ce05b2e9874b4d2b70f503e73a51ba"
+CURRENT_DIGEST = "d3a64dc75a0a19652d62bd63aa357029eb14ecc707f65224154261765b2785c4"
 PORTED_CTX = PORTED_STATES[CURRENT_DIGEST].ctx
 
 # Char and string literals, removed before brace counting so that a `b'{'` in
@@ -322,12 +330,23 @@ def assert_port_matches_rust(src: str | None = None, states: dict | None = None)
     for digest, st in candidates.items():
         text, missing = ported_source(src, st.regions)
         if missing is not None:
-            raise SystemExit(
-                f"`{missing}` was renamed or reshaped in shellquote.rs.\n"
-                "  This checker's port can no longer be shown to match it, so "
-                "its\n  verdict would be about a scanner that is not the one "
-                "shipping."
+            # A MISSING REGION IS REPORTED ALONGSIDE THE DIGEST, NOT INSTEAD OF
+            # IT. This used to raise immediately, which cost lane A three runs:
+            # they renamed `const fn hex_val` to `fn hex_val` in the same commit
+            # that changed the `\c` semantics inside `decode_ansi_c`, and the
+            # guard stopped at "renamed or reshaped" without ever reaching the
+            # comparison -- naming the trivial half of what it had detected and
+            # hiding the substantive half. Their fix, taken as offered: say
+            # which keys resolved and which did not, and hash the ones that did.
+            resolved = [r for r in st.regions if _region(src, r) is not None]
+            partial, _ = ported_source(src, tuple(resolved))
+            seen[digest] = (
+                hashlib.sha256(partial.encode("utf-8")).hexdigest()
+                + f"  (over {len(resolved)} of {len(st.regions)} region(s);"
+                f" `{missing}` not found)",
+                st,
             )
+            continue
         got = hashlib.sha256(text.encode("utf-8")).hexdigest()
         if got == digest:
             return digest, st
@@ -336,8 +355,9 @@ def assert_port_matches_rust(src: str | None = None, states: dict | None = None)
         "PORT HAS DRIFTED -- every result below would be about the wrong "
         "scanner.\n"
         "  The contexts and the escape alphabet still match, so the change\n"
-        "  is a rule INSIDE one of them. Those are the changes the two\n"
-        "  checks above cannot see, and are why this third one exists.\n"
+        "  is a rule INSIDE one of them, or a pinned declaration was renamed.\n"
+        "  Those are the changes the two checks above cannot see, and are why\n"
+        "  this third one exists.\n"
         + "".join(
             f"  {st.label}\n"
             f"    regions      : {', '.join(st.regions)}\n"
@@ -345,7 +365,11 @@ def assert_port_matches_rust(src: str | None = None, states: dict | None = None)
             f"    recorded here: {digest}\n"
             for digest, (got, st) in seen.items()
         )
-        + "  Re-read `scan()` against the port, then re-bless with\n"
+        + "  A region key is a substring match on the declaration's first line,\n"
+        "  so prefer the shortest that is unambiguous -- `fn hex_val` matches\n"
+        "  `const fn hex_val` too, and does not need touching when a qualifier\n"
+        "  comes or goes.\n"
+        "  Re-read `scan()` against the port, then re-bless with\n"
         "    python scripts/check-shellquote-vs-bash.py --print-digest"
     )
 
@@ -428,7 +452,21 @@ def decode_ansi_c(after: bytes) -> tuple[bytes, int]:
         return (bytes([BACKSLASH]), 0) if n == 0 else (bytes([val & 0xFF]), n + 1)
     if c == ord("c"):
         # Control-X: X with bit 6 cleared. `\cA` is 0x01.
-        return (bytes([after[1] & 0x1F]), 2) if len(after) > 1 else (bytes([BACKSLASH]), 0)
+        #
+        # The two special operands are lane A's repair to the defect this port
+        # found on its first run (`requests/b-a-dollar-single-c-escape-swallows-
+        # the-closing-quote.md`). The closing quote is NOT an operand -- it
+        # terminates, and `\c` before it is a literal backslash-c -- so taking
+        # it made `$'\c' tail` one word where bash makes two, a word boundary
+        # lost in silence. A backslash IS an operand but is spelled with two
+        # bytes: `$'\c\\'` is control-backslash, 0x1c, consuming three. Without
+        # that arm the first backslash becomes the operand and the second
+        # escapes the terminator, which is the stray-quote symptom.
+        if len(after) < 2 or after[1] == ord("'"):
+            return bytes([BACKSLASH]), 0
+        if after[1] == BACKSLASH:
+            return (bytes([after[2] & 0x1F]), 3) if len(after) > 2 else (bytes([BACKSLASH]), 0)
+        return bytes([after[1] & 0x1F]), 2
     if c in (ord("u"), ord("U")):
         limit = 4 if c == ord("u") else 8
         val = n = 0
@@ -675,6 +713,12 @@ CASES = [
     b"$'\\u00e9'",
     b"$'\\U0001F600'",
     b"$'\\cA'",
+    # Fixed by lane A on 2026-09-12 after this port found them disagreeing with
+    # bash; they are permanent coverage now rather than an open finding.
+    b"$'\\c'",
+    b"$'\\c' tail",
+    b"$'\\c\\\\'",
+    b"$'x\\c'y",
     b"$'x\\x41y'",
     b"$'\\x41'$'\\x42'",
     b"$'\\n'",
@@ -905,6 +949,14 @@ TABLE_RUNGS = [
             (b"$'re\\xffport.txt'", b"re\xffport.txt"),
             (b"$'\\u00e9'", b"\xc3\xa9"),
             (b"$'a\\0b'", b"ab"),
+            # The two regressions from
+            # `requests/b-a-dollar-single-c-escape-swallows-the-closing-quote.md`,
+            # added by lane A with the fix. `$'\c'` is the literal two bytes,
+            # not nothing -- the closing quote terminates and is never a `\c`
+            # operand -- and `$'\c\\'` is control-backslash, where the operand
+            # is spelled with two bytes.
+            (b"$'\\c'", b"\\c"),
+            (b"$'\\c\\\\'", b"\x1c"),
             (b"$'\\x41'$'\\x42'", b"AB"),
         ],
     ),
@@ -1889,13 +1941,21 @@ def _print_digest() -> int:
     # itself part of a state -- `decode_ansi_c` exists only in the four-context
     # scanner. Printing a single number would silently pick one.
     for regions in dict.fromkeys(st.regions for st in PORTED_STATES.values()):
-        text, missing = ported_source(src, regions)
         print(f"regions: {', '.join(regions)}")
-        if missing is not None:
-            print(f"  `{missing}` is not in {RUST}; no digest for this list.")
-            continue
-        print(f"  {len(text)} bytes normalised over {len(regions)} region(s)")
+        # Report per-key rather than giving up on the whole list: "no digest
+        # for this list" is what sent lane A to importing `ported_digest` by
+        # hand to get a number this command exists to print.
+        resolved = [r for r in regions if _region(src, r) is not None]
+        for key in regions:
+            if key not in resolved:
+                print(f"  MISSING  {key}  <- renamed, or the key is too specific")
+        text, _ = ported_source(src, tuple(resolved))
+        print(f"  {len(text)} bytes normalised over {len(resolved)} of "
+              f"{len(regions)} region(s)")
         print('  "%s"' % hashlib.sha256(text.encode("utf-8")).hexdigest())
+        if len(resolved) != len(regions):
+            print("  ^ over the regions that RESOLVED. Fix the key(s) above "
+                  "before pasting this.")
     return 0
 
 

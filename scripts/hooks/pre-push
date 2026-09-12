@@ -57,6 +57,9 @@
 #  31. Refuse a gate that runs differently here than in `boot-test.sh` without
 #      the difference being declared, so that this hook's own report cannot be
 #      read as evidence the boot check was pre-run.
+#  32. Refuse a tracked shell script that carries CRLF on disk. Git normalises
+#      line endings on commit, so the pushed bytes are always clean and the
+#      damage lives only in the working tree -- which is where bash reads it.
 #
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented; wrong again the moment gate 13 was written, when the
@@ -3925,6 +3928,61 @@ Either the narrower run is deliberate, in which case name it in NARROWER in
 check-gate-invocation-parity.py with the reason, or the two have drifted.  This
 hook reports the gate as having run, and a reader has no other way to learn it
 checked less.
+EOF
+    exit 1
+fi
+
+# Gate 32 -- shell-crlf.  A tracked shell script carrying CRLF **on disk**.
+#
+# THE ONLY GATE HERE THAT DELIBERATELY READS THE WORKING TREE RATHER THAN THE
+# PUSHED REVISION, and it has to: this repository normalises line endings on
+# commit, so HEAD is already LF whatever the file on disk holds.  `git diff`
+# shows nothing.  A gate reading the revision being pushed would be reading the
+# one copy that is guaranteed to be clean, while `bash` reads the other one.
+#
+# Not hypothetical.  A Python helper rewrote scripts/patch-diff.sh with
+# `Path.write_text` on 2026-09-12; on Windows that translates every newline, and
+# the next WSL run died with `cd: $'/work': No such file or directory` -- an
+# error naming a directory nobody typed.  The first run of the gate then found
+# scripts/bootstrap-worktree.sh in the same state, 486 endings, put there long
+# before and invoked with --check ahead of every build and boot lock.
+#
+# It refuses rather than warning because the failure mode is a script that
+# worked yesterday breaking with an error that does not name its own cause.
+shcrlf="${repo_root:-.}/scripts/check-shell-crlf.py"
+skip_shcrlf=0
+# Bypass: ALLOW_SHELL_CRLF=1 git push origin <branch>
+if [ "${ALLOW_SHELL_CRLF:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_SHELL_CRLF=1 set - skipping the shell-crlf gate." >&2
+    skip_shcrlf=1
+fi
+[ -n "$py" ] || skip_shcrlf=1
+[ -f "$shcrlf" ] || skip_shcrlf=1
+note_gate shell-crlf "$skip_shcrlf"
+shcrlf_failed=0
+if [ "$skip_shcrlf" != "1" ]; then
+    # The self-test first, as every gate here does.  This one carries a FLOOR
+    # as well as fixtures: "0 offenders" and "found no shell scripts" print the
+    # same word, and a bad file list would produce the second while reading as
+    # the first.
+    if ! run_checker shell-crlf-selftest "$py" "$shcrlf" --self-test; then
+        echo "pre-push: check-shell-crlf.py FAILED ITS OWN SELF-TEST - its verdict is not trustworthy." >&2
+        shcrlf_failed=1
+    else
+        if ! run_checker shell-crlf "$py" "$shcrlf"; then
+            shcrlf_failed=1
+        fi
+    fi
+fi
+if [ "$shcrlf_failed" != "0" ]; then
+    cat >&2 <<EOF
+pre-push: REFUSING to push - a tracked shell script carries CRLF on disk.
+Git normalises line endings on commit, so this is invisible in a diff and the
+pushed bytes are fine; the damage is in the working tree, which is where bash
+reads it from.  Repair it by rewriting the file as bytes:
+    python -c "import pathlib,sys; p=pathlib.Path(sys.argv[1]); p.write_bytes(p.read_bytes().replace(b'\r\n', b'\n'))" <path>
+To push anyway:
+    ALLOW_SHELL_CRLF=1 git push origin ...
 EOF
     exit 1
 fi

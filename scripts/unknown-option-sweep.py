@@ -176,6 +176,33 @@ def selftest():
     return 1 if failures else 0
 
 
+def stale_binaries(bindir, src_root):
+    """Binaries older than the source they were built from.
+
+    This sweep reads *binaries*, so a crate fixed but not rebuilt reports
+    its old behaviour and the run says a defect is still there. That is the
+    worst direction for a tool whose output is a list of accusations, and it
+    nearly happened: 85 of 191 binaries here were older than their source,
+    including three crates fixed the same day, because `cargo test` and
+    `cargo clippy` had been run on them and `cargo build` had not.
+
+    A count taken over stale inputs is not a smaller or larger count -- it
+    is a different question's answer.
+    """
+    out = []
+    for main_rs in glob.glob(os.path.join(src_root, "*", "src", "main.rs")):
+        crate = os.path.basename(os.path.dirname(os.path.dirname(main_rs)))
+        exe = os.path.join(bindir, crate + ".exe")
+        if not os.path.exists(exe):
+            continue
+        try:
+            if os.path.getmtime(main_rs) > os.path.getmtime(exe):
+                out.append(crate)
+        except OSError:
+            continue
+    return sorted(out)
+
+
 def personality_map(src_root):
     """personality name -> the crate whose binary answers to it."""
     found = {}
@@ -195,6 +222,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dir", default="target/x86_64-pc-windows-gnu/debug")
     ap.add_argument("--src", default="userspace")
+    ap.add_argument(
+        "--allow-stale",
+        action="store_true",
+        help="report even though some binaries predate their source",
+    )
     ap.add_argument(*selftestflag.SPELLINGS, dest="selftest", action="store_true")
     args = ap.parse_args()
 
@@ -204,6 +236,19 @@ def main():
     exes = sorted(glob.glob(os.path.join(args.dir, "*.exe")))
     if not exes:
         print("no binaries under %s -- build first" % args.dir)
+        return 2
+
+    stale = stale_binaries(args.dir, args.src)
+    if stale and not args.allow_stale:
+        print("REFUSING to report: %d binary/binaries are older than their" % len(stale))
+        print("source, so this run would describe code that is no longer there.")
+        print("  %s" % ", ".join(stale[:12]))
+        if len(stale) > 12:
+            print("  ...and %d more" % (len(stale) - 12))
+        print()
+        print("Rebuild first:")
+        print("  cargo build --workspace --target x86_64-pc-windows-gnu")
+        print("or pass --allow-stale if you know what the difference is.")
         return 2
 
     # (label, path-to-run, argv0-name). A multi-call binary is probed once

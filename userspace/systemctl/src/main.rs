@@ -1279,37 +1279,107 @@ fn run_cgls(out: &mut dyn Write) -> io::Result<i32> {
 // systemd-cgtop
 // ============================================================================
 
+/// A byte count in the units `systemd-cgtop` prints: binary, one decimal.
+///
+/// Measured against the reference: 4096 renders `4.0K` and 162 424 832
+/// renders `154.9M`. Below a kibibyte it is a plain count of bytes.
+fn format_cgroup_size(bytes: u64) -> String {
+    const STEP: f64 = 1024.0;
+    let units = ["K", "M", "G", "T", "P"];
+    if bytes < 1024 {
+        return format!("{bytes}B");
+    }
+    let mut value = bytes as f64 / STEP;
+    let mut unit = units[0];
+    for next in &units[1..] {
+        if value < STEP {
+            break;
+        }
+        value /= STEP;
+        unit = next;
+    }
+    format!("{value:.1}{unit}")
+}
+
+/// How many processes are in a cgroup.
+///
+/// `pids.current` when that controller is enabled, and the line count of
+/// `cgroup.procs` otherwise -- which is what the number means either way.
+/// `None` when neither file is readable, and the reference prints `-` for
+/// that rather than 0: a group whose count is unknown is not a group with
+/// no processes.
+fn cgroup_tasks(dir: &Path) -> Option<u64> {
+    if let Ok(n) = fs::read_to_string(dir.join("pids.current"))
+        .map_err(|_| ())
+        .and_then(|t| t.trim().parse::<u64>().map_err(|_| ()))
+    {
+        return Some(n);
+    }
+    let text = fs::read_to_string(dir.join("cgroup.procs")).ok()?;
+    Some(text.lines().filter(|l| !l.trim().is_empty()).count() as u64)
+}
+
+/// A cgroup's `memory.current`, in bytes.
+fn cgroup_memory(dir: &Path) -> Option<u64> {
+    fs::read_to_string(dir.join("memory.current"))
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()
+}
+
+/// Every cgroup under `root`, with the figures the kernel has for it.
+///
+/// Depth-first and sorted, so two runs of the same tree agree.
+fn cgroup_usage_rows(root: &Path, base: &Path, into: &mut Vec<(String, Option<u64>, Option<u64>)>) {
+    for kid in cgroup_children(base) {
+        // Joined from components rather than the platform separator, and
+        // via `to_str` rather than `to_string_lossy`: a cgroup name that is
+        // not UTF-8 falls back to the escaped label instead of gaining
+        // replacement characters.
+        let name = kid.strip_prefix(root).map_or_else(
+            |_| cgroup_label(&kid),
+            |rel| {
+                rel.components()
+                    .filter_map(|c| c.as_os_str().to_str())
+                    .collect::<Vec<_>>()
+                    .join("/")
+            },
+        );
+        into.push((name, cgroup_tasks(&kid), cgroup_memory(&kid)));
+        cgroup_usage_rows(root, &kid, into);
+    }
+}
+
 fn run_cgtop(out: &mut dyn Write) -> io::Result<i32> {
+    // This used to print five invented cgroups with invented task counts,
+    // CPU percentages and memory figures, having read nothing.
+    let root = Path::new(CGROUP_ROOT);
+    if !root.is_dir() {
+        writeln!(out, "systemd-cgtop: {CGROUP_ROOT} is not a directory")?;
+        return Ok(1);
+    }
     writeln!(
         out,
         "{:<40} {:>6} {:>8} {:>8} {:>8}",
         "Control Group", "Tasks", "%CPU", "Memory", "Input/s"
     )?;
-    writeln!(
-        out,
-        "{:<40} {:>6} {:>8} {:>8} {:>8}",
-        "/", "15", "2.1", "128.0M", "-"
-    )?;
-    writeln!(
-        out,
-        "{:<40} {:>6} {:>8} {:>8} {:>8}",
-        "/system.slice", "10", "1.5", "64.0M", "-"
-    )?;
-    writeln!(
-        out,
-        "{:<40} {:>6} {:>8} {:>8} {:>8}",
-        "/system.slice/network.service", "2", "0.5", "12.0M", "-"
-    )?;
-    writeln!(
-        out,
-        "{:<40} {:>6} {:>8} {:>8} {:>8}",
-        "/system.slice/sshd.service", "1", "0.1", "8.0M", "-"
-    )?;
-    writeln!(
-        out,
-        "{:<40} {:>6} {:>8} {:>8} {:>8}",
-        "/user.slice", "5", "0.5", "32.0M", "-"
-    )?;
+    let mut rows = Vec::new();
+    cgroup_usage_rows(root, root, &mut rows);
+    for (name, tasks, memory) in rows {
+        writeln!(
+            out,
+            "{:<40} {:>6} {:>8} {:>8} {:>8}",
+            name,
+            tasks.map_or_else(|| "-".to_string(), |t| t.to_string()),
+            // One sample has no interval to divide by, so there is no
+            // percentage to print. The reference prints `-` here too, for
+            // the same reason -- measured with `systemd-cgtop -n 1`.
+            "-",
+            memory.map_or_else(|| "-".to_string(), format_cgroup_size),
+            "-"
+        )?;
+    }
     Ok(0)
 }
 
@@ -3140,12 +3210,61 @@ mod tests {
 
     // --- systemd-cgtop ---
 
+    /// Same story as the `cgls` test it sits beside: this asserted
+    /// `/system.slice` appeared, which was true on every machine because
+    /// the row was hardcoded.
     #[test]
-    fn test_cgtop() {
+    fn cgtop_on_a_host_without_cgroups_says_so() {
         let (out, code) = capture(|buf| run_cgtop(buf));
-        assert_eq!(code, 0);
-        assert!(out.contains("Control Group"));
-        assert!(out.contains("/system.slice"));
+        assert_eq!(code, 1, "{out}");
+        assert!(out.contains("not a directory"), "{out}");
+        assert!(!out.contains("system.slice"), "{out}");
+    }
+
+    #[test]
+    fn cgtop_reports_the_figures_the_files_hold() {
+        let scratch = scratchdir::ScratchDir::new("cgtop");
+        let root = scratch.path("root");
+        let svc = root.join("system.slice").join("sshd.service");
+        fs::create_dir_all(&svc).expect("fixture");
+        fs::write(svc.join("pids.current"), "3\n").expect("fixture");
+        fs::write(svc.join("memory.current"), "8388608\n").expect("fixture");
+
+        let mut rows = Vec::new();
+        cgroup_usage_rows(&root, &root, &mut rows);
+
+        let found = rows
+            .iter()
+            .find(|(name, _, _)| name.ends_with("sshd.service"))
+            .expect("the cgroup that was created");
+        assert_eq!(found.1, Some(3), "tasks come from pids.current");
+        assert_eq!(found.2, Some(8_388_608), "memory comes from memory.current");
+        assert_eq!(format_cgroup_size(8_388_608), "8.0M");
+        // Nothing invents a group that was not there.
+        assert!(!rows.iter().any(|(n, _, _)| n.contains("user.slice")));
+    }
+
+    /// A group whose counters are unreadable is `-`, not 0. Zero would say
+    /// the group is empty, which is a different claim from not knowing.
+    #[test]
+    fn cgtop_distinguishes_unknown_from_zero() {
+        let scratch = scratchdir::ScratchDir::new("cgtop-bare");
+        let root = scratch.path("root");
+        fs::create_dir_all(root.join("bare.slice")).expect("fixture");
+        assert_eq!(cgroup_memory(&root.join("bare.slice")), None);
+        // No `pids.current`, but an absent `cgroup.procs` too, so unknown.
+        assert_eq!(cgroup_tasks(&root.join("bare.slice")), None);
+    }
+
+    /// Measured against the reference, which renders 4096 as `4.0K` and
+    /// 162 424 832 as `154.9M`.
+    #[test]
+    fn cgroup_sizes_read_as_the_reference_prints_them() {
+        assert_eq!(format_cgroup_size(4096), "4.0K");
+        assert_eq!(format_cgroup_size(162_424_832), "154.9M");
+        assert_eq!(format_cgroup_size(512), "512B");
+        assert_eq!(format_cgroup_size(1024), "1.0K");
+        assert_eq!(format_cgroup_size(1024 * 1024 * 1024), "1.0G");
     }
 
     // --- systemd-escape ---

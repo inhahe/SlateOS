@@ -6214,6 +6214,82 @@ pub fn format_self_test() -> KernelResult<()> {
 
     verify?;
     serial_println!("[fat]   write/read on formatted volume: OK");
+    // Placed HERE, in format_self_test, and NOT in `self_test` above, because
+    // `self_test` does not run on the boot test: main.rs gates it on `fat_ok`,
+    // the harness's vda is a raw swap disk with no FAT, so `fat::init` fails
+    // and the whole call is skipped. Its first line, "[fat] Running
+    // self-test...", prints zero times in a boot log. A pure check placed
+    // there would be dead code, and a green boot could not distinguish that
+    // from a passing one. This function formats its own RAM disk and always
+    // runs.
+    // 8.3 short names that do not decode must never match in a lookup.
+    //
+    // `display_name`/`short_name` substitute `????????` when the 8.3 bytes are
+    // not UTF-8, and that substitution is a CONSTANT -- so before the guard, a
+    // lookup for the literal `????????` matched every undecodable entry and
+    // returned whichever came first. A wrong file, not no file.
+    //
+    // Asserts the COLLISION, not just the predicate: two entries whose bytes
+    // differ, neither decoding, both rendering identically. Checking only
+    // `short_name_decodes(bad) == false` would pass against a guard that was
+    // never wired into the lookup at all.
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            let mk = |raw: [u8; 11]| FatDirEntry {
+                name: raw,
+                attr: 0,
+                first_cluster: 2,
+                file_size: 0,
+                write_time: 0,
+                write_date: 0,
+                create_time: 0,
+                create_date: 0,
+                access_date: 0,
+                long_name: None,
+            };
+            // Two DIFFERENT undecodable names: 0xE9 vs 0xEF in byte 0.
+            let a = mk([
+                0xE9, b'S', b'U', b'M', b'E', b' ', b' ', b' ', b'T', b'X', b'T',
+            ]);
+            let b = mk([
+                0xEF, b'S', b'U', b'M', b'E', b' ', b' ', b' ', b'T', b'X', b'T',
+            ]);
+            let ok = mk([
+                b'R', b'E', b'A', b'D', b'M', b'E', b' ', b' ', b'T', b'X', b'T',
+            ]);
+
+            if a.short_name_decodes() || b.short_name_decodes() {
+                serial_println!("[fat]   FAIL: a non-UTF-8 8.3 name reported as decodable");
+                return Err(KernelError::IoError);
+            }
+            if !ok.short_name_decodes() {
+                serial_println!("[fat]   FAIL: an ASCII 8.3 name reported as undecodable");
+                return Err(KernelError::IoError);
+            }
+            // The collision itself. Reported rather than asserted: if the
+            // placeholder ever changes so distinct names stop colliding, this
+            // should say so, not fail -- a test that breaks when the underlying
+            // problem is FIXED is a test that gets deleted for the wrong reason.
+            if a.display_name() == b.display_name() {
+                serial_println!(
+                    "[fat]   short-name guard: two distinct undecodable names both render {:?}, \
+                     and neither is compared in a lookup: OK",
+                    a.display_name()
+                );
+            } else {
+                serial_println!(
+                    "[fat]   short-name guard: OK ({:?} vs {:?} no longer collide -- the guard \
+                     is still correct but no longer load-bearing)",
+                    a.display_name(),
+                    b.display_name()
+                );
+            }
+            Ok(())
+        }
+        case()?;
+    }
+
     serial_println!("[fat] mkfs/format self-test PASSED");
     Ok(())
 }

@@ -16022,6 +16022,39 @@ pre-validate should the handler route ring-0 user-address faults to the
 resolver, and then only with a fault-fixup/exception-table mechanism so
 an unresolvable access returns `-EFAULT` instead of halting.
 
+**[A] 2026-09-12 — the four write-through-user-pointer primitives are all clean, so the
+search narrows.** The entry's own prescription is to *"identify the specific kernel write
+path that reaches a user COW page without pre-validating"*, which is a static question and
+does not need the repro this has been blocked on since June. Audited `mm/user.rs`'s four
+public write primitives:
+
+| primitive | breaks CoW via |
+|---|---|
+| `copy_to_user` | `validate_user_write` directly |
+| `write_user_value<T>` | delegates to `copy_to_user` |
+| `write_user_items<T>` | delegates to `copy_to_user` |
+| `copy_to_user_as` | `user_page_phys(.., need_writable=true)` → `try_resolve_remote` |
+
+The last one is worth spelling out because it looks like a gap and is not. It never writes
+through the user mapping at all: it walks the target `pml4`, converts the frame to an HHDM
+kernel address and writes there, so no CoW *fault* can occur. The protection is that
+`user_page_phys` with `need_writable` fails the walk on a read-only page and then calls
+`try_resolve_remote` to break CoW in the remote address space before retrying. Different
+mechanism, same guarantee — and had it merely *checked* writability and returned an error,
+the bug would be worse than a halt: a silent write into a frame another process shares.
+
+**So if the unvalidated path exists, it is not one of these four.** It would be a raw
+write through a user pointer that bypasses `mm::user` entirely. That is where to look next,
+and it is a narrower search than "any kernel write path".
+
+One false lead, recorded so nobody re-walks it: `mm/user.rs` defines
+`const PAGE_SIZE: u64 = 4096`, which reads as a violation of the project's
+"16 KiB pages, not 4 KiB" rule and of `CLAUDE.md`'s "the entire memory subsystem must be
+built around this". It is neither. `page_table.rs`'s module doc says it outright — *"16 KiB
+Frames on 4 KiB Hardware Pages… to map a 16 KiB frame, we set 4 consecutive page table
+entries"* — so 16 KiB is the logical allocation unit and 4 KiB is the hardware granularity
+a page-table walk must use. The constant's own doc comment says so too.
+
 **Discovered:** 2026-06-30 (page-cache §36 sub-task 4 review).
 
 **[A] 2026-08-14 — made self-identifying (diagnostic only, not a fix).**

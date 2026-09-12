@@ -38,6 +38,10 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 LONG = re.compile(r"(?<!-)--[a-z][a-z0-9_-]*")
 SHORT = re.compile(r"(?<![-\w])-([A-Za-z0-9])(?=[,\s])")
 
+# A getopt optstring or a bundle of `set` letters: letters only, plus the
+# `:` and `+` getopt uses for argument and ordering markers.
+LETTERSET = re.compile(r"^[A-Za-z:+]+$")
+
 # A Rust string literal, non-greedy, no escapes handled -- help text has none.
 STRING = re.compile(r'"((?:[^"\\]|\\.)*)"')
 
@@ -62,6 +66,14 @@ def advertised(text):
         # fourth false positive, on `flock` of all things. Two or more
         # spaces separate the field from the prose.
         body = re.split(r"\s{2,}", body.strip(), maxsplit=1)[0]
+        # A field naming a lowercase bare word is a synopsis, not a list of
+        # documented options: `iptables` writes `-m match --opts`, where
+        # `match` is a metavariable and `--opts` means "that match's own
+        # options" rather than an option called `--opts`. Documented options
+        # spell their metavariables in caps or in angle brackets. Eighth
+        # false positive.
+        if any(re.fullmatch(r"[a-z][a-z0-9_-]*", tok) for tok in body.split()):
+            continue
         for opt in LONG.findall(body):
             found.setdefault(opt, lit.strip())
         for c in SHORT.findall(body):
@@ -91,6 +103,14 @@ def recognised(text, opt):
             return True
         if '"%s"' % c in text:
             return True
+        # A run of option letters held as one string rather than one literal
+        # each: `oils` has `const SET_OPTION_LETTERS: &str =
+        # "euxfaCnTEBmbhkptvHP"`, and a getopt optstring like `"abc:"` is the
+        # same shape. All five `set` letters it was accused of are in there.
+        # Seventh false positive.
+        for lit in STRING.findall(text):
+            if len(lit) >= 4 and LETTERSET.match(lit) and c in lit:
+                return True
         return False
     # Some parsers strip the dashes before matching, and then the literal is
     # the bare name: `coreutils/cal` holds `("help", Takes::Nothing)` and

@@ -138785,7 +138785,7 @@ opened anyway. So the count of 70 is a floor, not a total.
 - `ulimit (via prlimit)`
 - `update-grub (via grub2)`
 
-## B-THIRTY-FOUR-OPTIONS-ARE-ADVERTISED-BY-HELP-AND-READ-BY-NOTHING (lane B, 2026-09-12) -- now 19, and one of them was worse than a missing option
+## B-THIRTY-FOUR-OPTIONS-ARE-ADVERTISED-BY-HELP-AND-READ-BY-NOTHING (lane B, 2026-09-12) -- CLOSED, 0 findings
 
 The mirror image of the unknown-option class above, found by
 `scripts/check-help-vs-parser.py`. That sweep asks whether an option we do
@@ -138815,6 +138815,28 @@ list, because `getfacl --zzq` with no file operand exits 1 with "no files
 specified". It accepted the option and failed for an unrelated reason,
 exactly as `blockdev` did. Two independent confirmations of the same
 blind spot.
+
+### CLOSED
+
+`scripts/check-help-vs-parser.py` reports **0 findings**: every option
+advertised by a help text in this lane is read by its parser. What was
+fixed, in order: `getfacl`'s `-a`/`-d`/`-n`; `blkzone` (deleted, it
+invented its output); `lscpu -B`; `lsmem`'s `--summary`, whose help line
+invented a short form *and* attached it to the wrong option;
+`systemd-cat`'s `-p`/`-t`, which turned out to mean the tool had never
+written to the journal at all; `getfattr`'s `-e`, whose text branch was
+one `-e text` away from corrupting values with `from_utf8_lossy`;
+`systemd-notify`'s silently-dropped `--pid`; and `irqbalance --banmod`,
+which needed no new data because the field it matches against was
+already parsed into `_name` and discarded.
+
+**The count over the tool's life: 180, 153, 74, 46, 34, 25, 19, 13, 11,
+5, 3, 2, 0.** Ten of those steps were false positives, each found by
+opening a file the tool had accused; three were repairs. So the tool
+found roughly a dozen real defects and accused about a hundred and fifty
+innocents on the way, and the only reason the last number means anything
+is that every step down was checked by hand. A sweep's first number is
+not a finding count -- it is a reading list.
 
 ### Progress, and the count's history
 

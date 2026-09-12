@@ -130,7 +130,13 @@ DEFAULT_MIN = 10
 #: marker that is not yet in any `gated_ran` is not live and the entry would fail
 #: as naming nothing. That refusal is correct and is left intact; see
 #: `scripts/check-ran-if.py`, which is what now keeps a marker honest.
-ALLOWED: dict[str, str] = {}
+ALLOWED: dict[str, str] = {
+    "[fat] Running self-test...":
+        "A FAT filesystem on vda. The boot test mounts an in-memory root and "
+        'attaches vda as a raw swap disk, so `fs::fat::init("vda")` returns an '
+        "error there and the suite is skipped; it runs on a real FAT boot. This "
+        "entry ends the day the harness attaches a FAT-formatted vda.",
+}
 
 
 def load(path: str) -> list[dict]:

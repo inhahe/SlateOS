@@ -6,7 +6,8 @@ description = "Coreutils for SlateOS (86 binaries)"
 
 [dependencies]
 # `/proc` parsing lives in `procinfo`, shared with `userspace/htop`,
-# `userspace/ps` and `apps/procexplorer`. See `known-issues.md` ->
+# `apps/procexplorer`, and `userspace/ps` until it was retired on
+# 2026-09-12. See `known-issues.md` ->
 # TD-B-FIFTY-PROC-READERS-DUPLICATE-WHAT-PROCINFO-ALREADY-PARSES.
 procinfo = { path = "../../procinfo" }
 # One regex engine for the utilities and the shell. `grep`, `sed`, `awk` and

@@ -2150,13 +2150,6 @@ name = "procinfo"
 version = "0.1.0"
 
 [[package]]
-name = "ps"
-version = "0.1.0"
-dependencies = [
- "procinfo",
-]
-
-[[package]]
 name = "pstree"
 version = "0.1.0"
 dependencies = [
@@ -3009,14 +3002,6 @@ dependencies = [
 [[package]]
 name = "upower"
 version = "0.1.0"
-
-[[package]]
-name = "uptime"
-version = "0.1.0"
-dependencies = [
- "procinfo",
- "utmpfile",
-]
 
 [[package]]
 name = "useradd"

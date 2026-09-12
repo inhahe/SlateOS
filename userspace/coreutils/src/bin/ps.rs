@@ -28,6 +28,16 @@ struct PsArgs {
     select_pids: Option<Vec<u64>>,
     /// `-u`: show only processes with these effective UIDs.
     select_uids: Option<Vec<u32>>,
+    /// `-o`: print exactly these columns. Repeated `-o` accumulates rather
+    /// than replaces, which is procps' behaviour: `-o pid -o comm` is the
+    /// same as `-o pid,comm`.
+    columns: Vec<Spec>,
+    /// `-t`: show only processes on these terminals, as `format_tty` renders
+    /// them. `?` and `-` both mean "no controlling terminal" and both arrive
+    /// here as `?`.
+    select_ttys: Option<Vec<String>>,
+    /// `-l`: the long format.
+    long_format: bool,
 }
 
 /// Parse ps's argv.  BSD-style and POSIX-style flags are accepted via
@@ -101,6 +111,29 @@ fn parse_args(args: &[String]) -> Result<Request, String> {
                 match c {
                     'e' | 'A' => out.all_procs = true,
                     'f' => out.full_format = true,
+                    'l' => out.long_format = true,
+                    't' => {
+                        let glued: String = rest.by_ref().collect();
+                        let list = if glued.is_empty() {
+                            let next = args.get(i).cloned().unwrap_or_default();
+                            i = i.saturating_add(1);
+                            next
+                        } else {
+                            glued
+                        };
+                        out.select_ttys = Some(parse_tty_list(&list)?);
+                    }
+                    'o' => {
+                        let glued: String = rest.by_ref().collect();
+                        let list = if glued.is_empty() {
+                            let next = args.get(i).cloned().unwrap_or_default();
+                            i = i.saturating_add(1);
+                            next
+                        } else {
+                            glued
+                        };
+                        parse_columns(&list, &mut out.columns)?;
+                    }
                     'u' => {
                         let glued: String = rest.by_ref().collect();
                         let list = if glued.is_empty() {
@@ -135,6 +168,54 @@ fn parse_args(args: &[String]) -> Result<Request, String> {
         // covered by `parse_bare_args_ignored`.
     }
     Ok(Request::List(out))
+}
+
+/// `-t`'s argument: terminal names, separated by commas or spaces.
+///
+/// # Errors
+///
+/// A name with no device behind it. procps' message, measured:
+/// `ps -t nosuchtty` prints `error: TTY could not be found` and exits 1,
+/// while `ps -t pts/0` is ACCEPTED even when no process is on it -- it simply
+/// matches nothing and exits 1 through the no-match path. So the test is
+/// whether the terminal exists, not whether anything is using it, which is
+/// why this asks the filesystem rather than the process table.
+///
+/// `?` and `-` both name the absence of a terminal and are not looked up.
+fn parse_tty_list(list: &str) -> Result<Vec<String>, String> {
+    parse_tty_list_with(list, &|name| {
+        std::path::Path::new("/dev").join(name).exists()
+    })
+}
+
+/// The half of `parse_tty_list` that does not touch the filesystem.
+///
+/// Split BEFORE writing the test rather than after one failed, because the
+/// obvious test -- `-t pts/0` is accepted -- is a statement about the machine.
+/// There is no `/dev` on the Windows host these tests run on, so every name
+/// would be "could not be found" and the assertion would hold in exactly the
+/// environments where it proves nothing. `-u root` taught this the other way
+/// round, by going red after it was written.
+fn parse_tty_list_with(list: &str, exists: &dyn Fn(&str) -> bool) -> Result<Vec<String>, String> {
+    let missing = || "error: TTY could not be found".to_string();
+    let mut out = Vec::new();
+    for field in list.split([',', ' ']).filter(|f| !f.is_empty()) {
+        if field == "?" || field == "-" {
+            out.push("?".to_string());
+            continue;
+        }
+        // `/dev/pts/0` for `pts/0`, `/dev/tty1` for `tty1`. procps accepts
+        // both the bare name and a `/dev/`-prefixed one.
+        let bare = field.strip_prefix("/dev/").unwrap_or(field);
+        if !exists(bare) {
+            return Err(missing());
+        }
+        out.push(bare.to_string());
+    }
+    if out.is_empty() {
+        return Err(missing());
+    }
+    Ok(out)
 }
 
 /// `-u`'s argument: user names or numeric UIDs, separated by commas or spaces.
@@ -211,6 +292,172 @@ fn parse_pid_list(list: &str) -> Result<Vec<u64>, String> {
     Ok(out)
 }
 
+/// One column `-o` can name.
+///
+/// Every width here was measured from procps, one column at a time, because
+/// none of them follows from the column's name and two are actively
+/// surprising: `comm`'s title is **COMMAND**, not COMM, and `tty`'s is **TT**,
+/// not TTY -- the same field that the default format heads `TTY`.
+///
+/// The widths are FIXED, not sized to content. `ps -e -o user,pid` on a host
+/// whose only user is `root` still pads USER to eight, and `comm` to fifteen,
+/// which is the kernel's own cap on a task name.
+struct Column {
+    /// What `-o` calls it.
+    name: &'static str,
+    /// The heading, when the user does not supply one.
+    title: &'static str,
+    width: usize,
+    right: bool,
+}
+
+const COLUMNS: &[Column] = &[
+    Column {
+        name: "pid",
+        title: "PID",
+        width: 7,
+        right: true,
+    },
+    Column {
+        name: "ppid",
+        title: "PPID",
+        width: 7,
+        right: true,
+    },
+    Column {
+        name: "uid",
+        title: "UID",
+        width: 5,
+        right: true,
+    },
+    Column {
+        name: "user",
+        title: "USER",
+        width: 8,
+        right: false,
+    },
+    Column {
+        name: "comm",
+        title: "COMMAND",
+        width: 15,
+        right: false,
+    },
+    // `args` is the full command line and is always last in practice, so its
+    // width never shows. Zero rather than a guess: an invented width would be
+    // wrong the first time someone puts a column after it.
+    Column {
+        name: "args",
+        title: "COMMAND",
+        width: 0,
+        right: false,
+    },
+    Column {
+        name: "tty",
+        title: "TT",
+        width: 8,
+        right: false,
+    },
+    Column {
+        name: "time",
+        title: "TIME",
+        width: 8,
+        right: true,
+    },
+    Column {
+        name: "stime",
+        title: "STIME",
+        width: 5,
+        right: true,
+    },
+    Column {
+        name: "c",
+        title: "C",
+        width: 2,
+        right: true,
+    },
+];
+
+/// A column the caller asked for, with the heading they asked for.
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+struct Spec {
+    /// Index into `COLUMNS`.
+    col: usize,
+    /// The heading. Empty when the spec ended in `=` with nothing after it,
+    /// which procps uses to suppress that column's title.
+    title: String,
+}
+
+/// Parse one `-o` argument: a comma-separated list of `name` or `name=TITLE`.
+///
+/// # Errors
+///
+/// A name not in `COLUMNS`. procps' message, measured:
+/// `error: unknown user-defined format specifier "nosuchcolumn"`.
+fn parse_columns(list: &str, into: &mut Vec<Spec>) -> Result<(), String> {
+    for field in list.split(',').filter(|f| !f.is_empty()) {
+        let (name, title) = match field.split_once('=') {
+            Some((n, t)) => (n, Some(t.to_string())),
+            None => (field, None),
+        };
+        let Some(col) = COLUMNS.iter().position(|c| c.name == name) else {
+            return Err(format!(
+                "error: unknown user-defined format specifier {name:?}"
+            ));
+        };
+        let title = title.unwrap_or_else(|| COLUMNS[col].title.to_string());
+        into.push(Spec { col, title });
+    }
+    Ok(())
+}
+
+/// Join one row's cells the way procps does.
+///
+/// **Every field is padded to its width EXCEPT THE LAST, which is emitted as
+/// it is.** That single rule accounts for all of this, measured byte for byte:
+///
+/// ```text
+/// ps -o user        "USER\nroot\n"          no padding at all
+/// ps -o user,pid    "USER     " + "    PID"  USER padded to 8
+/// ps -o comm        "COMMAND\nps\n"         no padding
+/// ps -o pid,comm=   "    PID \n      1 ps"   header ends at the SEPARATOR
+/// ```
+///
+/// The last line is the one that pins the rule down. `comm=` has an empty
+/// title, so the header's final field is the empty string -- unpadded, which
+/// leaves the line ending in the separator that precedes it. Trimming the
+/// whole line instead would have eaten that space, and padding the last field
+/// would have added fourteen more.
+fn render_row(cells: &[String], specs: &[Spec]) -> String {
+    let mut out = String::new();
+    for (i, cell) in cells.iter().enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        let last = i + 1 == cells.len();
+        let Some(spec) = specs.get(i) else { continue };
+        let Some(col) = COLUMNS.get(spec.col) else {
+            continue;
+        };
+        // A RIGHT-aligned column is padded even when it is LAST, because its
+        // padding lands on the left and is therefore not trailing whitespace.
+        // `ps -o pid` prints "    PID" over "      1", not "PID" over "1".
+        // Only a left-aligned final column drops its padding, which is what
+        // makes `ps -o user` print a bare "USER".
+        //
+        // The first version of this treated "last" as "unpadded" for both, and
+        // the harness put six cases against it: -o pid, -o pid=MYPID, -o time,
+        // -o c, -o user,pid and -o uid,pid.
+        if last && !col.right {
+            out.push_str(cell);
+        } else if col.right {
+            out.push_str(&format!("{cell:>width$}", width = col.width));
+        } else {
+            out.push_str(&format!("{cell:<width$}", width = col.width));
+        }
+    }
+    out
+}
+
 /// procps-ng's `ps --help` with no topic, byte for byte.
 ///
 /// Captured with `ps --help | cat -A`. The leading blank line is procps' and
@@ -251,6 +498,22 @@ struct ProcInfo {
     user: String,
     /// procps' `C` column: integer percent of CPU over the process's life.
     cpu_pct: u64,
+    /// `-l`'s `S`: the one-character state.
+    state: String,
+    /// `-l`'s `F`: `(flags >> 6) & 7`, in octal. Measured -- a default task
+    /// carries `flags` 4194560 and procps prints `4`.
+    flag: u64,
+    /// `-l`'s `PRI`. **`stat`'s priority PLUS 60**, which is measured, not
+    /// derived: with nice 0, 5, 10 and 19 procps prints 80, 85, 90 and 99
+    /// while the file says 20, 25, 30 and 39.
+    pri: i64,
+    /// `-l`'s `NI`.
+    nice: i64,
+    /// `-l`'s `SZ`: virtual size in 4096-byte pages.
+    size_pages: u64,
+    /// `-l`'s `WCHAN`, truncated to six characters as procps does. `-` when
+    /// the process is running rather than blocked.
+    wchan: String,
     /// procps' `STIME`: `HH:MM` if the process started today, else `MMM DD`.
     stime: String,
     tty: String,
@@ -317,8 +580,42 @@ fn run_main() -> ExitCode {
     // `--no-header` suppresses the titles and nothing else. The header still
     // prints when `-p` matches nothing -- measured: `ps -p 999999` writes the
     // header and exits 1, so "no rows" and "no header" are independent.
-    if !parsed.no_header {
-        if parsed.full_format {
+    // `-o` replaces the built-in formats entirely, and suppresses the header
+    // by itself when EVERY title is empty -- `ps -o comm=` prints one column
+    // and no heading at all, while `ps -o pid,comm=` still prints a heading
+    // because `pid` kept its own. Measured.
+    let custom = !parsed.columns.is_empty();
+    let all_titles_empty = custom && parsed.columns.iter().all(|c| c.title.is_empty());
+    if custom {
+        if !parsed.no_header && !all_titles_empty {
+            let titles: Vec<String> = parsed.columns.iter().map(|c| c.title.clone()).collect();
+            let _ = writeln!(out, "{}", render_row(&titles, &parsed.columns));
+        }
+    } else if !parsed.no_header {
+        if parsed.long_format {
+            // ADDR and SZ ABUT WITH NO SEPARATOR. Every other pair here is
+            // joined by one space; these two are not, and the gap in the
+            // header is SZ's own right-padding. Computed from the column
+            // offsets of a measured line rather than counted by eye --
+            // `ADDR SZ` and `-   701` both occupy exactly columns 37-43.
+            let _ = writeln!(
+                out,
+                "{:<1} {:<1} {:>5} {:>7} {:>7} {:>2} {:>3} {:>3} {:<4}{:>3} {:<6} {:<8} {:>8} CMD",
+                "F",
+                "S",
+                "UID",
+                "PID",
+                "PPID",
+                "C",
+                "PRI",
+                "NI",
+                "ADDR",
+                "SZ",
+                "WCHAN",
+                "TTY",
+                "TIME"
+            );
+        } else if parsed.full_format {
             let _ = writeln!(
                 out,
                 "{:<8} {:>7} {:>7} {:>2} {:>5} {:<8} {:>8} CMD",
@@ -338,31 +635,84 @@ fn run_main() -> ExitCode {
 
     let mut matched = false;
     for pid in pids {
+        // `-e`/`-A` OVERRIDES every selection, in either order. Measured:
+        // `ps -e -p 2`, `ps -p 2 -e`, `ps -e -u root` and `ps -e -t ?` all
+        // list every process, so "show all" is not one filter among several
+        // -- it cancels them. Without this, `-e -p 2` printed one row here
+        // against procps' two.
+        let select = !parsed.all_procs;
         // `-p` selects; without it every process is shown.
-        if parsed
-            .select_pids
-            .as_ref()
-            .is_some_and(|w| !w.contains(&pid))
+        if select
+            && parsed
+                .select_pids
+                .as_ref()
+                .is_some_and(|w| !w.contains(&pid))
         {
             continue;
         }
-        let Ok(Some(info)) = read_one(&procfs, pid, parsed.full_format, &ctx) else {
+        // `-o args` needs the command line too, so the flag is "does anything
+        // ask for it" rather than "was -f given". Reading it costs a second
+        // open per process, which is why it is still conditional.
+        let wants_cmdline = parsed.full_format
+            || parsed
+                .columns
+                .iter()
+                .any(|s| COLUMNS.get(s.col).is_some_and(|c| c.name == "args"));
+        let Ok(Some(info)) = read_one(&procfs, pid, wants_cmdline, parsed.long_format, &ctx) else {
             // A process that exits between the listing and the read is the
             // normal case for anything walking /proc, not a failure.
             continue;
         };
+        // `-t` matches on the RENDERED terminal, which is the same string the
+        // TTY column prints -- so `ps -t ?` and the `?` a reader sees in the
+        // table cannot disagree.
+        if select
+            && parsed
+                .select_ttys
+                .as_ref()
+                .is_some_and(|w| !w.contains(&info.tty))
+        {
+            continue;
+        }
         // `-u` filters on a value only the read can supply, so unlike `-p` it
         // cannot skip the read first.
-        if parsed
-            .select_uids
-            .as_ref()
-            .is_some_and(|w| !w.contains(&info.uid))
+        if select
+            && parsed
+                .select_uids
+                .as_ref()
+                .is_some_and(|w| !w.contains(&info.uid))
         {
             continue;
         }
         let pid32 = u32::try_from(pid).unwrap_or(0);
 
-        if parsed.full_format {
+        if custom {
+            let cells: Vec<String> = parsed
+                .columns
+                .iter()
+                .map(|spec| info.cell(COLUMNS.get(spec.col), pid32))
+                .collect();
+            let _ = writeln!(out, "{}", render_row(&cells, &parsed.columns));
+        } else if parsed.long_format {
+            let _ = writeln!(
+                out,
+                "{:<1} {:<1} {:>5} {:>7} {:>7} {:>2} {:>3} {:>3} {:<4}{:>3} {:<6} {:<8} {:>8} {}",
+                info.flag,
+                info.state,
+                info.uid,
+                pid32,
+                info.ppid,
+                info.cpu_pct,
+                info.pri,
+                info.nice,
+                "-",
+                info.size_pages,
+                info.wchan,
+                info.tty,
+                info.time_str,
+                info.comm
+            );
+        } else if parsed.full_format {
             let _ = writeln!(
                 out,
                 "{:<8} {:>7} {:>7} {:>2} {:>5} {:<8} {:>8} {}",
@@ -389,7 +739,14 @@ fn run_main() -> ExitCode {
     // header. Measured. Without `-p` an empty table is not an error -- there
     // is always at least this process -- so the status only turns on a
     // selection that matched nothing.
-    if (parsed.select_pids.is_some() || parsed.select_uids.is_some()) && !matched {
+    // A selection that matched nothing exits 1 -- but only when there WAS a
+    // selection, and `-e` means there was not.
+    if !parsed.all_procs
+        && (parsed.select_pids.is_some()
+            || parsed.select_uids.is_some()
+            || parsed.select_ttys.is_some())
+        && !matched
+    {
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
@@ -398,8 +755,9 @@ fn run_main() -> ExitCode {
 /// One process, read through [`procinfo`].
 ///
 /// The `/proc/<pid>/stat` parsing this used to do itself now lives in the
-/// crate, shared with `userspace/ps`, `userspace/htop` and
-/// `apps/procexplorer`. Two things it could not do on its own:
+/// crate, shared with `userspace/htop` and `apps/procexplorer` -- and with
+/// `userspace/ps` until that crate was retired on 2026-09-12, leaving this
+/// the only `ps`. Two things it could not do on its own:
 ///
 /// * **the real UID.** This was `uid: 0` with the comment "would need
 ///   `/proc/<pid>/status` for real UID" — so the `-f` listing showed every
@@ -415,6 +773,7 @@ fn read_one(
     procfs: &procinfo::ProcFs,
     pid: u64,
     full: bool,
+    long: bool,
     ctx: &ListCtx,
 ) -> std::io::Result<Option<ProcInfo>> {
     let Some(stat) = procfs.process_stat(pid)? else {
@@ -446,6 +805,16 @@ fn read_one(
         ppid: u32::try_from(stat.ppid).unwrap_or(0),
         uid,
         user: ctx.user_name(uid),
+        state: char::from(stat.state).to_string(),
+        flag: (stat.flags >> 6) & 7,
+        pri: stat.priority.saturating_add(60),
+        nice: stat.nice,
+        size_pages: stat.vsize_bytes / 4096,
+        wchan: if long {
+            read_wchan(procfs, pid)
+        } else {
+            String::new()
+        },
         cpu_pct: cpu_percent(
             stat.utime_ticks,
             stat.stime_ticks,
@@ -456,6 +825,39 @@ fn read_one(
         time_str: format_cpu_time(stat.utime_ticks, stat.stime_ticks),
         cmd,
     }))
+}
+
+impl ProcInfo {
+    /// One column's value for this process.
+    ///
+    /// `args` falls back to the bracketed `comm` when the command line is
+    /// empty, which is what the `-f` path already does for a kernel thread --
+    /// the same value, reached the same way, rather than a second rule.
+    fn cell(&self, col: Option<&Column>, pid: u32) -> String {
+        let Some(col) = col else { return String::new() };
+        match col.name {
+            "pid" => pid.to_string(),
+            "ppid" => self.ppid.to_string(),
+            "uid" => self.uid.to_string(),
+            "user" => self.user.clone(),
+            "comm" => self.comm.clone(),
+            "args" => {
+                if self.cmd.is_empty() {
+                    format!("[{}]", self.comm)
+                } else {
+                    self.cmd.clone()
+                }
+            }
+            "tty" => self.tty.clone(),
+            "time" => self.time_str.clone(),
+            "stime" => self.stime.clone(),
+            "c" => self.cpu_pct.to_string(),
+            // `COLUMNS` is the only source of names and every one of them is
+            // handled above; an unknown name cannot be constructed because
+            // `parse_columns` refuses it.
+            _ => String::new(),
+        }
+    }
 }
 
 /// The things every row needs and no row should read for itself.
@@ -529,6 +931,22 @@ impl ListCtx {
         let fmt: &[u8] = if same_day { b"%H:%M" } else { b"%b%d" };
         String::from_utf8(strftime(fmt, &started)).unwrap_or_default()
     }
+}
+
+/// `/proc/<pid>/wchan`, as `-l` prints it.
+///
+/// procps truncates to six characters -- `do_wait` shows as `do_wai` -- and
+/// prints `-` for a process that is running rather than blocked, which the
+/// kernel reports as `0`. Read only under `-l`, because it is a third open
+/// per process.
+fn read_wchan(procfs: &procinfo::ProcFs, pid: u64) -> String {
+    let raw = procfs.process_wchan(pid).ok().flatten().unwrap_or_default();
+    let text = procinfo::display_bytes(&raw);
+    let text = text.trim();
+    if text.is_empty() || text == "0" {
+        return "-".to_string();
+    }
+    text.chars().take(6).collect()
 }
 
 /// procps' `C` column: integer percent of CPU used over the process's life.
@@ -734,6 +1152,119 @@ mod tests {
         let err = parse_args(&s(&["-u", "nosuchuser"])).expect_err("no such user");
         assert_eq!(err, "error: user name does not exist");
         assert!(parse_args(&s(&["-u", ""])).is_err());
+    }
+
+    fn cols(list: &str) -> Vec<Spec> {
+        let mut out = Vec::new();
+        parse_columns(list, &mut out).expect("valid column list");
+        out
+    }
+
+    /// THE RULE THAT TOOK TWO GOES.
+    ///
+    /// A right-aligned column is padded even when it is the last on the line,
+    /// because its padding lands on the LEFT and so is not trailing
+    /// whitespace. A left-aligned one is not. The first version treated
+    /// "last" as "unpadded" for both and `scripts/ps-diff.sh` returned six
+    /// failures for it, every one a right-aligned column standing alone.
+    ///
+    /// Each row below is a measured procps output, not a derivation.
+    #[test]
+    fn a_trailing_right_aligned_column_keeps_its_padding() {
+        // `ps -o pid` -> "    PID" / "      1"
+        let pid = cols("pid");
+        assert_eq!(render_row(&["PID".into()], &pid), "    PID");
+        assert_eq!(render_row(&["1".into()], &pid), "      1");
+        // `ps -o user` -> "USER" / "root", no padding at all
+        let user = cols("user");
+        assert_eq!(render_row(&["USER".into()], &user), "USER");
+        assert_eq!(render_row(&["root".into()], &user), "root");
+        // `ps -o user,pid` -> USER padded to 8, PID right-aligned in 7
+        let both = cols("user,pid");
+        assert_eq!(
+            render_row(&["USER".into(), "PID".into()], &both),
+            "USER         PID"
+        );
+        assert_eq!(
+            render_row(&["root".into(), "1".into()], &both),
+            "root           1"
+        );
+    }
+
+    /// `=` empties a title, and the line then ends at the SEPARATOR.
+    ///
+    /// `ps -o pid,comm=` prints "    PID " with one trailing space -- the
+    /// empty final field contributes nothing, but the space before it stays.
+    /// Trimming the whole line would eat it; padding the last field would add
+    /// fourteen more.
+    #[test]
+    fn an_empty_title_leaves_the_separator_behind() {
+        let specs = cols("pid,comm=");
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[1].title, "");
+        assert_eq!(
+            render_row(&["PID".into(), String::new()], &specs),
+            "    PID "
+        );
+        assert_eq!(render_row(&["1".into(), "ps".into()], &specs), "      1 ps");
+    }
+
+    #[test]
+    fn column_specs_take_titles_and_accumulate() {
+        // A custom title keeps the column's width and alignment.
+        let renamed = cols("pid=MYPID");
+        assert_eq!(renamed[0].title, "MYPID");
+        assert_eq!(render_row(&["MYPID".into()], &renamed), "  MYPID");
+        // Two `-o` flags accumulate rather than replace, as procps does.
+        let mut acc = Vec::new();
+        parse_columns("pid", &mut acc).expect("pid");
+        parse_columns("comm", &mut acc).expect("comm");
+        assert_eq!(acc.len(), 2);
+        // `comm` is titled COMMAND and `tty` is titled TT -- neither follows
+        // from the name, and the default format heads the same field `TTY`.
+        assert_eq!(cols("comm")[0].title, "COMMAND");
+        assert_eq!(cols("tty")[0].title, "TT");
+    }
+
+    #[test]
+    fn an_unknown_column_is_refused_with_procps_wording() {
+        let mut sink = Vec::new();
+        let err = parse_columns("nosuchcolumn", &mut sink).expect_err("unknown");
+        assert_eq!(
+            err,
+            "error: unknown user-defined format specifier \"nosuchcolumn\""
+        );
+    }
+
+    /// `-t` against a `/dev` supplied by the test, not by the host.
+    ///
+    /// Measured from procps: `?` and `-` both mean "no terminal";
+    /// `-t pts/0` is ACCEPTED even with nothing on it, because the test is
+    /// whether the terminal exists rather than whether it is in use; and
+    /// `-t nosuchtty` is `error: TTY could not be found`.
+    #[test]
+    fn dash_t_accepts_a_terminal_that_exists_and_refuses_one_that_does_not() {
+        let dev = |name: &str| matches!(name, "pts/0" | "tty1");
+        let ok = |list: &str| parse_tty_list_with(list, &dev);
+        // The absence of a terminal, spelled two ways, normalised to one.
+        assert_eq!(ok("?"), Ok(vec!["?".to_string()]));
+        assert_eq!(ok("-"), Ok(vec!["?".to_string()]));
+        // Existing terminals, bare and /dev-prefixed, both normalise to bare
+        // so they can be compared against what the TTY column prints.
+        assert_eq!(ok("pts/0"), Ok(vec!["pts/0".to_string()]));
+        assert_eq!(ok("/dev/pts/0"), Ok(vec!["pts/0".to_string()]));
+        assert_eq!(
+            ok("pts/0,tty1"),
+            Ok(vec!["pts/0".to_string(), "tty1".to_string()])
+        );
+        // And the refusals.
+        for bad in ["nosuchtty", "", "pts/0,nosuchtty"] {
+            assert_eq!(
+                ok(bad),
+                Err("error: TTY could not be found".to_string()),
+                "for {bad:?}"
+            );
+        }
     }
 
     #[test]

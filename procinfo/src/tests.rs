@@ -760,6 +760,13 @@ fn process_stat_reads_the_fields_proc5_numbers() {
     assert_eq!(st.pgrp, 42);
     assert_eq!(st.session, 42);
     assert_eq!(st.tty_nr, 0);
+    // Field 9. The fixture's 4194304 is one bit off the 4194560 a real
+    // task carries, which is deliberate: `ps -l`'s F column is
+    // `(flags >> 6) & 7`, so these two differ in the answer (0 against 4)
+    // and a parser reading the wrong field would likely give 0 for both.
+    assert_eq!(st.flags, 4_194_304);
+    assert_eq!((st.flags >> 6) & 7, 0);
+    assert_eq!((4_194_560_u64 >> 6) & 7, 4, "a real task's F");
     assert_eq!(st.starttime_ticks, 99);
     assert_eq!(st.utime_ticks, 1234);
     assert_eq!(st.stime_ticks, 567);

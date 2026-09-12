@@ -30,7 +30,8 @@ const VERSION: &str = "0.1.0";
 // `PAGE_SIZE_KB` used to live here, a private copy of a fact about the kernel.
 // It is `procinfo::PAGE_SIZE_KIB` now, and this program no longer converts
 // pages to KiB itself -- `ProcessStat::rss_kib` and `ProcessStatm::shared_kib`
-// do. `userspace/ps` still has its own copy; see `known-issues.md` ->
+// do. `userspace/ps` had its own copy until it was retired on 2026-09-12,
+// leaving this one; see `known-issues.md` ->
 // TD-B-TEN-PROC-PARSERS-IN-USERSPACE-AND-ONE-CRATE.
 
 /// Assumed tick rate (ticks per second).

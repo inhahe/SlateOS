@@ -117736,6 +117736,23 @@ finding does*. Here the "guard" is an exit status, and the fact it had not
 checked was whether the thing I actually ran succeeded. Arriving from a third
 direction is the argument for writing it down.
 
+**A third instance, and the mildest: `git push`'s own printed range can
+UNDERSTATE what landed.** Observed twice on 2026-09-12. The log said
+
+```
+793ae7fcc..c29318365  lane-b -> lane-b
+PUSH_EXIT=0
+```
+
+and `git ls-remote` immediately afterwards reported `3963ae04d` — one commit
+further on, made while the 32 pre-push gates were still running. One
+`lane-b -> lane-b` line in the log, so it was one push, not two. The mechanism
+is not asserted here because it was not measured; what was measured is that
+**the range git prints is not proof of what is on the server.** The direction
+is safe — more landed than was reported, never less — but it means a push log
+cannot answer "did my last commit go up?". `git ls-remote` can, and is the
+instrument that cannot answer from a local cache.
+
 **The rule.** Never pipe a command whose exit status you intend to believe.
 
 **The sharper form, from lane A on 2026-09-12 — piping is dangerous even when
@@ -131368,13 +131385,32 @@ Two measured examples:
   for the implementation that has it. This is `free` again: 23 options
   advertised against 2 is not 21 options that agree.
 
-  **What that means for the retirement is "merge, not pick".** Deleting
-  `userspace/ps` outright loses five options that exist, however wrongly they
-  render; §1005 says the better half survives *inside coreutils*, which here
-  means porting them in and then retiring the crate, as `diff` was ported. The
-  harness measures each one independently, and each is declared by name in
-  `ps-diff.sh` so implementing `-o` turns three cases into XPASS rather than
-  disappearing into a collective excuse.
+  **RETIRED 2026-09-12. `userspace/ps` is deleted; coreutils' `ps` is the one
+  `ps`.** Final measurement before the delete: **22 passed, 0 differed, 10
+  differ on purpose** for coreutils', against **0 passed, 12 differed** for the
+  standalone on the same cases.
+
+  **What the loser knew, measured option by option rather than counted.** Its
+  nine options split three ways:
+
+  | | |
+  |---|---|
+  | ported in first | `-p`, `--no-header`, `-u` |
+  | real procps options, still missing here | `-l`, `-o`, `-t`, `--sort` |
+  | **inventions** | `--reverse`, `--json` |
+
+  `--reverse` and `--json` both draw `error: unknown gnu long option` from
+  procps — checked, not assumed, because `free`'s standalone advertised
+  `--json` too and it was the one thing that looked like a feature. The four
+  real ones are genuine capability and are **not** ported from that crate:
+  measured, its implementations of them do not match procps either (0 XPASS),
+  so porting the code would import a second wrong rendering. They are written
+  fresh against measurements, one at a time, and each is declared by name in
+  `ps-diff.sh`. `todo.txt` carries the entry.
+
+  `DIFF_PKG=ps bash scripts/ps-diff.sh` now fails loudly with "has no
+  Cargo.toml anywhere under … — is DIFF_PKG right?", which is correct: there
+  is no second `ps` to measure.
 
   **The original entry, from before the fixes:**
 
@@ -131448,6 +131484,22 @@ Two measured examples:
   and the differential harnesses answer it directly for every program that has
   one. Recorded here rather than filed as a checker change, because the
   cheaper instrument already exists.
+
+* **`uptime`** — **RETIRED 2026-09-12. coreutils 40 passed / 0 differed
+  against the standalone's 20 / 20**, same cases, `scripts/uptime-diff.sh`.
+
+  The standalone is the best-performing loser of the seven: it passes half the
+  cases rather than none. What it fails is a pair of clusters, and both are the
+  kind a from-scratch implementation gets wrong — every uptime at or past a day
+  boundary (86400, 86460, 172800, 259200, 604800), and every user count except
+  one (0, 2 and 12 all wrong, 1 right). Those are exactly the two places
+  procps' own rules are counter-intuitive: `up 1 day, 0 min` rather than
+  `1 day, 00:00`, and `0 user` SINGULAR.
+
+  Its three unique options — `-r`, `--raw`, `--json` — are all inventions.
+  Measured, not taken from the note that already said so: procps answers
+  `invalid option -- 'r'` and `unrecognized option '--raw'` / `'--json'`.
+  Nothing to port.
 
 * **`logger`** — **not a measurement question at all, and a harness cannot
   settle it.** `dup-bins-survey` lists it as "no harness — write one", which is

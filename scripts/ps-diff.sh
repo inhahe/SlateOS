@@ -86,7 +86,28 @@ run_side() {
      PATH=$PS_DIFF_BIN:$PATH; export PATH
      LC_ALL=C.UTF-8; export LC_ALL
      TZ=UTC; export TZ
+     # A SECOND PROCESS, when asked for, and `-l` is why.
+     #
+     # Every other case here reports on `ps` itself, which is fine while the
+     # compared columns are properties of the SYSTEM. `-l` prints SZ, the
+     # subjects own virtual size -- and the two subjects are different
+     # binaries, so ours said 920 where procps said 2093 and neither was
+     # wrong. Comparing a program against a different programs memory
+     # footprint is not a test of the format.
+     #
+     # With this, PID 2 is `sleep` on both sides: the same binary, the same
+     # arguments, the same everything. `-p 2` then points both at it.
+     if [ -n "${PS_DIFF_SPAWN-}" ]; then sleep 5 & fi
      exec ps "$@"' _ "$@" < /dev/null
+}
+
+# A case whose subject is the spawned `sleep`, not `ps`.
+run_shared() {
+  if [ "$ns" != yes ]; then masked=$((masked + 1)); return 0; fi
+  PS_DIFF_SPAWN=1; export PS_DIFF_SPAWN
+  compare "$@"
+  unset PS_DIFF_SPAWN
+  report "ps $* [subject is the spawned sleep, not ps]"
 }
 
 # Minutes since midnight of an `HH:MM` STIME field, one per line.
@@ -221,16 +242,44 @@ run_case -Af
 # The UID is NUMERIC here -- `0`, where `-f` prints `root` for the same
 # process in the same listing. Two format options, two renderings of one
 # field, and the obvious shared helper would get one of them wrong.
-xfail_case "-l (long format) is not implemented here" -l
-xfail_case "-l (long format) is not implemented here" -el
-xfail_case "-l (long format) is not implemented here" -efl
+# `-l` on a SHARED subject. Reporting on `ps` itself cannot work here:
+# SZ is the subject's own virtual size and the two subjects are different
+# binaries. Everything else in the format -- all thirteen other columns
+# and the header, including the ADDR/SZ pair that abut with no separator
+# -- matched on the first run.
+run_shared -l -p 2
+# `-el -p 2` cannot be a real case, and the reason is a consequence of the
+# fix two lines up: `-e` OVERRIDES the selection, so this lists `ps` as
+# well as the sleeper -- and the `ps` row carries SZ, which differs
+# because the two subjects are different binaries. The sleeper row is
+# byte-identical; it is the row we cannot avoid that differs.
+xfail_case "-e overrides -p, so this includes the ps row, whose SZ differs" -el -p 2
+
+# `-l` COMBINED WITH `-f` is a MERGED format, not one of them winning.
+# Measured: `ps -lf` heads
+#
+#   F S UID          PID    PPID  C PRI  NI ADDR SZ WCHAN  STIME TTY   TIME CMD
+#
+# which is `-l`'s columns with UID widened and rendered as a NAME, STIME
+# inserted after WCHAN, and CMD carrying the full command line. Three of
+# `-f`'s properties grafted onto `-l`'s column set. That is a third format
+# rather than a combination rule, and it is not implemented.
+xfail_case "-l with -f is a merged format, which is not implemented" -lf -p 2
+xfail_case "-l with -f is a merged format, which is not implemented" -efl -p 2
+run_shared -l --no-header -p 2
+
+# And `-l` on `ps` itself, where SZ is expected to differ and does. Kept
+# as a declared divergence rather than deleted, so that a change which
+# accidentally made the whole line agree would show up as an XPASS.
+xfail_case "SZ is the subject's own virtual size; the two subjects are different binaries" -l
 # `-u` is SELECTION BY USER, not a format, and the reason here said
 # otherwise until it was measured. SysV `ps -u root` prints the DEFAULT
 # columns for that user's processes; the user-oriented format is BSD `u`
 # with no dash, which is a different option that happens to share a
-# letter. `userspace/ps` documents "-u [user] User-oriented format" and
-# so conflates them -- which is worth knowing before porting it in, since
-# porting the standalone's `-u` would import the conflation.
+# letter. The retired `userspace/ps` documented "-u [user] User-oriented
+# format" and so conflated them -- which is why its `-u` was NOT ported and
+# this one was written against the measurement instead. Porting the code
+# would have imported the conflation along with it.
 #
 # `ps -u` with no list exits 1.
 # Bare `-u` with no list is NOT the error it looks like. procps prints the
@@ -249,9 +298,44 @@ run_case -u root,daemon
 run_case -u nosuchuser
 run_case -u 99999
 run_case -p 1
-xfail_case "-o (output column selection) is not implemented here" -o pid
-xfail_case "-o (output column selection) is not implemented here" -o pid,comm
-xfail_case "-o (output column selection) is not implemented here" -o comm=
+run_case -o pid
+run_case -o pid,comm
+run_case -o comm=
+run_case -o pid,comm=
+run_case -o pid=MYPID
+run_case -o pid=MYPID,comm
+run_case -o user
+run_case -o user,pid
+run_case -o uid,pid
+run_case -o tty
+run_case -o time
+run_case -o stime
+run_case -o c
+run_case -o args
+run_case -o pid,ppid,user,comm
+
+# --- `-t`, select by controlling terminal ------------------------------------
+# Every process in this namespace has NO terminal, because `setsid` took it
+# away -- which is the same mount that makes the TTY column deterministic,
+# and it is what makes `?` the interesting value here rather than a corner.
+#
+# `-t pts/0` is ACCEPTED and matches nothing: procps tests whether the
+# terminal EXISTS, not whether anything is on it, so it exits 1 through the
+# no-match path rather than the error path. `-t nosuchtty` is the error.
+run_case -t ?
+run_case -t -
+run_case -t pts/0
+run_case -t nosuchtty
+run_case -t /dev/pts/0
+run_case -e -t ?
+
+# Bare `-t` falls back to a BSD format -- `PID TTY STAT TIME COMMAND`, with
+# `R` and `0:00` rather than `00:00:00` -- exactly as bare `-u` falls back to
+# the BSD user format. Two options, one shape, and neither is a defect in the
+# option: both need a format this build does not have.
+xfail_case "bare -t needs the BSD format, which is not implemented" -t
+run_case -o pid -o comm
+run_case -e -o pid,comm
 run_case --no-header
 run_case -e --no-header
 
@@ -266,7 +350,7 @@ run_case -Q
 # reasons are for: implementing `-p` turned its three cases into real
 # comparisons instead of leaving a collective excuse covering an option that
 # had since been written.
-xfail_case "we reject -o itself; procps rejects the column name" -o nosuchcolumn
+run_case -o nosuchcolumn
 run_case -p notanumber
 run_case -p 999999
 

@@ -91,7 +91,6 @@ userspace/pgrep
 userspace/ping
 userspace/pkg
 userspace/powerctl
-userspace/ps
 userspace/pv
 userspace/route
 userspace/rsync
@@ -110,7 +109,6 @@ userspace/top
 userspace/tput
 userspace/traceroute
 userspace/udevd
-userspace/uptime
 userspace/vi
 userspace/vmstat
 userspace/wall

@@ -214,7 +214,21 @@ def test_retirement_is_read_from_the_newest_boot():
 # --------------------------------------------------------------------------
 
 def _allowed(monkey: dict):
-    """Swap ALLOWED for the duration of one test."""
+    """Swap ALLOWED for the duration of one test.
+
+    Any test that builds a SYNTHETIC history and asserts a *successful* exit
+    must call this, even when the allowlist is not what it is testing. A real
+    entry names nothing in a history that never mentions its marker, which is
+    exactly the `stale_allowlist` condition, so the gate exits 1 and the test
+    fails for a reason unrelated to its subject. That is not hypothetical: the
+    first real entry landed 2026-09-12 and broke
+    `test_main_passes_on_a_healthy_history`, which had been resting on the
+    allowlist happening to be empty.
+
+    Do NOT empty ALLOWED for every test from the runner instead. Tests that
+    read the REAL history need the real allowlist: without it the FAT marker
+    there is un-allowlisted and never-seen, which passes only while it sits
+    under the evidence floor and fails once ten boots carry it."""
     prev = gate.ALLOWED
     gate.ALLOWED = monkey
     return prev
@@ -311,10 +325,20 @@ def test_main_fails_on_a_real_finding(tmpdir):
 
 
 def test_main_passes_on_a_healthy_history(tmpdir):
-    path = os.path.join(tmpdir, "h.jsonl")
-    _write(path, _rows(10, {M1: True, M2: True}))
-    check("a history where every marker has been seen exits 0",
-          gate.main(["--history", path]), 0)
+    # ALLOWED is emptied for the duration, as in the tests above. This one used
+    # to pass without that only because the real allowlist was empty: a synthetic
+    # history naming M1 and M2 does not name whatever the tree allowlists, so a
+    # real entry is `stale` here -- it names nothing in *this* history -- and the
+    # gate exits 1. The first real entry landed 2026-09-12 and broke it, which is
+    # a test resting on a fact about the tree rather than on its own fixture.
+    prev = _allowed({})
+    try:
+        path = os.path.join(tmpdir, "h.jsonl")
+        _write(path, _rows(10, {M1: True, M2: True}))
+        check("a history where every marker has been seen exits 0",
+              gate.main(["--history", path]), 0)
+    finally:
+        gate.ALLOWED = prev
 
 
 def test_main_survives_a_malformed_line(tmpdir):

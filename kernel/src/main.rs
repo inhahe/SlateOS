@@ -1573,7 +1573,11 @@ extern "C" fn kernel_main() -> ! {
                 selftest::dispatch_debug(
                     "FAT",
                     selftest::Severity::Diagnostic,
-                    // RAN-IF: "[fat] Running mkfs/format self-test..."
+                    // RAN-IF must name a line THIS call prints. It named
+                    // `format_self_test`'s banner until 2026-09-12; that one is
+                    // dispatched unconditionally below, so the gate saw it on every
+                    // boot and reported this site as running when it never has.
+                    // RAN-IF: "[fat] Running self-test..."
                     fs::fat::self_test(),
                 );
                 // Flush buffer cache to disk so data survives power loss / QEMU kill.
@@ -1594,6 +1598,15 @@ extern "C" fn kernel_main() -> ! {
             // Pure ext4 extent-placement regression guard (BUG-EXT4-SPARSE-READ) — no
             // disk needed, so unlike ext4::self_test() it runs on the diskless / non-FAT
             // Path-Z boot too, where the sparse fastpy ELFs on /mnt/tests are loaded.
+            // Pure DOS<->Unix time conversion: no volume, so unlike
+            // fat::self_test() it does not sit behind `fat_ok`.  It did until
+            // 2026-09-12, which meant the only tests for a function on the
+            // stat path had never once run.
+            selftest::dispatch_debug(
+                "fat datetime",
+                selftest::Severity::Diagnostic,
+                fs::fat::self_test_datetime(),
+            );
             selftest::dispatch_debug(
                 "ext4 pure",
                 selftest::Severity::Diagnostic,

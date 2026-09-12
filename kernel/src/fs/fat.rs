@@ -736,6 +736,24 @@ impl FatDirEntry {
         }
     }
 
+    /// Whether the 8.3 short name decodes at all.
+    ///
+    /// `display_name` and `short_name` substitute `????????` when it does not,
+    /// and that substitution is a **constant** -- every undecodable name becomes
+    /// the same eight characters. Comparing it in a lookup therefore matches
+    /// every such entry against a target of literally `????????` and returns
+    /// whichever happens to come first, which is a wrong answer rather than a
+    /// missing one.
+    ///
+    /// Callers that *match* must consult this first; callers that only *display*
+    /// need not. Which code page these bytes are actually in is open as A-Q12 and
+    /// is deliberately not decided here -- this predicate is correct under every
+    /// answer to it.
+    fn short_name_decodes(&self) -> bool {
+        core::str::from_utf8(&self.name[..8]).is_ok()
+            && core::str::from_utf8(&self.name[8..11]).is_ok()
+    }
+
     /// Return the 8.3 short name as a string (for matching purposes).
     fn short_name(&self) -> String {
         let base = core::str::from_utf8(&self.name[..8])
@@ -1889,12 +1907,25 @@ impl FatFs {
                     return false;
                 }
                 // Match against display name (long name if present, else 8.3).
-                if e.display_name().eq_ignore_ascii_case(&target) {
+                //
+                // Guarded by `short_name_decodes` when there is no long name:
+                // `display_name` falls back to the 8.3 bytes and substitutes
+                // `????????` if they are not UTF-8. That substitution is a
+                // constant, so comparing it made a target of literally
+                // `????????` match every undecodable entry and return the first
+                // -- a *wrong* file rather than no file. Skipping the comparison
+                // makes such a name unfindable, which it already was, without
+                // ever handing back the wrong one.
+                if (e.long_name.is_some() || e.short_name_decodes())
+                    && e.display_name().eq_ignore_ascii_case(&target)
+                {
                     return true;
                 }
                 // Also match against the short name if a long name was used
-                // for display — callers may use either form.
-                if e.long_name.is_some() {
+                // for display — callers may use either form. Same guard, and
+                // needed here too: `short_name` uses the 8.3 bytes always, so
+                // this arm could fabricate even when a long name exists.
+                if e.long_name.is_some() && e.short_name_decodes() {
                     return e.short_name().eq_ignore_ascii_case(&target);
                 }
                 false
@@ -4438,6 +4469,95 @@ pub fn init(device_name: &str) -> KernelResult<()> {
     Ok(())
 }
 
+/// `dos_datetime_to_ns` unit tests: pure computation, no disk.
+///
+/// Extracted from [`self_test`] on 2026-09-12. That suite is dispatched under
+/// `if fat_ok` and has never run on this harness -- the boot test mounts an
+/// in-memory root and attaches vda as a raw swap disk, so `init` fails and the
+/// whole suite is skipped. These checks need no volume, while
+/// `dos_datetime_to_ns` is used in production by the stat path to report the
+/// timestamps a user sees: a live function with no executing coverage.
+///
+/// The absolute values are the point. A `rtc_to_dos_datetime` ->
+/// `dos_datetime_to_ns` round-trip -- which is what `self_test` still has -- can
+/// pass while both directions are wrong in compensating ways. 1980-01-01 and
+/// 2000-06-15T14:30Z can only pass by being right.
+pub fn self_test_datetime() -> KernelResult<()> {
+    crate::serial_println!("[fat] Running dos_datetime_to_ns self-test...");
+
+    // Known epoch: 0 date -> 0 ns.
+    //
+    // Was `assert_eq!`, which panics. A self-test that halts the kernel reports
+    // nothing about the suites queued behind it, and this one now runs on every
+    // boot rather than never, so the failure mode matters. The dispatcher
+    // collects an `Err` and carries on.
+    let zero = dos_datetime_to_ns(0, 0);
+    if zero != 0 {
+        crate::serial_println!(
+            "[fat]   dos_datetime_to_ns FAILED: (0, 0) = {}, expected 0",
+            zero
+        );
+        return Err(KernelError::IoError);
+    }
+
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // 1980-01-01 00:00:00 — DOS epoch.
+            //   date = (1980-1980)<<9 | 1<<5 | 1 = 0x0021
+            //   time = 0
+            //   Expected: 315532800 seconds since Unix epoch = 315_532_800_000_000_000 ns.
+            let dos_epoch_date: u16 = (1 << 5) | 1;
+            let dos_epoch_ns = dos_datetime_to_ns(dos_epoch_date, 0);
+            // 1980-01-01T00:00:00Z = 315532800 seconds * 1e9.
+            let expected_dos_epoch_ns: u64 = 315_532_800_000_000_000;
+            if dos_epoch_ns != expected_dos_epoch_ns {
+                crate::serial_println!(
+                    "[fat]   dos_datetime_to_ns FAILED: DOS epoch = {}, expected {}",
+                    dos_epoch_ns,
+                    expected_dos_epoch_ns
+                );
+                return Err(KernelError::IoError);
+            }
+            Ok(())
+        }
+        case()?;
+    }
+
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            // 2000-06-15 14:30:00.
+            //   date = (2000-1980)<<9 | 6<<5 | 15 = 20<<9 | 6<<5 | 15 = 10240 + 192 + 15 = 10447
+            //   time = 14<<11 | 30<<5 | 0 = 28672 + 960 = 29632
+            let y2k_date: u16 = (20 << 9) | (6 << 5) | 15;
+            let y2k_time: u16 = (14 << 11) | (30 << 5);
+            let y2k_ns = dos_datetime_to_ns(y2k_date, y2k_time);
+            // 2000-06-15T14:30:00Z = 961079400 seconds * 1e9.
+            //
+            // Was 961_078_200, which is 14:10:00Z -- twenty minutes early. The
+            // kernel had it right all along; the *test* was wrong, and nothing
+            // noticed because this suite sat behind `if fat_ok` and had never
+            // once executed. It failed on the first boot after being moved out.
+            // A dead test is not inert: it rots, and then it accuses the code.
+            let expected_y2k_ns: u64 = 961_079_400_000_000_000;
+            if y2k_ns != expected_y2k_ns {
+                crate::serial_println!(
+                    "[fat]   dos_datetime_to_ns FAILED: 2000-06-15 14:30 = {}, expected {}",
+                    y2k_ns,
+                    expected_y2k_ns
+                );
+                return Err(KernelError::IoError);
+            }
+            Ok(())
+        }
+        case()?;
+    }
+
+    crate::serial_println!("[fat] dos_datetime_to_ns self-test PASSED");
+    Ok(())
+}
+
 /// Self-test: verify we can read the directory and a file.
 // String formatting uses bounded operations.
 #[allow(clippy::arithmetic_side_effects)]
@@ -4624,63 +4744,6 @@ pub fn self_test() -> KernelResult<()> {
     // Clean up: remove the empty test directory.
     crate::fs::Vfs::rmdir("/TESTDIR")?;
     crate::serial_println!("[fat]   rmdir verified: TESTDIR removed");
-
-    // ---------------------------------------------------------------
-    // dos_datetime_to_ns unit tests (pure computation, no disk I/O)
-    // ---------------------------------------------------------------
-    crate::serial_println!("[fat]   Testing dos_datetime_to_ns...");
-
-    // Known epoch: 0 date → 0 ns.
-    assert_eq!(dos_datetime_to_ns(0, 0), 0);
-
-    {
-        #[inline(never)]
-        fn case() -> crate::error::KernelResult<()> {
-            // 1980-01-01 00:00:00 — DOS epoch.
-            //   date = (1980-1980)<<9 | 1<<5 | 1 = 0x0021
-            //   time = 0
-            //   Expected: 315532800 seconds since Unix epoch = 315_532_800_000_000_000 ns.
-            let dos_epoch_date: u16 = (1 << 5) | 1;
-            let dos_epoch_ns = dos_datetime_to_ns(dos_epoch_date, 0);
-            // 1980-01-01T00:00:00Z = 315532800 seconds * 1e9.
-            let expected_dos_epoch_ns: u64 = 315_532_800_000_000_000;
-            if dos_epoch_ns != expected_dos_epoch_ns {
-                crate::serial_println!(
-                    "[fat]   dos_datetime_to_ns FAILED: DOS epoch = {}, expected {}",
-                    dos_epoch_ns,
-                    expected_dos_epoch_ns
-                );
-                return Err(KernelError::IoError);
-            }
-            Ok(())
-        }
-        case()?;
-    }
-
-    {
-        #[inline(never)]
-        fn case() -> crate::error::KernelResult<()> {
-            // 2000-06-15 14:30:00.
-            //   date = (2000-1980)<<9 | 6<<5 | 15 = 20<<9 | 6<<5 | 15 = 10240 + 192 + 15 = 10447
-            //   time = 14<<11 | 30<<5 | 0 = 28672 + 960 = 29632
-            let y2k_date: u16 = (20 << 9) | (6 << 5) | 15;
-            let y2k_time: u16 = (14 << 11) | (30 << 5);
-            let y2k_ns = dos_datetime_to_ns(y2k_date, y2k_time);
-            // 2000-06-15T14:30:00Z = 961078200 seconds * 1e9.
-            let expected_y2k_ns: u64 = 961_078_200_000_000_000;
-            if y2k_ns != expected_y2k_ns {
-                crate::serial_println!(
-                    "[fat]   dos_datetime_to_ns FAILED: 2000-06-15 14:30 = {}, expected {}",
-                    y2k_ns,
-                    expected_y2k_ns
-                );
-                return Err(KernelError::IoError);
-            }
-            crate::serial_println!("[fat]   dos_datetime_to_ns verified");
-            Ok(())
-        }
-        case()?;
-    }
 
     // ---------------------------------------------------------------
     // FAT metadata integration test
@@ -6183,6 +6246,82 @@ pub fn format_self_test() -> KernelResult<()> {
 
     verify?;
     serial_println!("[fat]   write/read on formatted volume: OK");
+    // Placed HERE, in format_self_test, and NOT in `self_test` above, because
+    // `self_test` does not run on the boot test: main.rs gates it on `fat_ok`,
+    // the harness's vda is a raw swap disk with no FAT, so `fat::init` fails
+    // and the whole call is skipped. Its first line, "[fat] Running
+    // self-test...", prints zero times in a boot log. A pure check placed
+    // there would be dead code, and a green boot could not distinguish that
+    // from a passing one. This function formats its own RAM disk and always
+    // runs.
+    // 8.3 short names that do not decode must never match in a lookup.
+    //
+    // `display_name`/`short_name` substitute `????????` when the 8.3 bytes are
+    // not UTF-8, and that substitution is a CONSTANT -- so before the guard, a
+    // lookup for the literal `????????` matched every undecodable entry and
+    // returned whichever came first. A wrong file, not no file.
+    //
+    // Asserts the COLLISION, not just the predicate: two entries whose bytes
+    // differ, neither decoding, both rendering identically. Checking only
+    // `short_name_decodes(bad) == false` would pass against a guard that was
+    // never wired into the lookup at all.
+    {
+        #[inline(never)]
+        fn case() -> crate::error::KernelResult<()> {
+            let mk = |raw: [u8; 11]| FatDirEntry {
+                name: raw,
+                attr: 0,
+                first_cluster: 2,
+                file_size: 0,
+                write_time: 0,
+                write_date: 0,
+                create_time: 0,
+                create_date: 0,
+                access_date: 0,
+                long_name: None,
+            };
+            // Two DIFFERENT undecodable names: 0xE9 vs 0xEF in byte 0.
+            let a = mk([
+                0xE9, b'S', b'U', b'M', b'E', b' ', b' ', b' ', b'T', b'X', b'T',
+            ]);
+            let b = mk([
+                0xEF, b'S', b'U', b'M', b'E', b' ', b' ', b' ', b'T', b'X', b'T',
+            ]);
+            let ok = mk([
+                b'R', b'E', b'A', b'D', b'M', b'E', b' ', b' ', b'T', b'X', b'T',
+            ]);
+
+            if a.short_name_decodes() || b.short_name_decodes() {
+                serial_println!("[fat]   FAIL: a non-UTF-8 8.3 name reported as decodable");
+                return Err(KernelError::IoError);
+            }
+            if !ok.short_name_decodes() {
+                serial_println!("[fat]   FAIL: an ASCII 8.3 name reported as undecodable");
+                return Err(KernelError::IoError);
+            }
+            // The collision itself. Reported rather than asserted: if the
+            // placeholder ever changes so distinct names stop colliding, this
+            // should say so, not fail -- a test that breaks when the underlying
+            // problem is FIXED is a test that gets deleted for the wrong reason.
+            if a.display_name() == b.display_name() {
+                serial_println!(
+                    "[fat]   short-name guard: two distinct undecodable names both render {:?}, \
+                     and neither is compared in a lookup: OK",
+                    a.display_name()
+                );
+            } else {
+                serial_println!(
+                    "[fat]   short-name guard: OK ({:?} vs {:?} no longer collide -- the guard \
+                     is still correct but no longer load-bearing)",
+                    a.display_name(),
+                    b.display_name()
+                );
+            }
+            Ok(())
+        }
+        case()?;
+    }
+
     serial_println!("[fat] mkfs/format self-test PASSED");
     Ok(())
 }

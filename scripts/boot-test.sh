@@ -2843,6 +2843,9 @@ print_bench_results() {
     if [ "${BT_DIRTY:-0}" = 1 ]; then
         bench_args+=(--dirty)
     fi
+    if [ "${BT_SRC_CHANGED:-0}" = "1" ]; then
+        bench_args+=(--src-changed-during-run)
+    fi
     # A probe run is recorded but never becomes a baseline. BENCH_EXPERIMENT
     # states the reason; QEMU_EXTRA implies one even when the caller forgot,
     # because a run under non-default emulator flags is no more reproducible
@@ -2997,6 +3000,9 @@ record_boot_outcome() {
     fi
     if [ "${BT_DIRTY:-0}" = 1 ]; then
         args+=(--dirty)
+    fi
+    if [ "${BT_SRC_CHANGED:-0}" = "1" ]; then
+        args+=(--src-changed-during-run)
     fi
     if [ -n "${BOOT_LABEL:-}" ]; then
         args+=(--label "$BOOT_LABEL")
@@ -5751,6 +5757,58 @@ if ! check_variant_lists; then
     exit 1
 fi
 
+# A `RAN-IF` comment claims which serial line proves a gated self-test ran.
+# Nothing checked that the line it names is printed by the function it is
+# attached to, and on 2026-09-12 one of the six named a neighbour's banner.
+# That neighbour is dispatched unconditionally, so check-gated-selftests.py
+# saw the marker on every boot and reported a suite that has never run as
+# having run in 135 of 136 boots.  The 2026-08-31 audit that cleared all six
+# compared the same declared markers against a serial log, so it agreed, for
+# the same reason.
+#
+# This gate reads source and never a boot log.  That is the whole point: it
+# is the only one of the three that can disagree with the other two.
+check_ran_if() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== RAN-IF marker check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Checking the RAN-IF gate against its fixture ==="
+    if ! run_checker check-ran-if-selftest "$py" "$PROJECT_ROOT/scripts/check-ran-if.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The RAN-IF gate no longer agrees" >&2
+        echo "with its own fixture, so its verdict on the tree means nothing." >&2
+        return 1
+    fi
+
+    echo "=== Checking that every RAN-IF marker is printed by its own call ==="
+    if run_checker check-ran-if "$py" "$PROJECT_ROOT/scripts/check-ran-if.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  A RAN-IF marker names a serial line the" >&2
+    echo "call it annotates does not print.  check-gated-selftests.py believes" >&2
+    echo "that comment, so the marker it tracks is not evidence about the suite" >&2
+    echo "behind the gate -- it can report a dead suite as live indefinitely." >&2
+    echo "" >&2
+    echo "Fix the comment to name a line the annotated function prints, not a" >&2
+    echo "neighbour's, however similar the wording.  If the suite prints no" >&2
+    echo "banner of its own, give it one rather than borrowing another." >&2
+    echo "" >&2
+    return 1
+}
+
+if ! check_ran_if; then
+    exit 1
+fi
+
 # An app that keeps time but never receives the clock.
 #
 # A GUI app's clock is one event, `Event::Tick { elapsed_ms }`.  An app that
@@ -7402,6 +7460,33 @@ if [ "$NO_BUILD" -eq 0 ]; then
     # spawns dozens of processes -- and it is also twenty minutes we would spend
     # before discovering the boot cannot run either.
     check_commit_headroom "before building"
+    # Re-take the source digest here, next to the compiler, and compare it with
+    # the one from the top of the run.  Everything identifying this row --
+    # --commit, --dirty, --src-digest -- was read before the gates, so an edit
+    # during the gate phase (~25 minutes) is compiled while all three still
+    # describe the earlier tree.  A row that misattributes a result to an
+    # innocent commit is worse than one that admits it does not know.
+    #
+    # Never fatal and never a refusal: a lane editing its own worktree is
+    # allowed.  Recording it as though it had not happened is not.
+    BT_SRC_CHANGED=0
+    if [ -n "$BT_SRC_DIGEST" ]; then
+        _bt_digest_now=""
+        if command -v python &>/dev/null; then
+            _bt_digest_now="$(python "$PROJECT_ROOT/scripts/src_digest.py" --root "$PROJECT_ROOT" 2>/dev/null || true)"
+        elif command -v python3 &>/dev/null; then
+            _bt_digest_now="$(python3 "$PROJECT_ROOT/scripts/src_digest.py" --root "$PROJECT_ROOT" 2>/dev/null || true)"
+        fi
+        # An unavailable second digest proves nothing and must not accuse.
+        if [ -n "$_bt_digest_now" ] && [ "$_bt_digest_now" != "$BT_SRC_DIGEST" ]; then
+            BT_SRC_CHANGED=1
+            echo "=== WARNING: source changed during this run ===" >&2
+            echo "  before gates: $BT_SRC_DIGEST" >&2
+            echo "  at build:     $_bt_digest_now" >&2
+            echo "  --commit/--dirty/--src-digest describe the earlier tree, so" >&2
+            echo "  this row is marked src_changed_during_run." >&2
+        fi
+    fi
     echo "=== Building kernel ==="
     # Timed, and recorded in bench/boot-history.jsonl alongside the QEMU window.
     #

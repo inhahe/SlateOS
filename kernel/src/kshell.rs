@@ -8945,8 +8945,24 @@ fn cmd_top() {
     // Show top 10 (or all if fewer).
     let show_count = task_list.len().min(10);
     for info in task_list.iter().take(show_count) {
-        let name = core::str::from_utf8(info.name.get(..info.name_len).unwrap_or(&info.name))
-            .unwrap_or("?");
+        // Escaped, not decoded. A task comm is raw bytes (execve sets it from
+        // argv[0] with no validation), and the old
+        // `from_utf8(..).unwrap_or("?")` collapsed every undecodable name to
+        // the same `?` — so two processes with different unreadable names
+        // printed identically in this listing, which is the collision
+        // `A-EXEC-WRITES-A-COMM-...` is about, surviving here after the procfs
+        // surfaces were fixed.
+        //
+        // `escape_octal` rather than raw bytes because this is a width-padded
+        // column: raw bytes would break the alignment every other row depends
+        // on. It is total, lossless and pure ASCII, so distinct names stay
+        // distinct and `unescape_octal` recovers the original. Not
+        // `from_utf8_lossy` — U+FFFD is many-to-one and would re-create the
+        // collision in a different alphabet.
+        let name = crate::fs::escape::escape_octal(
+            info.name.get(..info.name_len).unwrap_or(&info.name),
+            &[],
+        );
 
         // TSC-based time (nanosecond precision).
         let cpu_ms = if freq > 0 {
@@ -9415,8 +9431,24 @@ fn cmd_schedstat() {
     shell_println!("---------------------------------------------------------------------");
 
     for info in &task_list {
-        let name = core::str::from_utf8(info.name.get(..info.name_len).unwrap_or(&info.name))
-            .unwrap_or("?");
+        // Escaped, not decoded. A task comm is raw bytes (execve sets it from
+        // argv[0] with no validation), and the old
+        // `from_utf8(..).unwrap_or("?")` collapsed every undecodable name to
+        // the same `?` — so two processes with different unreadable names
+        // printed identically in this listing, which is the collision
+        // `A-EXEC-WRITES-A-COMM-...` is about, surviving here after the procfs
+        // surfaces were fixed.
+        //
+        // `escape_octal` rather than raw bytes because this is a width-padded
+        // column: raw bytes would break the alignment every other row depends
+        // on. It is total, lossless and pure ASCII, so distinct names stay
+        // distinct and `unescape_octal` recovers the original. Not
+        // `from_utf8_lossy` — U+FFFD is many-to-one and would re-create the
+        // collision in a different alphabet.
+        let name = crate::fs::escape::escape_octal(
+            info.name.get(..info.name_len).unwrap_or(&info.name),
+            &[],
+        );
 
         // Format run time (total_ticks) as ss.t
         let run_secs = info.total_ticks / 100;
@@ -9512,8 +9544,24 @@ fn cmd_stack() {
     let mut max_pct_name_len = 0;
 
     for info in &task_list {
-        let name = core::str::from_utf8(info.name.get(..info.name_len).unwrap_or(&info.name))
-            .unwrap_or("?");
+        // Escaped, not decoded. A task comm is raw bytes (execve sets it from
+        // argv[0] with no validation), and the old
+        // `from_utf8(..).unwrap_or("?")` collapsed every undecodable name to
+        // the same `?` — so two processes with different unreadable names
+        // printed identically in this listing, which is the collision
+        // `A-EXEC-WRITES-A-COMM-...` is about, surviving here after the procfs
+        // surfaces were fixed.
+        //
+        // `escape_octal` rather than raw bytes because this is a width-padded
+        // column: raw bytes would break the alignment every other row depends
+        // on. It is total, lossless and pure ASCII, so distinct names stay
+        // distinct and `unescape_octal` recovers the original. Not
+        // `from_utf8_lossy` — U+FFFD is many-to-one and would re-create the
+        // collision in a different alphabet.
+        let name = crate::fs::escape::escape_octal(
+            info.name.get(..info.name_len).unwrap_or(&info.name),
+            &[],
+        );
 
         match (info.stack_used, info.stack_pct) {
             (Some(used), Some(pct)) => {
@@ -9609,8 +9657,24 @@ fn cmd_ps() {
     }
 
     for info in &task_list {
-        let name = core::str::from_utf8(info.name.get(..info.name_len).unwrap_or(&info.name))
-            .unwrap_or("?");
+        // Escaped, not decoded. A task comm is raw bytes (execve sets it from
+        // argv[0] with no validation), and the old
+        // `from_utf8(..).unwrap_or("?")` collapsed every undecodable name to
+        // the same `?` — so two processes with different unreadable names
+        // printed identically in this listing, which is the collision
+        // `A-EXEC-WRITES-A-COMM-...` is about, surviving here after the procfs
+        // surfaces were fixed.
+        //
+        // `escape_octal` rather than raw bytes because this is a width-padded
+        // column: raw bytes would break the alignment every other row depends
+        // on. It is total, lossless and pure ASCII, so distinct names stay
+        // distinct and `unescape_octal` recovers the original. Not
+        // `from_utf8_lossy` — U+FFFD is many-to-one and would re-create the
+        // collision in a different alphabet.
+        let name = crate::fs::escape::escape_octal(
+            info.name.get(..info.name_len).unwrap_or(&info.name),
+            &[],
+        );
 
         // Format CPU time as mm:ss.t (minutes:seconds.tenths).
         // Each tick = 10 ms at 100 Hz.

@@ -1542,6 +1542,21 @@ Europe, 932 for Japan. The number is not written to the disk. Newer disks usuall
 carry a long filename in Unicode and we use that when it is there; the problem is the
 short name, which is all that older or simpler devices write.
 
+**Now observed on a running kernel, not just read out of the source.** A boot
+self-test builds two FAT directory entries whose 8.3 bytes differ in the first
+byte (0xE9 vs 0xEF) and asks the kernel to render both:
+
+```
+[fat]   short-name guard: two distinct undecodable names both render "????????.TXT",
+        and neither is compared in a lookup: OK
+```
+
+So the collision is real rather than argued. A guard now stops the lookup
+*matching* on a fabricated name -- looking for one of these files can no longer
+hand you the other -- but the names themselves are still unreadable and still
+identical on screen, and no guard can fix that without knowing the alphabet.
+That is the part this question decides.
+
 **What happens today**, and it is a name collision rather than a display wart:
 `résumé.txt` and `naïve.txt` on such a disk both appear as `????????.???`, both answer to
 that name when opened, and the second is unreachable.

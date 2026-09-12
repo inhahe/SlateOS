@@ -137353,7 +137353,20 @@ the target in whitespace alone, and no case in this tree does. Correct today,
 incomplete rather than wrong, and recorded so a passing harness is not read as
 evidence that whitespace-insensitive matching exists. It does not.
 
-### A-OPTION-REFUSAL-PASS-LINE-CLAIMS-MORE-THAN-ITS-DETECTORS-ESTABLISH — 2026-09-12 — LOGGED (lane A)
+### A-OPTION-REFUSAL-PASS-LINE-CLAIMS-MORE-THAN-ITS-DETECTORS-ESTABLISH — 2026-09-12 — FIXED by lane B (lane A)
+
+**FIXED by lane B, 2026-09-12, and better than what I proposed.** The pass line now reads:
+
+```
+[option-refusal] kshell.rs: 102155 production statement(s) and 1483 loop(s) inspected;
+no site matches D1 (parse fallback), D2 (dash-filtered word), D3 (option …)
+```
+
+I suggested naming the detectors. They also added **the counts** — 102,155 statements and
+1,483 loops inspected — which is the half that matters more: naming the detectors stops the
+line overclaiming, but naming the population is what makes a regex that has quietly stopped
+matching visible. "No site matches D1/D2/D3" out of 102,155 and out of 0 are different
+statements; the old line and my proposed line would both have printed the same word.
 
 **In short:** a check that runs on every boot prints "no word is silently dropped"
 when it passes. It does look for three specific ways a word can be dropped, and it
@@ -137546,7 +137559,24 @@ its own change and its own verification rather than riding along on this one.
 | `/proc/<pid>/status` `Name:` | bytes |
 | `/proc/<pid>/cmdline` | bytes |
 | `prctl(PR_GET_NAME)` | bytes (always was) |
-| `kshell` task listings (4 sites) | **still `"?"`** |
+| `kshell` task listings (4 sites) | **escaped** (`escape_octal`) — see below |
+
+**The four kshell sites are done too, and the fix is different from the procfs one for a
+reason worth recording.** They feed a width-padded column (`{:<12}`), so emitting raw bytes
+would break the alignment every other row depends on. They use `fs::escape::escape_octal`
+instead: total over any byte sequence, lossless, invertible by `unescape_octal`, and pure
+printable ASCII — so distinct names stay distinct *and* the column still lines up.
+
+Deliberately **not** `from_utf8_lossy`: U+FFFD is many-to-one, so it would re-create the
+exact collision this entry is about in a different alphabet. That is the same choice lane B
+made for the four `/proc/<pid>/comm` consumers, and the same argument as
+`A-FAT-8-3-NAMES-DECODE-TO-QUESTION-MARKS`: escaping says which byte it was and is
+reversible; replacement is neither.
+
+One visible change for ordinary names: a comm containing a space now prints `\040`,
+because `escape_octal` escapes anything non-graphic. For a column-aligned listing that is
+the better behaviour — a space in a name would otherwise make the columns unparseable — and
+it matches how the tree already renders `/proc/mounts`.
 
 **In short:** every running program has a short name the system shows in process
 listings. There is a check that stops a program *asking* for a name the system cannot
@@ -137794,6 +137824,28 @@ to decode, and returns whichever comes first; and a file whose real short name i
 non-ASCII cannot be found by its real name at all. `A-EXEC-WRITES-A-COMM-...` manufactures
 collisions in a *display*; this one manufactures them in a *resolver*.
 
+**[A] 2026-09-12 — the COLLISION is fixed; the DISPLAY question stays open, and the two are
+separable in a way this entry did not make clear.** A-Q12 asks which code page an 8.3 name
+was written in. That is the operator's and it governs *display*. It does not govern
+*matching*, and the matching bug is wrong under every possible answer to it:
+`display_name()` and `short_name()` substitute `????????`, which is a **constant**, so a
+lookup for that literal matched every undecodable entry and returned whichever came first.
+
+`FatDirEntry::short_name_decodes()` now guards both comparison arms in the path lookup
+(`fat.rs`). An undecodable short name is no longer compared at all, so such a file is
+unfindable — which it already was — without the lookup ever handing back a *different* file.
+**Turning a wrong answer into no answer is the fail-safe direction and needed no policy
+decision.**
+
+The second guard is the one worth pointing at: `short_name()` uses the 8.3 bytes **always**,
+even when a long name exists, so that arm could fabricate for a file whose LFN decodes
+perfectly. Guarding only the no-LFN path would have looked complete and left the more
+common case open.
+
+Still open and still the operator's: what an undecodable short name should *look like*. The
+recommendation in A-Q12 is escapes by default with a per-mount code page, on the argument
+that the escape is the correct answer in the absence of information.
+
 **Proper fix:** the same shape as the comm work — keep the 8.3 field as the eleven bytes it
 is, compare bytes, and decode lossily only for display. `DirEntry.name` is already byte-
 clean since `D-VFS-PATHS-ARE-STR-NOT-BYTES`, so the destination type exists; what does not
@@ -137805,6 +137857,171 @@ surfaced: grepping `comm_truncate` found three sites in one file; grepping the l
 `"???"` found four there, a fifth surface (`/proc/<pid>/cmdline`), this, and a *fixed*
 instance in `fs/ar.rs` whose comment records the same reasoning. A search keyed on the
 path being worked on cannot contain a defect in a different subsystem.
+
+## A-THE-GATE-FOR-SELF-TESTS-THAT-NEVER-RAN-WAS-WATCHING-ANOTHER-FUNCTION (lane A, 2026-09-12) — FIXED
+
+`check-gated-selftests.py` exists to fail the build when a self-test behind an
+`if` has never once announced itself. For the FAT site it reported *ran* on 135
+of 136 boots. The suite has never run at all.
+
+**The marker named a different function.** Each gated dispatch in `main.rs`
+carries a `RAN-IF:` comment giving the serial line that proves it executed. The
+one on `fs::fat::self_test()` (main.rs:1576) named `[fat] Running mkfs/format
+self-test...`, which is printed by `format_self_test` (fat.rs:6029) -- a
+*different* suite, dispatched unconditionally three hundred lines below. Its
+banner is therefore on every boot, so the marker was permanently green and
+nothing could ever have turned it red.
+
+**What was actually behind the gate:** `fat::self_test` is 1,184 lines covering
+read, write, create, delete, mkdir, rmdir and directory listing against a live
+FAT volume. Not a stub, and not redundant with `format_self_test`, which formats
+a RAM disk. That coverage has never executed in the harness.
+
+**Two witnesses, and they agreed for the same reason.** The allowlist comment
+recorded that on 2026-08-31 all six gated sites `were audited ... against a full
+serial log and every one of them was found to run on this host`. That audit read
+each site's *declared* marker -- the same mislabelled string this gate reads. An
+audit derived from the annotation can only confirm the annotation. Nothing in
+either check touched the one fact that would have settled it: whether the
+declared line is printed by the function it is attached to.
+
+**Found by asking a question the fix could not answer for itself.** The prompt
+was a stale-looking comment, not a failure. The check that settled it was written
+from the *convention* (a marker must be emitted by its own call) and run against
+all six sites, so it could report the other five as correct -- which it did. Had
+it been derived from the FAT bug it could only have rediscovered the FAT bug.
+
+**Independent confirmation before acting**, because the claim `this never runs`
+otherwise rested on the same marker list being impeached: `[fat] Running
+self-test` occurs 0 times in the retained serial logs while the mkfs banner
+occurs once, and `fat_ok` is `fs::fat::init("vda")`, which cannot
+succeed on a harness that mounts an in-memory root and attaches vda as a raw swap
+disk. The code comment at main.rs:1561 has said so in prose the whole time. The
+prose was right and the machine-checked claim was wrong, which is the wrong way
+round -- the machine-checked one is the one people trust.
+
+**Fixed in two steps, and the gate chose the order.** The plan was one atomic
+commit -- correcting the marker alone turns a false green into a hard failure
+ten boots later (`DEFAULT_MIN`), which would block all three lanes. Applying it
+to a scratch copy of the tree first showed that the second half cannot land yet:
+`live` is the newest boot`s `gated_ran` keys, so a marker just declared in source
+is not live, and allowlisting it fails as `names nothing`. That refusal is right
+-- an allowlist that accepts markers nobody has ever observed is a place to hide
+phantoms -- so the entry waits for a boot instead of the gate being loosened to
+accept it. Step 1 (this commit): the annotation names the banner its own call
+prints, and the 2026-08-31 audit note is corrected in place, since a wrong
+finding that has been *checked* is harder to dislodge than an unexamined one.
+Step 2, after the next boot records the corrected marker: the allowlist entry,
+with the condition that would end it -- a FAT-formatted vda. Nine boots of
+margin, and step 1 leaves both gates green (verified against real history).
+
+**Still true after the fix:** the suite still does not run. The gate now says so
+honestly instead of claiming the opposite. Making it run means giving the harness
+a FAT volume, which is a disk-layout change to a boot test three lanes share, and
+is deliberately not bundled here.
+
+**And the new gate had the same defect, which its own tree caught.** `check-ran-if.py`
+tested `"--self-test" in argv`, so `--selftest` fell through to the real scan and
+exited 0 -- the command asking whether the checker is still correct answering
+yes without asking. `check-selftest-flag-spellings.py` refused the push over it,
+naming sixteen scripts that had already had this shape. The fix is
+`selftestflag.wants_selftest(argv)` plus `unknown_options`, so an unrecognised
+flag is an error rather than a fall-through. Recorded because it is the same
+defect as the entry above, one level up, written by someone who had spent the
+hour thinking about nothing else: success and not-having-run must not be the
+same observation.
+
+**Follow-up: the gate that caught this was itself nearly vacuous.**
+
+`check-ran-if.py` shipped in 0417ad5b8 resolving the annotated call by its
+**last path segment only**. There are **719** definitions of `fn self_test`
+under `kernel/src`, so `fs::fat::self_test` was checked against all of them and
+passed if any one printed the declared marker. It caught the bug above purely
+by luck: that marker belongs to `format_self_test`, a differently *named*
+function. Had a neighbouring module's `self_test` printed it, the gate would
+have reported OK having verified a body the annotation never named -- the same
+defect it exists to catch, one level up. The commit message claimed it
+`resolves each annotated call to its fn`, which was true of the design and
+false of the code.
+
+Two hardenings, both verified against real history rather than fixtures --
+`main.rs` restored from `0744cd8a0` must still yield exactly one finding, and
+the current tree none:
+
+- The module path now picks the file: `fs::fat::self_test` is satisfied by
+  `fs/fat.rs` or `fs/fat/mod.rs` and nothing else. (`os.path.relpath` returns
+  backslashes on Windows, where this runs, so the comparison is normalised --
+  without that it would report six findings on a clean tree.)
+- It scans every `.rs`, not just `main.rs`. All six annotations live in
+  `main.rs` today and the sibling gate assumes the same, which made the
+  assumption consistent but unenforced; an annotation added elsewhere would
+  have been silently unchecked. `scripts/hooks/pre-push` carries the identical
+  lesson -- its gate 20 selector excluded every shell script for months and an
+  excluded file looks exactly like one with nothing to find.
+
+A regression case covers the namesake hole directly: two modules defining the
+same function, only the wrong one printing the marker, must be a finding.
+Kept because without it the next refactor can quietly widen the resolver again
+and every symptom would look like a pass.
+**The structural gap is real, and is the next commit.** A `RAN-IF` is a comment;
+nothing verifies that the line it names is printed by the function it annotates.
+A static check does: resolve the annotated call to its `fn`, assert the literal
+appears in that body. It never reads a serial log, so it cannot be satisfied by
+the evidence that satisfied both this gate and the 2026-08-31 audit. Run against
+the tree *before* the correction it reported exactly one finding -- this one --
+and five clean, which is the discriminator: a check derived from the fix could
+only have reported the fix.
+
+## A-THE-ONLY-TESTS-FOR-A-LIVE-TIMESTAMP-PATH-SAT-BEHIND-A-DISK-GATE (lane A, 2026-09-12) — FIXED
+
+`dos_datetime_to_ns` converts a FAT on-disk date/time into a Unix timestamp and
+is called in production by the stat path (fat.rs:3282-3285) to report the times
+a user sees. Its only tests lived inside `fat::self_test`, which is dispatched
+under `if fat_ok` and has never run on this harness -- so a function on a live
+path had **no executing coverage at all**. fat.rs has no `#[cfg(test)]` module
+either; the one match for that string is inside a doc comment.
+
+Found while writing up the RAN-IF entry above, by reading the dead suite's
+section headers rather than its size: one is titled `pure computation, no disk
+I/O`. A previous session moved seven whole dispatches out from behind `fat_ok`
+for exactly this reason. It could not have found this one -- this is a pure
+*section nested inside* a disk-dependent suite, not a suite of its own.
+
+Now `fat::self_test_datetime()`, dispatched unconditionally beside the other
+`runs on any root` suites. Two judgement calls in the move:
+
+- The bare `assert_eq!(dos_datetime_to_ns(0, 0), 0)` became an `Err` return. A
+  panic halts the kernel and reports nothing about the suites queued behind it.
+  That cost nothing while the code never ran and costs the rest of the boot now
+  that it runs every time.
+- The `rtc_to_dos_datetime` -> `dos_datetime_to_ns` round-trip was left behind
+  deliberately. A round trip can pass while both directions are wrong in
+  compensating ways; it is a mirror, not a witness. What was worth rescuing is
+  the absolute values -- 1980-01-01 -> 315532800s and 2000-06-15T14:30Z ->
+  961078200s -- which can only pass by being right.
+
+**On its first boot the rescued test failed -- and the code was right.**
+
+```
+[fat]   dos_datetime_to_ns FAILED: 2000-06-15 14:30 = 961079400000000000,
+                                   expected 961078200000000000
+```
+
+The delta is 1200s exactly. `961078200` is 2000-06-15T**14:10**Z: the *expected*
+constant was twenty minutes early, and the kernel had been right all along.
+Checked against Python's `datetime` before touching anything, because the
+tempting read -- a brand-new failing test means broken production code -- would
+have had me 'fixing' a correct conversion. The DOS-epoch vector in the same
+block (315532800) is right, so the two disagree and only one could be wrong.
+
+This is the argument against leaving dead tests in place, made by the tests
+themselves. A suite that never runs is not inert: it rots quietly, and what it
+accumulates is *accusations against working code*. Had this ever executed, the
+wrong constant would have been caught the day it was written. Instead it sat
+behind `if fat_ok` looking like coverage.
+Verified the wiring gate *sees* it rather than trusting its exit 0, since a pass
+and a silent skip are the same observation: self-tests defined went 1319 -> 1320,
+run at boot 1317 -> 1318, reachable from nothing 0.
 
 
 ## B-SIX-PROGRAMS-READ-ETC-GROUP-AS-TEXT-AND-ASK-THE-WRONG-MEMBERSHIP-QUESTION (lane B, 2026-09-12) -- `doas` FIXED, five open

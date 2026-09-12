@@ -116,10 +116,27 @@ DEFAULT_MIN = 10
 #: would have to change in the *world* for the marker to appear -- a device
 #: attached, a second core, a CPU feature. "It is fine" is not an entry.
 #:
-#: Empty today, and that is a fact rather than an oversight: all six gated sites
-#: were audited on 2026-08-31 against a full serial log and every one of them
-#: was found to run on this host.
-ALLOWED: dict[str, str] = {}
+#: The 2026-08-31 audit concluded that all six gated sites run on this host. It
+#: was wrong about one, and wrong in a way worth recording: it checked each site's
+#: *declared* marker against the serial log, and the FAT site declared
+#: `format_self_test`'s banner rather than its own. That suite is dispatched
+#: unconditionally, so its banner is on every boot -- the audit and this gate were
+#: reading the same mislabelled marker, which is why they agreed.
+#:
+#: `fs::fat::self_test` has in fact never run here: the harness mounts an in-memory
+#: root and attaches vda as a raw swap disk, so `fs::fat::init` fails and the suite
+#: is skipped. The annotation was corrected on 2026-09-12 and the marker belongs in
+#: this dict -- but it cannot be added until one boot has recorded it, because a
+#: marker that is not yet in any `gated_ran` is not live and the entry would fail
+#: as naming nothing. That refusal is correct and is left intact; see
+#: `scripts/check-ran-if.py`, which is what now keeps a marker honest.
+ALLOWED: dict[str, str] = {
+    "[fat] Running self-test...":
+        "A FAT filesystem on vda. The boot test mounts an in-memory root and "
+        'attaches vda as a raw swap disk, so `fs::fat::init("vda")` returns an '
+        "error there and the suite is skipped; it runs on a real FAT boot. This "
+        "entry ends the day the harness attaches a FAT-formatted vda.",
+}
 
 
 def load(path: str) -> list[dict]:

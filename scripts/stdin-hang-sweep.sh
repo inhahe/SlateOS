@@ -163,5 +163,17 @@ fi
 if [ "$#" -gt 0 ]; then
   sweep "$@"
 else
-  sweep $(ls userspace/coreutils/src/bin/*.rs | sed 's|.*/||; s|\.rs$||') posix
+  # Was `sweep $(ls .../*.rs | sed ...)`, which shellcheck refuses (SC2046) and
+  # the gate is right to: the word splitting is wanted here, but it is the same
+  # construct that breaks on a name with a space, and `ls` adds nothing a glob
+  # does not do better. The array says 'these are separate arguments' outright.
+  names=()
+  for f in userspace/coreutils/src/bin/*.rs; do
+    # An unmatched glob stays literal in bash, which would sweep a name that is
+    # really a pattern and report it absent.
+    [ -e "$f" ] || continue
+    base=${f##*/}
+    names+=("${base%.rs}")
+  done
+  sweep "${names[@]}" posix
 fi

@@ -12,6 +12,69 @@
 use std::env;
 use std::fs;
 use std::io::{self, Write};
+
+#[cfg(target_vendor = "slateos")]
+unsafe fn syscall4(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    let ret: i64;
+    // SAFETY: Caller guarantees arguments are valid for the given syscall.
+    // The `syscall` instruction clobbers rcx and r11 per the System V ABI.
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            inlateout("rax") nr as i64 => ret,
+            in("rdi") a1,
+            in("rsi") a2,
+            in("rdx") a3,
+            in("r10") a4,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+// Stub for development hosts (where `cargo test` runs). ENOSYS is what
+// the caller reports, so a host build says it could not set the limit
+// rather than claiming it did.
+#[cfg(not(target_vendor = "slateos"))]
+unsafe fn syscall4(_nr: u64, _a1: u64, _a2: u64, _a3: u64, _a4: u64) -> i64 {
+    -38 // ENOSYS
+}
+
+/// `prlimit64`'s resource limit pair, as the kernel expects it.
+#[repr(C)]
+struct RLimit64 {
+    soft: u64,
+    hard: u64,
+}
+
+/// x86_64 `prlimit64`.
+const SYS_PRLIMIT64: u64 = 302;
+
+/// Apply `soft`/`hard` to `resource` on `pid`.
+///
+/// Returns the raw negative errno on failure. This used to be nothing at
+/// all: the caller printed `prlimit: setting NOFILE for PID N: soft=10,
+/// hard=10` and exited 0, having made no syscall, so a script could set a
+/// limit, be told it was set, and run with the old one.
+fn set_rlimit(pid: u32, resource: u32, soft: u64, hard: u64) -> Result<(), i64> {
+    let new = RLimit64 { soft, hard };
+    // SAFETY: `new` outlives the call and is `#[repr(C)]` with the layout
+    // `prlimit64` documents; the old-limit pointer is null, which the
+    // syscall accepts to mean "do not report the previous value".
+    let rc = unsafe {
+        syscall4(
+            SYS_PRLIMIT64,
+            u64::from(pid),
+            u64::from(resource),
+            core::ptr::from_ref(&new) as u64,
+            0,
+        )
+    };
+    if rc < 0 { Err(rc) } else { Ok(()) }
+}
+
 use std::process;
 
 const VERSION: &str = "0.1.0";
@@ -55,6 +118,32 @@ enum LimitValue {
 }
 
 impl Resource {
+    /// The `RLIMIT_*` number the kernel knows this by.
+    ///
+    /// Read out of `/usr/include/asm-generic/resource.h` and
+    /// `bits/resource.h` rather than recalled: the generic header stops at
+    /// 4 and resumes at 10, because 5 through 9 are architecture-specific.
+    fn number(self) -> u32 {
+        match self {
+            Self::CpuTime => 0,
+            Self::FileSize => 1,
+            Self::DataSize => 2,
+            Self::StackSize => 3,
+            Self::CoreSize => 4,
+            Self::Rss => 5,
+            Self::Processes => 6,
+            Self::OpenFiles => 7,
+            Self::MemLock => 8,
+            Self::AddressSpace => 9,
+            Self::Locks => 10,
+            Self::SigPending => 11,
+            Self::MsgQueue => 12,
+            Self::Nice => 13,
+            Self::RtPrio => 14,
+            Self::RtTime => 15,
+        }
+    }
+
     fn name(&self) -> &'static str {
         match self {
             Self::AddressSpace => "AS",
@@ -484,8 +573,26 @@ fn cmd_prlimit(args: &[String]) {
     let _ = output_cols; // Reserved for future column filtering.
 
     // Handle set operations.
+    let mut failed = false;
     if !set_operations.is_empty() {
         for (res, soft, hard) in &set_operations {
+            // This used to print the line below and stop -- no syscall, no
+            // change, exit 0. A caller could set a limit, be told it was
+            // set, and run with the old one.
+            let raw = |v: &LimitValue| match v {
+                LimitValue::Unlimited => u64::MAX,
+                LimitValue::Value(n) => *n,
+            };
+            if let Err(errno) = set_rlimit(target_pid, res.number(), raw(soft), raw(hard)) {
+                eprintln!(
+                    "prlimit: cannot set {} for PID {}: errno {}",
+                    res.name(),
+                    target_pid,
+                    -errno
+                );
+                failed = true;
+                continue;
+            }
             eprintln!(
                 "prlimit: setting {} for PID {}: soft={}, hard={}",
                 res.name(),
@@ -493,6 +600,13 @@ fn cmd_prlimit(args: &[String]) {
                 soft.display(),
                 hard.display()
             );
+        }
+        // A limit that could not be set is reported and the status says so.
+        // On a host build the syscall is the ENOSYS stub, so every set
+        // fails here and says why -- which is the honest answer, and is
+        // what this printed success for before.
+        if failed {
+            process::exit(1);
         }
         return;
     }
@@ -646,6 +760,57 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Read out of the kernel headers, not recalled. The generic header
+    /// stops at 4 and resumes at 10 because 5..=9 are architecture
+    /// specific, which is exactly the gap a memory of this list gets wrong.
+    #[test]
+    fn resource_numbers_are_the_kernels() {
+        assert_eq!(Resource::CpuTime.number(), 0);
+        assert_eq!(Resource::FileSize.number(), 1);
+        assert_eq!(Resource::DataSize.number(), 2);
+        assert_eq!(Resource::StackSize.number(), 3);
+        assert_eq!(Resource::CoreSize.number(), 4);
+        assert_eq!(Resource::Rss.number(), 5);
+        assert_eq!(Resource::Processes.number(), 6);
+        assert_eq!(Resource::OpenFiles.number(), 7);
+        assert_eq!(Resource::MemLock.number(), 8);
+        assert_eq!(Resource::AddressSpace.number(), 9);
+        assert_eq!(Resource::Locks.number(), 10);
+        assert_eq!(Resource::SigPending.number(), 11);
+        assert_eq!(Resource::MsgQueue.number(), 12);
+        assert_eq!(Resource::Nice.number(), 13);
+        assert_eq!(Resource::RtPrio.number(), 14);
+        assert_eq!(Resource::RtTime.number(), 15);
+    }
+
+    /// Every resource has a distinct number -- a duplicate would silently
+    /// set the wrong limit, which no other test here would catch.
+    #[test]
+    fn no_two_resources_share_a_number() {
+        let all = [
+            Resource::CpuTime,
+            Resource::FileSize,
+            Resource::DataSize,
+            Resource::StackSize,
+            Resource::CoreSize,
+            Resource::Rss,
+            Resource::Processes,
+            Resource::OpenFiles,
+            Resource::MemLock,
+            Resource::AddressSpace,
+            Resource::Locks,
+            Resource::SigPending,
+            Resource::MsgQueue,
+            Resource::Nice,
+            Resource::RtPrio,
+            Resource::RtTime,
+        ];
+        let mut seen: Vec<u32> = all.iter().map(|r| r.number()).collect();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), all.len(), "a number is used twice");
+    }
 
     #[test]
     fn test_resource_names() {

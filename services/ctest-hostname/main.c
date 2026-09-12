@@ -47,7 +47,7 @@
  *     `SET_HOSTNAME` but not `(File, READ)` -- spent a boot test looking like
  *     the kernel dropping the name. Two faults, one exit code, three layers
  *     between the symptom and the cause.
- *   - **the-baseline-read-failed, by layer** -- codes 24-28, added 2026-09-12
+ *   - **the-baseline-read-failed, by layer** -- codes 25-28, added 2026-09-12
  *     for the same reason one day later. Check 13 asked only whether
  *     `getdomainname` returned zero, so a failure said nothing about WHERE.
  *     Lane A traced the entire kernel-side read path by hand, proved every
@@ -346,7 +346,7 @@ int main(void)
     errno = 0;
     if (getdomainname(orig_domain, sizeof orig_domain - 1) != 0) {
         /*
-         * 24-28. WHICH WAY IT FAILED, because "13" on its own cost two lanes
+         * 25-28. WHICH WAY IT FAILED, because "13" on its own cost two lanes
          * an evening.
          *
          * libc returns EIO only when the one source could not be READ -- the
@@ -375,6 +375,21 @@ int main(void)
          *   25 - the buffer was too small. Neither lane; this fixture.
          *   26 - some other errno, printed so it is not swallowed.
          *   13 - the call failed and set no errno at all, which is its own
+         *
+         * THERE IS NO 24. An earlier draft returned it for 'libc could not
+         * read the node', which the 27/28 probe then answered properly, so
+         * the branch went and the number went with it. Recorded rather than
+         * renumbered: the codes are an ABI between this fixture and lane A's
+         * rung, and shifting them to close a gap would silently change what
+         * every older number means.
+         *
+         * Caught by counting what this file can actually RETURN and finding
+         * 24 only in prose -- and the first two patterns I used to count
+         * missed 13, 27 and 28 as well, because they are returned through a
+         * ternary rather than a `return N;`. Three greps, three different
+         * populations, none of them the whole set. That is the defect lane A
+         * and I had been discussing in the abstract about twenty minutes
+         * earlier, reproduced here by me while writing the fix for it.
          *        bug and is now distinguishable from all of the above.
          *
          * Neither of lane A's ring-0 rungs can tell 27 from 28: both read

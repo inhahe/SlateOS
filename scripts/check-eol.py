@@ -264,6 +264,9 @@ import io
 import subprocess
 import sys
 import tempfile
+from pathlib import Path as _P
+sys.path.insert(0, str(_P(__file__).resolve().parent))
+import gitenv  # noqa: E402  (after the path insert, by necessity)
 from pathlib import Path
 
 # Measured 2026-09-04: `git ls-files` returns 13 908 paths. 500 is well below
@@ -296,8 +299,30 @@ def _git(args: list[str], stdin: bytes | None = None,
     # `.gitattributes` of its own. See `self_test`: the alignment fixtures used
     # to be two real files from this tree, and A-27 dissolved the distinction
     # they rested on.
+    #
+    # `cwd` ALONE DOES NOT ANCHOR GIT, and this file learned that the
+    # expensive way on 2026-09-12. `GIT_DIR` wins over the working directory,
+    # and **git sets `GIT_DIR` for every hook it runs** -- so the moment this
+    # checker was wired into `scripts/hooks/pre-push`, the self-test's
+    # `git init --quiet` in a temp directory re-initialised THE REPOSITORY
+    # BEING PUSHED and set `core.bare=true` on the shared config, which makes
+    # the `os` integration worktree answer "this operation must be run in a
+    # work tree" to every `status`, `merge` and `checkout`.
+    #
+    # It had been latent for days: run from `boot-test.sh` there is no
+    # `GIT_DIR` in the environment, so `cwd` worked and nothing broke. Wiring
+    # the same gate into a hook changed nothing about the checker and
+    # everything about where it points -- which is why `gitenv`'s own docstring
+    # calls this out, and why the remedy is to strip the bindings rather than
+    # to pass `cwd` more carefully.
+    #
+    # Stripped only when `cwd` is given: the real run has no `cwd` and MUST
+    # keep the repository context, because `git ls-files` there is the whole
+    # point.
+    env = gitenv.clean_env() if cwd is not None else None
     return subprocess.run(
-        ["git", *args], input=stdin, capture_output=True, check=False, cwd=cwd)
+        ["git", *args], input=stdin, capture_output=True, check=False,
+        cwd=cwd, env=env)
 
 
 def tracked_files() -> list[bytes]:

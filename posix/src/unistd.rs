@@ -1309,21 +1309,30 @@ pub(crate) fn set_stored_hostname_for_test(name: &[u8]) {
 /// `"localdomain"`. Verified against the source, 2026-09-12, after lane A read
 /// this doc and found the old claim false.
 ///
-/// **WHAT THE NODE ACTUALLY SERVES IS NOT ESTABLISHED, and the difference
-/// matters.** That the initialiser sets `localdomain` is read from the source
-/// and is solid. That the node therefore *serves* `localdomain` is an
-/// INFERENCE from it, and there is evidence against: `ctest-hostname` check 13
-/// -- `getdomainname` returning non-zero -- failed on a boot where that
-/// inference says it should have succeeded, because eleven bytes would have
-/// read back fine even through the empty-versus-unreadable bug below. Lane A
-/// traced every layer and could not reconcile it either, and has flagged their
-/// own `localdomain` report to me as read-not-observed.
+/// **SETTLED 2026-09-12 BY OBSERVATION: the node serves the EMPTY STRING.**
+/// Lane A instrumented procfs and booted it:
 ///
-/// So this records the initialiser, which is a fact, and stops short of the
-/// node's contents, which is not one. The settling instrument is a ring-0 rung
-/// PRINTING the value rather than either of us reading a path to it -- lane A
-/// has that queued. Until it runs, treat "an unset domain reads back as X" as
-/// unanswered here.
+/// ```text
+/// [procfs]   domainname node = 1 byte(s) "\n", store = ""
+/// ```
+///
+/// So the paragraph below was right to stop where it did. `localdomain` is
+/// what `init_defaults` *sets*, and the node serves `""` regardless -- the
+/// inference from initialiser to served value was false, and it was the only
+/// thing standing between two lanes and the right answer for three boots.
+///
+/// **This also settles `ctest-hostname` check 13 in the original direction.**
+/// The node served `"\n"`, so `read_kernel_name` got `n = 1`, trimmed to
+/// `len = 0`, and returned `None` -> `EIO` -> 13. The `kernel_name_len` fix
+/// below is what fixed it. My retraction of that diagnosis -- *"my empty fix
+/// cannot be it, because on lane A's kernel the domain is never empty"* -- was
+/// wrong, and it was wrong **because I took a peer's inference as a
+/// measurement**. It was labelled as fact in the sentence I read.
+///
+/// That is the lesson twice over, from both ends: a fact and an inference
+/// drawn from it, written in one sentence, are indistinguishable to the next
+/// reader -- and correct reasoning from a false premise produces a confident
+/// retraction of a correct answer.
 ///
 /// **That is the worst shape of stale claim this tree has produced.** It is not
 /// a comment that fell behind its own code -- it is a confident assertion about

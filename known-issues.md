@@ -138558,3 +138558,120 @@ either side's timing moved the race. Adding row buffering for `--sort` moved it.
 It now polls `/proc/2/stat` until the state is `S`, using the `read` builtin so
 it forks **nothing** -- a forked `awk` would take PID 3 and could itself be
 caught in the listing it is preparing.
+
+## B-SEVENTY-PROGRAMS-ACCEPT-AN-OPTION-THEY-DO-NOT-HAVE-AND-EXIT-ZERO (lane B, 2026-09-12) -- 7 of 70 FIXED
+
+Found by `scripts/unknown-option-sweep.py`, which runs every binary in an
+empty directory with nothing but a bogus long option and looks at what it
+does. The sweep exists because a file named `--list.lock` was sitting in the
+repository root: `flock` had been handed `--list`, had not recognised it, and
+had locked it.
+
+**Three programs made a file out of the option** and are fixed: `flock`
+(created `--list.lock`), `lockfile` (created `--zzq` *and exited 0*), and the
+`nohup` personality of the `timeout` crate (created `nohup.out`; removed
+outright, coreutils already had a correct `nohup`).
+
+**Seventy more accepted the option and exited 0** without a filesystem side
+effect. Seven are fixed -- `nproc`, `arch`, `pathchk`, `users` (all one
+crate), `lscpu`, `lsmem`, `blkzone`. The remaining 63 are listed below.
+
+The wording to fix them with is in `userspace/usageerror`; it is getopt's,
+not ours, and was measured in the C locale. The exit status is *not* in that
+crate and must be measured per tool: coreutils exits 1, util-linux's `flock`
+exits 64, and util-linux's `lscpu`, `lsmem`, `prlimit` and `blkzone` exit 1.
+
+**`prlimit` needs more than a refusal** and is called out separately: its
+`--<resource>` arm silently ignores a resource name it cannot parse, and it
+drops the trailing command entirely, so `prlimit --nofile=10 cmd` never runs
+`cmd`. Refusing unknown options there without fixing that would paper over
+the larger gap.
+
+**`sysstat`'s five personalities are blocked on a reference.** `mpstat`,
+`pidstat`, `tapestat`, `cifsiostat` and `sysstat` itself are all in the list,
+but the sysstat package is not installed in the WSL reference environment and
+`apt-get` needs a password this session does not have. Their wording is
+therefore unmeasured, and guessing it is exactly what §371 forbids. Trigger to
+promote: sysstat available in the reference environment.
+
+### Two things the sweep does not see, both verified rather than assumed
+
+**A program that creates the file and removes it again before exiting reads
+as clean.** A create-then-remove probe reports nothing. This is very likely
+what the original `flock` did -- probing it in a scratch directory showed a
+clean run while a real `--list.lock` sat on disk, so that invocation simply
+never reached its cleanup.
+
+**A program can accept the option and still exit non-zero for an unrelated
+reason**, which reads as a refusal. `blockdev` is the proof: it does not
+appear in the list below, because on this host it accepted `--zzq`, went on
+to the device, and exited 1 with `cannot read the device size from sysfs`.
+On a machine where `/dev/sda` exists it would have exited 0. It was found
+only because `blkzone`, its argv[0] sibling, was flagged and the crate was
+opened anyway. So the count of 70 is a floor, not a total.
+
+### Still open (63)
+
+- `clipboard`
+- `coredumpctl`
+- `credentials`
+- `dbus`
+- `desktop`
+- `ftp`
+- `fwupd`
+- `gdb`
+- `getopt`
+- `hwinfo`
+- `ifconfig`
+- `loginmgr`
+- `lsirq`
+- `m4`
+- `match3`
+- `numactl`
+- `objdump`
+- `pinball`
+- `prlimit`
+- `resolvectl`
+- `route`
+- `sanitize`
+- `selinux`
+- `servicebus`
+- `shell`
+- `sysstat`
+- `thermald`
+- `tuned`
+- `wpa`
+- `atq (via at)`
+- `autrace (via audit)`
+- `captest (via capsh)`
+- `cifsiostat (via sysstat)`
+- `clear (via tput)`
+- `cpufreq-info (via cpupower)`
+- `dnsdomainname (via hostnamectl)`
+- `getcap (via capsh)`
+- `getenforce (via selinux)`
+- `grub-reboot (via grub2)`
+- `grub-set-default (via grub2)`
+- `lsattr (via chattr)`
+- `lshw (via hwinfo)`
+- `mpstat (via sysstat)`
+- `numademo (via numactl)`
+- `numastat (via numactl)`
+- `pidstat (via sysstat)`
+- `resolvconf (via resolvectl)`
+- `restorecon (via selinux)`
+- `rfkill-event (via rfkill)`
+- `sbkeysync (via sbctl)`
+- `sestatus (via selinux)`
+- `systemd-cat (via systemctl)`
+- `systemd-cgls (via systemctl)`
+- `systemd-cgtop (via systemctl)`
+- `systemd-escape (via systemctl)`
+- `systemd-path (via systemctl)`
+- `systemd-resolve (via resolvectl)`
+- `tapestat (via sysstat)`
+- `tset (via tput)`
+- `tuned-gui (via tuned)`
+- `turbostat (via cpupower)`
+- `ulimit (via prlimit)`
+- `update-grub (via grub2)`

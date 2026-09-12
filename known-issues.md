@@ -12457,6 +12457,48 @@ boots were all pre-build gates — inherited shellcheck, a misfiled open-questio
 clippy denial in another lane — so the base rate for "failed for an unrelated reason" is
 demonstrably high, but that is an impression and not a measurement of those 85.
 
+**[A] 2026-09-12 — TAKEN THE CHEAP ROUTE THIS ENTRY NAMED FIRST, AND THE SIGNATURE HAS NOT
+RECURRED IN 722 RECORDED BOOTS.** No stress run was needed: the data already existed in
+`bench/boot-history.jsonl`, which carries an `exceptions` field nobody had queried.
+
+| measurement | value |
+|---|---|
+| boot records | 722 |
+| non-host failures | 84 |
+| of those, reached the kernel (serial output) | **84** — pre-build gate failures never get a record |
+| failures with an exception captured | 6 |
+| page faults among them | 3 |
+| **matching `address=0x97`** | **0** |
+
+The three captured faults are at `0xffff80007fef4000`, `0x1000` and `0xffff80007feb0000` —
+none is the near-null read this entry describes.
+
+**Why the absence is meaningful rather than an artefact of missing instrumentation**, which
+is the question that decides whether any of the above counts. Only 10 of 722 records carry
+the `exceptions` key at all, which looks at first like sparse instrumentation. It is not:
+the key is written **only when an exception is parsed**, and all 10 that have it have a
+non-empty value. The test is whether the parser was live across the failure window, and it
+was — failures span 2026-08-17 to 2026-09-10 and the *earliest failure of all* already
+carries the key, with zero failures preceding it. So within that window, absence of the key
+means no exception was seen, not that none could have been.
+
+**And the self-test that provokes it does run**, checked rather than assumed: tonight's
+boot shows `spawn-test-glibc-pthread` as process 339 doing 4 threads, 40,000 mutex/futex
+ops and `pthread_join`, and `check-boot-skips` does not list it. A population of 700 boots
+says nothing if the test was skipping in all of them.
+
+**What this establishes, and what it does not.** At the observed July rate of 1 in 5, ~700
+boots would have produced on the order of a hundred recurrences; there are none. So the
+rate has collapsed and the defect was most likely fixed incidentally by teardown work in
+the interim. It does **not** identify a root cause, and the July occurrence predates the
+recorded window entirely — this is absence of recurrence, not a diagnosis. The honest
+status is a measured negative rather than a fix.
+
+*Worth noting for the next entry that reaches this state:* the route this took was already
+written down here — "a boot whose serial log is checked for the `address=0x97` signature" —
+and the cheaper version of it, querying a field the harness had been recording all along,
+was available for weeks. The 15-boot stress run was the option everyone remembered.
+
 *What would close this.* Either a boot whose serial log is checked for the `address=0x97`
 signature across the 85, or a deliberate stress run of
 `self_test_linux_real_glibc_pthread` — the old rate means ~15 boots would give better than

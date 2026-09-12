@@ -604,8 +604,85 @@ fn reverse_hunk(hunk: &Hunk) -> Hunk {
     }
 }
 
+/// `patch --version`, in GNU's five-line shape.
+fn version_text() -> String {
+    let mut text = String::new();
+    text.push_str("patch (SlateOS coreutils) 0.1.0\n");
+    text.push_str("Copyright (C) 2026 Free Software Foundation, Inc.\n");
+    text.push_str("This program is free software; you may redistribute it under the terms of\n");
+    text.push_str(
+        "the GNU General Public License version 3 or (at your option) any later version.\n",
+    );
+    text.push_str("This program has absolutely no warranty.\n");
+    text
+}
+
+/// `patch --help`.  Ours, not the GNU project's, and the divergence is
+/// declared in `scripts/patch-diff.sh`.
+fn help_text() -> String {
+    let mut text = String::new();
+    text.push_str("Usage: patch [OPTION]... [ORIGFILE [PATCHFILE]]\n\n");
+    text.push_str("Apply a diff file to an original.\n\n");
+    text.push_str("  -i FILE  --input=FILE      Read the patch from FILE.\n");
+    text.push_str("  -pNUM    --strip=NUM       Strip NUM leading components from names.\n");
+    text.push_str("  -o FILE  --output=FILE     Write the result to FILE.\n");
+    text.push_str("  -r FILE  --reject-file=FILE  Write rejects to FILE.\n");
+    text.push_str("  -d DIR   --directory=DIR   Change to DIR first.\n");
+    text.push_str("  -R       --reverse         Assume the patch was made the other way.\n");
+    text.push_str("  -N       --forward         Ignore patches that seem reversed.\n");
+    text.push_str("  -f       --force           Do not ask any questions.\n");
+    text.push_str("  -l       --ignore-whitespace  Match ignoring whitespace.\n");
+    text.push_str("  -b       --backup          Save the original as <file>.orig.\n");
+    text.push_str("  -E       --remove-empty-files  Delete a file the patch empties.\n");
+    text.push_str("  -s       --quiet --silent  Do not narrate the work.\n");
+    text.push_str("           --dry-run         Say what would happen, change nothing.\n");
+    text.push_str("           --no-backup-if-mismatch  No .orig when a hunk fails.\n");
+    text.push_str("           --help            Print this message.\n");
+    text.push_str("  -v       --version         Print the program's version number.\n");
+    text
+}
+
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
+
+    // HANDLED BEFORE `parse_args`, AND WITH THE SPELLINGS GNU ACTUALLY HAS.
+    // Measured rather than copied from the sibling utilities, because `patch`
+    // is not shaped like them and the house convention would have been wrong
+    // three ways:
+    //
+    //     --help     usage, status 0
+    //     -h         INVALID OPTION, status 2 -- patch has no `-h`
+    //     --version  version, status 0
+    //     -v         version, status 0 -- not "verbose"; `--verbose` is
+    //     -V         OPTION REQUIRES AN ARGUMENT, status 2 -- it is
+    //                `--version-control`, and is not a spelling of --version
+    //
+    // `strings` in this same tree takes `-h`/`-H` and `-v`/`-V`, so adopting
+    // that set here would have invented two options and mistyped a third.
+    // Before this, `patch --help` and `patch --version` were both rejected as
+    // unrecognized -- while `scripts/patch-diff.sh` excused them as "our help
+    // text" and "our version string", which described a behaviour this program
+    // did not have. A declared divergence has to be true before it can be
+    // declared.
+    if args.iter().any(|a| a == "--help") {
+        let mut out = Stream::stdout();
+        let _ = out.write_all(help_text().as_bytes());
+        // `process::exit` runs no destructors, so `Stream`'s Drop
+        // never flushes and the text is lost. Exit 0 with an empty
+        // stdout is what this looked like the first time.
+        let _ = out.flush();
+        process::exit(0);
+    }
+    if args.iter().any(|a| a == "--version" || a == "-v") {
+        let mut out = Stream::stdout();
+        let _ = out.write_all(version_text().as_bytes());
+        // `process::exit` runs no destructors, so `Stream`'s Drop
+        // never flushes and the text is lost. Exit 0 with an empty
+        // stdout is what this looked like the first time.
+        let _ = out.flush();
+        process::exit(0);
+    }
+
     let opts = match parse_args(&args) {
         Ok(o) => o,
         Err(e) => {

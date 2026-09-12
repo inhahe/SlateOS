@@ -136789,3 +136789,44 @@ state that is correct. Recorded so the next person does not re-derive the three 
 above, and with the instrument already in the tree: the rung prints the value every boot,
 so anyone who wants the answer can bisect by adding one more print rather than starting
 from the question.
+
+### A-FAT-8-3-NAMES-DECODE-TO-QUESTION-MARKS-AND-COLLIDE-IN-LOOKUP (lane A, 2026-09-12)
+
+**In short:** FAT stores short filenames in a DOS codepage, not UTF-8. We decode them as
+UTF-8 and substitute `????????` when that fails — so any accented short name becomes the
+same eight question marks, and two different files answer to one name.
+
+**Where:** `kernel/src/fs/fat.rs`. `display_name()` (715) falls back to the 8.3 name when
+there is no long-name entry; `short_name()` (740) uses it **always**. Both decode with
+`core::str::from_utf8(..).unwrap_or("????????")` for the base and `"???"` for the
+extension.
+
+**Why it is not an edge case.** 8.3 names are codepage-encoded *by specification* —
+CP437/CP850 and friends — so a byte ≥ 0x80 is the normal representation of an accented
+character, not corruption. Any disk formatted or written by a DOS-era tool, a camera, or
+embedded firmware carries them.
+
+**The collision is in a matching path, which makes it worse than the procfs case.**
+`fat.rs:1892-1899`:
+
+```rust
+if e.display_name().eq_ignore_ascii_case(&target) { return true; }
+if e.long_name.is_some() { return e.short_name().eq_ignore_ascii_case(&target); }
+```
+
+So a lookup for the literal `????????.???` matches **every** entry whose short name failed
+to decode, and returns whichever comes first; and a file whose real short name is
+non-ASCII cannot be found by its real name at all. `A-EXEC-WRITES-A-COMM-...` manufactures
+collisions in a *display*; this one manufactures them in a *resolver*.
+
+**Proper fix:** the same shape as the comm work — keep the 8.3 field as the eleven bytes it
+is, compare bytes, and decode lossily only for display. `DirEntry.name` is already byte-
+clean since `D-VFS-PATHS-ARE-STR-NOT-BYTES`, so the destination type exists; what does not
+is a decision about *which codepage* to use for display, which is a real question and not
+one to answer in passing.
+
+**Found by enumerating the defect rather than the subsystem**, which is the only reason it
+surfaced: grepping `comm_truncate` found three sites in one file; grepping the literal
+`"???"` found four there, a fifth surface (`/proc/<pid>/cmdline`), this, and a *fixed*
+instance in `fs/ar.rs` whose comment records the same reasoning. A search keyed on the
+path being worked on cannot contain a defect in a different subsystem.

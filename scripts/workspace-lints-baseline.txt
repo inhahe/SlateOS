@@ -46,7 +46,6 @@ userspace/dmesg
 userspace/fdisk
 userspace/file
 userspace/fmt
-userspace/free
 userspace/fsck
 userspace/fw
 userspace/getopt

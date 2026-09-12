@@ -1165,7 +1165,7 @@ two implementations that can disagree with the winner picked by packaging:
 | `userspace/fuser` | `lsof` | `userspace/lsof` |
 | `userspace/hostnamectl` | `hostname` | `userspace/hostname` |
 | `userspace/resolvectl` | `nslookup` | `userspace/nslookup` |
-| `userspace/swapon` | `free` | `userspace/free` |
+| `userspace/swapon` | `free` | coreutils |
 | `userspace/useradd` | `newgrp` | `userspace/newgrp` |
 
 `nologin` answering to `true` and `false` is the one to look at first: those
@@ -131025,15 +131025,38 @@ other userspace crates, 39 names in both.
 **It does not cut one way, which is why this is a question and not a chore.**
 Two measured examples:
 
-* **`free`** -- `coreutils`'s is a 1876-line transcription of procps-ng 4.0.4,
-  measured against the real binary, and its own module doc lists the defects of
-  "the implementation this replaces": invented flags, wrong header widths,
-  `shared` hardcoded to zero, and `used = total - free - buffers - cached`
-  where upstream's is `MemTotal - MemAvailable`. **`userspace/free` still has
-  every one of them**, including that `used`. Here `coreutils` plainly wins.
-* **`ps`** -- `coreutils`'s is 405 lines and supports `-e -f`;
-  `userspace/ps` is 1022 lines with a full column selection. Here the
-  standalone plainly wins.
+* **`free`** -- **SETTLED 2026-09-12: `userspace/free` is deleted.** The
+  prediction below was written from the sources and was, for once, right --
+  but it was confirmed by measurement before anything was removed, not
+  instead of it. `scripts/free-diff.sh` pins `/proc/meminfo` inside a private
+  mount namespace and compares both against procps-ng 4.0.4:
+  **coreutils 48 passed / 0 differed; `userspace/free` 0 passed / 48
+  differed.** The most lopsided pair yet measured.
+
+  The original reasoning, kept because it is the only one of the five that
+  the harness upheld: `coreutils`'s is a 1876-line transcription of procps-ng
+  4.0.4, and its own module doc lists the defects of "the implementation this
+  replaces": invented flags, wrong header widths, `shared` hardcoded to zero,
+  and `used = total - free - buffers - cached` where upstream's is
+  `MemTotal - MemAvailable`. `userspace/free` still had every one of them.
+
+  **What the loser knew that the winner did not: nothing.** Its whole unique
+  surface was one invented flag, `--json`, which procps-ng does not have and
+  which nothing in this tree consumed. It was deliberately not ported --
+  adding a flag upstream lacks would break the bug-for-bug property
+  `free-diff.sh` asserts, which is the thing that made the pair decidable at
+  all. Every *real* option it lacked, coreutils has: `--peta`, `--pebi`,
+  `--si`, `--line`, `--committed`, `--version`. It also sat in
+  `argv-utf8-baseline.txt` as `argv-as-string`.
+* **`ps`** -- **the line counts below are stale and are left only as a record
+  of how fast that happens.** When written, `coreutils`'s `ps` was 405 lines
+  supporting `-e -f` against `userspace/ps`'s 1022 with full column
+  selection, and the conclusion was "the standalone plainly wins".
+  `dup-bins-survey` now measures coreutils' at **2007** lines and the
+  standalone at **1155**. The winner may well have changed; nobody knows,
+  because no harness has been written. **Do not act on either number --
+  measure it.** This is the same entry that, five pairs running, ranked
+  wrongly every time.
 
 So the answer is per command, and for some pairs it is "merge", not "pick".
 

@@ -881,13 +881,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "free"
-version = "0.1.0"
-dependencies = [
- "procinfo",
-]
-
-[[package]]
 name = "freecell"
 version = "0.1.0"
 dependencies = [

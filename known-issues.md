@@ -135140,6 +135140,64 @@ thing it checks.**
    `-rv` group that certifies the sort. Two comparison modes in one harness is
    a cost, but it is smaller than a check that cannot be trusted.
 
+**Five more runs, 2026-09-12 — and they refute the hypothesis above.**
+
+| run | differed | case(s) |
+|---|---|---|
+| 1 | 0 | — |
+| 2 | 1 | `-rfv tree dst` |
+| 3 | 1 | `-rbv tree dst` |
+| 4 | 4 | `-rv tree dir`, `-rLv tree dst`, `-riv [y,y,y]`, `-riv [y,n]` |
+| 5 | 1 | `-rLv treelink dst` |
+
+Eight runs in total have now produced verdicts of 0, 1, 1, 1, 3 and 4, and the
+cases move between runs. **I predicted the flakes would land only on the
+symlink-following and interactive cases, and run 4 includes `cp -rv tree dir`**
+— a plain recursive case from the very group whose comment says those cases
+"certify `read_dir_fastread`'s sort and would go red without it". So it is not
+a specific traversal path: it is directory enumeration itself, and the sort
+certification is measuring something that is only usually true.
+
+That also settles the fix order. Option 3 (compare `-v` output as a set for
+some cases, ordered for the `-rv` group) is now the *worst* option rather than
+the fallback, because the `-rv` group is exactly where a flake was observed.
+Option 1 — make the two copies enumerate identically by construction — is the
+only one that repairs what the assertions claim.
+
+## B-STAT-DIFF-ALSO-VARIES-BETWEEN-RUNS (lane B, 2026-09-12)
+
+**What.** `scripts/stat-diff.sh` reported **76 passed, 12 differed** inside a
+full `all-diff.sh` sweep and **77 passed, 11 differed** run by itself a few
+minutes later, with no edit and no rebuild in between.
+
+**Why, and why it is a different fault from `cp`'s.** `stat -f` reports free
+blocks. The two sides are run one after the other, so anything that allocates
+or frees on that filesystem in between moves the answer — and during a sweep
+the other 58 harnesses are doing exactly that. Run alone on a quiet machine the
+two calls see the same figure and it passes.
+
+**The harness already has half of this fix, which is what makes it
+instructive.** Its header records that `%f`/`%a` differed by one because the
+harness's own capture files consumed the blocks it was counting, demonstrated
+rather than theorised, and its scratch was moved to `/dev/shm` — deriving the
+rule *a harness must not write to the thing it measures*. That rule is true and
+it was not enough: it removed the harness's own writes and nothing else's. The
+stronger form is **a harness must not measure a quantity anything else can
+change between the two sides' calls** — free space, load, the clock, a shared
+directory's enumeration order.
+
+**Fix.** Either give `stat -f` a filesystem nothing else is touching (a private
+loopback or tmpfs mount made for the run), or exclude the free-space specifiers
+from comparison and assert only their *shape*, saying so. The first is better:
+`%f`/`%a` are among the fields an implementation is most likely to get wrong,
+which is the harness's own stated reason for comparing them at all.
+
+**Both entries share a consequence worth stating once.** `all-diff.sh`'s bottom
+line — "60 green, 8 red" — is not reproducible, and neither is any single
+harness's. Two of the eight reds are these. A sweep is a sample; a difference
+that appears in one run and not the next has not been shown to be a defect, and
+one that disappears has not been shown to be fixed.
+
 **First thing to measure next.** Whether `mv-diff.sh` has the same shape —
 known-issues already records that `cp-diff.sh` and `mv-diff.sh` must stay
 byte-identical across the sections they share, so if this is in one it is

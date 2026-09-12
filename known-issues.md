@@ -294,6 +294,33 @@ Both halves of the duplicate pair lacked it, so it survived the retirement of
 the standalone. `scripts/strings-diff.sh` covers it in three cases
 (`-d elf.bin`, `--data elf.bin`, alongside `-a`), all currently refusing.
 
+**Shape of the fix, scoped 2026-09-12 so it is not re-derived.** Walk the ELF
+section headers and scan only sections with `SHF_ALLOC` set and a type other
+than `SHT_NOBITS` — allocated means it is loaded, not-NOBITS means its bytes
+are actually in the file rather than zero-filled at load. `.bss` is the section
+that is `SHF_ALLOC` *and* `SHT_NOBITS`, which is exactly why both halves of the
+test are needed; scanning it would read whatever the file happens to hold at
+that offset, which is the next section.
+
+**The constants go in `strings.rs`, not `use posix::…`.** They already exist as
+`SHT_PROGBITS`/`SHT_NOBITS`/`SHF_ALLOC` in
+`posix/src/linux_elf_section_types.rs`, and reusing them looks like the obvious
+move — but `userspace/coreutils` deliberately depends only on host-buildable
+path crates (`procinfo`, `ere`, `quote`), because the whole crate is tested
+with `cargo test -p coreutils --target x86_64-pc-windows-gnu`. `posix` is the
+target's libc shim. Taking the dependency to save three integer constants would
+cost the crate its host build, which is where its tests run.
+
+**Two things to measure rather than assume**, both cheap once the harness is
+green on the rest: what binutils does with `-d` on a file that is NOT an object
+file, and whether our default already matches its default — binutils' man page
+says scanning the whole file is normally the default, so `elf.bin` and
+`-a elf.bin` should already agree, and if they do not then `-d` is not the only
+thing wrong here. Every offset and length out of the section table is
+attacker-controlled and must be range-checked against the file size with
+`checked_add`/`get`, not indexed — the crate denies `indexing_slicing` and
+`arithmetic_side_effects` for exactly this shape of input.
+
 Related and cheaper: the diagnostics for a bad option *value* — `-n 0`,
 `-n -1`, `-n notanumber`, `-t q`, `-e q`, and each of those options given
 nothing — differ from GNU's wording in 10 of the 15 remaining failures. The
@@ -594,9 +621,15 @@ deliberately — so it is recorded here with the harness that will judge it.
 
 ## TD-B-DIFF-HARNESSES-HAVE-NO-PER-CASE-BOUND-AND-ORPHAN-ACROSS-WSL (lane B, 2026-09-11)
 
-**What.** 22 of the 59 `scripts/<name>-diff.sh` harnesses do not bound an
-individual case. One subject that does not terminate stops the whole run, and
-the processes survive every kill available from the Windows side.
+**RESOLVED 2026-09-12, and the shape of the fix is the interesting part.**
+Every harness is now bounded, including the ones nobody has written yet, and
+the bound is in one place: `diff-wsl.sh` section 1b re-execs the harness under
+`timeout` on the Linux side of the WSL boundary. `scripts/test-diff-bound.sh`
+is the two-probe test, 9 cases.
+
+**What it was.** 22 of the 59 `scripts/<name>-diff.sh` harnesses did not bound
+an individual case. One subject that does not terminate stopped the whole run,
+and the processes survived every kill available from the Windows side.
 
 **CORRECTION (2026-09-11, same day).** This entry first said *none* of the
 harnesses bounds a case. That was asserted without measuring and is false:
@@ -613,6 +646,60 @@ solution to a problem already solved 31 times a few files away. **The actual
 fix is to copy the existing pattern into the 28 that lack it**, which needs no
 shared machinery touched and carries none of that risk.
 
+**Two wrong shapes came first, and both are worth recording.**
+
+*A `timeout` at every invocation site.* Six harnesses got one — `awk`, `tar`,
+`sh`, `ed`, `expr`, `calc` — before it was clear this is an enumeration with
+one entry per harness. It misses the next harness BY CONSTRUCTION and the miss
+is silent. It was also already wrong when written: the list of 22 came from a
+grep for the invocation shape, and that grep missed `sort-diff.sh`,
+`printf-diff.sh` and `seq-diff.sh`, which reach the same binaries through
+`$bindir` by a different spelling. **A list of instances is not a fix, and a
+list built by pattern-matching the instances is not even a reliable list.**
+
+*A wrapper script in `$bindir`.* This one covers every harness, written or
+not, because it sits where the two sides are constructed rather than where
+they are called. It looked right and it left `stat-diff.sh` at 77-11-19,
+unchanged to the case. It was still wrong: a wrapper is IN THE SUBJECT'S EXEC
+PATH, and anything there can be seen. `nohup-diff.sh` fell from 75-0 to 74-1,
+on its one case that closes stderr with `2>&-`. Measured:
+
+| caller closes fd 2, then… | what the subject finds | |
+|---|---|---|
+| direct, no wrapper | `0 1 2` | fd 2 still closed |
+| through a `#!/bin/sh` wrapper | `0 1 2 3` | **reopened** |
+| through a `#!/bin/bash` wrapper | `0 1 2 3` | **reopened** |
+| through `timeout` | `0 1 2` | unchanged |
+| through `bash -c 'exec -a …'` | `0 1 2` | unchanged |
+
+A shell reopens the standard descriptors before the script it interprets ever
+runs, so no shell-shebang wrapper can be transparent — and "stderr is closed"
+is a case this family deliberately tests. The general form is one this tree
+keeps rediscovering: **a harness may not put its own identity into the
+subject's input**, and an exec-path wrapper is identity in the most literal
+sense. It cost a real test case and returned nothing.
+
+**Why wrapping the harness works instead.** `timeout` puts its child in a new
+process group and signals the GROUP, so everything the harness spawned dies
+with it — measured, including that the *caller* is not in that group and
+survives with rc 124. The subject is launched exactly as before, by the same
+symlink, with the same `argv[0]`, the same `PATH` and the same descriptors.
+The cost is granularity: a hung case burns the harness's whole allowance
+rather than its own. That is the right trade — a bound tight enough to be
+precise is tight enough to fire on a slow-but-finite case, and a flaky verdict
+gets a check switched off. The six per-case bounds stay as a fast fail, which
+is safe precisely because `timeout` is transparent in the table above.
+
+**A note on how the test failed.** `test-diff-bound.sh` reported the bound not
+firing when what had actually happened was that its own generated fixture
+sourced an unquoted path — and this repository lives under `visual studio
+projects`, so the inner harness died at `/mnt/e/visual: No such file or
+directory` before ever reaching the preamble. **A test whose fixture is broken
+accuses the code it is testing**, and it accuses it of exactly the thing you
+were expecting to find, which is what makes it convincing. What caught it was
+printing the inner harness's own output on failure instead of only its exit
+status.
+
 **Progress, 2026-09-12.** The six whose subject is a *language* are done —
 `awk`, `tar`, `sh`, `ed`, `expr` and `calc` — because that is where a
 non-terminating program is ordinary input rather than an exotic one:
@@ -620,11 +707,18 @@ non-terminating program is ordinary input rather than an exotic one:
 reaches `q` never ends. Each was verified to change no verdict — sh 217/0,
 ed 499/0, expr 177/0, calc 200/0, awk 171/0, tar 245/0.
 
-**Still unbounded (22):** `all`, `cat`, `csplit`, `cut`, `df`, `du`,
-`extfloat`, `find`, `head`, `interleave`, `ls`, `more`, `nl`, `od`, `sed`,
-`sort`, `split`, `test`, `tr`, `uniq`, `wc`, `xargs`. These are filters over
-small fixtures, where a hang means a defect rather than an input — lower
-risk, but not zero: `find` walks a tree and `test`'s harness drives `bash`.
+**~~Still unbounded (22)~~ — superseded the same day by the harness-level
+bound above, which covers all 59 at once.** Left here because the list itself
+is the evidence for why the per-file approach was abandoned: it was built by
+grepping for the invocation shape, and it is WRONG. `sort`, `printf` and `seq`
+are missing from it and were unbounded too; `all` is on it and should not be,
+since `all-diff.sh` is the aggregate runner rather than a subject harness and
+must stay unbounded so its children's own bounds can fire. A hand-built list of
+instances gets both kinds of error at once, and neither announces itself.
+
+The list as filed read: `all`, `cat`, `csplit`, `cut`, `df`, `du`, `extfloat`,
+`find`, `head`, `interleave`, `ls`, `more`, `nl`, `od`, `sed`, `sort`, `split`,
+`test`, `tr`, `uniq`, `wc`, `xargs`.
 
 **Lane A has confirmed the scope from their side**, which is what makes the
 in-harness bound the only protection: `run-timeout.py`'s docstring promised
@@ -134291,3 +134385,73 @@ grep -rlE "/tmp/" scripts/*.py scripts/*.sh          # candidates
 ```
 The step that cannot be skipped is reading the line. Two of my three passes failed
 at precisely that point, in opposite directions.
+
+## B-CP-DIFF-GIVES-A-DIFFERENT-VERDICT-EACH-RUN (lane B, 2026-09-12)
+
+**What.** `scripts/cp-diff.sh` is not deterministic. Three consecutive runs, no
+edits between them, no rebuild:
+
+| run | verdict | case(s) |
+|---|---|---|
+| 1 | 580 passed, **3 differed** | `-rLv treelink dst`, `-riv tree dst [y,n]`, `-riv tree dst [y,y]` |
+| 2 | 580 passed, **1 differed** | `-rHv tree dst` — a case that passed in run 1 |
+| 3 | 581 passed, **0 differed** | — |
+
+**Why it matters more than one wrong verdict.** A green run is a sample, not a
+proof, and this harness is used as evidence — it certified two `cp` bug fixes
+(`B-CP-COPYING-A-FILE-ONTO-ITSELF-EMPTIED-IT`,
+`B-CP-R-COULD-NOT-REPLACE-AN-EXISTING-SYMLINK`). Run 3 above would have been
+reported as a clean pass by anyone who ran it once. It is also how this was
+found: an aggregate run reported `cp: 1 differed` and the obvious first
+hypothesis — that a change of mine had broken it — was wrong.
+
+**What differs.** Only the ORDER of the `-v` lines. In every case seen the
+resulting trees, file contents, hard links and xattrs were byte-identical —
+with one exception that matters: `-riv tree dst` fed `y` then `n`. There the
+prompts arrive in a different order, so the `n` lands on a different file, and
+the trees genuinely diverge. **A case whose answers are positional is unstable
+by construction if the order is.**
+
+**What is NOT the cause.** Neither binary is nondeterministic on its own.
+Built a fresh fixture and ran `cp -rLv treelink dst` five times per side:
+both produced creation order (`sub`, `a.txt`, `link`, `todir`), identically,
+ten runs out of ten. So this is not our `cp` walking a directory differently
+from GNU's in general.
+
+**Where it comes from.** Each side gets its own copy of the fixture tree —
+correct, because `cp` writes, and the rule is *give the subject a private copy
+only when it writes*. But the two copies are two different directories, and
+both programs walk a directory in inode order (the harness says so itself at
+the `-rv` group, and relies on it). Two directories built by the same sequence
+USUALLY allocate inodes in the same order. When they do not, the two sides
+enumerate differently and the `-v` lines come out in a different order.
+
+**Why the obvious fix is wrong.** Sorting the `-v` output before comparing
+would make this green — and would destroy the property the `-rv` group exists
+to test. Its comment is explicit: `tree` is created in the order `sub`,
+`a.txt`, `link`, and both programs name them in that order and in neither name
+order nor readdir order, *so these cases certify `read_dir_fastread`'s sort and
+would go red without it*. Sorting the comparison would certify nothing and
+still print `passed`. **A flaky check must not be silenced by removing the
+thing it checks.**
+
+**Proper fix, in the order to try it.**
+
+1. Make the two copies enumerate identically rather than usually-identically.
+   The fixture is built once and copied per case; if the copy is made by
+   replaying the same ordered creation sequence into each side rather than by
+   walking the prototype, both sides allocate in the same order by
+   construction. This keeps every order-sensitive assertion intact.
+2. Change `-riv tree dst [y,n]` to uniform answers. A mixed answer sequence
+   asserts *which* file was skipped, which is only meaningful if the prompt
+   order is pinned. Split it into two cases, all-`y` and all-`n`.
+3. Only if 1 is impossible: compare the `-v` output as a set for the cases
+   where order is not the property under test, and keep it ordered for the
+   `-rv` group that certifies the sort. Two comparison modes in one harness is
+   a cost, but it is smaller than a check that cannot be trusted.
+
+**First thing to measure next.** Whether `mv-diff.sh` has the same shape —
+known-issues already records that `cp-diff.sh` and `mv-diff.sh` must stay
+byte-identical across the sections they share, so if this is in one it is
+likely in the other. And whether any other harness compares unsorted output
+from a directory walk: `ls`, `du`, `find` and `tar` are the candidates.

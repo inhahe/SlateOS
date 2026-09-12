@@ -2831,6 +2831,36 @@ record_boot_outcome() {
         return 0
     fi
 
+    # PRESERVE THE SERIAL LOG WHEN THE RUN FAILED.  `$SERIAL_FILE` is one fixed
+    # path that every run overwrites, so the 713 boots recorded in
+    # bench/boot-history.jsonl retain exactly ONE serial log between them: the most
+    # recent.  The outcome of every run is kept and the evidence for it is discarded.
+    #
+    # That is not hypothetical.  On 2026-09-12 the recurrence argument for
+    # B-PTHREAD-TEARDOWN-PF -- an intermittent #PF last seen in July -- could show that
+    # 713 boots had run the failing test with no report of it, and then had to stop at
+    # "85 of those did not reach BOOT_OK and I cannot attribute them", because those 85
+    # serial logs had each been overwritten by the next run.  The question was
+    # answerable in principle and unanswerable in fact.
+    #
+    # Failures only, and bounded.  Median serial log is 2.4 MB: keeping all 713 would
+    # have cost 1.5 GB, keeping the 85 failures 154 MB.  Capped at the 20 newest, so
+    # ~48 MB however long this runs -- which matters because build/ lives on the drive
+    # CLAUDE.md notes is the finite one.
+    if [ "$rc" != "0" ] && [ -f "$SERIAL_FILE" ]; then
+        local keep="$PROJECT_ROOT/build/serial-failures"
+        mkdir -p "$keep" 2>/dev/null || true
+        local stamp
+        stamp="$(date -u '+%Y%m%dT%H%M%SZ')"
+        cp -f "$SERIAL_FILE" "$keep/$stamp-${BT_HEAD:-unknown}-rc$rc.txt" 2>/dev/null || true
+        # Keep the 20 newest; drop the rest.  `ls -1t` newest-first, so tail -n +21
+        # is everything past the cap.
+        ls -1t "$keep"/*.txt 2>/dev/null | tail -n +21 | while IFS= read -r _old; do
+            rm -f "$_old" 2>/dev/null || true
+        done || true
+        echo "boot-test: serial log preserved at $keep/$stamp-${BT_HEAD:-unknown}-rc$rc.txt" >&2
+    fi
+
     # --commit/--branch/--dirty carry the state captured before the build, not
     # whatever HEAD happens to be now; see the BT_HEAD block near the top.
     local args=(--serial "$SERIAL_FILE" --exit-code "$rc"

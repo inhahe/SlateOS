@@ -1583,22 +1583,40 @@ def _selftest() -> int:
     # 4. The ways the guard can go blind: a declaration renamed, so the
     #    extractor matches nothing and a carelessly-written check would
     #    compare empty against empty and pass.
-    for renamed, label in (
-        ("pub enum QuoteCtx", "enum Ctx"),
-        ("const DQ_ESC", "DQ_ESCAPABLE"),
-        ("impl Iterator for Scanner", "the scanner impl"),
+    #
+    # THIS ASSERTS THE PROPERTY, NOT THE WORDING, and it did not always. It
+    # used to require the literal phrase "renamed or reshaped", which was the
+    # message all three refusals happened to share. Then the missing-region
+    # diagnosis improved -- a renamed region now reports the digest of what DID
+    # resolve alongside the key that did not, instead of raising on the spot --
+    # and the scanner-impl case started leaving through a differently-worded
+    # path. The behaviour was better and the test failed, which is a test
+    # outliving the code it tests: the fixture pinned the sentence rather than
+    # the guarantee.
+    #
+    # It reached main because `--self-test` is a separate mode from the ordinary
+    # run. Both trees were verified green the ordinary way and both genuinely
+    # were; the self-test is what boot-test invokes, and it was not re-run after
+    # the diagnosis change. Reported by lane A after it red-treed every lane.
+    #
+    # The guarantee is: the refusal happens, and it NAMES the declaration the
+    # checker went looking for -- because "something is wrong with shellquote.rs"
+    # sends a reader to a 1,100-line file, and the key sends them to a line.
+    for old, renamed, key, label in (
+        ("pub enum Ctx", "pub enum QuoteCtx", "pub enum Ctx", "enum Ctx"),
+        ("const DQ_ESCAPABLE", "const DQ_ESC", "DQ_ESCAPABLE", "DQ_ESCAPABLE"),
+        ("impl Iterator for QuoteScan", "impl Iterator for Scanner",
+         "impl Iterator for QuoteScan", "the scanner impl"),
     ):
-        broken = fixture()
-        broken = broken.replace(
-            {"pub enum QuoteCtx": "pub enum Ctx",
-             "const DQ_ESC": "const DQ_ESCAPABLE",
-             "impl Iterator for Scanner": "impl Iterator for QuoteScan"}[renamed],
-            renamed, 1)
+        broken = fixture().replace(old, renamed, 1)
         try:
             assert_port_matches_rust(broken, states=states)
         except SystemExit as exc:
             check(f"a renamed {label} is refused rather than read as empty",
-                  "renamed or reshaped" in str(exc))
+                  True)
+            check(f"...and the refusal names `{key}` so a reader has a line "
+                  f"to go to",
+                  key in str(exc))
         else:
             check(f"a renamed {label} is refused rather than read as empty",
                   False)

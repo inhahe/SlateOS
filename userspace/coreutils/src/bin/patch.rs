@@ -760,10 +760,28 @@ fn main() {
 ",
                             fp.first_hunk_line
                         ));
-                        block.push_str(
+                        // TWO MESSAGES, not one, and which you get says which
+                        // mistake GNU thinks you made. Measured across `-p`
+                        // absent, `-p0` and `-p5`:
+                        //
+                        //   no -p at all -> "Perhaps you should have used the
+                        //                    -p or --strip option?"
+                        //   -p given, wrong -> "Perhaps you used the wrong -p
+                        //                       or --strip option?"
+                        //
+                        // This build always said the second, which tells a
+                        // reader who gave no `-p` to go and check the `-p`
+                        // they did not give. `opts.strip` is an Option for
+                        // exactly this reason: `None` is "not supplied", not
+                        // "supplied as zero", and `-p0` is a real and
+                        // different thing.
+                        block.push_str(if opts.strip.is_none() {
+                            "Perhaps you should have used the -p or --strip option?
+"
+                        } else {
                             "Perhaps you used the wrong -p or --strip option?
-",
-                        );
+"
+                        });
                         block.push_str(
                             "The text leading up to this was:
 ",

@@ -117,7 +117,7 @@ DIFF_GNU_SOURCE=9.4
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 
-pass=0; fail=0; xfail=0; xpass=0
+pass=0; fail=0; xfail=0; xpass=0; unstable=0
 
 work=$DIFF_TMP/work
 mkdir -p "$work"
@@ -339,6 +339,49 @@ run_one() {
   local side=$1 dir=$2 out=$3 err=$4 rcf=$5; shift 5
   mkdir -p "$dir"
   ( cd "$dir" && eval "$TREE" ) >/dev/null 2>&1
+  # A deliberate skew, for testing this harness rather than `cp`.
+  #
+  # THE NAME MUST START WITH `DIFF_`. The preamble re-execs the harness inside
+  # WSL and forwards only the variables it can enumerate -- every `DIFF_*` name,
+  # plus `OURS` and `VERBOSE`. A first attempt called this `CP_DIFF_SKEW`, which
+  # matches none of those, so it never crossed the boundary and the mode looked
+  # like a no-op: `0 UNSTABLE`, indistinguishable from a working test finding
+  # nothing. Same shape as the `DIFF_PKG` forwarding bug fixed earlier.
+  #
+  # EXPECTED OUTPUT of `DIFF_CP_SKEW=1`: around 92 UNSTABLE, 0 differed on the
+  # recursive cases, and exactly three differences -- `cp -p -r`,
+  # `cp --preserve=all -r` and `cp -a`, all against the `mkstamped` fixture.
+  # Those three are the skew's own second effect rather than a failure of the
+  # verdict: recreating `a.txt` also gives it the current mtime, and a
+  # timestamp-preserving copy carries that into the destination, so ours shows
+  # the pinned stamp where GNU's shows `now`. Verified by reading the report
+  # rather than assumed from the option names.
+  #
+  # `DIFF_CP_SKEW=1` recreates one fixture entry on the GNU side only, which
+  # moves its inode to the newest and so makes the two sides genuinely
+  # enumerate differently. That is the condition the UNSTABLE verdict exists
+  # for, and it is otherwise reached only by luck: it needs the inode allocator
+  # to hand back a reused number out of order, which happened in about one run
+  # in two and never on a case anyone chose.
+  #
+  # Without this, "0 UNSTABLE" and "that branch is unreachable" print the same
+  # thing. With it, `DIFF_CP_SKEW=1 bash scripts/cp-diff.sh` must report the
+  # recursive cases as UNSTABLE and NOT as differences -- a DIFF there means the
+  # harness is again blaming `cp` for the filesystem's bookkeeping.
+  if [ -n "${DIFF_CP_SKEW:-}" ] && [ "$side" = gnu ]; then
+    # The decoy is load-bearing. Deleting `a.txt` and writing it straight back
+    # changes nothing: ext4 hands the just-freed inode back to the next
+    # allocation, so the number -- and therefore the order -- is identical. The
+    # decoy takes that slot first, so `a.txt` gets a genuinely newer inode and
+    # sorts last instead of second. Measured: without it this mode reported 0
+    # UNSTABLE and looked like a working test.
+    ( cd "$dir" && [ -f tree/a.txt ] && {
+        rm -f tree/a.txt
+        : > tree/.skew-decoy
+        printf 'a\n' > tree/a.txt
+        rm -f tree/.skew-decoy
+      } ) >/dev/null 2>&1
+  fi
   # One file per side rather than one shared one: the two sides run one after
   # the other and a shared file would be consumed by whichever ran first.
   local answers=$dir.stdin
@@ -378,13 +421,35 @@ judge() {
   o_extra=$(printf '%s' "$o_extra" | scrub "$o_dir")
   g_extra=$(printf '%s' "$g_extra" | scrub "$g_dir")
 
+  local o_ino g_ino
+  o_ino=$(ino_order "$o_dir"); g_ino=$(ino_order "$g_dir")
+
+  # ORDER MATTERS HERE. The premise check gates the ATTRIBUTION of a failure,
+  # not the case itself. A first draft asked about inode order first and
+  # reported UNSTABLE whenever the two fixtures disagreed -- which flagged
+  # `cp --preserve= file.txt new.txt` and four other single-file copies whose
+  # outcome cannot depend on a walk order at all. Five cases that had agreed
+  # perfectly stopped counting as evidence.
+  #
+  # If the two sides agreed, the premise did not bite, whatever the allocator
+  # did. It is only when they disagree that the question "could this be the
+  # fixture rather than the program?" arises, and only then that an unequal
+  # inode order is a reason to withhold the verdict instead of blaming `cp`.
   if [ "$o_show" = "$g_show" ] && [ "$o_extra" = "$g_extra" ] \
      && [ "$o_snap" = "$g_snap" ] && [ "$o_body" = "$g_body" ] \
      && [ "$o_link" = "$g_link" ] && [ "$o_xat" = "$g_xat" ]; then
     AGREED=yes
+  elif [ "$o_ino" != "$g_ino" ]; then
+    # They disagree AND the two fixtures enumerated differently, so this case
+    # measured the inode allocator rather than `cp`. Neither `yes` nor `no`
+    # would be honest.
+    AGREED=unstable
   else
     AGREED=no
   fi
+  INO_REPORT=$(printf '  ours walked: %s\n  gnu  walked: %s' \
+    "$(printf '%s' "$o_ino" | tr '\n' '|')" \
+    "$(printf '%s' "$g_ino" | tr '\n' '|')")
   REPORT=$(printf '  ours: %s\n        out{%s}\n        tree{%s} files{%s} links{%s} xattr{%s}\n  gnu : %s\n        out{%s}\n        tree{%s} files{%s} links{%s} xattr{%s}' \
     "$(printf '%s' "$o_extra" | tr '\n' '|')" "$(printf '%s' "$o_show" | tr '\n' '|')" \
     "$(printf '%s' "$o_snap" | tr '\n' '|')" "$(printf '%s' "$o_body" | tr '\n' '|')" \
@@ -393,6 +458,38 @@ judge() {
     "$(printf '%s' "$g_snap" | tr '\n' '|')" "$(printf '%s' "$g_body" | tr '\n' '|')" \
     "$(printf '%s' "$g_link" | tr '\n' '|')" "$(printf '%s' "$g_xat" | tr '\n' '|')")
   LABEL=$label
+}
+
+# The ordering premise this harness rests on, CHECKED rather than assumed.
+#
+# The `-rv` group compares stdout line for line, which is only meaningful if
+# both sides walk their own copy of the tree in the same sequence. The comment
+# at `mktree` explains why they should: both programs sort by inode -- GNU
+# through `savedir (dir, SAVEDIR_SORT_FASTREAD)`, ours through
+# `read_dir_fastread` -- and two directories built by the same commands get
+# their inodes in the same relative order.
+#
+# That is true nearly always and not always. Eight runs of this harness with no
+# edit between them produced 0, 1, 1, 1, 3 and 4 differences, with the cases
+# moving between runs, and one of them was `cp -rv tree dir` -- a member of the
+# very group whose comment says it certifies the sort. The premise is about the
+# INODE ALLOCATOR, not about either program: 611 cases each create and delete a
+# tree, and a freed inode need not be handed back in the order it was freed.
+#
+# So a case whose two trees disagree on inode order has not shown anything
+# about `cp`, and reporting it as a difference accuses the program of the
+# filesystem's bookkeeping. It is reported as UNSTABLE and counted apart. Every
+# directory is checked, not just the top: the walk descends.
+ino_order() {
+  ( cd "$1" 2>/dev/null || exit 0
+    { printf '.\n'; find . -mindepth 1 -type d -printf '%P\n' 2>/dev/null; } \
+      | LC_ALL=C sort \
+      | while IFS= read -r d; do
+          printf '%s:' "$d"
+          find "$d" -maxdepth 1 -mindepth 1 -printf '%i %f\n' 2>/dev/null \
+            | LC_ALL=C sort -n | cut -d' ' -f2 | tr '\n' ','
+          printf '\n'
+        done )
 }
 
 compare() {
@@ -417,7 +514,12 @@ compare() {
 }
 
 report() {
-  if [ "$AGREED" = yes ]; then
+  if [ "$AGREED" = unstable ]; then
+    # Not a pass and not a difference. The two copies of the fixture did not
+    # enumerate alike, so whatever this case printed says nothing about `cp`.
+    unstable=$((unstable+1))
+    printf 'UNSTABLE %s -- the two fixtures disagree on inode order\n%s\n' "$LABEL" "$INO_REPORT"
+  elif [ "$AGREED" = yes ]; then
     pass=$((pass+1))
     [ -n "${VERBOSE:-}" ] && printf 'OK   %s\n' "$LABEL"
   else
@@ -2605,6 +2707,13 @@ xfail_case 'version names SlateOS' --version
 # decides green by matching " 0 differed" in the tail line, so a summary that
 # said "0 failed" would be reported as a failing harness forever.
 printf '\ncp: %d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
+if [ "$unstable" -gt 0 ]; then
+  # Named in the summary rather than folded into either column: a run with
+  # unstable cases has measured fewer cases than it looks like it did, and
+  # that is the thing a reader needs to know before trusting the other two
+  # numbers.
+  printf ', %d UNSTABLE (fixture inode order differed; nothing shown about cp)' "$unstable"
+fi
 [ "$xpass" -gt 0 ] && printf ', %d NO LONGER differ (update the harness)' "$xpass"
 printf '\n'
 [ "$fail" -eq 0 ] || exit 1

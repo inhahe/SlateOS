@@ -126565,6 +126565,23 @@ That is why `build.rs` should scan rather than hold a list of six.
 
 ## B-POSIX-SETGROUPS-REPORTS-SUCCESS-WITHOUT-CHANGING-ANY-GROUPS (lane B, 2026-09-07)
 
+**Status: IMPLEMENTED 2026-09-12.** `setgroups` now calls
+`SYS_PROCESS_SETGROUPS` (1067) and actually drops the groups; `chroot`, named
+at the foot of this entry as the model, calls `SYS_PROCESS_CHROOT` (1068).
+Lane A landed both on **2026-09-07**, the day after they were asked, and the
+request file has said `LANDED` in its own status line ever since. This entry
+went on describing the block for five days because nothing re-read it after
+the ground moved -- the third instance of that shape today, after the interval
+timers and their request. The lesson is not to write more carefully; it is
+that a document naming a blocker needs re-reading when the blocker is the
+kind of thing someone else can clear without telling you twice.
+
+On a host build both report `ENOSYS` through an explicit `cfg` arm rather
+than through the syscall wrapper's sentinel. That is not cosmetic: the
+sentinel is `HOST_ENOSYS`, which `errno::translate` reads as a *kernel* error
+code rather than a negative errno and maps to `EIO`. Sixteen `setgroups`
+tests and six `chroot` tests asserted `ENOSYS` and got 5.
+
 **Status: FIXED 2026-09-07** (lane B), the same day it was filed. `setgroups`
 now returns `-1`/`ENOSYS` after its validation instead of `0`. The thirteen
 tests that asserted the old success assert the failure *and* the errno; the one
@@ -135170,6 +135187,51 @@ it costs under WHPX. Confirming it needs a WHPX run, and the accelerator is not 
 3. Whether writes should carry version history at all is in `deferred-questions.md`. Its
    promotion trigger was "a cost figure". This is that figure: **half the write**.
 ## B-CP-DIFF-GIVES-A-DIFFERENT-VERDICT-EACH-RUN (lane B, 2026-09-12)
+
+**Status: FIXED 2026-09-12.** The harness now checks the ordering premise it
+rests on instead of assuming it, and reports a third verdict, `UNSTABLE`, when
+it fails. Four consecutive runs since: 581 passed, 0 differed, 0 unstable, the
+same three numbers every time — against 0, 1, 1, 1, 3 and 4 differences before.
+
+**The cause was the inode allocator, not either program.** Both `cp`s sort a
+directory by inode, so the comparison is only meaningful if the two private
+copies allocate in the same relative order. They nearly always do. Across 611
+cases that each create and delete a tree, a freed inode need not be handed back
+in the order it was freed, and then they do not.
+
+Measured before concluding: two sibling trees built by the same command
+sequence agreed on inode order 3000 times out of 3000 under light churn, and
+raw `readdir` order agreed 2000 out of 2000 — which also showed that readdir
+here returns *name* order, not the creation order the `mktree` comment asserts.
+The sort happens afterwards; the premise is about allocation, not enumeration.
+
+**The verdict gates attribution, not the case, and the order of those two
+tests is the whole fix.** A first draft asked about inode order first, and
+reported `UNSTABLE` for five single-file copies — `cp --preserve= file.txt
+new.txt` among them — whose outcome cannot depend on a walk order at all. Five
+cases that had agreed perfectly stopped counting as evidence. If the two sides
+agree, the premise did not bite whatever the allocator did; it is only when
+they disagree that "could this be the fixture rather than the program?" is a
+question worth asking.
+
+**`DIFF_CP_SKEW=1` proves the branch fires**, because otherwise `0 UNSTABLE`
+and `that branch is unreachable` print the same thing. It recreates one fixture
+entry on the GNU side so the two sides genuinely enumerate differently: 92
+UNSTABLE, 0 differences among the recursive cases. Two things had to be right
+for that mode to work at all, and neither was on the first attempt:
+
+* **The decoy.** Deleting `a.txt` and writing it straight back changes nothing
+  — ext4 returns the just-freed inode to the next allocation, so the order is
+  identical. A decoy file must take that slot first.
+* **The name.** It was `CP_DIFF_SKEW`, and the preamble forwards only `DIFF_*`
+  names across the WSL boundary, so it never arrived. The mode reported `0
+  UNSTABLE` and looked like a working test finding nothing — the same shape as
+  the `DIFF_PKG` forwarding bug fixed earlier in this tree.
+
+Both failures printed a plausible green. That is the argument for the mode
+existing at all.
+
+The description below is kept in the tense it was written in.
 
 **What.** `scripts/cp-diff.sh` is not deterministic. Three consecutive runs, no
 edits between them, no rebuild:

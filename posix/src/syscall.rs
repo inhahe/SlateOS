@@ -46,6 +46,19 @@ pub const SYS_GETRANDOM: u64 = 90;
 /// the kernel reads at delivery time.
 pub const SYS_SIGNAL_ALTSTACK: u64 = 1071;
 
+/// `(count, list_ptr) -> 0`. Set the calling process's supplementary group
+/// list; `count == 0` drops all of them, which is the privilege-drop idiom
+/// `setgroups(0, NULL)`. Gated on `(Process, SET_CREDENTIALS)` -- the same
+/// right that governs uid/gid changes -- and capped at Linux's NGROUPS_MAX.
+pub const SYS_PROCESS_SETGROUPS: u64 = 1067;
+
+/// `(path_ptr) -> 0`. Change the calling process's filesystem root to the
+/// NUL-terminated absolute path at `path_ptr`, which must name an existing
+/// directory. Gated on `(Process, SET_CREDENTIALS)`. Note that the Linux-ABI
+/// handler for `chroot(2)` terminally refuses with EPERM because no Linux
+/// caller holds `CAP_SYS_CHROOT`; this native number is the one that works.
+pub const SYS_PROCESS_CHROOT: u64 = 1068;
+
 /// `(which, value_ns, interval_ns) -> (prev_value_ns, prev_interval_ns)`. Arm,
 /// re-arm or disarm this process's real interval timer, reporting what it held
 /// before. `which` must be `ITIMER_REAL` (0); the kernel refuses the other two.

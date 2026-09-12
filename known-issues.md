@@ -137880,14 +137880,27 @@ members, and `pwdb::group_list` is built to put the primary gid back.
 |---|---|---|
 | `userspace/doas` | `read_to_string("/etc/group")`, members only | **FIXED 2026-09-12** |
 | `userspace/getent` | `read_to_string` x7, and `parse().unwrap_or(0)` | **passwd/group FIXED 2026-09-12**; its five other databases still read as text |
-| `userspace/install` | `read_to_string`, `resolve_group` | open |
-| `userspace/loginctl` | `read_to_string(GROUP_FILE)` | open |
-| `userspace/mktemp` | `read_to_string` | open |
-| `userspace/newgrp` | `read_to_string(...).unwrap_or_default()` | open |
+| `userspace/install` | `read_to_string` on both files, **and tried the number before the name** | **FIXED 2026-09-12** |
+| `userspace/loginctl` | `read_to_string(GROUP_FILE)` | **unreachable** -- its `userdbctl` personality |
+| `userspace/mktemp` | `read_to_string` | **unreachable** -- its `id`/`groups` personalities |
+| `userspace/newgrp` | `read_to_string(...).unwrap_or_default()` | **FIXED 2026-09-12** |
 
-`newgrp` is the worst of the remaining five: `unwrap_or_default()` turns an
-unreadable *or* non-text group file into an **empty group table**, which is the
-unreadable-means-empty conflation in its purest form.
+**Two of the six cannot be run at all, which the first version of this entry
+did not say.** `scripts/multicall-aliases.py` reports `loginctl`'s `userdbctl`
+and `mktemp`'s `id`/`groups` as unreachable personalities -- 168 of them across
+67 crates, produced by NOTHING, which is the subject of the open question
+"169 command names exist inside other programs and cannot be run. Which ones do
+we keep?". Their group parsing is dead code whose fate the operator decides, so
+fixing it would be work on code two of the three answers delete. Counting them
+as "open" alongside three live programs overstated the remaining work by
+two-thirds, and the count came from grepping for the defect without asking
+whether the code runs.
+
+So the class was **four live programs, all four now fixed**. `newgrp` was the
+worst of them: `unwrap_or_default()` turned an unreadable *or* non-text group
+file into an **empty group table**, the unreadable-means-empty conflation in
+its purest form -- so one group whose name is not text reported that every
+group does not exist.
 
 ### The fix, as applied to `doas`
 
@@ -137924,6 +137937,34 @@ for every account on the system -- a wrong answer rather than an error.
 formats, so they need their own byte parsing rather than a shared reader, and
 that is a separate change.
 
+### `install` had a third defect, and it is the one POSIX names
+
+`-o`/`-g` did `name.parse::<u32>()` FIRST and returned on success. GNU's manual,
+*Disambiguating names and IDs*:
+
+> POSIX requires that these commands first attempt to resolve the specified
+> string as a name, and only once that fails, then try to interpret it as an
+> ID. ... Simply invoking `chown 42 F` will set F's owner ID to 1000 -- not
+> what you intended.
+
+So on a system with an account named `1000` -- "using a number as a user name
+is common in some environments", says the same page -- `install -o 1000` and
+`chown 1000` picked **different accounts**. The `+` escape exists precisely
+because the name comes first; a number-first parser has no use for it, and
+this one ignored `+` entirely.
+
+Fixed by sharing `chown`'s and `id`'s resolver rather than repairing the
+private one. That meant **extracting `coreutils::userspec` into its own crate**
+(`userspace/userspec`), which was clean: the module imported exactly one thing,
+`pwdb::Db`, and nothing from `crate::`. `coreutils` re-exports it, so
+`coreutils::userspec::…` still names it and no bin changed -- the same move,
+for the same reason, as `quote`.
+
+The tests could not previously tell the two orders apart: the build host has no
+`/etc/passwd`, so every existing case exercised the numeric fallback. The
+resolvers now take the database as a parameter, and the fixture is a database
+in which `1000` is an account *name* whose uid is 7.
+
 ### What is deliberately NOT changed
 
 `None` still means "no answer" and is still distinct from "no members". The
@@ -137931,3 +137972,64 @@ three-way result is now: absent group is `Some(false)` (nobody is in a group
 that does not exist -- an answer, not an absence), absent caller is `None`
 (their primary gid is unknowable and primary membership counts), otherwise the
 list is consulted.
+
+
+## B-USERADD-REWROTE-ETC-GROUP-FROM-A-TABLE-IT-HAD-FAILED-TO-READ (lane B, 2026-09-12) -- FIXED
+
+**In short:** `groupadd`, `useradd` and their four siblings read `/etc/group`
+and `/etc/gshadow`, change the list in memory, and write the whole file back.
+If the read failed, the list was **empty** -- and the write-back then replaced
+the file with just the one group that had been added. Every other group on the
+system disappeared from the live file.
+
+**Reaching it needed no privilege and no corruption.** A group name may hold
+any byte but `/` and NUL on this filesystem, and the read was
+`fs::read_to_string`, which refuses the **whole file** for one byte that is not
+valid UTF-8. So a single group with a byte over 0x7F in its name was enough.
+A momentary permission or I/O error did it too.
+
+**Where.** `userspace/useradd/src/main.rs` -> `Database::load_file`, which was
+
+```rust
+let content = match fs::read_to_string(path) {
+    Ok(c) => c,
+    Err(_) => return Vec::new(),
+};
+```
+
+and `Database::save`, which rebuilds both files from those vectors.
+
+**The damage was bounded, not prevented.** `atomic_write` copies the old file
+to `/etc/group-` before replacing it, which is shadow-utils' convention, so the
+content survived where an operator who knew to look could find it. Nothing said
+to look, and nothing failed.
+
+**Fixed** by `optionalfile::read_or_empty`, which is written for exactly this
+caller and says so in its own docs: it refuses invalid UTF-8 *"because a caller
+that rewrites what it read would otherwise replace those bytes"*. `load_file`
+returns `Result`; `load_in` and `load` propagate; the six command handlers
+(`useradd`, `userdel`, `usermod`, `groupadd`, `groupdel`, `groupmod`) print and
+exit 1. An **absent** file is still an empty table -- a system with no
+`/etc/group` has no named groups, which is a fact rather than a failure, and
+that is the one case where empty is the answer.
+
+Two tests, both asserting their own premise so neither can pass vacuously: a
+group file with a `0xFF` in the middle line is refused **and is still on disk
+byte-identical afterwards**, and an absent file still loads as empty.
+
+**How it was found, which is the part worth keeping.** Not by grepping for the
+defect. The roadmap's lane-B backlog mentions in passing that
+`/etc/group`/`/etc/gshadow` "remain a separate gap (eleven readers, one writer,
+and no gid allocator in `userdb`)". I had spent the day on the *readers* and
+went looking for the **writer** named in that clause. `optionalfile`'s module
+docs already listed three programs destroyed by this exact pattern -- visudo
+over `/etc/sudoers`, `xdg` over `mimeapps.list`, `hostnamectl` over
+`/etc/machine-info` -- and named the shape precisely. This is a fourth, in a
+program that was not on that list because nobody had looked at it since the
+crate was written.
+
+**Still open, deliberately:** the group files are read as *text*, so a group
+whose name is not UTF-8 is now refused rather than mangled -- correct, but it
+means such a group cannot be administered at all. Making `GroupEntry` carry
+bytes end to end (including `serialize`) is the follow-on, and is a bigger
+change than stopping the destruction.

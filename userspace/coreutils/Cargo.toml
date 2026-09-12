@@ -49,6 +49,10 @@ sha2 = { path = "../../sha2" }
 # utility that resolved that name to a uid, or `chown "$(stat -c %U f)" f` stops
 # being a no-op. See `userspace/pwdb`.
 pwdb = { path = "../pwdb" }
+# The `OWNER[:GROUP]` operand grammar, re-exported as `coreutils::userspec`.
+# Extracted from this crate on 2026-09-12 so `userspace/install` can share it
+# rather than keep the third copy of a rule with this many corners.
+userspec = { path = "../userspec" }
 # One TZ resolution and one `strftime`, shared with `date`, `touch` and the
 # shell's prompt expansion. `ls -l` renders a timestamp in the machine's zone;
 # so does `date`; three private copies had disagreed about what an unset `TZ`

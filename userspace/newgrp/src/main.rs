@@ -9,7 +9,7 @@
 
 #![deny(clippy::all)]
 
-use quoting::quoteaf_os;
+use quoting::{quoteaf, quoteaf_os};
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Write};
@@ -20,13 +20,6 @@ const VERSION: &str = "0.1.0";
 // ============================================================================
 // Data structures
 // ============================================================================
-
-#[derive(Clone, Debug)]
-struct GroupEntry {
-    name: String,
-    gid: u32,
-    members: Vec<String>,
-}
 
 #[derive(Clone, Debug)]
 struct UserInfo {
@@ -65,28 +58,28 @@ struct GshadowEntry {
 // Group database parsing (/etc/group format)
 // ============================================================================
 
-fn parse_group_line(line: &str) -> Option<GroupEntry> {
-    let parts: Vec<&str> = line.splitn(4, ':').collect();
-    if parts.len() < 3 {
-        return None;
+/// Read `/etc/group`.
+///
+/// **As bytes.** This used `read_to_string`, which fails for the WHOLE file on
+/// a single byte that is not valid UTF-8 -- and this filesystem allows every
+/// byte but `/` and NUL in a name. Combined with `unwrap_or_default()`, one
+/// group whose name happened not to be text emptied the entire table, so
+/// `newgrp wheel` reported that `wheel` did not exist. Fail-closed, so not a
+/// way in; a way to lock everybody out of every group, on account of a group
+/// nobody asked about.
+///
+/// An absent file is still an empty table -- a system with no `/etc/group` has
+/// no named groups, which is a fact. A file that is present and unreadable is
+/// not, and says so: this program runs setuid root precisely so that it CAN
+/// read it, and silence there would look identical to "no such group".
+fn read_group_db() -> Vec<pwdb::Group> {
+    match optionalfile::read_bytes_or_empty(std::path::Path::new(pwdb::GROUP_PATH)) {
+        Ok(bytes) => pwdb::groups(&bytes),
+        Err(e) => {
+            eprintln!("newgrp: {}: {e}", pwdb::GROUP_PATH);
+            Vec::new()
+        }
     }
-    let name = parts[0].to_string();
-    let gid = parts.get(2).and_then(|s| s.parse().ok())?;
-    let members = parts
-        .get(3)
-        .map(|s| {
-            s.split(',')
-                .filter(|m| !m.is_empty())
-                .map(|m| m.to_string())
-                .collect()
-        })
-        .unwrap_or_default();
-    Some(GroupEntry { name, gid, members })
-}
-
-fn read_group_db() -> Vec<GroupEntry> {
-    let content = std::fs::read_to_string("/etc/group").unwrap_or_default();
-    content.lines().filter_map(parse_group_line).collect()
 }
 
 fn parse_gshadow_line(line: &str) -> Option<GshadowEntry> {
@@ -183,7 +176,7 @@ fn read_user_supplementary_groups(_uid: u32, username: &str) -> Vec<u32> {
     let group_db = read_group_db();
     group_db
         .iter()
-        .filter(|g| g.members.iter().any(|m| m == username))
+        .filter(|g| g.members.iter().any(|m| m == username.as_bytes()))
         .map(|g| g.gid)
         .collect()
 }
@@ -192,13 +185,13 @@ fn read_user_supplementary_groups(_uid: u32, username: &str) -> Vec<u32> {
 // Group membership check
 // ============================================================================
 
-fn user_is_member(user: &UserInfo, group: &GroupEntry) -> bool {
+fn user_is_member(user: &UserInfo, group: &pwdb::Group) -> bool {
     // User's primary group matches.
     if user.gid == group.gid {
         return true;
     }
     // User is in the group member list.
-    if group.members.iter().any(|m| m == &user.username) {
+    if group.members.iter().any(|m| m == user.username.as_bytes()) {
         return true;
     }
     // User has this group as supplementary.
@@ -208,11 +201,11 @@ fn user_is_member(user: &UserInfo, group: &GroupEntry) -> bool {
     false
 }
 
-fn find_group_by_name(groups: &[GroupEntry], name: &str) -> Option<GroupEntry> {
-    groups.iter().find(|g| g.name == name).cloned()
+fn find_group_by_name(groups: &[pwdb::Group], name: &str) -> Option<pwdb::Group> {
+    groups.iter().find(|g| g.name == name.as_bytes()).cloned()
 }
 
-fn find_group_by_gid(groups: &[GroupEntry], gid: u32) -> Option<GroupEntry> {
+fn find_group_by_gid(groups: &[pwdb::Group], gid: u32) -> Option<pwdb::Group> {
     groups.iter().find(|g| g.gid == gid).cloned()
 }
 
@@ -250,9 +243,17 @@ fn find_group_by_gid(groups: &[GroupEntry], gid: u32) -> Option<GroupEntry> {
 ///   function `login`, `su`, `doas` and `passwd` ask. This program states
 ///   nothing of its own about what a stored entry means; that was the defect
 ///   §341 exists to prevent.
-fn verify_group_password(group: &str, password: &str) -> bool {
+fn verify_group_password(group: &[u8], password: &str) -> bool {
     let db = read_gshadow_db();
-    password_opens(db.iter().find(|e| e.name == group), password)
+    // `/etc/gshadow` is still parsed as text -- `pwdb` does not cover that
+    // format -- so a group whose name is not text has no gshadow line this can
+    // match, and `password_opens(None, ..)` refuses. That is the right answer
+    // rather than a gap: an unmatchable name must not open a group.
+    let wanted = core::str::from_utf8(group).ok();
+    password_opens(
+        wanted.and_then(|w| db.iter().find(|e| e.name == w)),
+        password,
+    )
 }
 
 /// The rule itself, separated from the file so it can be tested.
@@ -413,7 +414,7 @@ fn newgrp_main(args: &[OsString]) -> i32 {
         // Would set up a clean environment for login shell.
         eprintln!(
             "newgrp: starting login shell with group {}",
-            quoteaf_os(&target_group.name)
+            quoteaf(&target_group.name)
         );
     }
 
@@ -716,32 +717,46 @@ mod tests {
         assert_eq!(sg_main(&args), 1);
     }
 
+    /// What this program needs `/etc/group` parsing to do. The parser itself
+    /// is `pwdb`'s now, and has its own tests measured against glibc's
+    /// `fgetgrent`; these four cases moved here as the shape `newgrp` relies
+    /// on rather than being deleted with the function they used to call.
     #[test]
-    fn test_parse_group_line_basic() {
-        let entry = parse_group_line("wheel:x:10:alice,bob").unwrap();
-        assert_eq!(entry.name, "wheel");
-        assert_eq!(entry.gid, 10);
-        assert_eq!(entry.members, vec!["alice", "bob"]);
+    fn the_group_file_parses_the_way_this_program_expects() {
+        let db = pwdb::groups(b"wheel:x:10:alice,bob\nnogroup:x:65534:\ndocker:x:999:alice\n");
+        assert_eq!(db.len(), 3);
+        assert_eq!(db[0].name, b"wheel");
+        assert_eq!(db[0].gid, 10);
+        assert_eq!(db[0].members, vec![b"alice".to_vec(), b"bob".to_vec()]);
+        assert!(db[1].members.is_empty());
+        assert_eq!(db[2].members, vec![b"alice".to_vec()]);
+
+        // A line that cannot carry a gid is not a group.
+        assert!(pwdb::groups(b"bad").is_empty());
+        assert!(pwdb::groups(b"").is_empty());
     }
 
+    /// The defect this conversion existed to remove.
+    ///
+    /// `read_to_string` fails for the WHOLE file on one byte that is not valid
+    /// UTF-8, and the result was `unwrap_or_default()`, so a single group whose
+    /// name is not text emptied the table -- and `newgrp wheel` then reported
+    /// that `wheel` does not exist. Fail-closed, so not a way in; a way to lock
+    /// everyone out of every group on account of a group nobody asked about.
     #[test]
-    fn test_parse_group_line_no_members() {
-        let entry = parse_group_line("nogroup:x:65534:").unwrap();
-        assert_eq!(entry.name, "nogroup");
-        assert_eq!(entry.gid, 65534);
-        assert!(entry.members.is_empty());
-    }
+    fn one_group_name_that_is_not_utf8_does_not_empty_the_table() {
+        let mut file = Vec::from(&b"wheel:x:10:alice\ncaf"[..]);
+        file.push(0xFF);
+        file.extend_from_slice(b":x:200:bob\nstaff:x:300:\n");
+        assert!(
+            core::str::from_utf8(&file).is_err(),
+            "fixture must not be utf-8, or this test proves nothing"
+        );
 
-    #[test]
-    fn test_parse_group_line_single_member() {
-        let entry = parse_group_line("docker:x:999:alice").unwrap();
-        assert_eq!(entry.members, vec!["alice"]);
-    }
-
-    #[test]
-    fn test_parse_group_line_invalid() {
-        assert!(parse_group_line("bad").is_none());
-        assert!(parse_group_line("").is_none());
+        let db = pwdb::groups(&file);
+        assert_eq!(db.len(), 3, "every line survives, including its neighbours");
+        assert_eq!(find_group_by_name(&db, "wheel").map(|g| g.gid), Some(10));
+        assert_eq!(find_group_by_name(&db, "staff").map(|g| g.gid), Some(300));
     }
 
     #[test]
@@ -753,6 +768,18 @@ mod tests {
         assert_eq!(entry.members, vec!["alice", "bob"]);
     }
 
+    /// A group fixture. `pwdb::Group` carries bytes, and building one by
+    /// hand in every test would bury what each test is about under four
+    /// `to_vec()` calls.
+    fn group(name: &str, gid: u32, members: &[&str]) -> pwdb::Group {
+        pwdb::Group {
+            name: name.as_bytes().to_vec(),
+            passwd: b"x".to_vec(),
+            gid,
+            members: members.iter().map(|m| m.as_bytes().to_vec()).collect(),
+        }
+    }
+
     #[test]
     fn test_user_is_member_primary_group() {
         let user = UserInfo {
@@ -761,11 +788,7 @@ mod tests {
             gid: 1000,
             groups: vec![],
         };
-        let group = GroupEntry {
-            name: "alice".to_string(),
-            gid: 1000,
-            members: vec![],
-        };
+        let group = group("alice", 1000, &[]);
         assert!(user_is_member(&user, &group));
     }
 
@@ -777,11 +800,7 @@ mod tests {
             gid: 1000,
             groups: vec![],
         };
-        let group = GroupEntry {
-            name: "wheel".to_string(),
-            gid: 10,
-            members: vec!["alice".to_string(), "bob".to_string()],
-        };
+        let group = group("wheel", 10, &["alice", "bob"]);
         assert!(user_is_member(&user, &group));
     }
 
@@ -793,11 +812,7 @@ mod tests {
             gid: 1000,
             groups: vec![10, 20],
         };
-        let group = GroupEntry {
-            name: "wheel".to_string(),
-            gid: 10,
-            members: vec![],
-        };
+        let group = group("wheel", 10, &[]);
         assert!(user_is_member(&user, &group));
     }
 
@@ -809,28 +824,13 @@ mod tests {
             gid: 1000,
             groups: vec![],
         };
-        let group = GroupEntry {
-            name: "wheel".to_string(),
-            gid: 10,
-            members: vec!["bob".to_string()],
-        };
+        let group = group("wheel", 10, &["bob"]);
         assert!(!user_is_member(&user, &group));
     }
 
     #[test]
     fn test_find_group_by_name() {
-        let groups = vec![
-            GroupEntry {
-                name: "root".to_string(),
-                gid: 0,
-                members: vec![],
-            },
-            GroupEntry {
-                name: "wheel".to_string(),
-                gid: 10,
-                members: vec!["alice".to_string()],
-            },
-        ];
+        let groups = vec![group("root", 0, &[]), group("wheel", 10, &["alice"])];
         let found = find_group_by_name(&groups, "wheel").unwrap();
         assert_eq!(found.gid, 10);
         assert!(find_group_by_name(&groups, "nonexistent").is_none());
@@ -838,20 +838,9 @@ mod tests {
 
     #[test]
     fn test_find_group_by_gid() {
-        let groups = vec![
-            GroupEntry {
-                name: "root".to_string(),
-                gid: 0,
-                members: vec![],
-            },
-            GroupEntry {
-                name: "wheel".to_string(),
-                gid: 10,
-                members: vec![],
-            },
-        ];
+        let groups = vec![group("root", 0, &[]), group("wheel", 10, &[])];
         let found = find_group_by_gid(&groups, 10).unwrap();
-        assert_eq!(found.name, "wheel");
+        assert_eq!(found.name, b"wheel");
         assert!(find_group_by_gid(&groups, 999).is_none());
     }
 }

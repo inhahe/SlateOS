@@ -43,7 +43,7 @@
 
 #![deny(clippy::all)]
 
-use quoting::quoteaf_os;
+use quoting::{quoteaf_os, quotef_os};
 use std::env;
 use std::ffi::OsString;
 use std::fs;
@@ -201,31 +201,78 @@ struct Database {
 
 impl Database {
     /// Load the system's account database, from `/etc`.
-    fn load() -> Self {
+    ///
+    /// # Errors
+    ///
+    /// A group file that exists and could not be read.
+    fn load() -> Result<Self, String> {
         Self::load_in(Path::new(ETC_DIR))
     }
 
     /// Load from `etc`. A missing file is an empty one -- which is right for
     /// the group files, and is `userdb::UserDb::load`'s own rule for a
     /// database that is not there yet.
-    fn load_in(etc: &Path) -> Self {
-        Database {
-            users: userdb::UserDb::load(etc.join(USERS_NAME)).unwrap_or_default(),
-            groups: Self::load_file(&etc.join(GROUP_NAME), GroupEntry::parse),
-            gshadow: Self::load_file(&etc.join(GSHADOW_NAME), GshadowEntry::parse),
+    ///
+    /// # Errors
+    ///
+    /// A group file that EXISTS and could not be read. That is not the same as
+    /// a missing one and must not be treated as one -- see [`Database::save`],
+    /// which rewrites these files from what this loaded.
+    fn load_in(etc: &Path) -> Result<Self, String> {
+        // `UserDb::load` ALREADY draws the distinction this needs -- NotFound
+        // is `Ok(empty)`, every other error is `Err` -- and `.unwrap_or_default()`
+        // threw it away. That is worse here than the two group files below,
+        // because `UserDb::save` regenerates `/etc/passwd` and `/etc/shadow`
+        // beside `users.yaml`: an unreadable database became an empty one,
+        // and the next `useradd` wrote all three files containing only the
+        // account just created. The crate below did the work correctly and
+        // this caller discarded it.
+        let users_path = etc.join(USERS_NAME);
+        Ok(Database {
+            users: userdb::UserDb::load(&users_path)
+                .map_err(|e| format!("cannot read {}: {e}", quotef_os(&users_path)))?,
+            groups: Self::load_file(&etc.join(GROUP_NAME), GroupEntry::parse)?,
+            gshadow: Self::load_file(&etc.join(GSHADOW_NAME), GshadowEntry::parse)?,
             etc: etc.to_path_buf(),
-        }
+        })
     }
 
-    fn load_file<T, F>(path: &Path, parser: F) -> Vec<T>
+    /// Parse one of the group files, or say why not.
+    ///
+    /// **THIS USED TO ANSWER `Vec::new()` FOR EVERY FAILURE, AND THAT DESTROYED
+    /// DATA.** [`Database::save`] rewrites `/etc/group` and `/etc/gshadow`
+    /// from these vectors, so a read that failed produced an empty table, and
+    /// the next `groupadd` wrote a file containing only the group it had just
+    /// added. Every other group on the system was gone from the live file.
+    ///
+    /// Two ways to reach it, neither exotic:
+    ///
+    /// * the file cannot be read at that moment -- a permission problem, an
+    ///   I/O error;
+    /// * the file holds a byte that is not valid UTF-8, because a group name
+    ///   may contain any byte but `/` and NUL on this filesystem, and
+    ///   `read_to_string` refuses the WHOLE file for one of them.
+    ///
+    /// `optionalfile::read_or_empty` is written for exactly this caller, and
+    /// says so: it refuses invalid UTF-8 rather than converting it "because a
+    /// caller that rewrites what it read would otherwise replace those bytes."
+    /// A file that is ABSENT is still an empty table, which is the one case
+    /// where empty is the answer.
+    ///
+    /// The damage was bounded, not prevented: `atomic_write` copies the old
+    /// file to `/etc/group-` first, so the content survived where an operator
+    /// who knew to look could find it. Nothing said to look.
+    ///
+    /// # Errors
+    ///
+    /// The file exists and could not be read as text.
+    fn load_file<T, F>(path: &Path, parser: F) -> Result<Vec<T>, String>
     where
         F: Fn(&str) -> Option<T>,
     {
-        let content = match fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(_) => return Vec::new(),
-        };
-        content.lines().filter_map(parser).collect()
+        let content = optionalfile::read_or_empty(path)
+            .map_err(|e| format!("cannot read {}: {e}", quotef_os(path)))?;
+        Ok(content.lines().filter_map(parser).collect())
     }
 
     /// Write everything back.
@@ -804,7 +851,13 @@ fn cmd_useradd(argv: &[OsString]) -> i32 {
         None => None,
     };
 
-    let mut db = Database::load();
+    let mut db = match Database::load() {
+        Ok(db) => db,
+        Err(e) => {
+            write_stderr(&format!("useradd: {e}"));
+            return 1;
+        }
+    };
 
     // Check for duplicates.
     if db.find_user(&username).is_some() {
@@ -1019,7 +1072,13 @@ fn cmd_userdel(argv: &[OsString]) -> i32 {
         }
     };
 
-    let mut db = Database::load();
+    let mut db = match Database::load() {
+        Ok(db) => db,
+        Err(e) => {
+            write_stderr(&format!("userdel: {e}"));
+            return 1;
+        }
+    };
 
     // The home directory is read before the record goes, because removing it
     // is the last thing this command does and by then there is nothing left to
@@ -1209,7 +1268,13 @@ fn cmd_usermod(argv: &[OsString]) -> i32 {
         None => None,
     };
 
-    let mut db = Database::load();
+    let mut db = match Database::load() {
+        Ok(db) => db,
+        Err(e) => {
+            write_stderr(&format!("usermod: {e}"));
+            return 1;
+        }
+    };
 
     // Find the user.
     if db.find_user(&username).is_none() {
@@ -1433,7 +1498,13 @@ fn cmd_groupadd(argv: &[OsString]) -> i32 {
         return 1;
     }
 
-    let mut db = Database::load();
+    let mut db = match Database::load() {
+        Ok(db) => db,
+        Err(e) => {
+            write_stderr(&format!("groupadd: {e}"));
+            return 1;
+        }
+    };
 
     // Check for duplicate.
     if db.find_group(&groupname).is_some() {
@@ -1522,7 +1593,13 @@ fn cmd_groupdel(argv: &[OsString]) -> i32 {
         }
     };
 
-    let mut db = Database::load();
+    let mut db = match Database::load() {
+        Ok(db) => db,
+        Err(e) => {
+            write_stderr(&format!("groupdel: {e}"));
+            return 1;
+        }
+    };
 
     // Check group exists.
     let group = match db.find_group(&groupname) {
@@ -1624,7 +1701,13 @@ fn cmd_groupmod(argv: &[OsString]) -> i32 {
         }
     };
 
-    let mut db = Database::load();
+    let mut db = match Database::load() {
+        Ok(db) => db,
+        Err(e) => {
+            write_stderr(&format!("groupmod: {e}"));
+            return 1;
+        }
+    };
 
     let group_idx = match db.groups.iter().position(|g| g.name == groupname) {
         Some(i) => i,
@@ -2910,6 +2993,72 @@ mod tests {
         assert!(db.find_group("carol").is_some());
     }
 
+    /// A group file that cannot be read as text must STOP the command, not
+    /// silently become an empty table.
+    ///
+    /// This is the destructive case, and it is the reason `load_file` returns
+    /// a `Result`. `Database::save` REWRITES `/etc/group` from whatever
+    /// `load_file` produced, so an empty table plus one `groupadd` used to
+    /// write a file containing only the group just added -- every other group
+    /// gone from the live file. A group name may hold any byte but `/` and NUL
+    /// on this filesystem, and `read_to_string` refuses the whole file for one
+    /// that is not valid UTF-8, so reaching this needed no privilege and no
+    /// corruption: one group with a byte over 0x7F in its name would do.
+    #[test]
+    fn a_group_file_that_is_not_text_is_refused_rather_than_read_as_empty() {
+        let env = TestEnv::new();
+        let mut file = Vec::from(&b"wheel:x:10:alice\ncaf"[..]);
+        file.push(0xFF);
+        file.extend_from_slice(b":x:200:bob\n");
+        assert!(
+            core::str::from_utf8(&file).is_err(),
+            "fixture must not be utf-8, or this test proves nothing"
+        );
+        fs::write(env.dir.path(GROUP_NAME), &file).expect("write group");
+
+        let loaded = Database::load_in(env.dir.dir());
+        assert!(
+            loaded.is_err(),
+            "an unreadable group file must stop the command, not empty the table"
+        );
+
+        // And the file is still on disk, untouched: nothing rewrote it.
+        let after = fs::read(env.dir.path(GROUP_NAME)).expect("still there");
+        assert_eq!(after, file, "the group file must not have been rewritten");
+    }
+
+    /// The same rule for the ACCOUNT database, which matters more.
+    ///
+    /// `UserDb::save` regenerates `/etc/passwd` and `/etc/shadow` beside
+    /// `users.yaml`, so an unreadable database that became an empty one took
+    /// all three files with it on the next write -- every account on the
+    /// system, replaced by the one just created.
+    ///
+    /// `UserDb::load` had always distinguished the two cases; `useradd` threw
+    /// that away with `.unwrap_or_default()`.
+    #[test]
+    fn an_unreadable_account_database_is_refused_rather_than_read_as_empty() {
+        let env = TestEnv::new();
+        // A directory where the file should be: readable as an entry, not as a
+        // file, so `read_to_string` fails with something other than NotFound.
+        fs::create_dir(env.dir.path(USERS_NAME)).expect("mkdir users.yaml");
+
+        let loaded = Database::load_in(env.dir.dir());
+        assert!(
+            loaded.is_err(),
+            "an unreadable account database must stop the command"
+        );
+    }
+
+    /// The one case where empty really is the answer, kept distinct from the
+    /// one above: a system with no `/etc/group` at all has no named groups.
+    #[test]
+    fn an_absent_group_file_is_an_empty_table_not_an_error() {
+        let env = TestEnv::new();
+        let db = Database::load_in(env.dir.dir()).expect("absent is fine");
+        assert!(db.groups.is_empty());
+    }
+
     #[test]
     fn test_copy_dir_recursive_basic() {
         let env = TestEnv::new();
@@ -2945,7 +3094,7 @@ mod tests {
     #[test]
     fn an_account_saved_here_reaches_the_database_and_both_generated_files() {
         let env = TestEnv::new();
-        let mut db = Database::load_in(env.dir.dir());
+        let mut db = Database::load_in(env.dir.dir()).expect("the scratch /etc is readable");
         db.groups.push(group("staff", 100));
         let mut user = record("alice", 1000, 100);
         user.set_home("/home/alice");
@@ -2959,7 +3108,7 @@ mod tests {
         db.save().expect("save");
 
         // The database itself.
-        let reloaded = Database::load_in(env.dir.dir());
+        let reloaded = Database::load_in(env.dir.dir()).expect("the scratch /etc is readable");
         assert_eq!(
             reloaded.find_user("alice").and_then(userdb::Record::uid),
             Some(1000)
@@ -2985,7 +3134,7 @@ mod tests {
     #[test]
     fn a_saved_database_reloads_with_both_stores_intact() {
         let env = TestEnv::new();
-        let mut db = Database::load_in(env.dir.dir());
+        let mut db = Database::load_in(env.dir.dir()).expect("the scratch /etc is readable");
         db.groups.push(group("wheel", 10));
         db.gshadow.push(GshadowEntry {
             name: "wheel".to_string(),
@@ -2997,7 +3146,7 @@ mod tests {
         db.add_to_group("root", "wheel");
         db.save().expect("save");
 
-        let reloaded = Database::load_in(env.dir.dir());
+        let reloaded = Database::load_in(env.dir.dir()).expect("the scratch /etc is readable");
         assert_eq!(
             reloaded.find_group("wheel").map(|g| g.members.clone()),
             Some(vec!["root".to_string()])
@@ -3026,7 +3175,8 @@ mod tests {
             },
         ];
         Database::atomic_write(&path, &entries, GroupEntry::serialize).expect("write");
-        let loaded: Vec<GroupEntry> = Database::load_file(&path, GroupEntry::parse);
+        let loaded: Vec<GroupEntry> =
+            Database::load_file(&path, GroupEntry::parse).expect("readable");
         assert_eq!(loaded.len(), 2);
         assert!(loaded[0].members.is_empty());
         assert_eq!(loaded[1].members, vec!["alice", "bob"]);
@@ -3043,7 +3193,8 @@ mod tests {
             members: vec!["admin".to_string()],
         }];
         Database::atomic_write(&path, &entries, GshadowEntry::serialize).expect("write");
-        let loaded: Vec<GshadowEntry> = Database::load_file(&path, GshadowEntry::parse);
+        let loaded: Vec<GshadowEntry> =
+            Database::load_file(&path, GshadowEntry::parse).expect("readable");
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].admins, "root");
     }
@@ -3051,7 +3202,8 @@ mod tests {
     #[test]
     fn test_load_missing_file_returns_empty() {
         let entries: Vec<GroupEntry> =
-            Database::load_file(Path::new("/nonexistent/path/file"), GroupEntry::parse);
+            Database::load_file(Path::new("/nonexistent/path/file"), GroupEntry::parse)
+                .expect("a missing file is an empty table, not an error");
         assert!(entries.is_empty());
     }
 
@@ -3065,7 +3217,7 @@ mod tests {
     #[test]
     fn a_display_name_that_cannot_be_written_fails_the_save_rather_than_shifting_fields() {
         let env = TestEnv::new();
-        let mut db = Database::load_in(env.dir.dir());
+        let mut db = Database::load_in(env.dir.dir()).expect("the scratch /etc is readable");
         let mut user = record("alice", 1000, 1000);
         user.set(userdb::field::DISPLAY_NAME, "Alice:Smith");
         db.users.push(user);

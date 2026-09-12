@@ -489,7 +489,15 @@ pub mod shell;
 pub mod stdfd;
 pub mod tabstops;
 pub mod umask;
-pub mod userspec;
+// `userspec` is its own crate as of 2026-09-12, and is re-exported here so
+// that `coreutils::userspec::…` keeps naming it and no bin changed — the same
+// move, for the same reason, as `quote`. It left because `userspace/install`
+// needs it too: `install -o`/`-g` resolve an owner and a group, and were doing
+// it with a private parser that tried the NUMBER FIRST. POSIX requires the
+// name first (GNU's manual, "Disambiguating names and IDs"), which is why the
+// `+` escape exists at all — so `install -o 1000` disagreed with `chown 1000`
+// on any system with an account named `1000`.
+pub use userspec;
 pub mod utimecmp;
 pub mod vercmp;
 pub mod xnum;

@@ -113,36 +113,62 @@ directory — `--target-dir` per `DIFF_PKG` entry — after which the symlink ca
 point at the right one deliberately rather than at whatever survived. Until then
 the survey's column says "coreutils half only", which is the truth.
 
-## B-COREUTILS-STAT-QUOTES-THE-FILE-LINE (lane B, 2026-09-11)
+## B-COREUTILS-STAT-QUOTES-THE-FILE-LINE — WITHDRAWN, IT IS DESIGN DECISION §371 (lane B, 2026-09-11)
 
-`stat`'s default report quotes the name on its first line; GNU's does not.
+**This entry was wrong and is kept as a correction rather than deleted.**
 
-    ours   File: 'file.txt'
-    GNU    File: file.txt
+I filed it hours after writing `scripts/stat-diff.sh`, on the strength of 25
+failing cases where our `File:` line reads `File: 'file.txt'` and GNU's reads
+`File: file.txt`. I had measured GNU carefully — including that it ignores
+`QUOTING_STYLE` for that line while honouring it for `-c %N` — and concluded
+ours was over-eager.
 
-That single line accounts for **25 of the 30 cases** `coreutils` fails in
-`scripts/stat-diff.sh` — every default-report case, for a regular file, an empty
-file, a directory, a symlink, a dangling symlink, a hard link and a FIFO. The
-rest of the report agrees byte for byte, including `Device`, `Inode`, `Links`,
-the mode rendering and all four timestamps.
+**It is `design-decisions.md` §371, taken deliberately on 2026-08-23, and
+argued better than my fix would have been:**
 
-**It is not a quote-when-needed rule.** The obvious guess is that GNU quotes
-only awkward names, so ours is merely over-eager; measured, GNU prints
-`File: with space.txt` unquoted as well. The default format's first field is the
-plain name.
+  * GNU's own behaviour there is a **`strstr` accident**. `stat -c '%N'` quotes
+    and `stat -c '%.3N'` does not, because the substring search for the literal
+    two characters `%N` misses the second. A directive that differs only by a
+    precision gets a different quoting style, which nobody designed.
+  * A file name is attacker-chosen input in every case that matters — a
+    tarball, a download directory, a shared `/tmp` — and `design.txt` permits
+    every byte but `/` and NUL. The human-readable block is the one a person
+    reads line by line, so a name that can forge a line of `stat`'s own output
+    is not recoverable by the reader.
+  * `%n` is still raw, one character away, for anything machine-read.
 
-The fix is one call site. Worth doing precisely because the rest of that report
-is already right: a script that greps `stat` output for a filename gets a name
-wrapped in quotes it did not ask for.
+**§371's own "Against" section names this harness's failure mode exactly**,
+which is the part worth carrying forward:
 
-*Unconfirmed observation, recorded rather than claimed:* while probing this,
-`stat f.txt | head -1` once aborted with
-`failed printing to stdout: Broken pipe (os error 32)` and a core dump. It did
-not reproduce on retry, and the write-error path is a documented design area —
-`stdfd.rs` states plainly that Rust masks `SIGPIPE` so a closed pipe surfaces as
-`EPIPE` here, and that SlateOS has no such signal to die of. So this may be that
-design behaving as intended on a host it was not written for. Noted with the
-exact command in case it recurs; not filed as a defect on one sighting.
+> Reproducing upstream bug-for-bug has value of its own: it is the property
+> that makes "measure GNU, assert the measurement" a usable method, and every
+> deliberate exception weakens it.
+
+That is what happened. **A harness whose null hypothesis is "GNU is right"
+reports every deliberate divergence as a defect, in proportion to how thorough
+it is** — the third time today, after `uname -o` printing `SlateOS` and
+`chown`'s SlateOS-gated syscall. The remedy is not a threshold; it is checking
+`design-decisions.md` before filing, which I did not do. The 19 affected cases
+are now `xfail`s in the harness naming §371, so they are still run and an XPASS
+would report the divergence disappearing.
+
+## B-COREUTILS-STAT-F-FILESYSTEM-MODE-DIFFERS (lane B, 2026-09-11)
+
+With the §371 cases correctly attributed, **13 real differences remain** in
+`scripts/stat-diff.sh`, and nine of them are one family: `stat -f`, the
+filesystem-information mode.
+
+    stat -f .            stat --file-system .       stat -f file.txt
+    stat -f -c %a .      stat -f -c %f .            stat -f -c %i .
+    stat -f -c %t .      stat -f -c %T .            stat -f -t .
+
+Both sides read the *same* filesystem — the harness deliberately points both
+halves at one tree — so these are not environment differences. `%i` (filesystem
+ID), `%t`/`%T` (type in hex and by name) and `%a`/`%f` (free blocks, for an
+unprivileged caller and in total) disagree, and the whole-report and terse forms
+inherit it.
+
+The remaining 4 are diagnostic wording for a missing operand.
 
 ## TD-B-A-LINUX-TARGETED-HARNESS-CANNOT-MEASURE-A-SLATEOS-GATED-SUBJECT (lane B, 2026-09-11)
 
@@ -65342,17 +65368,14 @@ built from source.
 The standalone lacks `--printf` entirely (12 cases) and long-option
 abbreviation, and its default report is wrong in 41 cases. Retired.
 
-**What the surviving half gets wrong is one line, and it is precise.** 25 of
-coreutils' 30 are the default report, and in every one the *only* difference is
-the first line:
-
-    ours   File: 'file.txt'
-    GNU    File: file.txt
-
-GNU does not quote there at all — not even for `name with spaces.txt`, which is
-the case that makes it look like a quote-when-needed rule and is not. Filed as
-`B-COREUTILS-STAT-QUOTES-THE-FILE-LINE`. The remaining 5 are diagnostic wording
-for a missing operand.
+**What the surviving half gets wrong — after a correction.** 25 of coreutils'
+30 were the default report's `File:` line, which ours quotes and GNU does not. I
+filed that as a defect and **it is not one**: it is design decision §371, taken
+deliberately because GNU's own quoting there is a `strstr` accident and because
+a file name must not be able to forge a line of `stat`'s own output. Those cases
+are now `xfail`s naming §371, and the honest score is **75 passed, 13 differed,
+19 differ on purpose**. Of the 13, nine are `stat -f` (the filesystem-information
+mode) and four are missing-operand wording.
 
 **Two things about the harness worth keeping.**
 

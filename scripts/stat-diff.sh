@@ -110,6 +110,26 @@ report() {
 
 run_case() { compare "$@"; report "stat $*"; }
 
+# The built-in human-readable report carries a `File:` line, and ours quotes the
+# name there where GNU does not. That is DESIGN DECISION §371, not a defect, and
+# it is argued there better than a "fix" would be: GNU's own behaviour is a
+# `strstr` accident (`stat -c '%.3N'` quotes differently from `-c '%N'` because
+# the substring search misses it), and a file name is attacker-chosen input in
+# every case that matters, so a name must not be able to forge a line of
+# `stat`'s own output.
+#
+# §371's "Against" section names this harness's failure mode exactly:
+# "Reproducing upstream bug-for-bug has value of its own: it is the property
+# that makes 'measure GNU, assert the measurement' a usable method, and every
+# deliberate exception weakens it."
+#
+# So these are run, compared, and counted apart. If our quoting ever changed to
+# match GNU the XPASS would say so -- which is the check that a documented
+# divergence still exists.
+report_case() {
+  xfail_case "the File: line is quoted here -- design-decisions.md §371" "$@"
+}
+
 xfail_case() {
   local why=$1; shift
   compare "$@"
@@ -124,16 +144,16 @@ xfail_case() {
 }
 
 # --- the default report, for every kind of thing ---------------------------------
-run_case file.txt
-run_case empty.txt
-run_case big.txt
-run_case dir
-run_case link
-run_case dangling
-run_case linkdir
-run_case hardlink.txt
-run_case fifo
-run_case 'name with spaces.txt'
+report_case file.txt
+report_case empty.txt
+report_case big.txt
+report_case dir
+report_case link
+report_case dangling
+report_case linkdir
+report_case hardlink.txt
+report_case fifo
+report_case 'name with spaces.txt'
 
 # --- every format specifier, one at a time ----------------------------------------
 for f in %a %A %b %B %d %D %f %F %g %G %h %i %m %n %N %o %s %t %T %u %U %w %W %x %X %y %Y %z %Z; do
@@ -169,10 +189,10 @@ run_case -t link
 run_case -t -L link
 
 # --- following links --------------------------------------------------------------------
-run_case -L link
-run_case --dereference link
-run_case -L dangling
-run_case -L linkdir
+report_case -L link
+report_case --dereference link
+report_case -L dangling
+report_case -L linkdir
 run_case -c %F link
 run_case -L -c %F link
 run_case -c %N dangling
@@ -187,8 +207,8 @@ done
 run_case -f -t .
 
 # --- several operands, and failures among them ------------------------------------------------
-run_case file.txt dir link
-run_case file.txt nosuch.txt empty.txt
+report_case file.txt dir link
+report_case file.txt nosuch.txt empty.txt
 run_case nosuch.txt
 run_case nosuch.txt nosuch2.txt
 run_case -c %n file.txt nosuch.txt
@@ -203,7 +223,7 @@ run_case --printf
 
 # --- long-option abbreviation -----------------------------------------------------------------------
 run_case --form='%n' file.txt
-run_case --deref link
+report_case --deref link
 run_case --ters file.txt
 run_case --file-sys .
 

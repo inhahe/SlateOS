@@ -160,8 +160,20 @@ def target_installed() -> bool:
 
 
 def check(crates: list[str]) -> tuple[int, str]:
-    """`cargo check` them all at once. Returns (exit code, output)."""
-    args = ["cargo", "check", "--target", TARGET]
+    """`cargo check` them all at once. Returns (exit code, output).
+
+    `--all-targets` because without it this gate skipped the population it
+    exists for. A `#[cfg(unix)]` block inside a `#[cfg(test)]` module is
+    compiled by neither a default `cargo check` (which does not build test
+    targets) nor a windows `cargo test` (which does not build the unix block),
+    so it was checked by nothing at push time -- `boot-test.sh` ran cargo
+    directly with `--all-targets` and caught it hours later, on lane A's
+    schedule rather than on the author's.
+
+    The self-test proves the flag is what makes the difference: the same
+    fixture compiles clean without it and fails with it.
+    """
+    args = ["cargo", "check", "--all-targets", "--target", TARGET]
     for c in crates:
         args += ["-p", c]
     proc = subprocess.run(
@@ -217,6 +229,44 @@ def self_test() -> int:
                     "this gate detects nothing"
                 )
 
+            # THE SAME QUESTION FOR A TEST MODULE, which is what `--all-targets`
+            # buys. `#[cfg(test)]` code is compiled only under `--test`, so a
+            # unix-gated error inside one is invisible to a plain compile --
+            # exactly as it was invisible to this gate until 2026-09-12.
+            # `rustc --test` is to `rustc` what `cargo check --all-targets` is
+            # to `cargo check`.
+            tsrc = (
+                "pub fn always() -> i32 { 0 }\n"
+                "#[cfg(test)]\n"
+                "mod tests {\n"
+                "    #[cfg(unix)]\n"
+                "    #[test]\n"
+                "    fn only_on_unix() { let _x: i32 = \"not an integer\"; }\n"
+                "}\n"
+            )
+            tf = Path(tmp) / "probe_test.rs"
+            tf.write_text(tsrc, encoding="utf-8", newline="")
+
+            def rustc_test(target: str, as_test: bool) -> int:
+                cmd = ["rustc", "--crate-type", "lib", "--target", target,
+                       "--out-dir", tmp, str(tf)]
+                if as_test:
+                    cmd.insert(1, "--test")
+                return subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=600, check=False,
+                ).returncode
+
+            if rustc_test(TARGET, as_test=False) != 0:
+                failures.append(
+                    "the premise of --all-targets is broken: a cfg(test) module "
+                    "was compiled without --test, so the flag buys nothing"
+                )
+            if rustc_test(TARGET, as_test=True) == 0:
+                failures.append(
+                    "a unix-only compile error inside a cfg(test) module was NOT "
+                    "caught with --test; --all-targets is not reaching test targets"
+                )
+
     for f in failures:
         print(f"check-cfg-unix --self-test: FAIL: {f}")
     if failures:
@@ -261,8 +311,13 @@ def main() -> int:
         print(f"check-cfg-unix: {len(crates)} crate(s) checked against {TARGET}; it failed:\n")
         print(output[-8000:])
         return 1
+    # Says `--all-targets` out loud. The flag is the difference between
+    # checking this population and skipping the half of it that lives in
+    # `#[cfg(test)]` modules, and a summary that does not name it reads the
+    # same either way -- which is how the gap went unnoticed.
     print(f"check-cfg-unix: OK ({len(crates)} of {len(candidate_crates())} workspace "
-          f"crate(s) hold unix-gated code and compile for {TARGET}; the other "
+          f"crate(s) hold unix-gated code and compile for {TARGET} with "
+          f"--all-targets; the other "
           f"{len(candidate_crates()) - len(crates)} are NOT checked here -- boot-test.sh covers the workspace)")
     return 0
 

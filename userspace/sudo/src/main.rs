@@ -1263,6 +1263,10 @@ fn check_authorization(
     command: &[u8],
     user_groups: &[String],
 ) -> Option<CmndSpec> {
+    // One secure path for every command spec in this decision, read once from
+    // the configuration rather than per match.
+    let secure = secure_path_of(config);
+    let dirs = path_dirs(&secure);
     // Iterate privileges in reverse order (last match wins, like real sudo).
     for priv_spec in config.privileges.iter().rev() {
         if !user_matches(
@@ -1286,7 +1290,13 @@ fn check_authorization(
         }
 
         for cmnd in priv_spec.commands.iter().rev() {
-            if command_matches(&cmnd.command, &cmnd.args, command, &config.cmnd_aliases) {
+            if command_matches(
+                &cmnd.command,
+                &cmnd.args,
+                command,
+                &config.cmnd_aliases,
+                &dirs,
+            ) {
                 return Some(cmnd.clone());
             }
         }
@@ -1295,70 +1305,77 @@ fn check_authorization(
 }
 
 /// Check if a username matches a user specification list.
+/// Evaluate a sudoers list in which **the last matching entry decides**.
+///
+/// # Why not the first
+///
+/// These lists are written to carve exceptions:
+///
+/// ```text
+/// alice  ALL, !secret = (ALL) ALL
+/// ```
+///
+/// Every one of them walked FORWARD and returned at the first match, so `ALL`
+/// answered before `!secret` was ever looked at and the rule applied on
+/// `secret` -- the one host the administrator had written it down to exclude.
+/// `runas_matches` used `.any()` and did not read `!` at all.
+///
+/// Real sudo resolves a list by the last match, which is why the idiom works
+/// there. This file already knew the rule and applied it one level up:
+/// `check_authorization` iterates privileges `.rev()` with the comment "last
+/// match wins, like real sudo". The lists inside them did the opposite.
+///
+/// Negation is handled here rather than in each caller's predicate, so a
+/// matcher cannot forget it -- which is how `runas_matches` came not to have
+/// it.
+fn list_matches<F>(specs: &[String], hit: F) -> bool
+where
+    F: Fn(&str) -> bool,
+{
+    let mut verdict = false;
+    for spec in specs {
+        let (negated, name) = spec
+            .strip_prefix('!')
+            .map_or((false, spec.as_str()), |rest| (true, rest));
+        if hit(name) {
+            verdict = !negated;
+        }
+    }
+    verdict
+}
+
+/// Does `name` name `target` directly, or through an alias that does?
+fn names_or_aliases(name: &str, target: &str, aliases: &HashMap<String, Vec<String>>) -> bool {
+    name == "ALL"
+        || name == target
+        || aliases
+            .get(name)
+            .is_some_and(|members| members.iter().any(|m| m == target || m == "ALL"))
+}
+
 fn user_matches(
     specs: &[String],
     username: &str,
     user_groups: &[String],
     aliases: &HashMap<String, Vec<String>>,
 ) -> bool {
-    for spec in specs {
-        if spec == "ALL" {
-            return true;
-        }
-        if spec == username {
-            return true;
-        }
-        // %group syntax.
-        if let Some(group) = spec.strip_prefix('%')
-            && user_groups.iter().any(|g| g == group)
-        {
-            return true;
-        }
-        // Alias reference.
-        if let Some(members) = aliases.get(spec.as_str()) {
-            if members.iter().any(|m| m == username || m == "ALL") {
-                return true;
-            }
-            // Check group members in alias.
-            for m in members {
-                if let Some(group) = m.strip_prefix('%')
-                    && user_groups.iter().any(|g| g == group)
-                {
-                    return true;
-                }
-            }
-        }
-        // Negation.
-        if let Some(negated) = spec.strip_prefix('!')
-            && negated == username
-        {
-            return false;
-        }
-    }
-    false
+    let in_group = |member: &str| {
+        member
+            .strip_prefix('%')
+            .is_some_and(|g| user_groups.iter().any(|have| have == g))
+    };
+    list_matches(specs, |name| {
+        names_or_aliases(name, username, aliases)
+            || in_group(name)
+            || aliases
+                .get(name)
+                .is_some_and(|members| members.iter().any(|m| in_group(m)))
+    })
 }
 
 /// Check if a hostname matches a host specification list.
 fn host_matches(specs: &[String], hostname: &str, aliases: &HashMap<String, Vec<String>>) -> bool {
-    for spec in specs {
-        if spec == "ALL" {
-            return true;
-        }
-        if spec == hostname {
-            return true;
-        }
-        if let Some(members) = aliases.get(spec.as_str())
-            && members.iter().any(|m| m == hostname || m == "ALL")
-        {
-            return true;
-        }
-        if let Some(negated) = spec.strip_prefix('!')
-            && negated == hostname
-        {
-            return false;
-        }
-    }
-    false
+    list_matches(specs, |name| names_or_aliases(name, hostname, aliases))
 }
 
 /// Check if target user/group matches a runas specification.
@@ -1368,12 +1385,11 @@ fn runas_matches(
     target_group: &str,
     aliases: &HashMap<String, Vec<String>>,
 ) -> bool {
-    let user_ok = runas.users.iter().any(|u| {
-        u == "ALL"
-            || u == target_user
-            || aliases
-                .get(u.as_str())
-                .is_some_and(|members| members.iter().any(|m| m == target_user || m == "ALL"))
+    // `list_matches`, not `.any()`: this read `!` as part of a name, so a
+    // `(ALL, !root)` runas spec let the caller run things AS root -- the one
+    // target it was written to forbid.
+    let user_ok = list_matches(&runas.users, |name| {
+        names_or_aliases(name, target_user, aliases)
     });
 
     // If no group constraint specified, only check user.
@@ -1381,12 +1397,8 @@ fn runas_matches(
         return user_ok;
     }
 
-    let group_ok = runas.groups.iter().any(|g| {
-        g == "ALL"
-            || g == target_group
-            || aliases
-                .get(g.as_str())
-                .is_some_and(|members| members.iter().any(|m| m == target_group || m == "ALL"))
+    let group_ok = list_matches(&runas.groups, |name| {
+        names_or_aliases(name, target_group, aliases)
     });
 
     user_ok && group_ok
@@ -1398,6 +1410,9 @@ fn command_matches(
     spec_args: &str,
     actual_cmd: &[u8],
     aliases: &HashMap<String, Vec<String>>,
+    // The secure path an unqualified spec resolves against; see
+    // `command_path_matches`.
+    dirs: &[&str],
 ) -> bool {
     if spec_cmd == "ALL" {
         return true;
@@ -1413,7 +1428,7 @@ fn command_matches(
             let (cmd, args) = member
                 .split_once(' ')
                 .map_or((member.as_str(), ""), |(cmd, args)| (cmd, args.trim()));
-            if command_path_matches(cmd, actual_cmd) && (args.is_empty() || args == "*") {
+            if command_path_matches(cmd, actual_cmd, dirs) && (args.is_empty() || args == "*") {
                 return true;
             }
         }
@@ -1422,10 +1437,10 @@ fn command_matches(
 
     // Negation.
     if let Some(negated) = spec_cmd.strip_prefix('!') {
-        return !command_path_matches(negated, actual_cmd);
+        return !command_path_matches(negated, actual_cmd, dirs);
     }
 
-    if !command_path_matches(spec_cmd, actual_cmd) {
+    if !command_path_matches(spec_cmd, actual_cmd, dirs) {
         return false;
     }
 
@@ -1447,7 +1462,7 @@ fn command_matches(
 /// gives. Every comparison below is therefore between `spec`'s bytes and
 /// `actual`, which decides exactly what the `&str`/`&str` version decided for
 /// every path that *was* text, and answers rather than aborting for the rest.
-fn command_path_matches(spec: &str, actual: &[u8]) -> bool {
+fn command_path_matches(spec: &str, actual: &[u8], dirs: &[&str]) -> bool {
     let spec_bytes = spec.as_bytes();
     if spec_bytes == actual {
         return true;
@@ -1461,16 +1476,78 @@ fn command_path_matches(spec: &str, actual: &[u8]) -> bool {
     {
         return actual.starts_with(dir.as_bytes());
     }
-    // Basename match: if spec has no path separator, match basename of actual.
-    // `rsplit` on a slice always yields at least one item, so the `is_some_and`
-    // is a formality rather than a case that can fail.
+    // AN UNQUALIFIED SPEC IS RESOLVED, NOT BASENAME-MATCHED.
+    //
+    // This arm used to compare the last path component alone, and `actual` is
+    // the caller's argv verbatim -- so `alice ALL = pkg` authorised
+    //
+    //     sudo /tmp/evil/pkg
+    //
+    // because `pkg == pkg`. The caller chooses that path and the binary runs
+    // as root. Real sudoers requires fully-qualified commands for exactly this
+    // reason; ours accepted a bare one as a convenience and gave away the
+    // guarantee with it.
+    //
+    // Both sides are now resolved against the secure path and compared whole,
+    // so `pkg` means the `pkg` that is actually on it -- and nothing else. A
+    // spec naming a program that is not there matches nothing, which is the
+    // safe direction: an unresolvable rule authorises nothing rather than
+    // authorising by name.
     if !spec.contains('/') {
-        return actual
-            .rsplit(|&b| b == b'/')
-            .next()
-            .is_some_and(|base| base == spec_bytes);
+        let Some(spec_full) = first_on_secure_path(spec, dirs) else {
+            return false;
+        };
+        return resolve_for_match(actual, dirs) == spec_full.as_bytes();
     }
     false
+}
+
+/// The first executable named `command` in `dirs`, or `None`.
+///
+/// Splitting the search from the `PATH` string is deliberate: an absolute path
+/// on the development host begins with a drive letter and a colon, so a test
+/// handing a real directory to something that splits on `:` searches two
+/// fragments of it and fails in a way that reads like the code being wrong.
+fn first_on_secure_path(command: &str, dirs: &[&str]) -> Option<String> {
+    dirs.iter()
+        .map(|dir| format!("{dir}/{command}"))
+        .find(|candidate| fs::metadata(candidate).is_ok())
+}
+
+/// `name` as a whole path: unchanged if it already has one, else resolved
+/// against `dirs`.
+///
+/// A name that is not valid UTF-8 is returned unchanged. It can then only
+/// match a spec it equals byte for byte, which is correct -- a sudoers file is
+/// text, so a command whose name is not text is named by no spec in it.
+fn resolve_for_match(name: &[u8], dirs: &[&str]) -> Vec<u8> {
+    if name.contains(&b'/') {
+        return name.to_vec();
+    }
+    match core::str::from_utf8(name) {
+        Ok(text) => {
+            first_on_secure_path(text, dirs).map_or_else(|| name.to_vec(), String::into_bytes)
+        }
+        Err(_) => name.to_vec(),
+    }
+}
+
+/// The `PATH` an unqualified command resolves against, from `Defaults
+/// secure_path` when the administrator set one.
+///
+/// `secure_path` was parsed and stored and **never read** until 2026-09-12 --
+/// a setting that accepted a value and did nothing with it. This is its first
+/// consumer, and the default matches what `sudo` ships.
+fn secure_path_of(config: &SudoersConfig) -> String {
+    config.get_default("secure_path").map_or_else(
+        || "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
+        ToString::to_string,
+    )
+}
+
+/// The directories of a `PATH`, in order, with empty entries dropped.
+fn path_dirs(path: &str) -> Vec<&str> {
+    path.split(':').filter(|d| !d.is_empty()).collect()
 }
 
 // ============================================================================
@@ -1571,28 +1648,72 @@ fn timestamp_path(username: &str) -> PathBuf {
 ///
 /// **Do not "improve" this by returning `true` when the file cannot be read.**
 /// That would hand out a cached authentication on the strength of a failed
-/// read, which is the whole thing a credential cache must not do. Checked on
-/// 2026-09-10 during a sweep for predicates that answer `false` on failure --
-/// this one is correct as written and is noted so the next sweep does not have
-/// to re-derive it.
+/// read, which is the whole thing a credential cache must not do.
+///
+/// # The error arms were never the problem
+///
+/// The paragraph above was written on 2026-09-10 during a sweep for predicates
+/// that answer `false` on failure, and it concluded "this one is correct as
+/// written", noted "so the next sweep does not have to re-derive it". It was
+/// right about every arm it looked at and the defect was in the other one:
+///
+/// ```text
+/// now.saturating_sub(ts) < timeout
+/// ```
+///
+/// With `ts` **in the future**, `saturating_sub` yields 0, `0 < timeout` is
+/// true, and the password prompt is skipped -- for as long as the clock takes
+/// to catch up. No failure occurs anywhere; the read succeeds, the parse
+/// succeeds, and the arithmetic answers a question nobody asked.
+///
+/// A backwards clock step is ordinary: an NTP correction, an RTC read at boot
+/// before the network is up, a restored VM snapshot. Each turns a legitimately
+/// written timestamp into a future one and the cache into a permanent one.
+/// Real `sudo` treats this as `TS_FATAL` -- "timestamp too far in the future".
+///
+/// So the rule this function's own heading states -- every failure answers
+/// `false` -- is kept, and a *success* that cannot mean what it says is now
+/// one of the things that answers `false` too.
 fn check_timestamp(username: &str, timeout: u64) -> bool {
-    let path = timestamp_path(username);
-    match fs::read_to_string(&path) {
-        Ok(content) => {
-            if let Some(ts_str) = content.lines().next()
-                && let Ok(ts) = ts_str.trim().parse::<u64>()
-            {
-                let now = current_epoch();
-                if timeout == u64::MAX {
-                    // Never expires.
-                    return true;
-                }
-                return now.saturating_sub(ts) < timeout;
-            }
-            false
-        }
+    match fs::read_to_string(timestamp_path(username)) {
+        Ok(content) => timestamp_is_fresh(&content, current_epoch(), timeout),
         Err(_) => false,
     }
+}
+
+/// Whether the timestamp file's `content` records an authentication that is
+/// still current at `now`.
+///
+/// Split out from [`check_timestamp`] so the clock is a parameter: the
+/// interesting cases are a timestamp in the future and one exactly at the
+/// timeout boundary, and neither can be reached by a test that has to use the
+/// real clock and the real file.
+fn timestamp_is_fresh(content: &str, now: u64, timeout: u64) -> bool {
+    let Some(ts_str) = content.lines().next() else {
+        return false;
+    };
+    let Ok(ts) = ts_str.trim().parse::<u64>() else {
+        return false;
+    };
+    // Checked BEFORE the never-expires arm. `timestamp_timeout=-1` is a
+    // statement about how long an authentication lasts, not a licence to trust
+    // a file whose contents cannot be true.
+    if ts > now {
+        return false;
+    }
+    // `invalidate_timestamp` writes 0 "to invalidate without removing", and 0
+    // is 1970 -- comfortably expired under every finite timeout, and NOT
+    // expired under `timestamp_timeout=-1`, where nothing expires. So `sudo -k`
+    // was a no-op for exactly the configuration that most needs it to work.
+    // The sentinel is honoured by the READER, because the reader is what has
+    // to agree with it.
+    if ts == 0 {
+        return false;
+    }
+    if timeout == u64::MAX {
+        return true;
+    }
+    now.saturating_sub(ts) < timeout
 }
 
 /// Update the timestamp to the current time.
@@ -3754,6 +3875,88 @@ fn main() {
 )]
 mod tests {
     use super::*;
+    use scratchdir::ScratchDir;
+
+    /// The secure path the command-spec tests resolve against. Absolute and
+    /// fabricated: nothing here exists on the build host, so a test that
+    /// expects a bare spec to RESOLVE must plant a real file and say so.
+    const SECURE: [&str; 2] = ["/usr/bin", "/bin"];
+
+    // -- The credential cache's clock --
+    //
+    // `check_timestamp` decides whether to skip the password prompt. Its own
+    // doc comment reasoned carefully about every failure arm and was checked
+    // by a 2026-09-10 sweep, which recorded that it "is correct as written"
+    // and need not be re-derived. Both defects below are in arms that sweep
+    // was not looking at, and in neither does anything fail.
+
+    #[test]
+    fn a_fresh_timestamp_is_fresh_and_a_stale_one_is_not() {
+        assert!(
+            timestamp_is_fresh("1000\n", 1010, 300),
+            "10s old, 300s timeout"
+        );
+        assert!(!timestamp_is_fresh("1000\n", 2000, 300), "1000s old");
+    }
+
+    #[test]
+    fn the_boundary_is_strictly_less_than_the_timeout() {
+        // Exactly `timeout` seconds old has expired; one second less has not.
+        assert!(!timestamp_is_fresh("1000\n", 1300, 300));
+        assert!(timestamp_is_fresh("1000\n", 1299, 300));
+    }
+
+    #[test]
+    fn a_timestamp_in_the_future_is_not_a_fresh_authentication() {
+        // `now.saturating_sub(ts)` answered 0 and `0 < timeout` is true, so
+        // the prompt was skipped until the clock caught up. A backwards clock
+        // step -- an NTP correction, an RTC read at boot, a restored VM
+        // snapshot -- produces exactly this, and nothing fails while it does.
+        assert!(!timestamp_is_fresh("9999\n", 1000, 300));
+        assert!(
+            !timestamp_is_fresh("1001\n", 1000, 300),
+            "even by one second"
+        );
+    }
+
+    #[test]
+    fn never_expires_still_does_not_trust_a_future_timestamp() {
+        // `timestamp_timeout=-1` says how long an authentication lasts. It is
+        // not a licence to believe a file whose contents cannot be true.
+        assert!(
+            timestamp_is_fresh("1000\n", 5000, u64::MAX),
+            "past, never expires"
+        );
+        assert!(
+            !timestamp_is_fresh("9999\n", 1000, u64::MAX),
+            "future, refused"
+        );
+    }
+
+    #[test]
+    fn an_unparsable_or_empty_timestamp_demands_the_password() {
+        assert!(!timestamp_is_fresh("", 1000, 300));
+        assert!(!timestamp_is_fresh("not a number\n", 1000, 300));
+        assert!(
+            !timestamp_is_fresh("-1\n", 1000, 300),
+            "negative is not a u64"
+        );
+    }
+
+    #[test]
+    fn invalidation_survives_a_never_expires_timeout() {
+        // `invalidate_timestamp` writes "0" to drop a cached credential --
+        // `sudo -k`. Under a finite timeout that is 1970 and long expired, so
+        // it worked. Under `timestamp_timeout=-1` NOTHING expires, so the
+        // sentinel came back FRESH and `sudo -k` was a no-op for exactly the
+        // configuration where the credential otherwise lasts all session.
+        //
+        // Found by writing the test above and then reading what it asserted:
+        // its first draft encoded the broken answer as the expected one, which
+        // is how a defect becomes a fixture.
+        assert!(!timestamp_is_fresh("0\n", 1_000_000, 300));
+        assert!(!timestamp_is_fresh("0\n", 1_000_000, u64::MAX));
+    }
 
     // -- Authentication --
     //
@@ -4971,62 +5174,102 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
     #[test]
     fn command_match_exact() {
         let aliases = HashMap::new();
-        assert!(command_matches("/usr/bin/ls", "", b"/usr/bin/ls", &aliases));
+        assert!(command_matches(
+            "/usr/bin/ls",
+            "",
+            b"/usr/bin/ls",
+            &aliases,
+            &SECURE
+        ));
     }
 
     #[test]
     fn command_match_all() {
         let aliases = HashMap::new();
-        assert!(command_matches("ALL", "", b"/any/command", &aliases));
-    }
-
-    #[test]
-    fn command_match_wildcard() {
-        let aliases = HashMap::new();
-        assert!(command_matches("/usr/bin/*", "", b"/usr/bin/ls", &aliases));
-    }
-
-    #[test]
-    fn command_no_match() {
-        let aliases = HashMap::new();
-        assert!(!command_matches(
-            "/usr/bin/ls",
+        assert!(command_matches(
+            "ALL",
             "",
-            b"/usr/bin/rm",
-            &aliases
+            b"/any/command",
+            &aliases,
+            &SECURE
         ));
-    }
-
-    #[test]
-    fn command_match_negation() {
-        let aliases = HashMap::new();
-        assert!(!command_matches(
-            "!/usr/bin/rm",
-            "",
-            b"/usr/bin/rm",
-            &aliases
-        ));
-    }
-
-    #[test]
-    fn command_path_match_exact() {
-        assert!(command_path_matches("/usr/bin/ls", b"/usr/bin/ls"));
     }
 
     #[test]
     fn command_path_match_wildcard() {
-        assert!(command_path_matches("/usr/bin/*", b"/usr/bin/ls"));
-        assert!(command_path_matches("/usr/bin/*", b"/usr/bin/cat"));
+        assert!(command_path_matches("/usr/bin/*", b"/usr/bin/ls", &SECURE));
+        assert!(command_path_matches("/usr/bin/*", b"/usr/bin/cat", &SECURE));
     }
 
     #[test]
     fn command_path_no_match_wildcard() {
-        assert!(!command_path_matches("/usr/bin/*", b"/usr/sbin/ls"));
+        assert!(!command_path_matches(
+            "/usr/bin/*",
+            b"/usr/sbin/ls",
+            &SECURE
+        ));
     }
 
     #[test]
     fn command_path_basename_match() {
-        assert!(command_path_matches("ls", b"/usr/bin/ls"));
+        // An unqualified spec is RESOLVED now, so this needs a real file --
+        // and a fabricated `/usr/bin` would make every assertion below pass
+        // for the wrong reason.
+        let dir = ScratchDir::new("sudo_cmdspec");
+        let path = dir.dir().to_string_lossy().to_string();
+        let real = format!("{path}/ls");
+        fs::write(&real, b"x").expect("write fixture");
+        let dirs = [path.as_str()];
+
+        assert!(command_path_matches("ls", real.as_bytes(), &dirs));
+        // And the caller may type the bare name: both sides resolve.
+        assert!(command_path_matches("ls", b"ls", &dirs));
+    }
+
+    /// The escalation this replaced, kept as the thing that must stay false.
+    ///
+    /// `command_path_matches` compared the last path component alone and
+    /// `actual_cmd` is the caller's argv verbatim, so `alice ALL = ls`
+    /// authorised `sudo /tmp/evil/ls` -- a binary the caller put there, run as
+    /// root. Asserted true here on 2026-09-12 before the fix.
+    #[test]
+    fn an_unqualified_spec_does_not_authorise_a_path_the_caller_chose() {
+        let dir = ScratchDir::new("sudo_cmdspec");
+        let path = dir.dir().to_string_lossy().to_string();
+        fs::write(format!("{path}/ls"), b"x").expect("write fixture");
+        let dirs = [path.as_str()];
+
+        assert!(!command_path_matches("ls", b"/tmp/evil/ls", &dirs));
+        assert!(!command_path_matches("ls", b"./ls", &dirs));
+        assert!(!command_path_matches("ls", b"/home/alice/ls", &dirs));
+    }
+
+    #[test]
+    fn an_unqualified_spec_naming_nothing_on_the_secure_path_matches_nothing() {
+        // The safe direction: a rule that cannot be resolved authorises
+        // nothing rather than authorising by name.
+        let dir = ScratchDir::new("sudo_cmdspec");
+        let path = dir.dir().to_string_lossy().to_string();
+        let dirs = [path.as_str()];
+        assert!(!command_path_matches(
+            "nosuchtool",
+            b"/usr/bin/nosuchtool",
+            &dirs
+        ));
+    }
+
+    #[test]
+    fn secure_path_defaults_and_is_overridable() {
+        // `secure_path` was parsed and stored and never read until
+        // 2026-09-12. This is its first consumer.
+        let config = parse_sudoers("").expect("empty sudoers parses");
+        assert!(secure_path_of(&config).contains("/usr/bin"));
+        let config = parse_sudoers(
+            "Defaults secure_path = /opt/bin
+",
+        )
+        .expect("parses");
+        assert_eq!(secure_path_of(&config), "/opt/bin");
     }
 
     // -- User matching tests --
@@ -5081,6 +5324,54 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
     fn host_match_exact() {
         let aliases = HashMap::new();
         assert!(host_matches(&["web1".to_string()], "web1", &aliases,));
+    }
+
+    /// A negation written after a broader entry is the whole point of the
+    /// idiom, and was unreachable: every list matcher walked forward and
+    /// returned at the first match, so `ALL` answered before `!secret` was
+    /// looked at. Asserted TRUE here on 2026-09-12 to prove it, before the
+    /// fix; it is the same three lines inverted.
+    #[test]
+    fn a_negated_host_after_all_is_honoured() {
+        let aliases = HashMap::new();
+        let specs = ["ALL".to_string(), "!secret".to_string()];
+        assert!(!host_matches(&specs, "secret", &aliases));
+        // ...and the rule still applies everywhere else.
+        assert!(host_matches(&specs, "web1", &aliases));
+    }
+
+    #[test]
+    fn a_negated_user_after_all_is_honoured() {
+        let aliases = HashMap::new();
+        let specs = ["ALL".to_string(), "!mallory".to_string()];
+        assert!(!user_matches(&specs, "mallory", &[], &aliases));
+        assert!(user_matches(&specs, "alice", &[], &aliases));
+    }
+
+    #[test]
+    fn a_negated_runas_target_is_honoured() {
+        // `runas_matches` used `.any()` and read `!` as part of a name, so
+        // `(ALL, !root)` permitted running things AS root -- the one target it
+        // was written to forbid.
+        let aliases = HashMap::new();
+        let runas = RunasSpec {
+            users: vec!["ALL".to_string(), "!root".to_string()],
+            groups: Vec::new(),
+        };
+        assert!(!runas_matches(&runas, "root", "", &aliases));
+        assert!(runas_matches(&runas, "backup", "", &aliases));
+    }
+
+    #[test]
+    fn order_decides_and_the_last_word_wins() {
+        // The rule this implements. Reversing the list reverses the answer,
+        // which is what "last match wins" means and what first-match-wins
+        // could not express.
+        let aliases = HashMap::new();
+        let deny_last = ["ALL".to_string(), "!secret".to_string()];
+        let allow_last = ["!secret".to_string(), "ALL".to_string()];
+        assert!(!host_matches(&deny_last, "secret", &aliases));
+        assert!(host_matches(&allow_last, "secret", &aliases));
     }
 
     #[test]

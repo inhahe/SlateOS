@@ -98924,6 +98924,25 @@ tooling gap is real and worth closing — it is a push-time blind spot in exactl
 the class of code this entry exists for — but it is a ratchet to install, not a
 fire.
 
+**The ratchet is installed, 2026-09-12.** `check-cfg-unix.py` passes
+`--all-targets`, so the push gate now compiles the `#[cfg(unix)]` code inside
+`#[cfg(test)]` modules that it previously skipped. Measured after the change:
+60 of 412 workspace crates hold unix-gated code and all 60 compile clean for
+`x86_64-unknown-linux-gnu` with the flag, exit 0.
+
+**The self-test gained the case that was actually blind.** Its existing fixture
+put a unix-only compile error at module top level, which the gate caught before
+this change — so it demonstrated the gate working on the half that was never
+the problem. The new fixture puts the error inside a `#[cfg(test)] mod` and
+asserts *both* directions: the module does not compile without `--test` (so the
+flag is buying something) and the error IS caught with it (so the flag reaches
+test targets). `rustc --test` is to `rustc` what `cargo check --all-targets` is
+to `cargo check`.
+
+**And the summary line now names the flag.** A gate that prints "OK, 60 crates
+compile" reads identically whether or not it looked at test targets, which is
+how this went unnoticed for as long as it did.
+
 **A note on how that was checked, because it nearly was not.** The first run
 piped the output through `grep -c '^error'` and printed `0`, which is the same
 thing it would print if cargo had failed to start. The second run captured the
@@ -126754,6 +126773,41 @@ that `scripts/run-timeout.py` is unaffected when it is the *outermost* command
 — it exits with the child's own status — but piping *its* output into `tail`
 loses that status again just the same.
 
+### It is not only `cargo test`. It hid a REFUSED PUSH, 2026-09-12
+
+`git push origin lane-b 2>&1 | tail -3; echo "PUSH_EXIT=$?"` printed
+`PUSH_EXIT=0` for a push the pre-push hook had **refused**. `$?` was `tail`'s.
+
+Worse than the `cargo test` case in two ways. The pipe also **truncated the
+diagnostic**: `tail -3` kept `error: failed to push some refs`, so the reason
+-- which gate, which file, and the one-call fix it named -- scrolled past
+unread and had to be recovered by re-running the push. And the false success
+was about *publication*, not about a test: the next step was merging `main` to
+that supposedly-pushed commit.
+
+**What caught it was not the exit code.** It was `git merge --ff-only
+origin/lane-b` answering **"Already up to date"** immediately after a push that
+claimed to have moved the branch. Two statements that cannot both be true. The
+instrument that settled it is `git ls-remote`, which cannot answer from a local
+cache -- `origin/lane-b` can, and would have agreed with the lie.
+
+**The habit that replaced it**, and it is shorter than the broken one:
+
+```sh
+git push origin lane-b > build/push.log 2>&1; echo "EXIT=$?"
+```
+
+Redirect rather than pipe. The status is git's, the whole diagnostic is kept,
+and the log can be grepped afterwards as many times as needed. Three further
+pushes were refused by gates that same afternoon -- for a diagnostic-forgery
+hole, a baseline exemption that outlived its site, and a `.unwrap_or_default()`
+regression -- and every one was seen immediately because the status was real.
+
+**The general rule, stated so it outlives these examples:** never pipe a
+command whose exit status you intend to read. Sharpened by lane A to the form
+worth remembering -- *piping is dangerous even when you do not want the status,
+because the status is the only thing separating "no matches" from "no input".*
+
 **Adjacent, unexplained.** The `rustdoc` failure that exposed this was itself
 strange: ~98 errors of the form "cannot find type `String` in this scope"
 across the whole of `userspace/userdb/src/lib.rs`, i.e. the crate compiling
@@ -131209,6 +131263,43 @@ argument for the crate was that *two* parsers would drift; the count inside
 **The ten:** `htop`, `ps`, `free`, `coreutils`'s `free`, `earlyoom`, `iostat`,
 `hwinfo`, `lsmem`, `numactl`, `hwclock`.
 
+### `/proc/diskstats` was a fourth family, and the copies disagreed (2026-09-12)
+
+Not on the list above, because that list was built from `/proc/<pid>` and
+`/proc/meminfo` readers. Three programs parsed `/proc/diskstats` privately --
+`iostat`, `sysstat`, `vmstat` -- and the thing they disagreed about was the
+size of a sector:
+
+| | conversion | verdict |
+|---|---|---|
+| `sysstat` | `sectors * 0.5` -> kB | 512 bytes, hardcoded, **right** |
+| `iostat` | `sectors * read_sector_size(dev)` | the DEVICE's sector size -- **8x over-report on a 4K drive** |
+| `vmstat` | prints raw sectors | never wrong about the unit, because it never converted |
+
+The block layer accounts in fixed 512-byte units whatever the device does, so
+`/sys/block/<dev>/queue/hw_sector_size` -- 4096 on a great many modern drives
+-- is not the unit these counters are in. **Latent on the development host,
+where every device reports 512**, which is exactly why it survived.
+
+Worth noting how it was found: not by hunting for the bug, but by asking which
+programs still parse `/proc` themselves. The disagreement was provable without
+leaving the repository -- two programs in one tree giving different byte counts
+for one kernel counter, and one of them matching upstream sysstat.
+
+They also disagreed about the WIDTH in a way that shows the drift directly:
+`iostat`'s comment said kernels since 4.18 append columns and treated 14 as a
+minimum; `vmstat`'s said "at least 14" and required exactly that. One format,
+two copies, two different amounts of knowledge about it.
+
+All three now use `procinfo::DiskStats` and `procinfo::DISKSTATS_SECTOR_BYTES`.
+
+**Two of `vmstat`'s tests were testing `str::split_whitespace`.** They split a
+line inside the test and asserted on the resulting `Vec`, never calling the
+program's parser; the short-line one asserted that its own literal had fewer
+than 14 fields and said in a comment that such a line "should be skipped",
+with nothing checking that anything skipped it. Both now go through the parser
+that runs, and a third covers a modern kernel's extra columns.
+
 **Why it matters more than tidiness.** The things these disagree about are not
 cosmetic:
 
@@ -132018,8 +132109,21 @@ account has no uid -- there is no safe default for "which user to run as".
 `doas`'s `UID`/`GID` environment "hints" are deleted rather than kept alongside:
 they were read as an *identity* by six other programs, so `doas` was
 manufacturing the spoofed environment they trusted (see the entry above).
-`login` remains, and it is a different job -- its success path still prints
-"would exec shell" and execs nothing at all; see `todo.txt`.
+~~`login` remains, and it is a different job -- its success path still prints
+"would exec shell" and execs nothing at all; see `todo.txt`.~~
+
+**`login` is done too, and this line was stale when it was written or shortly
+after (corrected 2026-09-12).** `build_login_command` builds a real
+`process::Command` for the user's shell, clears the inherited environment,
+sets the leading-hyphen `argv[0]`, and calls
+`authlib::identity::become_user(&mut cmd, user.uid, user.gid)` -- the same
+mechanism `doas` and `sudo` use. `spawn_login_shell` then tries the home
+directory and falls back to `/`, which is the one setting that can fail for a
+reason that is not the caller's fault. 62 tests pass.
+
+There is no `todo.txt` entry for it either, so the pointer at the end of that
+sentence led nowhere. Third stale status line found today in a document whose
+own subject is stale status lines.
 
 ---
 
@@ -133179,6 +133283,47 @@ untouched -- `rpm`'s `.rpmnew` bargain. Four tests, where there were none.
 no guard named `is_mounted`, `is_busy`, `is_in_use`, `is_locked`, `is_readonly`,
 `is_running`, `is_active`, `in_use`, `is_protected`, `is_immutable` or
 `is_open` fails open anywhere in lane B. The two that did are fixed.
+
+### A third one, 2026-09-12, that this method could not have found
+
+`doas`'s `user_in_group` -- the guard deciding whether `permit :wheel` or
+`deny :wheel` applies to you. It failed open for `deny`, and **every one of its
+error arms was already correct**. The fail-open was in the *success* path.
+
+The function asked whether `/etc/group`'s **member list** names you. That field
+deliberately omits everyone whose *login* group it already is (`pwdb::Group::
+members` says so, and glibc agrees -- measured, `id -nG` lists the primary
+group). So a caller whose primary group was `wheel` was answered "not a
+member". For `permit :wheel` that withholds a grant, which is safe. For `deny
+:wheel` the deny stops applying **to precisely the accounts most likely to be
+in the group**, and the caller falls through to whatever `permit` comes next.
+
+**Why the survey above could not reach it**, which is the part worth keeping:
+
+| The method looked for | This guard |
+|---|---|
+| a `-> bool` function | returns `Option<bool>` |
+| a fail-open **error arm** (`Err(_) => false`) | error arms all correct; one returns `None`, and `None` is handled well -- an unevaluable `deny` is *fatal* |
+| `false` produced by not knowing | `false` produced by **knowing a narrower fact than the question** |
+
+That last row is the new shape. The guard was not confused about whether it
+could answer; it answered confidently, about something slightly different from
+what it was asked. No grep over error handling finds that, because there is
+nothing wrong with the error handling.
+
+The irony is on the record in the file: `read_group_entries`' doc comment, ten
+lines above, was written *specifically* to warn about this inversion after lane
+A found it in `mkfs`/`fsck` -- *"for a check guarding a privileged action, 'I
+do not know' and 'it is safe' must not be the same value."* The comment guarded
+the error path. The bug was in the success path, eight lines below it.
+
+**A filter that would have caught it**, offered for the next sweep rather than
+as a finished tool: for each guard on a privileged action, ask not "what does
+it do when it fails" but **"what fact does it actually establish, and is that
+the fact the caller needs?"** Here the caller needs *membership*; the function
+established *listed-in-the-member-field*. Those differ for the commonest case
+there is. That question cannot be mechanised, but it can be asked of the dozen
+or so guards that gate a privilege, which is a reviewable number.
 
 ## B: `org.slateos.ServiceManager` has two clients and no provider
 
@@ -138033,3 +138178,296 @@ whose name is not UTF-8 is now refused rather than mangled -- correct, but it
 means such a group cannot be administered at all. Making `GroupEntry` carry
 bytes end to end (including `serialize`) is the follow-on, and is a bigger
 change than stopping the destruction.
+
+
+## B-SUDOS-CREDENTIAL-CACHE-NEVER-EXPIRED-ON-A-BACKWARDS-CLOCK, AND `sudo -k` DID NOTHING UNDER `timestamp_timeout=-1` (lane B, 2026-09-12) -- FIXED
+
+**In short:** `sudo` remembers that you typed your password, so a second `sudo`
+soon after does not ask again. Two ways that memory outlived what it was meant
+to mean. If the system clock ever steps **backwards**, the remembered moment is
+in the future and the memory never expires. And `sudo -k`, which exists to
+forget it deliberately, did not work at all when the administrator had
+configured the memory never to expire on its own.
+
+**Where.** `userspace/sudo/src/main.rs` -> `check_timestamp`, now split so the
+decision is in `timestamp_is_fresh(content, now, timeout)` with the clock as a
+parameter.
+
+### Defect 1: a future timestamp
+
+```rust
+now.saturating_sub(ts) < timeout
+```
+
+With `ts` after `now`, `saturating_sub` yields **0**, `0 < timeout` is true, and
+the prompt is skipped -- for as long as the clock takes to catch up. Nothing
+fails anywhere: the read succeeds, the parse succeeds, and the subtraction
+answers a question nobody asked.
+
+A backwards clock step is ordinary -- an NTP correction, an RTC read at boot
+before the network is up, a restored VM snapshot. Real `sudo` treats this as
+`TS_FATAL`, "timestamp too far in the future".
+
+### Defect 2: `sudo -k` under a never-expiring timeout
+
+`invalidate_timestamp` writes `0` "to invalidate without removing". Under any
+finite timeout 0 is 1970 and long expired, so it worked. Under
+`timestamp_timeout=-1` **nothing** expires, and the `timeout == u64::MAX` arm
+returned `true` before the age was ever considered -- so the sentinel came back
+fresh. `sudo -k` was a no-op for exactly the configuration that most needs it:
+the one where the credential otherwise lasts the whole session.
+
+The reader now honours the sentinel, rather than the writer being asked to pick
+a different number, because the reader is what has to agree with it.
+
+### What this says about the method
+
+**The error arms were never the problem.** This function's doc comment is a
+careful argument that every failure answers `false`, and it ends:
+
+> Checked on 2026-09-10 during a sweep for predicates that answer `false` on
+> failure -- this one is correct as written and is noted so the next sweep does
+> not have to re-derive it.
+
+That note was accurate about everything it examined and would have stopped the
+next reader looking. Both defects are in the **success** path. It is the second
+guard in two days of this shape -- `doas`'s `user_in_group` was the first, and
+its doc comment was likewise written to warn about fail-open and likewise
+guarded the wrong arm.
+
+So the sweep's question -- *what does it do when it fails?* -- is not enough on
+its own. The one that found these is: **what fact does it actually establish,
+and is that the fact the caller needs?** Here the caller needs "did this user
+authenticate within the last N seconds"; the function established "is the
+recorded number less than N away from the clock", which is a different
+statement whenever the number is in the future or is a sentinel.
+
+### And a near miss worth recording
+
+The first draft of the invalidation test asserted
+`timestamp_is_fresh("0", now, u64::MAX) == true` -- **the broken answer, written
+down as the expected one**. I caught it while re-reading what I had just
+asserted rather than that it passed. That is how a defect becomes a fixture,
+and a green suite then defends it.
+
+Six tests, where the decision previously could not be tested at all: the clock
+and the file were both welded in.
+
+
+## B-BOTH-PRIVILEGE-TOOLS-AUTHORISED-ANY-BINARY-WITH-THE-RIGHT-NAME (lane B, 2026-09-12) -- FIXED
+
+**In short:** `doas` and `sudo` both decide whether a rule's command matches
+what you asked to run. Both compared **only the last part of the path** when
+the rule named a command without a directory. So a rule saying you may run
+`pkg` let you run *any* file called `pkg` -- including one you had just written
+yourself, in a directory you control, as root.
+
+```text
+doas.conf:  permit alice cmd pkg
+$ doas /tmp/evil/pkg          # ran as root
+$ doas ./pkg                  # so did this
+$ PATH=/tmp/evil doas pkg     # and this, because doas read the CALLER's PATH
+```
+
+sudoers was the same shape: `alice ALL = pkg`, and `sudo /tmp/evil/pkg`. In
+`sudo` the command is the caller's argv verbatim -- nothing resolves it -- so
+the basename arm was the whole of the check.
+
+**Proven before either was changed.** An assertion added to each program's
+existing basename test showed the escalation returning `true`. Both are kept,
+inverted, as `..._does_not_authorise_a_path_the_caller_chose`.
+
+**The fix, the same in both.** An unqualified spec is *resolved* against a
+trusted path and the whole path is compared. `cmd pkg` therefore still means
+`/usr/bin/pkg`, which is what anybody writing it meant, and means nothing else.
+A spec naming a program that is not on that path matches nothing -- the safe
+direction: a rule that cannot be resolved authorises nothing rather than
+authorising by name.
+
+The trusted path differs per program, and in each case it is one the program
+already had:
+
+| | trusted path | note |
+|---|---|---|
+| `doas` | `target_path(uid)` | the `PATH` it was already going to hand the target, so the rule check and the `exec` cannot disagree about which binary a name means |
+| `sudo` | `Defaults secure_path` | **parsed, stored and never read until today** -- a setting that accepted a value and did nothing with it. This is its first consumer. |
+
+**How it was found.** By applying the filter written a few hours earlier, after
+`doas`'s `user_in_group`: the fail-open survey greps *error arms*, and neither
+of these has one. The question that reaches them is **"what fact does it
+actually establish, and is that the fact the caller needs?"** The caller needs
+*is this the command the rule names*; the function established *does the last
+path component match*, which is a different statement the moment the caller
+supplies a path of their own.
+
+That is now three defects found by that question in one day -- `doas`'s group
+membership, `sudo`'s credential clock, and this -- against zero found by
+grepping error handling, which had already been done and had already declared
+both files clean.
+
+**Two host artifacts that each read exactly like the fix being wrong**, and
+cost two rounds apiece to tell from a real failure. `ScratchDir::path` composes
+with a backslash on Windows while the code composes with `/`; `fs::metadata`
+accepts both, so the file was found and only the string comparison failed. And
+an absolute Windows path starts with a drive letter and a colon, while the
+search splits a `PATH` on `:` -- so the test searched two fragments of its own
+fixture directory. Both programs now split the path list at the edge
+(`path_dirs`) and pass the split list inward, which is a seam for the host's
+benefit and costs the target nothing.
+
+
+## B-SUDOERS-LIST-NEGATIONS-WERE-UNREACHABLE (lane B, 2026-09-12) -- FIXED
+
+**In short:** a sudoers rule can carve out an exception --
+`alice ALL, !secret = (ALL) ALL` means *every host except `secret`*. Every list
+matcher in our `sudo` walked the list forward and returned at the **first**
+entry that matched, so `ALL` answered before `!secret` was ever looked at. The
+rule applied on `secret`: the one host it had been written to exclude.
+
+**Three matchers, one cause.**
+
+| | was | effect of the bug |
+|---|---|---|
+| `host_matches` | forward, first match wins; `!` checked last and only against an exact hostname | `ALL, !secret` granted on `secret` |
+| `user_matches` | same shape | `ALL, !mallory` granted to `mallory` |
+| `runas_matches` | `.any()`, and **no `!` handling at all** | `(ALL, !root)` permitted running things *as root* |
+
+`runas_matches` is the one worth pausing on: it did not merely order the list
+wrongly, it read `!root` as the name of a user called `!root`, which matches
+nobody -- so the entry was inert and the `ALL` beside it decided everything.
+
+**Real sudo resolves these lists by the LAST match**, which is why the idiom
+works there. This file already knew the rule and applied it one level up:
+`check_authorization` iterates privileges `.rev()` with the comment *"last
+match wins, like real sudo"*. The lists inside those privileges did the
+opposite, in the same file, a hundred lines apart.
+
+**Fixed** with one `list_matches(specs, hit)` helper that strips `!`, evaluates
+the caller's predicate, and keeps the **last** decisive verdict. Negation lives
+in the helper rather than in each caller's predicate, so a matcher cannot
+forget it -- which is exactly how `runas_matches` came not to have it.
+
+Proven before the fix: `host_matches(["ALL", "!secret"], "secret")` asserted
+**true** in a test written for the purpose. That test is now the same three
+lines inverted, plus one that reverses the list and asserts the answer reverses
+with it -- which is what "last match wins" means and what first-match-wins
+could not express.
+
+**Found by the same question as the three before it** -- *what fact does it
+actually establish, and is that the fact the caller needs?* The caller needs
+"does this rule apply here"; the function established "does some entry in the
+list mention here", which stops being the same thing the moment the list
+contains an exception.
+
+
+## B-PRIVILEGED-GUARD-REVIEW-2026-09-12 (lane B) -- COMPLETE, and the note on it is written carefully
+
+**What was done.** Every `-> bool`/`-> Option<bool>` predicate in the programs
+that grant a privilege -- `doas`, `sudo`, `su`, `login`, `passwd`, `newgrp`,
+`crontab`, `at` -- read against one question:
+
+> **What fact does this actually establish, and is that the fact the caller
+> needs?**
+
+Not *what does it do when it fails*. That question had already been asked of
+these same files on 2026-09-10 and had found them clean.
+
+**Four defect clusters, all fixed, all in the SUCCESS path:**
+
+| Guard | Established | Caller needed |
+|---|---|---|
+| `doas::user_in_group` | listed in `/etc/group`'s member field | *is a member* -- the field omits primary members, so `deny :wheel` stopped applying to the likeliest members |
+| `sudo::check_timestamp` | recorded number is within N of the clock | *authenticated within N seconds* -- differs whenever the number is in the future or is the invalidation sentinel |
+| `doas`/`sudo` command specs | the last path component matches | *this is the command the rule names* -- differs the moment the caller supplies a path |
+| `sudo` host/user/runas lists | some entry mentions this | *does this rule apply* -- differs the moment the list holds an exception |
+
+**Five guards the question CONFIRMED**, which is the ordinary outcome and is
+worth recording so they are not re-read:
+
+* `doas::persist_valid` -- already refused a future timestamp, in the same tree
+  where `sudo` did not. The `sudo` fix was not invented; the correct version
+  was one program over.
+* `newgrp::user_is_member` -- checks the primary gid explicitly, which is the
+  thing `doas` was missing.
+* `passwd::has_password` -- both callers use `false` in the safe direction.
+* `login::check_account_expired` -- an unreadable clock skips *date* expiry and
+  still enforces the lock, with the trade written out in the code.
+* `at::atd_may_run` -- requires the daemon to already be the submitting user
+  and refuses when it cannot tell, because `atd` cannot change user and
+  running the job "would give it authority its submitter did not have".
+
+### The note itself, and why it is worded like this
+
+The 2026-09-10 sweep left this on `sudo::check_timestamp`:
+
+> Checked ... this one is correct as written and is noted so the next sweep
+> does not have to re-derive it.
+
+It was accurate about every arm it examined, and it is the sentence that would
+have stopped the next reader finding two live defects in the lines below it.
+A note that says *checked* invites the reader to skip; a note that says **what
+question was asked** lets them decide whether their question is different.
+
+So: the guards above were checked on 2026-09-12 against *what fact does this
+establish*. **That is not a statement that they are correct against some other
+question**, and a sweep arriving with a different one should read them again.
+
+
+## B-THREE-PROC-COUNTERS-WERE-MEASURED-WRONG-BY-PROGRAMS-THAT-PARSED-THEM-PRIVATELY (lane B, 2026-09-12) -- ALL FIXED
+
+**In short:** asking *which programs still parse `/proc` themselves* -- not
+looking for arithmetic errors -- turned up three wrong numbers. None of them is
+visible reading one file. Each is a disagreement between two programs about one
+kernel counter, so the comparison only exists across files, which is exactly
+what a shared parser removes.
+
+| Program | Counter | What it did | What a user saw |
+|---|---|---|---|
+| `iostat` | `/proc/diskstats` sectors | multiplied by `/sys/block/<dev>/queue/hw_sector_size` | **8x** the real throughput on a 4K-native drive |
+| `sysstat` | `/proc/stat` cpu | added `guest` and `guest_nice` to the total | every percentage **too small** on a machine running VMs |
+| `top` | `/proc/stat` cpu | never read `steal` at all | every percentage **too large**; idle 80% where the truth is 66.7% |
+
+The last two are mirrors of each other. One added time the kernel had already
+counted, inflating the denominator; the other omitted time the kernel does
+publish, deflating it. Both came from a program deciding privately which
+columns count.
+
+**Each was provable without leaving the repository.** `sysstat` converted
+diskstats sectors with `* 0.5` while `iostat` used the device's sector size --
+two programs, one counter, different byte totals, and one of them had to be
+wrong. `procinfo::CpuTimes` already documented "Running a guest. **Already
+counted in `user`**" while `sysstat` added it anyway.
+
+**Two of the three were defended by a test.** `sysstat`'s
+`test_cpu_stat_total` asserted 1068 -- the eight real states summing to 1067,
+plus guest a second time. `vmstat`'s two diskstats tests called
+`split_whitespace` inside the test and asserted on the result, never touching
+the program's parser; the short-line one asserted that its own literal had
+fewer than 14 fields and said in a comment that such a line "should be
+skipped", with nothing checking that anything skipped it.
+
+**A fourth defect, found while converting.** `procinfo::CpuTimes::parse_line`
+accepted any line beginning `cpu`, zero-filling absent columns. That leniency
+is for columns the kernel ADDED later (`steal` in 2.6.11, `guest` in 2.6.24),
+and it read `cpu 100` -- a truncated line -- as a CPU that is 100% user. Four
+states is the fewest Linux has ever published, and is now the floor.
+
+Three programs also disagreed about the diskstats WIDTH: `iostat` treated 14 as
+a minimum and said in a comment that 4.18 appends columns; `vmstat` said "at
+least 14" and required exactly that; `top` required seven `/proc/stat` columns
+and would show no CPU row at all against an older kernel.
+
+### What the sweep did NOT find, so nobody repeats it
+
+* **`/proc/net/dev`** -- four private parsers (`ifconfig`, `ip`, `netstat`,
+  `sysstat`), and all four agree that rx is field 0 and tx is field 8, which is
+  the index `procinfo`'s own doc calls "the kind of index nobody re-derives".
+  `netstat` indexes directly but guards `len() < 16` first.
+* **`/proc/uptime`** -- ten readers, every one of them taking only the first
+  field. The trap here is the second, which is idle time summed across ALL
+  CPUs and can exceed uptime on a multi-core machine; nobody reads it.
+* **`/proc/meminfo`** -- already consolidated; every reader goes through
+  `procinfo`.
+
+Consolidating those three families would be tidiness rather than repair, and
+is not done for that reason.

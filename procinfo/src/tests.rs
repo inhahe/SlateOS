@@ -1134,9 +1134,13 @@ fn non_cpu_lines_are_ignored() {
     assert!(CpuTimes::parse_line(b"ctxt 999").is_none());
     assert!(CpuTimes::parse_line(b"").is_none());
     // `cpu` followed by something that is not a number is not `cpuN`.
-    assert!(CpuTimes::parse_line(b"cpufreq 1 2 3").is_none());
-    assert_eq!(CpuTimes::parse_line(b"cpu 1 2 3").unwrap().0, None);
-    assert_eq!(CpuTimes::parse_line(b"cpu7 1 2 3").unwrap().0, Some(7));
+    assert!(CpuTimes::parse_line(b"cpufreq 1 2 3 4").is_none());
+    // Four states, which is the fewest a real `cpu` line has ever carried.
+    // These fixtures had three, which was incidental to what this test is
+    // about -- which LABELS are recognised -- and stopped parsing when
+    // `parse_line` gained its floor. The widths changed; the test did not.
+    assert_eq!(CpuTimes::parse_line(b"cpu 1 2 3 4").unwrap().0, None);
+    assert_eq!(CpuTimes::parse_line(b"cpu7 1 2 3 4").unwrap().0, Some(7));
 }
 
 /// One bar for the whole machine beats no bars.
@@ -1348,4 +1352,68 @@ fn a_non_utf8_comm_renders_as_a_name_not_as_absence() {
     assert_eq!(display_bytes(trim_comm(raw)), r"bad\xffname");
     // And the valid case is untouched, so the escape path costs nothing.
     assert_eq!(display_bytes(trim_comm(b"systemd\n")), "systemd");
+}
+
+// ---- /proc/diskstats ----
+
+/// Two lines of a real `/proc/diskstats`: the second carries the discard and
+/// flush columns kernels have appended since 4.18.
+const DISKSTATS: &[u8] =
+    b"   8       0 sda 12 3 456 78 9 10 1112 13 0 14 15\n 259 0 nvme0n1 20 0 700 30 40 0 800 50 0 60 70 1 2 3 4 5 6\n";
+
+#[test]
+fn diskstats_reads_the_classic_fourteen_and_tolerates_more() {
+    let d = DiskStats::parse_all(DISKSTATS);
+    assert_eq!(d.len(), 2, "a longer modern line must not be skipped");
+    assert_eq!(d[0].name, b"sda");
+    assert_eq!(d[0].major, Some(8));
+    assert_eq!(d[0].minor, Some(0));
+    assert_eq!(d[0].reads_completed, Some(12));
+    assert_eq!(d[0].sectors_read, Some(456));
+    // Index 9, which is 1112 -- I first wrote 13 here by counting the fixture
+    // wrong, and the test caught my arithmetic rather than the parser's.
+    assert_eq!(d[0].sectors_written, Some(1112));
+    assert_eq!(d[0].ms_writing, Some(13));
+    assert_eq!(d[0].weighted_ms, Some(15));
+    assert_eq!(d[1].name, b"nvme0n1");
+    assert_eq!(d[1].sectors_read, Some(700));
+}
+
+#[test]
+fn a_diskstats_sector_is_512_bytes_whatever_the_device_says() {
+    // The kernel accounts in fixed 512-byte units. `iostat` multiplied by
+    // `/sys/block/<dev>/queue/hw_sector_size` instead, which is 4096 on many
+    // modern drives -- an eightfold over-report -- while `sysstat` in the same
+    // tree converted with `* 0.5` and was right.
+    let d = DiskStats::parse_all(DISKSTATS);
+    assert_eq!(d[0].bytes_read(), Some(456 * 512));
+    assert_eq!(d[0].bytes_written(), Some(1112 * 512));
+    assert_eq!(DISKSTATS_SECTOR_BYTES, 512);
+}
+
+#[test]
+fn a_short_diskstats_line_is_not_a_device() {
+    // Fewer than the three identifiers plus eleven counters cannot be read
+    // positionally at all.
+    assert!(DiskStats::parse_all(b"   8       0 sda 12 3").is_empty());
+    assert!(DiskStats::parse_all(b"").is_empty());
+}
+
+#[test]
+fn a_truncated_cpu_line_is_not_a_cpu() {
+    // Four states is the fewest Linux has ever published. Fewer is a
+    // truncated line, and reading it as a CPU gives a wrong answer rather
+    // than a refusal: `cpu 100` would be 100% user.
+    assert!(CpuTimes::parse_line(b"cpu 100").is_none());
+    assert!(CpuTimes::parse_line(b"cpu").is_none());
+    // The oldest real format -- four states, no iowait -- still parses.
+    let (index, t) = CpuTimes::parse_line(b"cpu 100 200 300 400").expect("classic four");
+    assert_eq!(index, None);
+    assert_eq!(t.user, 100);
+    assert_eq!(t.idle, 400);
+    assert_eq!(t.iowait, 0, "a column the kernel did not publish is zero");
+    assert_eq!(t.total(), 1000);
+    // And a per-CPU line keeps its index.
+    let (index, _) = CpuTimes::parse_line(b"cpu7 1 2 3 4").expect("cpu7");
+    assert_eq!(index, Some(7));
 }

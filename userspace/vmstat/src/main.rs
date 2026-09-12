@@ -258,40 +258,46 @@ fn read_vmstat() -> Option<VmStatCounters> {
 }
 
 /// Parse `/proc/diskstats` for per-disk I/O statistics.
+///
+/// The layout is [`procinfo::DiskStats`]'s. This program carried its own
+/// reader, one of three in the tree, and the three did not agree: `iostat`
+/// converted sectors with the DEVICE's sector size where the kernel accounts
+/// in fixed 512-byte units. `vmstat` prints raw sector counts and so was never
+/// wrong about the unit -- but it was the copy whose comment said the width is
+/// "at least 14" while requiring exactly that, and `iostat`'s said kernels
+/// since 4.18 append columns. Two copies, two different amounts of knowledge
+/// about one format.
 fn read_diskstats() -> Option<Vec<DiskStats>> {
-    let content = read_file("/proc/diskstats")?;
-    let mut disks = Vec::new();
+    let raw = fs::read("/proc/diskstats").ok()?;
+    Some(
+        procinfo::DiskStats::parse_all(&raw)
+            .iter()
+            .filter_map(DiskStats::from_proc)
+            .collect(),
+    )
+}
 
-    for line in content.lines() {
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        // /proc/diskstats has at least 14 fields:
-        // major minor name reads_completed reads_merged sectors_read ms_reading
-        // writes_completed writes_merged sectors_written ms_writing ios_in_progress
-        // ms_io weighted_ms_io
-        if fields.len() < 14 {
-            continue;
-        }
-        let name = match fields.get(2) {
-            Some(n) => (*n).to_string(),
-            None => continue,
-        };
-        disks.push(DiskStats {
-            name,
-            reads_completed: fields.get(3).and_then(|s| s.parse().ok()).unwrap_or(0),
-            reads_merged: fields.get(4).and_then(|s| s.parse().ok()).unwrap_or(0),
-            sectors_read: fields.get(5).and_then(|s| s.parse().ok()).unwrap_or(0),
-            ms_reading: fields.get(6).and_then(|s| s.parse().ok()).unwrap_or(0),
-            writes_completed: fields.get(7).and_then(|s| s.parse().ok()).unwrap_or(0),
-            writes_merged: fields.get(8).and_then(|s| s.parse().ok()).unwrap_or(0),
-            sectors_written: fields.get(9).and_then(|s| s.parse().ok()).unwrap_or(0),
-            ms_writing: fields.get(10).and_then(|s| s.parse().ok()).unwrap_or(0),
-            ios_in_progress: fields.get(11).and_then(|s| s.parse().ok()).unwrap_or(0),
-            ms_io: fields.get(12).and_then(|s| s.parse().ok()).unwrap_or(0),
-            weighted_ms_io: fields.get(13).and_then(|s| s.parse().ok()).unwrap_or(0),
-        });
+impl DiskStats {
+    /// This program's flat view of one [`procinfo::DiskStats`] record.
+    ///
+    /// `None` for a device whose name is not text: `vmstat -d` prints a column
+    /// of names, so a device it cannot name is one it cannot show.
+    fn from_proc(d: &procinfo::DiskStats) -> Option<Self> {
+        Some(Self {
+            name: String::from_utf8(d.name.clone()).ok()?,
+            reads_completed: d.reads_completed.unwrap_or(0),
+            reads_merged: d.reads_merged.unwrap_or(0),
+            sectors_read: d.sectors_read.unwrap_or(0),
+            ms_reading: d.ms_reading.unwrap_or(0),
+            writes_completed: d.writes_completed.unwrap_or(0),
+            writes_merged: d.writes_merged.unwrap_or(0),
+            sectors_written: d.sectors_written.unwrap_or(0),
+            ms_writing: d.ms_writing.unwrap_or(0),
+            ios_in_progress: d.ios_in_progress.unwrap_or(0),
+            ms_io: d.ms_doing_io.unwrap_or(0),
+            weighted_ms_io: d.weighted_ms.unwrap_or(0),
+        })
     }
-
-    Some(disks)
 }
 
 /// Collect a full system snapshot.
@@ -1676,31 +1682,50 @@ pgmajfault 500
 
     // -- Diskstats parsing --
 
+    /// These two used to call `split_whitespace` in the test and assert on
+    /// the result -- testing `str::split_whitespace`, which is std's, and
+    /// never touching this program's parser. The short-line one asserted that
+    /// its own string literal had fewer than 14 fields and said in a comment
+    /// that such a line "should be skipped", without anything checking that
+    /// anything skipped it. They now go through the parser that runs.
     #[test]
     fn test_parse_diskstats_line() {
-        let line = "   8       0 sda 10000 500 200000 5000 8000 300 150000 3000 2 4000 8000";
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        assert_eq!(fields.len(), 14);
-        assert_eq!(fields.get(2), Some(&"sda"));
-        assert_eq!(
-            fields.get(3).and_then(|s| s.parse::<u64>().ok()),
-            Some(10000)
-        );
-        assert_eq!(
-            fields.get(5).and_then(|s| s.parse::<u64>().ok()),
-            Some(200000)
-        );
-        assert_eq!(
-            fields.get(7).and_then(|s| s.parse::<u64>().ok()),
-            Some(8000)
-        );
+        let line = b"   8       0 sda 10000 500 200000 5000 8000 300 150000 3000 2 4000 8000\n";
+        let parsed = procinfo::DiskStats::parse_all(line);
+        let d = parsed
+            .first()
+            .and_then(DiskStats::from_proc)
+            .expect("one device");
+        assert_eq!(d.name, "sda");
+        assert_eq!(d.reads_completed, 10000);
+        assert_eq!(d.sectors_read, 200_000);
+        assert_eq!(d.writes_completed, 8000);
+        assert_eq!(d.sectors_written, 150_000);
+        assert_eq!(d.weighted_ms_io, 8000);
     }
 
     #[test]
     fn test_parse_diskstats_short_line() {
-        // Lines with fewer than 14 fields should be skipped.
-        let line = "   8       0 sda 10000 500";
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        assert!(fields.len() < 14);
+        // A line that cannot carry the eleven counters is not a device, and
+        // this asserts that the parser drops it rather than that the literal
+        // is short.
+        let parsed = procinfo::DiskStats::parse_all(b"   8       0 sda 10000 500\n");
+        assert!(parsed.is_empty());
+    }
+
+    #[test]
+    fn a_modern_kernels_extra_columns_do_not_hide_the_device() {
+        // Kernels since 4.18 append discard and flush statistics. A reader
+        // requiring exactly 14 fields sees nothing on such a kernel; this
+        // program's old comment said "at least 14" while its code required
+        // exactly that.
+        let line = b"   8       0 sda 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17\n";
+        let parsed = procinfo::DiskStats::parse_all(line);
+        let d = parsed
+            .first()
+            .and_then(DiskStats::from_proc)
+            .expect("a longer line is still a device");
+        assert_eq!(d.name, "sda");
+        assert_eq!(d.sectors_read, 3);
     }
 }

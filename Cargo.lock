@@ -1203,6 +1203,9 @@ dependencies = [
 [[package]]
 name = "iostat"
 version = "0.1.0"
+dependencies = [
+ "procinfo",
+]
 
 [[package]]
 name = "ip"
@@ -2761,6 +2764,7 @@ name = "syslogd"
 version = "0.1.0"
 dependencies = [
  "quoting",
+ "scratchdir",
 ]
 
 [[package]]

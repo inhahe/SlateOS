@@ -749,6 +749,116 @@ impl StatCounters {
 // /proc/net/dev
 // ============================================================================
 
+/// The size of a `/proc/diskstats` sector, in bytes.
+///
+/// **512, always, whatever the device's own sector size is.** The block layer
+/// accounts in fixed 512-byte units (`block/genhd.c`, and Linux's
+/// `Documentation/admin-guide/iostats.rst`), so the number in
+/// `/sys/block/<dev>/queue/hw_sector_size` -- which is 4096 on a great many
+/// modern drives -- is **not** the unit these counters are in.
+///
+/// `userspace/iostat` multiplied by that value and would have reported eight
+/// times the real throughput on any 4K-native drive, while `userspace/sysstat`
+/// in the same tree converted with `* 0.5` and was right. Two programs, one
+/// kernel counter, different answers -- which is the whole argument for this
+/// constant living in one place.
+pub const DISKSTATS_SECTOR_BYTES: u64 = 512;
+
+/// One device's line of `/proc/diskstats`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiskStats {
+    /// Device name, e.g. `sda`. Bytes: a device name is not required to be
+    /// text, and a reader that decodes it drops the device rather than the
+    /// name.
+    pub name: Vec<u8>,
+    /// Device major number.
+    pub major: Option<u32>,
+    /// Device minor number.
+    pub minor: Option<u32>,
+    /// Reads completed successfully.
+    pub reads_completed: Option<u64>,
+    /// Reads merged.
+    pub reads_merged: Option<u64>,
+    /// Sectors read -- multiply by [`DISKSTATS_SECTOR_BYTES`], not by the
+    /// device's own sector size.
+    pub sectors_read: Option<u64>,
+    /// Milliseconds spent reading.
+    pub ms_reading: Option<u64>,
+    /// Writes completed.
+    pub writes_completed: Option<u64>,
+    /// Writes merged.
+    pub writes_merged: Option<u64>,
+    /// Sectors written -- see [`Self::sectors_read`].
+    pub sectors_written: Option<u64>,
+    /// Milliseconds spent writing.
+    pub ms_writing: Option<u64>,
+    /// I/Os currently in progress.
+    pub ios_in_progress: Option<u64>,
+    /// Milliseconds spent doing I/O.
+    pub ms_doing_io: Option<u64>,
+    /// Weighted milliseconds spent doing I/O.
+    pub weighted_ms: Option<u64>,
+}
+
+impl DiskStats {
+    /// Parse `/proc/diskstats`.
+    ///
+    /// The classic layout is 14 whitespace-separated fields: major, minor,
+    /// name, then eleven counters. Kernels since 4.18 **append** more columns
+    /// (discard and flush statistics), so the width is a MINIMUM and never an
+    /// equality -- a reader that requires exactly 14 sees nothing on a modern
+    /// kernel, and one that requires exactly 18 sees nothing on an old one.
+    ///
+    /// Bytes read: the counters are converted with
+    /// [`DISKSTATS_SECTOR_BYTES`].
+    #[must_use]
+    pub fn parse_all(content: &[u8]) -> Vec<Self> {
+        let mut out = Vec::new();
+        for line in content.split(|&b| b == b'\n') {
+            let f = split_ws(trim(line));
+            // Three identifiers plus the eleven classic counters.
+            if f.len() < 14 {
+                continue;
+            }
+            let at = |index: usize| f.get(index).and_then(|v| parse_u64(v));
+            let id = |index: usize| {
+                f.get(index)
+                    .and_then(|v| parse_u64(v))
+                    .and_then(|v| u32::try_from(v).ok())
+            };
+            out.push(Self {
+                name: f.get(2).map_or_else(Vec::new, |v| (*v).to_vec()),
+                major: id(0),
+                minor: id(1),
+                reads_completed: at(3),
+                reads_merged: at(4),
+                sectors_read: at(5),
+                ms_reading: at(6),
+                writes_completed: at(7),
+                writes_merged: at(8),
+                sectors_written: at(9),
+                ms_writing: at(10),
+                ios_in_progress: at(11),
+                ms_doing_io: at(12),
+                weighted_ms: at(13),
+            });
+        }
+        out
+    }
+
+    /// Bytes read, from [`Self::sectors_read`].
+    #[must_use]
+    pub fn bytes_read(&self) -> Option<u64> {
+        self.sectors_read?.checked_mul(DISKSTATS_SECTOR_BYTES)
+    }
+
+    /// Bytes written, from [`Self::sectors_written`].
+    #[must_use]
+    pub fn bytes_written(&self) -> Option<u64> {
+        self.sectors_written?.checked_mul(DISKSTATS_SECTOR_BYTES)
+    }
+}
+
 /// One interface's counters from `/proc/net/dev`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NetDevice {
@@ -1498,6 +1608,15 @@ impl CpuTimes {
         } else {
             Some(parse_u64(rest)?)
         };
+        // The four classic states -- user, nice, system, idle -- are the
+        // fewest Linux has ever published on a `cpu` line. Tolerating fewer
+        // does not accept an older kernel, it accepts a TRUNCATED line, and
+        // the result is not a refusal but a wrong answer: `cpu 100` would read
+        // as a CPU that is 100% user. The leniency above is for columns the
+        // kernel added later; this is the floor it started from.
+        if fields.len() < 5 {
+            return None;
+        }
         let at = |i: usize| -> u64 { fields.get(i).and_then(|f| parse_u64(f)).unwrap_or(0) };
         Some((
             index,

@@ -1,9 +1,16 @@
 # A → B — the operator's own `grep` has features ours lacks, and four of them collide with GNU flag meanings
 
 **From:** Lane A. **To:** Lane B. **Filed:** 2026-09-09.
-**Status:** MOSTLY CONSUMED by lane B — six of the nine novel features are in,
-one is measured NOT APPLICABLE, one is deliberately declined, one remains. Details below; this line said
-"open" for three days after most of it had landed.
+**Status:** ✅ FULLY CONSUMED by lane B, 2026-09-12 — seven of the nine novel
+features are in, one is measured NOT APPLICABLE, and one is deliberately
+declined under §1008. Nothing remains.
+
+This line has now been wrong twice in the same direction. It said "open" for
+three days after most of it had landed, was corrected to "one remains" on
+2026-09-12 — and `--dotall`, the one it named, was implemented **the same day,
+a few hours later**, without this table being touched. A status line is written
+once, at the moment it is true, and nothing prompts a rewrite when the work
+lands; that is the failure this file has now demonstrated about itself twice.
 
 ## What lane B actually built, and under which spellings (2026-09-12 audit)
 
@@ -19,7 +26,7 @@ source for `--proximity` finds nothing and the request looked untouched:
 | pass through existing ANSI | `--allow-match-colors` | **`--keep-color-escapes`** | done |
 | path-suffix excludes | `--x_paths` | **`--exclude-path`** | done |
 | **"your path became the regex" warning** | — | — | **not applicable, measured** |
-| `--dotall` | `--dotall` | — | remains |
+| `--dotall` | `--dotall` | **`--dotall`** | done 2026-09-12 |
 | colour names | (part of `--set-colors`) | **`GREP_COLORS` by name** | done |
 | persistent colour *file* | `--remember` | — | **declined, §1008** |
 

@@ -86,6 +86,37 @@ struct SystemSummary {
     cpu_iowait: u64,
     cpu_irq: u64,
     cpu_softirq: u64,
+    /// Time the hypervisor spent running something else.
+    ///
+    /// This field did not exist, and the column was not read. On a
+    /// virtualised machine steal can be a large fraction of the clock, and
+    /// leaving it out of the total makes every percentage below TOO LARGE by
+    /// `total / (total - steal)`. Real `top` shows it as `st`, which is also
+    /// why the header line here gained a field.
+    cpu_steal: u64,
+}
+
+impl SystemSummary {
+    /// Total CPU jiffies across every state the kernel publishes.
+    ///
+    /// One method, because this sum was written out three times -- in the
+    /// header line, in the per-process delta, and in the refresh loop -- and
+    /// `steal` was missing from all three. Three copies do not disagree until
+    /// somebody edits one, and the way to not find out is to keep them.
+    ///
+    /// `guest` and `guest_nice` are deliberately absent: the kernel counts
+    /// guest time inside `user`, so adding them would count it twice, which is
+    /// the bug `userspace/sysstat` had.
+    fn cpu_total(&self) -> u64 {
+        self.cpu_user
+            .saturating_add(self.cpu_nice)
+            .saturating_add(self.cpu_system)
+            .saturating_add(self.cpu_idle)
+            .saturating_add(self.cpu_iowait)
+            .saturating_add(self.cpu_irq)
+            .saturating_add(self.cpu_softirq)
+            .saturating_add(self.cpu_steal)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -164,6 +195,7 @@ fn read_system_summary() -> SystemSummary {
         cpu_iowait: 0,
         cpu_irq: 0,
         cpu_softirq: 0,
+        cpu_steal: 0,
     };
 
     // Uptime.
@@ -195,26 +227,27 @@ fn read_system_summary() -> SystemSummary {
         summary.swap_free_kb = get_meminfo_value(&meminfo, "SwapFree");
     }
 
-    // CPU stats from /proc/stat.
-    if let Some(stat) = read_file("/proc/stat") {
-        for line in stat.lines() {
-            if let Some(rest) = line.strip_prefix("cpu ") {
-                let vals: Vec<u64> = rest
-                    .split_whitespace()
-                    .filter_map(|s| s.parse().ok())
-                    .collect();
-                if vals.len() >= 7 {
-                    summary.cpu_user = vals[0];
-                    summary.cpu_nice = vals[1];
-                    summary.cpu_system = vals[2];
-                    summary.cpu_idle = vals[3];
-                    summary.cpu_iowait = vals.get(4).copied().unwrap_or(0);
-                    summary.cpu_irq = vals.get(5).copied().unwrap_or(0);
-                    summary.cpu_softirq = vals.get(6).copied().unwrap_or(0);
-                }
-                break;
-            }
-        }
+    // CPU stats from /proc/stat, through the shared parser.
+    //
+    // This read the line itself and required at least SEVEN columns, which
+    // rejects a valid older kernel outright -- `iowait` arrived in 2.5 and
+    // `steal` in 2.6.11, so a shorter line is an older format rather than a
+    // broken one, and `top` showed no CPU row at all against it. `procinfo`
+    // accepts four and upward and reads an absent column as zero.
+    if let Ok(raw) = fs::read("/proc/stat")
+        && let Some((_, t)) = raw
+            .split(|&b| b == b'\n')
+            .filter_map(procinfo::CpuTimes::parse_line)
+            .find(|(index, _)| index.is_none())
+    {
+        summary.cpu_user = t.user;
+        summary.cpu_nice = t.nice;
+        summary.cpu_system = t.system;
+        summary.cpu_idle = t.idle;
+        summary.cpu_iowait = t.iowait;
+        summary.cpu_irq = t.irq;
+        summary.cpu_softirq = t.softirq;
+        summary.cpu_steal = t.steal;
     }
 
     summary
@@ -383,17 +416,11 @@ fn print_header(summary: &SystemSummary) {
     );
 
     // Line 3: CPU usage.
-    let total = summary.cpu_user
-        + summary.cpu_nice
-        + summary.cpu_system
-        + summary.cpu_idle
-        + summary.cpu_iowait
-        + summary.cpu_irq
-        + summary.cpu_softirq;
+    let total = summary.cpu_total();
     let total_f = if total > 0 { total as f64 } else { 1.0 };
 
     println!(
-        "%%Cpu(s): {:.1} us, {:.1} sy, {:.1} ni, {:.1} id, {:.1} wa, {:.1} hi, {:.1} si",
+        "%%Cpu(s): {:.1} us, {:.1} sy, {:.1} ni, {:.1} id, {:.1} wa, {:.1} hi, {:.1} si, {:.1} st",
         summary.cpu_user as f64 / total_f * 100.0,
         summary.cpu_system as f64 / total_f * 100.0,
         summary.cpu_nice as f64 / total_f * 100.0,
@@ -401,6 +428,7 @@ fn print_header(summary: &SystemSummary) {
         summary.cpu_iowait as f64 / total_f * 100.0,
         summary.cpu_irq as f64 / total_f * 100.0,
         summary.cpu_softirq as f64 / total_f * 100.0,
+        summary.cpu_steal as f64 / total_f * 100.0,
     );
 
     // Line 4: memory.
@@ -556,13 +584,7 @@ fn display_snapshot(
     summary.zombie = zombie;
 
     // Compute CPU delta.
-    let current_cpu_total = summary.cpu_user
-        + summary.cpu_nice
-        + summary.cpu_system
-        + summary.cpu_idle
-        + summary.cpu_iowait
-        + summary.cpu_irq
-        + summary.cpu_softirq;
+    let current_cpu_total = summary.cpu_total();
     let cpu_delta = current_cpu_total.saturating_sub(prev_cpu_total);
 
     // Compute per-process CPU usage.
@@ -626,13 +648,7 @@ fn run(config: &Config) {
 
         // Save current ticks for next delta computation.
         prev_ticks = procs.iter().map(|p| (p.pid, p.cpu_ticks)).collect();
-        prev_cpu_total = summary.cpu_user
-            + summary.cpu_nice
-            + summary.cpu_system
-            + summary.cpu_idle
-            + summary.cpu_iowait
-            + summary.cpu_irq
-            + summary.cpu_softirq;
+        prev_cpu_total = summary.cpu_total();
 
         iteration += 1;
 
@@ -862,6 +878,49 @@ mod tests {
         assert!(
             !shown.contains('\u{1b}'),
             "the escape byte itself must not survive into the output"
+        );
+    }
+}
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic, clippy::expect_used)]
+mod cpu_total_tests {
+    use super::*;
+
+    fn summary_with(steal: u64) -> SystemSummary {
+        let mut s = read_system_summary();
+        s.cpu_user = 100;
+        s.cpu_nice = 0;
+        s.cpu_system = 50;
+        s.cpu_idle = 800;
+        s.cpu_iowait = 30;
+        s.cpu_irq = 10;
+        s.cpu_softirq = 10;
+        s.cpu_steal = steal;
+        s
+    }
+
+    /// Steal time is part of the clock. Leaving it out of the denominator --
+    /// which this program did, in three separately written sums -- makes every
+    /// percentage too LARGE by `total / (total - steal)`, and on a busy
+    /// hypervisor steal is not a rounding error.
+    #[test]
+    fn steal_is_part_of_the_total() {
+        assert_eq!(summary_with(0).cpu_total(), 1000);
+        assert_eq!(summary_with(200).cpu_total(), 1200);
+    }
+
+    /// The consequence, stated as the number a user would see: with 200 of
+    /// 1200 jiffies stolen, idle is 66.7% and not the 80% the old denominator
+    /// reported.
+    #[test]
+    fn omitting_steal_overstated_every_percentage() {
+        let s = summary_with(200);
+        let with_steal = s.cpu_idle as f64 / s.cpu_total() as f64 * 100.0;
+        let without = s.cpu_idle as f64 / (s.cpu_total() - s.cpu_steal) as f64 * 100.0;
+        assert!((with_steal - 66.666).abs() < 0.01, "got {with_steal}");
+        assert!(
+            (without - 80.0).abs() < 0.01,
+            "the old answer was {without}"
         );
     }
 }

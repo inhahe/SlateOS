@@ -73,9 +73,12 @@ more.
 
 This is a *heuristic*, deliberately. It cannot see an option that is parsed by
 a shared helper, and it will happily report an option named in a `--help`
-string that the parser rejects. It exists to rank forty-two pairs quickly so
-that attention goes to the ones that differ, not to pronounce on any single
-one -- every actual port is decided by reading both files. A pair this script
+string that the parser rejects. It existed to rank forty-two pairs quickly so
+that attention went to the ones that differ, not to pronounce on any single
+one -- and as of 2026-09-12 it is down to ONE, `logger`, which is not a
+measurement question at all but `open-questions.md` B-Q14. The survey has very
+nearly worked itself out of a job; what is left of its value is the warning at
+the bottom of its own output -- every actual port is decided by reading both files. A pair this script
 calls identical still gets read before either copy is removed.
 
 Usage:
@@ -496,10 +499,14 @@ def main() -> int:
 
     print(f"\n{with_harness} of {len(rows)} have a harness; "
           f"{len(rows) - with_harness} would need one written.")
-    print("\nThe option counts say what each source MENTIONS. Five pairs ranked"
+    print("\nThe option counts say what each source MENTIONS. EIGHT pairs ranked"
           "\nfrom them have since been measured, and the ranking was wrong every"
-          "\ntime -- twice backwards, three times calling a landslide close. Run"
-          "\nthe harness; do not delete on a count.")
+          "\ntime -- twice backwards, three times calling a landslide close, and"
+          "\nthree times (free, uptime, ps) handing the win to the side with MORE"
+          "\noptions, which then scored 0/48, 20/20 and 0/12 against the real"
+          "\nreference. An option a program MENTIONS is not one it gets right, and"
+          "\na count cannot tell the difference. Run the harness; never delete on"
+          "\na count.")
     return 0
 
 

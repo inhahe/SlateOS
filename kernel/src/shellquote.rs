@@ -73,6 +73,11 @@ pub enum Ctx {
     Single,
     /// Inside `"…"`. `$` and `` ` `` still expand; `\` escapes five bytes.
     Double,
+    /// Inside `$'…'` — ANSI-C quoting. Like [`Ctx::Single`] in that no
+    /// expansion happens; unlike it in that backslash escapes are decoded.
+    /// The only context whose output is not a subsequence of the input:
+    /// `\x41` is four bytes in and one byte (`A`) out.
+    DollarSingle,
 }
 
 /// One byte of the input, classified.
@@ -137,6 +142,15 @@ pub struct QuoteScan<'a> {
     /// whatever it is — including a quote character, which must not toggle
     /// the context.
     pending_escape: bool,
+    /// Output bytes of a `$'…'` escape that decoded to more than one byte
+    /// (only `\u`/`\U` can), waiting to be yielded one [`Tok`] at a time.
+    pending: [u8; 4],
+    /// How many of `pending` are meaningful.
+    pending_len: usize,
+    /// Index of the next one to yield; `>= pending_len` means none.
+    pending_at: usize,
+    /// Offset every queued byte reports — the backslash that produced them.
+    pending_off: usize,
 }
 
 impl QuoteScan<'_> {
@@ -190,6 +204,21 @@ impl Iterator for QuoteScan<'_> {
     type Item = Tok;
 
     fn next(&mut self) -> Option<Tok> {
+        // A multi-byte `$'\u…'` escape yields its remaining bytes before the
+        // input advances again. Checked before the input-exhausted test on
+        // purpose: the escape may be the last thing on the line, and dropping
+        // its tail would silently shorten the word.
+        if self.pending_at < self.pending_len {
+            let byte = *self.pending.get(self.pending_at).unwrap_or(&0);
+            self.pending_at = self.pending_at.saturating_add(1);
+            return Some(Tok {
+                off: self.pending_off,
+                byte,
+                ctx: Ctx::DollarSingle,
+                escaped: true,
+                structural: false,
+            });
+        }
         let b = *self.bytes.get(self.i)?;
         let off = self.i;
         self.i = self.i.saturating_add(1);
@@ -254,6 +283,52 @@ impl Iterator for QuoteScan<'_> {
                     }
                 }
             }
+            // Inside `$'…'`. Unlike `'…'`, a backslash here IS special — that
+            // is the entire difference between the two constructs, and the
+            // reason `Ctx::Single` could not simply be reused.
+            Ctx::DollarSingle => {
+                if b == b'\'' {
+                    self.ctx = Ctx::Unquoted;
+                    Tok {
+                        off,
+                        byte: b,
+                        ctx: Ctx::DollarSingle,
+                        escaped: false,
+                        structural: true,
+                    }
+                } else if b == b'\\' {
+                    let (out, len, consumed) =
+                        decode_ansi_c(self.bytes.get(self.i..).unwrap_or(&[]));
+                    self.i = self.i.saturating_add(consumed);
+                    // Bytes 1.. of a multi-byte escape are queued; byte 0 is
+                    // yielded now. They all report the offset of the
+                    // backslash, which is the only offset that means anything
+                    // for a run of input that produced them jointly.
+                    self.pending = out;
+                    self.pending_len = len;
+                    self.pending_at = 1;
+                    self.pending_off = off;
+                    Tok {
+                        off,
+                        byte: *out.first().unwrap_or(&b'\\'),
+                        ctx: Ctx::DollarSingle,
+                        // `escaped` marks a byte the user reached *through* an
+                        // escape, so a later pass cannot mistake a decoded `'`
+                        // for a closing quote. `consumed == 0` means no escape
+                        // was recognised and this is a plain backslash.
+                        escaped: consumed > 0,
+                        structural: false,
+                    }
+                } else {
+                    Tok {
+                        off,
+                        byte: b,
+                        ctx: Ctx::DollarSingle,
+                        escaped: false,
+                        structural: false,
+                    }
+                }
+            }
             Ctx::Unquoted => match b {
                 // A trailing backslash escapes nothing (bash would splice the
                 // next input line; kshell has no continuation, so it is data).
@@ -263,6 +338,24 @@ impl Iterator for QuoteScan<'_> {
                         off,
                         byte: b,
                         ctx: Ctx::Unquoted,
+                        escaped: false,
+                        structural: true,
+                    }
+                }
+                // `$'…'` — ANSI-C quoting. Both the `$` and the `'` are
+                // syntax, so one structural token stands for the pair and the
+                // `'` is stepped over here rather than being seen as an
+                // ordinary opening quote. Without this arm the `$` fell to
+                // the literal catch-all below and survived quote removal, so
+                // `echo $'hi'` printed `$hi`
+                // (`A-KSHELL-DOLLAR-SINGLE-QUOTE-LEAVES-A-STRAY-DOLLAR`).
+                b'$' if self.bytes.get(self.i) == Some(&b'\'') => {
+                    self.i = self.i.saturating_add(1);
+                    self.ctx = Ctx::DollarSingle;
+                    Tok {
+                        off,
+                        byte: b,
+                        ctx: Ctx::DollarSingle,
                         escaped: false,
                         structural: true,
                     }
@@ -308,6 +401,10 @@ pub fn scan(bytes: &[u8]) -> QuoteScan<'_> {
         i: 0,
         ctx: Ctx::Unquoted,
         pending_escape: false,
+        pending: [0; 4],
+        pending_len: 0,
+        pending_at: 0,
+        pending_off: 0,
     }
 }
 
@@ -379,6 +476,170 @@ pub fn split_bare_ranges(bytes: &[u8], sep: u8) -> Vec<(usize, usize)> {
     out
 }
 
+/// One byte of hex, or `None` if `b` is not a hex digit.
+///
+/// Delegates to `char::to_digit` rather than subtracting `b'0'` and friends.
+/// The match arms this replaces proved their own subtractions could not
+/// underflow, but `clippy::arithmetic_side_effects` cannot see that and is on
+/// deliberately, and an `allow` would be the wrong answer for a body that only
+/// restates what core already means by "hex digit". Accepts exactly
+/// 0-9/a-f/A-F; every byte >= 0x80 maps to U+0080..U+00FF and is rejected.
+fn hex_val(b: u8) -> Option<u32> {
+    char::from(b).to_digit(16)
+}
+
+/// Decode one ANSI-C (`$'…'`) escape.
+///
+/// `after` is the slice starting at the byte *following* the backslash. The
+/// return is `(out, out_len, consumed)`: the bytes the escape denotes, how
+/// many of them are meaningful, and how many bytes of `after` the escape ate.
+///
+/// **`consumed == 0` means "this is not an escape".** Bash keeps the
+/// backslash in that case — `$'\q'` is `\q`, two bytes, and `$'\8'` is `\8`
+/// because `8` is not an octal digit — so the caller emits the backslash and
+/// lets the next byte be scanned normally. Returning the backslash rather
+/// than swallowing it is the whole difference between `\q` and `q`.
+///
+/// Sized `[u8; 4]` because `\u`/`\U` encode a code point as UTF-8, which is
+/// the only escape family that can yield more than one byte. Every other
+/// escape yields exactly one, and several yield a byte that is *not* valid
+/// UTF-8 on its own (`$'\xff'`) — which is the entire point of the construct
+/// and the reason the output is `[u8]` rather than `str`.
+///
+/// Verified against bash 5.2.37 by `scripts/shellquote-oracle.rs`; the edges
+/// that a reading of the documentation gets wrong are called out per-arm.
+fn decode_ansi_c(after: &[u8]) -> ([u8; 4], usize, usize) {
+    let one = |b: u8, n: usize| ([b, 0, 0, 0], 1, n);
+    let Some(&c) = after.first() else {
+        // Trailing backslash before the closing quote: literal backslash.
+        return ([b'\\', 0, 0, 0], 1, 0);
+    };
+    match c {
+        b'n' => one(b'\n', 1),
+        b't' => one(b'\t', 1),
+        b'r' => one(b'\r', 1),
+        b'a' => one(0x07, 1),
+        b'b' => one(0x08, 1),
+        b'f' => one(0x0c, 1),
+        b'v' => one(0x0b, 1),
+        // Both spellings mean escape; bash accepts `\e` and `\E` alike.
+        b'e' | b'E' => one(0x1b, 1),
+        b'\\' => one(b'\\', 1),
+        b'\'' => one(b'\'', 1),
+        b'"' => one(b'"', 1),
+        b'?' => one(b'?', 1),
+        // `\xHH` — **one or two** hex digits, not exactly two. `$'\x4'` is
+        // 0x04 in bash, and `$'\xg'` is the literal three bytes `\xg`
+        // because no digit follows at all.
+        b'x' | b'X' => {
+            let mut val: u32 = 0;
+            let mut n = 0usize;
+            while n < 2 {
+                let Some(d) = after.get(n.saturating_add(1)).copied().and_then(hex_val) else {
+                    break;
+                };
+                val = val.saturating_mul(16).saturating_add(d);
+                n = n.saturating_add(1);
+            }
+            if n == 0 {
+                // No hex digit: not an escape. Keep the backslash.
+                ([b'\\', 0, 0, 0], 1, 0)
+            } else {
+                one(u8::try_from(val & 0xff).unwrap_or(0), n.saturating_add(1))
+            }
+        }
+        // `\cX` — control-X, i.e. X with bit 6 cleared. `\cA` is 0x01.
+        //
+        // **`'` is never the operand.** It terminates the construct, and bash
+        // emits a literal `\c` when nothing else follows: `$'\c' tail` is two
+        // words, `\c` and `tail`. Taking `after.get(1)` unconditionally ate the
+        // terminator (0x27 & 0x1f = 0x07, a BEL), left the string unterminated,
+        // and absorbed the rest of the line into one word — so `echo $'\c' foo`
+        // passed `echo` a single argument and it did something else rather than
+        // failing. Found by lane B against real bash; the tables are in
+        // requests/b-a-dollar-single-c-escape-swallows-the-closing-quote.md.
+        //
+        // `\\` *is* a legal operand and is spelled with two bytes, so it needs
+        // its own arm: `$'\c\\'` is 0x1c and then the quote closes. Without it
+        // the first backslash would be taken as the operand and the second would
+        // escape the terminator.
+        b'c' => match after.get(1) {
+            None | Some(&b'\'') => ([b'\\', 0, 0, 0], 1, 0),
+            Some(&b'\\') => match after.get(2) {
+                Some(&x) => one(x & 0x1f, 3),
+                None => ([b'\\', 0, 0, 0], 1, 0),
+            },
+            Some(&x) => one(x & 0x1f, 2),
+        },
+        // `\uHHHH` / `\UHHHHHHHH` — up to 4 / 8 hex digits, emitted as UTF-8.
+        // This is the only family that can produce more than one byte, and
+        // the reason `next()` needs a pending-output buffer at all.
+        b'u' | b'U' => {
+            let max = if c == b'u' { 4 } else { 8 };
+            let mut val: u32 = 0;
+            let mut n = 0usize;
+            while n < max {
+                let Some(d) = after.get(n.saturating_add(1)).copied().and_then(hex_val) else {
+                    break;
+                };
+                val = val.saturating_mul(16).saturating_add(d);
+                n = n.saturating_add(1);
+            }
+            if n == 0 {
+                return ([b'\\', 0, 0, 0], 1, 0);
+            }
+            // A surrogate or out-of-range value has no *valid* UTF-8
+            // encoding. Saying it had none at all was wrong, and bash proves
+            // it: it emits the WTF-8 form anyway (`$'\ud800'` is ED A0 80)
+            // and goes past Unicode entirely for `$'\U00110000'`
+            // (F4 90 80 80). Measured by lane B against 5.2.37.
+            //
+            // **Declared divergence, not an oversight.** We emit the literal
+            // escape text instead. Both answers are wrong in the sense that
+            // the user mistyped, but bash is not self-consistent here: at
+            // `$'\Uffffffff'` it emits *nothing*, which is the
+            // invisible outcome this fallback exists to avoid. A uniform
+            // "hand back what was typed" is more predictable than
+            // "WTF-8 in the middle, silence at the far end", and it is
+            // lossless — the user can see it did not decode. Pinned on both
+            // sides in check-shellquote-vs-bash DIVERGENCES so it fails the
+            // day either side changes.
+            let Some(ch) = char::from_u32(val) else {
+                return ([b'\\', 0, 0, 0], 1, 0);
+            };
+            let mut buf = [0u8; 4];
+            let s = ch.encode_utf8(&mut buf);
+            let len = s.len();
+            (buf, len, n.saturating_add(1))
+        }
+        // `\nnn` — **one to three** octal digits, with no special meaning for
+        // a leading zero. `$'\0101'` is 0x08 followed by a literal `1`
+        // (`\010` is three digits and stops), not 0x41. `$'\777'` is 0xff:
+        // the value wraps into a byte rather than erroring.
+        b'0'..=b'7' => {
+            let mut val: u32 = 0;
+            let mut n = 0usize;
+            while n < 3 {
+                let Some(d) = after.get(n).copied().filter(u8::is_ascii_digit) else {
+                    break;
+                };
+                if !(b'0'..=b'7').contains(&d) {
+                    break;
+                }
+                val = val
+                    .saturating_mul(8)
+                    .saturating_add(u32::from(d.saturating_sub(b'0')));
+                n = n.saturating_add(1);
+            }
+            one(u8::try_from(val & 0xff).unwrap_or(0), n)
+        }
+        // Anything else is not an escape: bash keeps the backslash AND the
+        // character (`$'\q'` is two bytes). Consuming zero leaves the
+        // character to be scanned as an ordinary literal on the next step.
+        _ => ([b'\\', 0, 0, 0], 1, 0),
+    }
+}
+
 /// Remove quoting: drop the structural quote and escape bytes, keep the data.
 ///
 /// This is the *dispatch-time* operation. Expansion must run before it and
@@ -388,6 +649,25 @@ pub fn split_bare_ranges(bytes: &[u8], sep: u8) -> Vec<(usize, usize)> {
 pub fn strip_quotes(bytes: &[u8]) -> Vec<u8> {
     scan(bytes)
         .filter(Tok::is_literal)
+        // A NUL produced by a `$'\0'` escape is dropped. Bash *truncates the
+        // word* there (`$'a\0b'` is `a`), because it carries words as C
+        // strings and cannot represent the rest. We carry them as `Vec<u8>`
+        // and could keep it — but a NUL is not a legal path byte under
+        // `design.txt` ("all characters except `/` and null"), so carrying it
+        // only defers a rejection to a point further from its cause.
+        //
+        // Dropping rather than truncating is deliberate and is the one place
+        // this deviates from bash. `strip_quotes` is handed a whole *line* by
+        // some callers and a single word by others; truncating would discard
+        // every later word on a line, which bash would keep, and silently
+        // losing commands is far worse than the one-byte difference between
+        // `ab` and `a` in a construct nothing uses. Recorded in `todo.txt`
+        // under Judgment Calls.
+        //
+        // The filter is here rather than in the decoder so `scan()` stays a
+        // faithful description of the input: a caller that wants the NUL can
+        // still see it.
+        .filter(|t| !(t.byte == 0 && t.ctx == Ctx::DollarSingle))
         .map(|t| t.byte)
         .collect()
 }
@@ -572,6 +852,31 @@ pub fn quote_suffix(suffix: &[u8], ctx: Ctx) -> Vec<u8> {
                 } else {
                     out.push(b);
                 }
+            }
+            out
+        }
+        // Inside `$'…'` a backslash is live, so a literal one has to be
+        // doubled — the opposite of `Ctx::Single`, where `\` is data. An
+        // apostrophe still ends the construct, and here `\'` is the correct
+        // spelling for it (in `'…'` it is not, which is why these two cases
+        // cannot share code).
+        //
+        // This arm preserves UTF-8 validity, which [`quote_suffix_str`] relies
+        // on when it says its `None` "cannot happen for a `&str` input". Adding
+        // a fourth context put that claim on a fourth arm, so it is worth
+        // stating why it still holds: the only byte inserted is `\` (ASCII),
+        // and it is inserted only *before* `\` or `'`, which are themselves
+        // ASCII and so can never be UTF-8 continuation bytes. Inserting an ASCII
+        // byte ahead of a continuation byte would split a character in half;
+        // that cannot arise here because no continuation byte is ever a match
+        // target. Same reasoning as `lf_to_crlf` going byte-wise.
+        Ctx::DollarSingle => {
+            let mut out = Vec::with_capacity(suffix.len());
+            for &b in suffix {
+                if b == b'\\' || b == b'\'' {
+                    out.push(b'\\');
+                }
+                out.push(b);
             }
             out
         }
@@ -818,6 +1123,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     Ctx::Unquoted => typed.is_empty() || quote_word(typed) == typed,
                     Ctx::Single => !typed.contains(&b'\''),
                     Ctx::Double => !typed.iter().any(|&b| b == b'"' || b == b'\\'),
+                    // Inside `$'…'` both the terminator and the escape
+                    // character would have to be written escaped to appear
+                    // literally, so a prefix containing either is not one the
+                    // user can have typed verbatim.
+                    Ctx::DollarSingle => !typed.iter().any(|&b| b == b'\'' || b == b'\\'),
                 };
                 if !typable {
                     continue;
@@ -840,6 +1150,73 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
     }
 
+    serial_println!("  shellquote::self_test 10: $'…' decodes ANSI-C escapes");
+    {
+        // Every expectation here was read out of bash 5.2.37 rather than out
+        // of its documentation — the awkward cases (one-digit \\x, octal with
+        // no leading zero, an unrecognised escape keeping its backslash) are
+        // exactly where a confident misreading lands. The differential lives
+        // in scripts/check-shellquote-vs-bash.py; these pin the same answers
+        // in the shipping kernel so a boot cannot pass with them wrong.
+        let cases: &[(&[u8], &[u8])] = &[
+            (b"$\'hi\'", b"hi"),
+            (b"$\'a b\'", b"a b"),
+            // The bug this section was written for: the `$` used to survive.
+            (b"echo $\'hi\'", b"echo hi"),
+            (b"$\'\\n\'", b"\n"),
+            (b"$\'\\t\'", b"\t"),
+            (b"$\'\\e\'", b"\x1b"),
+            (b"$\'\\E\'", b"\x1b"),
+            // One OR two hex digits, not exactly two.
+            (b"$\'x\\x41y\'", b"xAy"),
+            (b"$\'\\x4\'", b"\x04"),
+            // No digit at all: not an escape, backslash kept.
+            (b"$\'\\xg\'", b"\\xg"),
+            // Octal needs no leading zero, and stops at three digits.
+            (b"$\'\\101\'", b"A"),
+            (b"$\'\\0101\'", b"\x081"),
+            // Wraps into a byte rather than erroring.
+            (b"$\'\\777\'", b"\xff"),
+            // Not octal, not an escape.
+            (b"$\'\\8\'", b"\\8"),
+            (b"$\'\\q\'", b"\\q"),
+            (b"$\'\\cA\'", b"\x01"),
+            // The whole point of the construct: a byte no `str` can hold.
+            (b"$\'re\\xffport.txt\'", b"re\xffport.txt"),
+            // `\\u` is the only escape that yields more than one byte.
+            (b"$\'\\u00e9\'", b"\xc3\xa9"),
+            // A NUL is dropped, not carried — see `strip_quotes`.
+            (b"$\'a\\0b\'", b"ab"),
+            // `\c` before the closing quote: the quote terminates and is NOT
+            // the operand, so this is the literal two bytes and `tail` stays a
+            // separate word. Regression case for the swallowed terminator.
+            (b"$\'\\c\'", b"\\c"),
+            // `\\` is a legal operand, spelled with two bytes.
+            (b"$\'\\c\\\\\'", b"\x1c"),
+            // Adjacent constructs concatenate, as any quoting does.
+            (b"$\'\\x41\'$\'\\x42\'", b"AB"),
+        ];
+        // Loop variable named distinctively: the coverage sweep in
+        // scripts/check-shellquote-vs-bash.py keys rungs by their exact call
+        // text, so a generic name like `input` would make this rung's entry
+        // there silently cover any future rung spelled the same way.
+        for (ansi, want) in cases {
+            assert_eq!(strip_quotes(ansi).as_slice(), *want, "$'…' decode");
+        }
+        // A space inside the construct is not a word separator, and the
+        // construct is one word — the property that would break first if the
+        // scanner treated `$` as ordinary and let `'` open a plain region.
+        assert_eq!(split_bare_words(b"cmd $\'a b\' z").len(), 3);
+        // The regression that matters most from the `\\c` repair, and the one a
+        // byte-comparison of the dequoted line would NOT catch: the closing
+        // quote must terminate the construct rather than become the escape's
+        // operand. When it was eaten, the string ran on and swallowed the rest
+        // of the line into a single word — `echo $\'\\c\' foo` handed `echo` one
+        // argument instead of two. bash: `<\\c><tail>`.
+        assert_eq!(split_bare_words(b"$\'\\c\' tail").len(), 2);
+        // An unterminated construct reports itself rather than being guessed.
+        assert_eq!(trailing_context(b"cmd $\'ab"), Ctx::DollarSingle);
+    }
     serial_println!("  shellquote::self_test PASSED");
     Ok(())
 }

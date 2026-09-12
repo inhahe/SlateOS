@@ -136300,6 +136300,115 @@ Two tests were retargeted: `parse_invalid_p_value_errors` and
 
 `patch-diff.sh`: 49 passed / 16 differed to **51 / 14**.
 
+### A-KSHELL-DOLLAR-SINGLE-QUOTE-LEAVES-A-STRAY-DOLLAR. `echo $'hi'` prints `$hi` — 2026-09-12 — FIXED 2026-09-12 (lane A)
+
+**In short:** the shell understands the `$'...'` spelling well enough not to get
+confused by it, but not well enough to actually carry it out. Anything typed that way
+comes out with a stray dollar sign on the front and its escape codes unprocessed.
+
+**Where:** `kernel/src/shellquote.rs` — the `scan()` state machine has three contexts
+(`Unquoted`, `Single`, `Double`) and no notion of `$'`. A `$` in `Ctx::Unquoted` falls
+to the catch-all literal arm; the `'` after it then opens an ordinary single-quoted
+region. So `strip_quotes` removes the two quotes and keeps the `$`.
+
+**Measured**, with a host harness built from the real module (lines 1-608 have no
+`crate::` dependencies, so the scanner compiles on the host unmodified):
+
+| typed | kshell today | bash 5.2.37 |
+|---|---|---|
+| `$'hi'` | `$hi` | `hi` |
+| `$'a b'` | `$a b` | `a b` |
+| `$'x\x41y'` | `$x\x41y` | `xAy` |
+| `$'\n'` | `$\n` | a newline |
+
+Controls in the same run behave correctly, so this is specific to the construct and not
+a broken harness: `'plain'` -> `plain`, `"dq"` -> `dq`, `a\ b` -> `a b`.
+
+**Why it is a bug and not merely an unimplemented feature.** The 2026-08-24 note in
+`TD-KSHELL-LINE-EDITOR-IS-UTF8` says the expander's `$'` arm exists to *copy the
+construct through unchanged* and leave quote state alone — which it does correctly, and
+which fixed a real quoting-inversion bug. The intent was that decoding would happen
+later, after quote removal. **Nothing decodes.** So the construct is recognised, guarded,
+passed along — and then silently mangled at the end of the pipeline. A user who types
+`echo $'hi'` gets `$hi` with no error.
+
+**Three stale blockers found while confirming this, all of which say the work cannot be
+done yet, and all three premises are now false:**
+
+| claim | where | status |
+|---|---|---|
+| "needs an output path that can carry non-UTF-8 — `shell_write` takes `&str` and the capture buffer is a `String`" | `kshell.rs` doc comment on `interpret_echo_escapes` (~10264) | false: `SHELL_OUTPUT` is `Mutex<Option<Vec<u8>>>`, `capture_command -> Vec<u8>`, `shell_write_bytes` and `console::write_bytes` are the primitives |
+| "it cannot happen at all until the word path carries bytes end to end" | `kshell.rs` ~1213, the `$'` arm | false — and the comment sits **inside `expand_vars_bytes_inner(&[u8]) -> Option<Vec<u8>>`**, the very function whose signature disproves it |
+| "stages (b)+(c) are now gated on operator decision Q45" | `known-issues.md`, Correction 4 | answered 2026-08-21 as option B (§261); the entry already notes it read as blocked for three days after |
+
+This is the third time in this entry's history that a note saying "blocked" outlived the
+block. Stale reasoning outlives stale code because code gets exercised and prose does not.
+
+**Bash ground truth for the fix**, captured from 5.2.37 rather than recalled, because the
+awkward edges are where a confident misreading lands:
+
+| escape | result | note |
+|---|---|---|
+| \n \t \r \a \b \f \v | 0a 09 0d 07 08 0c 0b | one byte each |
+| \e, \E | 1b | both spellings |
+| \' , \" , \\ | 27, 22, 5c | |
+| \x41 | 41 | **1-2** hex digits: \x4 -> 04 |
+| \xg, \x | 5c 78 67, 5c 78 | no digits -> literal, backslash kept |
+| \101 | 41 | 1-3 **octal** digits, no leading 0 needed |
+| \777 | ff | wraps to a byte (511 & 0xFF) |
+| \0101 | 08 31 | \0 plus up to 3 more octal, then literal `1` |
+| \0 | NUL | |
+| \8, \q | 5c 38, 5c 71 | not an escape -> literal, backslash kept |
+| \cA | 01 | control-letter |
+| \uD | 0d | 1-4 hex, encoded **UTF-8** — so an escape can yield several bytes |
+
+**Design consequence.** `scan()` yields one `Tok` per input byte, and `\u`/`\U` can
+produce up to four output bytes, so the iterator needs a small pending-output buffer
+rather than a one-in-one-out map. Skipping input bytes is safe for the other callers:
+`split_bare_words` and `word_start_at` key only off *bare* whitespace, and a byte inside
+`$'...'` is never bare.
+
+**Also needed:** `Ctx` gains a `DollarSingle` variant, so `trailing_context` and
+`quote_suffix` need arms — inside `$'...'` a backslash *is* special, unlike `'...'`, so
+completion must escape differently there. The compiler will enumerate the sites.
+
+**FIXED the same day.** `shellquote::scan` gained a fourth context,
+`Ctx::DollarSingle`. On `$` immediately followed by `'` both bytes are consumed as one
+structural token, so neither survives quote removal; inside the region `\` introduces an
+escape and `'` closes it. `decode_ansi_c` implements the table above.
+
+*Verification, in three layers, none of which can stand in for the others:*
+
+| layer | asserts | catches |
+|---|---|---|
+| host harness vs **real bash 5.2.37** | 31 cases, byte for byte | our idea of the rules differing from bash's |
+| `shellquote::self_test` §10 | 20 expectations in the shipping kernel | the rules being right and not reaching the built binary |
+| host extraction of §10's own table | the 20 Rust literals decode to what the harness produces | a typo in an expectation, **before** spending a 24-minute boot on it |
+
+The third layer is the one worth keeping: a self-test expectation is only as good as the
+literal it is written with, and `b"\\x081"` is easy to get wrong and impossible to spot by
+reading. Extracting the table from the source and re-deriving it caught nothing this time,
+which is the outcome you want from it, and cost seconds rather than a boot cycle.
+
+*Two things found on the way, both filed rather than silently absorbed:*
+
+1. **`scripts/check-shellquote-vs-bash.py` is now green about a scanner that is not the
+   one shipping.** It grades bash against a Python *port* of the scanner, guarded by
+   `assert_port_matches_rust` — which checks only that `DQ_ESCAPABLE` matches. My change
+   does not touch `DQ_ESCAPABLE`, so the guard passes while the port lacks the whole new
+   context. The docstring is honest about checking "the escape alphabet"; the gap is that
+   the alphabet had been serving as a proxy for "the scanner" and has stopped being one.
+   It is lane B's file — its own docstring calls `shellquote.rs` "lane A's file" — so it is
+   filed as `requests/a-b-shellquote-port-has-drifted-and-the-guard-cannot-see-it.md`
+   with the measured rules, not edited.
+2. **`$'\0'` deliberately diverges from bash** — dropped rather than truncating the word.
+   `todo.txt`, Judgment Calls.
+
+**Why this matters beyond tidiness:** option B (`design-decisions.md` §261) makes
+`$'\xff'` *the* way a user names a non-UTF-8 file, since the source line stays text.
+That is the whole user-visible payoff of `TD-KSHELL-LINE-EDITOR-IS-UTF8`, and it rests
+entirely on this construct working.
+
 ## B-PATCH-IGNORED-THE-TARGET-YOU-NAMED (lane B, 2026-09-12) — FIXED
 
 Three fixes, `patch-diff.sh` 51 passed / 14 differed to **56 / 9**.
@@ -136324,3 +136433,212 @@ does not mean hide that the work did not happen.
 the target in whitespace alone, and no case in this tree does. Correct today,
 incomplete rather than wrong, and recorded so a passing harness is not read as
 evidence that whitespace-insensitive matching exists. It does not.
+
+### A-OPTION-REFUSAL-PASS-LINE-CLAIMS-MORE-THAN-ITS-DETECTORS-ESTABLISH — 2026-09-12 — LOGGED (lane A)
+
+**In short:** a check that runs on every boot prints "no word is silently dropped"
+when it passes. It does look for three specific ways a word can be dropped, and it
+finds none of them — but there is a fourth way, it happens in the very file the
+check reads, and the printed line does not leave room for it. Someone reading the
+boot log comes away believing something stronger than what was tested.
+
+**Where:** `scripts/check-option-refusal.py`, the pass line (~line 615):
+
+    [option-refusal] kshell.rs: no word is silently dropped and no new value is
+    guessed (1 allowed, 78 guessed-value site(s) carried as known debt across 78
+    function(s))
+
+**Be fair to the file first, because the obvious criticism is the wrong one.** Its
+module docstring is scrupulous — it enumerates its three detectors and says in as
+many words that it reports what it checks *"rather than claiming completeness"*:
+
+| | shape detected |
+|---|---|
+| `D1 guessed-value` | `parse().unwrap_or(D)`, `unwrap_or_default()` — a default standing in for an unreadable word |
+| `D2 dropped-word` | `.filter(\|w\| !w.starts_with('-'))` over an operand list |
+| `D3 mute-parser` | an option-dispatch loop with no way to say no |
+
+So the *file* does not overclaim. The **pass line** does, and the pass line is the
+only part of it that anybody reads: it goes into every boot log, while the
+docstring is seen only by someone who opens the source. The line even discloses
+the D1 backlog in its own parenthetical — "78 guessed-value site(s) carried as
+known debt" — which makes the unqualified first clause read as deliberate by
+contrast. One half of the sentence is careful and the other is not.
+
+**The live counterexample, in the same file the gate reads.**
+`kshell::split_words` (`kernel/src/kshell.rs`) ends:
+
+    String::from_utf8(word).ok()
+
+`filter_map` therefore **drops the word** when it is not valid UTF-8 — silently,
+changing the command's arity so the command runs and does something *else* rather
+than doing nothing. It matches none of D1/D2/D3: it is not a parse fallback, not a
+dash filter, and not an option loop.
+
+**It was unreachable until 2026-09-12 and is not any more**, which is why this is
+worth filing rather than shrugging at. The comment above it says the failure
+cannot happen because "only ASCII bytes are removed, and word boundaries are ASCII
+blanks" — true of every scanner that had ever run. Adding `$'…'` decoding
+(`A-KSHELL-DOLLAR-SINGLE-QUOTE-LEAVES-A-STRAY-DOLLAR`) made `strip_quotes` able to
+*produce* a non-UTF-8 byte, which is the entire purpose of the construct. So
+`touch $'re\xffport.txt'` now runs `touch` with no argument at all.
+
+The sibling `remove_quotes` degrades more gently — `unwrap_or_else(|_| s.to_string())`
+returns the line undecoded rather than dropping anything — and its author said why:
+"the one fallback that cannot turn a command into a *different* command if that
+reasoning is ever wrong." That instinct was right and it is the difference between
+the two sites.
+
+**The fix is not to widen the detectors.** A fourth regex is another proxy, and the
+lesson from `check-shellquote-vs-bash` this same night is that a table of shapes
+stops standing for the property it was chosen to represent. Two things that are
+worth doing:
+
+1. **Make the pass line say what was checked.** "no D1/D2/D3 site outside the
+   ledger" is a status a reader can act on; "no word is silently dropped" is a
+   claim the detectors do not support. A gate that overstates on success trains
+   people to believe the next one.
+2. **Remove the counterexample rather than describe it** — the refusal drafted as
+   `args_are_representable` turns both silent degradations into one visible
+   diagnostic at the two dispatch sites, following `path_arg_as_str`'s precedent
+   ("the refusal is the point... visible, not data loss, and disappears on its own
+   as each module is converted").
+
+**Ownership:** `scripts/` belongs to no lane per `which-lane.py`, which is A-Q11.
+The counterexample and its fix are lane A's and are being done here; the pass-line
+wording is a one-line change in an unowned file and is left for whoever answers
+A-Q11, recorded so it is not lost in the meantime.
+
+### A-TWO-AUDITS-THAT-FOUND-NOTHING-2026-09-12 (lane A) — NEGATIVE RESULTS, with their limits
+
+**In short:** two searches for known bug-shapes in the kernel, both prompted by lane B
+finding the shape elsewhere. Neither found anything. Recorded so the next person does not
+repeat them, and so the *limits* are on record rather than the reassurance.
+
+#### 1. Safety checks that fail open — none found
+
+Lane B found `userspace/mkfs` and `userspace/fsck` answering "is this device mounted?"
+with `Err(_) => return false`, so a single non-UTF-8 line anywhere in `/proc/mounts` made
+every device read as unmounted and `mkfs` would format a live filesystem. Their
+generalisation: **for any check guarding a destructive or privileged action, "I do not
+know" and "it is safe" must not be the same value.**
+
+Searched `kernel/src` for `Err(_) => false`, `unwrap_or(false)`, `unwrap_or(true)` and
+`None => true`. Every candidate that guards an action resolves in the *safe* direction.
+
+**The one that had to be read twice**, because it matches the bug's shape exactly —
+`fs/reclaim.rs:441`:
+
+```rust
+None => true, // Can't check → assume OK.
+```
+
+A self-described "can't check, assume OK" guarding *reclamation*, which deletes data.
+But **polarity decides it, not shape**: the function is `check_below_target`, and every
+caller reads `if check_below_target(low) { finalize; return }`. Returning `true` *stops*
+reclaiming. So "cannot measure" halts the destructive action, which is correct. The
+comment is ambiguous prose over right behaviour — the opposite of tonight's usual finding.
+
+Also cleared: `btrfs::probe` (`false` = do not claim the device, and its doc says the
+permissiveness is deliberate), `storageclean`'s `retain` (keeps unpathed items),
+and the `None => true` "never run, so due now" arms in `sysmaint`, `tasksched` and
+`backupsched`, which are scheduling semantics rather than gates.
+
+**Limit:** this searched for four syntactic shapes. A fail-open written as an early
+`return Ok(())`, or as a permission derived from an absent record, would not match. The
+search is a filter, not a proof.
+
+#### 2. `hpet::elapsed_ns()` on a hot path — none found in the one place checked
+
+Removing that read from `record_version` took a 256-byte write from 30,867 ns to 12,326
+under WHPX, because the MMIO access is a VM exit costing ~13.5 µs where a monotonic clock
+read costs ~450 ns under TCG. **432 call sites remain across 193 files.** Most are
+obviously cold — event logs, schedulers, hotplug.
+
+Checked the one that is genuinely hot in a microkernel: `ipc/futex.rs`, five sites, all in
+`futex_wait_bitset`. **Clean.** The value-mismatch fast path returns at line 426; the
+timestamp is taken at line 453, after the waiter is enqueued and immediately before
+blocking. So it is paid only when the thread actually parks, where it is amortised against
+a context switch rather than charged to an uncontended call.
+
+One narrow exception, not worth fixing: if a signal is found pending at lines 470-478 the
+call returns without blocking, having taken the timestamp. That needs a signal to arrive
+in the window between enqueue and registration.
+
+**Limit, and it is the important half:** 1 of 193 files was examined. This entry does not
+say the kernel has no HPET read on a hot path; it says futex does not. Anyone finding a
+surprising cost under hardware virtualisation should suspect this before suspecting their
+own code — the tell is a cost that is *larger* under WHPX than under TCG, which is a VM
+exit and not work.
+
+### A-EXEC-WRITES-A-COMM-THAT-PRCTL-WOULD-REFUSE-AND-PROCFS-RENDERS-IT-AS-QUESTION-MARKS (lane A, 2026-09-12)
+
+**In short:** every running program has a short name the system shows in process
+listings. There is a check that stops a program *asking* for a name the system cannot
+display — but the same name is also set automatically when a program starts, and that
+path has no check. So a program can end up called `???` in every listing, and **every**
+program in that state is called `???`, so they cannot be told apart.
+
+**Trivially reachable, by any process, with no unusual filesystem.** The comm is taken
+from `exe_path`, falling back to `argv[0]` — and `argv[0]` is whatever the caller passes
+to `execve`. A process that execs itself with `argv[0] = b"\xff"` gets a non-UTF-8 comm.
+No non-UTF-8 file need exist. (Since `D-VFS-PATHS-ARE-STR-NOT-BYTES`, a non-UTF-8 *path*
+reaches it too, so both routes are open.)
+
+**The two paths, and the asymmetry:**
+
+| path | validates UTF-8? | outcome |
+|---|---|---|
+| `prctl(PR_SET_NAME)` | **yes** — rejects with `EINVAL` | name unchanged |
+| `execve` → `spawn.rs:2386-2391` → `sched::set_task_name` | **no** | bytes stored verbatim |
+
+`sched::set_task_name` (`sched/mod.rs:5509`) copies raw bytes and validates nothing.
+`PR_SET_NAME`'s own doc (`syscall/linux.rs:12651`) explains the rejection: *"the procfs
+surfaces lossily decode the task name to a `str` (invalid bytes would render as `???`),
+so we reject rather than store something that wouldn't read back faithfully."* That
+reasoning is right. It is simply not enforced where the name is actually set most often.
+
+**What renders.** Two sites decode identically:
+
+```rust
+let full_name =
+    core::str::from_utf8(task.name.get(..task.name_len).unwrap_or(&[])).unwrap_or("???");
+```
+
+`procfs.rs:2367` (`build_pid_status`, the `Name:` line) and `procfs.rs:2690`
+(`build_pid_stat`, field 2). `gen_pid_comm` (`procfs.rs:3613`) is the third surface. So
+`/proc/<pid>/comm`, `/proc/<pid>/stat` field 2, `/proc/<pid>/status` `Name:` and
+`prctl(PR_GET_NAME)` all report `???`.
+
+**Why the collision is the real defect, not the mangling.** A lossy rendering that
+preserved *distinctness* would be a display wart. `"???"` is a constant: two processes
+with different unreadable names are reported identically, so anything that groups or
+matches by name — `pkill`, `pstree`, `top` — treats them as the same program. That is
+lane B's `/proc` finding arriving from the producer end: they fixed consumers that read
+`stat` into a `String`; this is the kernel writing a `String`-shaped answer in the first
+place, so a byte-correct consumer still gets `???`.
+
+**The docstring that names the principle it is not following.** `set_task_name`'s comment
+at `sched/mod.rs:5505-5507` says, of its `task_id == 0` guard: *"Rejecting it here rather
+than in the `prctl` handler covers every caller, present and future."* Exactly right —
+and the UTF-8 check sits in the `prctl` handler, which is the place that sentence warns
+against. One check moved to the shared path, one left at the caller, in the same function,
+with the reasoning for moving it written above the one that moved.
+
+**Proper fix — the one already named in `todo.txt:10454-10459`,** whose closing condition
+is "procfs to emit comm as raw bytes". Smaller than that entry implies:
+
+1. `comm_truncate(&str) -> &str` becomes `(&[u8]) -> &[u8]`. Its UTF-8 char-boundary walk
+   exists **only because the parameter is `&str`** — Linux's `comm` is a 16-byte array cut
+   at bytes, so byte truncation is *more* faithful, not less.
+2. Three call sites (`procfs.rs:2369`, `2692`, `3632`) drop the `from_utf8(...)` and use
+   `task.name.get(..task.name_len)` directly. `TaskInfo.name` is already `[u8; 32]` with
+   `name_len`, and `sched::copy_task_name` already returns bytes — the byte path exists at
+   both ends and only procfs's middle forces `str`.
+3. `PR_SET_NAME` then drops its UTF-8 validation, closing the tracked limitation, and the
+   two paths agree.
+
+**Interim behaviour is safe**, which is why this is debt and not an emergency: nothing is
+corrupted on disk, no privilege is involved, and the name is cosmetic to the kernel. What
+it costs is that monitoring tools cannot distinguish such processes, and that a process
+can *choose* to be indistinguishable by passing a non-UTF-8 `argv[0]`.

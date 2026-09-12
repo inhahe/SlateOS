@@ -15342,6 +15342,53 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[procfs]   /proc/sys/kernel/hostname agrees with fs::nameservice: OK");
     }
 
+    // The domain half of the same invariant, and it exists because the host
+    // half did not cover it. `ctest-hostname` failed at **check 13** on
+    // 2026-09-12 -- `getdomainname()` returning non-zero -- while checks 1-12,
+    // the entire host-name half, passed. So the ring-3 fixture could say the
+    // domain path was broken and could not say *where*, because the ring-0 test
+    // that splits libc from the kernel existed only for the host name.
+    //
+    // A gate covering one of two symmetric halves is the shape worth naming:
+    // the covered half passing reads as evidence about both, right up until the
+    // uncovered one fails and there is nothing to compare it against.
+    //
+    // Same structure as the block above, deliberately: a failure here is the
+    // kernel's, a pass here moves the search into userspace. Restores on every
+    // exit path -- a self-test that renames the machine's domain and leaves it
+    // renamed has changed the state every later rung observes.
+    //
+    // An empty original is normal (Linux reports the literal `(none)`), and
+    // `set_domain` accepts any string including empty, so the restore cannot
+    // fail on a machine that never had one.
+    {
+        let original = crate::fs::nameservice::get_domain();
+        const PROBE: &str = "procfs-selftest-domain";
+        let verdict = (|| -> KernelResult<()> {
+            crate::fs::nameservice::set_domain(PROBE)?;
+            let data = fs.read_file(Path::new("/sys/kernel/domainname"))?;
+            let text = core::str::from_utf8(&data).map_err(|_| KernelError::InternalError)?;
+            // `gen_sys` appends a newline, as Linux does for this file.
+            let reported = text.trim_end_matches(['\n', '\r']);
+            if reported != PROBE {
+                serial_println!(
+                    "[procfs]   FAIL: set the domain to {:?} and \
+                     /proc/sys/kernel/domainname reports {:?}. The setter and \
+                     the file are two publishers of one value and they disagree",
+                    PROBE,
+                    reported
+                );
+                return Err(KernelError::InternalError);
+            }
+            Ok(())
+        })();
+
+        let restored = crate::fs::nameservice::set_domain(&original);
+        verdict?;
+        restored?;
+        serial_println!("[procfs]   /proc/sys/kernel/domainname agrees with fs::nameservice: OK");
+    }
+
     // Test root readdir — should have root files + at least 1 PID directory.
     let entries = fs.readdir(Path::new("/"))?;
     let min_expected = ROOT_FILES.len();

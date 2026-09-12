@@ -4525,7 +4525,34 @@
 ##   (c) vfork() is implemented as plain fork() (no parent suspension / shared address space).
 ##       Correct but less efficient; documented in posix/src/process.rs::vfork.
 
-## Judgment Calls (fork() implementation, 2026-05-31):
+## Judgment Calls
+
+### 2026-09-12 (lane A) - `$'\0'` drops the NUL; bash truncates the word
+
+WHAT I DECIDED. In `kernel/src/shellquote.rs`, a NUL produced by an ANSI-C
+escape is dropped from the output. Bash instead truncates the word there:
+`$'a\0b'` is `a` in bash and `ab` here.
+
+WHY. Bash carries words as C strings and physically cannot represent the
+rest, so its truncation is a consequence of its representation rather than a
+decision. Ours are `Vec<u8>` and could hold it - but `design.txt` says paths
+allow all characters except `/` and null, so a NUL in a word can only ever be
+rejected further down, at a point further from its cause.
+
+WHY NOT MATCH BASH EXACTLY. `strip_quotes` is handed a whole *line* by some
+callers and a single word by others, and it cannot tell which. Truncating
+would therefore discard every later word on a line - which bash would keep -
+so the faithful-looking option is the one that can silently lose commands.
+The unfaithful option loses one byte in a construct nothing uses.
+
+WHERE. `strip_quotes` in `kernel/src/shellquote.rs`; the filter is a single
+line with the reasoning above it. Pinned by `self_test` section 10
+(`$'a\0b'` -> `ab`).
+
+HOW TO REVERSE IT. Delete the filter to carry the NUL, or move truncation to
+the per-word callers (`split_bare_words` knows the boundaries; `strip_quotes`
+does not) to match bash exactly. The second is the better fix if this ever
+matters; it was not worth the reach today for a case with no known user. (fork() implementation, 2026-05-31):
 ##   (a) SWAP-DURING-FORK: rather than add refcounting to swap slots, clone_user_half swaps any
 ##       swapped-out parent page back IN first (swap::swap_in_page with the fault handler's fixed
 ##       default flags PRESENT|WRITABLE|USER|NX) before CoW-sharing it. Simpler and avoids a

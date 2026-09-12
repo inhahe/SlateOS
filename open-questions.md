@@ -136,6 +136,68 @@ nobody had written down:
    the renderer's font advance, independently of the table that every layout
    decision is made from. They have never been checked against each other.
 
+**MEASURED 2026-09-12 (lane B) — and it changes the question.**
+
+Option (d) below ended with *"Unknown until measured: whether the renderer and
+the table agree today. Nobody has compared them."* They have now been compared.
+**They disagree about 185,074 characters.** The dispute this question is about
+covers 626. So the thing nobody had checked is 296 times larger than the thing
+being asked.
+
+The cause is simple and is visible in eleven lines of code. Our terminal
+(`apps/terminal`) has **no notion of character width at all**: when it places a
+character it moves the cursor one column, unconditionally, for every character
+there is. It never consults `charwidth`, or any other table — it does not
+depend on the crate. So "how wide we actually print" is, today, **one cell for
+everything**:
+
+| what the table says | how many characters | what the terminal does |
+|---|---|---|
+| two cells wide | 182,712 | one cell |
+| zero cells (invisible marks) | 2,362 | one cell |
+
+Concretely, and these are the recognisable ones rather than the obscure
+corners: **every one** of the 20,992 Chinese characters, **every one** of the
+11,172 Korean syllables, the Japanese kana, the fullwidth forms, and the 80
+emoticon emoji are marked two cells wide in our table and drawn one cell wide
+by our terminal. In the other direction, 1,281 combining marks — the accent in
+a decomposed `é`, which is the letter `e` followed by a separate mark — are
+marked zero cells and are given a cell of their own, so a decomposed accented
+letter takes two cells on screen where every layout calculation reserved one.
+
+**What this does to the question being asked.** Options (a) and (b) are a
+choice between bash's answer and the GNU tools' answer on 626 characters. On
+SlateOS *both* of those answers are wrong against our own screen for 185,074
+characters, including every character in Chinese, Japanese and Korean. That
+does not make the choice pointless — it is still the right choice for matching
+upstream byte-for-byte, which is what the differential harnesses measure — but
+it does mean **the choice is not what makes our screens correct**, and the
+entry previously read as though it were.
+
+**The operator's instinct was right, and following it is what found this.**
+"Why wouldn't the table simply report how wide we actually do print each
+character" is option (d), and it could not be evaluated before because nobody
+had looked at what we print. Now that someone has: (d) is not a matter of
+adjusting 626 entries to match the renderer. Taken literally today it would
+mean *setting the whole table to one*, which would make our `ls` disagree with
+every real terminal on Earth while agreeing with ours. The renderer is the
+thing that is wrong, not the table.
+
+**This is a defect in its own right and is not yours to decide.** A terminal
+that draws Chinese, Japanese, Korean and emoji one cell wide cannot display
+those languages correctly no matter which table the utilities read — text
+overwrites itself and every column is off. It is filed to lane C, who own the
+terminal, as `requests/b-c-the-terminal-gives-every-character-one-cell.md`. It
+is a separate problem from this question and neither blocks the other.
+
+**And the second half of the operator's question — "why wouldn't the programs
+just ask?" — they do.** Every one of our programs asks one table; that part
+already works as you would expect. Two things stop it from settling anything,
+and they are the two listed above: no program can ask the *terminal* how wide
+it will draw something, because terminals expose no such query; and on Linux,
+bash and the GNU tools ask two different tables, which is the entire origin of
+the 626.
+
 ### The question
 
 Our table lives in `userspace/charwidth` and is the only such table in the

@@ -83,6 +83,9 @@ struct FileAcl {
     path: String,
     owner: String,
     group: String,
+    /// The raw ids, kept because `-n` prints them instead of the names.
+    uid: u32,
+    gid: u32,
     access: Vec<AclEntry>,
     default: Vec<AclEntry>,
 }
@@ -248,6 +251,8 @@ fn read_file_acl(path: &str) -> Result<FileAcl, String> {
         path: path.to_string(),
         owner: uid_name(uid),
         group: gid_name(gid),
+        uid,
+        gid,
         access,
         default: Vec::new(),
     })
@@ -282,21 +287,50 @@ fn display_acl_path(path: &str, absolute: bool) -> &str {
     }
 }
 
-fn print_file_acl(
-    out: &mut io::StdoutLock<'_>,
-    acl: &FileAcl,
+/// Which of the two ACLs `getfacl` was asked for.
+///
+/// `-a` and `-d` are last-one-wins rather than an error, because they are
+/// selections and the later word is the one the caller meant.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+enum Which {
+    #[default]
+    Both,
+    AccessOnly,
+    DefaultOnly,
+}
+
+/// What `getfacl` was asked to print.
+#[derive(Clone, Copy, Default)]
+struct Show {
     omit_header: bool,
     absolute: bool,
     tabular: bool,
-) {
-    if !omit_header {
-        let display_path = display_acl_path(acl.path.as_str(), absolute);
+    /// `-n`: print the owning ids rather than looking their names up.
+    numeric: bool,
+    which: Which,
+}
+
+/// Generic over the sink rather than taking a `StdoutLock`, so a test can
+/// read back what it produced. Three options were added here that nothing
+/// could have asserted otherwise.
+fn print_file_acl<W: Write>(out: &mut W, acl: &FileAcl, show: &Show) {
+    let tabular = show.tabular;
+    if !show.omit_header {
+        let display_path = display_acl_path(acl.path.as_str(), show.absolute);
         let _ = writeln!(out, "# file: {display_path}");
-        let _ = writeln!(out, "# owner: {}", acl.owner);
-        let _ = writeln!(out, "# group: {}", acl.group);
+        if show.numeric {
+            let _ = writeln!(out, "# owner: {}", acl.uid);
+            let _ = writeln!(out, "# group: {}", acl.gid);
+        } else {
+            let _ = writeln!(out, "# owner: {}", acl.owner);
+            let _ = writeln!(out, "# group: {}", acl.group);
+        }
     }
 
     for entry in &acl.access {
+        if show.which == Which::DefaultOnly {
+            break;
+        }
         if tabular {
             let effective =
                 if has_mask(&acl.access) && !matches!(entry.tag, AclTag::UserObj | AclTag::Other) {
@@ -321,7 +355,7 @@ fn print_file_acl(
         }
     }
 
-    if !acl.default.is_empty() {
+    if !acl.default.is_empty() && show.which != Which::AccessOnly {
         for entry in &acl.default {
             let _ = writeln!(
                 out,
@@ -368,6 +402,8 @@ fn cmd_getfacl(args: &[String]) {
     let mut absolute = false;
     let mut tabular = false;
     let mut recursive = false;
+    let mut numeric = false;
+    let mut which = Which::Both;
     let mut paths: Vec<String> = Vec::new();
 
     for arg in args {
@@ -395,6 +431,12 @@ fn cmd_getfacl(args: &[String]) {
                 process::exit(0);
             }
             "-c" | "--omit-header" => omit_header = true,
+            // All three were advertised by the help text above and parsed by
+            // nothing: they fell into the `_ => {}` below and were dropped.
+            // Found by `scripts/check-help-vs-parser.py`.
+            "-a" | "--access" => which = Which::AccessOnly,
+            "-d" | "--default" => which = Which::DefaultOnly,
+            "-n" | "--numeric" => numeric = true,
             "--absolute-names" => absolute = true,
             "-t" | "--tabular" => tabular = true,
             "-R" | "--recursive" => recursive = true,
@@ -408,6 +450,14 @@ fn cmd_getfacl(args: &[String]) {
         process::exit(1);
     }
 
+    let show = Show {
+        omit_header,
+        absolute,
+        tabular,
+        numeric,
+        which,
+    };
+
     let stdout = io::stdout();
     let mut out = stdout.lock();
     let mut failed = false;
@@ -417,7 +467,7 @@ fn cmd_getfacl(args: &[String]) {
     // operand and exits non-zero at the end.
     let show =
         |out: &mut io::StdoutLock<'_>, path: &str, failed: &mut bool| match read_file_acl(path) {
-            Ok(acl) => print_file_acl(out, &acl, omit_header, absolute, tabular),
+            Ok(acl) => print_file_acl(out, &acl, &show),
             Err(e) => {
                 eprintln!("getfacl: {e}");
                 *failed = true;
@@ -474,6 +524,82 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── The three options the help advertised and nothing read ──
+
+    fn sample_acl() -> FileAcl {
+        FileAcl {
+            path: "/f".to_string(),
+            owner: "alice".to_string(),
+            group: "adm".to_string(),
+            uid: 1000,
+            gid: 4,
+            access: vec![AclEntry {
+                tag: AclTag::UserObj,
+                perms: Perms::from_rwx("rw-"),
+                _default: false,
+            }],
+            default: vec![AclEntry {
+                tag: AclTag::UserObj,
+                perms: Perms::from_rwx("r--"),
+                _default: true,
+            }],
+        }
+    }
+
+    fn rendered(show: &Show) -> String {
+        let mut buf: Vec<u8> = Vec::new();
+        print_file_acl(&mut buf, &sample_acl(), show);
+        String::from_utf8(buf).expect("ascii fixture")
+    }
+
+    #[test]
+    fn by_default_both_acls_are_printed() {
+        let out = rendered(&Show::default());
+        assert!(out.contains("user::rw-"), "{out}");
+        assert!(out.contains("default:"), "{out}");
+    }
+
+    #[test]
+    fn dash_a_prints_the_access_acl_only() {
+        let out = rendered(&Show {
+            which: Which::AccessOnly,
+            ..Show::default()
+        });
+        assert!(out.contains("user::rw-"), "{out}");
+        assert!(!out.contains("default:"), "{out}");
+    }
+
+    #[test]
+    fn dash_d_prints_the_default_acl_only() {
+        let out = rendered(&Show {
+            which: Which::DefaultOnly,
+            ..Show::default()
+        });
+        assert!(out.contains("default:"), "{out}");
+        assert!(!out.contains("user::rw-\n"), "{out}");
+    }
+
+    /// `-n` shows the ids. The fixture's gid is 4 and its group name `adm`,
+    /// so the two are distinguishable and the test cannot pass by accident.
+    #[test]
+    fn dash_n_prints_ids_instead_of_names() {
+        let out = rendered(&Show {
+            numeric: true,
+            ..Show::default()
+        });
+        assert!(out.contains("# owner: 1000"), "{out}");
+        assert!(out.contains("# group: 4"), "{out}");
+        assert!(!out.contains("alice"), "{out}");
+        assert!(!out.contains("adm"), "{out}");
+    }
+
+    #[test]
+    fn without_dash_n_the_names_are_shown() {
+        let out = rendered(&Show::default());
+        assert!(out.contains("# owner: alice"), "{out}");
+        assert!(out.contains("# group: adm"), "{out}");
+    }
 
     // ── Naming a gid ──
 
@@ -683,6 +809,8 @@ mod tests {
             path: "/test".to_string(),
             owner: "root".to_string(),
             group: "root".to_string(),
+            uid: 0,
+            gid: 0,
             access: vec![AclEntry {
                 tag: AclTag::UserObj,
                 perms: Perms::from_rwx("rwx"),

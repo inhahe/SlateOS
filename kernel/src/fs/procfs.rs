@@ -15363,6 +15363,33 @@ pub fn self_test() -> KernelResult<()> {
     // fail on a machine that never had one.
     {
         let original = crate::fs::nameservice::get_domain();
+
+        // Print what the node ACTUALLY serves, before touching anything. This
+        // exists because a claim about this value crossed a lane boundary twice
+        // on 2026-09-12 and was never observed by either side: I told lane B the
+        // node serves `localdomain` because `init_defaults()` sets it and
+        // `gen_sys` calls `init_defaults()` first, and lane B's libc doc said the
+        // same. Both of us were reading the initialiser and inferring the node.
+        // The inference is probably right and has never been seen.
+        //
+        // It matters because `ctest-hostname` failed at check 13 for three boots,
+        // and an eleven-byte `localdomain` would have read back fine through the
+        // libc bug that was blamed for it — so either the value is not what we
+        // both said, or that bug was never the cause. Printing the store and the
+        // node side by side answers which, and costs one line.
+        //
+        // Both are printed even when they agree: a value nobody has looked at is
+        // not confirmed by a check that only speaks when it is wrong.
+        {
+            let served = fs.read_file(Path::new("/sys/kernel/domainname"))?;
+            serial_println!(
+                "[procfs]   domainname node = {} byte(s) {:?}, store = {:?}",
+                served.len(),
+                core::str::from_utf8(&served).unwrap_or("<not UTF-8>"),
+                original
+            );
+        }
+
         const PROBE: &str = "procfs-selftest-domain";
         let verdict = (|| -> KernelResult<()> {
             crate::fs::nameservice::set_domain(PROBE)?;

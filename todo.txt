@@ -56992,3 +56992,49 @@ TRIGGER. Do it the next time anything in that parser is touched for any reason,
 or before adding an option to it -- whichever comes first. The cost of waiting
 is that a refusal regression there is invisible to `cargo test` and visible only
 to `scripts/diff-diff.sh`, which needs WSL and does not run in a hook.
+
+--------------------------------------------------------------------------
+SCOPED, NOT STARTED: scripts/uptime-diff.sh, and the one hazard free did not
+have (lane B, 2026-09-12)
+
+WHAT. `uptime` is one of the three duplicate pairs left (with `logger` and
+`ps`) and is the cheapest, because `free-diff.sh`'s technique transfers almost
+whole. coreutils' `uptime` says "Measured against procps-ng 4.0.4 before this
+was written" -- the same reference and the same version as `free` -- and reads
+exactly two files, `/proc/uptime` and `/proc/loadavg`. Both bind-mount inside
+`unshare -mUr` the same way `/proc/meminfo` does, so the load figures and the
+elapsed time become a fixture rather than a property of the host.
+
+THE HAZARD, which is why this is a note and not a commit. `uptime` prints the
+WALL CLOCK in its first field -- `14:32:09 up 3 days, ...`. That is not in
+either pinned file; it comes from the system clock, so the two sides are read
+at different instants and a case that straddles a second boundary differs for
+a reason that is not a property of either program. This is exactly the hazard
+`date-diff.sh` names -- "a gate that fails once an hour for a reason nobody
+can reproduce is a gate that gets switched off" -- except that `date` could
+escape it by making every case a function of its arguments, and `uptime`
+cannot: it takes no argument that sets the time.
+
+So the harness needs a third pin, and the choice matters:
+
+  * `faketime`/libfaketime if the host has it -- pins the clock for both
+    sides. Check availability first; it is not in the DIFF_NEED vocabulary
+    yet.
+  * Failing that, compare with the HH:MM:SS field masked, and say so in the
+    summary. A masked field is honest; a field that agrees because both runs
+    landed in the same second is not, and would pass for hours before failing
+    once.
+
+Do NOT let it fall back to comparing the live clock. That is the same shape as
+`free-diff.sh`'s masked-namespace case, which refuses rather than compares a
+moving target, and the reason that harness reported real numbers instead of
+lucky ones.
+
+ALSO CHECK BEFORE WRITING IT: procps-ng's `uptime` reads utmp for the user
+count and ours reads only the two /proc files, so the user field is a likely
+standing divergence rather than a bug. Measure it, then decide whether it is
+an xfail_case with a true reason -- and re-read that reason, because
+free-diff.sh shipped with a `--help` xfail whose stated reason had never been
+true in the first place.
+
+TRIGGER. Next tick that picks up duplicate-pair work. Nothing blocks it.

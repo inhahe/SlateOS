@@ -131398,8 +131398,46 @@ Two measured examples:
   `invalid option -- 'r'` and `unrecognized option '--raw'` / `'--json'`.
   Nothing to port.
 
-* **`logger`** — **not a measurement question at all, and a harness cannot
-  settle it.** `dup-bins-survey` lists it as "no harness — write one", which is
+* **`logger` had a separate bug, fixed 2026-09-12, independent of B-Q14.**
+  Its parser ended in `_ => message_parts.push(arg)`, so an unrecognised
+  option **became the message**: `logger -Q` logged the string `-Q` and
+  exited 0 where util-linux prints `logger: invalid option -- 'Q'` and
+  exits 1. Worse than `ps` discarding one, because the wrong thing is not
+  dropped — it is written to the system log and kept. Refusing an option
+  you do not implement is right under either answer to B-Q14.
+
+  **The sweep that found it, kept because it is worth re-running and is
+  not wired anywhere.** After fixing the same shape in `ps`, every
+  coreutils bin was run with an option no utility has:
+
+  ```bash
+  cargo build -p coreutils --target x86_64-pc-windows-gnu
+  B=target/x86_64-pc-windows-gnu/debug
+  for n in $(ls userspace/coreutils/src/bin/*.rs | sed 's|.*/||; s|\.rs$||'); do
+    [ -x "$B/$n.exe" ] || continue
+    "$B/$n.exe" --no-such-option-xyzzy >/dev/null 2>&1 </dev/null \n      || continue
+    echo "$n accepted it"
+  done
+  ```
+
+  83 tested, 6 accepted. Five are CORRECT and were checked against the
+  real binaries rather than assumed — `echo`, `expr`, `printf`, `test` and
+  `true` all treat it as text or an operand and exit 0, and ours agree.
+  `logger` was the only defect.
+
+  **Deliberately not made into a gate.** It needs all 83 binaries built,
+  which is too heavy for `pre-push`, and the only place that already
+  builds them is `scripts/boot-test.sh`, which is lane A's file. Writing
+  a checker nobody runs is the shape this tree spent 2026-09-12 digging
+  out of — `check-diff-preamble-order.py` sat unwired and red-treed
+  `main`. A recipe that works is better than a gate that does not run.
+
+  A *pattern* sweep would not have found it: `grep "_ => {}"` matches 25
+  files in that directory and most are state machines. Running the
+  program answers the question the pattern only approximates.
+
+* **`logger`'s pair question** — **not a measurement question at all, and a
+  harness cannot settle it.** `dup-bins-survey` lists it as "no harness — write one", which is
   the wrong instrument here. coreutils' `logger` writes its message to
   **stdout**; `userspace/logger` sends it to the `/dev/log` socket or appends
   to a file, the way util-linux does, with 23 options against 2. A

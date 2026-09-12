@@ -750,6 +750,15 @@ struct Options {
     /// changes what a line *is* while `-Z` alone only changes how a name is
     /// punctuated.
     null_data: bool,
+    /// `--dotall`: match the whole file at once, so `.` crosses newlines.
+    ///
+    /// The engine needed no change for this. `Inst::Any` is guarded by
+    /// `sp < input.len()` and nothing else -- `userspace/ere`'s `.` has always
+    /// matched a newline. It does not cross lines here because this program
+    /// hands the matcher ONE LINE AT A TIME, so a newline never reaches it.
+    /// `grep -z -o 'a.*b'` demonstrates the same thing today, byte-identically
+    /// with GNU's.
+    dotall: bool,
     /// `--label=NAME`: what standard input is *called* in a prefix or a
     /// diagnostic, in place of `(standard input)`.
     ///
@@ -989,6 +998,11 @@ const LONG_OPTIONS: &[(&str, Takes)] = &[
     ("color", Takes::Optional),
     ("colour", Takes::Optional),
     ("count", Takes::Nothing),
+    // `--dotall` is unambiguous: the other `d` options are `devices`,
+    // `directories` and `dereference-recursive`, none of which begins `do`.
+    // §1008 records three proposed names in a row that would have broken an
+    // existing abbreviation, so this is checked rather than assumed.
+    ("dotall", Takes::Nothing),
     ("devices", Takes::Required),
     ("directories", Takes::Required),
     ("exclude", Takes::Required),
@@ -1231,6 +1245,7 @@ enum Flag {
     Short(u8),
     EveryPattern,
     Near,
+    Dotall,
     EscapeControl,
     KeepColorEscapes,
     BinaryFiles,
@@ -1280,6 +1295,7 @@ fn long_flag(name: &str) -> Flag {
         "group-separator" => Flag::GroupSeparator,
         "every-pattern" => Flag::EveryPattern,
         "near" => Flag::Near,
+        "dotall" => Flag::Dotall,
         "escape-control" => Flag::EscapeControl,
         "keep-color-escapes" => Flag::KeepColorEscapes,
         "include" => Flag::Include,
@@ -1574,6 +1590,7 @@ fn parse_args(argv: &[OsString]) -> Result<Request, getopt::Error> {
             Flag::Label => opts.label = Some(quote::os_bytes(&required(value)).into_owned()),
             Flag::EveryPattern => opts.every_pattern = true,
             Flag::Near => opts.near = near_arg(&quote::os_bytes(&required(value)))?,
+            Flag::Dotall => opts.dotall = true,
             Flag::EscapeControl => opts.escape_control = true,
             Flag::KeepColorEscapes => opts.keep_color_escapes = true,
             Flag::LineBuffered => opts.line_buffered = true,
@@ -2815,8 +2832,9 @@ impl Run<'_> {
         // that silently did nothing on a pipe would be worse than one that
         // costs memory on a file.
         let mut eligible: Option<BTreeSet<usize>> = None;
+        let mut dotall_data: Vec<u8> = Vec::new();
         let gated = self.opts.every_pattern && self.pats.len() > 1;
-        if gated || self.opts.near.is_some() {
+        if gated || self.opts.near.is_some() || self.opts.dotall {
             let mut data = Vec::new();
             if let Err(e) = reader.read_to_end(&mut data) {
                 if !self.opts.no_messages {
@@ -2846,6 +2864,9 @@ impl Run<'_> {
                 // and not the same as `None`, which means the option is off.
                 eligible = Some(near_eligible_lines(&data[..], self.pats, self.opts, near));
             }
+            if self.opts.dotall {
+                dotall_data = data.clone();
+            }
             reader = Box::new(io::Cursor::new(data));
         }
 
@@ -2855,15 +2876,22 @@ impl Run<'_> {
             show_filename: self.show_filename,
             width: offset_width(size, self.opts),
         };
-        match search_stream(
-            &mut self.out,
-            reader,
-            self.pats,
-            &src,
-            self.opts,
-            &mut self.printed_before,
-            eligible.as_ref(),
-        ) {
+        let searched = if self.opts.dotall {
+            // `dotall_data` is the buffer filled above; the Cursor is not used
+            // on this path because the whole point is not to split into lines.
+            search_dotall(&mut self.out, &dotall_data, self.pats, &src, self.opts)
+        } else {
+            search_stream(
+                &mut self.out,
+                reader,
+                self.pats,
+                &src,
+                self.opts,
+                &mut self.printed_before,
+                eligible.as_ref(),
+            )
+        };
+        match searched {
             Ok(Outcome {
                 matched,
                 binary_match,
@@ -3435,6 +3463,85 @@ struct Outcome {
 /// too: `grep -A1 HIT a b` puts a `--` between the last group of `a` and the
 /// first of `b`, so a file cannot decide on its own whether its opening group
 /// needs one. It never leads the very first group of the run.
+/// `--dotall`: one match at a time over the whole file.
+///
+/// Measured against the operator's own grep, which is where this option comes
+/// from (`design-decisions.md` §919, §1008). It prints the MATCH, not the
+/// lines containing it, and the line-oriented options do not apply:
+///
+/// ```text
+/// --dotall alpha.*beta        file:alpha / two / three beta   the match
+/// --dotall -n alpha.*beta     the same -- `-n` is IGNORED
+/// --dotall -C 1 alpha.*beta   the same -- context is IGNORED
+/// --dotall alpha              file:alpha -- not the containing line
+/// --dotall -l alpha.*beta     file -- `-l` still works
+/// ```
+///
+/// So this is `-o` semantics over a whole-file regex, which is why it is a
+/// separate function rather than a flag threaded through `search_stream`:
+/// every line-based decision that function makes is one this option does not
+/// have to make.
+fn search_dotall(
+    out: &mut impl Write,
+    data: &[u8],
+    pats: &[Pat],
+    src: &Source<'_>,
+    opts: &Options,
+) -> io::Result<Outcome> {
+    let spans = match matches_in(pats, data, opts) {
+        Ok(v) => v,
+        Err(e) => return Err(limit_err(e)),
+    };
+    let hit = Outcome {
+        matched: !spans.is_empty(),
+        binary_match: false,
+    };
+
+    // `-c` counts MATCHES here, not lines, because under `--dotall` there are
+    // no lines to count -- the whole file is one record. That is a definition
+    // rather than a measurement: the operator's grep spells `-c` differently
+    // (case-sensitive filenames) so it has no answer to borrow, and counting
+    // matches is the only reading that does not require inventing a line
+    // structure the option has just been told to ignore.
+    if opts.count_only {
+        if src.show_filename {
+            out.write_all(&opts.paint(&opts.colors.filename, src.filename))?;
+            if opts.null_name {
+                out.write_all(&[0])?;
+            } else {
+                out.write_all(&opts.paint(&opts.colors.separator, b":"))?;
+            }
+        }
+        out.write_all(spans.len().to_string().as_bytes())?;
+        out.write_all(b"\n")?;
+        return Ok(hit);
+    }
+
+    // `-q`, `-l` and `-L` answer a question about the FILE; the caller prints
+    // whatever they need from `Outcome`. Same four-way guard `context_printed`
+    // uses, written out rather than borrowed, because that method is named for
+    // context and this is not context.
+    let prints = !opts.quiet && !opts.files_with_matches && !opts.files_without_match;
+    if !prints {
+        return Ok(hit);
+    }
+
+    for (start, end) in spans {
+        if src.show_filename {
+            out.write_all(&opts.paint(&opts.colors.filename, src.filename))?;
+            if opts.null_name {
+                out.write_all(&[0])?;
+            } else {
+                out.write_all(&opts.paint(&opts.colors.separator, b":"))?;
+            }
+        }
+        let text = data.get(start..end).unwrap_or_default();
+        out.write_all(&opts.paint(&opts.colors.selected_match, text))?;
+        out.write_all(b"\n")?;
+    }
+    Ok(hit)
+}
+
 fn search_stream(
     out: &mut impl Write,
     reader: impl Read,
@@ -5384,6 +5491,132 @@ mod tests {
     ) -> (Vec<u8>, bool) {
         let (out, outcome) = run_search_outcome(input, pats, opts, filename, show_filename);
         (out, outcome.matched)
+    }
+
+    /// `search_dotall` over one buffer, mirroring [`run_search`].
+    fn run_dotall(
+        input: &[u8],
+        pats: &[Pat],
+        opts: &Options,
+        filename: &str,
+        show_filename: bool,
+    ) -> (Vec<u8>, Outcome) {
+        let mut out: Vec<u8> = Vec::new();
+        let outcome =
+            search_dotall(&mut out, input, pats, &src(filename, show_filename), opts).unwrap();
+        (out, outcome)
+    }
+
+    /// `--dotall` prints the MATCH, and `.` crosses newlines.
+    ///
+    /// Every expectation here was measured against the operator's own grep,
+    /// which is where the option comes from. The engine needed no change: its
+    /// `.` has always matched a newline, and only ever failed to cross a line
+    /// because this program feeds it one line at a time.
+    #[test]
+    fn dotall_prints_the_match_across_newlines() {
+        let opts = Options {
+            dotall: true,
+            ..Options::default()
+        };
+        let pats = pats("alpha.*beta", &opts);
+        let (out, outcome) = run_dotall(
+            b"one alpha\ntwo\nthree beta\nfour\n",
+            &pats,
+            &opts,
+            "f",
+            false,
+        );
+        assert!(outcome.matched);
+        // The match, not the lines containing it: `one ` and `\nfour` are absent.
+        assert_eq!(out, b"alpha\ntwo\nthree beta\n");
+    }
+
+    /// A single-line match prints as the MATCH, not the containing line --
+    /// which is what makes this `-o` semantics rather than "grep with a bigger
+    /// record".
+    #[test]
+    fn dotall_prints_the_match_even_when_it_fits_on_one_line() {
+        let opts = Options {
+            dotall: true,
+            ..Options::default()
+        };
+        let pats = pats("alpha", &opts);
+        let (out, _) = run_dotall(b"one alpha\ntwo\n", &pats, &opts, "f", false);
+        assert_eq!(out, b"alpha\n");
+    }
+
+    /// The filename prefix follows GNU's rule, not the operator's.
+    ///
+    /// Their tool always prints it; GNU prints it only when more than one file
+    /// is being searched, and `show_filename` is how the caller says so.
+    /// §1008's rule is that GNU's conventions keep their meanings.
+    #[test]
+    fn dotall_prefixes_the_filename_only_when_asked() {
+        let opts = Options {
+            dotall: true,
+            ..Options::default()
+        };
+        let pats = pats("alpha", &opts);
+        let (bare, _) = run_dotall(b"one alpha\n", &pats, &opts, "f", false);
+        assert_eq!(bare, b"alpha\n");
+        let (named, _) = run_dotall(b"one alpha\n", &pats, &opts, "f", true);
+        assert_eq!(named, b"f:alpha\n");
+    }
+
+    /// `-c` counts MATCHES under `--dotall`, because there are no lines to
+    /// count -- the whole file is one record. A definition, not a
+    /// measurement: the operator's `-c` means something else entirely
+    /// (case-sensitive filenames), so there was no answer to borrow.
+    #[test]
+    fn dotall_counts_matches_not_lines() {
+        let opts = Options {
+            dotall: true,
+            count_only: true,
+            ..Options::default()
+        };
+        let pats = pats("a", &opts);
+        // Three `a`s, at 0, 3 and 6. The first draft of this test used
+        // `a\nba\nc\n` and asserted 3, which is two -- the assertion
+        // caught my counting, which is the direction that should fail.
+        let (out, outcome) = run_dotall(b"a\nba\nca\n", &pats, &opts, "f", false);
+        assert!(outcome.matched);
+        assert_eq!(out, b"3\n");
+    }
+
+    /// `-q`, `-l` and `-L` ask about the FILE, so nothing is printed here and
+    /// the caller decides from `Outcome`.
+    #[test]
+    fn dotall_prints_nothing_for_the_file_level_questions() {
+        let pats_for = |opts: &Options| pats("alpha", opts);
+        for set in [
+            |o: &mut Options| o.quiet = true,
+            |o: &mut Options| o.files_with_matches = true,
+            |o: &mut Options| o.files_without_match = true,
+        ] {
+            let mut opts = Options {
+                dotall: true,
+                ..Options::default()
+            };
+            set(&mut opts);
+            let pats = pats_for(&opts);
+            let (out, outcome) = run_dotall(b"one alpha\n", &pats, &opts, "f", true);
+            assert!(outcome.matched, "the file still matched");
+            assert!(out.is_empty(), "but nothing was printed");
+        }
+    }
+
+    /// No match is no output and no `matched`, whatever else is set.
+    #[test]
+    fn dotall_reports_no_match() {
+        let opts = Options {
+            dotall: true,
+            ..Options::default()
+        };
+        let pats = pats("zzz", &opts);
+        let (out, outcome) = run_dotall(b"one alpha\n", &pats, &opts, "f", true);
+        assert!(!outcome.matched);
+        assert!(out.is_empty());
     }
 
     /// [`run_search`] without dropping the second half of the answer, for the

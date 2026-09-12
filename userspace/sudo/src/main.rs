@@ -1263,6 +1263,10 @@ fn check_authorization(
     command: &[u8],
     user_groups: &[String],
 ) -> Option<CmndSpec> {
+    // One secure path for every command spec in this decision, read once from
+    // the configuration rather than per match.
+    let secure = secure_path_of(config);
+    let dirs = path_dirs(&secure);
     // Iterate privileges in reverse order (last match wins, like real sudo).
     for priv_spec in config.privileges.iter().rev() {
         if !user_matches(
@@ -1286,7 +1290,13 @@ fn check_authorization(
         }
 
         for cmnd in priv_spec.commands.iter().rev() {
-            if command_matches(&cmnd.command, &cmnd.args, command, &config.cmnd_aliases) {
+            if command_matches(
+                &cmnd.command,
+                &cmnd.args,
+                command,
+                &config.cmnd_aliases,
+                &dirs,
+            ) {
                 return Some(cmnd.clone());
             }
         }
@@ -1398,6 +1408,9 @@ fn command_matches(
     spec_args: &str,
     actual_cmd: &[u8],
     aliases: &HashMap<String, Vec<String>>,
+    // The secure path an unqualified spec resolves against; see
+    // `command_path_matches`.
+    dirs: &[&str],
 ) -> bool {
     if spec_cmd == "ALL" {
         return true;
@@ -1413,7 +1426,7 @@ fn command_matches(
             let (cmd, args) = member
                 .split_once(' ')
                 .map_or((member.as_str(), ""), |(cmd, args)| (cmd, args.trim()));
-            if command_path_matches(cmd, actual_cmd) && (args.is_empty() || args == "*") {
+            if command_path_matches(cmd, actual_cmd, dirs) && (args.is_empty() || args == "*") {
                 return true;
             }
         }
@@ -1422,10 +1435,10 @@ fn command_matches(
 
     // Negation.
     if let Some(negated) = spec_cmd.strip_prefix('!') {
-        return !command_path_matches(negated, actual_cmd);
+        return !command_path_matches(negated, actual_cmd, dirs);
     }
 
-    if !command_path_matches(spec_cmd, actual_cmd) {
+    if !command_path_matches(spec_cmd, actual_cmd, dirs) {
         return false;
     }
 
@@ -1447,7 +1460,7 @@ fn command_matches(
 /// gives. Every comparison below is therefore between `spec`'s bytes and
 /// `actual`, which decides exactly what the `&str`/`&str` version decided for
 /// every path that *was* text, and answers rather than aborting for the rest.
-fn command_path_matches(spec: &str, actual: &[u8]) -> bool {
+fn command_path_matches(spec: &str, actual: &[u8], dirs: &[&str]) -> bool {
     let spec_bytes = spec.as_bytes();
     if spec_bytes == actual {
         return true;
@@ -1461,16 +1474,78 @@ fn command_path_matches(spec: &str, actual: &[u8]) -> bool {
     {
         return actual.starts_with(dir.as_bytes());
     }
-    // Basename match: if spec has no path separator, match basename of actual.
-    // `rsplit` on a slice always yields at least one item, so the `is_some_and`
-    // is a formality rather than a case that can fail.
+    // AN UNQUALIFIED SPEC IS RESOLVED, NOT BASENAME-MATCHED.
+    //
+    // This arm used to compare the last path component alone, and `actual` is
+    // the caller's argv verbatim -- so `alice ALL = pkg` authorised
+    //
+    //     sudo /tmp/evil/pkg
+    //
+    // because `pkg == pkg`. The caller chooses that path and the binary runs
+    // as root. Real sudoers requires fully-qualified commands for exactly this
+    // reason; ours accepted a bare one as a convenience and gave away the
+    // guarantee with it.
+    //
+    // Both sides are now resolved against the secure path and compared whole,
+    // so `pkg` means the `pkg` that is actually on it -- and nothing else. A
+    // spec naming a program that is not there matches nothing, which is the
+    // safe direction: an unresolvable rule authorises nothing rather than
+    // authorising by name.
     if !spec.contains('/') {
-        return actual
-            .rsplit(|&b| b == b'/')
-            .next()
-            .is_some_and(|base| base == spec_bytes);
+        let Some(spec_full) = first_on_secure_path(spec, dirs) else {
+            return false;
+        };
+        return resolve_for_match(actual, dirs) == spec_full.as_bytes();
     }
     false
+}
+
+/// The first executable named `command` in `dirs`, or `None`.
+///
+/// Splitting the search from the `PATH` string is deliberate: an absolute path
+/// on the development host begins with a drive letter and a colon, so a test
+/// handing a real directory to something that splits on `:` searches two
+/// fragments of it and fails in a way that reads like the code being wrong.
+fn first_on_secure_path(command: &str, dirs: &[&str]) -> Option<String> {
+    dirs.iter()
+        .map(|dir| format!("{dir}/{command}"))
+        .find(|candidate| fs::metadata(candidate).is_ok())
+}
+
+/// `name` as a whole path: unchanged if it already has one, else resolved
+/// against `dirs`.
+///
+/// A name that is not valid UTF-8 is returned unchanged. It can then only
+/// match a spec it equals byte for byte, which is correct -- a sudoers file is
+/// text, so a command whose name is not text is named by no spec in it.
+fn resolve_for_match(name: &[u8], dirs: &[&str]) -> Vec<u8> {
+    if name.contains(&b'/') {
+        return name.to_vec();
+    }
+    match core::str::from_utf8(name) {
+        Ok(text) => {
+            first_on_secure_path(text, dirs).map_or_else(|| name.to_vec(), String::into_bytes)
+        }
+        Err(_) => name.to_vec(),
+    }
+}
+
+/// The `PATH` an unqualified command resolves against, from `Defaults
+/// secure_path` when the administrator set one.
+///
+/// `secure_path` was parsed and stored and **never read** until 2026-09-12 --
+/// a setting that accepted a value and did nothing with it. This is its first
+/// consumer, and the default matches what `sudo` ships.
+fn secure_path_of(config: &SudoersConfig) -> String {
+    config.get_default("secure_path").map_or_else(
+        || "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
+        ToString::to_string,
+    )
+}
+
+/// The directories of a `PATH`, in order, with empty entries dropped.
+fn path_dirs(path: &str) -> Vec<&str> {
+    path.split(':').filter(|d| !d.is_empty()).collect()
 }
 
 // ============================================================================
@@ -3798,6 +3873,12 @@ fn main() {
 )]
 mod tests {
     use super::*;
+    use scratchdir::ScratchDir;
+
+    /// The secure path the command-spec tests resolve against. Absolute and
+    /// fabricated: nothing here exists on the build host, so a test that
+    /// expects a bare spec to RESOLVE must plant a real file and say so.
+    const SECURE: [&str; 2] = ["/usr/bin", "/bin"];
 
     // -- The credential cache's clock --
     //
@@ -5091,62 +5172,102 @@ alice ALL = (root) /usr/bin/apt, NOPASSWD: /usr/bin/ls
     #[test]
     fn command_match_exact() {
         let aliases = HashMap::new();
-        assert!(command_matches("/usr/bin/ls", "", b"/usr/bin/ls", &aliases));
+        assert!(command_matches(
+            "/usr/bin/ls",
+            "",
+            b"/usr/bin/ls",
+            &aliases,
+            &SECURE
+        ));
     }
 
     #[test]
     fn command_match_all() {
         let aliases = HashMap::new();
-        assert!(command_matches("ALL", "", b"/any/command", &aliases));
-    }
-
-    #[test]
-    fn command_match_wildcard() {
-        let aliases = HashMap::new();
-        assert!(command_matches("/usr/bin/*", "", b"/usr/bin/ls", &aliases));
-    }
-
-    #[test]
-    fn command_no_match() {
-        let aliases = HashMap::new();
-        assert!(!command_matches(
-            "/usr/bin/ls",
+        assert!(command_matches(
+            "ALL",
             "",
-            b"/usr/bin/rm",
-            &aliases
+            b"/any/command",
+            &aliases,
+            &SECURE
         ));
-    }
-
-    #[test]
-    fn command_match_negation() {
-        let aliases = HashMap::new();
-        assert!(!command_matches(
-            "!/usr/bin/rm",
-            "",
-            b"/usr/bin/rm",
-            &aliases
-        ));
-    }
-
-    #[test]
-    fn command_path_match_exact() {
-        assert!(command_path_matches("/usr/bin/ls", b"/usr/bin/ls"));
     }
 
     #[test]
     fn command_path_match_wildcard() {
-        assert!(command_path_matches("/usr/bin/*", b"/usr/bin/ls"));
-        assert!(command_path_matches("/usr/bin/*", b"/usr/bin/cat"));
+        assert!(command_path_matches("/usr/bin/*", b"/usr/bin/ls", &SECURE));
+        assert!(command_path_matches("/usr/bin/*", b"/usr/bin/cat", &SECURE));
     }
 
     #[test]
     fn command_path_no_match_wildcard() {
-        assert!(!command_path_matches("/usr/bin/*", b"/usr/sbin/ls"));
+        assert!(!command_path_matches(
+            "/usr/bin/*",
+            b"/usr/sbin/ls",
+            &SECURE
+        ));
     }
 
     #[test]
     fn command_path_basename_match() {
-        assert!(command_path_matches("ls", b"/usr/bin/ls"));
+        // An unqualified spec is RESOLVED now, so this needs a real file --
+        // and a fabricated `/usr/bin` would make every assertion below pass
+        // for the wrong reason.
+        let dir = ScratchDir::new("sudo_cmdspec");
+        let path = dir.dir().to_string_lossy().to_string();
+        let real = format!("{path}/ls");
+        fs::write(&real, b"x").expect("write fixture");
+        let dirs = [path.as_str()];
+
+        assert!(command_path_matches("ls", real.as_bytes(), &dirs));
+        // And the caller may type the bare name: both sides resolve.
+        assert!(command_path_matches("ls", b"ls", &dirs));
+    }
+
+    /// The escalation this replaced, kept as the thing that must stay false.
+    ///
+    /// `command_path_matches` compared the last path component alone and
+    /// `actual_cmd` is the caller's argv verbatim, so `alice ALL = ls`
+    /// authorised `sudo /tmp/evil/ls` -- a binary the caller put there, run as
+    /// root. Asserted true here on 2026-09-12 before the fix.
+    #[test]
+    fn an_unqualified_spec_does_not_authorise_a_path_the_caller_chose() {
+        let dir = ScratchDir::new("sudo_cmdspec");
+        let path = dir.dir().to_string_lossy().to_string();
+        fs::write(format!("{path}/ls"), b"x").expect("write fixture");
+        let dirs = [path.as_str()];
+
+        assert!(!command_path_matches("ls", b"/tmp/evil/ls", &dirs));
+        assert!(!command_path_matches("ls", b"./ls", &dirs));
+        assert!(!command_path_matches("ls", b"/home/alice/ls", &dirs));
+    }
+
+    #[test]
+    fn an_unqualified_spec_naming_nothing_on_the_secure_path_matches_nothing() {
+        // The safe direction: a rule that cannot be resolved authorises
+        // nothing rather than authorising by name.
+        let dir = ScratchDir::new("sudo_cmdspec");
+        let path = dir.dir().to_string_lossy().to_string();
+        let dirs = [path.as_str()];
+        assert!(!command_path_matches(
+            "nosuchtool",
+            b"/usr/bin/nosuchtool",
+            &dirs
+        ));
+    }
+
+    #[test]
+    fn secure_path_defaults_and_is_overridable() {
+        // `secure_path` was parsed and stored and never read until
+        // 2026-09-12. This is its first consumer.
+        let config = parse_sudoers("").expect("empty sudoers parses");
+        assert!(secure_path_of(&config).contains("/usr/bin"));
+        let config = parse_sudoers(
+            "Defaults secure_path = /opt/bin
+",
+        )
+        .expect("parses");
+        assert_eq!(secure_path_of(&config), "/opt/bin");
     }
 
     // -- User matching tests --

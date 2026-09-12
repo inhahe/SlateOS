@@ -38,6 +38,11 @@ struct PsArgs {
     select_ttys: Option<Vec<String>>,
     /// `-l`: the long format.
     long_format: bool,
+    /// The BSD default format -- `PID TTY STAT TIME COMMAND` -- which bare
+    /// `-t` and `-h` both select. Not a third format for two options: measured
+    /// side by side, `ps -t` and `ps -h` print the same columns and `-h` also
+    /// drops the header.
+    bsd_default: bool,
     /// `--sort` terms, in the order written. The first is the primary key.
     sort: Vec<SortKey>,
 }
@@ -152,14 +157,32 @@ fn parse_args(args: &[String]) -> Result<Request, String> {
                     'l' => out.long_format = true,
                     't' => {
                         let glued: String = rest.by_ref().collect();
-                        let list = if glued.is_empty() {
-                            let next = args.get(i).cloned().unwrap_or_default();
-                            i = i.saturating_add(1);
-                            next
+                        // BARE `-t` IS A FORMAT, NOT AN EMPTY SELECTION.
+                        // `ps -t` with nothing after it prints the BSD default
+                        // columns for this terminal's processes; it does not
+                        // select the tty named by the empty string, which is
+                        // what consuming a missing argument amounted to.
+                        if glued.is_empty() && args.get(i).is_none() {
+                            out.bsd_default = true;
                         } else {
-                            glued
-                        };
-                        out.select_ttys = Some(parse_tty_list(&list)?);
+                            let list = if glued.is_empty() {
+                                let next = args.get(i).cloned().unwrap_or_default();
+                                i = i.saturating_add(1);
+                                next
+                            } else {
+                                glued
+                            };
+                            out.select_ttys = Some(parse_tty_list(&list)?);
+                        }
+                    }
+                    // `-h` is the same format with the header dropped. It is
+                    // NOT an alias for `--no-header`: measured side by side in
+                    // one shell, `-h` prints `Ss+` and `0:00` where
+                    // `--no-header` prints `00:00:00`. Only half of what it
+                    // does is what its name says.
+                    'h' => {
+                        out.bsd_default = true;
+                        out.no_header = true;
                     }
                     'o' => {
                         let glued: String = rest.by_ref().collect();
@@ -431,6 +454,69 @@ struct Spec {
 ///
 /// A name not in `COLUMNS`. procps' message, measured:
 /// `error: unknown user-defined format specifier "nosuchcolumn"`.
+/// BSD's `STAT`: the state letter, then the modifiers procps appends to it.
+///
+/// Measured on procps 4.x: `Ss+` for a session leader in the foreground, `S+`
+/// for a foreground child, `R+` for the running one. The suffixes, in the
+/// order procps emits them:
+///
+/// | | meaning | source |
+/// |---|---|---|
+/// | `<` | high priority | `nice < 0` |
+/// | `N` | low priority | `nice > 0` |
+/// | `L` | pages locked | not tracked here, so never emitted |
+/// | `s` | session leader | `session == pid` |
+/// | `l` | multi-threaded | `num_threads > 1` |
+/// | `+` | foreground process group | `tpgid == pgrp` |
+///
+/// `L` is left out rather than guessed. A modifier this cannot determine is
+/// one it must not print: `ps` is read to find out what a process IS, and a
+/// fabricated flag is worse than an absent one.
+fn bsd_stat(
+    state: &str,
+    nice: i64,
+    session: u64,
+    pid: u32,
+    threads: u64,
+    tpgid: i64,
+    pgrp: u64,
+) -> String {
+    let mut out = String::from(state);
+    if nice < 0 {
+        out.push('<');
+    } else if nice > 0 {
+        out.push('N');
+    }
+    if session == u64::from(pid) {
+        out.push('s');
+    }
+    if threads > 1 {
+        out.push('l');
+    }
+    if tpgid >= 0 && i64::try_from(pgrp).is_ok_and(|p| p == tpgid) {
+        out.push('+');
+    }
+    out
+}
+
+/// BSD's `TIME`: total minutes and seconds, not `HH:MM:SS`.
+///
+/// Measured against procps' own `bsdtime` column, which is what the BSD
+/// personality prints:
+///
+/// ```text
+/// time     bsdtime
+/// 00:01:33   1:33
+/// 00:00:46   0:46
+/// 00:00:00   0:00
+/// ```
+///
+/// So the hours do not get a field of their own -- they roll into the minutes.
+fn bsd_time(ticks: u64) -> String {
+    let secs = ticks / procinfo::TICKS_PER_SEC;
+    format!("{}:{:02}", secs / 60, secs % 60)
+}
+
 /// One `--sort` term: a column, and which way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SortKey {
@@ -613,6 +699,13 @@ struct ProcInfo {
     /// CPU time in ticks, beside the rendering of it. `--sort=time` compares
     /// this; `time_str` is `HH:MM:SS` and compares correctly as a string only
     /// while the hours stay two digits.
+    /// Session id, thread count, foreground pgrp and pgrp: the four the BSD
+    /// `STAT` suffixes are computed from. Kept beside the state letter rather
+    /// than re-read, so the modifiers describe the same sample as the letter.
+    session: u64,
+    num_threads: u64,
+    tpgid: i64,
+    pgrp: u64,
     cpu_ticks: u64,
     time_str: String,
     /// The `-f` command line, already rendered. Empty when `-f` was not asked
@@ -695,6 +788,30 @@ fn write_row(out: &mut impl Write, parsed: &PsArgs, info: &ProcInfo, pid32: u32)
             info.tty,
             info.time_str,
             info.cmd
+        );
+    } else if parsed.bsd_default {
+        let stat = bsd_stat(
+            &info.state,
+            info.nice,
+            info.session,
+            pid32,
+            info.num_threads,
+            info.tpgid,
+            info.pgrp,
+        );
+        let cmd = if info.cmd.is_empty() {
+            format!("[{}]", info.comm)
+        } else {
+            info.cmd.clone()
+        };
+        let _ = writeln!(
+            out,
+            "{:>7} {:<8} {:<4} {:>6} {}",
+            pid32,
+            info.tty,
+            stat,
+            bsd_time(info.cpu_ticks),
+            cmd
         );
     } else {
         let _ = writeln!(
@@ -819,6 +936,15 @@ fn run_main() -> ExitCode {
                 "{:<8} {:>7} {:>7} {:>2} {:>5} {:<8} {:>8} CMD",
                 "UID", "PID", "PPID", "C", "STIME", "TTY", "TIME"
             );
+        } else if parsed.bsd_default {
+            // `    PID TTY      STAT   TIME COMMAND`, measured byte for byte
+            // with `cat -A`: PID right in 7, TTY left in 8, STAT left in 4,
+            // TIME right in 6, then the command line unpadded.
+            let _ = writeln!(
+                out,
+                "{:>7} {:<8} {:<4} {:>6} COMMAND",
+                "PID", "TTY", "STAT", "TIME"
+            );
         } else {
             let _ = writeln!(out, "{:>7} {:<8} {:>8} CMD", "PID", "TTY", "TIME");
         }
@@ -855,7 +981,12 @@ fn run_main() -> ExitCode {
         // `-o args` needs the command line too, so the flag is "does anything
         // ask for it" rather than "was -f given". Reading it costs a second
         // open per process, which is why it is still conditional.
+        // The BSD default format's COMMAND is the command LINE, like `-f`'s --
+        // `sleep 5`, not `[sleep]`. Leaving it out of this condition printed
+        // the bracketed `comm` fallback for every row, which is the rendering
+        // reserved for a process that genuinely has no command line.
         let wants_cmdline = parsed.full_format
+            || parsed.bsd_default
             || parsed
                 .columns
                 .iter()
@@ -1002,6 +1133,10 @@ fn read_one(
         start_epoch,
         stime: ctx.format_stime(start_epoch),
         tty: format_tty(i32::try_from(stat.tty_nr).unwrap_or(0)),
+        session: stat.session,
+        num_threads: stat.num_threads,
+        tpgid: stat.tpgid,
+        pgrp: stat.pgrp,
         cpu_ticks: stat.utime_ticks.saturating_add(stat.stime_ticks),
         time_str: format_cpu_time(stat.utime_ticks, stat.stime_ticks),
         cmd,

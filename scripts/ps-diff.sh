@@ -97,7 +97,29 @@ run_side() {
      #
      # With this, PID 2 is `sleep` on both sides: the same binary, the same
      # arguments, the same everything. `-p 2` then points both at it.
-     if [ -n "${PS_DIFF_SPAWN-}" ]; then sleep 5 & fi
+     if [ -n "${PS_DIFF_SPAWN-}" ]; then
+       sleep 5 &
+       # WAIT FOR IT TO BE SLEEPING before letting ps look. Between fork and
+       # exec the child is still RUNNABLE and still carrying the memory map of
+       # the shell, so a ps arriving in that window reports state R and the
+       # virtual size of the SHELL -- one cause for two symptoms, and why
+       # `-l -p 2` flapped between runs instead of failing honestly. Adding
+       # work to either ps moved the race.
+       #
+       # The poll forks NOTHING: read is a shell builtin and the redirection
+       # re-opens the file each turn. A forked awk here would take PID 3 and
+       # could itself be caught in the listing.
+       #
+       # No apostrophes in this comment: it lives inside a single-quoted
+       # sh -c string, and one would end the quote.
+       i=0
+       while [ "$i" -lt 2000 ]; do
+         if read -r _ _ st _ < /proc/2/stat 2>/dev/null && [ "$st" = S ]; then
+           break
+         fi
+         i=$((i + 1))
+       done
+     fi
      exec ps "$@"' _ "$@" < /dev/null
 }
 
@@ -338,7 +360,16 @@ run_case -e -t ?
 # `R` and `0:00` rather than `00:00:00` -- exactly as bare `-u` falls back to
 # the BSD user format. Two options, one shape, and neither is a defect in the
 # option: both need a format this build does not have.
-xfail_case "bare -t needs the BSD format, which is not implemented" -t
+# Bare `-t` is a FORMAT, not an empty selection: it prints the BSD default
+# columns for this terminal's processes. Measured byte for byte with `cat -A`:
+#
+#     "    PID TTY      STAT   TIME COMMAND"
+#      PID right in 7, TTY left in 8, STAT left in 4, TIME right in 6.
+#
+# TIME is BSD's, which is total minutes and seconds -- procps' own `bsdtime`
+# column renders 00:01:33 as 1:33 -- and STAT is the state letter plus the
+# modifiers `<N sl+`.
+run_shared -t
 run_case -o pid -o comm
 run_case -e -o pid,comm
 run_case --no-header
@@ -371,7 +402,21 @@ run_case -p 999999
 # failure is an assertion, and it is the only kind its own case passing never
 # tests.
 xfail_case "procps implements -X (register format); this build does not" -X
-xfail_case "procps implements -h (suppress header); this build does not" -h
+# `-h` is the same FORMAT with the header dropped -- that half is implemented
+# and agrees. What still differs is the SELECTION, and the rule has not been
+# established, so this stays declared rather than guessed at.
+#
+# Measured inside this harness's namespace:
+#
+#     ps        exit 0, header + 2 rows      (TTY `?` on both)
+#     ps -t     exit 0, header + 2 rows      agrees with ours
+#     ps -h     exit 1, NOTHING
+#
+# So `-h` selects something narrower than both plain `ps` and bare `-t`, in a
+# namespace where nothing has a controlling terminal. "It needs the
+# own-terminal selection" was the obvious reading and does not survive the
+# first line: plain `ps` uses that selection and still printed two rows.
+xfail_case "the BSD format agrees; -h's narrower SELECTION is not characterised" -h
 
 # --- help and version --------------------------------------------------------
 # NOT declared divergences without measuring. free-diff.sh shipped a `--help`

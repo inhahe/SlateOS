@@ -228,9 +228,10 @@ xfail_case "-l (long format) is not implemented here" -efl
 # otherwise until it was measured. SysV `ps -u root` prints the DEFAULT
 # columns for that user's processes; the user-oriented format is BSD `u`
 # with no dash, which is a different option that happens to share a
-# letter. `userspace/ps` documents "-u [user] User-oriented format" and
-# so conflates them -- which is worth knowing before porting it in, since
-# porting the standalone's `-u` would import the conflation.
+# letter. The retired `userspace/ps` documented "-u [user] User-oriented
+# format" and so conflated them -- which is why its `-u` was NOT ported and
+# this one was written against the measurement instead. Porting the code
+# would have imported the conflation along with it.
 #
 # `ps -u` with no list exits 1.
 # Bare `-u` with no list is NOT the error it looks like. procps prints the

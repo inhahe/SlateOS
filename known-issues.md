@@ -131265,13 +131265,32 @@ Two measured examples:
   for the implementation that has it. This is `free` again: 23 options
   advertised against 2 is not 21 options that agree.
 
-  **What that means for the retirement is "merge, not pick".** Deleting
-  `userspace/ps` outright loses five options that exist, however wrongly they
-  render; §1005 says the better half survives *inside coreutils*, which here
-  means porting them in and then retiring the crate, as `diff` was ported. The
-  harness measures each one independently, and each is declared by name in
-  `ps-diff.sh` so implementing `-o` turns three cases into XPASS rather than
-  disappearing into a collective excuse.
+  **RETIRED 2026-09-12. `userspace/ps` is deleted; coreutils' `ps` is the one
+  `ps`.** Final measurement before the delete: **22 passed, 0 differed, 10
+  differ on purpose** for coreutils', against **0 passed, 12 differed** for the
+  standalone on the same cases.
+
+  **What the loser knew, measured option by option rather than counted.** Its
+  nine options split three ways:
+
+  | | |
+  |---|---|
+  | ported in first | `-p`, `--no-header`, `-u` |
+  | real procps options, still missing here | `-l`, `-o`, `-t`, `--sort` |
+  | **inventions** | `--reverse`, `--json` |
+
+  `--reverse` and `--json` both draw `error: unknown gnu long option` from
+  procps — checked, not assumed, because `free`'s standalone advertised
+  `--json` too and it was the one thing that looked like a feature. The four
+  real ones are genuine capability and are **not** ported from that crate:
+  measured, its implementations of them do not match procps either (0 XPASS),
+  so porting the code would import a second wrong rendering. They are written
+  fresh against measurements, one at a time, and each is declared by name in
+  `ps-diff.sh`. `todo.txt` carries the entry.
+
+  `DIFF_PKG=ps bash scripts/ps-diff.sh` now fails loudly with "has no
+  Cargo.toml anywhere under … — is DIFF_PKG right?", which is correct: there
+  is no second `ps` to measure.
 
   **The original entry, from before the fixes:**
 

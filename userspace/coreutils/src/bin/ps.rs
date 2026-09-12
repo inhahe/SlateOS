@@ -398,8 +398,9 @@ fn run_main() -> ExitCode {
 /// One process, read through [`procinfo`].
 ///
 /// The `/proc/<pid>/stat` parsing this used to do itself now lives in the
-/// crate, shared with `userspace/ps`, `userspace/htop` and
-/// `apps/procexplorer`. Two things it could not do on its own:
+/// crate, shared with `userspace/htop` and `apps/procexplorer` -- and with
+/// `userspace/ps` until that crate was retired on 2026-09-12, leaving this
+/// the only `ps`. Two things it could not do on its own:
 ///
 /// * **the real UID.** This was `uid: 0` with the comment "would need
 ///   `/proc/<pid>/status` for real UID" — so the `-f` listing showed every

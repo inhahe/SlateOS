@@ -1138,7 +1138,8 @@ impl ProcFs {
 /// produces plausible numbers.
 ///
 /// It lives here because it was a private `const PAGE_SIZE_KB: u64 = 16;` in
-/// both `userspace/htop` and `userspace/ps`, which is one copy per program of
+/// both `userspace/htop` and `userspace/ps` (the latter retired 2026-09-12),
+/// which was one copy per program of
 /// a fact about the kernel. Both were right; nothing made them stay right.
 pub const PAGE_SIZE_KIB: u64 = 16;
 

@@ -149,7 +149,6 @@ userspace/plymouth/src/main.rs:to_str-unwrap
 userspace/polkit/src/main.rs:argv-as-string
 userspace/powerctl/src/main.rs:argv-as-string
 userspace/prlimit/src/main.rs:argv-as-string
-userspace/ps/src/main.rs:argv-as-string
 userspace/pstree/src/main.rs:argv-as-string
 userspace/pv/src/main.rs:argv-as-string
 userspace/readelf/src/main.rs:argv-as-string

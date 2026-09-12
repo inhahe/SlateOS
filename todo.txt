@@ -57085,3 +57085,44 @@ TRIGGER. Next tick that picks up duplicate-pair work. Nothing blocks it. Note
 that `logger`, the third pair, is NOT harness work -- it is open-questions
 B-Q14, a design fork about where a logged message goes, which a differential
 test cannot answer.
+
+--------------------------------------------------------------------------
+FOUR REAL `ps` OPTIONS STILL MISSING, AFTER RETIRING THE CRATE THAT HAD THEM
+(lane B, 2026-09-12)
+
+WHAT. `userspace/ps` is deleted (§1005, and measured: coreutils' scores 22
+passed / 0 differed against the standalone's 0 / 12). Of its nine options,
+three were ported in first (`-p`, `--no-header`, `-u`) and two were inventions
+procps rejects outright (`--reverse`, `--json`, both `error: unknown gnu long
+option`). Four are real procps options this build still refuses:
+
+    -l        long format: F S UID PID PPID C PRI NI ADDR SZ WCHAN TTY TIME CMD
+    -o        output column selection, including `-o comm=` to suppress a title
+    -t        select by controlling terminal
+    --sort    sort by a named column
+
+DO NOT PORT THEM FROM THE DELETED CRATE, and this is the whole reason for the
+note. The crate scored **0 XPASS** on the harness: every case declared "not
+implemented here" for coreutils ALSO differed for the implementation that had
+it. Its `-l`, `-o`, `-t` and `--sort` do not produce procps' output, so
+porting the code would import a second wrong rendering rather than a feature.
+Write them against measurements, which is what the harness is for. The code is
+recoverable from git if it is ever worth reading, but read it as a hint about
+structure, never as a reference for output.
+
+TWO MEASUREMENTS ALREADY BANKED, in `scripts/ps-diff.sh`:
+
+  * `-l`'s column set, with its UID printed NUMERICALLY -- `0` where `-f`
+    prints `root` for the same process in the same listing. The obvious shared
+    helper gets one of the two wrong.
+  * `-l` needs a `flags` field (the `F` column) that `procinfo::Stat` does not
+    currently parse, and a `WCHAN` that is `-` in every case measured so far.
+    Adding the field to `procinfo` is the first step and is a change to a
+    shared crate.
+
+ALSO NOT IMPLEMENTED, and separately declared: bare `-u` (procps falls back to
+the BSD user-oriented format with nothing selected and exits 1), `-X` (register
+format), `-h` (suppress header, exits 1 silently).
+
+TRIGGER. Any tick picking up coreutils option work. `-o` is the highest value
+-- it is the one that makes the others expressible -- and the largest.

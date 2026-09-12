@@ -47,6 +47,21 @@
  *     `SET_HOSTNAME` but not `(File, READ)` -- spent a boot test looking like
  *     the kernel dropping the name. Two faults, one exit code, three layers
  *     between the symptom and the cause.
+ *   - **the-baseline-read-failed, by layer** -- codes 24-28, added 2026-09-12
+ *     for the same reason one day later. Check 13 asked only whether
+ *     `getdomainname` returned zero, so a failure said nothing about WHERE.
+ *     Lane A traced the entire kernel-side read path by hand, proved every
+ *     layer symmetric with the hostname's, and still could not say whether the
+ *     fault was the ring-3 `open()` or libc -- because a fixture that can only
+ *     report "the call failed" makes hand-tracing the only way forward.
+ *     Now: 25 the buffer, 26 an unexpected errno, 13 a failure that set no
+ *     errno at all, and the pair that matters -- **27** the same node cannot be
+ *     opened directly from ring 3 either (kernel side, since the *hostname*
+ *     node opened from this very process minutes earlier), **28** it opens
+ *     fine and libc is not getting the bytes (lane B's, and no kernel change
+ *     fixes it). Neither of lane A's ring-0 rungs can tell 27 from 28: both
+ *     read through the internal VFS call, so the ring-3 open is the one layer
+ *     nothing covers.
  *
  * The round trip is only evidence because its ends differ. See check 6 --
  * the write goes through `SYS_HOSTNAME_SET` and the read through
@@ -328,8 +343,60 @@ int main(void)
      *     "17-21 would have to move" and that was a guess.
      * ---------------------------------------------------------------- */
     memset(orig_domain, 0, sizeof orig_domain);
-    if (getdomainname(orig_domain, sizeof orig_domain - 1) != 0)
-        return 13;
+    errno = 0;
+    if (getdomainname(orig_domain, sizeof orig_domain - 1) != 0) {
+        /*
+         * 24-28. WHICH WAY IT FAILED, because "13" on its own cost two lanes
+         * an evening.
+         *
+         * libc returns EIO only when the one source could not be READ -- the
+         * open or the read itself -- and EINVAL only when the caller's buffer
+         * is too small. Those land in different subsystems and 13 named
+         * neither. Same repair as 22 and 23, in the place that rebuild did
+         * not reach.
+         *
+         * THE ERRNO IS SAVED BEFORE THE PROBE BELOW RUNS. `read_proc_line`
+         * calls open() and read(), both of which set errno, so testing errno
+         * afterwards would report the probe's outcome while claiming to
+         * report getdomainname's. The first draft of this block did exactly
+         * that -- a diagnostic that lies is worse than 13, which at least
+         * only failed to say anything.
+         *
+         * THE PROBE IS THE DECISIVE PART. It opens the same node directly,
+         * the way check 18 does and the way check 6 already opened the
+         * HOSTNAME node successfully earlier in this same process:
+         *
+         *   27 - the direct open/read ALSO fails. The hostname node opened
+         *        from this very process and this one does not, so it is the
+         *        ring-3 open of this specific node. Kernel side.
+         *   28 - the direct open/read SUCCEEDS while getdomainname fails.
+         *        The bytes are reachable from ring 3 and libc is not getting
+         *        them. Lane B's, and no kernel change will fix it.
+         *   25 - the buffer was too small. Neither lane; this fixture.
+         *   26 - some other errno, printed so it is not swallowed.
+         *   13 - the call failed and set no errno at all, which is its own
+         *        bug and is now distinguishable from all of the above.
+         *
+         * Neither of lane A's ring-0 rungs can tell 27 from 28: both read
+         * through the internal VFS call, so the ring-3 open is the one layer
+         * nothing covers. Rather than ask for a third rung, the fixture that
+         * is already standing in ring 3 answers it.
+         */
+        int saved = errno;
+        char probe[BUF];
+        int direct;
+
+        memset(probe, 0, sizeof probe);
+        direct = read_proc_line("/proc/sys/kernel/domainname", probe, sizeof probe);
+
+        if (saved == EINVAL)
+            return 25;
+        if (saved == EIO)
+            return direct != 0 ? 27 : 28;
+        if (saved != 0)
+            return 26;
+        return direct != 0 ? 27 : 13;
+    }
 
     /* ---------------------------------------------------------------- *
      * 14-16. The same three diagnoses for the domain. `SYS_DOMAINNAME_SET`

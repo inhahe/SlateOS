@@ -138827,6 +138827,24 @@ Deleted under §1005/§1006 rather than made to refuse. It was unreachable --
 in `multicall-aliases-baseline.txt`, so no build produced the name -- which
 means it was dead code that would have lied if anyone had wired it up.
 
+**Two more instances, found the same way** -- by reading a file the
+help-vs-parser sweep had pointed at for an unrelated reason.
+`systemd-cgls` printed a fixed cgroup tree (`init.scope` with pid 1,
+`dbus.service` with pid 100) on every machine, having opened nothing;
+it now walks `/sys/fs/cgroup`, which needs no ioctl and no privilege.
+`systemd-cgtop` **still** invents its numbers -- task counts, CPU
+percentages, memory figures -- and is the next one to fix; `cpu.stat` and
+`memory.current` are readable files, so it is tractable in the same way,
+but it needs two samples over an interval to have a percentage at all.
+
+**The `cgls` test is the cautionary half.** It asserted the output
+contained `system.slice` and `user.slice`, which was true on every
+machine because those names were hardcoded. A test that pins a
+fabrication in place is worse than no test: it makes the invention look
+verified, and it would have gone on passing forever. Its replacement
+asserts what a scratch directory was given comes back *and* that
+`user.slice` does not.
+
 **This is a class, and it has been hit here before.** `read_file_acl` used
 to call `fs::metadata`, discard the result, and report owner `root`, group
 `root` and mode 0755 for every file. Both are the same defect: output that

@@ -123,6 +123,38 @@ run_side() {
      exec ps "$@"' _ "$@" < /dev/null
 }
 
+# LIVENESS: two empty outputs compare equal.
+#
+# On 2026-09-12 a malformed inner script meant NEITHER side reached `exec ps`.
+# Both produced nothing, nothing matched nothing, and this harness reported
+# "59 passed, 0 differed, 6 NO LONGER differ" -- a perfect score from a run
+# that measured nothing at all. What caught it was an impossible XPASS: `-X`
+# and bare `-u` are not implemented and cannot agree with procps.
+#
+# The namespace probe above could not have caught it. It runs `ps` DIRECTLY,
+# so it proves the namespace works and says nothing about `run_side`, which is
+# the path every case actually takes. A probe that does not exercise the thing
+# it is vouching for is the shape this tree keeps meeting.
+#
+# `broken` could not either: `compare()` refuses exit 127 and 125, which are
+# "not found" and "cannot execute". A shell whose script will not parse exits
+# **2**, having run nothing, and no rule was watching that.
+#
+# So: run the real path once, on both sides, and require each to say something.
+if [ "$ns" = yes ]; then
+  live_ours=$(run_side ours -e -o pid= 2>/dev/null)
+  live_gnu=$(run_side gnu -e -o pid= 2>/dev/null)
+  if [ -z "$live_ours" ] || [ -z "$live_gnu" ]; then
+    echo "ps-diff.sh: REFUSING to report." >&2
+    echo "  The fixture produced no output on at least one side, so every" >&2
+    echo "  comparison below would be empty against empty and would PASS." >&2
+    printf '  ours: [%s]
+  gnu:  [%s]
+' "$live_ours" "$live_gnu" >&2
+    exit 2
+  fi
+fi
+
 # A case whose subject is the spawned `sleep`, not `ps`.
 run_shared() {
   if [ "$ns" != yes ]; then masked=$((masked + 1)); return 0; fi

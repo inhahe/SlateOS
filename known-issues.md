@@ -131244,6 +131244,43 @@ argument for the crate was that *two* parsers would drift; the count inside
 **The ten:** `htop`, `ps`, `free`, `coreutils`'s `free`, `earlyoom`, `iostat`,
 `hwinfo`, `lsmem`, `numactl`, `hwclock`.
 
+### `/proc/diskstats` was a fourth family, and the copies disagreed (2026-09-12)
+
+Not on the list above, because that list was built from `/proc/<pid>` and
+`/proc/meminfo` readers. Three programs parsed `/proc/diskstats` privately --
+`iostat`, `sysstat`, `vmstat` -- and the thing they disagreed about was the
+size of a sector:
+
+| | conversion | verdict |
+|---|---|---|
+| `sysstat` | `sectors * 0.5` -> kB | 512 bytes, hardcoded, **right** |
+| `iostat` | `sectors * read_sector_size(dev)` | the DEVICE's sector size -- **8x over-report on a 4K drive** |
+| `vmstat` | prints raw sectors | never wrong about the unit, because it never converted |
+
+The block layer accounts in fixed 512-byte units whatever the device does, so
+`/sys/block/<dev>/queue/hw_sector_size` -- 4096 on a great many modern drives
+-- is not the unit these counters are in. **Latent on the development host,
+where every device reports 512**, which is exactly why it survived.
+
+Worth noting how it was found: not by hunting for the bug, but by asking which
+programs still parse `/proc` themselves. The disagreement was provable without
+leaving the repository -- two programs in one tree giving different byte counts
+for one kernel counter, and one of them matching upstream sysstat.
+
+They also disagreed about the WIDTH in a way that shows the drift directly:
+`iostat`'s comment said kernels since 4.18 append columns and treated 14 as a
+minimum; `vmstat`'s said "at least 14" and required exactly that. One format,
+two copies, two different amounts of knowledge about it.
+
+All three now use `procinfo::DiskStats` and `procinfo::DISKSTATS_SECTOR_BYTES`.
+
+**Two of `vmstat`'s tests were testing `str::split_whitespace`.** They split a
+line inside the test and asserted on the resulting `Vec`, never calling the
+program's parser; the short-line one asserted that its own literal had fewer
+than 14 fields and said in a comment that such a line "should be skipped",
+with nothing checking that anything skipped it. Both now go through the parser
+that runs, and a third covers a modern kernel's extra columns.
+
 **Why it matters more than tidiness.** The things these disagree about are not
 cosmetic:
 

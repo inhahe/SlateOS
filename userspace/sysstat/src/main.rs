@@ -328,38 +328,45 @@ struct DiskStat {
     weighted_io_time_ms: u64,
 }
 
-fn parse_diskstat_line(line: &str) -> Option<DiskStat> {
-    let parts: Vec<&str> = line.split_whitespace().collect();
-    if parts.len() < 14 {
-        return None;
+impl DiskStat {
+    /// This program's view of one [`procinfo::DiskStats`] record.
+    ///
+    /// The layout used to be parsed here as well. Three programs in the tree
+    /// read `/proc/diskstats` privately and disagreed about the size of a
+    /// sector -- this one was the one that had it right, converting with
+    /// `* 0.5`, while `iostat` multiplied by the DEVICE's sector size. The
+    /// constant now lives beside the parser as
+    /// [`procinfo::DISKSTATS_SECTOR_BYTES`], so being right is no longer
+    /// something each reader has to arrive at separately.
+    ///
+    /// `None` for a device whose name is not text: every report here is a
+    /// column of names.
+    fn from_proc(d: &procinfo::DiskStats) -> Option<Self> {
+        Some(Self {
+            name: String::from_utf8(d.name.clone()).ok()?,
+            reads_completed: d.reads_completed.unwrap_or(0),
+            _reads_merged: d.reads_merged.unwrap_or(0),
+            sectors_read: d.sectors_read.unwrap_or(0),
+            _read_time_ms: d.ms_reading.unwrap_or(0),
+            writes_completed: d.writes_completed.unwrap_or(0),
+            _writes_merged: d.writes_merged.unwrap_or(0),
+            sectors_written: d.sectors_written.unwrap_or(0),
+            _write_time_ms: d.ms_writing.unwrap_or(0),
+            _io_in_progress: d.ios_in_progress.unwrap_or(0),
+            _io_time_ms: d.ms_doing_io.unwrap_or(0),
+            weighted_io_time_ms: d.weighted_ms.unwrap_or(0),
+        })
     }
-    Some(DiskStat {
-        name: parts.get(2)?.to_string(),
-        reads_completed: parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0),
-        _reads_merged: parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(0),
-        sectors_read: parts.get(5).and_then(|s| s.parse().ok()).unwrap_or(0),
-        _read_time_ms: parts.get(6).and_then(|s| s.parse().ok()).unwrap_or(0),
-        writes_completed: parts.get(7).and_then(|s| s.parse().ok()).unwrap_or(0),
-        _writes_merged: parts.get(8).and_then(|s| s.parse().ok()).unwrap_or(0),
-        sectors_written: parts.get(9).and_then(|s| s.parse().ok()).unwrap_or(0),
-        _write_time_ms: parts.get(10).and_then(|s| s.parse().ok()).unwrap_or(0),
-        _io_in_progress: parts.get(11).and_then(|s| s.parse().ok()).unwrap_or(0),
-        _io_time_ms: parts.get(12).and_then(|s| s.parse().ok()).unwrap_or(0),
-        weighted_io_time_ms: parts.get(13).and_then(|s| s.parse().ok()).unwrap_or(0),
-    })
 }
 
 fn read_diskstats() -> Vec<DiskStat> {
-    if let Some(lines) = read_file_lines("/proc/diskstats") {
-        let stats: Vec<DiskStat> = lines
-            .iter()
-            .filter_map(|l| parse_diskstat_line(l))
-            .collect();
-        if !stats.is_empty() {
-            return stats;
-        }
-    }
-    Vec::new()
+    let Ok(raw) = std::fs::read("/proc/diskstats") else {
+        return Vec::new();
+    };
+    procinfo::DiskStats::parse_all(&raw)
+        .iter()
+        .filter_map(DiskStat::from_proc)
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -2153,19 +2160,40 @@ mod tests {
     // Disk stat parsing
     // -----------------------------------------------------------------------
 
+    /// One device, through the shared parser this program now uses.
+    fn one(line: &[u8]) -> Option<DiskStat> {
+        procinfo::DiskStats::parse_all(line)
+            .first()
+            .and_then(DiskStat::from_proc)
+    }
+
     #[test]
     fn test_parse_diskstat_line() {
-        let line = "   8       0 sda 15000 500 600000 3000 8000 1200 320000 5000 0 6000 8000";
-        let stat = parse_diskstat_line(line).unwrap();
+        let line = b"   8       0 sda 15000 500 600000 3000 8000 1200 320000 5000 0 6000 8000\n";
+        let stat = one(line).expect("one device");
         assert_eq!(stat.name, "sda");
         assert_eq!(stat.reads_completed, 15000);
         assert_eq!(stat.writes_completed, 8000);
+        assert_eq!(stat.sectors_read, 600_000);
+        assert_eq!(stat.sectors_written, 320_000);
     }
 
     #[test]
     fn test_parse_diskstat_line_too_short() {
-        let line = "   8       0 sda";
-        assert!(parse_diskstat_line(line).is_none());
+        assert!(one(b"   8       0 sda\n").is_none());
+    }
+
+    /// This program was the one that had the unit right, converting sectors
+    /// with `* 0.5`. The constant is shared now, so that is a fact about the
+    /// tree rather than about this file.
+    #[test]
+    fn a_sector_is_512_bytes_and_that_is_now_shared() {
+        assert_eq!(procinfo::DISKSTATS_SECTOR_BYTES, 512);
+        let line = b"   8       0 sda 1 0 2048 0 1 0 4096 0 0 0 0\n";
+        let stat = one(line).expect("one device");
+        // 2048 sectors is 1 MiB; the `* 0.5` below turns sectors into kB.
+        assert_eq!(stat.sectors_read as f64 * 0.5, 1024.0);
+        assert_eq!(stat.sectors_written as f64 * 0.5, 2048.0);
     }
 
     /// Same for the disks: an empty list where there is no `/proc/diskstats`.

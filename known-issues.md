@@ -136638,6 +136638,26 @@ is "procfs to emit comm as raw bytes". Smaller than that entry implies:
 3. `PR_SET_NAME` then drops its UTF-8 validation, closing the tracked limitation, and the
    two paths agree.
 
+**SCOPE CORRECTION 2026-09-12, and the error is mine.** Point 2 above says "three call
+sites". That is true of where the *decode* happens and false as an estimate of the work. I
+verified the inputs are already bytes — `TaskInfo.name` is `[u8; 32]` with `name_len`,
+`sched::copy_task_name` returns bytes — and inferred the whole path was that cheap
+**without looking at the other end**. Measured since:
+
+| function | how it emits | cost of a `&[u8]` name |
+|---|---|---|
+| `gen_pid_comm` | builds a `Vec<u8>` already | genuinely small |
+| `build_pid_status` | **23 `write!`/`writeln!` calls into a `String`**, name via `writeln!(s, "Name:\t{name}")` | its output assembly has to change |
+| `build_pid_stat` | assembles the 52-field line as text | same |
+
+So the helper and the decode sites are three edits; the two builders are a restructure. The
+work is still worth doing and still bounded — **the estimate was wrong, not the plan** — but
+anyone scheduling it from point 2 alone would be planning the wrong task.
+
+It is also the same shape as the defect this entry is about, which is why it is corrected
+here rather than quietly: a verified fact about one end, an inference about the whole,
+written as a single claim.
+
 **Interim behaviour is safe**, which is why this is debt and not an emergency: nothing is
 corrupted on disk, no privilege is involved, and the name is cosmetic to the kernel. What
 it costs is that monitoring tools cannot distinguish such processes, and that a process

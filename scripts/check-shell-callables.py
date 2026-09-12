@@ -164,6 +164,14 @@ DISCOVERY_FLOOR = 60
 # gate has been silenced rather than satisfied -- which is the failure mode
 # every other note in this file is about. The self-test asserts the exclusion
 # is exactly this subtree and that it does not reach `scripts/`.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import gitenv  # noqa: E402
+
+
+#: The repository this script belongs to, resolved from the script's own location
+#: rather than from the cwd or the git environment.  See `tracked_shell_files`.
+REPO = Path(__file__).resolve().parent.parent
+
 EXCLUDED_PREFIXES = ("userspace/oils/tests/corpus/",)
 
 # Measured 2026-09-04: 1495 literal command substitutions across the 104 graded
@@ -422,7 +430,26 @@ def mask(text: str) -> str:
 def tracked_shell_files() -> list[Path]:
     """Every tracked `*.sh`, plus extensionless files with a sh/bash shebang."""
     try:
-        out = subprocess.run(["git", "ls-files", "-z"],
+        # `-C REPO` AND a cleaned environment.  `git push` sets GIT_DIR, and a bare
+        # call then resolves against that environment rather than against this tree:
+        # it listed nothing, this function returned [], and the self-test refused with
+        # "self-test cannot run: no tracked shell files".  Inside the hook this gate
+        # guards, that refusal is the gate reporting its own verdict untrustworthy --
+        # found by test-selftests-are-repo-safe.py the moment the self-test was wired
+        # into pre-push, which is what brought it into that suite's population.
+        #
+        # `-C` ALONE IS NOT ENOUGH, which was this lane's first attempt at the fix:
+        # GIT_DIR overrides `-C`, so the directory changed and the repository did not.
+        # `gitenv.clean_env()` drops every binding that names a repository, which is
+        # what the repo-safety suite itself uses to invoke git, so this gate and its
+        # examiner now resolve the tree the same way.
+        #
+        # REPO comes from `__file__` because that is the one thing the invoking
+        # environment cannot change.  The same resolve-from-the-script rule bit this
+        # lane twice the same night: running a checker out of /tmp made it walk a
+        # directory outside the repo and report 4 crates instead of 60.
+        out = subprocess.run(["git", "-C", str(REPO), "ls-files", "-z"],
+                             env=gitenv.clean_env(),
                              capture_output=True, check=True).stdout
     except (OSError, subprocess.CalledProcessError):
         return []
@@ -438,7 +465,8 @@ def tracked_shell_files() -> list[Path]:
         if p.suffix:
             continue
         try:
-            with p.open("rb") as fh:
+            # Anchored for the same reason as `read_text`.
+            with (REPO / p).open("rb") as fh:
                 first = fh.readline(200)
         except OSError:
             continue
@@ -448,8 +476,13 @@ def tracked_shell_files() -> list[Path]:
 
 
 def read_text(p: Path) -> str:
+    # Resolved against REPO, because `git ls-files` returns repo-relative paths and
+    # this script is not always run from the repository root: a git hook is, but the
+    # repo-safety suite deliberately runs it from a temp directory to prove it does
+    # not depend on cwd.  Joining an already-absolute path is a no-op, so this is
+    # safe for both.  Display paths stay relative; only the read is anchored.
     try:
-        return p.read_bytes().decode("utf-8", "replace")
+        return (REPO / p).read_bytes().decode("utf-8", "replace")
     except OSError:
         return ""
 
@@ -773,7 +806,7 @@ def self_test() -> int:
          any(p.as_posix().startswith(EXCLUDED_PREFIXES) for p in files), False),
         ("the excluded subtree still exists (the exclusion is not a no-op that "
          "would silently widen if lane B moved it)",
-         Path("userspace/oils/tests/corpus").is_dir(), True),
+         (REPO / "userspace/oils/tests/corpus").is_dir(), True),
 
         # -- the two shapes that produced false positives on the real tree
         ("an env-assignment prefix is stepped over, not taken as the callee",

@@ -98331,6 +98331,34 @@ not conclude the service is missing and write a second one.
 
 ## `B-DEV-HOST-IS-WINDOWS-SO-CFG-UNIX-CODE-IS-NEVER-COMPILED` (lane B, 2026-08-26) — **open**, process gap
 
+**Measured 2026-09-12: the remaining gap is latent, not live.** Lane A reports
+that `scripts/check-cfg-unix.py` never gained `--all-targets` and does not
+accept the flag, so the pre-push gate compiles default targets only while
+`boot-test.sh` runs cargo directly with `--all-targets --exclude kernel` over
+the whole workspace. That means `#[cfg(unix)]` code inside a `#[cfg(test)]`
+module is checked at boot and not at push.
+
+Whether that currently hides anything is a question nobody had asked, so:
+
+| check | result |
+|---|---|
+| `cargo check --workspace --exclude kernel --target x86_64-unknown-linux-gnu` | 0 errors |
+| same, plus `--all-targets` | 0 errors, `Finished`, exit 0 |
+
+So no `cfg(unix)` code in a test target fails to compile for a unix today. The
+tooling gap is real and worth closing — it is a push-time blind spot in exactly
+the class of code this entry exists for — but it is a ratchet to install, not a
+fire.
+
+**A note on how that was checked, because it nearly was not.** The first run
+piped the output through `grep -c '^error'` and printed `0`, which is the same
+thing it would print if cargo had failed to start. The second run captured the
+exit status and the tail, and the `appearance (lib test)` line in it is the
+evidence that `--all-targets` genuinely reached test targets rather than being
+silently ignored. **A count of zero findings and a check that did not run print
+the same digit** — a lesson this tree learned four separate times today, in
+four different tools.
+
 **In short:** everyone develops on a Windows machine, and the routine checks
 (`cargo build`, `cargo clippy`, `cargo test`) are run for that machine. Any code
 inside `#[cfg(unix)]` is therefore *not compiled at all* by a normal check —

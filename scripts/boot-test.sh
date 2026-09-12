@@ -2847,7 +2847,21 @@ record_boot_outcome() {
     # have cost 1.5 GB, keeping the 85 failures 154 MB.  Capped at the 20 newest, so
     # ~48 MB however long this runs -- which matters because build/ lives on the drive
     # CLAUDE.md notes is the finite one.
-    if [ "$rc" != "0" ] && [ -f "$SERIAL_FILE" ]; then
+    # ONLY IF THIS RUN WROTE IT.  `$SERIAL_FILE` is a fixed path, so a run that failed
+    # at a pre-build gate -- before QEMU ever started -- would otherwise preserve the
+    # PREVIOUS run's serial log under THIS run's commit.  I shipped exactly that bug an
+    # hour before writing this guard, and found it the first time a gate-failure run
+    # left a two-hour-old log sitting at that path.  Comparing against
+    # `BOOT_TEST_START_EPOCH` is what makes the filename honest.
+    #
+    # Fails CLOSED: if the mtime cannot be read, preserve nothing.  A serial log
+    # attributed to the wrong commit is worse than no serial log, because the whole
+    # point of keeping it is to attribute a failure.
+    local _serial_mtime=""
+    _serial_mtime="$(date -r "$SERIAL_FILE" +%s 2>/dev/null || true)"
+    if [ "$rc" != "0" ] && [ -f "$SERIAL_FILE" ] \
+       && [ -n "$_serial_mtime" ] \
+       && [ "$_serial_mtime" -ge "${BOOT_TEST_START_EPOCH:-0}" ]; then
         local keep="$PROJECT_ROOT/build/serial-failures"
         mkdir -p "$keep" 2>/dev/null || true
         local stamp

@@ -1617,7 +1617,10 @@ mod tests {
             "#ALPHA~",
         );
         let ps = parse_patch(
-            &patch.replace('~', "\n").replace('#', "+").replace('$', "\\"),
+            &patch
+                .replace('~', "\n")
+                .replace('#', "+")
+                .replace('$', "\\"),
         );
         assert_eq!(ps[0].malformed_at, None);
         // Two counted lines, and the marker is not one of them.

@@ -184,7 +184,7 @@ def boot_coverage_lines() -> list[str]:
         return [f"  Your last passing boot ran at {head[:9]}, which is HEAD.",
                 "  It covers exactly what you are about to push."]
     out = [f"  CAUTION: your last passing boot ran at {boot[:9]}, which is",
-           f"  {len(since)} commit(s) behind HEAD. Those commits are UNTESTED:"]
+           f"  {len(since)} commit(s) behind HEAD. NOT COVERED BY THAT RUN:"]
     for c in since[:8]:
         try:
             subject = git("log", "-1", "--format=%s", c).strip()
@@ -193,6 +193,14 @@ def boot_coverage_lines() -> list[str]:
         out.append(f"      {c[:9]}  {subject[:64]}")
     if len(since) > 8:
         out.append(f"      ... and {len(since) - 8} more")
+    # "NOT COVERED BY THAT RUN", not "untested". The count is usually dominated by
+    # commits merged from origin/main, which were green in the boot of whichever lane
+    # wrote them -- so calling them untested is the same kind of absolute word this
+    # script was written to remove from its own reassuring line. What is true is
+    # narrower and still worth knowing: YOUR run did not exercise this tree.
+    out.append("  'Not covered' is not 'untested': commits merged from origin/main were")
+    out.append("  green in their own lane's boot. What no run has exercised is this tree as")
+    out.append("  a combination -- which is the only thing a boot of YOUR branch can tell you.")
     out.append("  A merge of origin/main AFTER a green boot is the usual cause, and is")
     out.append("  exactly the case this tool used to call covered.")
     return out

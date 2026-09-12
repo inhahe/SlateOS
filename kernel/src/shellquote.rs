@@ -297,7 +297,8 @@ impl Iterator for QuoteScan<'_> {
                         structural: true,
                     }
                 } else if b == b'\\' {
-                    let (out, len, consumed) = decode_ansi_c(self.bytes.get(self.i..).unwrap_or(&[]));
+                    let (out, len, consumed) =
+                        decode_ansi_c(self.bytes.get(self.i..).unwrap_or(&[]));
                     self.i = self.i.saturating_add(consumed);
                     // Bytes 1.. of a multi-byte escape are queued; byte 0 is
                     // yielded now. They all report the offset of the
@@ -1084,9 +1085,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     // character would have to be written escaped to appear
                     // literally, so a prefix containing either is not one the
                     // user can have typed verbatim.
-                    Ctx::DollarSingle => {
-                        !typed.iter().any(|&b| b == b'\'' || b == b'\\')
-                    }
+                    Ctx::DollarSingle => !typed.iter().any(|&b| b == b'\'' || b == b'\\'),
                 };
                 if !typable {
                     continue;
@@ -1150,11 +1149,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             (b"$\'\\x41\'$\'\\x42\'", b"AB"),
         ];
         for (input, want) in cases {
-            assert_eq!(
-                strip_quotes(input).as_slice(),
-                *want,
-                "$'…' decode"
-            );
+            assert_eq!(strip_quotes(input).as_slice(), *want, "$'…' decode");
         }
         // A space inside the construct is not a word separator, and the
         // construct is one word — the property that would break first if the

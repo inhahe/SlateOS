@@ -103,6 +103,12 @@ comparison below is still unlike-for-unlike; the size of the gap is what I got w
 why — I had previously recorded the 16k one as CPU-bound kernel write work on the
 strength of an accelerator ratio that hashing satisfies equally well.
 
+**A second component ext4 does not have: the file indexer.** Measured at ~16 µs of a
+256-byte write, and live during every benchmark — see `design-decisions.md` §931 for why
+that is now a deliberate choice rather than an accident. So the row's comparison is
+unlike-for-unlike twice over: a SlateOS write carries a version record *and* an index
+insertion, and a Linux ext4 write carries neither.
+
 **What to do with the row until it is resolved.** Read it as a target for the write
 *plus* its version record, or measure against `/tmp`, which `should_auto_version` skips
 and which is the same `memfs` implementation — `bench_vfs_write_breakdown` now records

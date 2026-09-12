@@ -754,6 +754,44 @@ DIVERGENCES = [
         "     Judgment Calls names the better fix (truncate in the per-word\n"
         "     callers, which know where the boundaries are).",
     ),
+    # `\u`/`\U` with no Unicode scalar. Three cases rather than one, because
+    # the argument for the divergence is in the THIRD: bash is not
+    # self-consistent, so "match bash" does not name a single behaviour.
+    #
+    # Reported to lane A as finding 2 of
+    # `requests/b-a-dollar-single-c-escape-swallows-the-closing-quote.md`, and
+    # declared by them on 2026-09-12. Their comment used to say a surrogate
+    # "has no UTF-8 encoding"; it has no *valid* one, and bash emits WTF-8
+    # regardless. That premise is now corrected in `shellquote.rs` and the
+    # behaviour deliberately stands.
+    (
+        b"$'\\ud800'",
+        [b"\xed\xa0\x80"],
+        [b"\\ud800"],
+        "A lone surrogate. Bash emits WTF-8 -- the UTF-8 *shape* of a value\n"
+        "     that is not a scalar. We hand back what was typed, so the user\n"
+        "     can see it did not decode.",
+    ),
+    (
+        b"$'\\U00110000'",
+        [b"\xf4\x90\x80\x80"],
+        [b"\\U00110000"],
+        "Above U+10FFFF, the Unicode maximum. Bash encodes it anyway, four\n"
+        "     bytes, in a form no decoder will accept.",
+    ),
+    (
+        b"$'\\Uffffffff'",
+        [b""],
+        [b"\\Uffffffff"],
+        "THE CASE THAT DECIDES THE OTHER TWO. Here bash emits NOTHING -- the\n"
+        "     silently-absent outcome the fallback exists to avoid -- having\n"
+        "     emitted WTF-8 for the two above. So bash is not self-consistent\n"
+        "     and 'match bash' does not name one behaviour. A uniform 'hand\n"
+        "     back what was typed' is predictable and lossless where bash is\n"
+        "     neither, and if this ever has to match bash, matching it\n"
+        "     INCLUDING the silent far end would be the wrong half to copy.\n"
+        "     Declared by lane A 2026-09-12.",
+    ),
 ]
 
 # --- the rungs in shellquote.rs::self_test(), read out of the Rust ---------

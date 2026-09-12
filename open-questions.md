@@ -1375,15 +1375,32 @@ can recover something they overwrote. To do that, each time a program saves a fi
 system first reads back what was there and computes a checksum of it (a short fingerprint
 used to notice when two versions are identical and store them once). That is now measured
 and it is not cheap: **it is about half the total cost of saving a small file.** Saving
-currently costs ten times as much as reading the same data. The question is whether that
+currently costs six times as much as reading the same data. The question is whether that
 is a good trade.
 
-**The measurement**, so the figure can be checked rather than taken on trust. Writing 256
-bytes to an ordinary file: 95,942 ns. Writing the same bytes to `/tmp`, which is excluded
-from version history: 47,892 ns. Reading 256 bytes: 9,223 ns. Measured in one run under
-emulation (run `b6mifed3b`); under hardware virtualisation the absolute numbers are about
-half, and the share attributable to history is somewhat larger because a different part of
-it gets slower there. Either way it is the largest single component.
+**The measurement**, so the figure can be checked rather than taken on trust. The test
+writes 256 bytes to an ordinary file, then writes the same bytes to `/tmp`, which is
+excluded from version history; the difference is what the history costs.
+
+| | ordinary file | `/tmp` | history's share | reading 256 bytes |
+|---|---|---|---|---|
+| under hardware virtualisation (`6a0f8d89e`) | 12,584 ns | 7,087 ns | **43.7%** | 2,060 ns |
+| under emulation (`b6mifed3b`) | 95,942 ns | 47,892 ns | 50.1% | 9,223 ns |
+
+**The hardware-virtualisation row is the one to decide from** — it is the configuration a
+real machine resembles, and emulation inflates anything that touches a hardware clock by
+roughly thirtyfold, which distorts the comparison rather than merely scaling it. A second
+measurement of history's cost, taken a different way (timing the versioning step directly
+rather than subtracting two whole writes), gives 5,078 ns against the table's 5,497 — the
+two agree to 8%, so the number is not an artefact of how it was measured.
+
+*Correcting this entry's own earlier prediction:* it said the share would be **larger**
+under hardware virtualisation, because part of the versioning work was a hardware-clock
+read that is disproportionately expensive there. That read has since been removed, so the
+share came out slightly smaller instead. What remains — reading the old contents back,
+fingerprinting them, storing them — is ordinary work that no amount of tuning makes free.
+**The 44% is therefore a floor, not a starting point**, which strengthens the question
+rather than weakening it: the cheap part has already been taken out.
 
 **The options:**
 

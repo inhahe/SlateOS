@@ -11,6 +11,3 @@
 
 date    # scripts/date-diff.sh: 3 of 121 cases pass. `date -d @0` prints
         #   the CURRENT time. B-COREUTILS-DATE-SILENTLY-IGNORES-EVERY-ARGUMENT.
-uptime  # `uptime -s` prints the uptime duration where GNU prints the boot
-        #   TIME, and `uptime --nosuchoption` exits 0.
-        #   B-COREUTILS-UPTIME-SILENTLY-IGNORES-EVERY-ARGUMENT.

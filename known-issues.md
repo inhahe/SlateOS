@@ -275,7 +275,7 @@ Related and cheaper: the diagnostics for a bad option *value* — `-n 0`,
 nothing — differ from GNU's wording in 10 of the 15 remaining failures. The
 exit statuses already agree, so this is sentences rather than behaviour.
 
-## B-COREUTILS-UPTIME-SILENTLY-IGNORES-EVERY-ARGUMENT (lane B, 2026-09-11)
+## B-COREUTILS-UPTIME-SILENTLY-IGNORES-EVERY-ARGUMENT — FIXED 2026-09-11, one half remaining
 
 The same defect as `date` below, in the other bin that has it:
 
@@ -300,9 +300,26 @@ load averages, and ours prints none of them.
 *kind* of thing: a script asking when the machine booted gets how long it has
 been up, in a different format, with exit 0.
 
-**Not retired, and the standalone is the better half here** — it carries `-p`,
-`-s`, `-r`, `--json` and `--raw`. As with `date`, §1005's answer is to port into
-`coreutils` and then delete the crate.
+**FIXED.** `uptime` now parses its command line through `coreutils::getopt`
+with procps-ng 4.0.4's own four-option table, and `-p`/`--pretty` and
+`-s`/`--since` are implemented exactly — verified interleaved against procps,
+where both print the same string including long-option abbreviations (`--pret`,
+`--si`) and every refusal matches at exit 1. `scripts/check-argv-ignored.py`
+reports `fixed: uptime now reads argv` and its baseline is down to one entry.
+
+*A note on the reference, since the standalone advertised more.* It carried
+`-r`, `--json` and `--raw`; **procps has none of those** — its table is exactly
+`--pretty`, `--help`, `--since`, `--version`. Read from `uptime --help` rather
+than inherited from the crate being replaced. Implementing the standalone's
+options would have been implementing an invention.
+
+**THE HALF THAT REMAINS** is the default line. procps prints
+` 20:48:41 up  1:21,  1 user,  load average: 0.10, 0.10, 0.09` and this prints
+only the `up …` part. The time of day and the load averages are cheap — the
+clock and `/proc/loadavg` — but **the user count comes from `utmp`, and this
+tree has no utmp reader**: there is no `who` bin and no shared module. Printing
+a plausible number rather than a measured one is the exact defect this file was
+just repaired for, so the field is absent rather than invented.
 
 **No harness was written for this pair, deliberately.** `uptime`'s output *is*
 the current moment: the time of day and three load averages that change

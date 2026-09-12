@@ -1306,9 +1306,24 @@ pub(crate) fn set_stored_hostname_for_test(name: &[u8]) {
 /// This paragraph used to assert: *"A genuinely unset domain still reads back
 /// as `(none)`, because that is what the kernel's node contains."* **It does
 /// not.** `kernel/src/fs/nameservice.rs`'s `init_defaults` sets the domain to
-/// `"localdomain"`, so `/proc/sys/kernel/domainname` serves `localdomain` on
-/// every machine that has never set one. Verified against the source, 2026-09-12,
-/// after lane A read this doc and found it false.
+/// `"localdomain"`. Verified against the source, 2026-09-12, after lane A read
+/// this doc and found the old claim false.
+///
+/// **WHAT THE NODE ACTUALLY SERVES IS NOT ESTABLISHED, and the difference
+/// matters.** That the initialiser sets `localdomain` is read from the source
+/// and is solid. That the node therefore *serves* `localdomain` is an
+/// INFERENCE from it, and there is evidence against: `ctest-hostname` check 13
+/// -- `getdomainname` returning non-zero -- failed on a boot where that
+/// inference says it should have succeeded, because eleven bytes would have
+/// read back fine even through the empty-versus-unreadable bug below. Lane A
+/// traced every layer and could not reconcile it either, and has flagged their
+/// own `localdomain` report to me as read-not-observed.
+///
+/// So this records the initialiser, which is a fact, and stops short of the
+/// node's contents, which is not one. The settling instrument is a ring-0 rung
+/// PRINTING the value rather than either of us reading a path to it -- lane A
+/// has that queued. Until it runs, treat "an unset domain reads back as X" as
+/// unanswered here.
 ///
 /// **That is the worst shape of stale claim this tree has produced.** It is not
 /// a comment that fell behind its own code -- it is a confident assertion about

@@ -327,8 +327,11 @@ int main(void)
      *
      *     This comment used to add "Linux reports the literal (none)".
      *     True of Linux and false of us: our kernel's init_defaults sets
-     *     the domain to "localdomain" (nameservice.rs), so an unset domain
-     *     reads back as that. The sentence was a claim about ANOTHER LANE'S
+     *     the domain to "localdomain" (nameservice.rs). Whether the node
+     *     SERVES that is a separate question and is NOT established -- check
+     *     13 once failed on a boot where eleven bytes would have read back
+     *     fine, which no one has reconciled. The initialiser is a fact; the
+     *     node's contents are an inference from it. The sentence was a claim about ANOTHER LANE'S
      *     defaults sitting in a fixture comment, which is a place nobody
      *     checks it against the source — lane A found it by reading my
      *     libc, not by running anything. Lane A intends to change the

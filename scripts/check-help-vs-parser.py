@@ -30,7 +30,12 @@ import rustlex  # noqa: E402  (needs the path line above)
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 # An option as it appears inside a help line: `--long`, `--long=VAL`, `-x`.
-LONG = re.compile(r"--[a-z][a-z0-9_-]*")
+# `(?<!-)` so the pattern cannot start in the middle of a run of dashes.
+# `vmstat` prints a banner `---timestamp---` and `wget` prints
+# `---request begin---`; without the guard those yield options called
+# `--timestamp` and `--request`, which is this tool's sixth false
+# positive and the second one caused by reading decoration as documentation.
+LONG = re.compile(r"(?<!-)--[a-z][a-z0-9_-]*")
 SHORT = re.compile(r"(?<![-\w])-([A-Za-z0-9])(?=[,\s])")
 
 # A Rust string literal, non-greedy, no escapes handled -- help text has none.

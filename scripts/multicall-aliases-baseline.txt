@@ -30,8 +30,6 @@ base64:base32
 base64:uudecode
 base64:uuencode
 blkid:findfs
-blockdev:blkzone
-cal:ncal
 capsh:captest
 capsh:getcap
 capsh:getpcaps

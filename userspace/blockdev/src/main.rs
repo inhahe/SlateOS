@@ -2,7 +2,6 @@
 //!
 //! Multi-personality binary providing:
 //! - **blockdev** — call block device ioctls
-//! - **blkzone** — zone management for zoned block devices
 //!
 //! Provides low-level block device operations: get/set read-ahead,
 //! sector size, block size, device size, read-only flag, etc.
@@ -107,7 +106,7 @@ fn _format_bytes(bytes: u64) -> String {
 ///
 /// The wording is getopt's, shared through `usageerror` so every program
 /// here renders it identically. The status is **1**, measured rather than
-/// assumed: `lscpu`, `lsmem`, `prlimit` and `blkzone` all exit 1 for this,
+/// assumed: `lscpu`, `lsmem` and `prlimit` all exit 1 for this,
 /// where util-linux's own `flock` exits 64 -- so it is per-tool, which is
 /// why `usageerror` does not choose it.
 /// Every long operation this build performs.
@@ -367,94 +366,15 @@ fn print_blockdev_help() {
 }
 
 // ============================================================================
-// blkzone command
-// ============================================================================
-
-fn cmd_blkzone(args: &[String]) {
-    if args.is_empty() {
-        println!("Usage: blkzone <command> [options] <device>");
-        println!();
-        println!("Zone management for zoned block devices.");
-        println!();
-        println!("Commands:");
-        println!("  report     Report zone information");
-        println!("  capacity   Show zone capacity");
-        println!("  reset      Reset write pointer");
-        println!("  open       Open zone");
-        println!("  close      Close zone");
-        println!("  finish     Finish zone");
-        process::exit(0);
-    }
-
-    match args[0].as_str() {
-        "-h" | "--help" => {
-            println!("Usage: blkzone <command> [options] <device>");
-            println!();
-            println!("Commands: report, capacity, reset, open, close, finish");
-            println!("  -o, --offset SECTOR   Start sector");
-            println!("  -l, --length SECTORS  Number of sectors");
-            println!("  -c, --count NUM       Number of zones");
-            println!("  -h, --help            Show help");
-            println!("  -V, --version         Show version");
-            process::exit(0);
-        }
-        "-V" | "--version" => {
-            println!("blkzone {VERSION}");
-            process::exit(0);
-        }
-        "report" => {
-            let device = args.last().map(|s| s.as_str()).unwrap_or("/dev/sda");
-            let stdout = io::stdout();
-            let mut out = stdout.lock();
-            let _ = writeln!(
-                out,
-                "  start: 0x000000000, len 0x080000, cap 0x080000, wptr 0x000000 reset:0 non-seq:0, zcond: 1(em) [type: 2(SEQ_WRITE_REQUIRED)]"
-            );
-            let _ = writeln!(
-                out,
-                "  start: 0x000080000, len 0x080000, cap 0x080000, wptr 0x000000 reset:0 non-seq:0, zcond: 1(em) [type: 2(SEQ_WRITE_REQUIRED)]"
-            );
-            let _ = writeln!(out, "Total zones for {device}: 2");
-        }
-        // `blkzone --zzq` used to print `blkzone: --zzq on --zzq` and
-        // exit 0, reporting success for a command line it had not read.
-        opt if opt.starts_with('-') && opt.len() > 1 => {
-            refuse_unknown_option("blkzone", opt);
-        }
-        cmd => {
-            let device = args.last().map(|s| s.as_str()).unwrap_or("/dev/sda");
-            eprintln!("blkzone: {cmd} on {device}");
-        }
-    }
-}
-
-// ============================================================================
 // CLI
 // ============================================================================
 
 fn main() {
+    // One personality, so no argv[0] dispatch: the `blkzone` arm and the
+    // program-name derivation that existed only to select it are both gone.
     let args: Vec<String> = env::args().collect();
-
-    let prog_name = {
-        let s = args.first().map(|s| s.as_str()).unwrap_or("blockdev");
-        let bytes = s.as_bytes();
-        let mut last_sep = 0;
-        for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' {
-                last_sep = i + 1;
-            }
-        }
-        let base = &s[last_sep..];
-        let base = base.strip_suffix(".exe").unwrap_or(base);
-        base.to_string()
-    };
-
     let rest: Vec<String> = args.into_iter().skip(1).collect();
-
-    match prog_name.as_str() {
-        "blkzone" => cmd_blkzone(&rest),
-        _ => cmd_blockdev(&rest),
-    }
+    cmd_blockdev(&rest);
 }
 
 // ============================================================================

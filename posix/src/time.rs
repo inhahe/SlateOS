@@ -2981,13 +2981,10 @@ pub const ITIMER_VIRTUAL: i32 = 1;
 /// Profiling timer (user + system CPU time).
 pub const ITIMER_PROF: i32 = 2;
 
-/// Number of interval timer types (ITIMER_REAL, ITIMER_VIRTUAL, ITIMER_PROF).
-
-// Per-timer-type storage for `setitimer`/`getitimer` lives in
-// `timer_store::itimers()`, alongside the `timer_create` table.  The
-// timers never actually fire (no signal delivery), but we store the
-// values so `getitimer` returns what `setitimer` set.  This makes
-// programs that read back their own timer settings work correctly.
+// There is no per-timer-type storage here any more. `setitimer`/`getitimer`
+// reach the kernel's one real interval timer through `SYS_ITIMER_SET` and
+// `SYS_ITIMER_GET`; the table that used to answer for all three types, while
+// arming nothing, is gone with the doc comment that counted them.
 
 /// Ask the kernel to arm, re-arm or disarm the real interval timer.
 ///

@@ -138559,7 +138559,7 @@ It now polls `/proc/2/stat` until the state is `S`, using the `read` builtin so
 it forks **nothing** -- a forked `awk` would take PID 3 and could itself be
 caught in the listing it is preparing.
 
-## B-SEVENTY-PROGRAMS-ACCEPT-AN-OPTION-THEY-DO-NOT-HAVE-AND-EXIT-ZERO (lane B, 2026-09-12) -- 7 of 70 FIXED
+## B-SEVENTY-PROGRAMS-ACCEPT-AN-OPTION-THEY-DO-NOT-HAVE-AND-EXIT-ZERO (lane B, 2026-09-12) -- 11 of 70 FIXED
 
 Found by `scripts/unknown-option-sweep.py`, which runs every binary in an
 empty directory with nothing but a bogus long option and looks at what it
@@ -138573,8 +138573,15 @@ had locked it.
 outright, coreutils already had a correct `nohup`).
 
 **Seventy more accepted the option and exited 0** without a filesystem side
-effect. Seven are fixed -- `nproc`, `arch`, `pathchk`, `users` (all one
-crate), `lscpu`, `lsmem`, `blkzone`. The remaining 63 are listed below.
+effect. Eleven are fixed -- `nproc`, `arch`, `pathchk`, `users` (all one
+crate), `lscpu`, `lsmem`, `blkzone`, and `clear`, `tset`, `lsattr`,
+`getcap`. The remaining 59 are listed below.
+
+The last four are the group that has no long options at all, where the
+wording is `invalid option -- 'X'` naming the first character getopt has
+no option for -- *not* the second byte of the argument, which is right
+for `-z` and `--zzq` and wrong for `-Rz`. The rule and its measurements
+live on `usageerror::invalid_option`.
 
 The wording to fix them with is in `userspace/usageerror`; it is getopt's,
 not ours, and was measured in the C locale. The exit status is *not* in that
@@ -138610,7 +138617,7 @@ On a machine where `/dev/sda` exists it would have exited 0. It was found
 only because `blkzone`, its argv[0] sibling, was flagged and the crate was
 opened anyway. So the count of 70 is a floor, not a total.
 
-### Still open (63)
+### Still open (59)
 
 - `clipboard`
 - `coredumpctl`
@@ -138645,14 +138652,11 @@ opened anyway. So the count of 70 is a floor, not a total.
 - `autrace (via audit)`
 - `captest (via capsh)`
 - `cifsiostat (via sysstat)`
-- `clear (via tput)`
 - `cpufreq-info (via cpupower)`
 - `dnsdomainname (via hostnamectl)`
-- `getcap (via capsh)`
 - `getenforce (via selinux)`
 - `grub-reboot (via grub2)`
 - `grub-set-default (via grub2)`
-- `lsattr (via chattr)`
 - `lshw (via hwinfo)`
 - `mpstat (via sysstat)`
 - `numademo (via numactl)`
@@ -138670,7 +138674,6 @@ opened anyway. So the count of 70 is a floor, not a total.
 - `systemd-path (via systemctl)`
 - `systemd-resolve (via resolvectl)`
 - `tapestat (via sysstat)`
-- `tset (via tput)`
 - `tuned-gui (via tuned)`
 - `turbostat (via cpupower)`
 - `ulimit (via prlimit)`

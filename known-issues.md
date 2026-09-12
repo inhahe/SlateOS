@@ -127694,6 +127694,48 @@ half done.
 
 ## B-CTEST-FIXTURES-CANNOT-FIND-THE-FASTPY-CHECKOUT-AFTER-THE-E-DRIVE-MIGRATION (lane B, 2026-09-07)
 
+**Status: FIXED 2026-09-10, both halves; verified again 2026-09-12.**
+`scripts/ctest-fixtures.py` and `scripts/create-ext4-rootfs.sh` try the
+pre-migration `D:` location **last** — after `$FASTPY_DIR`, `$PYTHONPATH` and a
+real sibling, so a genuine sibling always wins — and **announce** it when they
+use it, because a lookup that quietly picks a checkout the caller did not
+choose is its own failure. `scripts/boot-test.sh` had the same dead fallback
+and is lane A's; handed over in
+`requests/b-a-the-fastpy-sibling-lookup-has-been-dead-since-the-e-migration.md`,
+which lane A closed the same day.
+
+Verified with no environment set at all, rather than read off the diff:
+
+```text
+$ env -u FASTPY_DIR -u PYTHONPATH python -c "...; print(_fastpy_dir())"
+[ctest] fastpy: using D:\visual studio projects\fastpy
+        (no sibling at E:\visual studio projects\fastpy)
+D:\visual studio projects\fastpy
+```
+
+**The workaround below is obsolete. Do not set `FASTPY_DIR` by hand.**
+
+**Why this entry was wrong, which is the part worth keeping.** It concluded
+"the proper fix is a decision, not a patch" and declined to act, on the
+grounds that teaching the search the `D:` location would "encode a migration
+that is supposed to be finished". That reasoning does not survive contact with
+the facts: the migration *is* finished — for `os`. It was never begun for
+fastpy. The global `CLAUDE.md` records fastpy, `Python Agent`, `orchestrator2`
+and `backup` as still living under `D:\visual studio projects`, and says so as
+current fact rather than as history. So the option was never "hard-code a
+stale path"; it was "read the documented one", which is a patch and needs
+nobody's standing.
+
+The entry turned a lookup into a governance question and then filed itself
+under "no lane may decide this". It cost four days of every lane setting an
+environment variable by hand, and cost lane A a boot test on 2026-09-10
+(`ModuleNotFoundError: No module named compiler`). **Declining to act is an
+act**, and "no lane has standing" deserves the same evidence as any other
+claim — here, one line of an instruction file that was already loaded every
+session would have refuted it.
+
+*The description below is kept in the tense it was written in.*
+
 **In short:** the script that builds the ring-3 C test fixtures needs a second
 repository (fastpy) to do the cross-compile. It looks for that repository *next
 to this one*. The 2026-09-06 move put this repository on `E:` and left fastpy on

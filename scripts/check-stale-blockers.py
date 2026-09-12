@@ -25,6 +25,19 @@ reader learns to skim. With it the answer is 8, every one of which claims to be
 waiting for something that is no longer missing. A check nobody acts on is worse
 than no check, because it looks like coverage.
 
+A THIRD PASS, ADDED 2026-09-12. The two passes above both need the entry to
+have NAMED something -- a request, a question. The failure they cannot see is
+the one where nobody was asked and nothing was filed: the entry described a
+defect, explained why it was not being fixed, and the code moved underneath it.
+`B-CTEST-FIXTURES` said "the proper fix is a decision, not a patch, which is
+why this is logged rather than fixed", and that no lane had standing to choose.
+The patch had landed two days earlier in the very file the entry names. There
+was no request to check, because the entry had reasoned its way out of filing
+one. So the third pass asks a different question: is this entry OPEN, does it
+SAY it is parked, and has its own cited source been committed to since it was
+written? Eight hits, against 43 for the wider wordings that were tried and
+measured -- see `DEFERRAL`.
+
 WHAT IT DOES NOT CLAIM. A hit is "re-read this", not "this is wrong". A request
 can land while the entry stays legitimately open, because the request was only
 part of what the entry needed. That is why this prints a report and exits 0
@@ -77,6 +90,29 @@ CLOSED_ENTRY = re.compile(
     re.I,
 )
 CLOSED_WINDOW = 8
+
+# A NEGATED closure word is not a closure. This was a bare word search, so an
+# entry opening with "this is logged rather than fixed" -- which is what an
+# entry that has DECLINED to act says, and precisely the population the third
+# pass below exists to find -- classified itself as CLOSED and was dropped by
+# all three passes. It read as coverage and was the opposite: the entries most
+# likely to be stale were the ones most likely to be skipped.
+#
+# Found by a must-report fixture whose wording happened to contain the phrase.
+# I would not have gone looking: the regex had been right about every entry I
+# had checked by hand, because I had only ever checked entries that were in
+# fact closed.
+NEGATED_CLOSURE = re.compile(
+    r"\b(?:rather than|instead of|not|never|cannot be|will not be|short of"
+    r"|nowhere near|far from)\s+(?:FIXED|RESOLVED|CLOSED|DONE|IMPLEMENTED)\b"
+    r"|\bun(?:fixed|resolved)\b",
+    re.I,
+)
+
+
+def announces_closure(head):
+    """Does this text claim the entry is finished, negations discounted?"""
+    return bool(CLOSED_ENTRY.search(NEGATED_CLOSURE.sub(" ", head)))
 
 # `## ` followed by a letter or a backtick. The document also uses `## ` for
 # four STRUCTURAL headings that organise it rather than describing a defect, and
@@ -133,7 +169,7 @@ def stale(text, resolved):
     """Entries that are open and cite a finished request in blocking language."""
     found = []
     for lineno, title, body in entries(text):
-        if CLOSED_ENTRY.search("\n".join(body[:CLOSED_WINDOW])):
+        if announces_closure("\n".join(body[:CLOSED_WINDOW])):
             continue
         for j, line in enumerate(body):
             names = [m.group(1) for m in REFERENCE.finditer(line)]
@@ -224,7 +260,7 @@ def stale_questions(text, answered):
     """
     found = []
     for lineno, title, body in entries(text):
-        if CLOSED_ENTRY.search("\n".join(body[:CLOSED_WINDOW])):
+        if announces_closure("\n".join(body[:CLOSED_WINDOW])):
             continue
         for j, line in enumerate(body):
             names = [m.group(1) for m in QUESTION_REF.finditer(line)]
@@ -308,6 +344,20 @@ def dangling_references(doc_texts, exists):
 
 
 SELFTEST = [
+    (
+        # The regex was a bare word search, so this entry -- which says it is
+        # NOT fixed -- classified itself as closed and was dropped. The
+        # population that phrases itself this way is exactly the population
+        # most likely to be stale: an entry that has declined to act.
+        "an entry saying 'rather than fixed' is open, not closed",
+        ["## B-SOMETHING-IS-BROKEN (lane B, 2026-01-01)",
+         "",
+         "This is logged rather than fixed, for now.",
+         "This is blocked on a kernel change.",
+         "Asked of lane A in `requests/x.md`."],
+        {"x.md": True},
+        1,
+    ),
     (
         "an open entry citing a landed request in blocking language is reported",
         ["## B-SOMETHING-IS-BROKEN (lane B, 2026-01-01)",
@@ -614,8 +664,15 @@ def selftest():
     bad += question_selftest()
     bad += dangling_selftest()
     bad += floors_selftest()
+    bad += moved_selftest()
     total = (
-        len(SELFTEST) + len(QUESTION_SELFTEST) + 1 + 7 + len(DANGLING_SELFTEST) + 3
+        len(SELFTEST)
+        + len(QUESTION_SELFTEST)
+        + 1
+        + 7
+        + len(DANGLING_SELFTEST)
+        + 3
+        + len(MOVED_SELFTEST)
     )
     print()
     print("check-stale-blockers selftest: %d case(s), %d failed" % (total, bad))
@@ -652,7 +709,229 @@ def document_texts():
     return texts
 
 
+# ---------------------------------------------------------------- moved ground
+#
+# The two passes above ask whether a named BLOCKER has been cleared: a request
+# that now says LANDED, a question that now has an answer. Both need the entry
+# to have named something nameable. The failure they cannot see is the one
+# where nobody was asked and nothing was filed -- the entry simply described a
+# defect, said why it was not being fixed, and the code moved underneath it.
+#
+# Two on 2026-09-12, both in this file, both found by hand:
+#
+#   * B-POSIX-TIMERS said the work waited on a syscall number. Lane A had
+#     landed it three days earlier. (This one the request pass DOES catch.)
+#   * B-CTEST-FIXTURES said "the proper fix is a decision, not a patch, which
+#     is why this is logged rather than fixed" and that no lane had standing
+#     to choose. The patch had landed two days earlier, in the very file the
+#     entry names. Nothing was filed, so nothing could report it -- the entry
+#     had talked itself out of the fix and then out of being checkable.
+#
+# So: an OPEN entry, which SAYS it is not being acted on, whose own cited
+# source file has been committed to since the entry was dated. That is not
+# "this entry is wrong" -- a file changes for many reasons. It is "the ground
+# under this sentence moved after you wrote it; re-read it."
+#
+# WHY IT IS NARROW ON PURPOSE. Dropping the deferral filter reports every open
+# entry whose file is under active development, which is most of them, and a
+# reader learns to skim -- the failure mode the blocking-language filter
+# already exists to avoid. Dropping the date comparison reports entries whose
+# file changed BEFORE they were written, which is just "this file is busy".
+# Both halves are what make a hit worth a minute.
+
+# How far back to ask git. Entries older than this are not reported as having
+# moved -- not because they cannot have, but because "this file changed at some
+# point in the last year" is not news about a document.
+HISTORY_WINDOW = "4.months"
+
+ENTRY_DATE = re.compile(r"\((?:lane [ABC], )?(\d{4}-\d{2}-\d{2})\)")
+
+# Present-tense claims that the entry is parked. Deliberately does NOT include
+# "the proper fix is", which `CLAUDE.md` asks every entry to carry and which
+# therefore separates nothing.
+# MEASURED, not guessed. Three candidate wordings over the real file:
+#
+#     every phrase below plus "blocked/waiting on/until X lands"   43 hits
+#     the waiting-on-someone half alone                            27 hits
+#     the declined-to-act half alone (this one)                     8 hits
+#
+# 43 is the volume the module docstring already warns about -- "a reader learns
+# to skim" -- so the wide version would have been a check nobody acts on.
+#
+# The waiting-on-someone half is dropped for a better reason than volume: it is
+# ALREADY COVERED, and covered better. An entry blocked on a request or a
+# question is caught by the two passes above, which can say the blocker is
+# provably cleared -- the request's own status line says LANDED. All this pass
+# could add there is "a file changed", which is weaker evidence about the same
+# entries.
+#
+# What is left is the population nothing else can see: an entry that asked
+# NOBODY and filed NOTHING, because it talked itself out of the fix. Both real
+# cases on 2026-09-12 were that shape, and the more instructive one --
+# B-CTEST-FIXTURES -- had reasoned that no lane had standing to choose, which
+# is not a blocker any tool can look up. It was wrong, and the patch had
+# already landed in the very file it named.
+DEFERRAL = re.compile(
+    r"logged rather than fixed|rather than fixed|written down with the"
+    r"|no standing|not this lane|is the next step",
+    re.I,
+)
+
+# A source path in backticks, optionally with a `:line` suffix. Documents are
+# excluded: a `.md` changing is not the ground moving, it is somebody else
+# writing prose, and every entry cites this file.
+CITED_SOURCE = re.compile(
+    r"`([A-Za-z0-9_][A-Za-z0-9_./\-]*\.(?:rs|py|sh|ps1|toml|c|h|json))(?::\d+)?`"
+)
+
+
+def file_history(paths, since):
+    """Map each path to the dates of commits touching it, newest first.
+
+    One `git log` for the whole set rather than one per path: the per-path
+    form is a process launch per citation, and there are hundreds.
+    """
+    import subprocess
+
+    if not paths:
+        return {}
+    out = subprocess.run(
+        [
+            "git",
+            "log",
+            "--since=" + since,
+            "--date=short",
+            "--format=C%ad",
+            "--name-only",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+        env=gitenv.clean_env(),
+    ).stdout
+    want = set(paths)
+    hist = {}
+    date = None
+    for line in out.split(chr(10)):
+        if line.startswith("C") and len(line) == 11:
+            date = line[1:]
+        elif line and date and line in want:
+            hist.setdefault(line, []).append(date)
+    return hist
+
+
+def moved_ground(text, hist, exists):
+    """Open, self-declared-parked entries whose own cited source has changed."""
+    found = []
+    for lineno, title, body in entries(text):
+        if announces_closure(chr(10).join(body[:CLOSED_WINDOW])):
+            continue
+        m = ENTRY_DATE.search(title)
+        if not m:
+            continue
+        when = m.group(1)
+        joined = chr(10).join(body)
+        if not DEFERRAL.search(joined):
+            continue
+        moved = []
+        for path in sorted(set(CITED_SOURCE.findall(joined))):
+            if not exists(path):
+                continue
+            after = [d for d in hist.get(path, []) if d > when]
+            if after:
+                moved.append((path, len(after), max(after)))
+        if moved:
+            found.append((lineno, title, when, moved))
+    return found
+
+
+MOVED_SELFTEST = [
+    (
+        "parked entry whose file moved after it is reported",
+        [
+            "## B-SOMETHING (lane B, 2026-09-07)",
+            "**Where.** `posix/src/time.rs`.",
+            "This is logged rather than fixed; no lane has standing to choose.",
+        ],
+        {"posix/src/time.rs": ["2026-09-10"]},
+        1,
+    ),
+    (
+        "a file that moved BEFORE the entry is not the ground moving",
+        [
+            "## B-SOMETHING (lane B, 2026-09-07)",
+            "**Where.** `posix/src/time.rs`.",
+            "This is logged rather than fixed; no lane has standing to choose.",
+        ],
+        {"posix/src/time.rs": ["2026-09-01"]},
+        0,
+    ),
+    (
+        "an entry that never says it is parked is just an open bug",
+        [
+            "## B-SOMETHING (lane B, 2026-09-07)",
+            "**Where.** `posix/src/time.rs`.",
+            "It returns the wrong value for a negative input.",
+        ],
+        {"posix/src/time.rs": ["2026-09-10"]},
+        0,
+    ),
+    (
+        "a closed entry is not reported however much its file moved",
+        [
+            "## B-SOMETHING (lane B, 2026-09-07) -- FIXED",
+            "**Where.** `posix/src/time.rs`.",
+            "This was logged rather than fixed for a while.",
+        ],
+        {"posix/src/time.rs": ["2026-09-10"]},
+        0,
+    ),
+    (
+        "a same-day commit is not 'after': the entry may describe it",
+        [
+            "## B-SOMETHING (lane B, 2026-09-07)",
+            "**Where.** `posix/src/time.rs`.",
+            "This is logged rather than fixed.",
+        ],
+        {"posix/src/time.rs": ["2026-09-07"]},
+        0,
+    ),
+    (
+        "a cited document is not source and never counts",
+        [
+            "## B-SOMETHING (lane B, 2026-09-07)",
+            "Logged rather than fixed; see `known-issues.md` and `roadmap.md`.",
+        ],
+        {"known-issues.md": ["2026-09-11"]},
+        0,
+    ),
+]
+
+
+def moved_selftest():
+    bad = 0
+    for name, body, hist, want in MOVED_SELFTEST:
+        got = len(
+            moved_ground(chr(10).join(body) + chr(10), hist, lambda p: p in hist)
+        )
+        ok = got == want
+        bad += 0 if ok else 1
+        print("%-4s %s" % ("ok" if ok else "FAIL", name))
+        if not ok:
+            print("       wanted %d hit(s), got %d" % (want, got))
+    return bad
+
+
 def main(argv=None):
+    # These documents are full of arrows, em dashes and box drawing, and a
+    # Windows console is cp1252 by default -- so printing an entry TITLE was
+    # enough to end the run with a UnicodeEncodeError partway through the
+    # report. It survived this long only because the entries the earlier
+    # passes happened to select were all plain ASCII; widening the report
+    # found it immediately. The same two lines appear in check-query-status.py
+    # and check-roadmap-done.py for the same reason.
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     argv = sys.argv[1:] if argv is None else argv
     if selftestflag.wants_selftest(argv):
         return selftest()
@@ -702,6 +981,16 @@ def main(argv=None):
     doc_texts = document_texts()
     dangling = dangling_references(doc_texts, lambda rel: (ROOT / rel).exists())
 
+    # Third pass: an entry that says it is parked, whose own cited source has
+    # been committed to since it was written. Nobody has to have been asked for
+    # this one to fire, which is the point -- the two passes above both need
+    # the entry to have named a request or a question.
+    cited = set()
+    for _lineno, _title, _body in entries(text):
+        cited.update(CITED_SOURCE.findall(chr(10).join(_body)))
+    hist = file_history(cited, HISTORY_WINDOW)
+    moved = moved_ground(text, hist, lambda rel: (ROOT / rel).exists())
+
     for lineno, title, request in hits:
         print("known-issues.md:%d: %s" % (lineno, title.strip()))
         print("    cites requests/%s, which reports itself finished." % request)
@@ -713,6 +1002,16 @@ def main(argv=None):
         print("    says it is blocked on %s, which open-questions.md records"
               " as answered." % question)
         print("    Re-read it: the decision it waits for has been made.")
+        print()
+
+    for lineno, title, when, paths in moved:
+        print("known-issues.md:%d: %s" % (lineno, title.strip()))
+        print("    says it is parked, and the source it names has moved since"
+              " %s:" % when)
+        for path, n, last in paths:
+            print("        %s -- %d commit(s), latest %s" % (path, n, last))
+        print("    Re-read it: it may be describing a tree that no longer"
+              " exists.")
         print()
 
     # Grouped by the missing file rather than by citation. One retired script is
@@ -785,6 +1084,13 @@ def main(argv=None):
         "check-stale-blockers: %d document(s) scanned for script references, "
         "%d citation(s) of %d file(s) that do not exist."
         % (len(doc_texts), len(dangling), len(by_path))
+    )
+    # Counted from what was PRINTED, not recomputed -- the question pass taught
+    # that lesson by printing four findings above a line that said "4".
+    print(
+        "check-stale-blockers: %d source path(s) cited, %d with history in the "
+        "last %s, %d parked entr(ies) whose ground has moved."
+        % (len(cited), len(hist), HISTORY_WINDOW, len(moved))
     )
 
     thin = []

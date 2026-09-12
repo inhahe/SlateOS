@@ -117636,6 +117636,26 @@ arrive down the same pipe and only one of them is visible.** The check had
 been run *specifically to be careful*, which is the recurring part: every
 instance of this family is someone verifying something.
 
+**Why that is not a coincidence, and the counter-habit that follows.** A
+casual command has nothing to pipe into — you run `git show` and read it. The
+pipe appears the moment you start **filtering, counting, extracting**, which
+is what verification *is*. So the construct that destroys the distinction
+between "no matches" and "no input" is introduced by the act of being
+rigorous, and most reliably by whoever is being most rigorous. Every instance
+so far was someone building an instrument rather than cutting a corner.
+
+So the rule is not "avoid pipes", which would forbid most checks. It is:
+
+> **When a check reduces something to a number, ask what that number does
+> when the input is ABSENT rather than empty.**
+
+`grep -c` cannot tell you. `wc -l` cannot. `| head -1` cannot. All three are
+the natural last stage of a careful check, and all three report the same value
+for "I looked and found nothing" as for "I never looked at all". Where the
+difference matters, check the thing exists first, or read the status — not
+because the status is interesting, but because it is the only surviving
+witness that the input was real.
+
 For a backgrounded run, redirect instead, and read the status explicitly:
 
 ```bash

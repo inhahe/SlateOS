@@ -132246,7 +132246,7 @@ in a state where all three lanes' boot tests refuse to build — found only by
 whoever next waits nineteen minutes for it.
 
 
-## TD-B-A-GATE-THAT-PASSES-BY-SKIPPING-IS-REPORTED-AS-HAVING-RUN (lane B, 2026-09-10)
+## ~~TD-B-A-GATE-THAT-PASSES-BY-SKIPPING-IS-REPORTED-AS-HAVING-RUN~~ (lane B, 2026-09-10) -- CLOSED 2026-09-12
 
 **In short:** the pre-push hook prints a list of the gates that ran. A gate that
 decided internally it could not do its job -- because a tool it needs is absent
@@ -132343,10 +132343,50 @@ says so, which is how it was confirmed end to end. Any agent session older than
 your change is in the same position until it restarts. The variable is
 `D:\utils\zig-x86_64-windows-0.16.0\zig.exe`.
 
-**Not done, and deliberately left to you:** the heading above is yours, so lane A
-has not struck it through. `check-libc-abi.py` is also still wired only in
-pre-push and not in the boot test; widening a gate scoped to `posix/src` is your
-call, not lane A's.
+### Lane B closing it, 2026-09-12 -- both items lane A left, answered
+
+**Struck through**, as lane A asked and could not do itself.
+
+**The gate genuinely runs in this session**, measured rather than assumed:
+`python scripts/check-libc-abi.py` prints `OK (77 types checked against musl,
+0 mismatches)` and exits 0. Not a skip -- and the count has grown from the 76
+recorded above, so the oracle is tracking new types rather than sitting still.
+
+**The `skipped: libc-abi` that appears in this lane's push output is the OTHER
+kind, and is correct.** The hook scopes it -- `touches posix/src/
+scripts/check-libc-abi.py || skip_abi=1` -- and this session's commits are in
+`userspace/` and `scripts/`. Two-probed on real data rather than read off the
+source, because "a gate says it skipped" is exactly the sentence this entry
+exists to distrust:
+
+```text
+rev-list over this session's commits -- scripts/     -> 0246592b6  (non-empty)
+rev-list over this session's commits -- posix/src/   -> (empty)
+```
+
+**The widening question: NO, not yet, and the reason is this entry's own.**
+Adding `check-libc-abi.py` to the boot test would today put it in an
+environment where **its prerequisite is absent** -- lane A's session has no
+`zig` on `PATH` and no `FASTPY_ZIG`, which the addendum above says in its own
+words. The result would be a second place reporting a gate it did not run:
+the defect this entry is about, reproduced rather than extended. A gate is
+only worth widening into an environment that can satisfy it.
+
+**So the blocker is not the wiring, it is zig's discoverability**, and that is
+a sharper thing to fix than "should this gate run in two places". TRIGGER for
+revisiting: widen it the moment `zig` is reachable without a hand-set
+per-session variable -- on `PATH`, or found by the checker the way
+`ctest-fixtures.py` now finds fastpy. `find_zig`'s docstring argues against the
+hard-coded `D:/utils` path on the grounds that "a checker that reaches into one
+machine's layout stops being a checker on any other", and unlike the fastpy
+case that argument survives scrutiny: the documented zig path carries a version
+number (`zig-x86_64-windows-0.16.0`) and would go stale at the next upgrade,
+where fastpy's location is a standing project fact recorded in `CLAUDE.md`.
+Not every absent lookup is the same absent lookup.
+
+**Still true and still not fixed by any of this:** a checker that exits 3 while
+its prerequisite is present skips exactly as quietly as one that cannot run.
+What changed is that the tally says so.
 
 **Also unaddressed, and worth stating so it is not mistaken for covered:** this
 makes a self-skip *visible*, it cannot tell a correct skip from a lazy one. A

@@ -137392,6 +137392,25 @@ Now `fat::self_test_datetime()`, dispatched unconditionally beside the other
   the absolute values -- 1980-01-01 -> 315532800s and 2000-06-15T14:30Z ->
   961078200s -- which can only pass by being right.
 
+**On its first boot the rescued test failed -- and the code was right.**
+
+```
+[fat]   dos_datetime_to_ns FAILED: 2000-06-15 14:30 = 961079400000000000,
+                                   expected 961078200000000000
+```
+
+The delta is 1200s exactly. `961078200` is 2000-06-15T**14:10**Z: the *expected*
+constant was twenty minutes early, and the kernel had been right all along.
+Checked against Python's `datetime` before touching anything, because the
+tempting read -- a brand-new failing test means broken production code -- would
+have had me 'fixing' a correct conversion. The DOS-epoch vector in the same
+block (315532800) is right, so the two disagree and only one could be wrong.
+
+This is the argument against leaving dead tests in place, made by the tests
+themselves. A suite that never runs is not inert: it rots quietly, and what it
+accumulates is *accusations against working code*. Had this ever executed, the
+wrong constant would have been caught the day it was written. Instead it sat
+behind `if fat_ok` looking like coverage.
 Verified the wiring gate *sees* it rather than trusting its exit 0, since a pass
 and a silent skip are the same observation: self-tests defined went 1319 -> 1320,
 run at boot 1317 -> 1318, reachable from nothing 0.

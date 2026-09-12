@@ -4533,8 +4533,14 @@ pub fn self_test_datetime() -> KernelResult<()> {
             let y2k_date: u16 = (20 << 9) | (6 << 5) | 15;
             let y2k_time: u16 = (14 << 11) | (30 << 5);
             let y2k_ns = dos_datetime_to_ns(y2k_date, y2k_time);
-            // 2000-06-15T14:30:00Z = 961078200 seconds * 1e9.
-            let expected_y2k_ns: u64 = 961_078_200_000_000_000;
+            // 2000-06-15T14:30:00Z = 961079400 seconds * 1e9.
+            //
+            // Was 961_078_200, which is 14:10:00Z -- twenty minutes early. The
+            // kernel had it right all along; the *test* was wrong, and nothing
+            // noticed because this suite sat behind `if fat_ok` and had never
+            // once executed. It failed on the first boot after being moved out.
+            // A dead test is not inert: it rots, and then it accuses the code.
+            let expected_y2k_ns: u64 = 961_079_400_000_000_000;
             if y2k_ns != expected_y2k_ns {
                 crate::serial_println!(
                     "[fat]   dos_datetime_to_ns FAILED: 2000-06-15 14:30 = {}, expected {}",

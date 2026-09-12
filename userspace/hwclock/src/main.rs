@@ -543,6 +543,11 @@ fn read_system_time() -> Result<u64, String> {
     // of the same rule used `"btime "` and would not have. Two spellings of one
     // rule, neither wrong in practice, with nothing to make them disagree
     // loudly enough for anyone to notice.
+    //
+    // That crate was retired on 2026-09-12, so this is now the only hand copy
+    // left -- which removes the disagreement without removing the reason it
+    // was worth writing down: `procinfo::StatCounters::boot_time` parses the
+    // same field and is where this belongs.
     let proc = procinfo::ProcFs::new();
     let uptime_secs = proc
         .uptime()

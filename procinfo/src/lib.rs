@@ -712,9 +712,10 @@ pub struct StatCounters {
     /// `btime`: the wall-clock second at which the system booted.
     ///
     /// Not a counter, and the reason this struct is named for its file. Two
-    /// other programs read `/proc/stat` for this one number
-    /// (`userspace/uptime`, `userspace/hwclock`) and each parses the file
-    /// itself.
+    /// other programs read `/proc/stat` for this one number and each parsed
+    /// the file itself: `userspace/hwclock`, which still does, and
+    /// `userspace/uptime`, retired 2026-09-12. `coreutils`'s `ps` reads it
+    /// through this field, which is what it is for.
     pub boot_time: Option<u64>,
 }
 

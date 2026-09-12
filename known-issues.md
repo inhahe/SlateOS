@@ -131365,6 +131365,22 @@ Two measured examples:
   one. Recorded here rather than filed as a checker change, because the
   cheaper instrument already exists.
 
+* **`uptime`** — **RETIRED 2026-09-12. coreutils 40 passed / 0 differed
+  against the standalone's 20 / 20**, same cases, `scripts/uptime-diff.sh`.
+
+  The standalone is the best-performing loser of the seven: it passes half the
+  cases rather than none. What it fails is a pair of clusters, and both are the
+  kind a from-scratch implementation gets wrong — every uptime at or past a day
+  boundary (86400, 86460, 172800, 259200, 604800), and every user count except
+  one (0, 2 and 12 all wrong, 1 right). Those are exactly the two places
+  procps' own rules are counter-intuitive: `up 1 day, 0 min` rather than
+  `1 day, 00:00`, and `0 user` SINGULAR.
+
+  Its three unique options — `-r`, `--raw`, `--json` — are all inventions.
+  Measured, not taken from the note that already said so: procps answers
+  `invalid option -- 'r'` and `unrecognized option '--raw'` / `'--json'`.
+  Nothing to port.
+
 * **`logger`** — **not a measurement question at all, and a harness cannot
   settle it.** `dup-bins-survey` lists it as "no harness — write one", which is
   the wrong instrument here. coreutils' `logger` writes its message to

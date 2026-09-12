@@ -109,7 +109,6 @@ userspace/top
 userspace/tput
 userspace/traceroute
 userspace/udevd
-userspace/uptime
 userspace/vi
 userspace/vmstat
 userspace/wall

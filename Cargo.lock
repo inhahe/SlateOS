@@ -3004,14 +3004,6 @@ name = "upower"
 version = "0.1.0"
 
 [[package]]
-name = "uptime"
-version = "0.1.0"
-dependencies = [
- "procinfo",
- "utmpfile",
-]
-
-[[package]]
 name = "useradd"
 version = "0.1.0"
 dependencies = [

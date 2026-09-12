@@ -57187,19 +57187,48 @@ the request). These two remain.
 
 1. `--dotall`: `.` matches newline, reading the whole file at once.
 
-   NOT A SMALL ADDITION, which is why it is here rather than done. It needs
-   two things in two crates:
-     * `userspace/ere` has no dot-matches-newline mode at all -- grep for
-       `dot_all` there returns nothing.
-     * `grep` is line-based: the read loop is `read_until(sep, &mut line)`.
-       Whole-file matching means a match can span lines, so `-n`, `-C`,
-       `--only-matching` and the byte-offset options all need to decide what
-       they report for a match covering four lines.
+   SMALLER THAN THE PARAGRAPH THIS REPLACES, and both of its claims were
+   wrong. I wrote them from greps of the source; measuring settled both.
 
-   The second is the real work. The engine flag is a day's reading; deciding
-   what `grep -n --dotall -C 2` should print is a design question, and the
-   operator's tool answers it by reading the whole file and treating the match
-   as belonging to the line it starts on. Measure that before building.
+   WRONG 1: "`userspace/ere` has no dot-matches-newline mode at all -- grep
+   for `dot_all` there returns nothing." The name is absent; the CAPABILITY is
+   not. `Inst::Any` is guarded only by `f.sp < input.len()` and `c.is_some()`
+   -- no newline exclusion anywhere. The engine has always been dotall. `.`
+   does not cross lines in `grep` because `grep` hands it ONE LINE AT A TIME,
+   so the newline never reaches the matcher. Demonstrated with machinery that
+   already exists:
+
+       $ grep -z -o 'alpha.*beta' file      # -z makes the whole file one record
+       alpha
+       two
+       three beta<NUL>
+
+   byte-identical to GNU's. A search for a spelling concluded absence; a test
+   of the behaviour found the feature.
+
+   WRONG 2: "a match can span lines, so `-n`, `-C`, `--only-matching` and the
+   byte offsets all need to decide what they report." They do not, because the
+   operator's tool does not report lines under `--dotall` at all. Measured
+   against `grep.65.py`:
+
+       --dotall alpha.*beta        the MATCH, three lines of it:
+                                     file:alpha
+                                     two
+                                     three beta
+       --dotall -n alpha.*beta     the same -- `-n` is IGNORED
+       --dotall -C 1 alpha.*beta   the same -- context is IGNORED
+       --dotall alpha              file:alpha  -- not the containing line
+       --dotall -l alpha.*beta     file        -- `-l` still works
+
+   So `--dotall` is `-o` semantics over a whole-file regex, and the design
+   questions I invented do not arise.
+
+   WHAT IS ACTUALLY LEFT is one grep-side change: `line_sep()` currently
+   serves BOTH input and output (newline, or NUL under `-z`), and `--dotall`
+   needs them split -- whole-file input, newline output, `-o`-style printing.
+   The whole-file read already exists for `--every-pattern` and `--near`
+   (`reader.read_to_end`), so there is precedent to follow rather than
+   machinery to invent.
 
 2. NOT REMAINING -- I was wrong an hour ago and this paragraph is the
    correction. Persistent colour config (`--set-colors`, `--remember`) was

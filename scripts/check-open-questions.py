@@ -414,7 +414,12 @@ def answers_notice(open_idents: list) -> None:
         print("    This notice fires once per branch; it is recorded now.")
         print("")
         mark.parent.mkdir(parents=True, exist_ok=True)
-        mark.write_text(digest + NL_, encoding="utf-8")
+        # newline="": without it Windows writes CRLF here, so the digest read
+        # back never matches the one written and the notice repeats forever.
+        # check-text-mode-writes refuses the build over exactly this, and did.
+        # digest read back never matches the one written. check-text-mode-writes
+        # refuses the build over exactly this, and did.
+        mark.write_text(digest + NL_, encoding="utf-8", newline="")
     except (OSError, subprocess.SubprocessError, UnicodeError):
         # Silence, never a refusal: see this function's rationale.
         return

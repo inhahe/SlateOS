@@ -213,13 +213,6 @@ name = "byteread"
 version = "0.1.0"
 
 [[package]]
-name = "cal"
-version = "0.1.0"
-dependencies = [
- "civildate",
-]
-
-[[package]]
 name = "calculator"
 version = "0.1.0"
 dependencies = [
@@ -778,13 +771,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "env"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
 name = "ere"
 version = "0.1.0"
 dependencies = [
@@ -1112,10 +1098,6 @@ dependencies = [
  "sha1",
  "sha2",
 ]
-
-[[package]]
-name = "hostname"
-version = "0.1.0"
 
 [[package]]
 name = "hostnamectl"
@@ -2692,14 +2674,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "stat"
-version = "0.1.0"
-dependencies = [
- "modechange",
- "quoting",
-]
-
-[[package]]
 name = "stickynotes"
 version = "0.1.0"
 dependencies = [
@@ -2721,13 +2695,6 @@ dependencies = [
 
 [[package]]
 name = "strace"
-version = "0.1.0"
-dependencies = [
- "quoting",
-]
-
-[[package]]
-name = "strings"
 version = "0.1.0"
 dependencies = [
  "quoting",

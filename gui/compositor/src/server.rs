@@ -1160,6 +1160,26 @@ mod tests {
             "the keystroke was not routed to anyone: {:?}",
             server.stats()
         );
+        // The sibling counter, which nothing asserted until 2026-09-11 and
+        // which is the one with a meaningful threshold. `routed_events > 0`
+        // only says somebody got something; this says nothing fell on the
+        // floor. An event no live link claims is discarded here precisely so it
+        // cannot accumulate and later be delivered to whoever next opens a
+        // window with a recycled id -- so a non-zero count is a real defect and
+        // not a slow path.
+        //
+        // Deliberately not pinning `routed_events` to an exact number. It
+        // measured 2 for this one keystroke, but `route_and_flush` runs per
+        // tick and the harness closes after two, so the figure is a property of
+        // the fixture rather than of the routing. A bound whose value a later
+        // reader cannot explain is worse than none: it gets relaxed rather than
+        // investigated the first time it fires.
+        assert_eq!(
+            server.stats().unrouted_events,
+            0,
+            "an input event reached nobody: {:?}",
+            server.stats()
+        );
 
         // And it reached the client, not merely the router. The scancode is the
         // one the display reported, unchanged: it is carried alongside the

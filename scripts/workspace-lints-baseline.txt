@@ -46,7 +46,6 @@ userspace/dbus
 userspace/diff
 userspace/diskutil
 userspace/dmesg
-userspace/env
 userspace/fdisk
 userspace/file
 userspace/fmt
@@ -57,7 +56,6 @@ userspace/getopt
 userspace/getty
 userspace/gzip
 userspace/hexdump
-userspace/hostname
 userspace/htop
 userspace/hwclock
 userspace/iconv
@@ -108,8 +106,6 @@ userspace/service
 userspace/shell
 userspace/shuf
 userspace/ss
-userspace/stat
-userspace/strings
 userspace/sysctl
 userspace/syslogd
 userspace/tac

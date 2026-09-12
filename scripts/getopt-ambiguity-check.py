@@ -988,6 +988,25 @@ def sweep(tree: gittree.Tree, wanted: set[str], runner: list[str]) -> int:
         if gnu_table(runner, GNU_NAME.get(name, name)) is not None
     ]
 
+    # The population that was NOT checked, which the summary has to name.
+    #
+    # This used to be computed only when bins were named on the command line --
+    # `if wanted:` -- which meant the FULL SWEEP, the run that reads as a
+    # complete audit, was the one run that said nothing about what it had
+    # skipped. On 2026-09-11 it printed "63 table(s) checked; 0 disagreement(s)"
+    # over a tree of 83 bins. Twenty carried no table, sixteen of them because
+    # they still parse `argv` by hand, and not one was mentioned.
+    #
+    # That is the defect `uname` had just been fixed for, one level up: a
+    # measurement that is true and reads as a guarantee. 63 checked out of 63
+    # tables and 63 checked out of 83 bins print the same sentence, and only the
+    # second is the question anyone is asking.
+    if not wanted:
+        wanted = {
+            stem_of(rel)
+            for rel in sources
+            if rel.count("/") == BIN_REL.count("/") + 1 or rel.endswith("/main.rs")
+        }
     if wanted:
         # Three reasons a requested name may not be checked, and only the last
         # is worth a warning. The pre-push hook passes whichever bins a push
@@ -1039,7 +1058,31 @@ def sweep(tree: gittree.Tree, wanted: set[str], runner: list[str]) -> int:
             print(line, flush=True)
         problems.extend(found)
 
-    print(f"\n{len(tables)} table(s) checked; {len(problems)} disagreement(s).")
+    # The denominator, not just the numerator. See the note above `missing`:
+    # "63 table(s) checked" is true of a tree with 63 bins and of a tree with
+    # 83, and the reader cannot tell which from the sentence.
+    # A BIN, not a source file. `stem_of` maps `bin/foo.rs` and `bin/foo/main.rs`
+    # to `foo`, but it has nothing to say about `bin/awk/ast.rs` -- it answers
+    # `ast`, which is a module of `awk` and not a program. Counting those gave a
+    # denominator of 95 and a list naming `ast`, `lex`, `parse` and six more
+    # submodules as uncovered bins. A wrong denominator is worse than none:
+    # it is the same false reassurance in the other direction, and this line
+    # exists to report coverage honestly.
+    bins = {
+        stem_of(rel)
+        for rel in sources
+        if rel.count("/") == BIN_REL.count("/") + 1 or rel.endswith("/main.rs")
+    }
+    uncovered = sorted(bins - {t.util for t in tables})
+    print(
+        f"\n{len(tables)} table(s) checked out of {len(bins)} coreutils bin(s);"
+        f" {len(problems)} disagreement(s)."
+    )
+    if uncovered:
+        print(
+            f"{len(uncovered)} bin(s) carry no LONG_OPTIONS table and are"
+            f" therefore outside this gate: {' '.join(uncovered)}"
+        )
     return 1 if problems else 0
 
 

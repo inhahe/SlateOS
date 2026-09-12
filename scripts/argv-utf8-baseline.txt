@@ -59,8 +59,6 @@ userspace/dmesg/src/main.rs:argv-as-string
 userspace/dmidecode/src/main.rs:argv-as-string
 userspace/efibootmgr/src/main.rs:argv-as-string
 userspace/eject/src/main.rs:argv-as-string
-userspace/env/src/main.rs:argv-as-string
-userspace/env/src/main.rs:env-as-string
 userspace/file/src/main.rs:argv-as-string
 userspace/findmnt/src/main.rs:argv-as-string
 userspace/finger/src/main.rs:argv-as-string
@@ -83,7 +81,6 @@ userspace/grub2/src/main.rs:to_str-unwrap
 userspace/gzip/src/main.rs:argv-as-string
 userspace/hardlink/src/main.rs:argv-as-string
 userspace/hexdump/src/main.rs:argv-as-string
-userspace/hostname/src/main.rs:argv-as-string
 userspace/hostnamectl/src/main.rs:argv-as-string
 userspace/htop/src/main.rs:argv-as-string
 userspace/hwclock/src/main.rs:argv-as-string
@@ -177,9 +174,7 @@ userspace/ss/src/main.rs:argv-as-string
 userspace/ssh-keygen/src/lib.rs:argv-as-string
 userspace/ssh/src/lib.rs:argv-as-string
 userspace/ssh/src/lib.rs:to_str-unwrap
-userspace/stat/src/main.rs:argv-as-string
 userspace/strace/src/main.rs:argv-as-string
-userspace/strings/src/main.rs:argv-as-string
 userspace/stty/src/main.rs:argv-as-string
 userspace/swapon/src/main.rs:argv-as-string
 userspace/sysctl/src/main.rs:argv-as-string

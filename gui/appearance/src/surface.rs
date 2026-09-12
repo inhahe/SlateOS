@@ -486,6 +486,63 @@ mod tests {
         }
     }
 
+    /// Switching the theme does not change how much the compositor is asked to
+    /// do.
+    ///
+    /// The question this answers is the one a benchmark cannot, because nothing
+    /// benchmarks the compositor: 436 draw sites moved from a fill to a stroke,
+    /// and if an outline cost an extra command each, that would be 436 more
+    /// commands per full redraw with no instrument anywhere to notice. It does
+    /// not -- every kind emits the same count either way. `Panel` emits two in
+    /// both themes because it is filled *and* edged in both.
+    ///
+    /// This is deliberately a count and not a time. A timing assertion on a
+    /// developer machine is noise: lane A measured run-to-run variation at a
+    /// median 1.02x under hardware virtualisation and 1.10x under emulation,
+    /// with a p90 of 1.75x, which cannot resolve anything smaller than a
+    /// disaster. A command count is exact, and it is the half of the cost this
+    /// change could plausibly have moved.
+    #[test]
+    fn neither_theme_asks_the_compositor_for_more_work_than_the_other() {
+        use guitk::render::RenderTree;
+
+        for what in [
+            Surface::Card,
+            Surface::Selected,
+            Surface::Panel,
+            Surface::Sidebar,
+            Surface::ControlTrack,
+        ] {
+            let count = |style| {
+                let mut tree = RenderTree::new();
+                styled(style).draw_surface(&mut tree, 0.0, 0.0, 100.0, 40.0, 4.0, what);
+                tree.commands.len()
+            };
+            assert_eq!(
+                count(SurfaceStyle::Borders),
+                count(SurfaceStyle::Cards),
+                "{what:?} costs a different number of commands in the two themes"
+            );
+        }
+    }
+
+    /// An outline covers a fraction of the pixels a fill does, which is the
+    /// other half of the cost and the half that favours the new default.
+    ///
+    /// Not a measurement of the renderer -- it is arithmetic on the geometry,
+    /// pinned so the claim is checkable rather than asserted in a commit
+    /// message. A 100x40 box is 4,000 pixels filled; its 1px outline is 276.
+    #[test]
+    fn an_outline_touches_far_fewer_pixels_than_the_fill_it_replaces() {
+        let (w, h, line) = (100.0_f32, 40.0_f32, 1.0_f32);
+        let filled = w * h;
+        let outlined = w * h - (w - 2.0 * line) * (h - 2.0 * line);
+        assert!(
+            outlined * 10.0 < filled,
+            "an outline of {outlined} px is not markedly cheaper than {filled} px filled"
+        );
+    }
+
     /// Borders is what a machine with no configuration gets.
     #[test]
     fn borders_is_the_default() {

@@ -113,6 +113,314 @@ directory — `--target-dir` per `DIFF_PKG` entry — after which the symlink ca
 point at the right one deliberately rather than at whatever survived. Until then
 the survey's column says "coreutils half only", which is the truth.
 
+## B-COREUTILS-STAT-QUOTES-THE-FILE-LINE — WITHDRAWN, IT IS DESIGN DECISION §371 (lane B, 2026-09-11)
+
+**This entry was wrong and is kept as a correction rather than deleted.**
+
+I filed it hours after writing `scripts/stat-diff.sh`, on the strength of 25
+failing cases where our `File:` line reads `File: 'file.txt'` and GNU's reads
+`File: file.txt`. I had measured GNU carefully — including that it ignores
+`QUOTING_STYLE` for that line while honouring it for `-c %N` — and concluded
+ours was over-eager.
+
+**It is `design-decisions.md` §371, taken deliberately on 2026-08-23, and
+argued better than my fix would have been:**
+
+  * GNU's own behaviour there is a **`strstr` accident**. `stat -c '%N'` quotes
+    and `stat -c '%.3N'` does not, because the substring search for the literal
+    two characters `%N` misses the second. A directive that differs only by a
+    precision gets a different quoting style, which nobody designed.
+  * A file name is attacker-chosen input in every case that matters — a
+    tarball, a download directory, a shared `/tmp` — and `design.txt` permits
+    every byte but `/` and NUL. The human-readable block is the one a person
+    reads line by line, so a name that can forge a line of `stat`'s own output
+    is not recoverable by the reader.
+  * `%n` is still raw, one character away, for anything machine-read.
+
+**§371's own "Against" section names this harness's failure mode exactly**,
+which is the part worth carrying forward:
+
+> Reproducing upstream bug-for-bug has value of its own: it is the property
+> that makes "measure GNU, assert the measurement" a usable method, and every
+> deliberate exception weakens it.
+
+That is what happened. **A harness whose null hypothesis is "GNU is right"
+reports every deliberate divergence as a defect, in proportion to how thorough
+it is** — the third time today, after `uname -o` printing `SlateOS` and
+`chown`'s SlateOS-gated syscall. The remedy is not a threshold; it is checking
+`design-decisions.md` before filing, which I did not do. The 19 affected cases
+are now `xfail`s in the harness naming §371, so they are still run and an XPASS
+would report the divergence disappearing.
+
+## B-COREUTILS-STAT-F-FSID-HALVES-ARE-SWAPPED (lane B, 2026-09-11)
+
+`stat -f -c %i` prints the filesystem id with its two 32-bit halves exchanged
+relative to GNU:
+
+    GNU    68867c45465b201c
+    ours   465b201c68867c45
+
+The cause is that the two programs read different syscalls. GNU uses Linux
+`statfs`, whose `f_fsid` is `struct { int val[2]; }` and which it renders half
+by half; ours uses POSIX `statvfs`, whose `f_fsid` is a single `unsigned long`
+that glibc packs in the opposite order.
+
+**Deliberately not "fixed" here.** Swapping the halves would match glibc on
+Linux and could be *wrong on the target* — SlateOS's own `statvfs` is free to
+pack its id however it likes, and compensating for a glibc detail in the
+renderer would bake a host assumption into a program that does not run on the
+host. Whoever fixes this should first measure what SlateOS's `statvfs` returns;
+the fix is then one line in the `b'i'` arm.
+
+### Not defects, recorded so they are not re-filed
+
+**`%t` and `%T`** print `?` and `UNKNOWN` where GNU prints `ef53` and
+`ext2/ext3`. `stat.rs` documents this at the call site: *"`statvfs` carries no
+filesystem-type field, so there is nothing to print. GNU prints `?` here too on
+a kernel whose `statfs` lacks `f_type`; this is that same case, not a new
+one."* A consequence of the syscall choice, already known.
+
+**`%a` and `%f`** were listed here as disagreeing and **do not**. They were an
+artefact of the harness — see below — and now pass.
+
+## TD-B-A-HARNESS-MUST-NOT-WRITE-TO-THE-THING-IT-MEASURES (lane B, 2026-09-11)
+
+`scripts/stat-diff.sh` reported `stat -f -c %a` and `stat -f -c %f` as
+differences. They are free-block counts, and **the harness was consuming the
+blocks**: it captures each side's stdout and stderr to temporary files, so
+writing ours' output allocated blocks on the very filesystem GNU was about to
+be asked about, a few milliseconds later.
+
+Demonstrated rather than reasoned about:
+
+    %f before four mktemps and one write : 238861778
+    %f after                             : 238861777
+
+Fixed by putting the capture files on `/dev/shm` — tmpfs, a different
+filesystem from the fixtures, confirmed by their differing `%i`. The two cases
+now pass, which is the check that the diagnosis was right.
+
+**This is the second harness in a day to have put itself into its own
+measurement.** `env-diff.sh` had to stop handing the two sides different `PATH`
+values, because `env` prints its environment and the harness's scaffolding was
+in it. Same shape, different resource: *a harness may not appear in the answer
+it is collecting.* Worth checking for in any future harness whose subject
+reports on a shared resource — free space, memory, process counts, open file
+descriptors.
+
+## TD-B-A-LINUX-TARGETED-HARNESS-CANNOT-MEASURE-A-SLATEOS-GATED-SUBJECT (lane B, 2026-09-11)
+
+**Every `*-diff.sh` here builds its subject for `x86_64-unknown-linux-gnu`, and
+47 of the standalone `userspace/` crates gate their real syscalls on
+`#[cfg(target_vendor = "slateos")]`.** Built for Linux those crates do not run
+the operation at all — they return a refusal stub — so a differential measures
+the stub and reports a landslide that says nothing about the program.
+
+`chown` is where this surfaced. `scripts/chown-diff.sh` reported:
+
+    coreutils   64 passed,  0 differed
+    standalone   3 passed, 61 differed
+
+and **43 of those 61 are the single sentence** `chown: cannot change ownership
+of 'file.txt': chown syscall unavailable on this platform`, which is
+`userspace/chown/src/main.rs:379` behind `#[cfg(not(target_vendor =
+"slateos"))]`. On the SlateOS target that arm does not exist. So the pair is
+**not decided** and the standalone has not been measured — only 18 of the 61 are
+real differences (the `user.group` dot form, unknown-user diagnostics, five
+`--from=` cases, the missing-operand messages, a `--ref=` abbreviation).
+
+**This is the same category as `uname -o`: a comparison against the wrong
+reference.** There the baseline was entitled to disagree; here the *subject* is
+not the program that ships. Both manufacture defects in proportion to how
+thorough the harness is, and neither is caught by any threshold.
+
+**What was checked rather than assumed, because a wrong answer here would
+invalidate work already done:**
+
+  * **Of the pairs already retired, only `df` ever contained the gate**, and its
+    recorded run contains **zero** platform-gate refusals — the standalone `df`
+    ran, produced a real five-filesystem table with ANSI escapes, and failed on
+    its own merits. That retirement stands.
+  * `date`'s standalone gates only its clock-**setting** path, which
+    `date-diff.sh` never exercises; its run has zero gate refusals too. That
+    record stands.
+  * `coreutils`' bins carry **no** such gate — they are portable, which is why
+    `coreutils` can score 64/64 here at all.
+
+**Affected among the pairs still open: `chown` (measured, mostly artifact) and
+`kill` (predicted — its gate will be on exactly the signal-sending path a `kill`
+harness would test).**
+
+**What would actually decide these.** Either build the standalone for the
+SlateOS target and run both halves under the boot test, or compare only the
+surface that is not gated — argument parsing, diagnostics, exit statuses — and
+say plainly that the behaviour was not measured. The second is cheap and is what
+the 18 real `chown` cases already are; the first is the only thing that settles
+the pair.
+
+## B-STRINGS-HAS-NO-DATA-SECTION-OPTION (lane B, 2026-09-11)
+
+`strings -d` / `--data` is absent. GNU's `strings` scans only the *initialised,
+loaded* sections of an object file with it, which is the difference between
+listing the strings a program will actually have in memory and listing every
+run of printable bytes in the file — including ones in debug info and symbol
+tables that never load.
+
+Both halves of the duplicate pair lacked it, so it survived the retirement of
+the standalone. `scripts/strings-diff.sh` covers it in three cases
+(`-d elf.bin`, `--data elf.bin`, alongside `-a`), all currently refusing.
+
+Related and cheaper: the diagnostics for a bad option *value* — `-n 0`,
+`-n -1`, `-n notanumber`, `-t q`, `-e q`, and each of those options given
+nothing — differ from GNU's wording in 10 of the 15 remaining failures. The
+exit statuses already agree, so this is sentences rather than behaviour.
+
+## B-COREUTILS-UPTIME-SILENTLY-IGNORES-EVERY-ARGUMENT — FIXED 2026-09-11, one half remaining
+
+The same defect as `date` below, in the other bin that has it:
+
+    $ uptime -s
+    ours   up 00:26                     <- the uptime DURATION
+    GNU    2026-09-11 19:24:28          <- the boot TIME
+
+    $ uptime -p
+    ours   up 00:26
+    GNU    up 26 minutes
+
+    $ uptime --nosuchoption ; echo $?
+    ours   up 00:26
+           0
+
+`userspace/coreutils/src/bin/uptime.rs` is 231 lines that read `/proc/uptime`
+and print it. Its header says so — *"Usage: uptime"* — and it parses nothing.
+The bare form differs too: GNU prints the time of day, the user count and three
+load averages, and ours prints none of them.
+
+`-s` is the one that matters most, because the two answers are not even the same
+*kind* of thing: a script asking when the machine booted gets how long it has
+been up, in a different format, with exit 0.
+
+**FIXED.** `uptime` now parses its command line through `coreutils::getopt`
+with procps-ng 4.0.4's own four-option table, and `-p`/`--pretty` and
+`-s`/`--since` are implemented exactly — verified interleaved against procps,
+where both print the same string including long-option abbreviations (`--pret`,
+`--si`) and every refusal matches at exit 1. `scripts/check-argv-ignored.py`
+reports `fixed: uptime now reads argv` and its baseline is down to one entry.
+
+*A note on the reference, since the standalone advertised more.* It carried
+`-r`, `--json` and `--raw`; **procps has none of those** — its table is exactly
+`--pretty`, `--help`, `--since`, `--version`. Read from `uptime --help` rather
+than inherited from the crate being replaced. Implementing the standalone's
+options would have been implementing an invention.
+
+**THE HALF THAT REMAINS** is the default line. procps prints
+` 20:48:41 up  1:21,  1 user,  load average: 0.10, 0.10, 0.09` and this prints
+only the `up …` part. The time of day and the load averages are cheap — the
+clock and `/proc/loadavg` — but **the user count comes from `utmp`, and this
+tree has no utmp reader**: there is no `who` bin and no shared module. Printing
+a plausible number rather than a measured one is the exact defect this file was
+just repaired for, so the field is absent rather than invented.
+
+**No harness was written for this pair, deliberately.** `uptime`'s output *is*
+the current moment: the time of day and three load averages that change
+continuously. Only `-s` (the boot time) is stable, so a differential could
+compare one case and the refusals. The evidence above is three direct
+measurements instead, which is proportionate to a program with three options —
+and the general prevention now lives in `scripts/check-argv-ignored.py` rather
+than in a harness per program.
+
+## B-COREUTILS-DATE-SILENTLY-IGNORES-EVERY-ARGUMENT (lane B, 2026-09-11)
+
+`userspace/coreutils/src/bin/date.rs` parses **no arguments at all**. It reads
+the clock, formats it one way, and prints it — whatever it was asked for.
+
+    $ date -d @0
+    ours   Fri Sep 11 23:45:44 UTC 2026     <- the current time
+    GNU    Thu Jan  1 00:00:00 UTC 1970
+
+Both exit 0. This is worse than an unimplemented option, and worse than the
+refusing stub §1006 forbids: **a refusal tells the caller it did not get what it
+asked for.** This answers a different question confidently. `date -d @0 +%s` in a
+script does not fail, it returns today.
+
+`scripts/date-diff.sh`, written 2026-09-11: **3 of 121 cases pass.** The three
+are the ones where the answer happens not to depend on the arguments.
+
+The file's own header says so plainly — *"Usage: date. Prints the current UTC
+date and time in a simple format. (No timezone support yet — always UTC.)"* —
+so this is not a hidden defect, it is an unfinished program that was never
+finished. What makes it worth an entry is that **it is the half §1005 would
+keep**, and the half the image ships.
+
+**The fix is the port described below, not a patch here.**
+
+## TD-B-DATE-IS-THE-SECOND-PAIR-THE-STANDALONE-WINS (lane B, 2026-09-11)
+
+`scripts/date-diff.sh`, 121 cases against a GNU coreutils 9.4 built from source:
+
+| half | passed | differed |
+|---|---|---|
+| `coreutils` | **3** | 118 |
+| standalone | **52** | 69 |
+
+Seventeen times as many passes. After `diff` (43 against 21) this is the second
+pair where the standalone is clearly the better half, and by a much wider
+margin. §1005 keeps `coreutils` as the one home, so the resolution is to **port
+the standalone into `coreutils/src/bin/date.rs` and then delete the crate** —
+not to delete the crate now.
+
+**What the standalone still gets wrong, which is the work list for that port:**
+
+| | cases | what |
+|---|---|---|
+| format specifiers | 30 | `%C`, `%g`, `%G`, `%V`, `%U`, `%W` (century and the ISO week-year family) and `%:z`/`%::z` (the extended zone forms) all differ while both sides exit 0. |
+| options absent | 20 | `--date=` (the `--opt=value` form — `-d X` works and `--date=X` does not), `--uct`, `--rfc-822`, `--rfc-2822`, `--rfc-3339`, `--reference=`, `-f`/`--file`. |
+| the `-d` language | 11 | `05:06:07`, `Mar 4 2021`, `4 March 2021`, a trailing `UTC`, a trailing `+0200`, `now`, `today` — all refused, all accepted by GNU. |
+| message shape | 7 | |
+| accepts what GNU refuses | 1 | `-d @0 -r stamped.txt`; GNU rejects the combination. |
+
+The 20 missing options are mostly the same `--opt=value`/abbreviation family
+that `uname` and `env` were fixed for by routing through `coreutils::getopt`, so
+a port should start there rather than end there.
+
+**A note on the harness: it has no "now" cases, deliberately.** `date` with no
+arguments prints the current time, and the two sides run milliseconds apart;
+when the second ticks between them the harness reports a difference that is a
+property of the clock. Every case is a function of its arguments — `-d @<epoch>`,
+`-d <fixed string>`, `-r <file with a stamped mtime>` — with `TZ` pinned to UTC.
+That covers the formatter completely, since `date -d @0 +%F` exercises the same
+code as `date +%F`. What it does not cover is reading the clock, which is one
+line.
+
+## B-HOSTNAME-RESOLVES-THE-DOMAIN-WITHOUT-ETC-HOSTS (lane B, 2026-09-11)
+
+`hostname -d` and `hostname -f` answer from the resolver's search domain and
+never consult `/etc/hosts`. net-tools resolves through nsswitch, so on this host:
+
+    /etc/hosts:  127.0.1.1  Logoplex3.localdomain  Logoplex3
+
+    net-tools    hostname -d  ->  localdomain
+                 hostname -f  ->  Logoplex3.localdomain
+    ours         hostname -d  ->  attlocal.net
+                 hostname -f  ->  Logoplex3.attlocal.net
+
+**Both exit 0**, so a script asking for this machine's FQDN gets a confident
+answer that disagrees with every other resolver user on the same box —
+`getent hosts`, `ping`, anything using `gethostbyname`. On a machine whose
+`/etc/hosts` is the *only* place the FQDN is written, which is the normal case
+for a host without DNS registration, ours invents one from the DHCP search
+domain instead.
+
+13 of `coreutils`' 50 differences and 14 of the standalone's 54 are this one
+cause, so it is the largest single family in the pair and survives the
+retirement.
+
+**The fix** is to resolve the name the way the C library does — `getaddrinfo`
+with `AI_CANONNAME` on the result of `gethostname`, which is what net-tools
+does — rather than reading `/etc/resolv.conf`'s `search` line. The distinction
+matters beyond this program: the resolver's search list is for *completing
+queries*, not for naming this host.
+
 ## B-COREUTILS-UNAME-PARSES-ITS-OWN-OPTIONS (lane B, 2026-09-11)
 
 `userspace/coreutils/src/bin/uname.rs` parses `argv` by hand rather than through
@@ -65106,6 +65414,221 @@ number is different** — not by a constant factor either: 12→16, 24→48,
 gets the sizes wrong and drops a directory has no correct output left; there is
 nothing else in it to be right about.
 
+**10 -> 9 (2026-09-11): `stat`, and one line explains 25 of our own failures.**
+`scripts/stat-diff.sh`, written today, 107 cases against a GNU coreutils 9.4
+built from source.
+
+**coreutils 75 passed, 30 differed. The standalone 44 passed, 61 differed.**
+
+The standalone lacks `--printf` entirely (12 cases) and long-option
+abbreviation, and its default report is wrong in 41 cases. Retired.
+
+**What the surviving half gets wrong — after a correction.** 25 of coreutils'
+30 were the default report's `File:` line, which ours quotes and GNU does not. I
+filed that as a defect and **it is not one**: it is design decision §371, taken
+deliberately because GNU's own quoting there is a `strstr` accident and because
+a file name must not be able to forge a line of `stat`'s own output. Those cases
+are now `xfail`s naming §371, and the honest score is **75 passed, 13 differed,
+19 differ on purpose**. Of those, two more turned out to be the harness
+writing to the filesystem it was measuring, so the score is now **77 passed, 11
+differed, 19 differ on purpose** — seven `stat -f` cases (one real defect in
+`%i`, plus `%t`/`%T` which are a documented consequence of using `statvfs`) and
+four missing-operand wordings.
+
+**Two things about the harness worth keeping.**
+
+*Both sides read the SAME files.* `stat` does not mutate, so there is no reason
+to give each side its own copy — and a strong reason not to: two copies have two
+different inode numbers, so `%i`, `%d` and `%b` could never be compared. Those
+are exactly the fields an implementation is most likely to get wrong, because
+they are the ones it cannot guess. **Give the subject a private copy only when
+it writes** — `patch-diff.sh` and `chown-diff.sh` do, this does not.
+
+*The multicall hazard was checked before the harness was written, not after.*
+`userspace/stat` dispatches on `argv[0]` and also serves `touch`, `mkfifo`,
+`readlink`, `realpath` and `ln`, so retiring the crate deletes six programs. All
+six were confirmed present in `coreutils/src/bin` first. A pair's row in
+`dup-bins-survey.py` names one program; the crate behind it may be six.
+
+**`chown` — MEASURED AND NOT DECIDED (2026-09-11).**
+`scripts/chown-diff.sh`, written today, 66 cases against a GNU coreutils 9.4
+built from source. **`coreutils` 64 passed, 0 differed** — every ownership
+change, every refusal, `-R` with each of `-H`/`-L`/`-P`, `-h` on a symlink and
+on a dangling one, `--from=`, `--reference=`, `-c`/`-v`/`-f`.
+
+The standalone scored 3 of 64, and **that number is not evidence**: 43 of its 61
+failures are `chown syscall unavailable on this platform`, a stub it compiles
+only when NOT built for SlateOS. See
+`TD-B-A-LINUX-TARGETED-HARNESS-CANNOT-MEASURE-A-SLATEOS-GATED-SUBJECT`. The pair
+stays open.
+
+*What the harness does establish* is that `coreutils`' half is correct against
+GNU on all 64, which is worth having on its own — and the 18 real differences on
+the standalone's side are recorded there.
+
+*Two safety properties of this harness, since `chown` mutates:* it refuses to
+run as root, because unprivileged `chown root f` is a refusal and a comparison
+while as root it is a change; and it verifies after building its fixtures that
+**no symlink resolves outside the fixture tree**, because `chown -R -L` follows
+directory symlinks and a link to `/etc` would have made the harness change
+something real.
+
+**11 -> 10 (2026-09-11): `strings`, decided by one data-loss case.**
+`scripts/strings-diff.sh`, written today, 71 cases against GNU Binutils 2.42.
+
+**coreutils 54 passed, 15 differed. The standalone 46 passed, 23 differed.**
+
+Eight passes apart, which on its own is the kind of margin this file has twice
+declined to act on (`patch`, `hostname`). What decides it is that the margin is
+**qualitative as well**:
+
+| | coreutils | standalone |
+|---|---|---|
+| `-e S` (8-bit characters) | correct | **drops data** |
+| `-s` / `--output-separator` | present | absent (3 cases) |
+| `strings -` (stdin) | refuses as GNU does | exits 0 |
+
+The `-e S` case is the one that matters. That encoding exists to say "high bytes
+are printable", and on `café latte`:
+
+    GNU         café latte
+    standalone  latte
+
+It drops the high byte **and everything before it**, with exit 0. A tool run to
+find strings in a binary silently returns fewer of them, which is the failure
+mode that tool cannot have.
+
+**What BOTH halves get wrong, and so survives the retirement** — filed as
+`B-STRINGS-HAS-NO-DATA-SECTION-OPTION`:
+
+  * `-d`/`--data` is absent from both. GNU scans only the *initialised, loaded*
+    sections with it, which is the option's whole point on an object file.
+  * The diagnostics for a bad option *value* differ on 10 of coreutils' 15 —
+    `-n 0`, `-n -1`, `-n notanumber`, `-t q`, `-e q` and the bare forms. The
+    exit statuses agree; the sentences do not.
+
+**A note on the fixtures.** They are written with `printf` escapes from inside
+the harness rather than checked in, because every interesting case here is a
+byte that is not text — a run exactly at the length threshold, a NUL, a high
+byte, UTF-16. A checked-in fixture is a file some editor has had an opinion
+about. The one exception is a copy of `/bin/true`, present so that the default
+"scan only the loaded sections" rule is exercised against a real object file;
+a fixture that is not an object file hides that rule completely.
+
+**12 -> 11 (2026-09-11): `cal`, where our half is perfect and the other fails
+everything.** `scripts/cal-diff.sh`, written today, 105 cases against
+util-linux's `cal`.
+
+**coreutils 103 passed, 0 differed. The standalone 0 passed, 101 differed.**
+
+`cal` is pure computation — every byte is a function of the arguments and of a
+calendar reform that happened in 1752 — so a disagreement is always a defect in
+one side and never an environment difference. The coreutils half gets all of it:
+September 1752 missing its eleven days, 1900 not a leap year while 2000 is, the
+ISO and US week numberings, `-j` renumbering every cell, `--reform=julian`, the
+three-month and whole-year layouts.
+
+**The standalone fails every case, for two causes:**
+
+| | cases | defect |
+|---|---|---|
+| **no trailing padding** | ~94 | util-linux pads *every* line to the calendar's width. Measured on `cal 1 2021`: its line lengths are `20 20 20 20 20 20 20 20`, ours are `16 20 20 20 20 20 20 2` — the month title is not padded to width and the last week row is two bytes. That padding is exactly what makes `-3` and `-y` line up in columns, so the layout options cannot work without it. |
+| **ANSI escapes on a pipe** | 7 | today's cell is wrapped in `ESC[7m` … `ESC[0m` on non-terminal output, in every month that contains today. Same defect as the retired `df`: highlighting must be gated on the output being a terminal. |
+
+Neither is visible to a comparison that trims whitespace, which is why this
+harness compares `od -An -c`. In the collapsed report `cal 1 2021` renders
+*identically* on both sides and is still a difference.
+
+**Two of the harness's own `xfail`s were wrong, and it said so.** `-h` and
+`--help` were written as expected-to-differ on the assumption that help text is
+always ours; they came back XPASS, because coreutils' `cal` reproduces
+util-linux's help exactly. Corrected to ordinary cases. An exemption that has
+stopped being true is worth more as a noisy failure than as a quiet allowance —
+which is the argument for counting XPASS at all.
+
+**13 -> 12 (2026-09-11): `env`, and a harness that measured nothing first.**
+`scripts/env-diff.sh`, written today, 61 cases against a GNU coreutils 9.4 built
+from source.
+
+**coreutils 39 passed, 20 differed. The standalone 18 passed, 41 differed.**
+
+The standalone's largest family is the program's core function: **16 cases where
+both sides exit 0 and the environment printed differs** — plain `env`, `env -0`,
+`env -u ZETA`. Eleven more leak `(os error N)` into diagnostics. Nine are
+options it does not have.
+
+**What the surviving half still gets wrong is the same root cause as `uname`:**
+8 of its 20 are `-S`/`--split-string` (absent entirely) and long-option
+abbreviations (`--unse`, `--ign`, `--nu`), because `env.rs` is one of the
+sixteen coreutils bins that still parse `argv` by hand instead of through
+`coreutils::getopt`. Three more exit 0 where GNU refuses — `env -u` with no
+argument, `env -C target` with no command.
+
+## Two things about the harness, both of which cost a run
+
+**`env` prints its own environment, and its environment contains `PATH`.** Every
+other harness here reaches its subject through `$bindir/ours/NAME` or
+`$bindir/gnu/NAME` — two *different* directories, which are the whole of `PATH`
+for one invocation. For this subject that would hand the two sides different
+`PATH` values by construction, so every case that dumps the environment differs
+on the harness's own scaffolding. "Normalising `PATH` away" would have hidden a
+difference in the variable most worth comparing. Instead there is **one**
+directory whose single entry is re-pointed between runs: identical `PATH`,
+identical `argv[0]`, nothing filtered. *A harness may not put its own identity
+into the subject's input* — visible here only because `env` is the program whose
+job is to show you that input.
+
+**The first run reported "59 passed, 0 differed" having compared nothing.** The
+fixed environment was built by a helper and expanded unquoted, so
+`WITH_SPACE=a b` split in two and the outer `env` read `b` as the command to
+run, with `env <case args>` as its arguments. Every case failed identically on
+both sides, which reads as agreement.
+
+**The only thing in the output that said so was the `xfail` pair.** `--help` and
+`--version` are *required* to differ, because that text is ours; they came back
+`XPASS`. A harness needs at least one case that must fail for the same reason a
+gate needs a refusal probe — without it, "everything agreed" and "nothing ran"
+print the same line.
+
+**14 -> 13 (2026-09-11): `hostname`, on a thin margin and one asymmetry.**
+`scripts/hostname-diff.sh`, written today, 61 cases against net-tools 3.23.
+
+**coreutils 7 passed, 50 differed. The standalone 3 passed, 54 differed.**
+
+**Say the honest thing first: neither half is usable, and four cases is not a
+verdict.** This is nothing like `uname`'s 71 to 43. It is recorded as a
+retirement because §1005 makes `coreutils` the home and nothing here shows it to
+be the *worse* half — not because the measurement settles the programs.
+
+**The one asymmetry that is worth more than the count.** `hostname -s newname`:
+
+    net-tools   usage message, rc=255 -- a display flag and a set operand
+                cannot be combined
+    standalone  prints `Logoplex3`, rc=0 -- the operand is silently ignored
+
+A user typing that to set the name gets a success, a printed hostname, and an
+unchanged system. `coreutils` refuses it. That is the difference between the two
+halves that has consequences, and it is the shape this tree keeps finding: a
+step that reports success is not evidence it did anything.
+
+**What BOTH halves get wrong, which is the more useful output of the harness**
+— filed as `B-HOSTNAME-RESOLVES-THE-DOMAIN-WITHOUT-ETC-HOSTS`:
+
+| | coreutils | standalone | |
+|---|---|---|---|
+| domain resolution | 13 | 14 | `-d` answers `attlocal.net` where net-tools answers `localdomain`; `-f` likewise. net-tools resolves through nsswitch, so `/etc/hosts` (`127.0.1.1 Logoplex3.localdomain`) wins; ours takes the search domain from the resolver and never consults `/etc/hosts`. Both exit 0, so a script asking for the FQDN gets a confident wrong answer. |
+| missing options | 19 | 16 | `-a`/`--alias`, `-y`/`--yp`/`--nis`, `-A`/`--all-fqdns`, `-b`/`--boot` are absent from both. |
+| `-F FILE` | 16 | 23 | reading a name from a file disagrees on every fixture — empty, blank, spaced, two-line, commented. |
+| `(os error 13)` | ⊂ | ⊂ | `cannot write /proc/sys/kernel/hostname: Permission denied (os error 13) (are you root?)` where net-tools says `you must be root to change the host name`. |
+
+**A note on the harness, because this subject is unlike every other one here:
+`hostname` WRITES TO THE MACHINE.** `hostname foo` sets the system's name and
+there is no dry-run flag. As an ordinary user every such call is refused, which
+is why the operand cases above are comparisons at all. Run as root they would
+stop being comparisons and become edits — twice each, on a host two other lanes
+are using — so the harness checks `id -u` and refuses outright. That guard is
+specific to this one subject, not a rule for the family.
+
 **15 -> 14 (2026-09-11): `uname`, with a new harness.**
 `scripts/uname-diff.sh`, written today: 109 cases, and close to exhaustive
 rather than representative, because `uname` has no input and nine flags so its
@@ -78519,7 +79042,59 @@ constant chosen beside the fill) is the one worth keeping.
 
 ---
 
-### TD-C-TEXT-ON-THE-LIGHT-THEMES-TWO-PALEST-SURFACES-IS-BELOW-THE-CONTRAST-FLOOR — 2026-08-24 — OPEN, **surveyed 2026-09-03: wider than this heading says**
+### TD-C-TEXT-ON-THE-LIGHT-THEMES-TWO-PALEST-SURFACES-IS-BELOW-THE-CONTRAST-FLOOR — 2026-08-24 — **CLOSED 2026-09-11 by §826**
+
+**Closed.** The operator chose `#000000` for the light theme's main text
+(`design-decisions.md` §826). Every figure in the table below is superseded;
+measured again through `palette_check::text_on_background` on 2026-09-11:
+
+| card | light, then | light, now |
+|---|---|---|
+| `base` | 7.06 | 18.57 |
+| `mantle` | 6.57 | 17.27 |
+| `crust` | 6.04 | 15.87 |
+| `surface0` | 5.17 | 13.60 |
+| `surface1` | **4.39** | **11.55** |
+| `surface2` | **3.69** | **9.71** |
+
+**It was fixed on 2026-09-09 and nobody noticed until 2026-09-11.** The test
+that pinned this entry --
+`palette_check::tests::the_two_pale_surfaces_measure_what_the_known_issue_says_they_do`
+-- went red the moment §826 landed, because it asserted the *defect*: that
+`surface1` measures 4.39 and is under the floor. It stayed red and unseen for
+two days, because `palette_check` sits behind the `testing` feature and
+`cargo test -p appearance` does not enable it. It surfaces under
+`cargo test -p appearance --features testing`, or in any invocation that also
+builds a crate which enables that feature -- feature unification then turns it
+on for `appearance`'s own test binary.
+
+**Exactly two crates do:** `gui/compositor` and `gui/desktop`, both as
+dev-dependencies. `apps/settings` does *not* -- it enables
+`settingsfile/testing` only, which is easy to misread as the same thing.
+Measured rather than assumed, because the first version of this paragraph said
+"a crate that enables it" and I could not have named which:
+
+| invocation | tests in `appearance` |
+|---|---|
+| `-p appearance` | 102 — `palette_check` absent |
+| `-p appearance -p settings` | 102 — still absent |
+| `-p appearance -p guitk -p compositor` | **114** — present, and red |
+
+So `cargo test --workspace` *does* catch it, since `compositor` and `desktop`
+are members. What does not is the per-crate command this file's own workflow
+recommends, which is what was being run.
+
+**Two things worth carrying from that.** A test written to pin a defect becomes
+a false alarm the day the defect is fixed, and reads as a regression rather than
+as success -- it is now rewritten to assert the *fix*, so a return under 4.5
+reopens this entry by name. And a test behind a feature flag nobody passes
+reports nothing at all; `cargo test -p <crate>` is not the same command as
+`cargo test --workspace` and the difference is invisible until it matters.
+
+The original entry follows, unaltered, because its survey is still the record of
+how the measurement was made.
+
+
 
 **In short.** The desktop's light theme has six background shades a card or
 panel can be painted. On the two palest of them, ordinary text is below the
@@ -128006,6 +128581,61 @@ used *only* in exempt positions, which is the property that actually matters.
 
 **Also found in the same survey:** `overlay1` and `overlay2` are declared and
 used **zero** times anywhere in `gui` or `apps`. They are dead palette rungs.
+
+## TD-C-THE-COMPOSITOR-FRAME-BUDGET-HAS-NO-INSTRUMENT
+
+**Date:** 2026-09-11. **Lane:** C. Found by lane A while checking whether the
+border conversion cost anything.
+
+**In short:** `performance-targets.md` says a full desktop must be composited in
+under 2 ms at 4K, or the machine misses a 144 Hz refresh. Nothing measures
+whether it does. The compositor times its own frames and the only thing anyone
+asserts about that number is that it is greater than zero.
+
+**The two halves, because they are different problems:**
+
+1. **No benchmark series.** The suite records 108 series — 35 of them `vfs`,
+   then crypto, net, http, ipc, sched, page, heap and a handful of others — and
+   **none** matching compositor, gui, draw, render, frame, blit, paint or
+   surface. There is no `benches/` directory under `gui/` and no criterion
+   dependency in any gui crate. Lane A checked this against the last
+   Hyper-V/WHPX record rather than inferring it.
+2. **The runtime measurement exists and is unchecked.** `gui/compositor/src/lib.rs`
+   records `last_frame_time_us` every frame. `grep` finds exactly one assertion
+   on it, at `lib.rs:9766`: `> 0`, with the message "the frame took no
+   measurable time, so it did no work". That is a test that the clock runs, not
+   that the budget is met. **This is the sharper half of the finding** — the
+   instrument is already there and nobody reads it.
+
+**What it means for the border conversion.** 436 draw sites moved from a fill to
+a stroke through a different render path, and the tree would report the same
+thing — silence — whether that cost nothing or ten times. Two things are now
+pinned in `gui/appearance/src/surface.rs` so at least the question is answerable
+without a benchmark:
+`neither_theme_asks_the_compositor_for_more_work_than_the_other` (every
+`Surface` kind emits the same command count in both themes, so the conversion
+adds no commands) and
+`an_outline_touches_far_fewer_pixels_than_the_fill_it_replaces` (a 100×40 box is
+4,000 pixels filled and 276 outlined). Those bound the risk; they do not measure
+the frame.
+
+**Proper fix, and it is split across two lanes.** The harness is lane A's
+(`bench/**` and the boot test) and they have offered to build that half. What a
+meaningful compositor benchmark *composites* is a design question in this
+subsystem and is mine: a plausible fixture is a full desktop at 4K — taskbar,
+two overlapping windows with real content, a menu open — composed repeatedly,
+reported as a series so `history.jsonl` can show drift. Neither half is useful
+alone.
+
+**Cheaper interim step, entirely in this lane:** raise that `> 0` assertion to a
+real bound in a controlled case. It will not be 2 ms at 4K on a developer
+machine under emulation — lane A measured run-to-run noise at a median 1.10x
+with a p90 of 1.75x, so a tight bound would be flaky — but an order-of-magnitude
+ceiling would catch a disaster, which is more than zero catches.
+
+**If never fixed:** the one performance target this subsystem has, stated with a
+number and a reason, remains unmeasured. Any change to the render path is
+unfalsifiable, and the next one will not have someone asking the question.
 
 ## TD-C-THE-SHELL-NEEDS-CONVERTING-BY-HAND-NOT-BY-SWEEP
 

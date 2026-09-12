@@ -967,7 +967,23 @@ fn main() {
                 .output_file
                 .clone()
                 .unwrap_or_else(|| file_path.clone());
-            if opts.remove_empty && output.is_empty() && opts.output_file.is_none() {
+            // A PATCH WHOSE DESTINATION IS /dev/null DELETES THE FILE, and it
+            // does so with or without `-E`. Measured: `diff -u --label x/a/keep.txt
+            // --label /dev/null keep.txt /dev/null` applied by GNU leaves no
+            // `keep.txt` at all, while this build wrote a one-byte file -- the
+            // empty join plus the trailing newline the original had.
+            //
+            // `-E` is the WEAKER rule, not the same one: it removes a file the
+            // patch merely emptied, whichever way the patch was spelled. A
+            // `/dev/null` destination says outright that the file is gone. I had
+            // implemented only the flag and assumed it covered both, which the
+            // harness disproved on a case that passes no flag at all.
+            //
+            // Reversed, a deletion is a creation, so the rule is off under `-R`.
+            let is_deletion = fp.new_path == "/dev/null" && !opts.reverse;
+            if (is_deletion || (opts.remove_empty && output.is_empty()))
+                && opts.output_file.is_none()
+            {
                 // `-E` removes a file the patch has emptied. Measured: the file
                 // is gone from the tree, not left at zero length.
                 if let Err(e) = fs::remove_file(&dest) {

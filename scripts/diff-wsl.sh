@@ -391,6 +391,84 @@ if ! command -v wslpath >/dev/null 2>&1; then
   exec wsl -e env "$@"
 fi
 
+# --- 1b. the bound, applied once to the whole harness --------------------------
+#
+# WHY THERE IS A BOUND AT ALL. An `awk` case ran for 35 minutes and survived
+# every kill available from the Windows side. `run-timeout.py` bounds a Windows
+# process TREE, and `wsl.exe` hands work to a separate VM, so nothing Linux-side
+# is a Windows descendant and the Job Object cannot reach it. Lane A has
+# narrowed that runner's docstring to say so. The bound therefore has to be
+# Linux-side, which is here.
+#
+# WHY IT WRAPS THE HARNESS AND NOT EACH CASE. Per-case was tried first, twice.
+# Once as a `timeout` at every invocation site, which is an enumeration with one
+# entry per harness: it misses the next harness BY CONSTRUCTION and the miss is
+# silent, and it was already wrong when written -- a grep for the invocation
+# shape missed `sort-diff.sh`, `printf-diff.sh` and `seq-diff.sh`, which reach
+# the same binaries by a different spelling. Then as a wrapper script standing
+# in `$bindir` where the symlink goes, which covers every harness including the
+# unwritten ones -- but a wrapper is in the subject's EXEC PATH, and anything
+# there can be seen. That one was caught by `nohup-diff.sh` falling from 75-0 to
+# 74-1 on its `2>&-` case, and the measurement is worth keeping:
+#
+#     caller closes fd 2, then...      what the subject finds
+#     direct (no wrapper)              0 1 2      fd 2 still closed
+#     through a #!/bin/sh wrapper      0 1 2 3    REOPENED
+#     through a #!/bin/bash wrapper    0 1 2 3    REOPENED
+#     through `timeout`                0 1 2      unchanged
+#     through `bash -c 'exec -a ...'`  0 1 2      unchanged
+#
+# A shell reopens the standard descriptors before the script it interprets ever
+# runs, so no shell-shebang wrapper can be transparent, and "stderr is closed"
+# is a case this family deliberately tests. THE BOUND MUST NOT BE IN THE
+# SUBJECT'S EXEC PATH. Wrapping the harness keeps it out entirely: the subject
+# is launched exactly as before, by the same symlink, with the same `argv[0]`,
+# the same `PATH` and the same descriptors.
+#
+# WHY THAT STILL CATCHES A RUNAWAY. `timeout` puts its child in a new process
+# group and signals the GROUP, so everything the harness spawned dies with it.
+# Measured, not assumed: a harness with a backgrounded `sleep 300` was killed at
+# the bound and the grandchild went with it. That is the property that matters
+# here -- the 35-minute `awk` was an orphan, not a slow case.
+#
+# The cost is granularity: a hung case burns the harness's whole allowance
+# rather than its own. That is the right trade, because a bound tight enough to
+# be precise is tight enough to fire on a slow-but-finite case, and a flaky
+# verdict gets a check switched off. `DIFF_TIMEOUT` raises it for a harness that
+# genuinely needs longer; the six language harnesses -- `awk`, `tar`, `sh`,
+# `ed`, `expr`, `calc` -- keep their own inner per-case `timeout` as a fast
+# fail, which is safe because `timeout` is transparent in the table above.
+#
+# `SLATEOS_DIFF_BOUNDED` deliberately does NOT start with `DIFF_`: the forwarding
+# enumeration above sweeps every `DIFF_*` name across the WSL boundary, and a
+# bound that announced itself to the far side would leave the far side unbound.
+# It is unset the moment it has been read, so no subject ever sees it.
+if [ -z "${SLATEOS_DIFF_BOUNDED:-}" ]; then
+  if ! command -v timeout >/dev/null 2>&1; then
+    echo "$DIFF_PROG-diff: no 'timeout' here, so the run cannot be bounded." >&2
+    echo "  An unbounded case is unreachable from the Windows side; that is" >&2
+    echo "  the failure this exists to prevent, so this is fatal." >&2
+    exit 1
+  fi
+  export SLATEOS_DIFF_BOUNDED=1
+  # Re-exec with the shell that is ALREADY running this, not a hardcoded
+  # `bash`. `all-diff.sh` chooses the interpreter from each harness's shebang
+  # -- `case $(head -n 1 "$h") in *bash) run=bash ;; *) run=sh ;; esac` -- and
+  # `osh-diff.sh` is `#!/bin/sh`. Hardcoding `bash` here would silently move
+  # that one harness onto a different shell as a side effect of bounding it,
+  # which is the same class of mistake as the exec-path wrapper: a change
+  # that was supposed to be invisible to the subject, visible.
+  #
+  # `$BASH` is set by bash and unset by dash, so this picks each correctly on
+  # a host where /bin/sh is a separate binary, which is the case here. The
+  # gap it does not cover is bash invoked AS sh: `$BASH` is still set, so the
+  # re-exec would drop POSIX mode. No harness does that today, and the check
+  # that would catch it is `check-diff-preamble-order.py` growing a shebang
+  # assertion rather than anything here.
+  exec timeout -k 10 "${DIFF_TIMEOUT:-1800}" "${BASH:-sh}" "$0" "$@"
+fi
+unset SLATEOS_DIFF_BOUNDED
+
 # --- 2. one stream back across the boundary -----------------------------------
 # `wsl.exe` shares a file offset with no other writer -- not the shell that
 # launched it, not a `cat` relaying its pipe, and not between its own two

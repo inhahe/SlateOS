@@ -233,7 +233,19 @@ GNU_NAME = {
 # converted?", which is a note the sweep prints routinely for bins that really
 # have none, and the summary still says "0 disagreement(s)".
 TABLE_HEAD_RE = re.compile(r"const\s+LONG_OPTIONS\s*:\s*&\[\([^\]]*?\)\]\s*=\s*")
-ALIAS_HEAD_RE = re.compile(r"const\s+ALIASES\s*:\s*&\[\(&str,\s*&str\)\]\s*=\s*")
+# The NAME of the alias table is not fixed. `chmod.rs` and `chown.rs` call
+# theirs `LONG_ALIASES`, and a regex demanding the bare word `ALIASES` could not
+# see either -- so two bins silently had no aliases as far as this gate was
+# concerned, which is the same silent-miss shape as the collapsed-table note
+# above. An optional screaming-snake prefix covers both spellings and any
+# future one.
+#
+# THE TYPE IS DOING REAL WORK and must stay pinned to `&[(&str, &str)]`.
+# `kill.rs` has a `const ALIASES: &[(i32, &str)]` holding signal-name aliases
+# -- POLL for 29, IOT and ABRT for 6 -- which are not long options at all.
+# Matching on the name alone would pull that table in and invent
+# disagreements out of it.
+ALIAS_HEAD_RE = re.compile(r"const\s+(?:[A-Z][A-Z0-9_]*_)?ALIASES\s*:\s*&\[\(&str,\s*&str\)\]\s*=\s*")
 ENTRY_RE = re.compile(r'\(\s*"([^"]*)"\s*,')
 PAIR_RE = re.compile(r'\(\s*"([^"]*)"\s*,\s*"([^"]*)"\s*\)')
 

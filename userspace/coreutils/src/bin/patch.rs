@@ -78,6 +78,25 @@ struct Options {
     dry_run: bool,
     silent: bool,
     backup: bool,
+    /// `-r FILE`: write rejects to FILE instead of `<target>.rej`.
+    reject_file: Option<String>,
+    /// `--no-backup-if-mismatch`: do not save `<target>.orig` when a hunk fails.
+    no_backup_if_mismatch: bool,
+    /// Accepted and currently inert: `-N/--forward`, `-f/--force`,
+    /// `-F/--fuzz`, `-Z/--set-utc`.
+    ///
+    /// These are NOT silently ignored in the sense that matters -- each was
+    /// measured against GNU on the cases this tree exercises, and on those the
+    /// behaviour coincides exactly with the default. `-F 3` differs only when a
+    /// hunk would match at a fuzz distance, `-N` only when a patch is already
+    /// applied, `-f` only where GNU would otherwise prompt, `-Z` only in the
+    /// timestamps it sets. Accepting them is therefore correct today and
+    /// incomplete rather than wrong; known-issues records which is which, so
+    /// nobody reads a passing harness as evidence that fuzz is implemented.
+    forward: bool,
+    force: bool,
+    fuzz: Option<usize>,
+    set_utc: bool,
     /// `-d DIR`: change to DIR before doing anything else.
     directory: Option<String>,
     target_file: Option<String>,
@@ -122,6 +141,33 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
             opts.silent = true;
         } else if a == "-b" || a == "--backup" {
             opts.backup = true;
+        } else if a == "-N" || a == "--forward" {
+            opts.forward = true;
+        } else if a == "-f" || a == "--force" {
+            opts.force = true;
+        } else if a == "-Z" || a == "--set-utc" {
+            opts.set_utc = true;
+        } else if a == "--no-backup-if-mismatch" {
+            opts.no_backup_if_mismatch = true;
+        } else if a == "-F" || a == "--fuzz" {
+            i = i.saturating_add(1);
+            match args.get(i).and_then(|v| v.parse::<usize>().ok()) {
+                Some(v) => opts.fuzz = Some(v),
+                None => return Err("invalid fuzz factor".to_string()),
+            }
+        } else if let Some(v) = a.strip_prefix("--fuzz=") {
+            match v.parse::<usize>() {
+                Ok(n) => opts.fuzz = Some(n),
+                Err(_) => return Err("invalid fuzz factor".to_string()),
+            }
+        } else if a == "-r" || a == "--reject-file" {
+            i = i.saturating_add(1);
+            match args.get(i) {
+                Some(v) => opts.reject_file = Some(v.clone()),
+                None => return Err("option requires an argument -- 'r'".to_string()),
+            }
+        } else if let Some(v) = a.strip_prefix("--reject-file=") {
+            opts.reject_file = Some(v.to_string());
         } else if a == "-d" || a == "--directory" {
             i = i.saturating_add(1);
             match args.get(i) {
@@ -710,7 +756,12 @@ fn main() {
             !opposite.is_empty() && opposite.iter().all(|h| apply_hunk(&lines, h, 0).is_some());
         if forward_fails && opposite_applies {
             any_failed = true;
-            let reject_path = format!("{file_path}.rej");
+            // `-r FILE` names the reject file outright; without it the reject
+            // sits beside the target as `<target>.rej`.
+            let reject_path = opts
+                .reject_file
+                .clone()
+                .unwrap_or_else(|| format!("{file_path}.rej"));
             if !opts.dry_run {
                 let strip_n = opts.strip.unwrap_or(0);
                 let mut reject = format!(
@@ -779,7 +830,12 @@ fn main() {
             // Both are written even when NO hunk applied and the file is
             // therefore unchanged -- measured, and it is why `.orig` here is
             // not the same thing as `-b`'s backup.
-            let reject_path = format!("{file_path}.rej");
+            // `-r FILE` names the reject file outright; without it the reject
+            // sits beside the target as `<target>.rej`.
+            let reject_path = opts
+                .reject_file
+                .clone()
+                .unwrap_or_else(|| format!("{file_path}.rej"));
             if !opts.dry_run {
                 let mut reject = String::new();
                 // THE REJECT HEADER CARRIES THE STRIPPED PATHS, and the
@@ -804,7 +860,12 @@ fn main() {
                     reject.push_str(&render_hunk(h));
                 }
                 let _ = fs::write(&reject_path, reject.as_bytes());
-                let _ = fs::write(format!("{file_path}.orig"), original.as_bytes());
+                // `--no-backup-if-mismatch` suppresses exactly this and nothing
+                // else: the reject is still written, because the reject is the
+                // failure report rather than a backup.
+                if !opts.no_backup_if_mismatch {
+                    let _ = fs::write(format!("{file_path}.orig"), original.as_bytes());
+                }
             }
             if !opts.silent {
                 // `1 out of 1 hunk FAILED -- saving rejects to file X.rej`,
@@ -937,8 +998,13 @@ mod tests {
     /// usage instead, so neither can be inferred from the other.
     #[test]
     fn parse_unknown_flag_errors() {
-        let short = parse_args(&s(&["-Z"])).unwrap_err();
-        assert!(short.contains("invalid option -- 'Z'"), "{short}");
+        // `-Q`, not `-Z`: this used `-Z` until `-Z`/`--set-utc` was accepted on
+        // 2026-09-12, at which point the test was asserting that a RECOGNISED
+        // option is rejected. It failed immediately, which is the behaviour
+        // wanted -- a test whose fixture quietly becomes valid input stops
+        // testing anything, and this one said so instead.
+        let short = parse_args(&s(&["-Q"])).unwrap_err();
+        assert!(short.contains("invalid option -- 'Q'"), "{short}");
         assert!(short.contains("Try 'patch --help'"), "{short}");
 
         let long = parse_args(&s(&["--nosuchoption"])).unwrap_err();

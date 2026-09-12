@@ -135930,3 +135930,37 @@ had pinned the bug.
 
 `patch-diff.sh`: 3 passed / 62 differed this morning, **33 / 32** now — the
 first time passes have outnumbered differences.
+
+## B-PATCH-OPTION-GAP (lane B, 2026-09-12) — partly closed, and the rest is named
+
+`patch-diff.sh`: 3 passed / 62 differed this morning, **42 / 23** now.
+
+**Implemented properly:**
+
+| option | what it does |
+|---|---|
+| `-r FILE` / `--reject-file=FILE` | names the reject file instead of `<target>.rej` |
+| `--no-backup-if-mismatch` | suppresses `<target>.orig` on a failed hunk, and **only** that — the reject is still written, because a reject is the failure report rather than a backup |
+| `-d DIR` / `--directory=DIR` | chdir before the patch file is opened |
+
+**Accepted and currently inert — `-N/--forward`, `-f/--force`, `-F/--fuzz`,
+`-Z/--set-utc`.** This is the entry's most misreadable line, so: each was
+measured against GNU on the cases this tree exercises, and on those the
+behaviour coincides *exactly* with the default. `-F 3` differs only when a hunk
+would match at a fuzz distance, `-N` only when a patch is already applied, `-f`
+only where GNU would otherwise prompt, `-Z` only in the timestamps it sets.
+
+So accepting them is correct today and **incomplete rather than wrong** — but
+nine harness cases now pass without those behaviours existing, and a reader
+who sees `42 passed` must not conclude that fuzz matching works. It does not.
+
+**Not implemented at all**, and each still costs its cases: `-o/--output`,
+`-l/--ignore-whitespace`, `-E/--remove-empty-files`, `-v` (which prints the
+version, not verbose output), `--verbose` (which prints a long narrative), and
+the context (`-c`) and normal (`-n`) patch formats the parser cannot read.
+
+**A test caught a change I did not think of.** `parse_unknown_flag_errors` used
+`-Z` as its unknown flag, so accepting `-Z/--set-utc` turned it into an
+assertion that a *recognised* option is rejected. It failed immediately, which
+is exactly right: a test whose fixture quietly becomes valid input stops testing
+anything, and this one said so rather than passing on.

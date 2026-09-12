@@ -424,17 +424,35 @@ fn try_hunk_at(lines: &[String], hunk: &Hunk, pos: usize) -> bool {
     true
 }
 
-/// Reverse a hunk: swap add and remove.
+/// Reverse a hunk: swap add and remove, and REORDER each change block.
+///
+/// Swapping the types alone is not enough, and the difference is visible in a
+/// `.rej` file. A unified diff writes every removal of a change block before
+/// every addition, so reversing `-bravo` / `+BRAVO` in place yields
+/// `+bravo` / `-BRAVO` -- the right lines with the wrong sign order, which is
+/// not a unified diff any more. GNU emits `-BRAVO` / `+bravo`.
+///
+/// It applied correctly either way, which is why this survived: `apply_hunk`
+/// reads the lines by type and does not care about their order. Only when the
+/// reversed hunk is WRITTEN OUT -- as a reject, for a human to re-apply -- does
+/// the order become part of the answer.
 fn reverse_hunk(hunk: &Hunk) -> Hunk {
-    let reversed_lines = hunk
-        .lines
-        .iter()
-        .map(|l| match l {
-            HunkLine::Context(s) => HunkLine::Context(s.clone()),
-            HunkLine::Add(s) => HunkLine::Remove(s.clone()),
-            HunkLine::Remove(s) => HunkLine::Add(s.clone()),
-        })
-        .collect();
+    let mut reversed_lines: Vec<HunkLine> = Vec::with_capacity(hunk.lines.len());
+    let mut pending_adds: Vec<HunkLine> = Vec::new();
+    for line in &hunk.lines {
+        match line {
+            // Was an addition, becomes a removal: those lead a change block.
+            HunkLine::Add(t) => reversed_lines.push(HunkLine::Remove(t.clone())),
+            // Was a removal, becomes an addition: held back until the block ends.
+            HunkLine::Remove(t) => pending_adds.push(HunkLine::Add(t.clone())),
+            HunkLine::Context(t) => {
+                reversed_lines.append(&mut pending_adds);
+                reversed_lines.push(HunkLine::Context(t.clone()));
+            }
+        }
+    }
+    reversed_lines.append(&mut pending_adds);
+    let reversed_lines = reversed_lines;
 
     Hunk {
         old_start: hunk.new_start,
@@ -664,6 +682,60 @@ fn main() {
         } else {
             fp.hunks.clone()
         };
+        // WOULD THE OTHER ORIENTATION APPLY? GNU asks this before calling a
+        // hunk failed, because the answer changes the diagnosis entirely: a
+        // patch that fails forward but applies backward has almost certainly
+        // been applied already, and a patch given `-R` that only applies
+        // forward was never reversed. Either way the useful message is not
+        // `Hunk #1 FAILED`.
+        //
+        // Measured, and the two spellings differ by which mistake was made:
+        //
+        //   -R on a forward patch:  Unreversed patch detected!  Ignore -R? [n]
+        //   no -R, already applied: Reversed (or previously applied) patch
+        //                           detected!  Assume -R? [n]
+        //
+        // then `Apply anyway? [n]`, `Skipping patch.`, and a count saying
+        // IGNORED rather than FAILED. Two spaces after the `!` in both.
+        //
+        // No `.orig` is written here, unlike a real hunk failure: nothing was
+        // touched, so there is nothing to have preserved.
+        let opposite: Vec<Hunk> = if opts.reverse {
+            fp.hunks.clone()
+        } else {
+            fp.hunks.iter().map(reverse_hunk).collect()
+        };
+        let forward_fails = hunks.iter().any(|h| apply_hunk(&lines, h, 0).is_none());
+        let opposite_applies =
+            !opposite.is_empty() && opposite.iter().all(|h| apply_hunk(&lines, h, 0).is_some());
+        if forward_fails && opposite_applies {
+            any_failed = true;
+            let reject_path = format!("{file_path}.rej");
+            if !opts.dry_run {
+                let strip_n = opts.strip.unwrap_or(0);
+                let mut reject = format!(
+                    "--- {}\n+++ {}\n",
+                    strip_path(&fp.old_path, strip_n),
+                    strip_path(&fp.new_path, strip_n)
+                );
+                for h in &hunks {
+                    reject.push_str(&render_hunk(h));
+                }
+                let _ = fs::write(&reject_path, reject.as_bytes());
+            }
+            if !opts.silent {
+                let detected = if opts.reverse {
+                    "Unreversed patch detected!  Ignore -R? [n] "
+                } else {
+                    "Reversed (or previously applied) patch detected!  Assume -R? [n] "
+                };
+                let n = hunks.len();
+                let plural = if n == 1 { "hunk" } else { "hunks" };
+                let mut out = Stream::stdout();
+                let _ = out.write_all(format!("{detected}\nApply anyway? [n] \nSkipping patch.\n{n} out of {n} {plural} ignored -- saving rejects to file {reject_path}\n").as_bytes());
+            }
+            continue;
+        }
 
         for (hunk_idx, hunk) in hunks.iter().enumerate() {
             match apply_hunk(&lines, hunk, offset) {
@@ -1066,12 +1138,19 @@ mod tests {
         assert_eq!(r.old_count, 4);
         assert_eq!(r.new_start, 1);
         assert_eq!(r.new_count, 2);
+        // REMOVALS BEFORE ADDITIONS, which is what a unified diff is. This
+        // asserted the in-place order until 2026-09-12 -- `Add` then `Remove`,
+        // the positions the originals happened to occupy -- and that is not a
+        // unified diff. It applied correctly either way, because `apply_hunk`
+        // reads lines by type and ignores their order, so the defect only
+        // surfaced when a reversed hunk was WRITTEN OUT as a `.rej` for a human
+        // to re-apply. GNU emits `-new` then `+old` here.
         assert_eq!(
             r.lines,
             vec![
                 HunkLine::Context("ctx".into()),
-                HunkLine::Add("old".into()),
                 HunkLine::Remove("new".into()),
+                HunkLine::Add("old".into()),
             ]
         );
     }

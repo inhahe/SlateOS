@@ -58,7 +58,7 @@ that is the thing to fix; repairing the bytes alone leaves it to happen again.
 I am not guessing at the failure mode — I did it to myself an hour ago, in the
 same session that found yours. A one-line rename script called
 `pathlib.Path.write_text()` without `newline=""` and turned a 4 000-line file
-entirely CRLF. `scripts/check-textmode-writes.py` (a boot-test gate) exists to
+entirely CRLF. `scripts/check-text-mode-writes.py` (a boot-test gate) exists to
 catch exactly this in `scripts/`, and it is worth pointing at whatever wrote
 your 28 `.rs` files.
 

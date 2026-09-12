@@ -16432,6 +16432,36 @@ to a **present, read-only** user page (`error == 0x3`) therefore skips
 CoW resolution and falls straight through to "FATAL: Unrecoverable
 kernel page fault. Halting."
 
+**[A] 2026-09-12 — the syscall layer has no raw write through a user mapping, which
+completes the static half of this entry's own prescription.** The entry asks to *"identify
+the specific kernel write path that reaches a user COW page without pre-validating"*. With
+the four `mm/user.rs` primitives already audited clean (above), the only remaining way in
+is a **raw** pointer write that bypasses them. Enumerated:
+
+- `write_volatile` / `copy_nonoverlapping` / raw `*mut` stores across `kernel/src`: 174
+  sites in 53 files — overwhelmingly device MMIO (`ahci`, `apic`, `e1000`, `fb`, `drm`),
+  which write physical or HHDM addresses and cannot fault on a user page.
+- **Inside `kernel/src/syscall/`, where a user buffer is actually in scope: 10 sites.**
+  Every one writes either a *kernel local* (`ex2`, `frame_buf`, `buf` — each with a SAFETY
+  comment saying the regions are distinct locals) or an **HHDM address** obtained by
+  translating the target `pml4` (`linux.rs:51024`, which stamps a pattern through
+  `phys + hhdm` rather than through the user mapping, exactly as `copy_to_user_as` does).
+
+So no syscall path writes through a user virtual address in ring 0. Every user write in
+that layer goes through the four primitives, and those break CoW.
+
+**Stopping here deliberately, and the reason is proportionality rather than completeness.**
+What remains unaudited is raw writes *outside* `syscall/` that might target a user address —
+in `fs/`, `ipc/`, `proc/`. That is the long tail of the 174, it is mostly MMIO, and
+distinguishing "this address is user" from "this address is a device" needs reading each
+site rather than grepping. Against a defect that has produced **one** observation in June,
+has never appeared in 722 recorded boots, and whose signature is distinctive enough to
+recognise instantly if it recurs, that audit is disproportionate today.
+
+What would change that: a recurrence, or a cheap way to key the search on *user-address
+provenance* rather than on the write itself. The second is the interesting one and I do not
+have it — noting the gap rather than pretending the enumeration is finished.
+
 **[A] 2026-09-12 — checked the recorded boots for this signature, and the answer is WEAK
 EVIDENCE rather than reassurance. The distinction is the point of this note.**
 

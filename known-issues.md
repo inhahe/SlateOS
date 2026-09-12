@@ -131184,15 +131184,52 @@ Two measured examples:
   all. Every *real* option it lacked, coreutils has: `--peta`, `--pebi`,
   `--si`, `--line`, `--committed`, `--version`. It also sat in
   `argv-utf8-baseline.txt` as `argv-as-string`.
-* **`ps`** -- **the line counts below are stale and are left only as a record
-  of how fast that happens.** When written, `coreutils`'s `ps` was 405 lines
-  supporting `-e -f` against `userspace/ps`'s 1022 with full column
-  selection, and the conclusion was "the standalone plainly wins".
-  `dup-bins-survey` now measures coreutils' at **2007** lines and the
-  standalone at **1155**. The winner may well have changed; nobody knows,
-  because no harness has been written. **Do not act on either number --
-  measure it.** This is the same entry that, five pairs running, ranked
-  wrongly every time.
+* **`ps`** -- **MEASURED 2026-09-12, and it is the first pair the pass count
+  does not decide.** `scripts/ps-diff.sh` pins the process table in a PID
+  namespace with its own `/proc` and compares both against procps-ng:
+
+      coreutils ps     0 passed, 26 differed
+      userspace/ps     0 passed, 26 differed
+
+  A tally says "tie". The content says otherwise, and this is why a harness
+  that only counts is not enough:
+
+      procps      UID          PID    PPID  C STIME TTY          TIME CMD
+                  root           1       0  0 13:39 ?        00:00:00 ps -f
+      standalone    UID      PID     PPID    C       STIME  TTY   TIME  CMD
+                      0        1        0    0       13:36  ?  00:00:00  ps
+      coreutils     UID   PID  PPID  STAT   TIME     CMD
+                      0     1     0  R      00:00:00 ps -f
+
+  The standalone has **the right column set** and gets the widths, the UID
+  resolution (`0` where procps prints `root`) and the `CMD` content wrong.
+  coreutils' has **the wrong columns entirely** -- no `C`, no `STIME`, no
+  `TTY`, and a `STAT` column procps does not put there. One is a formatting
+  problem; the other is a different report. So the old "the standalone plainly
+  wins" verdict survives measurement, which is notable given it was reached
+  from line counts that were themselves wrong by a factor of five.
+
+  **Do not read "0 vs 0" as "neither is worth keeping."** Both fail against
+  procps; only one of them is failing at the last step.
+
+* **`ps` also ignores every option it does not know, and `check-argv-ignored`
+  cannot see it.** Measured: `ps -X` prints the default listing at exit 0
+  where procps exits 1, and `ps --help` prints the process table. The parser
+  strips one `-` and then walks the string a character at a time:
+
+      match c { 'e' | 'A' => all_procs = true, 'f' => full = true, _ => {} }
+
+  So `--help` is read as `-h -e -l -p`, the `e` matches, and any long option
+  containing `e`, `A` or `f` silently turns that flag on. `--full` would set
+  `-f` by accident and `--version` would set `-e`.
+
+  `scripts/check-argv-ignored.py` reports **0 bins ignore argv** with an empty
+  baseline, and it is not lying: `ps` *does* read `argv` and *does* honour
+  `-e` and `-f`. The gate catches a program that ignores its command line
+  **entirely**, which is the defect `uptime` had. It does not catch one that
+  honours the options it knows and silently discards the rest — which is the
+  same class of hole, one notch finer, and is the shape §1006 is about: a
+  program that cannot do what it was asked should say so.
 
 * **`logger`** — **not a measurement question at all, and a harness cannot
   settle it.** `dup-bins-survey` lists it as "no harness — write one", which is

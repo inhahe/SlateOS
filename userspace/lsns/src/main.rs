@@ -92,9 +92,12 @@ fn read_ns_inode(pid: u32, ns_type: &str) -> Option<u64> {
     link_str[bracket_start + 1..bracket_end].parse().ok()
 }
 
+/// Bytes, not `read_to_string`: a `comm` that is not UTF-8 is a name, not a
+/// missing process, and those were both landing on `"?"`. `trim_comm` takes
+/// the trailing newline and leaves a leading space, which `.trim()` did not.
 fn read_proc_comm(pid: u32) -> String {
-    fs::read_to_string(format!("/proc/{pid}/comm"))
-        .map(|s| s.trim().to_string())
+    fs::read(format!("/proc/{pid}/comm"))
+        .map(|raw| procinfo::display_bytes(procinfo::trim_comm(&raw)))
         .unwrap_or_else(|_| "?".to_string())
 }
 

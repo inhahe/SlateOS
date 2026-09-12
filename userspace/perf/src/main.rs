@@ -1158,9 +1158,17 @@ fn run_report(args: &[String]) {
     // Read process names from /proc/<pid>/comm.
     let mut comm_by_pid: HashMap<u32, String> = HashMap::new();
     for &pid in &pid_set {
+        // Bytes: `read_to_string` fails on a name that is not UTF-8, and that
+        // failure fell through to `[pid:N]` -- the placeholder for a process
+        // whose name could not be READ. A name made of arbitrary bytes can be
+        // read perfectly well; it just is not UTF-8. `trim_comm` takes the
+        // trailing newline and nothing else, where `.trim()` also removed a
+        // leading space that is part of the name.
         let comm_path = format!("/proc/{pid}/comm");
-        let comm = fs::read_to_string(&comm_path).unwrap_or_else(|_| format!("[pid:{pid}]"));
-        comm_by_pid.insert(pid, comm.trim().to_string());
+        let comm = fs::read(&comm_path)
+            .map(|raw| procinfo::display_bytes(procinfo::trim_comm(&raw)))
+            .unwrap_or_else(|_| format!("[pid:{pid}]"));
+        comm_by_pid.insert(pid, comm);
     }
 
     // Build overhead table.

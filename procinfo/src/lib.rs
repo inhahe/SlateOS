@@ -1663,5 +1663,37 @@ pub fn display_bytes(raw: &[u8]) -> String {
     }
 }
 
+/// `/proc/<pid>/comm` with its trailing newline removed, as BYTES.
+///
+/// Four crates read this file — `fuser`, `lsns`, `netstat`, `perf` — and every
+/// one of them did `read_to_string(…).trim()`, which is wrong twice over now
+/// that the kernel carries `comm` as bytes end to end:
+///
+/// * **`read_to_string` FAILS on a non-UTF-8 name**, and all four map that
+///   failure onto the same `"?"` they print when the process has exited or the
+///   read was denied. A process named with a byte that is not UTF-8 became
+///   indistinguishable from one that was not there. Two different facts, one
+///   symbol — and only the second is what the `"?"` is documented to mean.
+/// * **`.trim()` removes LEADING whitespace**, and a leading space is a legal
+///   part of a name. Linux cuts `comm` at 16 bytes and imposes nothing else;
+///   only the trailing newline belongs to the file format. Everything before
+///   it is the name, spaces included.
+///
+/// So this strips exactly one trailing newline and nothing else. Pair it with
+/// [`display_bytes`], which renders an invalid byte as a visible hex escape
+/// rather than the U+FFFD replacement character: escaping is reversible and
+/// says which byte it was, lossy conversion is neither, and self-review item 7
+/// forbids the latter on OS-boundary data.
+#[must_use]
+pub fn trim_comm(raw: &[u8]) -> &[u8] {
+    match raw.split_last() {
+        // 0x0a written as a number, not as an escape: this file is edited
+        // through tooling that has collapsed a backslash more than once
+        // today, and a byte literal is the one spelling that cannot be.
+        Some((&0x0a, head)) => head,
+        _ => raw,
+    }
+}
+
 #[cfg(test)]
 mod tests;

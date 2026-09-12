@@ -921,6 +921,7 @@ dependencies = [
 name = "fuser"
 version = "0.1.0"
 dependencies = [
+ "procinfo",
  "quoting",
 ]
 
@@ -1527,6 +1528,9 @@ dependencies = [
 [[package]]
 name = "lsns"
 version = "0.1.0"
+dependencies = [
+ "procinfo",
+]
 
 [[package]]
 name = "lsof"
@@ -1802,6 +1806,9 @@ dependencies = [
 [[package]]
 name = "netstat"
 version = "0.1.0"
+dependencies = [
+ "procinfo",
+]
 
 [[package]]
 name = "newgrp"
@@ -2000,6 +2007,7 @@ dependencies = [
 name = "perf"
 version = "0.1.0"
 dependencies = [
+ "procinfo",
  "quoting",
 ]
 

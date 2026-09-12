@@ -4,3 +4,8 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS network connection and socket statistics"
 [dependencies]
+# `/proc/<pid>/comm` is read as BYTES here (`trim_comm` + `display_bytes`).
+# `read_to_string` fails on a name that is not UTF-8, and that failure was
+# landing on the same placeholder as a process that had exited. Zero
+# dependencies of its own, so it is safe under 768.
+procinfo = { path = "../../procinfo" }

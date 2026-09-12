@@ -388,8 +388,12 @@ fn build_inode_to_pid_map() -> HashMap<u64, (u32, String)> {
         // that exited between the directory listing and this read -- the
         // ordinary case on a busy machine. `userspace/fuser` prints `?` in the
         // same column for the same reason.
-        let comm = match fs::read_to_string(format!("/proc/{pid}/comm")) {
-            Ok(text) => text.trim().to_string(),
+        // Bytes: `read_to_string` fails on a name that is not UTF-8 and that
+        // failure was landing on the same `?` as the exited-process case named
+        // just above. `trim_comm` removes the trailing newline only, where
+        // `.trim()` also removed a leading space that belongs to the name.
+        let comm = match fs::read(format!("/proc/{pid}/comm")) {
+            Ok(raw) => procinfo::display_bytes(procinfo::trim_comm(&raw)),
             Err(_) => "?".to_string(),
         };
 

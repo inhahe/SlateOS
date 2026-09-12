@@ -57257,7 +57257,7 @@ smaller and only needs a location decided.
 
 --------------------------------------------------------------------------
 `ed`'s TESTS CANNOT EXERCISE `a`, `i` OR `c` UNTIL `Editor` TAKES ITS INPUT
-(lane B, 2026-09-12)
+(lane B, 2026-09-12) -- DONE the same day; see the RESOLVED block at the end
 
 WHY THIS IS HERE. `Editor::new` does `stdin().lock()`, so every editor built
 in a test holds the process's real standard input. The commands whose text
@@ -57293,3 +57293,33 @@ shared lock rather than of the editor.
 
 TRIGGER. Next time anything in `ed`'s editor construction is touched, or the
 first time someone wants a test for `a`/`i`/`c`. Nothing blocks it.
+
+RESOLVED 2026-09-12, and it found a bug, which is the point of the entry.
+
+`Editor` now carries `input: Box<dyn BufRead>`. `Editor::new` still measures
+`file_driven` off the real stdin and passes `stdin().lock()`; the new
+`Editor::with_input(opts, input, file_driven)` takes both as parameters. The
+tests build every editor through `editor_reading` / `editor_driven_by`, so
+nothing in the suite touches the process's stdin any more. Proof it is gone:
+the ed test binary run with an OPEN PIPE on stdin -- the exact condition that
+used to hang it -- now exits 0 in 0s, with the `0a` case restored to
+`a_mark_follows_its_line_wherever_the_line_goes`.
+
+THE BUG. `c` with no text -- a `c` followed immediately by `.` -- left the
+current line at `lo - 1` where GNU leaves it at `lo` clamped to the new
+length. Measured against GNU ed 1.20.1 on one/two/three: `2c` then `.` gives
+current 2 there and gave 1 here. Empty-text `c` is exactly `d`, and `d` in
+this same file already had the right formula six hundred lines away. The
+defect was three years' worth of unreachable: no test could execute a `c`.
+That is the argument for the refactor, stated as a measurement rather than as
+a principle -- untestable code is not merely unverified, it is where the bugs
+actually were.
+
+A SECOND MISTAKE WORTH KEEPING. The first measurement of GNU's behaviour ran
+`.=` AFTER `,p` in the same script. `,p` leaves the current line on the last
+line it printed, so `.=` reported the buffer length every time; five cases
+came back 4, 4, 4, 4, 3 and I nearly recorded line counts as current-line
+answers. Same shape as the other near-misses this week: the probe ran
+correctly and answered a narrower question than the one asked. The habit that
+catches it is to check whether a probe can distinguish the cases it is meant
+to -- four identical answers to four different questions is the tell.

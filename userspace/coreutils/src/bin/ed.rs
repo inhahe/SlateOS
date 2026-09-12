@@ -1410,7 +1410,16 @@ struct Editor {
     /// Standard input is a regular file. See the module docs: it decides both
     /// the shape of the `-v` explanation and whether an error is fatal.
     file_driven: bool,
-    stdin: std::io::StdinLock<'static>,
+    /// Where command lines come from. A *parameter* rather than `stdin()`,
+    /// so that the commands taking their text from input -- `a`, `i`, `c` --
+    /// are testable at all. They were not. `Editor::new` took
+    /// `stdin().lock()`, so a test that executed `0a` read the *harness's*
+    /// stdin and blocked on whatever was attached to it; under `cargo test`
+    /// that is inherited, not empty. Measured both ways: stdin at /dev/null
+    /// ran 73 tests in 0.01s, an open pipe hung until killed. The symptom was
+    /// twice misread as machine contention, because a hang has no message.
+    /// See [`Editor::with_input`].
+    input: Box<dyn BufRead>,
     /// The last pattern compiled, which `//`, `??` and `s//repl/` all reuse.
     ///
     /// `Rc` because a caller needs to hold the pattern while it edits the
@@ -1512,6 +1521,19 @@ struct Editor {
 impl Editor {
     fn new(opts: Options) -> Self {
         let file_driven = filekind::borrowed_stdin().is_some_and(|f| filekind::is_regular(&f));
+        Self::with_input(opts, Box::new(std::io::stdin().lock()), file_driven)
+    }
+
+    /// An editor reading its commands from `input`. See [`Editor::input`].
+    ///
+    /// `file_driven` is a parameter for the same reason `input` is: it is
+    /// measured off the real standard input in [`Editor::new`], and a caller
+    /// supplying its own input has to be able to say which of the two kinds
+    /// it is supplying. The two are not interchangeable -- they differ in
+    /// whether an error ends the session and in the shape of the `-v`
+    /// explanation, which is the whole subject of the table in the module
+    /// docs.
+    fn with_input(opts: Options, input: Box<dyn BufRead>, file_driven: bool) -> Self {
         let verbose = opts.verbose;
         // `-p` both sets the string and turns the prompt on; `P` alone turns on
         // GNU's default `*`. Measured: `P`, `1p` writes `*one`.
@@ -1529,7 +1551,7 @@ impl Editor {
             status: 0,
             line_no: 0,
             file_driven,
-            stdin: std::io::stdin().lock(),
+            input,
             last_re: None,
             marks: Vec::new(),
             kmarks: Vec::new(),
@@ -1900,7 +1922,7 @@ impl Editor {
             return pending.pop();
         }
         let mut raw: Vec<u8> = Vec::new();
-        match self.stdin.read_until(b'\n', &mut raw) {
+        match self.input.read_until(b'\n', &mut raw) {
             Ok(0) | Err(_) => return None,
             Ok(_) => {}
         }
@@ -2121,7 +2143,23 @@ impl Editor {
                 self.yank(lo, hi);
                 self.delete(lo, hi);
                 self.insert(lo.saturating_sub(1), text);
-                self.current = lo.saturating_sub(1).saturating_add(added);
+                // With text, the current line is the last line inserted. With
+                // NO text -- a `c` followed immediately by `.` -- `c` is
+                // exactly `d`, and leaves the line *after* the deleted range
+                // the way `d` does. Measured against GNU ed 1.20.1 on
+                // one/two/three:
+                //     2c .    current 2 ("three"), and 2d also gives 2
+                //     3c .    current 2,            and 3d also gives 2
+                //     1,3c .  current 0,            and 1,3d also gives 0
+                // We answered 1 to the first of those, because `lo - 1 + 0` is
+                // the wrong formula the moment `added` is zero. No test could
+                // reach it until `Editor` took its input as a parameter: `c`
+                // reads its text from input, and the editor held `stdin()`.
+                self.current = if added == 0 {
+                    lo.min(self.total())
+                } else {
+                    lo.saturating_sub(1).saturating_add(added)
+                };
                 self.touch();
                 self.record_change(before);
                 self.finish_suffix(suffix);
@@ -3129,7 +3167,7 @@ mod tests {
     /// are blank because no test here searches; the ones that do build their own
     /// buffer with `editor_with`.
     fn resolve_in(line: &str, current: usize, total: usize) -> Result<Resolved, EdError> {
-        let mut e = Editor::new(Options::default());
+        let mut e = editor_reading(b"", Options::default());
         e.buffer = vec![Vec::new(); total];
         e.current = current;
         let parsed = parse_command(line.as_bytes())?;
@@ -3600,8 +3638,28 @@ mod tests {
 
     // ---------------- buffer edits ----------------
 
+    /// An editor whose command input is a parameter, so no test here ever
+    /// reads the harness's standard input. Every `Editor` below is built
+    /// through this or through something that calls it.
+    ///
+    /// `file_driven: false` is the interactive kind, where an error does not
+    /// end the session. The script kind has its own tests, which say so.
+    fn editor_reading(input: &[u8], opts: Options) -> Editor {
+        Editor::with_input(opts, Box::new(std::io::Cursor::new(input.to_vec())), false)
+    }
+
+    /// A buffer, plus the text that a following `a`, `i` or `c` will read.
+    /// The text is ordinary input: it ends at a lone `.`, or at its end.
+    fn editor_driven_by(lines_in: &[&str], input: &[u8]) -> Editor {
+        let mut e = editor_reading(input, Options::default());
+        e.buffer = lines(lines_in);
+        e.kmarks = vec![0; e.buffer.len()];
+        e.current = e.buffer.len();
+        e
+    }
+
     fn editor_with(lines_in: &[&str]) -> Editor {
-        let mut e = Editor::new(Options::default());
+        let mut e = editor_reading(b"", Options::default());
         e.buffer = lines(lines_in);
         // Parallel to the buffer, exactly as `load` leaves it: the `k` marks are
         // addressed by position, so an array a different length from the buffer
@@ -3647,9 +3705,12 @@ mod tests {
 
     /// Run one command line against a fresh buffer and hand back what is left.
     ///
-    /// The editor must not outlive the call: `Editor::new` takes `stdin().lock()`,
-    /// so two live editors in one thread deadlock — and `let e = …` twice in a
-    /// row *is* two live editors, because shadowing does not drop.
+    /// Two live editors in one thread used to deadlock: `Editor::new` took
+    /// `stdin().lock()`, and a second one waited on the first forever — so
+    /// `let e = …` twice in a row *was* a hang, because shadowing does not
+    /// drop. That is over. Every editor here comes from [`editor_reading`],
+    /// which owns a `Cursor` of its own, and a test may hold as many as it
+    /// likes.
     fn after(lines_in: &[&str], cmd: &[u8]) -> Vec<Vec<u8>> {
         let mut e = editor_with(lines_in);
         assert!(e.execute(cmd).is_ok());
@@ -3807,43 +3868,113 @@ mod tests {
         assert_eq!(drive_err(&all, &[b"0,1j"]), EdError::InvalidAddress);
     }
 
+    /// The three commands that take their text from input, which nothing
+    /// could reach until `Editor` stopped locking the process's stdin.
+    ///
+    /// Every expectation was measured against GNU ed 1.20.1 on one/two/three,
+    /// asking `.=` *before* `,p`. The first run of that measurement asked
+    /// after, and `,p` leaves the current line on the last line it printed --
+    /// so it reported the buffer length five times running and I nearly read
+    /// five line counts as five different answers.
+    #[test]
+    fn a_i_and_c_take_their_text_from_input() {
+        let all = ["one", "two", "three"];
+        let run = |input: &[u8], cmd: &[u8]| {
+            let mut e = editor_driven_by(&all, input);
+            assert!(e.execute(cmd).is_ok(), "command failed: {cmd:?}");
+            (std::mem::take(&mut e.buffer), e.current, e.modified)
+        };
+        // `a` appends *after* the addressed line, so `0a` is a prepend, and
+        // the current line ends on the last line inserted.
+        let out = lines(&["one", "two", "X", "three"]);
+        assert_eq!(run(b"X\n.\n", b"2a"), (out, 3, true));
+        let out = lines(&["X", "one", "two", "three"]);
+        assert_eq!(run(b"X\n.\n", b"0a"), (out, 1, true));
+        let out = lines(&["one", "two", "X", "Y", "three"]);
+        assert_eq!(run(b"X\nY\n.\n", b"2a"), (out, 4, true));
+        // `i` inserts *before* it, which is why `0i` and `1i` are one command
+        // spelled two ways.
+        let out = lines(&["one", "X", "two", "three"]);
+        assert_eq!(run(b"X\n.\n", b"2i"), (out, 2, true));
+        let out = lines(&["X", "one", "two", "three"]);
+        assert_eq!(run(b"X\n.\n", b"0i"), (out.clone(), 1, true));
+        assert_eq!(run(b"X\n.\n", b"1i"), (out, 1, true));
+        // `c` replaces the range.
+        let out = lines(&["one", "X", "three"]);
+        assert_eq!(run(b"X\n.\n", b"2c"), (out, 2, true));
+        let out = lines(&["X", "Y", "three"]);
+        assert_eq!(run(b"X\nY\n.\n", b"1,2c"), (out, 2, true));
+    }
+
+    #[test]
+    fn empty_text_leaves_a_alone_and_still_makes_c_a_delete() {
+        let all = ["one", "two", "three"];
+        let run = |input: &[u8], cmd: &[u8]| {
+            let mut e = editor_driven_by(&all, input);
+            assert!(e.execute(cmd).is_ok(), "command failed: {cmd:?}");
+            (std::mem::take(&mut e.buffer), e.current, e.modified)
+        };
+        // `a` with a lone `.` inserts nothing and -- measured -- does not mark
+        // the buffer modified: GNU exits 0 for `2a . q` and 1 for `2a X . q`.
+        assert_eq!(run(b".\n", b"2a"), (lines(&all), 2, false));
+        assert_eq!(run(b".\n", b"2i"), (lines(&all), 1, false));
+        // `c` with a lone `.` is exactly `d`. It still deletes, so it is still
+        // a modification, and it leaves the current line where `d` leaves it:
+        // `lo` clamped to the new length. We answered `lo - 1` -- 1 instead of
+        // 2 for the first case -- until this test could exist to say so.
+        assert_eq!(run(b".\n", b"2c"), (lines(&["one", "three"]), 2, true));
+        assert_eq!(run(b".\n", b"3c"), (lines(&["one", "two"]), 2, true));
+        assert_eq!(run(b".\n", b"1c"), (lines(&["two", "three"]), 1, true));
+        assert_eq!(run(b".\n", b"2,3c"), (lines(&["one"]), 1, true));
+        assert_eq!(run(b".\n", b"1,3c"), (Vec::<Vec<u8>>::new(), 0, true));
+    }
+
+    #[test]
+    fn text_ends_at_the_end_of_input_when_no_dot_arrives() {
+        // A script that stops mid-text is not an error: the text ends where
+        // the input does. GNU takes the `X` and then has nothing left to run.
+        let mut e = editor_driven_by(&["one", "two", "three"], b"X\n");
+        assert!(e.execute(b"2a").is_ok());
+        assert_eq!(e.buffer, lines(&["one", "two", "X", "three"]));
+        assert_eq!(e.current, 3);
+        assert!(e.modified);
+        assert_eq!(e.read_line(), None, "the input is spent");
+    }
+
     #[test]
     fn a_mark_follows_its_line_wherever_the_line_goes() {
         let all = ["alpha", "beta", "gamma"];
         // This is the property the parallel array exists for. Each case is a
         // different way of moving text above the marked line; in every one of
         // them `'c` still names `gamma`.
-        // `0a` IS NOT HERE, and its absence is the fix for a hang rather than
-        // a gap in coverage.
-        //
-        // `a` takes its text from STDIN. `Editor::new` holds `stdin().lock()`,
-        // so executing it here reads the real standard input of the test
-        // process -- and when that is an open pipe with nothing on it, which
-        // is what a hook or a CI runner hands you, the read never returns and
-        // the global lock is never released. Every other test in this binary
-        // then blocks behind it.
-        //
-        // Measured on the built test binary:
+        // `0a` IS HERE AGAIN. It was removed earlier today to stop a hang,
+        // not because it lacked value. `a` reads its text from input, and
+        // `Editor::new` held `stdin().lock()`, so executing it here read the
+        // *test process's* own standard input. Measured on the built binary:
         //
         //     stdin = /dev/null            73 passed in 0.01s
         //     stdin = pipe, no data        hangs until killed
         //
-        // That is what made `cargo test -p coreutils` sit at 20 of 93 groups
-        // for fifteen minutes twice today. I first recorded it as machine
-        // contention, because the symptom -- "has been running for over 60
-        // seconds" -- is what starvation looks like too. The CPU being at 34%
-        // on the third occurrence is what made me look again.
+        // An open pipe with nothing on it is what a hook or a CI runner hands
+        // you, so the read never returned and every other test in the binary
+        // blocked behind the lock. That is what made `cargo test -p coreutils`
+        // sit at 20 of 93 groups for fifteen minutes twice in one day, and I
+        // recorded it as machine contention both times -- "has been running
+        // for over 60 seconds" is what starvation looks like too.
         //
-        // The comment on the option table below already said `a` and `i` are
-        // excluded from that list "because their text comes from stdin". The
-        // knowledge was in the file; this loop just did not have it.
-        //
-        // The four remaining shuffles are four independent ways of moving text
-        // above the marked line, which is the property under test. Testing `a`
-        // itself needs `Editor` to take its input as a parameter instead of
-        // locking the process's -- recorded in todo.txt.
-        for shuffle in [&b"1d"[..], &b"1m$"[..], &b"1t0"[..], &b"1,2j"[..]] {
-            let mut e = editor_with(&all);
+        // Deleting the case was a workaround. The fix is that `Editor` now
+        // takes its input as a parameter, which is also the only way `a`, `i`
+        // and `c` are testable at all. Each case below is an independent way
+        // of moving text above the marked line, and carries whatever input
+        // that way needs.
+        for (input, shuffle) in [
+            (&b""[..], &b"1d"[..]),
+            (&b""[..], &b"1m$"[..]),
+            (&b""[..], &b"1t0"[..]),
+            (&b""[..], &b"1,2j"[..]),
+            (&b"X\n.\n"[..], &b"0a"[..]),
+        ] {
+            let mut e = editor_driven_by(&all, input);
             assert!(e.execute(b"3kc").is_ok());
             assert!(e.execute(shuffle).is_ok());
             let at = e.mark_line(b'c').expect("the mark survived");
@@ -4216,11 +4347,13 @@ mod tests {
         assert!(e.verbose);
         assert!(e.execute(b"H").is_ok());
         assert!(!e.verbose);
-        drop(e);
-        let mut v = Editor::new(Options {
-            verbose: true,
-            ..Options::default()
-        });
+        let mut v = editor_reading(
+            b"",
+            Options {
+                verbose: true,
+                ..Options::default()
+            },
+        );
         assert!(v.verbose);
         assert!(v.execute(b"H").is_ok());
         assert!(!v.verbose, "-v then H is off, not on");
@@ -4235,11 +4368,13 @@ mod tests {
         assert!(e.prompt_on);
         assert!(e.execute(b"P").is_ok());
         assert!(!e.prompt_on);
-        drop(e);
-        let mut p = Editor::new(Options {
-            prompt: Some(b"> ".to_vec()),
-            ..Options::default()
-        });
+        let mut p = editor_reading(
+            b"",
+            Options {
+                prompt: Some(b"> ".to_vec()),
+                ..Options::default()
+            },
+        );
         assert!(p.prompt_on, "-p starts it on");
         assert_eq!(p.prompt, b"> ");
         assert!(p.execute(b"P").is_ok());

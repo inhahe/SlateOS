@@ -1571,28 +1571,72 @@ fn timestamp_path(username: &str) -> PathBuf {
 ///
 /// **Do not "improve" this by returning `true` when the file cannot be read.**
 /// That would hand out a cached authentication on the strength of a failed
-/// read, which is the whole thing a credential cache must not do. Checked on
-/// 2026-09-10 during a sweep for predicates that answer `false` on failure --
-/// this one is correct as written and is noted so the next sweep does not have
-/// to re-derive it.
+/// read, which is the whole thing a credential cache must not do.
+///
+/// # The error arms were never the problem
+///
+/// The paragraph above was written on 2026-09-10 during a sweep for predicates
+/// that answer `false` on failure, and it concluded "this one is correct as
+/// written", noted "so the next sweep does not have to re-derive it". It was
+/// right about every arm it looked at and the defect was in the other one:
+///
+/// ```text
+/// now.saturating_sub(ts) < timeout
+/// ```
+///
+/// With `ts` **in the future**, `saturating_sub` yields 0, `0 < timeout` is
+/// true, and the password prompt is skipped -- for as long as the clock takes
+/// to catch up. No failure occurs anywhere; the read succeeds, the parse
+/// succeeds, and the arithmetic answers a question nobody asked.
+///
+/// A backwards clock step is ordinary: an NTP correction, an RTC read at boot
+/// before the network is up, a restored VM snapshot. Each turns a legitimately
+/// written timestamp into a future one and the cache into a permanent one.
+/// Real `sudo` treats this as `TS_FATAL` -- "timestamp too far in the future".
+///
+/// So the rule this function's own heading states -- every failure answers
+/// `false` -- is kept, and a *success* that cannot mean what it says is now
+/// one of the things that answers `false` too.
 fn check_timestamp(username: &str, timeout: u64) -> bool {
-    let path = timestamp_path(username);
-    match fs::read_to_string(&path) {
-        Ok(content) => {
-            if let Some(ts_str) = content.lines().next()
-                && let Ok(ts) = ts_str.trim().parse::<u64>()
-            {
-                let now = current_epoch();
-                if timeout == u64::MAX {
-                    // Never expires.
-                    return true;
-                }
-                return now.saturating_sub(ts) < timeout;
-            }
-            false
-        }
+    match fs::read_to_string(timestamp_path(username)) {
+        Ok(content) => timestamp_is_fresh(&content, current_epoch(), timeout),
         Err(_) => false,
     }
+}
+
+/// Whether the timestamp file's `content` records an authentication that is
+/// still current at `now`.
+///
+/// Split out from [`check_timestamp`] so the clock is a parameter: the
+/// interesting cases are a timestamp in the future and one exactly at the
+/// timeout boundary, and neither can be reached by a test that has to use the
+/// real clock and the real file.
+fn timestamp_is_fresh(content: &str, now: u64, timeout: u64) -> bool {
+    let Some(ts_str) = content.lines().next() else {
+        return false;
+    };
+    let Ok(ts) = ts_str.trim().parse::<u64>() else {
+        return false;
+    };
+    // Checked BEFORE the never-expires arm. `timestamp_timeout=-1` is a
+    // statement about how long an authentication lasts, not a licence to trust
+    // a file whose contents cannot be true.
+    if ts > now {
+        return false;
+    }
+    // `invalidate_timestamp` writes 0 "to invalidate without removing", and 0
+    // is 1970 -- comfortably expired under every finite timeout, and NOT
+    // expired under `timestamp_timeout=-1`, where nothing expires. So `sudo -k`
+    // was a no-op for exactly the configuration that most needs it to work.
+    // The sentinel is honoured by the READER, because the reader is what has
+    // to agree with it.
+    if ts == 0 {
+        return false;
+    }
+    if timeout == u64::MAX {
+        return true;
+    }
+    now.saturating_sub(ts) < timeout
 }
 
 /// Update the timestamp to the current time.
@@ -3754,6 +3798,82 @@ fn main() {
 )]
 mod tests {
     use super::*;
+
+    // -- The credential cache's clock --
+    //
+    // `check_timestamp` decides whether to skip the password prompt. Its own
+    // doc comment reasoned carefully about every failure arm and was checked
+    // by a 2026-09-10 sweep, which recorded that it "is correct as written"
+    // and need not be re-derived. Both defects below are in arms that sweep
+    // was not looking at, and in neither does anything fail.
+
+    #[test]
+    fn a_fresh_timestamp_is_fresh_and_a_stale_one_is_not() {
+        assert!(
+            timestamp_is_fresh("1000\n", 1010, 300),
+            "10s old, 300s timeout"
+        );
+        assert!(!timestamp_is_fresh("1000\n", 2000, 300), "1000s old");
+    }
+
+    #[test]
+    fn the_boundary_is_strictly_less_than_the_timeout() {
+        // Exactly `timeout` seconds old has expired; one second less has not.
+        assert!(!timestamp_is_fresh("1000\n", 1300, 300));
+        assert!(timestamp_is_fresh("1000\n", 1299, 300));
+    }
+
+    #[test]
+    fn a_timestamp_in_the_future_is_not_a_fresh_authentication() {
+        // `now.saturating_sub(ts)` answered 0 and `0 < timeout` is true, so
+        // the prompt was skipped until the clock caught up. A backwards clock
+        // step -- an NTP correction, an RTC read at boot, a restored VM
+        // snapshot -- produces exactly this, and nothing fails while it does.
+        assert!(!timestamp_is_fresh("9999\n", 1000, 300));
+        assert!(
+            !timestamp_is_fresh("1001\n", 1000, 300),
+            "even by one second"
+        );
+    }
+
+    #[test]
+    fn never_expires_still_does_not_trust_a_future_timestamp() {
+        // `timestamp_timeout=-1` says how long an authentication lasts. It is
+        // not a licence to believe a file whose contents cannot be true.
+        assert!(
+            timestamp_is_fresh("1000\n", 5000, u64::MAX),
+            "past, never expires"
+        );
+        assert!(
+            !timestamp_is_fresh("9999\n", 1000, u64::MAX),
+            "future, refused"
+        );
+    }
+
+    #[test]
+    fn an_unparsable_or_empty_timestamp_demands_the_password() {
+        assert!(!timestamp_is_fresh("", 1000, 300));
+        assert!(!timestamp_is_fresh("not a number\n", 1000, 300));
+        assert!(
+            !timestamp_is_fresh("-1\n", 1000, 300),
+            "negative is not a u64"
+        );
+    }
+
+    #[test]
+    fn invalidation_survives_a_never_expires_timeout() {
+        // `invalidate_timestamp` writes "0" to drop a cached credential --
+        // `sudo -k`. Under a finite timeout that is 1970 and long expired, so
+        // it worked. Under `timestamp_timeout=-1` NOTHING expires, so the
+        // sentinel came back FRESH and `sudo -k` was a no-op for exactly the
+        // configuration where the credential otherwise lasts all session.
+        //
+        // Found by writing the test above and then reading what it asserted:
+        // its first draft encoded the broken answer as the expected one, which
+        // is how a defect becomes a fixture.
+        assert!(!timestamp_is_fresh("0\n", 1_000_000, 300));
+        assert!(!timestamp_is_fresh("0\n", 1_000_000, u64::MAX));
+    }
 
     // -- Authentication --
     //

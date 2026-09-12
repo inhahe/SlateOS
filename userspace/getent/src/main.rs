@@ -10,6 +10,7 @@
 use std::env;
 use std::fs;
 use std::io::{self, Write};
+use std::path::Path;
 use std::process;
 
 const VERSION: &str = "0.1.0";
@@ -206,12 +207,33 @@ impl ShadowEntry {
 // Database parsers
 // ============================================================================
 
+/// The bytes of a database file, or empty if it is not there.
+///
+/// A file that is ABSENT and a file that cannot be READ are different answers,
+/// and `unwrap_or_default()` gives them the same one. getent's exit contract
+/// does not distinguish them -- both end in "no entry", exit 2, which is what
+/// GNU does too -- so this does not change the status. What it changes is that
+/// the unreadable case now SAYS so on stderr instead of looking like an empty
+/// database, because "there is no such user" and "I was not allowed to look"
+/// are not the same thing to tell somebody.
+fn database_bytes(path: &str) -> Vec<u8> {
+    match optionalfile::read_bytes_or_empty(Path::new(path)) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            // Through `quotef_os`: a path with a newline in it would
+            // otherwise forge a line of this program's own stderr.
+            eprintln!("getent: {}: {e}", quoting::quotef_os(path));
+            Vec::new()
+        }
+    }
+}
+
 fn parse_passwd() -> Vec<pwdb::User> {
-    pwdb::users(&fs::read(PASSWD_FILE).unwrap_or_default())
+    pwdb::users(&database_bytes(PASSWD_FILE))
 }
 
 fn parse_group() -> Vec<pwdb::Group> {
-    pwdb::groups(&fs::read(GROUP_FILE).unwrap_or_default())
+    pwdb::groups(&database_bytes(GROUP_FILE))
 }
 
 fn parse_hosts() -> Vec<HostEntry> {

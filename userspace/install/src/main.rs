@@ -407,50 +407,81 @@ fn print_usage() {
 
 // ── Ownership helpers ──────────────────────────────────────────────
 
-/// Look up a user in /etc/passwd, return UID
+/// The uid an `-o` operand names, or a message.
+///
+/// **A NAME IS TRIED BEFORE A NUMBER, and that is not a preference.** GNU's
+/// manual, "Disambiguating names and IDs": *"POSIX requires that these
+/// commands first attempt to resolve the specified string as a name, and only
+/// once that fails, then try to interpret it as an ID."* This function used to
+/// do `name.parse::<u32>()` first and return on success, so on a system with
+/// an account literally called `1000` -- "using a number as a user name is
+/// common in some environments", says the same page -- `install -o 1000`
+/// picked a different account from `chown 1000`. The `+` escape exists
+/// precisely because the name comes first; a numeric-first parser would have
+/// no use for it, and this one ignored it.
+///
+/// The lookup is [`userspec`], the same code `chown` and `id` use, so the
+/// three cannot drift apart. It also reads the database as **bytes**: this
+/// function used `read_to_string`, which fails for the whole file on one byte
+/// that is not valid UTF-8 -- a GECOS field holding a person's name in Latin-1
+/// is the ordinary way that happens -- and reported it as "cannot read
+/// /etc/passwd", which was not true.
 fn resolve_user(name: &str) -> Result<u32, String> {
-    // Try numeric first
-    if let Ok(uid) = name.parse::<u32>() {
-        return Ok(uid);
-    }
-
-    let content =
-        fs::read_to_string("/etc/passwd").map_err(|e| format!("cannot read /etc/passwd: {e}"))?;
-    for line in content.lines() {
-        if line.starts_with('#') || line.is_empty() {
-            continue;
-        }
-        let fields: Vec<&str> = line.split(':').collect();
-        if fields.len() >= 3 && fields[0] == name {
-            return fields[2]
-                .parse::<u32>()
-                .map_err(|_| format!("invalid UID for user {}", quoteaf_os(name)));
-        }
-    }
-    Err(format!("unknown user {}", quoteaf_os(name)))
+    resolve_user_in(&load_db()?, name)
 }
 
-/// Look up a group in /etc/group, return GID
-fn resolve_group(name: &str) -> Result<u32, String> {
-    // Try numeric first
-    if let Ok(gid) = name.parse::<u32>() {
-        return Ok(gid);
-    }
+/// [`resolve_user`] against a database given rather than read.
+///
+/// A parameter because the rule it implements is *about* the database, and the
+/// build host has no `/etc/passwd` -- so every test of the old code exercised
+/// the fallback and none of them could tell name-first from number-first.
+fn resolve_user_in(db: &pwdb::Db, name: &str) -> Result<u32, String> {
+    let spec = userspec::parse_user_only(name.as_bytes(), db)
+        .map_err(|_| format!("invalid user {}", quoteaf_os(name)))?;
+    spec.uid
+        .ok_or_else(|| format!("unknown user {}", quoteaf_os(name)))
+}
 
-    let content =
-        fs::read_to_string("/etc/group").map_err(|e| format!("cannot read /etc/group: {e}"))?;
-    for line in content.lines() {
-        if line.starts_with('#') || line.is_empty() {
-            continue;
-        }
-        let fields: Vec<&str> = line.split(':').collect();
-        if fields.len() >= 3 && fields[0] == name {
-            return fields[2]
-                .parse::<u32>()
-                .map_err(|_| format!("invalid GID for group {}", quoteaf_os(name)));
-        }
+/// The gid a `-g` operand names, or a message. See [`resolve_user`] -- the
+/// name-before-number rule and the byte reading are the same rule.
+fn resolve_group(name: &str) -> Result<u32, String> {
+    resolve_group_in(&load_db()?, name)
+}
+
+/// [`resolve_group`] against a database given rather than read. See
+/// [`resolve_user_in`].
+fn resolve_group_in(db: &pwdb::Db, name: &str) -> Result<u32, String> {
+    match db.group_by_name(name.as_bytes()) {
+        Some(g) => Ok(g.gid),
+        // Only once the name lookup has failed, and `+` is never a valid group
+        // name, so `+42` reaches here and is read as 42 -- which is the whole
+        // point of the escape.
+        None => userspec::numeric_id(name.as_bytes())
+            .ok_or_else(|| format!("unknown group {}", quoteaf_os(name))),
     }
-    Err(format!("unknown group {}", quoteaf_os(name)))
+}
+
+/// The account database, read as bytes.
+///
+/// `pwdb::Db::load` is deliberately not used: it does `unwrap_or_default()` on
+/// each file, so a database that could not be READ is indistinguishable from
+/// one that is empty. For a program about to change a file's owner those are
+/// not the same -- an empty database ends in "unknown user", which looks like
+/// a typo in the operand and invites the user to retry with a number.
+///
+/// [`optionalfile::read_bytes_or_empty`] keeps the one case where empty really
+/// is the answer: a system with no `/etc/group` at all has no named groups,
+/// which is a fact rather than a failure.
+///
+/// # Errors
+///
+/// The database exists and could not be read.
+fn load_db() -> Result<pwdb::Db, String> {
+    let passwd = optionalfile::read_bytes_or_empty(Path::new(pwdb::PASSWD_PATH))
+        .map_err(|e| format!("cannot read {}: {e}", pwdb::PASSWD_PATH))?;
+    let group = optionalfile::read_bytes_or_empty(Path::new(pwdb::GROUP_PATH))
+        .map_err(|e| format!("cannot read {}: {e}", pwdb::GROUP_PATH))?;
+    Ok(pwdb::Db::from_bytes(&passwd, &group))
 }
 
 // ── Syscall wrappers ───────────────────────────────────────────────
@@ -1136,11 +1167,58 @@ mod tests {
 
     // ── User/Group resolution ──
 
+    /// A database in which `1000` is an account NAME, which is the situation
+    /// GNU's manual calls out: "using a number as a user name is common in
+    /// some environments".
+    fn tricky_db() -> pwdb::Db {
+        pwdb::Db::from_bytes(
+            b"alice:x:500:500::/home/alice:/bin/sh\n1000:x:7:7::/home/odd:/bin/sh\n",
+            b"staff:x:900:\n1000:x:11:\n",
+        )
+    }
+
     #[test]
     fn test_resolve_user_numeric() {
-        assert_eq!(resolve_user("0").unwrap(), 0);
-        assert_eq!(resolve_user("1000").unwrap(), 1000);
-        assert_eq!(resolve_user("65534").unwrap(), 65534);
+        // With nothing in the database, a number is still a number.
+        let empty = pwdb::Db::from_bytes(b"", b"");
+        assert_eq!(resolve_user_in(&empty, "0").unwrap(), 0);
+        assert_eq!(resolve_user_in(&empty, "1000").unwrap(), 1000);
+        assert_eq!(resolve_user_in(&empty, "65534").unwrap(), 65534);
+    }
+
+    /// The POSIX rule, which this program had backwards until 2026-09-12.
+    ///
+    /// GNU's manual, "Disambiguating names and IDs": *"POSIX requires that
+    /// these commands first attempt to resolve the specified string as a name,
+    /// and only once that fails, then try to interpret it as an ID."*
+    #[test]
+    fn a_name_is_tried_before_a_number() {
+        let db = tricky_db();
+        // `1000` names an account whose uid is 7. Answering 1000 here is the
+        // old behaviour and is wrong.
+        assert_eq!(resolve_user_in(&db, "1000").unwrap(), 7);
+        assert_eq!(resolve_group_in(&db, "1000").unwrap(), 11);
+        // A name that is not in the database still falls through to the number.
+        assert_eq!(resolve_user_in(&db, "4242").unwrap(), 4242);
+        assert_eq!(resolve_group_in(&db, "4242").unwrap(), 4242);
+    }
+
+    /// `+` is the escape that exists *because* names come first.
+    #[test]
+    fn a_leading_plus_forces_the_number() {
+        let db = tricky_db();
+        assert_eq!(resolve_user_in(&db, "+1000").unwrap(), 1000);
+        assert_eq!(resolve_group_in(&db, "+1000").unwrap(), 1000);
+        // And a plain name is found without it.
+        assert_eq!(resolve_user_in(&db, "alice").unwrap(), 500);
+        assert_eq!(resolve_group_in(&db, "staff").unwrap(), 900);
+    }
+
+    #[test]
+    fn an_unknown_name_is_an_error_not_a_zero() {
+        let db = tricky_db();
+        assert!(resolve_user_in(&db, "nosuchuser").is_err());
+        assert!(resolve_group_in(&db, "nosuchgroup").is_err());
     }
 
     #[test]

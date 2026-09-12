@@ -408,6 +408,7 @@ dependencies = [
  "quoting",
  "scratchdir",
  "sha2",
+ "userspec",
  "utmpfile",
 ]
 
@@ -662,6 +663,7 @@ version = "0.1.0"
 dependencies = [
  "authlib",
  "posix",
+ "pwdb",
  "quoting",
  "scratchdir",
  "userdb",
@@ -954,6 +956,11 @@ version = "0.1.0"
 [[package]]
 name = "getent"
 version = "0.1.0"
+dependencies = [
+ "optionalfile",
+ "pwdb",
+ "quoting",
+]
 
 [[package]]
 name = "getopt"
@@ -1178,7 +1185,10 @@ version = "0.1.0"
 dependencies = [
  "embed-manifest",
  "modechange",
+ "optionalfile",
+ "pwdb",
  "quoting",
+ "userspec",
 ]
 
 [[package]]
@@ -1815,7 +1825,9 @@ name = "newgrp"
 version = "0.1.0"
 dependencies = [
  "authlib",
+ "optionalfile",
  "posix",
+ "pwdb",
  "quoting",
  "userdb",
 ]
@@ -3007,6 +3019,7 @@ version = "0.1.0"
 name = "useradd"
 version = "0.1.0"
 dependencies = [
+ "optionalfile",
  "quoting",
  "scratchdir",
  "userdb",
@@ -3027,6 +3040,13 @@ dependencies = [
  "posix",
  "pwdb",
  "scratchdir",
+]
+
+[[package]]
+name = "userspec"
+version = "0.1.0"
+dependencies = [
+ "pwdb",
 ]
 
 [[package]]

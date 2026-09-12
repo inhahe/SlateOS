@@ -14,3 +14,11 @@ description = "SlateOS getent utility"
 # Safe to depend on under §768: `pwdb` has NO dependencies and its API takes
 # bytes, the same exemption `quoting` and `utmpfile` hold.
 pwdb = { path = "../pwdb" }
+# One rendering of a file name inside a diagnostic. A path may contain a
+# newline, and a utility that prints one raw lets whoever chose the name forge
+# a line of its error stream.
+quoting = { path = "../quoting" }
+# Separates "the database is not there" from "it could not be read". getent's
+# exit status treats both as "no entry", as GNU's does, but only one of them
+# deserves silence.
+optionalfile = { path = "../../optionalfile" }

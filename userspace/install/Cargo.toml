@@ -8,6 +8,16 @@ description = "SlateOS install - copy files and set attributes"
 # was told to run, every one of them from the command line.
 quoting = { path = "../quoting" }
 modechange = { path = "../modechange" }
+# The `OWNER[:GROUP]` grammar, shared with `chown` and `id`. `-o`/`-g` used a
+# private parser that tried the NUMBER before the NAME, which POSIX has
+# backwards -- see `resolve_user`. `pwdb` comes with it as the database the
+# names resolve against; both are dependency-free byte APIs, so §768's
+# one-libc rule is not engaged.
+userspec = { path = "../userspec" }
+pwdb = { path = "../pwdb" }
+# Separates "there is no /etc/group" (a fact) from "it could not be read" (an
+# unanswered question). `pwdb::Db::load` collapses the two.
+optionalfile = { path = "../../optionalfile" }
 
 [build-dependencies]
 embed-manifest = "1.5.0"

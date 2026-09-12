@@ -1,0 +1,13 @@
+[package]
+name = "userspec"
+version = "0.1.0"
+edition = "2024"
+description = "gnulib's userspec.c: reading an OWNER[:GROUP] operand"
+
+[lints]
+workspace = true
+
+[dependencies]
+# The account database this resolves names against. `pwdb` has no dependencies
+# of its own and takes bytes, so this crate stays a pure parser over it.
+pwdb = { path = "../pwdb" }

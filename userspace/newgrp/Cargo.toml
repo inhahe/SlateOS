@@ -7,6 +7,14 @@ description = "SlateOS newgrp utility"
 # newgrp names the group it is switching to. It runs setuid, so a word an
 # unprivileged caller chooses is reaching a privileged program's output.
 quoting = { path = "../quoting" }
+# One `/etc/group` reader. This program parsed the file itself with
+# `read_to_string`, which fails for the whole file on one byte that is not
+# valid UTF-8 -- emptying the group table on account of a group nobody asked
+# about. Both crates are dependency-free byte APIs (§768).
+pwdb = { path = "../pwdb" }
+# Separates "there is no /etc/group" from "it could not be read". This program
+# is setuid root precisely so that it CAN read it.
+optionalfile = { path = "../../optionalfile" }
 # The one definition of "is this the password?". A group password in
 # `/etc/gshadow` is a `crypt(3)` entry exactly as an account's is, so it is
 # checked with the same function `login`, `su`, `doas` and `passwd` ask --

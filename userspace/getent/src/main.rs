@@ -32,44 +32,64 @@ const RPC_FILE: &str = "/etc/rpc";
 // Database entry types
 // ============================================================================
 
-#[derive(Clone, Debug)]
-struct PasswdEntry {
-    name: String,
-    passwd: String,
-    uid: u32,
-    gid: u32,
-    gecos: String,
-    home: String,
-    shell: String,
+// `passwd` and `group` are [`pwdb`]'s types rather than two more of this
+// program's own. Parsing them here cost two defects at once:
+//
+//   * `read_to_string` fails for the WHOLE file on a single byte that is not
+//     valid UTF-8, and the arm was `Err(_) => Vec::new()` -- so one account
+//     whose GECOS field holds a name in Latin-1, which is the ordinary way a
+//     person's name gets into that field, made `getent passwd alice` answer
+//     "no such user" (exit 2) for every account on the system. A wrong answer,
+//     not an error. This filesystem allows every byte but `/` and NUL.
+//   * `uid: fields[2].parse().unwrap_or(0)` turned a malformed uid into **0**,
+//     which is root. `pwdb` rejects the line instead, which is what glibc's
+//     `fgetpwent` does.
+//
+// The output format is unchanged and still pinned by the tests below; it is
+// produced as BYTES now, because a field this program did not choose may
+// contain any of them.
+
+/// One `/etc/passwd` record, in the layout `getent passwd` prints.
+///
+/// Measured against GNU getent on this machine:
+/// `root:x:0:0:root:/root:/bin/bash`.
+fn format_user(u: &pwdb::User) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&u.name);
+    out.push(b':');
+    out.extend_from_slice(&u.passwd);
+    out.push(b':');
+    out.extend_from_slice(u.uid.to_string().as_bytes());
+    out.push(b':');
+    out.extend_from_slice(u.gid.to_string().as_bytes());
+    out.push(b':');
+    out.extend_from_slice(&u.gecos);
+    out.push(b':');
+    out.extend_from_slice(&u.dir);
+    out.push(b':');
+    out.extend_from_slice(&u.shell);
+    out
 }
 
-impl PasswdEntry {
-    fn format(&self) -> String {
-        format!(
-            "{}:{}:{}:{}:{}:{}:{}",
-            self.name, self.passwd, self.uid, self.gid, self.gecos, self.home, self.shell
-        )
+/// One `/etc/group` record, in the layout `getent group` prints.
+///
+/// Measured against GNU getent: `sudo:x:27:inhahe`, and `root:x:0:` for a
+/// group with no supplementary members -- the trailing colon stays.
+fn format_group(g: &pwdb::Group) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&g.name);
+    out.push(b':');
+    out.extend_from_slice(&g.passwd);
+    out.push(b':');
+    out.extend_from_slice(g.gid.to_string().as_bytes());
+    out.push(b':');
+    for (i, m) in g.members.iter().enumerate() {
+        if i > 0 {
+            out.push(b',');
+        }
+        out.extend_from_slice(m);
     }
-}
-
-#[derive(Clone, Debug)]
-struct GroupEntry {
-    name: String,
-    passwd: String,
-    gid: u32,
-    members: Vec<String>,
-}
-
-impl GroupEntry {
-    fn format(&self) -> String {
-        format!(
-            "{}:{}:{}:{}",
-            self.name,
-            self.passwd,
-            self.gid,
-            self.members.join(",")
-        )
-    }
+    out
 }
 
 #[derive(Clone, Debug)]
@@ -186,62 +206,12 @@ impl ShadowEntry {
 // Database parsers
 // ============================================================================
 
-fn parse_passwd() -> Vec<PasswdEntry> {
-    let content = match fs::read_to_string(PASSWD_FILE) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-
-    let mut entries = Vec::new();
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let fields: Vec<&str> = line.split(':').collect();
-        if fields.len() >= 7 {
-            entries.push(PasswdEntry {
-                name: fields[0].to_string(),
-                passwd: fields[1].to_string(),
-                uid: fields[2].parse().unwrap_or(0),
-                gid: fields[3].parse().unwrap_or(0),
-                gecos: fields[4].to_string(),
-                home: fields[5].to_string(),
-                shell: fields[6].to_string(),
-            });
-        }
-    }
-    entries
+fn parse_passwd() -> Vec<pwdb::User> {
+    pwdb::users(&fs::read(PASSWD_FILE).unwrap_or_default())
 }
 
-fn parse_group() -> Vec<GroupEntry> {
-    let content = match fs::read_to_string(GROUP_FILE) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
-
-    let mut entries = Vec::new();
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let fields: Vec<&str> = line.split(':').collect();
-        if fields.len() >= 4 {
-            let members = if fields[3].is_empty() {
-                Vec::new()
-            } else {
-                fields[3].split(',').map(|s| s.to_string()).collect()
-            };
-            entries.push(GroupEntry {
-                name: fields[0].to_string(),
-                passwd: fields[1].to_string(),
-                gid: fields[2].parse().unwrap_or(0),
-                members,
-            });
-        }
-    }
-    entries
+fn parse_group() -> Vec<pwdb::Group> {
+    pwdb::groups(&fs::read(GROUP_FILE).unwrap_or_default())
 }
 
 fn parse_hosts() -> Vec<HostEntry> {
@@ -402,6 +372,17 @@ fn parse_shadow() -> Vec<ShadowEntry> {
 // Lookup functions
 // ============================================================================
 
+/// Write one already-formatted record and a newline, as bytes.
+///
+/// `writeln!("{}", ...)` cannot be used for these two databases any more: the
+/// fields are bytes, and a name this program did not choose may hold any of
+/// them. Going through `String` would have to either refuse the record or
+/// corrupt it, and `from_utf8_lossy` corrupting it silently is the worse half.
+fn write_record(out: &mut impl Write, record: &[u8]) {
+    let _ = out.write_all(record);
+    let _ = out.write_all(b"\n");
+}
+
 fn lookup_passwd(keys: &[String]) -> i32 {
     let entries = parse_passwd();
     let stdout = io::stdout();
@@ -410,7 +391,7 @@ fn lookup_passwd(keys: &[String]) -> i32 {
     if keys.is_empty() {
         // Print all.
         for e in &entries {
-            let _ = writeln!(out, "{}", e.format());
+            write_record(&mut out, &format_user(e));
         }
         return 0;
     }
@@ -420,12 +401,10 @@ fn lookup_passwd(keys: &[String]) -> i32 {
         let found = if let Ok(uid) = key.parse::<u32>() {
             entries.iter().find(|e| e.uid == uid)
         } else {
-            entries.iter().find(|e| e.name == *key)
+            entries.iter().find(|e| e.name == key.as_bytes())
         };
         match found {
-            Some(e) => {
-                let _ = writeln!(out, "{}", e.format());
-            }
+            Some(e) => write_record(&mut out, &format_user(e)),
             None => ret = 2,
         }
     }
@@ -439,7 +418,7 @@ fn lookup_group(keys: &[String]) -> i32 {
 
     if keys.is_empty() {
         for e in &entries {
-            let _ = writeln!(out, "{}", e.format());
+            write_record(&mut out, &format_group(e));
         }
         return 0;
     }
@@ -449,12 +428,10 @@ fn lookup_group(keys: &[String]) -> i32 {
         let found = if let Ok(gid) = key.parse::<u32>() {
             entries.iter().find(|e| e.gid == gid)
         } else {
-            entries.iter().find(|e| e.name == *key)
+            entries.iter().find(|e| e.name == key.as_bytes())
         };
         match found {
-            Some(e) => {
-                let _ = writeln!(out, "{}", e.format());
-            }
+            Some(e) => write_record(&mut out, &format_group(e)),
             None => ret = 2,
         }
     }
@@ -728,40 +705,78 @@ fn main() {
 mod tests {
     use super::*;
 
+    /// The one record, parsed and reprinted. Round-tripping through the parser
+    /// is what a hand-built struct could not check: the format tests used to
+    /// assert that a struct someone filled in by hand printed the way they had
+    /// filled it in, which is true of any formatter.
+    fn reprint_user(line: &str) -> String {
+        let users = pwdb::users(line.as_bytes());
+        assert_eq!(users.len(), 1, "fixture should hold exactly one record");
+        String::from_utf8(format_user(&users[0])).expect("ascii fixture")
+    }
+
+    fn reprint_group(line: &str) -> String {
+        let groups = pwdb::groups(line.as_bytes());
+        assert_eq!(groups.len(), 1, "fixture should hold exactly one record");
+        String::from_utf8(format_group(&groups[0])).expect("ascii fixture")
+    }
+
     #[test]
     fn test_passwd_entry_format() {
-        let e = PasswdEntry {
-            name: "root".to_string(),
-            passwd: "x".to_string(),
-            uid: 0,
-            gid: 0,
-            gecos: "root".to_string(),
-            home: "/root".to_string(),
-            shell: "/bin/bash".to_string(),
-        };
-        assert_eq!(e.format(), "root:x:0:0:root:/root:/bin/bash");
+        // Measured against GNU getent on this machine.
+        let line = "root:x:0:0:root:/root:/bin/bash";
+        assert_eq!(reprint_user(line), line);
     }
 
     #[test]
     fn test_group_entry_format() {
-        let e = GroupEntry {
-            name: "wheel".to_string(),
-            passwd: "x".to_string(),
-            gid: 10,
-            members: vec!["alice".to_string(), "bob".to_string()],
-        };
-        assert_eq!(e.format(), "wheel:x:10:alice,bob");
+        assert_eq!(
+            reprint_group("wheel:x:10:alice,bob"),
+            "wheel:x:10:alice,bob"
+        );
     }
 
     #[test]
     fn test_group_entry_no_members() {
-        let e = GroupEntry {
-            name: "nogroup".to_string(),
-            passwd: "x".to_string(),
-            gid: 65534,
-            members: Vec::new(),
-        };
-        assert_eq!(e.format(), "nogroup:x:65534:");
+        // GNU prints the trailing colon: `getent group root` is `root:x:0:`.
+        assert_eq!(reprint_group("nogroup:x:65534:"), "nogroup:x:65534:");
+    }
+
+    #[test]
+    fn a_gecos_field_that_is_not_utf8_still_yields_its_record() {
+        // A person's name in Latin-1 is the ordinary way a non-UTF-8 byte gets
+        // into /etc/passwd. `read_to_string` failed for the WHOLE file on it,
+        // and the arm was `Err(_) => Vec::new()`, so `getent passwd alice`
+        // answered "no such user" -- exit 2 -- for every account on the system.
+        let mut line = Vec::from(&b"jose:x:1000:1000:Jos"[..]);
+        line.push(0xE9); // 'e-acute' in Latin-1; not valid UTF-8 on its own
+        line.extend_from_slice(b":/home/jose:/bin/sh");
+        assert!(
+            core::str::from_utf8(&line).is_err(),
+            "fixture must not be utf-8, or this test proves nothing"
+        );
+
+        let users = pwdb::users(&line);
+        assert_eq!(users.len(), 1, "the record must survive");
+        assert_eq!(users[0].name, b"jose");
+        // And it is reprinted byte-for-byte, not replaced with U+FFFD.
+        assert_eq!(format_user(&users[0]), line);
+    }
+
+    #[test]
+    fn a_malformed_uid_is_not_root() {
+        // `uid: fields[2].parse().unwrap_or(0)` reported this line as uid 0.
+        // glibc's fgetpwent rejects it, and so does pwdb.
+        let users = pwdb::users(b"broken:x:notanumber:5:::/bin/sh");
+        assert!(
+            users.is_empty(),
+            "a line with no usable uid is not a record"
+        );
+        // The sane neighbour on the next line still parses, so one bad line
+        // does not cost the file.
+        let users = pwdb::users(b"broken:x:notanumber:5:::/bin/sh\nok:x:7:7:::/bin/sh");
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].uid, 7);
     }
 
     #[test]
@@ -840,20 +855,31 @@ mod tests {
         assert_eq!(e.format(), "root:!:19000:0:99999:7:::");
     }
 
+    /// Replaces `test_passwd_entry_clone`, which built a struct by hand,
+    /// cloned it, and asserted the clone had the fields it was given -- a test
+    /// of `#[derive(Clone)]`, which the compiler already guarantees, and of a
+    /// type this program no longer owns. This asserts something the program
+    /// can actually get wrong: which field a key is matched against.
     #[test]
-    fn test_passwd_entry_clone() {
-        let e = PasswdEntry {
-            name: "test".to_string(),
-            passwd: "x".to_string(),
-            uid: 1000,
-            gid: 1000,
-            gecos: "Test".to_string(),
-            home: "/home/test".to_string(),
-            shell: "/bin/sh".to_string(),
-        };
-        let c = e.clone();
-        assert_eq!(c.name, "test");
-        assert_eq!(c.uid, 1000);
+    fn a_numeric_key_selects_by_id_and_a_name_key_by_name() {
+        let db = "alice:x:1000:1000::/home/alice:/bin/sh
+1000:x:7:7::/home/odd:/bin/sh
+";
+        let users = pwdb::users(db.as_bytes());
+        assert_eq!(users.len(), 2);
+
+        // The second account is *named* "1000". A numeric key is a uid, so it
+        // must select alice (uid 1000) and not the account called 1000.
+        let by_uid = users.iter().find(|e| e.uid == 1000).expect("uid 1000");
+        assert_eq!(by_uid.name, b"alice");
+
+        // A key that does not parse as a number is matched against the name,
+        // as bytes.
+        let by_name = users
+            .iter()
+            .find(|e| e.name == "1000".as_bytes())
+            .expect("named 1000");
+        assert_eq!(by_name.uid, 7);
     }
 
     #[test]

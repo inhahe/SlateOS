@@ -137662,7 +137662,7 @@ members, and `pwdb::group_list` is built to put the primary gid back.
 | Program | Reads | Status |
 |---|---|---|
 | `userspace/doas` | `read_to_string("/etc/group")`, members only | **FIXED 2026-09-12** |
-| `userspace/getent` | `read_to_string` | open |
+| `userspace/getent` | `read_to_string` x7, and `parse().unwrap_or(0)` | **passwd/group FIXED 2026-09-12**; its five other databases still read as text |
 | `userspace/install` | `read_to_string`, `resolve_group` | open |
 | `userspace/loginctl` | `read_to_string(GROUP_FILE)` | open |
 | `userspace/mktemp` | `read_to_string` | open |
@@ -137688,6 +137688,24 @@ exercised the "cannot read" arm. Six tests now cover supplementary membership,
 **primary** membership, a non-member, an absent group, an absent caller, and a
 group name that is not UTF-8 -- each asserting its own fixture really has the
 property it is named for, so none can pass vacuously.
+
+### `getent` had a second defect the others do not
+
+`uid: fields[2].parse().unwrap_or(0)` -- and the same for gid. A
+`/etc/passwd` line whose uid field is not a number was reported as **uid 0**,
+which is root. glibc's `fgetpwent` rejects such a line and so does `pwdb`, so
+moving onto it fixed this at the same time. There is a test.
+
+Its non-UTF-8 case is also the most likely to be hit in practice: a person's
+name in the GECOS field, written in Latin-1, is the ordinary way a byte that is
+not valid UTF-8 gets into `/etc/passwd`. The arm was `Err(_) => Vec::new()`, so
+one such account made `getent passwd alice` answer **"no such user"**, exit 2,
+for every account on the system -- a wrong answer rather than an error.
+
+**Five of `getent`'s seven databases are still read as text** -- `hosts`,
+`services`, `protocols`, `networks`, `shadow`. `pwdb` does not cover those
+formats, so they need their own byte parsing rather than a shared reader, and
+that is a separate change.
 
 ### What is deliberately NOT changed
 

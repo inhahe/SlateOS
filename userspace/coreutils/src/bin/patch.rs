@@ -92,6 +92,9 @@ struct Options {
     patch_file: Option<String>,
     reverse: bool,
     dry_run: bool,
+    /// `--verbose`: narrate the run -- the dialect, the header block,
+    /// `Using Plan A...`, and a line per hunk whether it applied or not.
+    verbose: bool,
     silent: bool,
     backup: bool,
     /// `-o FILE`: write the result to FILE, leaving the target untouched.
@@ -162,6 +165,11 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
             }
         } else if a == "-R" || a == "--reverse" {
             opts.reverse = true;
+        } else if a == "--verbose" {
+            // NOT `-v`. GNU's `-v` is `--version`; the two are
+            // measured in main() and the sibling utilities spell it
+            // the other way round.
+            opts.verbose = true;
         } else if a == "--dry-run" {
             opts.dry_run = true;
         } else if a == "-s" || a == "--silent" || a == "--quiet" {
@@ -1111,7 +1119,8 @@ fn main() {
     // about input GNU applies without comment. A patch program that reads a
     // third of the formats `diff` emits is not a narrow patch program, it is a
     // wrong answer with a confident error message.
-    let file_patches = match detect_dialect(&patch_input) {
+    let dialect = detect_dialect(&patch_input);
+    let file_patches = match dialect {
         Dialect::Context => parse_context_patch(&patch_input),
         Dialect::Normal => parse_normal_patch(&patch_input),
         Dialect::Unified | Dialect::Unknown => parse_patch(&patch_input),
@@ -1139,7 +1148,43 @@ fn main() {
 
     let mut any_failed = false;
 
+    // `--verbose` narrates the run. Measured against GNU 2.7.6 rather than
+    // reconstructed, because three details are not guessable: "Hmm..." carries
+    // TWO spaces before "Looks"; the second and later files say "The next
+    // patch looks like" instead of "Looks like"; and `done` is printed ONCE at
+    // the very end of the run, not once per file.
+    let dialect_name = match dialect {
+        Dialect::Context => "new-style context",
+        Dialect::Normal => "normal",
+        Dialect::Unified | Dialect::Unknown => "unified",
+    };
+    let mut announced = 0usize;
     for fp in &file_patches {
+        if opts.verbose {
+            let lead = if announced == 0 {
+                "Looks like"
+            } else {
+                "The next patch looks like"
+            };
+            announced = announced.saturating_add(1);
+            let mut intro = format!("Hmm...  {lead} a {dialect_name} diff to me...\n");
+            // A normal diff carries no header lines at all, so GNU omits the
+            // whole block rather than printing an empty one. The same block is
+            // already built for the can't-find-file diagnostic; this is the
+            // only other place it appears.
+            if !fp.header_lines.is_empty() {
+                intro.push_str("The text leading up to this was:\n");
+                intro.push_str("--------------------------\n");
+                for h in &fp.header_lines {
+                    intro.push('|');
+                    intro.push_str(h);
+                    intro.push('\n');
+                }
+                intro.push_str("--------------------------\n");
+            }
+            let mut out = Stream::stdout();
+            let _ = out.write_all(intro.as_bytes());
+        }
         // Determine the target file path.
         let raw_path = if let Some(ref target) = opts.target_file {
             target.clone()
@@ -1320,6 +1365,15 @@ fn main() {
             let mut out = Stream::stdout();
             let _ = out.write_all(line.as_bytes());
         }
+        if opts.verbose {
+            // GNU has a Plan A and a Plan B; Plan B is the out-of-core path
+            // for a file too large to hold in memory. We only have Plan A, so
+            // this line is honest rather than mimicry -- but it is worth
+            // knowing it is a claim about strategy, and if an out-of-core path
+            // ever lands here this line stops being true on its own.
+            let mut out = Stream::stdout();
+            let _ = out.write_all(b"Using Plan A...\n");
+        }
 
         // A HUNK THAT PROMISED MORE LINES THAN IT CARRIED IS NOT APPLIED.
         // Refused here rather than at parse time because the order of the two
@@ -1422,6 +1476,22 @@ fn main() {
         for (hunk_idx, hunk) in hunks.iter().enumerate() {
             match apply_hunk(&lines, hunk, offset) {
                 Some((new_lines, new_offset)) => {
+                    if opts.verbose && !opts.silent {
+                        // The line the hunk landed on, which is its start
+                        // shifted by everything applied before it -- not the
+                        // number in the header. A second hunk in a file whose
+                        // first hunk changed the line count reports the moved
+                        // position, which is the only number a reader can go
+                        // and look at.
+                        let at = i64::try_from(hunk.old_start)
+                            .unwrap_or(i64::MAX)
+                            .saturating_add(offset)
+                            .max(1);
+                        let mut out = Stream::stdout();
+                        let _ = out.write_all(
+                            format!("Hunk #{} succeeded at {at}.\n", hunk_idx + 1).as_bytes(),
+                        );
+                    }
                     lines = new_lines;
                     offset = new_offset;
                     hunks_applied += 1;
@@ -1588,6 +1658,16 @@ fn main() {
                 any_failed = true;
             }
         }
+    }
+
+    // ONCE, at the end of the run, and after the failure summary rather than
+    // before it. Measured both ways round: a two-file patch prints `done` once
+    // at the very bottom, not after each file, and a run whose only hunk was
+    // rejected still prints it -- `done` means "the program finished", not
+    // "the patch applied", which is why it sits outside the failure branch.
+    if opts.verbose {
+        let mut out = Stream::stdout();
+        let _ = out.write_all(b"done\n");
     }
 
     if any_failed {

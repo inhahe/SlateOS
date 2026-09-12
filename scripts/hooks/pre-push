@@ -3207,12 +3207,30 @@ fi
 # the boot test on the trunk for every lane.  That is not hypothetical; it cost four
 # runs of between nine and twenty-seven minutes.
 #
-# WHY NOT JUST WIDEN THIS ONE.  Matching the boot test means compiling the whole
-# workspace for a second target on every push, which is minutes per push borne by all
-# three lanes for a check the boot test already performs.  The honest fix is a name that
-# does not over-promise, not a gate that duplicates a slow one.  If the trunk keeps
-# going red this way, revisit -- the cost of the red is measurable and so is the cost of
-# the widening.
+# WHY NOT JUST WIDEN THIS ONE, with both costs now measured rather than argued.
+# Matching the boot test means `cargo clippy --workspace --exclude kernel --all-targets`
+# against a unix target: **252 seconds** here on a warm cache, measured 2026-09-12.  That
+# is minutes per push borne by all three lanes for a check the boot test already does, so
+# no.
+#
+# BUT THE FILTER HAS TWO INDEPENDENT RESTRICTIONS AND ONLY ONE IS ABOUT UNIX.  This
+# matters, and an earlier version of this comment got it wrong.  It said "--all-targets
+# would not have helped", which is true of this gate as scoped -- `apps/launcher` is
+# absent from the derived crate list, so no flag reaches it -- and false as a statement
+# about the flag.  Lane C made the correction: the crate-list restriction and the
+# target/flags restriction fail *separately*.  The lint that cost four boot runs,
+# `match_single_binding`, is target-INDEPENDENT; what hid it was `--all-targets`, because
+# the code sits in a `#[cfg(test)]` module that nothing else compiles.  So the axis was
+# never unix at all -- it was the test binary.
+#
+# WHICH LEAVES A CHEAP OPTION THIS COMMENT PREVIOUSLY TALKED ITSELF OUT OF.  A
+# **host-target** `clippy --all-targets` over the crates a push touches is seconds, not
+# minutes: ~3s for one crate, and lane C measured ~18s across the 58 they had touched.
+# That would have caught this at the machine that wrote it.  It is not a widening of THIS
+# gate -- it shares neither the target nor the crate list -- it is a separate, fast gate
+# that nobody has written.  Recorded here rather than done, because adding a gate to this
+# hook is a decision about every lane's push latency and the measurement above is from one
+# machine on a warm cache.
 #
 # IS ANY OTHER GATE SCOPED DIFFERENTLY HERE THAN AT BOOT TIME?  Audited 2026-09-12 by
 # comparing every `run_checker` invocation in this file against the ones in

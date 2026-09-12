@@ -44,8 +44,29 @@ ROOT = Path(__file__).resolve().parent.parent
 
 # A request is finished when its own status line says so. Matched at the start
 # of a line so that a sentence *about* a status in the body does not count.
+# A request announces its own closure on its `**Status:**` line -- but that
+# marker is not always the first thing on the line.
+#
+# `^\*\*Status:\*\*` required it to be, and 21 of 342 requests put it after
+# something else:
+#
+#     **From:** Lane A.  **To:** Lane B.  **Filed:** 2026-09-08.  **Status:** DONE
+#
+# Measured: 226 requests report themselves finished under the anchored form,
+# 245 under this one, 247 once `CONSUMED` joins the vocabulary -- which the
+# `*at`-family wire-up requests use ("CONSUMED 2026-09-02 by lane B").
+#
+# The direction this was failing in is the bad one. The gate reports an entry
+# as stale when the request it cites HAS finished; a request whose finish it
+# cannot see is simply never reported, so an entry that was unblocked weeks ago
+# keeps looking blocked and nobody is told. Same shape as the gate missing
+# answered open-questions entirely, fixed earlier today.
+#
+# Still anchored to the line, not the document: `[^\n]*` keeps the keyword on
+# the same line as the marker, so prose elsewhere saying "this is done" is not
+# a status.
 RESOLVED_REQUEST = re.compile(
-    r"^\*\*Status:\*\*.*(LANDED|DONE|RESOLVED|CLOSED|ANSWERED|✅)", re.M
+    r"\*\*Status:\*\*[^\n]*(LANDED|DONE|RESOLVED|CLOSED|ANSWERED|CONSUMED|✅)"
 )
 
 # An entry announces its own closure in the first few lines, not the heading --
@@ -514,6 +535,36 @@ QUESTION_SELFTEST = [
 ]
 
 
+def status_selftest():
+    """`RESOLVED_REQUEST` against the shapes real requests actually use.
+
+    The marker is not always first on its line -- 21 of 342 requests put it
+    after `**Filed:**` -- and a request the gate cannot see as finished is one
+    whose dependent entries keep looking blocked forever.
+    """
+    cases = [
+        ("**Status:** DONE", True, "marker at the start of the line"),
+        ("**From:** A.  **Filed:** 2026-09-08.  **Status:** DONE (lane B)",
+         True, "marker after something else on the same line"),
+        ("**Status:** CONSUMED 2026-09-02 by lane B", True, "CONSUMED counts"),
+        ("**Status:** ✅ landed", True, "the tick mark counts"),
+        ("**Status:** open; wire-up is yours", False, "an open request is open"),
+        ("**Status:** blocked on lane A", False, "blocked is not finished"),
+        # The keyword must share the line with the marker. Prose elsewhere
+        # saying the work is done is not a status, or every request that
+        # narrates its own history would read as closed.
+        ("**Status:** open" + chr(10) + "Later we got this DONE somehow.",
+         False, "a keyword on another line is not a status"),
+    ]
+    bad = 0
+    for text, want, name in cases:
+        got = bool(RESOLVED_REQUEST.search(text))
+        ok = got == want
+        bad += 0 if ok else 1
+        print("%-4s %s" % ("ok" if ok else "FAIL", name))
+    return bad
+
+
 def question_selftest():
     """`question_states` against a miniature open-questions.md.
 
@@ -559,11 +610,12 @@ def selftest():
         print("%-4s %s" % ("ok" if ok else "FAIL", name))
         if not ok:
             print("       wanted %d hit(s), got %d" % (want, got))
+    bad += status_selftest()
     bad += question_selftest()
     bad += dangling_selftest()
     bad += floors_selftest()
     total = (
-        len(SELFTEST) + len(QUESTION_SELFTEST) + 1 + len(DANGLING_SELFTEST) + 3
+        len(SELFTEST) + len(QUESTION_SELFTEST) + 1 + 7 + len(DANGLING_SELFTEST) + 3
     )
     print()
     print("check-stale-blockers selftest: %d case(s), %d failed" % (total, bad))

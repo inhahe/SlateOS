@@ -6373,12 +6373,28 @@ mod tests {
             assert_eq!(errno::get_errno(), errno::EPERM);
         }
 
-        /// Regression: default-cap sethostname still round-trips
-        /// (the existing test_sethostname_roundtrip exercises this
-        /// without explicit cap check; we add an explicit assertion
-        /// to lock it down).
         /// With `CAP_SYS_ADMIN` the capability check passes and the call
         /// still fails -- on `ENOSYS`, not `EPERM`.
+        ///
+        /// This docstring opened with four lines that have been deleted:
+        /// *"Regression: default-cap sethostname still round-trips (the
+        /// existing test_sethostname_roundtrip exercises this without explicit
+        /// cap check; we add an explicit assertion to lock it down)."*
+        ///
+        /// Every clause of that was false by the time it was read. The test it
+        /// cited no longer exists -- it was `test_sethostname_roundtrip`, which
+        /// was removed precisely because its round trip ran through one
+        /// process-local buffer and so agreed with itself whatever the kernel
+        /// believed. And `sethostname` does not round-trip here at all now: the
+        /// host arm reports ENOSYS, which is what the rest of this docstring
+        /// describes.
+        ///
+        /// It is the load-bearing stale comment one turn further on. In
+        /// `read_kernel_name` a stale comment argued for leaving a LINE alone;
+        /// this one argued for leaving a GAP alone -- it justified what this
+        /// test deliberately does not assert by pointing at coverage that had
+        /// been deleted. A reader trusting it would have concluded the round
+        /// trip was covered elsewhere. Found by lane A, reading my file.
         ///
         /// The order matters and is deliberate: an unprivileged caller must
         /// learn it is unprivileged, which is true and will stay true, rather

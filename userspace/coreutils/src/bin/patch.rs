@@ -1221,7 +1221,22 @@ fn main() {
             match fs::read_to_string(&file_path) {
                 Ok(s) => s,
                 Err(e) => {
-                    if fp.old_path == "/dev/null" {
+                    if fp.old_path == "/dev/null" || opts.target_file.is_some() {
+                        // A NAMED TARGET IS NOT A SEARCH, so it cannot fail as
+                        // one. The block below is what GNU prints when it
+                        // *looked* for a file and could not work out which one
+                        // the patch meant -- which is why it suggests `-p`. If
+                        // the operand named the file, there was nothing to work
+                        // out, and a missing one is simply empty.
+                        //
+                        // This is not a cosmetic difference. Measured, and it
+                        // is the same answer in every dialect: `patch -i
+                        // create.patch newfile.txt` where `create.patch` only
+                        // ADDS lines produces the file and exits 0. Refusing
+                        // with `can't find file to patch` meant this build
+                        // could not create a file from a patch at all when the
+                        // target was named -- and a normal diff names no file,
+                        // so for that dialect it could not create one ever.
                         String::new()
                     } else {
                         // GNU's whole block, on STDOUT, measured:
@@ -1537,6 +1552,28 @@ fn main() {
                 .reject_file
                 .clone()
                 .unwrap_or_else(|| format!("{file_path}.rej"));
+            // A NAMED TARGET THAT NEVER EXISTED, whose hunks then failed.
+            //
+            // GNU's shape is odd and is reproduced deliberately, ORDER
+            // INCLUDED: it writes the (empty) `.orig`, then tries to reopen the
+            // original to restore it, cannot, and dies -- before the reject is
+            // written. So the run leaves an empty `<target>.orig`, NO `.rej`,
+            // no output file, and exit 2.
+            //
+            // The order is the whole of the remaining difference. Placing this
+            // after the reject write matched GNU's stdout, stderr and exit code
+            // exactly and still left a 44-byte `a/nosuch.txt.rej` on disk that
+            // GNU does not create -- which only the harness's directory
+            // snapshot could see, since all three streams agreed.
+            //
+            // Bug-for-bug on purpose; design-decisions.md 371.
+            if opts.target_file.is_some() && !Path::new(&file_path).exists() && !opts.dry_run {
+                if !opts.no_backup_if_mismatch {
+                    let _ = fs::write(format!("{file_path}.orig"), original.as_bytes());
+                }
+                diag!("patch: **** Can't reopen file {file_path} : No such file or directory");
+                process::exit(2);
+            }
             if !opts.dry_run {
                 let mut reject = String::new();
                 // THE REJECT HEADER CARRIES THE STRIPPED PATHS, and the

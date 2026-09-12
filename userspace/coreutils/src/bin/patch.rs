@@ -25,9 +25,10 @@
 
 use coreutils::diag;
 use coreutils::quote::quotef_os;
+use coreutils::stdfd::Stream;
 use std::env;
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::Path;
 use std::process;
 
@@ -429,12 +430,25 @@ fn main() {
             None => raw_path.clone(),
         };
 
+        // PROGRESS GOES TO STDOUT, not stderr. Measured against GNU patch
+        // 2.7.6 rather than assumed, both ways round:
+        //
+        //     patch f < u.patch 2>/dev/null   ->  patching file f.txt
+        //     patch f < u.patch 2>&1 >/dev/null  ->  (nothing)
+        //
+        // and the same for `--dry-run`'s `checking file ...`. This was `diag!`
+        // for both, which is stderr, and it is why `patch-diff.sh` reported 3
+        // passed against 62 differed: almost every case in it produces one of
+        // these lines, so the stream alone decided the verdict and nothing
+        // about the patching was being compared at all.
         if !opts.silent {
-            if opts.dry_run {
-                diag!("checking file {file_path}...");
+            let line = if opts.dry_run {
+                format!("checking file {file_path}...\n")
             } else {
-                diag!("patching file {file_path}");
-            }
+                format!("patching file {file_path}\n")
+            };
+            let mut out = Stream::stdout();
+            let _ = out.write_all(line.as_bytes());
         }
 
         // Read the original file (or start empty for new files).

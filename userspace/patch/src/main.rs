@@ -1079,9 +1079,9 @@ fn main() {
 
         if !opts.silent {
             if opts.dry_run {
-                eprintln!("checking file {file_path_str}...");
+                println!("checking file {file_path_str}...");
             } else {
-                eprintln!("patching file {file_path_str}");
+                println!("patching file {file_path_str}");
             }
         }
 

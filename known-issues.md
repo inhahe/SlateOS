@@ -607,7 +607,41 @@ clean of the argv-as-String defect, 24 go through `getopt`; of the 49 dirty
 ones, none do. A bin that parses options through the shared module never had a
 reason to reach for `String` in the first place.
 
-## B-PATCH-WRITES-ITS-PROGRESS-TO-STDERR-NOT-STDOUT (lane B, 2026-09-11)
+## B-PATCH-WRITES-ITS-PROGRESS-TO-STDERR-NOT-STDOUT — **FIXED 2026-09-12 in both halves** (lane B, 2026-09-11)
+
+**Measured against GNU patch 2.7.6 both ways round**, rather than assumed:
+
+    patch f < u.patch 2>/dev/null      ->  patching file f.txt
+    patch f < u.patch 2>&1 >/dev/null  ->  (nothing)
+
+and the same for `--dry-run`'s `checking file …`. Both of ours used stderr —
+`diag!` in the coreutils bin, `eprintln!` in the standalone.
+
+**What it was worth, which is more than it looks:**
+
+| half | before | after |
+|---|---|---|
+| `coreutils` `patch` | 3 passed, 62 differed | **14 passed, 51 differed** |
+| `userspace/patch` | 3 passed, 62 differed | **17 passed, 48 differed** |
+
+Almost every case in `patch-diff.sh` produces one of these lines, so **the
+stream alone was deciding the verdict and nothing about the patching was being
+compared at all.** Eleven and fourteen cases respectively were hidden behind it.
+
+**The identical 3/62 was the tell, and I nearly misread it.** Two separate
+implementations — 892 lines against 2183, no shared module — scoring byte-for-
+byte the same is not a coincidence, it is a sign that something upstream of both
+is deciding the answer. My first hypothesis was that `DIFF_PKG=patch` had not
+switched halves at all, which the preamble's own probe disproved:
+`DIFF_PKG=no-such-package-at-all` fails loudly, so the knob was working.
+
+**The pair is still NOT decided, and 17-to-14 is not a decision.** Three cases
+apart out of sixty-five, with both halves failing about three quarters of them.
+`dup-bins-survey.py`'s own warning is against exactly this — five pairs ranked
+on thin evidence were later measured and the ranking was wrong every time. What
+the fix bought is a comparison that measures `patch` instead of measuring a file
+descriptor; what it did not buy is a winner. **Neither half is close to GNU**,
+and whichever survives needs real work rather than a retirement decision.
 
 **Both halves of the `patch` pair write `patching file X` to stderr. GNU writes
 it to stdout.** Verified directly rather than inferred from a harness column:

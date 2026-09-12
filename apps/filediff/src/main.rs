@@ -3798,24 +3798,22 @@ mod tests {
                 box_at = Some((bx, bw));
                 continue;
             }
-            match cmd {
-                RenderCommand::Text {
-                    x,
-                    text,
-                    font_size,
-                    font_weight,
-                    ..
-                } => {
-                    let Some((bx, bw)) = box_at else { continue };
-                    let end = x + text::measure(text, *font_size, *font_weight);
-                    assert!(
-                        end <= bx + bw + 0.5,
-                        "{text:?} ends at {end} but its button ends at {}",
-                        bx + bw
-                    );
-                    checked += 1;
-                }
-                _ => {}
+            if let RenderCommand::Text {
+                x,
+                text,
+                font_size,
+                font_weight,
+                ..
+            } = cmd
+            {
+                let Some((bx, bw)) = box_at else { continue };
+                let end = x + text::measure(text, *font_size, *font_weight);
+                assert!(
+                    end <= bx + bw + 0.5,
+                    "{text:?} ends at {end} but its button ends at {}",
+                    bx + bw
+                );
+                checked += 1;
             }
         }
         assert!(

@@ -97,6 +97,15 @@ def recognised(text, opt):
     bare = opt.lstrip("-")
     if '"%s"' % bare in text:
         return True
+    # ...and the de-dashed form may carry its `=`, because the parser has
+    # already split the value off: `objdump` holds
+    # `rest.strip_prefix("start-address=")`, so neither `"--start-address"`
+    # nor `"start-address"` occurs and the option works perfectly. This
+    # tool's fifth false positive.
+    if '"%s="' % bare in text:
+        return True
+    if re.search(r'(?:starts_with|strip_prefix)\(\s*"%s' % re.escape(bare), text):
+        return True
     return False
 
 

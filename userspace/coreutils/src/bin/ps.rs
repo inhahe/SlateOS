@@ -38,6 +38,8 @@ struct PsArgs {
     select_ttys: Option<Vec<String>>,
     /// `-l`: the long format.
     long_format: bool,
+    /// `--sort` terms, in the order written. The first is the primary key.
+    sort: Vec<SortKey>,
 }
 
 /// Parse ps's argv.  BSD-style and POSIX-style flags are accepted via
@@ -96,10 +98,46 @@ fn parse_args(args: &[String]) -> Result<Request, String> {
         // Long options are matched WHOLE. Splitting them into characters is
         // what made `--help` mean `-e`.
         if let Some(long) = arg.strip_prefix("--") {
+            // `--sort` takes a value, in either spelling procps accepts:
+            // `--sort=KEY` and `--sort KEY`. Split on the first `=` so the
+            // match below still sees whole option names -- the bug this
+            // comment's neighbour describes was caused by not matching whole.
+            let (long, inline) = match long.split_once('=') {
+                Some((name, value)) => (name, Some(value)),
+                None => (long, None),
+            };
             match long {
                 "help" => return Ok(Request::Help),
                 "no-header" | "no-heading" => {
                     out.no_header = true;
+                    continue;
+                }
+                "sort" => {
+                    let spec = match inline {
+                        Some(v) => v.to_string(),
+                        // The separated form. A `--sort` with NOTHING after
+                        // it has its own message -- measured, not guessed:
+                        //
+                        //   ps --sort            error: long sort specification must follow --sort
+                        //   ps --sort=nosuchkey  error: unknown sort specifier
+                        //
+                        // I wrote the second for both and the harness caught
+                        // it. procps distinguishes "you named a key I do not
+                        // know" from "you named no key at all", which are
+                        // different mistakes and get different sentences.
+                        None => match args.get(i) {
+                            Some(v) => {
+                                i = i.saturating_add(1);
+                                v.clone()
+                            }
+                            None => {
+                                return Err(
+                                    "error: long sort specification must follow --sort".to_string()
+                                );
+                            }
+                        },
+                    };
+                    parse_sort(&spec, &mut out.sort)?;
                     continue;
                 }
                 _ => return Err("error: unknown gnu long option".to_string()),
@@ -393,6 +431,52 @@ struct Spec {
 ///
 /// A name not in `COLUMNS`. procps' message, measured:
 /// `error: unknown user-defined format specifier "nosuchcolumn"`.
+/// One `--sort` term: a column, and which way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SortKey {
+    col: usize,
+    descending: bool,
+}
+
+/// What a column compares as.
+///
+/// Numbers compare as numbers. `--sort=pid` on pids 2, 10 and 9 must give
+/// 2, 9, 10 and not 10, 2, 9, which is what comparing the rendered strings
+/// gives -- and the rendering is what a naive implementation reaches for,
+/// because `cell()` already returns it.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum SortValue {
+    Num(i64),
+    Text(String),
+}
+
+/// Parse a `--sort` specification: comma-separated keys, each optionally
+/// prefixed `+` (ascending, the default) or `-` (descending).
+///
+/// Measured against procps 4.x:
+///
+/// ```text
+/// ps -e -o pid --sort=-pid        descending      exit 0
+/// ps -e -o pid --sort=+pid        ascending       exit 0
+/// ps -e -o pid,comm --sort=comm,-pid              exit 0, both applied
+/// ps -e --sort=nosuchkey          "error: unknown sort specifier", exit 1
+/// ps -e -o pid --sort pid         the separated form works too
+/// ```
+fn parse_sort(spec: &str, into: &mut Vec<SortKey>) -> Result<(), String> {
+    for term in spec.split(',').filter(|t| !t.is_empty()) {
+        let (descending, name) = match term.as_bytes().first() {
+            Some(b'-') => (true, &term[1..]),
+            Some(b'+') => (false, &term[1..]),
+            _ => (false, term),
+        };
+        let Some(col) = COLUMNS.iter().position(|c| c.name == name) else {
+            return Err("error: unknown sort specifier".to_string());
+        };
+        into.push(SortKey { col, descending });
+    }
+    Ok(())
+}
+
 fn parse_columns(list: &str, into: &mut Vec<Spec>) -> Result<(), String> {
     for field in list.split(',').filter(|f| !f.is_empty()) {
         let (name, title) = match field.split_once('=') {
@@ -515,8 +599,21 @@ struct ProcInfo {
     /// the process is running rather than blocked.
     wchan: String,
     /// procps' `STIME`: `HH:MM` if the process started today, else `MMM DD`.
+    /// The start time as an epoch second, beside the rendering of it.
+    ///
+    /// `--sort=stime` has to compare the VALUE: the rendering is `14:32` for a
+    /// process started today and `Sep12` for an older one, so ordering the
+    /// strings puts every process started this morning after every process
+    /// started last week. Sorting a rendering rather than the thing it renders
+    /// is the mistake this tree keeps finding; the field is here so this one
+    /// cannot make it.
+    start_epoch: i64,
     stime: String,
     tty: String,
+    /// CPU time in ticks, beside the rendering of it. `--sort=time` compares
+    /// this; `time_str` is `HH:MM:SS` and compares correctly as a string only
+    /// while the hours stay two digits.
+    cpu_ticks: u64,
     time_str: String,
     /// The `-f` command line, already rendered. Empty when `-f` was not asked
     /// for, which is also when it was never read.
@@ -529,6 +626,83 @@ struct ProcInfo {
 /// [`stdfd::close_stderr`].
 fn main() -> ExitCode {
     stdfd::close_stderr(run_main(), 1)
+}
+
+/// Write one process's row in whichever format the options chose.
+///
+/// Lifted out of the listing loop when `--sort` arrived: the rows have to
+/// be collected before any of them can be written, and five format
+/// branches inlined in a loop cannot be called twice. One function, one
+/// caller -- which is also why the branches could not drift apart while
+/// they were being moved.
+fn write_row(out: &mut impl Write, parsed: &PsArgs, info: &ProcInfo, pid32: u32) {
+    let custom = !parsed.columns.is_empty();
+    if custom {
+        let cells: Vec<String> = parsed
+            .columns
+            .iter()
+            .map(|spec| info.cell(COLUMNS.get(spec.col), pid32))
+            .collect();
+        let _ = writeln!(out, "{}", render_row(&cells, &parsed.columns));
+    } else if parsed.long_format && parsed.full_format {
+        let _ = writeln!(
+            out,
+            "{:<1} {:<1} {:<8} {:>7} {:>7} {:>2} {:>3} {:>3} {:<4}{:>3} {:<6} {:>5} {:<8} {:>8} {}",
+            info.flag,
+            info.state,
+            info.user,
+            pid32,
+            info.ppid,
+            info.cpu_pct,
+            info.pri,
+            info.nice,
+            "-",
+            info.size_pages,
+            info.wchan,
+            info.stime,
+            info.tty,
+            info.time_str,
+            info.cmd
+        );
+    } else if parsed.long_format {
+        let _ = writeln!(
+            out,
+            "{:<1} {:<1} {:>5} {:>7} {:>7} {:>2} {:>3} {:>3} {:<4}{:>3} {:<6} {:<8} {:>8} {}",
+            info.flag,
+            info.state,
+            info.uid,
+            pid32,
+            info.ppid,
+            info.cpu_pct,
+            info.pri,
+            info.nice,
+            "-",
+            info.size_pages,
+            info.wchan,
+            info.tty,
+            info.time_str,
+            info.comm
+        );
+    } else if parsed.full_format {
+        let _ = writeln!(
+            out,
+            "{:<8} {:>7} {:>7} {:>2} {:>5} {:<8} {:>8} {}",
+            info.user,
+            pid32,
+            info.ppid,
+            info.cpu_pct,
+            info.stime,
+            info.tty,
+            info.time_str,
+            info.cmd
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            "{:>7} {:<8} {:>8} {}",
+            pid32, info.tty, info.time_str, info.comm
+        );
+    }
 }
 
 fn run_main() -> ExitCode {
@@ -658,6 +832,10 @@ fn run_main() -> ExitCode {
     };
 
     let mut matched = false;
+    // Rows are collected before any is written, because `--sort` orders them
+    // and a row already on stdout cannot be moved. Without a sort this is one
+    // extra Vec of a few hundred entries and the same output.
+    let mut rows: Vec<(ProcInfo, u32)> = Vec::new();
     for pid in pids {
         // `-e`/`-A` OVERRIDES every selection, in either order. Measured:
         // `ps -e -p 2`, `ps -p 2 -e`, `ps -e -u root` and `ps -e -t ?` all
@@ -710,73 +888,30 @@ fn run_main() -> ExitCode {
         }
         let pid32 = u32::try_from(pid).unwrap_or(0);
 
-        if custom {
-            let cells: Vec<String> = parsed
-                .columns
-                .iter()
-                .map(|spec| info.cell(COLUMNS.get(spec.col), pid32))
-                .collect();
-            let _ = writeln!(out, "{}", render_row(&cells, &parsed.columns));
-        } else if parsed.long_format && parsed.full_format {
-            let _ = writeln!(
-                out,
-                "{:<1} {:<1} {:<8} {:>7} {:>7} {:>2} {:>3} {:>3} {:<4}{:>3} {:<6} {:>5} {:<8} {:>8} {}",
-                info.flag,
-                info.state,
-                info.user,
-                pid32,
-                info.ppid,
-                info.cpu_pct,
-                info.pri,
-                info.nice,
-                "-",
-                info.size_pages,
-                info.wchan,
-                info.stime,
-                info.tty,
-                info.time_str,
-                info.cmd
-            );
-        } else if parsed.long_format {
-            let _ = writeln!(
-                out,
-                "{:<1} {:<1} {:>5} {:>7} {:>7} {:>2} {:>3} {:>3} {:<4}{:>3} {:<6} {:<8} {:>8} {}",
-                info.flag,
-                info.state,
-                info.uid,
-                pid32,
-                info.ppid,
-                info.cpu_pct,
-                info.pri,
-                info.nice,
-                "-",
-                info.size_pages,
-                info.wchan,
-                info.tty,
-                info.time_str,
-                info.comm
-            );
-        } else if parsed.full_format {
-            let _ = writeln!(
-                out,
-                "{:<8} {:>7} {:>7} {:>2} {:>5} {:<8} {:>8} {}",
-                info.user,
-                pid32,
-                info.ppid,
-                info.cpu_pct,
-                info.stime,
-                info.tty,
-                info.time_str,
-                info.cmd
-            );
-        } else {
-            let _ = writeln!(
-                out,
-                "{:>7} {:<8} {:>8} {}",
-                pid32, info.tty, info.time_str, info.comm
-            );
-        }
+        rows.push((info, pid32));
         matched = true;
+    }
+
+    // `--sort` applies the terms in the order written, first as primary.
+    // `sort_by` is STABLE, so terms after the first decide only among rows the
+    // earlier ones tied -- which is what applying them in order means, and is
+    // why they are compared left to right here rather than each in its own
+    // pass.
+    if !parsed.sort.is_empty() {
+        rows.sort_by(|(a, apid), (b, bpid)| {
+            for key in &parsed.sort {
+                let col = COLUMNS.get(key.col);
+                let ord = a.sort_value(col, *apid).cmp(&b.sort_value(col, *bpid));
+                let ord = if key.descending { ord.reverse() } else { ord };
+                if ord != core::cmp::Ordering::Equal {
+                    return ord;
+                }
+            }
+            core::cmp::Ordering::Equal
+        });
+    }
+    for (info, pid32) in &rows {
+        write_row(&mut out, &parsed, info, *pid32);
     }
 
     // `ps -p <pid that is not running>` exits 1 having printed only the
@@ -864,8 +999,10 @@ fn read_one(
             stat.stime_ticks,
             ctx.now_epoch.saturating_sub(start_epoch),
         ),
+        start_epoch,
         stime: ctx.format_stime(start_epoch),
         tty: format_tty(i32::try_from(stat.tty_nr).unwrap_or(0)),
+        cpu_ticks: stat.utime_ticks.saturating_add(stat.stime_ticks),
         time_str: format_cpu_time(stat.utime_ticks, stat.stime_ticks),
         cmd,
     }))
@@ -877,6 +1014,32 @@ impl ProcInfo {
     /// `args` falls back to the bracketed `comm` when the command line is
     /// empty, which is what the `-f` path already does for a kernel thread --
     /// the same value, reached the same way, rather than a second rule.
+    /// What this process compares as under `--sort` for `col`.
+    ///
+    /// Deliberately NOT `cell()`. Three columns would order wrongly if the
+    /// rendering were compared: `pid`/`ppid`/`uid`/`c` are numbers printed
+    /// without padding here, so "10" sorts before "9"; `stime` renders as
+    /// `14:32` today and `Sep12` for an older process, so the strings
+    /// interleave by format rather than by time; and `time` is `HH:MM:SS`,
+    /// which happens to compare correctly only while the hours stay two
+    /// digits.
+    fn sort_value(&self, col: Option<&Column>, pid: u32) -> SortValue {
+        let Some(col) = col else {
+            return SortValue::Text(String::new());
+        };
+        match col.name {
+            "pid" => SortValue::Num(i64::from(pid)),
+            "ppid" => SortValue::Num(i64::from(self.ppid)),
+            "uid" => SortValue::Num(i64::from(self.uid)),
+            "c" => SortValue::Num(i64::try_from(self.cpu_pct).unwrap_or(i64::MAX)),
+            "stime" => SortValue::Num(self.start_epoch),
+            "time" => SortValue::Num(i64::try_from(self.cpu_ticks).unwrap_or(i64::MAX)),
+            // The rest are text and compare as text, which is what procps
+            // does with them.
+            _ => SortValue::Text(self.cell(Some(col), pid)),
+        }
+    }
+
     fn cell(&self, col: Option<&Column>, pid: u32) -> String {
         let Some(col) = col else { return String::new() };
         match col.name {

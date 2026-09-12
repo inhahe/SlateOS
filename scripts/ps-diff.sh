@@ -380,6 +380,32 @@ xfail_case "procps implements -h (suppress header); this build does not" -h
 # other and is the only kind never tested by its own case passing.
 run_case --help
 
+# ---- --sort ------------------------------------------------------------
+#
+# Written against these measurements, not ported: the retired crate's `--sort`
+# scored 0 XPASS like the rest of it, so its output was a second wrong
+# rendering rather than a feature.
+#
+#   ps -e -o pid --sort=-pid     descending            exit 0
+#   ps -e -o pid --sort=+pid     ascending             exit 0
+#   ps -e -o pid --sort pid      the separated form    exit 0
+#   ps -e --sort=nosuchkey       "error: unknown sort specifier", exit 1
+#
+# The keys that matter are the ones where sorting the RENDERING gives a
+# different answer from sorting the value: `pid` ("10" before "9") and `stime`
+# (`14:32` today against `Sep12` last week).
+run_shared -e -o pid --sort=pid
+run_shared -e -o pid --sort=-pid
+run_shared -e -o pid --sort=+pid
+run_shared -e -o pid --sort pid
+run_shared -e -o pid,comm --sort=comm,-pid
+run_shared -e -o pid,ppid --sort=ppid,pid
+compare -e --sort=nosuchkey
+report 'ps -e --sort=nosuchkey [unknown key is an error, not an empty sort]'
+compare --sort
+report 'ps --sort [a --sort with no specifier]'
+
+
 printf '\n%d passed, %d differed, %d differ on purpose' "$pass" "$fail" "$xfail"
 if [ "$xpass" -gt 0 ]; then
   printf ', %d NO LONGER differ (update the harness)' "$xpass"

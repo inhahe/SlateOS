@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS tput/reset/clear - terminal capability tools"
 [dependencies]
+# getopt's usage diagnostics, spelled once; the wording is getopt's, not
+# ours. Pure formatting over `quoting`, no I/O, so §768 exempt.
+usageerror = { path = "../usageerror" }
 # It interpolates `cap_name` into "tput: unknown terminfo capability {}".
 # That value is the first word of an argv operand, or -- under `-S` -- the
 # first word of a line read from stdin, so it is outside data twice over and

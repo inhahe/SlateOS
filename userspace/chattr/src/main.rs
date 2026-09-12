@@ -284,6 +284,20 @@ struct LsattrOpts {
     files: Vec<String>,
 }
 
+/// Refuse a short option `lsattr` does not have.
+///
+/// getopt names the first character after the dash that the program has no
+/// option for -- measured: `lsattr -z` names `z`, `lsattr -Rz` names `z`
+/// because `R` is real, and `lsattr --zzq` names `-`, since e2fsprogs
+/// `lsattr` has no long options and so reads the second dash as just another
+/// cluster character. It then prints the one-line synopsis, not the full
+/// help, and exits 1.
+fn refuse_lsattr_option(opt: u8) -> ! {
+    eprintln!("lsattr: {}", usageerror::invalid_option(opt));
+    eprintln!("Usage: lsattr [-RVadlp] [file...]");
+    process::exit(1);
+}
+
 fn cmd_lsattr(args: &[String]) {
     let mut opts = LsattrOpts {
         recursive: false,
@@ -318,16 +332,25 @@ fn cmd_lsattr(args: &[String]) {
                 println!("lsattr {VERSION}");
                 process::exit(0);
             }
-            s if s.starts_with('-') && s.len() > 1 && !s.starts_with("--") => {
-                for c in s[1..].chars() {
-                    match c {
-                        'R' => opts.recursive = true,
-                        'a' => opts.all = true,
-                        'd' => opts.dirs_as_files = true,
-                        'v' => opts.verbose = true,
-                        'l' => opts.long_format = true,
-                        'p' => opts.project = true,
-                        _ => {}
+            // Any dashed word is a cluster: e2fsprogs `lsattr` has no long
+            // options, so there is nothing else it could be. `--help` and
+            // `--version` are matched above as a deliberate extra this build
+            // keeps; GNU refuses both.
+            //
+            // Bytes rather than chars, because argv on this OS is bytes and
+            // the letter named in the diagnostic has to be one of them.
+            s if s.starts_with('-') && s.len() > 1 => {
+                for &b in s.as_bytes().iter().skip(1) {
+                    match b {
+                        b'R' => opts.recursive = true,
+                        b'a' => opts.all = true,
+                        b'd' => opts.dirs_as_files = true,
+                        b'v' => opts.verbose = true,
+                        b'l' => opts.long_format = true,
+                        b'p' => opts.project = true,
+                        // Used to be skipped, so `lsattr -z` listed the
+                        // current directory and exited 0.
+                        other => refuse_lsattr_option(other),
                     }
                 }
             }

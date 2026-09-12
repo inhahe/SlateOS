@@ -56,8 +56,25 @@ pub fn unrecognized_option(arg: &[u8]) -> String {
 
 /// `invalid option -- 'q'` — a short option the program does not have.
 ///
-/// Takes the offending byte, not the cluster: given `-xq`, getopt reports
-/// whichever letter it choked on, one at a time.
+/// # Which byte to pass
+///
+/// The **first character after the dash that this program does not
+/// recognise** — not the second byte of the argument, and not the whole
+/// cluster. Measured on `lsattr` in the C locale:
+///
+/// | Command | Names |
+/// |---|---|
+/// | `lsattr -z`    | `'z'` |
+/// | `lsattr -Rz`   | `'z'` — `R` is real, so getopt walks past it |
+/// | `lsattr --zzq` | `'-'` — no long options, so the second dash is the first unrecognised character |
+///
+/// So a caller with no long options can walk the bytes after the leading
+/// dash and pass the first one it has no option for, and all three rows
+/// fall out of that one loop. An earlier version of this crate offered a
+/// helper that took the whole argument and named byte 1; it was right for
+/// the first and third rows and wrong for the middle one, which is the
+/// shape of mistake that survives review because the message still reads
+/// perfectly.
 #[must_use]
 pub fn invalid_option(opt: u8) -> String {
     format!("invalid option -- {}", quoting::quoteaf(&[opt]))
@@ -155,6 +172,17 @@ mod tests {
     /// dash it stopped on.
     #[test]
     fn a_program_without_long_options_names_the_dash() {
+        assert_eq!(invalid_option(b'-'), "invalid option -- '-'");
+    }
+
+    /// The middle row of the table on `invalid_option`: a cluster whose
+    /// offending letter is not the byte after the dash.
+    #[test]
+    fn the_caller_names_the_offender_not_the_second_byte() {
+        // `lsattr -Rz`: `R` is a real option, so getopt stops on `z`.
+        assert_eq!(invalid_option(b'z'), "invalid option -- 'z'");
+        // `lsattr --zzq`: no long options, so the second dash is the first
+        // character it has no option for.
         assert_eq!(invalid_option(b'-'), "invalid option -- '-'");
     }
 

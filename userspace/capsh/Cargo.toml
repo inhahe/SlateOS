@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS capability shell wrapper"
 [dependencies]
+# getopt's usage diagnostics, spelled once; the wording is getopt's, not
+# ours. Pure formatting over `quoting`, no I/O, so §768 exempt.
+usageerror = { path = "../usageerror" }
 # One rendering of untrusted text inside a diagnostic. Capability set strings,
 # the program `capsh --` is asked to exec and the chroot it is pointed at are
 # all argv words, and a command line may hold a newline -- so a message that

@@ -78,6 +78,10 @@ struct Options {
     dry_run: bool,
     silent: bool,
     backup: bool,
+    /// `-o FILE`: write the result to FILE, leaving the target untouched.
+    output_file: Option<String>,
+    /// `-E`: delete a file the patch has emptied.
+    remove_empty: bool,
     /// `-r FILE`: write rejects to FILE instead of `<target>.rej`.
     reject_file: Option<String>,
     /// `--no-backup-if-mismatch`: do not save `<target>.orig` when a hunk fails.
@@ -141,6 +145,16 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
             opts.silent = true;
         } else if a == "-b" || a == "--backup" {
             opts.backup = true;
+        } else if a == "-E" || a == "--remove-empty-files" {
+            opts.remove_empty = true;
+        } else if a == "-o" || a == "--output" {
+            i = i.saturating_add(1);
+            match args.get(i) {
+                Some(v) => opts.output_file = Some(v.clone()),
+                None => return Err("option requires an argument -- 'o'".to_string()),
+            }
+        } else if let Some(v) = a.strip_prefix("--output=") {
+            opts.output_file = Some(v.to_string());
         } else if a == "-N" || a == "--forward" {
             opts.forward = true;
         } else if a == "-f" || a == "--force" {
@@ -263,6 +277,33 @@ fn parse_range(s: &str) -> Option<(usize, usize)> {
 /// The counts come from the hunk as parsed rather than being recounted from the
 /// lines. They are what the patch claimed, and a reject that silently corrected
 /// them would no longer be the hunk that failed.
+/// Write the patched result, creating a `-o` destination as 0600.
+///
+/// GNU creates the file named by `-o` with mode 600, not 644. Measured: the
+/// content matched byte for byte and only the mode differed, which is the kind
+/// of difference that survives every test that reads the file back.
+///
+/// It is restrictive on purpose -- `-o` writes somewhere the user named rather
+/// than updating a file that already has permissions of its own, so there is no
+/// existing mode to preserve and the safe default is the private one.
+/// In-place writes are left alone: those go to a file that already exists.
+fn write_result(dest: &str, output: &str, is_output_option: bool) -> io::Result<()> {
+    #[cfg(unix)]
+    if is_output_option && !Path::new(dest).exists() {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(dest)?;
+        return f.write_all(output.as_bytes());
+    }
+    #[cfg(not(unix))]
+    let _ = is_output_option;
+    fs::write(dest, output)
+}
+
 fn render_hunk(h: &Hunk) -> String {
     let mut out = format!(
         "@@ -{},{} +{},{} @@
@@ -708,10 +749,22 @@ fn main() {
         // these lines, so the stream alone decided the verdict and nothing
         // about the patching was being compared at all.
         if !opts.silent {
-            let line = if opts.dry_run {
-                format!("checking file {file_path}...\n")
+            // With `-o`, GNU announces the DESTINATION and names the source in
+            // parentheses -- `patching file out.txt (read from a/base.txt)` --
+            // because the file being written is no longer the file being read.
+            let named = opts
+                .output_file
+                .clone()
+                .unwrap_or_else(|| file_path.clone());
+            let source = if opts.output_file.is_some() {
+                format!(" (read from {file_path})")
             } else {
-                format!("patching file {file_path}\n")
+                String::new()
+            };
+            let line = if opts.dry_run {
+                format!("checking file {named}{source}...\n")
+            } else {
+                format!("patching file {named}{source}\n")
             };
             let mut out = Stream::stdout();
             let _ = out.write_all(line.as_bytes());
@@ -907,8 +960,22 @@ fn main() {
                 output.push('\n');
             }
 
-            if let Err(e) = fs::write(&file_path, &output) {
-                diag!("patch: cannot write {file_path}: {e}");
+            // `-o` redirects the RESULT and leaves the target alone, so a
+            // `-E` deletion would be deleting the wrong file: the emptiness is
+            // a property of what was written, not of what was read.
+            let dest = opts
+                .output_file
+                .clone()
+                .unwrap_or_else(|| file_path.clone());
+            if opts.remove_empty && output.is_empty() && opts.output_file.is_none() {
+                // `-E` removes a file the patch has emptied. Measured: the file
+                // is gone from the tree, not left at zero length.
+                if let Err(e) = fs::remove_file(&dest) {
+                    diag!("patch: cannot remove {dest}: {e}");
+                    any_failed = true;
+                }
+            } else if let Err(e) = write_result(&dest, &output, opts.output_file.is_some()) {
+                diag!("patch: cannot write {dest}: {e}");
                 any_failed = true;
             }
         }

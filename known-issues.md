@@ -126616,6 +126616,45 @@ which suggests the hazard is structural rather than careless.
 
 ## B-POSIX-TIMERS-SUCCEED-AND-ARM-NOTHING (lane B, 2026-09-07)
 
+**Status: FIXED 2026-09-12** (lane B). `alarm`, `ualarm`, `setitimer` and
+`getitimer` now reach the kernel's real interval timer through
+`SYS_ITIMER_SET` (1069) and `SYS_ITIMER_GET` (1070), so a `SIGALRM` actually
+arrives. `ITIMER_VIRTUAL` and `ITIMER_PROF` are **refused with ENOSYS** rather
+than answered out of a table this module kept -- the `setgroups` call again
+(design-decisions.md §1004): a caller told ENOSYS can choose a fallback, a
+caller told 0 cannot.
+
+**What unblocked it, and the lesson in that.** This entry's own conclusion was
+"implement it, once lane A exposes a native number", and it sat waiting. Lane A
+had already done so **on 2026-09-09, the same day it was asked** -- and said so
+in a notice, which also pointed out that the request file's own second line
+recorded the closure. The entry went on saying `blocked` for three days because
+nothing re-read it after the ground moved. That is precisely the failure lane A
+described in the same exchange: *a statement that was true when written, in a
+document read as present tense.* Worth noting that no amount of care at the
+keyboard prevents it; only revisiting does.
+
+**On the host there is a simulator**, the same split `pipe.rs` uses, and it is
+not a return of this bug. The bug was that the *target* stored a value, armed
+nothing, and reported success. Now the target really arms; the host keeps a
+per-thread nanosecond store so `cargo test` still exercises the validation
+order and the `Timeval`↔nanosecond conversions either side of it, which is the
+libc-side logic and the only part a host test can be about. Whether a signal
+actually arrives is a kernel question, and the kernel has its own self-test for
+1069/1070.
+
+Two tests changed rather than being deleted, both because they encoded the
+three-timer fiction: `test_setitimer_valid_which` asserted all three `which`
+values return 0, and `test_getitimer_per_timer_type_isolation` asserted that
+reading an unset virtual timer reports zeros. Zeros are a plausible answer --
+"no timer is set" -- and a caller cannot tell them from "this kind of timer
+does not exist here", which is how the old behaviour stayed invisible. Both now
+assert the refusal *and* the errno, because ENOSYS and not EINVAL is what
+distinguishes "not built" from "you asked wrongly". `cargo test -p posix
+--target x86_64-pc-windows-gnu`: 20702 passed, 0 failed.
+
+The description below is kept in the tense it was written in.
+
 **In short:** the functions a program calls to ask for "wake me in 5 seconds"
 (`timer_create`, `timer_settime`) check their arguments, report success, and set
 no timer. Nothing ever fires. A program that schedules a timeout and waits for

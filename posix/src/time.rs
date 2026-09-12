@@ -2546,10 +2546,6 @@ const MAX_TIMERS: usize = 32;
 /// are indices into this table.
 type TimerTable = [Option<Itimerspec>; MAX_TIMERS];
 
-/// Interval-timer state type, indexed by the `setitimer` `which`
-/// parameter (0 = REAL, 1 = VIRTUAL, 2 = PROF).
-type ItimerState = [Itimerval; ITIMER_COUNT];
-
 /// Storage for the two POSIX timer tables.
 ///
 /// POSIX makes both per-*process*, and on the target a process is one
@@ -2571,45 +2567,28 @@ type ItimerState = [Itimerval; ITIMER_COUNT];
 /// the call sites mutate the table in place; the pointer is valid for the
 /// calling thread and must not be shared with another one.
 mod timer_store {
-    use super::{ITIMER_COUNT, ItimerState, Itimerval, MAX_TIMERS, TimerTable, Timeval};
+    use super::{MAX_TIMERS, TimerTable};
 
     /// Cold-start state of the timer table, stated once for both builds.
     const TIMERS_INIT: TimerTable = [None; MAX_TIMERS];
-    /// Cold-start state of the interval timers, stated once for both builds.
-    const ITIMERS_INIT: ItimerState = [Itimerval {
-        it_interval: Timeval {
-            tv_sec: 0,
-            tv_usec: 0,
-        },
-        it_value: Timeval {
-            tv_sec: 0,
-            tv_usec: 0,
-        },
-    }; ITIMER_COUNT];
 
     #[cfg(target_os = "none")]
     mod imp {
-        use super::{ITIMERS_INIT, ItimerState, TIMERS_INIT, TimerTable};
+        use super::{TIMERS_INIT, TimerTable};
         static mut TIMER_TABLE: TimerTable = TIMERS_INIT;
-        static mut ITIMER_STATE: ItimerState = ITIMERS_INIT;
         pub(super) fn timers() -> *mut TimerTable {
             &raw mut TIMER_TABLE
-        }
-        pub(super) fn itimers() -> *mut ItimerState {
-            &raw mut ITIMER_STATE
         }
     }
 
     #[cfg(not(target_os = "none"))]
     mod imp {
-        use super::{ITIMERS_INIT, ItimerState, TIMERS_INIT, TimerTable};
+        use super::{TIMERS_INIT, TimerTable};
         use core::cell::UnsafeCell;
 
         std::thread_local! {
             static TIMER_TABLE: UnsafeCell<TimerTable> =
                 const { UnsafeCell::new(TIMERS_INIT) };
-            static ITIMER_STATE: UnsafeCell<ItimerState> =
-                const { UnsafeCell::new(ITIMERS_INIT) };
         }
 
         // Shared fallbacks for the window in which a thread's TLS has
@@ -2617,28 +2596,17 @@ mod timer_store {
         // Unreachable in practice, and by then the thread is the only one
         // that could still be using them — see `crate::perthread::current`.
         static mut TIMER_FALLBACK: TimerTable = TIMERS_INIT;
-        static mut ITIMER_FALLBACK: ItimerState = ITIMERS_INIT;
 
         pub(super) fn timers() -> *mut TimerTable {
             TIMER_TABLE
                 .try_with(UnsafeCell::get)
                 .unwrap_or(&raw mut TIMER_FALLBACK)
         }
-        pub(super) fn itimers() -> *mut ItimerState {
-            ITIMER_STATE
-                .try_with(UnsafeCell::get)
-                .unwrap_or(&raw mut ITIMER_FALLBACK)
-        }
     }
 
     /// Pointer to the calling context's timer table.  Never null.
     pub(super) fn timers() -> *mut TimerTable {
         imp::timers()
-    }
-
-    /// Pointer to the calling context's interval-timer state.  Never null.
-    pub(super) fn itimers() -> *mut ItimerState {
-        imp::itimers()
     }
 }
 
@@ -3014,13 +2982,110 @@ pub const ITIMER_VIRTUAL: i32 = 1;
 pub const ITIMER_PROF: i32 = 2;
 
 /// Number of interval timer types (ITIMER_REAL, ITIMER_VIRTUAL, ITIMER_PROF).
-const ITIMER_COUNT: usize = 3;
 
 // Per-timer-type storage for `setitimer`/`getitimer` lives in
 // `timer_store::itimers()`, alongside the `timer_create` table.  The
 // timers never actually fire (no signal delivery), but we store the
 // values so `getitimer` returns what `setitimer` set.  This makes
 // programs that read back their own timer settings work correctly.
+
+/// Ask the kernel to arm, re-arm or disarm the real interval timer.
+///
+/// Returns `(prev_value_ns, prev_interval_ns)`, or a negative first element
+/// carrying `-errno`.
+///
+/// **On a host build there is no kernel, so this simulates.** That is the same
+/// split `pipe.rs` uses, and it is not a return of the bug this replaced: the
+/// bug was that the TARGET stored a value and armed nothing while reporting
+/// success. Here the target really arms, and the host keeps a store so that
+/// `cargo test` still exercises the validation order and the `Timeval`↔ns
+/// conversions either side of it -- which is the libc-side logic, and the only
+/// part a host test can be about. Whether a `SIGALRM` actually arrives is a
+/// kernel question, answered by the kernel's own self-test for 1069/1070.
+pub(crate) fn itimer_kernel_set(value_ns: u64, interval_ns: u64) -> (i64, i64) {
+    #[cfg(target_os = "none")]
+    {
+        crate::syscall::syscall3_2ret(crate::syscall::SYS_ITIMER_SET, 0, value_ns, interval_ns)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let prev = host_itimer::swap(value_ns, interval_ns);
+        (
+            i64::try_from(prev.0).unwrap_or(i64::MAX),
+            i64::try_from(prev.1).unwrap_or(i64::MAX),
+        )
+    }
+}
+
+/// Read the real interval timer without disturbing it. See
+/// [`itimer_kernel_set`] for why the host arm simulates.
+fn itimer_kernel_get() -> (i64, i64) {
+    #[cfg(target_os = "none")]
+    {
+        crate::syscall::syscall3_2ret(crate::syscall::SYS_ITIMER_GET, 0, 0, 0)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let cur = host_itimer::peek();
+        (
+            i64::try_from(cur.0).unwrap_or(i64::MAX),
+            i64::try_from(cur.1).unwrap_or(i64::MAX),
+        )
+    }
+}
+
+/// Host-only stand-in for the kernel's one real interval timer.
+///
+/// Per-*thread* rather than per-process, for the reason the timer tables above
+/// give: `cargo test` runs every test on its own thread inside one process, so
+/// a process-global store would let one test's alarm leak into another's.
+#[cfg(not(target_os = "none"))]
+mod host_itimer {
+    use core::cell::Cell;
+
+    std::thread_local! {
+        static REAL: Cell<(u64, u64)> = const { Cell::new((0, 0)) };
+    }
+
+    /// Install `(value_ns, interval_ns)`, returning what was there before.
+    pub(super) fn swap(value_ns: u64, interval_ns: u64) -> (u64, u64) {
+        REAL.with(|r| r.replace((value_ns, interval_ns)))
+    }
+
+    /// Read without disturbing.
+    pub(super) fn peek() -> (u64, u64) {
+        REAL.with(Cell::get)
+    }
+}
+
+/// Convert a validated, non-negative `Timeval` to nanoseconds, saturating.
+///
+/// The kernel's interval-timer ABI speaks nanoseconds in a register rather
+/// than a `Timeval` through a buffer -- see `design-decisions.md` §925 -- so
+/// this is the conversion at the boundary. Saturating rather than wrapping:
+/// `setitimer` with a `tv_sec` near `i64::MAX` is a caller asking for
+/// effectively-never, and the honest rendering of that is the largest delay
+/// we can express, not a small one obtained by wrapping.
+fn itimer_timeval_to_ns(tv: &Timeval) -> u64 {
+    // Callers validate non-negativity first; `unwrap_or(0)` is the floor for
+    // a value that cannot occur rather than a silent fallback.
+    let sec = u64::try_from(tv.tv_sec).unwrap_or(0);
+    let usec = u64::try_from(tv.tv_usec).unwrap_or(0);
+    sec.saturating_mul(1_000_000_000)
+        .saturating_add(usec.saturating_mul(1_000))
+}
+
+/// Convert nanoseconds from the kernel back to a `Timeval`.
+///
+/// Truncates toward zero on the sub-microsecond part, which is what Linux
+/// reports through `getitimer` as well: the residue is smaller than the unit
+/// the structure can hold.
+fn itimer_ns_to_timeval(ns: u64) -> Timeval {
+    Timeval {
+        tv_sec: i64::try_from(ns / 1_000_000_000).unwrap_or(i64::MAX),
+        tv_usec: i64::try_from(ns % 1_000_000_000 / 1_000).unwrap_or(0),
+    }
+}
 
 /// Check that a `Timeval` is well-formed for itimer use.
 ///
@@ -3079,27 +3144,38 @@ pub extern "C" fn setitimer(
         return -1;
     }
 
-    #[allow(clippy::cast_sign_loss)]
-    let idx = which as usize;
-
-    // Return old value if requested.
-    if !old_value.is_null() {
-        // SAFETY: old_value verified non-null; idx < ITIMER_COUNT.
-        unsafe {
-            let state = timer_store::itimers();
-            if let Some(entry) = (*state).get(idx) {
-                *old_value = *entry;
-            }
-        }
+    // Only ITIMER_REAL exists. The kernel refuses the other two outright, and
+    // the previous code answered for all three out of a table it kept itself --
+    // which is how a program could set a profiling timer, read it back
+    // unchanged, and wait forever for a signal that nothing was going to send.
+    // Refusing is the same call `setgroups` made (design-decisions.md §1004):
+    // a caller told ENOSYS can choose a fallback, a caller told 0 cannot.
+    if which != ITIMER_REAL {
+        errno::set_errno(errno::ENOSYS);
+        return -1;
     }
 
-    // Store the new value.
-    // SAFETY: `timer_store::itimers` is non-null and reachable only from
-    // this thread; `get_mut` bounds-checks `idx` itself.
-    unsafe {
-        let state = timer_store::itimers();
-        if let Some(entry) = (*state).get_mut(idx) {
-            *entry = val;
+    let value_ns = itimer_timeval_to_ns(&val.it_value);
+    let interval_ns = itimer_timeval_to_ns(&val.it_interval);
+    let (prev_value, prev_interval) = itimer_kernel_set(value_ns, interval_ns);
+    // `rax` carries the previous value on success and `-errno` on failure.
+    // The two can never be confused: the kernel saturates its nanosecond
+    // answer at `i64::MAX`, so a success is never negative.
+    if crate::errno::translate(prev_value) < 0 {
+        return -1;
+    }
+
+    if !old_value.is_null() {
+        #[allow(clippy::cast_sign_loss)]
+        let old = Itimerval {
+            it_interval: itimer_ns_to_timeval(prev_interval as u64),
+            it_value: itimer_ns_to_timeval(prev_value as u64),
+        };
+        // SAFETY: `old_value` is non-null (just checked). Written unaligned to
+        // tolerate a caller buffer that is not naturally aligned, matching the
+        // unaligned read of `new_value` above.
+        unsafe {
+            core::ptr::write_unaligned(old_value, old);
         }
     }
 
@@ -3125,15 +3201,24 @@ pub extern "C" fn getitimer(which: i32, curr_value: *mut Itimerval) -> i32 {
         return -1;
     }
 
-    #[allow(clippy::cast_sign_loss)]
-    let idx = which as usize;
+    if which != ITIMER_REAL {
+        errno::set_errno(errno::ENOSYS);
+        return -1;
+    }
 
-    // SAFETY: curr_value verified non-null; idx < ITIMER_COUNT.
+    let (value_ns, interval_ns) = itimer_kernel_get();
+    if crate::errno::translate(value_ns) < 0 {
+        return -1;
+    }
+
+    #[allow(clippy::cast_sign_loss)]
+    let curr = Itimerval {
+        it_interval: itimer_ns_to_timeval(interval_ns as u64),
+        it_value: itimer_ns_to_timeval(value_ns as u64),
+    };
+    // SAFETY: `curr_value` is non-null (just checked).
     unsafe {
-        let state = timer_store::itimers();
-        if let Some(entry) = (*state).get(idx) {
-            *curr_value = *entry;
-        }
+        core::ptr::write_unaligned(curr_value, curr);
     }
     0
 }
@@ -5625,20 +5710,12 @@ mod tests {
             for slot in table.iter_mut() {
                 *slot = None;
             }
-            let state = timer_store::itimers().as_mut().unwrap();
-            for entry in state.iter_mut() {
-                *entry = Itimerval {
-                    it_interval: Timeval {
-                        tv_sec: 0,
-                        tv_usec: 0,
-                    },
-                    it_value: Timeval {
-                        tv_sec: 0,
-                        tv_usec: 0,
-                    },
-                };
-            }
         }
+        // The real interval timer is no longer a table of three kept in this
+        // module; it is the kernel's, stood in for per-thread on host builds.
+        // Disarm it the way a caller would rather than reaching past the
+        // boundary that now exists.
+        let _ = super::host_itimer::swap(0, 0);
     }
 
     #[test]
@@ -7736,18 +7813,28 @@ mod tests {
                 tv_usec: 0,
             },
         };
+        // ITIMER_REAL is the one that exists.
         assert_eq!(
             setitimer(ITIMER_REAL, &raw const val, core::ptr::null_mut()),
             0
         );
-        assert_eq!(
-            setitimer(ITIMER_VIRTUAL, &raw const val, core::ptr::null_mut()),
-            0
-        );
-        assert_eq!(
-            setitimer(ITIMER_PROF, &raw const val, core::ptr::null_mut()),
-            0
-        );
+        // The other two are accepted by the ARGUMENT check -- they are valid
+        // `which` values, so this is not EINVAL -- and then refused, because
+        // neither is implemented. Until 2026-09-12 all three returned 0 out of
+        // a table this module kept, so a program could set a profiling timer,
+        // read it back unchanged, and wait forever for a signal nothing was
+        // going to send. The errno is the assertion that matters here: ENOSYS
+        // and not EINVAL is what distinguishes "not built" from "you asked
+        // wrongly", and only the first is true of these.
+        for which in [ITIMER_VIRTUAL, ITIMER_PROF] {
+            errno::set_errno(0);
+            assert_eq!(
+                setitimer(which, &raw const val, core::ptr::null_mut()),
+                -1,
+                "setitimer({which}) must not claim to have armed a timer"
+            );
+            assert_eq!(errno::get_errno(), errno::ENOSYS, "which={which}");
+        }
     }
 
     #[test]
@@ -7902,9 +7989,21 @@ mod tests {
                 tv_usec: 0,
             },
         };
-        assert_eq!(getitimer(ITIMER_VIRTUAL, &raw mut out), 0);
-        assert_eq!(out.it_interval.tv_sec, 0);
-        assert_eq!(out.it_value.tv_sec, 0);
+        // There is no longer anything to be isolated FROM: the virtual and
+        // profiling timers are not implemented, so reading one is a refusal
+        // rather than a report of zeros. That distinction is the point. Zeros
+        // are a plausible answer -- "no timer is set" -- and a caller cannot
+        // tell them from "this kind of timer does not exist here", which is
+        // how the old behaviour stayed invisible for as long as it did.
+        errno::set_errno(0);
+        assert_eq!(getitimer(ITIMER_VIRTUAL, &raw mut out), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+
+        // And the real one still reads back what was just set, so this test
+        // still covers what its name says.
+        assert_eq!(getitimer(ITIMER_REAL, &raw mut out), 0);
+        assert_eq!(out.it_interval.tv_sec, 10);
+        assert_eq!(out.it_value.tv_sec, 20);
     }
 
     #[test]

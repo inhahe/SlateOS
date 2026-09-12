@@ -1558,43 +1558,64 @@ pub extern "C" fn getdtablesize() -> i32 {
     crate::fdtable::MAX_FDS as i32
 }
 
-/// Set an alarm timer.
+/// Set an alarm timer: deliver `SIGALRM` to this process in `seconds`.
 ///
-/// Stub: returns 0, having armed nothing, so no `SIGALRM` ever arrives.
+/// Returns the number of seconds left on any previously scheduled alarm, or
+/// zero if none was pending. `seconds == 0` cancels a pending alarm.
 ///
-/// **The reason given here until 2026-09-09 was "signals not implemented",
-/// and that has stopped being true.** `signal.rs` registers
-/// `__signal_trampoline` at startup and the kernel delivers pending signals
-/// through it. The gap is now narrower and elsewhere: the kernel's
-/// `proc/itimer.rs` really does back `alarm`/`setitimer(ITIMER_REAL)` with a
-/// real `SIGALRM`, but only through the Linux-ABI table
-/// (`kernel/src/syscall/linux.rs`), and `posix/src/syscall.rs` has no native
-/// number to reach it with. `SYS_TIMER_CREATE` (12) is native but reports
-/// expiry to a completion port rather than as a signal, so it cannot serve
-/// this on its own.
+/// **This armed nothing until 2026-09-12, and said so.** The history is worth
+/// keeping because the reason moved twice. It was first excused as "our OS
+/// does not deliver Unix signals", which stopped being true when `signal.rs`
+/// began registering `__signal_trampoline` at startup. The excuse then became
+/// the accurate one -- the kernel's `proc/itimer.rs` backs this with a real
+/// `SIGALRM` but was reachable only through the Linux-ABI table, so native
+/// libc had no number to call -- and lane A closed that on 2026-09-09 with
+/// `SYS_ITIMER_SET` (1069) and `SYS_ITIMER_GET` (1070), ABI in
+/// `design-decisions.md` §925. This is the libc half catching up.
 ///
-/// Asked of lane A in
-/// `requests/b-a-expose-the-interval-timer-natively-so-alarm-can-fire.md`.
-/// See `known-issues.md` -> `B-POSIX-TIMERS-SUCCEED-AND-ARM-NOTHING`, which
-/// records why this is not simply flipped to an error the way `setgroups`
-/// was: that one had no callers anywhere, and this one does.
+/// POSIX gives `alarm` no way to fail, so a refusal from the kernel is
+/// reported as "nothing was pending" rather than invented as an error.
+///
+/// The remainder is rounded **up** to whole seconds, as Linux does: a caller
+/// told `1` when 1.5 seconds remain can re-arm for 1 second and lose time,
+/// but one told `0` would conclude no alarm was set at all.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn alarm(_seconds: u32) -> u32 {
-    0
+pub extern "C" fn alarm(seconds: u32) -> u32 {
+    let value_ns = u64::from(seconds).saturating_mul(1_000_000_000);
+    let (prev_value, _prev_interval) = crate::time::itimer_kernel_set(value_ns, 0);
+    if crate::errno::translate(prev_value) < 0 {
+        return 0;
+    }
+    #[allow(clippy::cast_sign_loss)]
+    let ns = prev_value as u64;
+    let secs = ns.saturating_add(999_999_999) / 1_000_000_000;
+    u32::try_from(secs).unwrap_or(u32::MAX)
 }
 
 /// Set an alarm timer with microsecond granularity (deprecated BSD function).
 ///
-/// Stub: returns 0, having armed nothing. Same position as [`alarm`], whose
-/// doc carries the reason and the correction.
-/// `usecs` is the initial alarm delay in microseconds.
-/// `interval` is the repeat interval in microseconds (0 = one-shot).
+/// `usecs` is the initial delay in microseconds and `interval` the repeat
+/// interval (0 = one-shot). Returns the microseconds remaining from a
+/// previous alarm, or 0 if none was set.
 ///
-/// Returns the number of microseconds remaining from a previous alarm,
-/// or 0 if none was set.
+/// Shares the real interval timer with [`alarm`] and [`crate::time::setitimer`]
+/// -- there is one per process, so the last of the three to be called wins.
+/// That is not a limitation of this implementation but what the interface is:
+/// `ualarm` is specified in terms of `ITIMER_REAL`.
+///
+/// Like `alarm`, this has no error return, so a refusal reads as "nothing was
+/// pending".
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn ualarm(_usecs: u32, _interval: u32) -> u32 {
-    0
+pub extern "C" fn ualarm(usecs: u32, interval: u32) -> u32 {
+    let value_ns = u64::from(usecs).saturating_mul(1_000);
+    let interval_ns = u64::from(interval).saturating_mul(1_000);
+    let (prev_value, _prev_interval) = crate::time::itimer_kernel_set(value_ns, interval_ns);
+    if crate::errno::translate(prev_value) < 0 {
+        return 0;
+    }
+    #[allow(clippy::cast_sign_loss)]
+    let ns = prev_value as u64;
+    u32::try_from(ns / 1_000).unwrap_or(u32::MAX)
 }
 
 /// Suspend until a signal is delivered.

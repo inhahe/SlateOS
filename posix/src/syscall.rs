@@ -46,6 +46,19 @@ pub const SYS_GETRANDOM: u64 = 90;
 /// the kernel reads at delivery time.
 pub const SYS_SIGNAL_ALTSTACK: u64 = 1071;
 
+/// `(which, value_ns, interval_ns) -> (prev_value_ns, prev_interval_ns)`. Arm,
+/// re-arm or disarm this process's real interval timer, reporting what it held
+/// before. `which` must be `ITIMER_REAL` (0); the kernel refuses the other two.
+/// A `value_ns` of zero disarms. Both previous values come back in registers
+/// rather than through a caller-supplied buffer -- see `design-decisions.md`
+/// §925 for why -- so this is one of the handful of calls that needs
+/// [`syscall3_2ret`].
+pub const SYS_ITIMER_SET: u64 = 1069;
+
+/// `(which) -> (remaining_ns, interval_ns)`. Report this process's real
+/// interval timer without disturbing it. `which` must be `ITIMER_REAL` (0).
+pub const SYS_ITIMER_GET: u64 = 1070;
+
 /// `(ptr, len) -> 0`. Set the system hostname; `len == 0` clears it. Bounded
 /// at 64 bytes, Linux's `__NEW_UTS_LEN`, which is narrower than
 /// `nameservice`'s own 253 so that a name a native caller can set is always

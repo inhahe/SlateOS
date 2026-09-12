@@ -32,6 +32,8 @@ import re
 import sys
 import tempfile
 
+import selftestflag
+
 RAN_IF = re.compile(r'^\s*//\s*RAN-IF:\s*"(.+)"\s*$')
 CALL = re.compile(r"([A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)+)\s*\(")
 FN = re.compile(
@@ -323,7 +325,19 @@ def self_test():
 
 
 def main(argv):
-    if "--self-test" in argv:
+    # Both spellings through the shared helper, and an unrecognised option is
+    # an error rather than a fall-through to the scan. Getting this wrong would
+    # be this gate's own defect one level up: `--selftest` would run the real
+    # scan and exit 0, so the command asking whether the checker is still
+    # correct would answer yes without asking. Success and not-having-run must
+    # not be the same observation -- which is the whole reason this file exists.
+    bad = selftestflag.unknown_options(argv)
+    if bad:
+        sys.stderr.write("check-ran-if: unrecognised option(s): " +
+                         " ".join(bad) + NL)
+        sys.stderr.write("usage: check-ran-if.py [--self-test]" + NL)
+        return 2
+    if selftestflag.wants_selftest(argv):
         return self_test()
     root = os.environ.get("RANIF_ROOT") or os.path.dirname(
         os.path.dirname(os.path.abspath(__file__)))

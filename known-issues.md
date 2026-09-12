@@ -137344,6 +137344,17 @@ honestly instead of claiming the opposite. Making it run means giving the harnes
 a FAT volume, which is a disk-layout change to a boot test three lanes share, and
 is deliberately not bundled here.
 
+**And the new gate had the same defect, which its own tree caught.** `check-ran-if.py`
+tested `"--self-test" in argv`, so `--selftest` fell through to the real scan and
+exited 0 -- the command asking whether the checker is still correct answering
+yes without asking. `check-selftest-flag-spellings.py` refused the push over it,
+naming sixteen scripts that had already had this shape. The fix is
+`selftestflag.wants_selftest(argv)` plus `unknown_options`, so an unrecognised
+flag is an error rather than a fall-through. Recorded because it is the same
+defect as the entry above, one level up, written by someone who had spent the
+hour thinking about nothing else: success and not-having-run must not be the
+same observation.
+
 **The structural gap is real, and is the next commit.** A `RAN-IF` is a comment;
 nothing verifies that the line it names is printed by the function it annotates.
 A static check does: resolve the annotated call to its `fn`, assert the literal

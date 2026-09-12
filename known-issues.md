@@ -111886,7 +111886,42 @@ itself. When two conditions need different responses, ask for two answers rather
 than building a heuristic to separate one — and if the other side is another
 lane, file the request. That is what happened here, and it took a day.
 
-## B-READDIR-INVENTS-D_INO-FROM-THE-ENTRY-POSITION-SO-DU-AND-TAR-COALESCE-A-TREE — OPEN 2026-08-31
+## B-READDIR-INVENTS-D_INO-FROM-THE-ENTRY-POSITION-SO-DU-AND-TAR-COALESCE-A-TREE — **FIXED 2026-09-01, closed 2026-09-12**
+
+**The code was fixed eleven days before this entry said so, and that gap is
+the interesting part.** Both sites named in the table below now carry the
+kernel's inode verbatim:
+
+| site | code today |
+|---|---|
+| `readdir` | `dir.current.d_ino = entry.ino;` |
+| `getdents64` | `emit_linux_dirent64(remaining, entry.ino, …)` |
+
+`entry.ino` comes from the last eight bytes of the shared 647/664 record,
+which lane A widened to
+`u8 type | u32 name_len | u8[name_len] name | u64 size | u64 ino` — the whole
+of what this entry asked for. `d_ino == 0` now means what the ABI says it
+means, and two files in different directories no longer claim the same
+identity, so `du` and `tar` stop coalescing a tree.
+
+**Why it stayed open.** The fix landed inside `e99428c0a`, *posix: every
+directory stream reads through its descriptor, via 664* — a commit about
+routing directory reads through a descriptor, which had to parse the new record
+to do its own job and picked up the inode on the way. Nobody was closing this
+entry because nobody was working on this entry. **A fix that arrives as a side
+effect of a different change has no natural moment at which its bug gets
+closed**, which is a third distinct way for a document to go stale, alongside a
+blocker cleared by another lane and a file that has been retired.
+
+Found by `scripts/check-stale-blockers.py`, which flagged it for citing a
+request that reports itself LANDED. The checker could not know the code was
+already right — only that the entry's stated reason for waiting had expired,
+which was enough to make someone look.
+
+`cargo test -p posix --target x86_64-pc-windows-gnu dirent`: 97 passed, 0
+failed.
+
+The description below is kept in the tense it was written in.
 
 **In short:** when a program lists a directory, every entry comes back with an
 "inode number" — the number the filesystem uses to tell one file from another.

@@ -84,6 +84,15 @@ pub fn become_user(cmd: &mut Command, uid: u32, gid: u32) {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt as _;
+        // Declared here, before any statement in this scope: clippy's
+        // `items_after_statements` is right that an item appearing halfway
+        // down reads as though it came into existence there, when it was
+        // always in scope.
+        unsafe extern "C" {
+            fn setgroups(size: usize, list: *const u32) -> i32;
+            fn setgid(gid: u32) -> i32;
+            fn setuid(uid: u32) -> i32;
+        }
         // ALL THREE STEPS HAPPEN HERE, and `cmd.uid`/`cmd.gid` are deliberately
         // not used, which is the opposite of what this function did until
         // 2026-09-12.
@@ -110,21 +119,30 @@ pub fn become_user(cmd: &mut Command, uid: u32, gid: u32) {
         // today, because `posix::getgroups` reports none; that is a fact about
         // the current kernel and not a guarantee, which is exactly why this is
         // wired now rather than when it starts to matter.
-        let (uid, gid) = (uid, gid);
+        // REACHED AS C SYMBOLS, not through the `posix` rlib. A SlateOS program
+        // already links the real libc, and taking `posix` as a Rust dependency
+        // for a stateful call gives the process a SECOND copy of it whose
+        // syscalls are stubbed -- design-decisions.md §768 and
+        // TD-B-THE-POSIX-RLIB-IS-A-SECOND-LIBC-WITH-EVERY-SYSCALL-STUBBED-OUT.
+        // This crate's other use of `posix` is `posix::crypt`, which is a pure
+        // module and carries no such hazard; `posix::unistd` issues syscalls and
+        // does. The first version of this function called it directly and
+        // `check-one-libc-per-process` was right to refuse it.
         // SAFETY: `pre_exec` runs between `fork` and `exec` in the child, where
-        // only async-signal-safe work is permitted. All three calls are thin
-        // wrappers over a single syscall plus an errno store, and
-        // `Error::last_os_error` reads that errno without allocating. Nothing
-        // here takes a lock or touches the heap.
+        // only async-signal-safe work is permitted. All three are single
+        // syscalls plus an errno store, and `Error::last_os_error` reads that
+        // errno without allocating. Nothing here locks or touches the heap.
+        // `setgroups(0, NULL)` is the POSIX drop idiom; the list pointer is
+        // ignored when the count is zero.
         unsafe {
             cmd.pre_exec(move || {
-                if posix::unistd::setgroups(0, core::ptr::null()) != 0 {
+                if setgroups(0, core::ptr::null()) != 0 {
                     return Err(std::io::Error::last_os_error());
                 }
-                if posix::unistd::setgid(gid) != 0 {
+                if setgid(gid) != 0 {
                     return Err(std::io::Error::last_os_error());
                 }
-                if posix::unistd::setuid(uid) != 0 {
+                if setuid(uid) != 0 {
                     return Err(std::io::Error::last_os_error());
                 }
                 Ok(())

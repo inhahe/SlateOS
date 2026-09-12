@@ -136541,3 +136541,75 @@ say the kernel has no HPET read on a hot path; it says futex does not. Anyone fi
 surprising cost under hardware virtualisation should suspect this before suspecting their
 own code — the tell is a cost that is *larger* under WHPX than under TCG, which is a VM
 exit and not work.
+
+### A-EXEC-WRITES-A-COMM-THAT-PRCTL-WOULD-REFUSE-AND-PROCFS-RENDERS-IT-AS-QUESTION-MARKS (lane A, 2026-09-12)
+
+**In short:** every running program has a short name the system shows in process
+listings. There is a check that stops a program *asking* for a name the system cannot
+display — but the same name is also set automatically when a program starts, and that
+path has no check. So a program can end up called `???` in every listing, and **every**
+program in that state is called `???`, so they cannot be told apart.
+
+**Trivially reachable, by any process, with no unusual filesystem.** The comm is taken
+from `exe_path`, falling back to `argv[0]` — and `argv[0]` is whatever the caller passes
+to `execve`. A process that execs itself with `argv[0] = b"\xff"` gets a non-UTF-8 comm.
+No non-UTF-8 file need exist. (Since `D-VFS-PATHS-ARE-STR-NOT-BYTES`, a non-UTF-8 *path*
+reaches it too, so both routes are open.)
+
+**The two paths, and the asymmetry:**
+
+| path | validates UTF-8? | outcome |
+|---|---|---|
+| `prctl(PR_SET_NAME)` | **yes** — rejects with `EINVAL` | name unchanged |
+| `execve` → `spawn.rs:2386-2391` → `sched::set_task_name` | **no** | bytes stored verbatim |
+
+`sched::set_task_name` (`sched/mod.rs:5509`) copies raw bytes and validates nothing.
+`PR_SET_NAME`'s own doc (`syscall/linux.rs:12651`) explains the rejection: *"the procfs
+surfaces lossily decode the task name to a `str` (invalid bytes would render as `???`),
+so we reject rather than store something that wouldn't read back faithfully."* That
+reasoning is right. It is simply not enforced where the name is actually set most often.
+
+**What renders.** Two sites decode identically:
+
+```rust
+let full_name =
+    core::str::from_utf8(task.name.get(..task.name_len).unwrap_or(&[])).unwrap_or("???");
+```
+
+`procfs.rs:2367` (`build_pid_status`, the `Name:` line) and `procfs.rs:2690`
+(`build_pid_stat`, field 2). `gen_pid_comm` (`procfs.rs:3613`) is the third surface. So
+`/proc/<pid>/comm`, `/proc/<pid>/stat` field 2, `/proc/<pid>/status` `Name:` and
+`prctl(PR_GET_NAME)` all report `???`.
+
+**Why the collision is the real defect, not the mangling.** A lossy rendering that
+preserved *distinctness* would be a display wart. `"???"` is a constant: two processes
+with different unreadable names are reported identically, so anything that groups or
+matches by name — `pkill`, `pstree`, `top` — treats them as the same program. That is
+lane B's `/proc` finding arriving from the producer end: they fixed consumers that read
+`stat` into a `String`; this is the kernel writing a `String`-shaped answer in the first
+place, so a byte-correct consumer still gets `???`.
+
+**The docstring that names the principle it is not following.** `set_task_name`'s comment
+at `sched/mod.rs:5505-5507` says, of its `task_id == 0` guard: *"Rejecting it here rather
+than in the `prctl` handler covers every caller, present and future."* Exactly right —
+and the UTF-8 check sits in the `prctl` handler, which is the place that sentence warns
+against. One check moved to the shared path, one left at the caller, in the same function,
+with the reasoning for moving it written above the one that moved.
+
+**Proper fix — the one already named in `todo.txt:10454-10459`,** whose closing condition
+is "procfs to emit comm as raw bytes". Smaller than that entry implies:
+
+1. `comm_truncate(&str) -> &str` becomes `(&[u8]) -> &[u8]`. Its UTF-8 char-boundary walk
+   exists **only because the parameter is `&str`** — Linux's `comm` is a 16-byte array cut
+   at bytes, so byte truncation is *more* faithful, not less.
+2. Three call sites (`procfs.rs:2369`, `2692`, `3632`) drop the `from_utf8(...)` and use
+   `task.name.get(..task.name_len)` directly. `TaskInfo.name` is already `[u8; 32]` with
+   `name_len`, and `sched::copy_task_name` already returns bytes — the byte path exists at
+   both ends and only procfs's middle forces `str`.
+3. `PR_SET_NAME` then drops its UTF-8 validation, closing the tracked limitation, and the
+   two paths agree.
+
+**Interim behaviour is safe**, which is why this is debt and not an emergency: nothing is
+corrupted on disk, no privilege is involved, and the name is cosmetic to the kernel. What
+it costs is that monitoring tools cannot distinguish such processes, and that a process
+can *choose* to be indistinguishable by passing a non-UTF-8 `argv[0]`.

@@ -138581,7 +138581,7 @@ It now polls `/proc/2/stat` until the state is `S`, using the `read` builtin so
 it forks **nothing** -- a forked `awk` would take PID 3 and could itself be
 caught in the listing it is preparing.
 
-## B-SEVENTY-PROGRAMS-ACCEPT-AN-OPTION-THEY-DO-NOT-HAVE-AND-EXIT-ZERO (lane B, 2026-09-12) -- 11 of 70 FIXED
+## B-SEVENTY-PROGRAMS-ACCEPT-AN-OPTION-THEY-DO-NOT-HAVE-AND-EXIT-ZERO (lane B, 2026-09-12) -- 12 of 70 FIXED
 
 Found by `scripts/unknown-option-sweep.py`, which runs every binary in an
 empty directory with nothing but a bogus long option and looks at what it
@@ -138597,7 +138597,16 @@ outright, coreutils already had a correct `nohup`).
 **Seventy more accepted the option and exited 0** without a filesystem side
 effect. Eleven are fixed -- `nproc`, `arch`, `pathchk`, `users` (all one
 crate), `lscpu`, `lsmem`, `blkzone`, and `clear`, `tset`, `lsattr`,
-`getcap`. The remaining 59 are listed below.
+`getcap`, and `getopt`. The remaining 58 are listed below.
+
+`getopt` is worth singling out. It accepted an unknown option by making
+it the *optstring*, and fixing that surfaced a second, older defect:
+`parse_options` printed `invalid option -- 'x'` for the command line it
+was asked to parse and returned only the words, so the caller exited 0.
+`args=$(getopt "$@") || exit` -- the documented way to use the program --
+was told a rejected line had parsed cleanly. The two failures also carry
+different statuses, measured: **2** for an option of getopt's own, **1**
+for one in the line it parsed.
 
 The last four are the group that has no long options at all, where the
 wording is `invalid option -- 'X'` naming the first character getopt has
@@ -138623,6 +138632,35 @@ but the sysstat package is not installed in the WSL reference environment and
 therefore unmeasured, and guessing it is exactly what §371 forbids. Trigger to
 promote: sysstat available in the reference environment.
 
+### Most of what is left is blocked on a reference, not on effort
+
+Of the 58 remaining, only about **14** have a reference implementation in
+the WSL environment this lane measures against: `ifconfig`, `objdump`,
+`prlimit`, `resolvectl`, `resolvconf`, `route`, `dnsdomainname`, `lshw`,
+and the five `systemd-*` personalities. (`ulimit` reads as available but
+that is the shell builtin; util-linux ships no such binary.) The rest
+would have to have their wording invented, which is what §371 forbids, so
+they are blocked on the reference environment rather than on anyone's
+time. Installing the packages needs a password this session does not have.
+
+Wordings already measured, so the next pass does not have to re-derive
+them -- and they are all different, which is the argument for measuring
+each one rather than pattern-matching from the last:
+
+| Tool | Exit | First line |
+|---|---|---|
+| `systemd-cat`/`-cgls`/`-cgtop`/`-escape`/`-path` | 1 | `unrecognized option '--x'`, one line, no pointer |
+| `resolvconf`, `resolvectl` | 1 | same wording |
+| `objdump` | 1 | same wording, then the full usage |
+| `dnsdomainname` | 255 | same wording |
+| `route` | **0** | same wording, then the address-family list |
+| `ifconfig` | 1 | ``option `--x' not recognised.`` then ``` `--help' gives usage information.``` |
+
+`route` exiting 0 is not a transcription error: net-tools really does
+report the option and succeed. Ours differs by printing *no* diagnostic
+at all, so it is still a finding -- the fix there is the message, not the
+status.
+
 ### Two things the sweep does not see, both verified rather than assumed
 
 **A program that creates the file and removes it again before exiting reads
@@ -138639,7 +138677,7 @@ On a machine where `/dev/sda` exists it would have exited 0. It was found
 only because `blkzone`, its argv[0] sibling, was flagged and the crate was
 opened anyway. So the count of 70 is a floor, not a total.
 
-### Still open (59)
+### Still open (58)
 
 - `clipboard`
 - `coredumpctl`
@@ -138649,7 +138687,6 @@ opened anyway. So the count of 70 is a floor, not a total.
 - `ftp`
 - `fwupd`
 - `gdb`
-- `getopt`
 - `hwinfo`
 - `ifconfig`
 - `loginmgr`

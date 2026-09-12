@@ -57173,3 +57173,45 @@ format), `-h` (suppress header, exits 1 silently).
 
 TRIGGER. Any tick picking up coreutils option work. `-o` is the highest value
 -- it is the one that makes the others expressible -- and the largest.
+
+--------------------------------------------------------------------------
+TWO GREP FEATURES FROM THE OPERATOR'S TOOL REMAIN (lane B, 2026-09-12)
+
+CONTEXT. `requests/a-b-the-operators-grep-has-features-ours-lacks-...` asked
+for nine novel features from the operator's own grep (design-decisions §919,
+an operator decision of 2026-09-07). Six are in, under spellings that differ
+from the ones the request proposed -- `--near` not `--proximity`,
+`--every-pattern` not `--all-patterns`, `--escape-control`,
+`--keep-color-escapes`, `--exclude-path`. One is measured NOT APPLICABLE (see
+the request). These two remain.
+
+1. `--dotall`: `.` matches newline, reading the whole file at once.
+
+   NOT A SMALL ADDITION, which is why it is here rather than done. It needs
+   two things in two crates:
+     * `userspace/ere` has no dot-matches-newline mode at all -- grep for
+       `dot_all` there returns nothing.
+     * `grep` is line-based: the read loop is `read_until(sep, &mut line)`.
+       Whole-file matching means a match can span lines, so `-n`, `-C`,
+       `--only-matching` and the byte-offset options all need to decide what
+       they report for a match covering four lines.
+
+   The second is the real work. The engine flag is a day's reading; deciding
+   what `grep -n --dotall -C 2` should print is a design question, and the
+   operator's tool answers it by reading the whole file and treating the match
+   as belonging to the line it starts on. Measure that before building.
+
+2. Persistent colour config (`--set-colors`, `--remember`). Six independently
+   coloured elements saved to a config file beside the executable, read on
+   each run, overridable per invocation. GNU has only `GREP_COLORS` in the
+   environment. `grep.rs` already carries the `Colors` struct and comments at
+   lines 247 and 4832 describing the port; what is missing is the file.
+
+   Independent of `--dotall`. Note that "beside the executable" is the
+   operator's Windows convention; on SlateOS the honest home is
+   `$XDG_CONFIG_HOME` or `/etc`, which is a small decision worth making
+   deliberately rather than by copying the path.
+
+TRIGGER. Either is unblocked. `--dotall` is the larger and needs the design
+answer measured from the operator's tool first; the colour config is the
+smaller and only needs a location decided.

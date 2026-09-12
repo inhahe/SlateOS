@@ -3212,6 +3212,19 @@ fi
 # going red this way, revisit -- the cost of the red is measurable and so is the cost of
 # the widening.
 #
+# IS ANY OTHER GATE SCOPED DIFFERENTLY HERE THAN AT BOOT TIME?  Audited 2026-09-12 by
+# comparing every `run_checker` invocation in this file against the ones in
+# boot-test.sh: 15 resolved here, 53 there, 6 scripts invoked by both, and no further
+# mismatch found.  So cfg-unix appears to be the exception rather than the pattern.
+#
+# TREAT THAT AS WEAK EVIDENCE, because the audit is demonstrably incomplete.  It missed
+# this file's own `read-defaults` invocation entirely -- the gate label there is a
+# quoted variable, `"read-defaults-$sha"`, which a bare-identifier pattern cannot match
+# -- and on that basis it reported a mismatch that does not exist.  Checking the actual
+# line is what stopped a false "this gate cannot refuse" finding being written down.
+# Anyone re-running that comparison should resolve quoted and variable gate labels, and
+# should not read a clean result as proof.
+#
 # Lane B asked for test-module coverage in
 # requests/b-a-the-cfg-unix-gate-skips-every-test-module.md and lane A replied "taken in
 # full, both call sites at once".  That was true of boot-test.sh and FALSE of this one:

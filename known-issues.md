@@ -135422,6 +135422,40 @@ is the "real" one — real hardware is a third case nobody here has measured.
 2. The `index` phase at 16,059 ns is the second-largest component and is live **only
    because a self-test left it live** — see the indexer entry. Whatever is decided there
    changes this number by a sixth.
+### MEASURED UNDER WHPX, 2026-09-12 (run bbartu7os, commit 6a0f8d89e) — the fixes land
+
+The first WHPX run since the cold restart, and the first that could see the
+`record_version` HPET substitution at all. Compared against the last WHPX/release run,
+`96356d747`, so accelerator and profile both match:
+
+| series | before | after | delta |
+|---|---|---|---|
+| `vfs_write_256` | 30,867 | **12,326** | **−60.1%** |
+| `vfs_write_breakdown_full` | 30,183 | 12,584 | −58.3% |
+| `vfs_write_breakdown_index` | 4,115 | 2,979 | −27.6% |
+| `vfs_write_breakdown_journal` | 337 | 300 | stable, already fixed |
+
+**A 256-byte write costs 12.3 µs where it cost 30.9 µs.** 18,541 ns of that is gone; the
+HPET read alone was predicted at ~13,500–13,900 ns from the journal's own measured delta,
+which is roughly three quarters of it, and `index::add_entry`'s second path resolution
+accounts for another 1,136.
+
+**Attribution is inferred, not isolated, and that is worth saying plainly.** The window
+spans several commits including other lanes' work, so −60.1% is not all mine and no
+controlled experiment separates the parts. What is solid is the direction, the magnitude,
+and that the predicted HPET saving fits inside the observed one rather than exceeding it.
+
+**The two A/B routes now agree to 1.08×**, where under TCG they differed by 1.83×:
+differential 5,497 ns (43.7% of the write) against a direct `history` phase of 5,078 ns.
+That agreement is itself a result. The TCG disagreement was attributed to the `/tmp` arm
+differing by more than versioning; under WHPX that gap largely closes, which suggests the
+spread was accelerator structure rather than a confounder in the experiment's design.
+
+**Versioning is still 43.7% of the write** after the clock read was removed from it. The
+cost that remains is the read-back, the SHA-256 and the CAS insert — real work rather than
+a trapped instruction — so A-Q10's question stands and its figure is now firmer, not
+smaller.
+
 ### Replicated, 2026-09-12 (run bssh17cpy, commit 24f11ef45, TCG/release)
 
 A second independent run, and the ratio holds while the absolutes do not:
@@ -135854,6 +135888,69 @@ patch file is opened, groups-then-gid-then-uid in `become_user`, and now this.
 happens first.**
 
 `patch-diff.sh`: 3 passed / 62 differed this morning, **29 / 36** now.
+
+## TD-A-BENCH-ACCELERATOR-IS-AN-ENV-VAR-AND-A-RESTART-CLEARS-IT (lane A, 2026-09-12) — **three runs of measurements silently changed cost model**
+
+**In short:** the benchmark suite can run the emulated machine two ways, one about three
+times faster than the other. Which one it uses depends on an environment variable that
+has to be set by hand. The machine was restarted, the variable was lost, and the next
+three measurement runs used the slow one without anything saying so. The numbers are all
+still correct; they are just no longer comparable with the ones before the restart.
+
+### The evidence
+
+Every WHPX record in `bench/history.jsonl` carries
+`experiment: "QEMU_EXTRA=-accel whpx (non-default emulator flags)"`. Every TCG record has
+no experiment at all. `boot-test.sh` never names an accelerator itself — line 7621 is the
+only place flags enter, `read -r -a QEMU_EXTRA_ARGS <<< "${QEMU_EXTRA:-}"` — so with the
+variable unset, QEMU falls back to TCG.
+
+| commit | accel | experiment |
+|---|---|---|
+| `96356d747` | Hyper-V/WHPX | `QEMU_EXTRA=-accel whpx` |
+| `2de15d6f6` | QEMU TCG | *(none)* — first run after the cold restart |
+| `24f11ef45` | QEMU TCG | *(none)* |
+| `61cc05ce1` | QEMU TCG | *(none)* |
+
+Hyper-V is not the problem and was checked: `hvhost` and `vmcompute` are running and
+`HypervisorPresent` is true. Nothing broke. A variable set in one shell session did not
+survive the machine being power-cycled.
+
+### Why it matters more than a speed difference
+
+`bench-history.py`'s own comment is the authority here: *"A comparison that crosses
+accelerators is therefore not noisy, it is meaningless, and it is meaningless by a factor
+far larger than any regression this harness exists to catch."* Measured on one
+byte-identical binary: the median benchmark is 3.5× faster under WHPX, the fastest 10.4×,
+and **four get dramatically slower** — HPET reads cost a VM exit (~13.5 µs) where TCG
+emulates them inline (~450 ns).
+
+So the hazard is not "the numbers got worse". It is that anyone comparing `61cc05ce1`
+against `96356d747` sees everything roughly three times slower and concludes a
+catastrophic regression that is entirely the accelerator. And the reverse: the
+`record_version` HPET fix committed tonight is **invisible under TCG by construction**,
+because the cost it removes barely exists there. Three consecutive runs could not have
+measured it, and I nearly reported that as bad luck rather than as a cleared variable.
+
+### The gap
+
+The harness records the accelerator faithfully — that is how this was found — but nothing
+**warns** when it changes between consecutive records. The fact was in the file all along
+and only a human reading it carefully would catch it. That is the summary-versus-status
+distinction lane B named tonight: a value a reader must notice is weaker than a status
+something can act on.
+
+A cheap guard: `bench-history.py` already parses every record and already treats the
+accelerator as load-bearing. A line comparing the newest record's `accel` against the
+previous one, and saying so loudly when they differ, would turn this from an archaeology
+exercise into a sentence in the run's own output. Not done here — recorded so the next
+person hitting a mysterious 3× shift finds this first.
+
+### What to do
+
+Run benchmark boots as `QEMU_EXTRA="-accel whpx" ./scripts/boot-test.sh --bench`. The
+variable is not persisted anywhere, so it needs setting per shell session, and after any
+restart.
 
 ## B-PATCH-REPORTS-A-FAILED-HUNK-WITHOUT-SAVING-IT (lane B, 2026-09-12) — FIXED
 

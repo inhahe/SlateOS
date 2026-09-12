@@ -1897,6 +1897,91 @@ for _floor_var in MIN_FREE_GB MIN_FREE_TEMP_GB; do
 done
 unset _floor_var _floor_val
 
+# ---------------------------------------------------------------------------
+# Accelerator continuity: warn when this --bench run will not be comparable
+# to the last recorded one.
+#
+# WHY.  The accelerator is selected by an *environment variable*, QEMU_EXTRA,
+# and nothing on disk remembers it.  A machine restart clears it, and the next
+# run silently falls back to TCG while looking in every other respect like the
+# run before.  That happened on 2026-09-12: three consecutive runs landed on
+# TCG after a cold restart, and two of them were spent trying to measure a fix
+# to an HPET read -- a change that is invisible under TCG by construction,
+# because the MMIO access it removes costs ~450ns there against ~13.5us under
+# WHPX.  Roughly fifty minutes of wall clock produced a number that could not
+# have shown the thing it was run to show, and the surrounding notes said
+# "measured" throughout.
+#
+# The comparison is not merely noisier across accelerators, it is meaningless:
+# the median series runs 3.5x faster under WHPX, the fastest 10.4x, and four
+# run dramatically *slower* because they trap to the hypervisor.  A delta read
+# across that boundary is measuring the emulator.
+#
+# WARNS, DOES NOT REFUSE.  Switching accelerators on purpose is a legitimate
+# and frequent thing to do -- it is what QEMU_EXTRA is for, and the record is
+# tagged as an experiment when it is set.  A gate here would block the very
+# investigation the knob exists to enable.  What was missing was never
+# permission, it was notice: knowing at second 0 rather than at minute 24 that
+# this run answers a different question than the last one.
+#
+# Fails open in every direction -- absent file, unreadable JSON, no python,
+# no prior record.  A diagnostic that can abort a two-hour boot test is a
+# worse defect than the one it reports.
+if [ "$BENCH" = "1" ]; then
+    # Inlined rather than split into scripts/bench-last-accel.py: a new file
+    # under scripts/ would belong to no lane -- which-lane.py grants lane A
+    # only boot-test.sh, run-timeout.py and wedge-soak.sh there -- and that
+    # unowned-file gap is already open as A-Q11.  Eight lines is not worth
+    # widening it.
+    _accel_prev="$(python -c '
+import io, json, os, sys
+path = os.path.join(sys.argv[1], "bench", "history.jsonl")
+seen = ""
+try:
+    with io.open(path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                accel = json.loads(line).get("accel")
+            except ValueError:
+                continue
+            if accel:
+                seen = "tcg" if "TCG" in accel.upper() else "hardware"
+except (IOError, OSError):
+    pass
+sys.stdout.write(seen)
+' "$PROJECT_ROOT" 2>/dev/null || true)"
+    case "${QEMU_EXTRA:-}" in
+        *-accel*whpx*|*-accel*kvm*|*-accel*hvf*) _accel_now="hardware" ;;
+        *) _accel_now="tcg" ;;
+    esac
+    if [ -n "$_accel_prev" ] && [ "$_accel_prev" != "$_accel_now" ]; then
+        echo "" >&2
+        echo "===========================================================================" >&2
+        echo "NOTICE: accelerator differs from the last recorded --bench run." >&2
+        echo "          last recorded run: $_accel_prev" >&2
+        echo "          this run:          $_accel_now" >&2
+        if [ "$_accel_now" = "tcg" ]; then
+            echo "" >&2
+            echo "  QEMU_EXTRA is unset or names no accelerator, so this run will use TCG" >&2
+            echo "  emulation.  If you meant to measure under hardware virtualisation --" >&2
+            echo "  and after a restart you probably did, because the variable does not" >&2
+            echo "  survive one -- stop now and re-run with:" >&2
+            echo "" >&2
+            echo "      QEMU_EXTRA=\"-accel whpx\" ./scripts/boot-test.sh --bench" >&2
+        fi
+        echo "" >&2
+        echo "  Either way this run's numbers CANNOT be compared against the previous" >&2
+        echo "  record.  Compare within one accelerator only; across the boundary the" >&2
+        echo "  delta is the emulator, not the code." >&2
+        echo "===========================================================================" >&2
+        echo "" >&2
+    fi
+    unset _accel_prev _accel_now
+fi
+
 if [ -z "$MIN_FREE_TEMP_GB" ]; then
     MIN_FREE_TEMP_GB=$((MIN_FREE_GB / 4))
 fi

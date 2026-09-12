@@ -113,6 +113,56 @@ directory — `--target-dir` per `DIFF_PKG` entry — after which the symlink ca
 point at the right one deliberately rather than at whatever survived. Until then
 the survey's column says "coreutils half only", which is the truth.
 
+## TD-B-A-LINUX-TARGETED-HARNESS-CANNOT-MEASURE-A-SLATEOS-GATED-SUBJECT (lane B, 2026-09-11)
+
+**Every `*-diff.sh` here builds its subject for `x86_64-unknown-linux-gnu`, and
+47 of the standalone `userspace/` crates gate their real syscalls on
+`#[cfg(target_vendor = "slateos")]`.** Built for Linux those crates do not run
+the operation at all — they return a refusal stub — so a differential measures
+the stub and reports a landslide that says nothing about the program.
+
+`chown` is where this surfaced. `scripts/chown-diff.sh` reported:
+
+    coreutils   64 passed,  0 differed
+    standalone   3 passed, 61 differed
+
+and **43 of those 61 are the single sentence** `chown: cannot change ownership
+of 'file.txt': chown syscall unavailable on this platform`, which is
+`userspace/chown/src/main.rs:379` behind `#[cfg(not(target_vendor =
+"slateos"))]`. On the SlateOS target that arm does not exist. So the pair is
+**not decided** and the standalone has not been measured — only 18 of the 61 are
+real differences (the `user.group` dot form, unknown-user diagnostics, five
+`--from=` cases, the missing-operand messages, a `--ref=` abbreviation).
+
+**This is the same category as `uname -o`: a comparison against the wrong
+reference.** There the baseline was entitled to disagree; here the *subject* is
+not the program that ships. Both manufacture defects in proportion to how
+thorough the harness is, and neither is caught by any threshold.
+
+**What was checked rather than assumed, because a wrong answer here would
+invalidate work already done:**
+
+  * **Of the pairs already retired, only `df` ever contained the gate**, and its
+    recorded run contains **zero** platform-gate refusals — the standalone `df`
+    ran, produced a real five-filesystem table with ANSI escapes, and failed on
+    its own merits. That retirement stands.
+  * `date`'s standalone gates only its clock-**setting** path, which
+    `date-diff.sh` never exercises; its run has zero gate refusals too. That
+    record stands.
+  * `coreutils`' bins carry **no** such gate — they are portable, which is why
+    `coreutils` can score 64/64 here at all.
+
+**Affected among the pairs still open: `chown` (measured, mostly artifact) and
+`kill` (predicted — its gate will be on exactly the signal-sending path a `kill`
+harness would test).**
+
+**What would actually decide these.** Either build the standalone for the
+SlateOS target and run both halves under the boot test, or compare only the
+surface that is not gated — argument parsing, diagnostics, exit statuses — and
+say plainly that the behaviour was not measured. The second is cheap and is what
+the 18 real `chown` cases already are; the first is the only thing that settles
+the pair.
+
 ## B-STRINGS-HAS-NO-DATA-SECTION-OPTION (lane B, 2026-09-11)
 
 `strings -d` / `--data` is absent. GNU's `strings` scans only the *initialised,
@@ -65251,6 +65301,29 @@ number is different** — not by a constant factor either: 12→16, 24→48,
 3036→4112. Both exit 0. `du` prints nothing but sizes and paths, so a `du` that
 gets the sizes wrong and drops a directory has no correct output left; there is
 nothing else in it to be right about.
+
+**`chown` — MEASURED AND NOT DECIDED (2026-09-11).**
+`scripts/chown-diff.sh`, written today, 66 cases against a GNU coreutils 9.4
+built from source. **`coreutils` 64 passed, 0 differed** — every ownership
+change, every refusal, `-R` with each of `-H`/`-L`/`-P`, `-h` on a symlink and
+on a dangling one, `--from=`, `--reference=`, `-c`/`-v`/`-f`.
+
+The standalone scored 3 of 64, and **that number is not evidence**: 43 of its 61
+failures are `chown syscall unavailable on this platform`, a stub it compiles
+only when NOT built for SlateOS. See
+`TD-B-A-LINUX-TARGETED-HARNESS-CANNOT-MEASURE-A-SLATEOS-GATED-SUBJECT`. The pair
+stays open.
+
+*What the harness does establish* is that `coreutils`' half is correct against
+GNU on all 64, which is worth having on its own — and the 18 real differences on
+the standalone's side are recorded there.
+
+*Two safety properties of this harness, since `chown` mutates:* it refuses to
+run as root, because unprivileged `chown root f` is a refusal and a comparison
+while as root it is a change; and it verifies after building its fixtures that
+**no symlink resolves outside the fixture tree**, because `chown -R -L` follows
+directory symlinks and a link to `/etc` would have made the harness change
+something real.
 
 **11 -> 10 (2026-09-11): `strings`, decided by one data-loss case.**
 `scripts/strings-diff.sh`, written today, 71 cases against GNU Binutils 2.42.

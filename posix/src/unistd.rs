@@ -1007,9 +1007,39 @@ pub extern "C" fn setgroups(size: usize, list: *const GidT) -> i32 {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
-    // Validation has passed and there is nothing behind it. Reporting
-    // success here would assert a mutation that did not happen; see the
-    // doc comment above.
+    // Validation has passed, and since 2026-09-12 there is something behind
+    // it: `SYS_PROCESS_SETGROUPS` (1067), which lane A landed on 2026-09-07.
+    // Until then this returned ENOSYS, and before THAT it returned 0 -- which
+    // handed a caller a privilege drop it had never performed. The ENOSYS step
+    // was the right move at the time and is why this could be wired up without
+    // auditing anything: nothing could have been relying on a success that
+    // never came.
+    kernel_setgroups(size, list)
+}
+
+/// The kernel half of [`setgroups`].
+///
+/// **The host arm reports ENOSYS rather than calling anything**, and that is
+/// not laziness: there is no kernel under a host test, so a claim of success
+/// would be the very thing this function was fixed for. It cannot go through
+/// the syscall wrapper's host sentinel either -- that returns `HOST_ENOSYS`,
+/// which `errno::translate` reads as a KERNEL error code rather than a
+/// negative errno and maps to EIO. Sixteen tests asserted ENOSYS and got 5.
+#[cfg(target_os = "none")]
+fn kernel_setgroups(size: usize, list: *const GidT) -> i32 {
+    let rc = crate::syscall::syscall2(
+        crate::syscall::SYS_PROCESS_SETGROUPS,
+        size as u64,
+        list as u64,
+    );
+    if crate::errno::translate(rc) < 0 {
+        return -1;
+    }
+    0
+}
+
+#[cfg(not(target_os = "none"))]
+fn kernel_setgroups(_size: usize, _list: *const GidT) -> i32 {
     errno::set_errno(errno::ENOSYS);
     -1
 }
@@ -2384,6 +2414,26 @@ pub extern "C" fn chroot(path: *const u8) -> i32 {
         errno::set_errno(errno::EPERM);
         return -1;
     }
+    // `SYS_PROCESS_CHROOT` (1068), landed by lane A on 2026-09-07 alongside
+    // 1067. The kernel's Linux-ABI handler for `chroot(2)` terminally refuses,
+    // because no Linux caller holds CAP_SYS_CHROOT; this native number is the
+    // one that installs a root.
+    kernel_chroot(path)
+}
+
+/// The kernel half of [`chroot`]. Host arm reports ENOSYS for the reason given
+/// at [`kernel_setgroups`].
+#[cfg(target_os = "none")]
+fn kernel_chroot(path: *const u8) -> i32 {
+    let rc = crate::syscall::syscall1(crate::syscall::SYS_PROCESS_CHROOT, path as u64);
+    if crate::errno::translate(rc) < 0 {
+        return -1;
+    }
+    0
+}
+
+#[cfg(not(target_os = "none"))]
+fn kernel_chroot(_path: *const u8) -> i32 {
     errno::set_errno(errno::ENOSYS);
     -1
 }

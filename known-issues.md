@@ -126472,6 +126472,23 @@ That is why `build.rs` should scan rather than hold a list of six.
 
 ## B-POSIX-SETGROUPS-REPORTS-SUCCESS-WITHOUT-CHANGING-ANY-GROUPS (lane B, 2026-09-07)
 
+**Status: IMPLEMENTED 2026-09-12.** `setgroups` now calls
+`SYS_PROCESS_SETGROUPS` (1067) and actually drops the groups; `chroot`, named
+at the foot of this entry as the model, calls `SYS_PROCESS_CHROOT` (1068).
+Lane A landed both on **2026-09-07**, the day after they were asked, and the
+request file has said `LANDED` in its own status line ever since. This entry
+went on describing the block for five days because nothing re-read it after
+the ground moved -- the third instance of that shape today, after the interval
+timers and their request. The lesson is not to write more carefully; it is
+that a document naming a blocker needs re-reading when the blocker is the
+kind of thing someone else can clear without telling you twice.
+
+On a host build both report `ENOSYS` through an explicit `cfg` arm rather
+than through the syscall wrapper's sentinel. That is not cosmetic: the
+sentinel is `HOST_ENOSYS`, which `errno::translate` reads as a *kernel* error
+code rather than a negative errno and maps to `EIO`. Sixteen `setgroups`
+tests and six `chroot` tests asserted `ENOSYS` and got 5.
+
 **Status: FIXED 2026-09-07** (lane B), the same day it was filed. `setgroups`
 now returns `-1`/`ENOSYS` after its validation instead of `0`. The thirteen
 tests that asserted the old success assert the failure *and* the errno; the one

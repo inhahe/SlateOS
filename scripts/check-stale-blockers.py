@@ -171,6 +171,30 @@ def question_states(open_questions_text):
     return out
 
 
+# A passage that already says the question is ANSWERED is doing the reader's
+# work, not misleading them. Without this, CORRECTING one of these entries
+# makes it fire twice as loudly: the correction has to name the question, and
+# it lands next to the "blocked" sentence it is correcting. All three entries
+# fixed on 2026-09-12 kept reporting for exactly that reason.
+#
+# Same argument as `ALREADY_NOTED` above, and the same failure mode without
+# it -- a gate that flags its own fix teaches people to stop fixing.
+QUESTION_SETTLED = re.compile(
+    # `unblocked` IS NOT HERE, and the self-test is why. The sentence this
+    # whole check was written for reads "there is no unblocked work left in
+    # this entry" -- which means the opposite, and matching the word alone
+    # suppressed the one finding the gate exists to make. A recogniser for
+    # "already corrected" that also matches the uncorrected original is
+    # worse than not having one.
+    r"answered|resolved|decided|landed|settled"
+    r"|no longer (?:blocked|waiting)"
+    # The decision record itself. An entry that cites the section number has
+    # looked the answer up, which is the opposite of being stuck.
+    r"|\u00a71005|Decided by",
+    re.I,
+)
+
+
 def stale_questions(text, answered):
     """Entries that are open and cite an ANSWERED question in blocking language.
 
@@ -188,7 +212,7 @@ def stale_questions(text, answered):
                 continue
             lo = max(0, j - CONTEXT_BEFORE)
             context = "\n".join(body[lo : j + CONTEXT_AFTER])
-            if BLOCKING.search(context):
+            if BLOCKING.search(context) and not QUESTION_SETTLED.search(context):
                 found.append((lineno, title, done[0]))
                 break
     return found
@@ -466,6 +490,24 @@ QUESTION_SELFTEST = [
         ["## B-SOMETHING-IS-BROKEN (lane B, 2026-01-01)",
          "",
          "This is blocked on B-Q99."],
+        {"B-Q7": True},
+        0,
+    ),
+    (
+        "...and not once the passage says the question was answered",
+        ["## B-SOMETHING-IS-BROKEN (lane B, 2026-01-01)",
+         "",
+         "This used to say it was blocked on B-Q7.",
+         "B-Q7 was answered on 2026-09-07, so it is not waiting on anything."],
+        {"B-Q7": True},
+        0,
+    ),
+    (
+        "a correction that cites the decision record is not a finding either",
+        ["## B-SOMETHING-IS-BROKEN (lane B, 2026-01-01)",
+         "",
+         "Blocked on B-Q7 until it lands.",
+         "Decided by: Operator, so this is unblocked."],
         {"B-Q7": True},
         0,
     ),

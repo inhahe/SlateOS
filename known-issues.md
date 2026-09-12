@@ -64240,7 +64240,7 @@ the work. Note that if `open-questions.md` → B-Q7 is answered in favour of the
 standing §8 — standalone crates canonical, `coreutils/src/bin/*` retired — then
 this crate's 86 binaries do not need linting at all; they need porting into 45
 new crates that inherit the workspace lints by construction. That is a further
-reason not to start here until B-Q7 lands.
+reason not to start here until B-Q7 lands. **B-Q7 landed on 2026-09-07** (§1005: coreutils is the one home), so that reason has expired — left in place rather than deleted because the paragraph above it is still the right way to think about the work, and only its last clause went stale.
 
 **If never fixed:** no regression — the exposure is exactly what it has been
 since the crates were written. But the lints exist because this codebase has no
@@ -66923,9 +66923,13 @@ is duplicated. Concretely:
    kernel grants permissions per file, so one file answering to `w`, `finger`
    and `pinky` must hold the union of what all three need.
 
-**Blocked on nothing, but sequence it after `open-questions.md` → B-Q7**, which
+**UNBLOCKED since 2026-09-07 and this paragraph did not say so until
+2026-09-12.** It read "sequence it after `open-questions.md` → B-Q7, which
 decides whether `userspace/<tool>` crates or `coreutils` is the home for this
-family. Doing it first would mean doing it twice.
+family." B-Q7 was answered five days before that was noticed: §1005,
+`Decided by: Operator`, **coreutils is the one home** and the duplicate crate
+is deleted. So the sequencing advice was sound and its precondition had been
+met; the entry just went on giving it. Nothing here is waiting on anything.
 
 **How to see it** (once built):
 
@@ -68413,14 +68417,29 @@ diff  logger  patch  ps
 
 `fetch` and `sh` were the last two unblocked ones and are now done, which is
 what took the count from seven to four — `sh` carried two findings, argv and
-the environment. **Everything remaining is blocked on B-Q7**, so there is no
-unblocked work left in this entry; a reader looking for the next thing to do
-should look elsewhere until that question is answered. `diff`, `logger`,
-`patch` and `ps` each have a second implementation of the same utility outside
-`userspace/coreutils/` (`userspace/diff/`, `userspace/logger/`,
-`userspace/patch/`, `userspace/ps/`), so converting one of them means first
-deciding which copy is the real one — `open-questions.md` → **B-Q7** — and doing
-it before that is answered means doing it twice.
+the environment.
+
+**This paragraph used to say "Everything remaining is blocked on B-Q7, so
+there is no unblocked work left in this entry; a reader looking for the next
+thing to do should look elsewhere." B-Q7 was answered on 2026-09-07 and the
+sentence stood for five days after.** §1005, `Decided by: Operator`:
+**coreutils is the one home**, the better half of each duplicate pair survives
+inside it, the duplicate crate is deleted. So the decision these four were
+waiting on has been made, and "look elsewhere" was sending readers away from
+work that was ready.
+
+`diff`, `logger`, `patch` and `ps` each have a second implementation outside
+`userspace/coreutils/`. Under §1005 that is no longer a question, it is a
+measurement: run the pair's harness, keep the better half inside coreutils,
+delete the crate. As of 2026-09-12 `diff` and `patch` are done, `ps` is
+measured (coreutils' 22 passed / 0 differed against the standalone's 0 / 12),
+and `logger` is the one genuine hold-out — not on B-Q7, but on **B-Q14**,
+because its two implementations disagree about *where a logged message goes*,
+which a differential test cannot settle.
+
+`scripts/check-stale-blockers.py` now cross-references answered questions as
+well as landed requests, so the next sentence of this shape is caught by a
+gate rather than by someone wandering past.
 
 The live count is whatever `python scripts/argv-utf8.py --check` prints; the
 baseline shrinks by one line per conversion and never grows, so this paragraph

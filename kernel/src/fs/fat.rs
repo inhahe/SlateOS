@@ -736,6 +736,24 @@ impl FatDirEntry {
         }
     }
 
+    /// Whether the 8.3 short name decodes at all.
+    ///
+    /// `display_name` and `short_name` substitute `????????` when it does not,
+    /// and that substitution is a **constant** -- every undecodable name becomes
+    /// the same eight characters. Comparing it in a lookup therefore matches
+    /// every such entry against a target of literally `????????` and returns
+    /// whichever happens to come first, which is a wrong answer rather than a
+    /// missing one.
+    ///
+    /// Callers that *match* must consult this first; callers that only *display*
+    /// need not. Which code page these bytes are actually in is open as A-Q12 and
+    /// is deliberately not decided here -- this predicate is correct under every
+    /// answer to it.
+    fn short_name_decodes(&self) -> bool {
+        core::str::from_utf8(&self.name[..8]).is_ok()
+            && core::str::from_utf8(&self.name[8..11]).is_ok()
+    }
+
     /// Return the 8.3 short name as a string (for matching purposes).
     fn short_name(&self) -> String {
         let base = core::str::from_utf8(&self.name[..8])
@@ -1889,12 +1907,25 @@ impl FatFs {
                     return false;
                 }
                 // Match against display name (long name if present, else 8.3).
-                if e.display_name().eq_ignore_ascii_case(&target) {
+                //
+                // Guarded by `short_name_decodes` when there is no long name:
+                // `display_name` falls back to the 8.3 bytes and substitutes
+                // `????????` if they are not UTF-8. That substitution is a
+                // constant, so comparing it made a target of literally
+                // `????????` match every undecodable entry and return the first
+                // -- a *wrong* file rather than no file. Skipping the comparison
+                // makes such a name unfindable, which it already was, without
+                // ever handing back the wrong one.
+                if (e.long_name.is_some() || e.short_name_decodes())
+                    && e.display_name().eq_ignore_ascii_case(&target)
+                {
                     return true;
                 }
                 // Also match against the short name if a long name was used
-                // for display — callers may use either form.
-                if e.long_name.is_some() {
+                // for display — callers may use either form. Same guard, and
+                // needed here too: `short_name` uses the 8.3 bytes always, so
+                // this arm could fabricate even when a long name exists.
+                if e.long_name.is_some() && e.short_name_decodes() {
                     return e.short_name().eq_ignore_ascii_case(&target);
                 }
                 false

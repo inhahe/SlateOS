@@ -136777,7 +136777,20 @@ the target in whitespace alone, and no case in this tree does. Correct today,
 incomplete rather than wrong, and recorded so a passing harness is not read as
 evidence that whitespace-insensitive matching exists. It does not.
 
-### A-OPTION-REFUSAL-PASS-LINE-CLAIMS-MORE-THAN-ITS-DETECTORS-ESTABLISH — 2026-09-12 — LOGGED (lane A)
+### A-OPTION-REFUSAL-PASS-LINE-CLAIMS-MORE-THAN-ITS-DETECTORS-ESTABLISH — 2026-09-12 — FIXED by lane B (lane A)
+
+**FIXED by lane B, 2026-09-12, and better than what I proposed.** The pass line now reads:
+
+```
+[option-refusal] kshell.rs: 102155 production statement(s) and 1483 loop(s) inspected;
+no site matches D1 (parse fallback), D2 (dash-filtered word), D3 (option …)
+```
+
+I suggested naming the detectors. They also added **the counts** — 102,155 statements and
+1,483 loops inspected — which is the half that matters more: naming the detectors stops the
+line overclaiming, but naming the population is what makes a regex that has quietly stopped
+matching visible. "No site matches D1/D2/D3" out of 102,155 and out of 0 are different
+statements; the old line and my proposed line would both have printed the same word.
 
 **In short:** a check that runs on every boot prints "no word is silently dropped"
 when it passes. It does look for three specific ways a word can be dropped, and it
@@ -137234,6 +137247,28 @@ So a lookup for the literal `????????.???` matches **every** entry whose short n
 to decode, and returns whichever comes first; and a file whose real short name is
 non-ASCII cannot be found by its real name at all. `A-EXEC-WRITES-A-COMM-...` manufactures
 collisions in a *display*; this one manufactures them in a *resolver*.
+
+**[A] 2026-09-12 — the COLLISION is fixed; the DISPLAY question stays open, and the two are
+separable in a way this entry did not make clear.** A-Q12 asks which code page an 8.3 name
+was written in. That is the operator's and it governs *display*. It does not govern
+*matching*, and the matching bug is wrong under every possible answer to it:
+`display_name()` and `short_name()` substitute `????????`, which is a **constant**, so a
+lookup for that literal matched every undecodable entry and returned whichever came first.
+
+`FatDirEntry::short_name_decodes()` now guards both comparison arms in the path lookup
+(`fat.rs`). An undecodable short name is no longer compared at all, so such a file is
+unfindable — which it already was — without the lookup ever handing back a *different* file.
+**Turning a wrong answer into no answer is the fail-safe direction and needed no policy
+decision.**
+
+The second guard is the one worth pointing at: `short_name()` uses the 8.3 bytes **always**,
+even when a long name exists, so that arm could fabricate for a file whose LFN decodes
+perfectly. Guarding only the no-LFN path would have looked complete and left the more
+common case open.
+
+Still open and still the operator's: what an undecodable short name should *look like*. The
+recommendation in A-Q12 is escapes by default with a per-mount code page, on the argument
+that the escape is the correct answer in the absence of information.
 
 **Proper fix:** the same shape as the comm work — keep the 8.3 field as the eleven bytes it
 is, compare bytes, and decode lossily only for display. `DirEntry.name` is already byte-

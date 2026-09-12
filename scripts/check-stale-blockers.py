@@ -140,16 +140,24 @@ SCRIPT_REF = re.compile(r'`(scripts/[A-Za-z0-9_.\-]+\.(?:py|sh|ps1))`')
 # `stamp-ancestry.py` commitment saying exactly that, and reporting it would
 # train a reader to skim past the ones that are wrong.
 ALREADY_NOTED = re.compile(
-    r"no longer exists|was retired|has been deleted|was deleted"
-    r"|no longer present|since removed|was removed",
+    r"no longer exists|has been deleted|no longer present"
+    # Tense and voice both vary, and the first version only matched the past
+    # passive. `design-decisions.md` §382's own heading says "`diff-subject.sh`
+    # is retired" -- a section whose whole subject is the retirement -- and was
+    # reported six times because the regex wanted "was retired".
+    r"|(?:is|was|been|are|were)\s+(?:retired|deleted|removed|gone)"
+    r"|since removed|now gone|does not exist",
     re.I,
 )
 # And a name used as a stand-in for any script is not a claim that it exists.
 # `known-issues.md` discusses "a literal `scripts/X.py` on a `run_checker`
 # line", which is about pattern-matching, not about a file.
 PLACEHOLDER_REF = re.compile(r'^scripts/(?:X|Y|N|FOO|NAME|SOMETHING)\.', re.I)
+# The window is asymmetric on purpose. A note that a file is gone almost
+# always follows the citation it corrects -- a blockquote under the claim, or
+# a sentence after it -- and rarely precedes it.
 NOTE_BEFORE = 3
-NOTE_AFTER = 6
+NOTE_AFTER = 12
 
 
 def dangling_references(doc_texts, exists):
@@ -371,13 +379,43 @@ def main(argv=None):
     by_path = {}
     for name, lineno, path in dangling:
         by_path.setdefault(path, []).append((name, lineno))
+    # Git separates the two kinds without a hand-maintained list. A path that
+    # once existed and was deleted is a RETIRED script, and a citation of it is
+    # often legitimate history -- design-decisions.md narrates what the harnesses
+    # did in the weeks before `diff-subject.sh` was retired, and that prose is
+    # true. A path with no history at all was NEVER WRITTEN, so no reader has
+    # ever been able to follow it: a typo, or a file someone meant to add.
+    #
+    # Both are reported, because a live instruction to run a retired script is
+    # still wrong, but they are labelled differently so a reader can triage.
+    # `scripts/check-textmode-writes.py` is the clearest case of the second
+    # kind: the real gate is `check-text-mode-writes.py`, and the name is close
+    # enough that anyone following it would doubt themselves first.
+    import subprocess
+
+    def ever_existed(rel):
+        out = subprocess.run(
+            ["git", "log", "--all", "--oneline", "--", rel],
+            capture_output=True,
+            text=True,
+            cwd=ROOT,
+        ).stdout.strip()
+        return bool(out)
+
     for path, sites in sorted(by_path.items()):
         where = ", ".join("%s:%d" % (n, l) for n, l in sites[:3])
         if len(sites) > 3:
             where += " and %d more" % (len(sites) - 3)
-        print("`%s` does not exist, cited %d time(s): %s" % (path, len(sites), where))
-        print("    Either the file moved and the references should follow it, or")
-        print("    they should say it is gone.")
+        if ever_existed(path):
+            print("`%s` was deleted, still cited %d time(s): %s"
+                  % (path, len(sites), where))
+            print("    Historical narrative about it is fine. An instruction to")
+            print("    RUN it is not -- check which of these are which.")
+        else:
+            print("`%s` NEVER EXISTED, cited %d time(s): %s"
+                  % (path, len(sites), where))
+            print("    No reader has ever been able to follow this. It is a typo")
+            print("    or a file someone meant to add.")
         print()
 
     # Name the population. A checker that prints only a verdict reads the same

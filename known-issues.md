@@ -12457,6 +12457,48 @@ boots were all pre-build gates — inherited shellcheck, a misfiled open-questio
 clippy denial in another lane — so the base rate for "failed for an unrelated reason" is
 demonstrably high, but that is an impression and not a measurement of those 85.
 
+**[A] 2026-09-12 — TAKEN THE CHEAP ROUTE THIS ENTRY NAMED FIRST, AND THE SIGNATURE HAS NOT
+RECURRED IN 722 RECORDED BOOTS.** No stress run was needed: the data already existed in
+`bench/boot-history.jsonl`, which carries an `exceptions` field nobody had queried.
+
+| measurement | value |
+|---|---|
+| boot records | 722 |
+| non-host failures | 84 |
+| of those, reached the kernel (serial output) | **84** — pre-build gate failures never get a record |
+| failures with an exception captured | 6 |
+| page faults among them | 3 |
+| **matching `address=0x97`** | **0** |
+
+The three captured faults are at `0xffff80007fef4000`, `0x1000` and `0xffff80007feb0000` —
+none is the near-null read this entry describes.
+
+**Why the absence is meaningful rather than an artefact of missing instrumentation**, which
+is the question that decides whether any of the above counts. Only 10 of 722 records carry
+the `exceptions` key at all, which looks at first like sparse instrumentation. It is not:
+the key is written **only when an exception is parsed**, and all 10 that have it have a
+non-empty value. The test is whether the parser was live across the failure window, and it
+was — failures span 2026-08-17 to 2026-09-10 and the *earliest failure of all* already
+carries the key, with zero failures preceding it. So within that window, absence of the key
+means no exception was seen, not that none could have been.
+
+**And the self-test that provokes it does run**, checked rather than assumed: tonight's
+boot shows `spawn-test-glibc-pthread` as process 339 doing 4 threads, 40,000 mutex/futex
+ops and `pthread_join`, and `check-boot-skips` does not list it. A population of 700 boots
+says nothing if the test was skipping in all of them.
+
+**What this establishes, and what it does not.** At the observed July rate of 1 in 5, ~700
+boots would have produced on the order of a hundred recurrences; there are none. So the
+rate has collapsed and the defect was most likely fixed incidentally by teardown work in
+the interim. It does **not** identify a root cause, and the July occurrence predates the
+recorded window entirely — this is absence of recurrence, not a diagnosis. The honest
+status is a measured negative rather than a fix.
+
+*Worth noting for the next entry that reaches this state:* the route this took was already
+written down here — "a boot whose serial log is checked for the `address=0x97` signature" —
+and the cheaper version of it, querying a field the harness had been recording all along,
+was available for weeks. The 15-boot stress run was the option everyone remembered.
+
 *What would close this.* Either a boot whose serial log is checked for the `address=0x97`
 signature across the 85, or a deliberate stress run of
 `self_test_linux_real_glibc_pthread` — the old rate means ~15 boots would give better than
@@ -16389,6 +16431,67 @@ when `error & 4` (CPL3, ring-3 access). A *kernel-mode* (ring-0) write
 to a **present, read-only** user page (`error == 0x3`) therefore skips
 CoW resolution and falls straight through to "FATAL: Unrecoverable
 kernel page fault. Halting."
+
+**[A] 2026-09-12 — the syscall layer has no raw write through a user mapping, which
+completes the static half of this entry's own prescription.** The entry asks to *"identify
+the specific kernel write path that reaches a user COW page without pre-validating"*. With
+the four `mm/user.rs` primitives already audited clean (above), the only remaining way in
+is a **raw** pointer write that bypasses them. Enumerated:
+
+- `write_volatile` / `copy_nonoverlapping` / raw `*mut` stores across `kernel/src`: 174
+  sites in 53 files — overwhelmingly device MMIO (`ahci`, `apic`, `e1000`, `fb`, `drm`),
+  which write physical or HHDM addresses and cannot fault on a user page.
+- **Inside `kernel/src/syscall/`, where a user buffer is actually in scope: 10 sites.**
+  Every one writes either a *kernel local* (`ex2`, `frame_buf`, `buf` — each with a SAFETY
+  comment saying the regions are distinct locals) or an **HHDM address** obtained by
+  translating the target `pml4` (`linux.rs:51024`, which stamps a pattern through
+  `phys + hhdm` rather than through the user mapping, exactly as `copy_to_user_as` does).
+
+So no syscall path writes through a user virtual address in ring 0. Every user write in
+that layer goes through the four primitives, and those break CoW.
+
+**Stopping here deliberately, and the reason is proportionality rather than completeness.**
+What remains unaudited is raw writes *outside* `syscall/` that might target a user address —
+in `fs/`, `ipc/`, `proc/`. That is the long tail of the 174, it is mostly MMIO, and
+distinguishing "this address is user" from "this address is a device" needs reading each
+site rather than grepping. Against a defect that has produced **one** observation in June,
+has never appeared in 722 recorded boots, and whose signature is distinctive enough to
+recognise instantly if it recurs, that audit is disproportionate today.
+
+What would change that: a recurrence, or a cheap way to key the search on *user-address
+provenance* rather than on the write itself. The second is the interesting one and I do not
+have it — noting the gap rather than pretending the enumeration is finished.
+
+**[A] 2026-09-12 — checked the recorded boots for this signature, and the answer is WEAK
+EVIDENCE rather than reassurance. The distinction is the point of this note.**
+
+`bench/boot-history.jsonl` has captured every kernel exception across 722 boots. All 22 of
+them, in full: 15 deliberate breakpoints, 3 page faults (`error=0x2`, `0x0`, `0x2`), and
+one invalid opcode. **None with `error=0x3`** — the present/write/kernel combination this
+entry describes.
+
+**Why that is worth much less here than the identical measurement was for
+`B-PTHREAD-TEARDOWN-PF`.** That entry got a strong negative from the same data because its
+trigger is *known to run*: `spawn-test-glibc-pthread` executes every boot, verified in the
+serial log and absent from the skip ledger, so 700 boots at a 1-in-5 rate should have
+produced ~100 recurrences and produced none.
+
+This entry has no such trigger. The fault needs a kernel path that writes through a user
+pointer into a present, read-only COW page **without** first calling
+`mm::user::validate_user_write`. Whether any code path does that during a normal boot is
+exactly what is unknown — so zero occurrences is equally consistent with *the bug is gone*
+and with *nothing has ever exercised it*. The measurement cannot distinguish them.
+
+**So this is recorded as a null result, not a negative one.** The same query, the same
+population, the same zero — and it closes one entry while saying almost nothing about
+another, because the strength of an absence depends entirely on whether the thing that
+would produce it was running. An absence with no known trigger is not evidence; it is the
+shape of evidence.
+
+What *would* be evidence: a self-test that deliberately performs a ring-0 write through a
+user pointer into a `MAP_PRIVATE` file page that has not been touched since mapping, and
+asserts the write succeeds rather than halting. That is a rung, not a stress run, and it
+would convert this entry from WATCH to either fixed or reproducible in one boot.
 
 **Why it matters now:** the read-only page cache (§36) maps writable
 `MAP_PRIVATE` file pages **RO + COW** on first fault (so writes copy out

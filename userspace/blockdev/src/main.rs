@@ -103,6 +103,54 @@ fn _format_bytes(bytes: u64) -> String {
 // blockdev command
 // ============================================================================
 
+/// Refuse an option this program does not have.
+///
+/// The wording is getopt's, shared through `usageerror` so every program
+/// here renders it identically. The status is **1**, measured rather than
+/// assumed: `lscpu`, `lsmem`, `prlimit` and `blkzone` all exit 1 for this,
+/// where util-linux's own `flock` exits 64 -- so it is per-tool, which is
+/// why `usageerror` does not choose it.
+/// Every long operation this build performs.
+///
+/// This is the set the executor matches on, written down so the *parser* can
+/// reject a word outside it. It used to accept any `--word` as an operation,
+/// push it, read the device, and then print `unknown operation` on **stdout**
+/// and exit 0 -- so `blockdev --zzq /dev/sda` reported success.
+///
+/// `--setfra` and `--getfra` are real util-linux options this build does not
+/// implement, so they are deliberately absent: refusing them says what is
+/// true of this binary, which is better than accepting one and doing nothing.
+const OPERATIONS: [&str; 15] = [
+    "--flushbufs",
+    "--getbsz",
+    "--getpbsz",
+    "--getra",
+    "--getro",
+    "--getsize",
+    "--getsize64",
+    "--getss",
+    "--getsz",
+    "--report",
+    "--rereadpt",
+    "--setbsz",
+    "--setra",
+    "--setro",
+    "--setrw",
+];
+
+/// True if `arg` names an operation this build performs.
+fn is_operation(arg: &str) -> bool {
+    OPERATIONS.contains(&arg)
+}
+
+fn refuse_unknown_option(prog: &str, arg: &str) -> ! {
+    eprintln!(
+        "{prog}: {}",
+        usageerror::with_help_pointer(prog, &usageerror::unknown_option(arg.as_bytes()))
+    );
+    process::exit(1);
+}
+
 fn cmd_blockdev(args: &[String]) {
     if args.is_empty() {
         print_blockdev_help();
@@ -123,6 +171,11 @@ fn cmd_blockdev(args: &[String]) {
             "-V" | "--version" => {
                 println!("blockdev {VERSION}");
                 process::exit(0);
+            }
+            // Refused before any device is touched, which is where
+            // util-linux refuses it too.
+            s if s.starts_with("--") && !is_operation(s) => {
+                refuse_unknown_option("blockdev", s);
             }
             s if s.starts_with("--") => {
                 operations.push(s.to_string());
@@ -147,6 +200,12 @@ fn cmd_blockdev(args: &[String]) {
             }
             s if !s.starts_with('-') => {
                 devices.push(s.to_string());
+            }
+            // Everything reaching here begins with a dash and matched no
+            // option above, so it is one this build does not have. A lone
+            // `-` is left alone.
+            other if other.len() > 1 => {
+                refuse_unknown_option("blockdev", other);
             }
             _ => {}
         }
@@ -357,6 +416,11 @@ fn cmd_blkzone(args: &[String]) {
             );
             let _ = writeln!(out, "Total zones for {device}: 2");
         }
+        // `blkzone --zzq` used to print `blkzone: --zzq on --zzq` and
+        // exit 0, reporting success for a command line it had not read.
+        opt if opt.starts_with('-') && opt.len() > 1 => {
+            refuse_unknown_option("blkzone", opt);
+        }
         cmd => {
             let device = args.last().map(|s| s.as_str()).unwrap_or("/dev/sda");
             eprintln!("blkzone: {cmd} on {device}");
@@ -400,6 +464,27 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The parser and the executor must agree on the operation set, since
+    /// the parser now refuses anything outside it before a device is read.
+    #[test]
+    fn every_listed_operation_is_recognised() {
+        for op in OPERATIONS {
+            assert!(is_operation(op), "{op} is in the list but not recognised");
+        }
+        assert_eq!(OPERATIONS.len(), 15);
+    }
+
+    #[test]
+    fn a_word_outside_the_list_is_not_an_operation() {
+        assert!(!is_operation("--zzq-not-an-option"));
+        assert!(!is_operation("--getsz-typo"));
+        // Real util-linux options this build does not implement. Refusing
+        // them states what is true of this binary; accepting one and doing
+        // nothing would not.
+        assert!(!is_operation("--setfra"));
+        assert!(!is_operation("--getfra"));
+    }
 
     /// A device to format and convert, for the tests that need one.
     ///

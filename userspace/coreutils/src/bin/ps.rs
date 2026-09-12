@@ -28,6 +28,10 @@ struct PsArgs {
     select_pids: Option<Vec<u64>>,
     /// `-u`: show only processes with these effective UIDs.
     select_uids: Option<Vec<u32>>,
+    /// `-o`: print exactly these columns. Repeated `-o` accumulates rather
+    /// than replaces, which is procps' behaviour: `-o pid -o comm` is the
+    /// same as `-o pid,comm`.
+    columns: Vec<Spec>,
 }
 
 /// Parse ps's argv.  BSD-style and POSIX-style flags are accepted via
@@ -101,6 +105,17 @@ fn parse_args(args: &[String]) -> Result<Request, String> {
                 match c {
                     'e' | 'A' => out.all_procs = true,
                     'f' => out.full_format = true,
+                    'o' => {
+                        let glued: String = rest.by_ref().collect();
+                        let list = if glued.is_empty() {
+                            let next = args.get(i).cloned().unwrap_or_default();
+                            i = i.saturating_add(1);
+                            next
+                        } else {
+                            glued
+                        };
+                        parse_columns(&list, &mut out.columns)?;
+                    }
                     'u' => {
                         let glued: String = rest.by_ref().collect();
                         let list = if glued.is_empty() {
@@ -211,6 +226,172 @@ fn parse_pid_list(list: &str) -> Result<Vec<u64>, String> {
     Ok(out)
 }
 
+/// One column `-o` can name.
+///
+/// Every width here was measured from procps, one column at a time, because
+/// none of them follows from the column's name and two are actively
+/// surprising: `comm`'s title is **COMMAND**, not COMM, and `tty`'s is **TT**,
+/// not TTY -- the same field that the default format heads `TTY`.
+///
+/// The widths are FIXED, not sized to content. `ps -e -o user,pid` on a host
+/// whose only user is `root` still pads USER to eight, and `comm` to fifteen,
+/// which is the kernel's own cap on a task name.
+struct Column {
+    /// What `-o` calls it.
+    name: &'static str,
+    /// The heading, when the user does not supply one.
+    title: &'static str,
+    width: usize,
+    right: bool,
+}
+
+const COLUMNS: &[Column] = &[
+    Column {
+        name: "pid",
+        title: "PID",
+        width: 7,
+        right: true,
+    },
+    Column {
+        name: "ppid",
+        title: "PPID",
+        width: 7,
+        right: true,
+    },
+    Column {
+        name: "uid",
+        title: "UID",
+        width: 5,
+        right: true,
+    },
+    Column {
+        name: "user",
+        title: "USER",
+        width: 8,
+        right: false,
+    },
+    Column {
+        name: "comm",
+        title: "COMMAND",
+        width: 15,
+        right: false,
+    },
+    // `args` is the full command line and is always last in practice, so its
+    // width never shows. Zero rather than a guess: an invented width would be
+    // wrong the first time someone puts a column after it.
+    Column {
+        name: "args",
+        title: "COMMAND",
+        width: 0,
+        right: false,
+    },
+    Column {
+        name: "tty",
+        title: "TT",
+        width: 8,
+        right: false,
+    },
+    Column {
+        name: "time",
+        title: "TIME",
+        width: 8,
+        right: true,
+    },
+    Column {
+        name: "stime",
+        title: "STIME",
+        width: 5,
+        right: true,
+    },
+    Column {
+        name: "c",
+        title: "C",
+        width: 2,
+        right: true,
+    },
+];
+
+/// A column the caller asked for, with the heading they asked for.
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+struct Spec {
+    /// Index into `COLUMNS`.
+    col: usize,
+    /// The heading. Empty when the spec ended in `=` with nothing after it,
+    /// which procps uses to suppress that column's title.
+    title: String,
+}
+
+/// Parse one `-o` argument: a comma-separated list of `name` or `name=TITLE`.
+///
+/// # Errors
+///
+/// A name not in `COLUMNS`. procps' message, measured:
+/// `error: unknown user-defined format specifier "nosuchcolumn"`.
+fn parse_columns(list: &str, into: &mut Vec<Spec>) -> Result<(), String> {
+    for field in list.split(',').filter(|f| !f.is_empty()) {
+        let (name, title) = match field.split_once('=') {
+            Some((n, t)) => (n, Some(t.to_string())),
+            None => (field, None),
+        };
+        let Some(col) = COLUMNS.iter().position(|c| c.name == name) else {
+            return Err(format!(
+                "error: unknown user-defined format specifier {name:?}"
+            ));
+        };
+        let title = title.unwrap_or_else(|| COLUMNS[col].title.to_string());
+        into.push(Spec { col, title });
+    }
+    Ok(())
+}
+
+/// Join one row's cells the way procps does.
+///
+/// **Every field is padded to its width EXCEPT THE LAST, which is emitted as
+/// it is.** That single rule accounts for all of this, measured byte for byte:
+///
+/// ```text
+/// ps -o user        "USER\nroot\n"          no padding at all
+/// ps -o user,pid    "USER     " + "    PID"  USER padded to 8
+/// ps -o comm        "COMMAND\nps\n"         no padding
+/// ps -o pid,comm=   "    PID \n      1 ps"   header ends at the SEPARATOR
+/// ```
+///
+/// The last line is the one that pins the rule down. `comm=` has an empty
+/// title, so the header's final field is the empty string -- unpadded, which
+/// leaves the line ending in the separator that precedes it. Trimming the
+/// whole line instead would have eaten that space, and padding the last field
+/// would have added fourteen more.
+fn render_row(cells: &[String], specs: &[Spec]) -> String {
+    let mut out = String::new();
+    for (i, cell) in cells.iter().enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        let last = i + 1 == cells.len();
+        let Some(spec) = specs.get(i) else { continue };
+        let Some(col) = COLUMNS.get(spec.col) else {
+            continue;
+        };
+        // A RIGHT-aligned column is padded even when it is LAST, because its
+        // padding lands on the left and is therefore not trailing whitespace.
+        // `ps -o pid` prints "    PID" over "      1", not "PID" over "1".
+        // Only a left-aligned final column drops its padding, which is what
+        // makes `ps -o user` print a bare "USER".
+        //
+        // The first version of this treated "last" as "unpadded" for both, and
+        // the harness put six cases against it: -o pid, -o pid=MYPID, -o time,
+        // -o c, -o user,pid and -o uid,pid.
+        if last && !col.right {
+            out.push_str(cell);
+        } else if col.right {
+            out.push_str(&format!("{cell:>width$}", width = col.width));
+        } else {
+            out.push_str(&format!("{cell:<width$}", width = col.width));
+        }
+    }
+    out
+}
+
 /// procps-ng's `ps --help` with no topic, byte for byte.
 ///
 /// Captured with `ps --help | cat -A`. The leading blank line is procps' and
@@ -317,7 +498,18 @@ fn run_main() -> ExitCode {
     // `--no-header` suppresses the titles and nothing else. The header still
     // prints when `-p` matches nothing -- measured: `ps -p 999999` writes the
     // header and exits 1, so "no rows" and "no header" are independent.
-    if !parsed.no_header {
+    // `-o` replaces the built-in formats entirely, and suppresses the header
+    // by itself when EVERY title is empty -- `ps -o comm=` prints one column
+    // and no heading at all, while `ps -o pid,comm=` still prints a heading
+    // because `pid` kept its own. Measured.
+    let custom = !parsed.columns.is_empty();
+    let all_titles_empty = custom && parsed.columns.iter().all(|c| c.title.is_empty());
+    if custom {
+        if !parsed.no_header && !all_titles_empty {
+            let titles: Vec<String> = parsed.columns.iter().map(|c| c.title.clone()).collect();
+            let _ = writeln!(out, "{}", render_row(&titles, &parsed.columns));
+        }
+    } else if !parsed.no_header {
         if parsed.full_format {
             let _ = writeln!(
                 out,
@@ -346,7 +538,15 @@ fn run_main() -> ExitCode {
         {
             continue;
         }
-        let Ok(Some(info)) = read_one(&procfs, pid, parsed.full_format, &ctx) else {
+        // `-o args` needs the command line too, so the flag is "does anything
+        // ask for it" rather than "was -f given". Reading it costs a second
+        // open per process, which is why it is still conditional.
+        let wants_cmdline = parsed.full_format
+            || parsed
+                .columns
+                .iter()
+                .any(|s| COLUMNS.get(s.col).is_some_and(|c| c.name == "args"));
+        let Ok(Some(info)) = read_one(&procfs, pid, wants_cmdline, &ctx) else {
             // A process that exits between the listing and the read is the
             // normal case for anything walking /proc, not a failure.
             continue;
@@ -362,7 +562,14 @@ fn run_main() -> ExitCode {
         }
         let pid32 = u32::try_from(pid).unwrap_or(0);
 
-        if parsed.full_format {
+        if custom {
+            let cells: Vec<String> = parsed
+                .columns
+                .iter()
+                .map(|spec| info.cell(COLUMNS.get(spec.col), pid32))
+                .collect();
+            let _ = writeln!(out, "{}", render_row(&cells, &parsed.columns));
+        } else if parsed.full_format {
             let _ = writeln!(
                 out,
                 "{:<8} {:>7} {:>7} {:>2} {:>5} {:<8} {:>8} {}",
@@ -457,6 +664,39 @@ fn read_one(
         time_str: format_cpu_time(stat.utime_ticks, stat.stime_ticks),
         cmd,
     }))
+}
+
+impl ProcInfo {
+    /// One column's value for this process.
+    ///
+    /// `args` falls back to the bracketed `comm` when the command line is
+    /// empty, which is what the `-f` path already does for a kernel thread --
+    /// the same value, reached the same way, rather than a second rule.
+    fn cell(&self, col: Option<&Column>, pid: u32) -> String {
+        let Some(col) = col else { return String::new() };
+        match col.name {
+            "pid" => pid.to_string(),
+            "ppid" => self.ppid.to_string(),
+            "uid" => self.uid.to_string(),
+            "user" => self.user.clone(),
+            "comm" => self.comm.clone(),
+            "args" => {
+                if self.cmd.is_empty() {
+                    format!("[{}]", self.comm)
+                } else {
+                    self.cmd.clone()
+                }
+            }
+            "tty" => self.tty.clone(),
+            "time" => self.time_str.clone(),
+            "stime" => self.stime.clone(),
+            "c" => self.cpu_pct.to_string(),
+            // `COLUMNS` is the only source of names and every one of them is
+            // handled above; an unknown name cannot be constructed because
+            // `parse_columns` refuses it.
+            _ => String::new(),
+        }
+    }
 }
 
 /// The things every row needs and no row should read for itself.
@@ -735,6 +975,88 @@ mod tests {
         let err = parse_args(&s(&["-u", "nosuchuser"])).expect_err("no such user");
         assert_eq!(err, "error: user name does not exist");
         assert!(parse_args(&s(&["-u", ""])).is_err());
+    }
+
+    fn cols(list: &str) -> Vec<Spec> {
+        let mut out = Vec::new();
+        parse_columns(list, &mut out).expect("valid column list");
+        out
+    }
+
+    /// THE RULE THAT TOOK TWO GOES.
+    ///
+    /// A right-aligned column is padded even when it is the last on the line,
+    /// because its padding lands on the LEFT and so is not trailing
+    /// whitespace. A left-aligned one is not. The first version treated
+    /// "last" as "unpadded" for both and `scripts/ps-diff.sh` returned six
+    /// failures for it, every one a right-aligned column standing alone.
+    ///
+    /// Each row below is a measured procps output, not a derivation.
+    #[test]
+    fn a_trailing_right_aligned_column_keeps_its_padding() {
+        // `ps -o pid` -> "    PID" / "      1"
+        let pid = cols("pid");
+        assert_eq!(render_row(&["PID".into()], &pid), "    PID");
+        assert_eq!(render_row(&["1".into()], &pid), "      1");
+        // `ps -o user` -> "USER" / "root", no padding at all
+        let user = cols("user");
+        assert_eq!(render_row(&["USER".into()], &user), "USER");
+        assert_eq!(render_row(&["root".into()], &user), "root");
+        // `ps -o user,pid` -> USER padded to 8, PID right-aligned in 7
+        let both = cols("user,pid");
+        assert_eq!(
+            render_row(&["USER".into(), "PID".into()], &both),
+            "USER         PID"
+        );
+        assert_eq!(
+            render_row(&["root".into(), "1".into()], &both),
+            "root           1"
+        );
+    }
+
+    /// `=` empties a title, and the line then ends at the SEPARATOR.
+    ///
+    /// `ps -o pid,comm=` prints "    PID " with one trailing space -- the
+    /// empty final field contributes nothing, but the space before it stays.
+    /// Trimming the whole line would eat it; padding the last field would add
+    /// fourteen more.
+    #[test]
+    fn an_empty_title_leaves_the_separator_behind() {
+        let specs = cols("pid,comm=");
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[1].title, "");
+        assert_eq!(
+            render_row(&["PID".into(), String::new()], &specs),
+            "    PID "
+        );
+        assert_eq!(render_row(&["1".into(), "ps".into()], &specs), "      1 ps");
+    }
+
+    #[test]
+    fn column_specs_take_titles_and_accumulate() {
+        // A custom title keeps the column's width and alignment.
+        let renamed = cols("pid=MYPID");
+        assert_eq!(renamed[0].title, "MYPID");
+        assert_eq!(render_row(&["MYPID".into()], &renamed), "  MYPID");
+        // Two `-o` flags accumulate rather than replace, as procps does.
+        let mut acc = Vec::new();
+        parse_columns("pid", &mut acc).expect("pid");
+        parse_columns("comm", &mut acc).expect("comm");
+        assert_eq!(acc.len(), 2);
+        // `comm` is titled COMMAND and `tty` is titled TT -- neither follows
+        // from the name, and the default format heads the same field `TTY`.
+        assert_eq!(cols("comm")[0].title, "COMMAND");
+        assert_eq!(cols("tty")[0].title, "TT");
+    }
+
+    #[test]
+    fn an_unknown_column_is_refused_with_procps_wording() {
+        let mut sink = Vec::new();
+        let err = parse_columns("nosuchcolumn", &mut sink).expect_err("unknown");
+        assert_eq!(
+            err,
+            "error: unknown user-defined format specifier \"nosuchcolumn\""
+        );
     }
 
     #[test]

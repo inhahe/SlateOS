@@ -250,9 +250,23 @@ run_case -u root,daemon
 run_case -u nosuchuser
 run_case -u 99999
 run_case -p 1
-xfail_case "-o (output column selection) is not implemented here" -o pid
-xfail_case "-o (output column selection) is not implemented here" -o pid,comm
-xfail_case "-o (output column selection) is not implemented here" -o comm=
+run_case -o pid
+run_case -o pid,comm
+run_case -o comm=
+run_case -o pid,comm=
+run_case -o pid=MYPID
+run_case -o pid=MYPID,comm
+run_case -o user
+run_case -o user,pid
+run_case -o uid,pid
+run_case -o tty
+run_case -o time
+run_case -o stime
+run_case -o c
+run_case -o args
+run_case -o pid,ppid,user,comm
+run_case -o pid -o comm
+run_case -e -o pid,comm
 run_case --no-header
 run_case -e --no-header
 
@@ -267,7 +281,7 @@ run_case -Q
 # reasons are for: implementing `-p` turned its three cases into real
 # comparisons instead of leaving a collective excuse covering an option that
 # had since been written.
-xfail_case "we reject -o itself; procps rejects the column name" -o nosuchcolumn
+run_case -o nosuchcolumn
 run_case -p notanumber
 run_case -p 999999
 

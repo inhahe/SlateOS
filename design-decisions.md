@@ -66976,6 +66976,23 @@ deliberately being rigorous. A single source cannot report the population it did
 consider, because its output is a faithful answer to the question actually asked.
 Thoroughness improves the answer; only a second witness can question the question.
 
+**Two witnesses only count if something can make them disagree.** This is the clause the
+rule needs most, and it came from the case that looked like the *most* redundant of all.
+`check-eol` had **three** independent ways to name "which repository" — the process CWD,
+the ambient repository (`GIT_DIR`), and `ROOT` derived from `__file__` — and that was worse
+than having one, because their agreement was **structural rather than verified**. In
+production all three are the same directory, so nothing ever reconciled them; they read as
+redundancy on the page while being a single witness with extra steps. Three successive
+bugs hid behind that, one per witness: a `git init` that wrote to the wrong repository, a
+`git ls-files` that enumerated the wrong one, and a `read_bytes` that opened the wrong one.
+Each fix exposed the next.
+
+So the test is not *are there two producers* but *does an input exist that would separate
+them*. Three greps in different costumes fail this test — no input separates them, because
+they ask one question three ways. A doc and an implementation pass it, because a doc can
+say something the code does not do. When no separating input exists, that is the
+one-witness case and it should be labelled as such however many sources appear to agree.
+
 **What this costs.** Two producers is more code and a reconciliation that can itself be
 wrong — a port that drifts from the thing it ports is a real hazard and bit us tonight,
 which is why the digest that pins it exists. The cost is real and is accepted: a drifted

@@ -174,7 +174,6 @@ userspace/ss/src/main.rs:argv-as-string
 userspace/ssh-keygen/src/lib.rs:argv-as-string
 userspace/ssh/src/lib.rs:argv-as-string
 userspace/ssh/src/lib.rs:to_str-unwrap
-userspace/stat/src/main.rs:argv-as-string
 userspace/strace/src/main.rs:argv-as-string
 userspace/stty/src/main.rs:argv-as-string
 userspace/swapon/src/main.rs:argv-as-string

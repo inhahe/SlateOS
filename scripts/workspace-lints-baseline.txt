@@ -106,7 +106,6 @@ userspace/service
 userspace/shell
 userspace/shuf
 userspace/ss
-userspace/stat
 userspace/sysctl
 userspace/syslogd
 userspace/tac

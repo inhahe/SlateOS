@@ -113,6 +113,37 @@ directory — `--target-dir` per `DIFF_PKG` entry — after which the symlink ca
 point at the right one deliberately rather than at whatever survived. Until then
 the survey's column says "coreutils half only", which is the truth.
 
+## B-COREUTILS-STAT-QUOTES-THE-FILE-LINE (lane B, 2026-09-11)
+
+`stat`'s default report quotes the name on its first line; GNU's does not.
+
+    ours   File: 'file.txt'
+    GNU    File: file.txt
+
+That single line accounts for **25 of the 30 cases** `coreutils` fails in
+`scripts/stat-diff.sh` — every default-report case, for a regular file, an empty
+file, a directory, a symlink, a dangling symlink, a hard link and a FIFO. The
+rest of the report agrees byte for byte, including `Device`, `Inode`, `Links`,
+the mode rendering and all four timestamps.
+
+**It is not a quote-when-needed rule.** The obvious guess is that GNU quotes
+only awkward names, so ours is merely over-eager; measured, GNU prints
+`File: with space.txt` unquoted as well. The default format's first field is the
+plain name.
+
+The fix is one call site. Worth doing precisely because the rest of that report
+is already right: a script that greps `stat` output for a filename gets a name
+wrapped in quotes it did not ask for.
+
+*Unconfirmed observation, recorded rather than claimed:* while probing this,
+`stat f.txt | head -1` once aborted with
+`failed printing to stdout: Broken pipe (os error 32)` and a core dump. It did
+not reproduce on retry, and the write-error path is a documented design area —
+`stdfd.rs` states plainly that Rust masks `SIGPIPE` so a closed pipe surfaces as
+`EPIPE` here, and that SlateOS has no such signal to die of. So this may be that
+design behaving as intended on a host it was not written for. Noted with the
+exact command in case it recurs; not filed as a defect on one sighting.
+
 ## TD-B-A-LINUX-TARGETED-HARNESS-CANNOT-MEASURE-A-SLATEOS-GATED-SUBJECT (lane B, 2026-09-11)
 
 **Every `*-diff.sh` here builds its subject for `x86_64-unknown-linux-gnu`, and
@@ -65301,6 +65332,42 @@ number is different** — not by a constant factor either: 12→16, 24→48,
 3036→4112. Both exit 0. `du` prints nothing but sizes and paths, so a `du` that
 gets the sizes wrong and drops a directory has no correct output left; there is
 nothing else in it to be right about.
+
+**10 -> 9 (2026-09-11): `stat`, and one line explains 25 of our own failures.**
+`scripts/stat-diff.sh`, written today, 107 cases against a GNU coreutils 9.4
+built from source.
+
+**coreutils 75 passed, 30 differed. The standalone 44 passed, 61 differed.**
+
+The standalone lacks `--printf` entirely (12 cases) and long-option
+abbreviation, and its default report is wrong in 41 cases. Retired.
+
+**What the surviving half gets wrong is one line, and it is precise.** 25 of
+coreutils' 30 are the default report, and in every one the *only* difference is
+the first line:
+
+    ours   File: 'file.txt'
+    GNU    File: file.txt
+
+GNU does not quote there at all — not even for `name with spaces.txt`, which is
+the case that makes it look like a quote-when-needed rule and is not. Filed as
+`B-COREUTILS-STAT-QUOTES-THE-FILE-LINE`. The remaining 5 are diagnostic wording
+for a missing operand.
+
+**Two things about the harness worth keeping.**
+
+*Both sides read the SAME files.* `stat` does not mutate, so there is no reason
+to give each side its own copy — and a strong reason not to: two copies have two
+different inode numbers, so `%i`, `%d` and `%b` could never be compared. Those
+are exactly the fields an implementation is most likely to get wrong, because
+they are the ones it cannot guess. **Give the subject a private copy only when
+it writes** — `patch-diff.sh` and `chown-diff.sh` do, this does not.
+
+*The multicall hazard was checked before the harness was written, not after.*
+`userspace/stat` dispatches on `argv[0]` and also serves `touch`, `mkfifo`,
+`readlink`, `realpath` and `ln`, so retiring the crate deletes six programs. All
+six were confirmed present in `coreutils/src/bin` first. A pair's row in
+`dup-bins-survey.py` names one program; the crate behind it may be six.
 
 **`chown` — MEASURED AND NOT DECIDED (2026-09-11).**
 `scripts/chown-diff.sh`, written today, 66 cases against a GNU coreutils 9.4

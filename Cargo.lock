@@ -2674,14 +2674,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "stat"
-version = "0.1.0"
-dependencies = [
- "modechange",
- "quoting",
-]
-
-[[package]]
 name = "stickynotes"
 version = "0.1.0"
 dependencies = [

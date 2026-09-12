@@ -6616,6 +6616,37 @@ fn bench_vfs_write_breakdown() {
     let notify_only = run("vfs_write_breakdown_notify", 200, || {
         crate::fs::notify::emit_modified(&resolved);
     });
+    // Record WHETHER THE INDEXER IS LIVE, because this phase's cost depends entirely on
+    // it and nothing previously said so. `on_file_changed` returns immediately unless
+    // `stats.initialized && stats.rebuild_count > 0`; when it does not return, it runs
+    // `add_entry`, which resolves the path again through `Vfs::metadata`. Measured at 16
+    // microseconds under TCG -- the second largest component of a small write.
+    //
+    // AND NOTHING CHOSE THAT STATE. `index::init` has exactly one caller in the tree,
+    // `kshell.rs`, an interactive command -- so on a bare boot the indexer is dead. What
+    // turns it on is `index::self_test`, which calls `init` then `rebuild` and never
+    // resets `rebuild_count`. `default_config` watches "/", and `path_in_subtree`
+    // short-circuits to true for that root, so every path is watched. The benchmark
+    // therefore measures an indexed write or an unindexed one depending on which
+    // self-test ran first, and until this line nothing in the scorecard said which.
+    //
+    // Reported rather than forced, deliberately. Setting the state here would be the
+    // tidier fix and it would step every `vfs_write_*` series at one commit, which the
+    // history ratchets read as a regression -- and which state the benchmarks SHOULD use
+    // is a real question (comparability against ext4 figures, where no indexer runs,
+    // versus representing a real SlateOS machine). That question is filed. Naming the
+    // condition costs nothing and makes the 16 microseconds interpretable today.
+    let ist = crate::fs::index::stats();
+    let indexer_live = ist.initialized && ist.rebuild_count > 0;
+    serial_println!(
+        "[bench]   vfs_write_breakdown: indexer live={} (initialized={}, rebuilds={}, \
+         entries={}) -- the `index` phase below is `add_entry` when live and two \
+         predicate checks when not, so the two are not comparable",
+        indexer_live,
+        ist.initialized,
+        ist.rebuild_count,
+        ist.total_entries,
+    );
     let index_only = run("vfs_write_breakdown_index", 200, || {
         crate::fs::index::on_file_changed(&resolved);
     });

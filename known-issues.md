@@ -113959,7 +113959,50 @@ was factored out of it.
 
 ---
 
-## B-RENAME-CROSS-MOUNT-COPIES-INSTEAD-OF-ANSWERING-EXDEV — OPEN 2026-09-01
+## B-RENAME-CROSS-MOUNT-COPIES-INSTEAD-OF-ANSWERING-EXDEV — **FIXED 2026-09-12**
+
+**Both conditions this entry named for its own closure are met.** It said it
+would stay open "until the kernel actually answers `CrossDevice`, because until
+then `mv`'s fallback remains unreachable on the target and the three-line
+`CrossDevice` deletion in `try_pinned_renameat` cannot be made".
+
+1. **The kernel answers.** Lane A made `Vfs::rename` return
+   `KernelError::CrossDevice` for a cross-mount rename, with a `vfs_selftest`
+   case that fails if a cross-mount rename succeeds. `sys_fs_rename` forwards
+   it, so the path-based route refuses exactly as `SYS_FS_RENAMEAT_PINNED`
+   (670) always did.
+2. **The deletion is made.** `try_pinned_renameat` no longer declines 670's
+   `CrossDevice` answer. Both routes now give the same answer, so `renameat`
+   has one contract again rather than two chosen by the shape of its arguments.
+
+**Why the exception existed and why removing it is not a reversal.** It was the
+family's one deliberate departure from "a pinned call that answers has
+answered", and the reason was sound: the two routes did *different operations*.
+670 refused; the path call copied and deleted. Declining gave up nothing,
+because a pin could never have covered a copy. What changed is not the
+judgement but the premise — there is no second operation left to fall back to.
+
+**The more expensive half of leaving it would have been the comment.** The
+fallback cost one extra syscall to reach the same answer; the twenty lines
+explaining it would have gone on describing a copy-then-delete that no longer
+happens, to every reader who came after. Stale reasoning outlives stale code,
+because code gets exercised.
+
+**A test was renamed rather than deleted.**
+`a_cross_device_answer_is_final_everywhere_but_the_rename` is now
+`a_cross_device_answer_is_final_for_every_pinned_call`. Its assertion did not
+change — `pinned_answer` always called `CrossDevice` final, and that is still
+the thing worth pinning, because the cheap way to have written the original
+exception was a line in `pinned_answer` that would have silently handed it to
+all seven pinned calls. The test is what would have caught that. Only its name
+was a claim about the world, and only the name was wrong.
+
+`cargo test -p posix --target x86_64-pc-windows-gnu`: 20702 passed, 0 failed.
+
+Found by `scripts/check-stale-blockers.py`, which flagged this entry for citing
+a request that had reported itself `DONE`.
+
+The description below is kept in the tense it was written in.
 
 **In short:** `rename(2)` on this system never returns `EXDEV`. Asked to rename
 across a mount boundary, the kernel's `SYS_FS_RENAME` copies the file and deletes

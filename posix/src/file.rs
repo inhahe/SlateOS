@@ -3089,14 +3089,13 @@ pub(crate) fn resolve_dirfd_path(
 // on the failure path where nobody is looking.  Only "this kernel does not
 // have the call" falls back.
 //
-// 670's `CrossDevice` is the single exception, and it is an exception because
-// there the two routes do *different operations* rather than the same one
-// twice: the path-based `SYS_FS_RENAME` answers a cross-mount rename with a
-// copy-then-delete, which no pin could ever have covered, so declining gives up
-// nothing 670 was offering.  Forwarding it instead would make `renameat` return
-// EXDEV or silently copy depending on whether its arguments happened to be
-// pinnable — the two-contracts bug [`linkat`] already refused.  See
-// [`try_pinned_renameat`] and `design-decisions.md` §742.
+// 670's `CrossDevice` WAS the single exception, until 2026-09-12. It was one
+// because the two routes did *different operations* rather than the same one
+// twice: the path-based `SYS_FS_RENAME` answered a cross-mount rename with a
+// copy-then-delete, which no pin could ever have covered. That stopped being
+// true when lane A made `Vfs::rename` refuse a cross-mount rename, so both
+// routes now give the same answer and there is no exception left to make.
+// See [`try_pinned_renameat`] and `design-decisions.md` §742.
 //
 // "This kernel does not have the call" is now something the kernel *says*
 // rather than something this side infers.  An empty dispatch slot answers
@@ -3622,23 +3621,27 @@ fn pack_pinned_name_lengths(source: usize, destination: usize) -> u64 {
 /// refuses the rest, so an unknown bit is `EINVAL` either way and the route
 /// cannot change the answer.
 ///
-/// # `CrossDevice` is the one answer that falls back
+/// # `CrossDevice` used to fall back here, and no longer does
 ///
-/// This is a deliberate exception to the family's rule that a pinned call which
-/// answers has answered. 670 refuses a cross-mount rename; the path-based
-/// `SYS_FS_RENAME` copies and then deletes. Forwarding the refusal would give
-/// `renameat` two contracts selected by the shape of its arguments — EXDEV when
-/// both names happen to be single components under real directory fds, a silent
-/// copy otherwise — and [`linkat`] already settled that question the other way,
-/// in lane A's own words: one operation with two error contracts depending on
-/// which route ran is the worse bug.
+/// Until 2026-09-12 this function declined 670's `CrossDevice` answer and let
+/// the caller retry by path, which was the family's one deliberate exception to
+/// "a pinned call that answers has answered". The reason was real: 670 refused a
+/// cross-mount rename while the path-based `SYS_FS_RENAME` copied and then
+/// deleted, so the two routes did *different operations*. Forwarding the refusal
+/// would have given `renameat` two contracts selected by the shape of its
+/// arguments — EXDEV when both names happened to be single components under real
+/// directory fds, a silent copy otherwise — and [`linkat`] had already settled
+/// that the other way, in lane A's own words: one operation with two error
+/// contracts depending on which route ran is the worse bug.
 ///
-/// Nothing is given up by falling back, because the pin was never available for
-/// this operation. The copy is a sequence of independent operations each taking
-/// its own lock, so no verification could cover it; 670 refuses precisely
-/// because it cannot make the promise, not because some future version might.
-/// The race in the fallback is the copy's own, not one this reintroduced. See
-/// `design-decisions.md` §742.
+/// **The premise is gone.** Lane A made `Vfs::rename` answer `CrossDevice` for a
+/// cross-mount rename, so `SYS_FS_RENAME` now refuses exactly as 670 does and
+/// there is no second operation to be routed to. Keeping the exception would
+/// have cost a second syscall to reach the same answer, and left this comment
+/// describing a copy that no longer happens — which is the more expensive half.
+/// Asked for in
+/// `requests/b-a-rename-across-a-mount-copies-instead-of-answering-exdev.md`;
+/// the original reasoning is `design-decisions.md` §742.
 ///
 /// The check reads the *raw* return rather than `pinned_answer`'s translation,
 /// so that errno is still untouched when this returns `None` — the fallback
@@ -3670,9 +3673,6 @@ unsafe fn try_pinned_renameat(
         pack_pinned_name_lengths(old_name.len(), new_name.len()),
         flags,
     );
-    if ret == crate::errno::native::CROSS_DEVICE {
-        return None;
-    }
     pinned_answer(ret)
 }
 
@@ -15538,17 +15538,25 @@ mod tests {
             assert_eq!(pinned_answer(0), Some(0));
         }
 
-        /// `CrossDevice` is 670's exception and *only* 670's — the shared
-        /// decision function still calls it final.
+        /// `CrossDevice` is final for every pinned call, the rename included
+        /// since 2026-09-12.
         ///
-        /// Worth stating because the cheap way to write the exception would
-        /// have been a line in [`pinned_answer`], which would have silently
-        /// given it to all seven calls. The other six have no cross-mount
-        /// answer to fall back from: 668 already reports a cross-mount link as
-        /// `EINVAL` on both routes precisely so that the route cannot be
-        /// observed, and a fallback here would have undone that.
+        /// This assertion has not changed; its NAME has. It used to say
+        /// `..._everywhere_but_the_rename`, because `try_pinned_renameat`
+        /// declined 670's `CrossDevice` and let the caller retry by path —
+        /// which was right while the path-based call answered a cross-mount
+        /// rename with a copy instead of a refusal. Lane A closed that, both
+        /// routes now refuse, and the exception is gone.
+        ///
+        /// Still worth stating, for the reason it was worth stating before:
+        /// the cheap way to write that exception would have been a line in
+        /// [`pinned_answer`], which would have silently given it to all seven
+        /// calls. The other six never had a cross-mount answer to fall back
+        /// from — 668 reports a cross-mount link as `EINVAL` on both routes
+        /// precisely so the route cannot be observed — so a line there would
+        /// have undone that. This test is what would have caught it.
         #[test]
-        fn a_cross_device_answer_is_final_everywhere_but_the_rename() {
+        fn a_cross_device_answer_is_final_for_every_pinned_call() {
             assert_eq!(pinned_answer(crate::errno::native::CROSS_DEVICE), Some(-1));
             assert_eq!(crate::errno::get_errno(), crate::errno::EXDEV);
         }

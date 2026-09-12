@@ -476,20 +476,16 @@ pub fn split_bare_ranges(bytes: &[u8], sep: u8) -> Vec<(usize, usize)> {
     out
 }
 
-/// Remove quoting: drop the structural quote and escape bytes, keep the data.
-///
-/// This is the *dispatch-time* operation. Expansion must run before it and
-/// must preserve quoting, or a value that legitimately contains a quote
-/// character gets unquoted twice.
-#[must_use]
 /// One byte of hex, or `None` if `b` is not a hex digit.
-const fn hex_val(b: u8) -> Option<u32> {
-    match b {
-        b'0'..=b'9' => Some((b - b'0') as u32),
-        b'a'..=b'f' => Some((b - b'a' + 10) as u32),
-        b'A'..=b'F' => Some((b - b'A' + 10) as u32),
-        _ => None,
-    }
+///
+/// Delegates to `char::to_digit` rather than subtracting `b'0'` and friends.
+/// The match arms this replaces proved their own subtractions could not
+/// underflow, but `clippy::arithmetic_side_effects` cannot see that and is on
+/// deliberately, and an `allow` would be the wrong answer for a body that only
+/// restates what core already means by "hex digit". Accepts exactly
+/// 0-9/a-f/A-F; every byte >= 0x80 maps to U+0080..U+00FF and is rejected.
+fn hex_val(b: u8) -> Option<u32> {
+    char::from(b).to_digit(16)
 }
 
 /// Decode one ANSI-C (`$'…'`) escape.
@@ -553,9 +549,27 @@ fn decode_ansi_c(after: &[u8]) -> ([u8; 4], usize, usize) {
             }
         }
         // `\cX` — control-X, i.e. X with bit 6 cleared. `\cA` is 0x01.
+        //
+        // **`'` is never the operand.** It terminates the construct, and bash
+        // emits a literal `\c` when nothing else follows: `$'\c' tail` is two
+        // words, `\c` and `tail`. Taking `after.get(1)` unconditionally ate the
+        // terminator (0x27 & 0x1f = 0x07, a BEL), left the string unterminated,
+        // and absorbed the rest of the line into one word — so `echo $'\c' foo`
+        // passed `echo` a single argument and it did something else rather than
+        // failing. Found by lane B against real bash; the tables are in
+        // requests/b-a-dollar-single-c-escape-swallows-the-closing-quote.md.
+        //
+        // `\\` *is* a legal operand and is spelled with two bytes, so it needs
+        // its own arm: `$'\c\\'` is 0x1c and then the quote closes. Without it
+        // the first backslash would be taken as the operand and the second would
+        // escape the terminator.
         b'c' => match after.get(1) {
+            None | Some(&b'\'') => ([b'\\', 0, 0, 0], 1, 0),
+            Some(&b'\\') => match after.get(2) {
+                Some(&x) => one(x & 0x1f, 3),
+                None => ([b'\\', 0, 0, 0], 1, 0),
+            },
             Some(&x) => one(x & 0x1f, 2),
-            None => ([b'\\', 0, 0, 0], 1, 0),
         },
         // `\uHHHH` / `\UHHHHHHHH` — up to 4 / 8 hex digits, emitted as UTF-8.
         // This is the only family that can produce more than one byte, and
@@ -574,10 +588,22 @@ fn decode_ansi_c(after: &[u8]) -> ([u8; 4], usize, usize) {
             if n == 0 {
                 return ([b'\\', 0, 0, 0], 1, 0);
             }
-            // A surrogate or out-of-range value has no UTF-8 encoding.
-            // Emitting nothing would silently delete what the user typed, so
-            // fall back to the literal backslash and let the digits stand as
-            // themselves — visibly wrong beats invisibly absent.
+            // A surrogate or out-of-range value has no *valid* UTF-8
+            // encoding. Saying it had none at all was wrong, and bash proves
+            // it: it emits the WTF-8 form anyway (`$'\ud800'` is ED A0 80)
+            // and goes past Unicode entirely for `$'\U00110000'`
+            // (F4 90 80 80). Measured by lane B against 5.2.37.
+            //
+            // **Declared divergence, not an oversight.** We emit the literal
+            // escape text instead. Both answers are wrong in the sense that
+            // the user mistyped, but bash is not self-consistent here: at
+            // `$'\Uffffffff'` it emits *nothing*, which is the
+            // invisible outcome this fallback exists to avoid. A uniform
+            // "hand back what was typed" is more predictable than
+            // "WTF-8 in the middle, silence at the far end", and it is
+            // lossless — the user can see it did not decode. Pinned on both
+            // sides in check-shellquote-vs-bash DIVERGENCES so it fails the
+            // day either side changes.
             let Some(ch) = char::from_u32(val) else {
                 return ([b'\\', 0, 0, 0], 1, 0);
             };
@@ -614,6 +640,12 @@ fn decode_ansi_c(after: &[u8]) -> ([u8; 4], usize, usize) {
     }
 }
 
+/// Remove quoting: drop the structural quote and escape bytes, keep the data.
+///
+/// This is the *dispatch-time* operation. Expansion must run before it and
+/// must preserve quoting, or a value that legitimately contains a quote
+/// character gets unquoted twice.
+#[must_use]
 pub fn strip_quotes(bytes: &[u8]) -> Vec<u8> {
     scan(bytes)
         .filter(Tok::is_literal)
@@ -1145,6 +1177,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             (b"$\'\\u00e9\'", b"\xc3\xa9"),
             // A NUL is dropped, not carried — see `strip_quotes`.
             (b"$\'a\\0b\'", b"ab"),
+            // `\c` before the closing quote: the quote terminates and is NOT
+            // the operand, so this is the literal two bytes and `tail` stays a
+            // separate word. Regression case for the swallowed terminator.
+            (b"$\'\\c\'", b"\\c"),
+            // `\\` is a legal operand, spelled with two bytes.
+            (b"$\'\\c\\\\\'", b"\x1c"),
             // Adjacent constructs concatenate, as any quoting does.
             (b"$\'\\x41\'$\'\\x42\'", b"AB"),
         ];
@@ -1159,6 +1197,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // construct is one word — the property that would break first if the
         // scanner treated `$` as ordinary and let `'` open a plain region.
         assert_eq!(split_bare_words(b"cmd $\'a b\' z").len(), 3);
+        // The regression that matters most from the `\\c` repair, and the one a
+        // byte-comparison of the dequoted line would NOT catch: the closing
+        // quote must terminate the construct rather than become the escape's
+        // operand. When it was eaten, the string ran on and swallowed the rest
+        // of the line into a single word — `echo $\'\\c\' foo` handed `echo` one
+        // argument instead of two. bash: `<\\c><tail>`.
+        assert_eq!(split_bare_words(b"$\'\\c\' tail").len(), 2);
         // An unterminated construct reports itself rather than being guessed.
         assert_eq!(trailing_context(b"cmd $\'ab"), Ctx::DollarSingle);
     }

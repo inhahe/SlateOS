@@ -16,6 +16,37 @@ This file is distinct from:
   here. Anything whose own text says "ask again later" belongs there, not here:
   this file is a queue, and a padded queue gets skimmed.
 
+### How an answer actually arrives — read this before assuming nobody replied
+
+The operator has answered this queue by writing a plain text file,
+**`open-questions-answers.txt`, in the integration tree** (`E:/visual studio projects/os`), one paragraph per question keyed by its ID. As of 2026-09-12 that
+file is dated 2026-09-07, holds about two dozen answers spanning all three lanes,
+and every one of them has been processed. **The channel works. What does not work
+is noticing it.**
+
+- It is **untracked** — not ignored, just never added — so it exists in exactly one
+  directory on one machine. It is on no branch, in no lane's worktree, and in no
+  clone. Fetching and merging `origin/main`, which is what the start-of-task
+  checklist tells you to do, cannot show it to you.
+- **Nothing watches it.** No gate, no hook, no script mentions the filename.
+- It was found on 2026-09-12 **by accident**, in `git status` output during an
+  unrelated merge, five days after it was written.
+
+So: **check it at the start of a task**, alongside the merge. Reading the
+integration tree is fine — the rule against touching `os` is about *writing*.
+
+```bash
+cat "E:/visual studio projects/os/open-questions-answers.txt"
+```
+
+A question sitting at `Status: OPEN` here is **not** evidence that the operator has
+not answered it. Two entries below (B-Q8, C-Q9) are open precisely because the
+operator *did* reply and asked for a clearer explanation — which is a reply, and
+which is invisible from this file alone.
+
+*Recorded by lane A. This describes what has been observed, not a policy the
+operator has set; if a different channel is preferred, say so and this goes away.*
+
 Format for each entry — **written for a reader who does not know the
 subsystem**, because an entry the operator cannot decide from has failed no
 matter how correct it is:

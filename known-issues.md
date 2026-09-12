@@ -136128,3 +136128,46 @@ the stream reason, so nothing had ever compared the text.
 That is the same shape as the whole `patch` effort: a defect that only becomes
 visible once the bigger one in front of it is gone. Nine fixes in, the count has
 gone 3 passed / 62 differed to **49 / 16**, and most steps uncovered the next.
+
+## TD-A-THE-OPERATORS-ANSWER-CHANNEL-IS-WATCHED-BY-NOTHING (lane A, 2026-09-12)
+
+**In short:** the operator answers our question queue by writing a text file. That
+file lives in one directory, on one machine, is not in version control, and no part
+of our tooling looks at it. It has worked so far only because someone happened to
+glance at the right output. The answers are not being lost; they are being found by
+luck.
+
+**What exists.** `open-questions-answers.txt` in the integration tree, dated
+2026-09-07, 7,344 bytes, about two dozen answers keyed by question ID and spanning
+all three lanes. Every one has been processed into `design-decisions.md` or the
+archive, so the channel is real and has been used comprehensively, once.
+
+**Why it is fragile, precisely:**
+
+| property | consequence |
+|---|---|
+| untracked (not ignored — never `git add`ed) | on no branch; `fetch && merge` cannot reveal it |
+| lives only in `E:/visual studio projects/os` | absent from all three lane worktrees |
+| no script, gate or hook names the file | nothing reports that it changed |
+| lanes are told never to write to `os` | which is easily over-read as never *look* at it |
+
+**How it was found:** by accident, in `git status` output during an unrelated merge,
+**five days** after it was written. Nothing about that latency is bounded — it could
+as easily have been fifty days, and two lanes currently have questions in the queue
+waiting on it.
+
+**The proper fix** is four lines in a gate that already runs on every push: stat the
+file, compare its mtime against a recorded high-water mark, and print a line when it
+is newer. Not a refusal — a notice. `check-open-questions` is the natural home; it
+already parses the queue and already runs.
+
+**Why it is not fixed here.** That script is in `scripts/`, which `which-lane.py`
+assigns to no lane — lane A owns only `boot-test.sh`, `run-timeout.py` and
+`wedge-soak.sh` there. That is the ownership gap **A-Q11** already asks about, and
+the boot test is the wrong cadence for this anyway: a twenty-four-minute job is not
+where you learn that a five-day-old message is waiting.
+
+**The circularity is worth stating outright:** the fix is blocked on A-Q11, A-Q11 is
+waiting for an operator answer, and the answer would arrive through the channel this
+entry is about. Interim mitigation is documentation only — `open-questions.md` now
+carries a section telling every lane to read the file at task start.

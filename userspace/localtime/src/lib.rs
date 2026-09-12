@@ -380,7 +380,35 @@ pub fn strftime(fmt: &[u8], tm: &Tm) -> Vec<u8> {
             b'g' => pad_zero(&mut out, iso_week(tm).0.rem_euclid(100), 2),
             b'y' => pad_zero(&mut out, tm.year.rem_euclid(100), 2),
             b'Y' => push_int(&mut out, tm.year),
-            b'z' => push_offset(&mut out, tm.gmtoff),
+            b'z' => push_offset(&mut out, tm.gmtoff, 0),
+            // `%:z`, `%::z` and `%:::z` -- GNU's colon forms, which are a
+            // MODIFIER on `z` rather than specifiers of their own, so they are
+            // read here rather than in the match arm above.
+            //
+            // They are not decoration: `date -Iseconds` and
+            // `date --rfc-3339=seconds` are both defined in terms of `%:z`, so
+            // without this they emit a literal `%:z` where the zone should be.
+            // That is how this was found -- `date -Iseconds` printed
+            // `2001-09-09T01:46:40%:z`.
+            b':' => {
+                let mut colons: u8 = 1;
+                let mut next = it.next();
+                while next == Some(b':') && colons < 3 {
+                    colons = colons.saturating_add(1);
+                    next = it.next();
+                }
+                if next == Some(b'z') {
+                    push_offset(&mut out, tm.gmtoff, colons);
+                } else {
+                    // Not a zone directive after all. Emit what was consumed,
+                    // unchanged, the way an unknown specifier is emitted.
+                    out.push(b'%');
+                    out.extend(std::iter::repeat_n(b':', usize::from(colons)));
+                    if let Some(c) = next {
+                        out.push(c);
+                    }
+                }
+            }
             b'Z' => out.extend_from_slice(tm.abbr.as_bytes()),
             other => {
                 out.push(b'%');
@@ -493,15 +521,48 @@ fn pad_space(out: &mut Vec<u8>, value: i64, width: usize) {
 
 /// `%z`: `+hhmm`, with the sign taken from the offset and the magnitude from
 /// its absolute value — `-0400`, not `-04-00`.
-fn push_offset(out: &mut Vec<u8>, gmtoff: i32) {
+/// `colons` selects GNU's four spellings of the UTC offset, measured against
+/// coreutils 9.4 at `+00:00`:
+///
+/// | directive | output |
+/// |---|---|
+/// | `%z`     | `+0000` |
+/// | `%:z`    | `+00:00` |
+/// | `%::z`   | `+00:00:00` |
+/// | `%:::z`  | `+00` — the *minimal* form, which drops trailing zero fields |
+fn push_offset(out: &mut Vec<u8>, gmtoff: i32, colons: u8) {
     let (sign, mag) = if gmtoff < 0 {
         (b'-', gmtoff.unsigned_abs())
     } else {
         (b'+', gmtoff.unsigned_abs())
     };
+    let (hh, mm, ss) = (mag / 3600, (mag / 60) % 60, mag % 60);
     out.push(sign);
-    pad_zero(out, i64::from(mag / 3600), 2);
-    pad_zero(out, i64::from((mag / 60) % 60), 2);
+    pad_zero(out, i64::from(hh), 2);
+    match colons {
+        0 => pad_zero(out, i64::from(mm), 2),
+        1 => {
+            out.push(b':');
+            pad_zero(out, i64::from(mm), 2);
+        }
+        2 => {
+            out.push(b':');
+            pad_zero(out, i64::from(mm), 2);
+            out.push(b':');
+            pad_zero(out, i64::from(ss), 2);
+        }
+        // `%:::z` prints only as much as it needs to.
+        _ => {
+            if mm != 0 || ss != 0 {
+                out.push(b':');
+                pad_zero(out, i64::from(mm), 2);
+                if ss != 0 {
+                    out.push(b':');
+                    pad_zero(out, i64::from(ss), 2);
+                }
+            }
+        }
+    }
 }
 
 /// An `OsStr`'s bytes, on both the host and the target.

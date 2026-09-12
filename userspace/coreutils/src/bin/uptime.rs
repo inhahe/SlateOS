@@ -118,11 +118,36 @@ fn main() -> ExitCode {
 /// An unknown option, an ambiguous abbreviation, or any operand: procps takes
 /// none.
 fn parse_args(args: &[std::ffi::OsString]) -> Result<Request, String> {
-    let mut req = Request::Plain;
+    // `-s` RETURNS HERE AND NOW. Only `-p` defers.
+    //
+    // This was `req = …` per arm -- last-one-wins -- which agrees with procps
+    // on `-ps` and is wrong on `-sp`, where it printed the pretty form.
+    // `scripts/uptime-diff.sh` caught it, and only because `-ps` XPASSed: I
+    // had declared the clustered pair an error without measuring it, and
+    // asking why it was not one is what put `-sp` in the harness.
+    //
+    // The first repair was wrong too, and in a way worth keeping a note
+    // about. From `-ps`/`-sp` both printing the boot time I inferred "flags
+    // resolved after the loop, `since` tested first" -- which fits both
+    // observations and is still false. The discriminator is what `-s` does to
+    // arguments AFTER it, measured because a unit test for `-s -V` disagreed
+    // with the harness:
+    //
+    //     uptime -sV      -> the boot time        the -V never runs
+    //     uptime -sXYZ    -> the boot time, rc=0  no "invalid option -- 'X'"
+    //     uptime -s junk  -> the boot time, rc=0  an operand, ACCEPTED
+    //     uptime -Vs      -> the version          whichever fires first wins
+    //
+    // `-s` is not a flag with precedence, it is an early exit: procps prints
+    // and leaves before the rest of argv is looked at, so everything after it
+    // is unexamined rather than accepted. Two models fitted the first
+    // measurement and the cheap way to separate them was to feed the option
+    // something it should have rejected.
+    let mut pretty_flag = false;
     for item in UPTIME.parse(args, SHORT_OPTIONS, LONG_OPTIONS) {
         match item.map_err(|e| e.message())? {
-            Opt::Long("pretty", _) | Opt::Short(b'p', _) => req = Request::Pretty,
-            Opt::Long("since", _) | Opt::Short(b's', _) => req = Request::Since,
+            Opt::Long("pretty", _) | Opt::Short(b'p', _) => pretty_flag = true,
+            Opt::Long("since", _) | Opt::Short(b's', _) => return Ok(Request::Since),
             Opt::Long("help", _) | Opt::Short(b'h', _) => return Ok(Request::Help),
             Opt::Long("version", _) | Opt::Short(b'V', _) => return Ok(Request::Version),
             Opt::Long(other, _) => {
@@ -139,7 +164,11 @@ fn parse_args(args: &[std::ffi::OsString]) -> Result<Request, String> {
             }
         }
     }
-    Ok(req)
+    Ok(if pretty_flag {
+        Request::Pretty
+    } else {
+        Request::Plain
+    })
 }
 
 /// The `-p` rendering, which is procps' own decomposition.
@@ -192,8 +221,15 @@ fn since(total_secs: f64) -> Option<String> {
     String::from_utf8(strftime(b"%Y-%m-%d %H:%M:%S", &tm)).ok()
 }
 
+/// procps-ng 4.0.4's `--help`, byte for byte -- 241 bytes.
+///
+/// The leading blank line and the trailing `For more details see uptime(1).`
+/// are both procps', and both were missing. They are not decoration: this text
+/// is compared byte-for-byte by `scripts/uptime-diff.sh`, and a help text that
+/// is "obviously the same" is the kind of near-match that hides a real one.
+/// Captured with `uptime --help | cat -A` rather than retyped.
 fn help_text() -> String {
-    "\
+    "
 Usage:
  uptime [options]
 
@@ -202,6 +238,8 @@ Options:
  -h, --help     display this help and exit
  -s, --since    system up since
  -V, --version  output version information and exit
+
+For more details see uptime(1).
 "
     .to_string()
 }
@@ -427,6 +465,51 @@ fn split_uptime(total_secs: f64) -> (u64, u64, u64) {
 #[allow(clippy::unwrap_used, clippy::panic, clippy::float_cmp)]
 mod tests {
     use super::*;
+
+    /// `-s` beats `-p` in either order, and `-h`/`-V` do not defer at all.
+    ///
+    /// Measured, because "the last option wins" is the rule almost every
+    /// utility here follows and is wrong for exactly this pair:
+    ///
+    /// ```text
+    /// uptime -ps   -> 2026-09-12 04:50:23      uptime -sV -> 2026-09-12 …
+    /// uptime -sp   -> 2026-09-12 04:50:23      uptime -Vs -> uptime from …
+    /// ```
+    ///
+    /// So `-s`/`-p` are flags resolved after parsing with `since` tested
+    /// first, while `-h`/`-V` act where they are seen. Last-one-wins agrees
+    /// with procps on `-ps` and is wrong on `-sp`, which is why one case
+    /// could not have caught it.
+    #[test]
+    fn since_beats_pretty_in_either_order() {
+        let argv = |args: &[&str]| -> Request {
+            let owned: Vec<std::ffi::OsString> =
+                args.iter().map(std::ffi::OsString::from).collect();
+            parse_args(&owned).expect("these are all valid option lists")
+        };
+        assert_eq!(argv(&["-p", "-s"]), Request::Since);
+        assert_eq!(argv(&["-s", "-p"]), Request::Since, "-sp must not be Pretty");
+        assert_eq!(argv(&["-ps"]), Request::Since);
+        assert_eq!(argv(&["-sp"]), Request::Since);
+        assert_eq!(argv(&["--since", "--pretty"]), Request::Since);
+        assert_eq!(argv(&["--pretty", "--since"]), Request::Since);
+        // Neither alone changes the other's answer.
+        assert_eq!(argv(&["-p"]), Request::Pretty);
+        assert_eq!(argv(&["-s"]), Request::Since);
+        assert_eq!(argv(&[]), Request::Plain);
+        // `-h` and `-V` act where they are seen rather than deferring.
+        assert_eq!(argv(&["-V", "-s"]), Request::Version);
+        // `-s` first means the `-V` is never reached. This assertion is the
+        // one that disproved the "deferred flags" model: under it, `-V`
+        // returning early would have won here.
+        assert_eq!(argv(&["-s", "-V"]), Request::Since);
+        // And the discriminator itself: procps accepts these at rc=0 because
+        // `-s` leaves before argv is examined any further.
+        assert_eq!(argv(&["-s", "junk"]), Request::Since);
+        assert_eq!(argv(&["-sZ"]), Request::Since);
+        assert_eq!(argv(&["-h", "-V"]), Request::Help);
+        assert_eq!(argv(&["-V", "-h"]), Request::Version);
+    }
 
     /// Every row measured against procps-ng 4.0.4 with `/proc/uptime`
     /// bind-mounted to a fixture inside `unshare -mUr`.

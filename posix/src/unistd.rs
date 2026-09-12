@@ -1092,6 +1092,34 @@ process_global! {
     fn hostname_len_ptr() -> usize = 9; // "localhost".len()
 }
 
+/// What a procfs name read MEANS, separated from the reading so it can be
+/// tested on a host that has no procfs.
+///
+/// `None` is "the kernel could not be asked". `Some(0)` is "it was asked
+/// and the name is empty". Those are different facts, and this returned
+/// `None` for both until 2026-09-12 -- see `read_kernel_name` for the cost.
+///
+/// Taking `n` as the raw `isize` the read returned, rather than a `usize`,
+/// is deliberate: the sign IS the distinction, and a caller that had already
+/// clamped it could not tell this function which case it was in.
+// Gated the same way `crt.rs` gates its host-testable array walkers: the
+// only production caller is target-only, so a plain host lib build has
+// nothing calling this and warns. `test` keeps it reachable from the one
+// place that can check it.
+#[cfg(any(target_os = "none", test))]
+fn kernel_name_len(n: isize, buf: &[u8]) -> Option<usize> {
+    if n < 0 {
+        return None;
+    }
+    #[allow(clippy::cast_sign_loss)]
+    let mut len = (n as usize).min(buf.len());
+    // procfs terminates these with a newline; the name does not include it.
+    while len > 0 && matches!(buf.get(len.wrapping_sub(1)), Some(b'\n' | b'\r')) {
+        len = len.wrapping_sub(1);
+    }
+    Some(len)
+}
+
 /// Read a `/proc/sys/kernel/` name file into `out`, minus its trailing
 /// newline. Returns the byte count, or `None` if the file cannot be read.
 ///
@@ -1109,6 +1137,7 @@ process_global! {
 /// A `SYS_HOSTNAME` pair is requested in
 /// `requests/b-a-no-native-syscall-reports-the-hostname.md`; when it lands,
 /// this becomes a syscall and the file read goes away.
+
 #[cfg(target_os = "none")]
 fn read_kernel_name(path: &[u8], out: &mut [u8]) -> Option<usize> {
     let fd = crate::file::open(path.as_ptr(), crate::fcntl::O_RDONLY, 0);
@@ -1118,20 +1147,27 @@ fn read_kernel_name(path: &[u8], out: &mut [u8]) -> Option<usize> {
     let mut buf = [0u8; HOST_NAME_MAX + 2];
     let n = crate::file::read(fd, buf.as_mut_ptr(), buf.len());
     let _ = crate::file::close(fd);
-    if n <= 0 {
-        return None;
-    }
-    #[allow(clippy::cast_sign_loss)]
-    let mut len = (n as usize).min(buf.len());
-    // procfs terminates these with a newline; the hostname does not include it.
-    while len > 0 && matches!(buf.get(len.wrapping_sub(1)), Some(b'\n' | b'\r')) {
-        len = len.wrapping_sub(1);
-    }
-    // An empty file is not a hostname. Falling back is better than reporting
-    // the empty string, which no caller can do anything with.
-    if len == 0 {
-        return None;
-    }
+    let len = kernel_name_len(n, &buf)?;
+    // AN EMPTY FILE IS AN ANSWER. `None` here means "the kernel could not be
+    // asked"; a zero-length read means it was asked and said the name is
+    // empty, and those are different facts.
+    //
+    // This returned `None` for both until 2026-09-12, under a comment reading
+    // "Falling back is better than reporting the empty string" -- true when it
+    // was written, when every caller fell back to a process-local buffer. That
+    // fallback was removed (it answered `localhost` for an unreadable name, and
+    // `services/ctest-hostname` found it). Removing it turned this line from a
+    // fallback trigger into an ERROR: `getdomainname` now returns `EIO`, which
+    // claims the system could not be asked.
+    //
+    // An empty NIS domain is the ordinary state of almost every machine, so
+    // that made a normal system look broken. It is what `ctest-hostname`'s
+    // check 13 -- the getdomainname baseline, before any set -- was failing on,
+    // with checks 1-12 green because the hostname is not empty.
+    //
+    // The same three-into-two collapse as `localhost` standing in for "cannot
+    // answer", one turn of the screw further: there the plausible value hid a
+    // failure, here a failure hides a plausible value.
     let copy = len.min(out.len());
     let mut i = 0;
     while i < copy {
@@ -4312,6 +4348,49 @@ mod tests {
     // change — it never actually worked, because it could only serialise
     // *this* module's tests, while `linux_seccomp` and `linux_landlock`
     // drove the same bit through `_test_reset_no_new_privs` without it.
+
+    // ------------------------------------------------------------------
+    // kernel_name_len — a failed read and an empty one are not the same
+    // ------------------------------------------------------------------
+
+    /// `None` means the kernel could not be asked; `Some(0)` means it was
+    /// asked and the name is empty.
+    ///
+    /// Collapsing the two made `getdomainname` return `EIO` on a machine
+    /// with no NIS domain -- which is almost every machine -- so a normal
+    /// system reported that it could not be asked for its domain name.
+    /// `services/ctest-hostname` check 13, the getdomainname baseline
+    /// before any set, was failing on exactly that while checks 1-12 stayed
+    /// green because a hostname is not empty.
+    ///
+    /// Tested here rather than through `getdomainname` because the read
+    /// itself only exists on the target: the host arm of `read_kernel_name`
+    /// returns `None` unconditionally, so the case cannot be reached from a
+    /// host test at all. The decision was split out of the reading so that
+    /// the half that can be wrong is the half that can be checked.
+    #[test]
+    fn an_empty_kernel_name_is_an_answer_and_a_failed_read_is_not() {
+        // A failed read. The ONLY `None`.
+        assert_eq!(kernel_name_len(-1, b""), None);
+        assert_eq!(kernel_name_len(-22, b"ignored"), None);
+
+        // A successful read of nothing: an answer, and the answer is empty.
+        assert_eq!(kernel_name_len(0, b""), Some(0));
+
+        // A procfs node holding only its terminating newline is also empty,
+        // and is what an unset domain name actually looks like on disk.
+        assert_eq!(kernel_name_len(1, b"\n"), Some(0));
+        assert_eq!(kernel_name_len(2, b"\r\n"), Some(0));
+
+        // ...and a real name still comes back with its newline trimmed, so
+        // the assertions above are about the empty case and not about the
+        // function having stopped working.
+        assert_eq!(kernel_name_len(6, b"slate\n"), Some(5));
+        assert_eq!(kernel_name_len(5, b"slate"), Some(5));
+
+        // A read longer than the buffer is clamped rather than trusted.
+        assert_eq!(kernel_name_len(9999, b"slate"), Some(5));
+    }
 
     // ------------------------------------------------------------------
     // normalize_path — pure function, exhaustively testable

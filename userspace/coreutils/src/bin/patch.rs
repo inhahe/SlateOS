@@ -141,12 +141,20 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
 
     while let Some(arg) = args.get(i) {
         let a = arg.as_str();
-        if a == "-i" {
+        if a == "-i" || a == "--input" {
             i = i.saturating_add(1);
             let v = args
                 .get(i)
                 .ok_or_else(|| "option -i requires an argument".to_string())?;
             opts.patch_file = Some(v.clone());
+        } else if let Some(v) = a.strip_prefix("--input=") {
+            // `--input` is the one thing the retired `userspace/patch` crate
+            // accepted that this did not. It is carried over rather than lost:
+            // deleting the worse half of a duplicate pair means the better half
+            // has to end up with everything, and a survey column reading
+            // "1 only in the standalone" is a list of one to go and check, not
+            // a rounding error.
+            opts.patch_file = Some(v.to_string());
         } else if a == "-p" {
             i = i.saturating_add(1);
             let v = args

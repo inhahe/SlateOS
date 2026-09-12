@@ -133906,6 +133906,55 @@ So a 200-iteration write benchmark performs 200 read-backs, 200 SHA-256 computat
 >
 > This makes the A/B measurement more valuable, not less: it was designed to confirm a
 > prediction and will now have to produce the number instead.
+>
+> **Second correction, same day: the cost is not the hash at all.** `record_version`'s
+> body contains
+> `let timestamp_ns = crate::hpet::elapsed_ns();` — the **same MMIO clock read** fixed
+> in `journal::record` earlier today, where switching it to `clock_monotonic()` took that
+> phase from 14,206 ns to 337 ns. `VersionEntry::timestamp_ns` is documented as "HPET
+> timestamp (nanoseconds since boot)", the identical contract, which `clock_monotonic`
+> satisfies.
+>
+> So roughly **13.9 µs of the ~26 µs residual is one line**, and it is the line I had
+> already fixed once, one module over. I reached it by reading the function to predict
+> what the A/B would contain — not by the A/B, which has not run yet.
+>
+> **The write path's HPET exposure is exactly this one site**, checked rather than
+> assumed: `notify`, `audit`, `quota`, `intercept`, `cas`, `journal`, `vfs` and
+> `page_cache` have zero calls; `index` has two and both are in `rebuild()` and
+> `age_of_last_rebuild_ns()`, neither on the write path. That is a consistency check as
+> well as a survey — if `add_entry` read the HPET, the `index` phase could not have
+> measured 4,115 ns, because one read alone costs ~13.9 µs.
+>
+> **What the residual now looks like**, with the arithmetic stated so it can be checked:
+>
+> | component | ns | basis |
+> |---|---|---|
+> | `record_version`'s HPET read | ~13,900 | the journal's measured 14,206 → 337 delta |
+> | `index::add_entry` | ~4,100 | measured phase, and HPET-free per the survey above |
+> | memfs write, `cache_identity`, mount resolution, CAS, hash | remainder | unmeasured |
+> | co-occurrence slack | unknown | `min(whole) − Σmin(parts)` is an upper bound |
+>
+> So about half the residual is now named and fixable, and the rest stays consistent with
+> the upper-bound framing rather than demanding a further hidden cost. **The fix is held
+> behind the measurement on purpose**: repairing it first would measure the repaired state
+> and destroy the before/after that makes the improvement checkable.
+>
+> **The 13,900 figure was checked, and checking it found a lapse of mine.** It rests
+> on the journal delta being attributable to one line, so I read the commit.
+> `journal.rs` changed exactly one code line; the other 18 were comments. But the same
+> commit also touched `bench.rs` by 22 lines, *removing the `ns` phase* — the removal
+> that red-treed the tree hours later. It does not disturb the attribution: `ns_only`
+> measured **4 ns**, so dropping it moved the reported remainder by 4 ns, and
+> `journal_only` itself was untouched.
+>
+> The verification was only necessary because I had put two logical changes in one
+> commit, against the one-logical-change rule. A clock fix sharing a commit with a
+> benchmark-phase removal is exactly the shape that makes a later delta
+> unattributable, and it is the same shape as the three baseline artefacts produced
+> earlier today by computing over a window straddling an unrelated change. Here it
+> cost one `git show`, because the phase was 4 ns. With a phase worth microseconds the
+> attribution would not have been recoverable from the recorded numbers at all.
 
 ### What this re-explains
 

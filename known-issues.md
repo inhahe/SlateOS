@@ -12142,6 +12142,41 @@ exposed a pre-existing latent race.
 faults intermittently (observed ~1/5). Non-deterministic — depends on the
 exact preemption interleaving of the four clone-children during join/exit.
 
+**[A] 2026-09-12 — three commits have since closed the named race windows, and the
+recurrence count is now an argument rather than a hope.** Not closing this, because an
+intermittent fault cannot be proved absent; but the entry has been carrying July's
+assessment into September and the ground has moved.
+
+*The code.* Sixty commits have touched `proc/thread.rs`, `proc/pcb.rs` or `sched/mod.rs`
+since the sighting, and three of them address exactly the window this describes:
+
+* `a2c7b8bb9` — *close the `thread::join` exit race with register-then-recheck.* The fault
+  occurs during `pthread_join` while siblings exit. This is that race.
+* `975114f54` — *seed thread `%fs`/`%gs` base before admission, fixes clone TLS race.* The
+  failing test is clone+futex+**TLS**.
+* `edf331c0e` — *register `CLONE_CHILD_CLEARTID` before admitting the child.*
+
+*The count, using this file's own method.* `W1` two entries down was closed "on a count,
+not an assertion", and the same is available here. `bench/boot-history.jsonl` holds **713**
+records, the earliest 2026-08-16 — a month *after* the sighting, so every one postdates it.
+**Zero** of them list the pthread test as skipped, so it ran. 628 reached `BOOT_OK`. At the
+observed rate of roughly one fault in five boots, 713 runs should have produced on the
+order of 140 recurrences. None is reported.
+
+*The gap in that argument, stated rather than rounded away.* **85 of the 713 did not reach
+`BOOT_OK`**, and the records do not carry serial content, so I cannot attribute those
+failures. One or more could in principle be an unnoticed recurrence. Today's five failed
+boots were all pre-build gates — inherited shellcheck, a misfiled open-questions entry, a
+clippy denial in another lane — so the base rate for "failed for an unrelated reason" is
+demonstrably high, but that is an impression and not a measurement of those 85.
+
+*What would close this.* Either a boot whose serial log is checked for the `address=0x97`
+signature across the 85, or a deliberate stress run of
+`self_test_linux_real_glibc_pthread` — the old rate means ~15 boots would give better than
+95% confidence of seeing it if it still occurs at 1-in-5. Symbolizing the July RIP is *not*
+a route: `scripts/resolve-rip.sh` maps against the current ELF, and the kernel has changed
+beyond recognition since, so it would confidently name the wrong function.
+
 **Investigation status (updated 2026-07-15):** the toolchain *does* have a
 working symbolizer — `scripts/resolve-rip.sh`, which maps a RIP against the
 actual booted ELF (`target/x86_64-unknown-none/debug/kernel`, staged by

@@ -136770,9 +136770,22 @@ stop substituting, which `uname` already does. If the observed value turns out t
 Deliberately not acted on: the observation boot has not reported yet, and the whole reason
 that boot exists is that both lanes had inferred this value rather than seen it.
 
-**Open, and mine:** `init_defaults()` sets `localdomain` and `gen_sys` calls it before
-reading, yet the store reads empty. Either something initialises `STATE` ahead of
-`init_defaults` — which then early-returns and never applies its defaults — or something
-empties it later and a restore does not take. One candidate not yet confirmed: the `uname`
-pure-read rung restores with `let _ = set_domain(&saved_dom)`, a discarded `Result`.
-Investigating. Recorded as a question, not a cause.
+**Open, low value, and deliberately stopped.** `init_defaults()` sets `localdomain`, yet
+the store reads empty. Narrowed by inspection, then abandoned on purpose:
+
+- `nameservice::STATE` is created in exactly one place, `init_defaults()`, with
+  `domain: "localdomain"`. Nothing at boot calls it; only procfs's `gen_sys` and kshell do.
+- The `uname` pure-read rung is **not** the cause I first guessed. It calls
+  `init_defaults()` itself (`syscall/linux.rs:69341`) before capturing `saved_dom`, so it
+  captures `localdomain`, and every one of its failure paths restores. It passed, so it
+  restored faithfully.
+- That leaves something between that rung and this print, of which `ctest-hostname`'s own
+  save-and-restore around checks 13-21 is the only candidate I have identified.
+
+**Not pursued further, because nothing is broken.** An empty domain is a legitimate state —
+no NIS domain configured — `uname` and procfs agree on it, and the pure-read contract is
+satisfied. Settling *why* costs another 35-minute boot with an extra print, to explain a
+state that is correct. Recorded so the next person does not re-derive the three bullets
+above, and with the instrument already in the tree: the rung prints the value every boot,
+so anyone who wants the answer can bisect by adding one more print rather than starting
+from the question.

@@ -495,6 +495,48 @@ each: `up 00:59` where procps prints `up 59 min`, `up 01:00` where it prints
 `up 1 day, 0 min`. **Six tests encoded the unmeasured format**, which is why it
 survived; they now carry the measurements.
 
+### Two findings from `scripts/uptime-diff.sh`, one upstream and one ours
+
+**procps-ng 4.0.4's `uptime -p` is wrong at every unit boundary, and we do not
+reproduce it.** Each level of its decomposition rolls over only when the
+remainder *exceeds* the unit, never when it equals it, so an exact boundary
+falls through to the unit below — and the last level has nothing below it:
+
+| `/proc/uptime` | procps-ng 4.0.4 | ours |
+|---|---|---|
+| 60 | `up ` — **empty** | `up 1 minute` |
+| 3600 | `up 60 minutes` | `up 1 hour` |
+| 3660 | `up 1 hour` — loses the minute | `up 1 hour, 1 minute` |
+| 86400 | `up 24 hours, 0 minutes` | `up 1 day` |
+| 90000 | `up 1 day, 60 minutes` | `up 1 day, 1 hour` |
+
+At exactly one minute of uptime it prints `up ` and stops. §371 makes
+bug-for-bug reproduction the default, but that default assumes the reference's
+answer is *an* answer; `up ` is not a wrong rendering of one minute, it is
+none. Declared in the harness as nine `xfail_uptime` cases with the sweep as
+the reason. **The earlier claim that `-p` was "verified interleaved against
+procps" is not withdrawn but is narrower than it reads: it compared the live
+uptime, which is one point, and generalised.**
+
+**`-s` is an early exit, not a flag — and our last-one-wins parse was wrong.**
+`uptime -sp` printed the pretty form here and the boot time in procps. The
+first repair inferred "flags resolved after the loop, `since` tested first",
+which fits `-ps` and `-sp` both printing the boot time and is still false. The
+discriminator is what `-s` does to arguments *after* it:
+
+    uptime -sV      -> boot time         the -V never runs
+    uptime -sXYZ    -> boot time, rc=0   no "invalid option -- 'X'"
+    uptime -s junk  -> boot time, rc=0   an operand, accepted
+    uptime -Vs      -> the version       whichever fires first wins
+
+So procps prints and leaves before the rest of argv is looked at. Two models
+fitted the first measurement and the cheap way to separate them was to feed
+the option something it should have rejected. **Found only because `-ps`
+XPASSed** — it was in the harness as a declared refusal, which it is not, and
+asking why put `-sp` in the harness. That is the third false xfail reason in
+two days, after `free --help`; a declared divergence is an assertion like any
+other, and the only kind never tested by its case passing.
+
 ## B-COREUTILS-DATE-SILENTLY-IGNORES-EVERY-ARGUMENT — FIXED 2026-09-11
 
 `userspace/coreutils/src/bin/date.rs` parses **no arguments at all**. It reads

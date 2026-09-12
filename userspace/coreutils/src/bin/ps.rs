@@ -9,9 +9,11 @@
 
 use coreutils::diag;
 use coreutils::stdfd;
+use localtime::{Zone, strftime};
 use std::env;
 use std::io::{self, Write};
 use std::process::ExitCode;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Default)]
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
@@ -117,9 +119,21 @@ For more details see ps(1).
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 struct ProcInfo {
     comm: String,
-    state: String,
     ppid: u32,
-    uid: u32,
+    /// The UID resolved through `/etc/passwd`, or the number if it does not
+    /// resolve. procps prints `root`, not `0`.
+    ///
+    /// The raw `uid` and the process `state` used to be carried here too.
+    /// `state` was the `STAT` column this printed under `-f`, which procps
+    /// does not have there -- it belongs to `-l`, which this build does not
+    /// implement. Both are dropped rather than kept unread: a field nobody
+    /// reads is indistinguishable from one whose reader was deleted by
+    /// mistake, and `stat.state` is one line away if `-l` ever arrives.
+    user: String,
+    /// procps' `C` column: integer percent of CPU over the process's life.
+    cpu_pct: u64,
+    /// procps' `STIME`: `HH:MM` if the process started today, else `MMM DD`.
+    stime: String,
     tty: String,
     time_str: String,
     /// The `-f` command line, already rendered. Empty when `-f` was not asked
@@ -163,24 +177,43 @@ fn run_main() -> ExitCode {
     let stdout = io::stdout();
     let mut out = stdout.lock();
 
+    // procps' own field widths, derived from its output rather than chosen.
+    //
+    // Both header and rows go through the same format string, which is what
+    // makes them line up; `ps -f` is
+    //
+    //     {:<8} {:>7} {:>7} {:>2} {:>5} {:<8} {:>8} {}
+    //
+    // and the default is `{:>5} {:<8} {:>8} {}`. Each was checked against the
+    // column offsets of a measured line -- PID ends at 16, PPID at 24, C at
+    // 27, STIME spans 29-33, TTY starts at 35, TIME ends at 51, CMD starts at
+    // 53 -- because two samples are not enough to infer a width and this is
+    // the kind of thing that looks right until a field overflows.
+    //
+    // The default `PID` column is SEVEN wide, not five. I had it at five
+    // first, having counted it off the differential harness's own REPORT
+    // line -- which prefixes the output with `  ours (rc=0): ` and shifts
+    // every column. Measure the artifact, not a rendering of it:
+    // `ps | cat -A` settles it in one line.
     if parsed.full_format {
         let _ = writeln!(
             out,
-            "{:>5} {:>5} {:>5}  {:<6} {:<8} CMD",
-            "UID", "PID", "PPID", "STAT", "TIME"
+            "{:<8} {:>7} {:>7} {:>2} {:>5} {:<8} {:>8} CMD",
+            "UID", "PID", "PPID", "C", "STIME", "TTY", "TIME"
         );
     } else {
-        let _ = writeln!(out, "{:>5} {:<8} CMD", "PID", "TTY");
+        let _ = writeln!(out, "{:>7} {:<8} {:>8} CMD", "PID", "TTY", "TIME");
     }
 
     let procfs = procinfo::ProcFs::new();
+    let ctx = ListCtx::new(&procfs);
     let Ok(pids) = procfs.process_ids() else {
         // No /proc — nothing to show.
         return ExitCode::SUCCESS;
     };
 
     for pid in pids {
-        let Ok(Some(info)) = read_one(&procfs, pid, parsed.full_format) else {
+        let Ok(Some(info)) = read_one(&procfs, pid, parsed.full_format, &ctx) else {
             // A process that exits between the listing and the read is the
             // normal case for anything walking /proc, not a failure.
             continue;
@@ -190,11 +223,22 @@ fn run_main() -> ExitCode {
         if parsed.full_format {
             let _ = writeln!(
                 out,
-                "{:>5} {:>5} {:>5}  {:<6} {:<8} {}",
-                info.uid, pid32, info.ppid, info.state, info.time_str, info.cmd
+                "{:<8} {:>7} {:>7} {:>2} {:>5} {:<8} {:>8} {}",
+                info.user,
+                pid32,
+                info.ppid,
+                info.cpu_pct,
+                info.stime,
+                info.tty,
+                info.time_str,
+                info.cmd
             );
         } else {
-            let _ = writeln!(out, "{:>5} {:<8} {}", pid32, info.tty, info.comm);
+            let _ = writeln!(
+                out,
+                "{:>7} {:<8} {:>8} {}",
+                pid32, info.tty, info.time_str, info.comm
+            );
         }
     }
 
@@ -217,7 +261,12 @@ fn run_main() -> ExitCode {
 /// # Errors
 ///
 /// Any read error other than "no such file", which is `Ok(None)`.
-fn read_one(procfs: &procinfo::ProcFs, pid: u64, full: bool) -> std::io::Result<Option<ProcInfo>> {
+fn read_one(
+    procfs: &procinfo::ProcFs,
+    pid: u64,
+    full: bool,
+    ctx: &ListCtx,
+) -> std::io::Result<Option<ProcInfo>> {
     let Some(stat) = procfs.process_stat(pid)? else {
         return Ok(None);
     };
@@ -241,15 +290,108 @@ fn read_one(procfs: &procinfo::ProcFs, pid: u64, full: bool) -> std::io::Result<
     } else {
         String::new()
     };
+    let start_epoch = ctx.start_epoch(stat.starttime_ticks);
     Ok(Some(ProcInfo {
         comm,
-        state: char::from(stat.state).to_string(),
         ppid: u32::try_from(stat.ppid).unwrap_or(0),
-        uid,
+        user: ctx.user_name(uid),
+        cpu_pct: cpu_percent(
+            stat.utime_ticks,
+            stat.stime_ticks,
+            ctx.now_epoch.saturating_sub(start_epoch),
+        ),
+        stime: ctx.format_stime(start_epoch),
         tty: format_tty(i32::try_from(stat.tty_nr).unwrap_or(0)),
         time_str: format_cpu_time(stat.utime_ticks, stat.stime_ticks),
         cmd,
     }))
+}
+
+/// The things every row needs and no row should read for itself.
+///
+/// `/etc/passwd` and `/proc/stat`'s `btime` are the same for every process in
+/// a listing, so they are read once. A per-row lookup would reopen
+/// `/etc/passwd` for each of several hundred processes, and -- worse -- could
+/// see a different boot time partway down the table.
+struct ListCtx {
+    db: pwdb::Db,
+    zone: Zone,
+    /// `btime` from `/proc/stat`: the wall-clock second the system booted.
+    boot_epoch: i64,
+    /// Read once, so every `STIME` in one listing is judged against the same
+    /// "today".
+    now_epoch: i64,
+}
+
+impl ListCtx {
+    fn new(procfs: &procinfo::ProcFs) -> Self {
+        // `stat_counters`, not `stat`: `/proc/stat` is the whole-system file
+        // and `/proc/<pid>/stat` is the per-process one, and `ProcFs` has an
+        // accessor for each. `btime` lives on the former.
+        let boot_epoch = procfs
+            .stat_counters()
+            .ok()
+            .flatten()
+            .and_then(|st| st.boot_time)
+            .and_then(|b| i64::try_from(b).ok())
+            .unwrap_or(0);
+        let now_epoch = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .and_then(|d| i64::try_from(d.as_secs()).ok())
+            .unwrap_or(0);
+        Self {
+            db: pwdb::Db::load(),
+            zone: Zone::from_env(),
+            boot_epoch,
+            now_epoch,
+        }
+    }
+
+    /// When the process started, in epoch seconds.
+    fn start_epoch(&self, starttime_ticks: u64) -> i64 {
+        let secs_since_boot = starttime_ticks / procinfo::TICKS_PER_SEC;
+        self.boot_epoch
+            .saturating_add(i64::try_from(secs_since_boot).unwrap_or(0))
+    }
+
+    /// procps prints the NAME. A uid with no passwd entry keeps its number,
+    /// which is also what procps does -- it does not invent one, and inventing
+    /// one is the defect `uptime`'s user count was written to avoid.
+    fn user_name(&self, uid: u32) -> String {
+        self.db
+            .user_by_uid(uid)
+            .map_or_else(|| uid.to_string(), |u| procinfo::display_bytes(&u.name))
+    }
+
+    /// `HH:MM` when the process started today, `MMM DD` otherwise.
+    ///
+    /// Measured: a process started this morning prints `09:49`, one from
+    /// yesterday prints `Sep11` -- month abbreviation and a ZERO-PADDED day
+    /// with no space between them, five characters either way, which is why
+    /// the column is exactly five wide.
+    fn format_stime(&self, start_epoch: i64) -> String {
+        let started = self.zone.local(start_epoch, 0);
+        let now = self.zone.local(self.now_epoch, 0);
+        let same_day =
+            started.year == now.year && started.month == now.month && started.day == now.day;
+        let fmt: &[u8] = if same_day { b"%H:%M" } else { b"%b%d" };
+        String::from_utf8(strftime(fmt, &started)).unwrap_or_default()
+    }
+}
+
+/// procps' `C` column: integer percent of CPU used over the process's life.
+///
+/// Zero elapsed seconds yields 0 rather than a division by zero -- every
+/// process is younger than a second at some point, including `ps` itself,
+/// which is always in its own listing.
+fn cpu_percent(utime: u64, stime: u64, elapsed_secs: i64) -> u64 {
+    let elapsed = u64::try_from(elapsed_secs).unwrap_or(0);
+    if elapsed == 0 {
+        return 0;
+    }
+    let total_secs = utime.saturating_add(stime) / procinfo::TICKS_PER_SEC;
+    total_secs.saturating_mul(100) / elapsed
 }
 
 /// Format the `tty_nr` field from /proc/<pid>/stat.  Zero is "?" (no

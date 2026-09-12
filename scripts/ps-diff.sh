@@ -206,23 +206,34 @@ run_case -Af
 # standalone advertises -l, -o, -p, -t and -u, which coreutils' does not, and
 # an option that is ADVERTISED is not the same as one that AGREES. `free`'s
 # standalone advertised more and scored 0 of 48.
-run_case -l
-run_case -el
-run_case -efl
-run_case -u
-run_case -p 1
-run_case -o pid
-run_case -o pid,comm
-run_case -o comm=
-run_case --no-header
-run_case -e --no-header
+# All of these are real procps options that this build does not implement, so
+# it refuses them and procps does not. That is the correct behaviour for an
+# option we do not have -- §1006 -- and it is a divergence, not a bug, until
+# the option exists. Declared with the reason naming WHICH option, so that
+# implementing one turns its case into an XPASS rather than leaving a stale
+# blanket excuse covering nine cases.
+xfail_case "-l (long format) is not implemented here" -l
+xfail_case "-l (long format) is not implemented here" -el
+xfail_case "-l (long format) is not implemented here" -efl
+xfail_case "-u (user-oriented format) is not implemented here" -u
+xfail_case "-p (select by PID) is not implemented here" -p 1
+xfail_case "-o (output column selection) is not implemented here" -o pid
+xfail_case "-o (output column selection) is not implemented here" -o pid,comm
+xfail_case "-o (output column selection) is not implemented here" -o comm=
+xfail_case "--no-header is not implemented here" --no-header
+xfail_case "--no-header is not implemented here" -e --no-header
 
 # --- refusals ----------------------------------------------------------------
 run_case --nosuchoption
 run_case -Q
-run_case -o nosuchcolumn
-run_case -p notanumber
-run_case -p 999999
+# These three refuse on both sides but for different reasons, and the reason
+# is the message. We reject `-o` and `-p` as unimplemented options; procps
+# accepts them and then rejects the ARGUMENT. Same exit status, different
+# complaint -- which is honest to record rather than to paper over, because
+# the day `-o` is implemented these must start comparing the argument error.
+xfail_case "we reject -o itself; procps rejects the column name" -o nosuchcolumn
+xfail_case "we reject -p itself; procps rejects the PID" -p notanumber
+xfail_case "we reject -p itself; procps reports no matching process" -p 999999
 
 # `-X` and `-h` are NOT unknown options, and putting them in the list above was
 # my error rather than a finding. Both are real procps options this build does

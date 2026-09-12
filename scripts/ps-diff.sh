@@ -264,8 +264,13 @@ xfail_case "-e overrides -p, so this includes the ps row, whose SZ differs" -el 
 # inserted after WCHAN, and CMD carrying the full command line. Three of
 # `-f`'s properties grafted onto `-l`'s column set. That is a third format
 # rather than a combination rule, and it is not implemented.
-xfail_case "-l with -f is a merged format, which is not implemented" -lf -p 2
-xfail_case "-l with -f is a merged format, which is not implemented" -efl -p 2
+run_shared -lf -p 2
+run_shared -fl -p 2
+
+# `-efl` includes the ps row because `-e` overrides the selection, and that
+# row carries SZ -- the virtual size of two different binaries. Same reason
+# as bare `-l`.
+xfail_case "-e overrides -p, so this includes the ps row, whose SZ differs" -efl -p 2
 run_shared -l --no-header -p 2
 
 # And `-l` on `ps` itself, where SZ is expected to differ and does. Kept

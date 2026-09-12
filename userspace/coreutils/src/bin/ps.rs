@@ -592,7 +592,31 @@ fn run_main() -> ExitCode {
             let _ = writeln!(out, "{}", render_row(&titles, &parsed.columns));
         }
     } else if !parsed.no_header {
-        if parsed.long_format {
+        if parsed.long_format && parsed.full_format {
+            // `-l` AND `-f` is a MERGED format, not one of them winning.
+            // Measured: it is `-l`'s column set with three substitutions --
+            // UID widened to 8 and rendered as a NAME, STIME inserted after
+            // WCHAN, and CMD carrying the full command line. The ADDR/SZ pair
+            // still abut with no separator, exactly as in `-l`.
+            let _ = writeln!(
+                out,
+                "{:<1} {:<1} {:<8} {:>7} {:>7} {:>2} {:>3} {:>3} {:<4}{:>3} {:<6} {:>5} {:<8} {:>8} CMD",
+                "F",
+                "S",
+                "UID",
+                "PID",
+                "PPID",
+                "C",
+                "PRI",
+                "NI",
+                "ADDR",
+                "SZ",
+                "WCHAN",
+                "STIME",
+                "TTY",
+                "TIME"
+            );
+        } else if parsed.long_format {
             // ADDR and SZ ABUT WITH NO SEPARATOR. Every other pair here is
             // joined by one space; these two are not, and the gap in the
             // header is SZ's own right-padding. Computed from the column
@@ -693,6 +717,26 @@ fn run_main() -> ExitCode {
                 .map(|spec| info.cell(COLUMNS.get(spec.col), pid32))
                 .collect();
             let _ = writeln!(out, "{}", render_row(&cells, &parsed.columns));
+        } else if parsed.long_format && parsed.full_format {
+            let _ = writeln!(
+                out,
+                "{:<1} {:<1} {:<8} {:>7} {:>7} {:>2} {:>3} {:>3} {:<4}{:>3} {:<6} {:>5} {:<8} {:>8} {}",
+                info.flag,
+                info.state,
+                info.user,
+                pid32,
+                info.ppid,
+                info.cpu_pct,
+                info.pri,
+                info.nice,
+                "-",
+                info.size_pages,
+                info.wchan,
+                info.stime,
+                info.tty,
+                info.time_str,
+                info.cmd
+            );
         } else if parsed.long_format {
             let _ = writeln!(
                 out,

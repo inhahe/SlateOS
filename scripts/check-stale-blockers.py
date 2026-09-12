@@ -127,6 +127,73 @@ def stale(text, resolved):
     return found
 
 
+# The SECOND source of a stale blocker, and the one that cost five days here.
+#
+# An entry can wait on a `requests/` file -- covered above -- or on an
+# `open-questions.md` question. The known-issues entry for the duplicate-pair
+# conversions read "Everything remaining is blocked on B-Q7, so there is no
+# unblocked work left in this entry", and B-Q7 had been answered by the
+# operator on 2026-09-07 (design-decisions 1005, "coreutils is the one home").
+# The sentence told every reader to go and do something else, and it was wrong
+# for five days.
+#
+# It was invisible here because this gate only ever cross-referenced
+# `requests/`. Nothing misbehaved: the check ran, inspected 832 entries and
+# reported 4, and all 4 were real. It answered the question it was built to
+# answer, in full, about a population that excluded the failure -- the same
+# shape as a `grep -c` on a path that does not exist. See known-issues ->
+# "never pipe a command whose exit status you intend to believe".
+QUESTION_REF = re.compile(r"\b([ABC]-Q\d+)\b")
+
+# `## B-Q7 - ...` in the live half; `- B-Q7 ...` in the archive below
+# `# Resolved`.
+QUESTION_OPEN = re.compile(r"^## ([ABC]-Q\d+)\b", re.M)
+QUESTION_DONE = re.compile(r"^- ([ABC]-Q\d+)\b", re.M)
+RESOLVED_HEAD = re.compile(r"^# Resolved\s*$", re.M)
+
+
+def question_states(open_questions_text):
+    """Map each question id to whether `open-questions.md` says it is answered.
+
+    A question is answered when it sits in the archive below `# Resolved`, and
+    open when it has a `##` heading above that line. An id in neither is absent
+    from the map rather than guessed at: an unknown id must not read as
+    "resolved", because that is the direction that invents a finding.
+    """
+    split = RESOLVED_HEAD.search(open_questions_text)
+    cut = split.start() if split else len(open_questions_text)
+    live, archive = open_questions_text[:cut], open_questions_text[cut:]
+    out = {}
+    for m in QUESTION_OPEN.finditer(live):
+        out[m.group(1)] = False
+    for m in QUESTION_DONE.finditer(archive):
+        out.setdefault(m.group(1), True)
+    return out
+
+
+def stale_questions(text, answered):
+    """Entries that are open and cite an ANSWERED question in blocking language.
+
+    Deliberately the same context test as `stale`: a citation alone is not a
+    finding, because an entry may mention a question it is not waiting on.
+    """
+    found = []
+    for lineno, title, body in entries(text):
+        if CLOSED_ENTRY.search("\n".join(body[:CLOSED_WINDOW])):
+            continue
+        for j, line in enumerate(body):
+            names = [m.group(1) for m in QUESTION_REF.finditer(line)]
+            done = [n for n in names if answered.get(n)]
+            if not done:
+                continue
+            lo = max(0, j - CONTEXT_BEFORE)
+            context = "\n".join(body[lo : j + CONTEXT_AFTER])
+            if BLOCKING.search(context):
+                found.append((lineno, title, done[0]))
+                break
+    return found
+
+
 # A second shape of the same failure: prose that points at a file which is no
 # longer there. Lane A hit five instances of stale prose in one day and only one
 # of them was a cleared blocker; the rest included a design-decisions commitment
@@ -366,6 +433,74 @@ def floors_selftest():
     return bad
 
 
+QUESTION_SELFTEST = [
+    (
+        "an open entry blocked on an ANSWERED question is reported",
+        ["## B-SOMETHING-IS-BROKEN (lane B, 2026-01-01)",
+         "",
+         "Everything remaining is blocked on B-Q7, so there is no unblocked",
+         "work left in this entry."],
+        {"B-Q7": True},
+        1,
+    ),
+    (
+        "...but not when the question is still open",
+        ["## B-SOMETHING-IS-BROKEN (lane B, 2026-01-01)",
+         "",
+         "Everything remaining is blocked on B-Q7, so there is no unblocked",
+         "work left in this entry."],
+        {"B-Q7": False},
+        0,
+    ),
+    (
+        "a question MENTIONED without blocking language is not a finding",
+        ["## B-SOMETHING-IS-BROKEN (lane B, 2026-01-01)",
+         "",
+         "The reasoning behind this is recorded in B-Q7.",
+         "It has no bearing on the work below."],
+        {"B-Q7": True},
+        0,
+    ),
+    (
+        "an id nobody has heard of does not read as answered",
+        ["## B-SOMETHING-IS-BROKEN (lane B, 2026-01-01)",
+         "",
+         "This is blocked on B-Q99."],
+        {"B-Q7": True},
+        0,
+    ),
+]
+
+
+def question_selftest():
+    """`question_states` against a miniature open-questions.md.
+
+    The archive/live split is the whole mechanism, so it is tested on a
+    document that has both halves rather than on the real file, where a change
+    to an unrelated question would move the answer.
+    """
+    doc = "\n".join([
+        "# Open Questions",
+        "",
+        "## B-Q14 - something undecided - Status: OPEN",
+        "",
+        "body",
+        "",
+        "# Resolved",
+        "",
+        "- B-Q7 which copy is canonical - resolved 2026-09-07",
+        "- A-Q3 something else - resolved 2026-08-01",
+    ])
+    got = question_states(doc)
+    want = {"B-Q14": False, "B-Q7": True, "A-Q3": True}
+    ok = got == want
+    print("%-4s %s" % ("ok" if ok else "FAIL", "question_states splits live from archived"))
+    if not ok:
+        print("       wanted %r" % (want,))
+        print("       got    %r" % (got,))
+    return 0 if ok else 1
+
+
 def selftest():
     bad = 0
     for name, body, resolved, want in SELFTEST:
@@ -375,9 +510,19 @@ def selftest():
         print("%-4s %s" % ("ok" if ok else "FAIL", name))
         if not ok:
             print("       wanted %d hit(s), got %d" % (want, got))
+    for name, body, answered, want in QUESTION_SELFTEST:
+        got = len(stale_questions("\n".join(body) + "\n", answered))
+        ok = got == want
+        bad += 0 if ok else 1
+        print("%-4s %s" % ("ok" if ok else "FAIL", name))
+        if not ok:
+            print("       wanted %d hit(s), got %d" % (want, got))
+    bad += question_selftest()
     bad += dangling_selftest()
     bad += floors_selftest()
-    total = len(SELFTEST) + len(DANGLING_SELFTEST) + 3
+    total = (
+        len(SELFTEST) + len(QUESTION_SELFTEST) + 1 + len(DANGLING_SELFTEST) + 3
+    )
     print()
     print("check-stale-blockers selftest: %d case(s), %d failed" % (total, bad))
     return 1 if bad else 0
@@ -436,6 +581,18 @@ def main(argv=None):
     text = issues.read_text(encoding="utf-8", errors="surrogateescape")
     hits = stale(text, resolved)
 
+    # The same question asked of `open-questions.md`. An entry waiting on an
+    # ANSWERED question is as stuck as one waiting on a landed request, and
+    # reads more convincingly because a question sounds like it is still being
+    # thought about.
+    questions = ROOT / "open-questions.md"
+    answered = (
+        question_states(questions.read_text(encoding="utf-8", errors="surrogateescape"))
+        if questions.is_file()
+        else {}
+    )
+    qhits = stale_questions(text, answered)
+
     # Second pass: prose pointing at a script that is not there any more.
     import subprocess
 
@@ -455,6 +612,13 @@ def main(argv=None):
         print("known-issues.md:%d: %s" % (lineno, title.strip()))
         print("    cites requests/%s, which reports itself finished." % request)
         print("    Re-read it: the thing it waits for may already exist.")
+        print()
+
+    for lineno, title, question in qhits:
+        print("known-issues.md:%d: %s" % (lineno, title.strip()))
+        print("    says it is blocked on %s, which open-questions.md records"
+              " as answered." % question)
+        print("    Re-read it: the decision it waits for has been made.")
         print()
 
     # Grouped by the missing file rather than by citation. One retired script is
@@ -508,11 +672,20 @@ def main(argv=None):
     # whether it inspected 849 entries or none, which is how a regex that stops
     # matching after a refactor goes unnoticed.
     total = sum(1 for _ in entries(text))
+    # BOTH counts, and the questions one is named separately rather than added
+    # in. When the question pass was first wired the summary still printed only
+    # `len(hits)`: four new findings were printed above it and the line under
+    # them said "4", which is the exact defect the comment above warns about.
+    # A reader who trusts the summary would have seen half the report.
     print(
         "check-stale-blockers: %d entr(ies) and %d request(s) inspected, "
-        "%d request(s) report themselves finished, %d entr(ies) may have been "
-        "unblocked without noticing."
-        % (total, len(resolved), sum(resolved.values()), len(hits))
+        "%d request(s) report themselves finished, %d entr(ies) cite a "
+        "finished request, %d cite an answered question."
+        % (total, len(resolved), sum(resolved.values()), len(hits), len(qhits))
+    )
+    print(
+        "check-stale-blockers: %d question(s) known, %d answered."
+        % (len(answered), sum(1 for v in answered.values() if v))
     )
     print(
         "check-stale-blockers: %d document(s) scanned for script references, "

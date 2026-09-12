@@ -1417,3 +1417,24 @@ fn a_truncated_cpu_line_is_not_a_cpu() {
     let (index, _) = CpuTimes::parse_line(b"cpu7 1 2 3 4").expect("cpu7");
     assert_eq!(index, Some(7));
 }
+
+#[test]
+fn stat_reads_tpgid_between_tty_and_flags() {
+    // Field 8, one-indexed. Pinned BETWEEN its two neighbours on purpose: an
+    // off-by-one here reads the tty number or the flag word, and both are
+    // plausible integers that no assertion on tpgid alone would catch.
+    let st = ProcessStat::parse(&stat_line("bash")).expect("parses");
+    assert_eq!(st.tty_nr, 0, "field 7 is still the tty");
+    assert_eq!(st.tpgid, -1, "field 8; -1 is no controlling terminal");
+    assert_eq!(st.flags, 4_194_304, "field 9 is still the flag word");
+
+    // And with a real terminal, so the -1 above is not the only value seen.
+    let raw = String::from_utf8(stat_line("bash")).expect("ascii");
+    let with_tty = raw.replace(" 0 -1 4194304 ", " 34816 900 4194304 ");
+    let st = ProcessStat::parse(with_tty.as_bytes()).expect("parses");
+    assert_eq!(st.tty_nr, 34816);
+    assert_eq!(st.tpgid, 900);
+    assert_eq!(st.flags, 4_194_304);
+    // `+` in BSD STAT means tpgid == pgrp; here it does not.
+    assert_ne!(st.tpgid, i64::try_from(st.pgrp).unwrap_or(-1));
+}

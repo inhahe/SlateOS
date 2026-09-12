@@ -212,10 +212,29 @@ run_case -Af
 # the option exists. Declared with the reason naming WHICH option, so that
 # implementing one turns its case into an XPASS rather than leaving a stale
 # blanket excuse covering nine cases.
+# `-l` is a fixed column set, measured so the eventual implementation has
+# something to match rather than a name to guess from:
+#
+#   F S   UID     PID    PPID  C PRI  NI ADDR SZ WCHAN  TTY          TIME CMD
+#   4 R     0       1       0  0  80   0 -  2093 -      ?        00:00:00 ps
+#
+# The UID is NUMERIC here -- `0`, where `-f` prints `root` for the same
+# process in the same listing. Two format options, two renderings of one
+# field, and the obvious shared helper would get one of them wrong.
 xfail_case "-l (long format) is not implemented here" -l
 xfail_case "-l (long format) is not implemented here" -el
 xfail_case "-l (long format) is not implemented here" -efl
-xfail_case "-u (user-oriented format) is not implemented here" -u
+# `-u` is SELECTION BY USER, not a format, and the reason here said
+# otherwise until it was measured. SysV `ps -u root` prints the DEFAULT
+# columns for that user's processes; the user-oriented format is BSD `u`
+# with no dash, which is a different option that happens to share a
+# letter. `userspace/ps` documents "-u [user] User-oriented format" and
+# so conflates them -- which is worth knowing before porting it in, since
+# porting the standalone's `-u` would import the conflation.
+#
+# `ps -u` with no list exits 1.
+xfail_case "-u (select by effective user) is not implemented here" -u
+xfail_case "-u (select by effective user) is not implemented here" -u root
 run_case -p 1
 xfail_case "-o (output column selection) is not implemented here" -o pid
 xfail_case "-o (output column selection) is not implemented here" -o pid,comm

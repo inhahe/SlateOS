@@ -66993,6 +66993,23 @@ they ask one question three ways. A doc and an implementation pass it, because a
 say something the code does not do. When no separating input exists, that is the
 one-witness case and it should be labelled as such however many sources appear to agree.
 
+**A test can be a second witness or it can be a mirror, and they look identical green.**
+Lane B's `patch` off-by-one survived a unit test that asserted the *compensated internal
+value*: `parse_normal_patch` added one, `apply_hunk` subtracted one, and the test pinned
+the number after both. It therefore asserted the implementation against itself and would
+have failed had either half been corrected alone. A test that reads a value the code just
+wrote, through the code that wrote it, is a mirror — it reports that the module is
+self-consistent, which is never the question. The same objection retired lane B's
+`test_setdomainname_roundtrip` and applies to `sysfs.rs`'s hostname round trip, which
+writes and reads one private static and so passes whatever the rest of the system believes.
+
+The distinction is *which code paths the two ends touch*, not whether the test round-trips.
+The ring-0 `domainname` rung added here also writes then reads — but it writes through
+`fs::nameservice::set_domain` and reads through procfs's `gen_sys` generator, two different
+modules, so it genuinely witnesses that the generator reports the store. Its limit is
+correspondingly narrow and is stated where it lives: it says nothing about whether a ring-3
+program can *open* the node, because both ends are in-kernel.
+
 **What this costs.** Two producers is more code and a reconciliation that can itself be
 wrong — a port that drifts from the thing it ports is a real hazard and bit us tonight,
 which is why the digest that pins it exists. The cost is real and is accepted: a drifted

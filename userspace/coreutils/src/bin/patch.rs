@@ -128,13 +128,15 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
             let v = args
                 .get(i)
                 .ok_or_else(|| "option -p requires an argument".to_string())?;
-            let n: usize = v.parse().map_err(|_| format!("invalid strip count: {v}"))?;
+            let n: usize = v
+                .parse()
+                .map_err(|_| format!("**** strip count {v} is not a number"))?;
             opts.strip = Some(n);
         } else if let Some(rest) = a.strip_prefix("-p") {
             if !rest.is_empty() {
                 let n: usize = rest
                     .parse()
-                    .map_err(|_| format!("invalid strip count: {rest}"))?;
+                    .map_err(|_| format!("**** strip count {rest} is not a number"))?;
                 opts.strip = Some(n);
             }
         } else if a == "-R" || a == "--reverse" {
@@ -582,7 +584,19 @@ fn main() {
         match fs::read_to_string(path) {
             Ok(s) => s,
             Err(e) => {
-                diag!("patch: {}: {e}", quotef_os(path));
+                // GNU: `patch: **** Can't open patch file <path> : <reason>`,
+                // with the `****` marker it uses for fatal errors and a space
+                // before the colon. `clean_reason` drops Rust's `(os error 2)`
+                // tail, which no C program prints.
+                diag!(
+                    "patch: **** Can't open patch file {} : {}",
+                    quotef_os(path),
+                    // The shared strerror rather than a third private copy of
+                    // the same `os error` trim: coreutils::errmsg gives the
+                    // POSIX text an errno really has, which is what a C
+                    // program prints.
+                    coreutils::errmsg::strerror(&e)
+                );
                 process::exit(2);
             }
         }
@@ -1118,13 +1132,19 @@ mod tests {
     #[test]
     fn parse_invalid_p_value_errors() {
         let err = parse_args(&s(&["-p", "abc"])).unwrap_err();
-        assert!(err.contains("invalid strip count"));
+        // GNU's wording: `**** strip count abc is not a number`. This asserted
+        // `invalid strip count`, which was this build's own phrase.
+        assert!(err.contains("strip count"), "{err}");
+        assert!(err.contains("is not a number"), "{err}");
     }
 
     #[test]
     fn parse_invalid_pn_value_errors() {
         let err = parse_args(&s(&["-pabc"])).unwrap_err();
-        assert!(err.contains("invalid strip count"));
+        // GNU's wording: `**** strip count abc is not a number`. This asserted
+        // `invalid strip count`, which was this build's own phrase.
+        assert!(err.contains("strip count"), "{err}");
+        assert!(err.contains("is not a number"), "{err}");
     }
 
     #[test]

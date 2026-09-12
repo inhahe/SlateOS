@@ -737,7 +737,19 @@ fn lshw_main(args: &[String]) -> i32 {
                 // Could be class name after -class.
                 filter_class = Some(s.to_string());
             }
-            _ => {}
+            // Used to be skipped, so `lshw --zzq` listed the hardware and
+            // exited 0.
+            //
+            // The reference prints its banner and usage for anything it does
+            // not recognise and exits 1, *without* naming the option --
+            // measured, and reproduced rather than improved on. There is
+            // nothing indefensible in it to diverge from: the status is
+            // non-zero, so a script can tell, and the terseness is the
+            // reference's own choice about its interface.
+            _ => {
+                eprintln!("Usage: lshw [-short] [-json] [-xml] [-class CLASS]");
+                return 1;
+            }
         }
     }
 

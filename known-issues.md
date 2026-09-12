@@ -15958,7 +15958,41 @@ running).
 
 **Still pending (why not fully closed):** no in-tree C/C++ program emits
 constructors, so the *non-null* path has never executed on real hardware/
-QEMU. When the first such consumer lands it additionally needs either
+QEMU.
+
+**AMENDED 2026-09-12 (lane A) — the toolchain premise has fired, AND the plan above
+would have validated only half the mechanism.**
+
+Prompted by lane B's broadcast that the C++/slateos cross-toolchain has existed since
+July, run against `todo.txt`'s standing rule (S305: re-check entries deferred for want
+of a capability you now have). Measured here rather than assumed, with zig 0.16.0 under
+our own codegen flags (`-mcmodel=large -fno-pic -fno-pie`):
+
+| consumer | `.init_array` | `.fini_array` |
+|---|---|---|
+| C++, global object with a destructor | **1 entry** | **section absent entirely** |
+| C, `__attribute__((constructor))` + `((destructor))` | **1 entry** | **1 entry** |
+
+Both link static `ET_EXEC` cleanly (C++ 6.0 MB, `.init_array` at 0x10df1f0 with one
+relocated function pointer; `.rela.init_array` present in the object). So *producing* a
+consumer is no longer blocked on anything — that half of the premise has fired.
+
+**The half that matters more:** a C++ program does not populate `.fini_array` at all.
+Its destructor is registered at run time by `__cxa_atexit` and run by `__cxa_finalize`
+— both symbols are present in the linked binary, and no `.fini_array` section is. This
+is standard modern C++ ABI behaviour, not a zig or musl quirk.
+
+Therefore **validating with a C++ consumer would exercise the `.init_array` walk and
+leave the `.fini_array` walk exactly as unproven as it is today** — while this entry,
+which names them together, would read as closed. That is a false completion, and the
+likeliest consumer to land first is C++ (Oils/YSH), so it is the probable path rather
+than a corner case.
+
+**The validating consumer must therefore be C with `__attribute__((destructor))`**, or
+C++ *plus* a C translation unit. Filed to lane B as
+`requests/a-b-crt-init-array-consumer-must-be-c-not-cpp.md`, since `posix/src/crt.rs`
+and `userspace/` are theirs; the kernel-side spawn self-test that boots it is lane A's
+and is unblocked the moment such a binary is staged. When the first such consumer lands it additionally needs either
 (a) a C crt0 + `__libc_start_main` exported on slateos, or (b) a
 posix-linking Rust program that actually emits `.init_array` — at which
 point the boundary symbols become non-null and the walk should be

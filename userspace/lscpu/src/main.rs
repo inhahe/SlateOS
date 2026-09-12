@@ -72,6 +72,8 @@ struct LscpuOpts {
     offline: bool,
     hex: bool,
     caches: bool,
+    /// `-B`: sizes as raw byte counts rather than sysfs's K/M/G form.
+    bytes: bool,
 }
 
 // ============================================================================
@@ -443,6 +445,43 @@ fn print_caches(out: &mut io::StdoutLock<'_>, info: &CpuInfo) {
 // CLI
 // ============================================================================
 
+/// Refuse an option this program does not have.
+///
+/// The wording is getopt's, shared through `usageerror` so every program
+/// here renders it identically. The status is **1**, measured rather than
+/// assumed: `lscpu`, `lsmem`, `prlimit` and `blkzone` all exit 1 for this,
+/// where util-linux's own `flock` exits 64 -- so it is per-tool, which is
+/// why `usageerror` does not choose it.
+fn refuse_unknown_option(prog: &str, arg: &str) -> ! {
+    eprintln!(
+        "{prog}: {}",
+        usageerror::with_help_pointer(prog, &usageerror::unknown_option(arg.as_bytes()))
+    );
+    process::exit(1);
+}
+
+/// A sysfs cache size (`32K`, `1M`, `512`) as a byte count.
+///
+/// sysfs writes these with a binary K/M/G suffix. `-B` prints the number
+/// they stand for: measured, `lscpu -B` turns the `192 KiB` of its default
+/// output into `196608`.
+fn cache_size_bytes(text: &str) -> Option<u64> {
+    let t = text.trim();
+    for (suffix, mult) in [
+        ("K", 1024u64),
+        ("k", 1024),
+        ("M", 1024 * 1024),
+        ("m", 1024 * 1024),
+        ("G", 1024 * 1024 * 1024),
+        ("g", 1024 * 1024 * 1024),
+    ] {
+        if let Some(num) = t.strip_suffix(suffix) {
+            return num.trim().parse::<u64>().ok()?.checked_mul(mult);
+        }
+    }
+    t.parse::<u64>().ok()
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     let mut opts = LscpuOpts {
@@ -453,6 +492,7 @@ fn main() {
         offline: false,
         hex: false,
         caches: false,
+        bytes: false,
     };
 
     let mut i = 1;
@@ -487,12 +527,41 @@ fn main() {
             "--offline" => opts.offline = true,
             "-x" | "--hex" => opts.hex = true,
             "-C" | "--caches" => opts.caches = true,
+            // Advertised by the help above and parsed by nothing until now;
+            // found by `scripts/check-help-vs-parser.py`.
+            "-B" | "--bytes" => opts.bytes = true,
+            // Anything else beginning with a dash is an option this build
+            // does not have. It used to be skipped, so `lscpu --zzq` printed
+            // the CPU table and exited 0.
+            other if other.starts_with('-') && other.len() > 1 => {
+                refuse_unknown_option("lscpu", other);
+            }
             _ => {}
         }
         i += 1;
     }
 
-    let info = collect_cpu_info();
+    let mut info = collect_cpu_info();
+    // Converted once here rather than at each print site, so the standard,
+    // JSON and --caches renderings cannot disagree about what -B means.
+    if opts.bytes {
+        for field in [
+            &mut info.l1d_cache,
+            &mut info.l1i_cache,
+            &mut info.l2_cache,
+            &mut info.l3_cache,
+        ] {
+            if let Some(n) = cache_size_bytes(field) {
+                *field = n.to_string();
+            }
+        }
+        for cache in &mut info.caches {
+            if let Some(n) = cache_size_bytes(&cache.size) {
+                cache.size = n.to_string();
+            }
+        }
+    }
+    let info = info;
     let stdout = io::stdout();
     let mut out = stdout.lock();
 
@@ -512,6 +581,31 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── -B / --bytes ──
+
+    /// Measured: `lscpu -B` turns the `192 KiB` of the default output into
+    /// `196608`, so the suffix is binary, not decimal.
+    #[test]
+    fn a_sysfs_cache_size_converts_to_bytes() {
+        assert_eq!(cache_size_bytes("192K"), Some(196_608));
+        assert_eq!(cache_size_bytes("1M"), Some(1_048_576));
+        assert_eq!(cache_size_bytes("2G"), Some(2_147_483_648));
+        // Lower case, and a bare number that is already bytes.
+        assert_eq!(cache_size_bytes("32k"), Some(32_768));
+        assert_eq!(cache_size_bytes("512"), Some(512));
+        // sysfs pads with whitespace often enough to be worth pinning.
+        assert_eq!(cache_size_bytes("  64K  "), Some(65_536));
+    }
+
+    /// A value that is not a size leaves the field alone rather than
+    /// becoming 0, which would read as a cache that exists and is empty.
+    #[test]
+    fn an_unparseable_size_is_not_a_zero() {
+        assert_eq!(cache_size_bytes(""), None);
+        assert_eq!(cache_size_bytes("unknown"), None);
+        assert_eq!(cache_size_bytes("K"), None);
+    }
 
     #[test]
     fn test_parse_cpu_range_single() {

@@ -350,6 +350,41 @@ fn expand_params(template: &str, params: &[i32]) -> String {
 
 // ── clear mode ─────────────────────────────────────────────────────
 
+/// The name this program was invoked as, without directory or `.exe`.
+///
+/// `detect_mode` already strips the suffix when it dispatches; this makes the
+/// diagnostics agree with it, and with GNU, which prints `clear` rather than
+/// `clear.exe`.
+fn prog_name() -> String {
+    let argv0 = env::args().next().unwrap_or_else(|| "tput".to_string());
+    let base = argv0.rsplit(['/', '\\']).next().unwrap_or(&argv0);
+    base.strip_suffix(".exe").unwrap_or(base).to_string()
+}
+
+/// Refuse an option this personality does not have.
+///
+/// getopt names the first character after the dash that the program has no
+/// option for -- measured in the C locale: `clear -z` names `z`, `clear -xz`
+/// names `z` because `x` is real, and `clear --zzq` names `-`, since ncurses
+/// `clear` has no long options and so reads the second dash as just another
+/// cluster character. One walk over the bytes produces all three.
+///
+/// Then the one-line synopsis, and exit 1 -- which is what `clear`, `tset`,
+/// `lsattr` and `getcap` all do. (`tput` itself exits 2; it is not routed
+/// through here.)
+fn refuse_option(prog: &str, arg: &str, known: &[u8], usage: &str) -> ! {
+    let bad = arg
+        .as_bytes()
+        .iter()
+        .skip(1)
+        .copied()
+        .find(|b| !known.contains(b))
+        .unwrap_or(b'-');
+    eprintln!("{prog}: {}", usageerror::invalid_option(bad));
+    eprintln!("{usage}");
+    process::exit(1);
+}
+
 fn run_clear() -> Result<(), String> {
     let argv: Vec<String> = env::args().collect();
     let mut term: Option<String> = None;
@@ -374,6 +409,11 @@ fn run_clear() -> Result<(), String> {
                 term = Some(argv[i].clone());
             }
             "-x" => clear_scrollback = true,
+            // Used to be skipped, so `clear --zzq` cleared the screen and
+            // exited 0.
+            other if other.starts_with('-') && other.len() > 1 => {
+                refuse_option(&prog_name(), other, b"Txh", "Usage: clear [-T term] [-x]");
+            }
             _ => {}
         }
         i += 1;
@@ -414,6 +454,17 @@ fn run_clear() -> Result<(), String> {
 // ── reset mode ─────────────────────────────────────────────────────
 
 fn run_reset() -> Result<(), String> {
+    // This personality (`reset` and `tset`) parses no arguments at all, so
+    // it used to reset the terminal and exit 0 whatever it was handed.
+    let prog = prog_name();
+    if let Some(arg) = env::args()
+        .nth(1)
+        .filter(|a| a.starts_with('-') && a.len() > 1)
+    {
+        let usage = format!("Usage: {prog} [terminal]");
+        refuse_option(&prog, &arg, b"", &usage);
+    }
+
     let mut stdout = io::stdout();
 
     // Full terminal reset sequence:
@@ -666,8 +717,7 @@ fn main() {
     };
 
     if let Err(e) = result {
-        let name = argv0.rsplit(['/', '\\']).next().unwrap_or(&argv0);
-        eprintln!("{name}: {e}");
+        eprintln!("{}: {e}", prog_name());
         process::exit(1);
     }
 }

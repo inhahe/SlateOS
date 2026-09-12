@@ -138595,3 +138595,356 @@ either side's timing moved the race. Adding row buffering for `--sort` moved it.
 It now polls `/proc/2/stat` until the state is `S`, using the `read` builtin so
 it forks **nothing** -- a forked `awk` would take PID 3 and could itself be
 caught in the listing it is preparing.
+
+## B-SEVENTY-PROGRAMS-ACCEPT-AN-OPTION-THEY-DO-NOT-HAVE-AND-EXIT-ZERO (lane B, 2026-09-12) -- 20 of 70 FIXED
+
+Found by `scripts/unknown-option-sweep.py`, which runs every binary in an
+empty directory with nothing but a bogus long option and looks at what it
+does. The sweep exists because a file named `--list.lock` was sitting in the
+repository root: `flock` had been handed `--list`, had not recognised it, and
+had locked it.
+
+**Three programs made a file out of the option** and are fixed: `flock`
+(created `--list.lock`), `lockfile` (created `--zzq` *and exited 0*), and the
+`nohup` personality of the `timeout` crate (created `nohup.out`; removed
+outright, coreutils already had a correct `nohup`).
+
+**Seventy more accepted the option and exited 0** without a filesystem side
+effect. Eleven are fixed -- `nproc`, `arch`, `pathchk`, `users` (all one
+crate), `lscpu`, `lsmem`, `blkzone`, and `clear`, `tset`, `lsattr`,
+`getcap`, `getopt`, the five `systemd-*` personalities, and
+`resolvectl`/`resolvconf`/`systemd-resolve`. The remaining 50 are
+listed below.
+
+`getopt` is worth singling out. It accepted an unknown option by making
+it the *optstring*, and fixing that surfaced a second, older defect:
+`parse_options` printed `invalid option -- 'x'` for the command line it
+was asked to parse and returned only the words, so the caller exited 0.
+`args=$(getopt "$@") || exit` -- the documented way to use the program --
+was told a rejected line had parsed cleanly. The two failures also carry
+different statuses, measured: **2** for an option of getopt's own, **1**
+for one in the line it parsed.
+
+The last four are the group that has no long options at all, where the
+wording is `invalid option -- 'X'` naming the first character getopt has
+no option for -- *not* the second byte of the argument, which is right
+for `-z` and `--zzq` and wrong for `-Rz`. The rule and its measurements
+live on `usageerror::invalid_option`.
+
+The wording to fix them with is in `userspace/usageerror`; it is getopt's,
+not ours, and was measured in the C locale. The exit status is *not* in that
+crate and must be measured per tool: coreutils exits 1, util-linux's `flock`
+exits 64, and util-linux's `lscpu`, `lsmem`, `prlimit` and `blkzone` exit 1.
+
+**`prlimit` needs more than a refusal** and is called out separately: its
+`--<resource>` arm silently ignores a resource name it cannot parse, and it
+drops the trailing command entirely, so `prlimit --nofile=10 cmd` never runs
+`cmd`. Refusing unknown options there without fixing that would paper over
+the larger gap.
+
+**`sysstat`'s five personalities are blocked on a reference.** `mpstat`,
+`pidstat`, `tapestat`, `cifsiostat` and `sysstat` itself are all in the list,
+but the sysstat package is not installed in the WSL reference environment and
+`apt-get` needs a password this session does not have. Their wording is
+therefore unmeasured, and guessing it is exactly what §371 forbids. Trigger to
+promote: sysstat available in the reference environment.
+
+### A neighbouring class, found while fixing this one: help that lies
+
+`systemd-cat --help` advertises `-p, --priority=PRIO` and
+`-t, --identifier=ID`. `run_cat_journal` takes no arguments and
+implements neither. `blockdev`'s parser accepted `--setfra`, consumed its
+value, and then reported `unknown operation`, because the option was in
+the parser's value-taking list and not in the executor's. Both are the
+same defect from the other side: not "an option we do not have is
+accepted", but "an option we advertise does not exist".
+
+It is sweepable the same way the first one was, and more cheaply, since
+it needs no reference implementation: parse each binary's own `--help`
+for the options it names, then check the parser recognises every one.
+Any disagreement is a defect in one direction or the other, and the
+program tells you both halves itself. Not started; noted here so the
+idea is not lost with the tick that had it.
+
+### Most of what is left is blocked on a reference, not on effort
+
+Of the 58 remaining, only about **14** have a reference implementation in
+the WSL environment this lane measures against: `ifconfig`, `objdump`,
+`prlimit`, `resolvectl`, `resolvconf`, `route`, `dnsdomainname`, `lshw`,
+and the five `systemd-*` personalities. (`ulimit` reads as available but
+that is the shell builtin; util-linux ships no such binary.) The rest
+would have to have their wording invented, which is what §371 forbids, so
+they are blocked on the reference environment rather than on anyone's
+time. Installing the packages needs a password this session does not have.
+
+Wordings already measured, so the next pass does not have to re-derive
+them -- and they are all different, which is the argument for measuring
+each one rather than pattern-matching from the last:
+
+| Tool | Exit | First line |
+|---|---|---|
+| `systemd-cat`/`-cgls`/`-cgtop`/`-escape`/`-path` | 1 | `unrecognized option '--x'`, one line, no pointer |
+| `resolvconf`, `resolvectl` | 1 | same wording |
+| `objdump` | 1 | same wording, then the full usage |
+| `dnsdomainname` | 255 | same wording |
+| `route` | **0** | same wording, then the address-family list |
+| `ifconfig` | 1 | ``option `--x' not recognised.`` then ``` `--help' gives usage information.``` |
+
+`route` exiting 0 is not a transcription error: net-tools really does
+report the option and succeed. Ours differs by printing *no* diagnostic
+at all, so it is still a finding -- the fix there is the message, not the
+status.
+
+### Two things the sweep does not see, both verified rather than assumed
+
+**A program that creates the file and removes it again before exiting reads
+as clean.** A create-then-remove probe reports nothing. This is very likely
+what the original `flock` did -- probing it in a scratch directory showed a
+clean run while a real `--list.lock` sat on disk, so that invocation simply
+never reached its cleanup.
+
+**A program can accept the option and still exit non-zero for an unrelated
+reason**, which reads as a refusal. `blockdev` is the proof: it does not
+appear in the list below, because on this host it accepted `--zzq`, went on
+to the device, and exited 1 with `cannot read the device size from sysfs`.
+On a machine where `/dev/sda` exists it would have exited 0. It was found
+only because `blkzone`, its argv[0] sibling, was flagged and the crate was
+opened anyway. So the count of 70 is a floor, not a total.
+
+### Still open (50)
+
+- `clipboard`
+- `coredumpctl`
+- `credentials`
+- `dbus`
+- `desktop`
+- `ftp`
+- `fwupd`
+- `gdb`
+- `hwinfo`
+- `ifconfig`
+- `loginmgr`
+- `lsirq`
+- `m4`
+- `match3`
+- `numactl`
+- `objdump`
+- `pinball`
+- `prlimit`
+- `route`
+- `sanitize`
+- `selinux`
+- `servicebus`
+- `shell`
+- `sysstat`
+- `thermald`
+- `tuned`
+- `wpa`
+- `atq (via at)`
+- `autrace (via audit)`
+- `captest (via capsh)`
+- `cifsiostat (via sysstat)`
+- `cpufreq-info (via cpupower)`
+- `dnsdomainname (via hostnamectl)`
+- `getenforce (via selinux)`
+- `grub-reboot (via grub2)`
+- `grub-set-default (via grub2)`
+- `lshw (via hwinfo)`
+- `mpstat (via sysstat)`
+- `numademo (via numactl)`
+- `numastat (via numactl)`
+- `pidstat (via sysstat)`
+- `restorecon (via selinux)`
+- `rfkill-event (via rfkill)`
+- `sbkeysync (via sbctl)`
+- `sestatus (via selinux)`
+- `tapestat (via sysstat)`
+- `tuned-gui (via tuned)`
+- `turbostat (via cpupower)`
+- `ulimit (via prlimit)`
+- `update-grub (via grub2)`
+
+## B-THIRTY-FOUR-OPTIONS-ARE-ADVERTISED-BY-HELP-AND-READ-BY-NOTHING (lane B, 2026-09-12) -- now 19, and one of them was worse than a missing option
+
+The mirror image of the unknown-option class above, found by
+`scripts/check-help-vs-parser.py`. That sweep asks whether an option we do
+not have gets accepted; this one asks whether an option we *advertise*
+exists. It needs no reference implementation -- the program supplies both
+halves of the comparison -- which is why it is worth doing now, while two
+thirds of the other list waits on a reference environment.
+
+**34 options across 14 files.** The number began at 180 and every
+correction came from opening a file the tool had accused; the four
+false-positive classes and their fixes are in the tool's own commit
+message and docstring. Both remaining ambiguities fail toward silence, so
+34 is a floor.
+
+Two worked examples, both confirmed by hand:
+
+- `getfacl` advertises `-a/--access`, `-d/--default` and `-n/--numeric`
+  and parses none of them -- its match ends `_ => {}`. Fixing it means
+  either implementing the three or removing them from the help; the help
+  must stop claiming what the binary cannot do either way.
+- `blkzone` advertises `-o/--offset`, `-l/--length` and `-c/--count` and
+  parses none of those either.
+
+**`getfacl` also shows why the first sweep's count is a floor.** It has
+the unknown-option defect too -- `_ => {}` -- but never appeared in that
+list, because `getfacl --zzq` with no file operand exits 1 with "no files
+specified". It accepted the option and failed for an unrelated reason,
+exactly as `blockdev` did. Two independent confirmations of the same
+blind spot.
+
+### Progress, and the count's history
+
+**19 findings across 11 files** as of the `blkzone` deletion, from 34 when
+this was filed. Two of the drops were fixes and one was a fifth false
+positive:
+
+- `getfacl`'s `-a`, `-d` and `-n` are implemented rather than removed from
+  the help; all three were cheap and useful.
+- `blkzone` is **deleted**, see below.
+- `objdump`'s `--radix`, `--start-address` and `--stop-address` were never
+  broken: the parser holds `strip_prefix("start-address=")`, a de-dashed
+  name carrying its `=`, which the checker did not recognise.
+
+The count over the whole life of the tool: **180, 153, 74, 46, 34, 25, 19**.
+The first number is nine times the last, and every correction came from
+opening a file the tool had accused. Nobody should quote an untriaged
+number from this or any similar sweep.
+
+### `blkzone` was not a missing option, it was an invented answer
+
+Reading it to add the three options found that `blkzone report` printed two
+zones with hardcoded start/length/capacity/write-pointer values, for any
+device, on any machine, without opening anything -- a fabricated answer to a
+question about real hardware, in the format of a real answer. `reset`,
+`open`, `close` and `finish` printed `blkzone: reset on /dev/sda` and exited
+**0**, reporting a destructive zone operation as done when none was
+attempted.
+
+Deleted under §1005/§1006 rather than made to refuse. It was unreachable --
+in `multicall-aliases-baseline.txt`, so no build produced the name -- which
+means it was dead code that would have lied if anyone had wired it up.
+
+**Two more instances, found the same way** -- by reading a file the
+help-vs-parser sweep had pointed at for an unrelated reason.
+`systemd-cgls` printed a fixed cgroup tree (`init.scope` with pid 1,
+`dbus.service` with pid 100) on every machine, having opened nothing;
+it now walks `/sys/fs/cgroup`, which needs no ioctl and no privilege.
+`systemd-cgtop` printed five invented rows and now reports
+`pids.current` and `memory.current`, both `-` when unreadable rather than
+0 -- a group whose count is unknown is not a group with no processes.
+Its `%CPU` column is `-`, which is the correct answer rather than a gap:
+a percentage needs two samples and an interval, and one invocation has
+neither. Measured, `systemd-cgtop -n 1` prints `-` there too. Continuous
+mode is where the number would come from and is neither implemented nor
+claimed.
+
+**The `cgls` test is the cautionary half.** It asserted the output
+contained `system.slice` and `user.slice`, which was true on every
+machine because those names were hardcoded. A test that pins a
+fabrication in place is worse than no test: it makes the invention look
+verified, and it would have gone on passing forever. Its replacement
+asserts what a scratch directory was given comes back *and* that
+`user.slice` does not.
+
+**This is a class, and it has been hit here before.** `read_file_acl` used
+to call `fs::metadata`, discard the result, and report owner `root`, group
+`root` and mode 0755 for every file. Both are the same defect: output that
+is shaped like a measurement and is not one. It is not cheaply sweepable --
+telling an invented constant from a real one needs a reader -- but 45
+comments in lane B say `stub`, `fake`, `placeholder` or `simulated`, and
+most are honest host-test shims. Worth a reader's pass, not a script's.
+
+### The 34, as filed
+
+
+```
+  userspace/acl/src/main.rs
+      --access             nowhere                from: -a, --access    Display access ACL only
+      --default            nowhere                from: -d, --default   Display default ACL only
+      --numeric            nowhere                from: -n, --numeric      Numeric UIDs/GIDs
+      -a                   nowhere                from: -a, --access    Display access ACL only
+      -d                   nowhere                from: -d, --default   Display default ACL only
+      -n                   nowhere                from: -n, --numeric      Numeric UIDs/GIDs
+  userspace/blockdev/src/main.rs
+      --count              nowhere                from: -c, --count NUM       Number of zones
+      --length             nowhere                from: -l, --length SECTORS  Number of sectors
+      --offset             nowhere                from: -o, --offset SECTOR   Start sector
+      -c                   nowhere                from: -c, --count NUM       Number of zones
+      -l                   nowhere                from: -l, --length SECTORS  Number of sectors
+      -o                   nowhere                from: -o, --offset SECTOR   Start sector
+  userspace/iptables/src/main.rs
+      --opts               nowhere                from: -m match --opts      Extended match module
+  userspace/irqbalance/src/main.rs
+      --banmod             nowhere                from: --banmod=MOD         Ban module IRQs
+  userspace/lscpu/src/main.rs
+      --bytes              nowhere                from: -B, --bytes        Print sizes in bytes
+      -B                   nowhere                from: -B, --bytes        Print sizes in bytes
+  userspace/lsmem/src/main.rs
+      -s                   nowhere                from: -s, --summary[=WHEN] Summary (auto, only, never)
+  userspace/objdump/src/main.rs
+      --radix              nowhere                from: --radix=N  Radix (8, 10, 16)
+      --start-address      nowhere                from: --start-address=ADDR
+      --stop-address       nowhere                from: --stop-address=ADDR
+  userspace/oils/src/main.rs
+      -C                   nowhere                from: -e -x -u -f -C …             Single-letter `set`
+      -e                   nowhere                from: -e -x -u -f -C …             Single-letter `set`
+      -f                   nowhere                from: -e -x -u -f -C …             Single-letter `set`
+      -u                   nowhere                from: -e -x -u -f -C …             Single-letter `set`
+      -x                   nowhere                from: -e -x -u -f -C …             Single-letter `set`
+  userspace/pstree/src/main.rs
+      --compact            nowhere                from: -c, --compact=no    Don't compact identical subt
+  userspace/systemctl/src/main.rs
+      --identifier         nowhere                from: -t, --identifier=ID  Set syslog identifier
+      --pid                nowhere                from: --pid=PID       Send from specific PID
+      --priority           nowhere                from: -p, --priority=PRIO  Set syslog priority (0-7)
+  userspace/vmstat/src/main.rs
+      --timestamp---       nowhere                from: ---timestamp---
+  userspace/wget/src/main.rs
+      --request            nowhere                from: ---request begin---
+      --response           nowhere                from: ---response begin---
+  userspace/xattr/src/main.rs
+      --encoding           nowhere                from: -e, --encoding ENC Encoding (text, hex, base64)
+  userspace/xdg/src/main.rs
+      --icon               nowhere                from: --icon
+```
+
+## B-SYSTEMD-CAT-WRITES-TO-STDOUT-SO-NOTHING-IT-LOGS-REACHES-THE-JOURNAL (lane B, 2026-09-12)
+
+Found while chasing the three options `check-help-vs-parser` flagged on
+`systemd-cat` (`-p/--priority`, `-t/--identifier`, `--pid`, all advertised
+and none parsed). Deciding whether to implement or de-advertise them meant
+asking what they would *do*, and the answer is the actual defect.
+
+`run_cat_journal` reads stdin and writes each line to **stdout** prefixed
+with `[journal] `. There is no journal in it. Meanwhile
+`userspace/journalctl` reads real JSON-lines records out of
+`/var/log/journal/` (`JOURNAL_DIR`), so a line piped through `systemd-cat`
+is never readable by `journalctl` -- the two tools that exist to be each
+other's ends do not meet.
+
+That makes the three options implementable and worth implementing, rather
+than removable: they are exactly the fields the record format carries.
+`journalctl` parses `ts`, `msg`, `pid`, `level` (falling back to
+`PRIORITY`) and `service` (falling back to `unit`), so:
+
+| option | field |
+|---|---|
+| `-t`, `--identifier=ID` | `service` |
+| `-p`, `--priority=PRIO` | `level` |
+| `--pid=PID` | `pid` |
+
+One wrinkle worth writing down before someone trusts the module doc: it
+gives the example record as `{"ts":…,"level":…,"service":…}` but the
+parser accepts `unit` as an alternative and the doc does not say so. Write
+`service`, since that is what the documented example uses and what the
+parser tries first.
+
+**Not started.** The work is: append one record per input line to a file
+under `/var/log/journal/`, with those fields; keep the `[journal] ` stdout
+echo only if something depends on it, which nothing appears to. This is a
+functional gap rather than a fabrication -- the prefix is a placeholder
+transport, not an invented measurement -- so it is filed rather than
+urgent.

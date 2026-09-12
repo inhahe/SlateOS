@@ -1156,6 +1156,26 @@ fn run_getcap(args: &[String]) -> i32 {
                 println!("  -n  Numeric output");
                 return 0;
             }
+            // An unknown option used to become a *file* to query -- the same
+            // shape as the `flock` bug -- so `getcap --zzq` looked for
+            // capabilities on a file of that name and exited 0.
+            //
+            // libcap's `getcap` has no long options, so getopt reads any
+            // dashed word as a cluster and names the first character it has
+            // no option for: measured, `getcap -z` names `z`, `getcap -lz`
+            // names `z`, and `getcap --zzq` names `-`.
+            other if other.starts_with('-') && other.len() > 1 => {
+                let bad = other
+                    .as_bytes()
+                    .iter()
+                    .skip(1)
+                    .copied()
+                    .find(|b| !b"rvnh".contains(b))
+                    .unwrap_or(b'-');
+                eprintln!("getcap: {}", usageerror::invalid_option(bad));
+                eprintln!("usage: getcap [-h] [-n] [-r] [-v] <filename> [<filename> ...]");
+                return 1;
+            }
             other => files.push(other.to_string()),
         }
         i += 1;

@@ -6,6 +6,7 @@ version = 4
 name = "acl"
 version = "0.1.0"
 dependencies = [
+ "pwdb",
  "userdb",
 ]
 
@@ -179,6 +180,7 @@ name = "blockdev"
 version = "0.1.0"
 dependencies = [
  "quoting",
+ "usageerror",
 ]
 
 [[package]]
@@ -244,6 +246,7 @@ name = "capsh"
 version = "0.1.0"
 dependencies = [
  "quoting",
+ "usageerror",
 ]
 
 [[package]]
@@ -279,6 +282,9 @@ version = "0.1.0"
 [[package]]
 name = "chattr"
 version = "0.1.0"
+dependencies = [
+ "usageerror",
+]
 
 [[package]]
 name = "checkers"
@@ -971,6 +977,7 @@ name = "getopt"
 version = "0.1.0"
 dependencies = [
  "quoting",
+ "usageerror",
 ]
 
 [[package]]
@@ -1523,6 +1530,9 @@ dependencies = [
 [[package]]
 name = "lscpu"
 version = "0.1.0"
+dependencies = [
+ "usageerror",
+]
 
 [[package]]
 name = "lsirq"
@@ -1533,6 +1543,7 @@ name = "lsmem"
 version = "0.1.0"
 dependencies = [
  "procinfo",
+ "usageerror",
 ]
 
 [[package]]
@@ -2289,6 +2300,9 @@ dependencies = [
 [[package]]
 name = "resolvectl"
 version = "0.1.0"
+dependencies = [
+ "usageerror",
+]
 
 [[package]]
 name = "reversi"
@@ -2795,6 +2809,7 @@ name = "systemctl"
 version = "0.1.0"
 dependencies = [
  "procinfo",
+ "usageerror",
 ]
 
 [[package]]
@@ -2928,6 +2943,7 @@ name = "tput"
 version = "0.1.0"
 dependencies = [
  "quoting",
+ "usageerror",
 ]
 
 [[package]]

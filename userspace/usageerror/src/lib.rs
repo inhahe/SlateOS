@@ -56,8 +56,25 @@ pub fn unrecognized_option(arg: &[u8]) -> String {
 
 /// `invalid option -- 'q'` — a short option the program does not have.
 ///
-/// Takes the offending byte, not the cluster: given `-xq`, getopt reports
-/// whichever letter it choked on, one at a time.
+/// # Which byte to pass
+///
+/// The **first character after the dash that this program does not
+/// recognise** — not the second byte of the argument, and not the whole
+/// cluster. Measured on `lsattr` in the C locale:
+///
+/// | Command | Names |
+/// |---|---|
+/// | `lsattr -z`    | `'z'` |
+/// | `lsattr -Rz`   | `'z'` — `R` is real, so getopt walks past it |
+/// | `lsattr --zzq` | `'-'` — no long options, so the second dash is the first unrecognised character |
+///
+/// So a caller with no long options can walk the bytes after the leading
+/// dash and pass the first one it has no option for, and all three rows
+/// fall out of that one loop. An earlier version of this crate offered a
+/// helper that took the whole argument and named byte 1; it was right for
+/// the first and third rows and wrong for the middle one, which is the
+/// shape of mistake that survives review because the message still reads
+/// perfectly.
 #[must_use]
 pub fn invalid_option(opt: u8) -> String {
     format!("invalid option -- {}", quoting::quoteaf(&[opt]))
@@ -79,6 +96,23 @@ pub fn extra_operand(arg: &[u8]) -> String {
 ///
 /// A bare `-` and the end-of-options `--` are operands, not options, and are
 /// not this function's business; the caller must exclude them first.
+///
+/// # Only for programs that have long options
+///
+/// The `--` prefix selects the long wording, which is right only if the
+/// program calls `getopt_long`. A program that calls plain `getopt` has no
+/// long options at all, so it reads `--zzq` as a *short cluster* and chokes
+/// on the first character: measured, `clear`, `tset`, `lsattr` and `getcap`
+/// all answer
+///
+/// ```text
+/// clear: invalid option -- '-'
+/// ```
+///
+/// to `clear --zzq`, naming the dash itself. Such a caller wants
+/// [`invalid_option`]`(b'-')`, not this function. There is no way to tell
+/// the two apart from the argument alone, which is why this is a caller's
+/// decision and is written down here rather than guessed at each site.
 #[must_use]
 pub fn unknown_option(arg: &[u8]) -> String {
     if arg.starts_with(b"--") {
@@ -131,6 +165,25 @@ mod tests {
     fn shape_selects_the_wording() {
         assert_eq!(unknown_option(b"--long"), "unrecognized option '--long'");
         assert_eq!(unknown_option(b"-s"), "invalid option -- 's'");
+    }
+
+    /// The shape a program with no long options wants. Measured from
+    /// `clear --zzq`, which reads the word as a short cluster and names the
+    /// dash it stopped on.
+    #[test]
+    fn a_program_without_long_options_names_the_dash() {
+        assert_eq!(invalid_option(b'-'), "invalid option -- '-'");
+    }
+
+    /// The middle row of the table on `invalid_option`: a cluster whose
+    /// offending letter is not the byte after the dash.
+    #[test]
+    fn the_caller_names_the_offender_not_the_second_byte() {
+        // `lsattr -Rz`: `R` is a real option, so getopt stops on `z`.
+        assert_eq!(invalid_option(b'z'), "invalid option -- 'z'");
+        // `lsattr --zzq`: no long options, so the second dash is the first
+        // character it has no option for.
+        assert_eq!(invalid_option(b'-'), "invalid option -- '-'");
     }
 
     #[test]

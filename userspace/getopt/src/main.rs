@@ -141,6 +141,41 @@ fn run_getopt() -> Result<(), String> {
                 }
                 break;
             }
+            // Before any operand, a dashed word is one of getopt's *own*
+            // options; after one, everything belongs to the command line
+            // being parsed. Measured against util-linux, and the two cases
+            // fail differently, which is the point:
+            //
+            //   getopt -o ab -x   invalid option -- 'x', exit 2 -- no
+            //                     operand yet, so `-x` is getopt's own
+            //   getopt abc -x     `abc` is the optstring and `-x` goes to
+            //                     the parse, which prints the same words
+            //                     and exits 1
+            //
+            // `args_to_parse.is_empty()` is "no operand seen yet"; in
+            // enhanced mode `-o` has already filled `optstring`, so that
+            // alone cannot stand in for it.
+            //
+            // This used to fall through below and *become the optstring*,
+            // so `getopt --zzq` parsed an empty command line against an
+            // optstring of `--zzq` and exited 0.
+            other
+                if other.starts_with('-')
+                    && other.len() > 1
+                    && args_to_parse.is_empty()
+                    && (enhanced || optstring.is_none()) =>
+            {
+                eprintln!(
+                    "getopt: {}",
+                    usageerror::with_help_pointer(
+                        "getopt",
+                        &usageerror::unknown_option(other.as_bytes())
+                    )
+                );
+                // 2 for getopt's own bad option; `main` exits 1, which is
+                // what a bad option in the *parsed* line gets.
+                process::exit(2);
+            }
             _ => {
                 if !enhanced && optstring.is_none() {
                     optstring = Some(argv[i].clone());
@@ -153,10 +188,17 @@ fn run_getopt() -> Result<(), String> {
     }
 
     let opts = optstring.unwrap_or_default();
-    let result = parse_options(&opts, &longopts, &args_to_parse, &name, alternative);
+    let (result, had_error) = parse_options(&opts, &longopts, &args_to_parse, &name, alternative);
 
     let quoted = quote_for_shell(&result, &shell);
     println!("{quoted}");
+
+    if had_error {
+        // The output is still printed -- the caller needs the `--` -- so
+        // this cannot be an early return. 1, not the 2 that a bad option of
+        // getopt's own gets.
+        process::exit(1);
+    }
 
     Ok(())
 }
@@ -201,13 +243,23 @@ fn parse_longopts(spec: &str) -> Vec<LongOpt> {
     opts
 }
 
+/// Parse `args` against `optstring`, returning the shell-ready words and
+/// whether anything in `args` was rejected.
+///
+/// The flag is the point: this used to report a bad option on stderr and
+/// return only the words, so `run_getopt` had no way to know and exited 0.
+/// util-linux exits **1** when the command line it was asked to parse holds
+/// an option the optstring does not have -- distinct from the **2** it exits
+/// for a bad option of its own -- and a script writing
+/// `args=$(getopt ...) || exit` depends on the difference.
 fn parse_options(
     optstring: &str,
     longopts: &[LongOpt],
     args: &[String],
     _name: &str,
     _alternative: bool,
-) -> Vec<String> {
+) -> (Vec<String>, bool) {
+    let mut had_error = false;
     let mut result = Vec::new();
     let opt_chars: Vec<char> = optstring.chars().collect();
     let mut i = 0;
@@ -256,7 +308,11 @@ fn parse_options(
                 }
             } else {
                 // Unknown long option
-                eprintln!("getopt: unrecognized option '--{opt_name}'");
+                had_error = true;
+                eprintln!(
+                    "getopt: {}",
+                    usageerror::unrecognized_option(format!("--{opt_name}").as_bytes())
+                );
             }
             i += 1;
             continue;
@@ -301,6 +357,7 @@ fn parse_options(
                     // so `to_string` is lossless. Not the `byte as char` this
                     // sweep keeps finding elsewhere, which is a Latin-1
                     // widening that reports 0xE9 as an 'é' nobody typed.
+                    had_error = true;
                     eprintln!("getopt: invalid option -- {}", quoteaf_os(c.to_string()));
                 }
                 j += 1;
@@ -316,7 +373,7 @@ fn parse_options(
 
     result.push("--".to_string());
     result.extend(non_option_args);
-    result
+    (result, had_error)
 }
 
 fn quote_for_shell(parts: &[String], shell: &str) -> String {
@@ -631,6 +688,23 @@ mod tests {
 
     // ── Personality detection ──
 
+    /// The flag exists so `run_getopt` can exit 1. Before it, a rejected
+    /// option was printed and then reported as success.
+    #[test]
+    fn a_rejected_option_sets_the_error_flag() {
+        let (_out, had_error) = parse_options("abc", &[], &["-x".to_string()], "test", false);
+        assert!(
+            had_error,
+            "an option outside the optstring must be reported"
+        );
+    }
+
+    #[test]
+    fn a_clean_line_does_not_set_the_error_flag() {
+        let (_out, had_error) = parse_options("abc", &[], &["-a".to_string()], "test", false);
+        assert!(!had_error);
+    }
+
     #[test]
     fn test_detect_getopt() {
         assert_eq!(detect_mode("getopt"), Mode::Getopt);
@@ -690,7 +764,7 @@ mod tests {
 
     #[test]
     fn test_parse_short_options() {
-        let result = parse_options(
+        let (result, _had_error) = parse_options(
             "abc:",
             &[],
             &[
@@ -710,7 +784,7 @@ mod tests {
 
     #[test]
     fn test_parse_combined_short() {
-        let result = parse_options("ab", &[], &["-ab".to_string()], "test", false);
+        let (result, _had_error) = parse_options("ab", &[], &["-ab".to_string()], "test", false);
         assert!(result.contains(&"-a".to_string()));
         assert!(result.contains(&"-b".to_string()));
     }
@@ -718,7 +792,7 @@ mod tests {
     #[test]
     fn test_parse_long_options() {
         let longopts = parse_longopts("verbose,output:");
-        let result = parse_options(
+        let (result, _had_error) = parse_options(
             "",
             &longopts,
             &[
@@ -737,7 +811,7 @@ mod tests {
     #[test]
     fn test_parse_long_option_with_equals() {
         let longopts = parse_longopts("output:");
-        let result = parse_options(
+        let (result, _had_error) = parse_options(
             "",
             &longopts,
             &["--output=file.txt".to_string()],
@@ -750,7 +824,7 @@ mod tests {
 
     #[test]
     fn test_parse_separator() {
-        let result = parse_options(
+        let (result, _had_error) = parse_options(
             "a",
             &[],
             &["-a".to_string(), "--".to_string(), "non-opt".to_string()],
@@ -764,7 +838,7 @@ mod tests {
 
     #[test]
     fn test_parse_non_option_args() {
-        let result = parse_options(
+        let (result, _had_error) = parse_options(
             "a",
             &[],
             &["-a".to_string(), "file1".to_string(), "file2".to_string()],
@@ -853,13 +927,13 @@ mod tests {
 
     #[test]
     fn test_parse_empty_args() {
-        let result = parse_options("", &[], &[], "test", false);
+        let (result, _had_error) = parse_options("", &[], &[], "test", false);
         assert_eq!(result, vec!["--".to_string()]);
     }
 
     #[test]
     fn test_parse_only_separator() {
-        let result = parse_options("", &[], &["--".to_string()], "test", false);
+        let (result, _had_error) = parse_options("", &[], &["--".to_string()], "test", false);
         assert_eq!(result, vec!["--".to_string()]);
     }
 

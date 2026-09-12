@@ -215,6 +215,19 @@ fn record_type_str(rtype: &str) -> &str {
 // resolvectl command
 // ============================================================================
 
+/// The name this program was invoked as, without directory or `.exe`.
+///
+/// The diagnostics need it as well as the dispatch does: `systemd-resolve`
+/// is a compatibility name for `resolvectl` -- a symlink, in systemd -- and
+/// a refusal has to name the one the caller typed.
+fn invoked_as() -> String {
+    let argv0 = env::args()
+        .next()
+        .unwrap_or_else(|| "resolvectl".to_string());
+    let base = argv0.rsplit(['/', '\\']).next().unwrap_or(&argv0);
+    base.strip_suffix(".exe").unwrap_or(base).to_string()
+}
+
 fn cmd_resolvectl(args: &[String]) {
     if args.is_empty() {
         cmd_resolvectl_status();
@@ -277,6 +290,18 @@ fn cmd_resolvectl(args: &[String]) {
         "-V" | "--version" => {
             println!("resolvectl {VERSION}");
             process::exit(0);
+        }
+        // An unknown *option* is not a hostname. It used to fall into the
+        // arm below and be queried as one, so `resolvectl --zzq` looked up a
+        // name of that spelling and exited 0. A hostname never begins with a
+        // dash, so the two cannot be confused.
+        opt if opt.starts_with('-') && opt.len() > 1 => {
+            eprintln!(
+                "{}: {}",
+                invoked_as(),
+                usageerror::unknown_option(opt.as_bytes())
+            );
+            process::exit(1);
         }
         other => {
             // Treat unknown subcommand as a hostname to query.
@@ -571,8 +596,14 @@ fn cmd_resolvconf(args: &[String]) {
                 let _ = writeln!(out, "search {}", config.search_domains.join(" "));
             }
         }
-        _ => {
-            eprintln!("resolvconf: unknown option: {}", args[0]);
+        // Reported the problem and then exited 0, so a script could not tell
+        // the configuration had not been applied.
+        other => {
+            eprintln!(
+                "resolvconf: {}",
+                usageerror::unknown_option(other.as_bytes())
+            );
+            process::exit(1);
         }
     }
 }
@@ -677,19 +708,7 @@ fn cmd_host(args: &[String]) {
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    let prog_name = {
-        let s = args.first().map(|s| s.as_str()).unwrap_or("resolvectl");
-        let bytes = s.as_bytes();
-        let mut last_sep = 0;
-        for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' {
-                last_sep = i + 1;
-            }
-        }
-        let base = &s[last_sep..];
-        let base = base.strip_suffix(".exe").unwrap_or(base);
-        base.to_string()
-    };
+    let prog_name = invoked_as();
 
     let rest: Vec<String> = args.into_iter().skip(1).collect();
 

@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS getopt/tsort/cksum - shell scripting helpers"
 [dependencies]
+# getopt's usage diagnostics, spelled once -- fitting here, since this is
+# the program those diagnostics are named after. Pure formatting over
+# `quoting`, no I/O, so §768 exempt.
+usageerror = { path = "../usageerror" }
 # It interpolates `c` into "getopt: invalid option -- {}". That value is an
 # argv word, so it is whatever the user typed and not text this program
 # chose.

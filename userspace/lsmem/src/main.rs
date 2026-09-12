@@ -64,7 +64,9 @@ struct LsmemOpts {
 
 #[derive(Clone, Debug, PartialEq)]
 enum SummaryMode {
-    Auto,
+    /// Summary *and* table. What the reference calls `always`, and what
+    /// you get with no `--summary` at all.
+    Always,
     Only,
     Never,
 }
@@ -407,6 +409,21 @@ fn print_summary(
 // CLI
 // ============================================================================
 
+/// Refuse an option this program does not have.
+///
+/// The wording is getopt's, shared through `usageerror` so every program
+/// here renders it identically. The status is **1**, measured rather than
+/// assumed: `lscpu`, `lsmem`, `prlimit` and `blkzone` all exit 1 for this,
+/// where util-linux's own `flock` exits 64 -- so it is per-tool, which is
+/// why `usageerror` does not choose it.
+fn refuse_unknown_option(prog: &str, arg: &str) -> ! {
+    eprintln!(
+        "{prog}: {}",
+        usageerror::with_help_pointer(prog, &usageerror::unknown_option(arg.as_bytes()))
+    );
+    process::exit(1);
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     let mut opts = LsmemOpts {
@@ -416,7 +433,7 @@ fn main() {
         noheadings: false,
         bytes: false,
         all: false,
-        summary: SummaryMode::Auto,
+        summary: SummaryMode::Always,
         columns: Vec::new(),
     };
 
@@ -438,7 +455,7 @@ fn main() {
                 println!(
                     "  -o, --output COLS    Columns (RANGE,SIZE,STATE,REMOVABLE,BLOCK,NODE,ZONES)"
                 );
-                println!("  -s, --summary[=WHEN] Summary (auto, only, never)");
+                println!("      --summary[=WHEN] Summary (never, always or only)");
                 println!("  -h, --help           Show this help");
                 println!("  -V, --version        Show version");
                 process::exit(0);
@@ -464,14 +481,28 @@ fn main() {
             }
             s if s.starts_with("--summary") => {
                 if let Some(val) = s.strip_prefix("--summary=") {
+                    // Measured: the reference answers `lsmem: unsupported
+                    // --summary argument` and exits 1 for anything outside
+                    // these three -- including `auto`, which is what this
+                    // build used to call the default and would silently
+                    // have accepted here along with every typo.
                     opts.summary = match val {
                         "only" => SummaryMode::Only,
                         "never" => SummaryMode::Never,
-                        _ => SummaryMode::Auto,
+                        "always" => SummaryMode::Always,
+                        _ => {
+                            eprintln!("lsmem: unsupported --summary argument");
+                            process::exit(1);
+                        }
                     };
                 } else {
                     opts.summary = SummaryMode::Only;
                 }
+            }
+            // Anything else beginning with a dash is an option this
+            // build does not have; it used to be skipped silently.
+            other if other.starts_with('-') && other.len() > 1 => {
+                refuse_unknown_option("lsmem", other);
             }
             _ => {}
         }
@@ -495,7 +526,7 @@ fn main() {
                 print_table(&mut out, &ranges, &opts);
             }
         }
-        SummaryMode::Auto => {
+        SummaryMode::Always => {
             if opts.json {
                 print_json(&mut out, &ranges, &opts);
             } else {
@@ -693,7 +724,7 @@ mod tests {
 
     #[test]
     fn test_summary_mode() {
-        assert_eq!(SummaryMode::Auto, SummaryMode::Auto);
+        assert_eq!(SummaryMode::Always, SummaryMode::Always);
         assert_ne!(SummaryMode::Only, SummaryMode::Never);
     }
 

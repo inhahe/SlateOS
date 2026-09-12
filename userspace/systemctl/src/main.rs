@@ -19,7 +19,9 @@
 
 use std::collections::BTreeMap;
 use std::env;
+use std::fs;
 use std::io::{self, BufRead, Write};
+use std::path::{Path, PathBuf};
 use std::process;
 
 // ============================================================================
@@ -1156,25 +1158,120 @@ fn run_cat_journal(out: &mut dyn Write) -> io::Result<i32> {
 // systemd-cgls
 // ============================================================================
 
+// ── cgroups, read rather than invented ─────────────────────────────
+
+/// The cgroup v2 mount point.
+///
+/// `systemd-cgls` shows the unified hierarchy. v1 controllers live in
+/// per-controller subdirectories of this same path and are not what this
+/// walks; on a v2 system there are none.
+const CGROUP_ROOT: &str = "/sys/fs/cgroup";
+
+/// A cgroup's child cgroups: its subdirectories, sorted.
+///
+/// Sorted because `read_dir` yields the filesystem's order, and a tree that
+/// reorders itself between runs cannot be diffed against an earlier one.
+fn cgroup_children(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut kids: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    kids.sort();
+    kids
+}
+
+/// The pids listed in a cgroup's `cgroup.procs`.
+///
+/// An interior cgroup usually has none of its own: v2 forbids processes in a
+/// node that has controller-enabled children.
+fn cgroup_procs(dir: &Path) -> Vec<u32> {
+    let Ok(text) = fs::read_to_string(dir.join("cgroup.procs")) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter_map(|l| l.trim().parse::<u32>().ok())
+        .collect()
+}
+
+/// How `systemd-cgls` labels a process: its command line, with the NULs that
+/// separate the arguments rendered as spaces.
+///
+/// Bytes, not text. A command line is whatever `execve` was handed and need
+/// not be UTF-8, and `from_utf8_lossy` here would put replacement characters
+/// into a listing someone reads to identify a process.
+fn pid_command(pid: u32) -> Vec<u8> {
+    if let Ok(raw) = fs::read(format!("/proc/{pid}/cmdline")) {
+        let parts: Vec<&[u8]> = raw.split(|b| *b == 0).filter(|p| !p.is_empty()).collect();
+        if !parts.is_empty() {
+            return parts.join(&b' ');
+        }
+    }
+    // A kernel thread has an empty cmdline; `comm` is what it has instead.
+    fs::read(format!("/proc/{pid}/comm"))
+        .map(|mut c| {
+            while c.last() == Some(&b'\n') {
+                c.pop();
+            }
+            c
+        })
+        .unwrap_or_default()
+}
+
+/// One cgroup's name as it should appear in the tree.
+///
+/// `to_str` rather than `to_string_lossy`: a name that is not UTF-8 is shown
+/// in its escaped debug form, which is unambiguous, instead of having its
+/// bytes replaced by U+FFFD.
+fn cgroup_label(dir: &Path) -> String {
+    let name = dir.file_name().unwrap_or(dir.as_os_str());
+    name.to_str()
+        .map_or_else(|| format!("{name:?}"), ToString::to_string)
+}
+
+/// Print `dir`'s children and processes, `systemd-cgls` style.
+fn print_cgroup_tree(out: &mut dyn Write, dir: &Path, prefix: &str) -> io::Result<()> {
+    let kids = cgroup_children(dir);
+    let procs = cgroup_procs(dir);
+    let total = kids.len().saturating_add(procs.len());
+    let mut seen = 0usize;
+
+    for pid in procs {
+        seen = seen.saturating_add(1);
+        let stem = if seen == total { "└─" } else { "├─" };
+        write!(out, "{prefix}{stem}{pid} ")?;
+        out.write_all(&pid_command(pid))?;
+        writeln!(out)?;
+    }
+    for kid in kids {
+        seen = seen.saturating_add(1);
+        let last = seen == total;
+        writeln!(
+            out,
+            "{prefix}{}{}",
+            if last { "└─" } else { "├─" },
+            cgroup_label(&kid)
+        )?;
+        let deeper = format!("{prefix}{}", if last { "  " } else { "│ " });
+        print_cgroup_tree(out, &kid, &deeper)?;
+    }
+    Ok(())
+}
+
 fn run_cgls(out: &mut dyn Write) -> io::Result<i32> {
+    // This used to print a fixed tree -- `init.scope`, `dbus.service`, pids
+    // 1 and 100 -- for every machine, having read nothing. The hierarchy is
+    // a directory tree, so there was never a reason to invent it.
+    let root = Path::new(CGROUP_ROOT);
+    if !root.is_dir() {
+        writeln!(out, "systemd-cgls: {CGROUP_ROOT} is not a directory")?;
+        return Ok(1);
+    }
     writeln!(out, "Control group /:")?;
-    writeln!(out, "├─init.scope")?;
-    writeln!(out, "│ └─1 /sbin/init")?;
-    writeln!(out, "├─system.slice")?;
-    writeln!(out, "│ ├─dbus.service")?;
-    writeln!(out, "│ │ └─100 /usr/bin/dbus")?;
-    writeln!(out, "│ ├─network.service")?;
-    writeln!(out, "│ │ └─200 /usr/bin/network")?;
-    writeln!(out, "│ ├─sshd.service")?;
-    writeln!(out, "│ │ └─300 /usr/bin/sshd")?;
-    writeln!(out, "│ ├─logd.service")?;
-    writeln!(out, "│ │ └─400 /usr/bin/logd")?;
-    writeln!(out, "│ └─cron.service")?;
-    writeln!(out, "│   └─500 /usr/bin/cron")?;
-    writeln!(out, "└─user.slice")?;
-    writeln!(out, "  └─user-1000.slice")?;
-    writeln!(out, "    └─session-1.scope")?;
-    writeln!(out, "      └─1000 bash")?;
+    print_cgroup_tree(out, root, "")?;
     Ok(0)
 }
 
@@ -1182,37 +1279,107 @@ fn run_cgls(out: &mut dyn Write) -> io::Result<i32> {
 // systemd-cgtop
 // ============================================================================
 
+/// A byte count in the units `systemd-cgtop` prints: binary, one decimal.
+///
+/// Measured against the reference: 4096 renders `4.0K` and 162 424 832
+/// renders `154.9M`. Below a kibibyte it is a plain count of bytes.
+fn format_cgroup_size(bytes: u64) -> String {
+    const STEP: f64 = 1024.0;
+    let units = ["K", "M", "G", "T", "P"];
+    if bytes < 1024 {
+        return format!("{bytes}B");
+    }
+    let mut value = bytes as f64 / STEP;
+    let mut unit = units[0];
+    for next in &units[1..] {
+        if value < STEP {
+            break;
+        }
+        value /= STEP;
+        unit = next;
+    }
+    format!("{value:.1}{unit}")
+}
+
+/// How many processes are in a cgroup.
+///
+/// `pids.current` when that controller is enabled, and the line count of
+/// `cgroup.procs` otherwise -- which is what the number means either way.
+/// `None` when neither file is readable, and the reference prints `-` for
+/// that rather than 0: a group whose count is unknown is not a group with
+/// no processes.
+fn cgroup_tasks(dir: &Path) -> Option<u64> {
+    if let Ok(n) = fs::read_to_string(dir.join("pids.current"))
+        .map_err(|_| ())
+        .and_then(|t| t.trim().parse::<u64>().map_err(|_| ()))
+    {
+        return Some(n);
+    }
+    let text = fs::read_to_string(dir.join("cgroup.procs")).ok()?;
+    Some(text.lines().filter(|l| !l.trim().is_empty()).count() as u64)
+}
+
+/// A cgroup's `memory.current`, in bytes.
+fn cgroup_memory(dir: &Path) -> Option<u64> {
+    fs::read_to_string(dir.join("memory.current"))
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()
+}
+
+/// Every cgroup under `root`, with the figures the kernel has for it.
+///
+/// Depth-first and sorted, so two runs of the same tree agree.
+fn cgroup_usage_rows(root: &Path, base: &Path, into: &mut Vec<(String, Option<u64>, Option<u64>)>) {
+    for kid in cgroup_children(base) {
+        // Joined from components rather than the platform separator, and
+        // via `to_str` rather than `to_string_lossy`: a cgroup name that is
+        // not UTF-8 falls back to the escaped label instead of gaining
+        // replacement characters.
+        let name = kid.strip_prefix(root).map_or_else(
+            |_| cgroup_label(&kid),
+            |rel| {
+                rel.components()
+                    .filter_map(|c| c.as_os_str().to_str())
+                    .collect::<Vec<_>>()
+                    .join("/")
+            },
+        );
+        into.push((name, cgroup_tasks(&kid), cgroup_memory(&kid)));
+        cgroup_usage_rows(root, &kid, into);
+    }
+}
+
 fn run_cgtop(out: &mut dyn Write) -> io::Result<i32> {
+    // This used to print five invented cgroups with invented task counts,
+    // CPU percentages and memory figures, having read nothing.
+    let root = Path::new(CGROUP_ROOT);
+    if !root.is_dir() {
+        writeln!(out, "systemd-cgtop: {CGROUP_ROOT} is not a directory")?;
+        return Ok(1);
+    }
     writeln!(
         out,
         "{:<40} {:>6} {:>8} {:>8} {:>8}",
         "Control Group", "Tasks", "%CPU", "Memory", "Input/s"
     )?;
-    writeln!(
-        out,
-        "{:<40} {:>6} {:>8} {:>8} {:>8}",
-        "/", "15", "2.1", "128.0M", "-"
-    )?;
-    writeln!(
-        out,
-        "{:<40} {:>6} {:>8} {:>8} {:>8}",
-        "/system.slice", "10", "1.5", "64.0M", "-"
-    )?;
-    writeln!(
-        out,
-        "{:<40} {:>6} {:>8} {:>8} {:>8}",
-        "/system.slice/network.service", "2", "0.5", "12.0M", "-"
-    )?;
-    writeln!(
-        out,
-        "{:<40} {:>6} {:>8} {:>8} {:>8}",
-        "/system.slice/sshd.service", "1", "0.1", "8.0M", "-"
-    )?;
-    writeln!(
-        out,
-        "{:<40} {:>6} {:>8} {:>8} {:>8}",
-        "/user.slice", "5", "0.5", "32.0M", "-"
-    )?;
+    let mut rows = Vec::new();
+    cgroup_usage_rows(root, root, &mut rows);
+    for (name, tasks, memory) in rows {
+        writeln!(
+            out,
+            "{:<40} {:>6} {:>8} {:>8} {:>8}",
+            name,
+            tasks.map_or_else(|| "-".to_string(), |t| t.to_string()),
+            // One sample has no interval to divide by, so there is no
+            // percentage to print. The reference prints `-` here too, for
+            // the same reason -- measured with `systemd-cgtop -n 1`.
+            "-",
+            memory.map_or_else(|| "-".to_string(), format_cgroup_size),
+            "-"
+        )?;
+    }
     Ok(0)
 }
 
@@ -1825,6 +1992,42 @@ fn print_systemctl_help(out: &mut dyn Write) -> io::Result<()> {
     Ok(())
 }
 
+/// Refuse an option this personality does not have.
+///
+/// systemd's tools print exactly one line -- no `Try --help` pointer -- and
+/// use both of getopt's wordings. Measured: `systemd-cat --zzq` gives
+/// `unrecognized option '--zzq'`, `systemd-cat -z` gives
+/// `invalid option -- 'z'`, and all five exit 1.
+fn refuse_unknown_option(prog: &str, arg: &str) -> i32 {
+    eprintln!("{prog}: {}", usageerror::unknown_option(arg.as_bytes()));
+    1
+}
+
+/// The first argument that is an option none of `known` covers.
+///
+/// `known` holds whole words (`--help`) and prefixes ending in `=`
+/// (`--suffix=`), which match either the prefixed form or the bare word. A
+/// lone `-` is an operand, and so is everything after `--`.
+fn first_unknown_option<'a>(args: &'a [String], known: &[&str]) -> Option<&'a String> {
+    let mut operands_only = false;
+    args.iter().find(|a| {
+        if operands_only {
+            return false;
+        }
+        if a.as_str() == "--" {
+            operands_only = true;
+            return false;
+        }
+        if !a.starts_with('-') || a.as_str() == "-" {
+            return false;
+        }
+        !known.iter().any(|k| match k.strip_suffix('=') {
+            Some(bare) => a.starts_with(k) || a.as_str() == bare,
+            None => a.as_str() == *k,
+        })
+    })
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     let argv0 = args.first().map(|s| s.as_str()).unwrap_or("systemctl");
@@ -1848,6 +2051,8 @@ fn main() {
             } else if rest.iter().any(|a| a == "--version") {
                 writeln!(out, "systemd-cat {}", VERSION).ok();
                 Ok(0)
+            } else if let Some(bad) = first_unknown_option(&rest, &["--help", "-h", "--version"]) {
+                Ok(refuse_unknown_option("systemd-cat", bad))
             } else {
                 run_cat_journal(&mut out)
             }
@@ -1862,6 +2067,8 @@ fn main() {
             } else if rest.iter().any(|a| a == "--version") {
                 writeln!(out, "systemd-cgls {}", VERSION).ok();
                 Ok(0)
+            } else if let Some(bad) = first_unknown_option(&rest, &["--help", "-h", "--version"]) {
+                Ok(refuse_unknown_option("systemd-cgls", bad))
             } else {
                 run_cgls(&mut out)
             }
@@ -1876,6 +2083,8 @@ fn main() {
             } else if rest.iter().any(|a| a == "--version") {
                 writeln!(out, "systemd-cgtop {}", VERSION).ok();
                 Ok(0)
+            } else if let Some(bad) = first_unknown_option(&rest, &["--help", "-h", "--version"]) {
+                Ok(refuse_unknown_option("systemd-cgtop", bad))
             } else {
                 run_cgtop(&mut out)
             }
@@ -1886,6 +2095,20 @@ fn main() {
             if rest.iter().any(|a| a == "--version") {
                 writeln!(out, "systemd-escape {}", VERSION).ok();
                 Ok(0)
+            } else if let Some(bad) = first_unknown_option(
+                &rest,
+                &[
+                    "--help",
+                    "-h",
+                    "--version",
+                    "-u",
+                    "--unescape",
+                    "-p",
+                    "--path",
+                    "--suffix=",
+                ],
+            ) {
+                Ok(refuse_unknown_option("systemd-escape", bad))
             } else {
                 run_escape(&mut out, &rest)
             }
@@ -1896,6 +2119,8 @@ fn main() {
             if rest.iter().any(|a| a == "--version") {
                 writeln!(out, "systemd-path {}", VERSION).ok();
                 Ok(0)
+            } else if let Some(bad) = first_unknown_option(&rest, &["--help", "-h", "--version"]) {
+                Ok(refuse_unknown_option("systemd-path", bad))
             } else {
                 run_path(&mut out, &rest)
             }
@@ -1938,6 +2163,65 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Refusing an option a personality does not have ──
+
+    fn argv(words: &[&str]) -> Vec<String> {
+        words.iter().map(|w| (*w).to_string()).collect()
+    }
+
+    #[test]
+    fn a_known_option_is_not_reported() {
+        let known = ["--help", "-h", "--version"];
+        assert!(first_unknown_option(&argv(&["--help"]), &known).is_none());
+        assert!(first_unknown_option(&argv(&["-h", "--version"]), &known).is_none());
+    }
+
+    #[test]
+    fn the_first_unknown_option_is_reported() {
+        let known = ["--help", "--version"];
+        let args = argv(&["--version", "--zzq", "--also-bad"]);
+        assert_eq!(
+            first_unknown_option(&args, &known).map(String::as_str),
+            Some("--zzq")
+        );
+    }
+
+    /// Operands are not options, however they are spelled.
+    #[test]
+    fn operands_are_never_reported() {
+        let known = ["--help"];
+        assert!(first_unknown_option(&argv(&["unit.service"]), &known).is_none());
+        // A lone dash is an operand -- conventionally stdin.
+        assert!(first_unknown_option(&argv(&["-"]), &known).is_none());
+        // And everything after `--` is one, dashes included.
+        assert!(first_unknown_option(&argv(&["--", "--zzq"]), &known).is_none());
+    }
+
+    /// `--suffix=` in the known list covers both `--suffix=x` and a bare
+    /// `--suffix`, which is how systemd-escape spells that option.
+    #[test]
+    fn a_prefix_entry_covers_its_valued_form() {
+        let known = ["--suffix="];
+        assert!(first_unknown_option(&argv(&["--suffix=service"]), &known).is_none());
+        assert!(first_unknown_option(&argv(&["--suffix"]), &known).is_none());
+        // But the prefix is `--suffix=`, not "anything starting with
+        // --suffix": `--suffixx` is a different word and is refused.
+        assert_eq!(
+            first_unknown_option(&argv(&["--suffixx"]), &known).map(String::as_str),
+            Some("--suffixx")
+        );
+    }
+
+    #[test]
+    fn the_refusal_reads_as_systemd_prints_it() {
+        // One line, no `Try --help` pointer, and both getopt wordings.
+        assert_eq!(
+            usageerror::unknown_option(b"--zzq"),
+            "unrecognized option '--zzq'"
+        );
+        assert_eq!(usageerror::unknown_option(b"-z"), "invalid option -- 'z'");
+    }
 
     // Helper to capture output.
     fn capture<F>(f: F) -> (String, i32)
@@ -2875,23 +3159,112 @@ mod tests {
 
     // --- systemd-cgls ---
 
+    /// The old test here asserted that the output contained `system.slice`
+    /// and `user.slice` on any machine, which was true only because those
+    /// names were hardcoded. A test that pins a fabrication in place is
+    /// worse than no test: it makes the lie look verified.
     #[test]
-    fn test_cgls() {
+    fn a_host_without_cgroups_is_told_so_rather_than_shown_a_tree() {
+        // No `/sys/fs/cgroup` on the machine this suite runs on.
         let (out, code) = capture(|buf| run_cgls(buf));
-        assert_eq!(code, 0);
-        assert!(out.contains("Control group /"));
-        assert!(out.contains("system.slice"));
-        assert!(out.contains("user.slice"));
+        assert_eq!(code, 1, "{out}");
+        assert!(out.contains("not a directory"), "{out}");
+        assert!(!out.contains("system.slice"), "{out}");
+    }
+
+    #[test]
+    fn the_tree_is_the_directories_that_are_actually_there() {
+        let scratch = scratchdir::ScratchDir::new("cgls-tree");
+        let root = scratch.path("root");
+        fs::create_dir_all(root.join("system.slice").join("dbus.service")).expect("fixture");
+        fs::write(
+            root.join("system.slice")
+                .join("dbus.service")
+                .join("cgroup.procs"),
+            "4242\n",
+        )
+        .expect("fixture");
+
+        let mut buf: Vec<u8> = Vec::new();
+        print_cgroup_tree(&mut buf, &root, "").expect("write");
+        let out = String::from_utf8(buf).expect("ascii fixture");
+
+        assert!(out.contains("system.slice"), "{out}");
+        assert!(out.contains("dbus.service"), "{out}");
+        assert!(out.contains("4242"), "{out}");
+        // The discriminating half: the old code printed `user.slice` for
+        // every machine, so a tree that does not contain one it was not
+        // given is the whole point.
+        assert!(!out.contains("user.slice"), "{out}");
+        assert!(!out.contains("init.scope"), "{out}");
+    }
+
+    #[test]
+    fn a_cgroup_with_no_procs_file_contributes_no_pids() {
+        let scratch = scratchdir::ScratchDir::new("cgls-empty");
+        let root = scratch.path("root");
+        fs::create_dir_all(root.join("lonely.slice")).expect("fixture");
+        assert!(cgroup_procs(&root.join("lonely.slice")).is_empty());
+        assert_eq!(cgroup_children(&root).len(), 1);
     }
 
     // --- systemd-cgtop ---
 
+    /// Same story as the `cgls` test it sits beside: this asserted
+    /// `/system.slice` appeared, which was true on every machine because
+    /// the row was hardcoded.
     #[test]
-    fn test_cgtop() {
+    fn cgtop_on_a_host_without_cgroups_says_so() {
         let (out, code) = capture(|buf| run_cgtop(buf));
-        assert_eq!(code, 0);
-        assert!(out.contains("Control Group"));
-        assert!(out.contains("/system.slice"));
+        assert_eq!(code, 1, "{out}");
+        assert!(out.contains("not a directory"), "{out}");
+        assert!(!out.contains("system.slice"), "{out}");
+    }
+
+    #[test]
+    fn cgtop_reports_the_figures_the_files_hold() {
+        let scratch = scratchdir::ScratchDir::new("cgtop");
+        let root = scratch.path("root");
+        let svc = root.join("system.slice").join("sshd.service");
+        fs::create_dir_all(&svc).expect("fixture");
+        fs::write(svc.join("pids.current"), "3\n").expect("fixture");
+        fs::write(svc.join("memory.current"), "8388608\n").expect("fixture");
+
+        let mut rows = Vec::new();
+        cgroup_usage_rows(&root, &root, &mut rows);
+
+        let found = rows
+            .iter()
+            .find(|(name, _, _)| name.ends_with("sshd.service"))
+            .expect("the cgroup that was created");
+        assert_eq!(found.1, Some(3), "tasks come from pids.current");
+        assert_eq!(found.2, Some(8_388_608), "memory comes from memory.current");
+        assert_eq!(format_cgroup_size(8_388_608), "8.0M");
+        // Nothing invents a group that was not there.
+        assert!(!rows.iter().any(|(n, _, _)| n.contains("user.slice")));
+    }
+
+    /// A group whose counters are unreadable is `-`, not 0. Zero would say
+    /// the group is empty, which is a different claim from not knowing.
+    #[test]
+    fn cgtop_distinguishes_unknown_from_zero() {
+        let scratch = scratchdir::ScratchDir::new("cgtop-bare");
+        let root = scratch.path("root");
+        fs::create_dir_all(root.join("bare.slice")).expect("fixture");
+        assert_eq!(cgroup_memory(&root.join("bare.slice")), None);
+        // No `pids.current`, but an absent `cgroup.procs` too, so unknown.
+        assert_eq!(cgroup_tasks(&root.join("bare.slice")), None);
+    }
+
+    /// Measured against the reference, which renders 4096 as `4.0K` and
+    /// 162 424 832 as `154.9M`.
+    #[test]
+    fn cgroup_sizes_read_as_the_reference_prints_them() {
+        assert_eq!(format_cgroup_size(4096), "4.0K");
+        assert_eq!(format_cgroup_size(162_424_832), "154.9M");
+        assert_eq!(format_cgroup_size(512), "512B");
+        assert_eq!(format_cgroup_size(1024), "1.0K");
+        assert_eq!(format_cgroup_size(1024 * 1024 * 1024), "1.0G");
     }
 
     // --- systemd-escape ---

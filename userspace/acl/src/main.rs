@@ -83,6 +83,9 @@ struct FileAcl {
     path: String,
     owner: String,
     group: String,
+    /// The raw ids, kept because `-n` prints them instead of the names.
+    uid: u32,
+    gid: u32,
     access: Vec<AclEntry>,
     default: Vec<AclEntry>,
 }
@@ -177,6 +180,32 @@ fn uid_name(uid: u32) -> String {
         .unwrap_or_else(|| uid.to_string())
 }
 
+/// The name of the group `gid`, or the number if nothing names it.
+///
+/// # What this replaced
+///
+/// The group field went through [`uid_name`], which reads the *user*
+/// database: a file owned by group `adm` (gid 4) was reported as `lp`, the
+/// user whose uid is 4. It looks right on any machine where each account has
+/// a private group of the same number, which is most of them -- and it is
+/// wrong for every system group, which is where ACLs are actually used.
+///
+/// `userdb` cannot answer this. It is SlateOS's own account store and holds a
+/// user's primary gid, but no table of groups, so there is nothing in it to
+/// map 4 to a name. Group names live in `/etc/group`, which is `pwdb`'s half
+/// of the world, and an ACL group entry is a POSIX group by definition.
+fn gid_name(gid: u32) -> String {
+    gid_name_in(&pwdb::Db::load(), gid)
+}
+
+/// [`gid_name`] against a database the caller supplies, so it can be tested
+/// without an `/etc/group` on the machine running the test.
+fn gid_name_in(db: &pwdb::Db, gid: u32) -> String {
+    db.group_by_gid(gid)
+        .and_then(|g| String::from_utf8(g.name.clone()).ok())
+        .unwrap_or_else(|| gid.to_string())
+}
+
 /// The access ACL of `path`, or `Err` saying why there is none to report.
 ///
 /// # What this replaced
@@ -221,7 +250,9 @@ fn read_file_acl(path: &str) -> Result<FileAcl, String> {
     Ok(FileAcl {
         path: path.to_string(),
         owner: uid_name(uid),
-        group: uid_name(gid),
+        group: gid_name(gid),
+        uid,
+        gid,
         access,
         default: Vec::new(),
     })
@@ -256,21 +287,50 @@ fn display_acl_path(path: &str, absolute: bool) -> &str {
     }
 }
 
-fn print_file_acl(
-    out: &mut io::StdoutLock<'_>,
-    acl: &FileAcl,
+/// Which of the two ACLs `getfacl` was asked for.
+///
+/// `-a` and `-d` are last-one-wins rather than an error, because they are
+/// selections and the later word is the one the caller meant.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+enum Which {
+    #[default]
+    Both,
+    AccessOnly,
+    DefaultOnly,
+}
+
+/// What `getfacl` was asked to print.
+#[derive(Clone, Copy, Default)]
+struct Show {
     omit_header: bool,
     absolute: bool,
     tabular: bool,
-) {
-    if !omit_header {
-        let display_path = display_acl_path(acl.path.as_str(), absolute);
+    /// `-n`: print the owning ids rather than looking their names up.
+    numeric: bool,
+    which: Which,
+}
+
+/// Generic over the sink rather than taking a `StdoutLock`, so a test can
+/// read back what it produced. Three options were added here that nothing
+/// could have asserted otherwise.
+fn print_file_acl<W: Write>(out: &mut W, acl: &FileAcl, show: &Show) {
+    let tabular = show.tabular;
+    if !show.omit_header {
+        let display_path = display_acl_path(acl.path.as_str(), show.absolute);
         let _ = writeln!(out, "# file: {display_path}");
-        let _ = writeln!(out, "# owner: {}", acl.owner);
-        let _ = writeln!(out, "# group: {}", acl.group);
+        if show.numeric {
+            let _ = writeln!(out, "# owner: {}", acl.uid);
+            let _ = writeln!(out, "# group: {}", acl.gid);
+        } else {
+            let _ = writeln!(out, "# owner: {}", acl.owner);
+            let _ = writeln!(out, "# group: {}", acl.group);
+        }
     }
 
     for entry in &acl.access {
+        if show.which == Which::DefaultOnly {
+            break;
+        }
         if tabular {
             let effective =
                 if has_mask(&acl.access) && !matches!(entry.tag, AclTag::UserObj | AclTag::Other) {
@@ -295,7 +355,7 @@ fn print_file_acl(
         }
     }
 
-    if !acl.default.is_empty() {
+    if !acl.default.is_empty() && show.which != Which::AccessOnly {
         for entry in &acl.default {
             let _ = writeln!(
                 out,
@@ -342,6 +402,8 @@ fn cmd_getfacl(args: &[String]) {
     let mut absolute = false;
     let mut tabular = false;
     let mut recursive = false;
+    let mut numeric = false;
+    let mut which = Which::Both;
     let mut paths: Vec<String> = Vec::new();
 
     for arg in args {
@@ -369,6 +431,12 @@ fn cmd_getfacl(args: &[String]) {
                 process::exit(0);
             }
             "-c" | "--omit-header" => omit_header = true,
+            // All three were advertised by the help text above and parsed by
+            // nothing: they fell into the `_ => {}` below and were dropped.
+            // Found by `scripts/check-help-vs-parser.py`.
+            "-a" | "--access" => which = Which::AccessOnly,
+            "-d" | "--default" => which = Which::DefaultOnly,
+            "-n" | "--numeric" => numeric = true,
             "--absolute-names" => absolute = true,
             "-t" | "--tabular" => tabular = true,
             "-R" | "--recursive" => recursive = true,
@@ -382,6 +450,14 @@ fn cmd_getfacl(args: &[String]) {
         process::exit(1);
     }
 
+    let show = Show {
+        omit_header,
+        absolute,
+        tabular,
+        numeric,
+        which,
+    };
+
     let stdout = io::stdout();
     let mut out = stdout.lock();
     let mut failed = false;
@@ -391,7 +467,7 @@ fn cmd_getfacl(args: &[String]) {
     // operand and exits non-zero at the end.
     let show =
         |out: &mut io::StdoutLock<'_>, path: &str, failed: &mut bool| match read_file_acl(path) {
-            Ok(acl) => print_file_acl(out, &acl, omit_header, absolute, tabular),
+            Ok(acl) => print_file_acl(out, &acl, &show),
             Err(e) => {
                 eprintln!("getfacl: {e}");
                 *failed = true;
@@ -448,6 +524,112 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── The three options the help advertised and nothing read ──
+
+    fn sample_acl() -> FileAcl {
+        FileAcl {
+            path: "/f".to_string(),
+            owner: "alice".to_string(),
+            group: "adm".to_string(),
+            uid: 1000,
+            gid: 4,
+            access: vec![AclEntry {
+                tag: AclTag::UserObj,
+                perms: Perms::from_rwx("rw-"),
+                _default: false,
+            }],
+            default: vec![AclEntry {
+                tag: AclTag::UserObj,
+                perms: Perms::from_rwx("r--"),
+                _default: true,
+            }],
+        }
+    }
+
+    fn rendered(show: &Show) -> String {
+        let mut buf: Vec<u8> = Vec::new();
+        print_file_acl(&mut buf, &sample_acl(), show);
+        String::from_utf8(buf).expect("ascii fixture")
+    }
+
+    #[test]
+    fn by_default_both_acls_are_printed() {
+        let out = rendered(&Show::default());
+        assert!(out.contains("user::rw-"), "{out}");
+        assert!(out.contains("default:"), "{out}");
+    }
+
+    #[test]
+    fn dash_a_prints_the_access_acl_only() {
+        let out = rendered(&Show {
+            which: Which::AccessOnly,
+            ..Show::default()
+        });
+        assert!(out.contains("user::rw-"), "{out}");
+        assert!(!out.contains("default:"), "{out}");
+    }
+
+    #[test]
+    fn dash_d_prints_the_default_acl_only() {
+        let out = rendered(&Show {
+            which: Which::DefaultOnly,
+            ..Show::default()
+        });
+        assert!(out.contains("default:"), "{out}");
+        assert!(!out.contains("user::rw-\n"), "{out}");
+    }
+
+    /// `-n` shows the ids. The fixture's gid is 4 and its group name `adm`,
+    /// so the two are distinguishable and the test cannot pass by accident.
+    #[test]
+    fn dash_n_prints_ids_instead_of_names() {
+        let out = rendered(&Show {
+            numeric: true,
+            ..Show::default()
+        });
+        assert!(out.contains("# owner: 1000"), "{out}");
+        assert!(out.contains("# group: 4"), "{out}");
+        assert!(!out.contains("alice"), "{out}");
+        assert!(!out.contains("adm"), "{out}");
+    }
+
+    #[test]
+    fn without_dash_n_the_names_are_shown() {
+        let out = rendered(&Show::default());
+        assert!(out.contains("# owner: alice"), "{out}");
+        assert!(out.contains("# group: adm"), "{out}");
+    }
+
+    // ── Naming a gid ──
+
+    /// The exact confusion the group field used to make. On a real Debian
+    /// system uid 4 is `lp` and gid 4 is `adm`; the two databases are
+    /// unrelated and coincide only for private user groups.
+    #[test]
+    fn a_gid_is_named_from_the_group_file_not_the_user_file() {
+        let passwd = b"root:x:0:0::/root:/bin/sh\nlp:x:4:7::/var/spool/lpd:/bin/false\n";
+        let group = b"root:x:0:\nadm:x:4:alice\n";
+        let db = pwdb::Db::from_bytes(passwd, group);
+        assert_eq!(gid_name_in(&db, 4), "adm");
+        // And the wrong answer is a different string, so this would have
+        // failed against the old code rather than passing by coincidence.
+        assert_ne!(gid_name_in(&db, 4), "lp");
+    }
+
+    #[test]
+    fn an_unnamed_gid_reads_back_as_its_number() {
+        let db = pwdb::Db::from_bytes(b"", b"root:x:0:\n");
+        assert_eq!(gid_name_in(&db, 1234), "1234");
+    }
+
+    /// A group name is bytes and need not be UTF-8. Printing the number is
+    /// honest; `from_utf8_lossy` would invent characters nobody chose.
+    #[test]
+    fn a_non_utf8_group_name_falls_back_to_the_number() {
+        let db = pwdb::Db::from_bytes(b"", b"\xff\xfe:x:9:\n");
+        assert_eq!(gid_name_in(&db, 9), "9");
+    }
 
     #[test]
     fn test_perms_from_rwx() {
@@ -627,6 +809,8 @@ mod tests {
             path: "/test".to_string(),
             owner: "root".to_string(),
             group: "root".to_string(),
+            uid: 0,
+            gid: 0,
             access: vec![AclEntry {
                 tag: AclTag::UserObj,
                 perms: Perms::from_rwx("rwx"),

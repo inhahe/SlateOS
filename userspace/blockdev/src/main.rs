@@ -2,7 +2,6 @@
 //!
 //! Multi-personality binary providing:
 //! - **blockdev** — call block device ioctls
-//! - **blkzone** — zone management for zoned block devices
 //!
 //! Provides low-level block device operations: get/set read-ahead,
 //! sector size, block size, device size, read-only flag, etc.
@@ -103,6 +102,54 @@ fn _format_bytes(bytes: u64) -> String {
 // blockdev command
 // ============================================================================
 
+/// Refuse an option this program does not have.
+///
+/// The wording is getopt's, shared through `usageerror` so every program
+/// here renders it identically. The status is **1**, measured rather than
+/// assumed: `lscpu`, `lsmem` and `prlimit` all exit 1 for this,
+/// where util-linux's own `flock` exits 64 -- so it is per-tool, which is
+/// why `usageerror` does not choose it.
+/// Every long operation this build performs.
+///
+/// This is the set the executor matches on, written down so the *parser* can
+/// reject a word outside it. It used to accept any `--word` as an operation,
+/// push it, read the device, and then print `unknown operation` on **stdout**
+/// and exit 0 -- so `blockdev --zzq /dev/sda` reported success.
+///
+/// `--setfra` and `--getfra` are real util-linux options this build does not
+/// implement, so they are deliberately absent: refusing them says what is
+/// true of this binary, which is better than accepting one and doing nothing.
+const OPERATIONS: [&str; 15] = [
+    "--flushbufs",
+    "--getbsz",
+    "--getpbsz",
+    "--getra",
+    "--getro",
+    "--getsize",
+    "--getsize64",
+    "--getss",
+    "--getsz",
+    "--report",
+    "--rereadpt",
+    "--setbsz",
+    "--setra",
+    "--setro",
+    "--setrw",
+];
+
+/// True if `arg` names an operation this build performs.
+fn is_operation(arg: &str) -> bool {
+    OPERATIONS.contains(&arg)
+}
+
+fn refuse_unknown_option(prog: &str, arg: &str) -> ! {
+    eprintln!(
+        "{prog}: {}",
+        usageerror::with_help_pointer(prog, &usageerror::unknown_option(arg.as_bytes()))
+    );
+    process::exit(1);
+}
+
 fn cmd_blockdev(args: &[String]) {
     if args.is_empty() {
         print_blockdev_help();
@@ -123,6 +170,11 @@ fn cmd_blockdev(args: &[String]) {
             "-V" | "--version" => {
                 println!("blockdev {VERSION}");
                 process::exit(0);
+            }
+            // Refused before any device is touched, which is where
+            // util-linux refuses it too.
+            s if s.starts_with("--") && !is_operation(s) => {
+                refuse_unknown_option("blockdev", s);
             }
             s if s.starts_with("--") => {
                 operations.push(s.to_string());
@@ -147,6 +199,12 @@ fn cmd_blockdev(args: &[String]) {
             }
             s if !s.starts_with('-') => {
                 devices.push(s.to_string());
+            }
+            // Everything reaching here begins with a dash and matched no
+            // option above, so it is one this build does not have. A lone
+            // `-` is left alone.
+            other if other.len() > 1 => {
+                refuse_unknown_option("blockdev", other);
             }
             _ => {}
         }
@@ -308,89 +366,15 @@ fn print_blockdev_help() {
 }
 
 // ============================================================================
-// blkzone command
-// ============================================================================
-
-fn cmd_blkzone(args: &[String]) {
-    if args.is_empty() {
-        println!("Usage: blkzone <command> [options] <device>");
-        println!();
-        println!("Zone management for zoned block devices.");
-        println!();
-        println!("Commands:");
-        println!("  report     Report zone information");
-        println!("  capacity   Show zone capacity");
-        println!("  reset      Reset write pointer");
-        println!("  open       Open zone");
-        println!("  close      Close zone");
-        println!("  finish     Finish zone");
-        process::exit(0);
-    }
-
-    match args[0].as_str() {
-        "-h" | "--help" => {
-            println!("Usage: blkzone <command> [options] <device>");
-            println!();
-            println!("Commands: report, capacity, reset, open, close, finish");
-            println!("  -o, --offset SECTOR   Start sector");
-            println!("  -l, --length SECTORS  Number of sectors");
-            println!("  -c, --count NUM       Number of zones");
-            println!("  -h, --help            Show help");
-            println!("  -V, --version         Show version");
-            process::exit(0);
-        }
-        "-V" | "--version" => {
-            println!("blkzone {VERSION}");
-            process::exit(0);
-        }
-        "report" => {
-            let device = args.last().map(|s| s.as_str()).unwrap_or("/dev/sda");
-            let stdout = io::stdout();
-            let mut out = stdout.lock();
-            let _ = writeln!(
-                out,
-                "  start: 0x000000000, len 0x080000, cap 0x080000, wptr 0x000000 reset:0 non-seq:0, zcond: 1(em) [type: 2(SEQ_WRITE_REQUIRED)]"
-            );
-            let _ = writeln!(
-                out,
-                "  start: 0x000080000, len 0x080000, cap 0x080000, wptr 0x000000 reset:0 non-seq:0, zcond: 1(em) [type: 2(SEQ_WRITE_REQUIRED)]"
-            );
-            let _ = writeln!(out, "Total zones for {device}: 2");
-        }
-        cmd => {
-            let device = args.last().map(|s| s.as_str()).unwrap_or("/dev/sda");
-            eprintln!("blkzone: {cmd} on {device}");
-        }
-    }
-}
-
-// ============================================================================
 // CLI
 // ============================================================================
 
 fn main() {
+    // One personality, so no argv[0] dispatch: the `blkzone` arm and the
+    // program-name derivation that existed only to select it are both gone.
     let args: Vec<String> = env::args().collect();
-
-    let prog_name = {
-        let s = args.first().map(|s| s.as_str()).unwrap_or("blockdev");
-        let bytes = s.as_bytes();
-        let mut last_sep = 0;
-        for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' {
-                last_sep = i + 1;
-            }
-        }
-        let base = &s[last_sep..];
-        let base = base.strip_suffix(".exe").unwrap_or(base);
-        base.to_string()
-    };
-
     let rest: Vec<String> = args.into_iter().skip(1).collect();
-
-    match prog_name.as_str() {
-        "blkzone" => cmd_blkzone(&rest),
-        _ => cmd_blockdev(&rest),
-    }
+    cmd_blockdev(&rest);
 }
 
 // ============================================================================
@@ -400,6 +384,27 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The parser and the executor must agree on the operation set, since
+    /// the parser now refuses anything outside it before a device is read.
+    #[test]
+    fn every_listed_operation_is_recognised() {
+        for op in OPERATIONS {
+            assert!(is_operation(op), "{op} is in the list but not recognised");
+        }
+        assert_eq!(OPERATIONS.len(), 15);
+    }
+
+    #[test]
+    fn a_word_outside_the_list_is_not_an_operation() {
+        assert!(!is_operation("--zzq-not-an-option"));
+        assert!(!is_operation("--getsz-typo"));
+        // Real util-linux options this build does not implement. Refusing
+        // them states what is true of this binary; accepting one and doing
+        // nothing would not.
+        assert!(!is_operation("--setfra"));
+        assert!(!is_operation("--getfra"));
+    }
 
     /// A device to format and convert, for the tests that need one.
     ///

@@ -857,6 +857,9 @@ dependencies = [
 [[package]]
 name = "flock"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "flood"

@@ -137281,3 +137281,75 @@ surfaced: grepping `comm_truncate` found three sites in one file; grepping the l
 `"???"` found four there, a fifth surface (`/proc/<pid>/cmdline`), this, and a *fixed*
 instance in `fs/ar.rs` whose comment records the same reasoning. A search keyed on the
 path being worked on cannot contain a defect in a different subsystem.
+
+## A-THE-GATE-FOR-SELF-TESTS-THAT-NEVER-RAN-WAS-WATCHING-ANOTHER-FUNCTION (lane A, 2026-09-12) — FIXED
+
+`check-gated-selftests.py` exists to fail the build when a self-test behind an
+`if` has never once announced itself. For the FAT site it reported *ran* on 135
+of 136 boots. The suite has never run at all.
+
+**The marker named a different function.** Each gated dispatch in `main.rs`
+carries a `RAN-IF:` comment giving the serial line that proves it executed. The
+one on `fs::fat::self_test()` (main.rs:1576) named `[fat] Running mkfs/format
+self-test...`, which is printed by `format_self_test` (fat.rs:6029) -- a
+*different* suite, dispatched unconditionally three hundred lines below. Its
+banner is therefore on every boot, so the marker was permanently green and
+nothing could ever have turned it red.
+
+**What was actually behind the gate:** `fat::self_test` is 1,184 lines covering
+read, write, create, delete, mkdir, rmdir and directory listing against a live
+FAT volume. Not a stub, and not redundant with `format_self_test`, which formats
+a RAM disk. That coverage has never executed in the harness.
+
+**Two witnesses, and they agreed for the same reason.** The allowlist comment
+recorded that on 2026-08-31 all six gated sites `were audited ... against a full
+serial log and every one of them was found to run on this host`. That audit read
+each site's *declared* marker -- the same mislabelled string this gate reads. An
+audit derived from the annotation can only confirm the annotation. Nothing in
+either check touched the one fact that would have settled it: whether the
+declared line is printed by the function it is attached to.
+
+**Found by asking a question the fix could not answer for itself.** The prompt
+was a stale-looking comment, not a failure. The check that settled it was written
+from the *convention* (a marker must be emitted by its own call) and run against
+all six sites, so it could report the other five as correct -- which it did. Had
+it been derived from the FAT bug it could only have rediscovered the FAT bug.
+
+**Independent confirmation before acting**, because the claim `this never runs`
+otherwise rested on the same marker list being impeached: `[fat] Running
+self-test` occurs 0 times in the retained serial logs while the mkfs banner
+occurs once, and `fat_ok` is `fs::fat::init("vda")`, which cannot
+succeed on a harness that mounts an in-memory root and attaches vda as a raw swap
+disk. The code comment at main.rs:1561 has said so in prose the whole time. The
+prose was right and the machine-checked claim was wrong, which is the wrong way
+round -- the machine-checked one is the one people trust.
+
+**Fixed in two steps, and the gate chose the order.** The plan was one atomic
+commit -- correcting the marker alone turns a false green into a hard failure
+ten boots later (`DEFAULT_MIN`), which would block all three lanes. Applying it
+to a scratch copy of the tree first showed that the second half cannot land yet:
+`live` is the newest boot`s `gated_ran` keys, so a marker just declared in source
+is not live, and allowlisting it fails as `names nothing`. That refusal is right
+-- an allowlist that accepts markers nobody has ever observed is a place to hide
+phantoms -- so the entry waits for a boot instead of the gate being loosened to
+accept it. Step 1 (this commit): the annotation names the banner its own call
+prints, and the 2026-08-31 audit note is corrected in place, since a wrong
+finding that has been *checked* is harder to dislodge than an unexamined one.
+Step 2, after the next boot records the corrected marker: the allowlist entry,
+with the condition that would end it -- a FAT-formatted vda. Nine boots of
+margin, and step 1 leaves both gates green (verified against real history).
+
+**Still true after the fix:** the suite still does not run. The gate now says so
+honestly instead of claiming the opposite. Making it run means giving the harness
+a FAT volume, which is a disk-layout change to a boot test three lanes share, and
+is deliberately not bundled here.
+
+**The structural gap is real, and is the next commit.** A `RAN-IF` is a comment;
+nothing verifies that the line it names is printed by the function it annotates.
+A static check does: resolve the annotated call to its `fn`, assert the literal
+appears in that body. It never reads a serial log, so it cannot be satisfied by
+the evidence that satisfied both this gate and the 2026-08-31 audit. Run against
+the tree *before* the correction it reported exactly one finding -- this one --
+and five clean, which is the discriminator: a check derived from the fix could
+only have reported the fix.
+

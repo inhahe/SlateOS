@@ -4527,6 +4527,27 @@
 
 ## Judgment Calls
 
+Judgment call (lane A, 2026-09-12): lane A writes the harness gates.
+
+  `which-lane.py` lists lane A's `owns` as kernel/**, bench/**, the toolchain
+  json and three named scripts -- so `scripts/check-*.py` appears to be outside
+  it. I edited `check-gated-selftests.py` anyway, and am adding a new gate.
+
+  This is not a stretch, and the evidence is in the tree rather than in my
+  reading of the rule: lane A wrote `scripts/check-variant-lists.py`, a gate
+  covering posix/, userspace/, services/ and init/, and announced it in
+  requests/a-b-a-new-build-gate-now-covers-your-tree-lists-named-ALL.md, which
+  lane B closed after running it. CLAUDE.md's prose scope for lane A is
+  `kernel & core -- kernel/**, bench/**, the boot test`, and a gate the boot
+  test runs is part of the boot test. The `owns` glob list is narrower than the
+  prose and than the practice.
+
+  Worth reconciling: either the glob list should name `scripts/check-*.py` for
+  lane A, or the practice should stop. Right now a correct action looks like a
+  violation to anyone who reads only `which-lane.py`, which is how a rule that
+  everyone quietly ignores gets started. Related to A-Q11 (who owns
+  scripts/hooks/pre-push), and probably the same answer.
+
 ### 2026-09-12 (lane A) - what is actually left, after following the references
 
 Not a judgment call, a planning note, recorded because I spent real time

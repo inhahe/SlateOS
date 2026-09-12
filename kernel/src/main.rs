@@ -1573,7 +1573,11 @@ extern "C" fn kernel_main() -> ! {
                 selftest::dispatch_debug(
                     "FAT",
                     selftest::Severity::Diagnostic,
-                    // RAN-IF: "[fat] Running mkfs/format self-test..."
+                    // RAN-IF must name a line THIS call prints. It named
+                    // `format_self_test`'s banner until 2026-09-12; that one is
+                    // dispatched unconditionally below, so the gate saw it on every
+                    // boot and reported this site as running when it never has.
+                    // RAN-IF: "[fat] Running self-test..."
                     fs::fat::self_test(),
                 );
                 // Flush buffer cache to disk so data survives power loss / QEMU kill.

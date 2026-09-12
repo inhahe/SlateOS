@@ -10,34 +10,47 @@ Requires WSL; see `bashprobe.py` for why that keeps it out of the boot test.
 can drift away from the Rust it claims to model, and a drifted copy reports
 "0 disagreements" about a scanner that no longer exists -- worse than no
 checker, because it looks like evidence.  `assert_port_matches_rust()` reads
-`shellquote.rs` and refuses to run if the one table that is easy to get
-silently wrong -- the set of characters a backslash may escape inside
-double quotes -- differs from the set below.  It cannot prove the whole port
-is faithful; it can and does stop the failure mode that actually happens,
-which is a rule being changed in the Rust and not here.
+`shellquote.rs` and refuses to run unless three things still hold: the set of
+quoting contexts is the set `scan()` models, the escape alphabet is the one
+ported, and the whole of what is ported still hashes to `PORTED_DIGEST`.
+
+That third layer replaced a single `DQ_ESCAPABLE` regex on 2026-09-12, after
+lane A showed what a one-table guard buys.  They gave the Rust scanner a
+fourth context, `Ctx::DollarSingle`, so that `echo $'hi'` stopped printing
+`$hi`.  The change does not touch `DQ_ESCAPABLE`, so the guard passed, the
+port kept three contexts, and any `$'...'` case would have been graded against
+semantics that no longer shipped.  The alphabet had been serving as a proxy
+for "the scanner" and quietly stopped being one.  See
+`requests/a-b-shellquote-port-has-drifted-and-the-guard-cannot-see-it.md`.
 
 WHAT THIS GATE DOES NOT GRADE, STATED PLAINLY
 ---------------------------------------------
-It does not grade the scanner.  Measured, not assumed: replacing the
-`Ctx::Single` arm's `let structural = b == b'\''` with `let structural =
-false` -- a scanner in which a single-quoted string can never close -- leaves
-this file printing `0 failure(s)`, exiting 0, and passing its own self-test
-25/25.  Nothing here executes a line of Rust; `scan()` below is a hand port,
-so a defect in the real scanner changes nothing this file can see.
+It does not grade the scanner, and the digest does not change that -- it
+changes only whether a moved scanner is noticed.  Nothing here executes a line
+of Rust; `scan()` below is a hand port, so a *defect* in the real scanner is
+still something this file cannot see.  What it can now see is that the real
+scanner has moved, which is the difference between "wrong answer" and "answer
+about the wrong question".
 
-That is not a hole to be plugged here, because it is already covered where it
-belongs: `shellquote.rs::self_test()` runs those rungs at boot, and the
-mutation above fails the rung at shellquote.rs:568.  The boot test is what
-grades the implementation.  This gate exists for the question the rungs
-*cannot* answer -- whether what they assert is what a real shell does, since a
-rung whose expectation was transcribed wrongly is confidently, permanently
-green.  Naming that split is the point: the file's own name implies it grades
-`shellquote.rs`, and for a long time its entire tether to that file was one
-regex for `DQ_ESCAPABLE`.
+Measured, not assumed, both before and after.  Replacing the `Ctx::Single`
+arm's `let structural = b == b'\''` with `let structural = false` -- a scanner
+in which a single-quoted string can never close -- used to leave this file
+printing `0 failure(s)`, exiting 0, and passing its own self-test.  As of the
+digest it refuses to run at all, naming the change as a rule inside an
+existing context.  Refusing is not grading: this file still cannot tell you
+that mutation is *wrong*, only that it is not what was ported.
+
+Telling you it is wrong is already covered where it belongs:
+`shellquote.rs::self_test()` runs those rungs at boot, and the mutation above
+fails the rung at shellquote.rs:568.  The boot test is what grades the
+implementation.  This gate exists for the question the rungs *cannot* answer
+-- whether what they assert is what a real shell does, since a rung whose
+expectation was transcribed wrongly is confidently, permanently green.
 
 So, concretely, this file answers four questions and no others:
 
-  1. does the Rust's escape alphabet still match the ported one
+  1. is the Rust scanner still the one ported here -- contexts, escape
+     alphabet, and the digest of all three ported regions
      (`assert_port_matches_rust`);
   2. is every rung of the three graded functions either checked here or
      explicitly excused (`assert_every_rung_is_accounted_for`) -- the check
@@ -52,22 +65,183 @@ So, concretely, this file answers four questions and no others:
      the port, which is weaker than bash and is labelled as such below.
 """
 import contextlib
+import hashlib
 import io
 import pathlib
 import re
 import sys
+import typing
 
 import bashprobe
 import rustrungs
 
-UNQ, SGL, DBL = "U", "S", "D"
+UNQ, SGL, DBL, DSQ = "U", "S", "D", "A"
 DQ_ESCAPABLE = set(b'"\\$`\n')
+BACKSLASH = 0x5C
 
 RUST = pathlib.Path(__file__).resolve().parent.parent / "kernel" / "src" / "shellquote.rs"
 
+# A blessed state of `shellquote.rs`: the declarations this file hand-ports,
+# the quoting contexts `scan()` models, and why this state is acceptable.
+#
+# Named regions rather than the whole file, because the rest of
+# `shellquote.rs` is consumers of the scanner (`find_bare`, `quote_word`,
+# `self_test`) which this file either ports separately or does not claim to
+# model at all, and pinning them would fire on edits that cannot affect a
+# single result here.
+class _State(typing.NamedTuple):
+    regions: tuple[str, ...]
+    ctx: frozenset[str]
+    label: str
+    note: str
 
-def assert_port_matches_rust(src: str | None = None):
-    """Refuse to run if the Rust's escape alphabet is not the one ported.
+
+_SCANNER = ("pub enum Ctx", "const DQ_ESCAPABLE", "impl Iterator for QuoteScan")
+
+# WHY A DIGEST AND NOT A THIRD HAND-PICKED TABLE.  Until 2026-09-12 the entire
+# tether between this file and `shellquote.rs` was the `DQ_ESCAPABLE` regex,
+# and lane A demonstrated what that buys: they gave the Rust scanner a fourth
+# context, `Ctx::DollarSingle`, so that `echo $'hi'` stopped printing `$hi`.
+# The change does not touch `DQ_ESCAPABLE`.  So the guard passed, the port kept
+# three contexts, and every `$'...'` case would have been graded against
+# semantics that no longer shipped -- `0 failure(s)` about the wrong scanner,
+# filed as `requests/a-b-shellquote-port-has-drifted-and-the-guard-cannot-
+# see-it.md`.  The alphabet had been serving as a proxy for "the scanner" and
+# quietly stopped being one; a proxy is exactly what a digest is not.
+#
+# The cost is honest and worth naming: an edit to a trailing comment inside
+# these regions fires this guard, because the stripper drops whole-line
+# comments only and does not parse Rust string literals to find the others.
+# Re-blessing is one command (`--print-digest`) and a re-read of `scan()`,
+# which is the re-read the drift above shows is needed anyway.
+#
+# ONE ENTRY IS THE NORMAL STATE.  Two only while a change is in flight across
+# lanes, and never for longer -- an extra entry is a declaration, and a
+# declaration that has stopped being true is the failure this tree spends its
+# days pulling out of documents.  The port below models the CURRENT state; a
+# run against an older one prints, loudly, what its results therefore do not
+# cover.  See `_transition_warning`.
+PORTED_STATES = {
+    "c6e289003e50b572e592c6a6e36ef6c142d38aa7a4ca3891a8804e5f1ec1cf55": _State(
+        regions=_SCANNER,
+        ctx=frozenset({"Unquoted", "Single", "Double"}),
+        label="OUTGOING (three contexts, no $'...')",
+        note=(
+            "main's scanner before lane A's DollarSingle work merges "
+            "(kernel/src/shellquote.rs @ 3650a966c, 2026-09-12). DELETE THIS "
+            "ENTRY once origin/main carries the four-context scanner: keeping "
+            "it would let a revert of that merge pass unnoticed, which is the "
+            "whole failure this guard exists to stop."
+        ),
+    ),
+    "57f03a1c87b5247c8f03a316b7c3148b84ce05b2e9874b4d2b70f503e73a51ba": _State(
+        regions=_SCANNER + ("const fn hex_val", "fn decode_ansi_c"),
+        ctx=frozenset({"Unquoted", "Single", "Double", "DollarSingle"}),
+        label="CURRENT (four contexts, ANSI-C quoting)",
+        note=(
+            "lane A's scanner at c13605f1a, read from origin/lane-a rather "
+            "than from a pasted description -- a transcription is exactly the "
+            "failure mode this digest exists to catch, and manufacturing it "
+            "to prove the guard works would be silly. `hex_val` and "
+            "`decode_ansi_c` join the pinned regions because the decode table "
+            "is now part of what this file ports, and a table left outside "
+            "the digest is the 2026-09-12 defect one level down."
+        ),
+    ),
+}
+
+# The state the port below actually models.  Used for diagnosis when nothing
+# matches, and to decide whether a run needs the transition warning.
+CURRENT_DIGEST = "57f03a1c87b5247c8f03a316b7c3148b84ce05b2e9874b4d2b70f503e73a51ba"
+PORTED_CTX = PORTED_STATES[CURRENT_DIGEST].ctx
+
+# Char and string literals, removed before brace counting so that a `b'{'` in
+# the Rust cannot unbalance the region extractor.  Rust lifetimes (`'_`, `'a`)
+# look like unterminated char literals and therefore do not match, which is the
+# behaviour wanted -- `impl Iterator for QuoteScan<'_> {` must keep its brace.
+_RUST_LITERAL = re.compile(r"b?'(?:\\.|[^'\\])*'|b?\"(?:\\.|[^\"\\])*\"")
+
+
+def _normalise(lines: list[str]) -> str:
+    """Drop whole-line comments and attributes; collapse runs of whitespace."""
+    kept = []
+    for line in lines:
+        bare = line.strip()
+        if not bare or bare.startswith("//") or bare.startswith("#["):
+            continue
+        kept.append(" ".join(bare.split()))
+    return "\n".join(kept)
+
+
+def _region(src: str, header: str) -> list[str] | None:
+    """The declaration introduced by `header`, as a list of source lines.
+
+    Brace-delimited declarations run to their matching close brace; a `const`
+    runs to the first line whose scrubbed form ends in `;`.
+    """
+    lines = src.splitlines()
+    start = None
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith(header):
+            start = i
+            break
+    if start is None:
+        return None
+    scrubbed = _RUST_LITERAL.sub("_", lines[start])
+    if "{" not in scrubbed:
+        for j in range(start, len(lines)):
+            if _RUST_LITERAL.sub("_", lines[j]).rstrip().endswith(";"):
+                return lines[start : j + 1]
+        return None
+    depth = 0
+    for j in range(start, len(lines)):
+        text = _RUST_LITERAL.sub("_", lines[j])
+        depth += text.count("{") - text.count("}")
+        if depth == 0:
+            return lines[start : j + 1]
+    return None
+
+
+def ported_source(src: str, regions: tuple[str, ...] | None = None) -> tuple[str, str | None]:
+    """The normalised text of every ported region, and the first one missing."""
+    chunks = []
+    for header in PORTED_STATES[CURRENT_DIGEST].regions if regions is None else regions:
+        lines = _region(src, header)
+        if lines is None:
+            return "", header
+        chunks.append(_normalise(lines))
+    return "\n".join(chunks), None
+
+
+def ported_digest(src: str, regions: tuple[str, ...] | None = None) -> str:
+    text, missing = ported_source(src, regions)
+    if missing is not None:
+        return ""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _ctx_variants(src: str) -> set[str] | None:
+    lines = _region(src, "pub enum Ctx")
+    if lines is None:
+        return None
+    body = _normalise(lines)
+    inner = body[body.index("{") + 1 : body.rindex("}")]
+    return {v.strip() for v in inner.split(",") if v.strip()}
+
+
+def assert_port_matches_rust(src: str | None = None, states: dict | None = None):
+    """Refuse to run if the Rust scanner is not one this file has been told about.
+
+    Three layers, most specific first, because a digest mismatch says only
+    that something changed and a reader needs to know *what*:
+
+      1. the set of quoting contexts (`enum Ctx`) -- the drift that actually
+         happened, and the one whose message can name the missing context;
+      2. the escape alphabet (`DQ_ESCAPABLE`) -- the rule easiest to get
+         silently wrong, and the only thing this guard checked before;
+      3. the digest of all three ported regions -- complete where the first
+         two are proxies. A rule changed *inside* an existing context passes
+         both of the above and cannot pass this.
 
     `src` is injectable so the self-test can drive this against a fixture
     rather than against the real `shellquote.rs`. That is not a convenience:
@@ -85,6 +259,39 @@ def assert_port_matches_rust(src: str | None = None):
             src = RUST.read_text(encoding="utf-8")
         except OSError as e:
             raise SystemExit(f"cannot read {RUST}: {e}") from e
+    states = PORTED_STATES if states is None else states
+    modelled = states[max(states, key=lambda d: len(states[d].ctx))].ctx
+
+    # --- 1. the contexts ----------------------------------------------------
+    theirs_ctx = _ctx_variants(src)
+    if theirs_ctx is None:
+        raise SystemExit(
+            "`pub enum Ctx` was renamed or reshaped in shellquote.rs.\n"
+            "  This checker's port can no longer be shown to match it, so its\n"
+            "  verdict would be about a scanner that is not the one shipping."
+        )
+    if not any(theirs_ctx == st.ctx for st in states.values()):
+        gained = sorted(theirs_ctx - modelled)
+        lost = sorted(modelled - theirs_ctx)
+        detail = []
+        if gained:
+            detail.append(
+                "  shellquote.rs has quoting context(s) this file does not "
+                "model: " + ", ".join(gained) + "\n"
+                "    Any input reaching one of them is graded here against\n"
+                "    semantics that no longer ship, and reported as agreement."
+            )
+        if lost:
+            detail.append(
+                "  this file models context(s) shellquote.rs no longer has: "
+                + ", ".join(lost)
+            )
+        raise SystemExit(
+            "PORT HAS DRIFTED -- every result below would be about the wrong "
+            "scanner.\n" + "\n".join(detail)
+        )
+
+    # --- 2. the escape alphabet --------------------------------------------
     m = re.search(r"const DQ_ESCAPABLE: \[u8; \d+\] = \[([^\]]*)\];", src)
     if not m:
         raise SystemExit(
@@ -105,6 +312,148 @@ def assert_port_matches_rust(src: str | None = None):
             f"  this file    : {sorted(DQ_ESCAPABLE)}"
         )
 
+    # --- 3. the whole of what is ported ------------------------------------
+    #
+    # Only the states whose context set the file actually has are candidates,
+    # so the digest reported on failure is the one a reader would compare
+    # against rather than an unrelated state's.
+    candidates = {d: st for d, st in states.items() if st.ctx == theirs_ctx}
+    seen = {}
+    for digest, st in candidates.items():
+        text, missing = ported_source(src, st.regions)
+        if missing is not None:
+            raise SystemExit(
+                f"`{missing}` was renamed or reshaped in shellquote.rs.\n"
+                "  This checker's port can no longer be shown to match it, so "
+                "its\n  verdict would be about a scanner that is not the one "
+                "shipping."
+            )
+        got = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        if got == digest:
+            return digest, st
+        seen[digest] = (got, st)
+    raise SystemExit(
+        "PORT HAS DRIFTED -- every result below would be about the wrong "
+        "scanner.\n"
+        "  The contexts and the escape alphabet still match, so the change\n"
+        "  is a rule INSIDE one of them. Those are the changes the two\n"
+        "  checks above cannot see, and are why this third one exists.\n"
+        + "".join(
+            f"  {st.label}\n"
+            f"    regions      : {', '.join(st.regions)}\n"
+            f"    shellquote.rs: {got}\n"
+            f"    recorded here: {digest}\n"
+            for digest, (got, st) in seen.items()
+        )
+        + "  Re-read `scan()` against the port, then re-bless with\n"
+        "    python scripts/check-shellquote-vs-bash.py --print-digest"
+    )
+
+
+def _transition_warning(digest: str, st: "_State") -> str | None:
+    """What a run against a non-current blessed state does NOT cover.
+
+    Printed rather than raised, and printed *after* the transport check: a
+    `run_checker --may-skip` gate takes the checker's first line of output as
+    the reason it declined, so a warning emitted earlier would become the
+    explanation for a gate that did not run.
+    """
+    if digest == CURRENT_DIGEST:
+        return None
+    missing = sorted(PORTED_CTX - st.ctx)
+    return (
+        f"TRANSITION: shellquote.rs is the {st.label} state.\n"
+        f"  {st.note}\n"
+        "  The port below models the CURRENT state, so every result here is\n"
+        "  the port measured against bash. For "
+        + (", ".join(missing) or "the difference")
+        + " that says NOTHING\n"
+        "  about the scanner in this tree, which does not have that context.\n"
+        "  Read `0 failure(s)` accordingly until this entry is deleted."
+    )
+
+
+
+def _hex_val(b: int) -> int | None:
+    """Port of `shellquote.rs::hex_val`."""
+    if 0x30 <= b <= 0x39:
+        return b - 0x30
+    if 0x61 <= b <= 0x66:
+        return b - 0x61 + 10
+    if 0x41 <= b <= 0x46:
+        return b - 0x41 + 10
+    return None
+
+
+# `$'...'` escapes that stand for exactly one byte and consume exactly one.
+# `\e` and `\E` are both escape; bash accepts either.
+_ANSI_C_ONE = {
+    ord("n"): 0x0A, ord("t"): 0x09, ord("r"): 0x0D, ord("a"): 0x07,
+    ord("b"): 0x08, ord("f"): 0x0C, ord("v"): 0x0B,
+    ord("e"): 0x1B, ord("E"): 0x1B,
+    BACKSLASH: BACKSLASH, ord("'"): 0x27, ord('"'): 0x22, ord("?"): 0x3F,
+}
+
+
+def decode_ansi_c(after: bytes) -> tuple[bytes, int]:
+    """Port of `shellquote.rs::decode_ansi_c` -> (output bytes, bytes consumed).
+
+    `consumed == 0` means no escape was recognised: the backslash stands for
+    itself and the byte after it has not been eaten, which is how `$'\\q'` keeps
+    both of its bytes.  Every edge here is bash 5.2.37's, measured by lane A
+    rather than read off the manual, and the measurements are what make the
+    edges surprising:
+
+      * `\\x` takes **one or two** hex digits, so `$'\\x4'` is 0x04;
+      * octal needs no leading zero (`$'\\101'` is `A`) and takes at most
+        three digits, so `$'\\0101'` is 0x08 followed by a literal `1`;
+      * `$'\\777'` wraps into a byte (0xff) rather than erroring;
+      * `\\8` and `\\q` keep their backslash -- unrecognised is not an error;
+      * `\\u`/`\\U` emit UTF-8 and are the only family yielding more than one
+        byte, which is why `scan` needs a pending-output queue at all.
+    """
+    if not after:
+        # Trailing backslash before the closing quote: literal backslash.
+        return bytes([BACKSLASH]), 0
+    c = after[0]
+    if c in _ANSI_C_ONE:
+        return bytes([_ANSI_C_ONE[c]]), 1
+    if c in (ord("x"), ord("X")):
+        val = n = 0
+        while n < 2:
+            d = _hex_val(after[n + 1]) if n + 1 < len(after) else None
+            if d is None:
+                break
+            val, n = val * 16 + d, n + 1
+        return (bytes([BACKSLASH]), 0) if n == 0 else (bytes([val & 0xFF]), n + 1)
+    if c == ord("c"):
+        # Control-X: X with bit 6 cleared. `\cA` is 0x01.
+        return (bytes([after[1] & 0x1F]), 2) if len(after) > 1 else (bytes([BACKSLASH]), 0)
+    if c in (ord("u"), ord("U")):
+        limit = 4 if c == ord("u") else 8
+        val = n = 0
+        while n < limit:
+            d = _hex_val(after[n + 1]) if n + 1 < len(after) else None
+            if d is None:
+                break
+            val, n = val * 16 + d, n + 1
+        if n == 0:
+            return bytes([BACKSLASH]), 0
+        # A surrogate or out-of-range value has no UTF-8 encoding. Emitting
+        # nothing would silently delete what the user typed, so the backslash
+        # stands and the digits stay as themselves: visibly wrong beats
+        # invisibly absent.
+        if val > 0x10FFFF or 0xD800 <= val <= 0xDFFF:
+            return bytes([BACKSLASH]), 0
+        return chr(val).encode("utf-8"), n + 1
+    if ord("0") <= c <= ord("7"):
+        val = n = 0
+        while n < 3 and n < len(after) and ord("0") <= after[n] <= ord("7"):
+            val, n = val * 8 + (after[n] - ord("0")), n + 1
+        return bytes([val & 0xFF]), n
+    # Not an escape: bash keeps the backslash AND the character. Consuming
+    # zero leaves the character to be scanned as an ordinary literal.
+    return bytes([BACKSLASH]), 0
 
 
 def scan(bs: bytes):
@@ -112,8 +461,21 @@ def scan(bs: bytes):
     i = 0
     ctx = UNQ
     pending = False
+    queue, queue_at, queue_off = b"", 0, 0
     n = len(bs)
-    while i < n:
+    while True:
+        # A multi-byte `$'\u...'` escape yields its remaining bytes before the
+        # input advances again, and is checked BEFORE the end-of-input test on
+        # purpose: the escape may be the last thing on the line, and draining
+        # afterwards would silently shorten the word. Getting this order wrong
+        # is the one thing lane A said they would expect a blind port to miss.
+        if queue_at < len(queue):
+            b = queue[queue_at]
+            queue_at += 1
+            yield (queue_off, b, DSQ, True, False)
+            continue
+        if i >= n:
+            return
         b = bs[i]
         off = i
         i += 1
@@ -127,7 +489,7 @@ def scan(bs: bytes):
                 ctx = UNQ
             yield (off, b, SGL, False, structural)
         elif ctx == DBL:
-            if b == ord("\\") and i < n and bs[i] in DQ_ESCAPABLE:
+            if b == BACKSLASH and i < n and bs[i] in DQ_ESCAPABLE:
                 pending = True
                 yield (off, b, DBL, False, True)
             else:
@@ -135,10 +497,36 @@ def scan(bs: bytes):
                 if structural:
                     ctx = UNQ
                 yield (off, b, DBL, False, structural)
+        elif ctx == DSQ:
+            # Unlike `'...'`, a backslash here IS special -- that is the entire
+            # difference between the two constructs.
+            if b == ord("'"):
+                ctx = UNQ
+                yield (off, b, DSQ, False, True)
+            elif b == BACKSLASH:
+                out, consumed = decode_ansi_c(bs[i:])
+                i += consumed
+                # Bytes 1.. are queued; byte 0 is yielded now. They all report
+                # the offset of the backslash, the only offset that means
+                # anything for a run of input that produced them jointly.
+                queue, queue_at, queue_off = out, 1, off
+                yield (off, out[0], DSQ, consumed > 0, False)
+            else:
+                yield (off, b, DSQ, False, False)
         else:
-            if b == ord("\\") and i < n:
+            if b == BACKSLASH and i < n:
                 pending = True
                 yield (off, b, UNQ, False, True)
+            elif b == ord("$") and i < n and bs[i] == ord("'"):
+                # Both the `$` and the `'` are syntax, so ONE structural token
+                # stands for the pair and the `'` is stepped over rather than
+                # seen as an ordinary opening quote. One token for two bytes is
+                # why the `$` stops surviving quote removal -- without this arm
+                # it fell to the literal catch-all and `echo $'hi'` printed
+                # `$hi`.
+                i += 1
+                ctx = DSQ
+                yield (off, b, DSQ, False, True)
             elif b == ord("'"):
                 ctx = SGL
                 yield (off, b, SGL, False, True)
@@ -154,7 +542,11 @@ def is_bare(t):
 
 
 def strip_quotes(bs):
-    return bytes(t[1] for t in scan(bs) if not t[4])
+    # The NUL filter is `shellquote.rs::strip_quotes`'s, not the decoder's, so
+    # `scan()` stays a faithful description of the input. See DIVERGENCES for
+    # why dropping rather than truncating is the deliberate choice.
+    return bytes(t[1] for t in scan(bs)
+                 if not t[4] and not (t[1] == 0 and t[2] == DSQ))
 
 
 def split_bare_words(bs):
@@ -242,9 +634,73 @@ CASES = [
     b"a'b'c",
     b'a"b"c',
     b"'a'\\''b'",
-    # NOTE: no `$`-bearing cases here.  bash expands before quote removal and
-    # this harness only does quote removal, so any `$` case compares apples to
-    # oranges.  The `$` question -- "which context is it in?" -- is asked
+    # ANSI-C quoting, `$'...'`.  These ARE `$`-bearing and they belong here
+    # anyway, which is worth stating because the note below says the opposite
+    # about every other `$`: `$'...'` is not expansion at all, it is quote
+    # removal with decoding, so bash's answer and ours are the same kind of
+    # thing.  `$'$HOME'` proves it -- nothing inside expands.
+    #
+    # Every one of these was measured against bash 5.2.37 rather than read off
+    # the manual, and three of them are why that matters: `\x` takes ONE or two
+    # hex digits, octal needs no leading zero and stops at three, and an
+    # unrecognised escape keeps its backslash instead of erroring.
+    b"$'hi'",
+    b"echo $'hi'",
+    b"$''",
+    b"$'a b'",
+    b"$'x' $'y'",
+    b"a$'\\n'b",
+    b"$'\\u0041'z",
+    b"$'a\\tb'",
+    b"$'\\e'",
+    b"$'\\E'",
+    b"$'\\?'",
+    b"$'\\\"'",
+    b"$'\\''",
+    b"$'\\x41'",
+    b"$'\\x4'",
+    b"$'\\x'",
+    b"$'\\xg'",
+    b"$'\\101'",
+    b"$'\\0101'",
+    b"$'\\777'",
+    b"$'\\8'",
+    b"$'\\q'",
+    b"$'\\z\\n'",
+    b"$'\\$'",
+    b"$'\\$HOME'",
+    b"$'\\`'",
+    b"$'\\u'",
+    b"$'\\u0041'",
+    b"$'\\u00e9'",
+    b"$'\\U0001F600'",
+    b"$'\\cA'",
+    b"$'x\\x41y'",
+    b"$'\\x41'$'\\x42'",
+    b"$'\\n'",
+    b"$'\\t'",
+    b"$'re\\xffport.txt'",
+    b"$'\\x00'",
+    b"$'\\u0000'",
+    b"$'\\0'",
+    # NOTE: the rest of the `\c` family, and `\u`/`\U` values with no scalar
+    # (surrogates, and anything above U+10FFFF), are NOT here.  They disagree
+    # with bash today -- measured, ten cases -- and the fault is in
+    # `shellquote.rs`, not in this port, so they are filed to lane A as
+    # `requests/b-a-dollar-single-c-escape-swallows-the-closing-quote.md`
+    # rather than pinned here.  Pinning a defect in a table called CASES would
+    # make it pass; pinning it in DIVERGENCES would call it a decision.  It is
+    # neither: it is a bug with an owner.
+    #
+    # `$'\c '` is also held out even though it AGREES, which is the subtler
+    # reason: it agrees by coincidence.  `\c` + space is 0x00, bash truncates
+    # the word there and we drop the byte, and both roads end at one empty
+    # word.  A case that passes for a reason other than the one it is named
+    # for is worse than no case.
+    #
+    # NOTE: no OTHER `$`-bearing cases here.  bash expands before quote removal
+    # and this harness only does quote removal, so any `$` case compares apples
+    # to oranges.  The `$` question -- "which context is it in?" -- is asked
     # separately below, which is the only part kshell's expander needs.
     b"a b  c",
     b"  lead",
@@ -280,6 +736,61 @@ DIVERGENCES = [
         "     this entry is the thing that should start failing -- at which\n"
         "     point the question moves to the line editor and `a\\` stops being\n"
         "     answerable by a scanner at all.",
+    ),
+    (
+        b"$'a\\0b'",
+        [b"a"],
+        [b"ab"],
+        "A NUL inside $'...'. Bash TRUNCATES the word there, because it\n"
+        "     carries words as C strings and cannot represent the rest. We\n"
+        "     carry them as Vec<u8> and could keep the byte, but a NUL is not\n"
+        "     a legal path byte under design.txt, so carrying it only defers a\n"
+        "     rejection further from its cause. Dropping rather than\n"
+        "     truncating is the deliberate part: strip_quotes is handed a whole\n"
+        "     LINE by some callers and a single word by others and cannot tell\n"
+        "     which, so truncating would discard later words bash keeps --\n"
+        "     silently losing commands, to save one byte in a construct with no\n"
+        "     known user. shellquote.rs::strip_quotes says this; todo.txt\n"
+        "     Judgment Calls names the better fix (truncate in the per-word\n"
+        "     callers, which know where the boundaries are).",
+    ),
+    # `\u`/`\U` with no Unicode scalar. Three cases rather than one, because
+    # the argument for the divergence is in the THIRD: bash is not
+    # self-consistent, so "match bash" does not name a single behaviour.
+    #
+    # Reported to lane A as finding 2 of
+    # `requests/b-a-dollar-single-c-escape-swallows-the-closing-quote.md`, and
+    # declared by them on 2026-09-12. Their comment used to say a surrogate
+    # "has no UTF-8 encoding"; it has no *valid* one, and bash emits WTF-8
+    # regardless. That premise is now corrected in `shellquote.rs` and the
+    # behaviour deliberately stands.
+    (
+        b"$'\\ud800'",
+        [b"\xed\xa0\x80"],
+        [b"\\ud800"],
+        "A lone surrogate. Bash emits WTF-8 -- the UTF-8 *shape* of a value\n"
+        "     that is not a scalar. We hand back what was typed, so the user\n"
+        "     can see it did not decode.",
+    ),
+    (
+        b"$'\\U00110000'",
+        [b"\xf4\x90\x80\x80"],
+        [b"\\U00110000"],
+        "Above U+10FFFF, the Unicode maximum. Bash encodes it anyway, four\n"
+        "     bytes, in a form no decoder will accept.",
+    ),
+    (
+        b"$'\\Uffffffff'",
+        [b""],
+        [b"\\Uffffffff"],
+        "THE CASE THAT DECIDES THE OTHER TWO. Here bash emits NOTHING -- the\n"
+        "     silently-absent outcome the fallback exists to avoid -- having\n"
+        "     emitted WTF-8 for the two above. So bash is not self-consistent\n"
+        "     and 'match bash' does not name one behaviour. A uniform 'hand\n"
+        "     back what was typed' is predictable and lossless where bash is\n"
+        "     neither, and if this ever has to match bash, matching it\n"
+        "     INCLUDING the silent far end would be the wrong half to copy.\n"
+        "     Declared by lane A 2026-09-12.",
     ),
 ]
 
@@ -353,6 +864,66 @@ OFFSET_RUNGS = [
 # An excuse list is how a coverage check stays honest instead of becoming a
 # thing people delete when it is inconvenient -- but it is only honest if the
 # reasons are real, so each is a property of the rung and not of our appetite.
+# A rung that loops over a LITERAL table, which `rustrungs.expectations` cannot
+# read: the expected side at the call site is a loop variable, so the twenty
+# answers live in the table above it.
+#
+# Excusing it would have been quick and would have been FALSE. The standing
+# excuse for a loop rung is "its input is a loop variable, so there is no fixed
+# case to ask bash about" -- true of `quote_word`'s round-trip loop, where the
+# input is generated. Here every case is a literal a shell can be asked, so the
+# excuse would have been a sentence that was accurate about the call and wrong
+# about the rung. That is the exact shape this file exists to refuse.
+#
+# Graded three ways, the same as any other rung: the table is read out of the
+# Rust and compared with the transcription here (a corrupted expectation in a
+# twenty-case table is invisible to a reader and fatal to a boot); each answer
+# is checked against the port; and each input is required to be in CASES, where
+# bash grades it directly. The third is what keeps this from being the port
+# agreeing with itself.
+TABLE_RUNGS = [
+    (
+        "strip_quotes(ansi)",
+        "let cases: &[(&[u8], &[u8])] = &[",
+        [
+            (b"$'hi'", b"hi"),
+            (b"$'a b'", b"a b"),
+            (b"echo $'hi'", b"echo hi"),
+            (b"$'\\n'", b"\n"),
+            (b"$'\\t'", b"\t"),
+            (b"$'\\e'", b"\x1b"),
+            (b"$'\\E'", b"\x1b"),
+            (b"$'x\\x41y'", b"xAy"),
+            (b"$'\\x4'", b"\x04"),
+            (b"$'\\xg'", b"\\xg"),
+            (b"$'\\101'", b"A"),
+            (b"$'\\0101'", b"\x081"),
+            (b"$'\\777'", b"\xff"),
+            (b"$'\\8'", b"\\8"),
+            (b"$'\\q'", b"\\q"),
+            (b"$'\\cA'", b"\x01"),
+            (b"$'re\\xffport.txt'", b"re\xffport.txt"),
+            (b"$'\\u00e9'", b"\xc3\xa9"),
+            (b"$'a\\0b'", b"ab"),
+            (b"$'\\x41'$'\\x42'", b"AB"),
+        ],
+    ),
+]
+
+# Inputs a table rung may carry that no real shell is asked about. EMPTY, and
+# the emptiness is the finding: five cases were written here first, with
+# plausible reasons -- a newline or tab word would be reshaped by the probe's
+# framing, and `$'re\xffport.txt'` carries a raw 0xff that the latin-1
+# transport surely could not round-trip. Every one of those five was then
+# measured and every one was wrong. bash carries all of them, 0xff included,
+# because bashprobe frames words with NUL rather than with whitespace.
+#
+# Kept as a live hatch rather than deleted: the next case that genuinely cannot
+# be asked needs somewhere to go that is not silence. But an entry here costs a
+# case its only independent oracle, so the bar is a measurement showing the
+# probe fails -- not a reason it ought to.
+TABLE_RUNG_NOT_IN_CASES: dict[bytes, str] = {}
+
 EXCUSED_RUNGS = {
     "strip_quotes(ansi)":
         "self_test section 10, the $'...' ANSI-C decode table. Its input is a "
@@ -500,6 +1071,7 @@ def assert_every_rung_is_accounted_for(src: str | None = None) -> None:
             "  want a human: every check below would pass over nothing.")
     known = ({c for c, _b, _w in STRIP_RUNGS}
              | {c for c, _b, _n, _e in OFFSET_RUNGS}
+             | {c for c, _d, _p in TABLE_RUNGS}
              | set(EXCUSED_RUNGS)
              | {DIVERGENCE_RUNG})
     strays = sorted({c for _line, c in found} - known)
@@ -560,6 +1132,119 @@ def score_strip_rungs(src, rungs, quiet=False) -> int:
                 if not ok:
                     print("       <-- the RUNG is wrong: bash is the oracle "
                           "here, not the subject")
+    return fails
+
+
+def read_rust_table(src: str, decl: str) -> list[tuple[bytes, bytes]] | None:
+    """The literal `(input, want)` pairs of a Rust `let cases … = &[…];` table.
+
+    Returns None if the declaration is absent -- which is a finding, not an
+    empty table: a rung looping over a table this file cannot find would
+    otherwise be graded against nothing and report agreement.
+    """
+    at = src.find(decl)
+    if at < 0:
+        return None
+    body = src[at + len(decl):]
+    end = _match_close(body)
+    if end is None:
+        return None
+    # Whole-line comments carry byte literals inside prose (`\\x` above), so
+    # they are dropped before any literal is read out.
+    text = "\n".join(
+        ln for ln in body[:end].splitlines() if not ln.strip().startswith("//")
+    )
+    pairs = []
+    for element in rustrungs.split_top_level(text):
+        lits = rustrungs.literals_in(element)
+        if len(lits) == 2:
+            pairs.append((lits[0], lits[1]))
+    return pairs
+
+
+def _match_close(text: str) -> int | None:
+    """Index of the `]` closing the `[` the caller has already consumed."""
+    depth = 1
+    i = 0
+    while i < len(text):
+        c = text[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c in "\"'":
+            quote, i = c, i + 1
+            while i < len(text) and text[i] != quote:
+                i += 2 if text[i] == "\\" else 1
+        elif c == "[":
+            depth += 1
+        elif c == "]":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return None
+
+
+def _bash_is_asked(line: bytes) -> bool:
+    """Is `line` put to a real shell anywhere in this file?
+
+    DIVERGENCES counts. It pins bash's answer as well as ours, so a case
+    living there has been asked and the answer recorded -- it is not an
+    ungraded case, it is a graded one whose two sides differ on purpose.
+    Missing this was a real hole: `$'a\\0b'` sat in DIVERGENCES and the first
+    version of the table check called it port-only.
+    """
+    return (line in CASES
+            or any(line == d[0] for d in DIVERGENCES)
+            or line in TABLE_RUNG_NOT_IN_CASES)
+
+
+def score_table_rungs(src, rungs, quiet=False) -> int:
+    """A looped rung's literal table: Rust vs. this file vs. the port."""
+    fails = 0
+    if not quiet:
+        print("\n--- looped rungs over a literal table ---")
+    for call, decl, want in rungs:
+        pairs = read_rust_table(src, decl)
+        if pairs is None:
+            fails += 1
+            print(f"FAIL {call} -- `{decl}` is not in shellquote.rs, so the "
+                  f"{len(want)} case(s) here grade nothing")
+            continue
+        if pairs != want:
+            fails += 1
+            print(f"FAIL {call} -- the Rust table is not what this file "
+                  f"transcribes")
+            print(f"       Rust      : {len(pairs)} case(s)")
+            print(f"       this file : {len(want)} case(s)")
+            for a, b in zip(pairs, want):
+                if a != b:
+                    print(f"       first difference: Rust {a!r} vs here {b!r}")
+                    break
+            continue
+        bad = 0
+        for src_bytes, expected in pairs:
+            got = strip_quotes(src_bytes)
+            if got != expected:
+                bad += 1
+                fails += 1
+                print(f"FAIL {call} {src_bytes!r}")
+                print(f"       rung asserts: {expected!r}")
+                print(f"       the port says: {got!r}")
+            elif not _bash_is_asked(src_bytes):
+                bad += 1
+                fails += 1
+                print(f"FAIL {call} {src_bytes!r} is graded against the port "
+                      f"only")
+                print("       Add it to CASES so bash grades it, to "
+                      "DIVERGENCES if bash deliberately disagrees, or to "
+                      "TABLE_RUNG_NOT_IN_CASES with the reason bash cannot "
+                      "be asked. A case the port checks against itself is "
+                      "not evidence.")
+        if not bad and not quiet:
+            asked = sum(1 for s, _ in pairs if _bash_is_asked(s))
+            print(f"ok   {call} -- {len(pairs)} case(s) transcribed exactly, "
+                  f"{asked} of them also put to bash in CASES")
     return fails
 
 
@@ -745,21 +1430,84 @@ def _selftest() -> int:
             rc = fn(*a)
         return rc, buf.getvalue()
 
-    # --- the port-drift guard, in both directions. ------------------------
-    same = "const DQ_ESCAPABLE: [u8; 5] = [b'\"', b'\\\\', b'$', b'`', b'\\n'];"
-    try:
-        assert_port_matches_rust(same)
-    except SystemExit as exc:
-        check(f"a matching Rust table passes ({exc})", False)
-    else:
-        check("a matching Rust table passes", True)
+    # --- the port-drift guard, in every direction it can go wrong. --------
+    #
+    # Driven entirely through fixtures this file carries, never against the
+    # real `shellquote.rs` -- see `assert_port_matches_rust`'s docstring for
+    # why a lane-B self-test must not read a lane-A file.
+    def fixture(ctx=None, alphabet=None, body=None, comment="// the scanner"):
+        variants = "Unquoted,\n    Single,\n    Double," if ctx is None else ctx
+        table = (
+            "const DQ_ESCAPABLE: [u8; 5] = [b'\"', b'\\\\', b'$', b'`', b'\\n'];"
+            if alphabet is None else alphabet
+        )
+        inner = "        self.i += 1;" if body is None else body
+        return (
+            "pub enum Ctx {\n"
+            f"    {variants}\n"
+            "}\n"
+            "\n"
+            f"{table}\n"
+            "\n"
+            f"    {comment}\n"
+            "impl Iterator for QuoteScan<'_> {\n"
+            "    fn next(&mut self) -> Option<Tok> {\n"
+            f"{inner}\n"
+            "    }\n"
+            "}\n"
+        )
 
-    # The drift this exists for: a rule changed in the Rust and not here.
-    # `\n` dropped from the alphabet is the realistic shape of it, because it
-    # is the member a reader is least likely to remember is there.
+    baseline = fixture()
+    blessed = ported_digest(baseline, _SCANNER)
+    states = {blessed: _State(regions=_SCANNER,
+                              ctx=frozenset({"Unquoted", "Single", "Double"}),
+                              label="the self-test fixture",
+                              note="carried in this file, not read from lane A")}
+    check("the fixture's three regions are found and digested",
+          len(blessed) == 64 and blessed != hashlib.sha256(b"").hexdigest())
+
+    try:
+        assert_port_matches_rust(baseline, states=states)
+    except SystemExit as exc:
+        check(f"a matching Rust scanner passes ({exc})", False)
+    else:
+        check("a matching Rust scanner passes", True)
+
+    # 1. THE DRIFT THAT ACTUALLY HAPPENED, 2026-09-12: lane A added a fourth
+    #    quoting context (`Ctx::DollarSingle`, for `$'...'`) and nothing here
+    #    could see it, because the change does not touch `DQ_ESCAPABLE`.
+    try:
+        assert_port_matches_rust(
+            fixture(ctx="Unquoted,\n    Single,\n    Double,\n    DollarSingle,"),
+            states=states,
+        )
+    except SystemExit as exc:
+        check("a context the port does not model is refused",
+              "PORT HAS DRIFTED" in str(exc))
+        check("...and the refusal names the context rather than only the fact",
+              "DollarSingle" in str(exc))
+    else:
+        check("a context the port does not model is refused", False)
+
+    # ...and the other direction, which is not the same failure: a port that
+    # models MORE than the Rust grades cases the Rust cannot reach. Worth
+    # refusing, but the message must not accuse the Rust of hiding something.
+    try:
+        assert_port_matches_rust(
+            fixture(ctx="Unquoted,\n    Single,"), states=states)
+    except SystemExit as exc:
+        check("a context the Rust no longer has is refused too",
+              "PORT HAS DRIFTED" in str(exc) and "Double" in str(exc))
+    else:
+        check("a context the Rust no longer has is refused too", False)
+
+    # 2. The drift this file was already guarded against: a rule changed in
+    #    the Rust and not here. `\n` dropped from the alphabet is the
+    #    realistic shape of it, because it is the member a reader is least
+    #    likely to remember is there.
     drifted = "const DQ_ESCAPABLE: [u8; 4] = [b'\"', b'\\\\', b'$', b'`'];"
     try:
-        assert_port_matches_rust(drifted)
+        assert_port_matches_rust(fixture(alphabet=drifted), states=states)
     except SystemExit as exc:
         check("a drifted Rust table is refused", "PORT HAS DRIFTED" in str(exc))
         check("...and the refusal prints both sides, not just a verdict",
@@ -767,16 +1515,119 @@ def _selftest() -> int:
     else:
         check("a drifted Rust table is refused", False)
 
-    # The other way the guard can go blind: the constant is renamed or
-    # reshaped, the regex matches nothing, and a silent `theirs == set()`
-    # would compare empty against empty if the code were written carelessly.
+    # 3. THE CASE NEITHER OF THE ABOVE CAN SEE, and the reason the digest
+    #    exists: a rule changed INSIDE an existing context. The contexts match,
+    #    the alphabet matches, and the scanner is a different scanner.
     try:
-        assert_port_matches_rust("const DQ_ESC: [u8; 0] = [];")
+        assert_port_matches_rust(
+            fixture(body="        self.i = self.i.wrapping_sub(1);"),
+            states=states,
+        )
     except SystemExit as exc:
-        check("a renamed constant is refused rather than read as empty",
-              "renamed or reshaped" in str(exc))
+        check("a rule changed inside a context is refused",
+              "PORT HAS DRIFTED" in str(exc))
+        check("...and the refusal says it is an inside-a-context change",
+              "INSIDE one of them" in str(exc))
     else:
-        check("a renamed constant is refused rather than read as empty", False)
+        check("a rule changed inside a context is refused", False)
+
+    # ...but NOT on a comment or an attribute, which is what the normaliser is
+    # for. Without this the guard is noise, and a noisy guard gets bypassed --
+    # which costs more than the drift it was added to catch.
+    try:
+        assert_port_matches_rust(
+            fixture(comment="// rewritten comment, same scanner"),
+            states=states,
+        )
+    except SystemExit as exc:
+        check(f"a comment-only change does NOT fire the guard ({exc})", False)
+    else:
+        check("a comment-only change does NOT fire the guard", True)
+
+    # 4. The ways the guard can go blind: a declaration renamed, so the
+    #    extractor matches nothing and a carelessly-written check would
+    #    compare empty against empty and pass.
+    for renamed, label in (
+        ("pub enum QuoteCtx", "enum Ctx"),
+        ("const DQ_ESC", "DQ_ESCAPABLE"),
+        ("impl Iterator for Scanner", "the scanner impl"),
+    ):
+        broken = fixture()
+        broken = broken.replace(
+            {"pub enum QuoteCtx": "pub enum Ctx",
+             "const DQ_ESC": "const DQ_ESCAPABLE",
+             "impl Iterator for Scanner": "impl Iterator for QuoteScan"}[renamed],
+            renamed, 1)
+        try:
+            assert_port_matches_rust(broken, states=states)
+        except SystemExit as exc:
+            check(f"a renamed {label} is refused rather than read as empty",
+                  "renamed or reshaped" in str(exc))
+        else:
+            check(f"a renamed {label} is refused rather than read as empty",
+                  False)
+
+    # 5. And the extractor itself: a `{` inside a byte literal must not
+    #    unbalance the region, or the impl would end early and the digest
+    #    would be taken over a fragment -- green having inspected a third of
+    #    what it names.
+    braced = fixture(body="        if b == b'{' { self.i += 1; }")
+    lines = _region(braced, "impl Iterator for QuoteScan")
+    check("a `{` inside a byte literal does not truncate the region",
+          lines is not None and lines[-1].strip() == "}" and len(lines) == 5)
+
+    # --- the transition table, which is the thing that can go stale. ------
+    #
+    # Two blessed states is a declaration, and a declaration outliving its
+    # reason is the failure the digest exists to stop, one level up. So the
+    # non-current one must ANNOUNCE itself on every run.
+    current = PORTED_STATES[CURRENT_DIGEST]
+    check("the port models the CURRENT state, so it needs no warning",
+          _transition_warning(CURRENT_DIGEST, current) is None)
+    for digest, st in PORTED_STATES.items():
+        if digest == CURRENT_DIGEST:
+            continue
+        warning = _transition_warning(digest, st)
+        check(f"the {st.label} state warns that it is not what the port models",
+              warning is not None and "TRANSITION" in warning)
+        check("...and names the context whose results therefore mean nothing",
+              warning is not None
+              and any(c in warning for c in PORTED_CTX - st.ctx))
+        check("...and says when the entry must be deleted",
+              "DELETE THIS ENTRY" in st.note)
+
+    # --- the ANSI-C decoder, against bash 5.2.37's measured answers. ------
+    #
+    # Bash-free on purpose: these are the edges where a confident reading of
+    # the manual lands in the wrong place, so they are the cases most worth
+    # having on a host with no WSL. Every expectation here was measured.
+    bs = bytes([BACKSLASH])
+    for after, want_out, want_consumed, why in [
+        (b"n", b"\n", 1, "the ordinary case"),
+        (b"e", b"\x1b", 1, "\\e is escape"),
+        (b"E", b"\x1b", 1, "...and so is \\E"),
+        (b"x41", b"A", 3, "two hex digits"),
+        (b"x4'", b"\x04", 2, "ONE hex digit is legal -- $'\\x4' is 0x04"),
+        (b"xg", bs, 0, "no hex digit at all: not an escape, backslash kept"),
+        (b"101", b"A", 3, "octal needs no leading zero"),
+        (b"0101", b"\x08", 3, "...and stops at three, leaving a literal 1"),
+        (b"777", b"\xff", 3, "wraps into a byte rather than erroring"),
+        (b"8", bs, 0, "8 is not an octal digit"),
+        (b"q", bs, 0, "unrecognised keeps the backslash AND the character"),
+        (b"u0041", b"A", 5, "\\u, one byte out"),
+        (b"u00e9", b"\xc3\xa9", 5, "\\u, TWO bytes out -- why a queue exists"),
+        (b"U0001F600", b"\xf0\x9f\x98\x80", 9, "\\U, four bytes out"),
+        (b"cA", b"\x01", 2, "control-A"),
+        (b"", bs, 0, "a trailing backslash is a literal backslash"),
+    ]:
+        got_out, got_consumed = decode_ansi_c(after)
+        check(f"decode_ansi_c({after!r}) -> {want_out!r}, {want_consumed} ({why})",
+              got_out == want_out and got_consumed == want_consumed)
+
+    # The property that makes `consumed == 0` mean what it says: the byte after
+    # an unrecognised escape must NOT be eaten, or `$'\q'` would lose its `q`.
+    check("an unrecognised escape consumes nothing after the backslash",
+          all(decode_ansi_c(bytes([c]))[1] == 0 for c in b"qz89QZ"))
 
     # --- the bash-free tables, on the real data. --------------------------
     rc, _ = quietly(score_delim, DELIM)
@@ -969,7 +1820,7 @@ def main():
     # neither needs WSL and a gutted table is worth reporting on a host that
     # cannot run the rest of this file at all.
     _assert_tables_are_not_gutted()
-    assert_port_matches_rust()
+    state_digest, state = assert_port_matches_rust()
     src = _read_rust()
     # Before anything is graded: is there anything this file has not heard of?
     # An ungraded rung is an unasked question, not a wrong answer, so it raises
@@ -981,6 +1832,12 @@ def main():
     # rewritten for.
     rung_fails = score_offset_rungs(src, OFFSET_RUNGS, quiet=True)
     rung_fails += score_divergence_rung(src, quiet=True)
+    # Only the tables this tree actually has. A rung whose declaration is
+    # absent is a finding when the rung is present and nothing when it is not,
+    # and during the DollarSingle transition the four-context table is exactly
+    # that: not yet here.
+    live_tables = [r for r in TABLE_RUNGS if read_rust_table(src, r[1]) is not None]
+    rung_fails += score_table_rungs(src, live_tables, quiet=True)
     # Both checks above run before the transport check and neither needs WSL:
     # a gutted table or a drifted port is worth reporting on a host that cannot
     # run the rest of this file at all, and both exit 1, which is a finding.
@@ -1000,10 +1857,21 @@ def main():
         return 1
     bashprobe.assert_transport_is_faithful()
     print("port verified against shellquote.rs")
-    n_rungs = len(STRIP_RUNGS) + len(OFFSET_RUNGS) + 1 + len(EXCUSED_RUNGS)
+    warning = _transition_warning(state_digest, state)
+    if warning is not None:
+        print(warning)
+    # Count what is LIVE in this tree, not the sum of the tables' lengths. The
+    # two differ during a transition -- the looped ANSI-C table is absent from
+    # the three-context scanner -- and a summary that counted a rung the tree
+    # does not have would be naming a population it had not inspected, which is
+    # the failure this whole file is organised around.
+    table_cases = sum(len(read_rust_table(src, d) or ()) for _c, d, _p in live_tables)
+    n_rungs = (len(STRIP_RUNGS) + len(OFFSET_RUNGS) + 1 + len(EXCUSED_RUNGS)
+               + len(live_tables))
     print(f"all {n_rungs} shellquote.rs rungs accounted for "
           f"({len(STRIP_RUNGS)} graded against bash, {len(OFFSET_RUNGS)} "
-          f"against the port, 1 divergence, {len(EXCUSED_RUNGS)} excused)")
+          f"against the port, 1 divergence, {len(EXCUSED_RUNGS)} excused, "
+          f"{len(live_tables)} looped over a table of {table_cases} case(s))")
     print("transport verified faithful\n")
 
     fails = score_cases(CASES)
@@ -1011,13 +1879,45 @@ def main():
     fails += score_divergences(DIVERGENCES)
     fails += score_offset_rungs(src, OFFSET_RUNGS)
     fails += score_divergence_rung(src)
+    fails += score_table_rungs(src, live_tables)
     fails += score_delim(DELIM)
     fails += score_ctx(CTX)
     print(f"\n{fails} failure(s)")
     return 1 if fails else 0
 
 
+def _print_digest() -> int:
+    """Re-bless `PORTED_DIGEST` -- after re-reading `scan()`, not instead of it.
+
+    Deliberately prints rather than rewrites this file. A guard that can
+    silence itself in one command is a guard that gets silenced; the digest has
+    to be pasted in by whoever has just looked at what changed.
+    """
+    try:
+        src = RUST.read_text(encoding="utf-8")
+    except OSError as e:
+        raise SystemExit(f"cannot read {RUST}: {e}") from e
+    variants = _ctx_variants(src) or set()
+    print(f"contexts in shellquote.rs : {', '.join(sorted(variants))}")
+    print(f"contexts modelled here    : {', '.join(sorted(PORTED_CTX))}")
+    print()
+    # One digest per DISTINCT region list, because which regions are pinned is
+    # itself part of a state -- `decode_ansi_c` exists only in the four-context
+    # scanner. Printing a single number would silently pick one.
+    for regions in dict.fromkeys(st.regions for st in PORTED_STATES.values()):
+        text, missing = ported_source(src, regions)
+        print(f"regions: {', '.join(regions)}")
+        if missing is not None:
+            print(f"  `{missing}` is not in {RUST}; no digest for this list.")
+            continue
+        print(f"  {len(text)} bytes normalised over {len(regions)} region(s)")
+        print('  "%s"' % hashlib.sha256(text.encode("utf-8")).hexdigest())
+    return 0
+
+
 if __name__ == "__main__":
+    if "--print-digest" in sys.argv[1:]:
+        sys.exit(_print_digest())
     if "--self-test" in sys.argv[1:] or "--selftest" in sys.argv[1:]:
         sys.exit(_selftest())
     sys.exit(main())

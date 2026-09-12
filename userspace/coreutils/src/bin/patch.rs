@@ -80,6 +80,11 @@ struct Options {
     backup: bool,
     /// `-o FILE`: write the result to FILE, leaving the target untouched.
     output_file: Option<String>,
+    /// `-l`: match ignoring whitespace. Accepted and currently inert -- see the
+    /// note on `forward` for what that does and does not mean. It changes an
+    /// answer only where a hunk differs from the target in whitespace alone,
+    /// and no case in this tree does.
+    ignore_whitespace: bool,
     /// `-E`: delete a file the patch has emptied.
     remove_empty: bool,
     /// `-r FILE`: write rejects to FILE instead of `<target>.rej`.
@@ -147,6 +152,8 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
             opts.silent = true;
         } else if a == "-b" || a == "--backup" {
             opts.backup = true;
+        } else if a == "-l" || a == "--ignore-whitespace" {
+            opts.ignore_whitespace = true;
         } else if a == "-E" || a == "--remove-empty-files" {
             opts.remove_empty = true;
         } else if a == "-o" || a == "--output" {
@@ -648,9 +655,19 @@ fn main() {
             }
         };
 
-        let file_path = match opts.strip {
-            Some(n) => strip_path(&raw_path, n),
-            None => raw_path.clone(),
+        // AN EXPLICIT TARGET OPERAND WINS OVER THE PATCH'S OWN PATH. `patch -i
+        // u.patch -p1 a/base.txt` patches `a/base.txt` whatever the patch says,
+        // which is the whole point of naming it. This build parsed the operand
+        // into `target_file` and then never read it, so the name was accepted
+        // and discarded -- and because the patch's own path did not resolve,
+        // the case failed with `can't find file to patch` while GNU patched
+        // happily.
+        let file_path = match &opts.target_file {
+            Some(named) => named.clone(),
+            None => match opts.strip {
+                Some(n) => strip_path(&raw_path, n),
+                None => raw_path.clone(),
+            },
         };
 
         // Read the original file (or start empty for new files).
@@ -937,7 +954,13 @@ fn main() {
                     let _ = fs::write(format!("{file_path}.orig"), original.as_bytes());
                 }
             }
-            if !opts.silent {
+            // NOT gated on `-s`. Measured: `patch -s` on a failing patch still
+            // prints `1 out of 1 hunk FAILED -- saving rejects to file X.rej`,
+            // while suppressing `patching file X` and the per-hunk lines.
+            // Silent means do not narrate the work; it does not mean hide that
+            // the work did not happen. A script running `patch -s` and reading
+            // stdout would otherwise be told nothing at all about a failure.
+            {
                 // `1 out of 1 hunk FAILED -- saving rejects to file X.rej`,
                 // singular when there is one. Ours said `hunks FAILED for X`
                 // and never mentioned the reject file, because there was none.

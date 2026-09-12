@@ -521,9 +521,12 @@ def main(argv: list[str]) -> int:
     # around them were long enough to make rustfmt wrap the chain. See
     # `statements` for the full argument and known-issues.md
     # `A-KSHELL-THE-OPTION-GATE-COUNTS-ONE-LINE-AND-RUSTFMT-USES-FOUR`.
+    n_statements = 0
+    n_loops = 0
     for start, stmt in _rl.statements(code_lines, struct):
         if not is_production(start):
             continue
+        n_statements += 1
         fn = outer_fn(stacks[start])
         if D1.search(stmt) and not allowed(fn, stmt):
             guessed.append((start + 1, fn, stmt[:96]))
@@ -542,6 +545,7 @@ def main(argv: list[str]) -> int:
     for open_i, close_i in loop_bodies(struct):
         if not is_production(open_i):
             continue
+        n_loops += 1
         # Comments are stripped here too, and in both directions: an option
         # spelling quoted in a comment would push a loop over the two-spelling
         # threshold it never reached in code, and the word `set_exit` in a
@@ -611,10 +615,35 @@ def main(argv: list[str]) -> int:
     problems = bool(unaccounted_guessed or dropped or mute or stale or silent)
     if not problems:
         carried = sum(seen.values())
+        # A STATUS, NOT A CLAIM.  This line used to read "no word is silently
+        # dropped and no new value is guessed", which is a statement about
+        # kshell.rs that these four detectors cannot support -- and the same
+        # sentence then disclosed the carried backlog in a parenthetical, so
+        # one half was careful and the other was not.
+        #
+        # The docstring above was always scrupulous about this: it enumerates
+        # D1/D2/D3 and says outright that it reports what it checks rather than
+        # claiming completeness.  But a docstring is read by whoever opens the
+        # source, and this line is read by everyone, in every boot log.  Where
+        # those two disagree the log wins, because it is the one being believed.
+        #
+        # Lane A had a live counterexample when this was written -- a word
+        # dropped by `String::from_utf8(word).ok()` in `split_words`, matching
+        # none of the four shapes, unreachable until `$'...'` decoding made
+        # `strip_quotes` able to produce a non-UTF-8 byte.  The fix for that is
+        # theirs; the fix for the sentence that would have read as covering it
+        # is this one.  A fifth detector was deliberately NOT added: a table of
+        # shapes stops standing for the property it was picked to represent,
+        # which is exactly how `DQ_ESCAPABLE` stopped standing for "the scanner"
+        # in `check-shellquote-vs-bash.py` the same night.
         print(
-            f"[option-refusal] kshell.rs: no word is silently dropped and no new value "
-            f"is guessed ({len(ALLOWED)} allowed, {carried} guessed-value site(s) "
-            f"carried as known debt across {len(ledger)} function(s))"
+            f"[option-refusal] kshell.rs: {n_statements} production statement(s) "
+            f"and {n_loops} loop(s) inspected; no site matches D1 (parse "
+            f"fallback), D2 (dash-filtered word), D3 (option loop with no "
+            f"refusal) or the silent-numeric-operand shape, outside the ledger "
+            f"({len(ALLOWED)} allowed, {carried} guessed-value site(s) carried "
+            f"as known debt across {len(ledger)} function(s)). Other ways to "
+            f"drop a word are not checked here -- see this file's docstring."
         )
         return 0
 

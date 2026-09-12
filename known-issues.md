@@ -16015,6 +16015,48 @@ runtime, not `crt.rs`), but it de-risks the concept and is the path real
 Linux-ABI binaries actually use; the still-open gap is purely the
 slateos-native `posix` crt whose live linker-script wiring remains vestigial.
 
+**AMENDED 2026-09-12 (lane B) - the consumer is staged. The walk is still
+not proven to RUN.**
+
+Answering `requests/a-b-crt-init-array-consumer-must-be-c-not-cpp.md`, which is
+where the full measurement and the exit-code legend live.
+
+`services/ctest-initfini/` is the first program in this tree whose boundary
+symbols are non-null. It is C with `__attribute__((constructor))` and
+`((destructor))` at two priorities each, plus one `.preinit_array` entry placed
+by hand. Measured in the linked ELF rather than assumed:
+
+| section | entries |
+|---|---|
+| `.preinit_array` | 1 |
+| `.init_array` | 2, ascending by priority |
+| `.fini_array` | 2, so the reverse walk has something to reverse |
+
+and all six boundary symbols (`__preinit_array_start/end` and the other two
+pairs) are DEFINED by lld, including the preinit pair. That last part matters
+as much as the sections: `crt.rs` declares them **weak**, so an undefined one
+resolves to null and the walk becomes a silent, successful no-op that is
+indistinguishable at run time from a walk that ran.
+
+**The fixture's `main` deliberately returns a FAILING status (7).** Only a
+destructor can turn it into the passing 42, so the fixture cannot pass unless
+the `.fini_array` walk actually runs. `build.py` additionally refuses to emit
+the binary unless all three arrays are non-empty, and proves that refusal on
+every build by first compiling the same source with `CTEST_INITFINI_NO_FINI` -
+which reproduces the C++ shape in C, functions emitted and section absent - and
+requiring the check to reject it.
+
+**What is still open, and why this entry does not close here.** Everything above
+is a static fact about a file. The loader mapping those sections,
+`__libc_start_main` calling `run_constructors`, and `atexit(run_destructors)`
+firing are what remains unproven, and `crt.rs`'s four host unit tests cannot
+reach any of the three: on a host build the weak bounds are null by
+construction, so those tests would all still pass if the linker never defined
+the symbols, if the crt never called the walk, or if the atexit registration
+were dropped. The mechanism has only ever been proven to be a correct *no-op*.
+The kernel-side spawn self-test that boots `/tests/ctest-initfini.elf` and
+asserts 42 is lane A's and is now unblocked.
+
 **Discovered/documented:** 2026-06-30; mechanism implemented + host-tested
 2026-07-01.
 
@@ -136337,3 +136379,28 @@ which is the outcome you want from it, and cost seconds rather than a boot cycle
 `$'\xff'` *the* way a user names a non-UTF-8 file, since the source line stays text.
 That is the whole user-visible payoff of `TD-KSHELL-LINE-EDITOR-IS-UTF8`, and it rests
 entirely on this construct working.
+
+## B-PATCH-IGNORED-THE-TARGET-YOU-NAMED (lane B, 2026-09-12) — FIXED
+
+Three fixes, `patch-diff.sh` 51 passed / 14 differed to **56 / 9**.
+
+**An explicit target operand was parsed and then discarded.** `patch -i u.patch
+-p1 a/base.txt` patches `a/base.txt` whatever the patch says — that is the
+point of naming it. This build stored the operand in `target_file` and never
+read it, so the name was accepted and thrown away. Because the patch's own path
+did not resolve, the case failed with `can't find file to patch` while GNU
+patched happily. **An option that is parsed but unread is worse than one that is
+refused**: the refusal at least tells you.
+
+**`-s` suppresses the narration, not the outcome.** Measured: `patch -s` on a
+failing patch still prints `1 out of 1 hunk FAILED -- saving rejects to file
+X.rej`, while suppressing `patching file X` and the per-hunk lines. Ours
+suppressed everything, so a script running `patch -s` and reading stdout was
+told nothing at all about a failure. Silent means do not narrate the work; it
+does not mean hide that the work did not happen.
+
+**`-l`/`--ignore-whitespace` is accepted and inert**, on the same terms as
+`-N`/`-f`/`-F`/`-Z` above: it changes an answer only where a hunk differs from
+the target in whitespace alone, and no case in this tree does. Correct today,
+incomplete rather than wrong, and recorded so a passing harness is not read as
+evidence that whitespace-insensitive matching exists. It does not.

@@ -132053,8 +132053,21 @@ account has no uid -- there is no safe default for "which user to run as".
 `doas`'s `UID`/`GID` environment "hints" are deleted rather than kept alongside:
 they were read as an *identity* by six other programs, so `doas` was
 manufacturing the spoofed environment they trusted (see the entry above).
-`login` remains, and it is a different job -- its success path still prints
-"would exec shell" and execs nothing at all; see `todo.txt`.
+~~`login` remains, and it is a different job -- its success path still prints
+"would exec shell" and execs nothing at all; see `todo.txt`.~~
+
+**`login` is done too, and this line was stale when it was written or shortly
+after (corrected 2026-09-12).** `build_login_command` builds a real
+`process::Command` for the user's shell, clears the inherited environment,
+sets the leading-hyphen `argv[0]`, and calls
+`authlib::identity::become_user(&mut cmd, user.uid, user.gid)` -- the same
+mechanism `doas` and `sudo` use. `spawn_login_shell` then tries the home
+directory and falls back to `/`, which is the one setting that can fail for a
+reason that is not the caller's fault. 62 tests pass.
+
+There is no `todo.txt` entry for it either, so the pointer at the end of that
+sentence led nowhere. Third stale status line found today in a document whose
+own subject is stale status lines.
 
 ---
 

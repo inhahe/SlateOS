@@ -66999,9 +66999,19 @@ value*: `parse_normal_patch` added one, `apply_hunk` subtracted one, and the tes
 the number after both. It therefore asserted the implementation against itself and would
 have failed had either half been corrected alone. A test that reads a value the code just
 wrote, through the code that wrote it, is a mirror — it reports that the module is
-self-consistent, which is never the question. The same objection retired lane B's
-`test_setdomainname_roundtrip` and applies to `sysfs.rs`'s hostname round trip, which
-writes and reads one private static and so passes whatever the rest of the system believes.
+self-consistent, which is never the question.
+
+**Correction, 2026-09-12, and it is the entry's own rule catching the entry.** This
+paragraph first cited `sysfs.rs`'s hostname round trip as a live mirror. It is not — it was
+already repaired, and the comment at `sysfs.rs:1283` explains the repair in the same terms
+this section arrives at independently: *"a round trip through one buffer is evidence about
+the buffer, and it reads exactly like evidence about the system"*, replaced by *"change the
+one store, and check that BOTH files follow"*. I took the claim from a cross-lane message
+and wrote it into a decision record **without opening a file in my own tree**, which is
+precisely the defect I had criticised the day it was made: a confident assertion about code
+nobody would read against the source. That it was my own lane's file makes it worse, not
+better. The claim about lane B's `test_setdomainname_roundtrip` does hold — git history
+carries it across ten commits — but I had not checked that either when I wrote it.
 
 The distinction is *which code paths the two ends touch*, not whether the test round-trips.
 The ring-0 `domainname` rung added here also writes then reads — but it writes through

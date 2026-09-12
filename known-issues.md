@@ -183,6 +183,30 @@ one."* A consequence of the syscall choice, already known.
 **`%a` and `%f`** were listed here as disagreeing and **do not**. They were an
 artefact of the harness — see below — and now pass.
 
+## TD-B-TWO-BINS-DECLARE-ALIASES-UNDER-A-NAME-THE-GATE-CANNOT-SEE (lane B, 2026-09-12)
+
+`scripts/getopt-ambiguity-check.py` reads a bin's alias table with
+
+    ALIAS_HEAD_RE = re.compile(r"const\s+ALIASES\s*:\s*&\[\(&str,\s*&str\)\]\s*=\s*")
+
+— the constant must be named exactly `ALIASES`. **`chmod.rs` and `chown.rs`
+name theirs `LONG_ALIASES`**, so their `("silent", "quiet")` rows are invisible
+to the gate and both bins are unchecked on the ambiguity axis.
+
+Found while fixing `date`: I wrote `LONG_ALIASES` by copying `chown.rs`, and the
+gate went on reporting the same disagreement with the table sitting right there.
+Renaming to `ALIASES` cleared it.
+
+Neither bin is currently *mis*-reported, because the gate falls back to comparing
+names and `--silent`/`--quiet` share no prefix that collides. But that is luck,
+not coverage: the day one of them gains an alias whose prefix matters, the gate
+will report a disagreement that the source already answers.
+
+**The fix is one regex** — accept `(?:LONG_)?ALIASES` — plus deciding which
+spelling the tree wants and making the other three agree. It is in a shared
+script and touches two lanes' reading of a gate, so it is filed rather than
+done in passing.
+
 ## TD-B-A-HARNESS-MUST-NOT-WRITE-TO-THE-THING-IT-MEASURES (lane B, 2026-09-11)
 
 `scripts/stat-diff.sh` reported `stat -f -c %a` and `stat -f -c %f` as
@@ -329,7 +353,7 @@ measurements instead, which is proportionate to a program with three options —
 and the general prevention now lives in `scripts/check-argv-ignored.py` rather
 than in a harness per program.
 
-## B-COREUTILS-DATE-SILENTLY-IGNORES-EVERY-ARGUMENT (lane B, 2026-09-11)
+## B-COREUTILS-DATE-SILENTLY-IGNORES-EVERY-ARGUMENT — FIXED 2026-09-11
 
 `userspace/coreutils/src/bin/date.rs` parses **no arguments at all**. It reads
 the clock, formats it one way, and prints it — whatever it was asked for.
@@ -352,7 +376,27 @@ so this is not a hidden defect, it is an unfinished program that was never
 finished. What makes it worth an entry is that **it is the half §1005 would
 keep**, and the half the image ships.
 
-**The fix is the port described below, not a patch here.**
+**FIXED.** `date` now parses through `coreutils::getopt` with GNU's own
+sixteen-entry table and implements `+FORMAT`, `-u`/`--utc`/`--universal`/`--uct`,
+`-d @EPOCH`, `-r FILE`, `-R`/`--rfc-email`/`--rfc-822`/`--rfc-2822`,
+`-I[SPEC]` and `--rfc-3339=SPEC`. **3 of 121 becomes 79 of 121** — past the
+standalone's 52, so the pair no longer needs the port it was filed for.
+
+*Mostly wiring, not new code.* The hard part of `date` is the formatter and the
+tree already had one: `localtime::strftime` implements the whole specifier set.
+This file decides which instant, which zone and which format string, and hands
+all three to code that already worked. The previous version carried its own
+`unix_secs_to_datetime`, the fourth copy of that arithmetic the tree has had to
+remove.
+
+*What is refused rather than approximated.* `-d` with anything but `@EPOCH`
+(GNU's `-d` is a small natural language — `yesterday`, `2 weeks ago` — and
+guessing at it would reintroduce this very defect in a subtler form: a date that
+is plausible and wrong), plus `-s`, `-f`, `--debug` and `--resolution`. Each
+says so. 21 of the remaining 42 are those refusals.
+
+*`scripts/check-argv-ignored.py`'s baseline is now empty* — both bins it was
+written for are fixed, and the gate stands as a ratchet against the next one.
 
 ## TD-B-DATE-IS-THE-SECOND-PAIR-THE-STANDALONE-WINS (lane B, 2026-09-11)
 

@@ -9,5 +9,3 @@
 # finish or to replace, and each one carries the measurement that says so.
 
 
-date    # scripts/date-diff.sh: 3 of 121 cases pass. `date -d @0` prints
-        #   the CURRENT time. B-COREUTILS-DATE-SILENTLY-IGNORES-EVERY-ARGUMENT.

@@ -6327,6 +6327,12 @@ fn tab_complete(line: &str, cursor: usize) -> (String, Vec<String>) {
                 match ctx {
                     shellquote::Ctx::Single => result.push('\''),
                     shellquote::Ctx::Double => result.push('"'),
+                    // `$'…'` closes with a plain `'` — the `$` belongs to the
+                    // opener only. Same closer as `Ctx::Single`, different
+                    // reason, so it is spelled out rather than merged: the
+                    // two contexts escape their *contents* differently and a
+                    // shared arm would invite one edit to serve both.
+                    shellquote::Ctx::DollarSingle => result.push('\''),
                     shellquote::Ctx::Unquoted => {}
                 }
                 result.push(' ');

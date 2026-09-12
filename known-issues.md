@@ -136229,7 +136229,7 @@ Two tests were retargeted: `parse_invalid_p_value_errors` and
 
 `patch-diff.sh`: 49 passed / 16 differed to **51 / 14**.
 
-### A-KSHELL-DOLLAR-SINGLE-QUOTE-LEAVES-A-STRAY-DOLLAR. `echo $'hi'` prints `$hi` — 2026-09-12 — LOGGED 2026-09-12 (lane A)
+### A-KSHELL-DOLLAR-SINGLE-QUOTE-LEAVES-A-STRAY-DOLLAR. `echo $'hi'` prints `$hi` — 2026-09-12 — FIXED 2026-09-12 (lane A)
 
 **In short:** the shell understands the `$'...'` spelling well enough not to get
 confused by it, but not well enough to actually carry it out. Anything typed that way
@@ -136300,6 +136300,38 @@ rather than a one-in-one-out map. Skipping input bytes is safe for the other cal
 **Also needed:** `Ctx` gains a `DollarSingle` variant, so `trailing_context` and
 `quote_suffix` need arms — inside `$'...'` a backslash *is* special, unlike `'...'`, so
 completion must escape differently there. The compiler will enumerate the sites.
+
+**FIXED the same day.** `shellquote::scan` gained a fourth context,
+`Ctx::DollarSingle`. On `$` immediately followed by `'` both bytes are consumed as one
+structural token, so neither survives quote removal; inside the region `\` introduces an
+escape and `'` closes it. `decode_ansi_c` implements the table above.
+
+*Verification, in three layers, none of which can stand in for the others:*
+
+| layer | asserts | catches |
+|---|---|---|
+| host harness vs **real bash 5.2.37** | 31 cases, byte for byte | our idea of the rules differing from bash's |
+| `shellquote::self_test` §10 | 20 expectations in the shipping kernel | the rules being right and not reaching the built binary |
+| host extraction of §10's own table | the 20 Rust literals decode to what the harness produces | a typo in an expectation, **before** spending a 24-minute boot on it |
+
+The third layer is the one worth keeping: a self-test expectation is only as good as the
+literal it is written with, and `b"\\x081"` is easy to get wrong and impossible to spot by
+reading. Extracting the table from the source and re-deriving it caught nothing this time,
+which is the outcome you want from it, and cost seconds rather than a boot cycle.
+
+*Two things found on the way, both filed rather than silently absorbed:*
+
+1. **`scripts/check-shellquote-vs-bash.py` is now green about a scanner that is not the
+   one shipping.** It grades bash against a Python *port* of the scanner, guarded by
+   `assert_port_matches_rust` — which checks only that `DQ_ESCAPABLE` matches. My change
+   does not touch `DQ_ESCAPABLE`, so the guard passes while the port lacks the whole new
+   context. The docstring is honest about checking "the escape alphabet"; the gap is that
+   the alphabet had been serving as a proxy for "the scanner" and has stopped being one.
+   It is lane B's file — its own docstring calls `shellquote.rs` "lane A's file" — so it is
+   filed as `requests/a-b-shellquote-port-has-drifted-and-the-guard-cannot-see-it.md`
+   with the measured rules, not edited.
+2. **`$'\0'` deliberately diverges from bash** — dropped rather than truncating the word.
+   `todo.txt`, Judgment Calls.
 
 **Why this matters beyond tidiness:** option B (`design-decisions.md` §261) makes
 `$'\xff'` *the* way a user names a non-UTF-8 file, since the source line stays text.

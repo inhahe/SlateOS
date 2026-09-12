@@ -30,7 +30,9 @@ const VERSION: &str = "0.1.0";
 #[derive(Clone, Debug)]
 struct IrqStat {
     irq: u32,
-    _name: String,
+    /// The tail of the `/proc/interrupts` line: chip, trigger, then
+    /// the action names. `--banmod` matches against those.
+    name: String,
     per_cpu: Vec<u64>,
     affinity_mask: u64,
 }
@@ -49,6 +51,8 @@ struct BalanceOpts {
     pid_file: String,
     banned_cpus: u64,
     banned_irqs: Vec<u32>,
+    /// Modules whose IRQs are left alone, from `--banmod`.
+    banned_modules: Vec<String>,
     hint_policy: HintPolicy,
     power_thresh: Option<u32>,
     deep_idle: bool,
@@ -110,7 +114,7 @@ fn read_irq_stats() -> Vec<IrqStat> {
 
         stats.push(IrqStat {
             irq,
-            _name: name,
+            name,
             per_cpu,
             affinity_mask: affinity,
         });
@@ -184,6 +188,34 @@ fn load_imbalance(loads: &[CpuLoad]) -> f64 {
 }
 
 /// Find the busiest IRQ on a given CPU.
+/// True if `name` -- an IRQ's `/proc/interrupts` tail -- names `module`.
+///
+/// The tail looks like `IR-PCI-MSI-0000:00:14.0  0-edge  xhci_hcd`, and a
+/// shared IRQ lists several actions separated by commas. A module matches
+/// when it is one of those tokens **exactly**: a substring test would let
+/// `--banmod=nvme` also ban `nvme_wq`, which is a different thing.
+fn irq_belongs_to(name: &str, module: &str) -> bool {
+    name.split(|c: char| c.is_whitespace() || c == ',')
+        .any(|tok| tok == module)
+}
+
+/// Every IRQ the options say not to touch: those named outright by
+/// `--banirq`, plus those belonging to a `--banmod` module.
+fn banned_irqs_for(stats: &[IrqStat], opts: &BalanceOpts) -> Vec<u32> {
+    let mut banned = opts.banned_irqs.clone();
+    for stat in stats {
+        if opts
+            .banned_modules
+            .iter()
+            .any(|m| irq_belongs_to(&stat.name, m))
+            && !banned.contains(&stat.irq)
+        {
+            banned.push(stat.irq);
+        }
+    }
+    banned
+}
+
 fn busiest_irq_on_cpu(stats: &[IrqStat], cpu: u32, banned_irqs: &[u32]) -> Option<u32> {
     stats
         .iter()
@@ -223,7 +255,7 @@ fn balance_once(opts: &BalanceOpts) -> Vec<(u32, u64)> {
         find_most_loaded_cpu(&loads, opts.banned_cpus),
         find_least_loaded_cpu(&loads, opts.banned_cpus),
     ) && most != least
-        && let Some(irq) = busiest_irq_on_cpu(&stats, most, &opts.banned_irqs)
+        && let Some(irq) = busiest_irq_on_cpu(&stats, most, &banned_irqs_for(&stats, opts))
     {
         let new_mask = 1u64 << least;
         if let Err(e) = write_irq_affinity(irq, new_mask) {
@@ -252,6 +284,7 @@ fn parse_args(args: &[String]) -> BalanceOpts {
         pid_file: "/var/run/irqbalance.pid".to_string(),
         banned_cpus: 0,
         banned_irqs: Vec::new(),
+        banned_modules: Vec::new(),
         hint_policy: HintPolicy::Ignore,
         power_thresh: None,
         deep_idle: false,
@@ -300,6 +333,16 @@ fn parse_args(args: &[String]) -> BalanceOpts {
                 i += 1;
                 if i < args.len() {
                     opts.pid_file = args[i].clone();
+                }
+            }
+            // Advertised beside `--banirq` and parsed by nothing; the IRQ
+            // name it matches against was already being read and thrown
+            // away, under the name `_name`.
+            s if s.starts_with("--banmod=") => {
+                if let Some(val) = s.strip_prefix("--banmod=")
+                    && !val.is_empty()
+                {
+                    opts.banned_modules.push(val.to_string());
                 }
             }
             s if s.starts_with("--banirq=") => {
@@ -373,10 +416,79 @@ fn main() {
 mod tests {
     use super::*;
 
+    // ── --banmod ──
+
+    fn stat(irq: u32, name: &str) -> IrqStat {
+        IrqStat {
+            irq,
+            name: name.to_string(),
+            per_cpu: vec![0],
+            affinity_mask: 1,
+        }
+    }
+
+    /// The tail of a `/proc/interrupts` line, as it really looks.
+    #[test]
+    fn a_module_matches_an_action_name_exactly() {
+        let tail = "IR-PCI-MSI-0000:00:14.0  0-edge  xhci_hcd";
+        assert!(irq_belongs_to(tail, "xhci_hcd"));
+        assert!(!irq_belongs_to(tail, "ahci"));
+        // A shared IRQ lists several actions.
+        assert!(irq_belongs_to(
+            "IR-IO-APIC  19-fasteoi  ehci_hcd, snd_hda",
+            "snd_hda"
+        ));
+    }
+
+    /// Exact tokens, not substrings: `--banmod=nvme` must not also ban
+    /// `nvme_wq`, which is a different thing that happens to start the same.
+    #[test]
+    fn a_module_is_not_a_prefix_of_another() {
+        let tail = "IR-PCI-MSI  0-edge  nvme_wq";
+        assert!(!irq_belongs_to(tail, "nvme"));
+        assert!(irq_belongs_to(tail, "nvme_wq"));
+    }
+
+    #[test]
+    fn banning_a_module_bans_its_irqs_and_leaves_the_rest() {
+        let stats = vec![
+            stat(16, "IR-PCI-MSI  0-edge  xhci_hcd"),
+            stat(17, "IR-PCI-MSI  1-edge  nvme0q0"),
+            stat(18, "IR-IO-APIC  18-fasteoi  ahci"),
+        ];
+        let mut opts = parse_args(&[]);
+        opts.banned_modules = vec!["xhci_hcd".to_string(), "ahci".to_string()];
+        let banned = banned_irqs_for(&stats, &opts);
+        assert!(banned.contains(&16), "{banned:?}");
+        assert!(banned.contains(&18), "{banned:?}");
+        assert!(!banned.contains(&17), "{banned:?}");
+    }
+
+    #[test]
+    fn banmod_and_banirq_combine_without_duplicating() {
+        let stats = vec![stat(16, "IR-PCI-MSI  0-edge  xhci_hcd")];
+        let mut opts = parse_args(&["--banirq=16".to_string()]);
+        opts.banned_modules = vec!["xhci_hcd".to_string()];
+        let banned = banned_irqs_for(&stats, &opts);
+        assert_eq!(banned, vec![16], "named twice, banned once");
+    }
+
+    #[test]
+    fn banmod_is_parsed_from_the_command_line() {
+        let opts = parse_args(&["--banmod=xhci_hcd".to_string(), "--banmod=ahci".to_string()]);
+        assert_eq!(opts.banned_modules, vec!["xhci_hcd", "ahci"]);
+        // An empty value names no module and is not one.
+        assert!(
+            parse_args(&["--banmod=".to_string()])
+                .banned_modules
+                .is_empty()
+        );
+    }
+
     fn make_stat(irq: u32, per_cpu: Vec<u64>) -> IrqStat {
         IrqStat {
             irq,
-            _name: format!("irq{irq}"),
+            name: format!("irq{irq}"),
             per_cpu,
             affinity_mask: 0xf,
         }

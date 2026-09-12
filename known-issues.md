@@ -137931,6 +137931,28 @@ defect as the entry above, one level up, written by someone who had spent the
 hour thinking about nothing else: success and not-having-run must not be the
 same observation.
 
+**A guard for this already existed, and it passed.** `check-self-tests-wired.py` has
+validated `RAN-IF` markers since before this bug, and
+`test_marker_must_live_in_the_tested_file` states the intent exactly:
+*another module's line does not vouch for this one*. It did not fire, and the
+reason is one word wide -- **file**:
+
+```python
+homes = {defs[s][0] for s in syms if s in defs}      # defs[s][0] is the FILE
+if not any(lit in files.get(rel, "") for rel in homes):
+```
+
+`fs::fat::self_test`'s home is `fs/fat.rs`, and `format_self_test` prints the
+declared banner *from that same file*, so the literal was found and the marker
+accepted. The guard was correct about a different module and blind to a
+different function in the same one.
+
+This matters for whoever reads the two gates later and sees overlap.
+`scripts/check-ran-if.py` is not a duplicate: it resolves the annotated call to
+its `fn` and checks that body, which is the granularity this check is missing.
+Deleting either one restores the gap -- the file-level check runs on every
+marker including ones whose callee cannot be resolved, and the function-level
+one is what distinguishes neighbours sharing a file.
 **Follow-up: the gate that caught this was itself nearly vacuous.**
 
 `check-ran-if.py` shipped in 0417ad5b8 resolving the annotated call by its

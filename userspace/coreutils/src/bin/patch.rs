@@ -348,6 +348,373 @@ fn render_hunk(h: &Hunk) -> String {
     out
 }
 
+/// Which of the three diff dialects `input` is written in.
+///
+/// `patch` reads three, and this build read one. `diff -c` and plain `diff`
+/// both reached `parse_patch`, which looks for `--- ` followed by `+++ `,
+/// found no file at all, and the caller reported `Only garbage was found in
+/// the patch input` -- about input GNU applies without comment.
+///
+/// The order of the tests matters. A context diff's SECOND header line is
+/// `--- y/a/base.txt`, which is also how a unified diff's FIRST one starts, so
+/// a scan that looked for `--- ` before `*** ` would call every context patch
+/// a malformed unified one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Dialect {
+    Unified,
+    Context,
+    Normal,
+    Unknown,
+}
+
+fn detect_dialect(input: &str) -> Dialect {
+    let lines: Vec<&str> = input.lines().collect();
+    for (i, line) in lines.iter().enumerate() {
+        let next = lines.get(i.saturating_add(1)).copied().unwrap_or("");
+        if line.starts_with("*** ") && next.starts_with("--- ") {
+            return Dialect::Context;
+        }
+        if line.starts_with("--- ") && next.starts_with("+++ ") {
+            return Dialect::Unified;
+        }
+        if parse_normal_command(line).is_some() {
+            return Dialect::Normal;
+        }
+    }
+    Dialect::Unknown
+}
+
+/// `2c2`, `1,3d0`, `4a5,7` -- a normal diff's command line.
+///
+/// Returns `(old_start, old_end, action, new_start, new_end)` with inclusive
+/// ends, which is the normal format's own convention and NOT unified's
+/// start-plus-count. Conflating the two is the mistake that makes a
+/// three-line hunk one line long.
+fn parse_normal_command(line: &str) -> Option<(usize, usize, char, usize, usize)> {
+    let at = line.find(['a', 'c', 'd'])?;
+    let action = line.get(at..at.saturating_add(1))?.chars().next()?;
+    let left = line.get(..at)?;
+    let right = line.get(at.saturating_add(1)..)?;
+    if left.is_empty() || right.is_empty() {
+        return None;
+    }
+    let range = |s: &str| -> Option<(usize, usize)> {
+        match s.split_once(',') {
+            Some((a, b)) => Some((a.parse().ok()?, b.parse().ok()?)),
+            None => {
+                let n: usize = s.parse().ok()?;
+                Some((n, n))
+            }
+        }
+    };
+    let (os, oe) = range(left)?;
+    let (ns, ne) = range(right)?;
+    Some((os, oe, action, ns, ne))
+}
+
+/// Parse a context diff (`diff -c`).
+///
+/// The shape, which is nothing like unified's:
+///
+/// ```text
+/// *** x/a/base.txt
+/// --- y/a/base.txt
+/// ***************
+/// *** 1,4 ****
+///   alpha        <- two spaces: context
+/// ! bravo        <- bang: changed, on the old side
+/// --- 1,4 ----
+///   alpha
+/// ! BRAVO        <- bang: changed, on the new side
+/// ```
+///
+/// The two halves are listed in full and separately, so a change appears
+/// twice -- once under `***` as `!` and once under `---` as `!`. Unified
+/// interleaves them. Rebuilding a unified hunk therefore means reading both
+/// halves and pairing them, not reading one and inferring the other.
+///
+/// `- ` appears only in the old half and `+ ` only in the new; a hunk that
+/// only deletes omits the `---` half's body entirely, and one that only adds
+/// omits the `***` half's.
+fn parse_context_patch(input: &str) -> Vec<FilePatch> {
+    let lines: Vec<&str> = input.lines().collect();
+    let mut patches: Vec<FilePatch> = Vec::new();
+    let mut i = 0;
+
+    while let Some(line) = lines.get(i).copied() {
+        let next = lines.get(i.saturating_add(1)).copied().unwrap_or("");
+        if !(line.starts_with("*** ") && next.starts_with("--- ")) {
+            i = i.saturating_add(1);
+            continue;
+        }
+        let old_path = parse_file_path(line, "*** ");
+        let new_path = parse_file_path(next, "--- ");
+        let header_lines = vec![line.to_string(), next.to_string()];
+        i = i.saturating_add(2);
+        let first_hunk_line = i.saturating_add(1);
+        let mut hunks: Vec<Hunk> = Vec::new();
+
+        while let Some(cur) = lines.get(i).copied() {
+            if cur.starts_with("*** ") && !cur.trim_end().ends_with("****") {
+                break; // the next file's header
+            }
+            if !cur.starts_with("***************") {
+                i = i.saturating_add(1);
+                continue;
+            }
+            i = i.saturating_add(1);
+
+            // `*** 1,4 ****`
+            let Some(old_hdr) = lines.get(i).copied() else {
+                break;
+            };
+            let Some((os, oe)) = context_range(old_hdr, "*** ") else {
+                i = i.saturating_add(1);
+                continue;
+            };
+            i = i.saturating_add(1);
+            let mut old_body: Vec<(char, String)> = Vec::new();
+            while let Some(b) = lines.get(i).copied() {
+                if b.starts_with("--- ") || b.starts_with("***************") {
+                    break;
+                }
+                if let Some(item) = context_body_line(b) {
+                    old_body.push(item);
+                }
+                i = i.saturating_add(1);
+            }
+
+            // `--- 1,4 ----`
+            let mut new_body: Vec<(char, String)> = Vec::new();
+            let mut ns = os;
+            let mut ne = oe;
+            if let Some(new_hdr) = lines.get(i).copied()
+                && let Some((a, b)) = context_range(new_hdr, "--- ")
+            {
+                ns = a;
+                ne = b;
+                i = i.saturating_add(1);
+                while let Some(bl) = lines.get(i).copied() {
+                    if bl.starts_with("***************") || bl.starts_with("*** ") {
+                        break;
+                    }
+                    if let Some(item) = context_body_line(bl) {
+                        new_body.push(item);
+                    }
+                    i = i.saturating_add(1);
+                }
+            }
+
+            hunks.push(context_hunk(os, oe, ns, ne, &old_body, &new_body));
+        }
+
+        patches.push(FilePatch {
+            old_path,
+            new_path,
+            hunks,
+            header_lines,
+            first_hunk_line,
+            malformed_at: None,
+        });
+    }
+    patches
+}
+
+/// `*** 1,4 ****` / `--- 1,4 ----` -> the INCLUSIVE line range.
+fn context_range(line: &str, prefix: &str) -> Option<(usize, usize)> {
+    let rest = line.strip_prefix(prefix)?;
+    let body = rest.trim_end_matches(['*', '-', ' ']);
+    match body.split_once(',') {
+        Some((a, b)) => Some((a.trim().parse().ok()?, b.trim().parse().ok()?)),
+        None => {
+            let n: usize = body.trim().parse().ok()?;
+            Some((n, n))
+        }
+    }
+}
+
+/// One body line of a context half -> its marker and its text.
+///
+/// The marker is two characters wide (`  `, `- `, `+ `, `! `) and the text
+/// begins at the third. A line that is exactly the marker with nothing after
+/// it is a blank line, not a short line, so the fallback keeps the empty
+/// string rather than dropping the entry.
+fn context_body_line(line: &str) -> Option<(char, String)> {
+    let mut chars = line.chars();
+    let marker = chars.next()?;
+    if !matches!(marker, ' ' | '-' | '+' | '!') {
+        return None;
+    }
+    let rest = line.get(2..).unwrap_or("");
+    Some((marker, rest.to_string()))
+}
+
+/// Fold a context hunk's two halves into the unified `Hunk` the applier uses.
+///
+/// Both halves are walked together. A `!` run on the old side and the `!` run
+/// facing it on the new side are one change, and are emitted removals-first,
+/// which is the order `apply_hunk` and `render_hunk` expect.
+fn context_hunk(
+    os: usize,
+    oe: usize,
+    ns: usize,
+    ne: usize,
+    old_body: &[(char, String)],
+    new_body: &[(char, String)],
+) -> Hunk {
+    let mut lines: Vec<HunkLine> = Vec::new();
+    let (mut a, mut b) = (0usize, 0usize);
+    while a < old_body.len() || b < new_body.len() {
+        let om = old_body.get(a).map(|x| x.0);
+        let nm = new_body.get(b).map(|x| x.0);
+        match (om, nm) {
+            (Some(' '), Some(' ')) => {
+                if let Some((_, text)) = old_body.get(a) {
+                    lines.push(HunkLine::Context(text.clone()));
+                }
+                a = a.saturating_add(1);
+                b = b.saturating_add(1);
+            }
+            (Some('-'), _) => {
+                if let Some((_, text)) = old_body.get(a) {
+                    lines.push(HunkLine::Remove(text.clone()));
+                }
+                a = a.saturating_add(1);
+            }
+            (_, Some('+')) => {
+                if let Some((_, text)) = new_body.get(b) {
+                    lines.push(HunkLine::Add(text.clone()));
+                }
+                b = b.saturating_add(1);
+            }
+            (Some('!'), _) | (_, Some('!')) => {
+                // Every `!` on the old side, then every `!` facing it on the
+                // new side. Emitting them interleaved would produce a hunk
+                // that renders back into a .rej file no shell could reapply.
+                while let Some(('!', text)) = old_body.get(a) {
+                    lines.push(HunkLine::Remove(text.clone()));
+                    a = a.saturating_add(1);
+                }
+                while let Some(('!', text)) = new_body.get(b) {
+                    lines.push(HunkLine::Add(text.clone()));
+                    b = b.saturating_add(1);
+                }
+            }
+            (Some(_), _) => {
+                if let Some((_, text)) = old_body.get(a) {
+                    lines.push(HunkLine::Context(text.clone()));
+                }
+                a = a.saturating_add(1);
+                b = b.saturating_add(1);
+            }
+            (None, Some(_)) => {
+                if let Some((_, text)) = new_body.get(b) {
+                    lines.push(HunkLine::Add(text.clone()));
+                }
+                b = b.saturating_add(1);
+            }
+            (None, None) => break,
+        }
+    }
+    Hunk {
+        old_start: os,
+        // INCLUSIVE END -> COUNT. A context header says `1,4` meaning lines
+        // one through four; a unified header says `1,4` meaning four lines
+        // starting at one. They agree here by coincidence and disagree the
+        // moment the range does not start at 1.
+        old_count: oe.saturating_add(1).saturating_sub(os),
+        new_start: ns,
+        new_count: ne.saturating_add(1).saturating_sub(ns),
+        lines,
+    }
+}
+
+/// Parse a normal diff (plain `diff`, no flags).
+///
+/// ```text
+/// 2c2
+/// < bravo
+/// ---
+/// > BRAVO
+/// ```
+///
+/// It carries NO FILENAMES at all, which is why GNU requires the target as an
+/// operand and why `scripts/patch-diff.sh` passes one. Both paths are left
+/// empty here and the caller's explicit-target handling supplies the name --
+/// the same road `-o` already travels.
+///
+/// A normal hunk has no context lines, so it is applied by line number rather
+/// than by matching surroundings. `old_start` is therefore load-bearing in a
+/// way it is not for unified.
+fn parse_normal_patch(input: &str) -> Vec<FilePatch> {
+    let lines: Vec<&str> = input.lines().collect();
+    let mut hunks: Vec<Hunk> = Vec::new();
+    let mut i = 0;
+    let mut first_hunk_line = 1;
+    let mut seen_first = false;
+
+    while let Some(line) = lines.get(i).copied() {
+        let Some((os, oe, action, ns, ne)) = parse_normal_command(line) else {
+            i = i.saturating_add(1);
+            continue;
+        };
+        if !seen_first {
+            first_hunk_line = i.saturating_add(1);
+            seen_first = true;
+        }
+        i = i.saturating_add(1);
+        let mut body: Vec<HunkLine> = Vec::new();
+        while let Some(b) = lines.get(i).copied() {
+            if let Some(rest) = b.strip_prefix("< ") {
+                body.push(HunkLine::Remove(rest.to_string()));
+            } else if let Some(rest) = b.strip_prefix("> ") {
+                body.push(HunkLine::Add(rest.to_string()));
+            } else if b == "---" || b == "<" || b == ">" {
+                // The `c` separator, and the two degenerate spellings of a
+                // blank line on either side.
+                if b == "<" {
+                    body.push(HunkLine::Remove(String::new()));
+                } else if b == ">" {
+                    body.push(HunkLine::Add(String::new()));
+                }
+            } else {
+                break;
+            }
+            i = i.saturating_add(1);
+        }
+        // `a` ADDS AFTER THE NAMED LINE, so its hunk starts at the line after.
+        // `d` and `c` start at the line they name. Getting this wrong puts an
+        // appended line one row too high, which still applies and is wrong.
+        let (old_start, old_count) = match action {
+            'a' => (os.saturating_add(1), 0),
+            _ => (os, oe.saturating_add(1).saturating_sub(os)),
+        };
+        let (new_start, new_count) = match action {
+            'd' => (ns.saturating_add(1), 0),
+            _ => (ns, ne.saturating_add(1).saturating_sub(ns)),
+        };
+        hunks.push(Hunk {
+            old_start,
+            old_count,
+            new_start,
+            new_count,
+            lines: body,
+        });
+    }
+
+    if hunks.is_empty() {
+        return Vec::new();
+    }
+    vec![FilePatch {
+        old_path: String::new(),
+        new_path: String::new(),
+        hunks,
+        header_lines: Vec::new(),
+        first_hunk_line,
+        malformed_at: None,
+    }]
+}
+
 fn parse_patch(input: &str) -> Vec<FilePatch> {
     let lines: Vec<&str> = input.lines().collect();
     let mut patches: Vec<FilePatch> = Vec::new();
@@ -738,7 +1105,17 @@ fn main() {
         buf
     };
 
-    let file_patches = parse_patch(&patch_input);
+    // THREE DIALECTS, and this build read one. `diff -c` and plain `diff` both
+    // went to the unified parser, which looks for `--- ` followed by `+++ `,
+    // found no file, and produced `Only garbage was found in the patch input`
+    // about input GNU applies without comment. A patch program that reads a
+    // third of the formats `diff` emits is not a narrow patch program, it is a
+    // wrong answer with a confident error message.
+    let file_patches = match detect_dialect(&patch_input) {
+        Dialect::Context => parse_context_patch(&patch_input),
+        Dialect::Normal => parse_normal_patch(&patch_input),
+        Dialect::Unified | Dialect::Unknown => parse_patch(&patch_input),
+    };
 
     // EMPTY INPUT AND GARBAGE INPUT ARE DIFFERENT ANSWERS, and this build gave
     // one. Measured against GNU patch 2.7.6:
@@ -1720,5 +2097,196 @@ mod tests {
         assert_eq!(ps[0].malformed_at, None);
         // Two counted lines, and the marker is not one of them.
         assert_eq!(ps[0].hunks[0].lines.len(), 2);
+    }
+
+    // ---------------- the context and normal dialects ----------------
+
+    /// A context diff, as `diff -c` emits it.  `~` stands in for a newline so
+    /// the fixture reads as the shape it is testing.
+    const CTX: &str = concat!(
+        "*** x/a/base.txt~",
+        "--- y/a/base.txt~",
+        "***************~",
+        "*** 1,4 ****~",
+        "  alpha~",
+        "! bravo~",
+        "  charlie~",
+        "  delta~",
+        "--- 1,4 ----~",
+        "  alpha~",
+        "! BRAVO~",
+        "  charlie~",
+        "  delta~",
+    );
+
+    fn ctx(text: &str) -> String {
+        text.replace('~', "\n")
+    }
+
+    #[test]
+    fn the_three_dialects_are_told_apart() {
+        assert_eq!(detect_dialect(&ctx(CTX)), Dialect::Context);
+        assert_eq!(detect_dialect(SIMPLE_PATCH), Dialect::Unified);
+        assert_eq!(
+            detect_dialect(&ctx("2c2~< bravo~---~> BRAVO~")),
+            Dialect::Normal
+        );
+        assert_eq!(detect_dialect("this is not a patch"), Dialect::Unknown);
+        assert_eq!(detect_dialect(""), Dialect::Unknown);
+    }
+
+    /// THE ORDER OF THE TESTS IS THE WHOLE OF IT. A context diff's SECOND
+    /// header line is `--- y/a/base.txt`, which is also how a unified diff's
+    /// FIRST one starts. A detector that looked for `--- ` first would call
+    /// every context patch a malformed unified one and report garbage.
+    #[test]
+    fn a_context_header_is_not_read_as_a_unified_one() {
+        let headers_only = ctx("*** x/a/base.txt~--- y/a/base.txt~");
+        assert_eq!(detect_dialect(&headers_only), Dialect::Context);
+    }
+
+    #[test]
+    fn a_context_hunk_becomes_one_removal_and_one_addition() {
+        let ps = parse_context_patch(&ctx(CTX));
+        assert_eq!(ps.len(), 1);
+        assert_eq!(ps[0].old_path, "x/a/base.txt");
+        assert_eq!(ps[0].new_path, "y/a/base.txt");
+        assert_eq!(ps[0].hunks.len(), 1);
+        let h = &ps[0].hunks[0];
+        assert_eq!(
+            h.lines,
+            vec![
+                HunkLine::Context("alpha".into()),
+                HunkLine::Remove("bravo".into()),
+                HunkLine::Add("BRAVO".into()),
+                HunkLine::Context("charlie".into()),
+                HunkLine::Context("delta".into()),
+            ]
+        );
+    }
+
+    /// A context header's `1,4` means lines one THROUGH four; a unified
+    /// header's `1,4` means four lines STARTING at one. They agree only when
+    /// the range starts at 1 -- which the harness fixture does, so the harness
+    /// cannot see this conversion being wrong. Hence a fixture that starts at
+    /// line 3, where the two readings differ by two.
+    #[test]
+    fn an_inclusive_context_range_becomes_a_count() {
+        let shifted = ctx(concat!(
+            "*** x/f~",
+            "--- y/f~",
+            "***************~",
+            "*** 3,6 ****~",
+            "  c~",
+            "! d~",
+            "  e~",
+            "  f~",
+            "--- 3,6 ----~",
+            "  c~",
+            "! D~",
+            "  e~",
+            "  f~",
+        ));
+        let h = &parse_context_patch(&shifted)[0].hunks[0];
+        assert_eq!(h.old_start, 3);
+        assert_eq!(h.old_count, 4, "3..=6 is four lines, not six and not three");
+        assert_eq!(h.new_start, 3);
+        assert_eq!(h.new_count, 4);
+    }
+
+    /// A pure deletion omits the new half's body entirely; a pure addition
+    /// omits the old half's. Reading one half and inferring the other gets
+    /// both of these backwards.
+    #[test]
+    fn a_context_hunk_with_only_one_side_is_read_correctly() {
+        let del = ctx(concat!(
+            "*** x/f~",
+            "--- y/f~",
+            "***************~",
+            "*** 1,2 ****~",
+            "  a~",
+            "- b~",
+            "--- 1,1 ----~",
+            "  a~",
+        ));
+        let h = &parse_context_patch(&del)[0].hunks[0];
+        assert_eq!(
+            h.lines,
+            vec![HunkLine::Context("a".into()), HunkLine::Remove("b".into())]
+        );
+
+        let add = ctx(concat!(
+            "*** x/f~",
+            "--- y/f~",
+            "***************~",
+            "*** 1,1 ****~",
+            "  a~",
+            "--- 1,2 ----~",
+            "  a~",
+            "+ b~",
+        ));
+        let h = &parse_context_patch(&add)[0].hunks[0];
+        assert_eq!(
+            h.lines,
+            vec![HunkLine::Context("a".into()), HunkLine::Add("b".into())]
+        );
+    }
+
+    #[test]
+    fn normal_command_lines_parse() {
+        assert_eq!(parse_normal_command("2c2"), Some((2, 2, 'c', 2, 2)));
+        assert_eq!(parse_normal_command("1,3d0"), Some((1, 3, 'd', 0, 0)));
+        assert_eq!(parse_normal_command("4a5,7"), Some((4, 4, 'a', 5, 7)));
+        assert_eq!(parse_normal_command("2,4c3,5"), Some((2, 4, 'c', 3, 5)));
+        // Not command lines, and each would be a plausible false positive.
+        assert_eq!(parse_normal_command("< bravo"), None);
+        assert_eq!(parse_normal_command("---"), None);
+        assert_eq!(parse_normal_command("alpha"), None);
+        assert_eq!(parse_normal_command("c2"), None);
+        assert_eq!(parse_normal_command("2c"), None);
+    }
+
+    #[test]
+    fn a_normal_change_becomes_a_removal_and_an_addition() {
+        let ps = parse_normal_patch(&ctx("2c2~< bravo~---~> BRAVO~"));
+        assert_eq!(ps.len(), 1);
+        // A normal diff names no file at all, which is why patch requires the
+        // target as an operand.
+        assert_eq!(ps[0].old_path, "");
+        let h = &ps[0].hunks[0];
+        assert_eq!(h.old_start, 2);
+        assert_eq!(h.old_count, 1);
+        assert_eq!(
+            h.lines,
+            vec![
+                HunkLine::Remove("bravo".into()),
+                HunkLine::Add("BRAVO".into())
+            ]
+        );
+    }
+
+    /// `4a5` ADDS AFTER line four, so the hunk starts at five and removes
+    /// nothing. Starting it at four still applies and puts the line one row
+    /// too high -- a wrong answer that looks like a right one.
+    #[test]
+    fn append_starts_after_the_line_it_names() {
+        let h = &parse_normal_patch(&ctx("4a5~> new~"))[0].hunks[0];
+        assert_eq!(h.old_start, 5);
+        assert_eq!(h.old_count, 0);
+        assert_eq!(h.lines, vec![HunkLine::Add("new".into())]);
+    }
+
+    /// ...and `1,2d0` deletes without adding, so the NEW side is empty and
+    /// starts after the named zero.
+    #[test]
+    fn delete_leaves_the_new_side_empty() {
+        let h = &parse_normal_patch(&ctx("1,2d0~< a~< b~"))[0].hunks[0];
+        assert_eq!(h.old_start, 1);
+        assert_eq!(h.old_count, 2);
+        assert_eq!(h.new_count, 0);
+        assert_eq!(
+            h.lines,
+            vec![HunkLine::Remove("a".into()), HunkLine::Remove("b".into())]
+        );
     }
 }

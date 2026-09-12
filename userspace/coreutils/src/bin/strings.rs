@@ -899,13 +899,36 @@ fn run_main() -> ExitCode {
     let request = match parse_args(&args) {
         Ok(request) => request,
         Err(e) => {
-            // Upstream reports the sentence (when there is one) and then
-            // prints the whole usage to stderr, rather than referring the
-            // reader to `--help`.
+            // Upstream has THREE shapes here and this build had one, which is
+            // where its last diagnostic differences came from. Measured against
+            // binutils 2.42 rather than reasoned about:
+            //
+            //   -n 0            sentence only, no usage
+            //   -n  (no value)  sentence, then the whole usage
+            //   -t q            the usage alone, no sentence
+            //
+            // `referral` is what separates the first two. A getopt error --
+            // a missing argument, an unknown option -- carries one; a value
+            // this program rejected itself does not. So the field that decides
+            // whether to print `Try '... --help'` elsewhere in the tree decides
+            // whether to print the usage here.
+            //
+            // And the referral itself is never printed: `strings` refers the
+            // reader to the usage by SHOWING it, where coreutils proper refers
+            // to `--help` by naming it. Printing both is this build's own
+            // invention and appeared in six of the thirteen differences.
+            let getopt_error = e.referral.is_some();
             if !e.sentence.is_empty() {
-                STRINGS.report(&e);
+                let bare = getopt::Error {
+                    sentence: e.sentence.clone(),
+                    referral: None,
+                    ..e
+                };
+                STRINGS.report(&bare);
             }
-            stdfd::diag_bytes(help_text().as_bytes());
+            if getopt_error || e.sentence.is_empty() {
+                stdfd::diag_bytes(help_text().as_bytes());
+            }
             return ExitCode::from(1);
         }
     };

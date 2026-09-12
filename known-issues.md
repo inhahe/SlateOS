@@ -284,6 +284,45 @@ the pair.
 
 ## B-STRINGS-HAS-NO-DATA-SECTION-OPTION (lane B, 2026-09-11)
 
+**Status: FULLY CLOSED 2026-09-12.** Both halves. `strings-diff.sh` is
+**62 passed, 0 differed, 12 differ on purpose** — from 54/15 this morning.
+
+**The diagnostics half, which the entry called "related and cheaper".** It was
+cheaper and it was one bug, not ten: upstream has THREE error shapes here and
+this build had one. Measured against binutils 2.42 rather than reasoned about:
+
+| input | binutils prints |
+|---|---|
+| `-n 0` | the sentence, no usage |
+| `-n` with no value | the sentence, then the whole usage |
+| `-t q` | the usage alone, no sentence |
+
+`Error::referral` already separated the first two and nothing was reading it:
+a getopt error — a missing argument, an unknown option — carries one, and a
+value this program rejected itself does not. So the field that decides whether
+to print `Try '… --help'` elsewhere in the tree is the field that decides
+whether to print the usage here. Three cases fixed by reading it.
+
+Six more were a referral this build invented: `strings` refers the reader to
+the usage by SHOWING it, where coreutils proper refers to `--help` by naming
+it, and this printed both.
+
+**The last nine are xfail, and the reason is one line of our own help text.**
+Every one of them prints the usage, and ours carries
+`--target, @<file>, and every --unicode mode but `d' are refused` where GNU
+prints `supported targets: elf64-x86-64 …`. We cannot print that list without
+claiming support we do not have, so the two can never match — which is why
+`--help` and `--version` were already xfail. **The part that can match is
+still asserted**: each diagnostic sentence is unit-tested in `strings.rs`, 13
+assertions on `e.sentence`, so what is given up is only the comparison of two
+usage blocks that were never going to agree. Verified before reclassifying
+rather than after: the message lines matched byte for byte once the spurious
+referral was gone.
+
+`-T nosucharch` is xfail for a different reason worth stating separately: GNU
+accepts an unknown target on a non-object file and prints its strings, while
+this build refuses `--target` outright.
+
 **Status: FIXED 2026-09-12.** `strings -d` / `--data` scans only the
 initialised, loaded sections of an ELF64. `scripts/strings-diff.sh` goes from
 54 passed / 15 differed to 59 / 13, and the three cases that remain of the

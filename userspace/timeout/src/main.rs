@@ -1,14 +1,25 @@
-//! timeout/nohup/nice/renice — process control utilities for Slate OS
+//! `timeout` — run a command with a time limit, for Slate OS
 //!
-//! Multi-personality binary detected via argv[0]:
-//! - `timeout`: run a command with a time limit
-//! - `nohup`: run a command immune to hangup signals
-//! - `nice`: run a command with modified scheduling priority
-//! - `renice`: alter priority of running processes
+//! This crate used to answer to `nohup`, `nice` and `renice` as well, via
+//! argv[0]. Those three are gone: `userspace/coreutils` already had all
+//! three as real binaries, and its versions are the ones with a
+//! differential harness behind them (`scripts/nohup-diff.sh`,
+//! `scripts/nice-diff.sh`). Measured against GNU with an unrecognised
+//! option, the coreutils binaries matched it exactly and the personalities
+//! here did not:
+//!
+//! | | coreutils (kept) | personality (removed) |
+//! |---|---|---|
+//! | `nohup --bogus`  | exit 125, `unrecognized option` | exit 127, and it created `nohup.out` |
+//! | `nice --bogus`   | exit 125, `unrecognized option` | exit 127, `cannot set niceness (tried -20)` |
+//! | `renice --bogus` | exit 1, `not enough arguments`  | exit 1, `invalid priority` |
+//!
+//! The `nice` line is the reason this was not left alone: an option it did
+//! not recognise became a request to renice to -20. See design-decisions.md
+//! §1005/§1006 — coreutils is the one home for a coreutils command.
 
 use quoting::quoteaf_os;
 use std::env;
-use std::fs::{self, OpenOptions};
 use std::io;
 use std::process::{self, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -55,91 +66,6 @@ fn sys_kill(pid: u32, signal: u32) -> i64 {
     {
         let _ = (pid, signal);
         -38 // ENOSYS
-    }
-}
-
-/// Get the current process priority via syscall.
-fn sys_getpriority(which: u32, who: u32) -> i64 {
-    #[cfg(target_vendor = "slateos")]
-    {
-        let result: i64;
-        // SAFETY: SYS_GETPRIORITY takes two scalars and touches no userspace
-        // memory. rcx/r11 are clobbered by SYSCALL per the x86_64 ABI.
-        unsafe {
-            std::arch::asm!(
-                "syscall",
-                in("rax") 140_u64,  // SYS_GETPRIORITY
-                in("rdi") which as u64,
-                in("rsi") who as u64,
-                lateout("rax") result,
-                lateout("rcx") _,
-                lateout("r11") _,
-            );
-        }
-        result
-    }
-    #[cfg(not(target_vendor = "slateos"))]
-    {
-        let _ = (which, who);
-        -38 // ENOSYS
-    }
-}
-
-/// Set process priority via syscall.
-fn sys_setpriority(which: u32, who: u32, prio: i32) -> i64 {
-    #[cfg(target_vendor = "slateos")]
-    {
-        let result: i64;
-        // SAFETY: SYS_SETPRIORITY takes three scalars and touches no userspace
-        // memory. rcx/r11 are clobbered by SYSCALL per the x86_64 ABI.
-        unsafe {
-            std::arch::asm!(
-                "syscall",
-                in("rax") 141_u64,  // SYS_SETPRIORITY
-                in("rdi") which as u64,
-                in("rsi") who as u64,
-                in("rdx") prio as u64,
-                lateout("rax") result,
-                lateout("rcx") _,
-                lateout("r11") _,
-            );
-        }
-        result
-    }
-    #[cfg(not(target_vendor = "slateos"))]
-    {
-        let _ = (which, who, prio);
-        -38 // ENOSYS
-    }
-}
-
-/// Get current UID.
-///
-/// The host arm answers `u32::MAX` rather than a plausible uid: this function
-/// gates privileged operations, so an invented "0" would be the one wrong
-/// answer that matters, and any real uid would be a lie about a machine we
-/// are not running on.
-#[allow(dead_code)]
-fn sys_getuid() -> u32 {
-    #[cfg(target_vendor = "slateos")]
-    {
-        let result: u64;
-        // SAFETY: SYS_GETUID takes no arguments and touches no userspace
-        // memory. rcx/r11 are clobbered by SYSCALL per the x86_64 ABI.
-        unsafe {
-            std::arch::asm!(
-                "syscall",
-                in("rax") 102_u64,  // SYS_GETUID
-                lateout("rax") result,
-                lateout("rcx") _,
-                lateout("r11") _,
-            );
-        }
-        result as u32
-    }
-    #[cfg(not(target_vendor = "slateos"))]
-    {
-        u32::MAX
     }
 }
 
@@ -206,27 +132,6 @@ fn parse_duration(s: &str) -> Option<Duration> {
 
     let total_secs = value * multiplier;
     Some(Duration::from_secs_f64(total_secs))
-}
-
-// ── Mode detection ───────────────────────────────────────────────
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum Mode {
-    Timeout,
-    Nohup,
-    Nice,
-    Renice,
-}
-
-fn detect_mode(argv0: &str) -> Mode {
-    let base = argv0.rsplit(['/', '\\']).next().unwrap_or(argv0);
-    let name = base.strip_suffix(".exe").unwrap_or(base);
-    match name.to_lowercase().as_str() {
-        "nohup" => Mode::Nohup,
-        "nice" => Mode::Nice,
-        "renice" => Mode::Renice,
-        _ => Mode::Timeout,
-    }
 }
 
 // ── timeout ──────────────────────────────────────────────────────
@@ -485,399 +390,12 @@ fn run_timeout(args: &[String]) -> i32 {
     }
 }
 
-// ── nohup ────────────────────────────────────────────────────────
-
-fn run_nohup(args: &[String]) -> i32 {
-    if args.is_empty() || args[0] == "--help" {
-        println!("Usage: nohup COMMAND [ARG]...");
-        println!("Run COMMAND immune to hangup signals, with output to nohup.out.");
-        println!();
-        println!("If standard output is a terminal, redirect it to 'nohup.out'.");
-        println!("If standard error is a terminal, redirect it to standard output.");
-        return if args.is_empty() { 125 } else { 0 };
-    }
-
-    if args[0] == "--version" {
-        println!("nohup (Slate OS) 0.1.0");
-        return 0;
-    }
-
-    let program = &args[0];
-    let child_args = &args[1..];
-
-    // Try to open nohup.out for stdout redirection
-    let stdout_file = match OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("nohup.out")
-    {
-        Ok(f) => {
-            eprintln!("nohup: appending output to 'nohup.out'");
-            Some(f)
-        }
-        Err(_) => {
-            // Try $HOME/nohup.out
-            if let Ok(home) = env::var("HOME") {
-                let path = format!("{}/nohup.out", home);
-                match OpenOptions::new().create(true).append(true).open(&path) {
-                    Ok(f) => {
-                        eprintln!("nohup: appending output to {}", quoteaf_os(&path));
-                        Some(f)
-                    }
-                    Err(_) => {
-                        eprintln!("nohup: failed to open 'nohup.out'");
-                        None
-                    }
-                }
-            } else {
-                eprintln!("nohup: failed to open 'nohup.out'");
-                None
-            }
-        }
-    };
-
-    let stdout = if let Some(f) = stdout_file {
-        Stdio::from(f)
-    } else {
-        Stdio::inherit()
-    };
-
-    // Spawn the child — on real Slate OS, we'd ignore SIGHUP for this process
-    let mut child = match Command::new(program)
-        .args(child_args)
-        .stdin(Stdio::inherit())
-        .stdout(stdout)
-        .stderr(Stdio::inherit())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("nohup: failed to execute {}: {}", quoteaf_os(program), e);
-            return if e.kind() == io::ErrorKind::NotFound {
-                127
-            } else {
-                126
-            };
-        }
-    };
-
-    match child.wait() {
-        Ok(status) => status.code().unwrap_or(1),
-        Err(e) => {
-            eprintln!("nohup: wait failed: {}", e);
-            125
-        }
-    }
-}
-
-// ── nice ─────────────────────────────────────────────────────────
-
-fn run_nice(args: &[String]) -> i32 {
-    let mut adjustment: i32 = 10; // default niceness increment
-    let mut cmd_start = 0;
-
-    // Parse options
-    let mut i = 0;
-    while i < args.len() {
-        let arg = &args[i];
-        match arg.as_str() {
-            "--help" => {
-                println!("Usage: nice [-n ADJUSTMENT] COMMAND [ARG]...");
-                println!("Run COMMAND with an adjusted scheduling priority.");
-                println!();
-                println!("Options:");
-                println!("  -n, --adjustment=N   add N to the niceness (default: 10)");
-                println!("      --help           display this help and exit");
-                println!("      --version        output version information");
-                println!();
-                println!("Niceness range: -20 (highest priority) to 19 (lowest priority).");
-                println!("Only root can set negative adjustments.");
-                return 0;
-            }
-            "--version" => {
-                println!("nice (Slate OS) 0.1.0");
-                return 0;
-            }
-            "-n" | "--adjustment" => {
-                i += 1;
-                if i < args.len() {
-                    match args[i].parse::<i32>() {
-                        Ok(n) => adjustment = n,
-                        Err(_) => {
-                            eprintln!("nice: invalid adjustment {}", quoteaf_os(&args[i]));
-                            return 125;
-                        }
-                    }
-                }
-            }
-            _ if arg.starts_with("--adjustment=") => {
-                let val = arg.strip_prefix("--adjustment=").unwrap_or("");
-                match val.parse::<i32>() {
-                    Ok(n) => adjustment = n,
-                    Err(_) => {
-                        eprintln!("nice: invalid adjustment {}", quoteaf_os(val));
-                        return 125;
-                    }
-                }
-            }
-            _ if arg.starts_with("-") && arg.len() > 1 && !arg.starts_with("--") => {
-                // Try -N where N is the adjustment
-                if let Ok(n) = arg[1..].parse::<i32>() {
-                    adjustment = n;
-                } else {
-                    cmd_start = i;
-                    break;
-                }
-            }
-            _ => {
-                cmd_start = i;
-                break;
-            }
-        }
-        i += 1;
-        cmd_start = i;
-    }
-
-    if cmd_start >= args.len() {
-        // No command — just print current niceness
-        let current = sys_getpriority(0, 0); // PRIO_PROCESS, current process
-        println!("{}", current);
-        return 0;
-    }
-
-    let program = &args[cmd_start];
-    let child_args = &args[cmd_start + 1..];
-
-    // Set the priority for current process (child will inherit)
-    let current = sys_getpriority(0, 0);
-    let new_prio = (current as i32 + adjustment).clamp(-20, 19);
-    let result = sys_setpriority(0, 0, new_prio);
-    if result < 0 {
-        eprintln!(
-            "nice: cannot set niceness: Permission denied (tried {})",
-            new_prio
-        );
-        // Non-root trying negative adjustment is common; continue anyway
-    }
-
-    let mut child = match Command::new(program)
-        .args(child_args)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("nice: {}: {}", quoteaf_os(program), e);
-            return if e.kind() == io::ErrorKind::NotFound {
-                127
-            } else {
-                126
-            };
-        }
-    };
-
-    match child.wait() {
-        Ok(status) => status.code().unwrap_or(1),
-        Err(e) => {
-            eprintln!("nice: wait failed: {}", e);
-            125
-        }
-    }
-}
-
-// ── renice ───────────────────────────────────────────────────────
-
-const PRIO_PROCESS: u32 = 0;
-const PRIO_PGRP: u32 = 1;
-const PRIO_USER: u32 = 2;
-
-fn run_renice(args: &[String]) -> i32 {
-    if args.is_empty() {
-        eprintln!("Usage: renice [-n PRIORITY] [-p PID] [-g PGRP] [-u USER]");
-        eprintln!("Try 'renice --help' for more information.");
-        return 1;
-    }
-
-    let mut priority: Option<i32> = None;
-    let mut targets: Vec<(u32, u32)> = Vec::new(); // (which, who)
-    let mut current_which: u32 = PRIO_PROCESS;
-
-    let mut i = 0;
-    while i < args.len() {
-        let arg = &args[i];
-        match arg.as_str() {
-            "--help" => {
-                println!("Usage: renice [-n] PRIORITY [-p PID] [-g PGRP] [-u USER]");
-                println!("Alter the scheduling priority of running processes.");
-                println!();
-                println!("Options:");
-                println!("  -n, --priority N   priority value (range: -20 to 19)");
-                println!("  -p, --pid PID      interpret argument as process ID (default)");
-                println!("  -g, --pgrp PGRP    interpret argument as process group ID");
-                println!("  -u, --user USER    interpret argument as user name/ID");
-                println!("      --help         display this help and exit");
-                println!("      --version      output version information");
-                return 0;
-            }
-            "--version" => {
-                println!("renice (Slate OS) 0.1.0");
-                return 0;
-            }
-            "-n" | "--priority" => {
-                i += 1;
-                if i < args.len() {
-                    match args[i].parse::<i32>() {
-                        Ok(n) => priority = Some(n.clamp(-20, 19)),
-                        Err(_) => {
-                            eprintln!("renice: invalid priority {}", quoteaf_os(&args[i]));
-                            return 1;
-                        }
-                    }
-                }
-            }
-            "-p" | "--pid" => {
-                current_which = PRIO_PROCESS;
-                i += 1;
-                if i < args.len() {
-                    match args[i].parse::<u32>() {
-                        Ok(pid) => targets.push((PRIO_PROCESS, pid)),
-                        Err(_) => {
-                            eprintln!("renice: invalid PID {}", quoteaf_os(&args[i]));
-                            return 1;
-                        }
-                    }
-                }
-            }
-            "-g" | "--pgrp" => {
-                current_which = PRIO_PGRP;
-                i += 1;
-                if i < args.len() {
-                    match args[i].parse::<u32>() {
-                        Ok(pgrp) => targets.push((PRIO_PGRP, pgrp)),
-                        Err(_) => {
-                            eprintln!("renice: invalid PGRP {}", quoteaf_os(&args[i]));
-                            return 1;
-                        }
-                    }
-                }
-            }
-            "-u" | "--user" => {
-                current_which = PRIO_USER;
-                i += 1;
-                if i < args.len() {
-                    // Try numeric UID first, then look up user
-                    let uid = if let Ok(n) = args[i].parse::<u32>() {
-                        n
-                    } else {
-                        // Look up username in /etc/passwd
-                        match lookup_uid(&args[i]) {
-                            Some(uid) => uid,
-                            None => {
-                                eprintln!("renice: unknown user {}", quoteaf_os(&args[i]));
-                                return 1;
-                            }
-                        }
-                    };
-                    targets.push((PRIO_USER, uid));
-                }
-            }
-            _ => {
-                // Could be priority or target depending on context
-                if priority.is_none() {
-                    if let Ok(n) = arg.parse::<i32>() {
-                        priority = Some(n.clamp(-20, 19));
-                    } else {
-                        eprintln!("renice: invalid priority {}", quoteaf_os(arg));
-                        return 1;
-                    }
-                } else if let Ok(n) = arg.parse::<u32>() {
-                    targets.push((current_which, n));
-                } else {
-                    eprintln!("renice: invalid argument {}", quoteaf_os(arg));
-                    return 1;
-                }
-            }
-        }
-        i += 1;
-    }
-
-    let prio = match priority {
-        Some(p) => p,
-        None => {
-            eprintln!("renice: missing priority");
-            return 1;
-        }
-    };
-
-    if targets.is_empty() {
-        eprintln!("renice: no target specified");
-        return 1;
-    }
-
-    let mut exit_code = 0;
-
-    for (which, who) in &targets {
-        let old_prio = sys_getpriority(*which, *who);
-        let result = sys_setpriority(*which, *who, prio);
-
-        if result < 0 {
-            let which_name = match *which {
-                PRIO_PROCESS => "process",
-                PRIO_PGRP => "process group",
-                PRIO_USER => "user",
-                _ => "unknown",
-            };
-            eprintln!(
-                "renice: failed to set priority for {} {}: Permission denied",
-                which_name, who
-            );
-            exit_code = 1;
-        } else {
-            let which_name = match *which {
-                PRIO_PROCESS => "process ID",
-                PRIO_PGRP => "process group ID",
-                PRIO_USER => "user ID",
-                _ => "unknown",
-            };
-            println!(
-                "{} {}: old priority {}, new priority {}",
-                which_name, who, old_prio, prio
-            );
-        }
-    }
-
-    exit_code
-}
-
-fn lookup_uid(username: &str) -> Option<u32> {
-    let content = fs::read_to_string("/etc/passwd").ok()?;
-    for line in content.lines() {
-        let fields: Vec<&str> = line.split(':').collect();
-        if fields.len() >= 3 && fields[0] == username {
-            return fields[2].parse().ok();
-        }
-    }
-    None
-}
-
 // ── main ─────────────────────────────────────────────────────────
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let mode = detect_mode(args.first().map(|s| s.as_str()).unwrap_or("timeout"));
-
     let rest: Vec<String> = args.into_iter().skip(1).collect();
-
-    let exit_code = match mode {
-        Mode::Timeout => run_timeout(&rest),
-        Mode::Nohup => run_nohup(&rest),
-        Mode::Nice => run_nice(&rest),
-        Mode::Renice => run_renice(&rest),
-    };
-
-    process::exit(exit_code);
+    process::exit(run_timeout(&rest));
 }
 
 // ── Tests ────────────────────────────────────────────────────────
@@ -887,35 +405,6 @@ mod tests {
     use super::*;
 
     // Mode detection
-    #[test]
-    fn test_detect_timeout() {
-        assert_eq!(detect_mode("timeout"), Mode::Timeout);
-        assert_eq!(detect_mode("/usr/bin/timeout"), Mode::Timeout);
-        assert_eq!(detect_mode("timeout.exe"), Mode::Timeout);
-    }
-
-    #[test]
-    fn test_detect_nohup() {
-        assert_eq!(detect_mode("nohup"), Mode::Nohup);
-        assert_eq!(detect_mode("/usr/bin/nohup"), Mode::Nohup);
-    }
-
-    #[test]
-    fn test_detect_nice() {
-        assert_eq!(detect_mode("nice"), Mode::Nice);
-        assert_eq!(detect_mode("/usr/bin/nice"), Mode::Nice);
-    }
-
-    #[test]
-    fn test_detect_renice() {
-        assert_eq!(detect_mode("renice"), Mode::Renice);
-        assert_eq!(detect_mode("/usr/bin/renice"), Mode::Renice);
-    }
-
-    #[test]
-    fn test_detect_unknown_defaults() {
-        assert_eq!(detect_mode("something"), Mode::Timeout);
-    }
 
     // Duration parsing
     #[test]
@@ -994,20 +483,8 @@ mod tests {
     }
 
     // UID lookup
-    #[test]
-    fn test_lookup_uid_not_found() {
-        // On test system without /etc/passwd, this should return None
-        let result = lookup_uid("nonexistent_user_xyz");
-        assert!(result.is_none());
-    }
 
     // Priority constants
-    #[test]
-    fn test_priority_constants() {
-        assert_eq!(PRIO_PROCESS, 0);
-        assert_eq!(PRIO_PGRP, 1);
-        assert_eq!(PRIO_USER, 2);
-    }
 
     // Signal constants
     #[test]
@@ -1019,22 +496,8 @@ mod tests {
     }
 
     // Renice argument parsing
-    #[test]
-    fn test_renice_requires_priority() {
-        // Just verify the function returns 1 with no args
-        let result = run_renice(&[]);
-        assert_eq!(result, 1);
-    }
 
     // Nice without command prints current niceness
-    #[test]
-    fn test_nice_no_command_prints_niceness() {
-        // This is hard to test without the syscall, but we can verify
-        // the argument parsing logic.
-        let _args = ["-n".to_string(), "5".to_string()];
-        // Without a command, nice should print current niceness.
-        // On non-slateos this would use the fallback syscall behavior.
-    }
 
     // Duration edge cases
     #[test]

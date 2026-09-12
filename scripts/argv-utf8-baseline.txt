@@ -34,7 +34,6 @@ userspace/bootctl/src/main.rs:argv-as-string
 userspace/capsh/src/main.rs:argv-as-string
 userspace/cgroup/src/main.rs:argv-as-string
 userspace/chattr/src/main.rs:argv-as-string
-userspace/chown/src/main.rs:argv-as-string
 userspace/chroot/src/main.rs:argv-as-string
 userspace/column/src/main.rs:argv-as-string
 userspace/coredumpctl/src/main.rs:argv-as-string

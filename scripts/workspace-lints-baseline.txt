@@ -33,7 +33,6 @@ userspace/at
 userspace/backup
 userspace/base64
 userspace/blkid
-userspace/chown
 userspace/chpasswd
 userspace/chroot
 userspace/column

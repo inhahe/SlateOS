@@ -66660,7 +66660,7 @@ live one:
 | Program | Alias | Who really provides it |
 |---|---|---|
 | `userspace/head` | `tail` | `coreutils`'s `tail` — and `tail-diff.sh` tests *that* one |
-| `userspace/chown` | `chmod` | `coreutils`'s `chmod` |
+| `userspace/chown` | `chmod` | `coreutils`'s `chmod` -- **crate retired 2026-09-12** |
 | `userspace/who` | `w` | `userspace/w` — see the entry below |
 | `userspace/pv` | `fuser` | `userspace/fuser` |
 | `userspace/sysstat` | `iostat` | `userspace/iostat` |

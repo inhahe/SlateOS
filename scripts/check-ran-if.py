@@ -109,14 +109,27 @@ def fn_bodies(src):
                 if started and depth <= 0:
                     break
             index.setdefault(m.group(1), []).append(
-                (os.path.relpath(path, src), i + 1, NL.join(body))
+                # Forward slashes: the module path is joined with '/' and this
+                # is compared against it. os.path.relpath yields backslashes on
+                # Windows, where this runs, so every comparison would fail and
+                # the gate would report six findings on a clean tree.
+                (os.path.relpath(path, src).replace(os.sep, "/"),
+                 i + 1, NL.join(body))
             )
     return index
 
 
-def annotations(main_rs):
-    """[(line, marker, call or None)] for every RAN-IF in main.rs."""
-    lines = io.open(main_rs, encoding="utf-8").read().split(NL)
+def annotations(paths, src):
+    """[(relpath, line, marker, call or None)] for every RAN-IF found."""
+    out = []
+    for path in paths:
+        out.extend(_annotations_in(path, src))
+    return out
+
+
+def _annotations_in(path, src):
+    rel = os.path.relpath(path, src).replace(os.sep, "/")
+    lines = io.open(path, encoding="utf-8").read().split(NL)
     out = []
     for i, ln in enumerate(lines):
         m = RAN_IF.match(ln)
@@ -136,22 +149,30 @@ def annotations(main_rs):
                     break
             if call:
                 break
-        out.append((i + 1, m.group(1), call))
+        out.append((rel, i + 1, m.group(1), call))
     return out
 
 
 def analyse(anns, index):
     """[(line, marker, call, why)] -- one per annotation that does not hold."""
     findings = []
-    for line, marker, call in anns:
+    for rel, line, marker, call in anns:
         if call is None:
-            findings.append((line, marker, None,
+            findings.append((rel, line, marker, None,
                              "no call on the lines after the annotation"))
             continue
-        name = call.rsplit("::", 1)[1]
-        cands = index.get(name, [])
+        parts = call.split("::")
+        name = parts[-1]
+        # The module path is the whole point. Matching on the bare name meant
+        # searching 719 `fn self_test` bodies and passing if any one of them
+        # printed the marker, which is not a check.
+        stem = "/".join(parts[:-1])
+        want = {stem + ".rs", stem + "/mod.rs"}
+        cands = [c for c in index.get(name, []) if c[0] in want]
         if not cands:
-            findings.append((line, marker, call, "no `fn " + name + "` in the tree"))
+            findings.append((rel, line, marker, call,
+                             "no `fn " + name + "` in " +
+                             " or ".join(sorted(want))))
             continue
         if any(marker in body for _, _, body in cands):
             continue
@@ -160,8 +181,9 @@ def analyse(anns, index):
             for other, defs in index.items() for d in defs
             if other != name and marker in d[2]
         })
-        findings.append((line, marker, call,
-                         "not printed by " + name + "; printed by " +
+        findings.append((rel, line, marker, call,
+                         "not printed by " + cands[0][0] + ":" +
+                         str(cands[0][1]) + " " + name + "; printed by " +
                          (", ".join(elsewhere) if elsewhere else "nothing in the tree")))
     return findings
 
@@ -172,7 +194,8 @@ def run(root):
     if not os.path.isfile(main_rs):
         sys.stderr.write("check-ran-if: cannot read " + main_rs + NL)
         return 2
-    anns = annotations(main_rs)
+    # Every .rs, not just main.rs: see this function's module docstring.
+    anns = annotations(rs_files(src), src)
     if not anns:
         sys.stderr.write(
             "check-ran-if: no RAN-IF annotations in main.rs. Either the convention "
@@ -181,8 +204,8 @@ def run(root):
         return 2
     findings = analyse(anns, fn_bodies(src))
     print("check-ran-if: " + str(len(anns)) + " annotation(s) checked")
-    for line, marker, call, why in findings:
-        print("  kernel/src/main.rs:" + str(line) + "  " + (call or "<unparsed>"))
+    for rel, line, marker, call, why in findings:
+        print("  kernel/src/" + rel + ":" + str(line) + "  " + (call or "<unparsed>"))
         print("      declares: " + marker)
         print("      " + why)
     if findings:
@@ -219,8 +242,8 @@ def _fn(name, prints):
 
 
 def _findings(root):
-    return analyse(annotations(os.path.join(root, "kernel", "src", "main.rs")),
-                   fn_bodies(os.path.join(root, "kernel", "src")))
+    src = os.path.join(root, "kernel", "src")
+    return analyse(annotations(rs_files(src), src), fn_bodies(src))
 
 
 def self_test():
@@ -253,7 +276,7 @@ def self_test():
         f = _findings(root)
         check("a neighbour's banner is a finding", len(f), 1)
         if f:
-            check("and the neighbour is named", "format_self_test" in f[0][3], True)
+            check("and the neighbour is named", "format_self_test" in f[0][4], True)
 
         # 3. Printed nowhere at all.
         root = _tree(os.path.join(tmp, "c"), NL.join([
@@ -265,7 +288,7 @@ def self_test():
         f = _findings(root)
         check("a marker printed nowhere is a finding", len(f), 1)
         if f:
-            check("and says so", "nothing in the tree" in f[0][3], True)
+            check("and says so", "nothing in the tree" in f[0][4], True)
 
         # 4. The annotated function does not exist.
         root = _tree(os.path.join(tmp, "d"), NL.join([
@@ -304,6 +327,24 @@ def self_test():
         f = _findings(root)
         check("a commented-out print does not count as evidence", len(f), 1)
 
+        # 7b. The 719-namesake hole: another module defines the same function
+        #     name and prints the marker. Resolving on the bare name passed
+        #     this, having verified a body the annotation never named.
+        root = _tree(os.path.join(tmp, "h"), NL.join([
+            "fn kmain() {",
+            '    // RAN-IF: "' + M + '"',
+            "    fs::x::self_test();",
+            "}",
+        ]) + NL, {
+            "fs/x.rs": _fn("self_test", [OTHER]),
+            "fs/y.rs": _fn("self_test", [M]),
+        })
+        f = _findings(root)
+        check("a namesake in another module does not satisfy it", len(f), 1)
+        if f:
+            check("and it says which file it wanted",
+                  "fs/x.rs" in f[0][4], True)
+
         # 7. No annotations at all is no-verdict, not a pass. stderr is
         #    captured: this path prints a deliberately alarming message, and a
         #    passing gate must not look like a failing one in the boot log.
@@ -320,7 +361,7 @@ def self_test():
     if failures:
         print("check-ran-if --self-test: " + str(len(failures)) + " failure(s)")
         return 1
-    print("check-ran-if --self-test: all 9 checks passed")
+    print("check-ran-if --self-test: all 11 checks passed")
     return 0
 
 

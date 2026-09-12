@@ -137355,6 +137355,38 @@ defect as the entry above, one level up, written by someone who had spent the
 hour thinking about nothing else: success and not-having-run must not be the
 same observation.
 
+**Follow-up: the gate that caught this was itself nearly vacuous.**
+
+`check-ran-if.py` shipped in 0417ad5b8 resolving the annotated call by its
+**last path segment only**. There are **719** definitions of `fn self_test`
+under `kernel/src`, so `fs::fat::self_test` was checked against all of them and
+passed if any one printed the declared marker. It caught the bug above purely
+by luck: that marker belongs to `format_self_test`, a differently *named*
+function. Had a neighbouring module's `self_test` printed it, the gate would
+have reported OK having verified a body the annotation never named -- the same
+defect it exists to catch, one level up. The commit message claimed it
+`resolves each annotated call to its fn`, which was true of the design and
+false of the code.
+
+Two hardenings, both verified against real history rather than fixtures --
+`main.rs` restored from `0744cd8a0` must still yield exactly one finding, and
+the current tree none:
+
+- The module path now picks the file: `fs::fat::self_test` is satisfied by
+  `fs/fat.rs` or `fs/fat/mod.rs` and nothing else. (`os.path.relpath` returns
+  backslashes on Windows, where this runs, so the comparison is normalised --
+  without that it would report six findings on a clean tree.)
+- It scans every `.rs`, not just `main.rs`. All six annotations live in
+  `main.rs` today and the sibling gate assumes the same, which made the
+  assumption consistent but unenforced; an annotation added elsewhere would
+  have been silently unchecked. `scripts/hooks/pre-push` carries the identical
+  lesson -- its gate 20 selector excluded every shell script for months and an
+  excluded file looks exactly like one with nothing to find.
+
+A regression case covers the namesake hole directly: two modules defining the
+same function, only the wrong one printing the marker, must be a finding.
+Kept because without it the next refactor can quietly widen the resolver again
+and every symptom would look like a pass.
 **The structural gap is real, and is the next commit.** A `RAN-IF` is a comment;
 nothing verifies that the line it names is printed by the function it annotates.
 A static check does: resolve the annotated call to its `fn`, assert the literal

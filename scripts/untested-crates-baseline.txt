@@ -15,4 +15,4 @@ userspace/file  # 1212 lines, ws
 userspace/indexer  # 1319 lines, ws
 userspace/man  # 1198 lines, ws
 userspace/nano  # 1923 lines, ws
-userspace/shell  # 204 lines, ws
+userspace/shell  # 204 lines, ws -- not a shell. It is the toolchain validation program (its own module doc says so), and its whole behaviour is printing a fixed sequence of checks from main(). There is no unit to test; the real shell is /bin/dash, staged by scripts/create-ext4-rootfs.sh.

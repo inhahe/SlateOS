@@ -140207,13 +140207,24 @@ and never populates the model.
 
 ## TD-C-SYSINFO-PARSES-HARDWARE-FIELDS-BY-DEFAULTING-TO-ZERO
 
-**In short:** the System Information app reads hardware facts -- how much
-memory you have, how fast the processor is -- out of files the kernel
-publishes. If one of those files contains something it cannot read, the app
-does not say so: it shows zero. A machine with a garbled memory file and a
-machine with no memory look identical on screen. Three helper functions that
+**In short:** the code that reads hardware facts out of the files the kernel
+publishes -- how much memory you have, how fast the processor is -- turns a
+value it cannot parse into zero without saying so. Three helper functions that
 would report the problem properly were written, are tested, and are called by
 nothing.
+
+**Corrected 2026-09-13, same day, and the correction is the useful part.**
+When this was written it said "a machine with a garbled memory file and a
+machine with no memory look identical *on screen*". That is false. `hwquery`
+is one of the five modules in
+`TD-C-FIVE-APP-MODULES-ARE-COMPILED-TESTED-AND-UNREACHABLE`: `sysinfo/main.rs`
+declares `pub mod hwquery;` and never calls into it, so nothing this module
+computes reaches a screen at all. The defect is real and the fix below is
+still the right one, but its *urgency* was overstated by an entry written
+from the code rather than from the call graph -- and an entry that overstates
+gets worked before things that matter more. Whether to do it at all is
+downstream of C-Q17, which asks whether these five modules are wired up or
+deleted.
 
 **Where it lives:** `apps/sysinfo/src/hwquery.rs`. About thirty sites of the
 form

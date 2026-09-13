@@ -166,7 +166,8 @@
       <p class="note" style="margin-top:0">The question the presets above ask you to answer. The desktop draws
          text on <b>five</b> shaded surfaces, not one &mdash; <code>surface0</code> is the ordinary card
          (1012 sites), <code>surface1</code> (542) and <code>surface2</code> (159) are the deeper ones, and
-         <code>mantle</code> (353) and <code>crust</code> (285) are <em>lighter</em> than the page. A palette
+         <code>mantle</code> (353) and <code>crust</code> (285) are <em>darker</em> than the page
+         in both modes &mdash; they are the recessed shades a card sits in front of, not raised ones. A palette
          naming one card colour has to say what becomes of the other four. Anything below 4.5 is marked.</p>
       <div id="allsurf"></div>
     </div>
@@ -204,9 +205,11 @@
             exists.</li>
       </ol>
 
-      <h3 style="font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:#666;margin:14px 0 6px">What the conversion actually touches</h3>
-      <p class="note" style="margin-top:0">Counted, not estimated &mdash;
-         <code>grep</code> across <code>gui/</code> and <code>apps/</code>:</p>
+      <h3 style="font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:#666;margin:14px 0 6px">What the conversion touched &mdash; <b>done 2026&#8209;09&#8209;12</b></h3>
+      <p class="note" style="margin-top:0">Every convertible draw site now goes through the one decision point;
+         a re-run of the converter finds <b>zero</b> left. The shell is green at 2,915 tests and the Themes page
+         carries both settings with a preview drawn through the same function the desktop uses. The estimate
+         below is kept as written, because what it got wrong is the useful part.</p>
       <table>
         <thead><tr><th>what</th><th class="num">count</th><th>treatment</th></tr></thead>
         <tbody>
@@ -226,6 +229,23 @@
          knowing: the fills that are genuinely <b>control chrome</b> (a switch track, a scrollbar, a progress
          groove) stay fills in <em>both</em> themes and must be classified out by hand rather than swept, and the
          shade ladder cannot be deleted, only stop being the default.</p>
+      <p class="note">What the estimate missed was that a sweep can be <em>wrong in a way that still compiles and
+         still draws</em>. Four classes of that reached the tree and none of them failed a build; each was found
+         afterwards by looking for a <b>shape</b> rather than by reading code, and each is now a guard in the
+         converter so it cannot come back:</p>
+      <table>
+        <thead><tr><th>sweep</th><th>what it looks for</th><th class="num">found</th></tr></thead>
+        <tbody>
+          <tr><td>too thin</td><td>a surface 1px in either direction</td><td class="num">21</td></tr>
+          <tr><td>at the origin</td><td>(0,&nbsp;0), full width, no corner radius</td><td class="num">8</td></tr>
+          <tr><td>doubled</td><td>a surface and an outline at the same four coordinates</td><td class="num">19</td></tr>
+          <tr><td>a disc or a swatch</td><td>a circle, or a box under 16&times;16</td><td class="num">3</td></tr>
+        </tbody>
+      </table>
+      <p class="note">The reason none of them could be caught by the words in the code: they are commented
+         &ldquo;Header&rdquo;, &ldquo;Divider&rdquo;, &ldquo;Full-window background&rdquo;, &ldquo;Icon background
+         circle&rdquo;. That is ordinary English no pattern matches. What separates a page from a card, or a rule
+         from a box, is the rectangle &mdash; so the guards are geometric.</p>
     </div>
 
     <div class="panel" style="margin-top:18px">

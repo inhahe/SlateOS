@@ -2,7 +2,18 @@
 // full-page section actually renders. Catches a syntax error or a thrown
 // exception, neither of which is visible from reading the file.
 const fs = require('fs');
-const html = fs.readFileSync(process.argv[2], 'utf8');
+const path = require('path');
+// Defaults to the page beside this script. Taking the path as a bare argv[2]
+// meant running it with no argument produced a readFileSync stack trace rather
+// than a usage line, which reads like the harness is broken rather than like
+// it was called wrong.
+const target = process.argv[2] || path.join(__dirname, 'contrast-explorer.html');
+if (!fs.existsSync(target)) {
+  console.error(`no such page: ${target}`);
+  console.error('usage: node check-contrast-explorer.js [path/to/contrast-explorer.html]');
+  process.exit(2);
+}
+const html = fs.readFileSync(target, 'utf8');
 const script = html.slice(html.indexOf('<script>') + 8, html.lastIndexOf('</script>'));
 
 const store = {};

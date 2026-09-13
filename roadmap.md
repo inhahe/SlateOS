@@ -1746,8 +1746,10 @@ Roadmap:
 - `[C]` Port VS Code, Thunderbird (lines ~5046–5047) — after Chromium
 - `[C]` Speech input/output; phone camera/mic integration (lines ~5390–5391)
 
-- `[C]` **The bordered theme, applied** (§829-§836) — done for the shell and the
-  apps; ~356 draw sites remain, listed below. Every box that is a *surface* — a
+- `[C]` **The bordered theme, applied** (§829-§837) — done. A re-run of the
+  converter finds **zero** convertible sites left; what the earlier survey
+  counted as ~356 remaining was overwhelmingly test assertions and the data
+  bars deliberately left as fills. Every box that is a *surface* — a
   card, a selected row, a sidebar, a panel, a control's groove, a full-width
   strip — now asks `Palette::surface_paint` what to draw instead of naming a
   shade, so the Outlined/Filled choice and the Shaded/A-line choice are two
@@ -1776,6 +1778,24 @@ Roadmap:
   vacuously through a whole conversion), and `.all()` over that empty vector is
   true. `appearance::painted_rect` matches either shape on the logical
   rectangle; assert non-empty before asserting uniform.
+
+  **The contrast half** (§837, and the operator's own requirement): every ink
+  now clears 4.5:1 on every surface its theme puts text on — both modes, both
+  style settings, all fourteen accents and any custom one. `subtext0`,
+  `subtext1` and `link` are floored in the palette (546 sites, none touched);
+  the dual-use roles stay as chosen and a text site asks `Palette::ink`.
+  **Still to land:** those 315 text sites (`gui/appearance/ink-text.py` does
+  the transformation) and the 29 shell tests that compare a text colour
+  against a raw role. Until they do, the dual-use roles behave exactly as they
+  do today, so nothing regresses in the meantime.
+
+  **One performance note for anyone touching the contrast path.** It runs
+  inside the compositor's render loop — `Palette::from_settings` is called per
+  blurred window, per frame. `contrast_ratio` used to be three `powf(2.4)`
+  evaluations and cost 436 ns; the compositor's frame ceiling caught it at 13x
+  the recorded median. The sRGB curve is a 256-entry table now (4 ns), with
+  `gui/appearance/tests/resolve_cost.rs` holding the bound. Do not put a
+  `powf` back.
 
 Known-issues: no open GUI/app entries today — lane C's backlog is roadmap
 features, and it should also run bug-hunt sweeps over `apps/**` (~200 crates

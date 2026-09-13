@@ -475,6 +475,22 @@ fn run_daemon(args: &[String]) {
 
 // ── fwupdtool personality ──────────────────────────────────────────────
 
+/// The first `-`-prefixed argument that is not in `known`, if any.
+///
+/// Only `-`-prefixed arguments are judged. `--` ends option parsing and a
+/// lone `-` is left alone, as elsewhere in this tree.
+fn first_unknown_option<'a>(args: &'a [String], known: &[&str]) -> Option<&'a str> {
+    for a in args {
+        if a == "--" {
+            return None;
+        }
+        if a.starts_with('-') && a != "-" && !known.contains(&a.as_str()) {
+            return Some(a);
+        }
+    }
+    None
+}
+
 fn run_fwupdtool(args: Vec<String>) -> i32 {
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let cmd = rest
@@ -614,6 +630,13 @@ fn main() {
                 println!("fwupd — Firmware update daemon");
                 println!("Usage: fwupd [--no-daemon]");
                 0
+            } else if let Some(bad) = first_unknown_option(&rest, &["--no-daemon", "-h", "--help"])
+            {
+                // Announced "starting firmware update daemon" for anything at
+                // all. A firmware updater is the last program that should act
+                // on a request it did not understand.
+                eprintln!("fwupd: unknown option: {bad}");
+                1
             } else {
                 run_daemon(&rest);
                 0
@@ -691,6 +714,16 @@ mod tests {
                 _checksum: String::new(),
             },
         ]
+    }
+
+    /// A firmware update daemon does not start on an unparsed request.
+    #[test]
+    fn fwupd_refuses_an_option_it_does_not_have() {
+        let a = |v: &[&str]| -> Vec<String> { v.iter().map(|s| (*s).to_string()).collect() };
+        let known = ["--no-daemon", "-h", "--help"];
+        assert_eq!(first_unknown_option(&a(&["--zzq"]), &known), Some("--zzq"));
+        assert_eq!(first_unknown_option(&a(&["--no-daemon"]), &known), None);
+        assert_eq!(first_unknown_option(&a(&["--", "--zzq"]), &known), None);
     }
 
     #[test]

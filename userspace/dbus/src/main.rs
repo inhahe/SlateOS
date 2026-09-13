@@ -2922,7 +2922,13 @@ fn parse_send_args(args: &[String]) -> Result<SendArgs, String> {
         } else if arg == "--type=signal" {
             sa.msg_type = MSG_SIGNAL;
         } else if arg.starts_with("--") {
-            // ignore unknown flags
+            // Was "// ignore unknown flags", which is what it did. A
+            // dbus-send that silently drops a misspelled `--type=signal`
+            // sends a method call instead, to a caller that believes
+            // otherwise. Reported through the existing `Err` channel rather
+            // than printed here, so it is diagnosed like every other bad
+            // argument in this function.
+            return Err(format!("unknown option: {arg}"));
         } else {
             positional.push(arg.clone());
         }
@@ -3055,7 +3061,8 @@ fn run_dbus_monitor(args: &[String]) -> i32 {
         } else if arg == "--session" {
             system = false;
         } else if arg.starts_with("--") {
-            // ignore unknown flags
+            eprintln!("dbus-monitor: unknown option: {arg}");
+            return 1;
         } else {
             // Treat as match rule
             match MatchRule::parse(arg) {
@@ -3104,6 +3111,13 @@ fn run_dbus_daemon(args: &[String]) -> i32 {
             "--fork" => fork_mode = true,
             s if s.starts_with("--config-file=") => {
                 config_path = Some(s[14..].to_string());
+            }
+            // `dbus-daemon --zzq` announced "session bus listening at ..."
+            // and started a bus, having not parsed its arguments. A daemon
+            // that ignores `--system` misspelled starts the wrong bus.
+            s if s.starts_with('-') && s != "-" => {
+                eprintln!("dbus-daemon: unknown option: {s}");
+                return 1;
             }
             _ => {}
         }

@@ -1503,6 +1503,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "logrotate"
+version = "0.1.0"
+dependencies = [
+ "deflate",
+ "quoting",
+ "scratchdir",
+]
+
+[[package]]
 name = "logviewer"
 version = "0.1.0"
 dependencies = [

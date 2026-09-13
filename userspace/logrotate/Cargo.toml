@@ -1,0 +1,19 @@
+[package]
+name = "logrotate"
+version = "0.1.0"
+edition = "2024"
+description = "SlateOS log rotation"
+
+[dependencies]
+# Diagnostics name log paths, and a path may hold spaces or newlines;
+# scripts/quote-names.py enforces that they are quoted.
+quoting = { path = "../quoting" }
+# `compress` really compresses. The alternative -- renaming to `.gz` and
+# leaving the bytes alone -- is the fabrication class this tree keeps finding.
+deflate = { path = "../../deflate" }
+
+[dev-dependencies]
+# Tests own their directories. A test that wrote to a real /var/log would, on
+# this Windows dev host, create E:/var/log -- see
+# requests/c-b-tests-create-real-directories-at-the-drive-root.md.
+scratchdir = { path = "../scratchdir" }

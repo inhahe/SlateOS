@@ -129631,7 +129631,7 @@ mind. The constant now comes from `appearance::CONFIG_NAME`, which owns it.
 
 ---
 
-## TD-C-FOUR-SHELL-FEATURES-ARE-BUILT-AND-NEVER-CONSTRUCTED
+## TD-C-FOUR-SHELL-FEATURES-ARE-BUILT-AND-NEVER-CONSTRUCTED -- ONE LEFT 2026-09-13
 
 **Date:** 2026-09-08. **Lane:** C.
 **Where:** `gui/desktop/src/` — `login_screen.rs` (2 417 lines), `blur.rs`
@@ -129683,6 +129683,29 @@ The first two were wired at some point after this entry was written and the
 entry was never re-read -- the fifth stale entry found today. What is different
 now is that being constructed finally means something, because there is a
 process to be constructed in.
+
+**Re-measured 2026-09-13: it is one, and the entry was accurate for a single
+day.** Filed 2026-09-08; three of its four were resolved on 2026-09-09 and the
+entry was never re-read. Traced to the commits rather than inferred:
+
+| module | what happened | commit |
+|---|---|---|
+| `blur.rs` | **moved to `gui/compositor/src/blur.rs`**, where a framebuffer exists, and wired -- `blur::` appears 7 times in the compositor's `lib.rs` | `7692576d3`, 2026-09-09 |
+| `login_screen.rs` | constructed by `ShellSession` -- `session.rs:83` imports `LoginScreen`, `:501` its user sources | `43bd98bcf`, 2026-09-09 |
+| `input_method.rs` | constructed as `DesktopShell::input_methods` with `with_builtins()`, and its `SwitchShortcut` reads `keyboard.layout_switch` | `96839ec3b`, 2026-09-09 |
+| **`tray_dnd.rs`** | **still nothing.** 1 184 lines, and the only reference anywhere is `pub mod tray_dnd;` in `lib.rs:143` | -- |
+
+So "7 105 lines" is 1 184, and the `blur.rs` row was not a mistake in the
+sweep: the file was in `gui/desktop/src/` when the sweep ran and moved the next
+day. `git log -- gui/desktop/src/blur.rs` says so, which is the check worth
+doing before calling a past measurement wrong.
+
+**Why this kept happening.** Five entries were found stale today and this is
+the sixth thing corrected; the pattern in all of them is that the work updated
+the code and the entry stayed as filed. The specific trap here is that the
+entry names a *count* in its title, and a count in a title is a claim that goes
+out of date silently -- nothing fails when three of four are fixed, and the
+heading still says four.
 
 **These are not the settings panels, and must not be treated the same way.**
 Three unreachable `*_settings.rs` panels were deleted the same day under

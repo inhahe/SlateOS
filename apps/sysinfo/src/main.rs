@@ -17,6 +17,7 @@
 pub mod hwquery;
 
 #[allow(unused_imports)]
+use appearance::Palette;
 use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};
@@ -75,61 +76,25 @@ const DEFAULT_HEIGHT: f32 = 700.0;
 // Color palette — Catppuccin Mocha
 // ============================================================================
 
-/// Base background (Crust).
-const COLOR_BASE: Color = Color::rgb(17, 17, 27);
-/// Slightly lighter surface (Mantle).
-const COLOR_MANTLE: Color = Color::rgb(24, 24, 37);
-/// Surface for panels.
-const COLOR_SURFACE0: Color = Color::rgb(30, 30, 46);
-/// Lighter surface for selected items.
-const COLOR_SURFACE1: Color = Color::rgb(49, 50, 68);
-/// Overlay surface.
-#[allow(dead_code)]
-const COLOR_SURFACE2: Color = Color::rgb(69, 71, 90);
-/// Primary text (Text).
-const COLOR_TEXT: Color = Color::rgb(205, 214, 244);
-/// Secondary/dimmed text (Subtext0).
-const COLOR_SUBTEXT: Color = Color::rgb(166, 173, 200);
-/// Overlay text (Overlay1).
-const COLOR_OVERLAY: Color = Color::rgb(147, 153, 178);
-/// Blue accent (Blue).
-const COLOR_BLUE: Color = Color::rgb(137, 180, 250);
-/// Lavender accent.
-const COLOR_LAVENDER: Color = Color::rgb(180, 190, 254);
-/// Green (success / checkmark).
-const COLOR_GREEN: Color = Color::rgb(166, 227, 161);
-/// Yellow (warning).
-#[allow(dead_code)]
-const COLOR_YELLOW: Color = Color::rgb(249, 226, 175);
-/// Red (error / stopped).
-const COLOR_RED: Color = Color::rgb(243, 139, 168);
-/// Peach accent.
-const COLOR_PEACH: Color = Color::rgb(250, 179, 135);
-/// Teal accent.
-#[allow(dead_code)]
-const COLOR_TEAL: Color = Color::rgb(148, 226, 213);
-/// Sidebar background.
-const COLOR_SIDEBAR_BG: Color = Color::rgb(24, 24, 37);
-/// Tree node hover.
-const COLOR_TREE_HOVER: Color = Color::rgb(40, 40, 58);
-/// Tree node selected.
-const COLOR_TREE_SELECTED: Color = Color::rgb(49, 50, 68);
-/// Title bar background.
-const COLOR_TITLE_BG: Color = Color::rgb(17, 17, 27);
-/// Toolbar background.
-const COLOR_TOOLBAR_BG: Color = Color::rgb(24, 24, 37);
-/// Status bar background.
-const COLOR_STATUS_BG: Color = Color::rgb(24, 24, 37);
-/// Property row alternating.
-const COLOR_ROW_EVEN: Color = Color::rgb(30, 30, 46);
-/// Property row alternating.
-const COLOR_ROW_ODD: Color = Color::rgb(36, 36, 54);
-/// Separator line color.
-const COLOR_SEPARATOR: Color = Color::rgb(49, 50, 68);
-/// Search box background.
-const COLOR_SEARCH_BG: Color = Color::rgb(30, 30, 46);
-/// Search box border.
-const COLOR_SEARCH_BORDER: Color = Color::rgb(69, 71, 90);
+// The colours live in the user's palette, not here.
+//
+// 26 constants used to sit here -- the Catppuccin Mocha table, copied
+// verbatim -- so a light desktop got a dark system-information window.
+// design-decisions 822 added `App::theme_changed`; this was one of the 55
+// crates never converted against it.
+//
+// Mapped to roles **by value, not by name**: the constant this module called
+// SURFACE0 held rgb(30, 30, 46), which is the palette's `base`, and the ones
+// it called SURFACE1 and SURFACE2 were likewise one rung off. Trusting the
+// names would have darkened every background by a step.
+//
+// And nearest-value was not the last word either. Four constants had to be
+// moved off their closest role because the closest role was *already taken*
+// by a neighbour they were drawn to differ from: ROW_ODD would have become
+// ROW_EVEN (no striping), TREE_HOVER would have become TREE_SELECTED
+// (pointing at a row would look like choosing it), and OVERLAY would have
+// become SUBTEXT (the muted ink stops being muted). Preserving a distinction
+// the module draws on purpose outranks matching the nearest colour.
 
 // ============================================================================
 // Category tree definitions
@@ -558,6 +523,12 @@ pub struct StartupEntry {
 
 /// Main application state for the System Information Explorer.
 pub struct SysInfoState {
+    /// The user's colours, handed over by the framework (§822).
+    ///
+    /// Defaulted rather than `Option`, so the first frame has *a* palette on
+    /// a machine with no settings file.
+    pub palette: Palette,
+
     /// Currently selected category in the tree.
     pub selected_category: SysInfoCategory,
     /// Which parent nodes are expanded.
@@ -629,6 +600,7 @@ impl SysInfoState {
     /// Create a new state with default values.
     pub fn new() -> Self {
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             selected_category: SysInfoCategory::SystemSummary,
             expanded: vec![
                 SysInfoCategory::HardwareResources,
@@ -2298,7 +2270,7 @@ impl SysInfoState {
         let mut tree = RenderTree::new();
 
         // Background fill.
-        tree.fill_rect(0.0, 0.0, self.window_width, self.window_height, COLOR_BASE);
+        tree.fill_rect(0.0, 0.0, self.window_width, self.window_height, self.palette.crust);
 
         // Title bar.
         self.render_title_bar(&mut tree);
@@ -2320,7 +2292,7 @@ impl SysInfoState {
             0.0,
             self.window_width,
             TITLE_BAR_HEIGHT,
-            COLOR_TITLE_BG,
+            self.palette.crust,
         );
 
         // Title text.
@@ -2328,7 +2300,7 @@ impl SysInfoState {
             x: 12.0,
             y: 10.0,
             text: "System Information".to_string(),
-            color: COLOR_TEXT,
+            color: self.palette.text,
             font_size: 15.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -2341,14 +2313,14 @@ impl SysInfoState {
             y1: TITLE_BAR_HEIGHT - 1.0,
             x2: self.window_width,
             y2: TITLE_BAR_HEIGHT - 1.0,
-            color: COLOR_SEPARATOR,
+            color: self.palette.surface0,
             width: 1.0,
         });
     }
 
     fn render_toolbar(&self, tree: &mut RenderTree) {
         let y = TITLE_BAR_HEIGHT;
-        tree.fill_rect(0.0, y, self.window_width, TOOLBAR_HEIGHT, COLOR_TOOLBAR_BG);
+        tree.fill_rect(0.0, y, self.window_width, TOOLBAR_HEIGHT, self.palette.mantle);
 
         // Search box.
         let search_x = 8.0;
@@ -2361,14 +2333,14 @@ impl SysInfoState {
             y: search_y,
             width: search_w,
             height: search_h,
-            color: COLOR_SEARCH_BG,
+            color: self.palette.base,
             corner_radii: CornerRadii::all(3.0),
         });
 
         let border_color = if self.search_focused {
-            COLOR_BLUE
+            self.palette.blue
         } else {
-            COLOR_SEARCH_BORDER
+            self.palette.surface1
         };
         tree.push(RenderCommand::StrokeRect {
             x: search_x,
@@ -2386,9 +2358,9 @@ impl SysInfoState {
             &self.search_text
         };
         let search_color = if self.search_text.is_empty() {
-            COLOR_OVERLAY
+            self.palette.overlay0
         } else {
-            COLOR_TEXT
+            self.palette.text
         };
         tree.push(RenderCommand::Text {
             x: search_x + 6.0,
@@ -2409,14 +2381,14 @@ impl SysInfoState {
             y: search_y,
             width: btn_w,
             height: search_h,
-            color: COLOR_SURFACE1,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(3.0),
         });
         tree.push(RenderCommand::Text {
             x: export_x + 10.0,
             y: search_y + 4.0,
             text: "Export".to_string(),
-            color: COLOR_SUBTEXT,
+            color: self.palette.subtext0,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -2430,14 +2402,14 @@ impl SysInfoState {
             y: search_y,
             width: btn_w,
             height: search_h,
-            color: COLOR_SURFACE1,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(3.0),
         });
         tree.push(RenderCommand::Text {
             x: copy_x + 14.0,
             y: search_y + 4.0,
             text: "Copy".to_string(),
-            color: COLOR_SUBTEXT,
+            color: self.palette.subtext0,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -2450,7 +2422,7 @@ impl SysInfoState {
             y1: y + TOOLBAR_HEIGHT - 1.0,
             x2: self.window_width,
             y2: y + TOOLBAR_HEIGHT - 1.0,
-            color: COLOR_SEPARATOR,
+            color: self.palette.surface0,
             width: 1.0,
         });
     }
@@ -2460,7 +2432,7 @@ impl SysInfoState {
         let height = self.pane_height();
 
         // Sidebar background.
-        tree.fill_rect(0.0, top, SIDEBAR_WIDTH, height, COLOR_SIDEBAR_BG);
+        tree.fill_rect(0.0, top, SIDEBAR_WIDTH, height, self.palette.mantle);
 
         // Clip to sidebar area.
         tree.clip(0.0, top, SIDEBAR_WIDTH, height);
@@ -2484,9 +2456,9 @@ impl SysInfoState {
 
             // Row background (selected or hovered).
             let bg = if cat == self.selected_category {
-                COLOR_TREE_SELECTED
+                self.palette.surface1
             } else if self.hovered_tree_row == Some(idx) {
-                COLOR_TREE_HOVER
+                self.palette.surface0
             } else {
                 Color::TRANSPARENT
             };
@@ -2506,7 +2478,7 @@ impl SysInfoState {
                     x: indent - 14.0,
                     y: row_y + 5.0,
                     text: arrow.to_string(),
-                    color: COLOR_OVERLAY,
+                    color: self.palette.overlay0,
                     font_size: 10.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
@@ -2516,9 +2488,9 @@ impl SysInfoState {
 
             // Label.
             let text_color = if cat == self.selected_category {
-                COLOR_BLUE
+                self.palette.blue
             } else {
-                COLOR_TEXT
+                self.palette.text
             };
             tree.push(RenderCommand::Text {
                 x: indent,
@@ -2544,7 +2516,7 @@ impl SysInfoState {
             y1: top,
             x2: SIDEBAR_WIDTH - 1.0,
             y2: top + height,
-            color: COLOR_SEPARATOR,
+            color: self.palette.surface0,
             width: 1.0,
         });
     }
@@ -2556,7 +2528,7 @@ impl SysInfoState {
         let height = self.pane_height();
 
         // Background.
-        tree.fill_rect(left, top, width, height, COLOR_SURFACE0);
+        tree.fill_rect(left, top, width, height, self.palette.base);
 
         // Clip to detail area.
         tree.clip(left, top, width, height);
@@ -2567,7 +2539,7 @@ impl SysInfoState {
             x: left + 16.0,
             y: heading_y,
             text: self.selected_category.label().to_string(),
-            color: COLOR_LAVENDER,
+            color: self.palette.lavender,
             font_size: 15.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - 32.0),
@@ -2581,7 +2553,7 @@ impl SysInfoState {
             y1: sep_y,
             x2: left + width - 16.0,
             y2: sep_y,
-            color: COLOR_SEPARATOR,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -2596,12 +2568,12 @@ impl SysInfoState {
         let name_col_width = width * 0.38;
 
         // Header row.
-        tree.fill_rect(left, table_top, width, PROPERTY_HEADER_HEIGHT, COLOR_MANTLE);
+        tree.fill_rect(left, table_top, width, PROPERTY_HEADER_HEIGHT, self.palette.mantle);
         tree.push(RenderCommand::Text {
             x: left + 16.0,
             y: table_top + 6.0,
             text: "Property".to_string(),
-            color: COLOR_SUBTEXT,
+            color: self.palette.subtext0,
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(name_col_width - 20.0),
@@ -2611,7 +2583,7 @@ impl SysInfoState {
             x: left + name_col_width + 8.0,
             y: table_top + 6.0,
             text: "Value".to_string(),
-            color: COLOR_SUBTEXT,
+            color: self.palette.subtext0,
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - name_col_width - 24.0),
@@ -2639,9 +2611,9 @@ impl SysInfoState {
             // table, not its slot on screen, so the stripes do not invert as
             // the table scrolls.
             let row_bg = if idx % 2 == 0 {
-                COLOR_ROW_EVEN
+                self.palette.base
             } else {
-                COLOR_ROW_ODD
+                self.palette.surface0
             };
             tree.fill_rect(left, row_y, width, PROPERTY_ROW_HEIGHT, row_bg);
 
@@ -2650,11 +2622,11 @@ impl SysInfoState {
             // wrote it, and an environment variable may be called anything.
             let is_section = prop.kind == PropertyKind::Heading;
             let name_color = if is_section {
-                COLOR_PEACH
+                self.palette.peach
             } else {
-                COLOR_SUBTEXT
+                self.palette.subtext0
             };
-            let value_color = if is_section { COLOR_PEACH } else { COLOR_TEXT };
+            let value_color = if is_section { self.palette.peach } else { self.palette.text };
 
             // Name.
             if !prop.name.is_empty() {
@@ -2678,9 +2650,9 @@ impl SysInfoState {
             if !prop.value.is_empty() {
                 // Color checkmarks green and X marks red.
                 let val_color = if prop.value == "\u{2713}" {
-                    COLOR_GREEN
+                    self.palette.green
                 } else if prop.value == "\u{2717}" {
-                    COLOR_RED
+                    self.palette.red
                 } else {
                     value_color
                 };
@@ -2707,7 +2679,7 @@ impl SysInfoState {
             y,
             self.window_width,
             STATUS_BAR_HEIGHT,
-            COLOR_STATUS_BG,
+            self.palette.mantle,
         );
 
         // Top separator.
@@ -2716,7 +2688,7 @@ impl SysInfoState {
             y1: y,
             x2: self.window_width,
             y2: y,
-            color: COLOR_SEPARATOR,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -2725,7 +2697,7 @@ impl SysInfoState {
             x: 12.0,
             y: y + 5.0,
             text: self.status_message.clone(),
-            color: COLOR_SUBTEXT,
+            color: self.palette.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(self.window_width * 0.5),
@@ -2738,7 +2710,7 @@ impl SysInfoState {
             x: self.window_width - 300.0,
             y: y + 5.0,
             text: cat_text,
-            color: COLOR_OVERLAY,
+            color: self.palette.overlay0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(280.0),
@@ -2761,6 +2733,14 @@ fn format_bytes(bytes: u64) -> String {
 // ============================================================================
 
 impl App for SysInfoState {
+    /// Adopt the user's colours (§822).
+    ///
+    /// The trait's default does nothing, which is how this crate shipped a
+    /// verbatim copy of Catppuccin Mocha: not overriding it is silent.
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         "System Information".to_owned()
     }
@@ -3135,11 +3115,41 @@ mod tests {
     /// the two stripe colours. Structural rather than positional, for the
     /// reason given on [`drawn_sidebar_rows`].
     ///
-    /// The height test is not belt-and-braces. `COLOR_ROW_EVEN` and
-    /// `COLOR_SURFACE0` are the same RGB, so a colour-only filter also matches
+    /// The height test is not belt-and-braces. The even stripe and the search
+    /// field share `base`, so a colour-only filter also matches
     /// the pane's own background and reports one row more than the table
     /// drew — which is exactly how the first draft of this helper made two
     /// correct page-step assertions fail by one. A helper filtered on the
+    /// Every colour this app draws comes from the user's palette.
+    ///
+    /// The guard §822 expects each converted crate to adopt. It is also what
+    /// finds the work a survey of `const COLOR_*` cannot see -- inline
+    /// literals, and text hardcoded on a themed fill.
+    #[test]
+    fn every_colour_the_sysinfo_window_draws_comes_from_its_palette() {
+        for light in [false, true] {
+            let mut app = SysInfoState::new();
+            app.palette = Palette::for_mode(light);
+            let tree = app.render_tree();
+            // Not a formality: a guard that sweeps an empty command list passes
+            // for the wrong reason, and this file's own `drawn_property_rows`
+            // exists because a helper filtered on the wrong property once
+            // already. A default `SysInfoState` draws its chrome, its sidebar
+            // and its detail pane, so the floor is generous and still real.
+            assert!(
+                tree.commands.len() > 50,
+                "the sweep examined only {} commands, which is not a render",
+                tree.commands.len()
+            );
+            appearance::palette_check::assert_drawn_from(
+                &app.palette,
+                &tree.commands,
+                &[],
+                &format!("sysinfo (light={light})"),
+            );
+        }
+    }
+
     /// wrong property is as wrong as the code it is checking.
     fn drawn_property_rows(app: &SysInfoState) -> Vec<(f32, Color)> {
         let mut t = RenderTree::new();
@@ -3149,7 +3159,7 @@ mod tests {
             .filter_map(|c| match c {
                 RenderCommand::FillRect {
                     y, height, color, ..
-                } if (*color == COLOR_ROW_EVEN || *color == COLOR_ROW_ODD)
+                } if (*color == app.palette.base || *color == app.palette.surface0)
                     && (*height - PROPERTY_ROW_HEIGHT).abs() < 0.01 =>
                 {
                     Some((*y, *color))

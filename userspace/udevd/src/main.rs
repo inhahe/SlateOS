@@ -1333,10 +1333,17 @@ fn apply_device_node(
                 );
             }
 
-            // Ensure parent directory exists.
-            if let Some(parent) = Path::new(&dev_path).parent() {
-                let _ = fs::create_dir_all(parent);
-            }
+            // NO DIRECTORY IS CREATED EITHER, and that is the point.
+            //
+            // This used to `create_dir_all` the parent of a node that the very
+            // next statement declines to make -- so the only lasting effect of
+            // an Add event was an empty directory. On this dev host, where a
+            // leading-slash path is drive-relative, that directory was `E:/dev`
+            // at the root of the operator's data drive, and it is how udevd's
+            // tests came to change what other crates' tests saw.
+            //
+            // The symlink path below creates its own parent, because a symlink
+            // it really does write needs one. This did not.
 
             // NO NODE IS CREATED, and nothing is written in its place.
             //

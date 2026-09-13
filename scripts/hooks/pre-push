@@ -4060,6 +4060,47 @@ EOF
     exit 1
 fi
 
+# Gate 33 -- dead-code-allows.  A blanket suppression hides the next dead
+# function, and the comment above it is usually about something else.
+dcallow="${repo_root:-.}/scripts/check-dead-code-allows.py"
+skip_dcallow=0
+# Bypass: ALLOW_DEAD_CODE_ALLOWS=1 git push origin <branch>
+if [ "${ALLOW_DEAD_CODE_ALLOWS:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_DEAD_CODE_ALLOWS=1 set - skipping the dead-code-allows gate." >&2
+    skip_dcallow=1
+fi
+[ -n "$py" ] || skip_dcallow=1
+[ -f "$dcallow" ] || skip_dcallow=1
+note_gate dead-code-allows "$skip_dcallow"
+dcallow_failed=0
+if [ "$skip_dcallow" != "1" ]; then
+    # The checker before its verdict, as every gate here does.
+    if ! run_checker dead-code-allows-selftest "$py" "$dcallow" --self-test; then
+        echo "pre-push: check-dead-code-allows.py FAILED ITS OWN SELF-TEST - its verdict is not trustworthy." >&2
+        dcallow_failed=1
+    else
+        if ! run_checker dead-code-allows "$py" "$dcallow"; then
+            dcallow_failed=1
+        fi
+    fi
+fi
+if [ "$dcallow_failed" != "0" ]; then
+    cat >&2 <<EOF
+pre-push: REFUSING to push - a blanket dead_code allow (details above).
+userspace/gdb kept 105 lines of a function nothing called, beneath an
+allow whose careful comment justified its two neighbours and never
+mentioned dead_code. Twenty-two crates share that shape and it hides 180
+findings. Put #[allow(dead_code)] on the item, with a reason -- a
+deliberate constant table and a function nobody calls should not look
+the same to the next reader.
+
+To push anyway:
+    ALLOW_DEAD_CODE_ALLOWS=1 git push $remote_name ...
+
+EOF
+    exit 1
+fi
+
 if [ "$skip" -eq 0 ] && [ -f "$repo_root/scripts/check-lane-signals.py" ]; then
     if ! "$py" "$repo_root/scripts/check-lane-signals.py" --quiet >&2; then
         echo "" >&2

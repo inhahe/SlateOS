@@ -141155,6 +141155,45 @@ does not show the earlier measurement was wrong. What it does show:
 **So the 2 ms target is missed by 3.4x, not by 8x**, and the thing to attack
 in this scene is `window_render`'s 5.5 ms, of which text is one eighth.
 
+### And that 5.5 ms is already below the floor, which settles the entry
+
+`bench_fill_floor` fills exactly the bench's window area -- sixteen 1100x720
+rectangles, 12.67 M pixels, 50.7 MB -- through the same `fill_rect` the
+renderer uses. Three runs, minimum taken, agreeing to 1%:
+
+| | time | written |
+|---|---|---|
+| opaque fill of that area | **5.92 ms** | 8.6 GB/s |
+| the same area, alpha 0.5 (read-modify-write) | 25.8 ms | 2.0 GB/s |
+| **`window_render`, same scene** | **5.51 ms** | -- |
+
+**Window rendering is faster than a plain opaque fill of the same area.** It
+has to be: the occlusion cull means it does not write all 12.67 M pixels. So
+the drawing code is at or below the memory-write floor, and *no rearrangement
+of it can help*. This entry has asserted "memory-bandwidth bound on a full
+recomposite" since July on reasoning; it is measured now.
+
+**Which makes the 2 ms target at 4K arithmetically unreachable on a CPU
+compositor at this bandwidth**, and that is a statement about the target, not
+about the code. One full-screen pass is 3840 x 2160 x 4 bytes = 33.2 MB; at
+8.6 GB/s that is **3.9 ms to touch every pixel once**, before reading a single
+source pixel. A 2 ms frame would need 16.5 GB/s of pure writes. The remaining
+levers are therefore only two, and neither is in this code:
+
+1. **Write fewer pixels.** Occlusion culling and damage tracking both already
+   do this, and the damage path is why an idle desktop is cheap -- see
+   `tests/damage_narrows_the_work.rs`. A *full* recomposite is the case where
+   there is nothing left to cull.
+2. **Do not write them with the CPU.** That is the GPU path, and it is a
+   different subsystem rather than an optimisation of this one.
+
+**The blended figure is the other actionable number here.** An alpha fill runs
+at 2.0 GB/s against 8.6 -- four times slower, because every pixel is read as
+well as written. Anything that makes a surface translucent (window opacity,
+shadows, the blur behind a panel) pays that multiple over its area. That is a
+design cost worth knowing before the next transparency feature, and it is
+measured rather than assumed.
+
 **A note on the estimator, because the first version of this bench got it
 wrong.** Run once each in sequence, the three phases reported *"the clip test
 is -0.98 ns"* -- a negative cost, which is a measurement saying the difference

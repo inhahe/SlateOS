@@ -14379,6 +14379,81 @@ mod tests {
     /// It prints a PASS/OVER verdict for tracking and hard-fails only on a
     /// catastrophic regression (mean > 150 ms/frame, ~3x the current baseline)
     /// so an accidental super-linear blow-up is still caught without flaking.
+    /// What the machine can write at all, so that `window_render`'s 5.5 ms can
+    /// be compared against the floor rather than against nothing.
+    ///
+    /// The 4K bench composites sixteen 1100x720 windows: 12.7 M pixels, 50 MB
+    /// at four bytes each. If an opaque `fill_rect` of the same area takes
+    /// about the same time, then window rendering is already at memory
+    /// bandwidth and no rearrangement of that code will help -- the only
+    /// remaining lever is *writing fewer pixels*, which is what the occlusion
+    /// cull already does. If it is much faster, the gap is code and worth
+    /// chasing.
+    ///
+    /// This is the measurement that tells those two apart, and the entry has
+    /// asserted the first without it ("memory-bandwidth bound on a full
+    /// recomposite") since July.
+    ///
+    /// ```text
+    /// cargo test -p compositor --target x86_64-pc-windows-gnu --release     ///   -- --ignored --nocapture bench_fill_floor
+    /// ```
+    #[test]
+    #[ignore = "measurement benchmark; run explicitly with --release --ignored --nocapture"]
+    fn bench_fill_floor() {
+        const W: u32 = 3840;
+        const H: u32 = 2160;
+        const WW: u32 = 1100;
+        const WH: u32 = 720;
+        const WINDOWS: u32 = 16;
+        const ROUNDS: usize = 9;
+
+        let mut fb = Framebuffer::new(W, H).expect("framebuffer");
+        let px = u64::from(WW) * u64::from(WH) * u64::from(WINDOWS);
+
+        // Sixteen rectangles the size the bench's windows are, placed where
+        // they will not all land on the same cache lines.
+        let rects: Vec<Rect> = (0..WINDOWS)
+            .map(|i| Rect {
+                x: ((i * 97) % (W - WW)) as i32,
+                y: ((i * 61) % (H - WH)) as i32,
+                width: WW,
+                height: WH,
+            })
+            .collect();
+
+        let mut opaque = f64::MAX;
+        let mut blended = f64::MAX;
+        for _ in 0..ROUNDS {
+            let t = std::time::Instant::now();
+            for r in &rects {
+                fb.fill_rect(*r, 0xFF20_3040, 1.0);
+            }
+            opaque = opaque.min(t.elapsed().as_nanos() as f64 / 1e6);
+
+            // The same area with an alpha, which is a read-modify-write and so
+            // moves twice the memory.
+            let t = std::time::Instant::now();
+            for r in &rects {
+                fb.fill_rect(*r, 0xFF20_3040, 0.5);
+            }
+            blended = blended.min(t.elapsed().as_nanos() as f64 / 1e6);
+        }
+
+        let gb = |ms: f64| (px as f64 * 4.0) / (ms / 1000.0) / 1e9;
+        println!("fill floor, {px} px ({:.1} MB):", px as f64 * 4.0 / 1e6);
+        println!("  opaque  {opaque:.3} ms  ({:.1} GB/s written)", gb(opaque));
+        println!(
+            "  blended {blended:.3} ms  ({:.1} GB/s written)",
+            gb(blended)
+        );
+        println!("  the 4K bench's window_render is ~5.5 ms over the same area");
+
+        assert!(
+            opaque > 0.0,
+            "a fill that takes no measurable time did not happen"
+        );
+    }
+
     /// Where the 32 ns per covered pixel actually goes.
     ///
     /// The entry's named next step, and deliberately an experiment rather than

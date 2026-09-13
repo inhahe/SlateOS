@@ -2101,7 +2101,11 @@ impl IrcClientApp {
                 let color = if unread > 0 {
                     self.palette.text
                 } else if is_active {
-                    self.palette.blue
+                    // `ink`, because an accent-family role is dual-use: the
+                    // same blue is a fill elsewhere and only needs the 4.5:1
+                    // floor when it is text. See known-issues
+                    // TD-C-THIRTEEN-LIGHT-ACCENTS-STILL-FAIL-ON-CARDS.
+                    self.palette.ink(self.palette.blue)
                 } else {
                     self.palette.subtext0
                 };

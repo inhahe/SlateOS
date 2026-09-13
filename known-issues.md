@@ -70745,10 +70745,59 @@ It is green. `cargo test --workspace` is not.
    invisible, because a crate that did not build produces neither. Any filter
    must include `^error` and the runner's exit status must be checked; a
    `test result` tally with no `error` line and a zero exit is the only green.
-3. **A `cargo check --workspace --all-targets` in CI** would catch it in a
-   fraction of the time of a full test run, since it is a compile problem and
-   not a behavioural one. There is no CI on this project yet; when there is,
-   this is the cheapest possible guard and should be the first job.
+3. **A `cargo check --workspace --all-targets`** would catch it in a fraction
+   of the time of a full test run, since it is a compile problem and not a
+   behavioural one.
+
+   **UPDATE 2026-09-13: that guard already exists, and this item did not know
+   it.** `scripts/boot-test.sh` runs
+   `cargo clippy --workspace --exclude kernel --all-targets --target
+   x86_64-unknown-linux-gnu`, which compiles every test target in the
+   workspace. A test binary that does not build fails it. The reason nobody
+   here counted it is that it runs inside the gate *named* `cfg-unix`, and a
+   gate whose name describes a narrower population than it checks is invisible
+   to anyone looking for the wider one -- which is this entry, looking for
+   exactly that guard and concluding it did not exist.
+
+   Lane A found the same confusion from the other side on 2026-09-13 and has
+   written it into `scripts/check-cfg-unix.py`'s docstring: the *script* of
+   that name checks 62 crates on their default targets, while `boot-test.sh`
+   checks the whole workspace on a unix target with `--all-targets`, so "a
+   pass here does not predict a pass there". Two gates, one name, two
+   populations.
+
+   `--exclude kernel` is load-bearing and is why the naive form does not work:
+   `cargo check --workspace --all-targets` fails on the kernel with
+   `duplicate lang item panic_impl`, because `--all-targets` builds a test
+   harness for a `no_std` binary that defines its own panic handler. That is
+   `TD-C-CARGO-BUILD-WORKSPACE-ON-THE-HOST-TARGET-FAILS-ON-THE-KERNEL`.
+
+   **The push-time half was the open question, and the measurement closes it:
+   no.** Timed on 2026-09-13 in `os-lane-c`:
+
+   | `cargo check --workspace --exclude kernel --all-targets` | |
+   |---|---|
+   | run after a `cargo test --workspace` | **3 m 10 s** |
+   | run again immediately after itself | **1.75 s** |
+
+   The check is nearly free *if the previous command was also a check*, and
+   costs three minutes if anything ran the tests first -- `check` and `test`
+   invalidate each other's fingerprints in the shared `target/`, which
+   `boot-test.sh` already says of `check` and `clippy`. Since this lane's
+   practice is `cargo test --workspace` **before** every push (item 1 above),
+   the realistic case is always the three-minute one, against a pre-push hook
+   that currently takes 90-115 s in total. It would triple the push.
+
+   **And it would not even cover the same population.** A push-time check
+   would run the Windows target; `boot-test.sh` runs the unix one, which is
+   what makes it see `#[cfg(unix)]` arms and unix-only test code at all.
+   Matching its coverage means a second target directory's worth of
+   artifacts, which the global build-output rules forbid leaving behind.
+
+   So the guard stays where it is, in the boot test. What this lane can do at
+   push time is what it already does: run the workspace tests, and read the
+   exit status rather than a filtered log -- item 2 above, which is the half
+   that actually catches this and costs nothing extra.
 
 **Severity.** Medium, and it is a *meta*-defect: it does not itself break
 anything a user can see, it removes the evidence that something else did. The
@@ -132410,11 +132459,108 @@ The roles split in two, and the split is the design:
 `overlay0` stays exempt: it is the muted ink, WCAG 1.4.3 exempts inactive
 controls, and raising it would make a disabled control look enabled.
 
-**Still open:** the 315 dual-use *text* sites. `gui/appearance/ink-text.py`
-performs the transformation and is proven on 100 shell sites; 29 shell tests
-compare a text colour against a raw role and must follow. Until those land the
-dual-use roles are unchanged, which is exactly today's behaviour -- so nothing
-regresses in the meantime.
+**The 315 dual-use text sites are done.** `ink-text.py --check` reports "every
+text site in 380 files goes through `ink()`" and `--verify` confirms all 650
+`ink()` calls are inside a `Text` command -- the second being the guard
+against the opposite error, an ink applied to something that is not text.
+
+**What was left is what the script could not see, and 2026-09-13 shrank that
+from 183 to 126 and found five real failures in the gap.** `--blind` exists
+because "`--check` says zero" means "zero among the sites I can classify".
+Two of its four unclassifiable shapes turned out to be classifiable after all:
+
+| | before | after | how |
+|---|---|---|---|
+| `color:` whose value is a call | 81 | 33 | take the *balanced* value instead of a five-line window; a conditional whose every branch is a floored ink is legible by construction and only looked like a call because `if` contains a `(` |
+| `color,` shorthand | 102 | 83 + 10 | walk back to the nearest `let color =` in the same function and classify *that* |
+
+The 83 that remain are shorthands whose local came from a parameter, a
+destructuring or a loop -- genuinely outside a line-based script -- and the 33
+calls are colours produced by a method, which is the
+`TD-C-FORTY-NINE-COLOUR-METHODS` class.
+
+**The five findings, four fixed and one a false positive the script caused:**
+
+| where | what | verdict |
+|---|---|---|
+| `gui/desktop/src/update_settings.rs:818` | `if entry.success { p.green } else { p.red }` — an update row's status, and the next line puts it on a `Card` | **inked** |
+| `apps/systemrestore` | a diff's green/red/yellow — the whole of what a diff communicates | **inked** |
+| `apps/typingtutor` | green for a correct character, red for a wrong one — the entire feedback of the program | **inked** |
+| `apps/ircclient` | `blue` for the active channel | **inked** |
+| `apps/whiteboard` | a stroke's colour | **left alone**, and annotated: it is the drawing, in the sense `apps/paint`'s swatch row is the document |
+
+**A second pass on the same day found four more, by widening the binding
+pattern to a destructuring.** `let (label, color) = match profile { .. }` is
+how a colour and the word it labels get chosen in one expression, and matching
+only `let color = ..` missed every one of them:
+
+| where | what |
+|---|---|
+| `gui/desktop/src/power.rs` | the power-profile badge's four labels — blue, peach, green, lavender |
+| `apps/jsonviewer` | teal and blue for YAML keys and list markers |
+| `apps/notes` | blue / lavender / mauve / teal for the four markdown heading levels, and blue for a wiki link |
+
+All are text whose whole purpose is to be read, and `lavender` and `teal` are
+among the palest accents. All inked.
+
+**A third pass, same day, on the bucket the script had lumped as "no local
+binding": six more.** Two refinements made them visible, and both were
+*subtractions* from the report rather than additions:
+
+* **A `RenderCommand::Text { .. }` that is a pattern is not a draw site.** The
+  compositor's `execute_command`, the wire encoder and `palette_check` all
+  destructure one, and their `color,` is a binding being introduced rather
+  than a colour being chosen. Six reports, none of which drew anything.
+* **A function that takes `color: Color` is not an unresolved colour.** It is
+  the correct shape for a toolkit primitive -- `RenderTree::text` must not ink,
+  because it does not know the ground -- and it accounts for **65** of the
+  remainder. They are resolved one frame up, at call sites the script does
+  convert.
+
+With those two out of the way the residue was eight, small enough to read, and
+six were real:
+
+| where | what |
+|---|---|
+| `apps/clipmanager` | the Use/Delete template buttons, and a seven-label action row |
+| `apps/finance` | Income / Expenses / Savings — the three figures a finance header exists to show |
+| `apps/renamer` | five button labels |
+| `apps/speedtest` | Download / Upload / Latency — the whole of what that screen reports |
+| `apps/startupmanager` | `status_color`'s enabled arm |
+
+All were **loop-destructured tuples** -- `for (label, color, target) in [..]`
+-- which is how a set of labelled, coloured things gets drawn in one pass, and
+which no binding pattern reaches.
+
+`startupmanager`'s is the neatest statement of the whole split: its
+`status_color` returns `pal.green` when enabled and `pal.overlay0` when not.
+The first is inked and the second must not be -- `overlay0` is the disabled
+ink, WCAG 1.4.3 exempts an inactive control, and flooring it would make a
+disabled entry look enabled. One method, two roles, two answers.
+
+**The report still says eight**, because the shape is unchanged even where the
+value is now right: the script reports what it cannot classify, not what is
+wrong. Three of the eight were checked and are correct as they stand --
+`apps/slides` (a slide's own element colours, content), `apps/pdfviewer`, and
+`startupmanager`'s two floored cells.
+
+**And one of those broke a test in exactly the way this entry predicted.**
+`power::every_choice_this_module_makes_hands_over_the_role_it_claims` compared
+the badge against `rgb(p.peach)` — the raw field. It compares against
+`rgb(p.ink(p.peach))` now, while the *gauge* assertions three lines above
+still use the raw field, because a gauge is a filled bar and a badge is a
+label. Same roles, two readings. That is the dual-use split working, and a
+test comparing both against the raw field would have passed while the label
+was unreadable.
+
+**The whiteboard one was reported because of a bug in the script's own span
+reader**, worth recording because it is the day's recurring shape: the value
+of a `let` was taken up to the next depth-zero *comma*, which is right for a
+struct field and wrong for a statement, so it ran past the `;`, swept up a
+palette role from unrelated code below, and accused the one file where the
+colour is the user's rather than the theme's. Fixed to stop at `;` as well.
+The four genuine ones were confirmed by reading the code, not by trusting the
+report, which is the only reason the false positive was recognisable as one.
 
 The guard `every_ink_clears_the_floor_on_every_ground_it_lands_on` covers both
 modes, both surface styles, both strip styles, the fourteen presets and two

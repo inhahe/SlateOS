@@ -279,7 +279,12 @@ impl StartupEntry {
     /// Status color for display.
     pub fn status_color(&self, pal: &Palette) -> Color {
         if self.enabled {
-            pal.green
+            // Inked: this is drawn as the status *text* of a table row, and
+            // `green` is dual-use. The other arm is not, and must not be:
+            // `overlay0` is the disabled ink, WCAG 1.4.3 exempts an inactive
+            // control, and flooring it would make a disabled entry look
+            // enabled. The same method, two roles, two answers.
+            pal.ink(pal.green)
         } else {
             pal.overlay0
         }

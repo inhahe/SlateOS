@@ -1965,11 +1965,16 @@ fn render_templates_panel(frame: &mut Frame, state: &AppState, x: f32, y: f32, w
     let use_rect = Rect::new(x + pad, cy, BUTTON_W, 24.0);
     let del_rect = Rect::new(use_rect.right() + BUTTON_GAP, cy, BUTTON_W, 24.0);
     for (rect, label, color, target) in [
-        (use_rect, "Use", state.palette.green, Target::UseTemplate),
+        (
+            use_rect,
+            "Use",
+            state.palette.ink(state.palette.green),
+            Target::UseTemplate,
+        ),
         (
             del_rect,
             "Delete",
-            state.palette.red,
+            state.palette.ink(state.palette.red),
             Target::DeleteTemplate,
         ),
     ] {
@@ -2160,13 +2165,41 @@ fn render_toolbar(frame: &mut Frame, state: &AppState, x: f32, y: f32, w: f32, h
 
     let mut bx = x + 8.0;
     for (label, color, target) in [
-        ("Copy", state.palette.blue, Target::CopyEntry),
-        ("Pin", state.palette.yellow, Target::PinEntry),
-        ("Mark", state.palette.peach, Target::MarkEntry),
-        ("Delete", state.palette.red, Target::DeleteEntry),
-        ("Clear All", state.palette.peach, Target::ClearAll),
-        ("Export", state.palette.teal, Target::ExportAll),
-        ("Import", state.palette.mauve, Target::ImportSelected),
+        (
+            "Copy",
+            state.palette.ink(state.palette.blue),
+            Target::CopyEntry,
+        ),
+        (
+            "Pin",
+            state.palette.ink(state.palette.yellow),
+            Target::PinEntry,
+        ),
+        (
+            "Mark",
+            state.palette.ink(state.palette.peach),
+            Target::MarkEntry,
+        ),
+        (
+            "Delete",
+            state.palette.ink(state.palette.red),
+            Target::DeleteEntry,
+        ),
+        (
+            "Clear All",
+            state.palette.ink(state.palette.peach),
+            Target::ClearAll,
+        ),
+        (
+            "Export",
+            state.palette.ink(state.palette.teal),
+            Target::ExportAll,
+        ),
+        (
+            "Import",
+            state.palette.ink(state.palette.mauve),
+            Target::ImportSelected,
+        ),
     ] {
         let rect = Rect::new(bx, y + 5.0, BUTTON_W, (h - 10.0).max(0.0));
         state

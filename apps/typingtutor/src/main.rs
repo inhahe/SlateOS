@@ -1810,8 +1810,11 @@ fn draw_lesson_text(
             pal.text
         } else {
             match session.statuses.get(i) {
-                Some(CharStatus::Correct) => pal.green,
-                Some(CharStatus::Incorrect) => pal.red,
+                // The whole feedback of a typing tutor is these two
+                // colours, so they are the last text in the tree that should
+                // be allowed under the contrast floor.
+                Some(CharStatus::Correct) => pal.ink(pal.green),
+                Some(CharStatus::Incorrect) => pal.ink(pal.red),
                 _ => pal.surface2,
             }
         };

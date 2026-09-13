@@ -2650,6 +2650,11 @@ impl WhiteboardApp {
     }
 
     fn render_shape(&self, cmds: &mut Vec<RenderCommand>, shape: &Shape, selected: bool) {
+        // NOT inked, and this is the whiteboard's answer to
+        // `gui/appearance/ink-text.py --blind`, which reports the shorthand
+        // below: a stroke's colour is the *drawing*, chosen by the user and
+        // saved with the file, in the sense `apps/paint`'s swatch row is the
+        // document. Flooring it for contrast would edit the picture.
         let color = shape.stroke.effective_color();
         let lw = shape.stroke.thickness as f32 * self.zoom;
 

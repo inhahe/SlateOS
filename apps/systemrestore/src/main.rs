@@ -3508,12 +3508,15 @@ impl SystemRestoreUI {
                     if entry_y > max_y {
                         break;
                     }
+                    // All three inked: a diff's colours are the whole of
+                    // what it communicates, and red is the worst accent on a
+                    // deep card at 2.88:1 unfloored.
                     let color = if entry.is_addition() {
-                        self.palette.green
+                        self.palette.ink(self.palette.green)
                     } else if entry.is_removal() {
-                        self.palette.red
+                        self.palette.ink(self.palette.red)
                     } else {
-                        self.palette.yellow
+                        self.palette.ink(self.palette.yellow)
                     };
                     rt.push(RenderCommand::Text {
                         x: panel_x + 8.0,

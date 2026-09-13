@@ -1389,10 +1389,10 @@ pub fn render_power_profile_badge(
     // these is the accent, including Balanced — the accent means "this is where
     // you are", and every machine is in one of these four states at all times.
     let (label, color) = match profile {
-        PowerProfile::Balanced => ("Balanced", p.blue),
-        PowerProfile::Performance => ("Performance", p.peach),
-        PowerProfile::PowerSaver => ("Power Saver", p.green),
-        PowerProfile::Custom => ("Custom", p.lavender),
+        PowerProfile::Balanced => ("Balanced", p.ink(p.blue)),
+        PowerProfile::Performance => ("Performance", p.ink(p.peach)),
+        PowerProfile::PowerSaver => ("Power Saver", p.ink(p.green)),
+        PowerProfile::Custom => ("Custom", p.ink(p.lavender)),
     };
 
     let badge_w = text::padded_width(label, 8.0, 12.0, FontWeightHint::Regular);
@@ -2732,10 +2732,28 @@ mod tests {
                 let cmds = render_power_profile_badge(profile, &p, 0.0, 0.0);
                 rgb(every_color(&cmds)[1])
             };
-            assert_eq!(badge(PowerProfile::Balanced), rgb(p.blue), "{mode}");
-            assert_eq!(badge(PowerProfile::Performance), rgb(p.peach), "{mode}");
-            assert_eq!(badge(PowerProfile::PowerSaver), rgb(p.green), "{mode}");
-            assert_eq!(badge(PowerProfile::Custom), rgb(p.lavender), "{mode}");
+            // Through `ink`, and the gauge assertions above are not: that is
+            // the dual-use split doing its job. A badge is a *label* -- text,
+            // so it takes the 4.5:1 floor -- and the gauge is a filled bar,
+            // which does not. Same roles, two readings, and a test that
+            // compared both against the raw field would pass while the label
+            // was unreadable.
+            assert_eq!(badge(PowerProfile::Balanced), rgb(p.ink(p.blue)), "{mode}");
+            assert_eq!(
+                badge(PowerProfile::Performance),
+                rgb(p.ink(p.peach)),
+                "{mode}"
+            );
+            assert_eq!(
+                badge(PowerProfile::PowerSaver),
+                rgb(p.ink(p.green)),
+                "{mode}"
+            );
+            assert_eq!(
+                badge(PowerProfile::Custom),
+                rgb(p.ink(p.lavender)),
+                "{mode}"
+            );
         }
     }
 

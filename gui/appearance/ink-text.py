@@ -349,28 +349,334 @@ SHORTHAND = re.compile(r"^\s*color,\s*$")
 GROUNDED = re.compile(r"readable_on|on_accent|on_wallpaper|contrast_text")
 
 
+# Roles that are floored in the palette itself, so a text site naming one is
+# already legible and needs no `ink()`. The split is the design -- see
+# `known-issues.md` TD-C-THIRTEEN-LIGHT-ACCENTS-STILL-FAIL-ON-CARDS.
+# The inks that are floored in the palette itself, so a text site naming one
+# is already legible and needs no `ink()`. Deliberately NOT the surface roles:
+# `surface1` used as a text colour is not a floored ink, it is a background
+# being used as a foreground, and excluding those would hide a real question
+# behind a rule written for a different one.
+FLOORED = re.compile(r"\b[A-Za-z_][\w.]*\.(subtext0|subtext1|link|text)\b(?!\s*\()")
+
+
+def value_of(lines, i, first_rest):
+    """The whole `color:` value, however many lines it spans.
+
+    A fixed window was the previous rule -- five lines, joined -- and it is the
+    wrong shape twice over: a conditional ink running to six lines was judged
+    on its first five, and a *neighbouring* field within five lines of a short
+    value was read as part of it. The balanced span is the value and nothing
+    else.
+    """
+    depth, parts, j, rest = 0, [], i, first_rest
+    while j < len(lines):
+        buf = ""
+        for ch in rest:
+            depth += (ch in "([{") - (ch in ")]}")
+            # A semicolon ends a `let` as a comma ends a struct field, and
+            # stopping only at the comma was a real bug: the value of
+            # `let color = shape.stroke.effective_color();` ran on past the
+            # statement until it met a comma several lines later, swept up a
+            # palette role from unrelated code, and reported the site as
+            # naming a dual-use role. One false positive, in the one file
+            # where the colour is the user's drawing rather than the theme's.
+            if ch in ",;" and depth == 0:
+                parts.append(buf)
+                return NL.join(parts)
+            buf += ch
+        parts.append(buf)
+        j += 1
+        if j < len(lines):
+            rest = lines[j]
+    return NL.join(parts)
+
+
+FN = re.compile(r"^\s{0,8}(?:pub(?:\([\w:]+\))?\s+)?(?:async\s+)?(?:const\s+)?fn\s")
+# `let color = ..`, and also a destructuring that binds `color` alongside
+# something else: `let (label, color) = match profile { .. }` is how a colour
+# and the word it labels get chosen in one expression, and it is common enough
+# that matching only the simple form left a real contrast failure unseen in
+# `gui/desktop/src/power.rs`.
+LET_COLOR = re.compile(r"^\s*let\s+(?:mut\s+)?(?:color\s*(?::[^=]*)?|\([^)]*\bcolor\b[^)]*\))\s*=\s*(.*)$")
+
+
+# A function that takes its ink as an argument. This is the correct shape for
+# a toolkit primitive -- `RenderTree::text(x, y, text, color, size)` must not
+# ink, because it does not know what ground the caller is drawing on -- so a
+# site inside one is not an unresolved colour. It is a colour resolved one
+# frame up, at a call site this script does convert.
+COLOR_PARAM = re.compile(r"\bcolor\s*:\s*&?\s*Color\b")
+
+
+def binding_of(lines, i, fn_start):
+    """The value of the nearest `let color = ...` above line `i`.
+
+    The shorthand form -- `Text { .., color, .. }` -- names a local, so the
+    ink is wherever that local was bound. Walking back to it is the whole of
+    what the docstring above calls "a property of a function's body rather
+    than of the draw site"; it does not need something that understands Rust,
+    only the nearest binding of that one name.
+
+    `None` when there is no such binding in the function, which is the honest
+    answer: the local came from a parameter, a destructuring, or a loop, and
+    this script genuinely cannot see it.
+    """
+    for k in range(i - 1, fn_start - 1, -1):
+        m = LET_COLOR.match(lines[k])
+        if m:
+            return value_of(lines, k, m.group(1))
+    return None
+
+
+# A `RenderCommand::Text { .. }` that is a *pattern* rather than a value: a
+# match arm or an `if let` destructuring one, as the compositor's
+# `execute_command` and the wire encoder both do. Its `color,` is a binding
+# being introduced, not a colour being chosen, and reporting it as an
+# unclassifiable ink sends the reader to a file that draws nothing.
+#
+# The discriminator is what precedes the brace on its own line. A value is
+# built inside something -- `push(`, `= `, `vec![` -- and a pattern stands at
+# the start of its line as a match arm.
+TEXT_VALUE = re.compile(r"[=(!\[,]\s*RenderCommand::Text\s*\{")
+
+
+def is_text_pattern(lines, i):
+    """Whether the `Text` block enclosing line `i` is a pattern, not a value."""
+    for k in range(i, max(-1, i - 24), -1):
+        if "RenderCommand::Text" in lines[k]:
+            return not TEXT_VALUE.search(lines[k])
+    return False
+
+
 def blind_spots(path):
-    """Text sites whose colour this script cannot classify."""
+    """Text sites whose colour this script cannot classify.
+
+    Returns `(line, kind, text)`, where `kind` says *why* it could not be
+    classified -- which is the difference between a site that needs looking at
+    and one the classifier simply cannot see through.
+    """
     lines = path.read_text(encoding="utf-8").splitlines()
     out = []
     end = production_end(lines)
     for i, line in enumerate(lines[:end]):
         if enclosing_kind(lines, i) != "Text":
             continue
-        # A few lines of the value, since a conditional colour runs over
-        # several and the exclusion may be on any of them.
-        value = " ".join(l.strip() for l in lines[i : i + 5])
+        m = COLOR.match(line)
+        value = value_of(lines, i, m.group(2)) if m else line
         if GROUNDED.search(value) or ".ink(" in value:
             continue
         if SHORTHAND.match(line):
-            out.append((i + 1, "shorthand", line.strip()))
+            if is_text_pattern(lines, i):
+                continue
+            start = 0
+            for k in range(i, -1, -1):
+                if FN.match(lines[k]):
+                    start = k
+                    break
+            bound = binding_of(lines, i, start)
+            if bound is None:
+                sig = NL.join(lines[start:start + 12])
+                kind = ("shorthand, inked by the caller"
+                        if COLOR_PARAM.search(sig)
+                        else "shorthand, no local binding")
+                out.append((i + 1, kind, line.strip()))
+            elif GROUNDED.search(bound) or ".ink(" in bound:
+                continue
+            elif FLOORED.search(bound) and not ROLE.search(bound):
+                continue
+            elif ROLE.search(bound):
+                out.append((i + 1, "shorthand naming a dual-use role", line.strip()))
+            else:
+                out.append((i + 1, "shorthand, colour from elsewhere", line.strip()))
         elif CALL_VALUE.match(line) and not ROLE.search(value):
+            # A conditional whose every branch names a floored role is not a
+            # blind spot: it is legible by construction, and the only reason
+            # it looked like one is that the value opens with `if` and so
+            # contains a `(`. Forty-seven of `gui/desktop`'s were this.
+            if FLOORED.search(value) and not ROLE.search(value):
+                continue
             out.append((i + 1, "a call", line.strip()))
     return out
 
 
+# Fixtures, each a whole file, because every verdict here depends on where the
+# test module starts and where a value ends -- the two things a fixture of
+# snippets would quietly lose. `(source, converted, blind)`: how many sites the
+# conversion rewrites, and how many the blind report cannot classify.
+SELF_TESTS = [
+    (
+        "a dual-use role at a text site is converted",
+        """fn render(&self, cmds: &mut Vec<RenderCommand>, p: &Palette) {
+    cmds.push(RenderCommand::Text {
+        x: 1.0,
+        text: "hi".to_string(),
+        color: p.green,
+        font_size: 12.0,
+    });
+}
+""",
+        1,
+        0,
+    ),
+    (
+        "a role already inked is left alone",
+        """fn render(&self, cmds: &mut Vec<RenderCommand>, p: &Palette) {
+    cmds.push(RenderCommand::Text {
+        x: 1.0,
+        text: "hi".to_string(),
+        color: p.ink(p.green),
+        font_size: 12.0,
+    });
+}
+""",
+        0,
+        0,
+    ),
+    (
+        "a floored ink needs no ink() and is not a blind spot",
+        """fn render(&self, cmds: &mut Vec<RenderCommand>, p: &Palette) {
+    cmds.push(RenderCommand::Text {
+        x: 1.0,
+        text: "hi".to_string(),
+        color: p.subtext0,
+        font_size: 12.0,
+    });
+}
+""",
+        0,
+        0,
+    ),
+    (
+        "a fill is not a text site",
+        """fn render(&self, cmds: &mut Vec<RenderCommand>, p: &Palette) {
+    cmds.push(RenderCommand::Rect {
+        x: 1.0,
+        color: p.green,
+    });
+}
+""",
+        0,
+        0,
+    ),
+    (
+        "a Text command matched as a pattern is not a draw site",
+        """fn encode(cmd: &RenderCommand) {
+    match cmd {
+        RenderCommand::Text {
+            x,
+            text,
+            color,
+            font_size,
+            ..
+        } => write(x, text, color, font_size),
+        _ => {}
+    }
+}
+""",
+        0,
+        0,
+    ),
+    (
+        "a shorthand whose let ends at a semicolon does not read past it",
+        """fn render(&self, cmds: &mut Vec<RenderCommand>, p: &Palette) {
+    let color = shape.stroke.effective_color();
+    cmds.push(RenderCommand::Text {
+        x: 1.0,
+        text: "hi".to_string(),
+        color,
+        font_size: 12.0,
+    });
+    let other = vec![p.green, p.red];
+}
+""",
+        0,
+        1,
+    ),
+    (
+        "a shorthand bound to a dual-use role is a blind-spot finding",
+        """fn render(&self, cmds: &mut Vec<RenderCommand>, p: &Palette) {
+    let color = p.green;
+    cmds.push(RenderCommand::Text {
+        x: 1.0,
+        text: "hi".to_string(),
+        color,
+        font_size: 12.0,
+    });
+}
+""",
+        0,
+        1,
+    ),
+    (
+        "a colour the caller supplies is not unresolved",
+        """fn draw(&self, cmds: &mut Vec<RenderCommand>, color: Color) {
+    cmds.push(RenderCommand::Text {
+        x: 1.0,
+        text: "hi".to_string(),
+        color,
+        font_size: 12.0,
+    });
+}
+""",
+        0,
+        1,
+    ),
+    (
+        "a site inside the test module is not production code",
+        """fn render(&self) {}
+
+#[cfg(test)]
+mod tests {
+    fn a_label_is_green(p: &Palette) {
+        cmds.push(RenderCommand::Text {
+            x: 1.0,
+            text: "hi".to_string(),
+            color: p.green,
+            font_size: 12.0,
+        });
+    }
+}
+""",
+        0,
+        0,
+    ),
+]
+
+
+def self_test():
+    """Grade the classifier against files whose verdicts are known.
+
+    Two of the nine cases are bugs this script actually had on 2026-09-13, and
+    they are the reason it has a self-test at all: a `let`'s value was read to
+    the next depth-zero *comma* rather than its semicolon, so it ran past the
+    statement and accused an innocent file; and a `RenderCommand::Text` matched
+    as a *pattern* was counted as a draw site, which put six files that draw
+    nothing into the report. Both produced confident, specific, wrong answers.
+    """
+    import tempfile
+
+    failed = 0
+    for name, source, want_converted, want_blind in SELF_TESTS:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "fixture.rs"
+            path.write_text(source, encoding="utf-8", newline=NL)
+            got_converted = convert(path, False, frozenset())
+            got_blind = len(blind_spots(path))
+        ok = (got_converted, got_blind) == (want_converted, want_blind)
+        print(("ok   " if ok else "FAIL ") + name)
+        if not ok:
+            print("       expected " + str((want_converted, want_blind))
+                  + ", got " + str((got_converted, got_blind)))
+            failed += 1
+    print(NL + str(len(SELF_TESTS)) + " self-test case(s), " + str(failed) + " failed")
+    return 1 if failed else 0
+
+
 if __name__ == "__main__":
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    if "--self-test" in sys.argv or "--selftest" in sys.argv:
+        sys.exit(self_test())
     check = "--check" in sys.argv
     paths = [pathlib.Path(a) for a in args] if args else default_paths()
     inked_already = already_inking(paths)

@@ -559,19 +559,65 @@ fn show_user(args: &[String]) {
     );
 }
 
+/// Create or remove a user's linger marker file.
+///
+/// Split out of `enable_linger`/`disable_linger` so the filesystem behaviour
+/// can be tested: those two end in `process::exit`, and they resolve the
+/// marker under the hardcoded `USER_RUNTIME_DIR`, so neither the success nor
+/// the failure path was reachable from a test.
+///
+/// Errors are RETURNED rather than discarded. Both call sites used
+/// `let _ = ...` and then announced the change unconditionally, so a marker
+/// that was never written -- or never removed -- still produced "Linger
+/// enabled"/"Linger disabled" and exit 0.
+fn set_linger_marker(marker: &std::path::Path, enable: bool) -> std::io::Result<()> {
+    if enable {
+        if let Some(parent) = marker.parent() {
+            // Propagated, not discarded: an unwritable runtime directory
+            // fails HERE with its real cause (EACCES), whereas letting it
+            // through would make `fs::write` report a bare "path not found",
+            // which names the symptom instead of the reason.
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(marker, "")
+    } else {
+        // An absent marker and an unremovable one are different answers.
+        // NotFound means linger was already off, which is the state the
+        // caller asked for -- disable-linger is idempotent, as on Linux. Any
+        // other error means the marker is still there and linger is still
+        // ENABLED, so announcing it disabled describes a system that does
+        // not exist.
+        match std::fs::remove_file(marker) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+}
+
 fn enable_linger(args: &[String]) {
     let user = args.first().map(|s| s.as_str()).unwrap_or("current user");
-    let linger_dir = format!("{}/linger", USER_RUNTIME_DIR);
-    let _ = std::fs::create_dir_all(&linger_dir);
-    let linger_file = format!("{}/{}", linger_dir, user);
-    let _ = std::fs::write(&linger_file, "");
+    let marker = format!("{}/linger/{}", USER_RUNTIME_DIR, user);
+    if let Err(e) = set_linger_marker(std::path::Path::new(&marker), true) {
+        eprintln!(
+            "loginctl: cannot enable linger for {}: {e}",
+            quoteaf_os(user)
+        );
+        process::exit(1);
+    }
     println!("Linger enabled for user {}.", quoteaf_os(user));
 }
 
 fn disable_linger(args: &[String]) {
     let user = args.first().map(|s| s.as_str()).unwrap_or("current user");
-    let linger_file = format!("{}/linger/{}", USER_RUNTIME_DIR, user);
-    let _ = std::fs::remove_file(&linger_file);
+    let marker = format!("{}/linger/{}", USER_RUNTIME_DIR, user);
+    if let Err(e) = set_linger_marker(std::path::Path::new(&marker), false) {
+        eprintln!(
+            "loginctl: cannot disable linger for {}: {e}",
+            quoteaf_os(user)
+        );
+        process::exit(1);
+    }
     println!("Linger disabled for user {}.", quoteaf_os(user));
 }
 
@@ -1297,5 +1343,69 @@ mod tests {
         let fields: Vec<&str> = line.splitn(4, ':').collect();
         assert_eq!(fields.len(), 4);
         assert_eq!(fields[3], "");
+    }
+
+    // ---- linger: a marker the filesystem refused is not a change ---------
+
+    fn linger_scratch(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "loginctl-linger-{}-{}-{}",
+            tag,
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::create_dir_all(&d);
+        d
+    }
+
+    #[test]
+    fn enabling_linger_creates_the_marker_and_its_parent() {
+        let dir = linger_scratch("enable");
+        let marker = dir.join("linger").join("alice");
+        set_linger_marker(&marker, true).expect("enable must succeed under a writable root");
+        assert!(marker.exists(), "the marker was not created");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn enabling_linger_onto_an_occupied_path_is_an_error_not_a_success() {
+        // The defect: `let _ = fs::write(...)` followed by an unconditional
+        // "Linger enabled for user ...". Reproduced by putting a DIRECTORY
+        // where the marker file must go -- `fs::write` cannot overwrite one.
+        // Measured on the built binary before the fix: "Linger enabled for
+        // user 'zzqblocked'." and exit 0. After: "Access is denied.
+        // (os error 5)" and exit 1.
+        let dir = linger_scratch("occupied");
+        let marker = dir.join("linger").join("bob");
+        std::fs::create_dir_all(&marker).expect("fixture");
+        let err = set_linger_marker(&marker, true).expect_err("must not report success");
+        assert_ne!(
+            err.kind(),
+            std::io::ErrorKind::NotFound,
+            "the error should be the write refusal, not a missing path: {err:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn disabling_linger_removes_the_marker() {
+        let dir = linger_scratch("disable");
+        let marker = dir.join("linger").join("carol");
+        set_linger_marker(&marker, true).expect("enable");
+        set_linger_marker(&marker, false).expect("disable");
+        assert!(!marker.exists(), "the marker survived disable-linger");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn disabling_linger_that_was_never_enabled_is_not_an_error() {
+        // The other half of the absent/unremovable distinction: an absent
+        // marker means linger is already off, which is what the caller asked
+        // for. Turning that into a failure would make disable-linger refuse
+        // every time it was run twice.
+        let dir = linger_scratch("absent");
+        let marker = dir.join("linger").join("dave");
+        set_linger_marker(&marker, false).expect("an absent marker is already the wanted state");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

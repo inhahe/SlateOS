@@ -13261,6 +13261,27 @@ netstack daemon (net.userspace on)` with **nothing on the kernel cmdline**, the
 daemon claiming the NIC and registering `net.stack`, a real HTTP fetch over IPC
 returning `HTTP/1.1 200 OK`, and 0 non-DRM self-test failures.
 
+**The head-of-line removal has ONE witness, and it is the code change itself.**
+
+Stated plainly because 932 requires it. What the passing boot proves is that
+the daemon path still works end to end -- HTTP over IPC returned 200. It does
+**not** prove that two accepted connections now progress independently, which
+is the property the fix exists for. A boot with the fix reverted would look
+exactly as green: every existing netstack self-test uses one connection at a
+time, so none of them can tell the two states apart.
+
+What a real witness needs: a listener, two accepted connections, one of them
+with no data pending, and an assertion that a read on the *other* completes.
+That needs two tasks -- sequentially there is nothing to observe, because a
+blocking read on an idle connection has nobody to be blocking. The existing
+`self_test_listen_accept` is the shape to build it from, and it is a real piece
+of work rather than an addition to that test.
+
+**This belongs in option D's trigger.** Deleting the resident stack on the
+strength of a property nothing checks would leave no way to notice if the fix
+ever regressed and no fallback when it did. Boots accumulating daemon-default
+mileage is necessary; a concurrency witness is what makes the deletion safe.
+
 **What is left is option D: delete the resident stack (~40 files).** It is not
 done here on purpose. design-decisions 934 sets the bar as the replacement
 having *run* as the default, not merely being it, and at the time of writing it

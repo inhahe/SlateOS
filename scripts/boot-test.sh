@@ -6108,6 +6108,34 @@ check_lane_c_gui_gates() {
         return 1
     fi
 
+    # The tech-debt index, which is a machine interface whether or not anyone
+    # meant it to be: every triage figure quoted in this project comes out of
+    # a grep on `known-issues.md`'s headings. Two shapes have already made one
+    # of those figures wrong -- a lowercase `-- fixed` marker that a
+    # case-sensitive grep counts as open, and a closed entry quoting its own
+    # original text under a second `##` heading, so every count sees it twice.
+    # Neither is visible by reading; both are one regex to refuse.
+    if ! run_checker known-issues-index-selftest "$py" \
+        "$PROJECT_ROOT/scripts/check-known-issues-index.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The known-issues index gate no longer" >&2
+        echo "agrees with its own fixtures, so its verdict on the file means" >&2
+        echo "nothing.  An anchored regex that lost its MULTILINE flag matched" >&2
+        echo "zero of 223 headings once already." >&2
+        return 1
+    fi
+
+    echo "=== Checking that the tech-debt index can still be counted ==="
+    if ! run_checker known-issues-index "$py" \
+        "$PROJECT_ROOT/scripts/check-known-issues-index.py"; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  A heading above breaks the contract" >&2
+        echo "every triage grep depends on: either two entries share a slug, so" >&2
+        echo "each is counted twice, or a status marker is lowercase, so a" >&2
+        echo "case-sensitive grep counts a closed entry as open." >&2
+        return 1
+    fi
+
     # A gate that has stopped scanning reports zero findings exactly as a
     # clean tree does, so the key-release gate is checked against its own
     # fixture before its verdict on the tree is believed.

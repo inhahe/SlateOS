@@ -73890,7 +73890,7 @@ The original entry follows.
 
 ---
 
-## TD-B-GETOPT-HAS-NO-DRIVER-FOR-OPTIONS-THAT-TAKE-VALUES (original entry, lane B, 2026-08-22)
+**TD-B-GETOPT-HAS-NO-DRIVER-FOR-OPTIONS-THAT-TAKE-VALUES** — as originally filed (lane B, 2026-08-22):
 
 **In short:** Our command-line tools share a helper that produces the *error
 messages* for bad options ("invalid option -- 'q'"). It does not do the actual
@@ -130522,7 +130522,7 @@ stops being free the next time something is added to it.
 
 ### The original entry, for the record
 
-## TD-C-THE-COMPOSITOR-FRAME-BUDGET-HAS-NO-INSTRUMENT
+**TD-C-THE-COMPOSITOR-FRAME-BUDGET-HAS-NO-INSTRUMENT** — as originally filed:
 
 **Date:** 2026-09-11. **Lane:** C. Found by lane A while checking whether the
 border conversion cost anything.
@@ -132605,7 +132605,7 @@ through `ink` would have passed while `p.subtext0` was unreadable.
 
 ### The original entry, for the record
 
-## TD-C-THIRTEEN-LIGHT-ACCENTS-STILL-FAIL-ON-CARDS
+**TD-C-THIRTEEN-LIGHT-ACCENTS-STILL-FAIL-ON-CARDS** — as originally filed:
 
 **Date:** 2026-09-09. **Lane:** C.
 **Where:** `gui/appearance/src/lib.rs` — `LIGHT_LAVENDER` through

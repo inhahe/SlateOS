@@ -13270,6 +13270,34 @@ is the property the fix exists for. A boot with the fix reverted would look
 exactly as green: every existing netstack self-test uses one connection at a
 time, so none of them can tell the two states apart.
 
+**Design, worked out 2026-09-13 so the next attempt is implementation rather
+than rediscovery.** The whole API needed is already public in `net::socket`:
+`create`, `bind_stream`, `listen`, `accept`, `connect`, `send`, `recv`, `close`.
+
+1. `srv = create(AF_INET)`, `bind_stream(srv, PORT)`, `listen(srv, 2)`.
+2. Connect and accept **twice** over loopback -- `a1`, `a2` -- so both accepted
+   fds share the listener's session, which is the configuration that used to
+   serialise (Q23 Option A).
+3. `sched::spawn` a task that sets an `AtomicBool` and then does a *blocking*
+   `recv(a1, ...)`. `a1` has no data, so under the old code it holds the shared
+   session mutex indefinitely.
+4. Main task waits for that flag, yields a few times so the spawned task is
+   genuinely inside `recv`, then `send(c2, msg)` and a blocking `recv(a2, ...)`
+   **with a deadline**.
+5. `a2` returning the payload before the deadline is the witness. Missing the
+   deadline is the failure.
+6. Release the blocked reader by sending on `c1`, join, then close all handles.
+
+**The step that makes or breaks it is 4.** If the main task reaches its read
+before the spawned one is inside `recv`, there is no contention and the test
+passes whether or not the fix is present -- it would be a test of nothing,
+which is the exact failure this entry is about. The flag plus the yields are
+not incidental; they are what makes the two states distinguishable.
+
+Deliberately not written at 00:17 after a long session: a racy self-test in the
+boot path is worse than no self-test, because it costs three lanes a rerun each
+time it flaps and it teaches everyone to ignore a red boot.
+
 **Scoping note, so the next attempt does not start in the wrong place.** The
 obvious base is `netstack_client::self_test_listen_accept`, which already does
 listen -> connect -> accept -> echo over loopback. It is the wrong base: it

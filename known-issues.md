@@ -131169,6 +131169,27 @@ have been through it.** For each crate:
 
    Cargo unifies it with the ordinary dependency when building tests.
 
+**Two things a survey of `const` cannot tell you, found while converting:**
+
+* **Some constants are function-local.** A pattern anchored at `^const` misses
+  them entirely. 32 of them across six crates — `explorer` (17), `filediff`
+  (6), `emojipicker` (3), `unitconverter` (3), `launcher` (2), `lockscreen`
+  (1). `explorer` has *no* module-level colour constants at all, so an anchored
+  survey reports it as clean.
+* **Some colour literals are not interface at all.** `explorer`'s `thumbs.rs`
+  has nine file-type colours — green for images, amber for folders, red for
+  PDF — which look exactly like theme candidates. They feed
+  `canvas.fill_rect` into a **pixel buffer** that becomes a thumbnail image,
+  not a `RenderCommand`. They are generating *content*, in the same sense as
+  `apps/paint`'s swatch row, and converting them would theme the pictures
+  rather than the window. The tell is the destination, not the name: follow
+  the colour to whether it reaches the renderer or a raster.
+
+  (`explorer` is also the mirror of `procexplorer`: it hardcodes a **light**
+  theme — `rgb(224, 224, 224)`, white chooser backgrounds — so on a dark
+  desktop it is a white file manager. Both directions of the same defect exist
+  in the tree.)
+
 **Step 5 is not the paperwork; it is where the rest of the work is found.**
 `procexplorer` had 22 `const COLOR_*` values — and *also* 26 inline
 `Color::rgb(..)` literals that were never constants, plus two labels drawn in

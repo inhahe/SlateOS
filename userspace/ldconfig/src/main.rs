@@ -12,7 +12,6 @@
 // byte and the on-disk /etc/ld.so.cache (CACHEMAGIC_NEW) file format
 // the real ldconfig must produce. Dead-code lint cannot see across
 // that future boundary.
-#![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::env;
@@ -50,6 +49,9 @@ struct LibEntry {
     /// Library type (ELF class).
     lib_type: LibType,
     /// OS/ABI.
+    // The ELF EI_OSABI encoding, parsed and not consulted when choosing a
+    // library. Kept so the entry matches the header it was read from.
+    #[allow(dead_code)]
     os_abi: u8,
 }
 
@@ -62,6 +64,7 @@ enum LibType {
 }
 
 /// Cache file representation.
+#[allow(dead_code)]
 struct LibCache {
     entries: Vec<LibEntry>,
 }

@@ -20,7 +20,6 @@
 // pumps into tcsetattr(2). The stub only exercises the line discipline
 // surface needed to print /etc/issue and read a username; the rest is
 // preserved for the future driver-attached implementation.
-#![allow(dead_code)]
 
 use quoting::quoteaf_os;
 #[cfg(not(test))]
@@ -60,6 +59,9 @@ struct Config {
     personality: Personality,
     port: String,
     baud_rates: Vec<u32>,
+    // Terminal settings parsed and not applied, and a path helper used only by
+    // tests. Kept so the record matches what the tty layer will need.
+    #[allow(dead_code)]
     term_type: String,
     autologin_user: Option<String>,
     no_issue: bool,
@@ -375,8 +377,11 @@ struct TermSettings {
     baud_rate: u32,
     erase_char: char,
     kill_char: char,
+    #[allow(dead_code)]
     echo: bool,
+    #[allow(dead_code)]
     canonical: bool,
+    #[allow(dead_code)]
     cr_to_nl: bool,
 }
 
@@ -468,6 +473,7 @@ fn get_hostname(long: bool) -> String {
 // TTY path helpers
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 fn tty_path(port: &str) -> PathBuf {
     if port.starts_with('/') {
         PathBuf::from(port)

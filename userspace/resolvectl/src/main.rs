@@ -13,7 +13,6 @@
 // QueryOptions::interface documents the per-link DNS resolution
 // vocabulary (matching systemd-resolved's resolve.dbus.OpenIfindex
 // API) the future driver-attached implementation must speak.
-#![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::env;
@@ -33,6 +32,8 @@ const _RESOLVED_CONF: &str = "/etc/systemd/resolved.conf";
 #[derive(Clone, Debug)]
 struct DnsServer {
     address: String,
+    // DNS vocabulary the current output does not render.
+    #[allow(dead_code)]
     interface: Option<String>,
     _protocol: DnsProtocol,
 }
@@ -196,6 +197,7 @@ fn reverse_lookup(_addr: &str) -> Option<String> {
     }
 }
 
+#[allow(dead_code)]
 fn record_type_str(rtype: &str) -> &str {
     match rtype.to_uppercase().as_str() {
         "A" => "A",

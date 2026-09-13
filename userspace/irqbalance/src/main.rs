@@ -12,7 +12,6 @@
 // vocabulary the real irqbalance must speak when writing migration
 // decisions back to the kernel. Dead-code lint cannot see across
 // that future boundary.
-#![allow(dead_code)]
 
 use std::env;
 use std::fs;
@@ -34,6 +33,8 @@ struct IrqStat {
     /// the action names. `--banmod` matches against those.
     name: String,
     per_cpu: Vec<u64>,
+    // Read from /proc/irq and not used in the current placement decision.
+    #[allow(dead_code)]
     affinity_mask: u64,
 }
 

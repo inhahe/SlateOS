@@ -44,7 +44,6 @@
 // three integration tests — and each uses a different part of it: the in-process
 // tests want `host_path`, the spawning ones want `scrub`. Whichever is unused in
 // a given build is not dead code, it is the other suite's half.
-#![allow(dead_code)]
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};

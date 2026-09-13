@@ -12,7 +12,6 @@
 // BlkidInfo::fs_size is part of the BLKGETSIZE64 ioctl surface and the
 // blkid -o size output the real implementation must produce. Dead-code
 // lint cannot see across that future boundary.
-#![allow(dead_code)]
 
 #[cfg(not(test))]
 use std::env;
@@ -53,6 +52,8 @@ struct BlkidInfo {
     partuuid: String,
     part_label: String,
     block_size: u64,
+    // Filesystem size, read and not printed by the current columns.
+    #[allow(dead_code)]
     fs_size: u64,
 }
 

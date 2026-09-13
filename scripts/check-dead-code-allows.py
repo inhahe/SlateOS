@@ -49,21 +49,6 @@ ROOTS = ("userspace", "services", "init", "posix")
 # The crates that already had one when this gate was written. Shrink this as
 # crates are cleaned; the gate fails if an entry no longer needs to be here.
 BASELINE = {
-    "userspace/acpi",
-    "userspace/ar",
-    "userspace/blkid",
-    "userspace/dhcpcd",
-    "userspace/findmnt",
-    "userspace/getty",
-    "userspace/irqbalance",
-    "userspace/ldconfig",
-    "userspace/login",
-    "userspace/ntpd",
-    "userspace/oils",
-    "userspace/resolvectl",
-    "userspace/ss",
-    "userspace/tcpdump",
-    "userspace/upower",
 }
 
 # Conditions under which a crate-level dead_code allow is inherently narrow,

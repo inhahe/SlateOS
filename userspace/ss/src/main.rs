@@ -13,7 +13,6 @@
 // NETLINK_SOCK_DIAG / INET_DIAG message vocabulary the real ss
 // implementation must speak. Dead-code lint cannot see across
 // that future boundary.
-#![allow(dead_code)]
 
 #[cfg(not(test))]
 use std::env;
@@ -95,6 +94,8 @@ impl SocketState {
         }
     }
 
+    // Socket fields the current columns do not print.
+    #[allow(dead_code)]
     fn long_str(&self) -> &'static str {
         match self {
             Self::Established => "ESTABLISHED",
@@ -168,6 +169,7 @@ struct SocketEntry {
     // Unix-specific
     unix_path: Option<String>,
     // Timer info
+    #[allow(dead_code)]
     timer: Option<String>,
 }
 

@@ -24,7 +24,6 @@
 // layouts the verbose-mode output and pcap export must surface. The stub
 // pretty-printer only renders a subset; the full vocabulary is intentionally
 // preserved so the future driver-attached implementation can drop in.
-#![allow(dead_code)]
 
 use std::env;
 use std::fs;
@@ -92,15 +91,22 @@ struct EthernetHeader {
 
 /// IPv4 header.
 struct Ipv4Header {
+    // Parsed from the wire header and not printed by the current output. The
+    // struct mirrors the on-wire layout; dropping a field would make the type
+    // disagree with the protocol it decodes.
+    #[allow(dead_code)]
     version: u8,
     ihl: u8,
     tos: u8,
     total_length: u16,
     identification: u16,
+    #[allow(dead_code)]
     flags: u8,
+    #[allow(dead_code)]
     fragment_offset: u16,
     ttl: u8,
     protocol: u8,
+    #[allow(dead_code)]
     header_checksum: u16,
     src_ip: u32,
     dst_ip: u32,
@@ -116,6 +122,7 @@ struct TcpHeader {
     flags: u8,
     window: u16,
     checksum: u16,
+    #[allow(dead_code)]
     urgent_ptr: u16,
 }
 
@@ -130,6 +137,7 @@ struct UdpHeader {
 /// ICMP header.
 struct IcmpHeader {
     icmp_type: u8,
+    #[allow(dead_code)]
     code: u8,
     checksum: u16,
     id: u16,
@@ -138,13 +146,18 @@ struct IcmpHeader {
 
 /// ARP header.
 struct ArpHeader {
+    #[allow(dead_code)]
     hw_type: u16,
+    #[allow(dead_code)]
     proto_type: u16,
+    #[allow(dead_code)]
     hw_len: u8,
+    #[allow(dead_code)]
     proto_len: u8,
     operation: u16,
     sender_mac: [u8; 6],
     sender_ip: u32,
+    #[allow(dead_code)]
     target_mac: [u8; 6],
     target_ip: u32,
 }

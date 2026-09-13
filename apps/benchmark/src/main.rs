@@ -1950,7 +1950,11 @@ impl BenchmarkApp {
                 y: slot.y + 10.0,
                 text: tab.label().into(),
                 font_size: 13.0,
-                color: if is_active { self.palette.text } else { self.palette.subtext0 },
+                color: if is_active {
+                    self.palette.text
+                } else {
+                    self.palette.subtext0
+                },
                 font_weight: if is_active {
                     FontWeightHint::Bold
                 } else {
@@ -2045,7 +2049,11 @@ impl BenchmarkApp {
                 ("CPU", result.cpu.composite_score, self.palette.blue),
                 ("Memory", result.memory.composite_score, self.palette.green),
                 ("Disk", result.disk.composite_score, self.palette.peach),
-                ("Graphics", result.graphics.composite_score, self.palette.lavender),
+                (
+                    "Graphics",
+                    result.graphics.composite_score,
+                    self.palette.lavender,
+                ),
             ];
 
             for (i, (name, score, color)) in categories.iter().enumerate() {
@@ -2152,7 +2160,11 @@ impl BenchmarkApp {
 
             for (i, (label, value)) in self.hardware.summary_lines().iter().enumerate() {
                 let row_y = y + i as f32 * ROW_HEIGHT;
-                let bg_color = if i % 2 == 0 { self.palette.base } else { self.palette.surface0 };
+                let bg_color = if i % 2 == 0 {
+                    self.palette.base
+                } else {
+                    self.palette.surface0
+                };
                 frame.push(RenderCommand::FillRect {
                     x,
                     y: row_y,
@@ -2347,7 +2359,11 @@ impl BenchmarkApp {
 
             for (i, sub) in cat.sub_tests.iter().enumerate() {
                 let row_y = y + i as f32 * (ROW_HEIGHT + 4.0);
-                let bg_color = if i % 2 == 0 { self.palette.base } else { self.palette.surface0 };
+                let bg_color = if i % 2 == 0 {
+                    self.palette.base
+                } else {
+                    self.palette.surface0
+                };
 
                 frame.push(RenderCommand::FillRect {
                     x,
@@ -2816,7 +2832,7 @@ impl BenchmarkApp {
                 self.palette.surface0
             };
             render_button(
-            frame,
+                frame,
                 clear,
                 clear_color,
                 self.palette.red,
@@ -2825,7 +2841,7 @@ impl BenchmarkApp {
                 "Clear History",
                 FontWeightHint::Regular,
                 appearance::readable_on(clear_color),
-        );
+            );
             frame.hit(Target::ClearHistory, clear);
         }
     }
@@ -3887,39 +3903,60 @@ mod tests {
 
     #[test]
     fn score_color_high_is_green() {
-        assert_eq!(score_color(8000.0, &Palette::for_mode(false)), Palette::for_mode(false).green);
+        assert_eq!(
+            score_color(8000.0, &Palette::for_mode(false)),
+            Palette::for_mode(false).green
+        );
     }
 
     #[test]
     fn score_color_mid_is_blue() {
-        assert_eq!(score_color(6000.0, &Palette::for_mode(false)), Palette::for_mode(false).blue);
+        assert_eq!(
+            score_color(6000.0, &Palette::for_mode(false)),
+            Palette::for_mode(false).blue
+        );
     }
 
     #[test]
     fn score_color_low_mid_is_yellow() {
-        assert_eq!(score_color(3000.0, &Palette::for_mode(false)), Palette::for_mode(false).yellow);
+        assert_eq!(
+            score_color(3000.0, &Palette::for_mode(false)),
+            Palette::for_mode(false).yellow
+        );
     }
 
     #[test]
     fn score_color_very_low_is_red() {
-        assert_eq!(score_color(1000.0, &Palette::for_mode(false)), Palette::for_mode(false).red);
+        assert_eq!(
+            score_color(1000.0, &Palette::for_mode(false)),
+            Palette::for_mode(false).red
+        );
     }
 
     // --- delta_color tests ---
 
     #[test]
     fn delta_color_positive_is_green() {
-        assert_eq!(delta_color(5.0, &Palette::for_mode(false)), Palette::for_mode(false).green);
+        assert_eq!(
+            delta_color(5.0, &Palette::for_mode(false)),
+            Palette::for_mode(false).green
+        );
     }
 
     #[test]
     fn delta_color_negative_is_red() {
-        assert_eq!(delta_color(-5.0, &Palette::for_mode(false)), Palette::for_mode(false).red);
+        assert_eq!(
+            delta_color(-5.0, &Palette::for_mode(false)),
+            Palette::for_mode(false).red
+        );
     }
 
     #[test]
     fn delta_color_zero_is_neutral() {
-        assert_eq!(delta_color(0.0, &Palette::for_mode(false)), Palette::for_mode(false).subtext0);
+        assert_eq!(
+            delta_color(0.0, &Palette::for_mode(false)),
+            Palette::for_mode(false).subtext0
+        );
     }
 
     // --- format_delta tests ---
@@ -3948,15 +3985,30 @@ mod tests {
 
     #[test]
     fn category_color_known() {
-        assert_eq!(category_color("CPU", &Palette::for_mode(false)), Palette::for_mode(false).blue);
-        assert_eq!(category_color("Memory", &Palette::for_mode(false)), Palette::for_mode(false).green);
-        assert_eq!(category_color("Disk", &Palette::for_mode(false)), Palette::for_mode(false).peach);
-        assert_eq!(category_color("Graphics", &Palette::for_mode(false)), Palette::for_mode(false).lavender);
+        assert_eq!(
+            category_color("CPU", &Palette::for_mode(false)),
+            Palette::for_mode(false).blue
+        );
+        assert_eq!(
+            category_color("Memory", &Palette::for_mode(false)),
+            Palette::for_mode(false).green
+        );
+        assert_eq!(
+            category_color("Disk", &Palette::for_mode(false)),
+            Palette::for_mode(false).peach
+        );
+        assert_eq!(
+            category_color("Graphics", &Palette::for_mode(false)),
+            Palette::for_mode(false).lavender
+        );
     }
 
     #[test]
     fn category_color_unknown() {
-        assert_eq!(category_color("Unknown", &Palette::for_mode(false)), Palette::for_mode(false).text);
+        assert_eq!(
+            category_color("Unknown", &Palette::for_mode(false)),
+            Palette::for_mode(false).text
+        );
     }
 
     // --- Tab tests ---
@@ -4715,4 +4767,3 @@ mod tests {
         }
     }
 }
-

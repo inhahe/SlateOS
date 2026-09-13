@@ -1275,7 +1275,11 @@ impl PomodoroApp {
             if active {
                 fill(frame, rect, self.palette.surface0, 6.0);
             }
-            let color = if active { self.palette.text } else { self.palette.overlay0 };
+            let color = if active {
+                self.palette.text
+            } else {
+                self.palette.overlay0
+            };
             centred(
                 frame,
                 rect,
@@ -1319,7 +1323,12 @@ impl PomodoroApp {
         // The ring: an outer disc with the background punched back out of it.
         if layout.ring.w > 8.0 {
             let ring_w = (layout.ring.w * 0.08).clamp(4.0, 10.0);
-            fill(frame, layout.ring, self.palette.surface0, layout.ring.w / 2.0);
+            fill(
+                frame,
+                layout.ring,
+                self.palette.surface0,
+                layout.ring.w / 2.0,
+            );
             let inner = Rect::new(
                 layout.ring.x + ring_w,
                 layout.ring.y + ring_w,
@@ -1330,7 +1339,14 @@ impl PomodoroApp {
 
             let time = Self::format_time(self.remaining_secs);
             let time_box = Rect::new(inner.x, inner.y + inner.h * 0.28, inner.w, layout.time_font);
-            centred(frame, time_box, &time, layout.time_font, self.palette.text, true);
+            centred(
+                frame,
+                time_box,
+                &time,
+                layout.time_font,
+                self.palette.text,
+                true,
+            );
 
             let (state_label, state_color) = match self.state {
                 TimerState::Idle => ("Ready", self.palette.overlay0),
@@ -1419,7 +1435,16 @@ impl PomodoroApp {
             let w = width * scale;
             let rect = Rect::new(x, layout.buttons.y, w, layout.buttons.h);
             let active = matches!(target, Target::StartPause) && self.state == TimerState::Running;
-            fill(frame, rect, if active { self.palette.surface1 } else { self.palette.surface0 }, 6.0);
+            fill(
+                frame,
+                rect,
+                if active {
+                    self.palette.surface1
+                } else {
+                    self.palette.surface0
+                },
+                6.0,
+            );
             centred(
                 frame,
                 rect,
@@ -1455,10 +1480,22 @@ impl PomodoroApp {
             (
                 "Today",
                 format!("{today} / {goal}"),
-                if today >= goal { self.palette.green } else { self.palette.peach },
+                if today >= goal {
+                    self.palette.green
+                } else {
+                    self.palette.peach
+                },
             ),
-            ("Streak", format!("{} days", self.streak_days), self.palette.mauve),
-            ("Total Pomodoros", format!("{}", self.total_pomodoros), self.palette.teal),
+            (
+                "Streak",
+                format!("{} days", self.streak_days),
+                self.palette.mauve,
+            ),
+            (
+                "Total Pomodoros",
+                format!("{}", self.total_pomodoros),
+                self.palette.teal,
+            ),
             (
                 "Total Focus",
                 Self::format_time_long(self.total_focus_minutes.saturating_mul(60)),
@@ -1544,7 +1581,15 @@ impl PomodoroApp {
         let head_y = layout.content.y + 34.0;
         for (i, name) in ["Started", "Phase", "Task", "Result"].iter().enumerate() {
             let cx = cols.get(i).copied().unwrap_or(x);
-            bold(frame, cx, head_y, (*name).to_string(), 10.0, self.palette.subtext0, w);
+            bold(
+                frame,
+                cx,
+                head_y,
+                (*name).to_string(),
+                10.0,
+                self.palette.subtext0,
+                w,
+            );
         }
 
         // Newest first, which is what a log is read as.
@@ -1636,7 +1681,11 @@ impl PomodoroApp {
                 rect.y + (rect.h - font) / 2.0,
                 name.to_string(),
                 font,
-                if selected { self.palette.text } else { self.palette.subtext1 },
+                if selected {
+                    self.palette.text
+                } else {
+                    self.palette.subtext1
+                },
                 rect.w * 0.45,
             );
 
@@ -1651,7 +1700,11 @@ impl PomodoroApp {
                 value_box,
                 &value,
                 font,
-                if selected { self.palette.blue } else { self.palette.subtext0 },
+                if selected {
+                    self.palette.blue
+                } else {
+                    self.palette.subtext0
+                },
                 selected,
             );
             for (glyph, box_rect, target) in [
@@ -1948,9 +2001,18 @@ mod tests {
 
     #[test]
     fn phase_colors_are_distinct() {
-        assert_ne!(Phase::Work.color(&Palette::for_mode(false)), Phase::ShortBreak.color(&Palette::for_mode(false)));
-        assert_ne!(Phase::Work.color(&Palette::for_mode(false)), Phase::LongBreak.color(&Palette::for_mode(false)));
-        assert_ne!(Phase::ShortBreak.color(&Palette::for_mode(false)), Phase::LongBreak.color(&Palette::for_mode(false)));
+        assert_ne!(
+            Phase::Work.color(&Palette::for_mode(false)),
+            Phase::ShortBreak.color(&Palette::for_mode(false))
+        );
+        assert_ne!(
+            Phase::Work.color(&Palette::for_mode(false)),
+            Phase::LongBreak.color(&Palette::for_mode(false))
+        );
+        assert_ne!(
+            Phase::ShortBreak.color(&Palette::for_mode(false)),
+            Phase::LongBreak.color(&Palette::for_mode(false))
+        );
     }
 
     #[test]

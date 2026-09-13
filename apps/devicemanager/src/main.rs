@@ -2087,7 +2087,9 @@ fn render_properties_body(
     match state.active_tab {
         PropertiesTab::General => render_general_tab(state, dev, cmds, panel_x, y, panel_width),
         PropertiesTab::Driver => render_driver_tab(state, dev, cmds, panel_x, y, panel_width),
-        PropertiesTab::Resources => render_resources_tab(dev, cmds, panel_x, y, panel_width, &state.palette),
+        PropertiesTab::Resources => {
+            render_resources_tab(dev, cmds, panel_x, y, panel_width, &state.palette)
+        }
         PropertiesTab::Events => render_events_tab(state, dev, cmds, panel_x, y, panel_width),
     }
 }
@@ -2161,7 +2163,11 @@ fn render_tab_bar(
             });
         }
 
-        let text_color = if is_active { state.palette.blue } else { state.palette.subtext0 };
+        let text_color = if is_active {
+            state.palette.blue
+        } else {
+            state.palette.subtext0
+        };
 
         cmds.push(RenderCommand::Text {
             x: tab_x + tab_width / 2.0 - 20.0,
@@ -3440,7 +3446,6 @@ mod tests {
     // line, not be handled into a pass. The lints these suppress are aimed at
     // production code, where the same panic would be a denial of service.
     #![allow(
-
         clippy::indexing_slicing,
         clippy::unwrap_used,
         clippy::expect_used,
@@ -3451,7 +3456,6 @@ mod tests {
     use super::*;
 
     // -- DeviceCategory tests ------------------------------------------------
-
 
     /// Every colour the device manager draws comes from the user's palette.
     #[test]

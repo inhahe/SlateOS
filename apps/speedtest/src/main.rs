@@ -2006,9 +2006,10 @@ impl SpeedTestUI {
             let x = l.phase_row.x + i as f32 * step;
 
             let (dot_color, text_color) = match &self.phase {
-                SpeedTestPhase::Testing(active) if active == kind => {
-                    (icons.get(i).copied().unwrap_or(self.palette.text), self.palette.text)
-                }
+                SpeedTestPhase::Testing(active) if active == kind => (
+                    icons.get(i).copied().unwrap_or(self.palette.text),
+                    self.palette.text,
+                ),
                 SpeedTestPhase::Complete => (self.palette.green, self.palette.subtext0),
                 _ => {
                     // Check if this phase has already been completed in the
@@ -2101,7 +2102,11 @@ impl SpeedTestUI {
             x: r.x + (r.w - label_w).max(0.0) / 2.0,
             y: r.y + (r.h - 14.0) / 2.0,
             text: label.into(),
-            color: if bg == self.palette.sapphire { self.palette.crust } else { self.palette.text },
+            color: if bg == self.palette.sapphire {
+                self.palette.crust
+            } else {
+                self.palette.text
+            },
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(r.w),

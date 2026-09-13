@@ -1497,7 +1497,16 @@ impl MixerApp {
                 (which, self.picker),
                 (0, Picker::Output) | (1, Picker::Input)
             );
-            fill(f, r, if open { self.palette.surface1 } else { self.palette.surface0 }, 5.0);
+            fill(
+                f,
+                r,
+                if open {
+                    self.palette.surface1
+                } else {
+                    self.palette.surface0
+                },
+                5.0,
+            );
             f.hit(target, r);
 
             let inset = (r.w * 0.03).min(8.0);
@@ -1571,7 +1580,11 @@ impl MixerApp {
                 stream.volume,
                 stream.muted,
                 Some(stream.peak_level),
-                if stream.playing { self.palette.blue } else { self.palette.overlay0 },
+                if stream.playing {
+                    self.palette.blue
+                } else {
+                    self.palette.overlay0
+                },
             );
         }
     }
@@ -1593,7 +1606,16 @@ impl MixerApp {
             return;
         }
         let selected = self.selection == sel;
-        fill(f, col, if selected { self.palette.surface0 } else { self.palette.mantle }, 6.0);
+        fill(
+            f,
+            col,
+            if selected {
+                self.palette.surface0
+            } else {
+                self.palette.mantle
+            },
+            6.0,
+        );
         if selected {
             stroke(f, col, accent, 2.0, 6.0);
         }
@@ -1614,7 +1636,11 @@ impl MixerApp {
             l.name_of(col),
             name,
             (l.font * 0.95).max(1.0),
-            if muted { self.palette.overlay0 } else { self.palette.text },
+            if muted {
+                self.palette.overlay0
+            } else {
+                self.palette.text
+            },
             FontWeightHint::Bold,
         );
 
@@ -1627,7 +1653,12 @@ impl MixerApp {
             track.w,
             track.h * volume,
         );
-        fill(f, filled, if muted { self.palette.surface1 } else { accent }, 3.0);
+        fill(
+            f,
+            filled,
+            if muted { self.palette.surface1 } else { accent },
+            3.0,
+        );
         f.hit(
             match sel {
                 Selection::Master => Target::MasterFader,
@@ -1655,18 +1686,35 @@ impl MixerApp {
             l.readout_of(col),
             &format_volume_percent(volume),
             (l.font * 0.9).max(1.0),
-            if muted { self.palette.overlay0 } else { self.palette.subtext0 },
+            if muted {
+                self.palette.overlay0
+            } else {
+                self.palette.subtext0
+            },
             FontWeightHint::Regular,
         );
 
         let mute = l.mute_of(col);
-        fill(f, mute, if muted { self.palette.red } else { self.palette.surface1 }, 4.0);
+        fill(
+            f,
+            mute,
+            if muted {
+                self.palette.red
+            } else {
+                self.palette.surface1
+            },
+            4.0,
+        );
         centred_in(
             f,
             mute,
             if muted { "muted" } else { "mute" },
             (mute.h * 0.5).clamp(1.0, l.font),
-            if muted { self.palette.crust } else { self.palette.text },
+            if muted {
+                self.palette.crust
+            } else {
+                self.palette.text
+            },
             FontWeightHint::Bold,
         );
         f.hit(
@@ -2369,8 +2417,22 @@ mod tests {
             for s in strings {
                 for size in [6.0_f32, 11.0, 22.0] {
                     let mut f = Frame::new(400.0, 400.0);
-                    centred_in(&mut f, boxes, s, size, Palette::for_mode(false).text, FontWeightHint::Regular);
-                    left_in(&mut f, boxes, s, size, Palette::for_mode(false).text, FontWeightHint::Regular);
+                    centred_in(
+                        &mut f,
+                        boxes,
+                        s,
+                        size,
+                        Palette::for_mode(false).text,
+                        FontWeightHint::Regular,
+                    );
+                    left_in(
+                        &mut f,
+                        boxes,
+                        s,
+                        size,
+                        Palette::for_mode(false).text,
+                        FontWeightHint::Regular,
+                    );
                     for c in f.commands() {
                         let RenderCommand::Text { x, max_width, .. } = c else {
                             continue;

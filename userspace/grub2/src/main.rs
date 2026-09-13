@@ -585,7 +585,11 @@ fn run_install(args: &[String]) -> Result<(), GrubError> {
     if opts.recheck || !Path::new(&device_map_path).exists() {
         let device = opts.device.as_deref().unwrap_or("/dev/sda");
         let content = format!("(hd0)\t{device}\n");
-        let _ = fs::write(&device_map_path, content);
+        // Propagated, not discarded. The announcement below said "Wrote
+        // <path>" for a write whose error had just been thrown away, and
+        // `run_install` ends with "Installation finished. No error reported."
+        // -- a sentence that was true only because the error was not kept.
+        fs::write(&device_map_path, content)?;
         println!("  Wrote {device_map_path}");
     }
 
@@ -593,6 +597,13 @@ fn run_install(args: &[String]) -> Result<(), GrubError> {
     Ok(())
 }
 
+/// Create a directory tree, ignoring the result.
+///
+/// Discarded deliberately: every caller goes on to WRITE inside the directory
+/// it just asked for, and those writes now propagate. A directory that could
+/// not be created produces a failure there, naming the file the caller
+/// actually cares about, rather than one naming the directory. `create_dir_all`
+/// also succeeds when the directory already exists, which is the ordinary case.
 fn create_dir_all_quiet(path: &str) {
     let _ = fs::create_dir_all(path);
 }
@@ -850,6 +861,8 @@ fn run_mkconfig(args: &[String]) -> Result<(), GrubError> {
     if let Some(ref output) = opts.output {
         // Ensure parent directory exists.
         if let Some(parent) = Path::new(output).parent() {
+            // See `create_dir_all_quiet`: the write below reports the same
+            // cause, against the path the caller named.
             let _ = fs::create_dir_all(parent);
         }
         fs::write(output, &config)?;

@@ -131157,7 +131157,26 @@ have been through it.** For each crate:
    `push_surface`, and *text* in a categorical hue becomes `p.ink(hue)`
    (§837).
 5. Adopt `palette_check::assert_drawn_from` in the crate's render test, with
-   the genuinely non-theme colours declared in `derived`.
+   the genuinely non-theme colours declared in `derived`. **This needs a
+   *dev*-dependency of its own** — `palette_check` is behind `appearance`'s
+   `testing` feature, because `cfg(test)` is set only when `appearance` itself
+   is under test:
+
+   ```toml
+   [dev-dependencies]
+   appearance = { path = "../../gui/appearance", features = ["testing"] }
+   ```
+
+   Cargo unifies it with the ordinary dependency when building tests.
+
+**Step 5 is not the paperwork; it is where the rest of the work is found.**
+`procexplorer` had 22 `const COLOR_*` values — and *also* 26 inline
+`Color::rgb(..)` literals that were never constants, plus two labels drawn in
+`Color::WHITE` on themed fills. A survey grepping for `const COLOR_` cannot see
+either class, so **the 987 figure above is an undercount**, and the only thing
+that reveals the remainder is adopting the guard and watching it fail. It
+failed twice within seconds of existing, on defects nobody would have found by
+reading.
 
 `procexplorer` shows how mechanical step 4 usually is — its thirteen named
 constants map almost one-to-one:

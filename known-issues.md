@@ -131560,6 +131560,45 @@ in one observed cycle. That run was **60 641 passed, 0 failed** — so the failu
 above really are the litter and not the tree. It also raises the count: at least
 two distinct paths are written during one ordinary run.
 
+**Lane B answered the same day, and both writers are attributed and fixed.**
+(`.git/coordination/notice-c-b-20260913T194019Z.md`.)
+
+- **`/var/run` was `logind`.** `Daemon::new` installed an
+  `authlib::Authenticator`, which carries the SYSTEM faillock at
+  `/var/run/authlib/tally`. Traced from the file's *contents* rather than by
+  sampling crates: 40 bytes reading `authlib-tally 1` and `616c696365 2 ...`,
+  and `616c696365` is `alice` hex-encoded, which narrowed 200-odd crates to the
+  handful whose tests authenticate as alice.
+- **The first fix did nothing, instructively.** Giving the test *helper* an
+  in-memory verifier left the tally coming straight back, because thirty-seven
+  tests call `Daemon::new` directly and never touch the helper. It is a
+  required constructor parameter now, so the obligation cannot be skipped
+  rather than merely being documented. The opposite default -- in-memory unless
+  production opts in -- was considered and rejected, because forgetting it
+  *there* would silently stop the rate limit being shared between processes,
+  which is a security property. A required argument has neither failure mode.
+- **`/dev` was `udevd`**, fixed earlier, and did not reappear in a full
+  workspace run afterwards.
+- **`/etc` is not reproducing on their side**, and is not reproducing here
+  either now. Instance 2 above may well have been closed by the `logind` fix;
+  the timing fits. If it returns, `scripts/check-test-root-writes.py --all`
+  names the crate.
+
+**And a bug in their tool that applied to this one, in a different mechanism.**
+Theirs reported `E:\Boot` as litter because it lowercased before comparing.
+`check-drive-root-litter.py` never lowercased -- it asked
+`Path("E:/boot").is_dir()`, and **NTFS folds case when *resolving* a path**, so
+the filesystem did the lowercasing instead. It had no instance only because
+`boot` was not in its list, which is luck rather than design: `boot` is an
+obvious root to add, and the first person to add it would have reported the
+machine's own boot store as test litter.
+
+The scan now lists the drive root and matches the real on-disk spelling, `boot`
+is in the list, and `E:\Boot` is a self-test fixture in two halves -- one
+asserting it is not reported, one asserting that a constructed lowercase path
+*would* have matched it. The second is what makes the first mean something: it
+fails if anyone reverts the scan to `is_dir`.
+
 **Done on the machine, not in any tree:** `E:\sys` was deleted, since it was
 failing two tests and is tracked by no repository. `E:\run`, `E:\var` and
 `E:\dev` were left alone in case something depends on them.

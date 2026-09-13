@@ -49,23 +49,49 @@ NL = chr(10)
 # tree's own scratch helper uses the real temp directory, and `E:/tmp` is a
 # normal thing for a developer to keep, so flagging it would be noise in the
 # one report that has to stay worth reading.
-POSIX_ROOTS = ("etc", "sys", "var", "run", "dev", "usr", "proc", "opt", "srv")
+#
+# `boot` is in the list only because the scan below is case-SENSITIVE. Windows
+# spells its own boot store `E:\Boot`, and NTFS is case-insensitive but
+# case-preserving, so `Path("E:/boot").is_dir()` answers True for it -- which
+# is how this tool would have reported the machine's boot configuration as test
+# litter. Lane B hit exactly that in their own version and said so
+# (`.git/coordination/notice-c-b-20260913T194019Z.md`); this one had no
+# instance yet because `boot` was not in the list, which is luck rather than
+# design. A Rust `create_dir("/boot")` produces lowercase `boot`, so comparing
+# the real on-disk spelling separates the two exactly.
+POSIX_ROOTS = (
+    "etc", "sys", "var", "run", "dev", "usr", "proc", "opt", "srv", "boot",
+)
 
 
 def litter(drive: str) -> list[tuple[pathlib.Path, list[str]]]:
-    """Every POSIX root present on `drive`, with a sample of what is inside."""
+    r"""Every POSIX root present on `drive`, with a sample of what is inside.
+
+    Reads the directory and compares the names it reports, rather than asking
+    whether a constructed path exists. On Windows those are different
+    questions: the filesystem folds case when *resolving* a path, so
+    `Path("E:/boot").is_dir()` is True on a machine whose boot store is
+    `E:\Boot` -- and the tool would then report Windows' own directory as
+    litter left by a test. Listing gives the real spelling, and a test that
+    writes `/boot` writes `boot`.
+    """
+    try:
+        present = {entry.name: entry for entry in pathlib.Path(drive + "/").iterdir()}
+    except OSError:
+        # No such drive, or not readable. Absent is not an offence.
+        return []
     found = []
     for name in POSIX_ROOTS:
-        path = pathlib.Path(f"{drive}/{name}")
+        entry = present.get(name)
+        if entry is None or not entry.is_dir():
+            continue
         try:
-            if not path.is_dir():
-                continue
-            inside = sorted(p.name for p in path.iterdir())
+            inside = sorted(p.name for p in entry.iterdir())
         except OSError:
             # Unreadable is not the same as absent, and a permission error here
             # is itself worth seeing rather than swallowing.
             inside = ["<unreadable>"]
-        found.append((path, inside[:6]))
+        found.append((entry, inside[:6]))
     return found
 
 
@@ -75,6 +101,23 @@ def _self_test() -> int:
     cases.append(("the root list is not empty", len(POSIX_ROOTS) > 0))
     cases.append(("tmp is excluded on purpose", "tmp" not in POSIX_ROOTS))
     cases.append(("etc is included", "etc" in POSIX_ROOTS))
+    # Lane B's finding, as a fixture. `E:/Boot` is Windows' boot store on this
+    # machine; `E:/boot` is what a test writing `/boot` would leave. The scan
+    # must tell them apart, and `is_dir` on a constructed path cannot.
+    boot = pathlib.Path("E:/Boot")
+    if boot.is_dir():
+        cases.append(
+            (
+                "Windows' own Boot store is not reported as litter",
+                not any(e.name == "boot" for e, _ in litter("E:")),
+            )
+        )
+        cases.append(
+            (
+                "and a constructed lowercase path would have matched it",
+                pathlib.Path("E:/boot").is_dir(),
+            )
+        )
     # A drive that cannot exist has no litter, which also proves the scan
     # tolerates a missing drive rather than raising.
     cases.append(("a nonexistent drive yields nothing", litter("Q:") == []))

@@ -8,6 +8,7 @@ use crate::event::{Key, KeyEvent};
 use crate::palette::Palette;
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::style::CornerRadii;
+use crate::surface::{Edge, Surface};
 
 /// A single tab definition.
 #[derive(Clone, Debug)]
@@ -283,15 +284,21 @@ impl TabView {
 
         let mut commands = Vec::new();
 
-        // Tab bar background
-        commands.push(RenderCommand::FillRect {
+        // The tab bar is a strip, not a card: it spans the view and its
+        // separator sits along the bottom, against the content it labels.
+        // `Surface::Strip` is what carries that -- and under the optional
+        // separator style it becomes a hairline instead of a band, which is
+        // the whole point of the role rather than a colour. See
+        // `design-decisions.md` 835.
+        palette.push_surface(
+            &mut commands,
             x,
-            y: bar_y,
+            bar_y,
             width,
-            height: bar_height,
-            color: palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+            bar_height,
+            0.0,
+            Surface::Strip(Edge::Bottom),
+        );
 
         // Clip the tab area for overflow
         commands.push(RenderCommand::PushClip {

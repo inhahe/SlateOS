@@ -35,12 +35,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 // Catppuccin Mocha palette — kept complete even though a few entries are
 // not currently referenced; future event-category styling will pick them up.
 
-const PINK: Color = Color::from_hex(0xF5C2E7);
+// Pink, flamingo and rosewater are palette roles now, not constants.
+// They survived this crate's conversion for one reason: the shared
+// palette had no rung for them, which was true of five applications at
+// once and so was the palette's gap rather than this file's.
 #[allow(dead_code)]
-const FLAMINGO: Color = Color::from_hex(0xF2CDCD);
 #[allow(dead_code)]
-const ROSEWATER: Color = Color::from_hex(0xF5E0DC);
-
 // ============================================================================
 // Date and time types
 // ============================================================================
@@ -375,7 +375,7 @@ impl EventCategory {
             Self::Personal => pal.green,
             Self::Health => pal.red,
             Self::Travel => pal.peach,
-            Self::Birthday => PINK,
+            Self::Birthday => pal.pink,
             Self::Holiday => pal.yellow,
             Self::Meeting => pal.mauve,
             Self::Deadline => pal.red,

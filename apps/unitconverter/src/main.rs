@@ -37,14 +37,10 @@ use std::fmt::Write as FmtWrite;
 mod theme {
     use guitk::color::Color;
 
-    // `0x89DCEB`. Was `0x89DCFE` — a transposed byte pair copied from
-    // `gui/appearance`, which had carried it since the constant was written.
-    // This is the one that was visible: `Category::DigitalStorage` renders in
-    // it. See known-issues.md
-    // TD-C-EVERY-APPLICATION-CARRIES-ITS-OWN-COPY-OF-THE-PALETTE-TOO.
-    pub const PINK: Color = Color::from_hex(0xF5C2E7);
-    pub const FLAMINGO: Color = Color::from_hex(0xF2CDCD);
-    pub const ROSEWATER: Color = Color::from_hex(0xF5E0DC);
+    // Pink, flamingo and rosewater are palette roles now, not constants.
+    // They survived this crate's conversion for one reason: the shared
+    // palette had no rung for them, which was true of five applications at
+    // once and so was the palette's gap rather than this file's.
 }
 
 // ============================================================================
@@ -132,10 +128,10 @@ impl Category {
             Category::Speed => pal.peach,
             Category::Time => pal.mauve,
             Category::DigitalStorage => pal.sky,
-            Category::Pressure => theme::FLAMINGO,
-            Category::Energy => theme::PINK,
+            Category::Pressure => pal.flamingo,
+            Category::Energy => pal.pink,
             Category::Frequency => pal.lavender,
-            Category::Angle => theme::ROSEWATER,
+            Category::Angle => pal.rosewater,
         }
     }
 }

@@ -2682,7 +2682,7 @@ mod tests {
     /// keep-them-in-step arrangement this crate exists to abolish, and the
     /// one that would have gone stale is this one, because it is the copy
     /// nothing outside the file can see.
-    fn roles(p: &Palette) -> [(&'static str, Color); 23] {
+    fn roles(p: &Palette) -> [(&'static str, Color); 27] {
         p.roles()
     }
 

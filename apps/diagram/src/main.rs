@@ -59,7 +59,10 @@ use std::collections::VecDeque;
 // Catppuccin Mocha theme constants
 // ============================================================================
 
-const PINK: Color = Color::from_hex(0xF5C2E7);
+// Pink, flamingo and rosewater are palette roles now, not constants.
+// They survived this crate's conversion for one reason: the shared
+// palette had no rung for them, which was true of five applications at
+// once and so was the palette's gap rather than this file's.
 
 // ============================================================================
 // Layout constants
@@ -199,7 +202,7 @@ impl NodeShape {
             Self::Hexagon => pal.mauve,
             Self::Triangle => pal.red,
             Self::Cylinder => pal.sky,
-            Self::Cloud => PINK,
+            Self::Cloud => pal.pink,
         }
     }
 }

@@ -39,13 +39,13 @@ use std::process::ExitCode;
 mod mocha {
     use guitk::color::Color;
 
-    pub const PINK: Color = Color::from_hex(0xF5C2E7);
-    pub const FLAMINGO: Color = Color::from_hex(0xF2CDCD);
+    // Pink, flamingo and rosewater are palette roles now, not constants.
+    // They survived this crate's conversion for one reason: the shared
+    // palette had no rung for them, which was true of five applications at
+    // once and so was the palette's gap rather than this file's.
     // `0x89DCEB`. Was `0x89DCFE` — a transposed byte pair copied from
     // `gui/appearance`. See known-issues.md
     // TD-C-EVERY-APPLICATION-CARRIES-ITS-OWN-COPY-OF-THE-PALETTE-TOO.
-
-    pub const ROSEWATER: Color = Color::from_hex(0xF5E0DC);
 }
 
 // ============================================================================

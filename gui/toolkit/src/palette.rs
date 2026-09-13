@@ -488,6 +488,24 @@ pub struct Palette {
     pub teal: Color,
     /// Sky. Present for the same reason as [`teal`](Self::teal).
     pub sky: Color,
+    /// Pink, rosewater, flamingo and maroon: the four hues the accent list
+    /// offers that this struct did not.
+    ///
+    /// Added 2026-09-13, and the reason is a pattern rather than a request.
+    /// Five applications converted under 822 -- calendar, emojipicker,
+    /// unitconverter, diagram, alarmclock -- each kept exactly these
+    /// constants and no others, because there was no rung to map them to;
+    /// `procexplorer` and `pdfviewer` had to map theirs away or delete them.
+    /// A palette that cannot name a colour the user is allowed to *choose as
+    /// their accent* is incomplete, and the incompleteness showed up as a
+    /// residue in every app that wanted one.
+    pub pink: Color,
+    /// See [`pink`](Self::pink).
+    pub rosewater: Color,
+    /// See [`pink`](Self::pink).
+    pub flamingo: Color,
+    /// See [`pink`](Self::pink).
+    pub maroon: Color,
     /// The colour this desktop is themed around, as the user chose it.
     ///
     /// Already resolved for the mode and for a custom colour — this is
@@ -565,6 +583,10 @@ impl Palette {
                 sapphire: LIGHT_SAPPHIRE,
                 teal: LIGHT_TEAL,
                 sky: LIGHT_SKY,
+                pink: LIGHT_PINK,
+                rosewater: LIGHT_ROSEWATER,
+                flamingo: LIGHT_FLAMINGO,
+                maroon: LIGHT_MAROON,
                 accent: LIGHT_BLUE,
                 panel_alpha: 255,
                 light: true,
@@ -595,6 +617,10 @@ impl Palette {
                 sapphire: SAPPHIRE,
                 teal: TEAL,
                 sky: SKY,
+                pink: PINK,
+                rosewater: ROSEWATER,
+                flamingo: FLAMINGO,
+                maroon: MAROON,
                 accent: BLUE,
                 panel_alpha: 255,
                 light: false,
@@ -883,7 +909,7 @@ impl Palette {
     /// every sweep that reads this. A guarantee that is documented but not real
     /// is worse than none, because it is the reason nobody looks.
     #[must_use]
-    pub fn roles(&self) -> [(&'static str, Color); 23] {
+    pub fn roles(&self) -> [(&'static str, Color); 27] {
         // A struct pattern with no `..` is exhaustive, so this stops compiling
         // the moment `Palette` grows a field: a new colour cannot reach the
         // palette without someone deciding, right here, whether it is a role.
@@ -913,6 +939,10 @@ impl Palette {
             sapphire,
             teal,
             sky,
+            pink,
+            rosewater,
+            flamingo,
+            maroon,
             accent,
             panel_alpha: _,
             light: _,
@@ -951,6 +981,10 @@ impl Palette {
             ("sapphire", sapphire),
             ("teal", teal),
             ("sky", sky),
+            ("pink", pink),
+            ("rosewater", rosewater),
+            ("flamingo", flamingo),
+            ("maroon", maroon),
             ("accent", accent),
         ]
     }

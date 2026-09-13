@@ -1818,6 +1818,73 @@ duplicate pair stays in `dup-bins-survey`'s table as undecided. It only bites
 when something starts relying on the system log actually receiving what was
 sent to it.
 
+## B-Q16 — [B] Two decisions of yours are cited 33 times and were never written down. Record them? — Status: OPEN
+
+**In short:** a *design decision* here is a numbered note in
+`design-decisions.md` explaining why the code is the way it is. Two of
+yours from 2026-09-07 — numbered §1005 and §1006 — are referred to by
+name in 33 places across the project's documents, and by me in several
+commit messages today, but neither note itself exists. Anyone following
+one of those references finds nothing. Nothing is broken in the running
+system; what is missing is the written reason behind a rule everyone is
+already following.
+
+**How I know they are missing rather than misplaced.** `design-decisions.md`
+contains the string `1005` eight times: two are references saying
+"SUPERSEDED by §1005", and the other six are font glyph numbers in an
+unrelated entry. No heading numbered §1005 or §1006 — or any four-digit
+number — exists in any document in the repository. The numbers are inside
+lane B's reserved band (§1000–§1099), so they were allocated deliberately
+and then the notes were never appended.
+
+**What the references say the two decisions were.** Reconstructed from the
+33 citations, not from memory:
+
+| | What the citations say it ruled |
+|---|---|
+| **§1005** | `coreutils` is the one home for a coreutils command. It resolved the open question "we have two of several commands — which ones do we keep?", superseded an earlier §8, and un-suspended an entry that §8 had put on hold. |
+| **§1006** | Described as *your* ruling: "delete every fabricating command" — a command that does not work is deleted rather than kept as a stub that refuses. |
+
+I have applied both repeatedly today — deleting `nohup`, `nice` and
+`renice` from the `timeout` crate, and deleting `blkzone`, which printed
+two hardcoded disk zones for any device on any machine. So the rules are
+in force and are doing useful work. Only the record of them is absent.
+
+**Why I am asking rather than just writing them.** The project's own
+instruction is that when *you* make a decision, I ask before recording it
+in `design-decisions.md` rather than assume. §1006 is explicitly
+attributed to you in the text that cites it, and §1005 resolved a
+question that had been put to you. Writing up your reasoning from my
+reconstruction of it, and signing it `Decided by: Operator`, is exactly
+the thing that instruction exists to prevent — the reconstruction above
+may be right in substance and wrong in emphasis, and a decision record
+that misstates the emphasis is worse than an absent one.
+
+**Options**
+
+1. **I write both entries from the reconstruction above, marked as
+   reconstructed, and you correct them.**
+   *What changes:* the 33 references resolve to something; the text is
+   mine until you edit it.
+2. **You dictate the two entries and I paste them.**
+   *What changes:* the record is yours, and costs you ten minutes.
+3. **Leave them unwritten and stop citing them.**
+   *What changes:* commit messages and documents stop referring to §1005
+   and §1006 by number, and the rules survive only as practice.
+
+**Recommendation: 1.** The reconstruction is well-evidenced — 33
+independent citations agree with each other — and being marked as
+reconstructed makes its status honest. Option 3 loses the numbering that
+33 documents already depend on.
+
+**If this is never answered:** nothing breaks. The rules keep being
+followed because they are written into the code and the commit history.
+The cost is that every future citation of §1005 or §1006 points at
+nothing, and that a later reader trying to understand *why* a working
+command was deleted has to reconstruct the argument as I just did.
+
+
+
 # Resolved
 
 **The body above holds OPEN questions only.** When the operator answers one,

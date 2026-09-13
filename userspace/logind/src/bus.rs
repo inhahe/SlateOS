@@ -132,6 +132,10 @@ impl Reply {
 
     /// Whether this is an error reply (convenience for tests and callers).
     #[must_use]
+    // `Reply::is_error` has no caller: every dispatch arm inspects the variant
+    // directly. Kept with the type rather than removed, so the Reply API stays
+    // symmetrical for the write-side methods that are not yet exposed.
+    #[allow(dead_code)]
     pub const fn is_error(&self) -> bool {
         matches!(self, Reply::Error(_))
     }

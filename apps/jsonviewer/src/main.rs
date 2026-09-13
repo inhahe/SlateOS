@@ -3373,9 +3373,9 @@ impl App {
 
                 // Simple YAML highlighting
                 let (color, bold) = if line.trim_start().starts_with('-') {
-                    (self.palette.teal, false)
+                    (self.palette.ink(self.palette.teal), false)
                 } else if line.contains(':') {
-                    (self.palette.blue, true)
+                    (self.palette.ink(self.palette.blue), true)
                 } else {
                     (self.palette.text, false)
                 };

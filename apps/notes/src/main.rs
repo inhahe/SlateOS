@@ -2998,11 +2998,15 @@ impl NotesApp {
         for block in &blocks {
             match block {
                 MdBlock::Heading { level, text } => {
+                    // Heading colours are text by definition, so each goes
+                    // through `ink`. Four different hues at four levels is the
+                    // case the floor exists for: `lavender` and `teal` are
+                    // among the palest accents.
                     let (font_size, color) = match level {
-                        1 => (22.0, self.palette.blue),
-                        2 => (18.0, self.palette.lavender),
-                        3 => (16.0, self.palette.mauve),
-                        _ => (14.0, self.palette.teal),
+                        1 => (22.0, self.palette.ink(self.palette.blue)),
+                        2 => (18.0, self.palette.ink(self.palette.lavender)),
+                        3 => (16.0, self.palette.ink(self.palette.mauve)),
+                        _ => (14.0, self.palette.ink(self.palette.teal)),
                     };
                     cmds.push(RenderCommand::Text {
                         x: x + EDITOR_PADDING,
@@ -3034,7 +3038,7 @@ impl NotesApp {
                             }
                             MdSpan::WikiLink(t) => (
                                 format!("[[{t}]]"),
-                                self.palette.blue,
+                                self.palette.ink(self.palette.blue),
                                 FontWeightHint::Regular,
                             ),
                         };

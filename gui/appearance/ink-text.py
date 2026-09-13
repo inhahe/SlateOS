@@ -393,7 +393,12 @@ def value_of(lines, i, first_rest):
 
 
 FN = re.compile(r"^\s{0,8}(?:pub(?:\([\w:]+\))?\s+)?(?:async\s+)?(?:const\s+)?fn\s")
-LET_COLOR = re.compile(r"^\s*let\s+(?:mut\s+)?color\s*(?::[^=]*)?=\s*(.*)$")
+# `let color = ..`, and also a destructuring that binds `color` alongside
+# something else: `let (label, color) = match profile { .. }` is how a colour
+# and the word it labels get chosen in one expression, and it is common enough
+# that matching only the simple form left a real contrast failure unseen in
+# `gui/desktop/src/power.rs`.
+LET_COLOR = re.compile(r"^\s*let\s+(?:mut\s+)?(?:color\s*(?::[^=]*)?|\([^)]*\bcolor\b[^)]*\))\s*=\s*(.*)$")
 
 
 def binding_of(lines, i, fn_start):

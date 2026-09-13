@@ -132395,6 +132395,29 @@ calls are colours produced by a method, which is the
 | `apps/ircclient` | `blue` for the active channel | **inked** |
 | `apps/whiteboard` | a stroke's colour | **left alone**, and annotated: it is the drawing, in the sense `apps/paint`'s swatch row is the document |
 
+**A second pass on the same day found four more, by widening the binding
+pattern to a destructuring.** `let (label, color) = match profile { .. }` is
+how a colour and the word it labels get chosen in one expression, and matching
+only `let color = ..` missed every one of them:
+
+| where | what |
+|---|---|
+| `gui/desktop/src/power.rs` | the power-profile badge's four labels — blue, peach, green, lavender |
+| `apps/jsonviewer` | teal and blue for YAML keys and list markers |
+| `apps/notes` | blue / lavender / mauve / teal for the four markdown heading levels, and blue for a wiki link |
+
+All are text whose whole purpose is to be read, and `lavender` and `teal` are
+among the palest accents. All inked.
+
+**And one of those broke a test in exactly the way this entry predicted.**
+`power::every_choice_this_module_makes_hands_over_the_role_it_claims` compared
+the badge against `rgb(p.peach)` — the raw field. It compares against
+`rgb(p.ink(p.peach))` now, while the *gauge* assertions three lines above
+still use the raw field, because a gauge is a filled bar and a badge is a
+label. Same roles, two readings. That is the dual-use split working, and a
+test comparing both against the raw field would have passed while the label
+was unreadable.
+
 **The whiteboard one was reported because of a bug in the script's own span
 reader**, worth recording because it is the day's recurring shape: the value
 of a `let` was taken up to the next depth-zero *comma*, which is right for a

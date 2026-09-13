@@ -13,6 +13,7 @@ use crate::row_strip::RowStrip;
 use crate::scrollbar;
 use crate::step;
 use crate::style::CornerRadii;
+use crate::surface::Surface;
 
 // ─── Catppuccin Mocha palette ───────────────────────────────────────────────
 
@@ -528,16 +529,21 @@ impl ContextMenu {
                     checked,
                     ..
                 } => {
-                    // Hover highlight.
+                    // Hover highlight, which is a *selection*: the row under
+                    // the pointer is the one Enter would take. 834 settles
+                    // that every selection is an accent outline, so this is
+                    // the same role a selected list row has and not a
+                    // menu-specific shade.
                     if self.hover_index == Some(i) && *enabled {
-                        cmds.push(RenderCommand::FillRect {
-                            x: self.x + 4.0,
-                            y: current_y,
-                            width: self.width - 8.0,
-                            height: ITEM_HEIGHT,
-                            color: palette.surface0,
-                            corner_radii: CornerRadii::all(4.0),
-                        });
+                        palette.push_surface(
+                            &mut cmds,
+                            self.x + 4.0,
+                            current_y,
+                            self.width - 8.0,
+                            ITEM_HEIGHT,
+                            4.0,
+                            Surface::Selected,
+                        );
                     }
 
                     let text_color = if *enabled {
@@ -590,16 +596,21 @@ impl ContextMenu {
                     }
                 }
                 MenuItem::Submenu { label, enabled, .. } => {
-                    // Hover highlight.
+                    // Hover highlight, which is a *selection*: the row under
+                    // the pointer is the one Enter would take. 834 settles
+                    // that every selection is an accent outline, so this is
+                    // the same role a selected list row has and not a
+                    // menu-specific shade.
                     if self.hover_index == Some(i) && *enabled {
-                        cmds.push(RenderCommand::FillRect {
-                            x: self.x + 4.0,
-                            y: current_y,
-                            width: self.width - 8.0,
-                            height: ITEM_HEIGHT,
-                            color: palette.surface0,
-                            corner_radii: CornerRadii::all(4.0),
-                        });
+                        palette.push_surface(
+                            &mut cmds,
+                            self.x + 4.0,
+                            current_y,
+                            self.width - 8.0,
+                            ITEM_HEIGHT,
+                            4.0,
+                            Surface::Selected,
+                        );
                     }
 
                     let text_color = if *enabled {
@@ -1250,16 +1261,41 @@ mod tests {
         let palette = Palette::for_mode(false);
         let (x, w) = (menu.x + 4.0, menu.width - 8.0);
         menu.render(&palette).into_iter().find_map(|cmd| match cmd {
-            // Exact equality on purpose: these are the very floats the
-            // renderer pushed, not a measurement of them.
+            // Matched by POSITION, not by colour, and either command kind.
+            //
+            // The highlight is `Surface::Selected` since 834, so what it
+            // draws depends on the theme: an accent *stroke* under Borders,
+            // a `surface1` *fill* under Cards. This helper exists to answer
+            // "which row is highlighted", and every caller uses it for that
+            // -- where a submenu hangs, whether scrolling reaches a row. None
+            // of them is about the colour, and keying on one made all of them
+            // fail the moment the role decided it rather than the call site.
+            //
+            // Exact equality on the geometry on purpose: these are the very
+            // floats the renderer pushed, not a measurement of them, and the
+            // pair (x + 4, width - 8) is the highlight's own inset -- no
+            // other box in this menu is drawn at it.
             RenderCommand::FillRect {
                 x: rx,
                 y,
                 width,
                 height,
-                color,
                 ..
-            } if rx == x && width == w && color == palette.surface0 => Some((y, height)),
+            } if rx == x && width == w => Some((y, height)),
+            // A 1px stroke is emitted half a pixel inside the box, so the
+            // line sits within it rather than straddling the edge:
+            // `x + 0.5, width - 1.0`. Undone here so both styles answer in
+            // the same coordinates -- the callers want the row, not the
+            // path. Without this the match simply never fires, which reads
+            // as "no highlight painted" and sends the reader looking at the
+            // hover logic instead of at a half pixel.
+            RenderCommand::StrokeRect {
+                x: rx,
+                y,
+                width,
+                height,
+                ..
+            } if rx == x + 0.5 && width == w - 1.0 => Some((y - 0.5, height + 1.0)),
             _ => None,
         })
     }

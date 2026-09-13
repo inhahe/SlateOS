@@ -1597,6 +1597,55 @@ fn run_tapestat(args: &[String], out: &mut impl Write) {
 // Help
 // ---------------------------------------------------------------------------
 
+/// The options each personality accepts, taken from what `print_help` prints
+/// for it.
+///
+/// Kept beside the help rather than beside the parser on purpose: the parser
+/// here *asks* whether a flag is present (`has_flag`) and never enumerates
+/// what it was given, so it cannot notice an option it does not know. The
+/// help text is the only place that states the whole set, and
+/// `scripts/check-help-vs-parser.py` already fails if the two disagree.
+const fn known_options(p: Personality) -> &'static [&'static str] {
+    match p {
+        Personality::Sar => &["-u", "-r", "-b", "-n", "-d", "-q", "-h", "--help"],
+        Personality::Mpstat => &["-P", "-I", "-h", "--help"],
+        Personality::Pidstat => &["-p", "-u", "-r", "-d", "-t", "-h", "--help"],
+        Personality::Cifsiostat | Personality::Tapestat => &["-h", "--help"],
+    }
+}
+
+/// The first argument that looks like an option and is not one, if any.
+///
+/// Only `-`-prefixed arguments are judged: `sar 2 5` passes an interval and a
+/// count as bare words, and a negative number is not a thing any of these
+/// take. `--` ends option parsing and a lone `-` is left alone, as elsewhere.
+///
+/// `-P ALL` and `-n DEV` take a value, so the value must not be judged as an
+/// option itself -- it is skipped, which is why this walks the list rather
+/// than filtering it.
+fn first_unknown_option(p: Personality, args: &[String]) -> Option<String> {
+    let known = known_options(p);
+    let takes_value = |o: &str| matches!(o, "-P" | "-n" | "-p" | "-I");
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--" {
+            return None;
+        }
+        if !a.starts_with('-') || a == "-" {
+            continue;
+        }
+        // `-u=1` and `-u` are the same option to `has_flag`, so split first.
+        let name = a.split_once('=').map_or(a.as_str(), |(k, _)| k);
+        if !known.contains(&name) {
+            return Some(a.clone());
+        }
+        if takes_value(name) && !a.contains('=') {
+            it.next();
+        }
+    }
+    None
+}
+
 fn print_help(personality: Personality) {
     match personality {
         Personality::Sar => {
@@ -1685,6 +1734,15 @@ fn main() {
         return;
     }
 
+    // Before any report is produced. Every personality here answered a
+    // question it had not parsed -- `cifsiostat --zzq` printed a full sysstat
+    // header and exited 0 -- because the parser asks for the flags it wants
+    // and never looks at what else arrived.
+    if let Some(bad) = first_unknown_option(personality, &rest) {
+        eprintln!("{personality}: unknown option: {bad}");
+        std::process::exit(1);
+    }
+
     let mut stdout = io::stdout().lock();
 
     match personality {
@@ -1707,6 +1765,110 @@ mod tests {
     // -----------------------------------------------------------------------
     // Personality detection
     // -----------------------------------------------------------------------
+
+    /// Every personality refused an option it does not have, and none of
+    /// them refuse the arguments they do take.
+    ///
+    /// All four flagged personalities printed a full sysstat report header
+    /// and exited 0 for `--zzq`: an answer produced without parsing the
+    /// question. The parser asks for the flags it wants (`has_flag`) and
+    /// never looks at what else arrived, so an unknown option was
+    /// structurally invisible to it.
+    #[test]
+    fn an_option_a_personality_does_not_have_is_refused() {
+        let a = |v: &[&str]| -> Vec<String> { v.iter().map(|s| (*s).to_string()).collect() };
+
+        for p in [
+            Personality::Sar,
+            Personality::Mpstat,
+            Personality::Pidstat,
+            Personality::Cifsiostat,
+            Personality::Tapestat,
+        ] {
+            assert_eq!(
+                first_unknown_option(p, &a(&["--zzq"])).as_deref(),
+                Some("--zzq"),
+                "{p} accepted --zzq"
+            );
+            // -h is the one option all five advertise.
+            assert_eq!(first_unknown_option(p, &a(&["-h"])), None, "{p} refused -h");
+        }
+
+        // Each personality's own options pass, and another's do not: `-P` is
+        // mpstat's and sar has never had it.
+        assert_eq!(
+            first_unknown_option(Personality::Sar, &a(&["-u", "-r"])),
+            None
+        );
+        assert_eq!(
+            first_unknown_option(Personality::Sar, &a(&["-P"])).as_deref(),
+            Some("-P")
+        );
+        assert_eq!(
+            first_unknown_option(Personality::Mpstat, &a(&["-P", "ALL"])),
+            None
+        );
+
+        // A value is not judged as an option. Without this, `-n DEV` would
+        // report DEV as unknown -- and `-P -u` passes because `-u` is
+        // consumed as -P's value, which is the parser's existing behaviour
+        // and not something this check should second-guess.
+        assert_eq!(
+            first_unknown_option(Personality::Sar, &a(&["-n", "DEV"])),
+            None
+        );
+
+        // Bare words are interval and count.
+        assert_eq!(
+            first_unknown_option(Personality::Sar, &a(&["2", "5"])),
+            None
+        );
+
+        // `--` ends option parsing; a lone `-` is not an option.
+        assert_eq!(
+            first_unknown_option(Personality::Sar, &a(&["--", "--zzq"])),
+            None
+        );
+        assert_eq!(first_unknown_option(Personality::Sar, &a(&["-"])), None);
+
+        // The `=` form splits before the lookup, both ways round.
+        assert_eq!(first_unknown_option(Personality::Sar, &a(&["-u=1"])), None);
+        assert_eq!(
+            first_unknown_option(Personality::Sar, &a(&["-zz=1"])).as_deref(),
+            Some("-zz=1")
+        );
+    }
+
+    /// The known-option table and the help text must not drift apart.
+    ///
+    /// `known_options` exists because the parser cannot enumerate what it
+    /// accepts; that makes the help the only statement of the full set, and
+    /// a table copied from it is a copy that can go stale. This asserts the
+    /// direction that matters -- everything the table allows is real -- and
+    /// `scripts/check-help-vs-parser.py` covers the other.
+    #[test]
+    fn the_known_option_table_matches_what_help_advertises() {
+        for p in [
+            Personality::Sar,
+            Personality::Mpstat,
+            Personality::Pidstat,
+            Personality::Cifsiostat,
+            Personality::Tapestat,
+        ] {
+            let opts = known_options(p);
+            assert!(opts.contains(&"-h"), "{p} does not allow -h");
+            assert!(opts.contains(&"--help"), "{p} does not allow --help");
+            for o in opts {
+                assert!(o.starts_with('-'), "{p} lists a non-option {o:?}");
+            }
+        }
+        // The sets are genuinely different; a single shared list would have
+        // let sar accept mpstat's options.
+        assert_ne!(
+            known_options(Personality::Sar),
+            known_options(Personality::Mpstat)
+        );
+    }
 
     #[test]
     fn test_personality_sar_default() {

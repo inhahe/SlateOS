@@ -105,6 +105,16 @@ def colour_field_lines(lines, end):
         m = re.search(r"RenderCommand::(\w+)", lines[i])
         if m:
             kind = m.group(1)
+        # `color,` -- field shorthand -- is a colour field too, and missing it
+        # is not a silent omission: the shorthand line then falls through to a
+        # default of "Text", which is the *wrong* answer in the one case that
+        # matters. `touchpad_status` feeds a 12px status dot and a label, both
+        # by shorthand; read as two text sites it looked safe to ink, and
+        # inking it would have darkened the dot.
+        if SHORTHAND.match(lines[i]) and kind:
+            out[i] = kind
+            i += 1
+            continue
         cm = re.match(r"^\s*color:\s*(.*)$", lines[i])
         if cm and kind:
             j, rest, depth = i, cm.group(1), 0
@@ -211,7 +221,7 @@ class World:
                 kinds.add(field[j])
                 continue
             if SHORTHAND.match(line) and name == "color":
-                kinds.add(field.get(j, "Text"))
+                kinds.add(field.get(j) or "unresolved")
                 continue
             for callee in set(CALL.findall(line)):
                 if callee == name or callee not in self.fns:

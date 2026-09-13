@@ -55760,8 +55760,18 @@ the compositor currently has no way to tell a trusted shell apart from an
 ordinary application.
 
 **Where:** `gui/compositor/src/wire.rs` — `ClientLink::answer_requests`
-intercepts `RequestBody::SubscribeWindowList` and calls
-`set_window_list_subscription` unconditionally. `gui/remote/src/control.rs` —
+intercepts `RequestBody::SubscribeWindowList` and grants the subscription.
+
+**Corrected 2026-09-13: it is no longer *unconditional*, and the difference
+matters for whoever picks this up.** The grant now runs through
+`link.require_shell()` — one of sixteen call sites of the single privilege
+seam — and refuses with that function's `Err` when it ever returns one. So the
+plumbing this entry asks for is in place; what is missing is only the
+capability that would make `require_shell` answer. That function's own doc
+says as much, and says why a check written today against a client-supplied
+value would be worse than none. The remaining work is in the kernel, not here,
+and the fix when it lands is a body in `require_shell` rather than an edit at
+this call site. `gui/remote/src/control.rs` —
 the request itself. `gui/compositor/src/lib.rs` — `Compositor::window_list`,
 which returns the whole desktop by design (see below).
 

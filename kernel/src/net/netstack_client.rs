@@ -75,20 +75,29 @@ const UD_BASE: u64 = 0x4e53_434c_0000_0000;
 /// blocking on the wire (connect handshake, receive) while it drains our SQE.
 const RECV_TIMEOUT_NS: u64 = 12_000_000_000;
 
-/// Whether the userspace-netstack cutover switch (`net.userspace`) is set on the
-/// kernel command line.
+/// Whether AF_INET/AF_INET6 stream sockets route to the userspace netstack
+/// daemon rather than the in-kernel resident stack.
 ///
-/// **Default off.** Absent the flag, the kernel keeps using its in-kernel
-/// resident stack. This is the staged-cutover gate from `design-decisions.md`
-/// §66 (Q22b → staged): prove daemon parity in QEMU behind the switch, flip the
-/// default, then delete the resident stack. When set: the persistent userspace
-/// netstack daemon is spawned at boot and claims the NIC (increment 5.6), and
-/// AF_INET/AF_INET6 `SOCK_STREAM` sockets route to it (increment 5.5). The
-/// default has not been flipped yet (increment 5.7), so today this only fires
-/// when the operator explicitly passes `net.userspace` on the kernel cmdline.
+/// **Default ON since 2026-09-12** (increment 5.7). The operator answered A-Q9
+/// with option C -- flip the default, but fix the server rough edge first -- and
+/// that prerequisite is done: no kernel recv path asks the daemon to withhold a
+/// reply any more, so a listener's accepted connections no longer serialise
+/// behind one quiet peer (`D-NETSOCK-SYNC`). See `design-decisions.md` 934, and
+/// §66 for the staged-cutover plan this completes the middle step of.
+///
+/// `net.userspace=0` (or `off`/`false`/`no`) on the kernel cmdline opts back out
+/// to the resident stack. That escape hatch is deliberate and temporary: A-Q9's
+/// option D deletes the resident stack, and when that lands there will be
+/// nothing to fall back *to*, so this function and its parameter go with it.
+/// Until then the flip stays reversible without a revert.
+///
+/// The truthiness of an explicit value matches `kernparam::is_set`; only the
+/// absent case differs, and that is the whole of the flip.
 #[must_use]
 pub fn userspace_enabled() -> bool {
-    crate::fs::kernparam::is_set("net.userspace")
+    crate::fs::kernparam::get("net.userspace").is_none_or(|v| {
+        v.is_empty() || v == "1" || v == "yes" || v == "true"
+    })
 }
 
 /// A connection's local endpoint, as reported by the daemon for `getsockname`.

@@ -13248,6 +13248,31 @@ needed. What survives is *not* a missing feature but the cost of that
 choice: **the listener and every connection it accepts share one SPSC
 session behind one lock, so a server's accepted connections are served
 strictly one at a time — one slow client holds up the others.** That
+**STATUS 2026-09-13: the head-of-line block is GONE and the default is FLIPPED.**
+
+Both halves of A-Q9 option C are on main. `81ef382d0` moved the wait above the
+session lock -- all three kernel recv paths ask the daemon for a non-blocking
+receive and back off here (16 yields, then 1 ms interruptible sleeps), so no
+reply is ever withheld while the shared session is held. `3614fcb14` flipped
+`net.userspace` on by default; `net.userspace=0` opts back out.
+
+Validated on a boot that reached QEMU: `[spawn] Starting persistent userspace
+netstack daemon (net.userspace on)` with **nothing on the kernel cmdline**, the
+daemon claiming the NIC and registering `net.stack`, a real HTTP fetch over IPC
+returning `HTTP/1.1 200 OK`, and 0 non-DRM self-test failures.
+
+**What is left is option D: delete the resident stack (~40 files).** It is not
+done here on purpose. design-decisions 934 sets the bar as the replacement
+having *run* as the default, not merely being it, and at the time of writing it
+has done so once. D is also the only step with no way back but a revert.
+
+**The trigger, so this is actionable rather than remembered:** once a handful of
+boots across the lanes have run daemon-default with no netstack regression, do
+the deletion. Evidence accumulates without anyone arranging it -- every lane's
+boot now exercises the daemon. When D lands, `userspace_enabled()` and the
+`net.userspace` parameter go with it: there will be nothing to fall back to, and
+an opt-out that selects a deleted stack is worse than no opt-out.
+
 **PLAN (2026-09-12, after A-Q9 resolved C-then-D): the fix is smaller than the
 phrase 'asynchronous rewrite' suggests, because the daemon is already fair.**
 `ring_tcp_recv` routes through `ring_pump` precisely so *concurrent connections

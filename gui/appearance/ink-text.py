@@ -216,54 +216,6 @@ def default_paths():
     return found
 
 
-if __name__ == "__main__":
-    args = [a for a in sys.argv[1:] if not a.startswith("--")]
-    check = "--check" in sys.argv
-    paths = [pathlib.Path(a) for a in args] if args else default_paths()
-    total = 0
-    for path in paths:
-        c = convert(path, "--apply" in sys.argv)
-        if c:
-            print(str(path) + ": " + str(c))
-        total += c
-    if "--verify" in sys.argv:
-        examined = 0
-        stray = []
-        for path in paths:
-            seen, found = stray_inks(path)
-            examined += seen
-            stray.extend((path, ln, kind, text) for ln, kind, text in found)
-        for path, ln, kind, text in stray:
-            print(str(path) + ":" + str(ln) + "  ink() inside a " + kind + ": " + text[:70])
-        if stray:
-            print(str(len(stray)) + " site(s) ask for a text ink and do not draw text.")
-            sys.exit(1)
-        if examined == 0:
-            # Not a pass. Five separate times in this conversion a check has
-            # reported success over an empty population: a collector matching
-            # only `FillRect` after its subject became an outline, the
-            # `.all()` over the empty vector it returned, two geometry helpers
-            # in `notif_pane`, and a harness regex that dropped one character
-            # and compared 0 > 0. Every one of them was green.
-            print("no ink() call sites found at all; refusing to call that a pass")
-            sys.exit(2)
-        print("ok: all " + str(examined) + " ink() call sites are inside a Text command")
-        sys.exit(0)
-
-    if check:
-        # A gate, not a report. A site that draws text in a dual-use role
-        # without asking `ink` renders perfectly and cannot be read on a card,
-        # which is exactly the kind of defect nobody notices until someone
-        # switches themes. See design decision 837.
-        if total:
-            print(str(total) + " text site(s) still name a dual-use role directly.")
-            print("Run:  python gui/appearance/ink-text.py --apply  (then check the diff)")
-            sys.exit(1)
-        print("ok: every text site in " + str(len(paths)) + " files goes through ink()")
-        sys.exit(0)
-    print(str(total) + " text sites routed through ink()")
-
-
 # ---------------------------------------------------------------------------
 # The blind spots
 # ---------------------------------------------------------------------------
@@ -315,3 +267,65 @@ def blind_spots(path):
         elif CALL_VALUE.match(line) and not ROLE.search(value):
             out.append((i + 1, "a call", line.strip()))
     return out
+
+
+if __name__ == "__main__":
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    check = "--check" in sys.argv
+    paths = [pathlib.Path(a) for a in args] if args else default_paths()
+    total = 0
+    for path in paths:
+        c = convert(path, "--apply" in sys.argv)
+        if c:
+            print(str(path) + ": " + str(c))
+        total += c
+    if "--blind" in sys.argv:
+        # Was accepted and did nothing for a day: every `--` argument is
+        # filtered out of `args` above, so `--blind` parsed fine, ran the
+        # ordinary conversion and printed "0 text sites routed through ink()".
+        # A flag that silently means nothing is the same defect as a check
+        # over an empty population, in a smaller package.
+        found = 0
+        for path in paths:
+            for ln, kind, text in blind_spots(path):
+                print(str(path) + ":" + str(ln) + "  " + kind + ": " + text[:70])
+                found += 1
+        print(str(found) + " text site(s) this script cannot classify.")
+        sys.exit(0)
+
+    if "--verify" in sys.argv:
+        examined = 0
+        stray = []
+        for path in paths:
+            seen, found = stray_inks(path)
+            examined += seen
+            stray.extend((path, ln, kind, text) for ln, kind, text in found)
+        for path, ln, kind, text in stray:
+            print(str(path) + ":" + str(ln) + "  ink() inside a " + kind + ": " + text[:70])
+        if stray:
+            print(str(len(stray)) + " site(s) ask for a text ink and do not draw text.")
+            sys.exit(1)
+        if examined == 0:
+            # Not a pass. Five separate times in this conversion a check has
+            # reported success over an empty population: a collector matching
+            # only `FillRect` after its subject became an outline, the
+            # `.all()` over the empty vector it returned, two geometry helpers
+            # in `notif_pane`, and a harness regex that dropped one character
+            # and compared 0 > 0. Every one of them was green.
+            print("no ink() call sites found at all; refusing to call that a pass")
+            sys.exit(2)
+        print("ok: all " + str(examined) + " ink() call sites are inside a Text command")
+        sys.exit(0)
+
+    if check:
+        # A gate, not a report. A site that draws text in a dual-use role
+        # without asking `ink` renders perfectly and cannot be read on a card,
+        # which is exactly the kind of defect nobody notices until someone
+        # switches themes. See design decision 837.
+        if total:
+            print(str(total) + " text site(s) still name a dual-use role directly.")
+            print("Run:  python gui/appearance/ink-text.py --apply  (then check the diff)")
+            sys.exit(1)
+        print("ok: every text site in " + str(len(paths)) + " files goes through ink()")
+        sys.exit(0)
+    print(str(total) + " text sites routed through ink()")

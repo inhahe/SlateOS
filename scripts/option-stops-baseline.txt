@@ -1,0 +1,8 @@
+# Empty on purpose.
+#
+# All thirteen findings from the 2026-09-13 sweep are fixed, and the five
+# shapes that resemble the defect but are correct -- a tail expression that IS
+# the exit code, getopt(1) accumulating an error flag, a `return` one block
+# further out -- are recognised by the checker rather than listed here. A
+# baseline entry should name a file:line and say why that arm legitimately
+# does not stop; `cgexec` would be the example if it had a diagnostic.

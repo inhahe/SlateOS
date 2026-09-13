@@ -60,6 +60,7 @@ use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::scroll_window;
 use crate::scrollbar;
 use crate::style::CornerRadii;
+use crate::surface::Surface;
 use crate::wheel;
 use core::ops::Range;
 use std::ffi::{OsStr, OsString};
@@ -1258,14 +1259,7 @@ impl FileDialog {
 
         // Address bar
         let addr_width = width - x - PADDING;
-        frame.push(RenderCommand::FillRect {
-            x,
-            y: btn_y,
-            width: addr_width,
-            height: 24.0,
-            color: palette.surface1,
-            corner_radii: CornerRadii::all(3.0),
-        });
+        palette.push_surface(frame, x, btn_y, addr_width, 24.0, 3.0, Surface::Card);
         frame.push(RenderCommand::Text {
             x: x + 6.0,
             y: btn_y + 5.0,
@@ -1349,6 +1343,11 @@ impl FileDialog {
 
         // Column headers
         let header_y = top;
+        // Left as a fill deliberately. The classifier offered `Surface::Panel`,
+        // which draws a border on all four sides -- a box around a header row
+        // that spans the list, which is not what a column header is. `Strip`
+        // is the closer role and changes the colour as well, so this wants
+        // deciding rather than sweeping.
         frame.push(RenderCommand::FillRect {
             x,
             y: header_y,
@@ -1448,14 +1447,7 @@ impl FileDialog {
 
             // Selection highlight
             if self.selected_index == Some(index) {
-                frame.push(RenderCommand::FillRect {
-                    x,
-                    y: row_y,
-                    width,
-                    height: ROW_HEIGHT,
-                    color: palette.surface2,
-                    corner_radii: CornerRadii::ZERO,
-                });
+                palette.push_surface(frame, x, row_y, width, ROW_HEIGHT, 0.0, Surface::Selected);
             }
 
             // Icon placeholder (folder vs file indicator)
@@ -1583,14 +1575,15 @@ impl FileDialog {
             capacity,
             self.visible_rows(dialog_height).start,
         );
-        frame.push(RenderCommand::FillRect {
-            x: thumb.x,
-            y: thumb.y,
-            width: thumb.w,
-            height: thumb.h,
-            color: palette.surface2,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
+        palette.push_surface(
+            frame,
+            thumb.x,
+            thumb.y,
+            thumb.w,
+            thumb.h,
+            CORNER_RADIUS,
+            Surface::ControlTrack,
+        );
         // Recorded after the track, so a press on the overlap reaches the thumb
         // — `hit_test` answers with the last box drawn, which is the one on top.
         frame.hit(DialogTarget::ScrollThumb, thumb);
@@ -1716,6 +1709,9 @@ impl FileDialog {
         });
 
         // Cancel button
+        // A button is not a card: there is no button role, and sweeping
+        // one in would decide by default that buttons follow the
+        // card/border setting. Left for a decision.
         frame.push(RenderCommand::FillRect {
             x: cancel_x,
             y: input_y,

@@ -131344,10 +131344,21 @@ ceiling would catch a disaster, which is more than zero catches.
 number and a reason, remains unmeasured. Any change to the render path is
 unfalsifiable, and the next one will not have someone asking the question.
 
-## TD-C-THE-SHELL-NEEDS-CONVERTING-BY-HAND-NOT-BY-SWEEP
+## TD-C-THE-SHELL-NEEDS-CONVERTING-BY-HAND-NOT-BY-SWEEP -- FIXED 2026-09-12
 
 **Date:** 2026-09-11. **Lane:** C.
 **Where:** `gui/desktop/**` — about 106 convertible draw sites across 30 files.
+
+**CLOSED: the shell was converted on 2026-09-12, the day after this was
+written**, in `fc2e22bef` — *"The shell draws through the theme: 2915
+tests green"*. The converter reports 0 convertible sites across all 58 files
+of `gui/desktop` today.
+
+This entry's method was right and is worth keeping for the next sweep: read
+each site, decide per test whether the role claim still holds. The two
+accent-policy tests it singles out were superseded by 834 rather than
+rewritten to fit — the operator decided that selection takes the accent
+everywhere, which is what those tests were the record of not yet knowing.
 
 **In short:** every application has been converted to the new bordered theme.
 The desktop shell itself has not, and should not be done the same way. Running
@@ -131396,7 +131407,7 @@ does not — the taskbar, launcher, notification pane and every settings panel
 keep their fills whichever style is chosen. That is visibly inconsistent, and
 it is the half the user looks at most.
 
-## TD-C-BORDER-CONVERSION — APPLICATIONS DONE, SHELL AND 211 STRIPS WAITING ON A DECISION
+## TD-C-BORDER-CONVERSION — APPLICATIONS DONE, SHELL AND 211 STRIPS WAITING ON A DECISION -- FIXED 2026-09-13
 
 **Date:** 2026-09-11. **Lane:** C.
 **Where:** run `python gui/appearance/survey-fills.py` for the live count;
@@ -131407,6 +131418,40 @@ refuses to touch.
 and filled boxes in Settings and they change. The desktop shell does not, and
 neither do toolbars and status bars anywhere. Both are waiting on a decision
 rather than on work.
+
+**CLOSED 2026-09-13. Both things it waits on were decided the day after it
+was written, and both were then done.**
+
+| this entry says | actually |
+|---|---|
+| 158 `gui/desktop` sites blocked on C-Q13 | C-Q13 answered 2026-09-12 (834); the shell converted the same day in `fc2e22bef`, *"The shell draws through the theme: 2915 tests green"*. The converter now reports **0 convertible** across all 58 shell files |
+| 211 strips blocked on C-Q14 | C-Q14 answered 2026-09-12 (835); `Surface::Strip` exists and is used in 53 files |
+
+**What was actually left was somewhere neither entry looked: `gui/toolkit`.**
+The sweep was scoped to applications, then the shell, and the shared widget
+library both of them draw through was in neither list. Twenty sites. Fifteen
+are now converted; the five that remain are declined on purpose and each
+carries its reason in the code beside it — four buttons and one column
+header row. Running the converter again reports exactly those five, so the
+number is a list of open questions rather than of work.
+
+**The classifier was wrong three times in twenty, always the same way.** It
+offered `Strip(Edge::Bottom)` for two menu *entries* (`MenuBarEntry::Check`
+and `::SubMenu` — it matched "Bar" in the type name) and for a file
+dialog's address bar (an input well — it matched "bar" in the comment).
+That is the same shape as the three misclassifications this entry already
+records, and it is the whole reason it says to read site by site rather than
+sweep. The tool did the typing; reading caught the three it got wrong.
+
+**Eight tests across four helpers had to change, all for one reason.** Each
+found a highlight or a pill by looking for a `FillRect` of a particular
+colour. Under a role the paint is the theme's decision, so the match stops
+firing — and reads as "nothing was painted", which sends the reader to the
+hover logic rather than to the paint. They match by *position* now, and each
+undoes the half-pixel inset a 1px stroke is drawn with (`x + 0.5`,
+`width - 1.0`) so both styles answer in the same coordinates. The general
+lesson is worth more than the fix: **a test that locates something by its
+colour breaks the moment the colour stops belonging to the call site.**
 
 **Done:** 436 draw sites across roughly 60 applications, plus the model
 (`appearance::surface`), the theme setting, and the Settings page with its

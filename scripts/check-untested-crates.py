@@ -122,16 +122,82 @@ def in_workspace(crate, globs):
     return False
 
 
+# A hand-written reason is anything after ` -- ` in a baseline line's comment.
+# `--write-baseline` carries it forward, because a ratchet that erased the
+# explanation every time it was regenerated would train people not to write
+# one -- and "why can this crate not have a test" is the single most useful
+# thing a line here can say.
+REASON_SEP = " -- "
+
+
 def read_baseline():
+    """{crate: reason-or-empty} from the project's baseline file."""
+    return read_baseline_from(BASELINE)
+
+
+def read_baseline_from(path):
+    """{crate: reason-or-empty} from any baseline file."""
+    out = {}
     try:
-        with open(BASELINE, encoding="utf-8") as fh:
-            return {
-                ln.split("#", 1)[0].strip()
-                for ln in fh
-                if ln.split("#", 1)[0].strip()
-            }
+        with open(path, encoding="utf-8") as fh:
+            for ln in fh:
+                name, _, comment = ln.partition("#")
+                name = name.strip()
+                if not name:
+                    continue
+                reason = ""
+                if REASON_SEP in comment:
+                    reason = comment.split(REASON_SEP, 1)[1].strip()
+                out[name] = reason
     except OSError:
-        return set()
+        pass
+    return out
+
+
+def baseline_text(untested, globs, existing):
+    """The whole baseline file, as text.
+
+    Pure, and taking `existing` as an argument rather than reading it, because
+    the bug this shape prevents is an ordering one: the first version called
+    `read_baseline()` INSIDE `open(BASELINE, "w")`, which truncates -- so every
+    hand-written reason was silently erased the first time the list tightened.
+    It was caught only because the reason being lost was one I had written
+    minutes earlier and happened to look at.
+    """
+    out = []
+    out.append("# Crates with no #[test] anywhere. Written by"
+               " check-untested-crates.py --write-baseline.")
+    out.append("# This list may only SHRINK. A crate that gains its first test"
+               " must be removed from it.")
+    out.append("#")
+    out.append("# `ws` = the root Cargo.toml lists it, so"
+               " `cargo test -p <name>` reaches it.")
+    out.append("# `separate` = it is not a workspace member; it builds for the"
+               " SlateOS target on its own,")
+    out.append("#   and `cargo test -p` answers \"did not match any packages\"."
+               " Adding a test to one of")
+    out.append("#   these is a different job from adding one to a workspace"
+               " member.")
+    out.append("#")
+    out.append("# Anything after \" -- \" in a line's comment is a human"
+               " explanation and is preserved")
+    out.append("#   when this file is regenerated.")
+    for c, lines in sorted(untested):
+        kind = "ws" if in_workspace(c, globs) else "separate"
+        line = c + "  # " + str(lines) + " lines, " + kind
+        reason = existing.get(c, "")
+        if reason:
+            line += REASON_SEP + reason
+        out.append(line)
+    return NL.join(out) + NL
+
+
+def write_baseline(path, untested, globs):
+    """Rewrite the baseline, carrying hand-written reasons forward."""
+    existing = read_baseline_from(path)
+    text = baseline_text(untested, globs, existing)
+    with open(path, "w", encoding="utf-8", newline=NL) as fh:
+        fh.write(text)
 
 
 def selftest():
@@ -189,6 +255,38 @@ def selftest():
     ck(not in_workspace("userspace/foo/bar", globs),
        "a glob one level deep must not match two levels")
 
+    # A hand-written reason must survive `--write-baseline`. Without this the
+    # explanation is erased every time the list tightens, which teaches people
+    # not to write one.
+    b = read_baseline()
+    ck(isinstance(b, dict), "read_baseline must return crate -> reason")
+    ck(all(isinstance(v, str) for v in b.values()),
+       "every reason must be a string, even when empty")
+
+    # The round trip, against a temporary file rather than the real baseline.
+    # A type check would not have caught the bug this replaces: the first
+    # version called `read_baseline()` INSIDE `open(BASELINE, "w")`, which
+    # truncates, so the reasons were read back from an already-emptied file.
+    # Only a genuine write-then-read says otherwise.
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        tmp = os.path.join(td, "baseline.txt")
+        seeded = {"userspace/zzq": "cannot be tested because reasons"}
+        with open(tmp, "w", encoding="utf-8", newline=NL) as fh:
+            fh.write(baseline_text([("userspace/zzq", 10)], globs, seeded))
+        ck(read_baseline_from(tmp).get("userspace/zzq")
+           == "cannot be tested because reasons",
+           "a reason must be readable back after being written")
+        # Regenerate over the top, exactly as --write-baseline does.
+        write_baseline(tmp, [("userspace/zzq", 10)], globs)
+        ck(read_baseline_from(tmp).get("userspace/zzq")
+           == "cannot be tested because reasons",
+           "a hand-written reason must SURVIVE regeneration")
+        # A crate that leaves the list takes its reason with it.
+        write_baseline(tmp, [], globs)
+        ck(read_baseline_from(tmp) == {},
+           "a crate no longer untested must not linger in the baseline")
+
     print("selftest: " + str(checks - bad) + "/" + str(checks) + " cases pass")
     return 1 if bad else 0
 
@@ -221,27 +319,11 @@ def main():
     globs = workspace_member_globs()
 
     if args.write_baseline:
-        with open(BASELINE, "w", encoding="utf-8", newline=NL) as fh:
-            fh.write("# Crates with no #[test] anywhere. Written by"
-                     " check-untested-crates.py --write-baseline." + NL)
-            fh.write("# This list may only SHRINK. A crate that gains its"
-                     " first test must be removed from it." + NL)
-            fh.write("#" + NL)
-            fh.write("# `ws` = the root Cargo.toml lists it, so"
-                     " `cargo test -p <name>` reaches it." + NL)
-            fh.write("# `separate` = it is not a workspace member; it builds"
-                     " for the SlateOS target on its own," + NL)
-            fh.write("#   and `cargo test -p` answers \"did not match any"
-                     " packages\". Adding a test to one of" + NL)
-            fh.write("#   these is a different job from adding one to a"
-                     " workspace member." + NL)
-            for c, lines in sorted(untested):
-                kind = "ws" if in_workspace(c, globs) else "separate"
-                fh.write(c + "  # " + str(lines) + " lines, " + kind + NL)
+        write_baseline(BASELINE, untested, globs)
         print("wrote " + str(len(untested)) + " crate(s) to " + BASELINE)
         return 0
 
-    baseline = read_baseline()
+    baseline = set(read_baseline())
     names = {c for c, _ in untested}
     new = sorted(n for n in names if n not in baseline)
     stale = sorted(b for b in baseline if b not in names)

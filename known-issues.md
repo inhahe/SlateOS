@@ -129812,9 +129812,41 @@ the taskbar is the shell's. A separate window would have to be parented inside
 another process's panel and kept there through every resize, theme change and
 scale change.
 
-**Not started here, deliberately**, and the reason is this entry's own subject:
-layers that exist without their consumers are what produced four models in the
-first place.
+**Update 2026-09-13 (later): three of the four layers are built, and the
+reason for not starting stopped applying the same day.**
+
+The objection recorded above was that layers without reachable consumers are
+what produced four models in the first place. Two things answered it: 842
+settled that icons go in the shell's tray, and `gui/desktop` gained a binary,
+so that destination became a running program rather than a library.
+
+| layer | state |
+|---|---|
+| 1. a control verb to register, update and remove | **done** — `SetTrayIcon` 0x21, `RemoveTrayIcon` 0x22, `CONTROL_VERSION` 12 |
+| 2. a registry in the compositor, reaped per client | **done** — `Compositor::set_tray_icon` / `remove_tray_icon` / `reap_tray_icons` |
+| 3. a `TRAY` frame and a subscription | **done** — `guiremote::tray`, `SubscribeTrayIcons` 0x23, `route_tray_list` |
+| 4. drag, drop, pin, reorder (`tray_dnd.rs`) | still unconstructed, but no longer built on nothing |
+
+Plus the two ends: `oswindow::EventLoop` has `watch_tray`, `set_tray_icon`,
+`remove_tray_icon` and `tray_icons`, and the shell subscribes, folds each
+frame in on its own revision, and draws the icons in the taskbar.
+
+**Nineteen tests**, and the one that matters reads the render tree for the
+glyph and asserts it is absent before and present after. Every other step of
+the road already had tests and none of them proves a pixel — which is
+precisely the state `apps/systray::register_icon` is in: public, correctly
+shaped, thoroughly tested, reaching nothing.
+
+**What is left, and it is now a short list:**
+
+- **A click does not route back to the owner.** The shell hit-tests the slot
+  (`tray_icon_rects`) and there is no verb carrying "your icon was clicked"
+  to the program that registered it.
+- **`apps/systray` is still the copy**, and 842 says its unique parts — quick
+  settings, the volume and network popups — move into the shell rather than
+  to Settings. Nothing has moved yet.
+- **`tray_dnd.rs` is still constructed by nothing**, but it now has real
+  icons to reorder, so wiring it is a task rather than a prerequisite.
 
 **A correction to how this was found, because it is the error this file keeps
 recording.** The first pass concluded "there are no tray icons anywhere" from a

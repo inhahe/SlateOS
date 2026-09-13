@@ -987,6 +987,149 @@ fn a_press_the_shell_does_not_want_repaints_nothing() {
     assert_eq!(desktop.borrow_mut().drawn().len(), before);
 }
 
+// ---- the keyboard-layout switcher, which is a modifier-only chord ----
+
+/// The shortcut a user gets out of the box. `switch_shortcut` defaults to
+/// Alt+Shift, and until the compositor could recognise a modifier-only chord
+/// there was no way to hold it: the setting named a shortcut that was bound to
+/// nothing, and only Super+Space actually switched a layout.
+#[test]
+fn the_shell_claims_the_layout_switching_chord_it_is_configured_for() {
+    let (session, desktop) = session();
+    let panel = session.panel().window();
+    let chords = session.shell().modifier_chords();
+    assert!(
+        !chords.is_empty(),
+        "the default layout shortcut is Alt+Shift, so one chord should be held"
+    );
+    for modifiers in chords {
+        assert!(
+            desktop.borrow().seen.iter().any(|r| r.body
+                == RequestBody::GrabModifierChord {
+                    window: panel,
+                    modifiers
+                }),
+            "{modifiers:?} is the configured layout shortcut and was never              claimed, so it is dead in every window but the shell's own"
+        );
+    }
+}
+
+/// And the chord, once delivered, actually changes the layout. The grab and
+/// the handler are separate halves and either can be present without the
+/// other: a claimed chord nothing acts on looks exactly like no chord at all.
+#[test]
+fn the_claimed_chord_cycles_the_keyboard_layout() {
+    let (mut session, desktop) = session();
+    assert!(
+        session.shell().input_methods.layouts.len() > 1,
+        "with one layout installed, cycling cannot be observed"
+    );
+    let before = session.shell().input_methods.tray_label().to_string();
+    let modifiers = session.shell().modifier_chords()[0];
+
+    desktop.borrow_mut().send_input(&[InputEvent::new(
+        session.panel().window(),
+        guitk::event::Event::ModifierChord { modifiers },
+    )]);
+    session.pump().expect("pump");
+
+    assert_ne!(
+        session.shell().input_methods.tray_label(),
+        before,
+        "Alt+Shift was claimed and delivered but switched nothing"
+    );
+}
+
+/// A chord the shell never asked for does nothing. The compositor only
+/// delivers claimed chords, so this is defence against a future second chord
+/// being silently treated as the layout switcher -- "whatever arrives must be
+/// the one thing we ask for" is true today and quietly wrong tomorrow.
+#[test]
+fn a_chord_that_is_not_the_configured_one_switches_nothing() {
+    let (mut session, desktop) = session();
+    let before = session.shell().input_methods.tray_label().to_string();
+
+    desktop.borrow_mut().send_input(&[InputEvent::new(
+        session.panel().window(),
+        guitk::event::Event::ModifierChord {
+            modifiers: Modifiers::ctrl(),
+        },
+    )]);
+    session.pump().expect("pump");
+
+    assert_eq!(
+        session.shell().input_methods.tray_label(),
+        before,
+        "a bare Ctrl chord switched the keyboard layout"
+    );
+}
+
+/// Changing the setting moves the grab, in both directions. Grabbing the new
+/// chord without releasing the old one leaves the shell holding a gesture
+/// nothing uses -- and, worse, leaves the *old* shortcut still switching
+/// layouts after the user chose a different one.
+#[test]
+fn changing_the_layout_shortcut_moves_the_grab() {
+    let (mut session, desktop) = session();
+    let panel = session.panel().window();
+    let old = session.shell().modifier_chords()[0];
+
+    let before = desktop.borrow().seen.len();
+    session.shell_mut().input_methods.switch_shortcut =
+        crate::input_method::SwitchShortcut::CtrlShift;
+    session.pump().expect("pump");
+    let new = session.shell().modifier_chords()[0];
+    assert_ne!(old, new, "the test's premise is that the chord changed");
+
+    let seen = &desktop.borrow().seen;
+    let after = &seen[before.min(seen.len())..];
+    assert!(
+        after.iter().any(|r| r.body
+            == RequestBody::GrabModifierChord {
+                window: panel,
+                modifiers: new
+            }),
+        "the new chord must be claimed, or the chosen shortcut is dead"
+    );
+    assert!(
+        after.iter().any(|r| r.body
+            == RequestBody::UngrabModifierChord {
+                window: panel,
+                modifiers: old
+            }),
+        "and the old one released, or Alt+Shift goes on switching layouts          after the user chose Ctrl+Shift"
+    );
+}
+
+/// Choosing Super+Space asks for no chord at all: it is an ordinary key
+/// shortcut and the hotkey registry already holds it. A grab left behind here
+/// would take Alt+Shift from every application for nothing.
+#[test]
+fn choosing_the_key_shortcut_releases_the_chord() {
+    let (mut session, desktop) = session();
+    let panel = session.panel().window();
+    let old = session.shell().modifier_chords()[0];
+
+    let before = desktop.borrow().seen.len();
+    session.shell_mut().input_methods.switch_shortcut =
+        crate::input_method::SwitchShortcut::SuperSpace;
+    session.pump().expect("pump");
+
+    assert!(
+        session.shell().modifier_chords().is_empty(),
+        "Super+Space is a key chord; no modifier chord should be wanted"
+    );
+    let seen = &desktop.borrow().seen;
+    assert!(
+        seen[before.min(seen.len())..].iter().any(|r| r.body
+            == RequestBody::UngrabModifierChord {
+                window: panel,
+                modifiers: old
+            }),
+        "Alt+Shift is still held after the user chose a different shortcut"
+    );
+}
+
 // ---- a settings change, announced rather than polled ----
 
 /// Announce a settings change to one of the shell's surfaces, the way the

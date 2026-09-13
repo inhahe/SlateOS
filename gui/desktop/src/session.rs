@@ -209,6 +209,13 @@ pub struct ShellSession<T: Transport> {
     /// its old chord and did nothing under its new one until the session
     /// restarted.
     global_held: Vec<(Key, Modifiers)>,
+    /// The modifier-only chords this session currently holds a grab on.
+    ///
+    /// Remembered for exactly the reason [`Self::global_held`] is: the answer
+    /// to `shell.modifier_chords()` changes when the user changes their
+    /// keyboard-layout shortcut, and an ungrab needs to know what was held
+    /// before it changed.
+    chords_held: Vec<Modifiers>,
     /// Whether the shell currently holds the Escape key.
     ///
     /// Tracked for the same reason `popups_shown` is, and reconciled by
@@ -441,10 +448,20 @@ impl<T: Transport> ShellSession<T> {
         for (key, modifiers) in &global_held {
             events.grab_key(panel.window, *key, *modifiers)?;
         }
+        // And the modifier-only ones, which are a separate claim over a
+        // separate predicate: Alt+Shift fires when the modifiers are released
+        // with nothing pressed in between. Grabbed here for the same reason
+        // the chords above are -- a shortcut the shell does not hold is a
+        // shortcut that never fires once the user clicks into an application.
+        let chords_held = shell.modifier_chords();
+        for chord in &chords_held {
+            events.grab_modifier_chord(panel.window, *chord)?;
+        }
 
         let mut session = Self {
             events,
             global_held,
+            chords_held,
             shell,
             wallpaper: WallpaperManager::new(),
             background,
@@ -1213,6 +1230,7 @@ impl<T: Transport> ShellSession<T> {
         // come and go with popups; this is about the set changing shape under
         // a rebind, and a rebind made in this pump should take effect in it.
         self.reconcile_global_grabs()?;
+        self.reconcile_modifier_chords()?;
         Ok(worked)
     }
 
@@ -1534,6 +1552,26 @@ impl<T: Transport> ShellSession<T> {
                 // was asked for.
                 self.launches.extend(outcome.launches);
             }
+            // A modifier-only gesture the shell claimed: Alt+Shift or
+            // Ctrl+Shift, held and let go with nothing pressed in between.
+            // The compositor decides that it happened; the shell decides what
+            // it means.
+            //
+            // Routed through `handle_modifier_chord` rather than through
+            // `handle_hotkey`, because there is no `KeyEvent` to hand it: the
+            // gesture has no key, and manufacturing one would be the same
+            // confusion the separate event type exists to prevent. What the
+            // chord *means* is the shell's to say, not this loop's.
+            Event::ModifierChord { modifiers } => {
+                let outcome = self.shell.handle_modifier_chord(modifiers);
+                if outcome.consumed {
+                    self.dirty = true;
+                }
+                for request in outcome.requests {
+                    self.request(request)?;
+                }
+                self.launches.extend(outcome.launches);
+            }
             // The background surface is screen-sized by construction, so the
             // compositor resizing it *is* the display changing size. Everything
             // the shell places is derived from the screen, so the other two
@@ -1658,6 +1696,36 @@ impl<T: Transport> ShellSession<T> {
         }
 
         self.global_held = wanted;
+        Ok(())
+    }
+
+    /// Bring the modifier-chord grabs back in line with the shell's settings.
+    ///
+    /// [`reconcile_global_grabs`](Self::reconcile_global_grabs)'s twin, over
+    /// the other kind of claim. Kept separate rather than folded into it
+    /// because the two grab *different things* -- a key chord and a
+    /// modifier-only gesture -- and one list holding both would need a
+    /// placeholder key for the entries that have none, which is precisely the
+    /// confusion the second request type exists to prevent.
+    fn reconcile_modifier_chords(&mut self) -> Result<(), Error<T>> {
+        let wanted = self.shell.modifier_chords();
+        if wanted == self.chords_held {
+            return Ok(());
+        }
+
+        for chord in &self.chords_held {
+            if !wanted.contains(chord) {
+                self.events
+                    .ungrab_modifier_chord(self.panel.window, *chord)?;
+            }
+        }
+        for chord in &wanted {
+            if !self.chords_held.contains(chord) {
+                self.events.grab_modifier_chord(self.panel.window, *chord)?;
+            }
+        }
+
+        self.chords_held = wanted;
         Ok(())
     }
 

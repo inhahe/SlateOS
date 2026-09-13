@@ -1089,6 +1089,42 @@ impl<T: Transport> EventLoop<T> {
         self.conn.ungrab_key(window, key, modifiers)
     }
 
+    /// Claim a modifier-only chord — Alt+Shift, Ctrl+Shift.
+    ///
+    /// Fires when those modifiers are held and released with **nothing pressed
+    /// in between**, delivered as [`Event::ModifierChord`]. This is the shape
+    /// most desktops use to cycle keyboard layouts, and it is not expressible
+    /// as [`grab_key`](Self::grab_key): the nearest thing that is — Shift
+    /// pressed while Alt is held — is the opening half of Alt+Shift+Tab.
+    ///
+    /// Unlike a key grab it takes nothing away from anyone. The focused window
+    /// still sees the modifiers go down and come up.
+    ///
+    /// # Errors
+    ///
+    /// As [`grab_key`](Self::grab_key), plus a refusal if `modifiers` is
+    /// empty.
+    pub fn grab_modifier_chord(
+        &mut self,
+        window: u64,
+        modifiers: Modifiers,
+    ) -> Result<(), Error<T>> {
+        self.conn.grab_modifier_chord(window, modifiers)
+    }
+
+    /// Give a claimed modifier chord back.
+    ///
+    /// # Errors
+    ///
+    /// As [`grab_modifier_chord`](Self::grab_modifier_chord).
+    pub fn ungrab_modifier_chord(
+        &mut self,
+        window: u64,
+        modifiers: Modifiers,
+    ) -> Result<(), Error<T>> {
+        self.conn.ungrab_modifier_chord(window, modifiers)
+    }
+
     /// Tell the compositor the user's appearance settings have changed on disk.
     ///
     /// For the one application that edits them — Settings — to call *after* it
@@ -1897,6 +1933,8 @@ pub mod testing {
                 RequestBody::SwitchWorkspace { .. } => "SwitchWorkspace",
                 RequestBody::SetWindowWorkspace { .. } => "SetWindowWorkspace",
                 RequestBody::UploadImage { .. } => "UploadImage",
+                RequestBody::GrabModifierChord { .. } => "GrabModifierChord",
+                RequestBody::UngrabModifierChord { .. } => "UngrabModifierChord",
                 RequestBody::DropImage { .. } => "DropImage",
                 RequestBody::GrabKey { .. } => "GrabKey",
                 RequestBody::UngrabKey { .. } => "UngrabKey",

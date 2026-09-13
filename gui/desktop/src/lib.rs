@@ -3203,6 +3203,33 @@ impl DesktopShell {
         outcome
     }
 
+    /// Act on a modifier-only chord the shell claimed.
+    ///
+    /// [`handle_hotkey`](Self::handle_hotkey)'s counterpart for the gestures
+    /// that have no key. The mapping from chord to action lives here rather
+    /// than in the session for the same reason the hotkey registry does: the
+    /// shell is what asked the compositor for this chord, so the shell is the
+    /// only thing that knows what it asked for it *for*.
+    ///
+    /// A chord that matches nothing is ignored rather than assumed. Today
+    /// exactly one is ever claimed — the keyboard-layout switcher — and
+    /// "whatever arrives must be that one" would be right today and silently
+    /// wrong the first time a second chord is added.
+    pub fn handle_modifier_chord(&mut self, modifiers: Modifiers) -> HotkeyOutcome {
+        // While the user is recording a new shortcut, every keystroke belongs
+        // to the recording. Letting go of Alt+Shift mid-capture must not also
+        // change the keyboard layout out from under them.
+        if self.shortcut_capture.is_some() {
+            return HotkeyOutcome::ignored();
+        }
+        if self.input_methods.switch_shortcut.as_modifier_chord() != Some(modifiers) {
+            return HotkeyOutcome::ignored();
+        }
+        let outcome = self.run_desktop_action(&HotkeyAction::SwitchInputLayout);
+        drop(self.apply_pane_events());
+        outcome
+    }
+
     fn handle_hotkey_inner(&mut self, key: &KeyEvent) -> HotkeyOutcome {
         if !key.pressed {
             // Key release — check for Alt+Tab completion
@@ -3883,6 +3910,24 @@ impl DesktopShell {
     #[must_use]
     pub fn global_chords(&self) -> Vec<(Key, Modifiers)> {
         self.hotkeys.global_chords()
+    }
+
+    /// The modifier-only chords the shell wants held, from the user's choice
+    /// of keyboard-layout switcher.
+    ///
+    /// A list rather than an `Option` because the session reconciles it as a
+    /// set, exactly as it does [`global_chords`](Self::global_chords), and a
+    /// second chord — a future "cycle input method" — costs nothing to add.
+    ///
+    /// Empty when the user's choice is Super+Space, which is an ordinary key
+    /// chord and is already in the hotkey registry.
+    #[must_use]
+    pub fn modifier_chords(&self) -> Vec<Modifiers> {
+        self.input_methods
+            .switch_shortcut
+            .as_modifier_chord()
+            .into_iter()
+            .collect()
     }
 
     /// The chords to hold only while [`any_popup_open`](Self::any_popup_open).

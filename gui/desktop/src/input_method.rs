@@ -33,6 +33,7 @@
 //! that no code consulted was worse than not tracking it: it read as support.
 
 use appearance::Palette;
+use guitk::event::Modifiers;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::step;
 use guitk::style::CornerRadii;
@@ -99,6 +100,31 @@ impl SwitchShortcut {
             Self::AltShift => "alt-shift",
             Self::CtrlShift => "ctrl-shift",
             Self::SuperSpace => "super-space",
+        }
+    }
+
+    /// The modifier-only chord this shortcut is, if it is one.
+    ///
+    /// `None` for [`SuperSpace`](Self::SuperSpace), which is an ordinary key
+    /// chord and is held by the hotkey registry like every other shortcut. The
+    /// other two cannot be: they fire when the modifiers are *released* with
+    /// nothing pressed in between, and the nearest expressible key grab —
+    /// Shift pressed while Alt is held — is the opening half of Alt+Shift+Tab.
+    /// See `Compositor::grab_modifier_chord`.
+    #[must_use]
+    pub fn as_modifier_chord(self) -> Option<Modifiers> {
+        match self {
+            Self::AltShift => Some(Modifiers {
+                alt: true,
+                shift: true,
+                ..Modifiers::default()
+            }),
+            Self::CtrlShift => Some(Modifiers {
+                ctrl: true,
+                shift: true,
+                ..Modifiers::default()
+            }),
+            Self::SuperSpace => None,
         }
     }
 

@@ -616,7 +616,11 @@ fn print_sbctl_help() {
     println!("Options:");
     println!("  -s, --save             Save file to tracking database");
     println!("  -o, --output FILE      Output file");
-    println!("  -y, --yes              Skip confirmations");
+    // `-y, --yes` was here and is gone. It skipped a confirmation that never
+    // waited for an answer: `enroll-keys` printed "Proceed? [y/N]" and then
+    // enrolled regardless of what you would have typed. With the prompt
+    // removed there is nothing for it to skip, and the help-vs-parser gate is
+    // right that advertising an option nothing reads is its own defect.
     println!("  -m, --microsoft        Include Microsoft keys");
     println!("  -h, --help             Show this help");
 }

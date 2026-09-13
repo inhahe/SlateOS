@@ -140239,3 +140239,70 @@ not at what the test asserts.
 **Evidence:** failed in the workspace run of 2026-09-13 (one failure in 579
 binaries); passed in the identical run immediately after; passed 8/8 in
 isolation, because in isolation the two tests do not overlap.
+
+## TD-C-THE-TOOLKIT-S-WIDGETS-STILL-PAINT-THEMSELVES-DARK
+
+**In short:** the shared widgets -- dialogs, menus, tab strips, the grid, the
+modal overlay -- each keep their own private table of dark-theme colours. A
+user on a light theme who opens a folder in the file manager gets a *dark*
+modal dialog on a light window. Twelve applications were converted to the
+user's palette this week; the widgets they are built from were not, because
+the widgets cannot reach the palette without a dependency cycle.
+
+**Where:** `gui/toolkit/src/`, 122 constants over eleven files --
+`modal.rs` 17, `menu.rs` 14, `menubar.rs` 13, `grid.rs` 12, `textview.rs` 12,
+`colorpicker.rs` 10, `dialog.rs` 10, `pathbar.rs` 10, `tabs.rs` 10,
+`color.rs` 9, `disabled.rs` 3 -- plus 148 inline literals.
+
+**It is not dead code.** Four of those widgets are used by real windows:
+`modal` by `explorer`, `diskcleanup`, `diskimager` and `partmanager`; `dialog`
+by the desktop shell's run dialog and session panel and by three apps; `grid`
+by `charmap`, `colorpicker`, `slides` and `worldclock`; `tabs` by `editor` and
+`markdowneditor`. The colours reach the screen.
+
+**Why it was not done with the other fifty-five crates.** `gui/appearance`
+depends on `guitk`, not the reverse, so a widget cannot name `Palette` at all.
+That is the same cycle recorded when the toolkit's own `Theme` was deleted
+(design-decisions.md 810): 32 widget-role colours, four built-in themes and a
+manager, none of it ever constructed, and its hand-written table already
+disagreed with itself. Re-introducing a second table in the toolkit would
+re-create exactly what 810 removed.
+
+**Proper fix — invert the dependency, do not duplicate the data.** Move the
+`Palette` type itself (and `Surface`, `SurfaceStyle`, `StripStyle`, `ink`,
+`ink_on`, `push_surface`) down into `guitk`, where `Color`, `RenderCommand`
+and the WCAG arithmetic already live, and leave the *settings* half in
+`gui/appearance`: reading `appearance.yaml`, the accent list, the
+high-contrast schemes. `appearance` then re-exports the type, so every
+`use appearance::Palette;` in 153 files keeps working untouched.
+
+The one friction is `Palette::from_settings(&AppearanceSettings)`, an inherent
+method needing a type that stays in `appearance` -- and it is called at 458
+sites, so its spelling must not change. The answer is a trait declared in
+`guitk` and implemented in `appearance`:
+
+```rust
+// guitk
+pub trait PaletteSource {
+    fn is_light(&self) -> bool;
+    fn accent(&self) -> Color;
+    fn surface_style(&self) -> SurfaceStyle;
+    fn strip_style(&self) -> StripStyle;
+    fn panel_alpha(&self) -> u8;
+    fn high_contrast(&self) -> Option<HighContrast>;   // the resolved colours,
+}                                                      // not the scheme enum
+impl Palette { pub fn from_settings<S: PaletteSource>(s: &S) -> Self { .. } }
+```
+
+`Palette::from_settings(&settings)` then compiles verbatim at all 458 sites,
+with no cycle and no second table. The toolkit declares what it needs from a
+settings source; `appearance` supplies it and keeps sole ownership of the file
+format, the accent list and the schemes.
+
+**Then** each widget's `render` takes `&Palette` and its constants go, exactly
+as the fifty-five crates' did. The two sweeps -- `convert-fills.py` and
+`ink-text.py` -- can do most of the bodies once the palette is reachable.
+
+**Until it is done:** every window built from these widgets is dark whatever
+the user chose. It is the largest remaining gap in design-decisions.md 822.
+

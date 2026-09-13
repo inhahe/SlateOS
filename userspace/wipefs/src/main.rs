@@ -502,16 +502,36 @@ fn cmd_blkdiscard(args: &[String]) {
             "-z" | "--zeroout" => zeroout = true,
             "-v" | "--verbose" => verbose = true,
             "-o" | "--offset" => {
+                // `unwrap_or(0)` before: an offset that did not parse became
+                // the START OF THE DEVICE. A user who names an offset and is
+                // silently given zero has the one region they were trying to
+                // protect destroyed first.
                 i += 1;
-                if i < args.len() {
-                    offset = parse_size(&args[i]).unwrap_or(0);
-                }
+                let Some(raw) = args.get(i) else {
+                    eprintln!("blkdiscard: --offset requires a byte count");
+                    process::exit(1);
+                };
+                let Some(v) = parse_size(raw) else {
+                    eprintln!("blkdiscard: invalid offset: {}", quoteaf_os(raw));
+                    process::exit(1);
+                };
+                offset = v;
             }
             "-l" | "--length" => {
+                // And this one defaulted the other way: a length that did not
+                // parse left `length` as None, which means ENTIRE DEVICE. The
+                // failure mode of a typo was to widen the operation from a
+                // bounded range to everything.
                 i += 1;
-                if i < args.len() {
-                    length = parse_size(&args[i]);
-                }
+                let Some(raw) = args.get(i) else {
+                    eprintln!("blkdiscard: --length requires a byte count");
+                    process::exit(1);
+                };
+                let Some(v) = parse_size(raw) else {
+                    eprintln!("blkdiscard: invalid length: {}", quoteaf_os(raw));
+                    process::exit(1);
+                };
+                length = Some(v);
             }
             s if !s.starts_with('-') => {
                 device = Some(s.to_string());
@@ -554,12 +574,97 @@ fn cmd_blkdiscard(args: &[String]) {
         eprintln!("blkdiscard: {mode} {device}: offset={offset}, length={len_str}");
     }
 
+    // Nothing below this line used to touch the device. blkdiscard parsed its
+    // arguments, printed one sentence describing what it would have done, and
+    // exited 0 -- a data-destruction command that reported destroying data and
+    // destroyed none.
+    //
+    // Only the zero-fill can be honoured here. A real discard is the
+    // BLKDISCARD ioctl and a secure discard is BLKSECDISCARD; this kernel
+    // dispatches neither -- `posix/src/linux_blkpg.rs` carries the numbers and
+    // nothing reads them -- and there is no way to approximate a discard,
+    // because its whole point is telling the device the blocks are free rather
+    // than writing over them. Refusing names what is missing; pretending would
+    // leave a caller believing an SSD had been told to forget the data.
+    if !zeroout {
+        eprintln!(
+            "blkdiscard: {mode} needs the {} ioctl, which this kernel does not implement; use --zeroout to overwrite the range instead",
+            if secure {
+                "BLKSECDISCARD"
+            } else {
+                "BLKDISCARD"
+            }
+        );
+        process::exit(1);
+    }
+
+    let written = match zero_range(Path::new(&device), offset, length) {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("blkdiscard: {}: {e}", quoteaf_os(&device));
+            process::exit(1);
+        }
+    };
+
     let stdout = io::stdout();
     let mut out = stdout.lock();
     let _ = writeln!(
         out,
-        "blkdiscard: {mode} {len_str} from {device} at offset {offset}"
+        "blkdiscard: {mode} {} from {} at offset {offset}",
+        format_size(written),
+        quoteaf_os(&device)
     );
+}
+
+/// Overwrite `[offset, offset+length)` of `device` with zeros.
+///
+/// Returns the number of bytes written. `length` of `None` means "to the end
+/// of the device", which is only knowable for something whose metadata carries
+/// a size -- a raw block device reports 0 and the caller is asked for an
+/// explicit length rather than being given a guess.
+fn zero_range(device: &Path, offset: u64, length: Option<u64>) -> io::Result<u64> {
+    let mut f = fs::OpenOptions::new().write(true).open(device)?;
+    let size = f.metadata()?.len();
+
+    let end = match length {
+        Some(l) => offset.checked_add(l).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "offset + length overflows")
+        })?,
+        None => {
+            if size == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "cannot determine the device size; give an explicit --length",
+                ));
+            }
+            size
+        }
+    };
+    if size != 0 && end > size {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the range extends past the end of the device",
+        ));
+    }
+    let Some(total) = end.checked_sub(offset) else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the offset is past the end of the range",
+        ));
+    };
+
+    f.seek(SeekFrom::Start(offset))?;
+    const CHUNK: usize = 1 << 20;
+    let zeros = vec![0u8; CHUNK];
+    let mut written = 0u64;
+    while written < total {
+        let remaining = total.saturating_sub(written);
+        let n = usize::try_from(remaining.min(CHUNK as u64)).unwrap_or(CHUNK);
+        f.write_all(zeros.get(..n).unwrap_or(&zeros))?;
+        written = written.saturating_add(n as u64);
+    }
+    f.sync_all()?;
+    Ok(written)
 }
 
 fn format_size(bytes: u64) -> String {
@@ -842,5 +947,69 @@ mod tests {
         let err = wipe_signature(Path::new("/nonexistent/device"), &sig)
             .expect_err("wiping a device that cannot be opened must not succeed");
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    // ---- blkdiscard: the range written is exactly the range asked for -----
+
+    fn filled_image(tag: &str, line: u32) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "blkdiscard-{}-{}-{}",
+            tag,
+            std::process::id(),
+            line
+        ));
+        let _ = fs::create_dir_all(&dir);
+        let img = dir.join("dev.img");
+        fs::write(&img, vec![0xABu8; 4096]).expect("fixture");
+        (dir, img)
+    }
+
+    #[test]
+    fn zeroing_a_bounded_range_leaves_both_sides_alone() {
+        // The strongest statement available about a destructive operation:
+        // the byte before the range and the byte after it are untouched. The
+        // code this replaces printed a sentence and wrote nothing, so it would
+        // have passed any test that checked only the message.
+        let (dir, img) = filled_image("bounded", line!());
+        let n = zero_range(&img, 1024, Some(512)).expect("writable");
+        assert_eq!(n, 512);
+        let after = fs::read(&img).expect("reread");
+        assert_eq!(after.len(), 4096, "the device was resized");
+        assert_eq!(after[1023], 0xAB, "the byte before the range was destroyed");
+        assert_eq!(after[1024], 0x00, "the range was not zeroed");
+        assert_eq!(after[1535], 0x00, "the range was not zeroed to its end");
+        assert_eq!(after[1536], 0xAB, "the write ran past the range");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn zeroing_with_no_length_covers_the_rest_of_the_device() {
+        let (dir, img) = filled_image("toend", line!());
+        let n = zero_range(&img, 4032, None).expect("writable");
+        assert_eq!(n, 64);
+        let after = fs::read(&img).expect("reread");
+        assert_eq!(after[4031], 0xAB);
+        assert!(after[4032..].iter().all(|b| *b == 0));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_range_past_the_end_is_refused_rather_than_extending_the_device() {
+        // Without this, `--offset 4000 --length 1000` would GROW a 4096-byte
+        // image to 5000 bytes, which is not something a discard can do to a
+        // block device and not something the caller asked for.
+        let (dir, img) = filled_image("pastend", line!());
+        let err = zero_range(&img, 4000, Some(1000)).expect_err("must refuse");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(fs::metadata(&img).expect("stat").len(), 4096);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_offset_plus_length_that_overflows_is_refused() {
+        let (dir, img) = filled_image("overflow", line!());
+        let err = zero_range(&img, u64::MAX, Some(2)).expect_err("must refuse");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

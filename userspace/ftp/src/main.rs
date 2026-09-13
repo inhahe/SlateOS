@@ -538,7 +538,12 @@ impl Default for CliArgs {
 }
 
 /// Parse command-line arguments.
-fn parse_args(args: &[String]) -> CliArgs {
+/// Parse options, or report the first one this program does not have.
+///
+/// Returned rather than printed-and-continued: `ftp --zzq` used to say
+/// "ftp: unknown option: --zzq" and then open its prompt and exit 0, so the
+/// message and the status disagreed and only the message was right.
+fn parse_args(args: &[String]) -> Result<CliArgs, String> {
     let mut result = CliArgs::default();
     let mut positional = Vec::new();
 
@@ -575,7 +580,7 @@ fn parse_args(args: &[String]) -> CliArgs {
                         }
                     }
                     if !recognized {
-                        eprintln!("ftp: unknown option: {arg}");
+                        return Err(arg.clone());
                     }
                 } else {
                     positional.push(arg.clone());
@@ -596,7 +601,7 @@ fn parse_args(args: &[String]) -> CliArgs {
         }
     }
 
-    result
+    Ok(result)
 }
 
 // ============================================================================
@@ -2030,7 +2035,13 @@ fn execute_command(session: &mut FtpSession, cmd: Command) -> Result<bool, FtpEr
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let cli = parse_args(&args[1..]);
+    let cli = match parse_args(&args[1..]) {
+        Ok(c) => c,
+        Err(bad) => {
+            eprintln!("ftp: unknown option: {bad}");
+            std::process::exit(1);
+        }
+    };
 
     let mut session = FtpSession::new();
     session.verbose = cli.verbose;
@@ -2076,11 +2087,27 @@ fn main() {
 // that the code under test must never call, so reaching one IS the test
 // failing and the message names which invariant broke. CLAUDE.md allows panic
 // in test modules for this.
-#[allow(clippy::panic)]
+// `expect` joins it for the same reason: a parse that must succeed is an
+// assertion about the parser, and a test that fires one is a test reporting
+// a failure rather than a program crashing on a user's data.
+#[allow(clippy::panic, clippy::expect_used)]
 mod tests {
     use super::*;
 
     // -- login credentials ----------------------------------------------------
+
+    /// An unknown option is refused, not merely mentioned.
+    ///
+    /// `ftp --zzq` printed the diagnostic, then opened its prompt and exited
+    /// 0 anyway.
+    #[test]
+    fn an_unknown_option_fails_rather_than_warning() {
+        let a = |v: &[&str]| -> Vec<String> { v.iter().map(|s| (*s).to_string()).collect() };
+        assert!(parse_args(&a(&["--zzq"])).is_err());
+        // A host operand is not an option.
+        assert!(parse_args(&a(&["ftp.example.org"])).is_ok());
+        assert!(parse_args(&a(&[])).is_ok());
+    }
 
     #[test]
     fn a_named_user_is_asked_for_a_password() {
@@ -2531,7 +2558,7 @@ mod tests {
     #[test]
     fn test_parse_args_defaults() {
         let args: Vec<String> = vec![];
-        let cli = parse_args(&args);
+        let cli = parse_args(&args).expect("known options");
         assert!(cli.host.is_none());
         assert_eq!(cli.port, 21);
         assert!(cli.auto_login);
@@ -2543,7 +2570,7 @@ mod tests {
     #[test]
     fn test_parse_args_host() {
         let args: Vec<String> = vec!["ftp.example.com".to_string()];
-        let cli = parse_args(&args);
+        let cli = parse_args(&args).expect("known options");
         assert_eq!(cli.host.as_deref(), Some("ftp.example.com"));
         assert_eq!(cli.port, 21);
     }
@@ -2551,7 +2578,7 @@ mod tests {
     #[test]
     fn test_parse_args_host_and_port() {
         let args = vec!["ftp.example.com".to_string(), "2121".to_string()];
-        let cli = parse_args(&args);
+        let cli = parse_args(&args).expect("known options");
         assert_eq!(cli.host.as_deref(), Some("ftp.example.com"));
         assert_eq!(cli.port, 2121);
     }
@@ -2559,7 +2586,7 @@ mod tests {
     #[test]
     fn test_parse_args_flags() {
         let args = vec!["-n".to_string(), "-v".to_string(), "-a".to_string()];
-        let cli = parse_args(&args);
+        let cli = parse_args(&args).expect("known options");
         assert!(!cli.auto_login);
         assert!(cli.verbose);
         assert!(!cli.passive);
@@ -2568,7 +2595,7 @@ mod tests {
     #[test]
     fn test_parse_args_debug_implies_verbose() {
         let args = vec!["-d".to_string()];
-        let cli = parse_args(&args);
+        let cli = parse_args(&args).expect("known options");
         assert!(cli.debug);
         assert!(cli.verbose);
     }
@@ -2576,7 +2603,7 @@ mod tests {
     #[test]
     fn test_parse_args_combined_flags() {
         let args = vec!["-nv".to_string(), "myhost".to_string()];
-        let cli = parse_args(&args);
+        let cli = parse_args(&args).expect("known options");
         assert!(!cli.auto_login);
         assert!(cli.verbose);
         assert_eq!(cli.host.as_deref(), Some("myhost"));

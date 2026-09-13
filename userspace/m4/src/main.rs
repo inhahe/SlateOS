@@ -49,7 +49,15 @@ struct Options {
     input_files: Vec<String>,
 }
 
-fn parse_args(args: &[String]) -> Options {
+/// Parse options, or report the first one this program does not have.
+///
+/// Returns `Err` rather than exiting from inside the loop, so the refusal is
+/// testable without running the binary -- and because this used to print the
+/// diagnostic and then *keep going*, which is the defect: `m4 --zzq` said
+/// "m4: unknown option: --zzq" and exited 0, so a script that checked the
+/// status was told the run had succeeded while a human reading the terminal
+/// was told it had not.
+fn parse_args(args: &[String]) -> Result<Options, String> {
     let mut opts = Options::default();
     let mut i = 0;
     while i < args.len() {
@@ -99,13 +107,13 @@ fn parse_args(args: &[String]) -> Options {
             }
             break;
         } else if arg.starts_with('-') && arg.len() > 1 {
-            eprintln!("m4: unknown option: {arg}");
+            return Err(arg.clone());
         } else {
             opts.input_files.push(arg.clone());
         }
         i += 1;
     }
-    opts
+    Ok(opts)
 }
 
 // ---------------------------------------------------------------------------
@@ -2129,7 +2137,13 @@ fn match_exact_recursive(s: &[char], si: usize, end: usize, p: &[char], pi: usiz
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let opts = parse_args(&args[1..]);
+    let opts = match parse_args(&args[1..]) {
+        Ok(o) => o,
+        Err(bad) => {
+            eprintln!("m4: unknown option: {bad}");
+            std::process::exit(1);
+        }
+    };
 
     let mut proc = if opts.prefix_builtins {
         Processor::new_with_prefix()
@@ -2215,6 +2229,21 @@ mod tests {
     }
 
     // -- Token scanning --
+
+    /// An unknown option is refused, not merely mentioned.
+    ///
+    /// `m4 --zzq` printed "m4: unknown option: --zzq" and then carried on and
+    /// exited 0, so the message and the status disagreed and only the message
+    /// was right. A script checking `$?` was told the run succeeded.
+    #[test]
+    fn an_unknown_option_fails_rather_than_warning() {
+        let a = |v: &[&str]| -> Vec<String> { v.iter().map(|s| (*s).to_string()).collect() };
+        assert_eq!(parse_args(&a(&["--zzq"])).err().as_deref(), Some("--zzq"));
+        assert_eq!(parse_args(&a(&["-zzq"])).err().as_deref(), Some("-zzq"));
+        // A file operand is not an option.
+        assert!(parse_args(&a(&["input.m4"])).is_ok());
+        assert!(parse_args(&a(&[])).is_ok());
+    }
 
     #[test]
     fn test_plain_text() {
@@ -2843,7 +2872,7 @@ mod tests {
     #[test]
     fn test_parse_args_define() {
         let args = vec!["-Dfoo=bar".to_string(), "input.m4".to_string()];
-        let opts = parse_args(&args);
+        let opts = parse_args(&args).expect("known options");
         assert_eq!(opts.defines.len(), 1);
         assert_eq!(opts.defines[0], ("foo".to_string(), "bar".to_string()));
         assert_eq!(opts.input_files, vec!["input.m4".to_string()]);
@@ -2852,14 +2881,14 @@ mod tests {
     #[test]
     fn test_parse_args_undefine() {
         let args = vec!["-Ufoo".to_string()];
-        let opts = parse_args(&args);
+        let opts = parse_args(&args).expect("known options");
         assert_eq!(opts.undefines, vec!["foo".to_string()]);
     }
 
     #[test]
     fn test_parse_args_prefix() {
         let args = vec!["-P".to_string()];
-        let opts = parse_args(&args);
+        let opts = parse_args(&args).expect("known options");
         assert!(opts.prefix_builtins);
     }
 

@@ -1511,6 +1511,15 @@ pub struct ProcessStatus {
     pub vm_size_kib: Option<u64>,
     /// `VmRSS` in KiB. Absent for the same reason.
     pub vm_rss_kib: Option<u64>,
+    /// `voluntary_ctxt_switches`: times this process gave up the CPU itself,
+    /// typically by blocking on I/O.
+    ///
+    /// `None` when the kernel did not report it, which is different from
+    /// zero. `fio` prints a `ctx=` column and was filling it with
+    /// `ops_done / 10`.
+    pub voluntary_ctxt_switches: Option<u64>,
+    /// `nonvoluntary_ctxt_switches`: times it was preempted.
+    pub nonvoluntary_ctxt_switches: Option<u64>,
 }
 
 impl ProcessStatus {
@@ -1539,6 +1548,10 @@ impl ProcessStatus {
             groups,
             vm_size_kib: key_value(content, "VmSize").and_then(|v| parse_kib(&v)),
             vm_rss_kib: key_value(content, "VmRSS").and_then(|v| parse_kib(&v)),
+            voluntary_ctxt_switches: key_value(content, "voluntary_ctxt_switches")
+                .and_then(|v| parse_u64(&v)),
+            nonvoluntary_ctxt_switches: key_value(content, "nonvoluntary_ctxt_switches")
+                .and_then(|v| parse_u64(&v)),
         }
     }
 }

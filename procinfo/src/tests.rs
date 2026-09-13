@@ -1458,3 +1458,27 @@ fn a_process_stat_line_yields_its_fault_counters() {
     assert_eq!(st.utime_ticks, 12, "field 14");
     assert_eq!(st.stime_ticks, 34, "field 15");
 }
+
+/// The two context-switch counters, and the distinction between a kernel
+/// that did not report one and a genuine zero. `fio` prints this column and
+/// was filling it with `ops_done / 10`.
+#[test]
+fn process_status_reads_both_context_switch_counters() {
+    let content = b"Name:	fio
+Uid:	1000	1000	1000	1000
+voluntary_ctxt_switches:	142
+nonvoluntary_ctxt_switches:	7
+";
+    let st = ProcessStatus::parse(content);
+    assert_eq!(st.voluntary_ctxt_switches, Some(142));
+    assert_eq!(st.nonvoluntary_ctxt_switches, Some(7));
+
+    // A status file without them is `None`, not `Some(0)`: "the kernel did
+    // not say" and "it happened zero times" are different claims.
+    let bare = ProcessStatus::parse(
+        b"Name:	fio
+",
+    );
+    assert_eq!(bare.voluntary_ctxt_switches, None);
+    assert_eq!(bare.nonvoluntary_ctxt_switches, None);
+}

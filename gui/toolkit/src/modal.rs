@@ -617,9 +617,28 @@ pub struct AlertDialog {
     /// Where the dialog last drew itself, or `None` before the first frame.
     /// This is what a click is tested against; see [`DialogLayout`].
     placement: Option<DialogLayout>,
+    /// How thick to draw the focus ring, in pixels.
+    ///
+    /// Defaults to the toolkit's own width; a caller that has read the user's
+    /// `focus_ring_scale` sets it with
+    /// [`with_focus_ring_width`](Self::with_focus_ring_width), exactly as
+    /// `InputDialog` takes a caret width.
+    focus_ring_width: f32,
 }
 
 impl AlertDialog {
+    /// Draw this dialog's focus ring at `width` pixels.
+    ///
+    /// For a caller that has read `focus_ring_scale` out of the appearance
+    /// settings -- `AppearanceSettings::focus_ring_width` does the
+    /// multiplication. A dialog raised without one keeps the toolkit's
+    /// default, which is what every caller did before this existed.
+    #[must_use]
+    pub fn with_focus_ring_width(mut self, width: f32) -> Self {
+        self.focus_ring_width = width;
+        self
+    }
+
     /// Create an informational dialog.
     pub fn info(title: &str, message: &str) -> Self {
         Self::new(title, message, DialogIcon::Info, ButtonSet::ok())
@@ -1062,15 +1081,23 @@ impl AlertDialog {
             });
 
             // Focus ring.
+            //
+            // The width arrives already multiplied out, so this is not the
+            // caller that forgets to scale. The *offset* grows with it and the
+            // corner radius follows, so a thicker ring stays a ring around the
+            // button rather than creeping over it -- at the old fixed 2.0 the
+            // three numbers were 2, 4 and +2, which is this arithmetic with
+            // the width substituted.
             if is_focused {
+                let ring = self.focus_ring_width;
                 tree.push(RenderCommand::StrokeRect {
-                    x: btn_x - 2.0,
-                    y: y - 2.0,
-                    width: btn_w + 4.0,
-                    height: btn_h + 4.0,
+                    x: btn_x - ring,
+                    y: y - ring,
+                    width: btn_w + ring * 2.0,
+                    height: btn_h + ring * 2.0,
                     color: palette.lavender,
-                    line_width: 2.0,
-                    corner_radii: CornerRadii::all(BUTTON_CORNER_RADIUS + 2.0),
+                    line_width: ring,
+                    corner_radii: CornerRadii::all(BUTTON_CORNER_RADIUS + ring),
                 });
             }
 
@@ -1282,6 +1309,7 @@ impl AlertDialog {
 
         let focused_button = buttons.default_index();
         Self {
+            focus_ring_width: crate::style::FOCUS_RING_WIDTH,
             title: title.to_string(),
             message: message.to_string(),
             detail: None,
@@ -5231,6 +5259,73 @@ mod tests {
             dialog.result(),
             Some(&DialogResult::Text(String::from("notes.txt"))),
             "clicking OK must accept, exactly as Enter does"
+        );
+    }
+
+    /// The focus ring is drawn at the width the caller asked for.
+    ///
+    /// The whole reason this setting exists is that the previous one did not
+    /// do this: `a11y.rs`'s `FocusIndicator` had a width field, a round-trip
+    /// test and a `render` method, and nothing ever called it. A test that
+    /// only checks the field round-trips proves the setting is *stored*, which
+    /// is not the question anyone has.
+    ///
+    /// So this reads the pixels: it renders the dialog and looks at the
+    /// `StrokeRect` the focused button is wearing.
+    #[test]
+    fn the_focus_ring_is_drawn_at_the_width_it_was_given() {
+        fn ring_of(width: f32) -> (f32, f32, f32) {
+            let mut dialog = AlertDialog::new("t", "m", DialogIcon::Info, ButtonSet::ok_cancel())
+                .with_focus_ring_width(width);
+            dialog.show();
+            let palette = Palette::for_mode(false);
+            let mut tree = RenderTree::new();
+            dialog.render(&palette, 800.0, 600.0, &mut tree);
+            let strokes: Vec<_> = tree
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::StrokeRect {
+                        x,
+                        width: w,
+                        line_width,
+                        ..
+                    } => Some((*x, *w, *line_width)),
+                    _ => None,
+                })
+                .collect();
+            // NEGATIVE CONTROL. Every assertion below is about a stroke, and
+            // a dialog that drew none would satisfy a `filter().all()` check
+            // perfectly. `ok_cancel` focuses a button by default, so exactly
+            // one ring is expected.
+            assert_eq!(
+                strokes.len(),
+                1,
+                "expected exactly one focus ring, got {}; the assertions below \
+                 would be about nothing",
+                strokes.len()
+            );
+            strokes[0]
+        }
+
+        let (x1, w1, line1) = ring_of(2.0);
+        let (x4, w4, line4) = ring_of(4.0);
+
+        assert!(
+            (line1 - 2.0).abs() < 0.001 && (line4 - 4.0).abs() < 0.001,
+            "the ring was drawn {line1} and {line4} pixels thick for widths 2 and 4"
+        );
+        // The ring grows outwards, so a thicker one starts further left and is
+        // wider by twice the difference. Asserted as a *relationship* rather
+        // than two absolutes, because the button's own position is layout's
+        // business and not this test's.
+        assert!(
+            (x1 - x4 - 2.0).abs() < 0.001,
+            "a 4px ring should start 2px further left than a 2px one: {x1} vs {x4}"
+        );
+        assert!(
+            (w4 - w1 - 4.0).abs() < 0.001,
+            "a 4px ring should be 4px wider overall than a 2px one: {w1} vs {w4}"
         );
     }
 

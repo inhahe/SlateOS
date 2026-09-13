@@ -61394,7 +61394,7 @@ globals.
 
 ---
 
-## TD-C-THE-DESKTOP-AND-THE-COMPOSITOR-BOTH-DRAW-WINDOW-TITLE-BARS
+## TD-C-THE-DESKTOP-AND-THE-COMPOSITOR-BOTH-DRAW-WINDOW-TITLE-BARS -- FIXED 2026-09-13
 
 **In short:** Two different parts of the system each know how to draw a
 window's title bar, borders and close/maximise/minimise buttons, and they
@@ -61754,6 +61754,34 @@ the four `Hit::Window{Close,Maximize,Minimize,TitleBar}` variants and their
 `pointer_tests.rs` tests that assert the duplicate. `ManagedWindow::frame_rect`
 stays.
 
+
+**CLOSED 2026-09-13. Both prerequisites and the deletion are done; the entry
+had simply not been re-read since the last of them landed.** Verified against
+the code rather than the prose above:
+
+| what the entry required | state |
+|---|---|
+| scale the compositor's decorations off `Display::scale_factor` | done -- `render_title_bar` takes `bar.scale`, and `frame_insets` carries it |
+| bring `WindowCorners` across from `AppearanceSettings` | done -- `decoration_radius` is `self.appearance.corner_radius() * scale` |
+| delete the shell's `render_window_decorations` and `window_chrome` | done -- neither name exists in `gui/desktop/**` |
+| remove the geometry fields that only fed them | done -- no `WINDOW_BUTTON_SIZE` or `TITLE_BAR_HEIGHT` anywhere in the shell |
+
+The shell's public surface is now the nine `render_*` methods a shell should
+have -- taskbar, Alt-Tab, start menu, desktop menu, widgets, calendar, OSD, run
+dialog -- and not one of them draws a window frame. The compositor is the only
+thing that decorates, which is what the module doc always said the policy was.
+
+**Worth noting how it was found, because it is this file's own recurring
+failure and this is the fourth instance today.** The entry reads as open: its
+last section still says *what is left in this entry is now prerequisite 2 and
+the deletion*. That sentence was true when written and each subsequent piece
+of work updated the code and a parenthetical, never the conclusion. The other
+three today were `TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR` carrying "135 to go"
+when the true figure was two, `TD-C-FOUR-APPEARANCE-SETTINGS-...` presenting
+three operator-blocked rows as unstarted work, and three entries counted twice
+by a triage grep for quoting their own headings. An entry that overstates what
+is left costs exactly what an entry that understates it does: it sends the next
+reader somewhere that does not need them.
 ## RESOLVED 2026-08-21 — the duplicate is gone, and one feature moved rather than died
 
 ✅ **The deletion is done and this entry is closed.** All five prerequisites had
@@ -129070,7 +129098,7 @@ and left an unused import pointing straight at it.
 
 ---
 
-## TD-C-STICKY-FILTER-AND-MOUSE-KEYS-ARE-BUILT-TESTED-AND-CONNECTED-TO-NOTHING
+## TD-C-STICKY-FILTER-AND-MOUSE-KEYS-ARE-BUILT-TESTED-AND-CONNECTED-TO-NOTHING -- FIXED 2026-09-13
 
 **Date:** 2026-09-07. **Lane:** C.
 **Where:** `gui/desktop/src/a11y.rs` — `StickyKeys` (317), `FilterKeys` (467),
@@ -129231,6 +129259,57 @@ sets it yet", which was stale — the high-contrast control does exist. Checking
 whether the *other* accessibility settings were wired turned up this instead.
 
 ---
+
+
+**Update 3, 2026-09-13 — the last two fields are built, and the entry closes.**
+
+It stayed open for `caret_width` and `focus_indicator`, the two fields from the
+original census that were "not superseded -- features never built", left in
+place because deleting them would have removed the only record that they were
+wanted. Both now exist, so the record is no longer the only copy.
+
+| | where it lives now | who supplies it | what draws it |
+|---|---|---|---|
+| caret width | `AppearanceSettings::caret_width_scale`, 839 | `apps/launcher`, the shell's run dialog | `guitk::textedit` |
+| focus ring | `AppearanceSettings::focus_ring_scale` | `apps/diskcleanup` through `App::appearance_changed` | `guitk::modal`'s `AlertDialog` |
+
+`guitk::style::FOCUS_RING_WIDTH` is the base measurement, in `style` rather
+than in one widget's module because a focus ring is shared visual vocabulary --
+`CARET_WIDTH` sits in `textedit` because only a text field has a caret, and a
+ring has no such excuse. `focus_ring_width()` does the multiplication once, for
+the reason 839 gives: a scale multiplied at each call site is a scale some call
+site will fail to multiply, which is exactly how the copy deleted below came to
+have passing tests and no reader.
+
+**The colour is deliberately not a setting**, unlike the deleted model's
+`color: Option<Color>`. A ring is drawn over an unknown background, so no fixed
+hue can be guaranteed legible, and a user who picks an invisible ring while
+believing they have made it *more* visible is worse off than one who was never
+offered the choice. Width is safe in a way hue is not: thicker is never less
+visible.
+
+**Deleted: `desktop::a11y`'s `FocusIndicator`, 146 lines** including the field
+on `AccessibilityConfig`, two tests that existed only to exercise it, and its
+arms in three broader tests -- each of which pairs it with `CursorSettings`,
+which asserts the same property and stays. That is this entry's own prescription
+("pick one model and delete the other two") applied to the last of them.
+
+**Three tests, one per join**, because each half passing proves nothing about
+the road between them -- and a road with tested ends and no middle is precisely
+what the deleted copy was. `appearance` proves the scale becomes a width;
+`guitk` renders the dialog and reads the `StrokeRect`; `diskcleanup` drives the
+real `appearance_changed` hook and reads the pixels out of its confirmation
+dialog, which is where a focus ring matters most -- the destructive button is
+one Tab from the safe one. Proved able to fail: dropping the
+`with_focus_ring_width` call makes the last one report *no ring was drawn at
+the 6px the settings ask for; widths drawn were [2.0]*.
+
+**Still open elsewhere, and not this entry's:** `AlertDialog` is the only
+widget in the toolkit that draws a focus ring at all. The others that hold
+focus show it another way -- `textedit` a caret, `colorpicker` a border,
+`menu` a highlight -- except `grid.rs`'s `GridView`, whose focus index reaches
+no renderer because nothing in the tree constructs a `GridView` at all. That is
+C-Q17's question, not this one's.
 
 ## TD-C-FOUR-ACCESSIBILITY-FEATURES-EXISTED-ONLY-AS-A-DEAD-PANELS-CONTROLS
 

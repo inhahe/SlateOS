@@ -1213,6 +1213,13 @@ pub struct CleanupUI {
     /// calls [`App::theme_changed`] before the first frame, so nothing is
     /// drawn with this initial value in a real window.
     palette: Palette,
+    /// How thick to draw a focus ring, in pixels, from the user's settings.
+    ///
+    /// Kept beside the palette because it arrives the same way and means the
+    /// same kind of thing: both are appearance the shell owns and this program
+    /// is told about. Defaulted to the toolkit's own width so a program that
+    /// is never told still draws a ring of the ordinary thickness.
+    focus_ring_width: f32,
 }
 
 impl CleanupUI {
@@ -1225,6 +1232,7 @@ impl CleanupUI {
         Self {
             screen: UiScreen::CategoryList,
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
+            focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             selected,
             category_sizes: BTreeMap::new(),
             scan_complete: false,
@@ -1347,7 +1355,8 @@ impl CleanupUI {
             },
             format_size(self.selected_savings()),
         );
-        let mut dialog = AlertDialog::destructive("Confirm Cleanup", &message, "Delete");
+        let mut dialog = AlertDialog::destructive("Confirm Cleanup", &message, "Delete")
+            .with_focus_ring_width(self.focus_ring_width);
         dialog.show();
         self.confirm = Some(dialog);
     }
@@ -2175,6 +2184,18 @@ impl oswindow::app::App for CleanupUI {
         self.palette = *palette;
     }
 
+    /// Take the focus-ring width from the user's accessibility settings.
+    ///
+    /// A confirmation dialog is exactly where this matters: the destructive
+    /// button is one Tab away from the safe one, and a keyboard user who
+    /// cannot see which has focus is a keyboard user who deletes something.
+    /// The width is read here rather than at the dialog's construction because
+    /// `appearance_changed` is the only place with the settings in hand --
+    /// which is the whole reason that hook exists.
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.focus_ring_width = settings.focus_ring_width();
+    }
+
     fn title(&self) -> String {
         String::from("Disk Cleanup")
     }
@@ -2253,6 +2274,7 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+
     // A test that indexes out of range should fail loudly and point at the line
     // that did it -- that is the diagnosis. The defensive lints exist to keep
     // panics out of code that runs on a user's data, which this is not.
@@ -2263,6 +2285,61 @@ mod tests {
         clippy::panic,
         clippy::arithmetic_side_effects
     )]
+
+    /// The user's setting reaches the ring the confirmation dialog draws.
+    ///
+    /// Each half of this road has its own test -- `appearance` proves the
+    /// scale becomes a width, `guitk` proves the width becomes a stroke -- and
+    /// neither would notice this program forgetting to carry it between them.
+    /// That gap is precisely what the old `a11y.rs` focus indicator was: every
+    /// piece present and tested, no road between them.
+    ///
+    /// So this drives the actual hook the strap calls and then reads the
+    /// pixels out of the dialog.
+    #[test]
+    fn the_focus_ring_setting_reaches_the_confirmation_dialog() {
+        use oswindow::app::App as _;
+
+        let mut ui = CleanupUI::new();
+        let mut settings = appearance::AppearanceSettings::default();
+        settings.focus_ring_scale = 3.0;
+        settings.validate();
+        ui.appearance_changed(&settings);
+
+        // A category has to be selected or there is nothing to confirm.
+        ui.select_all();
+        ui.show_confirm();
+        let dialog = ui
+            .confirm
+            .as_mut()
+            .expect("requesting a confirmation should have raised the dialog");
+
+        let palette = Palette::from_settings(&settings);
+        let mut tree = guitk::render::RenderTree::new();
+        dialog.render(&palette, 800.0, 600.0, &mut tree);
+
+        let widths: Vec<f32> = tree
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                guitk::render::RenderCommand::StrokeRect { line_width, .. } => Some(*line_width),
+                _ => None,
+            })
+            .collect();
+        // NEGATIVE CONTROL: without this, a dialog that drew no ring at all
+        // would satisfy the `any` below by vacuous truth in the other
+        // direction, and this test would pass while the feature did nothing.
+        assert!(
+            !widths.is_empty(),
+            "the dialog drew no stroked rectangle, so it drew no focus ring \
+             and this test can say nothing about its width"
+        );
+        let want = settings.focus_ring_width();
+        assert!(
+            widths.iter().any(|w| (w - want).abs() < 0.001),
+            "no ring was drawn at the {want}px the settings ask for; widths drawn were {widths:?}"
+        );
+    }
 
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};

@@ -118179,7 +118179,7 @@ those apart from the number alone.
 
 ---
 
-## B-LOGIND-IMPLEMENTS-THE-WRITE-SIDE-AND-EXPOSES-NONE-OF-IT — OPEN 2026-09-12
+## B-LOGIND-IMPLEMENTS-THE-WRITE-SIDE-AND-EXPOSES-NONE-OF-IT — MOSTLY CLOSED 2026-09-13
 
 **Lane:** B. **Severity:** medium — nothing is wrong with what runs; what runs
 can never do anything.
@@ -118215,7 +118215,33 @@ crate-level `#![allow(dead_code)]`: 22 items, and once grouped they were one
 thing. The blanket allow had made a whole unreachable subsystem look like
 scattered lint noise.
 
-**What the proper fix is.** Expose the write side and give it callers:
+**Closed for sessions, 2026-09-13, and not for the rest.**
+
+`CreateSession` is on the bus (administrator-only, checked before any
+argument is decoded), and `login` calls it after authentication and calls
+`TerminateSession` when the shell exits. `getty` needed no change: it
+builds a `login` command and hands off, including for autologin, so
+`login` is the one process on every path.
+
+**What has NOT been demonstrated, and this is the part to read.** The
+tests prove the *failure* path: on any target that is not `slateos` the
+bus syscalls return ENOSYS, so `connect` fails, the caller is told on
+stderr, and the login proceeds. They do not prove the success path,
+because `logind::serve` is `#[cfg(unix)]` and this host cannot boot the
+target. **No session has ever actually appeared in `loginctl`.** A green
+suite here means "login survives logind being unreachable", not "session
+registration works", and the difference is exactly the kind a passing
+test invites a reader to skip over. Confirming it needs a boot test,
+which is lane A's.
+
+**Still open:** the inhibitor, VT-switch and seat methods
+(`add_inhibitor`, `remove_inhibitors_by_pid`, `is_inhibited_any`,
+`switch_vt`, `create_seat`, `remove_seat`) remain implemented and
+unreachable. They are marked in the source with the reason. Nothing calls
+them because nothing has needed to yet, which is a weaker justification
+than sessions had and is why they are listed rather than done.
+
+**What the original fix was.** Expose the write side and give it callers:
 
 1. `CreateSession` on the bus, with `bus::authorize` deciding who may — that
    function exists and already has the `Required` vocabulary for it.

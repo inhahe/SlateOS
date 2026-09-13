@@ -1987,7 +1987,7 @@ mod tests {
                 ("Media Player", 13.0, p.text, "an app's name"),
                 ("55%", 13.0, p.subtext0, "an unmuted app's volume"),
                 ("Game", 13.0, p.text, "the muted app's name"),
-                ("30% (Muted)", 13.0, p.red, "a muted app's volume"),
+                ("30% (Muted)", 13.0, p.ink(p.red), "a muted app's volume"),
             ] {
                 let t = texts_saying(&apps, glyph, size);
                 assert_eq!(t.len(), 1, "{what} is not drawn once (light={light})");
@@ -2186,7 +2186,7 @@ mod tests {
                 assert_eq!(mode.len(), 1);
                 assert_eq!(
                     rgb(mode[0]),
-                    rgb(accent),
+                    rgb(p.ink(accent)),
                     "the selected spatial mode does not follow the accent (light={light})"
                 );
             }

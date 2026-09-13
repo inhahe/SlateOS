@@ -1624,9 +1624,10 @@ mod tests {
                     ]
                     .concat(),
                     RecordingState::Processing => {
-                        [vec![p.mantle, p.text, p.peach], stats.to_vec()].concat()
+                        [vec![p.mantle, p.text, p.ink(p.peach)], stats.to_vec()]
+                            .concat()
                     }
-                    _ => vec![p.mantle, p.text, p.peach],
+                    _ => vec![p.mantle, p.text, p.ink(p.peach)],
                 };
                 assert_eq!(
                     colors(&render_recording_controls(&r, &p, 0.0, 0.0, 400.0)),

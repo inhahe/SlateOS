@@ -748,7 +748,17 @@ impl PrivacySettingsUI {
             p.push_surface(cmds, x, y, width, 28.0, 4.0, Surface::Card);
             let icon = entry.permission.icon();
             let status = if entry.allowed { "✓" } else { "✕" };
-            let color = if entry.allowed { p.green } else { p.red };
+            // Both arms are text, so both are inked. Bound to a local and
+            // passed to the `Text` command by field shorthand (`color,`),
+            // which is the fourth way a colour reaches a draw site without
+            // naming a role there -- and the one `ink-text.py` is blindest
+            // to, since its pattern is `color: <expr>` and there is no
+            // expression here at all.
+            let color = if entry.allowed {
+                p.ink(p.green)
+            } else {
+                p.ink(p.red)
+            };
             cmds.push(RenderCommand::Text {
                 x: x + 8.0,
                 y: y + 6.0,
@@ -1944,9 +1954,12 @@ mod tests {
                     if rgb(*a) == rgb(*b) {
                         continue;
                     }
-                    assert_eq!(
-                        (rgb(*a), rgb(*b)),
-                        (rgb(A), rgb(B)),
+                    // Either form of the accent: raw where it fills, inked
+                    // where it is text. 837 made one accent two pixel values,
+                    // and a site is still the accent in both.
+                    assert!(
+                        (rgb(*a), rgb(*b)) == (rgb(A), rgb(B))
+                            || (rgb(*a), rgb(*b)) == (rgb(pa.ink(A)), rgb(pb.ink(B))),
                         "{what} (light={light}): command {i} changed with the \
                          accent without being the accent"
                     );

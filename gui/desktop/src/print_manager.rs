@@ -1375,6 +1375,13 @@ mod tests {
                     }
                     if (rgb(*a), rgb(*b)) == (rgb(A), rgb(B)) {
                         accent_moves += 1;
+                    } else if (rgb(*a), rgb(*b)) == (rgb(pa.ink(A)), rgb(pb.ink(B))) {
+                        // Accent *text*, which since 837 is a second pixel
+                        // value for the same accent. Counted with the accent
+                        // sites rather than the derived-ink ones: it is the
+                        // accent, adjusted to be readable, not a colour
+                        // computed from it like `on_accent`.
+                        accent_moves += 1;
                     } else if (rgb(*a), rgb(*b)) == (rgb(pa.on_accent()), rgb(pb.on_accent())) {
                         on_accent_moves += 1;
                     } else {

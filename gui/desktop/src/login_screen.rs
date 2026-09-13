@@ -2241,8 +2241,19 @@ mod tests {
             .collect()
     }
 
+    /// How many commands draw in `c` -- counting the *inked* form of it too.
+    ///
+    /// Since §837 a site drawing text in a dual-use colour asks
+    /// `Palette::ink` for a version that clears 4.5:1, so one accent is two
+    /// pixel values: the raw one on fills and the inked one on text. A count
+    /// of "how many things carry the accent" means both, and counting only one
+    /// would report half the answer while looking exactly as authoritative.
     fn count_of(cmds: &[RenderCommand], c: Color) -> usize {
-        every_color(cmds).into_iter().filter(|x| *x == c).count()
+        let inked = Palette::for_mode(false).ink(c);
+        every_color(cmds)
+            .into_iter()
+            .filter(|x| *x == c || *x == inked)
+            .count()
     }
 
     /// Lesson 1: the sweep walks every fixture in both modes, so it sees every

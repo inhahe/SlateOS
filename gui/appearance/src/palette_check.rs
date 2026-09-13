@@ -734,6 +734,7 @@ mod tests {
     /// under a feature nobody passes is a test that reports nothing, which is
     /// the same defect as an instrument with no threshold wearing a different
     /// hat.
+    #[test]
     fn the_two_palest_light_surfaces_clear_the_contrast_floor() {
         let p = Palette::for_mode(true);
         for (name, card, want) in [

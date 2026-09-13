@@ -1090,6 +1090,9 @@ pub struct AppearanceSettings {
     /// Whether boxes are outlined or filled. See [`SurfaceStyle`]; defaults to
     /// [`SurfaceStyle::Borders`] (§829), with `Cards` the optional theme.
     pub surface_style: SurfaceStyle,
+    /// Whether a toolbar or status bar is a band or a hairline. See
+    /// [`StripStyle`]; defaults to `Filled` (§835).
+    pub strip_style: StripStyle,
     /// The colour-vision filter applied to the whole screen.
     ///
     /// Unlike every other field here this one is not consumed by the palette:
@@ -1154,6 +1157,7 @@ impl Default for AppearanceSettings {
             // configuration file gets, so this is where "the default theme" is
             // actually decided.
             surface_style: SurfaceStyle::Borders,
+            strip_style: StripStyle::Filled,
             color_filter: ColorFilter::None,
             high_contrast: None,
             accent_color: AccentColor::Blue,
@@ -1393,6 +1397,11 @@ pub struct Palette {
     /// user's choice. `panel_alpha` and `light` are here for the same reason --
     /// settings-derived values every drawer needs.
     pub surface_style: SurfaceStyle,
+    /// Whether a toolbar or status bar is a band or a hairline.
+    ///
+    /// Carried on the palette for the reason `surface_style` is: a palette
+    /// already reaches every draw site, so a site needs no new argument.
+    pub strip_style: StripStyle,
     /// The blue of the categorical set. See the type's note on hues.
     pub blue: Color,
     /// Green — also "this succeeded", "this is allowed", "this is safe".
@@ -1489,6 +1498,7 @@ impl Palette {
                 link: LIGHT_LINK,
                 border: LIGHT_BORDER,
                 surface_style: SurfaceStyle::Borders,
+                strip_style: StripStyle::Filled,
                 blue: LIGHT_BLUE,
                 green: LIGHT_GREEN,
                 red: LIGHT_RED,
@@ -1518,6 +1528,7 @@ impl Palette {
                 link: LINK,
                 border: BORDER,
                 surface_style: SurfaceStyle::Borders,
+                strip_style: StripStyle::Filled,
                 blue: BLUE,
                 green: GREEN,
                 red: RED,
@@ -1550,12 +1561,14 @@ impl Palette {
             // not about that. Someone who chose outlined boxes and then turned
             // on high contrast has not asked for filled ones.
             palette.surface_style = settings.surface_style;
+            palette.strip_style = settings.strip_style;
             return palette;
         }
         let mut palette = Self::for_mode(settings.theme_mode.is_light());
         palette.accent = settings.effective_accent();
         palette.panel_alpha = settings.transparency.panel_alpha();
         palette.surface_style = settings.surface_style;
+        palette.strip_style = settings.strip_style;
         palette
     }
 
@@ -1716,6 +1729,8 @@ impl Palette {
             // Not a colour, so not a role. Named and discarded rather than
             // swept up by `..`, on the same terms as the two above it.
             surface_style: _,
+            // Not a colour either. Same terms as the three above it.
+            strip_style: _,
         } = *self;
         [
             ("crust", crust),
@@ -2094,6 +2109,24 @@ pub enum SurfaceStyle {
 }
 
 yaml_enum!(SurfaceStyle { Borders => "borders", Cards => "cards" });
+
+/// How a full-width structural band -- a toolbar, a status bar, a tab strip --
+/// is told apart from the content beside it. See [`surface::Surface::Strip`].
+///
+/// A separate setting from [`SurfaceStyle`] rather than a third variant of it,
+/// because the two are orthogonal: someone may want outlined boxes with banded
+/// chrome, or filled cards with hairline chrome. Folding them into one enum
+/// would offer four combinations as two. §835.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum StripStyle {
+    /// A pale band, as shipped. The default (§835).
+    #[default]
+    Filled,
+    /// No band; a hairline along the edge facing the content.
+    Separator,
+}
+
+yaml_enum!(StripStyle { Filled => "filled", Separator => "separator" });
 yaml_enum!(AccentColor {
     Blue => "blue",
     Lavender => "lavender",
@@ -2227,6 +2260,11 @@ impl AppearanceSettings {
             doc.get_str(&["theme", "surface_style"])
                 .and_then(|v| SurfaceStyle::from_yaml_name(&v))
         );
+        read_into!(
+            s.strip_style,
+            doc.get_str(&["theme", "strip_style"])
+                .and_then(|v| StripStyle::from_yaml_name(&v))
+        );
         // Absent and "off" both mean no high contrast, and an unrecognised
         // name does too. A scheme this build does not know is not a reason to
         // refuse to draw, and falling back to the ordinary theme is the safe
@@ -2335,6 +2373,7 @@ impl AppearanceSettings {
     pub fn write_into(&self, doc: &mut Document) {
         doc.set_str(&["theme", "mode"], self.theme_mode.yaml_name());
         doc.set_str(&["theme", "surface_style"], self.surface_style.yaml_name());
+        doc.set_str(&["theme", "strip_style"], self.strip_style.yaml_name());
         doc.set_str(&["theme", "color_filter"], self.color_filter.yaml_name());
         doc.set_str(
             &["theme", "high_contrast"],
@@ -2713,6 +2752,7 @@ mod tests {
             // Non-default, which is this helper's whole contract: the
             // round-trip test must not be able to pass on a field it forgot.
             surface_style: SurfaceStyle::Cards,
+            strip_style: StripStyle::Separator,
             color_filter: ColorFilter::Tritanopia,
             high_contrast: Some(HighContrastScheme::YellowOnBlack),
             accent_color: AccentColor::Custom,

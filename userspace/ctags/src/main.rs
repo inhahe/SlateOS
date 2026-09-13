@@ -362,7 +362,13 @@ fn detect_language(path: &str) -> Option<Language> {
 
 /// Collect files to scan, applying recursion and exclusion rules.
 #[cfg(not(test))]
-fn collect_files(config: &Config) -> Vec<String> {
+/// Collect the files to tag, and report whether any named path was missing.
+///
+/// The flag is an out-parameter rather than a richer return type because the
+/// caller needs both halves: the files it *did* find are still tagged, and a
+/// missing one still has to reach the exit status. Printing "cannot open" and
+/// returning only the successes is what made `ctags /nonexistent` exit 0.
+fn collect_files(config: &Config, missing: &mut bool) -> Vec<String> {
     let mut result = Vec::new();
 
     if config.recurse && config.files.is_empty() {
@@ -388,6 +394,7 @@ fn collect_files(config: &Config) -> Vec<String> {
                 "ctags: cannot open {}: No such file or directory",
                 quoteaf_os(f)
             );
+            *missing = true;
         }
     }
 
@@ -1938,7 +1945,8 @@ fn run_main() -> i32 {
 #[cfg(not(test))]
 fn run(config: &Config) -> i32 {
     // Collect files.
-    let files = collect_files(config);
+    let mut missing = false;
+    let files = collect_files(config, &mut missing);
 
     // Extract tags from all files.
     let mut all_tags: Vec<Tag> = Vec::new();
@@ -2044,7 +2052,11 @@ fn run(config: &Config) -> i32 {
         return 1;
     }
 
-    0
+    // A named path that did not exist was reported and then forgotten. The
+    // tags from the files that *did* exist are still written -- one bad name
+    // should not discard the rest -- so the failure is carried to the status
+    // rather than returned from the middle.
+    i32::from(missing)
 }
 
 // ============================================================================

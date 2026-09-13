@@ -601,6 +601,13 @@ fn main() {
     if config.dry_run && stats.renamed > 0 {
         println!("(dry run — run without -n to apply changes)");
     }
+
+    // The count was already kept and already printed -- "Errors: 1" on stdout
+    // -- and then thrown away, so `sanitize /nonexistent` reported the error
+    // twice and exited 0 both times. Nothing was missing but the last step.
+    if stats.errors > 0 {
+        process::exit(1);
+    }
 }
 
 // ============================================================================

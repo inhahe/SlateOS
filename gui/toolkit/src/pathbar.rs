@@ -14,6 +14,7 @@ use crate::palette::Palette;
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::step;
 use crate::style::CornerRadii;
+use crate::surface::Surface;
 use crate::text::TextCursor;
 
 // ---------------------------------------------------------------------------
@@ -779,14 +780,15 @@ impl PathBar {
         let text_x = BAR_PADDING + 4.0;
 
         // Inner background (slightly darker for input feel).
-        cmds.push(RenderCommand::FillRect {
-            x: 2.0,
-            y: 2.0,
-            width: width - 4.0,
-            height: height - 4.0,
-            color: palette.surface0,
-            corner_radii: CornerRadii::all(SEGMENT_RADIUS - 1.0),
-        });
+        palette.push_surface(
+            cmds,
+            2.0,
+            2.0,
+            width - 4.0,
+            height - 4.0,
+            SEGMENT_RADIUS - 1.0,
+            Surface::Card,
+        );
 
         // Selection highlight.
         if let Some(anchor) = self.selection_anchor {
@@ -892,14 +894,15 @@ impl PathBar {
         });
 
         // Background.
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: dropdown_y,
-            width: dropdown_w,
-            height: dropdown_h,
-            color: palette.surface1,
-            corner_radii: CornerRadii::all(SEGMENT_RADIUS),
-        });
+        palette.push_surface(
+            cmds,
+            0.0,
+            dropdown_y,
+            dropdown_w,
+            dropdown_h,
+            SEGMENT_RADIUS,
+            Surface::Panel,
+        );
 
         // Items. The window is taken as a slice from the scroll position, so
         // its end is the slice's own rather than a sum to be clamped back
@@ -922,14 +925,15 @@ impl PathBar {
 
             // Highlight selected item.
             if selected_row == Some(vi) {
-                cmds.push(RenderCommand::FillRect {
-                    x: DROPDOWN_PADDING,
-                    y: item_y,
-                    width: dropdown_w - DROPDOWN_PADDING * 2.0,
-                    height: DROPDOWN_ITEM_HEIGHT,
-                    color: palette.surface2,
-                    corner_radii: CornerRadii::all(3.0),
-                });
+                palette.push_surface(
+                    cmds,
+                    DROPDOWN_PADDING,
+                    item_y,
+                    dropdown_w - DROPDOWN_PADDING * 2.0,
+                    DROPDOWN_ITEM_HEIGHT,
+                    3.0,
+                    Surface::Selected,
+                );
             }
 
             // Directory indicator.
@@ -997,14 +1001,15 @@ fn push_pill(
 ) -> (f32, f32, f32, f32) {
     let width = pill_width(label);
     let y = y_center - SEGMENT_HEIGHT / 2.0;
-    cmds.push(RenderCommand::FillRect {
+    palette.push_surface(
+        cmds,
         x,
         y,
         width,
-        height: SEGMENT_HEIGHT,
-        color: palette.surface0,
-        corner_radii: CornerRadii::all(SEGMENT_RADIUS),
-    });
+        SEGMENT_HEIGHT,
+        SEGMENT_RADIUS,
+        Surface::Card,
+    );
     cmds.push(RenderCommand::Text {
         x: x + SEGMENT_PADDING_H,
         y: y_center - FONT_SIZE / 2.0,
@@ -1751,8 +1756,18 @@ mod tests {
         let mut bar = PathBar::new("/home/user/Documents");
         let cmds = bar.render(&palette, 800, 32);
 
-        // The bar's own background is a fill too; the pills are the ones one
+        // The bar's own background is a box too; the pills are the ones one
         // line of text tall.
+        //
+        // Either command kind, because a pill is `Surface::Card` and what
+        // that draws depends on the theme -- a border under the default
+        // style, a fill under Cards. This test is about *where* the pills
+        // are, which is what the hit boxes have to agree with, and the
+        // colour was never part of the claim.
+        //
+        // A 1px stroke is emitted half a pixel inside its box, so a pill
+        // drawn as a border reports `SEGMENT_HEIGHT - 1.0`; the arm below
+        // puts the box back so both styles produce the same rectangle.
         let pills: Vec<(f32, f32, f32, f32)> = cmds
             .iter()
             .filter_map(|cmd| match cmd {
@@ -1763,6 +1778,15 @@ mod tests {
                     height,
                     ..
                 } if *height == SEGMENT_HEIGHT => Some((*x, *y, *width, *height)),
+                RenderCommand::StrokeRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } if *height == SEGMENT_HEIGHT - 1.0 => {
+                    Some((*x - 0.5, *y - 0.5, *width + 1.0, *height + 1.0))
+                }
                 _ => None,
             })
             .collect();

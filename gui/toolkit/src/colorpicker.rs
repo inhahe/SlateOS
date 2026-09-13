@@ -20,6 +20,7 @@ use crate::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use crate::palette::Palette;
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::style::CornerRadii;
+use crate::surface::Surface;
 
 // ============================================================================
 // Catppuccin Mocha palette (UI chrome)
@@ -1489,14 +1490,15 @@ impl ColorPickerDialog {
 
         // Track background
         let track_y = y + (SLIDER_HEIGHT - SLIDER_TRACK_HEIGHT) / 2.0;
-        cmds.push(RenderCommand::FillRect {
-            x: track_x,
-            y: track_y,
-            width: track_width,
-            height: SLIDER_TRACK_HEIGHT,
-            color: palette.surface1,
-            corner_radii: CornerRadii::all(SLIDER_TRACK_HEIGHT / 2.0),
-        });
+        palette.push_surface(
+            cmds,
+            track_x,
+            track_y,
+            track_width,
+            SLIDER_TRACK_HEIGHT,
+            SLIDER_TRACK_HEIGHT / 2.0,
+            Surface::ControlTrack,
+        );
 
         // Filled portion
         let fill_width = fraction.clamp(0.0, 1.0) * track_width;

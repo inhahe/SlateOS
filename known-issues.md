@@ -141113,10 +141113,39 @@ per glyph, the `RenderCommand::Text` iteration -- and not only "putting glyph
 masks on the screen", which is what the entry calls it. Two measurements now
 say the two things that phrase actually names come to a fifth of it.
 
-**The next experiment** is therefore to split `draw_text`/`blit_run` itself,
-and the thing to be careful of is the one that has already caught this entry
-twice: a difference between two whole-frame timings attributes everything in
-between to whatever you happened to name it.
+**The split now exists and is measured directly, not by differencing.**
+`RenderEngine` accumulates two nanosecond counters under `#[cfg(test)]` --
+time in `font.shape` and time in `blit_run` -- and `bench_compose_frame_4k`
+prints them per frame. At the *run* level, not the glyph level: two
+`Instant::now()` calls cost tens of nanoseconds, which is the same order as
+the glyph-cache hit they would be measuring one level down, and there are a
+few hundred runs a frame against ten thousand glyphs.
+
+**Its scene, three consecutive release runs, and they agree to 1%:**
+
+```
+compose_frame 4K (3840x2160, 16 windows): min=6.88ms
+  phases: background_clear=1.33ms  window_render=5.51ms
+  text:   shape=0.35ms             blit_run=0.29ms
+```
+
+**Read that carefully, because it is a different scene from the one above.**
+The 20.3/8.0 ms figures were eight windows; this is the sixteen-window cascade
+`bench_compose_frame_4k` has always used. The two are not comparable and this
+does not show the earlier measurement was wrong. What it does show:
+
+* **In this scene text is 0.63 ms of 6.88 ms -- about 9%.** Whatever is
+  expensive here, it is not text.
+* **Shaping is more than half of the text cost** (0.35 of 0.63), which is a
+  different shape from "shaping is 1.3% of the frame" and worth keeping in
+  view: the cheap half is the one with a cache.
+* **The frame is 6.88 ms, not the ~16 ms this file records as the baseline.**
+  That number is stale by a factor of two. `bench/baselines.toml` should be
+  re-taken before anybody reasons from it -- including the assertion in this
+  bench, whose 80 ms catastrophe guard was set against the old figure.
+
+**So the 2 ms target is missed by 3.4x, not by 8x**, and the thing to attack
+in this scene is `window_render`'s 5.5 ms, of which text is one eighth.
 
 **A note on the estimator, because the first version of this bench got it
 wrong.** Run once each in sequence, the three phases reported *"the clip test

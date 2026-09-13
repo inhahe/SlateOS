@@ -3754,6 +3754,17 @@ fn blit_run<T: RenderTarget + ?Sized>(
 
 /// The rendering engine rasterizes RenderCommands to the framebuffer.
 struct RenderEngine {
+    /// Nanoseconds spent shaping, and nanoseconds spent blitting runs, since
+    /// the last `take_text_phases`.
+    ///
+    /// `#[cfg(test)]` because a probe on this path is not free: two
+    /// `Instant::now()` calls cost tens of nanoseconds, the same order as the
+    /// glyph-cache hit they would be measuring if they sat one level lower. At
+    /// the *run* level there are a few hundred calls a frame rather than ten
+    /// thousand, so the probe is well under a thousandth of what it reports.
+    /// That ratio is the whole reason this is per run and not per glyph.
+    #[cfg(test)]
+    text_phases: (u64, u64),
     clip_stack: ClipStack,
     translate_stack: TranslateStack,
     /// Same type, same rounding rule, and — because the faces are installed by
@@ -3797,6 +3808,8 @@ impl RenderEngine {
             ),
         }
         Self {
+            #[cfg(test)]
+            text_phases: (0, 0),
             clip_stack: ClipStack::default(),
             translate_stack: TranslateStack::default(),
             fonts,
@@ -4384,7 +4397,11 @@ impl RenderEngine {
         // from the process that sized the widget is how every centred label
         // ends up off by half the difference, with neither process looking
         // wrong on its own.
+        #[cfg(test)]
+        let t_shape = std::time::Instant::now();
         let run = font.shape(text);
+        #[cfg(test)]
+        let shape_ns = t_shape.elapsed().as_nanos() as u64;
 
         // Decide about the ellipsis *before* drawing anything, because it
         // changes where the real glyphs have to stop: the mark has to fit
@@ -4423,6 +4440,8 @@ impl RenderEngine {
         }
 
         let mut pen = x as f32;
+        #[cfg(test)]
+        let t_blit = std::time::Instant::now();
         blit_run(
             fb,
             font,
@@ -4458,6 +4477,26 @@ impl RenderEngine {
                 clip.as_ref(),
             );
         }
+
+        #[cfg(test)]
+        {
+            // Both phases, once per run: the shaping measured above and
+            // everything `blit_run` did, including the ellipsis pass, which is
+            // part of what drawing this text cost and would be invisible if
+            // the probe stopped at the first call.
+            self.text_phases.0 = self.text_phases.0.saturating_add(shape_ns);
+            self.text_phases.1 = self
+                .text_phases
+                .1
+                .saturating_add(t_blit.elapsed().as_nanos() as u64);
+        }
+    }
+
+    /// The nanoseconds spent shaping and blitting since this was last called,
+    /// and reset.
+    #[cfg(test)]
+    fn take_text_phases(&mut self) -> (u64, u64) {
+        std::mem::take(&mut self.text_phases)
     }
 
     /// Resolve the client's clip stack and hand the line to the backend.
@@ -8319,6 +8358,20 @@ impl Compositor {
     /// the aggregate frame time cannot say which half to optimize, and the two
     /// halves have completely different fixes (memory bandwidth vs. overdraw).
     #[doc(hidden)]
+    /// The nanoseconds the last composite spent shaping text and blitting
+    /// runs, and reset.
+    ///
+    /// Exists because the 12.1 ms this entry calls "putting glyph masks on the
+    /// screen" was obtained by differencing a frame with text against one
+    /// without, and a difference attributes everything in between to whatever
+    /// the differencer named it. Two measurements have already shown the two
+    /// things that phrase names -- the blit at 5.8 ns a covered pixel and the
+    /// warm mask lookup at 27 ns a glyph -- come to about a fifth of it.
+    #[cfg(test)]
+    fn take_text_phases(&mut self) -> (u64, u64) {
+        self.render_engine.take_text_phases()
+    }
+
     pub fn bench_full_composite_phases(&mut self) -> (u64, u64) {
         self.full_recomposite = true;
         let covered = self.opaque_cover_rects();
@@ -14551,6 +14604,26 @@ mod tests {
             "[compositor-bench] phases (min): background_clear={:.3}ms window_render={:.3}ms",
             cmin as f64 / 1_000_000.0,
             wmin as f64 / 1_000_000.0
+        );
+
+        // The text path, split. The 12.1 ms this entry attributes to "putting
+        // glyph masks on the screen" was a difference between a frame with
+        // text and one without, and a difference attributes everything in
+        // between to whatever it was named. The blit has since measured 5.8 ns
+        // a covered pixel and the warm mask lookup 27 ns a glyph -- about a
+        // fifth of it between them -- so the rest is somewhere in here.
+        comp.take_text_phases();
+        let (mut smin, mut bmin) = (u64::MAX, u64::MAX);
+        for _ in 0..ITERS {
+            comp.bench_full_composite();
+            let (shape_ns, blit_ns) = comp.take_text_phases();
+            smin = smin.min(shape_ns);
+            bmin = bmin.min(blit_ns);
+        }
+        println!(
+            "[compositor-bench] text (min per frame): shape={:.3}ms blit_run={:.3}ms",
+            smin as f64 / 1_000_000.0,
+            bmin as f64 / 1_000_000.0
         );
 
         // Catastrophic-regression guard only (see doc): the current baseline

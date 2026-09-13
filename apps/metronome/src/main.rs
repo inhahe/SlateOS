@@ -230,10 +230,16 @@ struct MetronomeApp {
 
 impl MetronomeApp {
     fn new() -> Self {
-        let sig = COMMON_SIGNATURES[2]; // 4/4
+        // 4/4, and `unwrap_or` rather than an index so a shorter table
+        // cannot panic the constructor. The fallback is the same signature
+        // spelled out, which is what makes it a fallback rather than a lie.
+        let sig = COMMON_SIGNATURES.get(2).copied().unwrap_or(TimeSignature {
+            beats_per_measure: 4,
+            beat_value: 4,
+        });
         let mut accents = vec![false; sig.beats_per_measure as usize];
-        if !accents.is_empty() {
-            accents[0] = true;
+        if let Some(first) = accents.first_mut() {
+            *first = true;
         }
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
@@ -265,7 +271,9 @@ impl MetronomeApp {
             return 1000;
         }
         let sub_div = self.subdivision.subdivisions_per_beat();
-        60_000 / (self.bpm as u64 * sub_div as u64)
+        60_000u64
+            .checked_div(u64::from(self.bpm).saturating_mul(u64::from(sub_div)))
+            .unwrap_or(1000)
     }
 
     fn set_bpm(&mut self, bpm: u32) {
@@ -281,12 +289,15 @@ impl MetronomeApp {
     }
 
     fn set_time_signature(&mut self, idx: usize) {
-        if idx < COMMON_SIGNATURES.len() {
+        // `get` rather than `len()` and an index. The bound is the same one
+        // either way; the difference is that this spelling cannot drift away
+        // from the access it guards, and clippy can see it.
+        if let Some(&sig) = COMMON_SIGNATURES.get(idx) {
             self.sig_index = idx;
-            self.time_signature = COMMON_SIGNATURES[idx];
+            self.time_signature = sig;
             self.accents = vec![false; self.time_signature.beats_per_measure as usize];
-            if !self.accents.is_empty() {
-                self.accents[0] = true;
+            if let Some(first) = self.accents.first_mut() {
+                *first = true;
             }
             self.current_beat = 0;
             self.current_sub = 0;
@@ -294,13 +305,17 @@ impl MetronomeApp {
     }
 
     fn cycle_time_signature(&mut self) {
-        let next = (self.sig_index + 1) % COMMON_SIGNATURES.len();
+        let next = self
+            .sig_index
+            .saturating_add(1)
+            .checked_rem(COMMON_SIGNATURES.len())
+            .unwrap_or(0);
         self.set_time_signature(next);
     }
 
     fn toggle_accent(&mut self, beat: usize) {
-        if beat < self.accents.len() {
-            self.accents[beat] = !self.accents[beat];
+        if let Some(accent) = self.accents.get_mut(beat) {
+            *accent = !*accent;
         }
     }
 
@@ -314,9 +329,19 @@ impl MetronomeApp {
             let intervals: Vec<u64> = self
                 .tap_times_ms
                 .windows(2)
-                .map(|w| w[1].saturating_sub(w[0]))
+                // `windows(2)` yields pairs, so both are always there --
+                // but saying so with `get` costs nothing and means the
+                // compiler is the one keeping the promise.
+                .map(|w| match (w.first(), w.get(1)) {
+                    (Some(&a), Some(&b)) => b.saturating_sub(a),
+                    _ => 0,
+                })
                 .collect();
-            let avg_interval: u64 = intervals.iter().sum::<u64>() / intervals.len() as u64;
+            let avg_interval: u64 = intervals
+                .iter()
+                .sum::<u64>()
+                .checked_div(intervals.len() as u64)
+                .unwrap_or(0);
             if let Some(calculated_bpm) = 60_000u64.checked_div(avg_interval) {
                 self.set_bpm(calculated_bpm as u32);
             }
@@ -419,17 +444,17 @@ impl MetronomeApp {
 
     fn advance_beat(&mut self) {
         let subs = self.subdivision.subdivisions_per_beat();
-        self.current_sub += 1;
+        self.current_sub = self.current_sub.saturating_add(1);
         if self.current_sub >= subs {
             self.current_sub = 0;
-            self.current_beat += 1;
-            self.total_beats += 1;
+            self.current_beat = self.current_beat.saturating_add(1);
+            self.total_beats = self.total_beats.saturating_add(1);
 
             if self.current_beat >= self.time_signature.beats_per_measure {
                 self.current_beat = 0;
                 // Practice mode: increment BPM after N measures
                 if self.practice_mode {
-                    self.practice_measure_count += 1;
+                    self.practice_measure_count = self.practice_measure_count.saturating_add(1);
                     if self.practice_measure_count >= self.practice_measures
                         && self.bpm < self.practice_target_bpm
                     {
@@ -526,7 +551,7 @@ impl MetronomeApp {
                 self.show_settings = false;
             }
             Key::Up if self.practice_mode => {
-                self.practice_target_bpm = (self.practice_target_bpm + 10).min(MAX_BPM);
+                self.practice_target_bpm = self.practice_target_bpm.saturating_add(10).min(MAX_BPM);
             }
             Key::Down if self.practice_mode => {
                 self.practice_target_bpm = self.practice_target_bpm.saturating_sub(10).max(MIN_BPM);
@@ -656,13 +681,12 @@ impl MetronomeApp {
         let beat_y = 215.0;
         let beats = self.time_signature.beats_per_measure;
         let circle_size = 36.0_f32.min(400.0 / beats as f32 - 8.0);
-        let _total_w = beats as f32 * (circle_size + 8.0) - 8.0;
         let start_x = 30.0;
 
         for i in 0..beats {
             let cx = start_x + i as f32 * (circle_size + 8.0);
             let is_current = self.playing && i == self.current_beat && self.current_sub == 0;
-            let is_accented = (i as usize) < self.accents.len() && self.accents[i as usize];
+            let is_accented = self.accents.get(i as usize).copied().unwrap_or(false);
 
             let color = if is_current && self.beat_flash_ms > 0 {
                 if is_accented {
@@ -689,7 +713,7 @@ impl MetronomeApp {
             cmds.push(RenderCommand::Text {
                 x: cx + circle_size / 2.0 - 5.0,
                 y: beat_y + circle_size / 2.0 - 8.0,
-                text: (i + 1).to_string(),
+                text: i.saturating_add(1).to_string(),
                 color: if is_current && self.beat_flash_ms > 0 {
                     self.palette.base
                 } else {
@@ -727,13 +751,17 @@ impl MetronomeApp {
         // Stats
         let stats_y = beat_y + circle_size + 40.0;
         if self.playing {
-            let measure = self.total_beats / self.time_signature.beats_per_measure as u64 + 1;
+            let measure = self
+                .total_beats
+                .checked_div(u64::from(self.time_signature.beats_per_measure))
+                .unwrap_or(0)
+                .saturating_add(1);
             cmds.push(RenderCommand::Text {
                 x: 30.0,
                 y: stats_y,
                 text: format!(
                     "Beat: {}/{}  |  Measure: {}  |  Total beats: {}",
-                    self.current_beat + 1,
+                    self.current_beat.saturating_add(1),
                     self.time_signature.beats_per_measure,
                     measure,
                     self.total_beats
@@ -966,6 +994,16 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    // Panicking on bad data is the point of a test, as CLAUDE.md prescribes.
+    // Production code above has no indexing and no unchecked arithmetic left.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects
+    )]
+
     use guitk::event::Modifiers;
 
     use super::*;

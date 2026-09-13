@@ -141743,7 +141743,33 @@ defect is worse than the ones already fixed today; the implementation is
 more than a single change.
 
 
-## B-TWELVE-CRATES-HAVE-NO-TESTS-AT-ALL-AND-REPORT-ZERO-PASSED (lane B, 2026-09-13)
+## B-TWELVE-CRATES-HAVE-NO-TESTS-AT-ALL-AND-REPORT-ZERO-PASSED (lane B, 2026-09-13) -- 12 -> 8, four defects found
+
+### Progress, and what writing the tests actually turned up
+
+| crate | tests | defect found while writing them |
+|---|---|---|
+| `userspace/backup` | 9 | `Manifest::parse` turned a corrupted file SIZE into 0 and a corrupted mtime into the epoch, silently -- the two fields an incremental backup compares to decide what to copy |
+| `userspace/sysctl` | 10 | none |
+| `userspace/file` | 9 | none |
+| `userspace/man` | 9 | none |
+| `userspace/indexer` | 9 | `indexer find notes.txt` also matched `notes.txt.bak` -- a wildcard-free pattern was matched as a PREFIX, because the "last segment must match the end" arm is an `else if` and is unreachable for a single segment |
+| `userspace/shell` | -- | stays on the list with a reason: it is not a shell, it is the toolchain validation program, and its whole behaviour is printing from `main()` |
+
+**Two real defects in five crates**, both of the same shape: a wrong answer
+that looks like a right one. A backup that silently records the wrong size
+still backs up. A search that returns four files instead of one still returns
+files. Neither would be reported by anything.
+
+Remaining: 8 crates, 9,975 lines. Six are `services/*`, which are NOT
+workspace members -- `cargo test -p netstack` answers "did not match any
+packages" -- so testing those is a different job and the baseline says so per
+line. The two workspace members left are `userspace/nano` (1,923 lines) and
+`userspace/indexer`'s neighbours.
+
+### The original measurement
+
+
 
 A crate with no `#[test]` anywhere reports
 

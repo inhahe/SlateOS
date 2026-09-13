@@ -20,8 +20,6 @@
 //!                               InstallPlan { steps }
 //! ```
 
-#![allow(dead_code)]
-
 pub mod grub;
 
 use std::fmt;

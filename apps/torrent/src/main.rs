@@ -28,7 +28,7 @@
 // bounded widget dimensions. Allow defensive lints file-wide; allow
 // dead_code for the SURFACE2/LAVENDER palette constants kept for theme
 // future-proofing.
-#![allow(clippy::arithmetic_side_effects, clippy::indexing_slicing, dead_code)]
+#![allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 
 use appearance::Edge;
 use appearance::Palette;

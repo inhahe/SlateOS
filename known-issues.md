@@ -129924,6 +129924,54 @@ so. Remove the line from `procexplorer/src/features.rs` and the build
 immediately reports **56** "never used / never constructed" warnings. The lint
 was not wrong; it was turned off.
 
+**Census 2026-09-13, and five of them are now gone.**
+
+The "23 files" above is the count of files carrying *any* crate- or
+module-level allow, not the dead-code ones. Measured properly — by disabling
+each inner `#![allow(...dead_code...)]`, type-checking the crate with
+`--all-targets`, counting what appears, and restoring — there are **17**, and
+they divide sharply:
+
+| | files | items hidden |
+|---|---|---|
+| masking nothing | **5** | 0 |
+| masking something | 12 | **198** |
+
+**The five that masked nothing are removed**, because an allow over nothing is
+pure cost: it silences the lint for everything added to that file afterwards
+and buys not one warning today. `installer/src/lib.rs`, `guitk/src/scaling.rs`
+and `guitk/src/signal.rs` lost the line outright; `rssreader` and `torrent`
+kept the rest of theirs — `clippy::too_many_arguments` in one,
+`arithmetic_side_effects` and `indexing_slicing` in the other — because
+removing an unrelated allow is a different change and would have been smuggled
+in under this one. All four crates: clippy clean, tests pass.
+
+**Where the 198 are**, and the shape of the list is the point:
+
+| items | file |
+|---|---|
+| 68 | `apps/imageviewer/src/video.rs` |
+| 50 | `apps/settings/src/remote.rs` |
+| 39 | `apps/procexplorer/src/features.rs` |
+| 16 | `apps/explorer/src/fileops.rs` |
+| 8 | `apps/explorer/src/columns.rs` |
+| 5 each | `apps/match3`, `apps/pinball` |
+| 3 | `gui/toolkit/src/grid.rs` |
+| 1 each | `explorer/thumbs.rs`, `screenrecorder`, `soundrecorder`, `guitk/pathbar.rs` |
+
+The top three are 157 of the 198 and are C-Q17's subject exactly — the video
+player, the remote-settings page and the window picker are three of the five
+features that entry asks the operator about. They are not this entry's to
+remove. `guitk/src/grid.rs` is the `GridView` nothing constructs, found
+separately the same day.
+
+**A correction to this lane's own first count.** "47 inner allows" was reported
+here an hour before the sweep ran, from `grep -c "#!\[allow"` — which counts
+every crate-level allow of any lint. The real figure is 17. Counting a *shape*
+that resembles the thing rather than the thing itself is the error this file
+records more often than any other, and it does not stop being that when the
+person making it is the one writing the entry.
+
 **Verified, not inferred.** All three crates are pure binaries — no `lib.rs`,
 no `[lib]` — so a public item that nothing references really is unreachable.
 That check matters: `apps/installer/src/grub.rs` looked identical to a

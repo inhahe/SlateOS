@@ -21,7 +21,7 @@
 //! All data is simulated locally (no network required).
 //! Uses the guitk library for rendering.
 
-#![allow(dead_code, clippy::too_many_arguments)]
+#![allow(clippy::too_many_arguments)]
 
 use appearance::Edge;
 use appearance::Palette;

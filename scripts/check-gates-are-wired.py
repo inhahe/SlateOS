@@ -165,7 +165,20 @@ PINNED: dict[str, str] = {
         "requests/c-b-tests-create-real-directories-at-the-drive-root.md; when "
         "that lands, the litter stops appearing and this can be wired as a "
         "cheap guard, or deleted. Until then it is the one command that "
-        "answers >is this red run real<. Decided by lane C 2026-09-13.",
+        "answers >is this red run real<. "
+        "REVIEWED 2026-09-13 (later), and the pin stands for a new reason: the "
+        "repair landed the same day -- lane B fixed logind and udevd, and a "
+        "full workspace run against a cleared root now leaves it clear, 581 "
+        "targets and nothing written. The gate need went with it, met by lane "
+        "B's own check-test-root-writes.py, which is wired into pre-push "
+        "narrowed to the crates a push touches and names the offending crate. "
+        "This one stays unwired because the two answer different questions: "
+        "theirs asks whether THIS PUSH adds a writer, this asks whether THE "
+        "MACHINE is in a state that makes a red run untrustworthy. A second "
+        "gate saying the same thing more weakly is how a tree acquires four "
+        "models of one feature. What makes it worth keeping is that its "
+        "baseline is now empty: a non-empty report is a new writer rather "
+        "than a list to triage past. Decided by lane C 2026-09-13.",
     "check-evdev-elf-asm.py":
         "lane C, and DELIBERATELY unwired: it imports `capstone`, a "
         "third-party disassembler that nothing in this repository declares as "

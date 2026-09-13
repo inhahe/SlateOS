@@ -4148,6 +4148,88 @@ EOF
     exit 1
 fi
 
+# Gate 35 -- scratch-config.  A test that writes settings into the developer's
+# own configuration directory.
+#
+# The bug it exists for did not look like a write at all.
+# `super_space_switches_to_the_next_keyboard_layout` asserted purely on an
+# in-memory field, and the chord it fired saved `input.yaml` two calls further
+# down inside the action handler.  The write landed in the real config dir --
+# and, because `with_scratch_config` swaps the process-wide `XDG_CONFIG_HOME`,
+# in a *neighbouring* test's scratch dir whenever the two overlapped, which is
+# where the intermittent failure came from.
+#
+# WHY HERE AND NOT IN boot-test.sh.  The verdict is empirical: it runs each
+# save-capable crate's tests with the config dir redirected and looks at what
+# appeared.  That costs 105 s over twelve crates, and lane C's block in
+# boot-test.sh is explicitly the place for gates that cost milliseconds and run
+# before a ten-minute build.  Here it can be *narrowed to the crates the push
+# touches*, which is the difference between 105 s and about ten.
+#
+# Narrowing is the whole design and it is worth being explicit about the risk:
+# a gate scoped to what changed cannot see a crate that was already wrong.  The
+# unnarrowed run is the answer to that, and `python scripts/check-scratch-config.py`
+# with no arguments is it -- run it when the tree is quiet, not on every push.
+scratchcfg="${repo_root:-.}/scripts/check-scratch-config.py"
+skip_scratchcfg=0
+# Bypass: ALLOW_SCRATCH_CONFIG=1 git push origin <branch>
+if [ "${ALLOW_SCRATCH_CONFIG:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_SCRATCH_CONFIG=1 set - skipping the scratch-config gate." >&2
+    skip_scratchcfg=1
+fi
+[ -n "$py" ] || skip_scratchcfg=1
+[ -f "$scratchcfg" ] || skip_scratchcfg=1
+touches gui/ apps/ scripts/check-scratch-config.py || skip_scratchcfg=1
+[ -n "${pushed_shas# }" ] || skip_scratchcfg=1
+
+# The crates this push touches, as substrings the checker will match. Empty is
+# not "check everything": it means the push changed no crate directory, and the
+# gate is skipped above by the same `touches` test that produced this list.
+scratchcfg_crates=""
+if [ "$skip_scratchcfg" != "1" ]; then
+    # shellcheck disable=SC2086
+    scratchcfg_crates=$(git diff --name-only $pushed_shas --not --remotes="$remote_name"                             -- gui/ apps/ 2>/dev/null                         | awk -F/ 'NF>2 {print $1 "/" $2}' | sort -u | tr '
+' ' ')
+    [ -n "$scratchcfg_crates" ] || skip_scratchcfg=1
+fi
+note_gate scratch-config "$skip_scratchcfg"
+
+scratchcfg_failed=0
+if [ "$skip_scratchcfg" != "1" ]; then
+    # The checker before its verdict. This one's silent failure is the worst
+    # shape there is: if every crate were skipped for want of a package name,
+    # or the probe directory were never inspected, it would print `ok` over
+    # nothing at all. Both are self-test cases.
+    if ! run_checker scratch-config-selftest "$py" "$scratchcfg" --self-test; then
+        echo "pre-push: check-scratch-config.py FAILED ITS OWN SELF-TEST - its verdict is not trustworthy." >&2
+        scratchcfg_failed=1
+    else
+        # shellcheck disable=SC2086
+        if ! run_checker scratch-config "$py" "$scratchcfg" $scratchcfg_crates; then
+            scratchcfg_failed=1
+        fi
+    fi
+fi
+if [ "$scratchcfg_failed" != "0" ]; then
+    cat >&2 <<EOF
+pre-push: REFUSING to push - a test wrote settings outside a scratch dir.
+It landed in whatever configuration directory the run had, which on a
+developer's machine is their own, and under a parallel run is a
+neighbouring test's scratch dir. That second one is not theoretical: it
+is where BUG-C-THE-KEYBOARD-LAYOUT-TEST-FAILS-ABOUT-ONE-WORKSPACE-RUN-IN-TWO
+came from.
+
+Wrap the test in \`settingsfile::testing::with_scratch_config\`. The test
+does not have to look like it writes -- the one that started this
+asserted on an in-memory field and saved two calls further down.
+
+To push anyway:
+    ALLOW_SCRATCH_CONFIG=1 git push $remote_name ...
+
+EOF
+    exit 1
+fi
+
 if [ "$skip" -eq 0 ] && [ -f "$repo_root/scripts/check-lane-signals.py" ]; then
     if ! "$py" "$repo_root/scripts/check-lane-signals.py" --quiet >&2; then
         echo "" >&2

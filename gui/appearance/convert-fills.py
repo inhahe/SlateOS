@@ -227,6 +227,92 @@ def convert(path: pathlib.Path, apply: bool):
             out.extend(lines[i : j + 1])
             i = j + 1
             continue
+        # --- the geometric refusals ------------------------------------------
+        #
+        # Four defect classes got into the tree before these existed, all found
+        # afterwards by sweeping for a *shape* rather than by reading. Each one
+        # is here so that re-running this tool cannot put them back: without
+        # them the five sites those sweeps repaired are convertible again, and
+        # the next run silently undoes the repair.
+        #
+        # The reason they are geometric and not lexical is worth keeping. This
+        # tool classifies from the words around a site, and the words at every
+        # one of these sites are ordinary English -- "Header", "Divider",
+        # "Full-window background", "Icon background circle". No CHROME or
+        # PANEL pattern will ever match those. What separates them is the
+        # rectangle.
+        x0 = fields.get("x") in ("0.0", "0.0_f32")
+        y0 = fields.get("y") in ("0.0", "0.0_f32")
+        if x0 and y0 and radius in ("0.0", "0.0_f32"):
+            # The page itself, or the strip along its top edge -- never a box
+            # *on* the page. Outlined, a full-window background draws a border
+            # round the display and no background at all: login_screen came up
+            # black. Which of the two it is needs a person, so neither is
+            # guessed here.
+            skipped.append(f"{path.name}:{i+1}  at the origin: a page or a strip, not a card")
+            out.extend(lines[i : j + 1])
+            i = j + 1
+            continue
+        w_t, h_t = fields.get("width"), fields.get("height")
+        if w_t is not None and w_t == h_t and radius is not None:
+            try:
+                side = float(w_t.replace("_f32", ""))
+                rad = float(radius.replace("_f32", ""))
+            except ValueError:
+                side = rad = None
+            if side is not None and abs(rad - side / 2.0) < 0.01:
+                # A circle. Almost always the ground under a graphic drawn on
+                # top of it -- a countdown ring, a status icon -- and the thing
+                # over it is read *against* it. Outlined, the ground goes.
+                skipped.append(f"{path.name}:{i+1}  a disc, which is a ground and not a card")
+                out.extend(lines[i : j + 1])
+                i = j + 1
+                continue
+        if w_t is not None and h_t is not None:
+            try:
+                wv = float(w_t.replace("_f32", ""))
+                hv = float(h_t.replace("_f32", ""))
+            except ValueError:
+                wv = hv = None
+            if wv is not None and wv <= 16.0 and hv <= 16.0:
+                # A swatch, a dot, a legend chip. Too small to read as a
+                # container, and what it says it says by being filled -- a
+                # 10x10 outline is a smudge. partmanager's "Unallocated" key
+                # is the one that reached the tree.
+                skipped.append(f"{path.name}:{i+1}  a swatch: too small to be a container")
+                out.extend(lines[i : j + 1])
+                i = j + 1
+                continue
+
+        # A box that already draws its own outline at the same four
+        # coordinates. Converting it gives two rings, one inside the other, in
+        # two colours. These want `push_paint_radii` with the state's colour
+        # replacing `paint.border` (§836), which is a judgement about whether
+        # that colour is structural or a state, so it is not done here.
+        tail = chr(10).join(lines[j + 1 : j + 16])
+        if "StrokeRect" in tail:
+            m_stroke = re.search(r"StrokeRect \{(.*?)\}", tail, re.S)
+            if m_stroke:
+                body_s = m_stroke.group(1)
+
+                def _f(name: str, b: str = body_s):
+                    pat = r"\b" + name + r":\s*([^," + chr(10) + r"]+),"
+                    mm = re.search(pat, b)
+                    return mm.group(1).strip() if mm else None
+
+                if (
+                    _f("x") == fields.get("x")
+                    and _f("y") == fields.get("y")
+                    and _f("width") == fields.get("width")
+                    and _f("height") == fields.get("height")
+                ):
+                    skipped.append(
+                        f"{path.name}:{i+1}  already outlined here; see §836"
+                    )
+                    out.extend(lines[i : j + 1])
+                    i = j + 1
+                    continue
+
         if SKIP.search(context):
             skipped.append(f"{path.name}:{i+1}  needs a design decision, left as a fill")
             out.extend(lines[i : j + 1])

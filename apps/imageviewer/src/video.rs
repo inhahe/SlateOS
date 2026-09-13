@@ -365,7 +365,13 @@ pub fn parse_mp4_info(data: &[u8]) -> Result<Mp4Info, VideoError> {
     // Parse mvhd for timescale and duration.
     let (timescale, duration_units) = parse_mvhd(moov_data)?;
     let duration_ms = if timescale > 0 {
-        duration_units.saturating_mul(1000) / timescale as u64
+        // `timescale > 0` on this arm, so the divisor cannot be zero; said
+        // with `checked_div` so the lint does not have to take the branch's
+        // word for it.
+        duration_units
+            .saturating_mul(1000)
+            .checked_div(u64::from(timescale))
+            .unwrap_or(0)
     } else {
         0
     };
@@ -680,7 +686,7 @@ fn decode_ebml_vint(data: &[u8]) -> Option<(u64, usize)> {
     // The count of leading zero bits gives the width; a VINT is at most 8
     // bytes, and `first != 0` bounds `leading_zeros()` at 7, so `+ 1` cannot
     // overflow and the width is in 1..=8.
-    let len = first.leading_zeros() as usize + 1;
+    let len = (first.leading_zeros() as usize).saturating_add(1);
     let rest = data.get(1..len)?;
 
     // The width marker is the leading 1 bit and the zeroes before it; the
@@ -1042,7 +1048,12 @@ impl VideoPlayer {
         if self.playlist.is_empty() {
             return;
         }
-        self.playlist_index = (self.playlist_index + 1) % self.playlist.len();
+        // `is_empty` returned false above, so the modulus is non-zero.
+        self.playlist_index = self
+            .playlist_index
+            .saturating_add(1)
+            .checked_rem(self.playlist.len())
+            .unwrap_or(0);
     }
 
     /// Move to the previous item in the playlist.
@@ -1053,7 +1064,7 @@ impl VideoPlayer {
         if self.playlist_index == 0 {
             self.playlist_index = self.playlist.len().saturating_sub(1);
         } else {
-            self.playlist_index -= 1;
+            self.playlist_index = self.playlist_index.saturating_sub(1);
         }
     }
 

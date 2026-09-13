@@ -2089,7 +2089,7 @@ fn render_properties_body(
         PropertiesTab::General => render_general_tab(state, dev, cmds, panel_x, y, panel_width),
         PropertiesTab::Driver => render_driver_tab(state, dev, cmds, panel_x, y, panel_width),
         PropertiesTab::Resources => {
-            render_resources_tab(dev, cmds, panel_x, y, panel_width, &state.palette)
+            render_resources_tab(dev, cmds, panel_x, y, panel_width, &state.palette);
         }
         PropertiesTab::Events => render_events_tab(state, dev, cmds, panel_x, y, panel_width),
     }

@@ -769,7 +769,12 @@ impl ViewerState {
         if self.entries.is_empty() {
             return;
         }
-        self.current_index = (self.current_index + 1) % self.entries.len();
+        // `is_empty` returned false above, so the modulus is non-zero.
+        self.current_index = self
+            .current_index
+            .saturating_add(1)
+            .checked_rem(self.entries.len())
+            .unwrap_or(0);
         self.load_current_entry();
     }
 
@@ -781,7 +786,7 @@ impl ViewerState {
         if self.current_index == 0 {
             self.current_index = self.entries.len().saturating_sub(1);
         } else {
-            self.current_index -= 1;
+            self.current_index = self.current_index.saturating_sub(1);
         }
         self.load_current_entry();
     }
@@ -1631,7 +1636,9 @@ fn render_thumbnail_strip(state: &ViewerState, tree: &mut RenderTree, y: f32) {
     let visible_count = (state.window_width / total_thumb_width) as usize;
     let half_visible = visible_count / 2;
     let start_idx = state.current_index.saturating_sub(half_visible);
-    let end_idx = (start_idx + visible_count).min(state.entries.len());
+    let end_idx = start_idx
+        .saturating_add(visible_count)
+        .min(state.entries.len());
 
     for (rel_idx, abs_idx) in (start_idx..end_idx).enumerate() {
         let thumb_x = (rel_idx as f32) * total_thumb_width + thumb_pad;
@@ -1746,7 +1753,11 @@ fn render_status_bar(state: &ViewerState, tree: &mut RenderTree, y: f32) {
 
     // Image N of M
     if !state.entries.is_empty() {
-        let pos_text = format!("{} / {}", state.current_index + 1, state.entries.len());
+        let pos_text = format!(
+            "{} / {}",
+            state.current_index.saturating_add(1),
+            state.entries.len()
+        );
         tree.push(RenderCommand::Text {
             x: state.window_width - 80.0,
             y: text_y,

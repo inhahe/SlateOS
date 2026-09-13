@@ -5,6 +5,7 @@
 //! common container formats (MP4, MKV, AVI, WebM, MOV) and codecs
 //! (H.264, H.265, VP9, AV1, AAC, Opus, FLAC).
 
+use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::color::Color;
@@ -3030,14 +3031,15 @@ impl VideoPlayerApp {
 
     fn render_tab_bar(&self, cmds: &mut Vec<RenderCommand>) {
         // Tab bar background
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: self.width,
-            height: TAB_BAR_HEIGHT,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            cmds,
+            0.0,
+            0.0,
+            self.width,
+            TAB_BAR_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Bottom),
+        );
 
         // Tab items, from the rectangles the hit test reads.
         for (tab, rect) in self.tab_rects() {
@@ -3248,14 +3250,15 @@ impl VideoPlayerApp {
         let seek_h = SEEK_BAR_HEIGHT;
 
         // Seek track background
-        cmds.push(RenderCommand::FillRect {
-            x: seek_x,
-            y: seek_y,
-            width: seek_w,
-            height: seek_h,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(3.0),
-        });
+        self.palette.push_surface(
+            cmds,
+            seek_x,
+            seek_y,
+            seek_w,
+            seek_h,
+            3.0,
+            Surface::ControlTrack,
+        );
 
         // Buffer progress (slightly ahead of play position)
         let buffer_frac = (self.progress_fraction() + 0.05).min(1.0);

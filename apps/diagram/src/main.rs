@@ -42,6 +42,7 @@
 #![allow(clippy::fn_params_excessive_bools)]
 #![allow(clippy::wildcard_imports)]
 
+use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::Color;
@@ -2086,14 +2087,15 @@ impl DiagramApp {
 
     fn render_toolbar(&self, cmds: &mut Vec<RenderCommand>) {
         // Toolbar background.
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: self.window_w,
-            height: TOOLBAR_HEIGHT,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            cmds,
+            0.0,
+            0.0,
+            self.window_w,
+            TOOLBAR_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Bottom),
+        );
 
         // Separator line.
         cmds.push(RenderCommand::Line {
@@ -2227,14 +2229,15 @@ impl DiagramApp {
         let pal_h = self.window_h - TOOLBAR_HEIGHT - STATUS_BAR_HEIGHT;
 
         // Background.
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: pal_y,
-            width: PALETTE_WIDTH,
-            height: pal_h,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            cmds,
+            0.0,
+            pal_y,
+            PALETTE_WIDTH,
+            pal_h,
+            0.0,
+            Surface::Strip(Edge::Top),
+        );
 
         // Separator.
         cmds.push(RenderCommand::Line {
@@ -3018,14 +3021,15 @@ impl DiagramApp {
         let ph = self.window_h - TOOLBAR_HEIGHT - STATUS_BAR_HEIGHT;
 
         // Background.
-        cmds.push(RenderCommand::FillRect {
-            x: px,
-            y: py,
-            width: PROPERTIES_WIDTH,
-            height: ph,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            cmds,
+            px,
+            py,
+            PROPERTIES_WIDTH,
+            ph,
+            0.0,
+            Surface::Strip(Edge::Top),
+        );
 
         // Separator.
         cmds.push(RenderCommand::Line {
@@ -3267,14 +3271,15 @@ impl DiagramApp {
     fn render_status_bar(&self, cmds: &mut Vec<RenderCommand>) {
         let sy = self.window_h - STATUS_BAR_HEIGHT;
 
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: sy,
-            width: self.window_w,
-            height: STATUS_BAR_HEIGHT,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            cmds,
+            0.0,
+            sy,
+            self.window_w,
+            STATUS_BAR_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Top),
+        );
 
         // Separator.
         cmds.push(RenderCommand::Line {

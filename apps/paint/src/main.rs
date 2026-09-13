@@ -20,6 +20,7 @@
 //!
 //! Uses the guitk library for UI rendering.
 
+use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::canvas::Canvas;
@@ -2837,14 +2838,15 @@ impl PaintApp {
     /// Renders the top option bar (tool options, shape mode, zoom).
     fn render_option_bar(&self, cmds: &mut Vec<RenderCommand>) {
         // Background
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: self.window_width,
-            height: OPTION_BAR_HEIGHT,
-            color: self.theme.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.theme.push_surface(
+            cmds,
+            0.0,
+            0.0,
+            self.window_width,
+            OPTION_BAR_HEIGHT,
+            0.0,
+            Surface::Card,
+        );
 
         // Bottom border
         cmds.push(RenderCommand::Line {
@@ -3519,14 +3521,15 @@ impl PaintApp {
         let ph = self.window_height - OPTION_BAR_HEIGHT - STATUS_BAR_HEIGHT;
 
         // Background
-        cmds.push(RenderCommand::FillRect {
-            x: px,
-            y: py,
-            width: LAYERS_PANEL_WIDTH,
-            height: ph,
-            color: self.theme.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.theme.push_surface(
+            cmds,
+            px,
+            py,
+            LAYERS_PANEL_WIDTH,
+            ph,
+            0.0,
+            Surface::Strip(Edge::Top),
+        );
 
         // Left border
         cmds.push(RenderCommand::Line {
@@ -3658,14 +3661,15 @@ impl PaintApp {
         let sy = self.window_height - STATUS_BAR_HEIGHT;
 
         // Background
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: sy,
-            width: self.window_width,
-            height: STATUS_BAR_HEIGHT,
-            color: self.theme.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.theme.push_surface(
+            cmds,
+            0.0,
+            sy,
+            self.window_width,
+            STATUS_BAR_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Top),
+        );
 
         // Top border
         cmds.push(RenderCommand::Line {

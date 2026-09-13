@@ -19,6 +19,7 @@
 //! - Import/export (simple text format)
 //! - Three sample decks pre-loaded
 
+use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::color::Color;
@@ -1527,14 +1528,15 @@ impl FlashcardsApp {
     }
 
     fn render_header(&self, cmds: &mut Vec<RenderCommand>) {
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: self.width,
-            height: Self::HEADER_H,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            cmds,
+            0.0,
+            0.0,
+            self.width,
+            Self::HEADER_H,
+            0.0,
+            Surface::Strip(Edge::Top),
+        );
 
         cmds.push(RenderCommand::Text {
             x: Self::PADDING,
@@ -1591,14 +1593,15 @@ impl FlashcardsApp {
 
     fn render_status_bar(&self, cmds: &mut Vec<RenderCommand>) {
         let y = self.height - Self::STATUS_H;
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
+        self.palette.push_surface(
+            cmds,
+            0.0,
             y,
-            width: self.width,
-            height: Self::STATUS_H,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::ZERO,
-        });
+            self.width,
+            Self::STATUS_H,
+            0.0,
+            Surface::Strip(Edge::Top),
+        );
         cmds.push(RenderCommand::Text {
             x: Self::PADDING,
             y: y + 7.0,

@@ -35,6 +35,7 @@
 #![allow(clippy::match_same_arms)]
 #![allow(clippy::cognitive_complexity)]
 
+use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::Color;
@@ -2676,14 +2677,15 @@ impl Multiplexer {
     #[allow(clippy::unused_self)] // kept as method for symmetry with other render_* dispatch
     fn render_tab_bar(&self, cmds: &mut Vec<RenderCommand>, session: &Session) {
         // Tab bar background
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: self.window_width,
-            height: TAB_BAR_HEIGHT,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            cmds,
+            0.0,
+            0.0,
+            self.window_width,
+            TAB_BAR_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Bottom),
+        );
 
         let mut tab_x = PADDING;
         for (i, window) in session.windows.iter().enumerate() {
@@ -3255,14 +3257,15 @@ impl Multiplexer {
     fn render_command_input(&self, cmds: &mut Vec<RenderCommand>) {
         let y = self.window_height - STATUS_BAR_HEIGHT;
         // Overwrite status bar with command input
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
+        self.palette.push_surface(
+            cmds,
+            0.0,
             y,
-            width: self.window_width,
-            height: STATUS_BAR_HEIGHT,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+            self.window_width,
+            STATUS_BAR_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Top),
+        );
         cmds.push(RenderCommand::Text {
             x: PADDING,
             y: y + 4.0,

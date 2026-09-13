@@ -22,6 +22,7 @@
 
 mod backend;
 
+use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::color::Color;
@@ -1684,14 +1685,15 @@ pub fn toolbar_enabled(state: &AppState, action: ToolbarAction) -> bool {
 /// Render the toolbar.
 pub fn render_toolbar(state: &AppState, frame: &mut Frame, y_offset: f32, width: f32) -> f32 {
     // Background
-    frame.push(RenderCommand::FillRect {
-        x: 0.0,
-        y: y_offset,
+    state.palette.push_surface(
+        frame,
+        0.0,
+        y_offset,
         width,
-        height: TOOLBAR_H,
-        color: state.palette.surface0,
-        corner_radii: CornerRadii::ZERO,
-    });
+        TOOLBAR_H,
+        0.0,
+        Surface::Strip(Edge::Bottom),
+    );
 
     let mut x = 8.0;
     let btn_y = y_offset + (TOOLBAR_H - TOOLBAR_BUTTON_H) / 2.0;
@@ -1754,14 +1756,15 @@ pub fn render_toolbar(state: &AppState, frame: &mut Frame, y_offset: f32, width:
 
 /// Render the address/path bar.
 pub fn render_path_bar(state: &AppState, frame: &mut Frame, y_offset: f32, width: f32) -> f32 {
-    frame.push(RenderCommand::FillRect {
-        x: 0.0,
-        y: y_offset,
+    state.palette.push_surface(
+        frame,
+        0.0,
+        y_offset,
         width,
-        height: PATH_BAR_H,
-        color: state.palette.mantle,
-        corner_radii: CornerRadii::ZERO,
-    });
+        PATH_BAR_H,
+        0.0,
+        Surface::Strip(Edge::Bottom),
+    );
 
     // Back / Forward / Up buttons
     let nav_btns = [
@@ -2377,14 +2380,15 @@ pub fn render_progress_bar(
 
 /// Render the status bar.
 pub fn render_status_bar(state: &AppState, frame: &mut Frame, y: f32, width: f32) -> f32 {
-    frame.push(RenderCommand::FillRect {
-        x: 0.0,
+    state.palette.push_surface(
+        frame,
+        0.0,
         y,
         width,
-        height: STATUS_H,
-        color: state.palette.mantle,
-        corner_radii: CornerRadii::ZERO,
-    });
+        STATUS_H,
+        0.0,
+        Surface::Strip(Edge::Top),
+    );
 
     // Top separator.
     frame.push(RenderCommand::Line {

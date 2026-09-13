@@ -20,6 +20,7 @@
 //! StartupUI       -- guitk-based GUI with table, toolbar, details panel
 //! ```
 
+use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use std::collections::BTreeMap;
@@ -2137,14 +2138,15 @@ impl StartupUI {
 
     fn draw_toolbar(&self, frame: &mut Frame, l: &Layout) {
         if !l.toolbar.is_empty() {
-            frame.push(RenderCommand::FillRect {
-                x: l.toolbar.x,
-                y: l.toolbar.y,
-                width: l.toolbar.w,
-                height: l.toolbar.h,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::ZERO,
-            });
+            self.palette.push_surface(
+                frame,
+                l.toolbar.x,
+                l.toolbar.y,
+                l.toolbar.w,
+                l.toolbar.h,
+                0.0,
+                Surface::Strip(Edge::Bottom),
+            );
         }
         for (rect, action) in l.buttons.iter().zip(ToolbarAction::all()) {
             Self::draw_button(

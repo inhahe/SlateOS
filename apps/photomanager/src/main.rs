@@ -36,6 +36,7 @@
 #![allow(clippy::unreadable_literal)]
 #![allow(clippy::doc_markdown)]
 
+use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::Color;
@@ -2681,14 +2682,15 @@ impl PhotoApp {
 
     fn render_toolbar(&self, cmds: &mut Vec<RenderCommand>, width: f32) {
         // Background
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
+        self.palette.push_surface(
+            cmds,
+            0.0,
+            0.0,
             width,
-            height: TOOLBAR_HEIGHT,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::ZERO,
-        });
+            TOOLBAR_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Bottom),
+        );
 
         // App title
         cmds.push(RenderCommand::Text {
@@ -2755,14 +2757,15 @@ impl PhotoApp {
         // Sort button
         let sort_label = format!("Sort: {}", self.sort_order.label());
         let sort_x = rect_of(ToolbarControl::Sort).x;
-        cmds.push(RenderCommand::FillRect {
-            x: sort_x,
-            y: 8.0,
-            width: 110.0,
-            height: 24.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
+        self.palette.push_surface(
+            cmds,
+            sort_x,
+            8.0,
+            110.0,
+            24.0,
+            CORNER_RADIUS,
+            Surface::Strip(Edge::Bottom),
+        );
         cmds.push(RenderCommand::Text {
             x: sort_x + 8.0,
             y: 14.0,
@@ -2865,14 +2868,15 @@ impl PhotoApp {
     fn render_status_bar(&self, cmds: &mut Vec<RenderCommand>, width: f32, height: f32) {
         let bar_y = height - STATUS_BAR_HEIGHT;
 
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: bar_y,
+        self.palette.push_surface(
+            cmds,
+            0.0,
+            bar_y,
             width,
-            height: STATUS_BAR_HEIGHT,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::ZERO,
-        });
+            STATUS_BAR_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Top),
+        );
 
         cmds.push(RenderCommand::Line {
             x1: 0.0,

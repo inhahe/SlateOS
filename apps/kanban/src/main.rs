@@ -4,6 +4,7 @@
 //! columns, rich cards (labels, priority, due dates, checklists, comments),
 //! filtering, sorting, WIP limits, swimlanes, archiving, and JSON export/import.
 
+use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::color::Color;
@@ -1257,14 +1258,15 @@ fn render_toolbar(tree: &mut RenderTree, app: &KanbanApp, width: f32) {
     let toolbar_h: f32 = 40.0;
 
     // Background
-    tree.push(RenderCommand::FillRect {
-        x: 0.0,
-        y: 0.0,
+    app.palette.push_surface(
+        tree,
+        0.0,
+        0.0,
         width,
-        height: toolbar_h,
-        color: app.palette.mantle,
-        corner_radii: CornerRadii::ZERO,
-    });
+        toolbar_h,
+        0.0,
+        Surface::Strip(Edge::Bottom),
+    );
 
     // App title
     tree.push(RenderCommand::Text {
@@ -1432,14 +1434,8 @@ fn render_filter_bar(tree: &mut RenderTree, app: &KanbanApp, width: f32, y_offse
 
     let bar_h: f32 = 36.0;
 
-    tree.push(RenderCommand::FillRect {
-        x: 0.0,
-        y: y_offset,
-        width,
-        height: bar_h,
-        color: app.palette.crust,
-        corner_radii: CornerRadii::ZERO,
-    });
+    app.palette
+        .push_surface(tree, 0.0, y_offset, width, bar_h, 0.0, Surface::Card);
 
     // Search icon area
     tree.push(RenderCommand::Text {

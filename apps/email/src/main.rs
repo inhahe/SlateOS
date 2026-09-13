@@ -27,6 +27,7 @@
 #![allow(clippy::struct_excessive_bools)]
 #![allow(clippy::similar_names)]
 
+use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use std::collections::BTreeMap;
@@ -2570,14 +2571,15 @@ impl EmailApp {
 
         // Toolbar
         let ty = header_h;
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: ty,
+        self.palette.push_surface(
+            &mut cmds,
+            0.0,
+            ty,
             width,
-            height: toolbar_h,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::ZERO,
-        });
+            toolbar_h,
+            0.0,
+            Surface::Strip(Edge::Bottom),
+        );
         let buttons = ["Compose", "Reply", "Forward", "Delete", "Archive", "Spam"];
         let mut bx = 16.0;
         for label in &buttons {

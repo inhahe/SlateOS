@@ -15,6 +15,7 @@
 //!
 //! Uses the guitk library for UI rendering.
 
+use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::color::Color;
@@ -2160,14 +2161,15 @@ impl WhiteboardApp {
 
     fn render_top_bar(&self, cmds: &mut Vec<RenderCommand>) {
         // Background
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: self.win_width,
-            height: TOP_BAR_HEIGHT,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            cmds,
+            0.0,
+            0.0,
+            self.win_width,
+            TOP_BAR_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Bottom),
+        );
 
         // Title
         cmds.push(RenderCommand::Text {
@@ -2312,14 +2314,15 @@ impl WhiteboardApp {
 
     fn render_page_tabs(&self, cmds: &mut Vec<RenderCommand>) {
         let y = TOP_BAR_HEIGHT;
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
+        self.palette.push_surface(
+            cmds,
+            0.0,
             y,
-            width: self.win_width,
-            height: PAGE_TAB_HEIGHT,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+            self.win_width,
+            PAGE_TAB_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Bottom),
+        );
 
         let tabs = self.page_tabs();
         let mut tx = TOOLBAR_WIDTH + 4.0;
@@ -2928,14 +2931,15 @@ impl WhiteboardApp {
         let panel_h = self.win_height - panel_y - STATUS_BAR_HEIGHT;
 
         // Background
-        cmds.push(RenderCommand::FillRect {
-            x: panel_x,
-            y: panel_y,
-            width: RIGHT_PANEL_WIDTH,
-            height: panel_h,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            cmds,
+            panel_x,
+            panel_y,
+            RIGHT_PANEL_WIDTH,
+            panel_h,
+            0.0,
+            Surface::Strip(Edge::Top),
+        );
 
         // Title
         cmds.push(RenderCommand::Text {
@@ -3071,14 +3075,15 @@ impl WhiteboardApp {
     fn render_status_bar(&self, cmds: &mut Vec<RenderCommand>) {
         let y = self.win_height - STATUS_BAR_HEIGHT;
 
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
+        self.palette.push_surface(
+            cmds,
+            0.0,
             y,
-            width: self.win_width,
-            height: STATUS_BAR_HEIGHT,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+            self.win_width,
+            STATUS_BAR_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Top),
+        );
 
         // Top border
         cmds.push(RenderCommand::Line {

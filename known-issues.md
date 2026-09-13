@@ -13270,6 +13270,21 @@ is the property the fix exists for. A boot with the fix reverted would look
 exactly as green: every existing netstack self-test uses one connection at a
 time, so none of them can tell the two states apart.
 
+**Scoping note, so the next attempt does not start in the wrong place.** The
+obvious base is `netstack_client::self_test_listen_accept`, which already does
+listen -> connect -> accept -> echo over loopback. It is the wrong base: it
+drives `NetstackConn` directly, and the head-of-line block is not there. The
+lock is `socket.rs`'s `with_stream_conn` over `SessionRef::Shared`, which only
+the fd layer (`net::socket::{create,listen,accept,recv}`) goes through. A test
+built on `NetstackConn` would bypass the mutex it exists to exercise and pass
+whether or not the fix is present -- the same trap as a marker that names a
+neighbour's banner.
+
+It also needs `sched::spawn` for the second task, and a **deadline** on the
+second read: under the old code that read never returns, and a self-test that
+hangs the boot converts a clear regression into a 2400 s timeout with no
+diagnosis. Fail on the deadline, do not wait on it.
+
 What a real witness needs: a listener, two accepted connections, one of them
 with no data pending, and an assertion that a read on the *other* completes.
 That needs two tasks -- sequentially there is nothing to observe, because a

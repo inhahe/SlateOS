@@ -44,6 +44,10 @@ const SECURETTY_FILE: &str = "/etc/securetty";
 /// `PATH` in play at this point is the one being built for the *user's*
 /// session, and resolving a privileged helper through a variable is how a
 /// program ends up running whatever was first on it.
+// Reachable only from `main`, which the test harness replaces, so this is dead
+// in the test build and live in the real one. Scoped to `test` rather than
+// allowed outright, so a genuinely dead item here is still reported.
+#[cfg_attr(test, allow(dead_code))]
 const PASSWD_COMMAND: &str = "/usr/bin/passwd";
 // `PASSWD_FILE` and `SHADOW_FILE` stood here. The account comes from
 // `userdb::DEFAULT_PATH` now: §353 makes those two files generated from it, so
@@ -53,6 +57,11 @@ const PASSWD_COMMAND: &str = "/usr/bin/passwd";
 const LASTLOG_FILE: &str = "/var/log/lastlog";
 const FAILLOG_FILE: &str = "/var/log/faillog";
 const MAIL_DIR: &str = "/var/mail";
+/// logind's name on the service bus, as `bus::SERVICE_NAME` declares it.
+const LOGIND_SERVICE: &str = "system.logind";
+
+// Login vocabulary not reachable in this build: there is no /etc/issue
+// rendering yet. Kept as the shape of the feature.
 #[allow(dead_code)]
 const ISSUE_FILE: &str = "/etc/issue";
 const HUSHLOGIN_FILE: &str = ".hushlogin";
@@ -851,6 +860,7 @@ fn do_login(
 // Help / version
 // ---------------------------------------------------------------------------
 
+#[cfg_attr(test, allow(dead_code))]
 fn print_help() {
     println!("Usage: login [-f] [-h hostname] [-p] [--] [username]");
     println!();
@@ -865,6 +875,7 @@ fn print_help() {
     println!("  --version      Show version");
 }
 
+#[cfg_attr(test, allow(dead_code))]
 fn print_version() {
     println!("login (Slate OS) 0.1.0");
 }
@@ -937,6 +948,7 @@ fn build_login_command(
 /// could start at all -- the shell being missing, say, which the first attempt
 /// would have reported as a directory problem. If the retry succeeds there was
 /// nothing to report. Same reasoning as `userspace/sshd`'s `spawn_session`.
+#[cfg_attr(test, allow(dead_code))]
 fn spawn_login_shell(
     user: &PasswdEntry,
     env_map: &HashMap<OsString, OsString>,
@@ -979,6 +991,7 @@ fn spawn_login_shell(
 /// not yet honoured here, the symptom is specific and worth recognising --
 /// every account with an expired password is refused with "password change
 /// failed" rather than being let in with a warning.
+#[cfg_attr(test, allow(dead_code))]
 fn force_password_change(user: &PasswdEntry) -> bool {
     let mut cmd = process::Command::new(PASSWD_COMMAND);
     cmd.arg(&user.username);
@@ -1010,8 +1023,98 @@ fn force_password_change(user: &PasswdEntry) -> bool {
 /// process-group handling later needs the shell to *be* the login process, the
 /// change is to exec after the directory has been settled, which is a
 /// different shape from what is written here.
+/// Register this login with `logind`, returning the session id it minted.
+///
+/// **Best effort, and deliberately so.** A machine whose session manager is
+/// absent, crashed, or simply not built for this target must still let people
+/// log in -- refusing the login would turn a bookkeeping outage into a
+/// lockout. That is also what `pam_systemd` does, for the same reason.
+///
+/// It is *not* silent, though. A session that was not registered means
+/// `loginctl` will not list this user, `TerminateSession` cannot reach them,
+/// and no seat is attached; saying nothing would be the "silently ignore"
+/// shape this tree has spent the day removing. So the failure is named on
+/// stderr and the login proceeds.
+///
+/// On a development host `Connection::connect` returns ENOSYS -- the syscall
+/// layer is gated on `target_vendor = "slateos"` -- so this reports once and
+/// costs nothing else.
+fn register_with_logind(user: &PasswdEntry, tty: Option<&str>) -> Option<String> {
+    // No UTF-8 guard here, and that is not an omission: this program's own
+    // `PasswdEntry.username` is already a `String`, so a name that is not
+    // UTF-8 has been rejected or transformed well before this point. logind
+    // types its side as `str` too. The byte-level question is real -- a name
+    // may hold any byte but `/` and NUL -- but it belongs upstream in the
+    // account store, not in a bus call that has only a `String` to send.
+    let name = user.username.as_str();
+
+    let mut conn = match libservicebus::Connection::connect(LOGIND_SERVICE) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("login: no session registered: cannot reach {LOGIND_SERVICE}: {e:?}");
+            return None;
+        }
+    };
+
+    // Twelve fields in the order `CreateSession` documents: uid, user, type,
+    // class, seat, vtnr, tty, remote, remote-host, service, desktop,
+    // leader-pid.
+    //
+    // `leader_pid` is this process and not the shell's: `run_session` spawns
+    // and waits rather than exec-ing, so `login` outlives the shell and is
+    // the process whose lifetime actually matches the session's.
+    let uid = user.uid.to_string();
+    let pid = std::process::id().to_string();
+    let tty = tty.unwrap_or("");
+    let payload = libservicebus::fields::encode(&[
+        uid.as_bytes(),
+        name.as_bytes(),
+        b"tty",
+        b"user",
+        b"",
+        b"0",
+        tty.as_bytes(),
+        b"0",
+        b"",
+        b"login",
+        b"",
+        pid.as_bytes(),
+    ]);
+
+    match conn.call("CreateSession", &payload) {
+        Ok(reply) => libservicebus::fields::decode_exact(&reply.payload, 1)
+            .and_then(|f| f.first().and_then(|b| core::str::from_utf8(b).ok()))
+            .map(ToOwned::to_owned),
+        Err(e) => {
+            eprintln!("login: no session registered: CreateSession failed: {e:?}");
+            None
+        }
+    }
+}
+
+/// Tell `logind` the session is over.
+///
+/// Without this a session is registered and never removed, so `loginctl`
+/// would accumulate one entry per login for the machine's uptime and report
+/// users who left hours ago as present -- which is a fabricated reading, and
+/// a worse outcome than not registering at all.
+fn release_from_logind(session_id: &str) {
+    let Ok(mut conn) = libservicebus::Connection::connect(LOGIND_SERVICE) else {
+        eprintln!("login: session {session_id} left registered: cannot reach {LOGIND_SERVICE}");
+        return;
+    };
+    let payload = libservicebus::fields::encode(&[session_id.as_bytes()]);
+    if let Err(e) = conn.call("TerminateSession", &payload) {
+        eprintln!("login: session {session_id} left registered: {e:?}");
+    }
+}
+
+#[cfg_attr(test, allow(dead_code))]
 fn run_session(user: &PasswdEntry, env_map: &HashMap<OsString, OsString>) -> i32 {
-    match spawn_login_shell(user, env_map) {
+    // Registered before the shell starts and released after it exits, so the
+    // session exists for exactly as long as the user does.
+    let session = register_with_logind(user, controlling_tty().as_deref());
+    let code = match spawn_login_shell(user, env_map) {
         Ok(mut child) => match child.wait() {
             Ok(status) => status.code().unwrap_or(1),
             Err(e) => {
@@ -1026,7 +1129,15 @@ fn run_session(user: &PasswdEntry, env_map: &HashMap<OsString, OsString>) -> i32
             );
             1
         }
+    };
+
+    // On every path out, including the one where the shell never started:
+    // a registered session whose shell failed to launch is still a session
+    // nobody is in.
+    if let Some(id) = session {
+        release_from_logind(&id);
     }
+    code
 }
 
 // ---------------------------------------------------------------------------
@@ -1113,6 +1224,34 @@ mod tests {
     }
 
     /// The shell that runs is the one the account names.
+    /// Login survives logind being unreachable.
+    ///
+    /// This is the property that matters about the registration: a machine
+    /// whose session manager is absent must still let people in. On any
+    /// target that is not `slateos` the bus syscalls return ENOSYS, so this
+    /// exercises the whole failure path -- connect fails, the caller is told
+    /// on stderr, and `None` comes back instead of a panic, a hang, or a
+    /// plausible-looking session id.
+    #[cfg(not(target_vendor = "slateos"))]
+    #[test]
+    fn an_unreachable_logind_does_not_stop_a_login() {
+        let user = PasswdEntry {
+            username: "alice".to_string(),
+            uid: 1000,
+            gid: 1000,
+            gecos: String::new(),
+            home_dir: PathBuf::from("/home/alice"),
+            shell: PathBuf::from("/bin/sh"),
+        };
+        assert_eq!(register_with_logind(&user, Some("tty3")), None);
+        assert_eq!(register_with_logind(&user, None), None);
+
+        // And releasing a session id that was never registered is a no-op
+        // rather than a panic: `run_session` only calls it when registration
+        // succeeded, but a future caller should not have to know that.
+        release_from_logind("7");
+    }
+
     #[test]
     fn the_session_runs_the_accounts_own_shell() {
         let env_map = HashMap::new();

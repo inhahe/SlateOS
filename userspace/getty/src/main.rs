@@ -494,6 +494,10 @@ fn tty_short_name(port: &str) -> &str {
 // Help and version
 // ---------------------------------------------------------------------------
 
+// Reachable only from `main`, which the test harness replaces, so this is dead
+// in the test build and live in the real one. Scoped to `test` rather than
+// allowed outright, so a genuinely dead item here is still reported.
+#[cfg_attr(test, allow(dead_code))]
 fn print_help(personality: Personality) {
     match personality {
         Personality::Getty => {
@@ -545,6 +549,7 @@ fn print_help(personality: Personality) {
     }
 }
 
+#[cfg_attr(test, allow(dead_code))]
 fn print_version(personality: Personality) {
     let name = match personality {
         Personality::Getty => "getty (agetty)",
@@ -745,6 +750,7 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
 /// through `arg0` rather than dropped, because `login(1)` is one of the
 /// programs that reads its own argv[0] -- a leading `-` is how a login shell
 /// is told it is one.
+#[cfg_attr(test, allow(dead_code))]
 fn exec_login(program: &Path, args: &[String]) -> i32 {
     let mut cmd = process::Command::new(program);
     if let Some((argv0, rest)) = args.split_first() {

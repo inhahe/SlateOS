@@ -14,6 +14,12 @@
     clippy::missing_safety_doc,
     clippy::not_unsafe_ptr_arg_deref,
     non_camel_case_types,
+    // `_Unwind_Backtrace` and friends are C ABI names fixed by the
+    // unwinder interface, not ours to rename. `#[no_mangle]` used to
+    // exempt them from this lint implicitly; now that the attribute is
+    // `cfg_attr(target_os = "none", ...)` the host build has no
+    // `no_mangle` and the exemption has to be stated.
+    non_snake_case,
     clippy::all,
     clippy::pedantic
 )]
@@ -38,7 +44,7 @@ const URC_END_OF_STACK: i32 = 5;
 
 /// Walk the call stack, invoking `callback` for each frame.
 /// Stub: immediately returns "end of stack" (no frames available).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn _Unwind_Backtrace(
     _callback: extern "C" fn(*mut _Unwind_Context, *mut c_void) -> i32,
     _data: *mut c_void,
@@ -48,21 +54,21 @@ pub extern "C" fn _Unwind_Backtrace(
 
 /// Get the instruction pointer from an unwind context.
 /// Stub: returns 0 (unknown address).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn _Unwind_GetIP(_context: *mut _Unwind_Context) -> usize {
     0
 }
 
 /// Find the start address of the function enclosing the given IP.
 /// Stub: returns 0 (unknown — disables symbol_address in backtrace).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn _Unwind_FindEnclosingFunction(_pc: *mut c_void) -> *mut c_void {
     core::ptr::null_mut()
 }
 
 /// Get the canonical frame address from an unwind context.
 /// Stub: returns 0 (unknown).
-#[unsafe(no_mangle)]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn _Unwind_GetCFA(_context: *mut _Unwind_Context) -> usize {
     0
 }
@@ -123,5 +129,62 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
         unsafe {
             core::arch::asm!("hlt", options(nomem, nostack));
         }
+    }
+}
+
+// -----------------------------------------------------------------------
+// Tests
+//
+// This crate had none, and the untested-crates gate could not see that
+// because its roots came from CLAUDE.md's lane table, which does not mention
+// `toolchain`. What is left here is four stubs returning constants, and three
+// of those constants are load-bearing rather than arbitrary: they are the
+// values std's backtrace code reads to decide there is nothing to print.
+// -----------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    static CALLED: AtomicBool = AtomicBool::new(false);
+
+    extern "C" fn record(_ctx: *mut _Unwind_Context, _data: *mut c_void) -> i32 {
+        CALLED.store(true, Ordering::SeqCst);
+        0
+    }
+
+    #[test]
+    fn backtrace_reports_end_of_stack_not_success() {
+        // 5 is `_URC_END_OF_STACK`; 0 is `_URC_NO_REASON`. The difference is
+        // whether std's walker learns the walk is OVER. Returning 0 would say
+        // "nothing went wrong" without saying "there is nothing more", which
+        // is not the same answer and is the plausible-looking simplification.
+        assert_eq!(_Unwind_Backtrace(record, core::ptr::null_mut()), 5);
+        assert_eq!(URC_END_OF_STACK, 5);
+    }
+
+    #[test]
+    fn backtrace_never_invokes_the_callback() {
+        // The contract that keeps the other three stubs safe. They are
+        // documented as never dereferencing their context, and they are only
+        // ever reached through a callback -- so a version that DID invoke it
+        // would hand std a null context and get an address of 0 back for
+        // every frame, which prints a backtrace of zeroes rather than none.
+        CALLED.store(false, Ordering::SeqCst);
+        let _ = _Unwind_Backtrace(record, core::ptr::null_mut());
+        assert!(
+            !CALLED.load(Ordering::SeqCst),
+            "the stub invoked the callback; there are no frames to report"
+        );
+    }
+
+    #[test]
+    fn the_address_queries_answer_unknown_rather_than_a_plausible_address() {
+        // 0 and NULL are what std reads as "no symbol". Any other value would
+        // be a fabricated address that a symboliser would try to resolve.
+        assert_eq!(_Unwind_GetIP(core::ptr::null_mut()), 0);
+        assert_eq!(_Unwind_GetCFA(core::ptr::null_mut()), 0);
+        assert!(_Unwind_FindEnclosingFunction(core::ptr::null_mut()).is_null());
     }
 }

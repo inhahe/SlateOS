@@ -40,7 +40,19 @@ NL = chr(10)
 
 # Lane B's trees. A crate outside these belongs to another lane, and a gate
 # scoped wider than its owner can fix blocks people who cannot act on it.
-ROOTS = ("userspace", "services", "init", "posix")
+#
+# `toolchain` IS one of them, and was missing here until 2026-09-13. This list
+# came from CLAUDE.md's lane table -- `posix/**, userspace/**, services/**,
+# init/**` -- which is a shorthand that does not mention `toolchain/stubs`,
+# although the fuller ownership list does. The result: `toolchain/stubs` had
+# zero tests and this gate could not see it, while
+# `check-pinned-target-build.py`, written a day later, scanned all five. Two
+# gates of mine disagreeing about my own lane's scope is how a crate hides.
+#
+# MUST MATCH `SEARCH_ROOTS` in `scripts/check-pinned-target-build.py`. Each
+# self-test asserts its own tuple against this literal, so editing one without
+# the other fails immediately rather than silently narrowing coverage.
+ROOTS = ("userspace", "services", "init", "posix", "toolchain")
 
 BASELINE = os.path.join(ROOT, "scripts", "untested-crates-baseline.txt")
 
@@ -286,6 +298,12 @@ def selftest():
         write_baseline(tmp, [], globs)
         ck(read_baseline_from(tmp) == {},
            "a crate no longer untested must not linger in the baseline")
+
+    # The roots, because getting them wrong is how toolchain/stubs stayed
+    # invisible. Must match SEARCH_ROOTS in check-pinned-target-build.py.
+    ck(sorted(ROOTS) == ["init", "posix", "services", "toolchain", "userspace"],
+       "roots are " + repr(ROOTS) + " -- they must match "
+       "check-pinned-target-build.py's SEARCH_ROOTS")
 
     print("selftest: " + str(checks - bad) + "/" + str(checks) + " cases pass")
     return 1 if bad else 0

@@ -8,6 +8,7 @@
 
 #![deny(clippy::all)]
 
+use quoting::quoteaf_os;
 use std::env;
 use std::fs;
 use std::io::{self, Seek, SeekFrom, Write};
@@ -325,7 +326,7 @@ fn cmd_wipefs(args: &[String]) {
         let mut sigs = match detect_signatures(Path::new(device)) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("wipefs: {device}: {e}");
+                eprintln!("wipefs: {}: {e}", quoteaf_os(device));
                 status = 1;
                 continue;
             }
@@ -388,8 +389,10 @@ fn cmd_wipefs(args: &[String]) {
                     }
                     Err(e) => {
                         eprintln!(
-                            "wipefs: {device}: cannot wipe {} at offset {:#x}: {e}",
-                            sig.name, sig.offset
+                            "wipefs: {}: cannot wipe {} at offset {:#x}: {e}",
+                            quoteaf_os(device),
+                            sig.name,
+                            sig.offset
                         );
                         status = 1;
                     }

@@ -4,3 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS wipefs utility"
 [dependencies]
+# For quoting device names in diagnostics: a path may contain spaces and
+# newlines, and an unquoted one makes the message ambiguous about where the
+# name ends. Enforced by scripts/quote-names.py.
+quoting = { path = "../quoting" }

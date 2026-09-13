@@ -70745,10 +70745,39 @@ It is green. `cargo test --workspace` is not.
    invisible, because a crate that did not build produces neither. Any filter
    must include `^error` and the runner's exit status must be checked; a
    `test result` tally with no `error` line and a zero exit is the only green.
-3. **A `cargo check --workspace --all-targets` in CI** would catch it in a
-   fraction of the time of a full test run, since it is a compile problem and
-   not a behavioural one. There is no CI on this project yet; when there is,
-   this is the cheapest possible guard and should be the first job.
+3. **A `cargo check --workspace --all-targets`** would catch it in a fraction
+   of the time of a full test run, since it is a compile problem and not a
+   behavioural one.
+
+   **UPDATE 2026-09-13: that guard already exists, and this item did not know
+   it.** `scripts/boot-test.sh` runs
+   `cargo clippy --workspace --exclude kernel --all-targets --target
+   x86_64-unknown-linux-gnu`, which compiles every test target in the
+   workspace. A test binary that does not build fails it. The reason nobody
+   here counted it is that it runs inside the gate *named* `cfg-unix`, and a
+   gate whose name describes a narrower population than it checks is invisible
+   to anyone looking for the wider one -- which is this entry, looking for
+   exactly that guard and concluding it did not exist.
+
+   Lane A found the same confusion from the other side on 2026-09-13 and has
+   written it into `scripts/check-cfg-unix.py`'s docstring: the *script* of
+   that name checks 62 crates on their default targets, while `boot-test.sh`
+   checks the whole workspace on a unix target with `--all-targets`, so "a
+   pass here does not predict a pass there". Two gates, one name, two
+   populations.
+
+   `--exclude kernel` is load-bearing and is why the naive form does not work:
+   `cargo check --workspace --all-targets` fails on the kernel with
+   `duplicate lang item panic_impl`, because `--all-targets` builds a test
+   harness for a `no_std` binary that defines its own panic handler. That is
+   `TD-C-CARGO-BUILD-WORKSPACE-ON-THE-HOST-TARGET-FAILS-ON-THE-KERNEL`.
+
+   **What is still missing is the push-time half.** The boot test is hours;
+   this is a compile problem that a push could catch in a minute or two. The
+   pre-push hook's own standard for what belongs there is written at gate 17:
+   *"it also takes minutes and needs every dependency to build, which is not a
+   push-boundary budget"* -- so whether a warm workspace check clears that bar
+   is a measurement, not an opinion, and it has not been taken.
 
 **Severity.** Medium, and it is a *meta*-defect: it does not itself break
 anything a user can see, it removes the evidence that something else did. The

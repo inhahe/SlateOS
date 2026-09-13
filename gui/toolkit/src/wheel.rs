@@ -75,6 +75,58 @@
 /// tree's hand-rolled handlers had already picked independently.
 pub const ROWS_PER_NOTCH: f32 = 3.0;
 
+thread_local! {
+    /// The rows-per-notch this thread converts with, from the user's settings.
+    ///
+    /// [`ROWS_PER_NOTCH`] is the *default*; this is what is actually used.
+    /// `input.yaml`'s `mouse.scroll_lines` is the same quantity Windows calls
+    /// `SPI_GETWHEELSCROLLLINES` and every desktop exposes, and until now this
+    /// tree read it from nowhere: the setting had a slider, a clamp, a file and
+    /// no reader.
+    ///
+    /// **Why a stored value rather than a parameter.** There are about 68
+    /// conversion sites outside this module -- 30 `Accumulator::rows` calls, 30
+    /// `pixels`, 6 `rows_f` -- and none of them has the user's settings in
+    /// scope; they are widgets, given a scroll event and their own geometry.
+    /// Threading a setting to all of them is 68 chances to forget, and a
+    /// caller that forgets silently keeps the old behaviour, which is the exact
+    /// failure this setting is being rescued from. `rows_at` still takes an
+    /// explicit step for the view that genuinely needs a different one.
+    ///
+    /// **Why thread-local rather than global.** The value is set by the event
+    /// loop that later calls these functions, so a thread is the honest scope.
+    /// It also means a test that changes it cannot disturb one running beside
+    /// it -- a process-wide counter did exactly that to this tree on
+    /// 2026-09-13, passing alone and failing in the full run, and the fix was
+    /// this.
+    static ROWS_PER_NOTCH_SETTING: core::cell::Cell<f32> =
+        const { core::cell::Cell::new(ROWS_PER_NOTCH) };
+}
+
+/// How many rows a notch moves on this thread.
+#[must_use]
+pub fn rows_per_notch() -> f32 {
+    ROWS_PER_NOTCH_SETTING.with(core::cell::Cell::get)
+}
+
+/// Set how many rows a notch moves on this thread.
+///
+/// For the event loop, from `input.yaml`. A value that is not finite or not
+/// positive is refused rather than stored: a zero would make the wheel do
+/// nothing at all and a negative one would invert it, and neither is a thing
+/// the user asked for by moving a slider labelled "lines".
+///
+/// Answers whether the value was taken, so a caller can tell "set" from
+/// "ignored" -- a setter that silently does nothing is how a setting comes to
+/// have a control and no effect, which is what this whole change is about.
+pub fn set_rows_per_notch(rows: f32) -> bool {
+    if !rows.is_finite() || rows <= 0.0 {
+        return false;
+    }
+    ROWS_PER_NOTCH_SETTING.set(rows);
+    true
+}
+
 /// Turns a stream of wheel notches into a stream of whole-row movements,
 /// without losing the fractions a high-resolution device sends.
 ///
@@ -110,7 +162,7 @@ impl Accumulator {
     /// stop scrolling permanently, with no way back short of restarting the
     /// app.
     pub fn rows(&mut self, dy: f32) -> isize {
-        self.rows_at(dy, ROWS_PER_NOTCH)
+        self.rows_at(dy, rows_per_notch())
     }
 
     /// [`rows`] with an explicit rows-per-notch, for a view that genuinely
@@ -178,7 +230,7 @@ pub fn rows_f(dy: f32) -> f32 {
     }
     // Negated for the same reason as `Accumulator::rows_at`: `dy` is positive
     // away from the user, which scrolls the view towards row 0.
-    let out = -dy * ROWS_PER_NOTCH;
+    let out = -dy * rows_per_notch();
     // A finite `dy` near `f32::MAX` still overflows the product to infinity,
     // and an infinity added to a stored offset freezes the view for good.
     if out.is_finite() { out } else { 0.0 }
@@ -253,7 +305,67 @@ pub fn pixels_x(dx: f32, col_w: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Accumulator, ROWS_PER_NOTCH, pixels, pixels_x, rows_f};
+
+    /// The user's step reaches the conversion, not just the cell it is in.
+    ///
+    /// `scroll_lines` had a slider, a clamp, a file and no reader for weeks.
+    /// The test that would have caught that is not "the value round-trips" --
+    /// it did -- it is this one: change the setting, convert a notch, and see
+    /// a different number of rows.
+    #[test]
+    fn the_stored_step_is_what_a_notch_converts_to() {
+        // Restored at the end because this is thread-local state and the test
+        // harness reuses threads between tests.
+        let before = rows_per_notch();
+
+        assert!(set_rows_per_notch(5.0), "a positive finite step is taken");
+        assert!(
+            (rows_f(-1.0) - 5.0).abs() < 0.001,
+            "one notch is now five rows"
+        );
+        assert!(
+            (pixels(-1.0, 10.0) - 50.0).abs() < 0.001,
+            "and pixels follow rows_f"
+        );
+        let mut acc = Accumulator::default();
+        assert_eq!(acc.rows(-1.0), 5, "the accumulator uses it too");
+
+        assert!(set_rows_per_notch(1.0), "one line per notch is legitimate");
+        assert!((rows_f(-1.0) - 1.0).abs() < 0.001);
+
+        // `rows_at` is the escape hatch and must ignore the setting, or a view
+        // that genuinely needs its own step would silently follow the user's.
+        let mut acc = Accumulator::default();
+        assert_eq!(acc.rows_at(-1.0, 8.0), 8, "an explicit step still wins");
+
+        assert!(set_rows_per_notch(before), "restore");
+    }
+
+    /// A step that would break the wheel is refused, and says so.
+    ///
+    /// Zero would make the wheel do nothing and a negative would invert it;
+    /// neither is something a user asked for by dragging a slider labelled
+    /// "lines". The setter answers `false` rather than storing quietly,
+    /// because a setter that silently does nothing is how a setting comes to
+    /// have a control and no effect -- which is the defect being fixed here.
+    #[test]
+    fn a_step_that_would_break_the_wheel_is_refused() {
+        let before = rows_per_notch();
+        for bad in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            assert!(!set_rows_per_notch(bad), "{bad} must be refused");
+            assert!(
+                (rows_per_notch() - before).abs() < 0.001,
+                "a refused value must not have been stored"
+            );
+        }
+        assert!(
+            (rows_f(-1.0) - before).abs() < 0.001,
+            "and the conversion is undisturbed"
+        );
+    }
+    use super::{
+        Accumulator, ROWS_PER_NOTCH, pixels, pixels_x, rows_f, rows_per_notch, set_rows_per_notch,
+    };
 
     /// The ordinary case: a detent is a full three-row step, both ways.
     #[test]

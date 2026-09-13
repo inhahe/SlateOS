@@ -61988,6 +61988,60 @@ changes scrolling everywhere, and it should begin a session rather than end
 one. What is above is the whole of the preparation: the measurement, the three
 chokepoints, and why A is tempting and wrong.
 
+**Update 2026-09-13 (later) — `scroll_lines` is wired, and the option table
+above was wrong about which options exist.**
+
+Two corrections to the analysis written an hour earlier, both found by looking
+instead of reasoning:
+
+- **Option B was impossible as described.** It says "a process-wide
+  rows-per-notch in `guitk::wheel`, set when input settings change" -- but
+  **an application is never told the input settings.** The protocol carries
+  appearance to clients (`App::appearance_changed`) and nothing carries input.
+  What does exist is `Reloads.input`, and the strap already watches
+  `appearance.yaml` through a generic `settingsfile::Watcher` that takes a
+  config name. So the road was one watcher away, not one protocol away.
+- **The population was 176 and is 68.** `.rows(` matches `grid.rows()` and
+  every other method of that name. Counting only receivers declared as
+  `wheel::Accumulator`, plus `rows_f` and `wheel::pixels`, gives 30 + 6 + 30 +
+  2 = **68**. Still far too many to thread a setting through by hand, so the
+  conclusion stands and only the number changes -- but the first figure was a
+  shape match, which is the error this lane keeps making and keeps writing down.
+
+**What landed.** `guitk::wheel` holds the step in a **thread-local**, defaulted
+to `ROWS_PER_NOTCH`; `rows`, `rows_f` and `pixels` read it, and `rows_at` still
+takes an explicit step for the view that genuinely needs its own. Thread-local
+rather than global because the event loop that sets it is the one that later
+calls these functions, and because a process-wide value written by tests is the
+cross-test interference that made the palette counter pass alone and fail in
+the full run this morning. `set_rows_per_notch` refuses a value that is not
+finite and positive, and *answers whether it took it* -- a setter that silently
+does nothing is how a setting comes to have a control and no effect, which is
+this entry.
+
+`oswindow`'s strap gained `ScrollWatch`, beside `ThemeWatch` and on the same
+poll. Its own watcher rather than a field of the other, because the two files
+change independently: a theme change must not re-read the pointer
+configuration, which is why `Reloads` has two flags.
+
+**`scroll_mode` is still unimplemented, and now says so rather than guessing.**
+`scroll_lines` is the step *in Lines mode*. Under Pages or Smooth the watch
+keeps the default, because handing Pages the lines number would make "Pages"
+mean "seven lines" -- a wrong answer delivered confidently, which is worse than
+the default, since the setting would look as though it worked.
+`a_mode_that_is_not_lines_keeps_the_default_step` pins that.
+
+**Four tests, and the join is the one that matters.** `guitk` proves the stored
+step is what a notch converts to and that a broken step is refused; `oswindow`
+proves a value written to `input.yaml` reaches the conversion and that an
+unchanged file reports no change. Proved able to fail: making `ScrollWatch`
+read the file and store the value without applying it -- the exact shape
+`scroll_lines` was already in -- makes the join test report *assertion failed:
+the user asked for seven lines a notch*, while everything else stays green.
+
+So the only mouse setting still reaching nothing is `scroll_mode`, which is a
+question about what a scroll *means* in each view rather than how big one is.
+
 **So the proper fix is now four pieces, not one call:**
 
 - **(a) A shared `gui/inputsettings` crate**, the counterpart of `appearance` —

@@ -510,6 +510,12 @@ pub fn drive<T: Transport, A: App + ?Sized>(
     // load path that could disagree with the reload path.
     let mut theme = ThemeWatch::new();
     theme.deliver(app);
+    // The scroll step, from the same directory and on the same schedule. Its
+    // own watcher rather than a field of `ThemeWatch`, because the two files
+    // change independently and a theme change must not re-read the pointer
+    // configuration -- the reason `Reloads` has two flags rather than one.
+    let mut scroll = ScrollWatch::new();
+    scroll.deliver();
 
     // Nothing has happened yet, so no event is going to ask for the first
     // frame, and a window that has never been drawn is blank.
@@ -595,6 +601,9 @@ pub fn drive<T: Transport, A: App + ?Sized>(
             // application that repaints only on input would otherwise keep the
             // old colours until something was clicked.
             if theme.poll(app) {
+                dirty = true;
+            }
+            if scroll.poll() {
                 dirty = true;
             }
             if !std::mem::take(&mut dirty) {
@@ -836,6 +845,74 @@ pub fn launch<A: App + ?Sized>(program: &str, app: &mut A) -> ExitCode {
 /// through [`App::theme_changed`] rather than reading `appearance.yaml`
 /// themselves — 135 copies of that parse would be 135 places for the reload
 /// edge to be wrong, and most of them would simply never do it.
+/// The scroll half of `input.yaml`, watched the way the theme is.
+///
+/// **Only the scroll settings.** `input.yaml` also holds pointer acceleration,
+/// the button mapping and the keyboard layout, and an application has no
+/// business with any of them: those are the compositor's, applied to raw device
+/// events before anything reaches a client. What a client must know is how far
+/// one notch of the wheel should move its view, because the client is the only
+/// thing that knows what its rows are.
+///
+/// That is also why this sets a value in `guitk::wheel` rather than handing the
+/// settings to the application. There are about 68 conversion sites across the
+/// toolkit and the apps, none of which has settings in scope; see
+/// `wheel::ROWS_PER_NOTCH_SETTING`.
+struct ScrollWatch {
+    watcher: appearance::config::Watcher,
+    lines: f32,
+}
+
+impl ScrollWatch {
+    fn new() -> Self {
+        Self {
+            watcher: appearance::config::Watcher::new(inputsettings::CONFIG_NAME),
+            lines: guitk::wheel::ROWS_PER_NOTCH,
+        }
+    }
+
+    /// Read the file if it changed and apply the scroll step.
+    ///
+    /// Answers whether anything changed, so the caller can mark the frame
+    /// dirty -- a view part-way down a list does not move when the step
+    /// changes, but one that is mid-scroll should not finish the gesture at the
+    /// old rate.
+    fn poll(&mut self) -> bool {
+        let Some(doc) = self.watcher.poll() else {
+            return false;
+        };
+        let settings = inputsettings::InputSettings::read_from(&doc);
+        // `scroll_lines` is the step *in Lines mode*. Pages and Smooth are
+        // different questions -- Pages means one viewport per notch, which only
+        // the consumer knows the height of -- and neither is implemented, so
+        // they keep the default rather than being given a number that means
+        // something else. See known-issues.md
+        // TD-C-THE-MOUSE-SETTINGS-PANEL-REACHES-NOTHING.
+        let wanted = if settings.mouse.scroll_mode == inputsettings::ScrollMode::Lines {
+            settings.mouse.scroll_lines as f32
+        } else {
+            guitk::wheel::ROWS_PER_NOTCH
+        };
+        if (wanted - self.lines).abs() < f32::EPSILON {
+            return false;
+        }
+        self.lines = wanted;
+        guitk::wheel::set_rows_per_notch(wanted)
+    }
+
+    /// Apply the opening value, whether or not a file exists.
+    ///
+    /// Unconditional for the same reason `ThemeWatch::deliver` is: on a machine
+    /// with no `input.yaml` the poll reports no change because there is nothing
+    /// to report, and the application would then scroll at whatever the last
+    /// thread-local value happened to be.
+    fn deliver(&mut self) {
+        if !self.poll() {
+            guitk::wheel::set_rows_per_notch(self.lines);
+        }
+    }
+}
+
 struct ThemeWatch {
     watcher: appearance::config::Watcher,
     settings: AppearanceSettings,
@@ -2189,6 +2266,74 @@ mod tests {
     /// The repaint is the half that is easy to leave out: an application that
     /// draws only in response to input would otherwise keep the old colours
     /// until something happened to be clicked.
+    /// A scroll step written to `input.yaml` reaches the wheel conversion.
+    ///
+    /// The join this whole change exists to make. `guitk`'s own tests prove the
+    /// stored step is what a notch converts to; `inputsettings`' prove the
+    /// value survives the file. Neither notices this layer failing to carry it
+    /// between them, which is precisely the state `scroll_lines` was in for
+    /// weeks: slider, clamp, file, no reader.
+    #[test]
+    fn a_scroll_step_in_the_file_reaches_the_wheel() {
+        appearance::config::testing::with_scratch_config("oswindow-scroll-step", |_| {
+            let restore = guitk::wheel::rows_per_notch();
+            let mut watch = ScrollWatch::new();
+            watch.deliver();
+            assert!(
+                (guitk::wheel::rows_per_notch() - guitk::wheel::ROWS_PER_NOTCH).abs() < 0.001,
+                "a machine with no input.yaml should scroll at the default"
+            );
+
+            // What the Mouse page does when the user drags the slider.
+            let mut file = inputsettings::InputFile::load();
+            file.settings.mouse.scroll_mode = inputsettings::ScrollMode::Lines;
+            file.settings.mouse.scroll_lines = 7;
+            file.save().unwrap();
+
+            assert!(watch.poll(), "the rewritten file did not reach the wheel");
+            assert!(
+                (guitk::wheel::rows_per_notch() - 7.0).abs() < 0.001,
+                "the user asked for seven lines a notch"
+            );
+
+            // Saving the same value again is not a change, for the reason the
+            // theme watch gives: every window redrawing because a settings
+            // window was saved is visible work in answer to nothing.
+            file.save().unwrap();
+            assert!(!watch.poll(), "an unchanged file must not report a change");
+
+            guitk::wheel::set_rows_per_notch(restore);
+        });
+    }
+
+    /// A mode this tree has not implemented does not borrow another mode's number.
+    ///
+    /// `scroll_lines` is lines-per-notch *in Lines mode*. Pages means one
+    /// viewport per notch and Smooth means pixels, and neither is implemented.
+    /// Handing them `scroll_lines` anyway would make "Pages" mean "seven
+    /// lines", which is a wrong answer delivered confidently -- worse than the
+    /// default, because the setting would look as though it worked.
+    #[test]
+    fn a_mode_that_is_not_lines_keeps_the_default_step() {
+        appearance::config::testing::with_scratch_config("oswindow-scroll-mode", |_| {
+            let restore = guitk::wheel::rows_per_notch();
+            let mut watch = ScrollWatch::new();
+            watch.deliver();
+
+            let mut file = inputsettings::InputFile::load();
+            file.settings.mouse.scroll_mode = inputsettings::ScrollMode::Pages;
+            file.settings.mouse.scroll_lines = 7;
+            file.save().unwrap();
+            watch.poll();
+            assert!(
+                (guitk::wheel::rows_per_notch() - guitk::wheel::ROWS_PER_NOTCH).abs() < 0.001,
+                "Pages mode must not silently mean seven lines"
+            );
+
+            guitk::wheel::set_rows_per_notch(restore);
+        });
+    }
+
     #[test]
     fn a_theme_change_reaches_the_application_and_repaints() {
         appearance::config::testing::with_scratch_config("oswindow-theme-change", |_| {

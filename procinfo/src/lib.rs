@@ -1315,6 +1315,14 @@ pub struct ProcessStat {
     /// and procps prints `4`. Whoever wants a different projection of the same
     /// word should take it from here rather than re-reading the file.
     pub flags: u64,
+    /// Minor faults: stat field 10. Page faults served without a disk read.
+    ///
+    /// Added for `fio`, which was reporting this as `ops_done / 100` --
+    /// arithmetic on its own operation count, printed in a table beside
+    /// real bandwidth figures.
+    pub minflt: u64,
+    /// Major faults: stat field 12. Page faults that required a disk read.
+    pub majflt: u64,
     /// User-mode time in ticks.
     pub utime_ticks: u64,
     /// Kernel-mode time in ticks.
@@ -1398,6 +1406,8 @@ impl ProcessStat {
             tty_nr: at_i(4),
             tpgid: at_i(5),
             flags: at(6),
+            minflt: at(7),
+            majflt: at(9),
             utime_ticks: at(11),
             stime_ticks: at(12),
             priority: at_i(15),

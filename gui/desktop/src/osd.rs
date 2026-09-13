@@ -964,17 +964,23 @@ fn brightness_icon(level: u8) -> &'static str {
 
 /// Get icon string and color for a generic OsdIcon.
 fn icon_info(p: &Palette, icon: OsdIcon) -> (&'static str, Color) {
+    // Every colour here is drawn as a glyph, so every one goes through
+    // `ink`. A colour reaching a `RenderCommand::Text` through a helper is
+    // invisible to `ink-text.py`, which classifies by the role named at the
+    // draw site -- so these had to be found by a failing test. Unlike
+    // `PermissionState::color` there is no exempt arm to be careful about:
+    // all ten are categorical hues and all ten are text.
     match icon {
-        OsdIcon::Info => ("\u{2139}", p.blue),
-        OsdIcon::Success => ("\u{2705}", p.green),
-        OsdIcon::Warning => ("\u{26A0}", p.yellow),
-        OsdIcon::Error => ("\u{274C}", p.red),
-        OsdIcon::Speaker => ("\u{1F50A}", p.blue),
-        OsdIcon::Brightness => ("\u{2600}", p.yellow),
-        OsdIcon::Network => ("\u{1F310}", p.green),
-        OsdIcon::Battery => ("\u{1F50B}", p.peach),
-        OsdIcon::Lock => ("\u{1F512}", p.lavender),
-        OsdIcon::Camera => ("\u{1F4F7}", p.green),
+        OsdIcon::Info => ("\u{2139}", p.ink(p.blue)),
+        OsdIcon::Success => ("\u{2705}", p.ink(p.green)),
+        OsdIcon::Warning => ("\u{26A0}", p.ink(p.yellow)),
+        OsdIcon::Error => ("\u{274C}", p.ink(p.red)),
+        OsdIcon::Speaker => ("\u{1F50A}", p.ink(p.blue)),
+        OsdIcon::Brightness => ("\u{2600}", p.ink(p.yellow)),
+        OsdIcon::Network => ("\u{1F310}", p.ink(p.green)),
+        OsdIcon::Battery => ("\u{1F50B}", p.ink(p.peach)),
+        OsdIcon::Lock => ("\u{1F512}", p.ink(p.lavender)),
+        OsdIcon::Camera => ("\u{1F4F7}", p.ink(p.green)),
     }
 }
 

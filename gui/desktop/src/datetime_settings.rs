@@ -1925,7 +1925,7 @@ mod tests {
                 let names = row_labels(&tz);
                 assert_eq!(names.len(), 10, "ten zone rows are named ({what})");
                 assert_eq!(
-                    names[6], accent,
+                    names[6], p.ink(accent),
                     "the name of the zone in force does not follow the accent \
                      ({what})"
                 );
@@ -2295,7 +2295,7 @@ mod tests {
                     "the zone in force is marked by its name and its strip, \
                      not by raising its row ({what})"
                 );
-                assert_eq!(names[6], accent, "the zone in force ({what})");
+                assert_eq!(names[6], p.ink(accent), "the zone in force ({what})");
 
                 assert_ne!(
                     rows[2], rows[6],

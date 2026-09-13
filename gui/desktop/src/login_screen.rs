@@ -2419,7 +2419,7 @@ mod tests {
             );
             assert_eq!(
                 fill_of_size(&cmds, 100.0, 32.0),
-                p.ink(p.accent),
+                p.accent,
                 "{mode}: Sign In is the default action"
             );
             assert_eq!(

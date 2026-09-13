@@ -1327,7 +1327,7 @@ mod tests {
                 let lit: Vec<usize> = bar
                     .iter()
                     .enumerate()
-                    .filter(|(_, (_, icon, _))| *icon == p.accent)
+                    .filter(|(_, (_, icon, _))| *icon == p.ink(p.accent))
                     .map(|(j, _)| j)
                     .collect();
                 assert_eq!(

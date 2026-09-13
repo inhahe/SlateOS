@@ -1694,7 +1694,10 @@ mod tests {
             );
             let on_region = all_colors(region)
                 .iter()
-                .filter(|c| **c == p.ink(p.accent))
+                // Both forms, for the reason the Language tab's count gives:
+                // the marker bar is an accent fill and stays raw, the labels
+                // are accent text and go through `ink`.
+                .filter(|c| **c == p.accent || **c == p.ink(p.accent))
                 .count();
             assert_eq!(
                 on_region, 2,

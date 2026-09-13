@@ -98,10 +98,36 @@ def is_closed(heading: str) -> bool:
                for m in MARKERS)
 
 
+# An explicit status field, which must agree with the heading.
+#
+# THE THIRD RULE, and it exists because the first two were not enough twice.
+# Twelve entries were closed in their body and open in their heading, found in
+# two passes because the second pass knew a shape the first did not: the first
+# looked for a paragraph starting `**Closed`, the second for `**Status:**
+# FIXED`. There is no reason to believe a third shape is not out there, so this
+# stops guessing at prose and keys on the one form that is unambiguous.
+#
+# `**Status:** FIXED` is a field, not a sentence. Someone who writes it has
+# stated a status, and the heading must say the same thing. Deliberately NOT
+# matched: a bold sentence like `**Fixed for the entropy calls (2026-09-04).
+# The underlying trap is still open**`, which is a real entry and a real
+# partial fix -- it says "Fixed" and means "not yet". A rule that read prose
+# would have closed it wrongly, which is worse than the miscount it prevents.
+STATUS_FIELD = re.compile(
+    r"^\*\*Status:\*\*\s*[*]{0,2}(FIXED|RESOLVED|CLOSED|DONE|WITHDRAWN)",
+    re.IGNORECASE,
+)
+# How far into an entry a status field is still the entry's own. Measured: in
+# all four found this way it is within two lines of the heading; twelve is
+# generous and still well short of the next heading.
+STATUS_WINDOW = 12
+
+
 def findings(text: str):
     """Yield (line_number, message) for every heading that breaks a rule."""
     seen = {}
-    for i, line in enumerate(text.split(NL), start=1):
+    lines = text.split(NL)
+    for i, line in enumerate(lines, start=1):
         m = HEADING.match(line.rstrip(chr(13)))
         if not m:
             continue
@@ -117,6 +143,17 @@ def findings(text: str):
             )
         else:
             seen[slug] = i
+        if not is_closed(heading):
+            for body in lines[i : i + STATUS_WINDOW]:
+                if STATUS_FIELD.match(body.strip()):
+                    yield (
+                        i,
+                        "the body says " + body.strip()[:40] + " but the "
+                        "heading carries no status marker, so every triage "
+                        "count reads this entry as open.",
+                    )
+                    break
+
         mk = MARKER.search(heading)
         if mk and mk.group(1) != mk.group(1).upper():
             yield (
@@ -156,6 +193,27 @@ def _self_test() -> int:
             "### TD-C-X" + NL + "## TD-C-X" + NL,
             0,
             "a deeper heading level is not a top-level entry",
+        ),
+        (
+            "## TD-C-A-THING" + NL + "**Status:** FIXED 2026-08-23" + NL,
+            1,
+            "a status field with an unmarked heading is the two-pass miscount",
+        ),
+        (
+            "## TD-C-A-THING -- FIXED" + NL + "**Status:** FIXED 2026-08-23" + NL,
+            0,
+            "and is fine once the heading agrees",
+        ),
+        (
+            "## TD-B-A-THING" + NL + "**Status:** **withdrawn** 2026-08-30" + NL,
+            1,
+            "lowercase and bold-wrapped is still a status field",
+        ),
+        (
+            "## TD-B-A-THING" + NL
+            + "**Fixed for the entropy calls. The underlying trap is still open**" + NL,
+            0,
+            "a bold sentence saying Fixed-but-not-really is NOT a status field",
         ),
         (
             "## TD-B-FIXED-POINT-MATH-IS-WRONG" + NL,

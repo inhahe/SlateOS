@@ -229,3 +229,10 @@ So the workspace test creates these directories on a machine where they did not
 exist, in a single observed cycle, with no inference about what else might have
 run. That also fixes the count: it is not one stray test, it is at least two
 distinct paths (`/var/run` and `/dev`) written during one ordinary run.
+
+**A third root, seen 2026-09-13 15:3x:** `E:\usr\share` appeared after a further
+workspace run on a root that had been cleared. So the paths written during one
+ordinary run are at least `/var/run`, `/dev` and `/usr/share`, and this is not
+one stray test but a habit spread across the tree. `E:\etc` and `E:\sys` are
+the two that have actually broken a run so far; the others are waiting for a
+test that reads them.

@@ -139222,7 +139222,7 @@ length names, NUL padding, and a buffer holding several events.
 defect is worse than the ones already fixed today; the implementation is
 more than a single change.
 
-## B-PROGRAMS-THAT-INVENT-THEIR-OUTPUT (lane B, 2026-09-12) -- 10 found, 9 fixed, 1 filed
+## B-PROGRAMS-THAT-INVENT-THEIR-OUTPUT (lane B, 2026-09-12) -- 11 found, 10 fixed, 1 filed
 
 A class, not a bug. A program prints something shaped like a measurement,
 an action or an event, and the value did not come from the system. It is
@@ -139241,6 +139241,7 @@ exactly like the working version.
 | `gdb` | `print $rxa` -- any unknown register -- evaluated to `0` | returns `No such register` |
 | `prlimit` | "setting NOFILE for PID N" with no syscall at all | calls `prlimit64` |
 | `mkinitramfs` | `compression: Gzip`, then wrote the cpio uncompressed | calls `deflate::gzip` |
+| `systemctl` | six commands: `enable` named a symlink path, `poweroff` announced a shutdown, `list-timers` invented a timer | all refuse via `no_unit_interface` |
 | `inotifywait` | a `newfile.txt` creation on every run | reads the kernel's event stream |
 | `chattr` | `+i` stored in a `<file>.attrs` sidecar; the file stayed writable | filed to A for `FS_IOC_SETFLAGS` |
 
@@ -139259,6 +139260,26 @@ invented action misleads whoever called it; this one also **wrote a
 file**, so the lie outlived the process and was still there for the next
 program to trust. A refusal that leaves a plausible artifact behind is
 the same bug in a quieter form, which is why it now writes nothing.
+
+`systemctl` is one program but six commands, and it spans the whole
+ordering by itself: `list-timers` invented a *reading* (`logwatch.timer`,
+next `Mon 2026-01-02 00:00:00`, `23h left`, on a system with no timer
+units), `enable` invented an *action*, and `poweroff` invented an
+*event*. `enable` is the most expensive single instance found so far, for
+a reason `mkinitramfs` only half has: it printed an **exact path** --
+`Created symlink /etc/slateos/system/multi-user.target.wants/sshd.service
+-> /usr/lib/slateos/system/sshd.service.` -- so the administrator is left
+with a specific file to believe in. No file was written, so there is not
+even a wrong artifact to find; there is a confident sentence and an empty
+directory, and the belief that the service starts at boot survives until
+the next boot disproves it.
+
+It also shows the class can be **half-fixed and look finished**. The
+query half of `systemctl` was already honest -- `is-active` refuses and
+carries a comment recording that it used to exit 0 for four hard-coded
+names -- while every command that *acts* still claimed. Whoever repaired
+the read side did not think to check the write side, and the file reads
+as tended.
 
 The count in this heading read `7 found, 6 fixed` while the table below
 it listed eight, from the last time it was extended without being
@@ -139284,6 +139305,28 @@ not a finding list. What actually identified them:
 - **A success banner before the work.** Twice: `inotifywait` printed
   "Watches established (1 total)" and `firejail` printed "Child process
   initialized", both immediately before refusing.
+
+### Unused model code is the best detector found so far
+
+Not in the original list of heuristics because it was not known then.
+Removing a crate's blanket `#![allow(dead_code)]` and reading what rustc
+then reports has found, in four crates:
+
+| crate | what the dead model meant |
+|---|---|
+| `gdb` | a duplicate tokeniser nobody called, and an unenforced breakpoint limit |
+| `wpa` | the personalities that used it were deleted for fabricating |
+| `logind` | the entire write side is implemented and exposed to nothing |
+| `systemctl` | six commands that print and do nothing, so the unit model is never populated |
+
+The reasoning is mechanical, which is why it works: **a model nothing
+constructs means nothing populates it, and something is usually
+pretending it did.** It is a far better filter than grepping for the word
+"stub" -- that produced a reading list of 45 comments of which two were
+real, while this produced a finding in four crates out of four.
+
+The cost is that it only fires where a blanket allow was hiding the
+evidence, so it runs out when the 19 remaining crates are cleaned.
 
 ### Negative results, so nobody re-checks them
 

@@ -15,7 +15,6 @@
 //! `[Install]`, `[Timer]`, `[Socket]`, `[Mount]`, `[Path]`.
 
 #![deny(clippy::all)]
-#![allow(dead_code)]
 
 use std::collections::BTreeMap;
 use std::env;
@@ -113,6 +112,18 @@ enum UnitType {
     Automount,
 }
 
+// Unused because nothing populates it, and until 2026-09-12 that was hidden
+// by a blanket allow. The unit model -- state enums, `UnitFile` with its
+// parser and verifier, specifier expansion, the list entry types -- has no
+// consumer because this system exposes no per-unit interface: `list-units`,
+// `status` and `is-active` refuse, and the commands that acted on units were
+// printing sentences and doing nothing until they were made to refuse too.
+//
+// Kept rather than deleted. It is the parser and vocabulary a real service
+// manager needs, it is exercised by the crate's tests, and the blocker is a
+// missing `/proc/servicemgr` interface rather than a missing design -- the
+// same standing as gdb's execution types under ptrace.
+#[allow(dead_code)]
 impl UnitType {
     fn as_str(self) -> &'static str {
         match self {
@@ -158,6 +169,18 @@ impl UnitType {
 
 /// Active state of a unit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// Unused because nothing populates it, and until 2026-09-12 that was hidden
+// by a blanket allow. The unit model -- state enums, `UnitFile` with its
+// parser and verifier, specifier expansion, the list entry types -- has no
+// consumer because this system exposes no per-unit interface: `list-units`,
+// `status` and `is-active` refuse, and the commands that acted on units were
+// printing sentences and doing nothing until they were made to refuse too.
+//
+// Kept rather than deleted. It is the parser and vocabulary a real service
+// manager needs, it is exercised by the crate's tests, and the blocker is a
+// missing `/proc/servicemgr` interface rather than a missing design -- the
+// same standing as gdb's execution types under ptrace.
+#[allow(dead_code)]
 enum ActiveState {
     Active,
     Inactive,
@@ -167,6 +190,18 @@ enum ActiveState {
     Reloading,
 }
 
+// Unused because nothing populates it, and until 2026-09-12 that was hidden
+// by a blanket allow. The unit model -- state enums, `UnitFile` with its
+// parser and verifier, specifier expansion, the list entry types -- has no
+// consumer because this system exposes no per-unit interface: `list-units`,
+// `status` and `is-active` refuse, and the commands that acted on units were
+// printing sentences and doing nothing until they were made to refuse too.
+//
+// Kept rather than deleted. It is the parser and vocabulary a real service
+// manager needs, it is exercised by the crate's tests, and the blocker is a
+// missing `/proc/servicemgr` interface rather than a missing design -- the
+// same standing as gdb's execution types under ptrace.
+#[allow(dead_code)]
 impl ActiveState {
     fn as_str(self) -> &'static str {
         match self {
@@ -194,6 +229,18 @@ impl ActiveState {
 
 /// Load state of a unit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// Unused because nothing populates it, and until 2026-09-12 that was hidden
+// by a blanket allow. The unit model -- state enums, `UnitFile` with its
+// parser and verifier, specifier expansion, the list entry types -- has no
+// consumer because this system exposes no per-unit interface: `list-units`,
+// `status` and `is-active` refuse, and the commands that acted on units were
+// printing sentences and doing nothing until they were made to refuse too.
+//
+// Kept rather than deleted. It is the parser and vocabulary a real service
+// manager needs, it is exercised by the crate's tests, and the blocker is a
+// missing `/proc/servicemgr` interface rather than a missing design -- the
+// same standing as gdb's execution types under ptrace.
+#[allow(dead_code)]
 enum LoadState {
     Loaded,
     NotFound,
@@ -202,6 +249,18 @@ enum LoadState {
     BadSetting,
 }
 
+// Unused because nothing populates it, and until 2026-09-12 that was hidden
+// by a blanket allow. The unit model -- state enums, `UnitFile` with its
+// parser and verifier, specifier expansion, the list entry types -- has no
+// consumer because this system exposes no per-unit interface: `list-units`,
+// `status` and `is-active` refuse, and the commands that acted on units were
+// printing sentences and doing nothing until they were made to refuse too.
+//
+// Kept rather than deleted. It is the parser and vocabulary a real service
+// manager needs, it is exercised by the crate's tests, and the blocker is a
+// missing `/proc/servicemgr` interface rather than a missing design -- the
+// same standing as gdb's execution types under ptrace.
+#[allow(dead_code)]
 impl LoadState {
     fn as_str(self) -> &'static str {
         match self {
@@ -216,6 +275,18 @@ impl LoadState {
 
 /// Sub-state of a unit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// Unused because nothing populates it, and until 2026-09-12 that was hidden
+// by a blanket allow. The unit model -- state enums, `UnitFile` with its
+// parser and verifier, specifier expansion, the list entry types -- has no
+// consumer because this system exposes no per-unit interface: `list-units`,
+// `status` and `is-active` refuse, and the commands that acted on units were
+// printing sentences and doing nothing until they were made to refuse too.
+//
+// Kept rather than deleted. It is the parser and vocabulary a real service
+// manager needs, it is exercised by the crate's tests, and the blocker is a
+// missing `/proc/servicemgr` interface rather than a missing design -- the
+// same standing as gdb's execution types under ptrace.
+#[allow(dead_code)]
 enum SubState {
     Running,
     Dead,
@@ -228,6 +299,18 @@ enum SubState {
     Failed,
 }
 
+// Unused because nothing populates it, and until 2026-09-12 that was hidden
+// by a blanket allow. The unit model -- state enums, `UnitFile` with its
+// parser and verifier, specifier expansion, the list entry types -- has no
+// consumer because this system exposes no per-unit interface: `list-units`,
+// `status` and `is-active` refuse, and the commands that acted on units were
+// printing sentences and doing nothing until they were made to refuse too.
+//
+// Kept rather than deleted. It is the parser and vocabulary a real service
+// manager needs, it is exercised by the crate's tests, and the blocker is a
+// missing `/proc/servicemgr` interface rather than a missing design -- the
+// same standing as gdb's execution types under ptrace.
+#[allow(dead_code)]
 impl SubState {
     fn as_str(self) -> &'static str {
         match self {
@@ -246,6 +329,18 @@ impl SubState {
 
 /// Enable state of a unit file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// Unused because nothing populates it, and until 2026-09-12 that was hidden
+// by a blanket allow. The unit model -- state enums, `UnitFile` with its
+// parser and verifier, specifier expansion, the list entry types -- has no
+// consumer because this system exposes no per-unit interface: `list-units`,
+// `status` and `is-active` refuse, and the commands that acted on units were
+// printing sentences and doing nothing until they were made to refuse too.
+//
+// Kept rather than deleted. It is the parser and vocabulary a real service
+// manager needs, it is exercised by the crate's tests, and the blocker is a
+// missing `/proc/servicemgr` interface rather than a missing design -- the
+// same standing as gdb's execution types under ptrace.
+#[allow(dead_code)]
 enum EnableState {
     Enabled,
     Disabled,
@@ -258,6 +353,18 @@ enum EnableState {
     Bad,
 }
 
+// Unused because nothing populates it, and until 2026-09-12 that was hidden
+// by a blanket allow. The unit model -- state enums, `UnitFile` with its
+// parser and verifier, specifier expansion, the list entry types -- has no
+// consumer because this system exposes no per-unit interface: `list-units`,
+// `status` and `is-active` refuse, and the commands that acted on units were
+// printing sentences and doing nothing until they were made to refuse too.
+//
+// Kept rather than deleted. It is the parser and vocabulary a real service
+// manager needs, it is exercised by the crate's tests, and the blocker is a
+// missing `/proc/servicemgr` interface rather than a missing design -- the
+// same standing as gdb's execution types under ptrace.
+#[allow(dead_code)]
 impl EnableState {
     fn as_str(self) -> &'static str {
         match self {
@@ -291,6 +398,18 @@ impl EnableState {
 
 /// Service types.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// Unused because nothing populates it, and until 2026-09-12 that was hidden
+// by a blanket allow. The unit model -- state enums, `UnitFile` with its
+// parser and verifier, specifier expansion, the list entry types -- has no
+// consumer because this system exposes no per-unit interface: `list-units`,
+// `status` and `is-active` refuse, and the commands that acted on units were
+// printing sentences and doing nothing until they were made to refuse too.
+//
+// Kept rather than deleted. It is the parser and vocabulary a real service
+// manager needs, it is exercised by the crate's tests, and the blocker is a
+// missing `/proc/servicemgr` interface rather than a missing design -- the
+// same standing as gdb's execution types under ptrace.
+#[allow(dead_code)]
 enum ServiceType {
     Simple,
     Forking,
@@ -301,6 +420,18 @@ enum ServiceType {
     Exec,
 }
 
+// Unused because nothing populates it, and until 2026-09-12 that was hidden
+// by a blanket allow. The unit model -- state enums, `UnitFile` with its
+// parser and verifier, specifier expansion, the list entry types -- has no
+// consumer because this system exposes no per-unit interface: `list-units`,
+// `status` and `is-active` refuse, and the commands that acted on units were
+// printing sentences and doing nothing until they were made to refuse too.
+//
+// Kept rather than deleted. It is the parser and vocabulary a real service
+// manager needs, it is exercised by the crate's tests, and the blocker is a
+// missing `/proc/servicemgr` interface rather than a missing design -- the
+// same standing as gdb's execution types under ptrace.
+#[allow(dead_code)]
 impl ServiceType {
     fn as_str(self) -> &'static str {
         match self {
@@ -336,10 +467,34 @@ impl ServiceType {
 /// Keys can appear multiple times (e.g. `After=` stacking), so values are
 /// collected into a `Vec`.
 #[derive(Clone, Debug, Default)]
+// Unused because nothing populates it, and until 2026-09-12 that was hidden
+// by a blanket allow. The unit model -- state enums, `UnitFile` with its
+// parser and verifier, specifier expansion, the list entry types -- has no
+// consumer because this system exposes no per-unit interface: `list-units`,
+// `status` and `is-active` refuse, and the commands that acted on units were
+// printing sentences and doing nothing until they were made to refuse too.
+//
+// Kept rather than deleted. It is the parser and vocabulary a real service
+// manager needs, it is exercised by the crate's tests, and the blocker is a
+// missing `/proc/servicemgr` interface rather than a missing design -- the
+// same standing as gdb's execution types under ptrace.
+#[allow(dead_code)]
 struct UnitFile {
     sections: BTreeMap<String, Vec<(String, String)>>,
 }
 
+// Unused because nothing populates it, and until 2026-09-12 that was hidden
+// by a blanket allow. The unit model -- state enums, `UnitFile` with its
+// parser and verifier, specifier expansion, the list entry types -- has no
+// consumer because this system exposes no per-unit interface: `list-units`,
+// `status` and `is-active` refuse, and the commands that acted on units were
+// printing sentences and doing nothing until they were made to refuse too.
+//
+// Kept rather than deleted. It is the parser and vocabulary a real service
+// manager needs, it is exercised by the crate's tests, and the blocker is a
+// missing `/proc/servicemgr` interface rather than a missing design -- the
+// same standing as gdb's execution types under ptrace.
+#[allow(dead_code)]
 impl UnitFile {
     /// Parse INI-like unit file content.
     fn parse(content: &str) -> Result<Self, String> {
@@ -513,6 +668,18 @@ impl UnitFile {
 // ============================================================================
 
 /// Expand systemd specifiers in a string.
+// Unused because nothing populates it, and until 2026-09-12 that was hidden
+// by a blanket allow. The unit model -- state enums, `UnitFile` with its
+// parser and verifier, specifier expansion, the list entry types -- has no
+// consumer because this system exposes no per-unit interface: `list-units`,
+// `status` and `is-active` refuse, and the commands that acted on units were
+// printing sentences and doing nothing until they were made to refuse too.
+//
+// Kept rather than deleted. It is the parser and vocabulary a real service
+// manager needs, it is exercised by the crate's tests, and the blocker is a
+// missing `/proc/servicemgr` interface rather than a missing design -- the
+// same standing as gdb's execution types under ptrace.
+#[allow(dead_code)]
 fn expand_specifiers(input: &str, unit_name: &str) -> String {
     let prefix = unit_prefix(unit_name);
     let instance = unit_instance(unit_name).unwrap_or("");
@@ -543,6 +710,18 @@ fn expand_specifiers(input: &str, unit_name: &str) -> String {
 }
 
 /// Extract the prefix (part before the first '@' or '.').
+// Unused because nothing populates it, and until 2026-09-12 that was hidden
+// by a blanket allow. The unit model -- state enums, `UnitFile` with its
+// parser and verifier, specifier expansion, the list entry types -- has no
+// consumer because this system exposes no per-unit interface: `list-units`,
+// `status` and `is-active` refuse, and the commands that acted on units were
+// printing sentences and doing nothing until they were made to refuse too.
+//
+// Kept rather than deleted. It is the parser and vocabulary a real service
+// manager needs, it is exercised by the crate's tests, and the blocker is a
+// missing `/proc/servicemgr` interface rather than a missing design -- the
+// same standing as gdb's execution types under ptrace.
+#[allow(dead_code)]
 fn unit_prefix(name: &str) -> &str {
     let end = name
         .find('@')
@@ -551,6 +730,18 @@ fn unit_prefix(name: &str) -> &str {
 }
 
 /// Extract the instance (between '@' and the suffix '.xxx').
+// Unused because nothing populates it, and until 2026-09-12 that was hidden
+// by a blanket allow. The unit model -- state enums, `UnitFile` with its
+// parser and verifier, specifier expansion, the list entry types -- has no
+// consumer because this system exposes no per-unit interface: `list-units`,
+// `status` and `is-active` refuse, and the commands that acted on units were
+// printing sentences and doing nothing until they were made to refuse too.
+//
+// Kept rather than deleted. It is the parser and vocabulary a real service
+// manager needs, it is exercised by the crate's tests, and the blocker is a
+// missing `/proc/servicemgr` interface rather than a missing design -- the
+// same standing as gdb's execution types under ptrace.
+#[allow(dead_code)]
 fn unit_instance(name: &str) -> Option<&str> {
     let at = name.find('@')?;
     let dot = name.rfind('.')?;
@@ -712,6 +903,18 @@ fn parse_systemctl_args(args: &[String]) -> (SystemctlFlags, Vec<String>) {
 // ============================================================================
 
 /// Simulated unit entry for list-units / status output.
+// Unused because nothing populates it, and until 2026-09-12 that was hidden
+// by a blanket allow. The unit model -- state enums, `UnitFile` with its
+// parser and verifier, specifier expansion, the list entry types -- has no
+// consumer because this system exposes no per-unit interface: `list-units`,
+// `status` and `is-active` refuse, and the commands that acted on units were
+// printing sentences and doing nothing until they were made to refuse too.
+//
+// Kept rather than deleted. It is the parser and vocabulary a real service
+// manager needs, it is exercised by the crate's tests, and the blocker is a
+// missing `/proc/servicemgr` interface rather than a missing design -- the
+// same standing as gdb's execution types under ptrace.
+#[allow(dead_code)]
 struct UnitEntry {
     name: &'static str,
     load: LoadState,
@@ -729,6 +932,18 @@ struct UnitEntry {
 /// a definition and leaves its doc comment does not fail to compile; it
 /// reattaches, and the next reader is told this type does something it does
 /// not.
+// Unused because nothing populates it, and until 2026-09-12 that was hidden
+// by a blanket allow. The unit model -- state enums, `UnitFile` with its
+// parser and verifier, specifier expansion, the list entry types -- has no
+// consumer because this system exposes no per-unit interface: `list-units`,
+// `status` and `is-active` refuse, and the commands that acted on units were
+// printing sentences and doing nothing until they were made to refuse too.
+//
+// Kept rather than deleted. It is the parser and vocabulary a real service
+// manager needs, it is exercised by the crate's tests, and the blocker is a
+// missing `/proc/servicemgr` interface rather than a missing design -- the
+// same standing as gdb's execution types under ptrace.
+#[allow(dead_code)]
 struct UnitFileEntry {
     name: &'static str,
     state: EnableState,
@@ -1126,6 +1341,18 @@ struct CatOpts {
     pid: u32,
 }
 
+// Unused because nothing populates it, and until 2026-09-12 that was hidden
+// by a blanket allow. The unit model -- state enums, `UnitFile` with its
+// parser and verifier, specifier expansion, the list entry types -- has no
+// consumer because this system exposes no per-unit interface: `list-units`,
+// `status` and `is-active` refuse, and the commands that acted on units were
+// printing sentences and doing nothing until they were made to refuse too.
+//
+// Kept rather than deleted. It is the parser and vocabulary a real service
+// manager needs, it is exercised by the crate's tests, and the blocker is a
+// missing `/proc/servicemgr` interface rather than a missing design -- the
+// same standing as gdb's execution types under ptrace.
+#[allow(dead_code)]
 impl Default for CatOpts {
     fn default() -> Self {
         Self {
@@ -1693,6 +1920,12 @@ struct TmpfilesEntry {
     user: String,
     group: String,
     age: String,
+    // tmpfiles.d's seventh column. Parsed and not consulted, because nothing
+    // acts on a tmpfiles line yet; kept so the record matches the file format
+    // rather than the subset currently read. On the field, not the struct: the
+    // other six are read, and a struct-level allow would stop reporting them if
+    // they ever stopped being.
+    #[allow(dead_code)]
     argument: String,
 }
 

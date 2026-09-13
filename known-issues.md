@@ -141001,6 +141001,18 @@ which asks whether the games should follow the theme in the first place.
 
 ## TD-C-A-4K-DESKTOP-FRAME-IS-OVER-THE-BUDGET -- and most of this was already known
 
+**STATUS 2026-09-13: the optimisation question is closed; what is left is the
+GPU roadmap item.** The frame is still over the 2 ms target -- 6.88 ms at 4K
+-- but the drawing code is at or below the memory-write floor and no
+rearrangement of it can help. The measurements are at the end of this entry
+under "already below the floor". The remaining work is
+`roadmap.md`'s `[C]` "Wayland-inspired compositor: GPU acceleration, currently
+a software rasterizer", which now carries the figure that motivates it.
+
+This entry stays open as the record of *why* that is the remaining work, and
+because the frame is genuinely over budget. It should not be picked up as an
+optimisation task.
+
 **Date:** 2026-09-13. **Lane:** C.
 
 **Read this first.** This entry was written over an afternoon in which I

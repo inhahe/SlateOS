@@ -75082,6 +75082,20 @@ drawn only by their own unit tests. Separately, `apps/settings` is a *second*,
 independent implementation of most of the same panels, and it is the one that
 would actually run.
 
+**Update 2026-09-13 (lane C): the shell now has a binary, which is upstream of
+this entry's question.**
+
+`ShellSession` was called by nothing but its own tests, so the paint path this
+entry measures -- `paint_background` and `paint_chrome`, the only two functions
+that hand render commands to a compositor -- ran only under test. `gui/desktop`'s
+`desktop` binary now dials, starts the session and pumps it, and the scripted
+demo that used to hold that name is `desktop-demo`.
+
+That does not change the count: the paint path still reaches the same four
+modules, and which of the other fifty-odd should be on screen is still this
+entry's question. What changes is that the answer can now be observed rather
+than argued, because there is a running desktop to look at.
+
 **Where:** `gui/desktop/src/session.rs`, `ShellSession::paint_background`
 (`:334`) and `ShellSession::paint_chrome` (`:353`), are the only two functions
 that hand render commands to a compositor. Between them they call:
@@ -129630,6 +129644,46 @@ referenced from anywhere else in the tree — including the shell's own
 input-method switching, and no drag-and-drop in the system tray, however much
 code there is for each.
 
+**Update 2026-09-13 (lane C) — it is two, not four, and until today none of
+them could have run whatever the reference count said.**
+
+**The shell had no binary.** `ShellSession` -- the four surfaces, the login
+screen, the hotkeys, the animations -- documents itself as "the real loop, and
+it is what a live session runs", and `ShellSession::start` was called from
+**nothing but its own tests**. `src/main.rs` was a scripted demo that says, in
+its own first line, that it is not the shell. So the question this entry asks
+-- which modules are constructed -- had a ceiling above it: nothing constructed
+the thing that constructs them.
+
+`gui/desktop`'s `desktop` binary now dials the compositor, starts the session
+and runs it; the demo is `desktop-demo`, kept because a library whose only
+caller is its own test suite drifts from what a real session does, but no
+longer holding the name that should start the desktop. This is the same defect
+`TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR` describes for applications, closed for
+all 135 of them earlier the same day -- the shell was the one client left, and
+it is the client every other one is drawn on top of.
+
+**It does not use `ShellSession::run`, and that is worth knowing before writing
+another caller.** Two of the session's outputs are drained by the caller on
+purpose -- `take_launches` and `take_login_power` -- because policy about how a
+program starts belongs outside the window manager. `run` never yields between
+pumps, so anything launched under it is queued and never started. The binary
+drives `pump` itself and drains after each turn.
+
+**Re-measured, against code rather than the 2026-09-08 sweep:**
+
+| module | state |
+|---|---|
+| `login_screen.rs` | **constructed** -- `session.rs:83` imports `LoginScreen`, `:501` its user sources |
+| `input_method.rs` | **constructed** -- `DesktopShell::input_methods`, built `with_builtins()`, and its `SwitchShortcut` is read from `keyboard.layout_switch` |
+| `blur.rs` | still nothing |
+| `tray_dnd.rs` | still nothing |
+
+The first two were wired at some point after this entry was written and the
+entry was never re-read -- the fifth stale entry found today. What is different
+now is that being constructed finally means something, because there is a
+process to be constructed in.
+
 **These are not the settings panels, and must not be treated the same way.**
 Three unreachable `*_settings.rs` panels were deleted the same day under
 `design-decisions.md` §815 — but §815 draws its line precisely here: *"The
@@ -131197,8 +131251,41 @@ English word.
 | `visual_alerts` | a separate field of the same name in `apps/settings` |
 | `text_scale` | partial: `FontSettings::ui_size` is absolute, not a multiplier |
 | `caret_width` | `AppearanceSettings::caret_width_scale`, added 2026-09-13 by 839 and *read* since the `appearance_changed` hook landed -- see below |
-| `focus_indicator` | **none** |
+| `focus_indicator` | `AppearanceSettings::focus_ring_scale`, built 2026-09-13 and *read* by `guitk::modal` -- and the dead copy here is deleted |
 | `screen_reader` | **none** — the feature does not exist |
+
+**Update 2026-09-13 (later): two rows moved, and one of them was made stale by
+this lane an hour earlier.**
+
+`focus_indicator` no longer has "none" as its live equivalent. It is
+`AppearanceSettings::focus_ring_scale`, read through `guitk::style::FOCUS_RING_WIDTH`
+by the one widget that draws a ring, and `desktop::a11y`'s `FocusIndicator` --
+146 lines including its own tests -- is deleted. `caret_width` went the same way
+under 839. Both were built because *this table* recorded them as wanted, which
+is the case for keeping a dead field rather than deleting it silently; both are
+now removed from here because the record is no longer the only copy.
+
+The module is 1 239 lines, down from 1 360, and the only reference to `a11y::`
+anywhere outside it is still the doc comment in `gui/inputsettings` calling it
+superseded.
+
+**What is left in it, and none of it is the same kind of thing:**
+
+| still here | what it is |
+|---|---|
+| `MagnifierConfig`, `MagnifierShape`, `Magnifier` | a complete, tested screen magnifier that nothing constructs |
+| `CursorSettings` | duplicates `AppearanceSettings::cursor_size`/`cursor_scheme`, and nothing draws a pointer at all (C-Q18) |
+| `AccessibilityConfig` | the parallel config this entry is named for |
+
+So the remainder splits cleanly. `AccessibilityConfig` and `CursorSettings` are
+**duplicates** and follow the precedent: the live definition is elsewhere, and
+these go once nothing needs them. The magnifier is **not** a duplicate -- it is
+the only implementation of a feature the roadmap lists as done, unreachable for
+the same reason `login_screen` and `blur` are, and it belongs with those in
+`TD-C-FOUR-SHELL-FEATURES-ARE-BUILT-AND-NEVER-CONSTRUCTED` rather than being
+deleted as a stale copy. Deleting it would be the misreading of
+`design-decisions.md` 815 that entry warns about: a magnifier is the desktop
+showing you something, not a screen you open.
 
 **This is the unfinished remainder of a cleanup that already happened.**
 `TD-C-STICKY-FILTER-AND-MOUSE-KEYS-ARE-BUILT-TESTED-AND-CONNECTED-TO-NOTHING`

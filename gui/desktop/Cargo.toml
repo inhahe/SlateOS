@@ -22,6 +22,14 @@ path = "src/lib.rs"
 name = "desktop"
 path = "src/main.rs"
 
+# The scripted walk through the shell's surfaces. Kept as a *second*
+# caller of the public API -- a library whose only caller is its own test
+# suite drifts from what a real session does -- but no longer the binary
+# named `desktop`, because that name should start the desktop.
+[[bin]]
+name = "desktop-demo"
+path = "src/bin/demo.rs"
+
 [dependencies]
 guitk = { path = "../toolkit" }
 

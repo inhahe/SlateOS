@@ -21,6 +21,7 @@
 //!
 //! Uses the guitk library for UI rendering.
 
+use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::color::Color;
@@ -4703,14 +4704,15 @@ impl SpreadsheetApp {
     /// Render the toolbar with formatting buttons.
     fn render_toolbar(&self, cmds: &mut Vec<RenderCommand>, y: f32) {
         // Toolbar background
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
+        self.palette.push_surface(
+            cmds,
+            0.0,
             y,
-            width: self.window_width,
-            height: TOOLBAR_HEIGHT,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+            self.window_width,
+            TOOLBAR_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Bottom),
+        );
 
         // Toolbar separator
         cmds.push(RenderCommand::Line {
@@ -4801,25 +4803,27 @@ impl SpreadsheetApp {
     /// Render the formula bar.
     fn render_formula_bar(&self, cmds: &mut Vec<RenderCommand>, y: f32) {
         // Background
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
+        self.palette.push_surface(
+            cmds,
+            0.0,
             y,
-            width: self.window_width,
-            height: FORMULA_BAR_HEIGHT,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+            self.window_width,
+            FORMULA_BAR_HEIGHT,
+            0.0,
+            Surface::Card,
+        );
 
         // Cell address label
         let addr_text = self.selection().active.display();
-        cmds.push(RenderCommand::FillRect {
-            x: 4.0,
-            y: y + 3.0,
-            width: 60.0,
-            height: FORMULA_BAR_HEIGHT - 6.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(3.0),
-        });
+        self.palette.push_surface(
+            cmds,
+            4.0,
+            y + 3.0,
+            60.0,
+            FORMULA_BAR_HEIGHT - 6.0,
+            3.0,
+            Surface::Card,
+        );
         cmds.push(RenderCommand::Text {
             x: 10.0,
             y: y + 7.0,
@@ -4844,14 +4848,15 @@ impl SpreadsheetApp {
         });
 
         // Formula/value text area
-        cmds.push(RenderCommand::FillRect {
-            x: 96.0,
-            y: y + 3.0,
-            width: self.window_width - 100.0,
-            height: FORMULA_BAR_HEIGHT - 6.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(3.0),
-        });
+        self.palette.push_surface(
+            cmds,
+            96.0,
+            y + 3.0,
+            self.window_width - 100.0,
+            FORMULA_BAR_HEIGHT - 6.0,
+            3.0,
+            Surface::Card,
+        );
 
         let formula_text = if let InteractionMode::Editing { ref buffer } = self.mode {
             buffer.text().to_owned()
@@ -5571,14 +5576,15 @@ impl SpreadsheetApp {
     /// Render the status bar.
     fn render_status_bar(&self, cmds: &mut Vec<RenderCommand>, y: f32) {
         // Background
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
+        self.palette.push_surface(
+            cmds,
+            0.0,
             y,
-            width: self.window_width,
-            height: STATUS_BAR_HEIGHT,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::ZERO,
-        });
+            self.window_width,
+            STATUS_BAR_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Top),
+        );
 
         // Top separator
         cmds.push(RenderCommand::Line {

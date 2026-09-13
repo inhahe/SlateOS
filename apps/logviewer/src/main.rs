@@ -32,6 +32,7 @@
 #![allow(clippy::match_same_arms)]
 #![allow(clippy::cognitive_complexity)]
 
+use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::Color;
@@ -1103,14 +1104,15 @@ impl App {
     }
 
     fn render_toolbar(&self, cmds: &mut Vec<RenderCommand>) {
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: WINDOW_WIDTH,
-            height: TOOLBAR_HEIGHT,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            cmds,
+            0.0,
+            0.0,
+            WINDOW_WIDTH,
+            TOOLBAR_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Bottom),
+        );
 
         // Title
         cmds.push(RenderCommand::Text {
@@ -1229,14 +1231,15 @@ impl App {
     fn render_filter_bar(&self, cmds: &mut Vec<RenderCommand>) {
         let y = TOOLBAR_HEIGHT;
 
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
+        self.palette.push_surface(
+            cmds,
+            0.0,
             y,
-            width: WINDOW_WIDTH,
-            height: FILTER_BAR_HEIGHT,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+            WINDOW_WIDTH,
+            FILTER_BAR_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Bottom),
+        );
 
         // Level filter pills
         let mut lx = PADDING;
@@ -1922,14 +1925,15 @@ impl App {
     fn render_status_bar(&self, cmds: &mut Vec<RenderCommand>) {
         let y = WINDOW_HEIGHT - STATUS_BAR_HEIGHT;
 
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
+        self.palette.push_surface(
+            cmds,
+            0.0,
             y,
-            width: WINDOW_WIDTH,
-            height: STATUS_BAR_HEIGHT,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::ZERO,
-        });
+            WINDOW_WIDTH,
+            STATUS_BAR_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Top),
+        );
 
         let entries = self.filtered_entries();
         let total = self.active_log().map_or(0, |l| l.entries.len());

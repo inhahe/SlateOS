@@ -20,6 +20,7 @@
 // list documented in the root Cargo.toml. This keeps the discipline
 // centralised rather than diverging per-crate.
 
+use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::Color;
@@ -1539,14 +1540,15 @@ impl PasswordApp {
     }
 
     fn render_toolbar(&self, cmds: &mut Vec<RenderCommand>, width: f32) {
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
+        self.palette.push_surface(
+            cmds,
+            0.0,
+            0.0,
             width,
-            height: TOOLBAR_HEIGHT,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::ZERO,
-        });
+            TOOLBAR_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Bottom),
+        );
 
         cmds.push(RenderCommand::Text {
             x: 12.0,
@@ -1615,14 +1617,15 @@ impl PasswordApp {
 
     fn render_status_bar(&self, cmds: &mut Vec<RenderCommand>, width: f32, height: f32) {
         let bar_y = height - STATUS_BAR_HEIGHT;
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: bar_y,
+        self.palette.push_surface(
+            cmds,
+            0.0,
+            bar_y,
             width,
-            height: STATUS_BAR_HEIGHT,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::ZERO,
-        });
+            STATUS_BAR_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Top),
+        );
 
         let status = format!(
             "{} passwords generated  |  Policy: {}",

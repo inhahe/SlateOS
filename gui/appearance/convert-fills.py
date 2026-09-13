@@ -71,10 +71,27 @@ GUARD = re.compile(
 #    region with a separator underneath is a question about what the theme
 #    looks like, and nobody has answered it.
 SKIP = re.compile(
-    r"bar_w|bar_x|bar_h|bar_max|percent|pct_|histogram|chart|graph|sparkline|"
-    r"toolbar|tool_bar|tab_bar|status_bar|statusbar|mode_bar|menu_bar|menubar",
+    r"bar_w|bar_x|bar_max|percent|pct_|histogram|chart|graph|sparkline",
     re.I,
 )
+
+# A full-width structural band. Answered by C-Q14 on 2026-09-12: these keep
+# their fill by default and a StripStyle setting offers a hairline instead,
+# so they convert to Surface::Strip rather than staying skipped. The edge is
+# which side faces the content -- a toolbar has content below it, a status
+# bar above -- because nothing about the rectangle says which and the
+# separator has to land on the right side when the setting is switched.
+# `[ _-]?` throughout: these names appear as `status_bar` in code and "Status
+# bar" in the comment above it, and the comment is often the only place the
+# thing is named at all. Matching only the identifier form missed every site
+# whose sole clue was prose.
+_SEP = r"[ _-]?"
+STRIP_BOTTOM = re.compile(
+    r"tool" + _SEP + r"bar|tab" + _SEP + r"bar|menu" + _SEP + r"bar|mode" + _SEP + r"bar"
+    r"|title" + _SEP + r"bar|top" + _SEP + r"bar",
+    re.I,
+)
+STRIP_TOP = re.compile(r"status" + _SEP + r"bar|footer", re.I)
 
 
 # How raised each rung is, for reading a conditional colour. A site that says
@@ -86,6 +103,12 @@ BRANCH = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_.]*)\.(" + "|".join(ROLES) + r")\
 
 
 def classify(context: str, preceding: list) -> str:
+    # Before CHROME, because "toolbar" contains no chrome word but "tab_bar"
+    # sits next to plenty, and a strip is a strip whatever is drawn on it.
+    if STRIP_TOP.search(context):
+        return "Strip(Edge::Top)"
+    if STRIP_BOTTOM.search(context):
+        return "Strip(Edge::Bottom)"
     if CHROME.search(context):
         return "ControlTrack"
     # Look only at the few lines directly above: an enclosing `if` is adjacent,

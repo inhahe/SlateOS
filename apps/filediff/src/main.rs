@@ -27,6 +27,7 @@
     clippy::struct_excessive_bools
 )]
 
+use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 #[allow(unused_imports)]
@@ -1400,14 +1401,15 @@ impl FileDiffApp {
 
     /// Render the toolbar area.
     fn render_toolbar(&self, tree: &mut RenderTree) {
-        tree.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: self.width,
-            height: TOOLBAR_HEIGHT,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            tree,
+            0.0,
+            0.0,
+            self.width,
+            TOOLBAR_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Bottom),
+        );
 
         let mut btn_x: f32 = 8.0;
         let btn_y: f32 = 6.0;
@@ -2217,14 +2219,15 @@ impl FileDiffApp {
     fn render_status_bar(&self, tree: &mut RenderTree) {
         let y = self.height - STATUS_BAR_HEIGHT;
 
-        tree.push(RenderCommand::FillRect {
-            x: 0.0,
+        self.palette.push_surface(
+            tree,
+            0.0,
             y,
-            width: self.width,
-            height: STATUS_BAR_HEIGHT,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+            self.width,
+            STATUS_BAR_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Top),
+        );
 
         // Top border
         tree.push(RenderCommand::Line {

@@ -17,6 +17,7 @@
 //! Network I/O is performed through Slate OS syscalls; simulated with
 //! representative data for initial development.
 
+use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::color::Color;
@@ -1715,14 +1716,15 @@ pub fn render_app(app: &VpnManager) -> RenderTree {
 
 fn render_title_bar(frame: &mut Frame, app: &VpnManager) {
     // Title bar background
-    frame.push(RenderCommand::FillRect {
-        x: 0.0,
-        y: 0.0,
-        width: frame.width,
-        height: TITLE_BAR_HEIGHT,
-        color: app.palette.mantle,
-        corner_radii: CornerRadii::ZERO,
-    });
+    app.palette.push_surface(
+        frame,
+        0.0,
+        0.0,
+        frame.width,
+        TITLE_BAR_HEIGHT,
+        0.0,
+        Surface::Strip(Edge::Bottom),
+    );
 
     // Title text
     frame.push(RenderCommand::Text {
@@ -1811,14 +1813,15 @@ fn render_toolbar(frame: &mut Frame, app: &VpnManager) {
     let y = TITLE_BAR_HEIGHT;
 
     // Toolbar background
-    frame.push(RenderCommand::FillRect {
-        x: 0.0,
+    app.palette.push_surface(
+        frame,
+        0.0,
         y,
-        width: frame.width,
-        height: TOOLBAR_HEIGHT,
-        color: app.palette.surface0,
-        corner_radii: CornerRadii::ZERO,
-    });
+        frame.width,
+        TOOLBAR_HEIGHT,
+        0.0,
+        Surface::Strip(Edge::Bottom),
+    );
 
     let btn_y = y + 4.0;
 
@@ -2173,14 +2176,15 @@ fn render_detail_panel(frame: &mut Frame, app: &VpnManager, content_y: f32, cont
 
 fn render_tab_bar(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw: f32) {
     // Tab bar background
-    frame.push(RenderCommand::FillRect {
-        x: px,
-        y: py,
-        width: pw,
-        height: TAB_HEIGHT,
-        color: app.palette.surface0,
-        corner_radii: CornerRadii::ZERO,
-    });
+    app.palette.push_surface(
+        frame,
+        px,
+        py,
+        pw,
+        TAB_HEIGHT,
+        0.0,
+        Surface::Strip(Edge::Bottom),
+    );
 
     let tabs = DetailTab::all();
     let tab_w = pw / tabs.len() as f32;
@@ -3453,14 +3457,15 @@ fn render_status_bar(frame: &mut Frame, app: &VpnManager) {
     let y = frame.height - STATUS_BAR_HEIGHT;
 
     // Background
-    frame.push(RenderCommand::FillRect {
-        x: 0.0,
+    app.palette.push_surface(
+        frame,
+        0.0,
         y,
-        width: frame.width,
-        height: STATUS_BAR_HEIGHT,
-        color: app.palette.mantle,
-        corner_radii: CornerRadii::ZERO,
-    });
+        frame.width,
+        STATUS_BAR_HEIGHT,
+        0.0,
+        Surface::Strip(Edge::Top),
+    );
 
     // Separator
     frame.push(RenderCommand::Line {

@@ -6,6 +6,7 @@
 //!
 //! Uses the guitk library for rendering. Dark theme (Catppuccin Mocha).
 
+use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use std::collections::BTreeMap;
@@ -2185,14 +2186,15 @@ impl FileAssocUI {
 
     /// Render the top toolbar with search bar and action buttons.
     fn draw_toolbar(&self, frame: &mut Frame, l: &Layout) {
-        frame.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: l.width,
-            height: TOOLBAR_HEIGHT,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            frame,
+            0.0,
+            0.0,
+            l.width,
+            TOOLBAR_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Bottom),
+        );
 
         frame.push(RenderCommand::Text {
             x: PADDING,

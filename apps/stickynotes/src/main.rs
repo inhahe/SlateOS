@@ -18,7 +18,9 @@
 //!
 //! Uses the guitk library for UI rendering.
 
+use appearance::Edge;
 use appearance::Palette;
+use appearance::Surface;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -2424,14 +2426,15 @@ impl StickyNotesApp {
 
     fn draw_toolbar(&self, frame: &mut Frame, width: f32, height: f32) {
         let bar_y = height - TOOLBAR_H;
-        frame.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: bar_y,
+        self.palette.push_surface(
+            frame,
+            0.0,
+            bar_y,
             width,
-            height: TOOLBAR_H,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+            TOOLBAR_H,
+            0.0,
+            Surface::Strip(Edge::Bottom),
+        );
         let chip_y = bar_y + (TOOLBAR_H - CHIP_H) / 2.0;
 
         // The right-hand toggles are laid out first, from the right edge, so

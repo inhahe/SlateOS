@@ -31,6 +31,7 @@
 #![allow(clippy::missing_panics_doc)]
 #![allow(clippy::missing_errors_doc)]
 
+use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::event::{Event, EventResult, Key, KeyEvent};
@@ -2032,14 +2033,15 @@ impl NotesApp {
 
     fn render_toolbar(&self, cmds: &mut Vec<RenderCommand>, width: f32) {
         // Toolbar background
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
+        self.palette.push_surface(
+            cmds,
+            0.0,
+            0.0,
             width,
-            height: TOOLBAR_HEIGHT,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::ZERO,
-        });
+            TOOLBAR_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Bottom),
+        );
 
         // App title
         cmds.push(RenderCommand::Text {
@@ -2189,14 +2191,15 @@ impl NotesApp {
         let bar_y = height - STATUS_BAR_HEIGHT;
 
         // Background
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: bar_y,
+        self.palette.push_surface(
+            cmds,
+            0.0,
+            bar_y,
             width,
-            height: STATUS_BAR_HEIGHT,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::ZERO,
-        });
+            STATUS_BAR_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Top),
+        );
 
         // Separator
         cmds.push(RenderCommand::Line {

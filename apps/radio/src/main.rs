@@ -1300,14 +1300,8 @@ impl RadioApp {
             ((self.height - PLAYER_BAR_HEIGHT) - h).abs() < 0.01,
             "the sidebar must be the one `genre_rows` sized the genre list for"
         );
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: w,
-            height: h,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(cmds, x, y, w, h, 0.0, Surface::Sidebar);
 
         // Title
         cmds.push(RenderCommand::Text {

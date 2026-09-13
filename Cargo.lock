@@ -1744,6 +1744,7 @@ dependencies = [
 name = "mkinitramfs"
 version = "0.1.0"
 dependencies = [
+ "deflate",
  "modechange",
  "quoting",
 ]

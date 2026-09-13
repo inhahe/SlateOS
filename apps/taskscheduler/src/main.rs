@@ -30,6 +30,7 @@
 
 #![allow(clippy::too_many_arguments)]
 
+use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::color::Color;
@@ -2322,14 +2323,15 @@ impl SchedulerUI {
     fn render_toolbar(&self, frame: &mut Frame, layout: &Layout) {
         let band = layout.toolbar;
 
-        frame.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: band.y,
-            width: band.w,
-            height: band.h,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            frame,
+            0.0,
+            band.y,
+            band.w,
+            band.h,
+            0.0,
+            Surface::Strip(Edge::Bottom),
+        );
 
         // The button shrinks to the strip rather than being centred in it at
         // its nominal height. A button is a fill and a hit box, and both are
@@ -2391,14 +2393,15 @@ impl SchedulerUI {
     fn render_tab_bar(&self, frame: &mut Frame, layout: &Layout) {
         let band = layout.tab_bar;
 
-        frame.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: band.y,
-            width: band.w,
-            height: band.h,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            frame,
+            0.0,
+            band.y,
+            band.w,
+            band.h,
+            0.0,
+            Surface::Strip(Edge::Bottom),
+        );
 
         // Separator line, along the bottom edge but never above the top one.
         let (sep_y, sep_h) = bottom_strip(band, 1.0);

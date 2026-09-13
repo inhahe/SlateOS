@@ -34,6 +34,7 @@
 #![allow(clippy::cognitive_complexity)]
 // Many items are used only via test module and the real GUI event loop
 
+use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::Color;
@@ -1741,14 +1742,15 @@ impl App {
 
     fn render_toolbar(&self, cmds: &mut Vec<RenderCommand>) {
         // Toolbar background
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: self.window_width,
-            height: TOOLBAR_HEIGHT,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            cmds,
+            0.0,
+            0.0,
+            self.window_width,
+            TOOLBAR_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Bottom),
+        );
 
         // Title
         cmds.push(RenderCommand::Text {
@@ -2596,14 +2598,15 @@ impl App {
         let col_width = (self.window_width - 3.0 * PADDING) / 2.0;
 
         // Left column: Syntax reference
-        cmds.push(RenderCommand::FillRect {
-            x: PADDING,
-            y: content_y,
-            width: col_width,
-            height: self.window_height - content_y - PADDING,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::all(6.0),
-        });
+        self.palette.push_surface(
+            cmds,
+            PADDING,
+            content_y,
+            col_width,
+            self.window_height - content_y - PADDING,
+            6.0,
+            Surface::Strip(Edge::Bottom),
+        );
 
         cmds.push(RenderCommand::Text {
             x: PADDING + 12.0,

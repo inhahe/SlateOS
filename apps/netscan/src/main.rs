@@ -19,6 +19,7 @@
 //! performed through Slate OS syscalls; simulated with representative
 //! data for initial development.
 
+use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 #[allow(unused_imports)]
@@ -2673,14 +2674,15 @@ impl NetScanApp {
 
     fn render_title_bar(&self, tree: &mut RenderTree) {
         // Title bar background
-        tree.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: self.window_width,
-            height: TITLE_BAR_HEIGHT,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            tree,
+            0.0,
+            0.0,
+            self.window_width,
+            TITLE_BAR_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Bottom),
+        );
 
         // App icon placeholder (radar circle)
         let icon_cx = 22.0;
@@ -2751,14 +2753,15 @@ impl NetScanApp {
         let y = TITLE_BAR_HEIGHT;
 
         // Panel background
-        tree.push(RenderCommand::FillRect {
-            x: 0.0,
+        self.palette.push_surface(
+            tree,
+            0.0,
             y,
-            width: self.window_width,
-            height: CONFIG_PANEL_HEIGHT,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+            self.window_width,
+            CONFIG_PANEL_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Bottom),
+        );
 
         // Section label
         tree.push(RenderCommand::Text {
@@ -2986,14 +2989,15 @@ impl NetScanApp {
         let tab_y = TITLE_BAR_HEIGHT + CONFIG_PANEL_HEIGHT + PADDING;
 
         // Tab bar background
-        tree.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: tab_y - 2.0,
-            width: self.window_width,
-            height: TAB_HEIGHT + 4.0,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            tree,
+            0.0,
+            tab_y - 2.0,
+            self.window_width,
+            TAB_HEIGHT + 4.0,
+            0.0,
+            Surface::Strip(Edge::Bottom),
+        );
 
         let mut tab_x = PADDING;
         for tab in &ViewTab::ALL {
@@ -3711,14 +3715,15 @@ impl NetScanApp {
         let area_h = self.window_height - content_y - PADDING;
 
         // Background
-        tree.push(RenderCommand::FillRect {
-            x: PADDING,
-            y: content_y,
-            width: area_w,
-            height: area_h,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
+        self.palette.push_surface(
+            tree,
+            PADDING,
+            content_y,
+            area_w,
+            area_h,
+            CORNER_RADIUS,
+            Surface::Strip(Edge::Bottom),
+        );
 
         tree.push(RenderCommand::Text {
             x: PADDING + 12.0,
@@ -4388,14 +4393,15 @@ impl NetScanApp {
         let y = self.window_height - PROGRESS_BAR_HEIGHT;
 
         // Background
-        tree.push(RenderCommand::FillRect {
-            x: 0.0,
+        self.palette.push_surface(
+            tree,
+            0.0,
             y,
-            width: self.window_width,
-            height: PROGRESS_BAR_HEIGHT,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::ZERO,
-        });
+            self.window_width,
+            PROGRESS_BAR_HEIGHT,
+            0.0,
+            Surface::ControlTrack,
+        );
 
         // Fill
         let frac = progress.fraction();

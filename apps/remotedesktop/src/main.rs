@@ -20,6 +20,7 @@
 //! Network I/O is performed through Slate OS syscalls; simulated with
 //! representative data for initial development.
 
+use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 #[allow(unused_imports)]
@@ -1771,14 +1772,15 @@ impl RemoteDesktopApp {
 
     fn render_title_bar(&self, cmds: &mut Vec<RenderCommand>) {
         // Title bar background
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: self.window_width,
-            height: TITLE_BAR_HEIGHT,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            cmds,
+            0.0,
+            0.0,
+            self.window_width,
+            TITLE_BAR_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Bottom),
+        );
 
         // App icon (simple monitor shape)
         cmds.push(RenderCommand::StrokeRect {
@@ -1858,14 +1860,15 @@ impl RemoteDesktopApp {
         let y = TITLE_BAR_HEIGHT;
 
         // Toolbar background
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
+        self.palette.push_surface(
+            cmds,
+            0.0,
             y,
-            width: self.window_width,
-            height: TOOLBAR_HEIGHT,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+            self.window_width,
+            TOOLBAR_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Bottom),
+        );
 
         let btn_labels = ["+ New", "Connect", "Screenshot", "Fullscreen", "Perf"];
         let btn_colors = [
@@ -1886,14 +1889,15 @@ impl RemoteDesktopApp {
                 self.palette.surface1
             };
 
-            cmds.push(RenderCommand::FillRect {
-                x: bx,
-                y: y + 4.0,
-                width: btn_width,
-                height: TOOLBAR_HEIGHT - 8.0,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            self.palette.push_surface(
+                cmds,
+                bx,
+                y + 4.0,
+                btn_width,
+                TOOLBAR_HEIGHT - 8.0,
+                4.0,
+                Surface::Strip(Edge::Bottom),
+            );
             cmds.push(RenderCommand::Text {
                 x: bx + 8.0,
                 y: y + 10.0,
@@ -1958,14 +1962,15 @@ impl RemoteDesktopApp {
     fn render_tabs(&self, cmds: &mut Vec<RenderCommand>) {
         let y = TITLE_BAR_HEIGHT + TOOLBAR_HEIGHT;
 
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
+        self.palette.push_surface(
+            cmds,
+            0.0,
             y,
-            width: self.window_width,
-            height: TAB_HEIGHT,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+            self.window_width,
+            TAB_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Bottom),
+        );
 
         let tabs = [
             MainView::Connections,
@@ -3049,14 +3054,15 @@ impl RemoteDesktopApp {
     fn render_status_bar(&self, cmds: &mut Vec<RenderCommand>) {
         let y = self.window_height - STATUS_BAR_HEIGHT;
 
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
+        self.palette.push_surface(
+            cmds,
+            0.0,
             y,
-            width: self.window_width,
-            height: STATUS_BAR_HEIGHT,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::ZERO,
-        });
+            self.window_width,
+            STATUS_BAR_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Top),
+        );
 
         // Separator
         cmds.push(RenderCommand::Line {

@@ -14,6 +14,7 @@
 //! Uses the guitk library for UI rendering. Disk data is gathered through
 //! Slate OS syscalls; stubbed with representative data for initial development.
 
+use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 #[allow(unused_imports)]
@@ -1199,14 +1200,15 @@ impl PartitionManagerApp {
 // ============================================================================
 
 fn render_title_bar(tree: &mut RenderTree, pal: &Palette, width: f32) {
-    tree.push(RenderCommand::FillRect {
-        x: 0.0,
-        y: 0.0,
+    pal.push_surface(
+        tree,
+        0.0,
+        0.0,
         width,
-        height: TITLE_BAR_HEIGHT,
-        color: pal.mantle,
-        corner_radii: CornerRadii::ZERO,
-    });
+        TITLE_BAR_HEIGHT,
+        0.0,
+        Surface::Strip(Edge::Bottom),
+    );
 
     tree.push(RenderCommand::Text {
         x: 12.0,
@@ -1237,14 +1239,15 @@ fn render_title_bar(tree: &mut RenderTree, pal: &Palette, width: f32) {
 fn render_toolbar(tree: &mut RenderTree, app: &PartitionManagerApp) {
     let y = TITLE_BAR_HEIGHT;
 
-    tree.push(RenderCommand::FillRect {
-        x: 0.0,
+    app.palette.push_surface(
+        tree,
+        0.0,
         y,
-        width: app.width,
-        height: TOOLBAR_HEIGHT,
-        color: app.palette.surface0,
-        corner_radii: CornerRadii::ZERO,
-    });
+        app.width,
+        TOOLBAR_HEIGHT,
+        0.0,
+        Surface::Strip(Edge::Bottom),
+    );
 
     let buttons = app.toolbar_buttons();
     let mut bx = 8.0;
@@ -2186,14 +2189,15 @@ fn render_detail_panel(tree: &mut RenderTree, app: &PartitionManagerApp) {
     let panel_height = bottom - top;
 
     // Panel background
-    tree.push(RenderCommand::FillRect {
-        x: panel_x,
-        y: top,
-        width: DETAIL_PANEL_WIDTH,
-        height: panel_height,
-        color: app.palette.mantle,
-        corner_radii: CornerRadii::ZERO,
-    });
+    app.palette.push_surface(
+        tree,
+        panel_x,
+        top,
+        DETAIL_PANEL_WIDTH,
+        panel_height,
+        0.0,
+        Surface::Strip(Edge::Top),
+    );
 
     // Left border
     tree.push(RenderCommand::Line {
@@ -2529,14 +2533,15 @@ fn render_queue_panel(tree: &mut RenderTree, app: &PartitionManagerApp) {
 fn render_status_bar(tree: &mut RenderTree, app: &PartitionManagerApp) {
     let y = app.height - STATUS_BAR_HEIGHT;
 
-    tree.push(RenderCommand::FillRect {
-        x: 0.0,
+    app.palette.push_surface(
+        tree,
+        0.0,
         y,
-        width: app.width,
-        height: STATUS_BAR_HEIGHT,
-        color: app.palette.mantle,
-        corner_radii: CornerRadii::ZERO,
-    });
+        app.width,
+        STATUS_BAR_HEIGHT,
+        0.0,
+        Surface::Strip(Edge::Top),
+    );
 
     // Top border
     tree.push(RenderCommand::Line {

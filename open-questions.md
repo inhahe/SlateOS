@@ -1165,6 +1165,25 @@ explorer without a window picker, and treating them as one question gets the
 installer either over- or under-served. I would not delete anything until each
 has been looked at — deletion is the only irreversible option here.
 
+**Since this was filed, the ongoing cost stopped being hypothetical.** On
+2026-09-13 two of the five were converted to the user's colour palette --
+the image viewer's video module and the process explorer's features module --
+because a tree-wide sweep found them and there is no way for a sweep to know
+that nothing runs them. That is 106 constant uses and two `&Palette`
+parameters threaded through code that cannot be reached, done on the
+reasoning that it is independent of this answer: it compiles and is tested
+either way, and if it is ever wired up it now arrives with the right
+colours. The same will be true of the next sweep, and the one after.
+
+**And the same shape turned up outside the five.** The desktop's icon layer
+(`DesktopIconLayer`, `gui/desktop/src/icons.rs`) is named nowhere but its own
+file, and it is what would read the *desktop icon size* setting -- so that
+preference has a working control in Settings and no consumer that runs.
+`cursor_size` and `cursor_scheme` are in the same position. Those are not
+part of this question and are logged separately, but they say something about
+it: **an answer of "delete" would need a rule, not a list**, because the
+list keeps growing as people look.
+
 **If it is never answered:** nothing breaks and nothing degrades; the system
 keeps carrying code it cannot run. The cost is ongoing rather than sudden —
 every sweep, every conversion and every audit pays attention to these files.

@@ -670,8 +670,13 @@ fn run_coredump_extract(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    cmd_dump(&rest);
-    0
+    // The status is returned, not discarded. When `cmd_dump` gained a return
+    // value in the previous commit this caller kept dropping it, so the
+    // option guard inside fired, printed, and the personality reported
+    // success anyway -- the same message-right/status-wrong shape that
+    // commit was fixing elsewhere. Rust does not warn on a discarded `i32`,
+    // and the sweep is what caught it.
+    cmd_dump(&rest)
 }
 
 // ── Help ───────────────────────────────────────────────────────────────

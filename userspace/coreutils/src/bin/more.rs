@@ -429,6 +429,9 @@ fn say(text: &[u8]) -> ExitCode {
 }
 
 fn run(opts: Options) -> ExitCode {
+    // Set when a named file could not be opened; carried to the end so one
+    // bad name does not stop the rest being paged.
+    let mut unreadable = false;
     let stdin_is_tty = io::stdin().is_terminal();
     let banners = wants_banners(opts.files.len(), stdin_is_tty);
 
@@ -514,6 +517,11 @@ fn run(opts: Options) -> ExitCode {
                 }
                 Err(e) => {
                     diag!("more: cannot open {}: {}", quotef(&name), strerror(&e));
+                    // The `continue` stays: `more a missing b` must still
+                    // page `a` and `b`. What was missing is that the failure
+                    // never reached the status, so `more /nonexistent`
+                    // reported it and exited 0.
+                    unreadable = true;
                     continue;
                 }
             }
@@ -568,7 +576,11 @@ fn run(opts: Options) -> ExitCode {
     }
 
     let _ = out.flush(); // see write_ignoring_errors
-    ExitCode::SUCCESS
+    if unreadable {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    }
 }
 
 /// The parts of the command line that describe the screen rather than the

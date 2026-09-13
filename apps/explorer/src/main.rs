@@ -30,13 +30,13 @@ mod fileops;
 mod thumbs;
 
 use appearance::Palette;
-use guitk::theme::with_alpha;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::listview::ListViewport;
 use guitk::modal::{AlertDialog, DialogResult, InputDialog};
 use guitk::render::RenderTree;
 use guitk::scroll_window;
 use guitk::scrollbar;
+use guitk::theme::with_alpha;
 use guitk::wheel::Accumulator as WheelAccumulator;
 
 use columns::{ColumnId, ColumnManager, ColumnValue, FileInfo, SortOrder};
@@ -1665,7 +1665,13 @@ impl ExplorerState {
             self.palette.surface1,
             1.0,
         );
-        tree.text(12.0, bar_y + 7.0, &self.address_text, self.palette.text, 13.0);
+        tree.text(
+            12.0,
+            bar_y + 7.0,
+            &self.address_text,
+            self.palette.text,
+            13.0,
+        );
     }
 
     fn render_sidebar(&self, tree: &mut RenderTree, zones: &mut DropZoneManager) {
@@ -2150,16 +2156,14 @@ impl ExplorerState {
 
             let values = self.row_values(entry);
             tree.translate(ICON_GUTTER, 0.0);
-            for cmd in
-                columns::render_column_values_from(
-                    &self.columns,
-                    &values,
-                    ey,
-                    table_w,
-                    name_color,
-                    &self.palette,
-                )
-            {
+            for cmd in columns::render_column_values_from(
+                &self.columns,
+                &values,
+                ey,
+                table_w,
+                name_color,
+                &self.palette,
+            ) {
                 tree.push(cmd);
             }
             tree.untranslate();

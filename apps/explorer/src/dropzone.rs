@@ -25,11 +25,11 @@
 //! for each one, and the absence of the blanket is what keeps that true.
 
 use appearance::Palette;
-use guitk::theme::with_alpha;
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::theme::with_alpha;
 
 use std::path::{Path, PathBuf};
 
@@ -1221,7 +1221,8 @@ mod tests {
             200.0,
             list_area,
             true,
-         &Palette::for_mode(false));
+            &Palette::for_mode(false),
+        );
         // Should have: list area overlay + label background + label text.
         assert_eq!(cmds.len(), 3);
         // First command is a FillRect covering the list area.
@@ -1248,7 +1249,8 @@ mod tests {
             90.0,
             None,
             true,
-         &Palette::for_mode(false));
+            &Palette::for_mode(false),
+        );
         // Should have: overlay + underline + label bg + label text.
         assert_eq!(cmds.len(), 4);
     }
@@ -1266,7 +1268,8 @@ mod tests {
             90.0,
             None,
             false,
-         &Palette::for_mode(false));
+            &Palette::for_mode(false),
+        );
         // The overlay reports refusal, so it is the palette's `red` -- checked
         // as the role rather than as an RGB triple, which is the difference
         // between "this means refusal" and "this is the colour someone typed
@@ -1284,7 +1287,15 @@ mod tests {
 
     #[test]
     fn render_feedback_none_zone_empty() {
-        let cmds = render_drop_feedback(&DropZone::None, DropOperation::None, 0.0, 0.0, None, true, &Palette::for_mode(false));
+        let cmds = render_drop_feedback(
+            &DropZone::None,
+            DropOperation::None,
+            0.0,
+            0.0,
+            None,
+            true,
+            &Palette::for_mode(false),
+        );
         assert!(cmds.is_empty());
     }
 
@@ -1301,7 +1312,8 @@ mod tests {
             130.0,
             None,
             true,
-         &Palette::for_mode(false));
+            &Palette::for_mode(false),
+        );
         // overlay + underline + label bg + label text.
         assert_eq!(cmds.len(), 4);
     }

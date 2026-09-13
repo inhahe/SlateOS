@@ -1500,11 +1500,7 @@ pub fn render_column_chooser(
             y: cb_y,
             width: cb_size,
             height: cb_size,
-            color: if is_active {
-                c.check_on
-            } else {
-                c.check_off
-            },
+            color: if is_active { c.check_on } else { c.check_off },
             line_width: 1.0,
             corner_radii: CornerRadii::all(2.0),
         });
@@ -2475,7 +2471,13 @@ mod tests {
     #[test]
     fn test_render_column_values_nonempty() {
         let mgr = ColumnManager::with_defaults();
-        let cmds = render_column_values(&mgr, "/test/file.txt", 0.0, 800.0, &Palette::for_mode(false));
+        let cmds = render_column_values(
+            &mgr,
+            "/test/file.txt",
+            0.0,
+            800.0,
+            &Palette::for_mode(false),
+        );
         assert!(!cmds.is_empty(), "row should produce render commands");
     }
 
@@ -2495,7 +2497,14 @@ mod tests {
         let mgr = ColumnManager::with_defaults();
         let path = "/test/file.txt";
         let via_path = render_column_values(&mgr, path, 0.0, 800.0, &Palette::for_mode(false));
-        let via_values = render_column_values_from(&mgr, &mgr.row_values(path), 0.0, 800.0, None, &Palette::for_mode(false));
+        let via_values = render_column_values_from(
+            &mgr,
+            &mgr.row_values(path),
+            0.0,
+            800.0,
+            None,
+            &Palette::for_mode(false),
+        );
         assert!(
             same_commands(&via_path, &via_values),
             "the path wrapper must draw exactly what it delegates to"
@@ -2566,7 +2575,14 @@ mod tests {
         ];
         let tint = Color::rgba(0, 102, 204, 255);
 
-        let cmds = render_column_values_from(&mgr, &values, 0.0, 800.0, Some(tint), &Palette::for_mode(false));
+        let cmds = render_column_values_from(
+            &mgr,
+            &values,
+            0.0,
+            800.0,
+            Some(tint),
+            &Palette::for_mode(false),
+        );
         let colors: Vec<Color> = cmds
             .iter()
             .filter_map(|c| match c {
@@ -2575,7 +2591,10 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(colors, vec![tint, ColumnColors::new(&Palette::for_mode(false)).cell_text]);
+        assert_eq!(
+            colors,
+            vec![tint, ColumnColors::new(&Palette::for_mode(false)).cell_text]
+        );
     }
 
     /// `StandardColumns::value` used to return `Empty` for Size and the two

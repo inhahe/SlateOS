@@ -2270,7 +2270,13 @@ impl SysInfoState {
         let mut tree = RenderTree::new();
 
         // Background fill.
-        tree.fill_rect(0.0, 0.0, self.window_width, self.window_height, self.palette.crust);
+        tree.fill_rect(
+            0.0,
+            0.0,
+            self.window_width,
+            self.window_height,
+            self.palette.crust,
+        );
 
         // Title bar.
         self.render_title_bar(&mut tree);
@@ -2320,7 +2326,13 @@ impl SysInfoState {
 
     fn render_toolbar(&self, tree: &mut RenderTree) {
         let y = TITLE_BAR_HEIGHT;
-        tree.fill_rect(0.0, y, self.window_width, TOOLBAR_HEIGHT, self.palette.mantle);
+        tree.fill_rect(
+            0.0,
+            y,
+            self.window_width,
+            TOOLBAR_HEIGHT,
+            self.palette.mantle,
+        );
 
         // Search box.
         let search_x = 8.0;
@@ -2568,7 +2580,13 @@ impl SysInfoState {
         let name_col_width = width * 0.38;
 
         // Header row.
-        tree.fill_rect(left, table_top, width, PROPERTY_HEADER_HEIGHT, self.palette.mantle);
+        tree.fill_rect(
+            left,
+            table_top,
+            width,
+            PROPERTY_HEADER_HEIGHT,
+            self.palette.mantle,
+        );
         tree.push(RenderCommand::Text {
             x: left + 16.0,
             y: table_top + 6.0,
@@ -2626,7 +2644,11 @@ impl SysInfoState {
             } else {
                 self.palette.subtext0
             };
-            let value_color = if is_section { self.palette.peach } else { self.palette.text };
+            let value_color = if is_section {
+                self.palette.peach
+            } else {
+                self.palette.text
+            };
 
             // Name.
             if !prop.name.is_empty() {

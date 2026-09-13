@@ -13,10 +13,10 @@
 
 mod features;
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};
 use guitk::history::SampleHistory;
-use appearance::Palette;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::scroll_window;
 use guitk::table::{Column, Fit, Table};
@@ -1525,7 +1525,13 @@ impl ProcessExplorerState {
             if is_active {
                 tree.fill_rect(tx, y, tab_w, TAB_BAR_HEIGHT, self.palette.mantle);
                 // Active indicator line at bottom
-                tree.fill_rect(tx, y + TAB_BAR_HEIGHT - 2.0, tab_w, 2.0, self.palette.accent);
+                tree.fill_rect(
+                    tx,
+                    y + TAB_BAR_HEIGHT - 2.0,
+                    tab_w,
+                    2.0,
+                    self.palette.accent,
+                );
             }
 
             let text_color = if is_active {
@@ -1546,7 +1552,13 @@ impl ProcessExplorerState {
         let y = self.window_height as f32 - STATUS_BAR_HEIGHT;
 
         tree.fill_rect(0.0, y, w, STATUS_BAR_HEIGHT, self.palette.mantle);
-        tree.text(8.0, y + 5.0, &self.status_message, self.palette.subtext0, 11.0);
+        tree.text(
+            8.0,
+            y + 5.0,
+            &self.status_message,
+            self.palette.subtext0,
+            11.0,
+        );
     }
 
     // -- Process tab --------------------------------------------------------
@@ -1778,7 +1790,13 @@ impl ProcessExplorerState {
 
         self.render_bold_text(tree, graph_x, graph_y, "CPU Usage", self.palette.text, 13.0);
         let cpu_label = format!("{:.1}%", self.system_info.cpu_overall);
-        tree.text(graph_x + 100.0, graph_y, &cpu_label, self.palette.green, 13.0);
+        tree.text(
+            graph_x + 100.0,
+            graph_y,
+            &cpu_label,
+            self.palette.green,
+            13.0,
+        );
 
         let chart_y = graph_y + 20.0;
         tree.fill_rect(graph_x, chart_y, graph_w, graph_h, self.palette.crust);
@@ -1794,9 +1812,21 @@ impl ProcessExplorerState {
         // Grid lines (25%, 50%, 75%)
         for pct in &[25.0f32, 50.0, 75.0] {
             let gy = chart_y + graph_h * (1.0 - pct / 100.0);
-            self.render_dashed_hline(tree, graph_x + 1.0, gy, graph_w - 2.0, self.palette.surface1);
+            self.render_dashed_hline(
+                tree,
+                graph_x + 1.0,
+                gy,
+                graph_w - 2.0,
+                self.palette.surface1,
+            );
             let pct_label = format!("{:.0}%", pct);
-            tree.text(graph_x + 2.0, gy - 10.0, &pct_label, self.palette.subtext0, 9.0);
+            tree.text(
+                graph_x + 2.0,
+                gy - 10.0,
+                &pct_label,
+                self.palette.subtext0,
+                9.0,
+            );
         }
 
         // CPU history line
@@ -1822,16 +1852,8 @@ impl ProcessExplorerState {
 
         // Total / Used / Free / Cached
         let mem_items: &[(&str, u64, Color)] = &[
-            (
-                "Used",
-                self.system_info.used_memory,
-                self.palette.blue,
-            ),
-            (
-                "Cached",
-                self.system_info.cached_memory,
-                self.palette.green,
-            ),
+            ("Used", self.system_info.used_memory, self.palette.blue),
+            ("Cached", self.system_info.cached_memory, self.palette.green),
             ("Free", self.system_info.free_memory, self.palette.surface1),
         ];
 
@@ -1935,7 +1957,13 @@ impl ProcessExplorerState {
             }
 
             let usage_str = format!("{usage:.0}%");
-            tree.text(cb_x + cb_w + 6.0, cur_y, &usage_str, self.palette.subtext0, 10.0);
+            tree.text(
+                cb_x + cb_w + 6.0,
+                cur_y,
+                &usage_str,
+                self.palette.subtext0,
+                10.0,
+            );
 
             cur_y += core_bar_h + core_bar_gap;
         }
@@ -2299,7 +2327,13 @@ impl ProcessExplorerState {
         cur_y += 18.0;
 
         // Thread table header
-        tree.fill_rect(pad, cur_y, w - 2.0 * pad, HEADER_HEIGHT, self.palette.mantle);
+        tree.fill_rect(
+            pad,
+            cur_y,
+            w - 2.0 * pad,
+            HEADER_HEIGHT,
+            self.palette.mantle,
+        );
         let thread_cols: &[(&str, f32)] = &[
             ("TID", 60.0),
             ("Name", 200.0),
@@ -2337,7 +2371,10 @@ impl ProcessExplorerState {
             let cells: [(String, Color); 4] = [
                 (thread.tid.to_string(), self.palette.subtext0),
                 (thread.name.clone(), self.palette.text),
-                (thread.status.label().to_string(), thread.status.color(&self.palette)),
+                (
+                    thread.status.label().to_string(),
+                    thread.status.color(&self.palette),
+                ),
                 (format!("{:.1}", thread.cpu_percent), self.palette.text),
             ];
             let mut tcx = pad;
@@ -2483,13 +2520,7 @@ impl ProcessExplorerState {
             let iy = menu.y + i as f32 * item_h;
 
             if menu.hover_index == Some(i) {
-                tree.fill_rect(
-                    menu.x + 1.0,
-                    iy,
-                    menu_w - 2.0,
-                    item_h,
-                    self.palette.blue,
-                );
+                tree.fill_rect(menu.x + 1.0, iy, menu_w - 2.0, item_h, self.palette.blue);
             }
 
             let text_color = if *action == ContextAction::Kill {

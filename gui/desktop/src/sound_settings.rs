@@ -1951,7 +1951,7 @@ mod tests {
                 (
                     "Microphone Settings",
                     14.0,
-                    p.lavender,
+                    p.ink(p.lavender),
                     "the mic section heading",
                 ),
                 ("Gain", 13.0, p.subtext0, "a label-value row's label"),
@@ -2023,7 +2023,7 @@ mod tests {
                 (
                     "Spatial Audio",
                     14.0,
-                    p.lavender,
+                    p.ink(p.lavender),
                     "the spatial section heading",
                 ),
                 (

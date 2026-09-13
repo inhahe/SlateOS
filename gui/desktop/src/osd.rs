@@ -880,6 +880,14 @@ impl OsdManager {
         accent: Color,
         commands: &mut Vec<RenderCommand>,
     ) {
+        // Inked here, once, rather than at each of the three call sites -- and
+        // this is the right place because the parameter is *provably* a text
+        // colour: its only use below is the `color:` of a `RenderCommand::Text`.
+        // A colour arriving as an argument is the third way one can reach a
+        // draw site without naming a role there, so `ink-text.py` cannot see
+        // it; the other two are a helper's return value and a method call in
+        // the `color:` field itself.
+        let accent = p.ink(accent);
         let padding = OSD_PADDING;
         let osd_h = self.height_for_kind(&OsdKind::Custom {
             icon: OsdIcon::Info,
@@ -3274,7 +3282,7 @@ mod tests {
             for (what, kind, want) in cases {
                 assert_eq!(
                     rgb(text_at(&overlay(kind, &p), 20.0)),
-                    rgb(want),
+                    rgb(p.ink(want)),
                     "{mode}: {what} does not draw its icon in its own colour"
                 );
             }

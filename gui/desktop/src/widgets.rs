@@ -2373,7 +2373,7 @@ mod tests {
                 ("Disk", 10.0, p.subtext0),
                 (WRITTEN_NOTE, 12.0, p.text),
                 (EMPTY_NOTE, 12.0, p.overlay0),
-                (WidgetKind::BatteryStatus.icon(), 28.0, p.green),
+                (WidgetKind::BatteryStatus.icon(), 28.0, p.ink(p.green)),
                 ("85%", 20.0, p.text),
                 ("3h 42m remaining", 11.0, p.subtext0),
                 (WidgetKind::Weather.icon(), 32.0, p.surface2),

@@ -5,13 +5,15 @@
 # `separate` = it is not a workspace member; it builds for the SlateOS target on its own,
 #   and `cargo test -p` answers "did not match any packages". Adding a test to one of
 #   these is a different job from adding one to a workspace member.
+#
+# Anything after " -- " in a line's comment is a human explanation and is preserved
+#   when this file is regenerated.
 services/hello  # 70 lines, separate
 services/httpget  # 303 lines, separate
 services/init  # 2454 lines, separate
 services/netstack  # 4329 lines, separate
 services/ticker  # 167 lines, separate
 services/udpget  # 525 lines, separate
-userspace/file  # 1212 lines, ws
 userspace/indexer  # 1319 lines, ws
 userspace/man  # 1198 lines, ws
 userspace/nano  # 1923 lines, ws

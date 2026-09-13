@@ -1210,3 +1210,139 @@ fn main() {
         process::exit(1);
     }
 }
+
+// ============================================================================
+// Tests
+//
+// This crate had none. Almost all of it is pure functions over a byte slice,
+// which is the easiest thing in the tree to test and the most consequential to
+// get wrong: `file` is what a script asks before deciding how to open
+// something.
+//
+// Fixtures are built from numeric bytes rather than escaped string literals,
+// so what the test asserts about is visible as the numbers the format
+// actually specifies.
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A minimal 64-bit little-endian x86-64 ELF executable header.
+    fn elf64_exec() -> Vec<u8> {
+        let mut b = vec![0u8; 20];
+        b[0] = 0x7f;
+        b[1] = b'E';
+        b[2] = b'L';
+        b[3] = b'F';
+        b[4] = 2; // class: 64-bit
+        b[5] = 1; // data: little-endian
+        b[16] = 2; // e_type: executable
+        b[17] = 0;
+        b[18] = 0x3e; // e_machine: x86-64
+        b[19] = 0;
+        b
+    }
+
+    #[test]
+    fn an_elf_executable_is_described_and_typed() {
+        let t = detect_elf(&elf64_exec()).expect("an ELF header must be recognised");
+        assert_eq!(t.description, "ELF 64-bit LSB executable, x86-64");
+        assert_eq!(t.mime, "application/x-executable");
+    }
+
+    #[test]
+    fn a_shared_object_gets_the_shared_library_mime() {
+        // The distinction a caller acts on: a .so must not be reported as
+        // something to execute.
+        let mut b = elf64_exec();
+        b[16] = 3; // e_type: shared object
+        let t = detect_elf(&b).expect("recognised");
+        assert!(t.description.contains("shared object"), "{}", t.description);
+        assert_eq!(t.mime, "application/x-sharedlib");
+    }
+
+    #[test]
+    fn a_truncated_elf_says_so_rather_than_guessing() {
+        // Four magic bytes and nothing else. The alternative -- reading past
+        // the end and reporting whatever fell out -- is the failure this
+        // branch exists to avoid.
+        let t = detect_elf(&[0x7f, b'E', b'L', b'F']).expect("magic is still ELF");
+        assert_eq!(t.description, "ELF (too short to parse)");
+        assert_eq!(t.mime, "application/x-elf");
+    }
+
+    #[test]
+    fn something_that_is_not_an_elf_is_not_claimed_as_one() {
+        assert!(detect_elf(b"MZ some windows thing").is_none());
+        assert!(detect_elf(b"").is_none());
+        // One byte short of the magic: the classic off-by-one in a prefix test.
+        assert!(detect_elf(&[0x7f, b'E', b'L']).is_none());
+    }
+
+    /// A PNG header carrying an IHDR chunk of `w` x `h`.
+    fn png(w: u32, h: u32) -> Vec<u8> {
+        let mut b = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        b.extend_from_slice(&[0, 0, 0, 13]); // IHDR length
+        b.extend_from_slice(b"IHDR");
+        b.extend_from_slice(&w.to_be_bytes());
+        b.extend_from_slice(&h.to_be_bytes());
+        b
+    }
+
+    #[test]
+    fn a_png_reports_its_dimensions_big_endian() {
+        // PNG stores its dimensions big-endian, which is the one thing a
+        // little-endian-by-habit reader gets wrong. 800 x 600 read as
+        // little-endian would be 537,919,488 x 671,088,640.
+        let t = detect_image(&png(800, 600)).expect("recognised");
+        assert_eq!(t.description, "PNG image data, 800 x 600");
+        assert_eq!(t.mime, "image/png");
+    }
+
+    #[test]
+    fn a_png_without_a_complete_ihdr_omits_the_dimensions_rather_than_inventing_them() {
+        let mut b = png(800, 600);
+        b.truncate(20); // header + IHDR tag + width, but no height
+        let t = detect_image(&b).expect("the magic is still a PNG");
+        assert_eq!(t.description, "PNG image data");
+        assert_eq!(t.mime, "image/png");
+    }
+
+    #[test]
+    fn a_jpeg_is_not_confused_with_a_png() {
+        let t = detect_image(&[0xff, 0xd8, 0xff, 0xe0]).expect("recognised");
+        assert_eq!(t.description, "JPEG image data");
+        assert_eq!(t.mime, "image/jpeg");
+    }
+
+    #[test]
+    fn the_integer_readers_refuse_to_read_past_the_end() {
+        // Every detector above depends on these answering None rather than
+        // panicking or wrapping around on a short file, and a truncated file
+        // is the ordinary case for this program.
+        let b = [0x01, 0x02, 0x03, 0x04];
+        assert_eq!(read_u32_le(&b, 0), Some(0x0403_0201));
+        assert_eq!(read_u32_be(&b, 0), Some(0x0102_0304));
+        assert_eq!(read_u16_le(&b, 0), Some(0x0201));
+        assert_eq!(read_u32_le(&b, 1), None, "one byte short must be None");
+        assert_eq!(read_u32_be(&b, 4), None, "at the end must be None");
+        assert_eq!(read_u16_le(&b, 3), None);
+        assert_eq!(read_u32_le(&[], 0), None);
+    }
+
+    #[test]
+    fn the_prefix_helpers_handle_a_needle_longer_than_the_buffer() {
+        assert!(starts_with(b"GIF89a", b"GIF"));
+        assert!(!starts_with(b"GI", b"GIF"), "a short buffer cannot match");
+        assert!(has_at(b"....IHDR", 4, b"IHDR"));
+        assert!(
+            !has_at(b"....IHD", 4, b"IHDR"),
+            "must not read past the end"
+        );
+        assert!(
+            !has_at(b"IHDR", 99, b"IHDR"),
+            "an offset past the end is false"
+        );
+    }
+}

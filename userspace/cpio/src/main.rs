@@ -20,7 +20,15 @@
 //! boundary). The archive is terminated by a trailer entry whose filename is
 //! `TRAILER!!!`.
 
-use quoting::{quoteaf_os, quotef_os};
+use quoting::quoteaf_os;
+// Gated exactly as its only uses are. `quotef_os` names a destination in the
+// two "symlink extraction not supported on this platform" diagnostics, both
+// inside `#[cfg(not(unix))]` blocks, so on a unix target the import is
+// genuinely unused and rustc says so -- while on Windows removing it breaks
+// the build. An ungated import is right for one target and wrong for the
+// other; this is right for both.
+#[cfg(not(unix))]
+use quoting::quotef_os;
 use std::env;
 use std::fs::{self, File, Metadata};
 use std::io::{self, BufRead, Read, Write};

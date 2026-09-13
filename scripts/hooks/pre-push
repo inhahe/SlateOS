@@ -100,10 +100,12 @@
 #      twelve that are like that today are baselined, and the list may only
 #      shrink -- a crate that gains its first test must leave it.
 #
-#  40. Compile the six crates under `services/` that nothing else compiles.
-#      They are not workspace members, so every workspace build and every
-#      other gate here skips them -- yet they link crates that ARE members
-#      and do change. 0.6 s warm.
+#  40. Compile every crate for the target it SHIPS to, when nothing else
+#      does. Eight of them pin `x86_64-unknown-none` in their own cargo
+#      config: the six under `services/`, which are not workspace members at
+#      all, plus `posix` and `toolchain/stubs`, which ARE members and are
+#      therefore worse -- `cargo test -p posix` runs on the HOST, and nothing
+#      here ever built the libc for the target every binary links. 1.9 s warm.
 #
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented; wrong again the moment gate 13 was written, when the
@@ -4610,8 +4612,8 @@ fi
 
 
 # ---------------------------------------------------------------------------
-# Gate 40 -- services-build.  The six crates under services/ that nothing else
-# compiles.
+# Gate 40 -- pinned-target-build.  Every crate compiled for the target it
+# SHIPS to, when nothing else does.
 #
 # hello, httpget, init, netstack, ticker and udpget are NOT workspace members.
 # Each carries its own .cargo/config.toml pinning x86_64-unknown-none, which is
@@ -4630,19 +4632,19 @@ fi
 # test: those crates have no host-runnable tests and the baseline says why per
 # line. The floor is what was missing.
 # ---------------------------------------------------------------------------
-svcbuild="${repo_root:-.}/scripts/check-services-build.py"
+svcbuild="${repo_root:-.}/scripts/check-pinned-target-build.py"
 skip_svcbuild=0
-# Bypass: ALLOW_SERVICES_BUILD=1 git push origin <branch>
-if [ "${ALLOW_SERVICES_BUILD:-0}" = "1" ]; then
-    echo "pre-push: ALLOW_SERVICES_BUILD=1 set -- skipping the services-build gate." >&2
+# Bypass: ALLOW_PINNED_TARGET_BUILD=1 git push origin <branch>
+if [ "${ALLOW_PINNED_TARGET_BUILD:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_PINNED_TARGET_BUILD=1 set -- skipping the pinned-target-build gate." >&2
     skip_svcbuild=1
 fi
 [ -n "$py" ] || skip_svcbuild=1
 [ -f "$svcbuild" ] || skip_svcbuild=1
 # Their own trees, and the workspace crates they link. netproto/netipc/netring
 # are the whole reason this gate exists, so a push touching those must run it.
-touches services/ netproto/ netipc/ netring/         scripts/check-services-build.py || skip_svcbuild=1
-note_gate services-build "$skip_svcbuild"
+touches services/ posix/ toolchain/stubs/ netproto/ netipc/ netring/         scripts/check-pinned-target-build.py || skip_svcbuild=1
+note_gate pinned-target-build "$skip_svcbuild"
 
 svcbuild_failed=0
 if [ "$skip_svcbuild" != "1" ]; then
@@ -4650,11 +4652,11 @@ if [ "$skip_svcbuild" != "1" ]; then
     # returning nothing: it would then compile zero crates and print a clean
     # verdict. That is a self-test case, along with both halves of the
     # two-marker rule.
-    if ! run_checker services-build-selftest "$py" "$svcbuild" --selftest; then
-        echo "pre-push: check-services-build.py FAILED ITS OWN SELF-TEST -- its verdict is not trustworthy." >&2
+    if ! run_checker pinned-target-build-selftest "$py" "$svcbuild" --selftest; then
+        echo "pre-push: check-pinned-target-build.py FAILED ITS OWN SELF-TEST -- its verdict is not trustworthy." >&2
         svcbuild_failed=1
     else
-        if ! run_checker services-build "$py" "$svcbuild"; then
+        if ! run_checker pinned-target-build "$py" "$svcbuild"; then
             svcbuild_failed=1
         fi
     fi
@@ -4677,7 +4679,7 @@ the breakage with.
     cd services/<name> && cargo check
 
 To push anyway:
-    ALLOW_SERVICES_BUILD=1 git push origin ...
+    ALLOW_PINNED_TARGET_BUILD=1 git push origin ...
 EOF
     exit 1
 fi

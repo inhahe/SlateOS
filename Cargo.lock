@@ -2372,6 +2372,9 @@ dependencies = [
 [[package]]
 name = "sanitize"
 version = "0.1.0"
+dependencies = [
+ "usageerror",
+]
 
 [[package]]
 name = "sbctl"

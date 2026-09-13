@@ -4,3 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS filename sanitizer — clean up problematic filenames"
 [dependencies]
+# getopt's wording. This program has no upstream to match, so the wording
+# is a house choice rather than a measurement -- but it should be the same
+# house choice every other program here makes.
+usageerror = { path = "../usageerror" }

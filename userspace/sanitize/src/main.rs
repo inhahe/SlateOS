@@ -180,9 +180,17 @@ fn sanitize_name(name: &str, config: &Config) -> String {
         if let Some(dot_pos) = result.rfind('.') {
             let ext = &result[dot_pos..];
             let max_base = config.max_length.saturating_sub(ext.len());
-            result = format!("{}{}", &result[..max_base], ext);
+            result = if max_base == 0 {
+                // The extension alone is longer than the limit. Keeping it
+                // whole and calling the result truncated would return a name
+                // *over* the limit, which is the one thing this branch is
+                // for.
+                truncate_chars(&result, config.max_length)
+            } else {
+                format!("{}{}", truncate_chars(&result[..dot_pos], max_base), ext)
+            };
         } else {
-            result.truncate(config.max_length);
+            result = truncate_chars(&result, config.max_length);
         }
     }
 
@@ -192,6 +200,30 @@ fn sanitize_name(name: &str, config: &Config) -> String {
     }
 
     result
+}
+
+/// At most `max` **bytes**, never splitting a character.
+///
+/// # Why this is not `String::truncate`
+///
+/// It was, and `String::truncate` panics when the index is not a UTF-8
+/// character boundary. So did `&result[..max_base]` beside it. This program
+/// exists to clean up awkward file names, and a name with non-ASCII in it is
+/// squarely awkward -- `sanitize --max-len 5` on a file called `€€€€` took
+/// the whole program down with
+/// `assertion failed: self.is_char_boundary(new_len)`.
+///
+/// The limit stays a byte count rather than becoming a character count,
+/// because that is what a filesystem's name limit is.
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    s.get(..end).unwrap_or("").to_string()
 }
 
 fn collapse_repeats(s: &str, ch: char) -> String {
@@ -384,14 +416,23 @@ fn print_usage() {
     println!("  sanitize --strip '()[]' -r .");
 }
 
-fn main() {
-    let args: Vec<String> = env::args().collect();
+/// What a command line asked for.
+///
+/// Returned rather than acted on, so a test can see a refusal. The parse
+/// used to live inside `main` reading `env::args()`, which made the
+/// destructive case -- a mistyped `--dry-run` -- reachable only by running
+/// the binary.
+#[derive(Debug)]
+enum Parsed {
+    /// Run with this configuration over these paths.
+    Run(Config, Vec<String>),
+    /// `--help`: print usage, succeed.
+    Usage,
+    /// Refuse, printing this and exiting 1.
+    Error(String),
+}
 
-    if args.len() < 2 {
-        print_usage();
-        process::exit(0);
-    }
-
+fn parse_args(args: &[String]) -> Parsed {
     let mut config = Config::default_config();
     let mut paths: Vec<String> = Vec::new();
     let mut i = 1;
@@ -416,8 +457,7 @@ fn main() {
             }
             "--mode" => {
                 if i + 1 >= args.len() {
-                    eprintln!("error: --mode requires a value");
-                    process::exit(1);
+                    return Parsed::Error("error: --mode requires a value".to_string());
                 }
                 config.mode = match args[i + 1].as_str() {
                     "conservative" | "con" => SanitizeMode::Conservative,
@@ -425,24 +465,23 @@ fn main() {
                     "windows" | "win" => SanitizeMode::Windows,
                     "minimal" | "min" => SanitizeMode::Minimal,
                     other => {
-                        eprintln!("error: unknown mode: {other}");
-                        process::exit(1);
+                        return Parsed::Error(format!("error: unknown mode: {other}"));
                     }
                 };
                 i += 2;
             }
             "--max-len" => {
                 if i + 1 >= args.len() {
-                    eprintln!("error: --max-len requires a value");
-                    process::exit(1);
+                    return Parsed::Error("error: --max-len requires a value".to_string());
                 }
                 config.max_length = args[i + 1].parse().unwrap_or(200);
                 i += 2;
             }
             "--replace" => {
                 if i + 2 >= args.len() {
-                    eprintln!("error: --replace requires two arguments: <char> <replacement>");
-                    process::exit(1);
+                    return Parsed::Error(
+                        "error: --replace requires two arguments: <char> <replacement>".to_string(),
+                    );
                 }
                 let from_str = &args[i + 1];
                 let to_str = args[i + 2].clone();
@@ -453,15 +492,38 @@ fn main() {
             }
             "--strip" => {
                 if i + 1 >= args.len() {
-                    eprintln!("error: --strip requires a character list");
-                    process::exit(1);
+                    return Parsed::Error("error: --strip requires a character list".to_string());
                 }
                 config.strip_chars.extend(args[i + 1].chars());
                 i += 2;
             }
             "--help" | "-h" | "help" => {
-                print_usage();
-                process::exit(0);
+                return Parsed::Usage;
+            }
+            // Everything after `--` is a path, however it is spelled. This
+            // program exists to rename files with awkward names, so a file
+            // called `-n` is squarely within its remit and it needs a way to
+            // be handed one.
+            "--" => {
+                i += 1;
+                while i < args.len() {
+                    paths.push(args[i].clone());
+                    i += 1;
+                }
+            }
+            // An unrecognised option used to become a *path to rename*.
+            //
+            // That is not merely untidy here. `sanitize --dry-runn DIR`
+            // would fail to set dry-run, add the typo as a path that does
+            // not exist, and then **rename every file under DIR** -- the
+            // user asked for a preview and got the real thing. A renaming
+            // tool cannot treat a mistyped flag as an operand.
+            other if other.starts_with('-') && other.len() > 1 => {
+                return Parsed::Error(format!(
+                    "sanitize: {}
+Run 'sanitize --help' for usage.",
+                    usageerror::unknown_option(other.as_bytes())
+                ));
             }
             other => {
                 paths.push(other.to_string());
@@ -469,6 +531,29 @@ fn main() {
             }
         }
     }
+
+    Parsed::Run(config, paths)
+}
+
+fn main() {
+    let args: Vec<String> = env::args().collect();
+
+    if args.len() < 2 {
+        print_usage();
+        process::exit(0);
+    }
+
+    let (config, paths) = match parse_args(&args) {
+        Parsed::Run(config, paths) => (config, paths),
+        Parsed::Usage => {
+            print_usage();
+            process::exit(0);
+        }
+        Parsed::Error(message) => {
+            eprintln!("{message}");
+            process::exit(1);
+        }
+    };
 
     if paths.is_empty() {
         eprintln!("error: no paths specified");
@@ -515,5 +600,162 @@ fn main() {
 
     if config.dry_run && stats.renamed > 0 {
         println!("(dry run — run without -n to apply changes)");
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── the command line, now reachable ──
+
+    fn argv(words: &[&str]) -> Vec<String> {
+        std::iter::once("sanitize".to_string())
+            .chain(words.iter().map(|w| (*w).to_string()))
+            .collect()
+    }
+
+    /// The destructive case. Before the refusal, this set no dry-run flag,
+    /// added `--dry-runn` as a path, and renamed everything under `docs`.
+    #[test]
+    fn a_mistyped_flag_is_refused_and_never_becomes_a_path() {
+        match parse_args(&argv(&["--dry-runn", "docs"])) {
+            Parsed::Error(msg) => {
+                assert!(msg.contains("unrecognized option"), "{msg}");
+                assert!(msg.contains("--dry-runn"), "{msg}");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_correct_flag_still_sets_dry_run() {
+        match parse_args(&argv(&["--dry-run", "docs"])) {
+            Parsed::Run(config, paths) => {
+                assert!(config.dry_run);
+                assert_eq!(paths, vec!["docs"]);
+            }
+            other => panic!("expected a run, got {other:?}"),
+        }
+    }
+
+    /// This program exists to rename awkward names, so it must be able to
+    /// accept one that begins with a dash.
+    #[test]
+    fn double_dash_hands_over_a_dashed_filename() {
+        match parse_args(&argv(&["--", "-n", "--dry-run"])) {
+            Parsed::Run(config, paths) => {
+                assert!(!config.dry_run, "words after -- are names, not flags");
+                assert_eq!(paths, vec!["-n", "--dry-run"]);
+            }
+            other => panic!("expected a run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn help_is_a_request_not_an_error() {
+        assert!(matches!(parse_args(&argv(&["--help"])), Parsed::Usage));
+    }
+
+    #[test]
+    fn a_bad_mode_and_a_missing_value_are_both_refused() {
+        assert!(matches!(
+            parse_args(&argv(&["--mode", "sideways", "d"])),
+            Parsed::Error(_)
+        ));
+        assert!(matches!(
+            parse_args(&argv(&["--max-len"])),
+            Parsed::Error(_)
+        ));
+    }
+
+    /// The crash this crate shipped with. `String::truncate` and `&s[..n]`
+    /// panic when `n` is not a UTF-8 character boundary, and this program
+    /// exists to clean up awkward names -- non-ASCII is squarely awkward.
+    /// `sanitize --max-len 5` on a file called `€€€€` took the whole program
+    /// down with `assertion failed: self.is_char_boundary(new_len)`.
+    #[test]
+    fn truncation_never_splits_a_character() {
+        // Three bytes each, so a limit of 5 lands mid-character.
+        assert_eq!(truncate_chars("€€€€", 5), "€");
+        assert_eq!(truncate_chars("€€€€", 6), "€€");
+        // A limit below the first character yields nothing rather than
+        // half of one.
+        assert_eq!(truncate_chars("€", 1), "");
+        assert_eq!(truncate_chars("€", 2), "");
+        assert_eq!(truncate_chars("€", 3), "€");
+    }
+
+    #[test]
+    fn truncation_leaves_a_short_name_alone() {
+        assert_eq!(truncate_chars("short.txt", 200), "short.txt");
+        assert_eq!(truncate_chars("", 5), "");
+    }
+
+    /// The limit is a byte count, because that is what a filesystem's name
+    /// limit is -- four euro signs are 4 characters and 12 bytes.
+    #[test]
+    fn the_limit_counts_bytes_not_characters() {
+        assert_eq!("€€€€".chars().count(), 4);
+        assert_eq!("€€€€".len(), 12);
+        assert!(truncate_chars("€€€€", 7).len() <= 7);
+    }
+
+    #[test]
+    fn an_extension_is_kept_when_the_base_is_cut() {
+        let cfg = Config {
+            max_length: 12,
+            ..Config::default_config()
+        };
+        let out = sanitize_name("averylongbasename.txt", &cfg);
+        assert!(out.len() <= 12, "{out}");
+        assert!(out.ends_with(".txt"), "{out}");
+    }
+
+    /// An extension longer than the whole limit used to produce a name
+    /// *over* the limit, which is the one thing the truncation branch is
+    /// for.
+    #[test]
+    fn an_over_long_extension_still_respects_the_limit() {
+        let cfg = Config {
+            max_length: 4,
+            ..Config::default_config()
+        };
+        let out = sanitize_name("a.averylongextension", &cfg);
+        assert!(out.len() <= 4, "{out}");
+    }
+
+    #[test]
+    fn a_name_with_spaces_is_the_ordinary_case() {
+        let cfg = Config::default_config();
+        assert_eq!(sanitize_name("my file .txt", &cfg), "my_file_.txt");
+    }
+
+    #[test]
+    fn splitting_a_name_finds_the_last_dot_only() {
+        assert_eq!(
+            split_name_ext("archive.tar.gz"),
+            ("archive.tar".to_string(), "gz".to_string())
+        );
+        // A leading dot is not an extension separator.
+        assert_eq!(
+            split_name_ext(".hidden"),
+            (".hidden".to_string(), String::new())
+        );
+        assert_eq!(
+            split_name_ext("noext"),
+            ("noext".to_string(), String::new())
+        );
+    }
+
+    #[test]
+    fn repeats_collapse_to_one() {
+        assert_eq!(collapse_repeats("a___b", '_'), "a_b");
+        assert_eq!(collapse_repeats("___", '_'), "_");
+        assert_eq!(collapse_repeats("ab", '_'), "ab");
     }
 }

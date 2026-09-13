@@ -12,7 +12,6 @@
 //! Uses the guitk library for UI rendering.
 
 use appearance::Palette;
-use guitk::theme::with_alpha;
 use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -21,6 +20,7 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::theme::with_alpha;
 #[allow(unused_imports)]
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
@@ -1457,10 +1457,22 @@ impl ScreenshotApp {
 
     fn render_menu(&self, tree: &mut RenderTree) {
         // Background.
-        tree.fill_rect(0.0, 0.0, self.window_width, self.window_height, self.palette.base);
+        tree.fill_rect(
+            0.0,
+            0.0,
+            self.window_width,
+            self.window_height,
+            self.palette.base,
+        );
 
         // Toolbar.
-        tree.fill_rect(0.0, 0.0, self.window_width, TOOLBAR_HEIGHT, self.palette.surface0);
+        tree.fill_rect(
+            0.0,
+            0.0,
+            self.window_width,
+            TOOLBAR_HEIGHT,
+            self.palette.surface0,
+        );
         tree.push(RenderCommand::Line {
             x1: 0.0,
             y1: TOOLBAR_HEIGHT,
@@ -1492,7 +1504,14 @@ impl ScreenshotApp {
                 bg,
                 CornerRadii::all(4.0),
             );
-            tree.stroke_rect(bx, by, BUTTON_WIDTH, BUTTON_HEIGHT, self.palette.surface1, 1.0);
+            tree.stroke_rect(
+                bx,
+                by,
+                BUTTON_WIDTH,
+                BUTTON_HEIGHT,
+                self.palette.surface1,
+                1.0,
+            );
             tree.text(bx + 10.0, by + 8.0, mode.label(), self.palette.text, 13.0);
         }
 
@@ -1505,7 +1524,13 @@ impl ScreenshotApp {
             "Shift+PrintScreen    Delayed (3s)",
         ];
         for (i, hint) in hints.iter().enumerate() {
-            tree.text(20.0, hints_y + i as f32 * 22.0, hint, self.palette.subtext0, 12.0);
+            tree.text(
+                20.0,
+                hints_y + i as f32 * 22.0,
+                hint,
+                self.palette.subtext0,
+                12.0,
+            );
         }
 
         // Status bar.
@@ -1572,10 +1597,22 @@ impl ScreenshotApp {
 
     fn render_preview(&self, tree: &mut RenderTree) {
         // Background.
-        tree.fill_rect(0.0, 0.0, self.window_width, self.window_height, self.palette.base);
+        tree.fill_rect(
+            0.0,
+            0.0,
+            self.window_width,
+            self.window_height,
+            self.palette.base,
+        );
 
         // Main toolbar.
-        tree.fill_rect(0.0, 0.0, self.window_width, TOOLBAR_HEIGHT, self.palette.surface0);
+        tree.fill_rect(
+            0.0,
+            0.0,
+            self.window_width,
+            TOOLBAR_HEIGHT,
+            self.palette.surface0,
+        );
         tree.text(16.0, 12.0, "Preview", self.palette.text, 18.0);
 
         // Action buttons in toolbar.
@@ -2238,7 +2275,6 @@ mod tests {
             );
         }
     }
-
 
     // ------------------------------------------------------------------
     // The clock, and the command line

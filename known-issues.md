@@ -130074,12 +130074,19 @@ used **zero** times anywhere in `gui` or `apps`. They are dead palette rungs.
 ## TD-C-THE-COMPOSITOR-FRAME-BUDGET-HAS-NO-INSTRUMENT -- FIXED 2026-09-13; the first half caught a 30x regression the day it landed
 
 
-**Both halves are done as of 2026-09-13.** Half one -- no benchmark series --
-is `gui/compositor/tests/frame_budget.rs`: a full 4K desktop, best of five,
-with the debug ceiling set at two and a half times the measurement rather
-than just over it. The first draft of that ceiling was 1.25x the measurement
-and one of the five samples on the very next run exceeded it, which is the
-argument for headroom in one line.
+**Correction, 2026-09-13 (later).** This entry's half one -- "no benchmark
+series" -- was **wrong when it was written**. `bench_compose_frame_4k` has
+existed since July, `#[ignore]`d, with a tracked baseline in
+`bench/baselines.toml` under `[compositor_frame_4k]`. The survey behind the
+claim checked the 108 recorded *runtime series* and stopped there; it did not
+look in `bench/baselines.toml` and did not grep the source for `fn bench_`.
+
+An afternoon was spent rebuilding it before anyone noticed, which is the cost
+of an entry that states an absence confidently. The half that was genuinely
+missing -- an assertion that the *partial* recomposite path is narrower than
+the full one -- is now `gui/compositor/tests/damage_narrows_the_work.rs`, and
+what else came out of the afternoon is written up under
+`TD-C-A-4K-DESKTOP-FRAME-IS-OVER-THE-BUDGET`.
 
 A `tests/` file rather than a criterion benchmark, for the reason the file
 states: no gui crate has criterion, and a benchmark nobody runs measures
@@ -140420,123 +140427,69 @@ can see at all, because their value is a name. That work belongs to
 `TD-C-SIXTY-EIGHT-APPS-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE` and to C-Q16,
 which asks whether the games should follow the theme in the first place.
 
-## TD-C-A-4K-DESKTOP-FRAME-IS-OVER-THE-BUDGET-AND-THE-FULL-RECOMPOSITE-IS-A-HITCH
+## TD-C-A-4K-DESKTOP-FRAME-IS-OVER-THE-BUDGET -- and most of this was already known
 
 **Date:** 2026-09-13. **Lane:** C.
-**Where:** `gui/compositor`, measured by `tests/frame_budget.rs`.
 
-**In short:** the target says a whole desktop should be drawn in under 2
-milliseconds so a fast display never waits. Measured for the first time
-today, an ordinary frame -- one window redrawing itself -- takes between 3 and
-7 milliseconds, and the frame after a window is opened, moved or resized takes
-20 to 45. The second number is the more interesting one: it is long enough to
-be seen as a hitch when a window is dragged.
+**Read this first.** This entry was written over an afternoon in which I
+believed the compositor had no frame benchmark, because
+`TD-C-THE-COMPOSITOR-FRAME-BUDGET-HAS-NO-INSTRUMENT` said so. It has one, and
+has had since July:
+`compositor::tests::bench_compose_frame_4k`, `#[ignore]`d, with a baseline in
+`bench/baselines.toml` under `[compositor_frame_4k]` -- 2 ms target, **7.0 ms
+measured**, and a recorded history of 48.6 -> 21.4 -> 15.8 -> 11.9 -> 10.6 ->
+7.0 ms across five named optimisations. The earlier entry checked the 108
+*runtime series* and concluded there was no benchmark; it never looked in
+`bench/baselines.toml` or grepped the source. I trusted the entry instead of
+the tree, which is the same mistake in a different costume.
 
-**This entry replaces one written an hour earlier that said seven times over
-budget.** That figure came from a scene with all eight windows left at the
-same origin, which is the worst case twice over: every window overlaps, so
-damage to one is damage to all, and the partial path becomes a full
-recomposite wearing a different name. Placing the windows apart -- which is
-what a desktop looks like -- changed the conclusion completely. The lesson is
-not about compositors; it is that the first measurement of anything should be
-distrusted until the scene it measures has been looked at.
+**What that benchmark already says, that I spent the afternoon rediscovering:**
 
-**Damage tracking works.** That was the open question and it now has an
-answer: redrawing one window of eight costs about an eighth of a full
-recomposite, which is what the partial path is for. There is a regression
-test on the *ratio* rather than on either number, because a ratio survives a
-busy machine and an absolute figure does not.
+- the frame is over the 2 ms target and has been all along;
+- the remaining gap is **memory-bandwidth bound on a full recomposite**;
+- the per-pixel float-alpha cost was already hoisted out of the inner loops by
+  a row-wise `fill_rect` rewrite -- which is why my clip-hoisting attempt
+  (below) lost 30%: that family of optimisation is done;
+- a timing benchmark must be `#[ignore]`d so it does not slow the correctness
+  run -- stated in its doc comment, and re-learned here by breaking a
+  neighbouring test;
+- `bench_full_composite` exists precisely to bypass `should_compose`.
 
-**The measurements** (release, best of five, 3840x2160, eight 960x720
-windows of about 60 draw commands each). The spread is machine load, and it
-is wide enough that a single run should not be quoted:
+**What is genuinely new, and is what survives in the tree:**
 
-| | best seen | worst seen |
-|---|---|---|
-| full recomposite | 20 ms | 45 ms |
-| one window redrawn | 2.6 ms | 7 ms |
-| nothing changed | 0 -- the frame is skipped | |
+1. `gui/compositor/tests/damage_narrows_the_work.rs` -- redrawing one window
+   of eight costs about an eighth of a full recomposite. The absolute cost was
+   measured; the *ratio* was not, and the ratio is the whole reason the
+   partial path exists. It asserts a quotient, so it survives a shared
+   machine, and it is cheap enough to run every time.
+2. **A fixed trap.** `compose_frame` returns early on two paths and both left
+   `last_frame_time_us` holding the previous frame's figure. A skipped frame
+   therefore reported a stale number, and it did not look stale -- it looked
+   like a beautifully repeatable measurement. Two separate probes read it as a
+   result within the hour. Both paths set it to zero now, with a test.
+3. **Shaping is not the cost.** Every `RenderCommand::Text` calls
+   `font.shape()` in the draw loop and no shaping cache exists anywhere, which
+   made it the obvious suspect for the ~60% of a frame that is text. Measured:
+   755 ns for a 39-character string, so the scene's 240 text commands cost
+   **181 us of a 13.8 ms frame -- 1.3%**. A shaping cache would buy nothing,
+   and would have risked what the call site's own comment warns about: shaping
+   happens there so the compositor lays text out exactly as the toolkit
+   measured it, and a cache is a second layout path that can disagree.
+4. **A negative result.** Hoisting the clip test out of the per-pixel glyph
+   loop -- intersect the glyph rectangle with the clip once, iterate the
+   survivors -- measured 27-34 ms against 19.5-26 ms as shipped, three runs
+   each alternated on the same machine. Reverted. For a glyph nowhere near an
+   edge, which is nearly all of them, the computed range is the range the old
+   loop already walked.
 
-**Where the text time goes -- measured, and not where I guessed.** About eight
-of a full recomposite's milliseconds are text: the same scene without it
-measured 5.4 ms against 13.8 ms. The obvious suspect was shaping. Every
-`RenderCommand::Text` calls `font.shape(text)` inside the draw loop
-(`gui/compositor/src/lib.rs`), and there is no shaping cache anywhere in
-`gui/font` or `gui/compositor` -- a glyph *raster* cache exists, but it caches
-a glyph's bitmap, not a run's layout.
+**Where the time goes, measured.** Text is about 60% of a full recomposite
+(20.3 ms with, 8.0 ms without, eight windows spread over 4K), and of that
+~12.1 ms is putting ~9 400 glyph masks on the screen -- roughly 32 ns a
+covered pixel.
 
-That hypothesis is **wrong**, and it took two minutes to find out. Shaping a
-39-character string costs **755 ns**, so the scene's 240 text commands cost
-about **181 us** -- 1.3% of a 13.8 ms frame. A shaping cache would buy
-nothing, and would have been a day's work plus an eviction policy plus the
-risk the call site's own comment warns about: shaping happens there so the
-compositor lays text out exactly as the toolkit measured it, and a cache is a
-second layout path that can disagree with the first.
-
-**So the cost is in blending, not layout**, and measured with the windows
-spread the way the damage test needs them:
-
-| | best of five |
-|---|---|
-| frame with text | 20.3 ms |
-| same frame, text removed | 8.0 ms |
-| **text's share** | **12.3 ms of 20.3 -- 60% of the frame** |
-
-Of that 12.3 ms, shaping is 0.18 ms. The other 12.1 ms is putting about 9 400
-glyph masks on the screen: roughly **1.3 us a glyph**, or about **32 ns a
-covered pixel**, which is an order of magnitude more than an alpha blend
-should cost.
-
-**Where it goes, from reading the inner loop** (`SoftwareFramebuffer::draw_glyph`
-and `blend_pixel`). Per covered pixel: a clip test in `draw_glyph`, a *second*
-clip test inside `blend_pixel`, a `coverage as f32 / 255.0` division, a
-bounds-checked `get` followed by a separate bounds-checked `get_mut` for the
-same index, and three `blend_channel` calls. None of that is wrong; all of it
-is per-pixel work that could be per-glyph or per-row.
-
-**The first obvious move was tried and made it 30% slower.** Intersecting the
-glyph's rectangle with the clip once per glyph, and iterating the surviving
-range instead of testing every pixel, measured:
-
-| | full recomposite | one window |
-|---|---|---|
-| as shipped | 19.5 - 25.7 ms | 2.5 - 3.0 ms |
-| with the clip hoisted | 27.1 - 33.7 ms | 3.0 - 4.8 ms |
-
-Three runs each, alternated on the same machine, because the run-to-run
-spread here is wide enough that a single before-and-after proves nothing.
-Reverted.
-
-**And the instrument itself had to be made lighter.** Five compositions of an
-eight-window 4K desktop saturate memory bandwidth for a second or two, and run
-alongside the rest of the workspace that was enough to push the *neighbouring*
-timing test -- `the_demo_scene_still_composites`, whose ceiling has ten times
-its median as headroom -- to 27x its median, and fail it. A timing test heavy
-enough to break other timing tests is worse than no timing test. The 4K
-measurement is `#[ignore]`d with the command to run it in its doc comment; the
-damage-tracking test stays in the ordinary suite at 1920x1080, which it can
-afford because it asserts a *ratio* and does not care how many pixels either
-side walks.
-
-Why it lost is a guess and is left as one: the hoisted version replaces two
-loop counters with `fx - ox` and `fy - oy` arithmetic per pixel, and for a
-glyph that is nowhere near an edge -- which is nearly all of them -- the
-range it computes is the range the old loop already walked, so it pays for
-work it does not save.
-
-**What that means for the next attempt.** Three hypotheses about this frame
-have now been wrong: that shaping was the cost, that the compositor was 7x
-over budget, and that hoisting the clip would help. All three were cheap to
-disprove and would have been expensive to act on. The next person should get
-a profiler onto `draw_glyph` rather than reason about its inner loop from
-reading it -- the reading has been wrong every time. The `frame_budget` test
-is the guard, and the alternating-runs method above is how to use it.
-
-**A trap fixed on the way, worth its own paragraph.** `last_frame_time_us`
-was left *unchanged* when `compose_frame` took either early-out -- the
-rate-limit check or the nothing-to-draw check. A skipped frame therefore
-reported the previous frame's time, and it did not look stale: it looked like
-a beautifully repeatable measurement. Two separate attempts to measure an
-idle frame got the same number five times in a row and read it as a result.
-Both paths now set it to zero, because a frame that did not happen took no
-time.
+**What to do next.** Put a profiler on `draw_glyph`. Four hypotheses about
+this frame have now been wrong -- that shaping was the cost, that the
+compositor was 7x over budget (it was my scene, with every window stacked at
+the origin), that hoisting the clip would help, and that no benchmark existed.
+Every one was cheap to disprove by measuring and expensive to act on. Reading
+the inner loop has been wrong every time.

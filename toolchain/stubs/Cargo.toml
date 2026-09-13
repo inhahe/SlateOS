@@ -6,8 +6,18 @@ description = "Stub symbols needed by Rust std that our POSIX layer doesn't prov
 
 [lib]
 crate-type = ["staticlib"]
-# slateos-stubs provides its own `panic_handler` for the bare-metal
-# `x86_64-slateos` target.  Host-side `cargo test` cannot link it because
-# `std` already supplies a `panic_impl`.  Tests for the stub symbols
-# must run under the bare-metal target via the kernel boot-test harness.
-test = false
+# Host tests RUN (2026-09-13). They used to be off with `test = false`, and
+# the reason recorded here was wrong: it said `std` already supplies a
+# `panic_impl` so the crate could not link. That is handled -- the
+# `panic_handler` is `#[cfg(not(test))]` and has been.
+#
+# The real obstacle was `no_mangle`. The host toolchain's `libgcc_eh.a`
+# defines `_Unwind_GetIP`, `_Unwind_Backtrace` and
+# `_Unwind_FindEnclosingFunction` too, so exporting ours unconditionally gave
+# "multiple definition" at link time. Measured by turning tests on and reading
+# what ld actually said.
+#
+# Fixed with the idiom the posix crate already uses 1,470 times:
+# `#[cfg_attr(target_os = "none", unsafe(no_mangle))]`. On bare metal the
+# symbols are exported exactly as before; on the host they are ordinary Rust
+# functions with mangled names, so nothing collides and they can be tested.

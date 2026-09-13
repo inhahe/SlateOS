@@ -186,6 +186,14 @@ def selftest():
     ck(pinned_target_crates(roots=("no-such-directory-zzq",)) == [],
        "a missing directory is an empty list, not a crash")
 
+    # Mirror of the assertion in check-untested-crates.py. The two gates
+    # disagreed about lane B's scope once -- this one included `toolchain` and
+    # that one did not -- and toolchain/stubs hid in the gap.
+    ck(sorted(SEARCH_ROOTS) == ["init", "posix", "services", "toolchain",
+                                "userspace"],
+       "roots are " + repr(SEARCH_ROOTS) + " -- they must match "
+       "check-untested-crates.py's ROOTS")
+
     print("selftest: " + str(checks - bad) + "/" + str(checks) + " cases pass")
     return 1 if bad else 0
 

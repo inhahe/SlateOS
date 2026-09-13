@@ -62,6 +62,16 @@
 #      clean and the damage lives only in the working tree -- which is where
 #      bash reads a script from. `check-eol.py`, already run by boot-test.sh;
 #      wired here so it is seen at the push that causes it, not a boot later.
+#  33. Refuse a NEW crate-level `#![allow(..., dead_code, ...)]`. Twenty-two
+#      crates already carry one and they hide 180 dead-code findings -- gdb's
+#      included 105 lines of a tokeniser nothing called, under an allow whose
+#      comment justified its two neighbours and never mentioned this one. The
+#      per-item form is the destination and is not touched; the blanket form
+#      makes a deliberate constant table and a dead function look the same.
+#  34. Refuse a program that advertises an option in `--help` its parser never
+#      reads. The count went 180 to 0 this session; this is what keeps it
+#      there, a closed class being exactly the kind whose zero stops being
+#      checked.
 #
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented; wrong again the moment gate 13 was written, when the

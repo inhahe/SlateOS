@@ -1611,6 +1611,7 @@ impl ExplorerState {
             drag.y,
             self.dropzone.list_area(),
             drag.valid,
+            &self.palette,
         ) {
             tree.push(cmd);
         }

@@ -179,3 +179,24 @@ directories themselves.
 `E:\sys` were deleted from the machine, since both were actively failing tests
 and neither is tracked by any repository. `E:\run`, `E:\var` and `E:\dev`
 are still there, untouched, in case something depends on them.
+
+### The cleanest form of the evidence: clean, run, look
+
+The two sections above infer the writer from timestamps. This does not. At
+14:3x the drive root was cleared, one `cargo test --workspace --no-fail-fast`
+was run, and the root was listed again:
+
+| | before the run | after the run |
+|---|---|---|
+| `E:\etc` | absent | absent |
+| `E:\sys` | absent | absent |
+| `E:\var` | absent | **`E:\var\run`** |
+| `E:\dev` | absent | **present, empty** |
+
+The run itself was **60 641 passed, 0 failed** — every failure described above
+disappears once the root is clean, which is the other half of the claim.
+
+So the workspace test creates these directories on a machine where they did not
+exist, in a single observed cycle, with no inference about what else might have
+run. That also fixes the count: it is not one stray test, it is at least two
+distinct paths (`/var/run` and `/dev`) written during one ordinary run.

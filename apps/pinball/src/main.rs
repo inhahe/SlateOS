@@ -28,9 +28,12 @@ use guitk::color::Color;
 #[cfg(test)]
 use guitk::event::Modifiers;
 use guitk::event::{Event, Key, KeyEvent};
-use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use oswindow::app::{self, App, Response};
 use randrange::{RandomSource, SeededRng, seeded_from_system};
+use std::process::ExitCode;
+use std::time::Duration;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
 const BASE: Color = Color::from_hex(0x1E1E2E);
@@ -61,6 +64,14 @@ const FOOTER_HEIGHT: f32 = 40.0;
 /// Plunger lane width on the right side of the table.
 const PLUNGER_LANE_WIDTH: f32 = 24.0;
 /// Full window width.
+/// How often the table is asked to advance itself.
+///
+/// 16 ms is one frame at 60 Hz. A pinball table is a physics simulation:
+/// `handle_tick` integrates the ball by the elapsed milliseconds, so a longer
+/// tick is not merely choppier, it is a coarser integration step and a fast
+/// ball can pass through a flipper between two samples.
+const TICK: Duration = Duration::from_millis(16);
+
 const WINDOW_WIDTH: f32 = SIDEBAR_WIDTH + TABLE_WIDTH + PADDING * 3.0;
 /// Full window height.
 const WINDOW_HEIGHT: f32 = TABLE_HEIGHT + PADDING * 2.0 + FOOTER_HEIGHT;
@@ -1156,7 +1167,11 @@ impl Pinball {
 
     // ── Rendering ───────────────────────────────────────────────────
 
-    fn render(&self) -> Vec<RenderCommand> {
+    /// Named `render_commands` and not `render`, so that a bare
+    /// `self.render_commands()` inside the `App` impl cannot resolve to the trait
+    /// method -- which it does even at a different arity, reporting a missing
+    /// argument rather than calling this.
+    fn render_commands(&self) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
 
         // Full window background.
@@ -2045,9 +2060,11 @@ fn classify_argument(first: Option<&std::ffi::OsStr>) -> ArgVerdict {
 }
 
 /// Act on [`classify_argument`], exiting for every verdict but `Run`.
-fn refuse_arguments() {
-    let first = std::env::args_os().nth(1);
-    match classify_argument(first.as_deref()) {
+/// Takes the first argument that is *not* `--display ADDR`: that one belongs
+/// to the strap and every application accepts it, so it is not something this
+/// game refuses.
+fn refuse_arguments(first: Option<&std::ffi::OsStr>) {
+    match classify_argument(first) {
         ArgVerdict::Run => {}
         ArgVerdict::Help => {
             println!("usage: pinball");
@@ -2076,9 +2093,68 @@ fn refuse_arguments() {
     }
 }
 
-fn main() {
-    refuse_arguments();
-    let _app = Pinball::new();
+impl App for Pinball {
+    fn title(&self) -> String {
+        "Pinball".to_string()
+    }
+
+    fn app_id(&self) -> String {
+        "pinball".to_string()
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        // The table decides the window. Every coordinate in the renderer and
+        // every collision bound in the physics is measured from these two
+        // constants, so a different window would draw a table the ball does
+        // not agree with.
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "both are a positive constant sum well under u32::MAX"
+        )]
+        {
+            (WINDOW_WIDTH.ceil() as u32, WINDOW_HEIGHT.ceil() as u32)
+        }
+    }
+
+    fn tick_interval(&self) -> Option<Duration> {
+        // Without this the ball does not move: everything on this table is
+        // driven by `handle_tick`, and input only nudges the flippers.
+        Some(TICK)
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        self.handle_event(event);
+        // Always a redraw: a ball in flight changes the picture on every tick
+        // whether or not the event that arrived was about it, and
+        // `handle_event` returns `()` so there is nothing honest to branch on.
+        Response::Redraw
+    }
+
+    fn render(&mut self, _width: f32, _height: f32) -> RenderTree {
+        // Fixed size, so the reported one is not used -- see `initial_size`.
+        RenderTree {
+            commands: self.render_commands(),
+        }
+    }
+}
+
+fn main() -> ExitCode {
+    // Parsed rather than indexed, so `--display` reaches the connection
+    // instead of being refused as an option this game does not take.
+    let args = match app::Args::from_env() {
+        Ok(args) => args,
+        Err(e) => {
+            eprintln!("pinball: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    refuse_arguments(args.rest.first().map(|a| std::ffi::OsStr::new(a.as_str())));
+    let mut game = Pinball::new();
+    app::launch_with("pinball", args.display.as_deref(), &mut game)
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -3108,7 +3184,7 @@ mod tests {
     #[test]
     fn test_render_produces_commands() {
         let app = test_app();
-        let cmds = app.render();
+        let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -3116,7 +3192,7 @@ mod tests {
     fn test_render_game_over_overlay() {
         let mut app = test_app();
         app.phase = GamePhase::GameOver;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         // Should contain game over text.
         let has_game_over = cmds
             .iter()
@@ -3128,7 +3204,7 @@ mod tests {
     fn test_render_pause_overlay() {
         let mut app = test_app();
         app.phase = GamePhase::Paused;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         let has_paused = cmds
             .iter()
             .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("PAUSED")));
@@ -3139,7 +3215,7 @@ mod tests {
     fn test_render_ball_lost_overlay() {
         let mut app = test_app();
         app.phase = GamePhase::BallLost;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         let has_ball_lost = cmds
             .iter()
             .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("BALL LOST")));
@@ -3149,7 +3225,7 @@ mod tests {
     #[test]
     fn test_render_has_score_text() {
         let app = test_app();
-        let cmds = app.render();
+        let cmds = app.render_commands();
         let has_score = cmds
             .iter()
             .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("SCORE")));
@@ -3159,7 +3235,7 @@ mod tests {
     #[test]
     fn test_render_has_pinball_title() {
         let app = test_app();
-        let cmds = app.render();
+        let cmds = app.render_commands();
         let has_title = cmds
             .iter()
             .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("PINBALL")));
@@ -3169,7 +3245,7 @@ mod tests {
     #[test]
     fn test_render_has_footer() {
         let app = test_app();
-        let cmds = app.render();
+        let cmds = app.render_commands();
         let has_footer = cmds
             .iter()
             .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Launch")));
@@ -3179,7 +3255,7 @@ mod tests {
     #[test]
     fn test_render_bumpers_visible() {
         let app = test_app();
-        let cmds = app.render();
+        let cmds = app.render_commands();
         // Bumpers render as FillRect with rounded corners. There should be at least
         // as many rounded rects as there are bumpers (each bumper renders 2+).
         let rounded_count = cmds.iter().filter(|c| {
@@ -3192,7 +3268,7 @@ mod tests {
     fn test_render_with_multi_ball_indicator() {
         let mut app = test_app();
         app.multi_ball_active = true;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         let has_multi = cmds
             .iter()
             .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("MULTI-BALL")));
@@ -3203,7 +3279,7 @@ mod tests {
     fn test_render_with_tilt_indicator() {
         let mut app = test_app();
         app.tilt.tilted = true;
-        let cmds = app.render();
+        let cmds = app.render_commands();
         let has_tilt = cmds
             .iter()
             .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("TILT")));
@@ -3213,7 +3289,7 @@ mod tests {
     #[test]
     fn test_render_high_scores_visible() {
         let app = test_app();
-        let cmds = app.render();
+        let cmds = app.render_commands();
         let has_hs = cmds
             .iter()
             .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("HIGH SCORES")));
@@ -3223,11 +3299,108 @@ mod tests {
     #[test]
     fn test_render_plunger_when_ready() {
         let app = test_app();
-        let cmds = app.render();
+        let cmds = app.render_commands();
         // Plunger renders a FillRect with PEACH color for the head.
         let has_plunger = cmds
             .iter()
             .any(|c| matches!(c, RenderCommand::FillRect { color, .. } if *color == PEACH));
         assert!(has_plunger);
+    }
+}
+
+/// The wiring itself, driven through the real strap against a stand-in
+/// compositor.
+///
+/// Every other test in this file exercises the game's own model. None of them
+/// would notice if the `App` impl were deleted, or if `initial_size` returned
+/// `(0, 0)`, or if `render` handed back an empty tree -- the program would
+/// compile, launch, and show nothing. That is precisely the failure
+/// `TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR` is about, and it is invisible to a
+/// model test by construction.
+///
+/// So this opens a window *through the trait* -- the title and the size are
+/// the ones the game reports, not ones the test chose -- scripts real input,
+/// and asserts frames came out and the close request was obeyed.
+///
+/// **Proved able to fail rather than assumed to be.** Replacing the body of
+/// `App::render` with an empty `RenderTree` -- the shape of a wiring that
+/// compiles and shows nothing -- makes this report *the game submitted 2
+/// frame(s) for this window and every one was empty, so the window would be
+/// blank*, while all 120 of the model tests keep passing.
+#[cfg(test)]
+mod reaches_a_window {
+    // A failure here should point at the line that failed, which is what a
+    // panicking assertion does. The defensive lints exist to keep panics out
+    // of code that runs on a user's data; this is a harness. Same list, and
+    // the same reason, as `mod tests` above.
+    #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+
+    use super::*;
+    use oswindow::InputEvent;
+    use oswindow::testing;
+
+    #[test]
+    fn the_game_opens_a_window_draws_and_closes() {
+        let (mut events, desktop) = testing::desktop();
+        let mut game = Pinball::new();
+
+        let window = app::open(&mut events, &game).expect("the compositor should grant a window");
+
+        {
+            let mut desk = desktop.borrow_mut();
+            // A tick, because this game animates without input and a frame
+            // that only ever follows a click would look frozen.
+            desk.script.push_back(vec![InputEvent::new(
+                window,
+                Event::Tick { elapsed_ms: 16 },
+            )]);
+            desk.script
+                .push_back(vec![InputEvent::new(window, Event::CloseRequested)]);
+        }
+
+        app::drive(&mut events, window, &mut game).expect("the loopback connection cannot fail");
+
+        let desk = desktop.borrow();
+        // NEGATIVE CONTROL FIRST. `submitted` being non-empty is what makes
+        // the command count below mean "the game drew" rather than "nothing
+        // ran and the filter found nothing".
+        assert!(
+            !desk.submitted.is_empty(),
+            "no frame was submitted at all, so this test cannot say anything \
+             about what was drawn"
+        );
+        let commands: usize = desk
+            .submitted
+            .iter()
+            .filter(|(w, _)| *w == window)
+            .map(|(_, n)| *n)
+            .sum();
+        assert!(
+            commands > 0,
+            "the game submitted {} frame(s) for this window and every one was \
+             empty, so the window would be blank",
+            desk.submitted.len()
+        );
+    }
+
+    /// The window the game asks for is the board it draws, not a number.
+    ///
+    /// `initial_size` is the one part of the `App` impl a compositor obeys
+    /// without question, and a wrong answer there is not a crash -- it is a
+    /// window with the playfield clipped or floating in a margin. Deriving the
+    /// expectation from the same constants the renderer uses is what stops
+    /// this from being a copy of the answer.
+    #[test]
+    fn the_window_it_asks_for_is_the_size_of_the_board() {
+        let game = Pinball::new();
+        let (w, h) = game.initial_size();
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "the same positive constants the impl casts"
+        )]
+        let expected = (WINDOW_WIDTH.ceil() as u32, WINDOW_HEIGHT.ceil() as u32);
+        assert_eq!((w, h), expected, "the window does not match the board");
+        assert!(w > 0 && h > 0, "a zero dimension is an invisible window");
     }
 }

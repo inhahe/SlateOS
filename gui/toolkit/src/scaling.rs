@@ -13,7 +13,6 @@
 //! Standard DPI factors: 1.0 (96 DPI), 1.25, 1.5, 1.75, 2.0, 2.5, 3.0.
 //! Custom fractional factors are also supported for non-standard monitors.
 
-
 use core::cmp::Reverse;
 use core::sync::atomic::{AtomicU32, Ordering};
 

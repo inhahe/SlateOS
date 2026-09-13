@@ -20,7 +20,6 @@
 //!                               InstallPlan { steps }
 //! ```
 
-
 pub mod grub;
 
 use std::fmt;

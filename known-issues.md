@@ -22701,6 +22701,15 @@ resize arrows on a window edge, the hand over a link: all decided, none drawn.
 On the dev host you get Windows' arrow everywhere, because the host window
 class names one cursor once and never changes it.
 
+**The first piece is now a question, not a task: C-Q18.** Drawing a pointer is
+straightforward until it meets `compose_frame`'s direct-scanout bypass, where a
+fullscreen opaque window's picture is handed to the display uncopied — and a
+pointer cannot be painted onto a frame that is never painted. Software cursor
+always (fullscreen loses the shortcut), software except over fullscreen (the
+pointer vanishes there), or a hardware cursor plane (most work, gives nothing
+up) is an architectural fork with a measured performance feature on one side,
+so it is the operator's. See `open-questions.md` → **C-Q18**.
+
 **Which makes the order of work clear, and it is not this entry.** Four models
 disagreeing about a size matters only once something draws a pointer. The
 first piece is a cursor renderer -- a compositor-drawn pointer on the DRM path,

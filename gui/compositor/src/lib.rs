@@ -10404,7 +10404,13 @@ mod tests {
         let window_id = compositor.create_window("Welcome to Slate OS".to_string(), 640, 480, 1);
         let mut tree = RenderTree::new();
         tree.fill_rect(10.0, 10.0, 200.0, 40.0, Color::BLUE);
-        tree.text(20.0, 20.0, "Hello from Slate OS Compositor!", Color::WHITE, 14.0);
+        tree.text(
+            20.0,
+            20.0,
+            "Hello from Slate OS Compositor!",
+            Color::WHITE,
+            14.0,
+        );
         tree.fill_rect(10.0, 60.0, 620.0, 1.0, Color::LIGHT_GRAY);
         compositor
             .submit_render(window_id, tree.commands)
@@ -10483,8 +10489,9 @@ mod tests {
         assert_ne!(
             changed,
             AppearanceSettings::default(),
-            "the fixture must differ from what the compositor already holds, "
-            ,
+            "the fixture must differ from the settings the compositor already \
+             holds, or `set_appearance` returns early and the assertion below \
+             passes by resolving nothing rather than by resolving once"
         );
         let before = guitk::palette::palette_resolutions();
         compositor.set_appearance(changed);

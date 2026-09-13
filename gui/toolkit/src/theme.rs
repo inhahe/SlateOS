@@ -120,8 +120,7 @@ fn channel_table() -> &'static [f32; 256] {
 /// compiling it in is 256 relaxed increments per process, once, because the
 /// path being instrumented is by construction cold. Instrumenting the cold
 /// path is free precisely when the regression is "this path became hot".
-static TRANSFER_EVALUATIONS: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(0);
+static TRANSFER_EVALUATIONS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// How many times the sRGB transfer function has been evaluated so far.
 ///

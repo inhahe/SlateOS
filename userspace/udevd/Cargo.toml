@@ -9,3 +9,9 @@ optionalfile = { path = "../../optionalfile" }
 # the kernel's device attributes and out of the rules directory, so a device
 # that reports its own name gets to choose the word udevd prints.
 quoting = { path = "../quoting" }
+# Tests only. `apply_device_node` writes under its dev root, and on Windows a
+# leading-slash path is drive-relative -- so a test using the real "/dev"
+# creates E:\dev on the operator's data drive. See
+# requests/c-b-tests-create-real-directories-at-the-drive-root.md.
+[dev-dependencies]
+scratchdir = { path = "../scratchdir" }

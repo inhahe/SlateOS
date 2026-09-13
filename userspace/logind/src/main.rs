@@ -902,7 +902,22 @@ struct Daemon {
 }
 
 impl Daemon {
-    fn new(config: DaemonConfig) -> Self {
+    /// Build the daemon over a given password verifier.
+    ///
+    /// The verifier is a PARAMETER rather than a default because the default
+    /// was wrong for every test and right only for production: it carried the
+    /// system faillock at `/var/run/authlib/tally`, and on Windows a
+    /// leading-slash path is drive-relative, so a test that authenticated and
+    /// failed wrote a real tally to the root of the operator's data drive.
+    /// Twenty tests called this directly, so fixing the one helper they were
+    /// supposed to use fixed nothing -- the obligation has to be impossible to
+    /// skip, not merely documented.
+    ///
+    /// The opposite default -- an in-memory tally unless production opts in --
+    /// was considered and rejected: forgetting it there would silently stop
+    /// the rate limit being shared between processes, which is a security
+    /// property rather than a tidiness one.
+    fn new(config: DaemonConfig, auth: authlib::Authenticator) -> Self {
         let mut seats = HashMap::new();
         // Always create seat0 as the default local seat.
         seats.insert("seat0".to_string(), Seat::new("seat0"));
@@ -917,7 +932,7 @@ impl Daemon {
             idle_since: 0,
             config,
             running: true,
-            auth: authlib::Authenticator::new(),
+            auth,
         }
     }
 
@@ -1630,7 +1645,7 @@ fn run_daemon(args: &[String]) -> i32 {
         Err(_) => DaemonConfig::default(),
     };
 
-    let mut daemon = Daemon::new(config);
+    let mut daemon = Daemon::new(config, authlib::Authenticator::new());
 
     if daemon_args.no_wall {
         daemon.config.wall_message = false;
@@ -2246,7 +2261,7 @@ fn handle_power_command(
 fn run_loginctl(args: &[String]) -> i32 {
     let cmd = parse_loginctl_args(args);
     let config = DaemonConfig::default();
-    let mut daemon = Daemon::new(config);
+    let mut daemon = Daemon::new(config, authlib::Authenticator::new());
     run_loginctl_command(&mut daemon, &cmd)
 }
 
@@ -2296,6 +2311,28 @@ pub extern "C" fn main(_argc: i32, _argv: *const *const u8) -> i32 {
 // failure report, not a crash in someone's session. CLAUDE.md scopes the four
 // defensive lints to non-test code for exactly this reason.
 #[cfg(test)]
+/// A verifier that touches nothing outside this process.
+///
+/// `Authenticator::new()` -- which `Daemon::new` used to install by itself
+/// -- carries the SYSTEM faillock at `/var/run/authlib/tally`. On Windows
+/// a leading-slash path is drive-relative, so a test that authenticated
+/// and failed wrote a real tally under var/run/authlib/tally at the root
+/// of the operator's data drive. It was found there with the username
+/// hex-encoded as 616c696365 -- "alice" -- which is what traced it back to
+/// this crate.
+///
+/// `with_stores` deliberately does NOT attach a faillock: it counts
+/// failures in memory. So this stops the write and keeps each test's tally
+/// to itself. The path names nothing and is never created; a test that
+/// needs real accounts uses `authenticating_daemon`, which builds its
+/// verifier over a `ScratchDir` database.
+pub(crate) fn test_verifier() -> authlib::Authenticator {
+    authlib::Authenticator::with_stores(std::path::Path::new(
+        "logind-tests-use-authenticating_daemon-for-a-real-account-database",
+    ))
+}
+
+#[cfg(test)]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -2309,7 +2346,7 @@ mod tests {
     // --- Helper: create a daemon with some sample data ---
 
     fn test_daemon() -> Daemon {
-        let mut d = Daemon::new(DaemonConfig::default());
+        let mut d = Daemon::new(DaemonConfig::default(), test_verifier());
         d.create_session(CreateSessionParams {
             uid: 1000,
             user: "alice",
@@ -2476,7 +2513,7 @@ mod tests {
 
     #[test]
     fn test_create_session_basic() {
-        let mut d = Daemon::new(DaemonConfig::default());
+        let mut d = Daemon::new(DaemonConfig::default(), test_verifier());
         let id = d
             .create_session(CreateSessionParams {
                 uid: 1000,
@@ -2502,7 +2539,7 @@ mod tests {
 
     #[test]
     fn test_create_session_assigns_seat() {
-        let mut d = Daemon::new(DaemonConfig::default());
+        let mut d = Daemon::new(DaemonConfig::default(), test_verifier());
         d.create_session(CreateSessionParams {
             uid: 1000,
             user: "alice",
@@ -2522,7 +2559,7 @@ mod tests {
 
     #[test]
     fn test_create_session_tracks_user() {
-        let mut d = Daemon::new(DaemonConfig::default());
+        let mut d = Daemon::new(DaemonConfig::default(), test_verifier());
         d.create_session(CreateSessionParams {
             uid: 1000,
             user: "alice",
@@ -2538,7 +2575,7 @@ mod tests {
 
     #[test]
     fn test_create_multiple_sessions_same_user() {
-        let mut d = Daemon::new(DaemonConfig::default());
+        let mut d = Daemon::new(DaemonConfig::default(), test_verifier());
         d.create_session(CreateSessionParams {
             uid: 1000,
             user: "alice",
@@ -2566,7 +2603,7 @@ mod tests {
             max_sessions: 2,
             ..DaemonConfig::default()
         };
-        let mut d = Daemon::new(config);
+        let mut d = Daemon::new(config, test_verifier());
         d.create_session(CreateSessionParams {
             uid: 1000,
             user: "a",
@@ -2595,7 +2632,7 @@ mod tests {
 
     #[test]
     fn test_session_id_incrementing() {
-        let mut d = Daemon::new(DaemonConfig::default());
+        let mut d = Daemon::new(DaemonConfig::default(), test_verifier());
         let id1 = d.allocate_session_id();
         let id2 = d.allocate_session_id();
         let id3 = d.allocate_session_id();
@@ -2606,7 +2643,7 @@ mod tests {
 
     #[test]
     fn test_session_id_wraps() {
-        let mut d = Daemon::new(DaemonConfig::default());
+        let mut d = Daemon::new(DaemonConfig::default(), test_verifier());
         d.next_session_id = MAX_SESSION_ID;
         let id1 = d.allocate_session_id();
         let id2 = d.allocate_session_id();
@@ -2616,7 +2653,7 @@ mod tests {
 
     #[test]
     fn test_session_remote() {
-        let mut d = Daemon::new(DaemonConfig::default());
+        let mut d = Daemon::new(DaemonConfig::default(), test_verifier());
         d.create_session(CreateSessionParams {
             uid: 1000,
             user: "alice",
@@ -2654,7 +2691,7 @@ mod tests {
 
     #[test]
     fn test_terminate_session_updates_user() {
-        let mut d = Daemon::new(DaemonConfig::default());
+        let mut d = Daemon::new(DaemonConfig::default(), test_verifier());
         d.create_session(CreateSessionParams {
             uid: 1000,
             user: "alice",
@@ -2670,7 +2707,7 @@ mod tests {
 
     #[test]
     fn test_terminate_session_not_found() {
-        let mut d = Daemon::new(DaemonConfig::default());
+        let mut d = Daemon::new(DaemonConfig::default(), test_verifier());
         assert!(d.terminate_session("999").is_err());
     }
 
@@ -2686,7 +2723,7 @@ mod tests {
 
     #[test]
     fn test_terminate_user_no_sessions() {
-        let mut d = Daemon::new(DaemonConfig::default());
+        let mut d = Daemon::new(DaemonConfig::default(), test_verifier());
         assert!(d.terminate_user(9999).is_err());
     }
 
@@ -2712,7 +2749,7 @@ mod tests {
 
     #[test]
     fn test_activate_session_not_found() {
-        let mut d = Daemon::new(DaemonConfig::default());
+        let mut d = Daemon::new(DaemonConfig::default(), test_verifier());
         assert!(d.activate_session("999").is_err());
     }
 
@@ -2739,7 +2776,7 @@ mod tests {
 
     #[test]
     fn test_lock_session_not_found() {
-        let mut d = Daemon::new(DaemonConfig::default());
+        let mut d = Daemon::new(DaemonConfig::default(), test_verifier());
         assert!(d.lock_session("999").is_err());
     }
 
@@ -3026,7 +3063,7 @@ mod tests {
 
     #[test]
     fn test_system_not_idle_no_sessions() {
-        let mut d = Daemon::new(DaemonConfig::default());
+        let mut d = Daemon::new(DaemonConfig::default(), test_verifier());
         d.update_idle_state(100);
         assert!(!d.system_idle);
     }
@@ -3035,7 +3072,7 @@ mod tests {
 
     #[test]
     fn test_add_inhibitor() {
-        let mut d = Daemon::new(DaemonConfig::default());
+        let mut d = Daemon::new(DaemonConfig::default(), test_verifier());
         d.add_inhibitor(
             InhibitWhat::Shutdown,
             "firefox",
@@ -3051,7 +3088,7 @@ mod tests {
 
     #[test]
     fn test_inhibitor_limit() {
-        let mut d = Daemon::new(DaemonConfig::default());
+        let mut d = Daemon::new(DaemonConfig::default(), test_verifier());
         for i in 0..MAX_INHIBITORS {
             d.add_inhibitor(
                 InhibitWhat::Shutdown,
@@ -3076,7 +3113,7 @@ mod tests {
 
     #[test]
     fn test_remove_inhibitors_by_pid() {
-        let mut d = Daemon::new(DaemonConfig::default());
+        let mut d = Daemon::new(DaemonConfig::default(), test_verifier());
         d.add_inhibitor(
             InhibitWhat::Shutdown,
             "app1",
@@ -3111,7 +3148,7 @@ mod tests {
 
     #[test]
     fn test_is_inhibited() {
-        let mut d = Daemon::new(DaemonConfig::default());
+        let mut d = Daemon::new(DaemonConfig::default(), test_verifier());
         d.add_inhibitor(
             InhibitWhat::Shutdown,
             "app",
@@ -3128,7 +3165,7 @@ mod tests {
 
     #[test]
     fn test_is_inhibited_any() {
-        let mut d = Daemon::new(DaemonConfig::default());
+        let mut d = Daemon::new(DaemonConfig::default(), test_verifier());
         d.add_inhibitor(
             InhibitWhat::Shutdown,
             "app",
@@ -3170,7 +3207,7 @@ mod tests {
 
     #[test]
     fn test_power_action_allowed() {
-        let d = Daemon::new(DaemonConfig::default());
+        let d = Daemon::new(DaemonConfig::default(), test_verifier());
         assert_eq!(
             d.request_power_action(PowerAction::PowerOff, false),
             PowerActionResult::Allowed
@@ -3191,7 +3228,7 @@ mod tests {
 
     #[test]
     fn test_power_action_inhibited() {
-        let mut d = Daemon::new(DaemonConfig::default());
+        let mut d = Daemon::new(DaemonConfig::default(), test_verifier());
         d.add_inhibitor(
             InhibitWhat::Shutdown,
             "app",
@@ -3218,7 +3255,7 @@ mod tests {
 
     #[test]
     fn test_power_action_force_overrides_inhibitor() {
-        let mut d = Daemon::new(DaemonConfig::default());
+        let mut d = Daemon::new(DaemonConfig::default(), test_verifier());
         d.add_inhibitor(
             InhibitWhat::Shutdown,
             "app",
@@ -3240,7 +3277,7 @@ mod tests {
             allow_suspend: false,
             ..DaemonConfig::default()
         };
-        let d = Daemon::new(config);
+        let d = Daemon::new(config, test_verifier());
         assert_eq!(
             d.request_power_action(PowerAction::Suspend, false),
             PowerActionResult::Denied
@@ -3251,27 +3288,27 @@ mod tests {
 
     #[test]
     fn test_default_seat0_exists() {
-        let d = Daemon::new(DaemonConfig::default());
+        let d = Daemon::new(DaemonConfig::default(), test_verifier());
         assert!(d.seats.contains_key("seat0"));
     }
 
     #[test]
     fn test_create_seat() {
-        let mut d = Daemon::new(DaemonConfig::default());
+        let mut d = Daemon::new(DaemonConfig::default(), test_verifier());
         d.create_seat("seat1").unwrap();
         assert!(d.seats.contains_key("seat1"));
     }
 
     #[test]
     fn test_create_seat_duplicate() {
-        let mut d = Daemon::new(DaemonConfig::default());
+        let mut d = Daemon::new(DaemonConfig::default(), test_verifier());
         d.create_seat("seat1").unwrap();
         assert!(d.create_seat("seat1").is_err());
     }
 
     #[test]
     fn test_remove_seat() {
-        let mut d = Daemon::new(DaemonConfig::default());
+        let mut d = Daemon::new(DaemonConfig::default(), test_verifier());
         d.create_seat("seat1").unwrap();
         d.remove_seat("seat1").unwrap();
         assert!(!d.seats.contains_key("seat1"));
@@ -3279,13 +3316,13 @@ mod tests {
 
     #[test]
     fn test_remove_seat0_forbidden() {
-        let mut d = Daemon::new(DaemonConfig::default());
+        let mut d = Daemon::new(DaemonConfig::default(), test_verifier());
         assert!(d.remove_seat("seat0").is_err());
     }
 
     #[test]
     fn test_remove_seat_detaches_sessions() {
-        let mut d = Daemon::new(DaemonConfig::default());
+        let mut d = Daemon::new(DaemonConfig::default(), test_verifier());
         d.create_seat("seat1").unwrap();
         d.create_session(CreateSessionParams {
             uid: 1000,
@@ -3332,7 +3369,7 @@ mod tests {
 
     #[test]
     fn test_kill_session_not_found() {
-        let d = Daemon::new(DaemonConfig::default());
+        let d = Daemon::new(DaemonConfig::default(), test_verifier());
         assert!(d.kill_session("999", 15).is_err());
     }
 
@@ -3348,7 +3385,7 @@ mod tests {
 
     #[test]
     fn test_kill_user_not_found() {
-        let d = Daemon::new(DaemonConfig::default());
+        let d = Daemon::new(DaemonConfig::default(), test_verifier());
         assert!(d.kill_user(9999, 15).is_err());
     }
 
@@ -3524,7 +3561,7 @@ HandleSuspendKey=ignore
 
     #[test]
     fn test_loginctl_list_sessions_empty() {
-        let mut d = Daemon::new(DaemonConfig::default());
+        let mut d = Daemon::new(DaemonConfig::default(), test_verifier());
         let rc = run_loginctl_command(&mut d, &LoginctlCommand::ListSessions);
         assert_eq!(rc, 0);
     }
@@ -3545,14 +3582,14 @@ HandleSuspendKey=ignore
 
     #[test]
     fn test_loginctl_show_session_not_found() {
-        let mut d = Daemon::new(DaemonConfig::default());
+        let mut d = Daemon::new(DaemonConfig::default(), test_verifier());
         let rc = run_loginctl_command(&mut d, &LoginctlCommand::ShowSession("999".to_string()));
         assert_eq!(rc, 1);
     }
 
     #[test]
     fn test_loginctl_show_session_empty_id() {
-        let mut d = Daemon::new(DaemonConfig::default());
+        let mut d = Daemon::new(DaemonConfig::default(), test_verifier());
         let rc = run_loginctl_command(&mut d, &LoginctlCommand::ShowSession(String::new()));
         assert_eq!(rc, 1);
     }
@@ -3578,7 +3615,7 @@ HandleSuspendKey=ignore
 
     #[test]
     fn test_loginctl_power_inhibited() {
-        let mut d = Daemon::new(DaemonConfig::default());
+        let mut d = Daemon::new(DaemonConfig::default(), test_verifier());
         d.add_inhibitor(
             InhibitWhat::Shutdown,
             "app",
@@ -3666,7 +3703,7 @@ HandleSuspendKey=ignore
 
     #[test]
     fn test_user_linger() {
-        let mut d = Daemon::new(DaemonConfig::default());
+        let mut d = Daemon::new(DaemonConfig::default(), test_verifier());
         d.create_session(CreateSessionParams {
             uid: 1000,
             user: "alice",

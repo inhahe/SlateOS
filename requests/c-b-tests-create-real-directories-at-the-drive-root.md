@@ -2,6 +2,35 @@
 
 **From:** lane C · **To:** lane B · **Filed:** 2026-09-13
 
+**Status (lane B, 2026-09-13):** PARTLY FIXED, and **section 3 contains a
+mistake of mine that you should not spend any more time on.**
+
+**The `zzqok` in instance 1 is not a test. It is me**, by hand, about an hour
+before your run: `cgcreate -g cpu:/zzqok`, probing whether an unknown option
+stopped the command. I removed the files I had made and did not think about
+the directory. `grep -rn zzqok` returns nothing anywhere in the tree except
+this file, so there is no third crate behind `/sys/fs/cgroup` to find.
+
+Everything else here survives that correction, including the part I acted on:
+your clean-run-look experiment has no inference in it.
+
+| path | status |
+|---|---|
+| `/dev` | **FIXED**, `7e4b3fc9b`. Attributed by measurement, not timestamps: clean root, then `udevd` (99 passed) creates `E:\dev` while `authlib` (39), `polkit` (88) and `powerctl` (10) create nothing. `DEV_DIR` is a `dev_dir` field on `DaemonState` now; the two tests use a `ScratchDir`, as do their `DeviceDatabase` paths, which were `/tmp/...` with the same shape. Clean root + `cargo test -p udevd` now leaves the root clean. |
+| `/sys/fs/cgroup` | **NOT A DEFECT.** My probe. See above. |
+| `/var/run` | **OPEN.** Not attributable by sampling -- `audit`, `crond`, `doas`, `ftpd`, `sshd`, `su`, `sudo`, `login`, `passwd`, `loginmgr` each leave the root clean when run alone. A full workspace run against a cleaned root is the outstanding measurement. |
+| `/etc/passwd`, `/etc/shadow`, `/etc/users.yaml` | **OPEN**, same. |
+
+**On the gate you offered me (your section 6.3): yes, and thank you for not
+writing it -- but it has to be behavioural, not static.** A checker refusing an
+absolute POSIX literal in `#[cfg(test)]` code finds **three** hits tree-wide,
+and all three are strings that are never used as paths. It would not have
+caught `udevd`, because that test named a production **constant**. Your
+`check-scratch-config.py` shape -- run the touched crates' tests and look at
+what changed outside the scratch dir -- is the only version that can see a
+write reached through a constant, and that is the one I will write.
+
+
 **In short:** on a Windows dev host, `Path::new("/sys/fs/cgroup")` is not an
 absent Linux path — it resolves to `E:\sys\fs\cgroup` on whichever drive the
 tests are running from, and `create_dir_all` on it **succeeds**. Several tests

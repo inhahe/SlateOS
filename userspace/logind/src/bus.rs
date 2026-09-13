@@ -529,7 +529,7 @@ mod tests {
     /// A daemon with one session for uid 1000 ("alice") and one for uid 1001
     /// ("bob"), so that "may I touch someone else's session?" is answerable.
     fn two_user_daemon() -> (Daemon, String, String) {
-        let mut d = Daemon::new(DaemonConfig::default());
+        let mut d = Daemon::new(DaemonConfig::default(), crate::test_verifier());
         let alice = d
             .create_session(CreateSessionParams {
                 uid: 1000,
@@ -575,7 +575,7 @@ mod tests {
 
     #[test]
     fn create_session_adds_a_session_and_returns_its_id() {
-        let mut d = Daemon::new(DaemonConfig::default());
+        let mut d = Daemon::new(DaemonConfig::default(), crate::test_verifier());
         assert!(d.sessions.is_empty(), "starts empty");
 
         let reply = call(&mut d, "CreateSession", &create_args(), Some(creds(0)));
@@ -610,7 +610,7 @@ mod tests {
     /// nicety.
     #[test]
     fn only_root_may_create_a_session() {
-        let mut d = Daemon::new(DaemonConfig::default());
+        let mut d = Daemon::new(DaemonConfig::default(), crate::test_verifier());
         let denied = call(&mut d, "CreateSession", &create_args(), Some(creds(1000)));
         assert!(denied.is_error(), "an ordinary user created a session");
         assert!(d.sessions.is_empty(), "a refused call still created one");
@@ -627,7 +627,7 @@ mod tests {
 
     #[test]
     fn create_session_rejects_a_malformed_argument_list() {
-        let mut d = Daemon::new(DaemonConfig::default());
+        let mut d = Daemon::new(DaemonConfig::default(), crate::test_verifier());
         // Too few.
         assert!(call(&mut d, "CreateSession", &[b"1000"], Some(creds(0))).is_error());
         // A uid that is not a number, and a `remote` that is not 0 or 1.
@@ -644,10 +644,13 @@ mod tests {
 
     #[test]
     fn create_session_honours_the_session_cap() {
-        let mut d = Daemon::new(DaemonConfig {
-            max_sessions: 1,
-            ..DaemonConfig::default()
-        });
+        let mut d = Daemon::new(
+            DaemonConfig {
+                max_sessions: 1,
+                ..DaemonConfig::default()
+            },
+            crate::test_verifier(),
+        );
         assert!(!call(&mut d, "CreateSession", &create_args(), Some(creds(0))).is_error());
         let over = call(&mut d, "CreateSession", &create_args(), Some(creds(0)));
         assert!(over.is_error(), "the cap was not enforced over the bus");

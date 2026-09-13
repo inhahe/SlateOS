@@ -141390,7 +141390,51 @@ length names, NUL padding, and a buffer holding several events.
 defect is worse than the ones already fixed today; the implementation is
 more than a single change.
 
-## B-PROGRAMS-THAT-INVENT-THEIR-OUTPUT (lane B, 2026-09-12) -- 14 found, 13 fixed, 1 filed
+## B-PROGRAMS-THAT-INVENT-THEIR-OUTPUT (lane B, 2026-09-12) -- 15 found, 14 fixed, 1 filed
+
+### `sbctl`, found 2026-09-13 -- the whole write half of a security tool
+
+`fs::write` appears **zero times in `userspace/sbctl`**. The crate reports
+creating secure-boot keys and signing EFI binaries and does neither.
+
+    $ sbctl create-keys
+    Creating secure boot keys...
+      Created: /etc/secureboot/keys/PK/PK.key       <- not written
+      ... five more                                 <- not written
+    Keys created successfully.
+
+    $ sbctl sign /boot/vmlinuz
+    Signing '/boot/vmlinuz' -> '/boot/vmlinuz'       <- file untouched
+      Using key: /etc/secureboot/keys/db/db.key
+
+The three key DIRECTORIES are created, empty. That detail matters: `status`
+decides `PK: Enrolled` by asking whether the directory exists and is
+non-empty, so `create-keys` leaves the tool in a state where it contradicts
+its own success message on the very next command.
+
+**Worse than the other inventions because of what the output is for.** A user
+who runs `sbctl sign` on a kernel image and reads that line has been told the
+image is signed. Nothing downstream can correct them: the file is unchanged,
+so the failure surfaces later, elsewhere, as a firmware refusal to boot.
+
+**The capability exists and userspace cannot reach it.** `roadmap.md:2783`
+describes `fs::secureboot` in the kernel -- four boot states, five key types,
+enrolment/removal, image verification, `/proc/secureboot`, eight self-tests --
+and `grep -rn "secureboot|secure_boot" posix/src/` returns nothing. No
+syscall, no wrapper, no constant. sbctl was written as though the feature did
+not exist.
+
+Key GENERATION is a separate gap and not lane A's: a PK/KEK/db keypair needs
+RSA and X.509, which this tree does not have.
+
+`roadmap.md:3835` said `[x] sbctl/sbsign/sbverify/sbkeysync: secure boot
+management (key enrollment, EFI signing, rotation, 645 lines)`. Corrected to
+`[~]` with the read/write split stated -- fabricated done-status about a
+security feature is the worst place for it. Filed as
+`requests/b-a-sbctl-needs-a-userspace-door-to-fs-secureboot.md`.
+
+`status` is untouched and was always real: it reads the efivars `SecureBoot`
+and `SetupMode` variables.
 
 ### Three more found 2026-09-13, all in `userspace/wipefs`, all destructive
 

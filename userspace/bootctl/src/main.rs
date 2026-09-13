@@ -329,6 +329,8 @@ fn cmd_set_default(esp: &Path, entry_id: &str) -> i32 {
 fn cmd_set_oneshot(esp: &Path, entry_id: &str) -> i32 {
     // Write to EFI variable (simulated).
     let loader_dir = esp.join("loader");
+    // Discarded deliberately: the write below is checked, and a directory
+    // that could not be created makes it fail with the same cause.
     let _ = fs::create_dir_all(&loader_dir);
     match fs::write(loader_dir.join("oneshot"), entry_id) {
         Ok(()) => {

@@ -1094,6 +1094,7 @@ fn main() {
 
     if wipe {
         let dir = require_session_dir();
+        let mut failed = 0usize;
         if let Ok(entries) = fs::read_dir(&dir) {
             for entry in entries.flatten() {
                 if let Some(name) = entry.file_name().to_str()
@@ -1101,10 +1102,23 @@ fn main() {
                     && let Ok(content) = fs::read_to_string(entry.path())
                     && content.contains("status=detached")
                 {
-                    let _ = fs::remove_file(entry.path());
-                    println!("Removed: {}", name);
+                    // "Removed:" is printed only once the file is gone. It
+                    // used to follow a discarded `remove_file`, so a session
+                    // whose file could not be deleted was listed as wiped and
+                    // was still there on the next `screen -ls`.
+                    match fs::remove_file(entry.path()) {
+                        Ok(()) => println!("Removed: {name}"),
+                        Err(e) => {
+                            eprintln!("screen: cannot remove {}: {e}", quoteaf_os(name));
+                            failed += 1;
+                        }
+                    }
                 }
             }
+        }
+        if failed > 0 {
+            eprintln!("screen: {failed} session file(s) could not be removed");
+            process::exit(1);
         }
         return;
     }

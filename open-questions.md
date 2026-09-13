@@ -1887,6 +1887,62 @@ command was deleted has to reconstruct the argument as I just did.
 
 
 
+## B-Q17 — [B] `sbctl` said it signed your kernel and did not. It refuses now — should the commands be deleted instead? — Status: OPEN
+
+**In short:** `sbctl` is the tool that manages Secure Boot — the firmware
+feature that refuses to start a kernel unless it carries a cryptographic
+signature the machine recognises. Ours reported creating those signing keys,
+and reported signing kernel images, and did **neither**: not one byte was ever
+written by it. I have made those commands stop and say why. Your own rule
+§1006 says a command that cannot work should be **deleted** rather than left
+refusing, and I want to check you meant that here before removing six
+subcommands from a security tool.
+
+**What was happening, exactly.** `sbctl sign /boot/vmlinuz` printed
+`Signing '/boot/vmlinuz'` and left the file byte-for-byte unchanged.
+`sbctl create-keys` printed six lines naming key files it did not write.
+`sbctl enroll-keys` printed `Proceed? [y/N]` and then never read the answer —
+it "proceeded" regardless of what you would have typed. None of this is
+detectable from the output; it is discovered by the firmware refusing to boot,
+later, by someone with no reason to suspect this tool.
+
+**Two different things are missing, with different prospects.**
+
+| commands | blocked on | can it ever work here? |
+|---|---|---|
+| `enroll-keys`, `reset` | a way for ordinary programs to reach the kernel's key store, which exists and is real but has no door to userspace | **yes** — I have asked lane A for the door |
+| `create-keys`, `sign`, `rotate-keys`, `bundle` | RSA and X.509 (the maths and the certificate format that make a signature), plus Authenticode (the specific way Windows-style binaries are signed) | **not without a cryptography library this project does not have and has not planned** |
+
+**The options**
+
+1. **Leave them refusing** (what I have done).
+   *What changes:* `sbctl sign foo` prints `sbctl: cannot sign 'foo': this
+   system has no RSA or X.509 implementation` and exits non-zero. The command
+   still appears in `--help`.
+2. **Delete the four that need cryptography, keep the two waiting on lane A.**
+   *What changes:* `sbctl sign` becomes an unknown subcommand. `--help` gets
+   shorter. Someone reading the help is never told about a capability we do
+   not have.
+3. **Delete all six.**
+   *What changes:* `sbctl` becomes a read-only tool — `status`, `verify`,
+   `list-files` — which is the half that genuinely works today.
+
+**My recommendation: 2.** It follows §1006 exactly where §1006 clearly
+applies — a command that cannot work is not kept — while not deleting two
+commands that are one lane-A change away from working. The reason I am asking
+rather than just doing it is that deleting subcommands from a security tool
+changes what a user is told the system can do, and that is your call rather
+than mine.
+
+**If this is never answered:** the current state is safe. Nothing claims to
+sign anything any more, and the refusals name what is missing. The cost of
+leaving it is only that `sbctl --help` continues to advertise four commands
+that cannot work on this system.
+
+**Where it bites:** `userspace/sbctl/src/main.rs`; `roadmap.md:3835`, which
+claimed this was done and now says `[~]`;
+`requests/b-a-sbctl-needs-a-userspace-door-to-fs-secureboot.md`.
+
 # Resolved
 
 **The body above holds OPEN questions only.** When the operator answers one,

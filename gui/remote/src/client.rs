@@ -472,6 +472,55 @@ impl<T: Transport> Connection<T> {
         self.confirm(RequestBody::SubscribeWindowList { subscribe: on })
     }
 
+    /// Ask to be sent the tray list whenever it changes.
+    ///
+    /// For a shell. Gated by the same privilege seam the window list is: the
+    /// list names every program that has an icon, which is a different fact
+    /// from the one a program is entitled to about itself.
+    ///
+    /// # Errors
+    ///
+    /// As [`confirm`](Self::confirm).
+    pub fn subscribe_tray(&mut self, on: bool) -> Result<(), ClientError<T::Error>> {
+        self.confirm(RequestBody::SubscribeTrayIcons { subscribe: on })
+    }
+
+    /// Put an icon in the tray, or replace this program's icon under `id`.
+    ///
+    /// `id` is this program's own name for the icon and need not be unique
+    /// beyond it: the compositor scopes it to the connection, so two programs
+    /// may both use 1. Sending the same id again updates in place rather than
+    /// adding a second icon, which is what makes a changing battery level one
+    /// icon instead of a growing row of them.
+    ///
+    /// # Errors
+    ///
+    /// As [`confirm`](Self::confirm).
+    pub fn set_tray_icon(
+        &mut self,
+        id: u32,
+        glyph: &str,
+        tooltip: &str,
+    ) -> Result<(), ClientError<T::Error>> {
+        self.confirm(RequestBody::SetTrayIcon {
+            id,
+            glyph: glyph.to_string(),
+            tooltip: tooltip.to_string(),
+        })
+    }
+
+    /// Take this program's icon out of the tray.
+    ///
+    /// Removing one that is not there is not an error: a program tidying up on
+    /// exit should not have to know whether it got as far as registering.
+    ///
+    /// # Errors
+    ///
+    /// As [`confirm`](Self::confirm).
+    pub fn remove_tray_icon(&mut self, id: u32) -> Result<(), ClientError<T::Error>> {
+        self.confirm(RequestBody::RemoveTrayIcon { id })
+    }
+
     /// Act on a window this client does not own — what a taskbar button, an
     /// Alt-Tab switcher and a window menu are made of.
     ///

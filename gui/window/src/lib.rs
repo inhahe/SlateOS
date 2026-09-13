@@ -923,6 +923,50 @@ impl<T: Transport> EventLoop<T> {
         self.conn.subscribe_window_list(on)
     }
 
+    /// Ask to be sent the system tray's icons whenever they change.
+    ///
+    /// For a shell, and the tray counterpart of
+    /// [`watch_desktop`](Self::watch_desktop). While subscribed,
+    /// [`poll`](Self::poll) and [`run`](Self::run) keep
+    /// [`tray_icons`](Self::tray_icons) current.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`].
+    pub fn watch_tray(&mut self, on: bool) -> Result<(), Error<T>> {
+        self.conn.subscribe_tray(on)
+    }
+
+    /// The tray's icons, or an empty slice before the first frame arrives.
+    #[must_use]
+    pub fn tray_icons(&self) -> &[guiremote::tray::TrayIcon] {
+        self.conn.tray_icons()
+    }
+
+    /// How many tray frames have arrived, for a shell that repaints on change.
+    #[must_use]
+    pub const fn tray_revision(&self) -> u64 {
+        self.conn.tray_revision()
+    }
+
+    /// Put an icon in the system tray, or replace this program's icon.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`].
+    pub fn set_tray_icon(&mut self, id: u32, glyph: &str, tooltip: &str) -> Result<(), Error<T>> {
+        self.conn.set_tray_icon(id, glyph, tooltip)
+    }
+
+    /// Take this program's icon out of the tray.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`].
+    pub fn remove_tray_icon(&mut self, id: u32) -> Result<(), Error<T>> {
+        self.conn.remove_tray_icon(id)
+    }
+
     /// Activate, minimise, restore, maximise or close a window this loop does
     /// not own.
     ///
@@ -2548,6 +2592,45 @@ mod tests {
                 height: 600,
             },
         ]
+    }
+
+    /// The tray requests reach the wire, and the registration is not local.
+    ///
+    /// The same argument `watch_desktop`'s test makes: nothing a client could
+    /// do locally puts an icon in somebody else's tray, so the observable
+    /// effect of these calls has to be a request on the wire. A version that
+    /// stored the icon in this process and drew nothing would pass any test
+    /// that only asked this client what it thought -- which is exactly the
+    /// state `apps/systray::register_icon` was in, public and callable and
+    /// reaching nothing.
+    #[test]
+    fn the_tray_calls_go_to_the_compositor_rather_than_staying_here() {
+        let (mut events, server) = wired();
+        events.watch_tray(true).unwrap();
+        events.set_tray_icon(1, "B", "Battery: 87%").unwrap();
+        events.remove_tray_icon(1).unwrap();
+
+        let seen = server.borrow();
+        assert!(
+            seen.seen
+                .iter()
+                .any(|r| matches!(r.body, RequestBody::SubscribeTrayIcons { subscribe: true })),
+            "watch_tray should have subscribed on the wire"
+        );
+        assert!(
+            seen.seen.iter().any(|r| matches!(
+                &r.body,
+                RequestBody::SetTrayIcon { id: 1, glyph, tooltip }
+                    if glyph == "B" && tooltip == "Battery: 87%"
+            )),
+            "the icon and its tooltip should have gone out as sent"
+        );
+        assert!(
+            seen.seen
+                .iter()
+                .any(|r| matches!(r.body, RequestBody::RemoveTrayIcon { id: 1 })),
+            "removing should have gone out too"
+        );
     }
 
     #[test]

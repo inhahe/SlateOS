@@ -1576,7 +1576,10 @@ impl HabitTrackerApp {
 
             // 7-day rate
             let rate_7 = habit.completion_rate(self.today, 7);
-            let rate_7_color = rate_color(rate_7, &self.palette);
+            // Inked at the binding: this local is used once, and it is a
+            // label. `rate_color` also fills the stat cards, so it cannot be
+            // inked in its own body. 837.
+            let rate_7_color = self.palette.ink(rate_color(rate_7, &self.palette));
             cmds.push(RenderCommand::Text {
                 x: stats_x + 50.0,
                 y: ry + 16.0,
@@ -1590,7 +1593,7 @@ impl HabitTrackerApp {
 
             // 30-day rate
             let rate_30 = habit.completion_rate(self.today, 30);
-            let rate_30_color = rate_color(rate_30, &self.palette);
+            let rate_30_color = self.palette.ink(rate_color(rate_30, &self.palette));
             cmds.push(RenderCommand::Text {
                 x: stats_x + 86.0,
                 y: ry + 16.0,

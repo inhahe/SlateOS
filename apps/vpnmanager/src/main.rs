@@ -2101,7 +2101,9 @@ fn render_sidebar_item(
         y: y + 40.0,
         text: status_text,
         font_size: 10.0,
-        color: status_color,
+        // The same colour fills the pill above; only the label needs to be
+        // legible on the page, so the ink goes here and not at the binding.
+        color: pal.ink(status_color),
         font_weight: FontWeightHint::Light,
         max_width: Some(SIDEBAR_WIDTH - 50.0),
         overflow: TextOverflow::Ellipsis,
@@ -2503,7 +2505,9 @@ fn render_tab_connection(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, 
             y,
             text: format!("Status: {status_label}"),
             font_size: 13.0,
-            color: status_color,
+            // The 8px dot above is this colour too, so the ink goes on the
+            // label alone rather than on the method. 837.
+            color: app.palette.ink(status_color),
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,

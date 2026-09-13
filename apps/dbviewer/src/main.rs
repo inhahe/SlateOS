@@ -515,12 +515,16 @@ fn put_text(
 
 /// The colour a cell of each type is drawn in.
 fn cell_color(cell: &CellValue, pal: &Palette) -> Color {
+    // Inked per arm. A cell's value is always written, never filled, and both
+    // callers hand this straight to a text helper. `Null` stays `overlay0` --
+    // the faintest legible mark is exactly what an absent value should be --
+    // and `text` is floored in the palette already. 837.
     match cell {
         CellValue::Null => pal.overlay0,
-        CellValue::Integer(_) => pal.blue,
-        CellValue::Real(_) => pal.peach,
+        CellValue::Integer(_) => pal.ink(pal.blue),
+        CellValue::Real(_) => pal.ink(pal.peach),
         CellValue::Text(_) => pal.text,
-        CellValue::Blob(_) => pal.mauve,
+        CellValue::Blob(_) => pal.ink(pal.mauve),
     }
 }
 

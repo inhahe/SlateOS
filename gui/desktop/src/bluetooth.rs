@@ -847,7 +847,7 @@ impl BluetoothSettingsUI {
             y: y + 26.0,
             text: dev.state.label().to_string(),
             font_size: 10.0,
-            color: dev.state.color(p),
+            color: p.ink(dev.state.color(p)),
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,

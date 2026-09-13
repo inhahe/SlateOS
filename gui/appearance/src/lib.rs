@@ -1152,6 +1152,19 @@ impl Default for AppearanceSettings {
 }
 
 impl AppearanceSettings {
+    /// The caret width this user asked for, in pixels.
+    ///
+    /// The one step between the stored setting and something that can be
+    /// drawn, and the step that did not exist when `caret_width_scale` was
+    /// added. A scale is not a width: every caller that multiplied for itself
+    /// would be a caller that could forget to, which is exactly how the dead
+    /// `a11y.rs` copy of this setting came to have a passing round-trip test
+    /// and no reader. See `design-decisions.md` 839.
+    #[must_use]
+    pub fn caret_width(&self) -> f32 {
+        guitk::textedit::CARET_WIDTH * self.caret_width_scale
+    }
+
     /// The accent colour to actually draw with.
     ///
     /// Resolves both things a caller would otherwise have to know: that
@@ -4051,20 +4064,24 @@ mod tests {
     /// of this setting, which is precisely why nobody noticed it was wired to
     /// nothing. It is that a caller can get from the settings to a width in
     /// pixels, which is the step that did not exist.
+    ///
+    /// **And for one day this test did not check that either.** It asserted
+    /// `CARET_WIDTH * s.caret_width_scale`, which is a test of `*`: it
+    /// performed the multiplication a caller would have to perform, and would
+    /// have passed with no caller and no helper anywhere in the tree. It calls
+    /// [`AppearanceSettings::caret_width`] now, so it fails if that step stops
+    /// existing. The trap named in the paragraph above is the one it fell into.
     #[test]
     fn the_caret_width_scale_reaches_a_width_in_pixels() {
         let mut s = AppearanceSettings::default();
         assert_eq!(
-            guitk::textedit::CARET_WIDTH * s.caret_width_scale,
+            s.caret_width(),
             guitk::textedit::CARET_WIDTH,
             "the default scale must leave the toolkit's width alone"
         );
 
         s.caret_width_scale = 2.0;
-        assert_eq!(
-            guitk::textedit::CARET_WIDTH * s.caret_width_scale,
-            guitk::textedit::CARET_WIDTH * 2.0
-        );
+        assert_eq!(s.caret_width(), guitk::textedit::CARET_WIDTH * 2.0);
 
         // Clamped, and at four rather than the dead module's five: past about
         // 4x a caret stops being a caret and starts covering the character

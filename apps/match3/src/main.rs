@@ -151,11 +151,30 @@ impl GemType {
     }
 
     fn color(self) -> Color {
-        GEM_COLORS[self.index()]
+        // `match`, not `GEM_COLORS[self.index()]`. Same lookup, except that
+        // adding a variant to `GemType` now fails to compile instead of
+        // panicking the first time that colour is drawn.
+        match self {
+            Self::Ruby => RED,
+            Self::Sapphire => BLUE,
+            Self::Emerald => GREEN,
+            Self::Topaz => YELLOW,
+            Self::Amber => PEACH,
+            Self::Amethyst => MAUVE,
+            Self::Aqua => TEAL,
+        }
     }
 
     fn symbol(self) -> &'static str {
-        GEM_SYMBOLS[self.index()]
+        match self {
+            Self::Ruby => "\u{25C6}",
+            Self::Sapphire => "\u{25CF}",
+            Self::Emerald => "\u{25A0}",
+            Self::Topaz => "\u{2605}",
+            Self::Amber => "\u{25B2}",
+            Self::Amethyst => "\u{2666}",
+            Self::Aqua => "\u{2764}",
+        }
     }
 }
 
@@ -382,7 +401,8 @@ impl Match3 {
     fn fill_board_no_matches(&mut self) {
         for row in 0..GRID_SIZE {
             for col in 0..GRID_SIZE {
-                self.board[row][col] = Some(self.random_gem_no_match(row, col));
+                let gem = self.random_gem_no_match(row, col);
+                self.set_gem(row, col, Some(gem));
             }
         }
     }
@@ -394,7 +414,10 @@ impl Match3 {
             let gem = Gem::new(gem_type);
             // Check horizontal: if two to the left are the same type, skip.
             if col >= 2
-                && let (Some(a), Some(b)) = (self.board[row][col - 1], self.board[row][col - 2])
+                && let (Some(a), Some(b)) = (
+                    self.get_gem(row, col.saturating_sub(1)),
+                    self.get_gem(row, col.saturating_sub(2)),
+                )
                 && a.gem_type == gem_type
                 && b.gem_type == gem_type
             {
@@ -402,7 +425,10 @@ impl Match3 {
             }
             // Check vertical: if two above are the same type, skip.
             if row >= 2
-                && let (Some(a), Some(b)) = (self.board[row - 1][col], self.board[row - 2][col])
+                && let (Some(a), Some(b)) = (
+                    self.get_gem(row.saturating_sub(1), col),
+                    self.get_gem(row.saturating_sub(2), col),
+                )
                 && a.gem_type == gem_type
                 && b.gem_type == gem_type
             {
@@ -428,13 +454,13 @@ impl Match3 {
         for row in 0..GRID_SIZE {
             let mut col = 0;
             while col < GRID_SIZE {
-                if let Some(gem) = self.board[row][col] {
+                if let Some(gem) = self.get_gem(row, col) {
                     let gem_type = gem.gem_type;
                     let start = col;
                     while col < GRID_SIZE {
-                        if let Some(g) = self.board[row][col] {
+                        if let Some(g) = self.get_gem(row, col) {
                             if g.gem_type == gem_type {
-                                col += 1;
+                                col = col.saturating_add(1);
                             } else {
                                 break;
                             }
@@ -442,7 +468,7 @@ impl Match3 {
                             break;
                         }
                     }
-                    let length = col - start;
+                    let length = col.saturating_sub(start);
                     if length >= 3 {
                         let positions: Vec<Pos> = (start..col).map(|c| Pos::new(row, c)).collect();
                         matches.push(MatchInfo {
@@ -452,7 +478,7 @@ impl Match3 {
                         });
                     }
                 } else {
-                    col += 1;
+                    col = col.saturating_add(1);
                 }
             }
         }
@@ -461,13 +487,13 @@ impl Match3 {
         for col in 0..GRID_SIZE {
             let mut row = 0;
             while row < GRID_SIZE {
-                if let Some(gem) = self.board[row][col] {
+                if let Some(gem) = self.get_gem(row, col) {
                     let gem_type = gem.gem_type;
                     let start = row;
                     while row < GRID_SIZE {
-                        if let Some(g) = self.board[row][col] {
+                        if let Some(g) = self.get_gem(row, col) {
                             if g.gem_type == gem_type {
-                                row += 1;
+                                row = row.saturating_add(1);
                             } else {
                                 break;
                             }
@@ -475,7 +501,7 @@ impl Match3 {
                             break;
                         }
                     }
-                    let length = row - start;
+                    let length = row.saturating_sub(start);
                     if length >= 3 {
                         let positions: Vec<Pos> = (start..row).map(|r| Pos::new(r, col)).collect();
                         matches.push(MatchInfo {
@@ -485,7 +511,7 @@ impl Match3 {
                         });
                     }
                 } else {
-                    row += 1;
+                    row = row.saturating_add(1);
                 }
             }
         }
@@ -496,16 +522,16 @@ impl Match3 {
     /// Check if a specific swap would create any match.
     fn swap_creates_match(&mut self, a: Pos, b: Pos) -> bool {
         // Perform swap.
-        let tmp = self.board[a.row][a.col];
-        self.board[a.row][a.col] = self.board[b.row][b.col];
-        self.board[b.row][b.col] = tmp;
+        let tmp = self.get_gem(a.row, a.col);
+        self.set_gem(a.row, a.col, self.get_gem(b.row, b.col));
+        self.set_gem(b.row, b.col, tmp);
 
         let has_match = !self.find_matches().is_empty();
 
         // Undo swap.
-        let tmp = self.board[a.row][a.col];
-        self.board[a.row][a.col] = self.board[b.row][b.col];
-        self.board[b.row][b.col] = tmp;
+        let tmp = self.get_gem(a.row, a.col);
+        self.set_gem(a.row, a.col, self.get_gem(b.row, b.col));
+        self.set_gem(b.row, b.col, tmp);
 
         has_match
     }
@@ -523,7 +549,7 @@ impl Match3 {
         let multiplier = self.cascade_multiplier();
         for m in &matches {
             let base = m.score();
-            let scored = (base * multiplier) / FP_BASE;
+            let scored = base.saturating_mul(multiplier) / FP_BASE;
             self.score = self.score.saturating_add(scored);
         }
 
@@ -534,7 +560,7 @@ impl Match3 {
             let special_pos = self.determine_special_gem(m);
             for &pos in &m.positions {
                 // Handle existing special gems being matched.
-                if let Some(gem) = self.board[pos.row][pos.col] {
+                if let Some(gem) = self.get_gem(pos.row, pos.col) {
                     match gem.special {
                         SpecialKind::LineClearH => {
                             // Clear entire row.
@@ -559,7 +585,7 @@ impl Match3 {
                             let target_type = gem.gem_type;
                             for r in 0..GRID_SIZE {
                                 for c in 0..GRID_SIZE {
-                                    if let Some(g) = self.board[r][c]
+                                    if let Some(g) = self.get_gem(r, c)
                                         && g.gem_type == target_type
                                     {
                                         let p = Pos::new(r, c);
@@ -580,9 +606,13 @@ impl Match3 {
 
             // Place special gem if one was determined.
             if let Some((pos, special)) = special_pos
-                && let Some(gem) = self.board[pos.row][pos.col]
+                && let Some(gem) = self.get_gem(pos.row, pos.col)
             {
-                self.board[pos.row][pos.col] = Some(Gem::with_special(gem.gem_type, special));
+                self.set_gem(
+                    pos.row,
+                    pos.col,
+                    Some(Gem::with_special(gem.gem_type, special)),
+                );
                 // Remove this position from the removal list so the special gem survives.
                 to_remove.retain(|&p| p != pos);
             }
@@ -590,7 +620,7 @@ impl Match3 {
 
         // Remove matched gems.
         for pos in &to_remove {
-            self.board[pos.row][pos.col] = None;
+            self.set_gem(pos.row, pos.col, None);
         }
 
         true
@@ -600,8 +630,10 @@ impl Match3 {
     fn determine_special_gem(&self, m: &MatchInfo) -> Option<(Pos, SpecialKind)> {
         if m.length == 4 {
             // 4-match: line clear gem at the center of the match.
-            let center = m.length / 2;
-            let pos = m.positions[center];
+            // `get`, because `length` and `positions.len()` are two facts
+            // that are only equal by construction, and the construction is in
+            // another function.
+            let pos = *m.positions.get(m.length / 2)?;
             let special = if m.horizontal {
                 SpecialKind::LineClearH
             } else {
@@ -610,8 +642,10 @@ impl Match3 {
             Some((pos, special))
         } else if m.length >= 5 {
             // 5+ match: color bomb at the center.
-            let center = m.length / 2;
-            let pos = m.positions[center];
+            // `get`, because `length` and `positions.len()` are two facts
+            // that are only equal by construction, and the construction is in
+            // another function.
+            let pos = *m.positions.get(m.length / 2)?;
             Some((pos, SpecialKind::ColorBomb))
         } else {
             None
@@ -622,7 +656,7 @@ impl Match3 {
     fn cascade_multiplier(&self) -> u32 {
         let mut mult = FP_BASE;
         for _ in 0..self.chain_level {
-            mult = (mult * CASCADE_MULTIPLIER_FP) / FP_BASE;
+            mult = mult.saturating_mul(CASCADE_MULTIPLIER_FP) / FP_BASE;
         }
         mult
     }
@@ -635,11 +669,11 @@ impl Match3 {
             // Compact column: move gems down to fill gaps.
             let mut write = GRID_SIZE;
             for read in (0..GRID_SIZE).rev() {
-                if self.board[read][col].is_some() {
-                    write -= 1;
+                if self.get_gem(read, col).is_some() {
+                    write = write.saturating_sub(1);
                     if write != read {
-                        self.board[write][col] = self.board[read][col];
-                        self.board[read][col] = None;
+                        self.set_gem(write, col, self.get_gem(read, col));
+                        self.set_gem(read, col, None);
                         moved = true;
                     }
                 }
@@ -652,8 +686,9 @@ impl Match3 {
     fn fill_empty_spaces(&mut self) {
         for col in 0..GRID_SIZE {
             for row in 0..GRID_SIZE {
-                if self.board[row][col].is_none() {
-                    self.board[row][col] = Some(self.random_gem());
+                if self.get_gem(row, col).is_none() {
+                    let gem = self.random_gem();
+                    self.set_gem(row, col, Some(gem));
                 }
             }
         }
@@ -667,7 +702,7 @@ impl Match3 {
             if !self.process_matches() {
                 break;
             }
-            self.chain_level += 1;
+            self.chain_level = self.chain_level.saturating_add(1);
             self.apply_gravity();
             self.fill_empty_spaces();
         }
@@ -683,7 +718,7 @@ impl Match3 {
         for row in 0..GRID_SIZE {
             for col in 0..GRID_SIZE - 1 {
                 let a = Pos::new(row, col);
-                let b = Pos::new(row, col + 1);
+                let b = Pos::new(row, col.saturating_add(1));
                 if self.swap_creates_match(a, b) {
                     moves.push((a, b));
                 }
@@ -693,7 +728,7 @@ impl Match3 {
         for row in 0..GRID_SIZE - 1 {
             for col in 0..GRID_SIZE {
                 let a = Pos::new(row, col);
-                let b = Pos::new(row + 1, col);
+                let b = Pos::new(row.saturating_add(1), col);
                 if self.swap_creates_match(a, b) {
                     moves.push((a, b));
                 }
@@ -708,7 +743,7 @@ impl Match3 {
         for row in 0..GRID_SIZE {
             for col in 0..GRID_SIZE - 1 {
                 let a = Pos::new(row, col);
-                let b = Pos::new(row, col + 1);
+                let b = Pos::new(row, col.saturating_add(1));
                 if self.swap_creates_match(a, b) {
                     return true;
                 }
@@ -718,7 +753,7 @@ impl Match3 {
         for row in 0..GRID_SIZE - 1 {
             for col in 0..GRID_SIZE {
                 let a = Pos::new(row, col);
-                let b = Pos::new(row + 1, col);
+                let b = Pos::new(row.saturating_add(1), col);
                 if self.swap_creates_match(a, b) {
                     return true;
                 }
@@ -729,20 +764,21 @@ impl Match3 {
 
     /// Shuffle the board until valid moves exist.
     fn shuffle_board(&mut self) {
-        let mut attempts = 0;
+        let mut attempts: usize = 0;
         loop {
             // Fisher-Yates shuffle of all gems.
             let mut gems: Vec<Option<Gem>> = Vec::new();
             for row in 0..GRID_SIZE {
                 for col in 0..GRID_SIZE {
-                    gems.push(self.board[row][col]);
+                    gems.push(self.get_gem(row, col));
                 }
             }
             self.rng.shuffle(&mut gems);
             // Place back on board.
             for row in 0..GRID_SIZE {
                 for col in 0..GRID_SIZE {
-                    self.board[row][col] = gems[row * GRID_SIZE + col];
+                    let at = row.saturating_mul(GRID_SIZE).saturating_add(col);
+                    self.set_gem(row, col, gems.get(at).copied().flatten());
                 }
             }
             // Remove any existing matches first.
@@ -753,7 +789,7 @@ impl Match3 {
             if self.has_valid_moves() {
                 break;
             }
-            attempts += 1;
+            attempts = attempts.saturating_add(1);
             if attempts > 100 {
                 // Fallback: regenerate board from scratch.
                 self.fill_board_no_matches();
@@ -771,7 +807,7 @@ impl Match3 {
             None
         } else {
             let idx = self.rng.below(moves.len());
-            Some(moves[idx])
+            moves.get(idx).copied()
         }
     }
 
@@ -809,13 +845,13 @@ impl Match3 {
     /// afterwards is testing the refill, not the detonation, and passes or
     /// fails on which gems the generator happened to deal.
     fn detonate_color_bomb(&mut self, bomb: Pos, target: GemType) {
-        self.board[bomb.row][bomb.col] = None;
+        self.set_gem(bomb.row, bomb.col, None);
         for r in 0..GRID_SIZE {
             for c in 0..GRID_SIZE {
-                if let Some(g) = self.board[r][c]
+                if let Some(g) = self.get_gem(r, c)
                     && g.gem_type == target
                 {
-                    self.board[r][c] = None;
+                    self.set_gem(r, c, None);
                 }
             }
         }
@@ -834,13 +870,13 @@ impl Match3 {
         if !a.in_bounds() || !b.in_bounds() || !a.is_adjacent(b) {
             return false;
         }
-        if self.board[a.row][a.col].is_none() || self.board[b.row][b.col].is_none() {
+        if self.get_gem(a.row, a.col).is_none() || self.get_gem(b.row, b.col).is_none() {
             return false;
         }
 
         // Check if either gem is a color bomb being swapped with a regular gem.
-        let gem_a = self.board[a.row][a.col];
-        let gem_b = self.board[b.row][b.col];
+        let gem_a = self.get_gem(a.row, a.col);
+        let gem_b = self.get_gem(b.row, b.col);
         if let (Some(ga), Some(gb)) = (gem_a, gem_b) {
             if ga.special == SpecialKind::ColorBomb && gb.special != SpecialKind::ColorBomb {
                 self.detonate_color_bomb(a, gb.gem_type);
@@ -860,9 +896,9 @@ impl Match3 {
         }
 
         // Perform the swap.
-        let tmp = self.board[a.row][a.col];
-        self.board[a.row][a.col] = self.board[b.row][b.col];
-        self.board[b.row][b.col] = tmp;
+        let tmp = self.get_gem(a.row, a.col);
+        self.set_gem(a.row, a.col, self.get_gem(b.row, b.col));
+        self.set_gem(b.row, b.col, tmp);
 
         // Run cascade.
         self.run_cascade();
@@ -1130,7 +1166,7 @@ impl Match3 {
         for row in 0..GRID_SIZE {
             for col in 0..GRID_SIZE {
                 let (cx, cy) = Self::cell_origin(Pos::new(row, col));
-                let bg = if (row + col) % 2 == 0 {
+                let bg = if row.saturating_add(col) % 2 == 0 {
                     SURFACE1
                 } else {
                     SURFACE0
@@ -1150,7 +1186,7 @@ impl Match3 {
     fn render_gems(&self, cmds: &mut Vec<RenderCommand>) {
         for row in 0..GRID_SIZE {
             for col in 0..GRID_SIZE {
-                if let Some(gem) = self.board[row][col] {
+                if let Some(gem) = self.get_gem(row, col) {
                     let pos = Pos::new(row, col);
                     self.render_gem(cmds, pos, gem);
                 }
@@ -1419,16 +1455,16 @@ impl Match3 {
 
         match key {
             Key::Left if self.cursor.col > 0 => {
-                self.cursor.col -= 1;
+                self.cursor.col = self.cursor.col.saturating_sub(1);
             }
             Key::Right if self.cursor.col < GRID_SIZE - 1 => {
-                self.cursor.col += 1;
+                self.cursor.col = self.cursor.col.saturating_add(1);
             }
             Key::Up if self.cursor.row > 0 => {
-                self.cursor.row -= 1;
+                self.cursor.row = self.cursor.row.saturating_sub(1);
             }
             Key::Down if self.cursor.row < GRID_SIZE - 1 => {
-                self.cursor.row += 1;
+                self.cursor.row = self.cursor.row.saturating_add(1);
             }
             Key::Enter | Key::Space => {
                 self.select_or_swap(self.cursor);
@@ -1486,30 +1522,51 @@ impl Match3 {
         self.update_hint(elapsed_ms);
 
         if self.state != GameState::GameOver && self.mode == GameMode::Timed {
-            if self.time_remaining_ms > elapsed_ms {
-                self.time_remaining_ms -= elapsed_ms;
-            } else {
-                self.time_remaining_ms = 0;
+            self.time_remaining_ms = self.time_remaining_ms.saturating_sub(elapsed_ms);
+            if self.time_remaining_ms == 0 {
                 self.end_game();
             }
         }
     }
 
-    // ── Board queries (for testing) ─────────────────────────────────
+    // ── Board access ─────────────────────────────────────────────────────
+    //
+    // The only two places that reason about the board's bounds. They were
+    // `(for testing)` helpers sitting beside forty direct
+    // `self.get_gem(row, col)` subscripts, which is the arrangement that
+    // produced 127 of this crate's clippy `indexing_slicing` warnings -- the
+    // whole of the tree's remaining total, in one file. A bounds test written
+    // next to each subscript is a test somebody forgets; two accessors are two
+    // places to be right.
 
-    /// Get the gem at a position.
+    /// The gem at `(row, col)`, or `None` -- for an empty cell and for a
+    /// coordinate off the board alike.
+    ///
+    /// The two are deliberately one answer. Every caller is either inside a
+    /// `0..GRID_SIZE` loop or holding a `Pos` the input path has already
+    /// vetted, so an out-of-range read is a bug and not an input; what it must
+    /// not do is end the player's game with a panic. An empty cell is the
+    /// nearest true thing to say about a square that is not there.
     fn get_gem(&self, row: usize, col: usize) -> Option<Gem> {
-        if row < GRID_SIZE && col < GRID_SIZE {
-            self.board[row][col]
-        } else {
-            None
-        }
+        self.board
+            .get(row)
+            .and_then(|r| r.get(col))
+            .copied()
+            .flatten()
     }
 
-    /// Set a gem at a position (for testing).
+    /// Put `gem` at `(row, col)`, or do nothing if that is off the board.
+    ///
+    /// `debug_assert` rather than a silent drop *and* rather than a panic: a
+    /// write off the board is a logic error worth failing a test over, and
+    /// worth surviving in a released game.
     fn set_gem(&mut self, row: usize, col: usize, gem: Option<Gem>) {
-        if row < GRID_SIZE && col < GRID_SIZE {
-            self.board[row][col] = gem;
+        debug_assert!(
+            row < GRID_SIZE && col < GRID_SIZE,
+            "write off the board at ({row}, {col})"
+        );
+        if let Some(cell) = self.board.get_mut(row).and_then(|r| r.get_mut(col)) {
+            *cell = gem;
         }
     }
 
@@ -1517,7 +1574,7 @@ impl Match3 {
     fn clear_board(&mut self) {
         for row in 0..GRID_SIZE {
             for col in 0..GRID_SIZE {
-                self.board[row][col] = None;
+                self.set_gem(row, col, None);
             }
         }
     }
@@ -1526,18 +1583,18 @@ impl Match3 {
     fn fill_board_with(&mut self, gem: Gem) {
         for row in 0..GRID_SIZE {
             for col in 0..GRID_SIZE {
-                self.board[row][col] = Some(gem);
+                self.set_gem(row, col, Some(gem));
             }
         }
     }
 
     /// Count non-empty cells.
     fn gem_count(&self) -> usize {
-        let mut count = 0;
+        let mut count: usize = 0;
         for row in 0..GRID_SIZE {
             for col in 0..GRID_SIZE {
-                if self.board[row][col].is_some() {
-                    count += 1;
+                if self.get_gem(row, col).is_some() {
+                    count = count.saturating_add(1);
                 }
             }
         }

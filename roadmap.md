@@ -1662,7 +1662,18 @@ Roadmap:
   protocol described above for exactly this case and is attributed to Claude,
   not the operator, so it is open to being overruled.
 - `[C]` Wayland-inspired compositor: GPU acceleration, currently a software
-  rasterizer (lines ~4605, ~4619)
+  rasterizer (lines ~4605, ~4619). **Measured 2026-09-13: this is the only way
+  to reach the 2 ms/4K target, and that is arithmetic rather than an opinion.**
+  One full-screen pass at 4K is 33.2 MB; the dev host writes at 8.6 GB/s, so
+  touching every pixel once costs 3.9 ms before a single source pixel is read.
+  A software compositor cannot get under 2 ms at that bandwidth however it is
+  written -- and it is already at the floor: `window_render` composites the
+  16-window bench scene in 5.51 ms against 5.92 ms for a plain opaque
+  `fill_rect` over the same area, because the occlusion cull means it writes
+  fewer pixels than the fill does. An alpha fill runs four times slower again
+  (2.0 GB/s), so transparency is where a GPU would pay for itself first. See
+  `known-issues.md` TD-C-A-4K-DESKTOP-FRAME-IS-OVER-THE-BUDGET and
+  `compositor::tests::bench_fill_floor`.
 - `[C]` Video-encoded capture fallback, H.264/VP9 (lines ~4623, ~5060)
 - `[C]` `netstack` userspace migration (line ~1125) — see joint task
 - `[C]` WiFi + wpa_supplicant port (line ~1181) — **in progress.** The parts

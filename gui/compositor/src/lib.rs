@@ -1598,6 +1598,39 @@ pub struct Framebuffer {
 }
 
 impl Framebuffer {
+    /// `draw_glyph`'s loop with the blend removed: the same pixels, written
+    /// straight into the back buffer.
+    ///
+    /// Exists only for `bench_glyph_blit_phases`, and is the control in that
+    /// experiment rather than a path anything draws through -- it ignores
+    /// coverage, so it is not a blit, it is the cost of *reaching* each pixel.
+    #[cfg(test)]
+    fn bench_glyph_store(&mut self, mask: &GlyphMask, pen: f32, baseline: f32, color: u32) {
+        let (ox, oy) = (
+            (pen + mask.left as f32).round() as i32,
+            (baseline + mask.top as f32).round() as i32,
+        );
+        for row in 0..mask.height {
+            let fy = oy.saturating_add(row as i32);
+            if fy < 0 {
+                continue;
+            }
+            for col in 0..mask.width {
+                if mask.at(col, row) == 0 {
+                    continue;
+                }
+                let fx = ox.saturating_add(col as i32);
+                if fx < 0 {
+                    continue;
+                }
+                let idx = Self::pixel_index(self.width as usize, fx as usize, fy as usize);
+                if let Some(pixel) = self.back.get_mut(idx) {
+                    *pixel = color;
+                }
+            }
+        }
+    }
+
     /// The buffer being composited into, for a pass that reads pixels back and
     /// rewrites them.
     ///
@@ -3721,6 +3754,17 @@ fn blit_run<T: RenderTarget + ?Sized>(
 
 /// The rendering engine rasterizes RenderCommands to the framebuffer.
 struct RenderEngine {
+    /// Nanoseconds spent shaping, and nanoseconds spent blitting runs, since
+    /// the last `take_text_phases`.
+    ///
+    /// `#[cfg(test)]` because a probe on this path is not free: two
+    /// `Instant::now()` calls cost tens of nanoseconds, the same order as the
+    /// glyph-cache hit they would be measuring if they sat one level lower. At
+    /// the *run* level there are a few hundred calls a frame rather than ten
+    /// thousand, so the probe is well under a thousandth of what it reports.
+    /// That ratio is the whole reason this is per run and not per glyph.
+    #[cfg(test)]
+    text_phases: (u64, u64),
     clip_stack: ClipStack,
     translate_stack: TranslateStack,
     /// Same type, same rounding rule, and — because the faces are installed by
@@ -3764,6 +3808,8 @@ impl RenderEngine {
             ),
         }
         Self {
+            #[cfg(test)]
+            text_phases: (0, 0),
             clip_stack: ClipStack::default(),
             translate_stack: TranslateStack::default(),
             fonts,
@@ -4351,7 +4397,11 @@ impl RenderEngine {
         // from the process that sized the widget is how every centred label
         // ends up off by half the difference, with neither process looking
         // wrong on its own.
+        #[cfg(test)]
+        let t_shape = std::time::Instant::now();
         let run = font.shape(text);
+        #[cfg(test)]
+        let shape_ns = t_shape.elapsed().as_nanos() as u64;
 
         // Decide about the ellipsis *before* drawing anything, because it
         // changes where the real glyphs have to stop: the mark has to fit
@@ -4390,6 +4440,8 @@ impl RenderEngine {
         }
 
         let mut pen = x as f32;
+        #[cfg(test)]
+        let t_blit = std::time::Instant::now();
         blit_run(
             fb,
             font,
@@ -4425,6 +4477,26 @@ impl RenderEngine {
                 clip.as_ref(),
             );
         }
+
+        #[cfg(test)]
+        {
+            // Both phases, once per run: the shaping measured above and
+            // everything `blit_run` did, including the ellipsis pass, which is
+            // part of what drawing this text cost and would be invisible if
+            // the probe stopped at the first call.
+            self.text_phases.0 = self.text_phases.0.saturating_add(shape_ns);
+            self.text_phases.1 = self
+                .text_phases
+                .1
+                .saturating_add(t_blit.elapsed().as_nanos() as u64);
+        }
+    }
+
+    /// The nanoseconds spent shaping and blitting since this was last called,
+    /// and reset.
+    #[cfg(test)]
+    fn take_text_phases(&mut self) -> (u64, u64) {
+        std::mem::take(&mut self.text_phases)
     }
 
     /// Resolve the client's clip stack and hand the line to the backend.
@@ -8286,6 +8358,20 @@ impl Compositor {
     /// the aggregate frame time cannot say which half to optimize, and the two
     /// halves have completely different fixes (memory bandwidth vs. overdraw).
     #[doc(hidden)]
+    /// The nanoseconds the last composite spent shaping text and blitting
+    /// runs, and reset.
+    ///
+    /// Exists because the 12.1 ms this entry calls "putting glyph masks on the
+    /// screen" was obtained by differencing a frame with text against one
+    /// without, and a difference attributes everything in between to whatever
+    /// the differencer named it. Two measurements have already shown the two
+    /// things that phrase names -- the blit at 5.8 ns a covered pixel and the
+    /// warm mask lookup at 27 ns a glyph -- come to about a fifth of it.
+    #[cfg(test)]
+    fn take_text_phases(&mut self) -> (u64, u64) {
+        self.render_engine.take_text_phases()
+    }
+
     pub fn bench_full_composite_phases(&mut self) -> (u64, u64) {
         self.full_recomposite = true;
         let covered = self.opaque_cover_rects();
@@ -14279,16 +14365,222 @@ mod tests {
     ///
     /// The `< 2ms/4K` target is judged on a release build (ideally on real
     /// hardware); the recorded dev-host baseline lives in
-    /// `bench/baselines.toml` under `[compositor_frame_4k]`. As of 2026-07-02
-    /// the compositor is still over target (~15.8ms/frame release on the dev host
-    /// after the row-wise `fill_rect` rewrite + redundant-bg-fill occlusion cull,
-    /// down from ~48.6ms — see known-issues BENCH-COMPOSITOR-SLOW; the remaining
-    /// gap is memory-bandwidth bound on a full recomposite). This test therefore
+    /// `bench/baselines.toml` under `[compositor_frame_4k]`, which as of
+    /// 2026-08-16 records **7.0 ms** and was confirmed at 6.88 ms on
+    /// 2026-09-13. This comment said ~15.8 ms for six weeks after that, which
+    /// is the 2026-07-02 figure: a doc comment naming a number that a data
+    /// file also names will drift from it, and the file is the one that gets
+    /// updated. Read the baseline, not this sentence. The compositor is still
+    /// over the 2 ms target — by 3.4x, not the 8x the old figure implied — and
+    /// the remaining gap is memory-bandwidth bound on a full recomposite (see
+    /// known-issues BENCH-COMPOSITOR-SLOW). This test therefore
     /// does NOT assert the 2ms target (it would always fail on a full-recomposite
     /// stress).
     /// It prints a PASS/OVER verdict for tracking and hard-fails only on a
     /// catastrophic regression (mean > 150 ms/frame, ~3x the current baseline)
     /// so an accidental super-linear blow-up is still caught without flaking.
+    /// What the machine can write at all, so that `window_render`'s 5.5 ms can
+    /// be compared against the floor rather than against nothing.
+    ///
+    /// The 4K bench composites sixteen 1100x720 windows: 12.7 M pixels, 50 MB
+    /// at four bytes each. If an opaque `fill_rect` of the same area takes
+    /// about the same time, then window rendering is already at memory
+    /// bandwidth and no rearrangement of that code will help -- the only
+    /// remaining lever is *writing fewer pixels*, which is what the occlusion
+    /// cull already does. If it is much faster, the gap is code and worth
+    /// chasing.
+    ///
+    /// This is the measurement that tells those two apart, and the entry has
+    /// asserted the first without it ("memory-bandwidth bound on a full
+    /// recomposite") since July.
+    ///
+    /// ```text
+    /// cargo test -p compositor --target x86_64-pc-windows-gnu --release     ///   -- --ignored --nocapture bench_fill_floor
+    /// ```
+    #[test]
+    #[ignore = "measurement benchmark; run explicitly with --release --ignored --nocapture"]
+    fn bench_fill_floor() {
+        const W: u32 = 3840;
+        const H: u32 = 2160;
+        const WW: u32 = 1100;
+        const WH: u32 = 720;
+        const WINDOWS: u32 = 16;
+        const ROUNDS: usize = 9;
+
+        let mut fb = Framebuffer::new(W, H).expect("framebuffer");
+        let px = u64::from(WW) * u64::from(WH) * u64::from(WINDOWS);
+
+        // Sixteen rectangles the size the bench's windows are, placed where
+        // they will not all land on the same cache lines.
+        let rects: Vec<Rect> = (0..WINDOWS)
+            .map(|i| Rect {
+                x: ((i * 97) % (W - WW)) as i32,
+                y: ((i * 61) % (H - WH)) as i32,
+                width: WW,
+                height: WH,
+            })
+            .collect();
+
+        let mut opaque = f64::MAX;
+        let mut blended = f64::MAX;
+        for _ in 0..ROUNDS {
+            let t = std::time::Instant::now();
+            for r in &rects {
+                fb.fill_rect(*r, 0xFF20_3040, 1.0);
+            }
+            opaque = opaque.min(t.elapsed().as_nanos() as f64 / 1e6);
+
+            // The same area with an alpha, which is a read-modify-write and so
+            // moves twice the memory.
+            let t = std::time::Instant::now();
+            for r in &rects {
+                fb.fill_rect(*r, 0xFF20_3040, 0.5);
+            }
+            blended = blended.min(t.elapsed().as_nanos() as f64 / 1e6);
+        }
+
+        let gb = |ms: f64| (px as f64 * 4.0) / (ms / 1000.0) / 1e9;
+        println!("fill floor, {px} px ({:.1} MB):", px as f64 * 4.0 / 1e6);
+        println!("  opaque  {opaque:.3} ms  ({:.1} GB/s written)", gb(opaque));
+        println!(
+            "  blended {blended:.3} ms  ({:.1} GB/s written)",
+            gb(blended)
+        );
+        println!("  the 4K bench's window_render is ~5.5 ms over the same area");
+
+        assert!(
+            opaque > 0.0,
+            "a fill that takes no measurable time did not happen"
+        );
+    }
+
+    /// Where the 32 ns per covered pixel actually goes.
+    ///
+    /// The entry's named next step, and deliberately an experiment rather than
+    /// a reading: four hypotheses about this frame have been wrong, every one
+    /// cheap to disprove by measuring and expensive to act on, and all four
+    /// came from reading the inner loop.
+    ///
+    /// Three timings over the same glyph, the same pixels, one variable
+    /// changed at a time:
+    ///
+    /// * **shipped** -- `draw_glyph` exactly as it runs, with a clip.
+    /// * **no clip** -- the same with `clip: None`. The difference is what the
+    ///   per-pixel `Rect::contains` costs, and `blend_pixel` tests the clip
+    ///   *again* through `clip_allows`, so this measures one of the two.
+    /// * **store** -- the same loop writing the pixel directly, skipping
+    ///   `blend_pixel` entirely. The difference is everything that function
+    ///   does per pixel: a second clip test, two separately bounds-checked
+    ///   lookups of the same index, a float multiply, and three channel
+    ///   blends.
+    ///
+    /// This says nothing about which of those to fix. It says how much of the
+    /// 32 ns is reachable at all, which is the number missing before any of
+    /// them is worth attempting.
+    ///
+    /// ```text
+    /// cargo test -p compositor --target x86_64-pc-windows-gnu --release     ///   -- --ignored --nocapture bench_glyph_blit_phases
+    /// ```
+    #[test]
+    #[ignore = "measurement benchmark; run explicitly with --release --ignored --nocapture"]
+    fn bench_glyph_blit_phases() {
+        // Both sizes, because the entry's 32 ns figure came from a 4K frame
+        // and a 1080p buffer is 8 MB against 33 MB: if the loop is the cost
+        // the two agree, and if memory is the cost they do not.
+        for (w, h, label) in [(1920u32, 1080u32, "1080p"), (3840, 2160, "4K")] {
+            // A mask the size and density of real body text: 12x16 with about
+            // two thirds of it covered, which is what the 4K figure averaged.
+            const MW: u32 = 12;
+            const MH: u32 = 16;
+            const REPS: usize = 20_000;
+
+            let mut fb = Framebuffer::new(w, h).expect("framebuffer");
+            let mask = GlyphMask {
+                width: MW,
+                height: MH,
+                left: 0,
+                top: 0,
+                coverage: (0..MW * MH)
+                    .map(|i| if i % 3 == 0 { 0 } else { 128 })
+                    .collect(),
+            };
+            let covered = mask.coverage.iter().filter(|&&c| c != 0).count();
+            let clip = Rect {
+                x: 0,
+                y: 0,
+                width: w,
+                height: h,
+            };
+
+            // Spread the glyphs over the framebuffer rather than stacking them:
+            // twenty thousand writes to one cache line would measure the cache,
+            // not the loop.
+            let place = |i: usize| {
+                (
+                    ((i * 17) % (w as usize - MW as usize)) as f32,
+                    ((i * 29) % (h as usize - MH as usize)) as f32,
+                )
+            };
+
+            // ALTERNATED AND MINIMISED, and the first version of this was
+            // neither. Run once each in sequence, the three phases reported
+            // "the clip test costs -0.98 ns" -- a negative cost, which is the
+            // measurement telling you the difference between two of its
+            // numbers is smaller than its own noise. Taking the minimum of
+            // several alternated rounds is the estimator that survives a
+            // machine whose clock speed and caches move underneath it; a
+            // single sample of each, in order, measures the order.
+            const ROUNDS: usize = 7;
+            let mut shipped = f64::MAX;
+            let mut no_clip = f64::MAX;
+            let mut store = f64::MAX;
+            for _ in 0..ROUNDS {
+                let t = std::time::Instant::now();
+                for i in 0..REPS {
+                    let (x, y) = place(i);
+                    fb.draw_glyph(&mask, x, y, 0x00FF_FFFF, 1.0, Some(&clip));
+                }
+                shipped = shipped.min(t.elapsed().as_nanos() as f64 / (REPS * covered) as f64);
+
+                let t = std::time::Instant::now();
+                for i in 0..REPS {
+                    let (x, y) = place(i);
+                    fb.draw_glyph(&mask, x, y, 0x00FF_FFFF, 1.0, None);
+                }
+                no_clip = no_clip.min(t.elapsed().as_nanos() as f64 / (REPS * covered) as f64);
+
+                let t = std::time::Instant::now();
+                for i in 0..REPS {
+                    let (x, y) = place(i);
+                    fb.bench_glyph_store(&mask, x, y, 0xFFFF_FFFF);
+                }
+                store = store.min(t.elapsed().as_nanos() as f64 / (REPS * covered) as f64);
+            }
+
+            println!(
+                "{label} glyph blit, ns per covered pixel ({covered} of {} per glyph, {REPS} glyphs):",
+                MW * MH
+            );
+            println!("  shipped (clipped blend) {shipped:.2}");
+            println!("  no clip                 {no_clip:.2}");
+            println!("  direct store            {store:.2}");
+            println!(
+                "  => the clip test is {:.2}, the rest of blend_pixel is {:.2}",
+                shipped - no_clip,
+                no_clip - store
+            );
+
+            // Not a threshold: the point is the breakdown, and a bound here
+            // would be a bound on the machine. Only that the work happened at
+            // all -- an optimiser that deleted the loop would report zero and
+            // look fast.
+            assert!(
+                shipped > 0.0 && store > 0.0,
+                "a blit that takes no measurable time did not happen"
+            );
+        }
+    }
+
     #[test]
     #[ignore = "measurement benchmark; run explicitly with --release --ignored --nocapture"]
     fn bench_compose_frame_4k() {
@@ -14393,10 +14685,38 @@ mod tests {
             wmin as f64 / 1_000_000.0
         );
 
-        // Catastrophic-regression guard only (see doc): the current baseline
-        // is ~16ms (still over the 2ms target, tracked separately); a mean past
-        // 80ms (~5x the baseline, and worse than the pre-optimization ~50ms)
-        // means a super-linear blow-up crept into the path.
+        // The text path, split. The 12.1 ms this entry attributes to "putting
+        // glyph masks on the screen" was a difference between a frame with
+        // text and one without, and a difference attributes everything in
+        // between to whatever it was named. The blit has since measured 5.8 ns
+        // a covered pixel and the warm mask lookup 27 ns a glyph -- about a
+        // fifth of it between them -- so the rest is somewhere in here.
+        comp.take_text_phases();
+        let (mut smin, mut bmin) = (u64::MAX, u64::MAX);
+        for _ in 0..ITERS {
+            comp.bench_full_composite();
+            let (shape_ns, blit_ns) = comp.take_text_phases();
+            smin = smin.min(shape_ns);
+            bmin = bmin.min(blit_ns);
+        }
+        println!(
+            "[compositor-bench] text (min per frame): shape={:.3}ms blit_run={:.3}ms",
+            smin as f64 / 1_000_000.0,
+            bmin as f64 / 1_000_000.0
+        );
+
+        // Catastrophic-regression guard only (see doc): the baseline is
+        // 7.0 ms (`bench/baselines.toml`, 2026-08-16; 6.88 ms measured
+        // 2026-09-13), still over the 2 ms target and tracked separately. A
+        // mean past 80 ms means a super-linear blow-up crept into the path.
+        //
+        // The bound is deliberately left at 80 ms rather than retightened to
+        // ~5x the current baseline. It is a *catastrophe* guard, and the thing
+        // it must not do is fire on a slow or loaded machine -- this file has
+        // already had one wall-clock assertion that could not tell a real
+        // regression from a busy host, and moving this one to 35 ms would
+        // recreate that. The number that tracks the baseline is in
+        // `bench/baselines.toml`, where it can be compared without a rebuild.
         assert!(
             mean_ms < 80.0,
             "compositor 4K recomposite mean {mean_ms:.3}ms is a catastrophic regression (>80ms)"

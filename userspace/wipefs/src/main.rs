@@ -164,13 +164,16 @@ const SIGNATURES: &[FsSignature] = &[
 // Signature detection
 // ============================================================================
 
-fn detect_signatures(device: &str) -> Vec<DetectedSig> {
+/// Read `device` and return the signatures actually present in it.
+///
+/// An unreadable device is an ERROR, not an empty result. It used to return
+/// the same empty vector as a device with no signatures, so
+/// `wipefs /dev/does-not-exist` printed a table header and exited 0 -- and in
+/// wipe mode reported success for a device it had never opened.
+fn detect_signatures(device: &str) -> std::io::Result<Vec<DetectedSig>> {
     let mut results = Vec::new();
 
-    let data = match fs::read(device) {
-        Ok(d) => d,
-        Err(_) => return results,
-    };
+    let data = fs::read(device)?;
 
     for sig in SIGNATURES {
         let off = sig.offset as usize;
@@ -199,28 +202,7 @@ fn detect_signatures(device: &str) -> Vec<DetectedSig> {
         }
     }
 
-    results
-}
-
-fn generate_default_sigs(device: &str) -> Vec<DetectedSig> {
-    vec![
-        DetectedSig {
-            device: device.to_string(),
-            offset: 0x438,
-            sig_type: "filesystem".to_string(),
-            name: "ext4".to_string(),
-            magic_hex: "53ef".to_string(),
-            _length: 2,
-        },
-        DetectedSig {
-            device: device.to_string(),
-            offset: 0x1FE,
-            sig_type: "partition-table".to_string(),
-            name: "dos".to_string(),
-            magic_hex: "55aa".to_string(),
-            _length: 2,
-        },
-    ]
+    Ok(results)
 }
 
 // ============================================================================
@@ -304,11 +286,25 @@ fn cmd_wipefs(args: &[String]) {
     let stdout = io::stdout();
     let mut out = stdout.lock();
 
+    // Worst error across all devices, so wiping three devices and failing on
+    // one does not exit 0 because the last one happened to work.
+    let mut status = 0;
+
     for device in &devices {
-        let mut sigs = detect_signatures(device);
-        if sigs.is_empty() {
-            sigs = generate_default_sigs(device);
-        }
+        // `generate_default_sigs` used to fill an empty result with an
+        // invented ext4 signature at 0x438 and an invented DOS partition
+        // table at 0x1fe. Measured before removal: a 16-BYTE file, far too
+        // small to hold either, was reported as carrying both. For a tool
+        // whose output decides what gets destroyed, inventing the inventory
+        // is the worst available failure.
+        let mut sigs = match detect_signatures(device) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("wipefs: {device}: {e}");
+                status = 1;
+                continue;
+            }
+        };
 
         // Filter by type.
         if !types.is_empty() {
@@ -400,6 +396,10 @@ fn cmd_wipefs(args: &[String]) {
                 }
             }
         }
+    }
+
+    if status != 0 {
+        process::exit(status);
     }
 }
 
@@ -656,17 +656,51 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_signatures_missing_file() {
-        let sigs = detect_signatures("/nonexistent/device");
-        assert!(sigs.is_empty());
+    fn a_device_that_cannot_be_read_is_an_error_not_an_empty_signature_list() {
+        // It used to return an empty Vec, which is also what a genuinely
+        // clean device returns -- so wipefs could not tell "nothing here"
+        // from "could not look".
+        let err = detect_signatures("/nonexistent/device")
+            .expect_err("an unreadable device must not read as clean");
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
     }
 
     #[test]
-    fn test_generate_default_sigs() {
-        let sigs = generate_default_sigs("/dev/sda");
-        assert_eq!(sigs.len(), 2);
-        assert_eq!(sigs[0].name, "ext4");
-        assert_eq!(sigs[1].name, "dos");
+    fn a_file_with_no_signatures_reports_none() {
+        // The other half of the two-probe rule: proof the reader RUNS, so the
+        // test above cannot pass by detection being broken outright. A file
+        // of zeros has no magic anywhere.
+        let dir =
+            std::env::temp_dir().join(format!("wipefs-clean-{}-{}", std::process::id(), line!()));
+        let _ = fs::create_dir_all(&dir);
+        let img = dir.join("zero.img");
+        fs::write(&img, vec![0u8; 4096]).expect("fixture");
+        let sigs =
+            detect_signatures(img.to_str().expect("the test path is ASCII")).expect("readable");
+        assert!(
+            sigs.is_empty(),
+            "invented signatures in a zero file: {sigs:?}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_real_ext4_magic_is_found_where_it_actually_is() {
+        // And proof the matcher is not merely always-empty now.
+        let dir =
+            std::env::temp_dir().join(format!("wipefs-ext4-{}-{}", std::process::id(), line!()));
+        let _ = fs::create_dir_all(&dir);
+        let img = dir.join("ext4.img");
+        let mut data = vec![0u8; 4096];
+        data[0x438] = 0x53;
+        data[0x439] = 0xEF;
+        fs::write(&img, &data).expect("fixture");
+        let sigs =
+            detect_signatures(img.to_str().expect("the test path is ASCII")).expect("readable");
+        assert_eq!(sigs.len(), 1, "{sigs:?}");
+        assert_eq!(sigs[0].offset, 0x438);
+        assert!(sigs[0].name.contains("ext4"));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

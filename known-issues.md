@@ -131185,7 +131185,26 @@ properties of a *function body* rather than of the draw site and need something
 that parses Rust. The fourth is reported as well, at 88 candidates, most of
 which are benign.
 
-**The 49 split in two, and only one half is this entry's problem:**
+**The 49 is the count of call sites; the count of *methods* is 108.** A survey
+for `fn *colour*(.., &Palette) -> Color` whose body names a dual-use role finds
+108 of them across `gui/` and `apps/`. The 49 are only those called from a
+`color:` field in a `Text` command — the same method is often also called from
+a fill, a badge or a legend, and that is the complication:
+
+- **Roughly half have an exempt arm** — they return `overlay0`, `subtext0` or
+  `text` for one of their cases. Those cannot be inked wholesale; the
+  adjustment goes per arm, skipping the exempt one.
+- **Many are used for fills as well as text.** `habits::heatmap_color` and
+  `diskanalyzer::color_for_node` fill rectangles; inking inside the method
+  would darken those for no reason. So "ink inside the method" is only correct
+  when *every* caller draws text with it, which has to be checked per method
+  rather than assumed.
+- **A method that is both mixed-use and has an exempt arm cannot be fixed
+  either way** and needs splitting in two — one for fills, one for text — or
+  a caller-side adjustment that knows which arm it got. That combination is
+  the reason this is an entry and not an afternoon.
+
+**The 49 call sites split in two, and only one half is this entry's problem:**
 
 - **39 take a palette** (`color(&self.palette)`). These are the ink gap and are
   fixable today. Concentrations: `desktop` (8), `remotedesktop` (5),

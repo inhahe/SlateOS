@@ -1970,8 +1970,15 @@ impl RemindersApp {
         let total_h = active.len() as f32 * NOTIFICATION_HEIGHT;
 
         // Background for all notifications
-        self.palette
-            .push_surface(cmds, 0.0, 0.0, self.width, total_h, 0.0, Surface::Panel);
+        // The notification overlay's own background, not a panel within it.
+        cmds.push(RenderCommand::FillRect {
+            x: 0.0,
+            y: 0.0,
+            width: self.width,
+            height: total_h,
+            color: self.palette.crust,
+            corner_radii: CornerRadii::ZERO,
+        });
 
         for (i, notif) in active.iter().enumerate() {
             let y = i as f32 * NOTIFICATION_HEIGHT;
@@ -1992,7 +1999,7 @@ impl RemindersApp {
                 y: y + 14.0,
                 text: "[!]".to_string(),
                 font_size: 16.0,
-                color: self.palette.peach,
+                color: self.palette.ink(self.palette.peach),
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(30.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2046,7 +2053,7 @@ impl RemindersApp {
                 y: y + 16.0,
                 text: "Snooze".to_string(),
                 font_size: 11.0,
-                color: self.palette.blue,
+                color: self.palette.ink(self.palette.blue),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(70.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2086,7 +2093,7 @@ impl RemindersApp {
             y: y_offset + 8.0,
             text: "Reminders".to_string(),
             font_size: 20.0,
-            color: self.palette.lavender,
+            color: self.palette.ink(self.palette.lavender),
             font_weight: FontWeightHint::Bold,
             max_width: Some(150.0),
             overflow: TextOverflow::Ellipsis,
@@ -2194,8 +2201,14 @@ impl RemindersApp {
             .push_surface(cmds, x, y, w, h, 0.0, Surface::Sidebar);
 
         // Right border
-        self.palette
-            .push_surface(cmds, x + w - 1.0, y, 1.0, h, 0.0, Surface::Card);
+        cmds.push(RenderCommand::FillRect {
+            x: x + w - 1.0,
+            y,
+            width: 1.0,
+            height: h,
+            color: self.palette.surface0,
+            corner_radii: CornerRadii::ZERO,
+        });
 
         let mut row_y = y + PADDING;
 
@@ -2653,7 +2666,7 @@ impl RemindersApp {
                 y: badge_y + 3.0,
                 text: format!("[{}]", task.recurrence.label()),
                 font_size: 9.0,
-                color: self.palette.teal,
+                color: self.palette.ink(self.palette.teal),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(100.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2719,8 +2732,14 @@ impl RemindersApp {
             .push_surface(cmds, x, y, w, h, 0.0, Surface::Card);
 
         // Left border
-        self.palette
-            .push_surface(cmds, x, y, 1.0, h, 0.0, Surface::Card);
+        cmds.push(RenderCommand::FillRect {
+            x,
+            y,
+            width: 1.0,
+            height: h,
+            color: self.palette.surface0,
+            corner_radii: CornerRadii::ZERO,
+        });
 
         let pad = PADDING;
         let mut row_y = y + pad;
@@ -2771,8 +2790,14 @@ impl RemindersApp {
         row_y += 32.0;
 
         // Separator
-        self.palette
-            .push_surface(cmds, x + pad, row_y, content_w, 1.0, 0.0, Surface::Card);
+        cmds.push(RenderCommand::FillRect {
+            x: x + pad,
+            y: row_y,
+            width: content_w,
+            height: 1.0,
+            color: self.palette.surface0,
+            corner_radii: CornerRadii::ZERO,
+        });
         row_y += 12.0;
 
         // Detail fields
@@ -2903,8 +2928,14 @@ impl RemindersApp {
 
         // Description
         if !task.description.is_empty() {
-            self.palette
-                .push_surface(cmds, x + pad, row_y, content_w, 1.0, 0.0, Surface::Card);
+            cmds.push(RenderCommand::FillRect {
+                x: x + pad,
+                y: row_y,
+                width: content_w,
+                height: 1.0,
+                color: self.palette.surface0,
+                corner_radii: CornerRadii::ZERO,
+            });
             row_y += 12.0;
 
             cmds.push(RenderCommand::Text {
@@ -2947,8 +2978,14 @@ impl RemindersApp {
 
         // Subtasks
         if !task.subtasks.is_empty() {
-            self.palette
-                .push_surface(cmds, x + pad, row_y, content_w, 1.0, 0.0, Surface::Card);
+            cmds.push(RenderCommand::FillRect {
+                x: x + pad,
+                y: row_y,
+                width: content_w,
+                height: 1.0,
+                color: self.palette.surface0,
+                corner_radii: CornerRadii::ZERO,
+            });
             row_y += 12.0;
 
             let done_count = task.subtasks.iter().filter(|s| s.completed).count();
@@ -3039,8 +3076,14 @@ impl RemindersApp {
         // Snooze options (if task has a due date and is not completed)
         if task.due.is_some() && !task.completed {
             row_y += 8.0;
-            self.palette
-                .push_surface(cmds, x + pad, row_y, content_w, 1.0, 0.0, Surface::Card);
+            cmds.push(RenderCommand::FillRect {
+                x: x + pad,
+                y: row_y,
+                width: content_w,
+                height: 1.0,
+                color: self.palette.surface0,
+                corner_radii: CornerRadii::ZERO,
+            });
             row_y += 12.0;
 
             cmds.push(RenderCommand::Text {
@@ -3069,7 +3112,7 @@ impl RemindersApp {
                     y: by + 5.0,
                     text: preset.label(),
                     font_size: 11.0,
-                    color: self.palette.sky,
+                    color: self.palette.ink(self.palette.sky),
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(btn_w - 16.0),
                     overflow: TextOverflow::Ellipsis,

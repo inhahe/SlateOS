@@ -5,6 +5,7 @@
 //! policies, and backup history with restore capabilities.
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -731,14 +732,7 @@ impl BackupSettingsUI {
             let is_active = *tab == self.active_tab;
 
             if is_active {
-                cmds.push(RenderCommand::FillRect {
-                    x: tab_x,
-                    y: tab_y,
-                    width: tw,
-                    height: 32.0,
-                    color: p.surface0,
-                    corner_radii: CornerRadii::all(6.0),
-                });
+                p.push_surface(&mut cmds, tab_x, tab_y, tw, 32.0, 6.0, Surface::Selected);
             }
 
             cmds.push(RenderCommand::Text {
@@ -746,7 +740,11 @@ impl BackupSettingsUI {
                 y: tab_y + 8.0,
                 text: label.to_string(),
                 font_size: 13.0,
-                color: if is_active { p.accent } else { p.subtext0 },
+                color: if is_active {
+                    p.ink(p.accent)
+                } else {
+                    p.subtext0
+                },
                 font_weight: if is_active {
                     FontWeightHint::Bold
                 } else {
@@ -762,14 +760,15 @@ impl BackupSettingsUI {
         let content_y = tab_y + 44.0;
         let content_h = height - (content_y - y) - 16.0;
 
-        cmds.push(RenderCommand::FillRect {
-            x: x + 8.0,
-            y: content_y,
-            width: width - 16.0,
-            height: content_h,
-            color: p.crust,
-            corner_radii: CornerRadii::all(6.0),
-        });
+        p.push_surface(
+            &mut cmds,
+            x + 8.0,
+            content_y,
+            width - 16.0,
+            content_h,
+            6.0,
+            Surface::Card,
+        );
 
         let cx = x + 24.0;
         let cy = content_y + 16.0;
@@ -803,14 +802,7 @@ impl BackupSettingsUI {
         } else {
             p.overlay0
         };
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y: row_y,
-            width,
-            height: 80.0,
-            color: p.surface0,
-            corner_radii: CornerRadii::all(8.0),
-        });
+        p.push_surface(cmds, x, row_y, width, 80.0, 8.0, Surface::Card);
 
         cmds.push(RenderCommand::FillRect {
             x: x + 16.0,
@@ -877,14 +869,7 @@ impl BackupSettingsUI {
         for (i, (label, value, color)) in stats.iter().enumerate() {
             let cx = x + i as f32 * (card_w + 8.0);
 
-            cmds.push(RenderCommand::FillRect {
-                x: cx,
-                y: row_y,
-                width: card_w,
-                height: 60.0,
-                color: p.surface0,
-                corner_radii: CornerRadii::all(6.0),
-            });
+            p.push_surface(cmds, cx, row_y, card_w, 60.0, 6.0, Surface::Card);
 
             cmds.push(RenderCommand::Text {
                 x: cx + 8.0,
@@ -1015,14 +1000,7 @@ impl BackupSettingsUI {
         let mut row_y = y;
 
         // Enable toggle
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y: row_y,
-            width,
-            height: 36.0,
-            color: p.surface0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        p.push_surface(cmds, x, row_y, width, 36.0, 4.0, Surface::ControlTrack);
 
         cmds.push(RenderCommand::Text {
             x: x + 16.0,
@@ -1208,14 +1186,7 @@ impl BackupSettingsUI {
         row_y += 22.0;
 
         for (label, enabled) in &options {
-            cmds.push(RenderCommand::FillRect {
-                x,
-                y: row_y,
-                width,
-                height: 32.0,
-                color: p.surface0,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            p.push_surface(cmds, x, row_y, width, 32.0, 4.0, Surface::Card);
 
             cmds.push(RenderCommand::Text {
                 x: x + 16.0,
@@ -1290,14 +1261,7 @@ impl BackupSettingsUI {
         row_y += 28.0;
 
         // Target
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y: row_y,
-            width,
-            height: 48.0,
-            color: p.surface0,
-            corner_radii: CornerRadii::all(6.0),
-        });
+        p.push_surface(cmds, x, row_y, width, 48.0, 6.0, Surface::Card);
 
         cmds.push(RenderCommand::Text {
             x: x + 16.0,
@@ -1315,7 +1279,7 @@ impl BackupSettingsUI {
             y: row_y + 26.0,
             text: self.settings.target.display_path(),
             font_size: 12.0,
-            color: p.blue,
+            color: p.ink(p.blue),
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 32.0),
             overflow: TextOverflow::Ellipsis,
@@ -1356,7 +1320,7 @@ impl BackupSettingsUI {
                     y: row_y + 12.0,
                     text: "\u{2713}".to_string(),
                     font_size: 12.0,
-                    color: p.accent,
+                    color: p.ink(p.accent),
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -1393,7 +1357,7 @@ impl BackupSettingsUI {
                 y: row_y + 12.0,
                 text: "\u{2715}".to_string(),
                 font_size: 12.0,
-                color: p.red,
+                color: p.ink(p.red),
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1476,20 +1440,21 @@ impl BackupSettingsUI {
             });
 
             // Pattern
-            cmds.push(RenderCommand::FillRect {
-                x: x + 56.0,
-                y: row_y + 8.0,
-                width: text::padded_width(&rule.pattern, 8.0, 11.0, FontWeightHint::Bold),
-                height: 20.0,
-                color: p.surface1,
-                corner_radii: CornerRadii::all(3.0),
-            });
+            p.push_surface(
+                cmds,
+                x + 56.0,
+                row_y + 8.0,
+                text::padded_width(&rule.pattern, 8.0, 11.0, FontWeightHint::Bold),
+                20.0,
+                3.0,
+                Surface::ControlTrack,
+            );
             cmds.push(RenderCommand::Text {
                 x: x + 64.0,
                 y: row_y + 10.0,
                 text: rule.pattern.clone(),
                 font_size: 11.0,
-                color: p.lavender,
+                color: p.ink(p.lavender),
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1513,7 +1478,7 @@ impl BackupSettingsUI {
                 y: row_y + 14.0,
                 text: "\u{2715}".to_string(),
                 font_size: 12.0,
-                color: p.red,
+                color: p.ink(p.red),
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1561,14 +1526,7 @@ impl BackupSettingsUI {
             });
         } else {
             for entry in self.settings.history.iter().rev() {
-                cmds.push(RenderCommand::FillRect {
-                    x,
-                    y: row_y,
-                    width,
-                    height: 56.0,
-                    color: p.surface0,
-                    corner_radii: CornerRadii::all(4.0),
-                });
+                p.push_surface(cmds, x, row_y, width, 56.0, 4.0, Surface::Card);
 
                 // Status badge
                 cmds.push(RenderCommand::FillRect {
@@ -1614,7 +1572,7 @@ impl BackupSettingsUI {
                         y: row_y + 38.0,
                         text: err.clone(),
                         font_size: 10.0,
-                        color: p.red,
+                        color: p.ink(p.red),
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(width - 40.0),
                         overflow: TextOverflow::Ellipsis,
@@ -2211,7 +2169,15 @@ mod tests {
     fn outlines(cmds: &[RenderCommand]) -> Vec<Color> {
         cmds.iter()
             .filter_map(|c| match c {
-                RenderCommand::StrokeRect { color, .. } => Some(*color),
+                // 16x16 is the radio ring and the checkbox, and since the
+                // border theme landed it is what separates them from every
+                // other outline on the page -- a card is an outline now too.
+                RenderCommand::StrokeRect {
+                    width: 16.0,
+                    height: 16.0,
+                    color,
+                    ..
+                } => Some(*color),
                 _ => None,
             })
             .collect()
@@ -2480,19 +2446,23 @@ mod tests {
             );
 
             // The well the tab content sits in: the full-width inset at x 8.
-            let well = cmds.iter().find_map(|c| match c {
-                RenderCommand::FillRect {
-                    x: 8.0,
-                    width: 684.0,
-                    color,
-                    ..
-                } => Some(*color),
-                _ => None,
-            });
+            //
+            // Asked of the palette rather than named. It was a `crust` fill
+            // until §829; it is a `Surface::Card` now, which is an outline
+            // under the default theme and a `surface0` fill under the optional
+            // one. What stays true across both -- and across whatever comes
+            // next -- is that this rectangle is painted the way a Card is.
+            // Located by width, as it always was -- 684 is the only rectangle
+            // of that width -- and then asked of the palette rather than
+            // compared to a named shade.
+            let well = cmds
+                .iter()
+                .find_map(|c| appearance::logical_rect(c).filter(|r| (r.2 - 684.0).abs() < 0.01))
+                .expect("the panel draws its content well");
             assert_eq!(
-                well,
-                Some(p.crust),
-                "the content well is not p.crust (light={light})"
+                appearance::paint_at(&cmds, well.0, well.1, well.2, well.3),
+                p.surface_paint(appearance::Surface::Card),
+                "the content well is not painted as a Card (light={light})"
             );
         }
     }

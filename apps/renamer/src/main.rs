@@ -1872,7 +1872,7 @@ impl RenamerApp {
                     y: py,
                     text: "⚠ Name conflict detected!".into(),
                     font_size: SMALL_TEXT,
-                    color: self.palette.red,
+                    color: self.palette.ink(self.palette.red),
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0),
                     overflow: TextOverflow::Ellipsis,

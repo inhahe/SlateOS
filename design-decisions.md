@@ -72789,3 +72789,169 @@ drawing a surface. `SurfacePaint` grows a `separator` field that is `None` for
 every other kind, and the tests that assert a box is "filled or outlined" have to
 learn a third answer. That is the price of the option and the operator took it
 knowingly.
+
+## 836. A state changes a member of the paint; it never draws a second box
+
+**Date:** 2026-09-12
+**Lane:** C
+**Decided by:** Claude (autonomous)
+
+**In short:** some boxes on screen change their outline to say something is
+happening to them -- a password field turns red when the password was wrong, a
+search box turns blue while you are typing in it. The old way to do that was to
+draw the box, then draw a coloured rectangle on top of its edge. That worked
+while boxes were filled, because the coloured rectangle was the only edge there
+was. Now that the standard theme outlines every box, it is two rings, one inside
+the other, in two different colours. The rule from here on is that a state
+**replaces** the box's outline rather than adding one.
+
+**What it looks like in code.** `push_surface` asks the theme what to paint and
+paints it. A site that needs a state to speak now starts from the same answer
+and changes the one part the state owns:
+
+```rust
+let mut paint = p.surface_paint(Surface::Card);
+if focused {
+    paint.border = Some(p.blue);
+}
+p.push_paint_radii(out, x, y, w, h, CornerRadii::all(4.0), paint);
+```
+
+`push_surface_radii` is now exactly this with `paint` taken straight from
+`surface_paint`, so there is one drawing path and not two.
+
+**The alternatives**
+
+**A. Keep drawing a second rectangle, and have the theme not outline boxes that
+have their own border.** Rejected: the theme would have to know which sites
+those are, and the only way to tell it is a flag at each site -- which is the
+draw site choosing its own appearance again, the thing 829 exists to stop.
+
+**B. Add a `Surface::Focused` and a `Surface::Invalid` beside `Selected`.**
+Tempting, and right for `Selected`, which is genuinely a kind of surface. Wrong
+for these: "rejected" is not a kind of box, it is a thing that happened to a
+box, and the two compose -- a rejected password field is still a card. Modelling
+every combination as its own `Surface` member multiplies the match arms by the
+number of states.
+
+**C. What was chosen.** The state owns one member of a paint the theme
+otherwise decides. It composes, it needs no new vocabulary, and the one thing
+it cannot express -- a site inventing a colour from nothing -- is the thing that
+should not be expressible.
+
+**Why this needed deciding at all.** Nineteen sites in the tree had the second
+rectangle, and none of them looked wrong to whoever wrote them, because the
+theme they had in front of them did not draw an outline. That is the shape of
+the whole conversion's risk: code that is correct under one theme and wrong
+under the other, with nothing in the type system to say which one you were
+thinking about. A rule that says *change the paint, do not add a rectangle*
+turns that into something a reader can check locally.
+
+**What it cost.** Twelve of the nineteen strokes were not states at all, just
+structural edges restating what the theme now says; they became
+`paint.border.unwrap_or(the old colour)`, which keeps the card theme's edge
+because that theme fills without outlining. Two were not borders at all --
+login's power menu restated an edge `Surface::Panel` already carries, and
+screenrecorder's countdown circle was a disc with a ring over it, where the disc
+is the ring's ground and vanished when outlined.
+
+## 837. Legibility belongs to the ink-and-ground pair, not to the palette field
+
+**Date:** 2026-09-12
+**Lane:** C
+**Decided by:** Claude (operator-approved scope)
+
+**In short:** the operator asked that text always reach the accessibility
+contrast floor of 4.5:1. Some of the colours that text is drawn in are *also*
+used to fill things -- the accent colour is both "the colour of a link" and
+"the colour of a switch that is on". Making those colours darker so the text
+can be read would also darken every switch, badge and progress bar, silently
+changing something the user picked. So the palette keeps every colour exactly
+as chosen, and a site that draws *text* asks for a readable version of it.
+
+**Glossary.** *Contrast ratio* is the WCAG number for how far apart two
+colours are in brightness; 4.5:1 is the level-AA floor for body text.
+*Ground* is whatever a piece of text is drawn on top of -- the page, a card, a
+toolbar. *Role* is a named colour in the palette (`accent`, `red`, `subtext0`).
+
+**What the measurement forced.** The obvious fix -- lighten the cards until
+everything is readable on them -- is impossible, and provably so. The palest
+accent (maroon) only clears 4.5:1 against greys lighter than `#EFEFEF`, and the
+page itself is `#EFF1F5`. There is no card shade *darker than the page* that
+all fourteen accents survive. The ink is the only thing that can move.
+
+**The split, which is the actual decision**
+
+| roles | resolved | why |
+|---|---|---|
+| `subtext0`, `subtext1`, `link` | in the palette, at construction | they exist to be read: never a fill, never a badge, not user-chosen. 546 of the 861 sites, and not one of them changes |
+| `accent`, `red`, `green`, `yellow`, … | at the draw site, via `Palette::ink` | dual-use. An accent is also a switch that is on; `red` is also an error bar |
+| `overlay0` | not at all | the muted ink -- a disabled label, an empty field's placeholder. WCAG 1.4.3 exempts inactive controls, and making it legible would make a disabled control look *enabled* |
+| `text`, `border` | not needed | `text` clears the floor unaided, and a border is a component outline at the 3:1 of SC 1.4.11, not body text |
+
+**The alternatives**
+
+**A. Adjust the palette's colours in place.** Tried first, and three existing
+tests refused it -- `a_custom_accent_reaches_the_palette_exactly_as_chosen`
+most directly. They were right. For: one line, no draw site changes. Against:
+a user who picks `#123456` gets `#75899C` on their switches, and the swatch
+they picked from no longer matches what they see.
+
+**B. A second field per dual-use role** -- `accent` and `accent_ink`. For:
+keeps both meanings, no method call at the site. Against: doubles the
+categorical half of the palette, and every one of those pairs is a chance to
+read the wrong one -- with no way to notice, because both render.
+
+**C. What was chosen: a method.** `p.ink(p.accent)` at sites that draw text.
+For: the palette keeps one meaning per role, custom accents survive untouched,
+and it extends to a colour nobody has seen -- a ratio is a promise about every
+colour in the cube, where a table is only as good as the values in it the day
+it was written. Against: 315 sites to convert, and site 316 can forget.
+
+**Where the ink goes, which the conversion had to work out.** Not "at the call
+site" -- that was tried and is wrong. The rule that survived 409 sites:
+
+> **Ink at the point where you can see that every path through it is text.**
+
+For `osd::render_icon_text_osd` that is the function body, because its colour
+parameter has exactly one use in it. For `PermissionState::color` it is the
+individual arms, because one arm returns `overlay0` -- the muted ink WCAG 1.4.3
+exempts -- and raising that makes a *not decided* row look decided. "Is it a
+helper?" is the wrong question; "does it have an exempt path?" is the right one.
+And there is a precondition that only showed up later: you must check the
+*callers* too, because a colour method used for a fill as well as text cannot
+be inked in its body at all.
+
+**What the scanner cannot see, stated plainly because the number is
+reassuring and wrong.** `ink-text.py` classifies by the role named at the draw
+site. Four ways a colour reaches a `RenderCommand::Text` without naming one --
+every one found by a failing test, none by the scanner:
+
+| | example |
+|---|---|
+| a method in the `color:` field | `app.state.color(p)` |
+| a helper's return value | `osd::icon_info -> (glyph, Color)` |
+| an argument to a draw helper | `render_icon_text_osd(.., p.red, ..)` |
+| a local passed by field shorthand | `let color = ..; Text { .., color, .. }` |
+
+So "`--check` reports zero" means *zero among the sites it can classify*. 108
+methods return a themed colour and name no role at a draw site; they are
+`TD-C-FORTY-NINE-COLOUR-METHODS-ARE-INVISIBLE-TO-THE-INK-SWEEP`. The scanner
+grew a `--blind` mode to report that gap rather than imply its absence.
+
+**About that last cost.** It is the same objection §829 answered for surfaces,
+and it gets the same answer: a scanner. `gui/appearance/ink-text.py` performs
+the conversion and, run without `--apply`, counts what is left -- so "did
+anyone forget?" is a question with a number rather than a matter of care. The
+day's other lesson applies here too: the check has to be *reachable*. The
+membership sweep that 45 modules rely on was about to start failing, because
+an inked accent is a legitimate colour of the palette that is not one of its
+roles; teaching `is_accounted_for` about it, in the one shared place, was part
+of the same change rather than 45 modules each declaring the same eleven
+values.
+
+**What is deliberately not decided here.** Whether the *card* theme's shade
+ladder should be lightened as well. It cannot fix this on its own -- see the
+measurement above -- but it would reduce how far the inks have to move. That
+is a question about how the optional theme looks, and it is the operator's.
+

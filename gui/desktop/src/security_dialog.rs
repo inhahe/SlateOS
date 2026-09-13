@@ -62,7 +62,7 @@
 //! }
 //! ```
 
-use appearance::{Palette, readable_on};
+use appearance::{Palette, Surface, readable_on};
 #[cfg(test)]
 use guitk::event::Modifiers;
 use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -1032,23 +1032,17 @@ impl SecurityDialog {
             let panel_w = dw - PADDING * 2.0;
             let panel_h = 100.0;
 
-            cmds.push(RenderCommand::FillRect {
-                x: dx + PADDING,
-                y: panel_y,
-                width: panel_w,
-                height: panel_h,
-                color: p.mantle,
-                corner_radii: CornerRadii::all(DETAIL_PANEL_RADIUS),
-            });
-            cmds.push(RenderCommand::StrokeRect {
-                x: dx + PADDING,
-                y: panel_y,
-                width: panel_w,
-                height: panel_h,
-                color: p.surface1,
-                line_width: 1.0,
-                corner_radii: CornerRadii::all(DETAIL_PANEL_RADIUS),
-            });
+            let mut paint = p.surface_paint(Surface::Card);
+            paint.border = Some(paint.border.unwrap_or(p.surface1));
+            p.push_paint_radii(
+                &mut cmds,
+                dx + PADDING,
+                panel_y,
+                panel_w,
+                panel_h,
+                CornerRadii::all(DETAIL_PANEL_RADIUS),
+                paint,
+            );
 
             let dp = 8.0; // detail panel inner padding
             let mut ty = panel_y + dp;
@@ -1221,14 +1215,7 @@ impl SecurityDialog {
         letter: char,
     ) {
         // Shield background (rounded square)
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: SHIELD_SIZE,
-            height: SHIELD_SIZE,
-            color: p.surface0,
-            corner_radii: CornerRadii::all(8.0),
-        });
+        p.push_surface(cmds, x, y, SHIELD_SIZE, SHIELD_SIZE, 8.0, Surface::Card);
 
         // Shield border with risk color
         cmds.push(RenderCommand::StrokeRect {

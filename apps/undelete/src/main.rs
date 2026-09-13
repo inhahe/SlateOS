@@ -2976,7 +2976,7 @@ impl UndeleteApp {
             x: PADDING,
             y: center_y,
             text: self.engine.progress.phase.display_name().to_string(),
-            color: self.palette.blue,
+            color: self.palette.ink(self.palette.blue),
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: Some(self.width - PADDING * 2.0),
@@ -3121,7 +3121,7 @@ impl UndeleteApp {
             y: all_y + 6.0,
             text: format!("All Files ({})", self.engine.files.len()),
             color: if all_selected {
-                self.palette.blue
+                self.palette.ink(self.palette.blue)
             } else {
                 self.palette.subtext1
             },
@@ -3168,7 +3168,7 @@ impl UndeleteApp {
                 y: item_y + 6.0,
                 text: format!("{} ({})", cat.display_name(), count),
                 color: if is_selected {
-                    self.palette.blue
+                    self.palette.ink(self.palette.blue)
                 } else {
                     self.palette.subtext1
                 },
@@ -3507,8 +3507,14 @@ impl UndeleteApp {
             .push_surface(cmds, x, y, width, height, 0.0, Surface::Card);
 
         // Left border
-        self.palette
-            .push_surface(cmds, x, y, 1.0, height, 0.0, Surface::Card);
+        cmds.push(RenderCommand::FillRect {
+            x,
+            y,
+            width: 1.0,
+            height,
+            color: self.palette.surface0,
+            corner_radii: CornerRadii::ZERO,
+        });
 
         if let Some(file) = self.selected_file() {
             self.render_file_preview(cmds, file, x, y, width);
@@ -3584,8 +3590,14 @@ impl UndeleteApp {
         cy += 64.0;
 
         // Separator
-        self.palette
-            .push_surface(cmds, inner_x, cy, inner_w, 1.0, 0.0, Surface::Card);
+        cmds.push(RenderCommand::FillRect {
+            x: inner_x,
+            y: cy,
+            width: inner_w,
+            height: 1.0,
+            color: self.palette.surface0,
+            corner_radii: CornerRadii::ZERO,
+        });
         cy += 12.0;
 
         // Metadata rows
@@ -3714,8 +3726,14 @@ impl UndeleteApp {
         cy += 24.0;
 
         // Source description
-        self.palette
-            .push_surface(cmds, inner_x, cy, inner_w, 1.0, 0.0, Surface::Card);
+        cmds.push(RenderCommand::FillRect {
+            x: inner_x,
+            y: cy,
+            width: inner_w,
+            height: 1.0,
+            color: self.palette.surface0,
+            corner_radii: CornerRadii::ZERO,
+        });
         cy += 12.0;
 
         cmds.push(RenderCommand::Text {
@@ -3767,7 +3785,7 @@ impl UndeleteApp {
                 x: inner_x + 6.0,
                 y: cy + 6.0,
                 text: hex_str,
-                color: self.palette.green,
+                color: self.palette.ink(self.palette.green),
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(inner_w - 12.0),
@@ -3790,8 +3808,14 @@ impl UndeleteApp {
         );
 
         // Separator
-        self.palette
-            .push_surface(cmds, 0.0, y, self.width, 1.0, 0.0, Surface::Card);
+        cmds.push(RenderCommand::FillRect {
+            x: 0.0,
+            y,
+            width: self.width,
+            height: 1.0,
+            color: self.palette.surface0,
+            corner_radii: CornerRadii::ZERO,
+        });
 
         // Selection info
         let selected = self.engine.selected_count();
@@ -4080,7 +4104,7 @@ impl UndeleteApp {
                 x: PADDING + row_w * 0.8,
                 y: y + 24.0,
                 text: msg.clone(),
-                color: self.palette.red,
+                color: self.palette.ink(self.palette.red),
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(row_w * 0.18),

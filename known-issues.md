@@ -129995,6 +129995,56 @@ used *only* in exempt positions, which is the property that actually matters.
 **Also found in the same survey:** `overlay1` and `overlay2` are declared and
 used **zero** times anywhere in `gui` or `apps`. They are dead palette rungs.
 
+## TD-C-THE-COMPOSITOR-FRAME-BUDGET-HAS-NO-INSTRUMENT -- half fixed; the half that was fixed caught a 30x regression on 2026-09-12
+
+**Update, 2026-09-12 (lane C).** Point 2 below -- "the runtime measurement
+exists and is unchecked" -- was fixed on 2026-09-11 by giving
+`the_demo_scene_still_composites` a real ceiling (`FRAME_CEILING_US =
+50_000`) instead of an assertion that the clock runs. **Twenty-four hours
+later it earned its keep.**
+
+A workspace test failed with *a frame of this trivial scene took 67 074 us,
+over the 50 000 us ceiling*. The first instinct was machine load -- the run was
+a parallel workspace test on a busy desktop, and the recorded adjudication rule
+says to suspect load. It was not load. Measured directly:
+
+| | before | after the fix |
+|---|---|---|
+| `contrast_ratio` | 436 ns | 4 ns |
+| `Palette::from_settings`, card theme | 87 395 ns | 3 102 ns |
+
+The cause was the 4.5:1 text floor (§837) making palette resolution call
+`contrast_ratio`, which was three `powf(2.4)` evaluations per colour -- and the
+compositor calls `Palette::from_settings` **inside the render path**, per
+blurred window, per frame. Fixed by tabling the sRGB transfer function: a
+channel is a `u8`, so all 256 inputs are precomputed from the same formula, and
+`guitk::theme::the_table_is_the_formula` asserts the table *is* the formula at
+every one of them.
+
+**What is worth generalising.** The bound was set with a comment explaining
+where its number came from and a rule for adjudicating a failure. Both were
+used within a day -- the number to see that 67 074 was 13x the median rather
+than merely "slow", and the rule to decide whether to investigate. An
+instrument with no threshold is a log line; a threshold whose value a later
+reader cannot explain gets relaxed instead of investigated.
+
+**Point 1 below is still open:** there is still no benchmark series for the
+compositor, and lane A offered two shapes for one (a host-side criterion bench
+in `gui/compositor/benches/`, or a ring-3 rung). This incident is an argument
+for the host-side bench: the regression was in *host* code called from the
+render path, and a criterion series would have shown it as a trend rather than
+as a single ceiling breach that had to be diagnosed from scratch.
+
+**A smaller thing this exposed, not yet fixed:** `Palette::from_settings` is
+called per blurred window per frame rather than resolved once when the
+appearance changes. At 273 ns it no longer matters for the budget, but
+resolving a settings struct inside a render loop is the kind of thing that
+stops being free the next time something is added to it.
+
+---
+
+### The original entry, for the record
+
 ## TD-C-THE-COMPOSITOR-FRAME-BUDGET-HAS-NO-INSTRUMENT
 
 **Date:** 2026-09-11. **Lane:** C. Found by lane A while checking whether the
@@ -131084,6 +131134,277 @@ question about where a shared transport lives, and it is recorded in the
 crate's own module docs where the next person to need one will read it.
 
 ---
+
+## TD-C-SIXTY-EIGHT-APPS-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE
+
+**Date:** 2026-09-12. **Lane:** C.
+**Where:** `apps/**` — 987 `const NAME: Color` declarations across 68 crates.
+
+**It is an unfinished migration, not a new defect — which is the useful
+framing.** §822 (2026-09-08) decided how applications receive the user's
+colours and says in its own preamble that it is *"the seam 135 applications
+will be converted against"*. **79 crates were converted. 55 were not, and
+nothing anywhere listed which.** A converted app's `Cargo.toml` says
+
+    # The user's colours, per design-decisions 822.
+    appearance = { path = "../../gui/appearance" }
+
+and an unconverted one simply has no such line — `explorer` and `procexplorer`
+both depend on `guitk` and `oswindow` and nothing else. So the per-crate recipe
+is known and already exercised 79 times: add the dependency, thread the
+`Palette` the trait hands over, replace the constants with roles, adopt
+`assert_drawn_from`. This entry is the missing list.
+
+**In short:** the desktop shell was cured, in September, of a defect where every
+one of its 49 modules declared its own private copy of the colour scheme —
+which meant a user who chose the light theme got a light taskbar and dark
+everything-else. The applications have the same defect, untouched, and at
+nearly twice the size. On a light desktop, 68 of them will still be dark.
+
+**The measurement.** `const NAME: Color = ...` in production code under
+`apps/`:
+
+| | shell (fixed) | apps (open) |
+|---|---|---|
+| constants | 549 | **987** |
+| crates/modules | 49 | **68** |
+
+And the same giveaway as last time — **the names collide**, which is what
+proves they are copies rather than each app's own considered choices:
+
+| name | declared in |
+|---|---|
+| `BASE` | 40 crates |
+| `SUBTEXT0` | 40 crates |
+| `BLUE`, `GREEN`, `RED` | 37 crates each |
+| `YELLOW`, `LAVENDER` | 38 crates each |
+
+`procexplorer` is the clearest single instance: `COLOR_TOOLBAR_BG`,
+`COLOR_TAB_BG`, `COLOR_TAB_ACTIVE`, `COLOR_CONTENT_BG`, `COLOR_HEADER_BG`,
+`COLOR_ROW_EVEN` — a complete hardcoded dark theme, 45 constants, with no
+reference to the user's setting anywhere.
+
+**Twelve crates are the real defect; the rest is a weaker question.** Splitting
+the 68 by whether the crate has a `Palette` in scope at all turns out to split
+it almost exactly along "is this an application or a game":
+
+| | crates | constants | what to do |
+|---|---|---|---|
+| **applications with no palette** | **12** | **~246** | the defect. Thread a `Palette` and convert |
+| games with no palette | ~43 | ~741 | see below — a weaker case |
+| already have a palette | 13 | 57 | cheap: the roles are already reachable |
+
+The twelve are `procexplorer` (45), `sysinfo` (26), `imageviewer` (25),
+`pdfviewer` (21), `musicplayer` (18), `speedtest` (17), `explorer` (17),
+`devicemanager` (17), `pomodoro` (16), `screenshot` (15), `benchmark` (15),
+`mixer` (14). A **file manager** and a **process explorer** that ignore the
+user's theme are the visible failure; start there.
+
+**The games are a different question and should not be swept with them.** A
+chess board's light and dark squares are the game's own art, in the same sense
+that `paint`'s swatch row is the document — a themed chessboard is not
+obviously better than a chessboard. What *should* follow the theme in a game is
+its **chrome**: the menu, the score panel, the dialogs, the window background
+behind the board. So the games want a narrower conversion, and doing it with
+the same sweep as the applications would recolour the boards, which nobody
+asked for. This is the part worth putting to the operator before starting.
+
+**Not all 987 are the defect, and the distinction matters.** Three categories,
+and only the first is wrong:
+
+1. **A private copy of the theme.** `BASE`, `SUBTEXT0`, `COLOR_TOOLBAR_BG`.
+   These should read from `Palette`. This is the bulk of the 68 crates.
+2. **A protocol.** `apps/terminal` and `apps/tmux` carry ANSI colour tables.
+   An ANSI palette is defined by the escape-sequence standard, not by the
+   desktop theme, and a terminal traditionally has its own scheme. These stay,
+   but the *chrome* around them (tab bar, status line) does not.
+3. **User data.** `apps/paint`'s swatch row, `apps/imageviewer`'s pixel
+   handling. A drawing program's colours are the document, not the interface.
+   These stay.
+
+**Why it is not visible today.** There is no guard. **47 shell modules use
+`appearance::palette_check`; zero apps do** — and only one app asserts a
+palette colour at all. `palette_check::assert_drawn_from` is the function that
+found the shell's copies, it is already a shared crate, and it takes a
+`derived` list precisely so categories 2 and 3 can be declared rather than
+excused.
+
+**The recipe, spelled out, because §822 already built the seam and 79 crates
+have been through it.** For each crate:
+
+1. `appearance = { path = "../../gui/appearance" }` in `Cargo.toml`, with the
+   comment the converted ones carry: *"The user's colours, per
+   design-decisions 822."*
+2. A `palette: Palette` field on the application struct, initialised
+   `Palette::from_settings(&AppearanceSettings::default())` — so the first
+   frame has *a* palette even on a machine with no settings file.
+3. `fn theme_changed(&mut self, palette: &Palette) { self.palette = *palette; }`
+   — the `oswindow::app::App` method §822 added for exactly this. It is
+   already called by `drive`; an app that does not override it silently keeps
+   its defaults, which is what all 55 of these are doing.
+4. Replace the constants: a background becomes a role, a box becomes
+   `push_surface`, and *text* in a categorical hue becomes `p.ink(hue)`
+   (§837).
+5. Adopt `palette_check::assert_drawn_from` in the crate's render test, with
+   the genuinely non-theme colours declared in `derived`.
+
+`procexplorer` shows how mechanical step 4 usually is — its thirteen named
+constants map almost one-to-one:
+
+| its constant | the role |
+|---|---|
+| `COLOR_CONTENT_BG` | `base` |
+| `COLOR_TOOLBAR_BG`, `COLOR_STATUS_BG` | `Surface::Strip` |
+| `COLOR_ROW_ODD`, `COLOR_ROW_HOVER` | `surface0` |
+| `COLOR_ROW_SELECTED` | `Surface::Selected` |
+| `COLOR_TAB_ACTIVE`, `COLOR_ACCENT` | `accent` |
+| `COLOR_TEXT`, `COLOR_TEXT_DIM` | `text`, `subtext0` |
+| `COLOR_DANGER` | `red` |
+
+**What the proper fix looks like.** Crate by crate, in the order the table
+above suggests: thread the `Palette` the app already receives (or add it),
+replace the category-1 constants with roles, adopt `assert_drawn_from` in the
+crate's existing render test, and declare categories 2 and 3 in `derived`. The
+shell's own conversion is the worked example, including the part that is not
+mechanical: `BASE` was opaque in 26 modules and translucent in 2, and those two
+are panels rather than pages.
+
+**How urgent.** Not a crash, and it does not worsen on its own — but it is
+straightforwardly user-visible the moment anyone selects the light theme, and
+it is the single largest remaining piece of the appearance work. It is also the
+reason the app half of the border conversion looked cheap: those crates were
+converted where they *did* use the palette, and the constants were never in
+scope.
+
+## TD-C-FORTY-NINE-COLOUR-METHODS-ARE-INVISIBLE-TO-THE-INK-SWEEP
+
+**Date:** 2026-09-12. **Lane:** C.
+**Where:** 49 sites across 22 crates; `gui/appearance/ink-text.py --blind`
+reports them.
+
+**In short:** §837 makes a site that draws *text* in an accent or a status
+colour ask the palette for a readable version of it. The script that converted
+1,200 such sites finds them by the role named at the draw site — and 49 sites
+name no role, because the colour arrives from a method: `dev.state.color(p)`,
+`task.priority.color(&self.palette)`, `alert.severity.color(&self.palette)`.
+The script reported zero for those files and was right about the question it
+asks, which is not the question anyone reading the number thinks it is.
+
+**How they were found:** by failing tests, one at a time, during the shell
+conversion — never by the sweep. Four distinct ways a colour can reach a
+`RenderCommand::Text` without naming a role there:
+
+| | example |
+|---|---|
+| a method in the `color:` field | `app.state.color(p)` |
+| a helper's return value | `osd::icon_info -> (glyph, Color)` |
+| an argument to a draw helper | `render_icon_text_osd(.., p.red, ..)` |
+| a local passed by field shorthand | `let color = ..; Text { .., color, .. }` |
+
+The first has a syntactic signature, so it is now reported. The middle two are
+properties of a *function body* rather than of the draw site and need something
+that parses Rust. The fourth is reported as well, at 88 candidates, most of
+which are benign.
+
+**The 49 is the count of call sites; the count of *methods* is 108.** A survey
+for `fn *colour*(.., &Palette) -> Color` whose body names a dual-use role finds
+108 of them across `gui/` and `apps/`. The 49 are only those called from a
+`color:` field in a `Text` command — the same method is often also called from
+a fill, a badge or a legend, and that is the complication:
+
+- **Roughly half have an exempt arm** — they return `overlay0`, `subtext0` or
+  `text` for one of their cases. Those cannot be inked wholesale; the
+  adjustment goes per arm, skipping the exempt one.
+- **Many are used for fills as well as text.** `habits::heatmap_color` and
+  `diskanalyzer::color_for_node` fill rectangles; inking inside the method
+  would darken those for no reason. So "ink inside the method" is only correct
+  when *every* caller draws text with it, which has to be checked per method
+  rather than assumed.
+- **A method that is both mixed-use and has an exempt arm cannot be fixed
+  either way** and needs splitting in two — one for fills, one for text — or
+  a caller-side adjustment that knows which arm it got. That combination is
+  the reason this is an entry and not an afternoon.
+
+**The 49 call sites split in two, and only one half is this entry's problem:**
+
+- **39 take a palette** (`color(&self.palette)`). These are the ink gap and are
+  fixable today. Concentrations: `desktop` (8), `remotedesktop` (5),
+  `reminders` (4), `sysmonitor` (3), `weather` (3).
+- **10 take nothing** (`cat.color()`, `dev.status.color()`). Those crates have
+  no `Palette` at all — they are
+  `TD-C-SIXTY-EIGHT-APPS-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE`, and the colour
+  they return is hardcoded. Inking is not the fix; threading a palette is.
+  `devicemanager` (4) and `procexplorer` (4) are both on that entry's list of
+  twelve.
+
+**What the fix looks like, per method.** Not "ink the call site" — that was
+tried and is wrong. `PermissionState::color` has three arms and one returns
+`overlay0`, the muted ink WCAG 1.4.3 exempts; raising it makes a *not decided*
+row look decided. The rule that came out of the shell: **ink at the point where
+every path through it is text.** For `osd::render_icon_text_osd` that is the
+body, because its colour parameter has exactly one use. For a method with arms
+it is the arms, individually, skipping any exempt one.
+
+**How urgent.** Low and non-worsening. These sites draw exactly what they drew
+before §837, so nothing regressed; they are simply not yet *improved*, and the
+text they draw can fall below 4.5:1 on a card under the optional filled theme.
+The guard `every_ink_clears_the_floor_on_every_ground_it_lands_on` does not
+catch them, because it tests the palette's arithmetic rather than which call
+sites use it — which is the same gap in a different place, and worth
+remembering when reading it.
+
+## TD-C-THIRTEEN-LIGHT-ACCENTS-STILL-FAIL-ON-CARDS -- being fixed 2026-09-12, mechanism landed
+
+**Update, 2026-09-12 (lane C).** Answered, and the entry below was wrong in
+three ways worth recording before the correction.
+
+**It was not thirteen, and it was not light-only.** Dark mode has the same
+defect and nobody had looked: 13 of its 16 inks fail on its deepest card, red
+worst at 2.88:1. Nor is the default theme exempt -- a toolbar is a `mantle`
+band with labels on it, and light accents sit at 4.28 there, under the floor.
+
+**"Colour the cards differently" cannot work, and this is provable.** The
+palest accent (maroon) only clears 4.5 against greys lighter than `#EFEFEF`.
+The page is `#EFF1F5`. So there is no card shade *darker than the page* that
+all fourteen accents survive, and the ink is what has to move.
+
+**The fear recorded below -- fourteen near-black accents, "a user picking green
+would get something indistinguishable from blue" -- does not hold.** Scaling
+toward an extreme preserves hue. Green becomes `#245A18` and blue stays
+`#0036A3`; measured over the fourteen, the closest pair after adjustment is
+teal/sapphire, which are near-duplicates in the source palette already.
+
+**What landed.** `appearance::legible_on(ink, bg)` moves an ink only as far as
+the floor requires, toward whichever pole is legible on that ground.
+`Palette::ink(colour)` applies it against every surface the *active theme* puts
+text on -- which is a consequence of the two style settings, not a fixed list,
+and getting that wrong is precisely what the old guard did.
+
+The roles split in two, and the split is the design:
+
+| roles | how they are fixed | why |
+|---|---|---|
+| `subtext0`, `subtext1`, `link` | floored in the palette | they exist to be read, are never fills, and the user does not choose them -- 546 of 861 sites, none touched |
+| `accent`, `red`, `green`, … | site asks `p.ink(…)` | dual-use: an accent is also a switch that is on, `red` is also an error bar, and those must not move |
+
+`overlay0` stays exempt: it is the muted ink, WCAG 1.4.3 exempts inactive
+controls, and raising it would make a disabled control look enabled.
+
+**Still open:** the 315 dual-use *text* sites. `gui/appearance/ink-text.py`
+performs the transformation and is proven on 100 shell sites; 29 shell tests
+compare a text colour against a raw role and must follow. Until those land the
+dual-use roles are unchanged, which is exactly today's behaviour -- so nothing
+regresses in the meantime.
+
+The guard `every_ink_clears_the_floor_on_every_ground_it_lands_on` covers both
+modes, both surface styles, both strip styles, the fourteen presets and two
+hostile custom accents, and checks each role *the way a draw site reads it* --
+the floored field for the three, `p.ink(field)` for the rest. Checking both
+through `ink` would have passed while `p.subtext0` was unreadable.
+
+---
+
+### The original entry, for the record
 
 ## TD-C-THIRTEEN-LIGHT-ACCENTS-STILL-FAIL-ON-CARDS
 

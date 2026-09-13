@@ -103,6 +103,77 @@ pub fn logical_rect(cmd: &guitk::render::RenderCommand) -> Option<(f32, f32, f32
     }
 }
 
+/// The logical rectangle and colour of a box, however the theme drew it.
+///
+/// The companion to [`logical_rect`] for tests that need the colour too. A
+/// test that used to read
+///
+/// ```text
+/// cmds.iter().find_map(|c| match c {
+///     RenderCommand::FillRect { height: 30.0, color, .. } => Some(*color),
+///     _ => None,
+/// })
+/// ```
+///
+/// sees nothing once that box becomes an outline, and -- worse -- keeps
+/// passing if every assertion it feeds is over the resulting empty set. That
+/// is not hypothetical: `privacy_settings` passed vacuously for exactly this
+/// reason. Written through this function the same test matches either shape.
+#[must_use]
+pub fn painted_rect(cmd: &guitk::render::RenderCommand) -> Option<(f32, f32, f32, f32, Color)> {
+    let color = match *cmd {
+        guitk::render::RenderCommand::FillRect { color, .. }
+        | guitk::render::RenderCommand::StrokeRect { color, .. } => color,
+        _ => return None,
+    };
+    let (x, y, w, h) = logical_rect(cmd)?;
+    Some((x, y, w, h, color))
+}
+
+/// What the theme painted at a given rectangle, whichever way it drew it.
+///
+/// For tests that used to assert "the well is `p.crust`" by matching a
+/// `FillRect` on colour. Since §829 that box may be an outline instead, and
+/// since §835 a strip may be a hairline, so the colour a test should expect is
+/// no longer a constant -- it is whatever `surface_paint` says for the kind the
+/// draw site named. The assertion becomes
+///
+/// ```ignore
+/// assert_eq!(paint_at(&cmds, x, y, w, h), p.surface_paint(Surface::Card));
+/// ```
+///
+/// which is true under both themes and stays true when either changes. Matching
+/// is on the *logical* rectangle, so a caller passes the geometry the draw site
+/// asked for and does not have to know about the half-pixel stroke inset.
+#[must_use]
+pub fn paint_at(
+    cmds: &[guitk::render::RenderCommand],
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+) -> SurfacePaint {
+    let mut found = SurfacePaint::none();
+    for cmd in cmds {
+        let Some((cx, cy, cw, ch)) = logical_rect(cmd) else {
+            continue;
+        };
+        let same = (cx - x).abs() < 0.01
+            && (cy - y).abs() < 0.01
+            && (cw - width).abs() < 0.01
+            && (ch - height).abs() < 0.01;
+        if !same {
+            continue;
+        }
+        match *cmd {
+            guitk::render::RenderCommand::FillRect { color, .. } => found.fill = Some(color),
+            guitk::render::RenderCommand::StrokeRect { color, .. } => found.border = Some(color),
+            _ => {}
+        }
+    }
+    found
+}
+
 /// What a box *is*, which is what a draw site knows.
 ///
 /// Deliberately not a list of shades. A caller that knew it wanted `surface1`
@@ -302,7 +373,36 @@ impl Palette {
         radii: CornerRadii,
         what: Surface,
     ) {
-        let paint = self.surface_paint(what);
+        self.push_paint_radii(out, x, y, width, height, radii, self.surface_paint(what));
+    }
+
+    /// Draw a paint that a *state* has altered, rather than one a theme chose.
+    ///
+    /// There is exactly one legitimate reason to reach past
+    /// [`push_surface_radii`](Self::push_surface_radii): a site whose box takes
+    /// a different outline when something is wrong with it. The login screen's
+    /// password field is the case -- a rejected password outlines it in
+    /// `p.red`, and under the bordered theme that would otherwise be a *second*
+    /// border drawn concentric with the theme's own, at the same rectangle, one
+    /// in red and one in black.
+    ///
+    /// Note the shape of the fix: the state **replaces** a member of the paint
+    /// rather than drawing another rectangle over it. A site that stacks a
+    /// second rectangle looks right under whichever theme was in front of the
+    /// author and wrong under the other one.
+    ///
+    /// This is not a way to pick colours at a draw site. Start from
+    /// `surface_paint`, change the one member the state owns, and pass it here.
+    pub fn push_paint_radii<S: CommandSink + ?Sized>(
+        &self,
+        out: &mut S,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        radii: CornerRadii,
+        paint: SurfacePaint,
+    ) {
         if let Some(fill) = paint.fill {
             out.emit(guitk::render::RenderCommand::FillRect {
                 x,
@@ -349,6 +449,34 @@ impl Palette {
         }
     }
 
+    /// The single colour this theme marks `what` with.
+    ///
+    /// For tests, and for the handful of callers that need a colour rather than
+    /// a paint. A box is filled *or* outlined depending on the theme, and a
+    /// test that used to say `p.surface0` now says `p.painted(Surface::Card)` --
+    /// one token, and correct under both themes.
+    ///
+    /// # Panics
+    ///
+    /// If `what` is drawn with nothing at all, which
+    /// `no_surface_is_invisible_in_either_theme` forbids. A panic here means
+    /// that invariant broke, and a test is the right place to hear about it.
+    #[must_use]
+    // Total by construction: every arm of `surface_paint` above returns a
+    // paint with at least one of the three set, and
+    // `no_surface_is_invisible_in_either_theme` asserts exactly that over the
+    // cross product of styles and kinds. Returning `Option` instead would put
+    // an `.expect` at each of the ~40 call sites rather than removing one.
+    #[allow(clippy::expect_used)]
+    pub fn painted(&self, what: Surface) -> Color {
+        let paint = self.surface_paint(what);
+        paint
+            .fill
+            .or(paint.border)
+            .or(paint.separator.map(|(_, c)| c))
+            .expect("every surface is drawn with something")
+    }
+
     /// Draw `what` as a rectangle, in whichever way the theme calls for.
     ///
     /// The one-line form, which is what nearly every call site wants. A site
@@ -390,7 +518,7 @@ mod tests {
     /// have to ask the question.
     fn styled(style: SurfaceStyle) -> Palette {
         let mut p = Palette::for_mode(true);
-        p.surface_style = style;
+        p.set_surface_style(style);
         p
     }
 
@@ -656,14 +784,14 @@ mod tests {
     fn a_strip_follows_the_strip_setting_and_ignores_the_surface_one() {
         for surface in [SurfaceStyle::Borders, SurfaceStyle::Cards] {
             let mut filled = Palette::for_mode(true);
-            filled.surface_style = surface;
-            filled.strip_style = crate::StripStyle::Filled;
+            filled.set_surface_style(surface);
+            filled.set_strip_style(crate::StripStyle::Filled);
             let paint = filled.surface_paint(Surface::Strip(Edge::Bottom));
             assert_eq!(paint.fill, Some(filled.mantle), "under {surface:?}");
             assert_eq!(paint.separator, None);
 
             let mut lined = filled;
-            lined.strip_style = crate::StripStyle::Separator;
+            lined.set_strip_style(crate::StripStyle::Separator);
             let paint = lined.surface_paint(Surface::Strip(Edge::Bottom));
             assert_eq!(paint.fill, None, "a separated strip has no band");
             assert_eq!(paint.separator, Some((Edge::Bottom, lined.border)));
@@ -679,7 +807,7 @@ mod tests {
     fn a_strips_separator_lands_on_the_edge_it_names() {
         use guitk::render::RenderCommand;
         let mut p = Palette::for_mode(true);
-        p.strip_style = crate::StripStyle::Separator;
+        p.set_strip_style(crate::StripStyle::Separator);
         for (edge, want_y) in [(Edge::Top, 20.0_f32), (Edge::Bottom, 20.0 + 40.0 - 1.0)] {
             let mut tree = RenderTree::new();
             p.draw_surface(

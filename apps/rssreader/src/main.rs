@@ -3094,8 +3094,15 @@ impl RssReaderApp {
     /// Render the title bar with app name and quick actions.
     fn render_title_bar(&self, cmds: &mut Vec<RenderCommand>, height: f32) {
         // Title bar background
-        self.palette
-            .push_surface(cmds, 0.0, 0.0, self.width, height, 0.0, Surface::Card);
+        self.palette.push_surface(
+            cmds,
+            0.0,
+            0.0,
+            self.width,
+            height,
+            0.0,
+            Surface::Strip(Edge::Bottom),
+        );
 
         // RSS icon (simplified as text)
         cmds.push(RenderCommand::Text {
@@ -3103,7 +3110,7 @@ impl RssReaderApp {
             y: 10.0,
             text: "RSS".to_string(),
             font_size: 13.0,
-            color: self.palette.peach,
+            color: self.palette.ink(self.palette.peach),
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -3146,7 +3153,7 @@ impl RssReaderApp {
             y: 12.0,
             text: "Refresh All".to_string(),
             font_size: 12.0,
-            color: self.palette.blue,
+            color: self.palette.ink(self.palette.blue),
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -3213,19 +3220,19 @@ impl RssReaderApp {
 
         // Search box
         let search_x = self.width - 260.0;
-        self.palette
-            .push_surface(cmds, search_x, y + 6.0, 240.0, 24.0, 4.0, Surface::Card);
+        let mut paint = self.palette.surface_paint(Surface::Card);
         if self.search_active {
-            cmds.push(RenderCommand::StrokeRect {
-                x: search_x,
-                y: y + 6.0,
-                width: 240.0,
-                height: 24.0,
-                color: self.palette.blue,
-                line_width: 1.0,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            paint.border = Some(self.palette.blue);
         }
+        self.palette.push_paint_radii(
+            cmds,
+            search_x,
+            y + 6.0,
+            240.0,
+            24.0,
+            CornerRadii::all(4.0),
+            paint,
+        );
 
         let search_display = if self.search_query.is_empty() {
             "Search articles... (Ctrl+F)".to_string()
@@ -3364,7 +3371,7 @@ impl RssReaderApp {
             text: "Starred".to_string(),
             font_size: 13.0,
             color: if is_starred_selected {
-                self.palette.yellow
+                self.palette.ink(self.palette.yellow)
             } else {
                 self.palette.subtext0
             },
@@ -3535,7 +3542,7 @@ impl RssReaderApp {
                             y: cy + 7.0,
                             text: format!("{feed_unread}"),
                             font_size: 10.0,
-                            color: self.palette.blue,
+                            color: self.palette.ink(self.palette.blue),
                             font_weight: FontWeightHint::Bold,
                             max_width: None,
                             overflow: TextOverflow::Clip,
@@ -3621,7 +3628,7 @@ impl RssReaderApp {
                         y: cy + 7.0,
                         text: format!("{feed_unread}"),
                         font_size: 10.0,
-                        color: self.palette.blue,
+                        color: self.palette.ink(self.palette.blue),
                         font_weight: FontWeightHint::Bold,
                         max_width: None,
                         overflow: TextOverflow::Clip,
@@ -3737,7 +3744,7 @@ impl RssReaderApp {
                     y: cy + 6.0,
                     text: "*".to_string(),
                     font_size: 16.0,
-                    color: self.palette.yellow,
+                    color: self.palette.ink(self.palette.yellow),
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -3925,7 +3932,7 @@ impl RssReaderApp {
                     y: cy + 4.0,
                     text: "* Starred".to_string(),
                     font_size: 11.0,
-                    color: self.palette.yellow,
+                    color: self.palette.ink(self.palette.yellow),
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -3946,7 +3953,7 @@ impl RssReaderApp {
                     y: cy + 4.0,
                     text: "Cached".to_string(),
                     font_size: 11.0,
-                    color: self.palette.green,
+                    color: self.palette.ink(self.palette.green),
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -3973,7 +3980,7 @@ impl RssReaderApp {
                     y: cy,
                     text: article.link.clone(),
                     font_size: 11.0,
-                    color: self.palette.blue,
+                    color: self.palette.ink(self.palette.blue),
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(content_width),
                     overflow: TextOverflow::Ellipsis,
@@ -4066,7 +4073,7 @@ impl RssReaderApp {
             y: y + 7.0,
             text: pane_label.to_string(),
             font_size: 11.0,
-            color: self.palette.blue,
+            color: self.palette.ink(self.palette.blue),
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -4091,7 +4098,7 @@ impl RssReaderApp {
                 y: y + 7.0,
                 text: self.status_message.clone(),
                 font_size: 11.0,
-                color: self.palette.peach,
+                color: self.palette.ink(self.palette.peach),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(self.width / 2.0 - 120.0),
                 overflow: TextOverflow::Ellipsis,
@@ -4218,7 +4225,7 @@ impl RssReaderApp {
                 y: row_y + 2.0,
                 text: action.key_hint().to_string(),
                 font_size: 11.0,
-                color: self.palette.peach,
+                color: self.palette.ink(self.palette.peach),
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(110.0),
                 overflow: TextOverflow::Ellipsis,

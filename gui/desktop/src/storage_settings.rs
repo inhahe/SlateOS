@@ -5,6 +5,7 @@
 //! reclamation policies.
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::ratio;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -553,7 +554,7 @@ impl StorageSettingsUI {
                 y: cy + 6.0,
                 text: "⚠ Low disk space — consider running cleanup".into(),
                 font_size: 12.0,
-                color: p.red,
+                color: p.ink(p.red),
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(inner - 20.0),
                 overflow: TextOverflow::Ellipsis,
@@ -579,7 +580,7 @@ impl StorageSettingsUI {
                 y: cy + 8.0,
                 text: (*label).into(),
                 font_size: 12.0,
-                color: if active { p.accent } else { p.subtext0 },
+                color: if active { p.ink(p.accent) } else { p.subtext0 },
                 font_weight: if active {
                     FontWeightHint::Bold
                 } else {
@@ -646,7 +647,7 @@ impl StorageSettingsUI {
                 ),
                 font_size: 12.0,
                 color: if drive.is_low_space() {
-                    p.red
+                    p.ink(p.red)
                 } else {
                     p.subtext0
                 },
@@ -657,14 +658,15 @@ impl StorageSettingsUI {
 
             // Usage bar
             let bar_y = y + 30.0;
-            cmds.push(RenderCommand::FillRect {
-                x: x + 12.0,
-                y: bar_y,
-                width: width - 24.0,
-                height: 12.0,
-                color: p.surface1,
-                corner_radii: CornerRadii::all(6.0),
-            });
+            p.push_surface(
+                cmds,
+                x + 12.0,
+                bar_y,
+                width - 24.0,
+                12.0,
+                6.0,
+                Surface::Card,
+            );
 
             // Stacked category bars
             let bar_w = width - 24.0;
@@ -712,7 +714,7 @@ impl StorageSettingsUI {
                 y,
                 text: "Breakdown".into(),
                 font_size: 14.0,
-                color: p.lavender,
+                color: p.ink(p.lavender),
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width),
                 overflow: TextOverflow::Ellipsis,
@@ -761,7 +763,7 @@ impl StorageSettingsUI {
                     y,
                     text: format!("Estimated reclaimable: {}", format_bytes(reclaimable)),
                     font_size: 13.0,
-                    color: p.green,
+                    color: p.ink(p.green),
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(width),
                     overflow: TextOverflow::Ellipsis,
@@ -805,7 +807,7 @@ impl StorageSettingsUI {
             y,
             text: "Auto-cleanup rules".into(),
             font_size: 14.0,
-            color: p.lavender,
+            color: p.ink(p.lavender),
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -875,14 +877,7 @@ impl StorageSettingsUI {
         ];
 
         for (label, path) in entries {
-            cmds.push(RenderCommand::FillRect {
-                x,
-                y,
-                width,
-                height: 36.0,
-                color: p.mantle,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            p.push_surface(cmds, x, y, width, 36.0, 4.0, Surface::Card);
             cmds.push(RenderCommand::Text {
                 x: x + 12.0,
                 y: y + 4.0,
@@ -904,20 +899,21 @@ impl StorageSettingsUI {
                 overflow: TextOverflow::Ellipsis,
             });
             // Change button placeholder
-            cmds.push(RenderCommand::FillRect {
-                x: x + width - 70.0,
-                y: y + 6.0,
-                width: 56.0,
-                height: 22.0,
-                color: p.surface0,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            p.push_surface(
+                cmds,
+                x + width - 70.0,
+                y + 6.0,
+                56.0,
+                22.0,
+                4.0,
+                Surface::Card,
+            );
             cmds.push(RenderCommand::Text {
                 x: x + width - 62.0,
                 y: y + 10.0,
                 text: "Change".into(),
                 font_size: 11.0,
-                color: p.accent,
+                color: p.ink(p.accent),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(48.0),
                 overflow: TextOverflow::Ellipsis,

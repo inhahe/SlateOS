@@ -9,6 +9,7 @@
 //! via a capability-gated registration API.
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -1200,7 +1201,7 @@ impl DesktopWidgetManager {
                     y: y + 10.0,
                     text: "\u{1F50B}".to_string(),
                     font_size: 28.0,
-                    color: Color::rgba(p.green.r, p.green.g, p.green.b, alpha),
+                    color: Color::rgba(p.ink(p.green).r, p.ink(p.green).g, p.ink(p.green).b, alpha),
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -1271,23 +1272,17 @@ impl DesktopWidgetManager {
             color: p.shadow(),
             corner_radii: CornerRadii::all(12.0),
         });
-        commands.push(RenderCommand::FillRect {
-            x: px,
-            y: py,
-            width: picker_w,
-            height: picker_h,
-            color: p.mantle,
-            corner_radii: CornerRadii::all(12.0),
-        });
-        commands.push(RenderCommand::StrokeRect {
-            x: px,
-            y: py,
-            width: picker_w,
-            height: picker_h,
-            color: p.surface1,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(12.0),
-        });
+        let mut paint = p.surface_paint(Surface::Card);
+        paint.border = Some(paint.border.unwrap_or(p.surface1));
+        p.push_paint_radii(
+            commands,
+            px,
+            py,
+            picker_w,
+            picker_h,
+            CornerRadii::all(12.0),
+            paint,
+        );
 
         // Title.
         commands.push(RenderCommand::Text {
@@ -1312,7 +1307,7 @@ impl DesktopWidgetManager {
                 y: cy + 4.0,
                 text: kind.icon().to_string(),
                 font_size: 16.0,
-                color: p.blue,
+                color: p.ink(p.blue),
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -2021,9 +2016,15 @@ mod tests {
             .collect()
     }
 
+    /// Every box painted in colour `c`, filled or outlined.
+    ///
+    /// Counting `FillRect` alone would see nothing once a surface becomes an
+    /// outline, and an assertion of "exactly 1" would fail loudly -- but an
+    /// assertion of "0 of the wrong colour" would pass for the wrong reason.
     fn fills_exactly(cmds: &[RenderCommand], c: Color) -> usize {
         cmds.iter()
-            .filter(|k| matches!(k, RenderCommand::FillRect { color, .. } if *color == c))
+            .filter_map(appearance::painted_rect)
+            .filter(|(_, _, _, _, got)| *got == c)
             .count()
     }
 
@@ -2230,7 +2231,7 @@ mod tests {
                 assert_eq!(batt.len(), 1);
                 assert_eq!(
                     rgb(batt[0]),
-                    rgb(p.green),
+                    rgb(p.ink(p.green)),
                     "the battery glyph is not green (light={light})"
                 );
                 assert_ne!(
@@ -2372,7 +2373,7 @@ mod tests {
                 ("Disk", 10.0, p.subtext0),
                 (WRITTEN_NOTE, 12.0, p.text),
                 (EMPTY_NOTE, 12.0, p.overlay0),
-                (WidgetKind::BatteryStatus.icon(), 28.0, p.green),
+                (WidgetKind::BatteryStatus.icon(), 28.0, p.ink(p.green)),
                 ("85%", 20.0, p.text),
                 ("3h 42m remaining", 11.0, p.subtext0),
                 (WidgetKind::Weather.icon(), 32.0, p.surface2),
@@ -2466,15 +2467,22 @@ mod tests {
                 let cmds = full_mgr().render(&p, &sample_readings());
 
                 assert_eq!(
-                    fills_exactly(&cmds, p.mantle),
+                    fills_exactly(&cmds, p.painted(appearance::Surface::Card)),
                     1,
-                    "the picker's panel is not mantle (light={light})"
+                    "the picker's panel is not the card surface (light={light})"
                 );
+                // Whatever the theme outlines a card with -- `surface1` under
+                // cards, the border colour under borders. Naming one of them
+                // here would make this test pass under one theme only.
+                let edge = p
+                    .surface_paint(appearance::Surface::Card)
+                    .border
+                    .unwrap_or(p.surface1);
                 let border = strokes_of_width(&cmds, 1.0);
                 assert_eq!(
-                    border.iter().filter(|c| **c == p.surface1).count(),
+                    border.iter().filter(|c| **c == edge).count(),
                     1,
-                    "the picker's border is not surface1 (light={light})"
+                    "the picker's border is not the card edge (light={light})"
                 );
 
                 for (glyph, size, role, what) in [
@@ -2487,7 +2495,11 @@ mod tests {
                     assert!(!t.is_empty(), "{what} is not drawn (light={light})");
                     for c in t {
                         assert_eq!(c, role, "{what} is the wrong role (light={light})");
-                        assert_ne!(c, p.accent, "{what} followed the accent (light={light})");
+                        assert_ne!(
+                            c,
+                            p.ink(p.accent),
+                            "{what} followed the accent (light={light})"
+                        );
                     }
                 }
             }

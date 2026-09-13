@@ -5,6 +5,7 @@
 //! flyout listing available WiFi networks.
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::step;
@@ -482,7 +483,10 @@ impl NetworkIndicator {
             }
         };
 
-        // Icon background circle
+        // A disc behind the icon, not a card: the icon's colour is the reading
+        // -- red for down, green for ethernet, lavender for VPN -- and it is
+        // read against this. Outlined, the ground goes and a ring appears
+        // round a 24px taskbar icon, which is the opposite of what it is for.
         cmds.push(RenderCommand::FillRect {
             x,
             y,
@@ -577,14 +581,15 @@ impl NetworkIndicator {
         } else {
             p.overlay0
         };
-        cmds.push(RenderCommand::FillRect {
-            x: x + pad,
-            y: cy,
-            width: inner * 0.48,
-            height: 28.0,
-            color: p.surface0,
-            corner_radii: CornerRadii::all(6.0),
-        });
+        p.push_surface(
+            &mut cmds,
+            x + pad,
+            cy,
+            inner * 0.48,
+            28.0,
+            6.0,
+            Surface::Card,
+        );
         cmds.push(RenderCommand::Text {
             x: x + pad + 8.0,
             y: cy + 6.0,
@@ -607,14 +612,15 @@ impl NetworkIndicator {
         } else {
             p.overlay0
         };
-        cmds.push(RenderCommand::FillRect {
-            x: x + pad + inner * 0.52,
-            y: cy,
-            width: inner * 0.48,
-            height: 28.0,
-            color: p.surface0,
-            corner_radii: CornerRadii::all(6.0),
-        });
+        p.push_surface(
+            &mut cmds,
+            x + pad + inner * 0.52,
+            cy,
+            inner * 0.48,
+            28.0,
+            6.0,
+            Surface::Card,
+        );
         cmds.push(RenderCommand::Text {
             x: x + pad + inner * 0.52 + 8.0,
             y: cy + 6.0,
@@ -660,7 +666,11 @@ impl NetworkIndicator {
                     y: cy + 4.0,
                     text: format!("{}{}{}", net.ssid, connected_marker, saved_marker),
                     font_size: 13.0,
-                    color: if net.connected { p.accent } else { p.text },
+                    color: if net.connected {
+                        p.ink(p.accent)
+                    } else {
+                        p.text
+                    },
                     font_weight: if net.connected {
                         FontWeightHint::Bold
                     } else {

@@ -11,6 +11,7 @@
 //! - Print history / job log
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::ratio;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -774,20 +775,21 @@ impl PrintDialog {
             .get(self.selected_printer_idx)
             .map(|p| p.name.as_str())
             .unwrap_or("None");
-        cmds.push(RenderCommand::FillRect {
-            x: dx + 100.0,
-            y: dy + 62.0,
-            width: 280.0,
-            height: 24.0,
-            color: p.surface0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        p.push_surface(
+            &mut cmds,
+            dx + 100.0,
+            dy + 62.0,
+            280.0,
+            24.0,
+            4.0,
+            Surface::Card,
+        );
         cmds.push(RenderCommand::Text {
             x: dx + 108.0,
             y: dy + 66.0,
             text: printer_name.to_string(),
             font_size: 12.0,
-            color: p.accent,
+            color: p.ink(p.accent),
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -860,7 +862,7 @@ impl PrintDialog {
                 y: cy,
                 text: err.clone(),
                 font_size: 11.0,
-                color: p.red,
+                color: p.ink(p.red),
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -888,14 +890,15 @@ impl PrintDialog {
             max_width: None,
             overflow: TextOverflow::Clip,
         });
-        cmds.push(RenderCommand::FillRect {
-            x: dx + dw - 100.0,
-            y: btn_y,
-            width: 80.0,
-            height: 28.0,
-            color: p.surface1,
-            corner_radii: CornerRadii::all(6.0),
-        });
+        p.push_surface(
+            &mut cmds,
+            dx + dw - 100.0,
+            btn_y,
+            80.0,
+            28.0,
+            6.0,
+            Surface::Card,
+        );
         cmds.push(RenderCommand::Text {
             x: dx + dw - 84.0,
             y: btn_y + 7.0,
@@ -1088,20 +1091,15 @@ mod tests {
         hits[0]
     }
 
+    /// The one box of this size, whether the theme filled it or outlined it.
     fn fill_of_size(cmds: &[RenderCommand], w: f32, h: f32) -> Color {
         let hits: Vec<Color> = cmds
             .iter()
-            .filter_map(|c| match c {
-                RenderCommand::FillRect {
-                    width,
-                    height,
-                    color,
-                    ..
-                } if *width == w && *height == h => Some(*color),
-                _ => None,
-            })
+            .filter_map(appearance::painted_rect)
+            .filter(|(_, _, width, height, _)| *width == w && *height == h)
+            .map(|t| t.4)
             .collect();
-        assert_eq!(hits.len(), 1, "expected exactly one {w}x{h} fill");
+        assert_eq!(hits.len(), 1, "expected exactly one {w}x{h} box");
         hits[0]
     }
 
@@ -1196,7 +1194,7 @@ mod tests {
             // The selected printer's name -- judgement 4, follows the accent.
             assert_eq!(
                 rgb(text_containing(&open, "Office Laser")),
-                rgb(p.accent),
+                rgb(p.ink(p.accent)),
                 "{mode}"
             );
             // Settings-row label (one site, four instances).
@@ -1214,7 +1212,7 @@ mod tests {
             // Validation error -- a reading of what went wrong, so frozen red.
             assert_eq!(
                 rgb(text_containing(&err, "Duplex not supported")),
-                rgb(p.red),
+                rgb(p.ink(p.red)),
                 "{mode}"
             );
             // The Print button's label -- judgement 3, ink DERIVED from the
@@ -1252,7 +1250,7 @@ mod tests {
             // label inside it marks the choice.
             assert_eq!(
                 rgb(fill_of_size(&open, 280.0, 24.0)),
-                rgb(p.surface0),
+                rgb(p.painted(appearance::Surface::Card)),
                 "{mode}"
             );
             // Print button: the default action.
@@ -1264,7 +1262,7 @@ mod tests {
             // Cancel button: not the default action.
             assert_eq!(
                 rgb(fill_of_size(&open, 80.0, 28.0)),
-                rgb(p.surface1),
+                rgb(p.painted(appearance::Surface::Card)),
                 "{mode}"
             );
         }
@@ -1376,6 +1374,13 @@ mod tests {
                         continue;
                     }
                     if (rgb(*a), rgb(*b)) == (rgb(A), rgb(B)) {
+                        accent_moves += 1;
+                    } else if (rgb(*a), rgb(*b)) == (rgb(pa.ink(A)), rgb(pb.ink(B))) {
+                        // Accent *text*, which since 837 is a second pixel
+                        // value for the same accent. Counted with the accent
+                        // sites rather than the derived-ink ones: it is the
+                        // accent, adjusted to be readable, not a colour
+                        // computed from it like `on_accent`.
                         accent_moves += 1;
                     } else if (rgb(*a), rgb(*b)) == (rgb(pa.on_accent()), rgb(pb.on_accent())) {
                         on_accent_moves += 1;

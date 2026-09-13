@@ -2140,17 +2140,10 @@ impl HabitTrackerApp {
         let fx = (self.width - fw) / 2.0;
         let fy = (self.height - fh) / 2.0;
 
+        let mut paint = self.palette.surface_paint(Surface::Card);
+        paint.border = Some(paint.border.unwrap_or(self.palette.surface1));
         self.palette
-            .push_surface(cmds, fx, fy, fw, fh, 12.0, Surface::Card);
-        cmds.push(RenderCommand::StrokeRect {
-            x: fx,
-            y: fy,
-            width: fw,
-            height: fh,
-            color: self.palette.surface1,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(12.0),
-        });
+            .push_paint_radii(cmds, fx, fy, fw, fh, CornerRadii::all(12.0), paint);
 
         cmds.push(RenderCommand::Text {
             x: fx + 20.0,

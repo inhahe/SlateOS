@@ -952,6 +952,118 @@ icon in it; `tray_dnd.rs` stays unreachable. The cost is only that the
 somewhere to minimise *to*.
 
 
+## C-Q15 — [C] Under the optional "Filled" theme, should the shaded boxes be made paler? — Status: OPEN
+
+**In short:** you chose outlined boxes as the normal look and kept the older
+filled-box look as an option people can switch to. In that filled look, boxes
+are shaded grey, and text on a grey box is harder to read than text on the
+white page. I have just made the *text* darker automatically so it is always
+readable — so nothing is broken either way. The question is whether you would
+also like the grey boxes themselves made a little paler, which would let the
+text stay closer to the colour you actually picked.
+
+**Glossary.** *Contrast* here is the standard accessibility measure of how far
+apart two colours are in brightness; 4.5 is the minimum for ordinary text.
+*Accent* is the one colour you pick that appears throughout the interface —
+currently the blue-green `#00688B`.
+
+**Why this is not urgent.** Every combination now clears 4.5 automatically, in
+both themes, for all fourteen accent choices and any custom one. This is purely
+about how much the accent has to change when the filled theme is switched on.
+
+**How much it changes today.** Under the normal outlined theme, almost nothing —
+at most six units of colour, which nobody can see. Under the filled theme it is
+visible: a green accent renders as a noticeably deeper green on a card than the
+swatch you chose it from.
+
+**The options**
+
+**A. Leave the greys as they are.**
+*What changes:* nothing. Under the filled theme the accent renders deeper than
+its swatch; under the normal theme it is unchanged.
+For: no work, and the automatic adjustment already guarantees readability.
+Against: someone who picks a bright accent and then switches themes sees it go
+muted, with no explanation on screen.
+
+**B. Make the shaded boxes paler, so the accent moves less.**
+*What changes:* cards, selected rows and sidebars become lighter greys in the
+filled theme; accents render closer to the swatch you picked.
+For: the accent you chose is more nearly the accent you see.
+Against: paler cards are harder to tell apart from the white page — which is
+the entire job of a filled theme — so this trades one visible defect for
+another, and there is not much room: a card must stay distinct from the page.
+
+**C. Show the resolved colour on the settings swatches.**
+*What changes:* the accent swatches in Settings are drawn in the colour that
+theme will actually use, so the picker and the desktop agree.
+For: removes the surprise without touching any grey. Cheap.
+Against: the fourteen swatches would look different under the two themes, which
+some people would read as a bug rather than as honesty.
+
+**My recommendation: C, and then A.** The complaint B addresses is really "the
+swatch lied", not "the accent is wrong" — and C fixes exactly that, for the
+cost of drawing the swatches through the palette instead of from the constants.
+B spends the one thing the filled theme cannot spare, which is the distance
+between a card and the page. If after seeing C you still find the deeper accents
+muddy, B is still available and nothing about C forecloses it.
+
+**If it is never answered:** option A happens, and nothing degrades. Text is
+readable in every combination today. The only cost is the mild surprise
+described above, and only for people who switch to the optional theme.
+
+## C-Q16 — [C] Should the games follow the desktop theme, or keep their own colours? — Status: OPEN
+
+**In short:** about forty small games ship with the system — chess, solitaire,
+minesweeper, tetris and so on — and each one has its colours written into it
+rather than taking them from your theme. Twelve *applications* have the same
+problem and that is plainly a bug: a file manager should be light when you
+choose the light theme. For the games I am not sure it is a bug, and I would
+rather ask than decide it with a script. A chess board's light and dark squares
+are the game's own look, the way a photograph in an image viewer is not
+something the theme should tint.
+
+**What is definitely being fixed either way:** every game's *chrome* — its
+menus, score panels, dialogs, and the window background behind the board. Those
+are interface and they should follow your theme. The question is only about the
+playing surface itself: the board, the pieces, the tiles, the cards.
+
+**The options**
+
+**A. The board keeps its own colours; only the chrome follows the theme.**
+*What changes:* a chess board looks the same in light and dark mode; the menu
+bar and score panel around it change.
+For: a game's board is artwork, and forty games designed around their own
+palettes will not all survive being recoloured. Solitaire's card backs,
+minesweeper's numbered tiles and tetris's seven piece colours are conventions
+people recognise. Against: a dark-theme user gets forty bright rectangles.
+
+**B. Everything follows the theme, boards included.**
+*What changes:* a chess board is drawn in two shades from your palette; tetris
+pieces take palette hues.
+For: complete consistency, and dark mode is genuinely dark.
+Against: tetris's pieces are *identified* by colour (the standard seven), and
+minesweeper's numbers 1–8 have fixed colours that players read at a glance.
+Recolouring those makes the games worse, not just different.
+
+**C. Per-game, decided by whether the colour carries meaning.**
+*What changes:* minesweeper and tetris keep their colours (they mean
+something); chess, checkers and solitaire's felt take the theme (they are
+decoration).
+For: the only option that respects both arguments.
+Against: forty individual judgements, and someone has to make them.
+
+**My recommendation: A**, with C available later for the handful where the
+board is obviously just decoration. A gets dark-mode chrome everywhere for a
+modest, mechanical change, and it cannot make any game worse — which B
+demonstrably can. The cost of deferring C is nothing: it is the same work,
+game by game, whenever anyone cares.
+
+**If it is never answered:** I do the chrome (which A and C agree on) and leave
+the boards alone. Nothing breaks; the games simply keep their current
+appearance, which is what they have today. This question is genuinely safe to
+leave — it is here because forty crates is too many to change on my own guess
+about taste, not because anything is blocked.
+
 ## B-Q9 — [B] We wrote our own copy of a shell because we could not build the original. We can now. Keep the copy, or switch to the original? — Status: OPEN
 
 **In short:** the *shell* is the program that runs the commands you type. SlateOS

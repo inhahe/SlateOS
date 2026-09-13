@@ -59,7 +59,7 @@
 //! *picker*: the accent is how "chosen" is spelled everywhere else in the
 //! shell, and a page that spelled it differently would be the odd one out.
 
-use appearance::{Palette, readable_on};
+use appearance::{Palette, Surface, readable_on};
 use guitk::color::Color;
 use guitk::daywindow::DailyWindow;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -531,7 +531,7 @@ impl FocusAssistManager {
             color: if mode == FocusMode::Off {
                 p.subtext0
             } else {
-                p.blue
+                p.ink(p.blue)
             },
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -573,7 +573,11 @@ impl FocusAssistManager {
                 font_size: 16.0,
                 // Here `BLUE` meant "chosen", not "this much silence" — the
                 // picker's only accent site.
-                color: if selected { p.accent } else { p.subtext0 },
+                color: if selected {
+                    p.ink(p.accent)
+                } else {
+                    p.subtext0
+                },
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -628,14 +632,15 @@ impl FocusAssistManager {
             });
         } else {
             for rule in &self.auto_rules {
-                commands.push(RenderCommand::FillRect {
-                    x: x + padding,
-                    y: cy,
-                    width: width - padding * 2.0,
-                    height: 28.0,
-                    color: p.surface0,
-                    corner_radii: CornerRadii::all(6.0),
-                });
+                p.push_surface(
+                    &mut commands,
+                    x + padding,
+                    cy,
+                    width - padding * 2.0,
+                    28.0,
+                    6.0,
+                    Surface::Card,
+                );
                 commands.push(RenderCommand::Text {
                     x: x + padding + 8.0,
                     y: cy + 6.0,
@@ -1208,11 +1213,20 @@ mod tests {
             let mut want = vec![p.text, p.blue, p.overlay0];
             for chosen in [false, false, true, false] {
                 want.push(if chosen { p.surface0 } else { p.mantle });
-                want.push(if chosen { p.accent } else { p.subtext0 });
+                // The chosen row's icon is accent *text*, so it is inked;
+                // the row's fill above it is not. Same accent, two values.
+                want.push(if chosen { p.ink(p.accent) } else { p.subtext0 });
                 want.push(if chosen { p.text } else { p.subtext0 });
                 want.push(p.overlay0);
             }
-            want.extend([p.text, p.surface0, p.text, p.overlay0]);
+            // The rule row is the one surface this page draws through the
+            // theme; the four mode rows above are still plain fills.
+            want.extend([
+                p.text,
+                p.painted(appearance::Surface::Card),
+                p.text,
+                p.overlay0,
+            ]);
             assert_eq!(
                 colors(&mgr.render_settings(&p, 0.0, 0.0, 400.0)),
                 want,
@@ -1233,7 +1247,9 @@ mod tests {
             let mut want = vec![p.text, p.subtext0];
             for chosen in [true, false, false, false] {
                 want.push(if chosen { p.surface0 } else { p.mantle });
-                want.push(if chosen { p.accent } else { p.subtext0 });
+                // The chosen row's icon is accent *text*, so it is inked;
+                // the row's fill above it is not. Same accent, two values.
+                want.push(if chosen { p.ink(p.accent) } else { p.subtext0 });
                 want.push(if chosen { p.text } else { p.subtext0 });
                 want.push(p.overlay0);
             }
@@ -1323,7 +1339,7 @@ mod tests {
                 let lit: Vec<usize> = bar
                     .iter()
                     .enumerate()
-                    .filter(|(_, (_, icon, _))| *icon == p.accent)
+                    .filter(|(_, (_, icon, _))| *icon == p.ink(p.accent))
                     .map(|(j, _)| j)
                     .collect();
                 assert_eq!(

@@ -2429,7 +2429,7 @@ impl SchedulerUI {
                     y,
                     text: label.to_string(),
                     color: if selected {
-                        self.palette.blue
+                        self.palette.ink(self.palette.blue)
                     } else {
                         self.palette.subtext0
                     },
@@ -3456,17 +3456,17 @@ impl SchedulerUI {
         if rect.is_empty() {
             return;
         }
-        self.palette
-            .push_surface(frame, rect.x, rect.y, rect.w, rect.h, 4.0, Surface::Card);
-        frame.push(RenderCommand::StrokeRect {
-            x: rect.x,
-            y: rect.y,
-            width: rect.w,
-            height: rect.h,
-            color: self.palette.surface2,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        let mut paint = self.palette.surface_paint(Surface::Card);
+        paint.border = Some(paint.border.unwrap_or(self.palette.surface2));
+        self.palette.push_paint_radii(
+            frame,
+            rect.x,
+            rect.y,
+            rect.w,
+            rect.h,
+            CornerRadii::all(4.0),
+            paint,
+        );
 
         let text_y = centre_line(rect, FONT_SIZE);
 

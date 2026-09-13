@@ -4,7 +4,7 @@
 //! display, input) with driver status, safely-remove functionality,
 //! auto-mount preferences, and power management per device.
 
-use appearance::{Palette, readable_on};
+use appearance::{Palette, Surface, readable_on};
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
@@ -615,14 +615,7 @@ impl DeviceSettingsUI {
             let is_active = *tab == self.active_tab;
 
             if is_active {
-                cmds.push(RenderCommand::FillRect {
-                    x: tab_x,
-                    y: tab_y,
-                    width: tw,
-                    height: 32.0,
-                    color: p.surface0,
-                    corner_radii: CornerRadii::all(6.0),
-                });
+                p.push_surface(&mut cmds, tab_x, tab_y, tw, 32.0, 6.0, Surface::Selected);
             }
 
             cmds.push(RenderCommand::Text {
@@ -630,7 +623,11 @@ impl DeviceSettingsUI {
                 y: tab_y + 8.0,
                 text: label.to_string(),
                 font_size: 13.0,
-                color: if is_active { p.accent } else { p.subtext0 },
+                color: if is_active {
+                    p.ink(p.accent)
+                } else {
+                    p.subtext0
+                },
                 font_weight: if is_active {
                     FontWeightHint::Bold
                 } else {
@@ -647,14 +644,15 @@ impl DeviceSettingsUI {
         let content_y = tab_y + 44.0;
         let content_h = height - (content_y - y) - 16.0;
 
-        cmds.push(RenderCommand::FillRect {
-            x: x + 8.0,
-            y: content_y,
-            width: width - 16.0,
-            height: content_h,
-            color: p.crust,
-            corner_radii: CornerRadii::all(6.0),
-        });
+        p.push_surface(
+            &mut cmds,
+            x + 8.0,
+            content_y,
+            width - 16.0,
+            content_h,
+            6.0,
+            Surface::Card,
+        );
 
         let cx = x + 24.0;
         let cy = content_y + 16.0;
@@ -709,14 +707,7 @@ impl DeviceSettingsUI {
         for (i, (label, value, color)) in stats.iter().enumerate() {
             let cx = x + i as f32 * (card_w + 8.0);
 
-            cmds.push(RenderCommand::FillRect {
-                x: cx,
-                y: row_y,
-                width: card_w,
-                height: 56.0,
-                color: p.surface0,
-                corner_radii: CornerRadii::all(6.0),
-            });
+            p.push_surface(cmds, cx, row_y, card_w, 56.0, 6.0, Surface::Card);
 
             cmds.push(RenderCommand::Text {
                 x: cx + 8.0,
@@ -756,14 +747,7 @@ impl DeviceSettingsUI {
         row_y += 24.0;
 
         for (category, count) in self.manager.category_counts() {
-            cmds.push(RenderCommand::FillRect {
-                x,
-                y: row_y,
-                width,
-                height: 36.0,
-                color: p.surface0,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            p.push_surface(cmds, x, row_y, width, 36.0, 4.0, Surface::Card);
 
             cmds.push(RenderCommand::Text {
                 x: x + 12.0,
@@ -826,14 +810,7 @@ impl DeviceSettingsUI {
         ];
 
         for (label, enabled) in &settings {
-            cmds.push(RenderCommand::FillRect {
-                x,
-                y: row_y,
-                width,
-                height: 32.0,
-                color: p.surface0,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            p.push_surface(cmds, x, row_y, width, 32.0, 4.0, Surface::Card);
 
             cmds.push(RenderCommand::Text {
                 x: x + 16.0,
@@ -872,14 +849,7 @@ impl DeviceSettingsUI {
         let mut row_y = y;
 
         // Search bar
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y: row_y,
-            width,
-            height: 32.0,
-            color: p.surface0,
-            corner_radii: CornerRadii::all(6.0),
-        });
+        p.push_surface(cmds, x, row_y, width, 32.0, 6.0, Surface::Card);
 
         let search_text = if self.search_query.is_empty() {
             "Search devices...".to_string()
@@ -928,14 +898,7 @@ impl DeviceSettingsUI {
                 self.expanded_category == Some(*category) || !self.search_query.is_empty();
 
             // Category header
-            cmds.push(RenderCommand::FillRect {
-                x,
-                y: row_y,
-                width,
-                height: 28.0,
-                color: p.surface0,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            p.push_surface(cmds, x, row_y, width, 28.0, 4.0, Surface::Card);
 
             cmds.push(RenderCommand::Text {
                 x: x + 12.0,
@@ -1085,7 +1048,7 @@ impl DeviceSettingsUI {
                 y: row_y + 8.0,
                 text: format!("{} device(s) with driver issues", problems.len()),
                 font_size: 13.0,
-                color: p.red,
+                color: p.ink(p.red),
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1095,14 +1058,7 @@ impl DeviceSettingsUI {
 
         // All devices with driver info
         for device in &self.manager.devices {
-            cmds.push(RenderCommand::FillRect {
-                x,
-                y: row_y,
-                width,
-                height: 52.0,
-                color: p.surface0,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            p.push_surface(cmds, x, row_y, width, 52.0, 4.0, Surface::Card);
 
             cmds.push(RenderCommand::Text {
                 x: x + 16.0,
@@ -1194,14 +1150,7 @@ impl DeviceSettingsUI {
             });
         } else {
             for device in &removable {
-                cmds.push(RenderCommand::FillRect {
-                    x,
-                    y: row_y,
-                    width,
-                    height: 56.0,
-                    color: p.surface0,
-                    corner_radii: CornerRadii::all(6.0),
-                });
+                p.push_surface(cmds, x, row_y, width, 56.0, 6.0, Surface::Card);
 
                 cmds.push(RenderCommand::Text {
                     x: x + 16.0,

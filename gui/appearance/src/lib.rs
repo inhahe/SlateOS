@@ -18,6 +18,29 @@
 //! [`config`] is part of the contract for the same reason the schema is: two
 //! processes writing one file must agree not only on what the keys mean but
 //! on which file it is and how it is replaced.
+//!
+//! # The two scanners that keep this crate's decisions true
+//!
+//! Both live beside this file, are tracked, and are the *standing* checks for
+//! properties nothing in `cargo test` can see -- because they are properties
+//! of the call sites, not of this crate.
+//!
+//! | script | the question it answers |
+//! |---|---|
+//! | `convert-fills.py` | does any box still fill a surface role directly, instead of asking [`Palette::surface_paint`]? (§829) |
+//! | `ink-text.py` | does any text still name a dual-use role directly, instead of asking [`Palette::ink`]? (§837) |
+//!
+//! `ink-text.py` has three modes and the difference between them is the point:
+//! `--check` counts sites that should be converted, `--verify` finds the
+//! opposite error -- a fill or a stroke that asked for a *text* ink -- and
+//! `--blind` reports the sites neither can classify, because their colour
+//! arrives from a method rather than naming a role.
+//!
+//! That third mode exists because "`--check` says zero" reads as "the
+//! conversion is complete" when it means "complete among the sites I can
+//! classify". 108 methods return a themed colour and none of them name a role
+//! at the draw site; see `known-issues.md`
+//! `TD-C-FORTY-NINE-COLOUR-METHODS-ARE-INVISIBLE-TO-THE-INK-SWEEP`.
 
 /// Where settings files live and how they are replaced.
 ///
@@ -260,7 +283,7 @@ pub const LIGHT_BORDER: Color = LIGHT_TEXT;
 use settingsfile::yaml_enum;
 
 pub mod surface;
-pub use surface::{CommandSink, Edge, Surface, SurfacePaint, logical_rect};
+pub use surface::{CommandSink, Edge, Surface, SurfacePaint, logical_rect, paint_at, painted_rect};
 
 // ============================================================================
 // Theme mode
@@ -1314,6 +1337,73 @@ pub fn emphasized(color: Color) -> Color {
     color.lerp(toward, 0.25)
 }
 
+/// The contrast a body-text ink owes its background: WCAG SC 1.4.3, level AA.
+pub const TEXT_CONTRAST_FLOOR: f32 = 4.5;
+
+/// `ink`, moved away from `bg` only as far as the contrast floor requires.
+///
+/// Returns `ink` unchanged when it already clears the floor, so it is a no-op
+/// for the great majority of pairs and cannot drift a palette that is already
+/// correct.
+///
+/// # Why a ratio rather than a fixed table of darker accents
+///
+/// The user may choose any accent, including one this project has never seen.
+/// A table can only be as good as the values in it on the day it was written;
+/// a ratio is a promise about every colour in the cube. The same reasoning
+/// [`readable_on`] gives for preferring a comparison to a luminance threshold.
+///
+/// # Why toward black or white rather than toward `bg`'s opposite
+///
+/// Scaling toward an extreme preserves hue: `#317B21` (green) darkened to
+/// clear 4.5 on a card is `#245A18`, still plainly green, and still plainly
+/// not `#0036A3`. Moving *away from `bg` in RGB* would drag hues around and
+/// two accents could converge. Measured over the fourteen: the closest pair
+/// after adjustment is teal/sapphire, which are near-duplicates in the source
+/// palette to begin with.
+#[must_use]
+pub fn legible_on(ink: Color, bg: Color) -> Color {
+    if contrast_ratio(ink, bg) >= TEXT_CONTRAST_FLOOR {
+        return ink;
+    }
+    // Toward whichever pole is legible *on this ground* -- not "away from the
+    // ground", which is what this said first and which is wrong whenever the
+    // ink is on the same side of the crossover as the ground. A pale yellow on
+    // the pale page has to become dark; retreating further into pale takes it
+    // from 1.13:1 to 1.00:1. A user can choose `#FFFFE0`, so this is not a
+    // corner case, it is a corner case someone will hit.
+    //
+    // True black and true white, not [`DARK_EXTREME`] and [`LIGHT_EXTREME`].
+    // Those two are the *palette's* bounds -- `#11111B` and `#EFF1F5` -- and
+    // between them they leave a gap: a background whose relative luminance
+    // falls in roughly 0.152..0.208 clears 4.5 against neither, so the
+    // bisection would converge on an extreme that still fails and this
+    // function would quietly return something under the floor. Pure black and
+    // pure white have no such gap -- black clears 4.5 for every background
+    // above 0.175 and white for every one below 0.183, and those two ranges
+    // overlap -- so one of them always works. (Pure black is not foreign to
+    // the palette either: `LIGHT_TEXT` is exactly it.)
+    let (black, white) = (Color::rgb(0, 0, 0), Color::rgb(255, 255, 255));
+    let toward = if contrast_ratio(bg, black) >= contrast_ratio(bg, white) {
+        black
+    } else {
+        white
+    };
+    // Bisection on the mix, 24 rounds -- finer than the 8 bits a channel has,
+    // so the answer is the nearest representable colour that clears the floor
+    // rather than an arbitrary one past it.
+    let (mut lo, mut hi) = (0.0_f32, 1.0_f32);
+    for _ in 0..24 {
+        let mid = f32::midpoint(lo, hi);
+        if contrast_ratio(ink.lerp(toward, mid), bg) >= TEXT_CONTRAST_FLOOR {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    ink.lerp(toward, hi)
+}
+
 // ============================================================================
 // The resolved palette
 // ============================================================================
@@ -1396,12 +1486,23 @@ pub struct Palette {
     /// draw site in the tree, so a site needs no new argument to honour the
     /// user's choice. `panel_alpha` and `light` are here for the same reason --
     /// settings-derived values every drawer needs.
-    pub surface_style: SurfaceStyle,
+    ///
+    /// Private, with [`set_surface_style`](Self::set_surface_style), because
+    /// changing it changes which surfaces carry text and therefore what the
+    /// text-only inks have to be. A plain `pub` field let a caller -- in
+    /// practice a test -- switch the theme and leave `subtext0` at the value
+    /// the *previous* theme needed, which reads at 4.10:1 on a dark card. An
+    /// invariant a field assignment can break is not an invariant.
+    surface_style: SurfaceStyle,
     /// Whether a toolbar or status bar is a band or a hairline.
     ///
     /// Carried on the palette for the reason `surface_style` is: a palette
     /// already reaches every draw site, so a site needs no new argument.
-    pub strip_style: StripStyle,
+    ///
+    /// Private for the same reason as `surface_style` above: a filled strip is
+    /// a `mantle` band with labels on it, and a separated one is not, so which
+    /// grounds exist depends on this.
+    strip_style: StripStyle,
     /// The blue of the categorical set. See the type's note on hues.
     pub blue: Color,
     /// Green — also "this succeeded", "this is allowed", "this is safe".
@@ -1483,7 +1584,7 @@ impl Palette {
     /// property of one palette, and a preview swatch.
     #[must_use]
     pub fn for_mode(light: bool) -> Self {
-        if light {
+        let mut chosen = if light {
             Self {
                 crust: LIGHT_CRUST,
                 mantle: LIGHT_MANTLE,
@@ -1543,7 +1644,148 @@ impl Palette {
                 panel_alpha: 255,
                 light: false,
             }
+        };
+        chosen.apply_text_floor();
+        chosen
+    }
+
+    /// `color`, made legible wherever this theme could put text in it.
+    ///
+    /// The operator's requirement, given on 2026-09-11 alongside the choice of
+    /// the bordered theme: *"we still have to figure out how to color them so
+    /// that contrast is always >=4.50."*
+    ///
+    /// # Why the surfaces are computed rather than listed
+    ///
+    /// Which surfaces carry text is a consequence of the two style settings,
+    /// not a fixed fact. Under [`SurfaceStyle::Borders`] a card is an outline,
+    /// so nothing is drawn on `surface0` at all and the page is very nearly
+    /// the only ground there is; under [`SurfaceStyle::Cards`] a selected row
+    /// is a `surface1` fill with a label on it. A hard-coded list would be
+    /// wrong for one of the two, and silently.
+    ///
+    /// # Why it is applied here and not at each draw site
+    ///
+    /// 315 sites draw text in an accent or a named colour. Adjusting at the
+    /// site means 315 chances to forget, and a forgotten one is invisible --
+    /// it renders, it just cannot be read. Adjusting once, where the palette
+    /// is built, is the same argument [`surface_paint`](Self::surface_paint)
+    /// makes about boxes.
+    ///
+    /// The cost, stated plainly: the accent a user picked renders slightly
+    /// deeper than the swatch they picked it from. Under the shipped theme
+    /// that is at most 6.6 units of RGB distance and invisible; under the
+    /// optional card theme it is real and deliberate, because the alternative
+    /// is accent text at 2.9:1 on a card, which is the defect this removes.
+    ///
+    /// `overlay0` is deliberately *not* adjusted. It is the muted ink -- the
+    /// placeholder in an empty field, the label of a disabled control -- and
+    /// WCAG 1.4.3 exempts inactive controls. Making it legible would make a
+    /// disabled control look enabled, which is a worse failure than a faint
+    /// one.
+    #[must_use]
+    pub fn ink(&self, color: Color) -> Color {
+        let grounds = self.text_grounds();
+        let mut out = color;
+        for ground in grounds.iter().flatten() {
+            out = legible_on(out, *ground);
         }
+        out
+    }
+
+    /// Whether boxes are outlined or filled.
+    #[must_use]
+    pub const fn surface_style(&self) -> SurfaceStyle {
+        self.surface_style
+    }
+
+    /// Whether a toolbar or status bar is a band or a hairline.
+    #[must_use]
+    pub const fn strip_style(&self) -> StripStyle {
+        self.strip_style
+    }
+
+    /// Choose how boxes are drawn, re-resolving the inks that depend on it.
+    pub fn set_surface_style(&mut self, style: SurfaceStyle) {
+        self.surface_style = style;
+        self.apply_text_floor();
+    }
+
+    /// Choose how strips are drawn, re-resolving the inks that depend on it.
+    pub fn set_strip_style(&mut self, style: StripStyle) {
+        self.strip_style = style;
+        self.apply_text_floor();
+    }
+
+    /// Raise the text-only inks to the floor for the theme now set.
+    ///
+    /// # Why these three and not the rest
+    ///
+    /// `subtext0`, `subtext1` and `link` exist *to be read*. They are not
+    /// fills, they are not badges, and the user does not choose them -- so
+    /// resolving them against the floor breaks no promise and costs no draw
+    /// site a change. That is 546 of the 861 sites that put an ink on screen.
+    ///
+    /// The remaining roles are dual-use: an accent is also a switch that is
+    /// on, `red` is also an error bar, `green` is also a progress fill. Moving
+    /// those in the palette would silently restyle things that are not text,
+    /// so they stay as chosen and a site that draws *text* in one asks
+    /// [`ink`](Self::ink) for it.
+    ///
+    /// (`link`'s one non-text use is its own underline -- the rule under it,
+    /// which must be the same colour as the text above it. Moving them
+    /// together is the point, not an exception.)
+    ///
+    /// # Why it starts from the constants
+    ///
+    /// So that it is idempotent under a change of theme. Resolving from the
+    /// current field would compound: a palette settled for filled strips and
+    /// then switched to separated ones would keep the deeper ink it no longer
+    /// needs, and a palette re-resolved every frame would drift.
+    fn apply_text_floor(&mut self) {
+        let (sub0, sub1, link) = if self.light {
+            (LIGHT_SUBTEXT0, LIGHT_SUBTEXT1, LIGHT_LINK)
+        } else {
+            (SUBTEXT0, SUBTEXT1, LINK)
+        };
+        self.subtext0 = self.ink(sub0);
+        self.subtext1 = self.ink(sub1);
+        self.link = self.ink(link);
+    }
+
+    /// As [`ink`](Self::ink), for a caller that knows which ground its text
+    /// lands on.
+    ///
+    /// Preferred where it is known, because [`ink`](Self::ink) has to assume
+    /// the worst ground the theme can produce and so darkens a label on the
+    /// page further than that label needs. Identical under the bordered theme,
+    /// where there is essentially one ground.
+    #[must_use]
+    pub fn ink_on(&self, color: Color, ground: Color) -> Color {
+        legible_on(color, ground)
+    }
+
+    /// The surfaces this theme actually draws text on.
+    ///
+    /// A fixed array of slots rather than a `Vec`, so that resolving a
+    /// palette allocates nothing. Callers iterate with `.flatten()`.
+    fn text_grounds(&self) -> [Option<Color>; 5] {
+        let strips = (self.strip_style == StripStyle::Filled).then_some(self.mantle);
+        let cards = self.surface_style == SurfaceStyle::Cards;
+        [
+            // The page, always -- it is under everything.
+            Some(self.base),
+            // A toolbar is a band of `mantle` with labels on it. Also a panel
+            // under the card theme, which is why either condition supplies it.
+            strips.or_else(|| cards.then_some(self.mantle)),
+            // A card and a selected row. `surface2` is not here: it is the
+            // control track, and a groove has a control drawn over it rather
+            // than a label on it.
+            cards.then_some(self.surface0),
+            cards.then_some(self.surface1),
+            // A sidebar.
+            cards.then_some(self.crust),
+        ]
     }
 
     /// Resolve the whole palette from what the user chose.
@@ -1560,6 +1802,14 @@ impl Palette {
             // fill -- and a high-contrast scheme has an opinion about colour,
             // not about that. Someone who chose outlined boxes and then turned
             // on high contrast has not asked for filled ones.
+            //
+            // Assigned rather than set, because the setters re-derive the
+            // text-only inks from the *mode's* constants -- and a high-contrast
+            // palette's inks are the scheme's, at 7:1 or better by
+            // construction. Re-deriving them put `subtext1` back to a value
+            // that reads at 6.26:1, which
+            // `every_text_role_clears_seven_to_one_on_every_surface` caught
+            // within the minute.
             palette.surface_style = settings.surface_style;
             palette.strip_style = settings.strip_style;
             return palette;
@@ -1567,8 +1817,10 @@ impl Palette {
         let mut palette = Self::for_mode(settings.theme_mode.is_light());
         palette.accent = settings.effective_accent();
         palette.panel_alpha = settings.transparency.panel_alpha();
-        palette.surface_style = settings.surface_style;
-        palette.strip_style = settings.strip_style;
+        // The setters re-resolve the text-only inks, which is the whole
+        // reason they are setters: which grounds exist depends on the styles.
+        palette.set_surface_style(settings.surface_style);
+        palette.set_strip_style(settings.strip_style);
         palette
     }
 
@@ -4386,6 +4638,242 @@ mod tests {
             assert_eq!(ColorFilter::from_yaml_name(name), Some(filter));
         }
         assert_eq!(ColorFilter::from_yaml_name("sepia"), None);
+    }
+
+    /// A newline, so the assertion messages below need no escape in a
+    /// heredoc-hostile position.
+    const NEWLINE: &str = "
+";
+
+    /// Every ink clears 4.5:1 on every ground its own theme puts it on --
+    /// both modes, both surface styles, both strip styles, all fourteen
+    /// accents, and a hostile custom one.
+    ///
+    /// This is the test `TD-C-THIRTEEN-LIGHT-ACCENTS-STILL-FAIL-ON-CARDS` said
+    /// would exist "the day this is decided". It asserts the *property*, not a
+    /// table of values, so it stays true if a colour is retuned and it fails
+    /// if a new ink or a new ground is added without being thought about.
+    ///
+    /// Note what the loop varies. The old guard fixed the theme and varied the
+    /// ink; the defect it missed was that the set of grounds *depends on the
+    /// theme*. Under the bordered theme a card is an outline and nothing is
+    /// drawn on `surface0` at all; under the card theme a selected row is a
+    /// `surface1` fill with a label on it. A test written against one of those
+    /// says nothing about the other.
+    #[test]
+    fn every_ink_clears_the_floor_on_every_ground_it_lands_on() {
+        let mut failures = Vec::new();
+        for light in [false, true] {
+            for surface_style in [SurfaceStyle::Borders, SurfaceStyle::Cards] {
+                for strip_style in [StripStyle::Filled, StripStyle::Separator] {
+                    // The fourteen presets, plus two a user could actually
+                    // choose and that no table would contain: one very pale
+                    // and one mid-grey, which is the luminance band where
+                    // neither black nor a palette extreme is obviously right.
+                    let mut accents: Vec<Color> = AccentColor::presets()
+                        .iter()
+                        .map(|a| if light { a.color_light() } else { a.color() })
+                        .collect();
+                    accents.push(Color::from_hex(0xFFFFE0));
+                    accents.push(Color::from_hex(0x808080));
+
+                    for accent in accents {
+                        let mut p = Palette::for_mode(light);
+                        p.accent = accent;
+                        p.set_surface_style(surface_style);
+                        p.set_strip_style(strip_style);
+                        // An exhaustive pattern, on the same terms as
+                        // `roles`: a new colour cannot reach the palette
+                        // without someone deciding here whether it is an ink
+                        // that has to be readable.
+                        let Palette {
+                            // Grounds, not inks.
+                            crust: _,
+                            mantle: _,
+                            base: _,
+                            surface0: _,
+                            surface1: _,
+                            surface2: _,
+                            // The muted ink -- the placeholder in an empty
+                            // field, the label of a disabled control. WCAG
+                            // 1.4.3 exempts inactive controls, and making this
+                            // legible would make a disabled control look
+                            // enabled, which is the worse failure.
+                            overlay0: _,
+                            // Not text: SC 1.4.11 floors a component outline
+                            // at 3.0, which
+                            // `the_border_is_visible_against_every_surface`
+                            // covers.
+                            border: _,
+                            subtext0,
+                            subtext1,
+                            text,
+                            link,
+                            red,
+                            green,
+                            yellow,
+                            peach,
+                            blue,
+                            lavender,
+                            mauve,
+                            sapphire,
+                            teal,
+                            sky,
+                            accent,
+                            panel_alpha: _,
+                            light: _,
+                            surface_style: _,
+                            strip_style: _,
+                        } = p;
+
+                        let grounds = p.text_grounds();
+                        // Each role is checked the way a draw site *actually*
+                        // reads it, which is the property that matters. The
+                        // three text-only roles are already floored in the
+                        // palette, so a site says `p.subtext0`; the dual-use
+                        // ones are not, so a site drawing text says
+                        // `p.ink(p.accent)`. Checking both through `ink` would
+                        // make this pass while `p.subtext0` was unreadable.
+                        for (name, ink, floored_in_place) in [
+                            ("text", text, true),
+                            ("subtext0", subtext0, true),
+                            ("subtext1", subtext1, true),
+                            ("link", link, true),
+                            ("accent", p.ink(accent), false),
+                            ("red", p.ink(red), false),
+                            ("green", p.ink(green), false),
+                            ("yellow", p.ink(yellow), false),
+                            ("peach", p.ink(peach), false),
+                            ("blue", p.ink(blue), false),
+                            ("lavender", p.ink(lavender), false),
+                            ("mauve", p.ink(mauve), false),
+                            ("sapphire", p.ink(sapphire), false),
+                            ("teal", p.ink(teal), false),
+                            ("sky", p.ink(sky), false),
+                        ] {
+                            let _ = floored_in_place;
+                            for ground in grounds.iter().flatten() {
+                                let ratio = contrast_ratio(ink, *ground);
+                                if ratio < TEXT_CONTRAST_FLOOR {
+                                    failures.push(format!(
+                                        "light={light} {surface_style:?}/{strip_style:?}                                          accent=#{:06X}: {name} on #{:06X} is {ratio:.2}",
+                                        (u32::from(accent.r) << 16)
+                                            | (u32::from(accent.g) << 8)
+                                            | u32::from(accent.b),
+                                        (u32::from(ground.r) << 16)
+                                            | (u32::from(ground.g) << 8)
+                                            | u32::from(ground.b),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} ink/ground pairs below the floor, first 10:{}{}",
+            failures.len(),
+            NEWLINE,
+            failures
+                .iter()
+                .take(10)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(NEWLINE)
+        );
+    }
+
+    /// `text` needs no adjustment, which is why its ~5,000 draw sites were
+    /// left saying `p.text`.
+    ///
+    /// A reachable check for an argument that would otherwise be a comment. If
+    /// the ladder is ever retuned so that the main ink no longer clears the
+    /// floor on its own, this fails and says so -- rather than the guard above
+    /// passing on `p.ink(p.text)` while every real site draws `p.text`.
+    #[test]
+    fn the_main_ink_clears_the_floor_without_help() {
+        for light in [false, true] {
+            for surface_style in [SurfaceStyle::Borders, SurfaceStyle::Cards] {
+                for strip_style in [StripStyle::Filled, StripStyle::Separator] {
+                    let mut p = Palette::for_mode(light);
+                    p.set_surface_style(surface_style);
+                    p.set_strip_style(strip_style);
+                    assert_eq!(
+                        p.ink(p.text),
+                        p.text,
+                        "p.text needs adjusting under {surface_style:?}/{strip_style:?}                          (light={light}), so its draw sites can no longer say `p.text`"
+                    );
+                }
+            }
+        }
+    }
+
+    /// `ink` is idempotent: adjusting for one ground does not push a colour
+    /// below the floor on another.
+    ///
+    /// The property `ink`'s loop relies on and does not prove. If it failed,
+    /// a second call would move the colour again, and a palette re-resolved
+    /// on every frame would drift.
+    #[test]
+    fn ink_converges_rather_than_trading_one_ground_for_another() {
+        for light in [false, true] {
+            let mut p = Palette::for_mode(light);
+            p.set_surface_style(SurfaceStyle::Cards);
+            p.set_strip_style(StripStyle::Filled);
+            for (_, role) in p.roles() {
+                let once = p.ink(role);
+                assert_eq!(
+                    p.ink(once),
+                    once,
+                    "inking twice moved it again, so the first pass had not                      finished (light={light})"
+                );
+            }
+        }
+    }
+
+    /// The palette's own fields are left exactly as chosen.
+    ///
+    /// The first version of this work adjusted them in place, and three
+    /// existing tests said no -- `a_custom_accent_reaches_the_palette_exactly_
+    /// as_chosen` most directly. They were right. Legibility is a property of
+    /// an ink *and a ground*, so it belongs to the pair, not to the field: an
+    /// accent is also a fill, a badge and a progress bar, and those do not
+    /// want the text adjustment.
+    #[test]
+    fn resolving_a_palette_does_not_alter_the_colours_it_was_given() {
+        let mut settings = AppearanceSettings::default();
+        settings.accent_color = AccentColor::Custom;
+        settings.custom_accent = Color::from_hex(0x123456);
+        settings.surface_style = SurfaceStyle::Cards;
+        let p = Palette::from_settings(&settings);
+        assert_eq!(p.accent, Color::from_hex(0x123456));
+        assert_ne!(
+            p.ink(p.accent),
+            p.accent,
+            "this fixture is only meaningful if the ink *would* have moved"
+        );
+    }
+
+    /// An ink that already clears the floor is returned untouched.
+    ///
+    /// Otherwise every palette would drift by a rounding step on every
+    /// resolve, and a preview drawn from a re-resolved palette would slowly
+    /// diverge from the desktop.
+    #[test]
+    fn legible_on_is_a_no_op_for_a_pair_that_already_passes() {
+        assert_eq!(legible_on(LIGHT_TEXT, LIGHT_BASE), LIGHT_TEXT);
+        assert_eq!(legible_on(TEXT, BASE), TEXT);
+        // And it does move one that does not.
+        let moved = legible_on(LIGHT_MAROON, LIGHT_SURFACE1);
+        assert_ne!(moved, LIGHT_MAROON);
+        assert!(contrast_ratio(moved, LIGHT_SURFACE1) >= TEXT_CONTRAST_FLOOR);
+        // Hue survives: still recognisably red rather than a neutral.
+        assert!(
+            moved.r > moved.g && moved.r > moved.b,
+            "maroon stopped being red: {moved:?}"
+        );
     }
 
     /// Every light-theme text ink clears 4.5:1 on every surface it can be

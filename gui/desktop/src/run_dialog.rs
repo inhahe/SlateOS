@@ -37,6 +37,7 @@
 //! ```
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::event::{EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
@@ -949,25 +950,17 @@ impl RunDialog {
         let input_x = x + PADDING + 40.0;
         let input_w = DIALOG_WIDTH - PADDING * 2.0 - 40.0;
 
-        cmds.push(RenderCommand::FillRect {
-            x: input_x,
-            y: y + INPUT_Y_OFFSET,
-            width: input_w,
-            height: INPUT_HEIGHT,
-            color: p.crust,
-            corner_radii: CornerRadii::all(4.0),
-        });
-
-        // Input field border.
-        cmds.push(RenderCommand::StrokeRect {
-            x: input_x,
-            y: y + INPUT_Y_OFFSET,
-            width: input_w,
-            height: INPUT_HEIGHT,
-            color: p.accent,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        let mut paint = p.surface_paint(Surface::Panel);
+        paint.border = Some(p.accent);
+        p.push_paint_radii(
+            &mut cmds,
+            input_x,
+            y + INPUT_Y_OFFSET,
+            input_w,
+            INPUT_HEIGHT,
+            CornerRadii::all(4.0),
+            paint,
+        );
 
         // Selection highlight (if any).
         if self.input.has_selection() {
@@ -1036,7 +1029,7 @@ impl RunDialog {
                 x: input_x,
                 y: y + INPUT_Y_OFFSET + INPUT_HEIGHT + 2.0,
                 text: err.clone(),
-                color: p.red,
+                color: p.ink(p.red),
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(input_w),
@@ -1050,45 +1043,39 @@ impl RunDialog {
             let dropdown_y = y + INPUT_Y_OFFSET + INPUT_HEIGHT + 2.0;
             let dropdown_h = self.suggestions.len() as f32 * AUTOCOMPLETE_ROW_HEIGHT;
 
-            cmds.push(RenderCommand::FillRect {
-                x: dropdown_x,
-                y: dropdown_y,
-                width: input_w,
-                height: dropdown_h,
-                color: p.mantle,
-                corner_radii: CornerRadii::all(4.0),
-            });
-
-            cmds.push(RenderCommand::StrokeRect {
-                x: dropdown_x,
-                y: dropdown_y,
-                width: input_w,
-                height: dropdown_h,
-                color: p.surface1,
-                line_width: 1.0,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            let mut paint = p.surface_paint(Surface::Panel);
+            paint.border = Some(paint.border.unwrap_or(p.surface1));
+            p.push_paint_radii(
+                &mut cmds,
+                dropdown_x,
+                dropdown_y,
+                input_w,
+                dropdown_h,
+                CornerRadii::all(4.0),
+                paint,
+            );
 
             for (i, suggestion) in self.suggestions.iter().enumerate() {
                 let row_y = dropdown_y + i as f32 * AUTOCOMPLETE_ROW_HEIGHT;
                 let is_selected = self.suggestion_index == Some(i);
 
                 if is_selected {
-                    cmds.push(RenderCommand::FillRect {
-                        x: dropdown_x + 1.0,
-                        y: row_y,
-                        width: input_w - 2.0,
-                        height: AUTOCOMPLETE_ROW_HEIGHT,
-                        color: p.surface0,
-                        corner_radii: CornerRadii::ZERO,
-                    });
+                    p.push_surface(
+                        &mut cmds,
+                        dropdown_x + 1.0,
+                        row_y,
+                        input_w - 2.0,
+                        AUTOCOMPLETE_ROW_HEIGHT,
+                        0.0,
+                        Surface::Selected,
+                    );
                 }
 
                 cmds.push(RenderCommand::Text {
                     x: dropdown_x + 8.0,
                     y: row_y + 6.0,
                     text: suggestion.text.clone(),
-                    color: if is_selected { p.accent } else { p.text },
+                    color: if is_selected { p.ink(p.accent) } else { p.text },
                     font_size: INPUT_FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(input_w - 16.0),

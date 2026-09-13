@@ -1609,9 +1609,9 @@ impl FinanceApp {
                 ),
                 font_size: 14.0,
                 color: if remaining >= 0 {
-                    self.palette.green
+                    self.palette.ink(self.palette.green)
                 } else {
-                    self.palette.red
+                    self.palette.ink(self.palette.red)
                 },
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(190.0),
@@ -1668,9 +1668,9 @@ impl FinanceApp {
                 text: rem_text,
                 font_size: 11.0,
                 color: if remaining >= 0 {
-                    self.palette.teal
+                    self.palette.ink(self.palette.teal)
                 } else {
-                    self.palette.red
+                    self.palette.ink(self.palette.red)
                 },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(200.0),
@@ -1878,11 +1878,11 @@ impl FinanceApp {
                 text: format!("Savings Rate: {savings_rate:.1}%"),
                 font_size: 16.0,
                 color: if savings_rate >= 20.0 {
-                    self.palette.green
+                    self.palette.ink(self.palette.green)
                 } else if savings_rate >= 0.0 {
-                    self.palette.yellow
+                    self.palette.ink(self.palette.yellow)
                 } else {
-                    self.palette.red
+                    self.palette.ink(self.palette.red)
                 },
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(300.0),

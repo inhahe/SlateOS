@@ -5,6 +5,7 @@
 //! telemetry opt-out, and app background access controls.
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
@@ -150,15 +151,24 @@ impl PermissionState {
         }
     }
 
-    /// The colour this state reports itself in.
+    /// The colour this state reports itself in, as *text*.
     ///
     /// Categorical, not decorative: green *means* allowed and red *means*
     /// denied, so neither follows the accent. See judgement 2 in the module's
     /// colour notes.
+    ///
+    /// Inked here rather than at the call site, and that is not a stylistic
+    /// choice. A colour reaching a `RenderCommand::Text` through a method is
+    /// invisible to `ink-text.py`, which classifies by the role named at the
+    /// site -- so this had to be found by a failing test rather than by the
+    /// sweep. And inking at the call site would be *wrong*: it would raise
+    /// `overlay0` too, and `overlay0` is the muted ink that WCAG 1.4.3 exempts,
+    /// so a "not decided" row would start looking decided. The adjustment
+    /// belongs per arm, which is where the arms are.
     pub fn color(self, p: &Palette) -> Color {
         match self {
-            Self::Allowed => p.green,
-            Self::Denied => p.red,
+            Self::Allowed => p.ink(p.green),
+            Self::Denied => p.ink(p.red),
             Self::NotDecided => p.overlay0,
         }
     }
@@ -522,7 +532,7 @@ impl PrivacySettingsUI {
                 y: cy + 8.0,
                 text: (*label).into(),
                 font_size: 12.0,
-                color: if active { p.accent } else { p.subtext0 },
+                color: if active { p.ink(p.accent) } else { p.subtext0 },
                 font_weight: if active {
                     FontWeightHint::Bold
                 } else {
@@ -566,7 +576,7 @@ impl PrivacySettingsUI {
                 y,
                 text: format!("{} {}", kind.icon(), kind.label()),
                 font_size: 16.0,
-                color: p.lavender,
+                color: p.ink(p.lavender),
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width),
                 overflow: TextOverflow::Ellipsis,
@@ -612,14 +622,7 @@ impl PrivacySettingsUI {
                 });
             } else {
                 for app in &apps {
-                    cmds.push(RenderCommand::FillRect {
-                        x,
-                        y,
-                        width,
-                        height: 32.0,
-                        color: p.mantle,
-                        corner_radii: CornerRadii::all(4.0),
-                    });
+                    p.push_surface(cmds, x, y, width, 32.0, 4.0, Surface::Card);
                     cmds.push(RenderCommand::Text {
                         x: x + 8.0,
                         y: y + 8.0,
@@ -658,14 +661,7 @@ impl PrivacySettingsUI {
             for (i, kind) in PermissionKind::ALL.iter().enumerate() {
                 let enabled = self.settings.is_globally_enabled(*kind);
                 let count = self.settings.allowed_count(*kind);
-                cmds.push(RenderCommand::FillRect {
-                    x,
-                    y,
-                    width,
-                    height: 40.0,
-                    color: p.mantle,
-                    corner_radii: CornerRadii::all(6.0),
-                });
+                p.push_surface(cmds, x, y, width, 40.0, 6.0, Surface::Card);
                 cmds.push(RenderCommand::Text {
                     x: x + 8.0,
                     y: y + 4.0,
@@ -689,7 +685,11 @@ impl PrivacySettingsUI {
                     y: y + 4.0,
                     text: status,
                     font_size: 12.0,
-                    color: if enabled { p.green } else { p.red },
+                    color: if enabled {
+                        p.ink(p.green)
+                    } else {
+                        p.ink(p.red)
+                    },
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width * 0.4),
                     overflow: TextOverflow::Ellipsis,
@@ -749,17 +749,20 @@ impl PrivacySettingsUI {
         // Show last 20 entries (newest first).
         let show = log.iter().rev().take(20);
         for entry in show {
-            cmds.push(RenderCommand::FillRect {
-                x,
-                y,
-                width,
-                height: 28.0,
-                color: p.mantle,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            p.push_surface(cmds, x, y, width, 28.0, 4.0, Surface::Card);
             let icon = entry.permission.icon();
             let status = if entry.allowed { "✓" } else { "✕" };
-            let color = if entry.allowed { p.green } else { p.red };
+            // Both arms are text, so both are inked. Bound to a local and
+            // passed to the `Text` command by field shorthand (`color,`),
+            // which is the fourth way a colour reaches a draw site without
+            // naming a role there -- and the one `ink-text.py` is blindest
+            // to, since its pattern is `color: <expr>` and there is no
+            // expression here at all.
+            let color = if entry.allowed {
+                p.ink(p.green)
+            } else {
+                p.ink(p.red)
+            };
             cmds.push(RenderCommand::Text {
                 x: x + 8.0,
                 y: y + 6.0,
@@ -793,7 +796,7 @@ impl PrivacySettingsUI {
             y,
             text: "Telemetry".into(),
             font_size: 14.0,
-            color: p.lavender,
+            color: p.ink(p.lavender),
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -816,7 +819,7 @@ impl PrivacySettingsUI {
                 y: y + 6.0,
                 text: format!("{}{}", indicator, level.label()),
                 font_size: 13.0,
-                color: if active { p.accent } else { p.text },
+                color: if active { p.ink(p.accent) } else { p.text },
                 font_weight: if active {
                     FontWeightHint::Bold
                 } else {
@@ -834,7 +837,7 @@ impl PrivacySettingsUI {
             y,
             text: "Other".into(),
             font_size: 14.0,
-            color: p.lavender,
+            color: p.ink(p.lavender),
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -1408,15 +1411,20 @@ mod tests {
     }
 
     fn fills(cmds: &[RenderCommand], w: f32, h: f32) -> Vec<Color> {
+        // Both kinds, on the logical rectangle. Since §829 a box may be an
+        // outline rather than a fill, and an outline reports a rectangle a
+        // pixel smaller than the one asked for.
         cmds.iter()
-            .filter_map(|c| match c {
-                RenderCommand::FillRect {
-                    width,
-                    height,
-                    color,
-                    ..
-                } if (*width - w).abs() < 0.01 && (*height - h).abs() < 0.01 => Some(*color),
-                _ => None,
+            .filter_map(|c| {
+                let (_, _, cw, ch) = appearance::logical_rect(c)?;
+                if (cw - w).abs() > 0.01 || (ch - h).abs() > 0.01 {
+                    return None;
+                }
+                match *c {
+                    RenderCommand::FillRect { color, .. }
+                    | RenderCommand::StrokeRect { color, .. } => Some(color),
+                    _ => None,
+                }
             })
             .collect()
     }
@@ -1608,7 +1616,7 @@ mod tests {
             // render_permissions_tab, detail arm
             assert_eq!(
                 rgb(text_containing(&bare, kind0.label())),
-                rgb(p.lavender),
+                rgb(p.ink(p.lavender)),
                 "{mode}"
             );
             assert_eq!(
@@ -1644,12 +1652,12 @@ mod tests {
             // site would give all three rows the same colour.
             assert_eq!(
                 rgb(text_containing(&full, PermissionState::Allowed.label())),
-                rgb(p.green),
+                rgb(p.ink(p.green)),
                 "{mode}"
             );
             assert_eq!(
                 rgb(text_containing(&full, PermissionState::Denied.label())),
-                rgb(p.red),
+                rgb(p.ink(p.red)),
                 "{mode}"
             );
             assert_eq!(
@@ -1682,12 +1690,12 @@ mod tests {
             // render_general_tab
             assert_eq!(
                 rgb(text_containing(&tab2, "Telemetry")),
-                rgb(p.lavender),
+                rgb(p.ink(p.lavender)),
                 "{mode}"
             );
             assert_eq!(
                 rgb(text_containing(&tab2, "Other")),
-                rgb(p.lavender),
+                rgb(p.ink(p.lavender)),
                 "{mode}"
             );
             // render_toggle
@@ -1712,38 +1720,47 @@ mod tests {
             let act = draw("activity: allowed and denied", &p);
             let tab2 = draw("general: level 0, toggles true", &p);
 
+            // Non-empty *and* uniform. Written as `.all()` alone this whole
+            // test passed while drawing nothing: once these rows became
+            // outlines the old `FillRect`-only collector returned an empty
+            // vector, and `[].all(..)` is true. Four assertions went quiet
+            // together and the suite stayed green.
+            let every = |got: &[Color], want: Color, what: &str| {
+                assert!(!got.is_empty(), "{mode}: no {what} was drawn at all");
+                assert!(
+                    got.iter().all(|c| rgb(*c) == rgb(want)),
+                    "{mode}: a {what} is in the wrong role: {got:?}"
+                );
+            };
+
             // render: the panel background.
             assert_eq!(rgb(fills(&over, 500.0, 900.0)[0]), rgb(p.base), "{mode}");
             // render_permissions_tab: an app row.
-            assert!(
-                fills(&full, 468.0, 32.0)
-                    .iter()
-                    .all(|c| rgb(*c) == rgb(p.mantle)),
-                "{mode}"
+            every(
+                &fills(&full, 468.0, 32.0),
+                p.painted(appearance::Surface::Card),
+                "app row",
             );
             // render_permissions_tab: an overview row.
-            assert!(
-                fills(&over, 468.0, 40.0)
-                    .iter()
-                    .all(|c| rgb(*c) == rgb(p.mantle)),
-                "{mode}"
+            every(
+                &fills(&over, 468.0, 40.0),
+                p.painted(appearance::Surface::Card),
+                "overview row",
             );
             // render_activity_tab: a log row.
-            assert!(
-                fills(&act, 468.0, 28.0)
-                    .iter()
-                    .all(|c| rgb(*c) == rgb(p.mantle)),
-                "{mode}"
+            every(
+                &fills(&act, 468.0, 28.0),
+                p.painted(appearance::Surface::Card),
+                "log row",
             );
             // render_toggle: the knob, which is `readable_on` its own pill
             // rather than a role. This fixture has every toggle *on*, so every
             // knob here rides `green`; the off ink is a different value and is
             // pinned by the switch module's own tests.
-            assert!(
-                fills(&tab2, 16.0, 16.0)
-                    .iter()
-                    .all(|c| rgb(*c) == rgb(appearance::readable_on(p.green))),
-                "{mode}"
+            every(
+                &fills(&tab2, 16.0, 16.0),
+                appearance::readable_on(p.green),
+                "toggle knob",
             );
         }
     }
@@ -1763,10 +1780,14 @@ mod tests {
             // PermissionState::color -- three arms.
             assert_eq!(
                 rgb(PermissionState::Allowed.color(&p)),
-                rgb(p.green),
+                rgb(p.ink(p.green)),
                 "{mode}"
             );
-            assert_eq!(rgb(PermissionState::Denied.color(&p)), rgb(p.red), "{mode}");
+            assert_eq!(
+                rgb(PermissionState::Denied.color(&p)),
+                rgb(p.ink(p.red)),
+                "{mode}"
+            );
             assert_eq!(
                 rgb(PermissionState::NotDecided.color(&p)),
                 rgb(p.overlay0),
@@ -1788,7 +1809,7 @@ mod tests {
             );
             assert_eq!(
                 rgb(text_exact(&over, "Permissions")),
-                rgb(p.accent),
+                rgb(p.ink(p.accent)),
                 "{mode}"
             );
             assert_eq!(
@@ -1800,17 +1821,17 @@ mod tests {
             // render_permissions_tab: the overview status line, all three ways.
             assert_eq!(
                 rgb(text_containing(&over, "Disabled")),
-                rgb(p.red),
+                rgb(p.ink(p.red)),
                 "{mode}"
             );
             assert_eq!(
                 rgb(text_containing(&over, "apps allowed")),
-                rgb(p.green),
+                rgb(p.ink(p.green)),
                 "{mode}"
             );
             assert_eq!(
                 rgb(text_containing(&over, "No apps")),
-                rgb(p.green),
+                rgb(p.ink(p.green)),
                 "{mode}"
             );
 
@@ -1818,10 +1839,14 @@ mod tests {
             let act = draw("activity: allowed and denied", &p);
             assert_eq!(
                 rgb(text_containing(&act, "\u{2713}")),
-                rgb(p.green),
+                rgb(p.ink(p.green)),
                 "{mode}"
             );
-            assert_eq!(rgb(text_containing(&act, "\u{2715}")), rgb(p.red), "{mode}");
+            assert_eq!(
+                rgb(text_containing(&act, "\u{2715}")),
+                rgb(p.ink(p.red)),
+                "{mode}"
+            );
 
             // render_general_tab: the radio row, fill and label, both ways.
             let tab2 = draw("general: level 0, toggles true", &p);
@@ -1838,7 +1863,7 @@ mod tests {
             );
             assert_eq!(
                 rgb(text_containing(&tab2, "\u{25CF} ")),
-                rgb(p.accent),
+                rgb(p.ink(p.accent)),
                 "{mode}"
             );
             assert_eq!(
@@ -1937,9 +1962,12 @@ mod tests {
                     if rgb(*a) == rgb(*b) {
                         continue;
                     }
-                    assert_eq!(
-                        (rgb(*a), rgb(*b)),
-                        (rgb(A), rgb(B)),
+                    // Either form of the accent: raw where it fills, inked
+                    // where it is text. 837 made one accent two pixel values,
+                    // and a site is still the accent in both.
+                    assert!(
+                        (rgb(*a), rgb(*b)) == (rgb(A), rgb(B))
+                            || (rgb(*a), rgb(*b)) == (rgb(pa.ink(A)), rgb(pb.ink(B))),
                         "{what} (light={light}): command {i} changed with the \
                          accent without being the accent"
                     );

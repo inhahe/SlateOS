@@ -1744,7 +1744,96 @@ Roadmap:
 - `[C]` Container runtime / Docker equivalent (lines ~5253, ~5315)
 - `[C]` System web app framework (line ~5045) — after Chromium
 - `[C]` Port VS Code, Thunderbird (lines ~5046–5047) — after Chromium
+- `[C]` **Twelve applications ignore the user's theme** — the shell's
+  `TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE`, again, in
+  `apps/`. 987 `const NAME: Color` declarations over 68 crates, and the names
+  collide the same way they did last time: `BASE` declared in 40 separate
+  crates, `SUBTEXT0` in 40, `RED`/`GREEN`/`BLUE` in 37 each. Those are copies of
+  one palette, not forty considered choices.
+
+  **Do the twelve applications first** — `procexplorer` (45 constants),
+  `sysinfo` (26), `imageviewer` (25), `pdfviewer` (21), `musicplayer` (18),
+  `speedtest` (17), `explorer` (17), `devicemanager` (17), `pomodoro` (16),
+  `screenshot` (15), `benchmark` (15), `mixer` (14). A file manager and a
+  process explorer that stay dark on a light desktop are the visible failure.
+  Thirteen more crates already have a `Palette` in scope and are nearly free.
+
+  **The ~43 games are C-Q16 and are not part of this.** Their chrome follows
+  the theme either way; whether the *board* should is a question about taste
+  that a sweep must not answer — tetris's seven piece colours and
+  minesweeper's numbered tiles *identify* things, and recolouring them makes
+  the games worse rather than different.
+
+  **Why nothing caught it:** 47 shell modules use `appearance::palette_check`
+  and **zero** apps do. `assert_drawn_from` is the function that found the
+  shell's copies; it already takes a `derived` list so an ANSI table or a
+  paint program's swatches can be declared rather than excused. Adopting it
+  per crate is both the fix and the guard.
+
 - `[C]` Speech input/output; phone camera/mic integration (lines ~5390–5391)
+
+- `[C]` **The bordered theme, applied** (§829-§837) — done. A re-run of the
+  converter finds **zero** convertible sites left; what the earlier survey
+  counted as ~356 remaining was overwhelmingly test assertions and the data
+  bars deliberately left as fills. Every box that is a *surface* — a
+  card, a selected row, a sidebar, a panel, a control's groove, a full-width
+  strip — now asks `Palette::surface_paint` what to draw instead of naming a
+  shade, so the Outlined/Filled choice and the Shaded/A-line choice are two
+  settings rather than a rewrite. The Themes page carries both, with a preview
+  that draws through the same function the desktop does.
+
+  **What the conversion cost, for whoever converts the remaining 356.** Three
+  defect classes got into the tree, all of them invisible on a passing build
+  and all of them found by *shape* rather than by reading:
+
+  | Sweep | What it looks for | Found |
+  |---|---|---|
+  | too thin | a surface 1px in either direction | 21 separators drawn as degenerate outlines |
+  | at the origin | `(0, 0)`, full width, no radius | 3 window backgrounds, 5 title bars |
+  | doubled | a surface and a `StrokeRect` at the same four coordinates | 19 concentric rings |
+  | circular | `w == h` and `radius == w/2` | 2 discs that were a graphic's ground |
+
+  The common cause is that the converter classifies from the words around a
+  site, and "Header", "Divider" and "Full-window background" are ordinary
+  English no pattern matches. Geometry is what separates them, and geometry is
+  what a sweep after the fact can see. Run all four before believing a batch.
+
+  Two test shapes hid failures rather than reporting them, and both are worth
+  looking for elsewhere: a collector matching `FillRect` only returns an empty
+  vector once its subject becomes an outline (`privacy_settings` passed
+  vacuously through a whole conversion), and `.all()` over that empty vector is
+  true. `appearance::painted_rect` matches either shape on the logical
+  rectangle; assert non-empty before asserting uniform.
+
+  **The contrast half** (§837, and the operator's own requirement): every ink
+  now clears 4.5:1 on every surface its theme puts text on — both modes, both
+  style settings, all fourteen accents and any custom one. `subtext0`,
+  `subtext1` and `link` are floored in the palette (546 sites, none touched);
+  the dual-use roles stay as chosen and a text site asks `Palette::ink`.
+  **Landed** across the shell (100 sites, 29 tests rewritten) and the apps
+  (309 sites). `ink-text.py --verify` confirms all 518 `ink()` call sites are
+  inside a `RenderCommand::Text`.
+
+  **Read the app half's green suite carefully, though.** The shell needed 29
+  test rewrites for 100 sites; the apps needed none for 309. That is not
+  because the app conversion was cleaner — it is because **18 of 143 app
+  crates assert a specific palette role at all**, against 25 of ~50 shell
+  modules, and *zero* apps use `appearance::palette_check`. A silent suite
+  over thin coverage is not a verdict. The evidence that the app sweep is
+  right is `--verify` and the diff, not the tests.
+
+  **Still open, and bigger than it looks:**
+  `TD-C-FORTY-NINE-COLOUR-METHODS-ARE-INVISIBLE-TO-THE-INK-SWEEP` — 108
+  methods return a themed `Color` and the sweep cannot see any of them,
+  because they name no role at the draw site.
+
+  **One performance note for anyone touching the contrast path.** It runs
+  inside the compositor's render loop — `Palette::from_settings` is called per
+  blurred window, per frame. `contrast_ratio` used to be three `powf(2.4)`
+  evaluations and cost 436 ns; the compositor's frame ceiling caught it at 13x
+  the recorded median. The sRGB curve is a 256-entry table now (4 ns), with
+  `gui/appearance/tests/resolve_cost.rs` holding the bound. Do not put a
+  `powf` back.
 
 Known-issues: no open GUI/app entries today — lane C's backlog is roadmap
 features, and it should also run bug-hunt sweeps over `apps/**` (~200 crates

@@ -1309,7 +1309,7 @@ impl RadioApp {
             y: y + 10.0,
             text: "Internet Radio".into(),
             font_size: 14.0,
-            color: self.palette.blue,
+            color: self.palette.ink(self.palette.blue),
             font_weight: FontWeightHint::Bold,
             max_width: Some(w - 24.0),
             overflow: TextOverflow::Ellipsis,
@@ -1483,8 +1483,14 @@ impl RadioApp {
         });
 
         // Separator
-        self.palette
-            .push_surface(cmds, x + w - 1.0, y, 1.0, h, 0.0, Surface::Card);
+        cmds.push(RenderCommand::FillRect {
+            x: x + w - 1.0,
+            y,
+            width: 1.0,
+            height: h,
+            color: self.palette.surface0,
+            corner_radii: CornerRadii::ZERO,
+        });
     }
 
     fn render_station_list(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, h: f32) {
@@ -1585,7 +1591,7 @@ impl RadioApp {
                     text: station.name.clone(),
                     font_size: 13.0,
                     color: if is_playing {
-                        self.palette.green
+                        self.palette.ink(self.palette.green)
                     } else if is_sel {
                         self.palette.text
                     } else {
@@ -1678,8 +1684,14 @@ impl RadioApp {
             .push_surface(cmds, x, y, w, h, 0.0, Surface::Card);
 
         // Separator
-        self.palette
-            .push_surface(cmds, x, y, w, 1.0, 0.0, Surface::Card);
+        cmds.push(RenderCommand::FillRect {
+            x,
+            y,
+            width: w,
+            height: 1.0,
+            color: self.palette.surface0,
+            corner_radii: CornerRadii::ZERO,
+        });
 
         if let Some(idx) = self.current_station {
             if let Some(station) = self.stations.get(idx) {
@@ -1690,7 +1702,7 @@ impl RadioApp {
                     text: station.name.clone(),
                     font_size: 14.0,
                     color: if self.play_state == PlayState::Playing {
-                        self.palette.green
+                        self.palette.ink(self.palette.green)
                     } else {
                         self.palette.text
                     },
@@ -1767,7 +1779,7 @@ impl RadioApp {
             text: vol_label,
             font_size: 10.0,
             color: if self.muted {
-                self.palette.red
+                self.palette.ink(self.palette.red)
             } else {
                 self.palette.subtext1
             },
@@ -1778,7 +1790,7 @@ impl RadioApp {
 
         // Volume bar
         self.palette
-            .push_surface(cmds, vol_x, y + 22.0, 80.0, 4.0, 2.0, Surface::Card);
+            .push_surface(cmds, vol_x, y + 22.0, 80.0, 4.0, 2.0, Surface::ControlTrack);
         let vol_fill = if self.muted {
             0.0
         } else {
@@ -1812,7 +1824,7 @@ impl RadioApp {
                 y: y + 48.0,
                 text: format!("Sleep: {}", Self::format_time(remaining)),
                 font_size: 9.0,
-                color: self.palette.yellow,
+                color: self.palette.ink(self.palette.yellow),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(100.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1834,7 +1846,7 @@ impl RadioApp {
                 y: y + 8.0,
                 text: format!("REC {}", Self::format_time(self.record_duration_secs)),
                 font_size: 9.0,
-                color: self.palette.red,
+                color: self.palette.ink(self.palette.red),
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(80.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1889,7 +1901,7 @@ impl RadioApp {
                 y: sy + 28.0,
                 text: format!("{} results — Enter to view", self.search_results.len()),
                 font_size: 10.0,
-                color: self.palette.green,
+                color: self.palette.ink(self.palette.green),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(sw - 24.0),
                 overflow: TextOverflow::Ellipsis,

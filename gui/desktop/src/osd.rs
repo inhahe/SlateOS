@@ -6,6 +6,7 @@
 //! after a configurable timeout.
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -808,7 +809,12 @@ impl OsdManager {
             y: oy + 14.0,
             text: "\u{266B}".to_string(),
             font_size: 28.0,
-            color: Color::rgba(p.lavender.r, p.lavender.g, p.lavender.b, text_alpha),
+            color: Color::rgba(
+                p.ink(p.lavender).r,
+                p.ink(p.lavender).g,
+                p.ink(p.lavender).b,
+                text_alpha,
+            ),
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -879,6 +885,14 @@ impl OsdManager {
         accent: Color,
         commands: &mut Vec<RenderCommand>,
     ) {
+        // Inked here, once, rather than at each of the three call sites -- and
+        // this is the right place because the parameter is *provably* a text
+        // colour: its only use below is the `color:` of a `RenderCommand::Text`.
+        // A colour arriving as an argument is the third way one can reach a
+        // draw site without naming a role there, so `ink-text.py` cannot see
+        // it; the other two are a helper's return value and a method call in
+        // the `color:` field itself.
+        let accent = p.ink(accent);
         let padding = OSD_PADDING;
         let osd_h = self.height_for_kind(&OsdKind::Custom {
             icon: OsdIcon::Info,
@@ -963,17 +977,23 @@ fn brightness_icon(level: u8) -> &'static str {
 
 /// Get icon string and color for a generic OsdIcon.
 fn icon_info(p: &Palette, icon: OsdIcon) -> (&'static str, Color) {
+    // Every colour here is drawn as a glyph, so every one goes through
+    // `ink`. A colour reaching a `RenderCommand::Text` through a helper is
+    // invisible to `ink-text.py`, which classifies by the role named at the
+    // draw site -- so these had to be found by a failing test. Unlike
+    // `PermissionState::color` there is no exempt arm to be careful about:
+    // all ten are categorical hues and all ten are text.
     match icon {
-        OsdIcon::Info => ("\u{2139}", p.blue),
-        OsdIcon::Success => ("\u{2705}", p.green),
-        OsdIcon::Warning => ("\u{26A0}", p.yellow),
-        OsdIcon::Error => ("\u{274C}", p.red),
-        OsdIcon::Speaker => ("\u{1F50A}", p.blue),
-        OsdIcon::Brightness => ("\u{2600}", p.yellow),
-        OsdIcon::Network => ("\u{1F310}", p.green),
-        OsdIcon::Battery => ("\u{1F50B}", p.peach),
-        OsdIcon::Lock => ("\u{1F512}", p.lavender),
-        OsdIcon::Camera => ("\u{1F4F7}", p.green),
+        OsdIcon::Info => ("\u{2139}", p.ink(p.blue)),
+        OsdIcon::Success => ("\u{2705}", p.ink(p.green)),
+        OsdIcon::Warning => ("\u{26A0}", p.ink(p.yellow)),
+        OsdIcon::Error => ("\u{274C}", p.ink(p.red)),
+        OsdIcon::Speaker => ("\u{1F50A}", p.ink(p.blue)),
+        OsdIcon::Brightness => ("\u{2600}", p.ink(p.yellow)),
+        OsdIcon::Network => ("\u{1F310}", p.ink(p.green)),
+        OsdIcon::Battery => ("\u{1F50B}", p.ink(p.peach)),
+        OsdIcon::Lock => ("\u{1F512}", p.ink(p.lavender)),
+        OsdIcon::Camera => ("\u{1F4F7}", p.ink(p.green)),
     }
 }
 
@@ -1126,14 +1146,15 @@ impl OsdSettingsUI {
         cy += 22.0;
         let timeout_frac = (self.config.timeout_ms as f32 - 500.0) / 4500.0;
         let track_w = width - padding * 2.0 - 20.0;
-        commands.push(RenderCommand::FillRect {
-            x: x + padding,
-            y: cy,
-            width: track_w,
-            height: 4.0,
-            color: p.surface0,
-            corner_radii: CornerRadii::all(2.0),
-        });
+        p.push_surface(
+            &mut commands,
+            x + padding,
+            cy,
+            track_w,
+            4.0,
+            2.0,
+            Surface::ControlTrack,
+        );
         commands.push(RenderCommand::FillRect {
             x: x + padding,
             y: cy,
@@ -2469,15 +2490,20 @@ mod tests {
 
     /// Colours of every `FillRect` of exactly `w` x `h`, in draw order.
     fn fills(cmds: &[RenderCommand], w: f32, h: f32) -> Vec<Color> {
+        // Both kinds, on the logical rectangle. Since §829 a box may be an
+        // outline rather than a fill, and an outline reports a rectangle a
+        // pixel smaller than the one asked for.
         cmds.iter()
-            .filter_map(|c| match c {
-                RenderCommand::FillRect {
-                    width,
-                    height,
-                    color,
-                    ..
-                } if (*width - w).abs() < 0.01 && (*height - h).abs() < 0.01 => Some(*color),
-                _ => None,
+            .filter_map(|c| {
+                let (_, _, cw, ch) = appearance::logical_rect(c)?;
+                if (cw - w).abs() > 0.01 || (ch - h).abs() > 0.01 {
+                    return None;
+                }
+                match *c {
+                    RenderCommand::FillRect { color, .. }
+                    | RenderCommand::StrokeRect { color, .. } => Some(color),
+                    _ => None,
+                }
             })
             .collect()
     }
@@ -2863,7 +2889,7 @@ mod tests {
                 &p,
             );
             // S4: the slider's icon takes the kind's own colour.
-            assert_eq!(rgb(text_at(&vol, 24.0)), rgb(p.blue), "slider icon");
+            assert_eq!(rgb(text_at(&vol, 24.0)), rgb(p.ink(p.blue)), "slider icon");
             // S5: the label and percentage are plain text.
             assert_eq!(rgb(text_at(&vol, 14.0)), rgb(p.text), "slider label");
 
@@ -2877,7 +2903,11 @@ mod tests {
                 &p,
             );
             // S9: the music note.
-            assert_eq!(rgb(text_at(&media, 28.0)), rgb(p.lavender), "media note");
+            assert_eq!(
+                rgb(text_at(&media, 28.0)),
+                rgb(p.ink(p.lavender)),
+                "media note"
+            );
             // S10: the title.
             assert_eq!(rgb(text_at(&media, 14.0)), rgb(p.text), "media title");
             // S11: the artist, one step down.
@@ -2888,7 +2918,11 @@ mod tests {
             // ---- render_icon_text_osd ----
             let batt = overlay(OsdKind::BatteryLow { percent: 7 }, &p);
             // S14: the icon takes the kind's own colour.
-            assert_eq!(rgb(text_at(&batt, 20.0)), rgb(p.red), "icon-text icon");
+            assert_eq!(
+                rgb(text_at(&batt, 20.0)),
+                rgb(p.ink(p.red)),
+                "icon-text icon"
+            );
             // S15: the label is plain text.
             assert_eq!(rgb(text_at(&batt, 14.0)), rgb(p.text), "icon-text label");
 
@@ -3071,7 +3105,11 @@ mod tests {
             // T9, T10: the timeout slider's track and its accent fill.
             let track = fills_h(&s, 4.0);
             assert_eq!(track.len(), 2, "the timeout slider is a track and a fill");
-            assert_eq!(rgb(track[0]), rgb(p.surface0), "the timeout track");
+            assert_eq!(
+                rgb(track[0]),
+                rgb(p.painted(appearance::Surface::ControlTrack)),
+                "the timeout track"
+            );
             assert_eq!(rgb(track[1]), rgb(p.accent), "the timeout fill");
             // T12: the checkboxes, both sides of their `if`.
             assert_eq!(
@@ -3257,7 +3295,7 @@ mod tests {
             for (what, kind, want) in cases {
                 assert_eq!(
                     rgb(text_at(&overlay(kind, &p), 20.0)),
-                    rgb(want),
+                    rgb(p.ink(want)),
                     "{mode}: {what} does not draw its icon in its own colour"
                 );
             }
@@ -3380,7 +3418,11 @@ mod tests {
             // The tick sits on `p.green`, whose value differs by mode.
             let tick = text_saying(&settings(&p), "\u{2713}");
             assert_eq!(rgb(tick), rgb(appearance::readable_on(p.green)));
-            assert_ne!(rgb(tick), rgb(p.green), "the tick is invisible on its box");
+            assert_ne!(
+                rgb(tick),
+                rgb(p.ink(p.green)),
+                "the tick is invisible on its box"
+            );
 
             // The Preview label sits on the accent, which the user chooses.
             p.accent = DARK;

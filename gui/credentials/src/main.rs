@@ -36,7 +36,6 @@
 //! `open-questions.md` C-Q5 for whether this tree should be porting one
 //! rather than writing its own.
 
-
 use std::collections::HashMap;
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -297,7 +296,6 @@ impl From<&Credential> for CredentialMetadata {
 // Cryptography (key derivation + counter-mode stream cipher)
 // ---------------------------------------------------------------------------
 
-
 /// The size of the nonce prefix that [`encrypt`] writes ahead of a ciphertext.
 const NONCE_LEN: usize = 8;
 
@@ -342,7 +340,6 @@ fn verifier_for(key: &[u8; 32]) -> [u8; 32] {
     pwkdf::verifier_for(key, VERIFIER_DOMAIN)
 }
 
-
 /// Encrypt plaintext under `key`, using `nonce` once and only once.
 ///
 /// The returned blob is `nonce ‖ ciphertext`: the nonce travels with the
@@ -377,14 +374,14 @@ pub fn encrypt(plaintext: &[u8], key: &[u8; 32], nonce: u64) -> Vec<u8> {
 /// than empty — an empty plaintext still encrypts to `NONCE_LEN` bytes, so
 /// anything shorter never came from `encrypt`.
 pub fn decrypt(blob: &[u8], key: &[u8; 32]) -> Result<Vec<u8>, CredentialError> {
-    let (prefix, body) = blob.split_at_checked(NONCE_LEN).ok_or_else(|| {
-        CredentialError::CryptoError {
-            detail: format!(
-                "ciphertext is {} bytes, too short to carry its {NONCE_LEN}-byte nonce",
-                blob.len()
-            ),
-        }
-    })?;
+    let (prefix, body) =
+        blob.split_at_checked(NONCE_LEN)
+            .ok_or_else(|| CredentialError::CryptoError {
+                detail: format!(
+                    "ciphertext is {} bytes, too short to carry its {NONCE_LEN}-byte nonce",
+                    blob.len()
+                ),
+            })?;
     let nonce_bytes: [u8; NONCE_LEN] =
         prefix
             .try_into()
@@ -724,9 +721,7 @@ pub fn match_url(credential_target: &str, query_url: &str) -> MatchPriority {
 
     // Check for wildcard pattern (*.example.com)
     if let Some(wildcard_base) = target_domain.strip_prefix("*.") {
-        if query_domain == wildcard_base
-            || query_domain.ends_with(&format!(".{wildcard_base}"))
-        {
+        if query_domain == wildcard_base || query_domain.ends_with(&format!(".{wildcard_base}")) {
             return MatchPriority::Wildcard;
         }
         return MatchPriority::None;
@@ -1323,9 +1318,10 @@ impl CredentialStore {
             .filter(|cred| {
                 cred.name.to_ascii_lowercase().contains(&query_lower)
                     || cred.target.to_ascii_lowercase().contains(&query_lower)
-                    || cred.tags.iter().any(|t| {
-                        t.to_ascii_lowercase().contains(&query_lower)
-                    })
+                    || cred
+                        .tags
+                        .iter()
+                        .any(|t| t.to_ascii_lowercase().contains(&query_lower))
                     || cred
                         .username
                         .as_ref()
@@ -1375,25 +1371,24 @@ impl CredentialStore {
         self.check_auto_lock();
 
         match request {
-            CredentialRequest::IsLocked => {
-                CredentialResponse::LockStatus { locked: self.is_locked() }
-            }
-            CredentialRequest::Unlock { master_password } => {
-                match self.unlock(&master_password) {
-                    Ok(()) => CredentialResponse::Ok,
-                    Err(e) => CredentialResponse::Error(e),
-                }
-            }
+            CredentialRequest::IsLocked => CredentialResponse::LockStatus {
+                locked: self.is_locked(),
+            },
+            CredentialRequest::Unlock { master_password } => match self.unlock(&master_password) {
+                Ok(()) => CredentialResponse::Ok,
+                Err(e) => CredentialResponse::Error(e),
+            },
             CredentialRequest::Lock => {
                 self.lock();
                 CredentialResponse::Ok
             }
-            CredentialRequest::SetMasterPassword { old_password, new_password } => {
-                match self.set_master_password(old_password.as_deref(), &new_password) {
-                    Ok(()) => CredentialResponse::Ok,
-                    Err(e) => CredentialResponse::Error(e),
-                }
-            }
+            CredentialRequest::SetMasterPassword {
+                old_password,
+                new_password,
+            } => match self.set_master_password(old_password.as_deref(), &new_password) {
+                Ok(()) => CredentialResponse::Ok,
+                Err(e) => CredentialResponse::Error(e),
+            },
             CredentialRequest::Store {
                 name,
                 credential_type,
@@ -1401,10 +1396,12 @@ impl CredentialStore {
                 target,
                 data,
                 tags,
-            } => match self.store_credential(name, credential_type, username, target, &data, tags) {
-                Ok(id) => CredentialResponse::Stored { id },
-                Err(e) => CredentialResponse::Error(e),
-            },
+            } => {
+                match self.store_credential(name, credential_type, username, target, &data, tags) {
+                    Ok(id) => CredentialResponse::Stored { id },
+                    Err(e) => CredentialResponse::Error(e),
+                }
+            }
             CredentialRequest::Retrieve { id } => match self.retrieve(id) {
                 Ok((meta, data)) => CredentialResponse::Credential {
                     id: meta.id,
@@ -1492,10 +1489,10 @@ impl SensitivityLevel {
     /// More sensitive operations have shorter debounce windows.
     fn default_debounce_secs(self) -> u64 {
         match self {
-            Self::Low => 0,       // No verification required
-            Self::Medium => 60,   // 1 minute
-            Self::High => 30,     // 30 seconds
-            Self::Critical => 0,  // Always re-verify
+            Self::Low => 0,      // No verification required
+            Self::Medium => 60,  // 1 minute
+            Self::High => 30,    // 30 seconds
+            Self::Critical => 0, // Always re-verify
         }
     }
 }
@@ -1888,7 +1885,77 @@ fn current_timestamp() -> u64 {
 // Entry Point
 // ---------------------------------------------------------------------------
 
+/// What to do about this program's first command-line argument.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArgVerdict {
+    /// No argument: get on with it.
+    Run,
+    Help,
+    Version,
+    /// Anything else. This program has no options.
+    Refuse,
+}
+
+/// Classify the first argument, if there is one.
+///
+/// Filed by lane B on 2026-09-12: this program accepted
+/// `--zzq-not-an-option` and exited 0, which to anything reading an exit
+/// status says the option was honoured. It was not -- nothing here had ever
+/// looked at `argv`. That is the more common shape of what lane B swept out
+/// of `userspace/`: not a parse loop with a careless `_ => {}` arm, but no
+/// parse at all.
+///
+/// Takes `&OsStr`, not `&str`, and that is the point of the signature. An
+/// argument can hold any byte; decoding it first would mean an undecodable
+/// option name arriving here as replacement characters, which is a string
+/// nobody passed. Undecodable is simply not one of the two options this
+/// program has, so it is refused like any other.
+///
+/// `--help` and `--version` are answered rather than refused, so that the
+/// refusal is a statement about the interface rather than the absence of one.
+fn classify_argument(first: Option<&std::ffi::OsStr>) -> ArgVerdict {
+    match first.and_then(std::ffi::OsStr::to_str) {
+        None if first.is_none() => ArgVerdict::Run,
+        Some("--help" | "-h") => ArgVerdict::Help,
+        Some("--version" | "-V") => ArgVerdict::Version,
+        _ => ArgVerdict::Refuse,
+    }
+}
+
+/// Act on [`classify_argument`], exiting for every verdict but `Run`.
+fn refuse_arguments() {
+    let first = std::env::args_os().nth(1);
+    match classify_argument(first.as_deref()) {
+        ArgVerdict::Run => {}
+        ArgVerdict::Help => {
+            println!("usage: credentials");
+            println!();
+            println!("The credential manager. Takes no options.");
+            std::process::exit(0);
+        }
+        ArgVerdict::Version => {
+            println!("credentials {}", env!("CARGO_PKG_VERSION"));
+            std::process::exit(0);
+        }
+        ArgVerdict::Refuse => {
+            let bad = first.unwrap_or_default();
+            // The raw bytes, escaped -- not `Display` and not `to_string_lossy`.
+            // An option name can hold any byte, and a lossy conversion prints
+            // U+FFFD where the undecodable ones were: a string nobody passed.
+            // `escape_ascii` renders those as \xNN, so the message names
+            // exactly what arrived and stays printable.
+            eprintln!(
+                "credentials: unrecognized option: '{}'",
+                bad.as_encoded_bytes().escape_ascii()
+            );
+            eprintln!("usage: credentials");
+            std::process::exit(2);
+        }
+    }
+}
+
 fn main() {
+    refuse_arguments();
     // The credential manager runs as a system service, receiving IPC requests.
     // For now, perform a self-test to validate core functionality.
     let mut store = CredentialStore::new(1000);
@@ -1903,7 +1970,14 @@ fn main() {
     println!("Store initialized for uid={}", store.uid);
     println!("Storage path: {}", store.storage_path());
     println!("Auto-lock timeout: {}s", store.lock_timeout_secs);
-    println!("Status: {}", if store.is_locked() { "locked" } else { "unlocked" });
+    println!(
+        "Status: {}",
+        if store.is_locked() {
+            "locked"
+        } else {
+            "unlocked"
+        }
+    );
     println!("\nCredential Manager service ready. Awaiting IPC requests...");
 }
 
@@ -1924,6 +1998,32 @@ fn main() {
 )]
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn an_option_this_program_does_not_have_is_not_silently_accepted() {
+        use std::ffi::OsStr;
+        assert_eq!(classify_argument(None), ArgVerdict::Run);
+        assert_eq!(
+            classify_argument(Some(OsStr::new("--help"))),
+            ArgVerdict::Help
+        );
+        assert_eq!(classify_argument(Some(OsStr::new("-h"))), ArgVerdict::Help);
+        assert_eq!(
+            classify_argument(Some(OsStr::new("--version"))),
+            ArgVerdict::Version
+        );
+        assert_eq!(
+            classify_argument(Some(OsStr::new("-V"))),
+            ArgVerdict::Version
+        );
+        assert_eq!(
+            classify_argument(Some(OsStr::new("--zzq-not-an-option"))),
+            ArgVerdict::Refuse,
+            "the option lane B's sweep uses"
+        );
+        // An empty argument is still an argument, and `credentials` takes none.
+        assert_eq!(classify_argument(Some(OsStr::new(""))), ArgVerdict::Refuse);
+    }
 
     use super::*;
 
@@ -2164,7 +2264,9 @@ mod tests {
     #[test]
     fn test_lock_and_unlock() {
         let mut store = test_store();
-        store.set_master_password_keeping_salt(None, "pw123").expect("set pw");
+        store
+            .set_master_password_keeping_salt(None, "pw123")
+            .expect("set pw");
         assert!(!store.is_locked());
 
         store.lock();
@@ -2177,7 +2279,9 @@ mod tests {
     #[test]
     fn test_unlock_wrong_password() {
         let mut store = test_store();
-        store.set_master_password_keeping_salt(None, "correct").expect("set pw");
+        store
+            .set_master_password_keeping_salt(None, "correct")
+            .expect("set pw");
         store.lock();
 
         let result = store.unlock("wrong");
@@ -2187,7 +2291,9 @@ mod tests {
     #[test]
     fn test_rate_limiting() {
         let mut store = test_store();
-        store.set_master_password_keeping_salt(None, "secure").expect("set pw");
+        store
+            .set_master_password_keeping_salt(None, "secure")
+            .expect("set pw");
         store.lock();
 
         // Fail 3 times to trigger lockout
@@ -2203,7 +2309,9 @@ mod tests {
     #[test]
     fn test_store_and_retrieve_credential() {
         let mut store = test_store();
-        store.set_master_password_keeping_salt(None, "master").expect("set pw");
+        store
+            .set_master_password_keeping_salt(None, "master")
+            .expect("set pw");
 
         let id = store
             .store_credential(
@@ -2226,7 +2334,9 @@ mod tests {
     #[test]
     fn test_retrieve_while_locked() {
         let mut store = test_store();
-        store.set_master_password_keeping_salt(None, "master").expect("set pw");
+        store
+            .set_master_password_keeping_salt(None, "master")
+            .expect("set pw");
 
         let id = store
             .store_credential(
@@ -2247,7 +2357,9 @@ mod tests {
     #[test]
     fn test_delete_credential() {
         let mut store = test_store();
-        store.set_master_password_keeping_salt(None, "master").expect("set pw");
+        store
+            .set_master_password_keeping_salt(None, "master")
+            .expect("set pw");
 
         let id = store
             .store_credential(
@@ -2268,7 +2380,9 @@ mod tests {
     #[test]
     fn test_search_credentials() {
         let mut store = test_store();
-        store.set_master_password_keeping_salt(None, "master").expect("set pw");
+        store
+            .set_master_password_keeping_salt(None, "master")
+            .expect("set pw");
 
         store
             .store_credential(
@@ -2315,7 +2429,10 @@ mod tests {
 
     #[test]
     fn test_url_match_with_path() {
-        let priority = match_url("https://example.com/app", "https://example.com/app/settings");
+        let priority = match_url(
+            "https://example.com/app",
+            "https://example.com/app/settings",
+        );
         assert_eq!(priority, MatchPriority::ExactWithPath);
     }
 
@@ -2442,7 +2559,10 @@ mod tests {
     #[test]
     fn test_password_strength_weak() {
         assert_eq!(estimate_password_strength("abc"), PasswordStrength::Weak);
-        assert_eq!(estimate_password_strength("abcdefg"), PasswordStrength::Weak);
+        assert_eq!(
+            estimate_password_strength("abcdefg"),
+            PasswordStrength::Weak
+        );
     }
 
     #[test]
@@ -2474,7 +2594,9 @@ mod tests {
     #[test]
     fn test_change_master_password_reencrypts() {
         let mut store = test_store();
-        store.set_master_password_keeping_salt(None, "old_pw").expect("set pw");
+        store
+            .set_master_password_keeping_salt(None, "old_pw")
+            .expect("set pw");
 
         let id = store
             .store_credential(
@@ -2544,7 +2666,10 @@ mod tests {
 
         // Check lock status
         let resp = store.handle_request(CredentialRequest::IsLocked);
-        assert!(matches!(resp, CredentialResponse::LockStatus { locked: true }));
+        assert!(matches!(
+            resp,
+            CredentialResponse::LockStatus { locked: true }
+        ));
 
         // Unlock
         let resp = store.handle_request(CredentialRequest::Unlock {
@@ -2579,7 +2704,9 @@ mod tests {
     #[test]
     fn test_autofill_query_priority_ordering() {
         let mut store = test_store();
-        store.set_master_password_keeping_salt(None, "master").expect("set pw");
+        store
+            .set_master_password_keeping_salt(None, "master")
+            .expect("set pw");
 
         // Wildcard match
         store
@@ -2625,14 +2752,20 @@ mod tests {
     fn test_verifier_medium_requires_verification_initially() {
         let verifier = IdentityVerifier::new();
         let result = verifier.check(SensitivityLevel::Medium, 1000);
-        assert!(matches!(result, VerificationResult::VerificationRequired { .. }));
+        assert!(matches!(
+            result,
+            VerificationResult::VerificationRequired { .. }
+        ));
     }
 
     #[test]
     fn test_verifier_high_requires_verification_initially() {
         let verifier = IdentityVerifier::new();
         let result = verifier.check(SensitivityLevel::High, 1000);
-        assert!(matches!(result, VerificationResult::VerificationRequired { .. }));
+        assert!(matches!(
+            result,
+            VerificationResult::VerificationRequired { .. }
+        ));
     }
 
     #[test]
@@ -2641,7 +2774,10 @@ mod tests {
         // Even after a recent verification, Critical always requires fresh
         verifier.record_success(SensitivityLevel::Critical, 1000);
         let result = verifier.check(SensitivityLevel::Critical, 1001);
-        assert!(matches!(result, VerificationResult::VerificationRequired { .. }));
+        assert!(matches!(
+            result,
+            VerificationResult::VerificationRequired { .. }
+        ));
     }
 
     #[test]
@@ -2660,7 +2796,10 @@ mod tests {
         verifier.record_success(SensitivityLevel::Medium, 1000);
         // 61 seconds later — past 60s debounce window
         let result = verifier.check(SensitivityLevel::Medium, 1061);
-        assert!(matches!(result, VerificationResult::VerificationRequired { .. }));
+        assert!(matches!(
+            result,
+            VerificationResult::VerificationRequired { .. }
+        ));
     }
 
     #[test]
@@ -2678,7 +2817,10 @@ mod tests {
         verifier.record_success(SensitivityLevel::High, 1000);
         // 31 seconds later — past 30s debounce
         let result = verifier.check(SensitivityLevel::High, 1031);
-        assert!(matches!(result, VerificationResult::VerificationRequired { .. }));
+        assert!(matches!(
+            result,
+            VerificationResult::VerificationRequired { .. }
+        ));
     }
 
     #[test]
@@ -2698,14 +2840,23 @@ mod tests {
         verifier.record_success(SensitivityLevel::Medium, 1000);
         // High should still require verification (Medium < High)
         let result = verifier.check(SensitivityLevel::High, 1010);
-        assert!(matches!(result, VerificationResult::VerificationRequired { .. }));
+        assert!(matches!(
+            result,
+            VerificationResult::VerificationRequired { .. }
+        ));
     }
 
     #[test]
     fn test_verifier_password_verification_success() {
         let mut verifier = IdentityVerifier::new();
         let master_hash = verifier_for(&test_key("correct_password"));
-        let result = verifier.verify("correct_password", &master_hash, &test_kdf(), SensitivityLevel::Medium, 1000);
+        let result = verifier.verify(
+            "correct_password",
+            &master_hash,
+            &test_kdf(),
+            SensitivityLevel::Medium,
+            1000,
+        );
         assert_eq!(result, VerificationResult::Verified);
     }
 
@@ -2713,7 +2864,13 @@ mod tests {
     fn test_verifier_password_verification_failure() {
         let mut verifier = IdentityVerifier::new();
         let master_hash = verifier_for(&test_key("correct_password"));
-        let result = verifier.verify("wrong_password", &master_hash, &test_kdf(), SensitivityLevel::Medium, 1000);
+        let result = verifier.verify(
+            "wrong_password",
+            &master_hash,
+            &test_kdf(),
+            SensitivityLevel::Medium,
+            1000,
+        );
         assert_eq!(result, VerificationResult::Failed);
     }
 
@@ -2722,9 +2879,27 @@ mod tests {
         let mut verifier = IdentityVerifier::new();
         let master_hash = verifier_for(&test_key("correct_password"));
         // 3 failed attempts
-        verifier.verify("wrong1", &master_hash, &test_kdf(), SensitivityLevel::Medium, 1000);
-        verifier.verify("wrong2", &master_hash, &test_kdf(), SensitivityLevel::Medium, 1001);
-        let result = verifier.verify("wrong3", &master_hash, &test_kdf(), SensitivityLevel::Medium, 1002);
+        verifier.verify(
+            "wrong1",
+            &master_hash,
+            &test_kdf(),
+            SensitivityLevel::Medium,
+            1000,
+        );
+        verifier.verify(
+            "wrong2",
+            &master_hash,
+            &test_kdf(),
+            SensitivityLevel::Medium,
+            1001,
+        );
+        let result = verifier.verify(
+            "wrong3",
+            &master_hash,
+            &test_kdf(),
+            SensitivityLevel::Medium,
+            1002,
+        );
         assert!(matches!(result, VerificationResult::LockedOut { .. }));
     }
 
@@ -2733,9 +2908,27 @@ mod tests {
         let mut verifier = IdentityVerifier::new();
         let master_hash = verifier_for(&test_key("correct_password"));
         // Trigger lockout
-        verifier.verify("wrong1", &master_hash, &test_kdf(), SensitivityLevel::Medium, 1000);
-        verifier.verify("wrong2", &master_hash, &test_kdf(), SensitivityLevel::Medium, 1001);
-        verifier.verify("wrong3", &master_hash, &test_kdf(), SensitivityLevel::Medium, 1002);
+        verifier.verify(
+            "wrong1",
+            &master_hash,
+            &test_kdf(),
+            SensitivityLevel::Medium,
+            1000,
+        );
+        verifier.verify(
+            "wrong2",
+            &master_hash,
+            &test_kdf(),
+            SensitivityLevel::Medium,
+            1001,
+        );
+        verifier.verify(
+            "wrong3",
+            &master_hash,
+            &test_kdf(),
+            SensitivityLevel::Medium,
+            1002,
+        );
         // Even check() should report lockout
         let result = verifier.check(SensitivityLevel::Medium, 1005);
         assert!(matches!(result, VerificationResult::LockedOut { .. }));
@@ -2746,11 +2939,35 @@ mod tests {
         let mut verifier = IdentityVerifier::new();
         let master_hash = verifier_for(&test_key("correct_password"));
         // Trigger lockout (default 30s)
-        verifier.verify("wrong1", &master_hash, &test_kdf(), SensitivityLevel::Medium, 1000);
-        verifier.verify("wrong2", &master_hash, &test_kdf(), SensitivityLevel::Medium, 1001);
-        verifier.verify("wrong3", &master_hash, &test_kdf(), SensitivityLevel::Medium, 1002);
+        verifier.verify(
+            "wrong1",
+            &master_hash,
+            &test_kdf(),
+            SensitivityLevel::Medium,
+            1000,
+        );
+        verifier.verify(
+            "wrong2",
+            &master_hash,
+            &test_kdf(),
+            SensitivityLevel::Medium,
+            1001,
+        );
+        verifier.verify(
+            "wrong3",
+            &master_hash,
+            &test_kdf(),
+            SensitivityLevel::Medium,
+            1002,
+        );
         // After lockout expires (30s), should be able to verify again
-        let result = verifier.verify("correct_password", &master_hash, &test_kdf(), SensitivityLevel::Medium, 1035);
+        let result = verifier.verify(
+            "correct_password",
+            &master_hash,
+            &test_kdf(),
+            SensitivityLevel::Medium,
+            1035,
+        );
         assert_eq!(result, VerificationResult::Verified);
     }
 
@@ -2759,12 +2976,36 @@ mod tests {
         let mut verifier = IdentityVerifier::new();
         let master_hash = verifier_for(&test_key("correct_password"));
         // 2 failed attempts
-        verifier.verify("wrong1", &master_hash, &test_kdf(), SensitivityLevel::Medium, 1000);
-        verifier.verify("wrong2", &master_hash, &test_kdf(), SensitivityLevel::Medium, 1001);
+        verifier.verify(
+            "wrong1",
+            &master_hash,
+            &test_kdf(),
+            SensitivityLevel::Medium,
+            1000,
+        );
+        verifier.verify(
+            "wrong2",
+            &master_hash,
+            &test_kdf(),
+            SensitivityLevel::Medium,
+            1001,
+        );
         // Success resets counter
-        verifier.verify("correct_password", &master_hash, &test_kdf(), SensitivityLevel::Medium, 1002);
+        verifier.verify(
+            "correct_password",
+            &master_hash,
+            &test_kdf(),
+            SensitivityLevel::Medium,
+            1002,
+        );
         // Another failure should not trigger lockout (counter was reset)
-        let result = verifier.verify("wrong3", &master_hash, &test_kdf(), SensitivityLevel::Medium, 1003);
+        let result = verifier.verify(
+            "wrong3",
+            &master_hash,
+            &test_kdf(),
+            SensitivityLevel::Medium,
+            1003,
+        );
         assert_eq!(result, VerificationResult::Failed);
     }
 
@@ -2812,7 +3053,10 @@ mod tests {
         assert_eq!(result, VerificationResult::Verified);
         // 121 seconds later — past custom window
         let result = verifier.check(SensitivityLevel::Medium, 1121);
-        assert!(matches!(result, VerificationResult::VerificationRequired { .. }));
+        assert!(matches!(
+            result,
+            VerificationResult::VerificationRequired { .. }
+        ));
     }
 
     #[test]
@@ -2822,16 +3066,37 @@ mod tests {
         verifier.clear();
         // Should require verification again after clear
         let result = verifier.check(SensitivityLevel::Medium, 1010);
-        assert!(matches!(result, VerificationResult::VerificationRequired { .. }));
+        assert!(matches!(
+            result,
+            VerificationResult::VerificationRequired { .. }
+        ));
     }
 
     #[test]
     fn test_verifier_stats() {
         let mut verifier = IdentityVerifier::new();
         let master_hash = verifier_for(&test_key("correct_password"));
-        verifier.verify("correct_password", &master_hash, &test_kdf(), SensitivityLevel::Medium, 1000);
-        verifier.verify("wrong", &master_hash, &test_kdf(), SensitivityLevel::Medium, 1001);
-        verifier.verify("correct_password", &master_hash, &test_kdf(), SensitivityLevel::Medium, 1002);
+        verifier.verify(
+            "correct_password",
+            &master_hash,
+            &test_kdf(),
+            SensitivityLevel::Medium,
+            1000,
+        );
+        verifier.verify(
+            "wrong",
+            &master_hash,
+            &test_kdf(),
+            SensitivityLevel::Medium,
+            1001,
+        );
+        verifier.verify(
+            "correct_password",
+            &master_hash,
+            &test_kdf(),
+            SensitivityLevel::Medium,
+            1002,
+        );
         let (successes, failures) = verifier.stats();
         assert_eq!(successes, 2);
         assert_eq!(failures, 1);
@@ -2841,9 +3106,27 @@ mod tests {
     fn test_verifier_lockout_remaining() {
         let mut verifier = IdentityVerifier::new();
         let master_hash = verifier_for(&test_key("correct_password"));
-        verifier.verify("wrong1", &master_hash, &test_kdf(), SensitivityLevel::Medium, 1000);
-        verifier.verify("wrong2", &master_hash, &test_kdf(), SensitivityLevel::Medium, 1001);
-        verifier.verify("wrong3", &master_hash, &test_kdf(), SensitivityLevel::Medium, 1002);
+        verifier.verify(
+            "wrong1",
+            &master_hash,
+            &test_kdf(),
+            SensitivityLevel::Medium,
+            1000,
+        );
+        verifier.verify(
+            "wrong2",
+            &master_hash,
+            &test_kdf(),
+            SensitivityLevel::Medium,
+            1001,
+        );
+        verifier.verify(
+            "wrong3",
+            &master_hash,
+            &test_kdf(),
+            SensitivityLevel::Medium,
+            1002,
+        );
         // Lockout duration is 30s from timestamp 1002
         assert!(verifier.is_locked_out(1010));
         assert_eq!(verifier.lockout_remaining(1010), 22); // 1032 - 1010
@@ -2854,9 +3137,15 @@ mod tests {
     #[test]
     fn test_verifier_time_since_verification() {
         let mut verifier = IdentityVerifier::new();
-        assert_eq!(verifier.time_since_verification(SensitivityLevel::Medium, 1000), None);
+        assert_eq!(
+            verifier.time_since_verification(SensitivityLevel::Medium, 1000),
+            None
+        );
         verifier.record_success(SensitivityLevel::Medium, 1000);
-        assert_eq!(verifier.time_since_verification(SensitivityLevel::Medium, 1045), Some(45));
+        assert_eq!(
+            verifier.time_since_verification(SensitivityLevel::Medium, 1045),
+            Some(45)
+        );
     }
 
     #[test]
@@ -2864,10 +3153,14 @@ mod tests {
         let request = CredentialRequest::IsLocked;
         assert_eq!(classify_operation(&request), SensitivityLevel::Low);
 
-        let request = CredentialRequest::List { filter: ListFilter::default() };
+        let request = CredentialRequest::List {
+            filter: ListFilter::default(),
+        };
         assert_eq!(classify_operation(&request), SensitivityLevel::Low);
 
-        let request = CredentialRequest::Search { query: "test".to_string() };
+        let request = CredentialRequest::Search {
+            query: "test".to_string(),
+        };
         assert_eq!(classify_operation(&request), SensitivityLevel::Low);
     }
 
@@ -2876,7 +3169,9 @@ mod tests {
         let request = CredentialRequest::Retrieve { id: 1 };
         assert_eq!(classify_operation(&request), SensitivityLevel::Medium);
 
-        let request = CredentialRequest::AutofillQuery { url: "https://example.com".to_string() };
+        let request = CredentialRequest::AutofillQuery {
+            url: "https://example.com".to_string(),
+        };
         assert_eq!(classify_operation(&request), SensitivityLevel::Medium);
     }
 
@@ -2944,7 +3239,10 @@ mod tests {
         ));
         // Disable
         verifier.set_enabled(false);
-        assert_eq!(verifier.check(SensitivityLevel::High, 1000), VerificationResult::Verified);
+        assert_eq!(
+            verifier.check(SensitivityLevel::High, 1000),
+            VerificationResult::Verified
+        );
         // Re-enable
         verifier.set_enabled(true);
         assert!(matches!(
@@ -3009,7 +3307,10 @@ mod tests {
     /// never happen is a salt appearing anyway.
     #[test]
     fn two_vaults_do_not_share_a_salt() {
-        match (KdfParams::fresh(TEST_KDF_ROUNDS), KdfParams::fresh(TEST_KDF_ROUNDS)) {
+        match (
+            KdfParams::fresh(TEST_KDF_ROUNDS),
+            KdfParams::fresh(TEST_KDF_ROUNDS),
+        ) {
             (Ok(first), Ok(second)) => {
                 assert_ne!(
                     first.salt(),
@@ -3054,8 +3355,10 @@ mod tests {
             .expect("set pw");
         let verifier = store.master_password_verifier().expect("verifier");
 
-        let mut wrong =
-            CredentialStore::with_kdf_params(1000, KdfParams::new(*b"the-wrong-salt!!", TEST_KDF_ROUNDS));
+        let mut wrong = CredentialStore::with_kdf_params(
+            1000,
+            KdfParams::new(*b"the-wrong-salt!!", TEST_KDF_ROUNDS),
+        );
         // The tests live in this module, so the field is reachable: this is a
         // vault reloaded from disk with its verifier intact and its salt lost.
         wrong.master_password_verifier = Some(verifier);
@@ -3102,10 +3405,15 @@ mod tests {
             "new",
             KdfParams::new(*b"never-installed!", TEST_KDF_ROUNDS),
         );
-        assert!(matches!(attempt, Err(CredentialError::InvalidMasterPassword)));
+        assert!(matches!(
+            attempt,
+            Err(CredentialError::InvalidMasterPassword)
+        ));
         assert_eq!(store.kdf_params().salt(), before);
         store.lock();
-        store.unlock("old").expect("the old password still opens it");
+        store
+            .unlock("old")
+            .expect("the old password still opens it");
     }
 
     /// Setting a password without entropy is refused all the way out to the IPC
@@ -3124,5 +3432,4 @@ mod tests {
         ));
         assert!(store.master_password_verifier().is_none());
     }
-
 }

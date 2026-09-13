@@ -5,6 +5,7 @@
 //! sub-page of the desktop's Settings application.
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
@@ -22,7 +23,8 @@ use guitk::style::CornerRadii;
 //    mode, and the filled part of every volume bar. The first two are radio
 //    groups — exactly one member is chosen, and the chosen one is *you are
 //    here*. The third is the slider rule: a volume bar is a control the user
-//    drags, its track is a surface (`surface1`) and its fill is the accent.
+//    drags, its track is the one control-track surface and its fill is the
+//    accent.
 //    Held per-site by `the_three_accent_sites_follow_the_accent`.
 //
 // 2. **A muted volume bar is red, and stays red.** Mute is the one state that
@@ -667,7 +669,7 @@ impl SoundSettingsUI {
             ),
             font_size: 14.0,
             color: if self.settings.master_muted {
-                p.red
+                p.ink(p.red)
             } else {
                 p.text
             },
@@ -705,7 +707,7 @@ impl SoundSettingsUI {
                 y: cy + 8.0,
                 text: (*label).into(),
                 font_size: 12.0,
-                color: if active { p.accent } else { p.subtext0 },
+                color: if active { p.ink(p.accent) } else { p.subtext0 },
                 font_weight: if active {
                     FontWeightHint::Bold
                 } else {
@@ -871,7 +873,7 @@ impl SoundSettingsUI {
             y,
             text: "Microphone Settings".into(),
             font_size: 14.0,
-            color: p.lavender,
+            color: p.ink(p.lavender),
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -938,14 +940,7 @@ impl SoundSettingsUI {
         }
 
         for entry in &self.settings.app_volumes {
-            cmds.push(RenderCommand::FillRect {
-                x,
-                y,
-                width,
-                height: 48.0,
-                color: p.mantle,
-                corner_radii: CornerRadii::all(6.0),
-            });
+            p.push_surface(cmds, x, y, width, 48.0, 6.0, Surface::Card);
             cmds.push(RenderCommand::Text {
                 x: x + 12.0,
                 y: y + 6.0,
@@ -962,7 +957,11 @@ impl SoundSettingsUI {
                 y: y + 6.0,
                 text: format!("{}%{}", entry.volume, muted_txt),
                 font_size: 13.0,
-                color: if entry.muted { p.red } else { p.subtext0 },
+                color: if entry.muted {
+                    p.ink(p.red)
+                } else {
+                    p.subtext0
+                },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width * 0.4),
                 overflow: TextOverflow::Ellipsis,
@@ -1005,14 +1004,7 @@ impl SoundSettingsUI {
             let label = sc.event.label();
             let status = if sc.enabled { "On" } else { "Off" };
             let custom = sc.custom_sound.as_deref().unwrap_or("Default");
-            cmds.push(RenderCommand::FillRect {
-                x,
-                y,
-                width,
-                height: 28.0,
-                color: p.mantle,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            p.push_surface(cmds, x, y, width, 28.0, 4.0, Surface::Card);
             cmds.push(RenderCommand::Text {
                 x: x + 8.0,
                 y: y + 6.0,
@@ -1028,7 +1020,11 @@ impl SoundSettingsUI {
                 y: y + 6.0,
                 text: status.into(),
                 font_size: 12.0,
-                color: if sc.enabled { p.green } else { p.overlay0 },
+                color: if sc.enabled {
+                    p.ink(p.green)
+                } else {
+                    p.overlay0
+                },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width * 0.15),
                 overflow: TextOverflow::Ellipsis,
@@ -1061,7 +1057,7 @@ impl SoundSettingsUI {
             y,
             text: "Spatial Audio".into(),
             font_size: 14.0,
-            color: p.lavender,
+            color: p.ink(p.lavender),
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -1084,7 +1080,7 @@ impl SoundSettingsUI {
                 y: y + 8.0,
                 text: format!("{}{}", indicator, mode.label()),
                 font_size: 13.0,
-                color: if active { p.accent } else { p.text },
+                color: if active { p.ink(p.accent) } else { p.text },
                 font_weight: if active {
                     FontWeightHint::Bold
                 } else {
@@ -1112,14 +1108,13 @@ impl SoundSettingsUI {
         muted: bool,
     ) -> f32 {
         let bar_h = 6.0_f32;
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width,
-            height: bar_h,
-            color: p.surface1,
-            corner_radii: CornerRadii::all(3.0),
-        });
+        // The groove, not a card: the accent fill drawn over it conveys how
+        // far the volume is dragged, and a magnitude you read off an area
+        // needs an area to read it against. The converter had no word to go
+        // on here -- `render_volume_bar` contains none of `slider`, `track`
+        // or `groove` -- and called it a card; two of this module's own
+        // tests caught it.
+        p.push_surface(cmds, x, y, width, bar_h, 3.0, Surface::ControlTrack);
         let frac = volume as f32 / 100.0;
         let fill_color = if muted { p.red } else { p.accent };
         cmds.push(RenderCommand::FillRect {
@@ -1701,15 +1696,20 @@ mod tests {
 
     /// Colours of every `FillRect` of exactly this size, in draw order.
     fn fills(cmds: &[RenderCommand], w: f32, h: f32) -> Vec<Color> {
+        // Both kinds, on the logical rectangle. Since §829 a box may be an
+        // outline rather than a fill, and an outline reports a rectangle a
+        // pixel smaller than the one asked for.
         cmds.iter()
-            .filter_map(|c| match c {
-                RenderCommand::FillRect {
-                    width,
-                    height,
-                    color,
-                    ..
-                } if (*width - w).abs() < 0.01 && (*height - h).abs() < 0.01 => Some(*color),
-                _ => None,
+            .filter_map(|c| {
+                let (_, _, cw, ch) = appearance::logical_rect(c)?;
+                if (cw - w).abs() > 0.01 || (ch - h).abs() > 0.01 {
+                    return None;
+                }
+                match *c {
+                    RenderCommand::FillRect { color, .. }
+                    | RenderCommand::StrokeRect { color, .. } => Some(color),
+                    _ => None,
+                }
             })
             .collect()
     }
@@ -1903,7 +1903,11 @@ mod tests {
             // render(): the muted master label.
             let m = texts_saying(&draw(&muted_ui(0), &p), "Master Volume: 60% (Muted)", 14.0);
             assert_eq!(m.len(), 1);
-            assert_eq!(rgb(m[0]), rgb(p.red), "a muted master label is not red");
+            assert_eq!(
+                rgb(m[0]),
+                rgb(p.ink(p.red)),
+                "a muted master label is not red"
+            );
 
             // render_output_tab.
             let out = draw(&full_ui(0), &p);
@@ -1963,7 +1967,7 @@ mod tests {
                 (
                     "Microphone Settings",
                     14.0,
-                    p.lavender,
+                    p.ink(p.lavender),
                     "the mic section heading",
                 ),
                 ("Gain", 13.0, p.subtext0, "a label-value row's label"),
@@ -1999,7 +2003,7 @@ mod tests {
                 ("Media Player", 13.0, p.text, "an app's name"),
                 ("55%", 13.0, p.subtext0, "an unmuted app's volume"),
                 ("Game", 13.0, p.text, "the muted app's name"),
-                ("30% (Muted)", 13.0, p.red, "a muted app's volume"),
+                ("30% (Muted)", 13.0, p.ink(p.red), "a muted app's volume"),
             ] {
                 let t = texts_saying(&apps, glyph, size);
                 assert_eq!(t.len(), 1, "{what} is not drawn once (light={light})");
@@ -2017,7 +2021,7 @@ mod tests {
                     "the global toggle's label",
                 ),
                 ("Notification", 12.0, p.text, 1, "a system sound's label"),
-                ("On", 12.0, p.green, 11, "an enabled sound's status"),
+                ("On", 12.0, p.ink(p.green), 11, "an enabled sound's status"),
                 ("Off", 12.0, p.overlay0, 1, "a disabled sound's status"),
                 ("chime.wav", 12.0, p.subtext0, 1, "a custom sound's name"),
                 ("Default", 12.0, p.subtext0, 11, "an unset sound's name"),
@@ -2035,7 +2039,7 @@ mod tests {
                 (
                     "Spatial Audio",
                     14.0,
-                    p.lavender,
+                    p.ink(p.lavender),
                     "the spatial section heading",
                 ),
                 (
@@ -2104,12 +2108,15 @@ mod tests {
             );
             assert_eq!(
                 fills(&draw(&full_ui(2), &p), INNER, 48.0),
-                vec![p.mantle, p.mantle],
+                vec![
+                    p.painted(appearance::Surface::Card),
+                    p.painted(appearance::Surface::Card)
+                ],
                 "an app row is in the wrong role"
             );
             assert_eq!(
                 fills(&draw(&full_ui(3), &p), INNER, 28.0),
-                vec![p.mantle; 12],
+                vec![p.painted(appearance::Surface::Card); 12],
                 "a system-sound row is in the wrong role"
             );
             assert_eq!(
@@ -2147,8 +2154,9 @@ mod tests {
                 assert_eq!(b.len(), 6, "the output tab does not draw three bars");
                 for (i, track) in b.iter().step_by(2).enumerate() {
                     assert_eq!(
-                        *track, p.surface1,
-                        "the {what} bar {i}'s track is not `surface1` (light={light})"
+                        *track,
+                        p.painted(appearance::Surface::ControlTrack),
+                        "the {what} bar {i}'s track is not the control track                          (light={light})"
                     );
                 }
             }
@@ -2174,7 +2182,7 @@ mod tests {
                 assert_eq!(tab.len(), 1);
                 assert_eq!(
                     rgb(tab[0]),
-                    rgb(accent),
+                    rgb(p.ink(accent)),
                     "the active tab's label does not follow the accent (light={light})"
                 );
 
@@ -2194,7 +2202,7 @@ mod tests {
                 assert_eq!(mode.len(), 1);
                 assert_eq!(
                     rgb(mode[0]),
-                    rgb(accent),
+                    rgb(p.ink(accent)),
                     "the selected spatial mode does not follow the accent (light={light})"
                 );
             }
@@ -2264,7 +2272,7 @@ mod tests {
                 for c in texts_saying(&sounds, "On", 12.0) {
                     assert_eq!(
                         rgb(c),
-                        rgb(plain.green),
+                        rgb(plain.ink(plain.green)),
                         "an enabled sound's status moved with the accent (light={light})"
                     );
                 }
@@ -2300,7 +2308,7 @@ mod tests {
                     assert_eq!(t.len(), 1);
                     assert_eq!(
                         rgb(t[0]),
-                        rgb(plain.lavender),
+                        rgb(plain.ink(plain.lavender)),
                         "{what} moved with the accent (light={light})"
                     );
                 }

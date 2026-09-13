@@ -3,6 +3,7 @@
 //! Implements IRC protocol message parsing, channel management,
 //! user tracking, message history, and a multi-panel chat UI.
 
+use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::color::Color;
@@ -1906,8 +1907,15 @@ impl IrcClientApp {
     }
 
     fn render_title_bar(&self, cmds: &mut Vec<RenderCommand>) {
-        self.palette
-            .push_surface(cmds, 0.0, 0.0, self.width, 30.0, 0.0, Surface::Card);
+        self.palette.push_surface(
+            cmds,
+            0.0,
+            0.0,
+            self.width,
+            30.0,
+            0.0,
+            Surface::Strip(Edge::Bottom),
+        );
 
         // Connection status
         cmds.push(RenderCommand::FillRect {
@@ -1940,7 +1948,7 @@ impl IrcClientApp {
             y: 8.0,
             text: format!("Nick: {}", self.my_nick),
             font_size: 12.0,
-            color: self.palette.blue,
+            color: self.palette.ink(self.palette.blue),
             font_weight: FontWeightHint::Bold,
             max_width: Some(180.0),
             overflow: TextOverflow::Ellipsis,
@@ -2261,7 +2269,7 @@ impl IrcClientApp {
                     y: y + 2.0,
                     text: format!("* {} {}", msg.sender, msg.text),
                     font_size: 11.0,
-                    color: self.palette.mauve,
+                    color: self.palette.ink(self.palette.mauve),
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(_w - tx + x),
                     overflow: TextOverflow::Ellipsis,
@@ -2273,7 +2281,7 @@ impl IrcClientApp {
                     y: y + 2.0,
                     text: format!("-{}- {}", msg.sender, msg.text),
                     font_size: 11.0,
-                    color: self.palette.peach,
+                    color: self.palette.ink(self.palette.peach),
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(_w - tx + x),
                     overflow: TextOverflow::Ellipsis,
@@ -2285,7 +2293,7 @@ impl IrcClientApp {
                     y: y + 2.0,
                     text: format!("--> {} has joined", msg.sender),
                     font_size: 10.0,
-                    color: self.palette.green,
+                    color: self.palette.ink(self.palette.green),
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(_w - tx + x),
                     overflow: TextOverflow::Ellipsis,
@@ -2302,7 +2310,7 @@ impl IrcClientApp {
                     y: y + 2.0,
                     text: format!("<-- {} has left{reason_str}", msg.sender),
                     font_size: 10.0,
-                    color: self.palette.red,
+                    color: self.palette.ink(self.palette.red),
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(_w - tx + x),
                     overflow: TextOverflow::Ellipsis,
@@ -2319,7 +2327,7 @@ impl IrcClientApp {
                     y: y + 2.0,
                     text: format!("<-- {} has quit{reason_str}", msg.sender),
                     font_size: 10.0,
-                    color: self.palette.red,
+                    color: self.palette.ink(self.palette.red),
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(_w - tx + x),
                     overflow: TextOverflow::Ellipsis,
@@ -2331,7 +2339,7 @@ impl IrcClientApp {
                     y: y + 2.0,
                     text: format!("*** {} was kicked by {} ({})", msg.sender, by, reason),
                     font_size: 10.0,
-                    color: self.palette.red,
+                    color: self.palette.ink(self.palette.red),
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(_w - tx + x),
                     overflow: TextOverflow::Ellipsis,
@@ -2343,7 +2351,7 @@ impl IrcClientApp {
                     y: y + 2.0,
                     text: format!("*** {old} is now known as {}", msg.sender),
                     font_size: 10.0,
-                    color: self.palette.teal,
+                    color: self.palette.ink(self.palette.teal),
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(_w - tx + x),
                     overflow: TextOverflow::Ellipsis,
@@ -2355,7 +2363,7 @@ impl IrcClientApp {
                     y: y + 2.0,
                     text: format!("*** {by} changed the topic to: {}", msg.text),
                     font_size: 10.0,
-                    color: self.palette.yellow,
+                    color: self.palette.ink(self.palette.yellow),
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(_w - tx + x),
                     overflow: TextOverflow::Ellipsis,
@@ -2367,7 +2375,7 @@ impl IrcClientApp {
                     y: y + 2.0,
                     text: format!("*** {by} sets mode {mode}"),
                     font_size: 10.0,
-                    color: self.palette.teal,
+                    color: self.palette.ink(self.palette.teal),
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(_w - tx + x),
                     overflow: TextOverflow::Ellipsis,

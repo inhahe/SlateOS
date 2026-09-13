@@ -1722,7 +1722,7 @@ impl CleanupUI {
                 y: y + 10.0,
                 text: size_text,
                 color: if size_bytes > 0 {
-                    self.palette.yellow
+                    self.palette.ink(self.palette.yellow)
                 } else {
                     self.palette.subtext0
                 },
@@ -1742,7 +1742,7 @@ impl CleanupUI {
                 x: link.0,
                 y: link.1 + (link.3 - FONT_SIZE_SMALL) / 2.0,
                 text: String::from("View"),
-                color: self.palette.blue,
+                color: self.palette.ink(self.palette.blue),
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -1816,7 +1816,7 @@ impl CleanupUI {
                 x: PADDING,
                 y: y + (FOOTER_HEIGHT - FONT_SIZE) / 2.0,
                 text: label,
-                color: self.palette.green,
+                color: self.palette.ink(self.palette.green),
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width * 0.4),
@@ -1926,7 +1926,7 @@ impl CleanupUI {
                     x: width - 120.0,
                     y,
                     text: format_size(item.estimated_size_bytes),
-                    color: self.palette.yellow,
+                    color: self.palette.ink(self.palette.yellow),
                     font_size: FONT_SIZE_SMALL,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
@@ -2027,7 +2027,7 @@ impl CleanupUI {
                 x: PADDING,
                 y,
                 text: String::from("Preview only -- no files were deleted."),
-                color: self.palette.yellow,
+                color: self.palette.ink(self.palette.yellow),
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width - PADDING * 2.0),
@@ -2070,7 +2070,7 @@ impl CleanupUI {
             color: if result.simulated {
                 self.palette.text
             } else {
-                self.palette.green
+                self.palette.ink(self.palette.green)
             },
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
@@ -2085,7 +2085,7 @@ impl CleanupUI {
                 x: PADDING,
                 y,
                 text: format!("Errors: {}", result.error_count()),
-                color: self.palette.red,
+                color: self.palette.ink(self.palette.red),
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - PADDING * 2.0),
@@ -2098,7 +2098,7 @@ impl CleanupUI {
                     x: PADDING * 2.0,
                     y,
                     text: format!("{}: {msg}", path.display()),
-                    color: self.palette.red,
+                    color: self.palette.ink(self.palette.red),
                     font_size: FONT_SIZE_SMALL,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - PADDING * 3.0),

@@ -5,6 +5,7 @@
 //! which the system should not restart.
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
@@ -477,14 +478,7 @@ impl UpdateSettingsUI {
 
         // Status banner
         let status = self.settings.status;
-        cmds.push(RenderCommand::FillRect {
-            x: x + pad,
-            y: cy,
-            width: inner,
-            height: 36.0,
-            color: p.mantle,
-            corner_radii: CornerRadii::all(6.0),
-        });
+        p.push_surface(&mut cmds, x + pad, cy, inner, 36.0, 6.0, Surface::Card);
         cmds.push(RenderCommand::Text {
             x: x + pad + 12.0,
             y: cy + 10.0,
@@ -504,7 +498,7 @@ impl UpdateSettingsUI {
                 y: cy,
                 text: "⏸ Updates are paused".into(),
                 font_size: 12.0,
-                color: p.yellow,
+                color: p.ink(p.yellow),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(inner),
                 overflow: TextOverflow::Ellipsis,
@@ -530,7 +524,7 @@ impl UpdateSettingsUI {
                 y: cy + 8.0,
                 text: (*label).into(),
                 font_size: 12.0,
-                color: if active { p.accent } else { p.subtext0 },
+                color: if active { p.ink(p.accent) } else { p.subtext0 },
                 font_weight: if active {
                     FontWeightHint::Bold
                 } else {
@@ -648,7 +642,7 @@ impl UpdateSettingsUI {
                 y,
                 text: "⚠ Some updates require a restart to complete".into(),
                 font_size: 12.0,
-                color: p.peach,
+                color: p.ink(p.peach),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width),
                 overflow: TextOverflow::Ellipsis,
@@ -671,7 +665,7 @@ impl UpdateSettingsUI {
             y,
             text: "Update schedule".into(),
             font_size: 14.0,
-            color: p.lavender,
+            color: p.ink(p.lavender),
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -694,7 +688,7 @@ impl UpdateSettingsUI {
                 y: y + 6.0,
                 text: format!("{}{}", indicator, sched.label()),
                 font_size: 13.0,
-                color: if active { p.accent } else { p.text },
+                color: if active { p.ink(p.accent) } else { p.text },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 16.0),
                 overflow: TextOverflow::Ellipsis,
@@ -811,7 +805,7 @@ impl UpdateSettingsUI {
                 y,
                 text: format!("{} updates can be rolled back", rollbacks),
                 font_size: 12.0,
-                color: p.lavender,
+                color: p.ink(p.lavender),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width),
                 overflow: TextOverflow::Ellipsis,
@@ -822,14 +816,7 @@ impl UpdateSettingsUI {
         for entry in self.settings.history.iter().rev().take(20) {
             let status_icon = if entry.success { "✓" } else { "✕" };
             let color = if entry.success { p.green } else { p.red };
-            cmds.push(RenderCommand::FillRect {
-                x,
-                y,
-                width,
-                height: 32.0,
-                color: p.mantle,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            p.push_surface(cmds, x, y, width, 32.0, 4.0, Surface::Card);
             cmds.push(RenderCommand::Text {
                 x: x + 8.0,
                 y: y + 4.0,
@@ -856,7 +843,7 @@ impl UpdateSettingsUI {
                 y: y + 4.0,
                 text: rollback_tag.into(),
                 font_size: 11.0,
-                color: p.lavender,
+                color: p.ink(p.lavender),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width * 0.25),
                 overflow: TextOverflow::Ellipsis,
@@ -867,7 +854,7 @@ impl UpdateSettingsUI {
                     y: y + 18.0,
                     text: err.clone(),
                     font_size: 10.0,
-                    color: p.red,
+                    color: p.ink(p.red),
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - 36.0),
                     overflow: TextOverflow::Ellipsis,

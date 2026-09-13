@@ -119,7 +119,7 @@
 //! conversion at all — it is a bug the conversion exposed, because it is
 //! invisible while the accent is hard-coded to blue.
 
-use appearance::{Palette, readable_on};
+use appearance::{Palette, Surface, readable_on};
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
@@ -677,7 +677,7 @@ impl SnapManager {
             // Kept as a hue rather than promoted to the accent: the title is
             // decoration on a panel, and an accented title would compete with
             // the accented thumbnail below it that actually means something.
-            color: p.lavender,
+            color: p.ink(p.lavender),
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(PICKER_WIDTH - 2.0 * PICKER_PADDING),
@@ -703,14 +703,15 @@ impl SnapManager {
             }
 
             // Thumbnail background.
-            cmds.push(RenderCommand::FillRect {
-                x: ix,
-                y: iy,
-                width: THUMB_SIZE,
-                height: THUMB_SIZE,
-                color: p.surface0,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            p.push_surface(
+                &mut cmds,
+                ix,
+                iy,
+                THUMB_SIZE,
+                THUMB_SIZE,
+                4.0,
+                Surface::ControlTrack,
+            );
 
             // Mini-zone rectangles inside the thumbnail. Built at the
             // thumbnail's own origin rather than at zero and offset by the
@@ -1256,14 +1257,14 @@ mod tests {
                 Color::rgba(0, 0, 0, 100),
                 p.panel_bg(),
                 p.surface0,
-                p.lavender,
+                p.ink(p.lavender),
             ];
             for (i, &preset) in SnapLayoutPreset::all().iter().enumerate() {
                 let active = mgr.active_preset == preset;
                 if i == hovered {
                     want.push(p.panel_hover());
                 }
-                want.push(p.surface0);
+                want.push(p.painted(appearance::Surface::ControlTrack));
                 want.extend(std::iter::repeat_n(
                     if active { p.accent } else { p.overlay0 },
                     mini_zone_count(preset),

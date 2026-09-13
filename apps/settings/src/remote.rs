@@ -7,7 +7,6 @@
 #![allow(dead_code)]
 
 use appearance::Palette;
-use appearance::Surface;
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
@@ -646,7 +645,14 @@ fn text_bold(tree: &mut RenderTree, x: f32, y: f32, content: &str, color: Color,
 /// Draw a section header with underline.
 fn render_section_header(pal: &Palette, tree: &mut RenderTree, x: f32, y: f32, title: &str) -> f32 {
     text_bold(tree, x, y, title, pal.text, 16.0);
-    pal.push_surface(tree, x, y + 24.0, CONTENT_WIDTH, 1.0, 0.0, Surface::Card);
+    tree.push(RenderCommand::FillRect {
+        x,
+        y: y + 24.0,
+        width: CONTENT_WIDTH,
+        height: 1.0,
+        color: pal.surface1,
+        corner_radii: CornerRadii::ZERO,
+    });
     y + 36.0
 }
 
@@ -840,7 +846,7 @@ fn render_warning(pal: &Palette, tree: &mut RenderTree, x: f32, y: f32, message:
         x: x + 34.0,
         y: y + 10.0,
         text: message.to_string(),
-        color: pal.peach,
+        color: pal.ink(pal.peach),
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(CONTENT_WIDTH - 48.0),
@@ -950,7 +956,7 @@ fn render_dyndns_section(
             x: x + 16.0,
             y,
             text: msg.clone(),
-            color: pal.red,
+            color: pal.ink(pal.red),
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(CONTENT_WIDTH - 32.0),
@@ -1158,7 +1164,7 @@ fn render_remote_desktop_section(
         x: x + 16.0,
         y: y + 12.0,
         text: connect_label,
-        color: pal.blue,
+        color: pal.ink(pal.blue),
         font_size: 14.0,
         font_weight: FontWeightHint::Bold,
         max_width: Some(CONTENT_WIDTH - 32.0),

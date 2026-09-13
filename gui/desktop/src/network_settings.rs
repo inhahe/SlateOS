@@ -5,7 +5,7 @@
 //! VPN profiles, and firewall rules. Communicates with the network
 //! stack via IPC for actual configuration changes.
 
-use appearance::{Palette, readable_on};
+use appearance::{Palette, Surface, readable_on};
 use guitk::color::Color;
 use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -1170,14 +1170,7 @@ impl NetworkSettingsUI {
             let is_active = *tab == self.active_tab;
 
             if is_active {
-                cmds.push(RenderCommand::FillRect {
-                    x: tab_x,
-                    y: tab_y,
-                    width: tw,
-                    height: 32.0,
-                    color: p.surface0,
-                    corner_radii: CornerRadii::all(6.0),
-                });
+                p.push_surface(&mut cmds, tab_x, tab_y, tw, 32.0, 6.0, Surface::Selected);
             }
 
             cmds.push(RenderCommand::Text {
@@ -1185,7 +1178,11 @@ impl NetworkSettingsUI {
                 y: tab_y + 8.0,
                 text: label.to_string(),
                 font_size: 13.0,
-                color: if is_active { p.accent } else { p.subtext0 },
+                color: if is_active {
+                    p.ink(p.accent)
+                } else {
+                    p.subtext0
+                },
                 font_weight: if is_active {
                     FontWeightHint::Bold
                 } else {
@@ -1202,14 +1199,15 @@ impl NetworkSettingsUI {
         let content_y = tab_y + 44.0;
         let content_h = height - (content_y - y) - 16.0;
 
-        cmds.push(RenderCommand::FillRect {
-            x: x + 8.0,
-            y: content_y,
-            width: width - 16.0,
-            height: content_h,
-            color: p.crust,
-            corner_radii: CornerRadii::all(6.0),
-        });
+        p.push_surface(
+            &mut cmds,
+            x + 8.0,
+            content_y,
+            width - 16.0,
+            content_h,
+            6.0,
+            Surface::Card,
+        );
 
         // Render active tab
         let cx = x + 24.0;
@@ -1252,14 +1250,7 @@ impl NetworkSettingsUI {
         let mut row_y = y;
 
         // Connection status card
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y: row_y,
-            width,
-            height: 80.0,
-            color: p.surface0,
-            corner_radii: CornerRadii::all(8.0),
-        });
+        p.push_surface(cmds, x, row_y, width, 80.0, 8.0, Surface::Card);
 
         let status = self.settings.connection_status();
         let status_color = if let Some(iface) = self.settings.default_interface() {
@@ -1318,14 +1309,7 @@ impl NetworkSettingsUI {
         ];
 
         for (label, enabled) in &toggles {
-            cmds.push(RenderCommand::FillRect {
-                x,
-                y: row_y,
-                width,
-                height: 36.0,
-                color: p.surface0,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            p.push_surface(cmds, x, row_y, width, 36.0, 4.0, Surface::ControlTrack);
 
             cmds.push(RenderCommand::Text {
                 x: x + 16.0,
@@ -1368,14 +1352,7 @@ impl NetworkSettingsUI {
         row_y += 24.0;
 
         for iface in &self.settings.interfaces {
-            cmds.push(RenderCommand::FillRect {
-                x,
-                y: row_y,
-                width,
-                height: 48.0,
-                color: p.surface0,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            p.push_surface(cmds, x, row_y, width, 48.0, 4.0, Surface::Card);
 
             cmds.push(RenderCommand::Text {
                 x: x + 16.0,
@@ -1468,14 +1445,7 @@ impl NetworkSettingsUI {
         row_y += 28.0;
 
         // Search bar
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y: row_y,
-            width,
-            height: 32.0,
-            color: p.surface0,
-            corner_radii: CornerRadii::all(6.0),
-        });
+        p.push_surface(cmds, x, row_y, width, 32.0, 6.0, Surface::Card);
 
         let search_text = if self.wifi_search.is_empty() {
             "Search networks...".to_string()
@@ -1570,7 +1540,11 @@ impl NetworkSettingsUI {
                     y: row_y + 8.0,
                     text: net.ssid.clone(),
                     font_size: 13.0,
-                    color: if net.is_connected { p.green } else { p.text },
+                    color: if net.is_connected {
+                        p.ink(p.green)
+                    } else {
+                        p.text
+                    },
                     font_weight: if net.is_connected {
                         FontWeightHint::Bold
                     } else {
@@ -1604,7 +1578,7 @@ impl NetworkSettingsUI {
                         y: row_y + 12.0,
                         text: "Connected".to_string(),
                         font_size: 11.0,
-                        color: p.green,
+                        color: p.ink(p.green),
                         font_weight: FontWeightHint::Bold,
                         max_width: None,
                         overflow: TextOverflow::Clip,
@@ -1655,14 +1629,7 @@ impl NetworkSettingsUI {
         row_y += 22.0;
 
         for profile in &self.settings.saved_wifi {
-            cmds.push(RenderCommand::FillRect {
-                x,
-                y: row_y,
-                width,
-                height: 36.0,
-                color: p.surface0,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            p.push_surface(cmds, x, row_y, width, 36.0, 4.0, Surface::Card);
 
             cmds.push(RenderCommand::Text {
                 x: x + 16.0,
@@ -1686,7 +1653,7 @@ impl NetworkSettingsUI {
                 y: row_y + 10.0,
                 text: "Forget".to_string(),
                 font_size: 11.0,
-                color: p.red,
+                color: p.ink(p.red),
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1730,14 +1697,7 @@ impl NetworkSettingsUI {
 
         for iface in &eth_ifaces {
             // Interface card
-            cmds.push(RenderCommand::FillRect {
-                x,
-                y: row_y,
-                width,
-                height: 200.0,
-                color: p.surface0,
-                corner_radii: CornerRadii::all(8.0),
-            });
+            p.push_surface(cmds, x, row_y, width, 200.0, 8.0, Surface::Card);
 
             cmds.push(RenderCommand::Text {
                 x: x + 16.0,
@@ -1932,14 +1892,7 @@ impl NetworkSettingsUI {
                 });
                 row_y += 18.0;
 
-                cmds.push(RenderCommand::FillRect {
-                    x,
-                    y: row_y,
-                    width,
-                    height: 32.0,
-                    color: p.surface0,
-                    corner_radii: CornerRadii::all(4.0),
-                });
+                p.push_surface(cmds, x, row_y, width, 32.0, 4.0, Surface::Card);
 
                 cmds.push(RenderCommand::Text {
                     x: x + 12.0,
@@ -2008,14 +1961,7 @@ impl NetworkSettingsUI {
         if self.settings.dns.dns_over_https {
             let providers = default_doh_providers();
             for provider in &providers {
-                cmds.push(RenderCommand::FillRect {
-                    x,
-                    y: row_y,
-                    width,
-                    height: 36.0,
-                    color: p.surface0,
-                    corner_radii: CornerRadii::all(4.0),
-                });
+                p.push_surface(cmds, x, row_y, width, 36.0, 4.0, Surface::Card);
 
                 cmds.push(RenderCommand::Text {
                     x: x + 16.0,
@@ -2190,14 +2136,7 @@ impl NetworkSettingsUI {
                 });
                 row_y += 18.0;
 
-                cmds.push(RenderCommand::FillRect {
-                    x,
-                    y: row_y,
-                    width,
-                    height: 32.0,
-                    color: p.surface0,
-                    corner_radii: CornerRadii::all(4.0),
-                });
+                p.push_surface(cmds, x, row_y, width, 32.0, 4.0, Surface::Card);
 
                 cmds.push(RenderCommand::Text {
                     x: x + 12.0,
@@ -2239,14 +2178,7 @@ impl NetworkSettingsUI {
                     });
                     row_y += 18.0;
 
-                    cmds.push(RenderCommand::FillRect {
-                        x,
-                        y: row_y,
-                        width,
-                        height: 32.0,
-                        color: p.surface0,
-                        corner_radii: CornerRadii::all(4.0),
-                    });
+                    p.push_surface(cmds, x, row_y, width, 32.0, 4.0, Surface::Card);
 
                     cmds.push(RenderCommand::Text {
                         x: x + 12.0,
@@ -2262,14 +2194,7 @@ impl NetworkSettingsUI {
                 }
 
                 // Authentication toggle
-                cmds.push(RenderCommand::FillRect {
-                    x,
-                    y: row_y,
-                    width,
-                    height: 36.0,
-                    color: p.surface0,
-                    corner_radii: CornerRadii::all(4.0),
-                });
+                p.push_surface(cmds, x, row_y, width, 36.0, 4.0, Surface::ControlTrack);
 
                 cmds.push(RenderCommand::Text {
                     x: x + 16.0,
@@ -2350,14 +2275,7 @@ impl NetworkSettingsUI {
         let mut row_y = y;
 
         // Firewall status
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y: row_y,
-            width,
-            height: 60.0,
-            color: p.surface0,
-            corner_radii: CornerRadii::all(8.0),
-        });
+        p.push_surface(cmds, x, row_y, width, 60.0, 8.0, Surface::Card);
 
         let fw_color = if self.settings.firewall.enabled {
             p.green
@@ -2420,14 +2338,7 @@ impl NetworkSettingsUI {
         ];
 
         for (label, enabled) in &options {
-            cmds.push(RenderCommand::FillRect {
-                x,
-                y: row_y,
-                width,
-                height: 36.0,
-                color: p.surface0,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            p.push_surface(cmds, x, row_y, width, 36.0, 4.0, Surface::Card);
 
             cmds.push(RenderCommand::Text {
                 x: x + 16.0,
@@ -3545,6 +3456,20 @@ mod tests {
     /// the same pattern is subtracted in [`colors_apart_from_the_controls`],
     /// so a pill wrongly counted as a segment is a colour silently removed
     /// from the frozen union.
+    /// The active tab's own pill -- the 32-tall box *above* the content well.
+    ///
+    /// The exact complement of [`segment_fills`]'s position bound, so between
+    /// them the two account for every 32-tall box in the module. Matched on
+    /// the logical rectangle and either shape: since 834 the pill is an accent
+    /// outline rather than an accent fill.
+    fn tab_pill(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(appearance::painted_rect)
+            .filter(|(_, y, _, h, _)| (*h - 32.0).abs() < 0.01 && *y <= 100.0)
+            .map(|t| t.4)
+            .collect()
+    }
+
     fn segment_fills(cmds: &[RenderCommand]) -> Vec<Color> {
         cmds.iter()
             .filter_map(|c| match c {
@@ -3630,7 +3555,8 @@ mod tests {
                     c,
                     RenderCommand::Text { text, .. }
                         if text == "+ Add rule" || is_picker_label(text)
-                )
+                ) && !appearance::painted_rect(c)
+                    .is_some_and(|(_, y, _, h, _)| (h - 32.0).abs() < 0.01 && y <= 100.0)
             })
             .filter_map(|c| match c {
                 RenderCommand::FillRect { color, .. }
@@ -3674,6 +3600,16 @@ mod tests {
                 tab_labels(&x),
                 tab_labels(&y),
                 "the {tab:?} tab's label did not move with the accent"
+            );
+
+            // The pill behind that label. Excluded from the frozen union
+            // below, so it gets its own negative half here -- an exclusion
+            // with no assertion behind it is how a site stops being checked.
+            assert_eq!(tab_pill(&x).len(), 1, "one tab is marked as active");
+            assert_ne!(
+                tab_pill(&x),
+                tab_pill(&y),
+                "the {tab:?} tab's pill did not move with the accent"
             );
 
             match tab {
@@ -3783,18 +3719,14 @@ mod tests {
             );
 
             // The well the tab content sits in: the full-width inset at x 8.
-            let well = cmds.iter().find_map(|c| match c {
-                RenderCommand::FillRect {
-                    x: 8.0,
-                    width: 584.0,
-                    color,
-                    ..
-                } => Some(*color),
-                _ => None,
-            });
+            let well = cmds
+                .iter()
+                .filter_map(appearance::painted_rect)
+                .find(|(x, _, w, _, _)| *x == 8.0 && *w == 584.0)
+                .map(|t| t.4);
             assert_eq!(
                 well,
-                Some(p.crust),
+                Some(p.painted(appearance::Surface::Card)),
                 "the content well is not p.crust (light={light})"
             );
         }

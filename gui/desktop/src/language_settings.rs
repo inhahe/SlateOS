@@ -38,7 +38,7 @@
 //!    placeholder is `p.overlay0` and text the user actually typed is
 //!    `p.text`, so "Search languages…" cannot be mistaken for a query.
 
-use appearance::{Palette, readable_on};
+use appearance::{Palette, Surface, readable_on};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
@@ -607,14 +607,7 @@ impl LanguageSettingsUI {
 
         // Current language
         if let Some(lang) = self.settings.current_language() {
-            cmds.push(RenderCommand::FillRect {
-                x,
-                y: cy,
-                width,
-                height: 50.0,
-                color: p.surface1,
-                corner_radii: CornerRadii::all(8.0),
-            });
+            p.push_surface(cmds, x, cy, width, 50.0, 8.0, Surface::Card);
             cmds.push(RenderCommand::Text {
                 x: x + 12.0,
                 y: cy + 6.0,
@@ -639,14 +632,7 @@ impl LanguageSettingsUI {
         }
 
         // Search box
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y: cy,
-            width,
-            height: 30.0,
-            color: p.surface0,
-            corner_radii: CornerRadii::all(6.0),
-        });
+        p.push_surface(cmds, x, cy, width, 30.0, 6.0, Surface::Card);
         let search_text = if self.language_search.is_empty() {
             "Search languages...".to_string()
         } else {
@@ -699,7 +685,7 @@ impl LanguageSettingsUI {
                 y: cy + 4.0,
                 text: lang.display_name.clone(),
                 font_size: 13.0,
-                color: if is_current { p.accent } else { p.text },
+                color: if is_current { p.ink(p.accent) } else { p.text },
                 font_weight: if is_current {
                     FontWeightHint::Bold
                 } else {
@@ -774,7 +760,7 @@ impl LanguageSettingsUI {
             y: cy,
             text: "Date Format".into(),
             font_size: 15.0,
-            color: p.lavender,
+            color: p.ink(p.lavender),
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -808,7 +794,7 @@ impl LanguageSettingsUI {
             y: cy,
             text: "Time Format".into(),
             font_size: 15.0,
-            color: p.lavender,
+            color: p.ink(p.lavender),
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -842,7 +828,7 @@ impl LanguageSettingsUI {
             y: cy,
             text: "Calendar".into(),
             font_size: 15.0,
-            color: p.lavender,
+            color: p.ink(p.lavender),
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -866,7 +852,7 @@ impl LanguageSettingsUI {
             y: cy,
             text: "Number Format".into(),
             font_size: 15.0,
-            color: p.lavender,
+            color: p.ink(p.lavender),
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -911,7 +897,7 @@ impl LanguageSettingsUI {
             y: cy,
             text: "Measurement".into(),
             font_size: 15.0,
-            color: p.lavender,
+            color: p.ink(p.lavender),
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -935,7 +921,7 @@ impl LanguageSettingsUI {
             y: cy,
             text: "Temperature".into(),
             font_size: 15.0,
-            color: p.lavender,
+            color: p.ink(p.lavender),
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -959,7 +945,7 @@ impl LanguageSettingsUI {
             y: cy,
             text: "Currency".into(),
             font_size: 15.0,
-            color: p.lavender,
+            color: p.ink(p.lavender),
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -1014,7 +1000,7 @@ impl LanguageSettingsUI {
                     cur.format_value(1234.56)
                 ),
                 font_size: 12.0,
-                color: if is_current { p.accent } else { p.text },
+                color: if is_current { p.ink(p.accent) } else { p.text },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 20.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1425,15 +1411,24 @@ mod tests {
 
     /// Every `FillRect` of exactly `w` x `h`, in draw order.
     fn fills_sized(cmds: &[RenderCommand], w: f32, h: f32) -> Vec<Color> {
+        // Both kinds, on the *logical* rectangle. Since §829 a box of a given
+        // size may be an outline rather than a fill, and an outline's command
+        // reports a rectangle a pixel smaller than the one asked for -- so an
+        // exact `width == w` on the raw command would miss every converted
+        // site. This collects what was painted at that size either way, and
+        // the assertions compare against what `surface_paint` says for the
+        // kind the draw site named.
         cmds.iter()
-            .filter_map(|c| match c {
-                RenderCommand::FillRect {
-                    width,
-                    height,
-                    color,
-                    ..
-                } if *width == w && *height == h => Some(*color),
-                _ => None,
+            .filter_map(|c| {
+                let (_, _, cw, ch) = appearance::logical_rect(c)?;
+                if (cw - w).abs() > 0.01 || (ch - h).abs() > 0.01 {
+                    return None;
+                }
+                match *c {
+                    RenderCommand::FillRect { color, .. }
+                    | RenderCommand::StrokeRect { color, .. } => Some(color),
+                    _ => None,
+                }
             })
             .collect()
     }
@@ -1564,10 +1559,14 @@ mod tests {
             assert_eq!(fills_sized(lang, 600.0, 800.0), vec![p.base], "panel");
             assert_eq!(text_color(lang, "Language & Region"), p.text, "title");
 
-            // The current-language card sits one rung above the list rows it
-            // summarises, so it is `surface1` while an ordinary row is
-            // `surface0`.
-            assert_eq!(fills_sized(lang, 552.0, 50.0), vec![p.surface1], "card");
+            // Under the bordered theme the card is an outline rather than a
+            // rung, so what separates it from the rows around it is that it
+            // has a boundary at all.
+            assert_eq!(
+                fills_sized(lang, 552.0, 50.0),
+                vec![p.painted(appearance::Surface::Card)],
+                "card"
+            );
             assert_eq!(
                 text_color(lang, "Current: English (United States)"),
                 p.text,
@@ -1581,7 +1580,7 @@ mod tests {
 
             assert_eq!(
                 fills_sized(lang, 552.0, 30.0),
-                vec![p.surface0],
+                vec![p.painted(appearance::Surface::Card)],
                 "search box"
             );
 
@@ -1610,7 +1609,11 @@ mod tests {
             // The Region tab: both heading rungs, a label/value pair, and the
             // currency rows, whose current entry is raised the same way.
             let region = &by_tab[2].1;
-            assert_eq!(text_color(region, "Measurement"), p.lavender, "heading");
+            assert_eq!(
+                text_color(region, "Measurement"),
+                p.ink(p.lavender),
+                "heading"
+            );
             assert_eq!(
                 text_color(region, "Available Currencies"),
                 p.subtext1,
@@ -1655,10 +1658,17 @@ mod tests {
             assert_eq!(fills_sized(lang, 4.0, 32.0), vec![p.accent], "marker bar");
             assert_eq!(
                 text_color(lang, "English (United States)"),
-                p.accent,
+                p.ink(p.accent),
                 "the current language's name marks which one is in force"
             );
-            let accented_count = all_colors(lang).iter().filter(|c| **c == p.accent).count();
+            // Both forms: the marker bar is an accent *fill* and stays raw,
+            // while the two labels are accent *text* and go through `ink`.
+            // The claim is about how many things are accented, not about
+            // which of the two spellings they use.
+            let accented_count = all_colors(lang)
+                .iter()
+                .filter(|c| **c == p.accent || **c == p.ink(p.accent))
+                .count();
             assert_eq!(
                 accented_count, 3,
                 "the Language tab should accent exactly the active tab, the \
@@ -1683,12 +1693,15 @@ mod tests {
             let region = &by_tab[2].1;
             assert_eq!(
                 text_color(region, "$ USD ($1234.56)"),
-                p.accent,
+                p.ink(p.accent),
                 "the default currency's row marks which one prices are shown in"
             );
             let on_region = all_colors(region)
                 .iter()
-                .filter(|c| **c == p.accent)
+                // Both forms, for the reason the Language tab's count gives:
+                // the marker bar is an accent fill and stays raw, the labels
+                // are accent text and go through `ink`.
+                .filter(|c| **c == p.accent || **c == p.ink(p.accent))
                 .count();
             assert_eq!(
                 on_region, 2,
@@ -1786,8 +1799,8 @@ mod tests {
                     .collect();
                 assert!(!headings.is_empty(), "{tab:?} has no headings");
                 for h in headings {
-                    assert_eq!(h, p.lavender, "{tab:?} heading left its rung");
-                    assert_ne!(h, p.accent, "a heading is not a selection");
+                    assert_eq!(h, p.ink(p.lavender), "{tab:?} heading left its rung");
+                    assert_ne!(h, p.ink(p.accent), "a heading is not a selection");
                 }
             }
         }

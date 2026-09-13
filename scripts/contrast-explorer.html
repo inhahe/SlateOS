@@ -166,9 +166,21 @@
       <p class="note" style="margin-top:0">The question the presets above ask you to answer. The desktop draws
          text on <b>five</b> shaded surfaces, not one &mdash; <code>surface0</code> is the ordinary card
          (1012 sites), <code>surface1</code> (542) and <code>surface2</code> (159) are the deeper ones, and
-         <code>mantle</code> (353) and <code>crust</code> (285) are <em>lighter</em> than the page. A palette
+         <code>mantle</code> (353) and <code>crust</code> (285) are <em>darker</em> than the page
+         in both modes &mdash; they are the recessed shades a card sits in front of, not raised ones. A palette
          naming one card colour has to say what becomes of the other four. Anything below 4.5 is marked.</p>
       <div id="allsurf"></div>
+    </div>
+
+    <div class="panel" style="margin-top:18px">
+      <h2>The fourteen accents, before and after the 4.5 floor</h2>
+      <p class="note" style="margin-top:0">Since &sect;837 a site that draws <em>text</em> in an accent
+         asks the palette for a version that clears 4.5 on whatever this theme puts underneath it. The
+         accent itself &mdash; the switch that is on, the progress fill, the badge &mdash; is left exactly
+         as chosen. This is the table behind <b>C&#8209;Q15</b>: the <em>moved</em> column is how far each
+         accent has to travel, and paler cards would shorten it. Change a pane colour above and watch it
+         move.</p>
+      <div id="accfloor"></div>
     </div>
 
     <div class="panel" style="margin-top:18px">
@@ -204,9 +216,11 @@
             exists.</li>
       </ol>
 
-      <h3 style="font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:#666;margin:14px 0 6px">What the conversion actually touches</h3>
-      <p class="note" style="margin-top:0">Counted, not estimated &mdash;
-         <code>grep</code> across <code>gui/</code> and <code>apps/</code>:</p>
+      <h3 style="font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:#666;margin:14px 0 6px">What the conversion touched &mdash; <b>done 2026&#8209;09&#8209;12</b></h3>
+      <p class="note" style="margin-top:0">Every convertible draw site now goes through the one decision point;
+         a re-run of the converter finds <b>zero</b> left. The shell is green at 2,915 tests and the Themes page
+         carries both settings with a preview drawn through the same function the desktop uses. The estimate
+         below is kept as written, because what it got wrong is the useful part.</p>
       <table>
         <thead><tr><th>what</th><th class="num">count</th><th>treatment</th></tr></thead>
         <tbody>
@@ -226,6 +240,23 @@
          knowing: the fills that are genuinely <b>control chrome</b> (a switch track, a scrollbar, a progress
          groove) stay fills in <em>both</em> themes and must be classified out by hand rather than swept, and the
          shade ladder cannot be deleted, only stop being the default.</p>
+      <p class="note">What the estimate missed was that a sweep can be <em>wrong in a way that still compiles and
+         still draws</em>. Four classes of that reached the tree and none of them failed a build; each was found
+         afterwards by looking for a <b>shape</b> rather than by reading code, and each is now a guard in the
+         converter so it cannot come back:</p>
+      <table>
+        <thead><tr><th>sweep</th><th>what it looks for</th><th class="num">found</th></tr></thead>
+        <tbody>
+          <tr><td>too thin</td><td>a surface 1px in either direction</td><td class="num">21</td></tr>
+          <tr><td>at the origin</td><td>(0,&nbsp;0), full width, no corner radius</td><td class="num">8</td></tr>
+          <tr><td>doubled</td><td>a surface and an outline at the same four coordinates</td><td class="num">19</td></tr>
+          <tr><td>a disc or a swatch</td><td>a circle, or a box under 16&times;16</td><td class="num">3</td></tr>
+        </tbody>
+      </table>
+      <p class="note">The reason none of them could be caught by the words in the code: they are commented
+         &ldquo;Header&rdquo;, &ldquo;Divider&rdquo;, &ldquo;Full-window background&rdquo;, &ldquo;Icon background
+         circle&rdquo;. That is ordinary English no pattern matches. What separates a page from a card, or a rule
+         from a box, is the rectangle &mdash; so the guards are geometric.</p>
     </div>
 
     <div class="panel" style="margin-top:18px">
@@ -871,6 +902,84 @@ function renderUseCases() {
     'the fills that constrain the palette, and there are fewer of them than the shade count suggests.';
 }
 
+// The palette's `legible_on`, in JavaScript, so the page shows the same answer
+// the desktop computes rather than a description of it.
+function legibleOn(ink, bg, floor) {
+  if (ratio(ink, bg) >= floor) return ink;
+  // Toward whichever pole is legible on this ground -- not away from the
+  // ground, which is wrong when the ink is already on the ground's side.
+  const toward = ratio(bg, '#000000') >= ratio(bg, '#ffffff') ? '#000000' : '#ffffff';
+  const a = parseInt(ink.slice(1), 16), b = parseInt(toward.slice(1), 16);
+  const mix = t => {
+    const ch = sh => Math.round(((a >> sh) & 255) + (((b >> sh) & 255) - ((a >> sh) & 255)) * t);
+    return '#' + [16, 8, 0].map(sh => ch(sh).toString(16).padStart(2, '0')).join('');
+  };
+  let lo = 0, hi = 1;
+  for (let i = 0; i < 24; i++) {
+    const m = (lo + hi) / 2;
+    if (ratio(mix(m), bg) >= floor) hi = m; else lo = m;
+  }
+  return mix(hi);
+}
+
+const dist = (a, b) => {
+  const x = parseInt(a.slice(1), 16), y = parseInt(b.slice(1), 16);
+  return Math.hypot(((x>>16)&255)-((y>>16)&255), ((x>>8)&255)-((y>>8)&255), (x&255)-(y&255));
+};
+
+// The fourteen presets, at their light-theme values. Fixed rather than driven
+// from the pane controls, because these are what the user picks *from*.
+const ACCENTS = [
+  ['blue','#0036A3'], ['lavender','#5565BE'], ['teal','#13787E'], ['green','#317B21'],
+  ['yellow','#976014'], ['peach','#B94908'], ['pink','#9F508A'], ['mauve','#8839EF'],
+  ['red','#D20F39'], ['rosewater','#965E52'], ['flamingo','#A05757'], ['maroon','#C33B47'],
+  ['sky','#0374A1'], ['sapphire','#187788'],
+];
+
+function renderAccentFloor() {
+  const L = cur.ladder;
+  // The grounds each theme actually puts text on -- which is the point §837
+  // turns on, and the reason one table cannot answer for both.
+  const bordered = [['page', cur.page], ['toolbar', L.mantle]];
+  const carded = bordered.concat([['card', L.s0], ['selected', L.s1], ['sidebar', L.crust]]);
+  const worstOn = (ink, grounds) => Math.min(...grounds.map(([, bg]) => ratio(ink, bg)));
+  const settle = (ink, grounds) => grounds.reduce((acc, [, bg]) => legibleOn(acc, bg, 4.5), ink);
+
+  let rows = '';
+  for (const [name, raw] of ACCENTS) {
+    const cells = [];
+    for (const [label, grounds] of [['outlined', bordered], ['filled', carded]]) {
+      const after = settle(raw, grounds);
+      const before = worstOn(raw, grounds);
+      const moved = dist(raw, after);
+      cells.push(
+        `<td class="num">${before.toFixed(2)}</td>` +
+        `<td><span style="display:inline-block;width:22px;height:12px;border-radius:3px;` +
+        `background:${after};border:1px solid rgba(0,0,0,.25);vertical-align:-2px"></span> ` +
+        `<code>${after.toUpperCase()}</code></td>` +
+        `<td class="num">${moved < 0.5 ? '&mdash;' : moved.toFixed(0)}</td>`);
+      void label;
+    }
+    rows += `<tr><td><span style="display:inline-block;width:22px;height:12px;border-radius:3px;` +
+            `background:${raw};border:1px solid rgba(0,0,0,.25);vertical-align:-2px"></span> ` +
+            `${name}</td>${cells.join('')}</tr>`;
+  }
+  const movedCarded = ACCENTS.map(([, raw]) => dist(raw, settle(raw, carded)));
+  const movedBordered = ACCENTS.map(([, raw]) => dist(raw, settle(raw, bordered)));
+  const avg = a => a.reduce((x, y) => x + y, 0) / a.length;
+  $('accfloor').innerHTML =
+    `<table><thead><tr><th rowspan="2">accent</th>` +
+    `<th colspan="3">outlined (the shipped theme)</th>` +
+    `<th colspan="3">filled (the optional theme)</th></tr>` +
+    `<tr><th class="num">worst now</th><th>what text uses</th><th class="num">moved</th>` +
+    `<th class="num">worst now</th><th>what text uses</th><th class="num">moved</th></tr></thead>` +
+    `<tbody>${rows}</tbody></table>` +
+    `<p class="note">Average distance travelled: <b>${avg(movedBordered).toFixed(1)}</b> under the ` +
+    `outlined theme &mdash; invisible &mdash; and <b>${avg(movedCarded).toFixed(1)}</b> under the ` +
+    `filled one, which is the number C&#8209;Q15 asks whether to reduce. Lightening the card shades ` +
+    `above lowers it; watch how little room there is before a card stops being distinct from the page.</p>`;
+}
+
 function renderAllSurfaces() {
   const L = cur.ladder;
   const surfaces = [
@@ -946,6 +1055,7 @@ function render() {
     }
   $('tbl').innerHTML = rows.join('');
   renderAllSurfaces();
+  renderAccentFloor();
   renderUseCases();
   renderFullPages();
   renderOptions();

@@ -2511,14 +2511,21 @@ impl EmailApp {
         });
 
         // Header
-        self.palette
-            .push_surface(&mut cmds, 0.0, 0.0, width, header_h, 0.0, Surface::Card);
+        self.palette.push_surface(
+            &mut cmds,
+            0.0,
+            0.0,
+            width,
+            header_h,
+            0.0,
+            Surface::Strip(Edge::Bottom),
+        );
         cmds.push(RenderCommand::Text {
             x: 16.0,
             y: 14.0,
             text: "Mail".to_string(),
             font_size: 18.0,
-            color: self.palette.blue,
+            color: self.palette.ink(self.palette.blue),
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2691,7 +2698,7 @@ impl EmailApp {
                 text: format!("{icon} {}", mb.name),
                 font_size: 12.0,
                 color: if is_sel {
-                    self.palette.blue
+                    self.palette.ink(self.palette.blue)
                 } else {
                     self.palette.subtext1
                 },
@@ -2710,7 +2717,7 @@ impl EmailApp {
                     y: my + 7.0,
                     text: mb.unread_messages.to_string(),
                     font_size: 11.0,
-                    color: self.palette.blue,
+                    color: self.palette.ink(self.palette.blue),
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -2825,7 +2832,7 @@ impl EmailApp {
                     y: ry + 6.0,
                     text: "★".to_string(),
                     font_size: 14.0,
-                    color: self.palette.yellow,
+                    color: self.palette.ink(self.palette.yellow),
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -2924,7 +2931,7 @@ impl EmailApp {
                     y: ry + 42.0,
                     text: "❗".to_string(),
                     font_size: 12.0,
-                    color: self.palette.red,
+                    color: self.palette.ink(self.palette.red),
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -2945,7 +2952,7 @@ impl EmailApp {
                     y: ry + 55.0,
                     text: label.clone(),
                     font_size: 9.0,
-                    color: self.palette.peach,
+                    color: self.palette.ink(self.palette.peach),
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -2959,8 +2966,14 @@ impl EmailApp {
 
     fn render_reading_pane(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, _h: f32) {
         // Separator line
-        self.palette
-            .push_surface(cmds, x, y, 1.0, _h, 0.0, Surface::Card);
+        cmds.push(RenderCommand::FillRect {
+            x,
+            y,
+            width: 1.0,
+            height: _h,
+            color: self.palette.surface0,
+            corner_radii: CornerRadii::ZERO,
+        });
 
         let msg = if let Some(m) = self
             .selected_message
@@ -3065,8 +3078,14 @@ impl EmailApp {
         py += 24.0;
 
         // Separator
-        self.palette
-            .push_surface(cmds, px, py, max_w, 1.0, 0.0, Surface::Card);
+        cmds.push(RenderCommand::FillRect {
+            x: px,
+            y: py,
+            width: max_w,
+            height: 1.0,
+            color: self.palette.surface0,
+            corner_radii: CornerRadii::ZERO,
+        });
         py += 12.0;
 
         // Body preview

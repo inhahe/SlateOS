@@ -2122,7 +2122,7 @@ fn render_sidebar_item(
             y: y + 10.0,
             text: String::from("KS"),
             font_size: 10.0,
-            color: pal.red,
+            color: pal.ink(pal.red),
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2431,7 +2431,7 @@ fn render_tab_overview(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw
             y: summary_y,
             text: String::from("Connected"),
             font_size: 14.0,
-            color: app.palette.green,
+            color: app.palette.ink(app.palette.green),
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2729,7 +2729,7 @@ fn render_tab_split_tunnel(frame: &mut Frame, app: &VpnManager, px: f32, py: f32
                 y: y + 6.0,
                 text: String::from("Remove"),
                 font_size: 11.0,
-                color: app.palette.red,
+                color: app.palette.ink(app.palette.red),
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -3313,17 +3313,17 @@ fn render_add_dialog(frame: &mut Frame, app: &VpnManager) {
     let dy = (frame.height - dialog_h) / 2.0;
 
     // Dialog background
-    app.palette
-        .push_surface(frame, dx, dy, dialog_w, dialog_h, 12.0, Surface::Panel);
-    frame.push(RenderCommand::StrokeRect {
-        x: dx,
-        y: dy,
-        width: dialog_w,
-        height: dialog_h,
-        color: app.palette.surface1,
-        line_width: 1.0,
-        corner_radii: CornerRadii::all(12.0),
-    });
+    let mut paint = app.palette.surface_paint(Surface::Panel);
+    paint.border = Some(paint.border.unwrap_or(app.palette.surface1));
+    app.palette.push_paint_radii(
+        frame,
+        dx,
+        dy,
+        dialog_w,
+        dialog_h,
+        CornerRadii::all(12.0),
+        paint,
+    );
 
     // Title
     frame.push(RenderCommand::Text {
@@ -3426,7 +3426,7 @@ fn render_add_dialog(frame: &mut Frame, app: &VpnManager) {
             y: dy + dialog_h - 74.0,
             text: app.dialog_error.clone(),
             font_size: 12.0,
-            color: app.palette.red,
+            color: app.palette.ink(app.palette.red),
             font_weight: FontWeightHint::Regular,
             max_width: Some(dialog_w - 40.0),
             overflow: TextOverflow::Ellipsis,
@@ -3497,7 +3497,7 @@ fn render_status_bar(frame: &mut Frame, app: &VpnManager) {
         text: format!("{active} connected"),
         font_size: 11.0,
         color: if active > 0 {
-            app.palette.green
+            app.palette.ink(app.palette.green)
         } else {
             app.palette.overlay0
         },
@@ -3528,7 +3528,7 @@ fn render_status_bar(frame: &mut Frame, app: &VpnManager) {
             y: y + 8.0,
             text: String::from("Kill Switch: ON"),
             font_size: 11.0,
-            color: app.palette.red,
+            color: app.palette.ink(app.palette.red),
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -3567,7 +3567,7 @@ fn render_section_title(frame: &mut Frame, pal: &Palette, title: &str, x: f32, y
         y,
         text: title.to_string(),
         font_size: 14.0,
-        color: pal.lavender,
+        color: pal.ink(pal.lavender),
         font_weight: FontWeightHint::Bold,
         max_width: None,
         overflow: TextOverflow::Clip,

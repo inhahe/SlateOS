@@ -2171,7 +2171,7 @@ impl DiagramApp {
             y: 14.0,
             text: String::from(grid_label),
             color: if self.show_grid {
-                self.palette.green
+                self.palette.ink(self.palette.green)
             } else {
                 self.palette.overlay0
             },
@@ -2192,7 +2192,7 @@ impl DiagramApp {
             y: 14.0,
             text: String::from(snap_label),
             color: if self.snap_to_grid {
-                self.palette.green
+                self.palette.ink(self.palette.green)
             } else {
                 self.palette.overlay0
             },
@@ -3336,7 +3336,7 @@ impl DiagramApp {
             x: self.window_w - 200.0,
             y: sy + 6.0,
             text: String::from(mode_str),
-            color: self.palette.lavender,
+            color: self.palette.ink(self.palette.lavender),
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(190.0),

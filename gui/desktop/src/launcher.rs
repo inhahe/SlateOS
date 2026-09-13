@@ -64,6 +64,7 @@
 //!    rather than a colour.
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -725,14 +726,15 @@ impl LauncherState {
             let is_selected = i == self.selected_index;
 
             if is_selected {
-                cmds.push(RenderCommand::FillRect {
-                    x: 0.0,
-                    y: row_y,
-                    width: input_width,
-                    height: ROW_HEIGHT,
-                    color: p.surface1,
-                    corner_radii: CornerRadii::all(6.0),
-                });
+                p.push_surface(
+                    &mut cmds,
+                    0.0,
+                    row_y,
+                    input_width,
+                    ROW_HEIGHT,
+                    6.0,
+                    Surface::Selected,
+                );
                 cmds.push(RenderCommand::FillRect {
                     x: 0.0,
                     y: row_y + 8.0,
@@ -1167,15 +1169,24 @@ mod tests {
 
     /// The colours of every `FillRect` of exactly `w` x `h`.
     fn fills_sized(cmds: &[RenderCommand], w: f32, h: f32) -> Vec<Color> {
+        // Both kinds, on the *logical* rectangle. Since §829 a box of a given
+        // size may be an outline rather than a fill, and an outline's command
+        // reports a rectangle a pixel smaller than the one asked for -- so an
+        // exact `width == w` on the raw command would miss every converted
+        // site. This collects what was painted at that size either way, and
+        // the assertions compare against what `surface_paint` says for the
+        // kind the draw site named.
         cmds.iter()
-            .filter_map(|c| match c {
-                RenderCommand::FillRect {
-                    width,
-                    height,
-                    color,
-                    ..
-                } if *width == w && *height == h => Some(*color),
-                _ => None,
+            .filter_map(|c| {
+                let (_, _, cw, ch) = appearance::logical_rect(c)?;
+                if (cw - w).abs() > 0.01 || (ch - h).abs() > 0.01 {
+                    return None;
+                }
+                match *c {
+                    RenderCommand::FillRect { color, .. }
+                    | RenderCommand::StrokeRect { color, .. } => Some(color),
+                    _ => None,
+                }
             })
             .collect()
     }
@@ -1896,10 +1907,17 @@ mod tests {
                 vec![p.mantle],
                 "the search field is a rung below the dialog around it"
             );
+            // At the origin, which is the search field and nothing else. A
+            // bare `StrokeRect` pattern would now also collect every card.
             let strokes: Vec<Color> = cmds
                 .iter()
                 .filter_map(|c| match c {
-                    RenderCommand::StrokeRect { color, .. } => Some(*color),
+                    RenderCommand::StrokeRect {
+                        x: 0.0,
+                        y: 0.0,
+                        color,
+                        ..
+                    } => Some(*color),
                     _ => None,
                 })
                 .collect();
@@ -1908,8 +1926,8 @@ mod tests {
             // The selected row: a fill and a bar, and exactly one of each.
             assert_eq!(
                 fills_sized(&cmds, 596.0, ROW_HEIGHT),
-                vec![p.surface1],
-                "exactly one row is filled, at the raised rung"
+                vec![p.painted(appearance::Surface::Selected)],
+                "exactly one row is marked as selected"
             );
             assert_eq!(
                 fills_sized(&cmds, 3.0, ROW_HEIGHT - 16.0),
@@ -2001,10 +2019,15 @@ mod tests {
             let p = accented(light);
             let cmds = five_categories().render(&p);
             let n = all_colors(&cmds).iter().filter(|c| **c == p.accent).count();
+            // Three since §834: the caret, the selected row's bar, and the
+            // outline the bordered theme draws round the selected row. All
+            // three say where you are, which is the claim this test makes --
+            // the number is the *population* of that claim, not a budget, so
+            // it moves when the theme gives the idea another expression.
             assert_eq!(
-                n, 2,
-                "the caret and the selected row's bar are the only two things \
-                 that say where you are — found {n}"
+                n, 3,
+                "the caret, the selected row's bar and its outline are the \
+                 only three things that say where you are — found {n}"
             );
 
             // The caret is one of the two, and it is the module's only Line.

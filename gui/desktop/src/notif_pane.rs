@@ -52,7 +52,7 @@
 //!
 //! [`NotificationPane::events`]: NotificationPane
 
-use appearance::{Palette, readable_on};
+use appearance::{Palette, Surface, readable_on};
 use guitk::color::Color;
 use guitk::event::{EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::idseq::IdSeq;
@@ -1361,7 +1361,7 @@ impl NotificationPane {
                 x: clear_x,
                 y: y + 6.0,
                 text: "Clear all".to_string(),
-                color: p.accent,
+                color: p.ink(p.accent),
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(60.0),
@@ -1387,7 +1387,7 @@ impl NotificationPane {
                 x: back_x,
                 y: y + 6.0,
                 text: "Back".to_string(),
-                color: p.accent,
+                color: p.ink(p.accent),
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(40.0),
@@ -1717,14 +1717,15 @@ impl NotificationPane {
         if is_hovered {
             let btn_x = x + card_width - DISMISS_BTN_SIZE - 8.0;
             let btn_y = y + 6.0;
-            cmds.push(RenderCommand::FillRect {
-                x: btn_x,
-                y: btn_y,
-                width: DISMISS_BTN_SIZE,
-                height: DISMISS_BTN_SIZE,
-                color: p.surface2,
-                corner_radii: CornerRadii::all(DISMISS_BTN_SIZE / 2.0),
-            });
+            p.push_surface(
+                cmds,
+                btn_x,
+                btn_y,
+                DISMISS_BTN_SIZE,
+                DISMISS_BTN_SIZE,
+                DISMISS_BTN_SIZE / 2.0,
+                Surface::Selected,
+            );
             // "X" glyph.
             cmds.push(RenderCommand::Text {
                 x: btn_x + 5.0,
@@ -1777,14 +1778,15 @@ impl NotificationPane {
             }
 
             // App card.
-            cmds.push(RenderCommand::FillRect {
-                x: PANE_PADDING,
+            p.push_surface(
+                cmds,
+                PANE_PADDING,
                 y,
-                width: card_width,
-                height: APP_CARD_HEIGHT,
-                color: p.surface0,
-                corner_radii: CornerRadii::all(CARD_RADIUS),
-            });
+                card_width,
+                APP_CARD_HEIGHT,
+                CARD_RADIUS,
+                Surface::Card,
+            );
 
             // App name.
             cmds.push(RenderCommand::Text {
@@ -1861,7 +1863,7 @@ impl NotificationPane {
                 x: PANE_PADDING,
                 y: start_y + Self::app_card_top(self.app_settings.len()) + 12.0,
                 text: "Open full notification settings...".to_string(),
-                color: p.accent,
+                color: p.ink(p.accent),
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(250.0),
@@ -2603,20 +2605,17 @@ mod tests {
 
     fn painted_app_cards(pane: &NotificationPane) -> Vec<f32> {
         let card_width = PANE_WIDTH - 2.0 * PANE_PADDING;
+        // On the logical rectangle, and either shape. A card is an outline
+        // under the bordered theme, and a `FillRect`-only pattern would return
+        // an empty vector -- which is worse than failing, because the two
+        // sweeps that consume this would then pass over nothing at all.
         app_settings_commands(pane)
             .iter()
-            .filter_map(|cmd| match cmd {
-                RenderCommand::FillRect {
-                    x,
-                    y,
-                    width,
-                    height,
-                    ..
-                } if *x == PANE_PADDING && *width == card_width && *height == APP_CARD_HEIGHT => {
-                    Some(*y)
-                }
-                _ => None,
+            .filter_map(appearance::painted_rect)
+            .filter(|(x, _, w, h, _)| {
+                *x == PANE_PADDING && *w == card_width && *h == APP_CARD_HEIGHT
             })
+            .map(|(_, y, _, _, _)| y)
             .collect()
     }
 
@@ -2624,18 +2623,9 @@ mod tests {
     fn painted_app_pills(pane: &NotificationPane) -> Vec<(f32, f32, f32, f32)> {
         app_settings_commands(pane)
             .iter()
-            .filter_map(|cmd| match cmd {
-                RenderCommand::FillRect {
-                    x,
-                    y,
-                    width,
-                    height,
-                    ..
-                } if *width == TOGGLE_WIDTH && *height == TOGGLE_HEIGHT => {
-                    Some((*x, *y, *width, *height))
-                }
-                _ => None,
-            })
+            .filter_map(appearance::painted_rect)
+            .filter(|(_, _, w, h, _)| *w == TOGGLE_WIDTH && *h == TOGGLE_HEIGHT)
+            .map(|(x, y, w, h, _)| (x, y, w, h))
             .collect()
     }
 

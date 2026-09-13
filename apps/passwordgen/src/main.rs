@@ -115,7 +115,7 @@ fn render_pattern_list(
             x,
             y: cy,
             text: format!("[{}] {}", pattern.kind.label(), pattern.description),
-            color: pal.peach,
+            color: pal.ink(pal.peach),
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(max_width),
@@ -1554,7 +1554,7 @@ impl PasswordApp {
             x: 12.0,
             y: 12.0,
             text: "Password Generator".to_owned(),
-            color: self.palette.blue,
+            color: self.palette.ink(self.palette.blue),
             font_size: 15.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
@@ -1589,7 +1589,7 @@ impl PasswordApp {
                 y: 14.0,
                 text: tab.label().to_owned(),
                 color: if is_active {
-                    self.palette.blue
+                    self.palette.ink(self.palette.blue)
                 } else {
                     self.palette.subtext0
                 },

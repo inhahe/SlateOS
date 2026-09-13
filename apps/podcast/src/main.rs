@@ -2928,7 +2928,7 @@ impl PodcastApp {
                 x: x + width - 40.0,
                 y: y + 8.0,
                 text: "DL".to_string(),
-                color: self.palette.green,
+                color: self.palette.ink(self.palette.green),
                 font_size: 10.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(30.0),
@@ -3039,7 +3039,7 @@ impl PodcastApp {
             x: pad,
             y: detail_y,
             text: format!("From: {}", podcast.title),
-            color: self.palette.blue,
+            color: self.palette.ink(self.palette.blue),
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(text_w),
@@ -3109,8 +3109,14 @@ impl PodcastApp {
         detail_y += 36.0;
 
         // Divider.
-        self.palette
-            .push_surface(cmds, pad, detail_y, text_w, 1.0, 0.0, Surface::Card);
+        cmds.push(RenderCommand::FillRect {
+            x: pad,
+            y: detail_y,
+            width: text_w,
+            height: 1.0,
+            color: self.palette.surface0,
+            corner_radii: CornerRadii::ZERO,
+        });
         detail_y += 16.0;
 
         // Description.
@@ -3139,8 +3145,14 @@ impl PodcastApp {
 
         // Notes section.
         if episode.notes.has_content() {
-            self.palette
-                .push_surface(cmds, pad, detail_y, text_w, 1.0, 0.0, Surface::Card);
+            cmds.push(RenderCommand::FillRect {
+                x: pad,
+                y: detail_y,
+                width: text_w,
+                height: 1.0,
+                color: self.palette.surface0,
+                corner_radii: CornerRadii::ZERO,
+            });
             detail_y += 16.0;
 
             cmds.push(RenderCommand::Text {
@@ -3176,7 +3188,7 @@ impl PodcastApp {
                     x: pad + 6.0,
                     y: detail_y + 3.0,
                     text: bm.timestamp_display(),
-                    color: self.palette.blue,
+                    color: self.palette.ink(self.palette.blue),
                     font_size: 11.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(50.0),
@@ -3230,7 +3242,7 @@ impl PodcastApp {
                 if self.auto_play_next { "On" } else { "Off" }
             ),
             color: if self.auto_play_next {
-                self.palette.green
+                self.palette.ink(self.palette.green)
             } else {
                 self.palette.overlay0
             },
@@ -3569,7 +3581,7 @@ impl PodcastApp {
                     x: content_x + content_w - 100.0,
                     y: row_y + 12.0,
                     text: "Completed".to_string(),
-                    color: self.palette.green,
+                    color: self.palette.ink(self.palette.green),
                     font_size: 11.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(80.0),
@@ -3988,8 +4000,14 @@ impl PodcastApp {
         );
 
         // Top border.
-        self.palette
-            .push_surface(cmds, 0.0, bar_y, self.width, 1.0, 0.0, Surface::Card);
+        cmds.push(RenderCommand::FillRect {
+            x: 0.0,
+            y: bar_y,
+            width: self.width,
+            height: 1.0,
+            color: self.palette.surface0,
+            corner_radii: CornerRadii::ZERO,
+        });
 
         // Progress bar across the top.
         let progress = if self.playback_duration_secs > 0 {
@@ -4159,7 +4177,7 @@ impl PodcastApp {
             x: speed.x + 6.0,
             y: speed.y + 4.0,
             text: self.playback_speed.label(),
-            color: self.palette.peach,
+            color: self.palette.ink(self.palette.peach),
             font_size: 11.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(38.0),

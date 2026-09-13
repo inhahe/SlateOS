@@ -1596,8 +1596,14 @@ fn render_disk_map(tree: &mut RenderTree, app: &PartitionManagerApp) {
     }
 
     // "Unallocated" in legend
-    app.palette
-        .push_surface(tree, lx, legend_y, 10.0, 10.0, 2.0, Surface::Card);
+    tree.push(RenderCommand::FillRect {
+        x: lx,
+        y: legend_y,
+        width: 10.0,
+        height: 10.0,
+        color: app.palette.surface0,
+        corner_radii: CornerRadii::all(2.0),
+    });
     tree.push(RenderCommand::Text {
         x: lx + 14.0,
         y: legend_y,
@@ -2219,7 +2225,7 @@ fn render_detail_panel(tree: &mut RenderTree, app: &PartitionManagerApp) {
         x: px,
         y: py,
         text: String::from("Disk Information"),
-        color: app.palette.blue,
+        color: app.palette.ink(app.palette.blue),
         font_size: 12.0,
         font_weight: FontWeightHint::Bold,
         max_width: Some(text_w),
@@ -2289,7 +2295,7 @@ fn render_detail_panel(tree: &mut RenderTree, app: &PartitionManagerApp) {
             x: px,
             y: py,
             text: String::from("Partition Details"),
-            color: app.palette.blue,
+            color: app.palette.ink(app.palette.blue),
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(text_w),
@@ -2316,7 +2322,7 @@ fn render_detail_panel(tree: &mut RenderTree, app: &PartitionManagerApp) {
                 x: px,
                 y: py + 4.0,
                 text: String::from("! System partition - modify with caution"),
-                color: app.palette.yellow,
+                color: app.palette.ink(app.palette.yellow),
                 font_size: 10.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(text_w),
@@ -2572,7 +2578,7 @@ fn render_status_bar(tree: &mut RenderTree, app: &PartitionManagerApp) {
             x: app.width - 200.0,
             y: y + 6.0,
             text: count_text,
-            color: app.palette.yellow,
+            color: app.palette.ink(app.palette.yellow),
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(190.0),
@@ -2643,18 +2649,10 @@ fn render_create_partition_dialog(tree: &mut RenderTree, app: &PartitionManagerA
     });
 
     // Background
+    let mut paint = app.palette.surface_paint(Surface::Card);
+    paint.border = Some(paint.border.unwrap_or(app.palette.surface2));
     app.palette
-        .push_surface(tree, dx, dy, dw, dh, 8.0, Surface::Card);
-
-    tree.push(RenderCommand::StrokeRect {
-        x: dx,
-        y: dy,
-        width: dw,
-        height: dh,
-        color: app.palette.surface2,
-        line_width: 1.0,
-        corner_radii: CornerRadii::all(8.0),
-    });
+        .push_paint_radii(tree, dx, dy, dw, dh, CornerRadii::all(8.0), paint);
 
     // Title
     tree.push(RenderCommand::Text {
@@ -2954,7 +2952,7 @@ fn render_format_dialog(tree: &mut RenderTree, app: &PartitionManagerApp) {
             "Format Partition {} (\"{}\")",
             dialog.partition_index, dialog.partition_label
         ),
-        color: app.palette.red,
+        color: app.palette.ink(app.palette.red),
         font_size: 14.0,
         font_weight: FontWeightHint::Bold,
         max_width: Some(DIALOG_WIDTH - 40.0),
@@ -2974,7 +2972,7 @@ fn render_format_dialog(tree: &mut RenderTree, app: &PartitionManagerApp) {
         x: dx + 32.0,
         y: dy + 60.0,
         text: String::from("All data on this partition will be erased!"),
-        color: app.palette.red,
+        color: app.palette.ink(app.palette.red),
         font_size: 11.0,
         font_weight: FontWeightHint::Bold,
         max_width: Some(DIALOG_WIDTH - 64.0),

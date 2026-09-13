@@ -1765,7 +1765,7 @@ impl DiskAnalyzerUI {
                 color: if i == last {
                     self.palette.text
                 } else {
-                    self.palette.blue
+                    self.palette.ink(self.palette.blue)
                 },
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
@@ -1928,7 +1928,7 @@ impl DiskAnalyzerUI {
                     SortDirection::Ascending => "^".to_string(),
                     SortDirection::Descending => "v".to_string(),
                 },
-                color: self.palette.blue,
+                color: self.palette.ink(self.palette.blue),
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(8.0),
@@ -2177,9 +2177,9 @@ impl DiskAnalyzerUI {
             y: y + 6.0,
             text: self.status_text(),
             color: if self.scan_error.is_some() {
-                self.palette.red
+                self.palette.ink(self.palette.red)
             } else if !self.complete {
-                self.palette.yellow
+                self.palette.ink(self.palette.yellow)
             } else {
                 self.palette.subtext0
             },
@@ -2254,17 +2254,17 @@ impl DiskAnalyzerUI {
         let tx = (self.tooltip_x + 12.0).min(width - tw - 4.0).max(4.0);
         let ty = (self.tooltip_y + 12.0).min(height - th - 4.0).max(4.0);
 
-        self.palette
-            .push_surface(frame, tx, ty, tw, th, CORNER_RADIUS, Surface::Panel);
-        frame.push(RenderCommand::StrokeRect {
-            x: tx,
-            y: ty,
-            width: tw,
-            height: th,
-            color: self.palette.overlay0,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
+        let mut paint = self.palette.surface_paint(Surface::Panel);
+        paint.border = Some(paint.border.unwrap_or(self.palette.overlay0));
+        self.palette.push_paint_radii(
+            frame,
+            tx,
+            ty,
+            tw,
+            th,
+            CornerRadii::all(CORNER_RADIUS),
+            paint,
+        );
 
         let mut line_y = ty + 6.0;
         for line in self.tooltip_text.split('\n') {

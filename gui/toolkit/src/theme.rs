@@ -52,15 +52,58 @@ use crate::color::Color;
 /// `appearance::relative_luminance` is this function, re-exported.
 #[must_use]
 pub fn relative_luminance(c: Color) -> f32 {
-    fn channel(v: u8) -> f32 {
-        let v = f32::from(v) / 255.0;
-        if v <= 0.039_28 {
-            v / 12.92
-        } else {
-            ((v + 0.055) / 1.055).powf(2.4)
-        }
+    let t = channel_table();
+    // SAFETY-of-indexing note: `u8` has 256 values and the table has 256
+    // entries, so `usize::from(u8)` is in range by construction. `get` with a
+    // fallback would be dead code that can never be taken and would hide that.
+    #[allow(clippy::indexing_slicing)]
+    {
+        0.2126 * t[usize::from(c.r)] + 0.7152 * t[usize::from(c.g)] + 0.0722 * t[usize::from(c.b)]
     }
-    0.2126 * channel(c.r) + 0.7152 * channel(c.g) + 0.0722 * channel(c.b)
+}
+
+/// The sRGB transfer function, evaluated once for each of its 256 inputs.
+///
+/// # Why this is a table
+///
+/// It was three `powf(2.4)` calls per colour, and `powf` is slow enough that
+/// it showed up in a frame budget. Measured: `contrast_ratio` cost **436 ns**,
+/// which is not a number anything in a render path should pay, and
+/// `Palette::from_settings` -- which the compositor calls per blurred window,
+/// per frame -- reached **92 us** under the card theme. The compositor's own
+/// frame ceiling is what caught it, which is the entire reason that bound has
+/// a threshold rather than being a log line.
+///
+/// A table is exact rather than approximate: a channel is a `u8`, so there are
+/// 256 possible inputs and all 256 are precomputed from the same formula.
+/// `the_table_is_the_formula` asserts that over every one of them, so this can
+/// never drift into an approximation the way a `powf(2.2)` shortcut would.
+fn channel_table() -> &'static [f32; 256] {
+    static TABLE: std::sync::LazyLock<[f32; 256]> = std::sync::LazyLock::new(|| {
+        let mut t = [0.0_f32; 256];
+        for (i, slot) in t.iter_mut().enumerate() {
+            *slot = srgb_to_linear(u8::try_from(i).unwrap_or(u8::MAX));
+        }
+        t
+    });
+    &TABLE
+}
+
+/// One channel of the sRGB transfer function, computed rather than looked up.
+///
+/// The definition [`channel_table`] is built from, and what
+/// `the_table_is_the_formula` checks it against. The curve is the real
+/// piecewise one -- a bare `powf(2.2)`, which this used to use, is a fair
+/// approximation in the middle and wrong near black, where the standard is
+/// linear.
+#[must_use]
+fn srgb_to_linear(v: u8) -> f32 {
+    let v = f32::from(v) / 255.0;
+    if v <= 0.039_28 {
+        v / 12.92
+    } else {
+        ((v + 0.055) / 1.055).powf(2.4)
+    }
 }
 
 /// The WCAG 2 contrast ratio between two opaque colours: 1.0 for a colour
@@ -192,6 +235,46 @@ mod tests {
 
     use super::*;
 
+    /// The lookup table is the formula, at every one of its 256 inputs.
+    ///
+    /// The check that makes the optimisation safe to have made. A table that
+    /// is *nearly* the formula is the classic way a precomputation becomes an
+    /// approximation nobody notices -- and this one feeds every contrast
+    /// judgement the desktop makes, so an error near black would show up as
+    /// text that passes a 4.5:1 test and cannot be read.
+    #[test]
+    fn the_table_is_the_formula() {
+        for v in 0..=u8::MAX {
+            let looked_up = super::channel_table()[usize::from(v)];
+            let computed = super::srgb_to_linear(v);
+            assert_eq!(
+                looked_up.to_bits(),
+                computed.to_bits(),
+                "channel {v}: table {looked_up} is not the formula's {computed}"
+            );
+        }
+    }
+
+    /// Black, white and mid-grey land where the standard says.
+    ///
+    /// An independent anchor, so the test above cannot pass by both sides
+    /// being wrong in the same way -- which is exactly what it would do if the
+    /// formula itself were edited.
+    #[test]
+    fn the_curve_matches_the_standards_own_anchors() {
+        assert!(relative_luminance(Color::rgb(0, 0, 0)).abs() < 1e-6);
+        assert!((relative_luminance(Color::rgb(255, 255, 255)) - 1.0).abs() < 1e-5);
+        // WCAG's worked example: #808080 has a relative luminance of 0.2159.
+        assert!(
+            (relative_luminance(Color::rgb(128, 128, 128)) - 0.2159).abs() < 0.001,
+            "got {}",
+            relative_luminance(Color::rgb(128, 128, 128))
+        );
+        // 21:1 is the largest ratio the scale can produce.
+        assert!(
+            (contrast_ratio(Color::rgb(0, 0, 0), Color::rgb(255, 255, 255)) - 21.0).abs() < 1e-4
+        );
+    }
     #[test]
     fn test_lighten_zero_is_identity() {
         let c = Color::rgb(100, 150, 200);

@@ -5,6 +5,7 @@
 //! health overview with charge history and estimated remaining time.
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::ratio;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -527,7 +528,7 @@ impl PowerSettingsUI {
                 y: cy + 8.0,
                 text: (*label).into(),
                 font_size: 12.0,
-                color: if active { p.accent } else { p.subtext0 },
+                color: if active { p.ink(p.accent) } else { p.subtext0 },
                 font_weight: if active {
                     FontWeightHint::Bold
                 } else {
@@ -559,14 +560,7 @@ impl PowerSettingsUI {
         width: f32,
     ) -> f32 {
         // Background bar
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width,
-            height: 40.0,
-            color: p.mantle,
-            corner_radii: CornerRadii::all(6.0),
-        });
+        p.push_surface(cmds, x, y, width, 40.0, 6.0, Surface::Card);
 
         // Charge bar
         let charge_color = match self.battery.charge_pct {
@@ -650,7 +644,7 @@ impl PowerSettingsUI {
                 y: y + 8.0,
                 text: format!("{}{}", indicator, plan.label()),
                 font_size: 14.0,
-                color: if active { p.accent } else { p.text },
+                color: if active { p.ink(p.accent) } else { p.text },
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width - 24.0),
                 overflow: TextOverflow::Ellipsis,
@@ -701,7 +695,7 @@ impl PowerSettingsUI {
             y,
             text: "On Battery".into(),
             font_size: 12.0,
-            color: p.lavender,
+            color: p.ink(p.lavender),
             font_weight: FontWeightHint::Bold,
             max_width: Some(width * 0.25),
             overflow: TextOverflow::Ellipsis,
@@ -711,7 +705,7 @@ impl PowerSettingsUI {
             y,
             text: "On AC".into(),
             font_size: 12.0,
-            color: p.lavender,
+            color: p.ink(p.lavender),
             font_weight: FontWeightHint::Bold,
             max_width: Some(width * 0.25),
             overflow: TextOverflow::Ellipsis,
@@ -719,14 +713,7 @@ impl PowerSettingsUI {
         y += 24.0;
 
         for (label, batt, ac) in rows {
-            cmds.push(RenderCommand::FillRect {
-                x,
-                y,
-                width,
-                height: 28.0,
-                color: p.mantle,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            p.push_surface(cmds, x, y, width, 28.0, 4.0, Surface::Card);
             cmds.push(RenderCommand::Text {
                 x: x + 12.0,
                 y: y + 6.0,
@@ -777,7 +764,7 @@ impl PowerSettingsUI {
             y,
             text: "Button & Lid Actions".into(),
             font_size: 14.0,
-            color: p.lavender,
+            color: p.ink(p.lavender),
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -909,7 +896,7 @@ impl PowerSettingsUI {
             y,
             text: "Battery Thresholds".into(),
             font_size: 14.0,
-            color: p.lavender,
+            color: p.ink(p.lavender),
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,

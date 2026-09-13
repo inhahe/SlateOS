@@ -1776,7 +1776,7 @@ impl QrApp {
             x: 12.0,
             y: 12.0,
             text: "QR Code Generator".to_owned(),
-            color: self.palette.blue,
+            color: self.palette.ink(self.palette.blue),
             font_size: 15.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
@@ -1807,7 +1807,7 @@ impl QrApp {
                 y: 14.0,
                 text: ct.label().to_owned(),
                 color: if is_active {
-                    self.palette.blue
+                    self.palette.ink(self.palette.blue)
                 } else {
                     self.palette.subtext0
                 },
@@ -1965,7 +1965,7 @@ impl QrApp {
                 y: cy + 5.0,
                 text: mode.label().to_owned(),
                 color: if is_active {
-                    self.palette.lavender
+                    self.palette.ink(self.palette.lavender)
                 } else {
                     self.palette.subtext0
                 },
@@ -1995,17 +1995,17 @@ impl QrApp {
         });
         cy += 16.0;
 
-        self.palette
-            .push_surface(cmds, lx, cy, max_w, 60.0, CORNER_RADIUS, Surface::Card);
-        cmds.push(RenderCommand::StrokeRect {
-            x: lx,
-            y: cy,
-            width: max_w,
-            height: 60.0,
-            color: self.palette.surface2,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
+        let mut paint = self.palette.surface_paint(Surface::Card);
+        paint.border = Some(paint.border.unwrap_or(self.palette.surface2));
+        self.palette.push_paint_radii(
+            cmds,
+            lx,
+            cy,
+            max_w,
+            60.0,
+            CornerRadii::all(CORNER_RADIUS),
+            paint,
+        );
 
         let display_text = if self.input_text.is_empty() {
             match self.input_mode {
@@ -2489,7 +2489,7 @@ impl QrApp {
                 y: cy + 5.0,
                 text: ec.label().to_owned(),
                 color: if is_active {
-                    self.palette.green
+                    self.palette.ink(self.palette.green)
                 } else {
                     self.palette.subtext0
                 },
@@ -2539,7 +2539,7 @@ impl QrApp {
                 y: cy + 5.0,
                 text: ms.label().to_owned(),
                 color: if is_active {
-                    self.palette.yellow
+                    self.palette.ink(self.palette.yellow)
                 } else {
                     self.palette.subtext0
                 },

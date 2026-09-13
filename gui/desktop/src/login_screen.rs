@@ -7,6 +7,7 @@
 //! on-screen keyboard toggle.
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -1048,6 +1049,9 @@ impl LoginScreen {
             LoginBackground::Theme
             | LoginBackground::SameAsDesktop(_)
             | LoginBackground::CustomImage(_) => {
+                // The greeter's whole screen, which is the page and not a box on it:
+                // outlined, it draws a border round the display and no background at
+                // all, and the login screen comes up black.
                 commands.push(RenderCommand::FillRect {
                     x: 0.0,
                     y: 0.0,
@@ -1124,7 +1128,11 @@ impl LoginScreen {
                 y: uy + 14.0,
                 text: user.avatar.clone(),
                 font_size: 28.0,
-                color: if selected { p.accent } else { p.subtext0 },
+                color: if selected {
+                    p.ink(p.accent)
+                } else {
+                    p.subtext0
+                },
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1173,7 +1181,7 @@ impl LoginScreen {
                     y: cy - 80.0,
                     text: user.avatar.clone(),
                     font_size: 48.0,
-                    color: p.accent,
+                    color: p.ink(p.accent),
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -1204,28 +1212,27 @@ impl LoginScreen {
 
             // Judgement 3: a rejected password must read as a rejection under
             // every accent, so this is `p.red` and never `p.accent`.
-            let border_color = if self.error_message.is_some() {
+            //
+            // The rejection *replaces* the field's outline rather than adding
+            // one. Drawn as a second rectangle it was a red ring concentric
+            // with the theme's black one under the bordered theme -- and a
+            // text field needs an edge under the card theme, which fills
+            // without outlining, so the neutral case supplies one.
+            let mut paint = p.surface_paint(Surface::Card);
+            paint.border = Some(if self.error_message.is_some() {
                 p.red
             } else {
-                p.surface1
-            };
-            commands.push(RenderCommand::FillRect {
-                x: field_x,
-                y: field_y,
-                width: field_w,
-                height: field_h,
-                color: p.surface0,
-                corner_radii: CornerRadii::all(8.0),
+                paint.border.unwrap_or(p.surface1)
             });
-            commands.push(RenderCommand::StrokeRect {
-                x: field_x,
-                y: field_y,
-                width: field_w,
-                height: field_h,
-                color: border_color,
-                line_width: 1.5,
-                corner_radii: CornerRadii::all(8.0),
-            });
+            p.push_paint_radii(
+                commands,
+                field_x,
+                field_y,
+                field_w,
+                field_h,
+                CornerRadii::all(8.0),
+                paint,
+            );
 
             // Password text or placeholder.
             let display = if self.password_input.is_empty() {
@@ -1298,7 +1305,7 @@ impl LoginScreen {
                         y: btn_y + 48.0,
                         text: msg.clone(),
                         font_size: 12.0,
-                        color: p.red,
+                        color: p.ink(p.red),
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(200.0),
                         overflow: TextOverflow::Ellipsis,
@@ -1319,7 +1326,7 @@ impl LoginScreen {
                             self.config.lockout_seconds
                         ),
                         font_size: 12.0,
-                        color: p.yellow,
+                        color: p.ink(p.yellow),
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(240.0),
                         overflow: TextOverflow::Ellipsis,
@@ -1468,23 +1475,11 @@ impl LoginScreen {
         let mx = self.screen_width - menu_w - 16.0;
         let my = self.screen_height - 40.0 - menu_h - 8.0;
 
-        commands.push(RenderCommand::FillRect {
-            x: mx,
-            y: my,
-            width: menu_w,
-            height: menu_h,
-            color: p.mantle,
-            corner_radii: CornerRadii::all(8.0),
-        });
-        commands.push(RenderCommand::StrokeRect {
-            x: mx,
-            y: my,
-            width: menu_w,
-            height: menu_h,
-            color: p.surface1,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(8.0),
-        });
+        // `Surface::Panel` carries the edge in both themes -- `surface1` under
+        // cards, the border colour under borders -- so the explicit stroke
+        // that used to follow this call was a second ring at the same
+        // rectangle.
+        p.push_surface(commands, mx, my, menu_w, menu_h, 8.0, Surface::Panel);
 
         for (i, (icon, label)) in POWER_MENU_LABELS.iter().enumerate() {
             let iy = self.power_menu_row_rect(i).y;
@@ -2194,24 +2189,46 @@ mod tests {
             .collect()
     }
 
+    /// The one box of this size, filled or outlined.
+    ///
+    /// Separate from [`fill_of_size`] rather than replacing it: the power menu
+    /// is a fill *and* a border at one rectangle, so a helper that collected
+    /// both could not tell its two assertions apart.
+    ///
+    /// Currently unused -- the power menu's two assertions ended up using the
+    /// narrower helpers. Kept because the next site with one shape under one
+    /// theme and the other under the other will want exactly this, and
+    /// rewriting it from scratch is how the two drift apart.
+    #[allow(dead_code)]
+    fn box_of_size(cmds: &[RenderCommand], w: f32, h: f32) -> Color {
+        let hits: Vec<Color> = cmds
+            .iter()
+            .filter_map(appearance::painted_rect)
+            .filter(|(_, _, width, height, _)| *width == w && *height == h)
+            .map(|t| t.4)
+            .collect();
+        assert_eq!(hits.len(), 1, "box {w}x{h}: {} matches", hits.len());
+        hits[0]
+    }
+
     fn fill_of_size(cmds: &[RenderCommand], w: f32, h: f32) -> Color {
         let hits = fills_of_size(cmds, w, h);
         assert_eq!(hits.len(), 1, "fill {w}x{h}: {} matches", hits.len());
         hits[0]
     }
 
+    /// The one outline of this size, measured on the rectangle it encloses.
+    ///
+    /// A stroke stores its path, which the theme insets by half a line so the
+    /// border lands inside the box -- so a 260x36 field records a 259x35
+    /// `StrokeRect`, and matching the stored width finds nothing at all.
     fn stroke_of_size(cmds: &[RenderCommand], w: f32, h: f32) -> Color {
         let hits: Vec<Color> = cmds
             .iter()
-            .filter_map(|c| match c {
-                RenderCommand::StrokeRect {
-                    width,
-                    height,
-                    color,
-                    ..
-                } if *width == w && *height == h => Some(*color),
-                _ => None,
-            })
+            .filter(|c| matches!(c, RenderCommand::StrokeRect { .. }))
+            .filter_map(appearance::painted_rect)
+            .filter(|(_, _, width, height, _)| *width == w && *height == h)
+            .map(|t| t.4)
             .collect();
         assert_eq!(hits.len(), 1, "stroke {w}x{h}: {} matches", hits.len());
         hits[0]
@@ -2228,8 +2245,22 @@ mod tests {
             .collect()
     }
 
-    fn count_of(cmds: &[RenderCommand], c: Color) -> usize {
-        every_color(cmds).into_iter().filter(|x| *x == c).count()
+    /// How many commands draw in `c` -- counting the *inked* form of it too.
+    ///
+    /// Since §837 a site drawing text in a dual-use colour asks
+    /// `Palette::ink` for a version that clears 4.5:1, so one accent is two
+    /// pixel values: the raw one on fills and the inked one on text. A count
+    /// of "how many things carry the accent" means both, and counting only one
+    /// would report half the answer while looking exactly as authoritative.
+    fn count_of(p: &Palette, cmds: &[RenderCommand], c: Color) -> usize {
+        // Against the palette in use, not a fixed one: the inked form of a
+        // colour depends on the theme's grounds, so asking a dark palette
+        // what the light one would draw gives a value nothing on screen has.
+        let inked = p.ink(c);
+        every_color(cmds)
+            .into_iter()
+            .filter(|x| *x == c || *x == inked)
+            .count()
     }
 
     /// Lesson 1: the sweep walks every fixture in both modes, so it sees every
@@ -2339,7 +2370,8 @@ mod tests {
             let avatars = texts(&cmds, AVATAR, 28.0);
             assert_eq!(avatars.len(), 2, "{mode}: two avatars");
             assert_eq!(
-                avatars[0].2, p.accent,
+                avatars[0].2,
+                p.ink(p.accent),
                 "{mode}: the accent marks which row you are on"
             );
             assert_eq!(avatars[1].2, p.subtext0, "{mode}: an unselected avatar");
@@ -2369,7 +2401,7 @@ mod tests {
 
             assert_eq!(
                 floating_text(&cmds, AVATAR, 48.0).1,
-                p.accent,
+                p.ink(p.accent),
                 "{mode}: the avatar of the user you are signing in as"
             );
             assert_eq!(
@@ -2377,10 +2409,17 @@ mod tests {
                 p.on_wallpaper(),
                 "{mode}: the name sits on the background, not on a panel"
             );
+            // Whatever the theme fills a card with, and nothing at all if it
+            // fills nothing -- written as a vector rather than an `if let` so
+            // that the bordered theme is asserted about too, instead of
+            // quietly skipping the check.
             assert_eq!(
-                fill_of_size(&cmds, 260.0, 36.0),
-                p.surface0,
-                "{mode}: the password field"
+                fills_of_size(&cmds, 260.0, 36.0),
+                p.surface_paint(appearance::Surface::Card)
+                    .fill
+                    .into_iter()
+                    .collect::<Vec<_>>(),
+                "{mode}: the password field's ground"
             );
             assert_eq!(
                 stroke_of_size(&cmds, 260.0, 36.0),
@@ -2409,12 +2448,12 @@ mod tests {
             );
             assert_eq!(
                 floating_text(&cmds, "Bad password", 12.0).1,
-                p.red,
+                p.ink(p.red),
                 "{mode}: the error message"
             );
             assert_eq!(
                 floating_text(&cmds, "Too many attempts. Try again in 30s.", 12.0).1,
-                p.yellow,
+                p.ink(p.yellow),
                 "{mode}: the lockout notice"
             );
             assert_eq!(
@@ -2430,7 +2469,9 @@ mod tests {
             let cmds = s.render(&p);
             assert_eq!(
                 stroke_of_size(&cmds, 260.0, 36.0),
-                p.surface1,
+                p.surface_paint(appearance::Surface::Card)
+                    .border
+                    .unwrap_or(p.surface1),
                 "{mode}: a field at rest"
             );
             assert_eq!(
@@ -2484,12 +2525,16 @@ mod tests {
 
             assert_eq!(
                 fill_of_size(&cmds, 160.0, 140.0),
-                p.mantle,
+                p.surface_paint(appearance::Surface::Panel)
+                    .fill
+                    .unwrap_or(p.mantle),
                 "{mode}: the power menu"
             );
             assert_eq!(
                 stroke_of_size(&cmds, 160.0, 140.0),
-                p.surface1,
+                p.surface_paint(appearance::Surface::Panel)
+                    .border
+                    .unwrap_or(p.surface1),
                 "{mode}: its border"
             );
             assert_eq!(
@@ -2662,7 +2707,7 @@ mod tests {
         for (mode, p) in table_palettes() {
             let cmds = everything().render(&p);
             assert_eq!(
-                count_of(&cmds, OFF_PALETTE),
+                count_of(&p, &cmds, OFF_PALETTE),
                 2,
                 "{mode}: the avatar of the chosen user and the Sign In fill, \
                  and nothing else. A third would mean the accent had leaked \
@@ -2673,7 +2718,7 @@ mod tests {
             let mut s = base();
             s.power_menu_open = true;
             assert_eq!(
-                count_of(&s.render(&p), OFF_PALETTE),
+                count_of(&p, &s.render(&p), OFF_PALETTE),
                 1,
                 "{mode}: in the user list only the selected avatar is accented"
             );
@@ -2695,19 +2740,19 @@ mod tests {
         for (mode, p) in table_palettes() {
             let cmds = everything().render(&p);
             assert_eq!(
-                count_of(&cmds, SHADOW),
+                count_of(&p, &cmds, SHADOW),
                 7,
                 "{mode}: the clock, the date, the avatar, the name, the error, \
                  the lockout notice and the back arrow — every text this render \
                  puts on a surface the shell did not choose, and no others"
             );
             assert_eq!(
-                count_of(&cmds, p.on_wallpaper()),
+                count_of(&p, &cmds, p.on_wallpaper()),
                 2,
                 "{mode}: the clock and the name"
             );
             assert_eq!(
-                count_of(&cmds, p.on_wallpaper_dim()),
+                count_of(&p, &cmds, p.on_wallpaper_dim()),
                 2,
                 "{mode}: the date and the back arrow"
             );

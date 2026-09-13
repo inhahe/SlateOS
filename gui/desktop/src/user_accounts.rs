@@ -10,7 +10,7 @@
 //! - User switching UI
 //! - Account activity log
 
-use appearance::{Palette, readable_on};
+use appearance::{Palette, Surface, readable_on};
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
@@ -894,14 +894,7 @@ impl AccountSettingsUI {
             let is_active = *tab == self.active_tab;
 
             if is_active {
-                cmds.push(RenderCommand::FillRect {
-                    x: tab_x,
-                    y: tab_y,
-                    width: 120.0,
-                    height: 28.0,
-                    color: p.surface1,
-                    corner_radii: CornerRadii::all(4.0),
-                });
+                p.push_surface(&mut cmds, tab_x, tab_y, 120.0, 28.0, 4.0, Surface::Selected);
             }
 
             cmds.push(RenderCommand::Text {
@@ -909,7 +902,11 @@ impl AccountSettingsUI {
                 y: tab_y + 6.0,
                 text: tab.display_name().to_string(),
                 font_size: 12.0,
-                color: if is_active { p.accent } else { p.subtext0 },
+                color: if is_active {
+                    p.ink(p.accent)
+                } else {
+                    p.subtext0
+                },
                 font_weight: if is_active {
                     FontWeightHint::Bold
                 } else {
@@ -955,20 +952,21 @@ impl AccountSettingsUI {
 
         // Status message
         if let Some(msg) = &self.status_message {
-            cmds.push(RenderCommand::FillRect {
-                x: x + 16.0,
-                y: y + height - 32.0,
-                width: width - 32.0,
-                height: 24.0,
-                color: p.surface0,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            p.push_surface(
+                &mut cmds,
+                x + 16.0,
+                y + height - 32.0,
+                width - 32.0,
+                24.0,
+                4.0,
+                Surface::Card,
+            );
             cmds.push(RenderCommand::Text {
                 x: x + 24.0,
                 y: y + height - 28.0,
                 text: msg.clone(),
                 font_size: 11.0,
-                color: p.yellow,
+                color: p.ink(p.yellow),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 48.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1111,14 +1109,7 @@ impl AccountSettingsUI {
 
             // Row background
             if is_selected {
-                cmds.push(RenderCommand::FillRect {
-                    x,
-                    y: row_y - 2.0,
-                    width,
-                    height: 36.0,
-                    color: p.surface0,
-                    corner_radii: CornerRadii::all(4.0),
-                });
+                p.push_surface(cmds, x, row_y - 2.0, width, 36.0, 4.0, Surface::Selected);
             }
 
             // Avatar small circle
@@ -1278,14 +1269,7 @@ impl AccountSettingsUI {
             row_y += 32.0;
 
             // Change password button
-            cmds.push(RenderCommand::FillRect {
-                x,
-                y: row_y,
-                width: 160.0,
-                height: 28.0,
-                color: p.surface0,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            p.push_surface(cmds, x, row_y, 160.0, 28.0, 4.0, Surface::Card);
             cmds.push(RenderCommand::Text {
                 x: x + 12.0,
                 y: row_y + 6.0,

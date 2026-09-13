@@ -5,6 +5,7 @@
 //! Integrates with the gui/clipboard service.
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::idseq::IdSeq;
 use guitk::listview::ListViewport;
@@ -586,14 +587,15 @@ impl ClipboardViewer {
 
         // Entry count badge.
         let count_text = format!("{}", self.history.len());
-        cmds.push(RenderCommand::FillRect {
-            x: x + w - 50.0,
-            y: y + 8.0,
-            width: 30.0,
-            height: 20.0,
-            color: p.surface1,
-            corner_radii: CornerRadii::all(10.0),
-        });
+        p.push_surface(
+            &mut cmds,
+            x + w - 50.0,
+            y + 8.0,
+            30.0,
+            20.0,
+            10.0,
+            Surface::Card,
+        );
         cmds.push(RenderCommand::Text {
             x: x + w - 44.0,
             y: y + 11.0,
@@ -704,14 +706,15 @@ impl ClipboardViewer {
 
                 // Row background.
                 if is_selected {
-                    cmds.push(RenderCommand::FillRect {
-                        x: x + 4.0,
-                        y: ey,
-                        width: w - 8.0,
-                        height: entry_h - 2.0,
-                        color: p.surface1,
-                        corner_radii: CornerRadii::all(4.0),
-                    });
+                    p.push_surface(
+                        &mut cmds,
+                        x + 4.0,
+                        ey,
+                        w - 8.0,
+                        entry_h - 2.0,
+                        4.0,
+                        Surface::Selected,
+                    );
                 }
 
                 // Format badge.
@@ -804,7 +807,7 @@ impl ClipboardViewer {
                         x: x + w - ROW_INDICATOR_INSET,
                         y: ey + 6.0,
                         text: "P".to_string(),
-                        color: p.yellow,
+                        color: p.ink(p.yellow),
                         font_size: 11.0,
                         font_weight: FontWeightHint::Bold,
                         max_width: Some(16.0),
@@ -818,7 +821,7 @@ impl ClipboardViewer {
                         x: x + w - ROW_INDICATOR_INSET,
                         y: ey + 22.0,
                         text: "S".to_string(),
-                        color: p.red,
+                        color: p.ink(p.red),
                         font_size: 10.0,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(16.0),
@@ -849,7 +852,7 @@ impl ClipboardViewer {
             x: x + 12.0,
             y: bottom_y + 8.0,
             text: "Clear All".to_string(),
-            color: p.red,
+            color: p.ink(p.red),
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(80.0),
@@ -863,7 +866,7 @@ impl ClipboardViewer {
                 x: x + w - 100.0,
                 y: bottom_y + 8.0,
                 text: format!("{} pinned", pinned),
-                color: p.yellow,
+                color: p.ink(p.yellow),
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(80.0),
@@ -1674,6 +1677,16 @@ mod tests {
     }
 
     /// Whether a command belongs to the filter-tab strip.
+    /// The selected entry's row, which since §834 carries the accent too.
+    ///
+    /// Fifty pixels tall -- `entry_h - 2.0` -- and nothing else on the popup
+    /// is. Recognised by geometry rather than by colour, because "is it the
+    /// accent?" is the question these tests are asking and an exclusion
+    /// phrased that way would answer itself.
+    fn is_selected_row(c: &RenderCommand) -> bool {
+        appearance::painted_rect(c).is_some_and(|(_, _, _, h, _)| (h - 50.0).abs() < 0.01)
+    }
+
     fn is_tab(c: &RenderCommand) -> bool {
         match c {
             RenderCommand::FillRect { height: 22.0, .. } => true,
@@ -1684,7 +1697,7 @@ mod tests {
         }
     }
 
-    /// Every colour the popup draws *apart* from the filter tabs' own two.
+    /// Every colour the popup draws *apart* from the two that mark position.
     ///
     /// Taken as one vector rather than a site at a time because this is the
     /// frozen half: an `assert_eq!` over a union fails if any single element
@@ -1693,7 +1706,7 @@ mod tests {
     /// member moves, which is how a frozen site hides behind a moving one.)
     fn colors_apart_from_the_tabs(cmds: &[RenderCommand]) -> Vec<Color> {
         cmds.iter()
-            .filter(|c| !is_tab(c))
+            .filter(|c| !is_tab(c) && !is_selected_row(c))
             .filter_map(|c| match c {
                 RenderCommand::FillRect { color, .. }
                 | RenderCommand::StrokeRect { color, .. }
@@ -1710,7 +1723,7 @@ mod tests {
     /// a colour the light palette contains; only varying the accent separates
     /// them.
     #[test]
-    fn only_the_active_filter_tab_follows_the_accent() {
+    fn only_the_active_filter_tab_and_the_selected_row_follow_the_accent() {
         let mut blue = Palette::for_mode(false);
         blue.accent = appearance::BLUE;
         let mut mauve = Palette::for_mode(false);
@@ -1737,6 +1750,25 @@ mod tests {
                 tab_backgrounds(&a),
                 tab_backgrounds(&b),
                 "the {filter:?} tab's fill did not move with the accent"
+            );
+
+            // Since §834 the selected row is outlined in the accent as well,
+            // and it is "where you are" in exactly the sense the tab is. It
+            // gets its own negative half rather than being quietly excused
+            // from the frozen union: an exclusion with no assertion behind it
+            // is how a site stops being checked without anyone noticing.
+            let sel = |c: &[RenderCommand]| -> Vec<Color> {
+                c.iter()
+                    .filter(|k| is_selected_row(k))
+                    .filter_map(appearance::painted_rect)
+                    .map(|t| t.4)
+                    .collect()
+            };
+            assert_eq!(sel(&a).len(), 1, "one entry is selected in this fixture");
+            assert_ne!(
+                sel(&a),
+                sel(&b),
+                "the selected row did not move with the accent (filter={filter:?})"
             );
 
             // The positive half: everything else stands still.

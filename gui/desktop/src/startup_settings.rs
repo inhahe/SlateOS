@@ -3,7 +3,7 @@
 //! Manages applications that run automatically at login, including
 //! startup delay, impact assessment, and per-app enable/disable control.
 
-use appearance::{Palette, readable_on};
+use appearance::{Palette, Surface, readable_on};
 use guitk::color::Color;
 use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -666,14 +666,7 @@ impl StartupSettingsUI {
         let mut cy = y;
 
         // Filter bar
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y: cy,
-            width,
-            height: 30.0,
-            color: p.surface0,
-            corner_radii: CornerRadii::all(6.0),
-        });
+        p.push_surface(cmds, x, cy, width, 30.0, 6.0, Surface::Card);
         let filter_text = if self.filter.is_empty() {
             "Filter startup apps...".to_string()
         } else {
@@ -727,7 +720,7 @@ impl StartupSettingsUI {
                     high_impact.len()
                 ),
                 font_size: 12.0,
-                color: p.red,
+                color: p.ink(p.red),
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width - 20.0),
                 overflow: TextOverflow::Ellipsis,
@@ -876,7 +869,7 @@ impl StartupSettingsUI {
             y: cy,
             text: "Boot Performance".into(),
             font_size: 15.0,
-            color: p.lavender,
+            color: p.ink(p.lavender),
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -885,14 +878,7 @@ impl StartupSettingsUI {
 
         // Last boot time
         if let Some(ms) = cfg.last_boot_time_ms {
-            cmds.push(RenderCommand::FillRect {
-                x,
-                y: cy,
-                width,
-                height: 48.0,
-                color: p.surface0,
-                corner_radii: CornerRadii::all(8.0),
-            });
+            p.push_surface(cmds, x, cy, width, 48.0, 8.0, Surface::Card);
             cmds.push(RenderCommand::Text {
                 x: x + 12.0,
                 y: cy + 6.0,
@@ -962,7 +948,7 @@ impl StartupSettingsUI {
             y: cy,
             text: "Thresholds".into(),
             font_size: 15.0,
-            color: p.lavender,
+            color: p.ink(p.lavender),
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -1827,17 +1813,14 @@ mod tests {
                 "the panel's backdrop is not p.base (light={light})"
             );
 
-            let filter_bar = apps.iter().find_map(|c| match c {
-                RenderCommand::FillRect {
-                    height: 30.0,
-                    color,
-                    ..
-                } => Some(*color),
-                _ => None,
-            });
+            let filter_bar = apps
+                .iter()
+                .filter_map(appearance::painted_rect)
+                .find(|(_, _, _, h, _)| *h == 30.0)
+                .map(|t| t.4);
             assert_eq!(
                 filter_bar,
-                Some(p.surface0),
+                Some(p.painted(appearance::Surface::Card)),
                 "the filter field is not p.surface0 (light={light})"
             );
 
@@ -1867,18 +1850,15 @@ mod tests {
             }
 
             let boot = render(&wound(StartupTab::Boot, true), &p);
-            let card = boot.iter().find_map(|c| match c {
-                RenderCommand::FillRect {
-                    height: 48.0,
-                    color,
-                    ..
-                } => Some(*color),
-                _ => None,
-            });
+            let card = boot
+                .iter()
+                .filter_map(appearance::painted_rect)
+                .find(|(_, _, _, h, _)| *h == 48.0)
+                .map(|t| t.4);
             assert_eq!(
                 card,
-                Some(p.surface0),
-                "the last-boot-time card is not p.surface0 (light={light})"
+                Some(p.painted(appearance::Surface::Card)),
+                "the last-boot-time card is not the card surface (light={light})"
             );
         }
     }

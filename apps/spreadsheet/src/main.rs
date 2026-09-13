@@ -4829,7 +4829,7 @@ impl SpreadsheetApp {
             y: y + 7.0,
             text: addr_text,
             font_size: FONT_SIZE,
-            color: self.palette.blue,
+            color: self.palette.ink(self.palette.blue),
             font_weight: FontWeightHint::Bold,
             max_width: Some(54.0),
             overflow: TextOverflow::Ellipsis,
@@ -5629,7 +5629,7 @@ impl SpreadsheetApp {
             y: y + 5.0,
             text: mode_text.to_string(),
             font_size: SMALL_FONT,
-            color: self.palette.green,
+            color: self.palette.ink(self.palette.green),
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -5840,19 +5840,17 @@ impl SpreadsheetApp {
         });
 
         // Background
-        self.palette
-            .push_surface(cmds, dlg_x, dlg_y, dlg_w, dlg_h, 8.0, Surface::Card);
-
-        // Border
-        cmds.push(RenderCommand::StrokeRect {
-            x: dlg_x,
-            y: dlg_y,
-            width: dlg_w,
-            height: dlg_h,
-            color: self.palette.surface1,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(8.0),
-        });
+        let mut paint = self.palette.surface_paint(Surface::Card);
+        paint.border = Some(paint.border.unwrap_or(self.palette.surface1));
+        self.palette.push_paint_radii(
+            cmds,
+            dlg_x,
+            dlg_y,
+            dlg_w,
+            dlg_h,
+            CornerRadii::all(8.0),
+            paint,
+        );
 
         // Title
         cmds.push(RenderCommand::Text {

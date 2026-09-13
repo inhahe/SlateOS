@@ -1273,7 +1273,7 @@ fn render_toolbar(tree: &mut RenderTree, app: &KanbanApp, width: f32) {
         x: 12.0,
         y: 10.0,
         text: "Kanban Board".to_string(),
-        color: app.palette.blue,
+        color: app.palette.ink(app.palette.blue),
         font_size: 16.0,
         font_weight: FontWeightHint::Bold,
         max_width: Some(200.0),
@@ -1688,7 +1688,11 @@ fn render_card(
             x: x + padding,
             y: y + card_h,
             text: progress_text,
-            color: if done == total { pal.green } else { pal.yellow },
+            color: if done == total {
+                pal.ink(pal.green)
+            } else {
+                pal.ink(pal.yellow)
+            },
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1838,7 +1842,7 @@ fn render_column_header(
             y: y + 11.0,
             text: wip_text,
             color: if col.is_over_wip_limit() {
-                pal.red
+                pal.ink(pal.red)
             } else {
                 pal.overlay0
             },
@@ -2265,7 +2269,7 @@ fn render_card_detail_body(
             x: content_x + 280.0,
             y: cy + 4.0,
             text: format!("Due: {}", date.display()),
-            color: pal.yellow,
+            color: pal.ink(pal.yellow),
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -2451,7 +2455,7 @@ fn render_card_detail_body(
                 x: content_x + COMMENT_PAD,
                 y: cy + 4.0,
                 text: comment.author.clone(),
-                color: pal.blue,
+                color: pal.ink(pal.blue),
                 font_size: 11.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
@@ -2558,7 +2562,7 @@ fn render_stats_view(tree: &mut RenderTree, app: &KanbanApp, _width: f32, y_star
         x: 20.0,
         y: cy,
         text: format!("Completion Rate: {:.1}%", rate),
-        color: app.palette.green,
+        color: app.palette.ink(app.palette.green),
         font_size: 14.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
@@ -2663,7 +2667,7 @@ fn render_stats_view(tree: &mut RenderTree, app: &KanbanApp, _width: f32, y_star
             y: cy,
             text: wip_text,
             color: if stat.over_wip {
-                app.palette.red
+                app.palette.ink(app.palette.red)
             } else {
                 app.palette.subtext0
             },
@@ -2866,9 +2870,15 @@ fn render_input_overlay(tree: &mut RenderTree, app: &KanbanApp, width: f32, heig
 fn render_app(app: &KanbanApp, width: f32, height: f32) -> RenderTree {
     let mut tree = RenderTree::new();
 
-    // Full-window background
-    app.palette
-        .push_surface(&mut tree, 0.0, 0.0, width, height, 0.0, Surface::Card);
+    // The window itself. A surface is something drawn *on* the page.
+    tree.push(RenderCommand::FillRect {
+        x: 0.0,
+        y: 0.0,
+        width,
+        height,
+        color: app.palette.crust,
+        corner_radii: CornerRadii::ZERO,
+    });
 
     // Toolbar
     render_toolbar(&mut tree, app, width);

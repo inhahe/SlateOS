@@ -906,7 +906,7 @@ pub fn render_recording_controls(
                 // region, encoding — offer no button, so the word replaces
                 // one. Peach because it is the shell's "working on it" hue
                 // and none of red/yellow/green is free to mean it here.
-                color: p.peach,
+                color: p.ink(p.peach),
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1624,9 +1624,9 @@ mod tests {
                     ]
                     .concat(),
                     RecordingState::Processing => {
-                        [vec![p.mantle, p.text, p.peach], stats.to_vec()].concat()
+                        [vec![p.mantle, p.text, p.ink(p.peach)], stats.to_vec()].concat()
                     }
-                    _ => vec![p.mantle, p.text, p.peach],
+                    _ => vec![p.mantle, p.text, p.ink(p.peach)],
                 };
                 assert_eq!(
                     colors(&render_recording_controls(&r, &p, 0.0, 0.0, 400.0)),

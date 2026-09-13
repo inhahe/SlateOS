@@ -26,6 +26,7 @@
 #![allow(clippy::struct_excessive_bools)]
 #![allow(clippy::similar_names)]
 
+use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use std::collections::BTreeMap;
@@ -1291,8 +1292,15 @@ impl FileSearchApp {
         });
 
         // Header with search bar
-        self.palette
-            .push_surface(&mut cmds, 0.0, 0.0, width, header_h, 0.0, Surface::Card);
+        self.palette.push_surface(
+            &mut cmds,
+            0.0,
+            0.0,
+            width,
+            header_h,
+            0.0,
+            Surface::Strip(Edge::Bottom),
+        );
 
         // App title
         cmds.push(RenderCommand::Text {
@@ -1300,7 +1308,7 @@ impl FileSearchApp {
             y: 8.0,
             text: "File Search".to_string(),
             font_size: 14.0,
-            color: self.palette.blue,
+            color: self.palette.ink(self.palette.blue),
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1354,7 +1362,7 @@ impl FileSearchApp {
             y: 36.0,
             text: self.criteria.mode.to_string(),
             font_size: 11.0,
-            color: self.palette.mauve,
+            color: self.palette.ink(self.palette.mauve),
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1446,7 +1454,7 @@ impl FileSearchApp {
                 text: format!("{} {cat}", category_icon(*cat)),
                 font_size: 11.0,
                 color: if is_sel {
-                    self.palette.blue
+                    self.palette.ink(self.palette.blue)
                 } else {
                     self.palette.subtext1
                 },
@@ -1496,7 +1504,7 @@ impl FileSearchApp {
                 text: sf.label().to_string(),
                 font_size: 11.0,
                 color: if is_sel {
-                    self.palette.blue
+                    self.palette.ink(self.palette.blue)
                 } else {
                     self.palette.subtext1
                 },
@@ -1536,7 +1544,7 @@ impl FileSearchApp {
                 text: df.label().to_string(),
                 font_size: 11.0,
                 color: if is_sel {
-                    self.palette.blue
+                    self.palette.ink(self.palette.blue)
                 } else {
                     self.palette.subtext1
                 },
@@ -1688,8 +1696,14 @@ impl FileSearchApp {
 
     fn render_preview(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, h: f32) {
         // Separator
-        self.palette
-            .push_surface(cmds, x, y, 1.0, h, 0.0, Surface::Card);
+        cmds.push(RenderCommand::FillRect {
+            x,
+            y,
+            width: 1.0,
+            height: h,
+            color: self.palette.surface0,
+            corner_radii: CornerRadii::ZERO,
+        });
 
         let entry = if let Some(e) = self.selected_entry() {
             e
@@ -1802,7 +1816,7 @@ impl FileSearchApp {
                 y: py + 5.0,
                 text: action.to_string(),
                 font_size: 11.0,
-                color: self.palette.teal,
+                color: self.palette.ink(self.palette.teal),
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,

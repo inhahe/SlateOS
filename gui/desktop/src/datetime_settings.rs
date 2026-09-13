@@ -4,6 +4,7 @@
 //! and additional clocks for multiple timezones.
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
@@ -621,14 +622,7 @@ impl DateTimeSettingsUI {
 
         // Current time display
         if let Some((hour, minute)) = self.settings.local_time(self.current_utc) {
-            cmds.push(RenderCommand::FillRect {
-                x,
-                y: cy,
-                width,
-                height: 80.0,
-                color: p.surface0,
-                corner_radii: CornerRadii::all(12.0),
-            });
+            p.push_surface(cmds, x, cy, width, 80.0, 12.0, Surface::Card);
 
             let time_str = format!("{:02}:{:02}", hour, minute);
             cmds.push(RenderCommand::Text {
@@ -668,7 +662,7 @@ impl DateTimeSettingsUI {
             y: cy,
             text: "Taskbar Clock".into(),
             font_size: 15.0,
-            color: p.lavender,
+            color: p.ink(p.lavender),
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -711,14 +705,7 @@ impl DateTimeSettingsUI {
 
         // Current timezone
         if let Some(tz) = self.settings.current_timezone() {
-            cmds.push(RenderCommand::FillRect {
-                x,
-                y: cy,
-                width,
-                height: 44.0,
-                color: p.surface1,
-                corner_radii: CornerRadii::all(8.0),
-            });
+            p.push_surface(cmds, x, cy, width, 44.0, 8.0, Surface::Card);
             cmds.push(RenderCommand::Text {
                 x: x + 12.0,
                 y: cy + 6.0,
@@ -763,14 +750,7 @@ impl DateTimeSettingsUI {
         cy += 40.0;
 
         // Search
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y: cy,
-            width,
-            height: 30.0,
-            color: p.surface0,
-            corner_radii: CornerRadii::all(6.0),
-        });
+        p.push_surface(cmds, x, cy, width, 30.0, 6.0, Surface::Card);
         let search_text = if self.tz_search.is_empty() {
             "Search timezones...".to_string()
         } else {
@@ -828,7 +808,7 @@ impl DateTimeSettingsUI {
                 y: cy + 4.0,
                 text: format!("{} — {}", tz.city, tz.display_name),
                 font_size: 13.0,
-                color: if is_current { p.accent } else { p.text },
+                color: if is_current { p.ink(p.accent) } else { p.text },
                 font_weight: if is_current {
                     FontWeightHint::Bold
                 } else {
@@ -860,7 +840,7 @@ impl DateTimeSettingsUI {
                     y: cy + 20.0,
                     text: "DST".into(),
                     font_size: 10.0,
-                    color: p.yellow,
+                    color: p.ink(p.yellow),
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(40.0),
                     overflow: TextOverflow::Ellipsis,
@@ -887,7 +867,7 @@ impl DateTimeSettingsUI {
             y: cy,
             text: "Time Synchronization".into(),
             font_size: 15.0,
-            color: p.lavender,
+            color: p.ink(p.lavender),
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -899,14 +879,7 @@ impl DateTimeSettingsUI {
 
         // Status
         let status_color = ntp.status.color(p);
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y: cy,
-            width,
-            height: 36.0,
-            color: p.surface0,
-            corner_radii: CornerRadii::all(6.0),
-        });
+        p.push_surface(cmds, x, cy, width, 36.0, 6.0, Surface::ControlTrack);
         cmds.push(RenderCommand::FillRect {
             x: x + 8.0,
             y: cy + 12.0,
@@ -973,7 +946,7 @@ impl DateTimeSettingsUI {
             y: cy,
             text: "NTP Servers".into(),
             font_size: 15.0,
-            color: p.lavender,
+            color: p.ink(p.lavender),
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -981,14 +954,7 @@ impl DateTimeSettingsUI {
         cy += 24.0;
 
         for server in &ntp.servers {
-            cmds.push(RenderCommand::FillRect {
-                x,
-                y: cy,
-                width,
-                height: 28.0,
-                color: p.surface0,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            p.push_surface(cmds, x, cy, width, 28.0, 4.0, Surface::Card);
             cmds.push(RenderCommand::Text {
                 x: x + 10.0,
                 y: cy + 6.0,
@@ -1018,7 +984,7 @@ impl DateTimeSettingsUI {
             y: cy,
             text: "Additional Clocks".into(),
             font_size: 15.0,
-            color: p.lavender,
+            color: p.ink(p.lavender),
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -1061,14 +1027,7 @@ impl DateTimeSettingsUI {
                 .iter()
                 .find(|t| t.tz_id == clock.tz_id);
 
-            cmds.push(RenderCommand::FillRect {
-                x,
-                y: cy,
-                width,
-                height: 60.0,
-                color: p.surface0,
-                corner_radii: CornerRadii::all(8.0),
-            });
+            p.push_surface(cmds, x, cy, width, 60.0, 8.0, Surface::Card);
 
             // Clock label
             cmds.push(RenderCommand::Text {
@@ -1747,10 +1706,9 @@ mod tests {
     /// Every fill exactly `h` tall, in draw order.
     fn fills_h(cmds: &[RenderCommand], h: f32) -> Vec<Color> {
         cmds.iter()
-            .filter_map(|c| match c {
-                RenderCommand::FillRect { height, color, .. } if *height == h => Some(*color),
-                _ => None,
-            })
+            .filter_map(appearance::painted_rect)
+            .filter(|(_, _, _, height, _)| *height == h)
+            .map(|t| t.4)
             .collect()
     }
 
@@ -1967,7 +1925,8 @@ mod tests {
                 let names = row_labels(&tz);
                 assert_eq!(names.len(), 10, "ten zone rows are named ({what})");
                 assert_eq!(
-                    names[6], accent,
+                    names[6],
+                    p.ink(accent),
                     "the name of the zone in force does not follow the accent \
                      ({what})"
                 );
@@ -2050,19 +2009,19 @@ mod tests {
             let dt = render(&wound(DateTimeTab::DateTime), &p);
             assert_eq!(
                 fills_h(&dt, 80.0),
-                vec![p.surface0],
+                vec![p.painted(appearance::Surface::Card)],
                 "the clock card ({what})"
             );
 
             let tz = render(&wound(DateTimeTab::Timezone), &p);
             assert_eq!(
                 fills_h(&tz, 44.0),
-                vec![p.surface1],
+                vec![p.painted(appearance::Surface::Card)],
                 "the current-zone card ({what})"
             );
             assert_eq!(
                 fills_h(&tz, 30.0),
-                vec![p.surface0],
+                vec![p.painted(appearance::Surface::Card)],
                 "the search field ({what})"
             );
             let rows = fills_h(&tz, 36.0);
@@ -2075,7 +2034,7 @@ mod tests {
             let ntp = render(&wound(DateTimeTab::Ntp), &p);
             assert_eq!(
                 fills_h(&ntp, 36.0),
-                vec![p.surface0],
+                vec![p.painted(appearance::Surface::ControlTrack)],
                 "the sync-status card ({what})"
             );
             let servers = fills_h(&ntp, 28.0);
@@ -2085,14 +2044,22 @@ mod tests {
                 "one row per configured server ({what})"
             );
             for (i, row) in servers.iter().enumerate() {
-                assert_eq!(*row, p.surface0, "server row {i} ({what})");
+                assert_eq!(
+                    *row,
+                    p.painted(appearance::Surface::Card),
+                    "server row {i} ({what})"
+                );
             }
 
             let clocks = render(&wound(DateTimeTab::Clocks), &p);
             let cards = fills_h(&clocks, 60.0);
             assert_eq!(cards.len(), 4, "four world-clock cards ({what})");
             for (i, card) in cards.iter().enumerate() {
-                assert_eq!(*card, p.surface0, "world-clock card {i} ({what})");
+                assert_eq!(
+                    *card,
+                    p.painted(appearance::Surface::Card),
+                    "world-clock card {i} ({what})"
+                );
             }
         }
     }
@@ -2251,7 +2218,7 @@ mod tests {
                      test proves nothing ({what})"
                 );
                 for (i, badge) in badges.iter().enumerate() {
-                    assert_eq!(*badge, p.yellow, "DST badge {i} ({what})");
+                    assert_eq!(*badge, p.ink(p.yellow), "DST badge {i} ({what})");
                 }
             }
         }
@@ -2329,7 +2296,7 @@ mod tests {
                     "the zone in force is marked by its name and its strip, \
                      not by raising its row ({what})"
                 );
-                assert_eq!(names[6], accent, "the zone in force ({what})");
+                assert_eq!(names[6], p.ink(accent), "the zone in force ({what})");
 
                 assert_ne!(
                     rows[2], rows[6],

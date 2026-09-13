@@ -12,7 +12,7 @@
 //! - Disable while typing
 //! - Custom gesture → action bindings
 
-use appearance::{Palette, readable_on};
+use appearance::{Edge, Palette, Surface, readable_on};
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::scroll_window;
@@ -728,14 +728,7 @@ impl TouchpadSettingsUI {
         });
 
         // Title bar.
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: w,
-            height: 40.0,
-            color: p.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        p.push_surface(&mut cmds, x, y, w, 40.0, 0.0, Surface::Strip(Edge::Bottom));
         cmds.push(RenderCommand::Text {
             x: x + 16.0,
             y: y + 12.0,
@@ -1057,14 +1050,7 @@ impl TouchpadSettingsUI {
             let i = rows.start.saturating_add(row);
             let selected = i == self.selected_gesture_idx;
             if selected {
-                cmds.push(RenderCommand::FillRect {
-                    x: x - 4.0,
-                    y: cy - 2.0,
-                    width: 420.0,
-                    height: 22.0,
-                    color: p.surface0,
-                    corner_radii: CornerRadii::all(4.0),
-                });
+                p.push_surface(cmds, x - 4.0, cy - 2.0, 420.0, 22.0, 4.0, Surface::Selected);
             }
 
             cmds.push(RenderCommand::Text {
@@ -1333,14 +1319,7 @@ impl TouchpadSettingsUI {
             max_width: None,
             overflow: TextOverflow::Clip,
         });
-        cmds.push(RenderCommand::FillRect {
-            x: x + 250.0,
-            y,
-            width: 200.0,
-            height: 22.0,
-            color: p.surface0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        p.push_surface(cmds, x + 250.0, y, 200.0, 22.0, 4.0, Surface::Card);
         cmds.push(RenderCommand::Text {
             x: x + 258.0,
             y: y + 4.0,
@@ -2238,19 +2217,14 @@ mod tests {
     //     that order; the fill's width varies with the value and reaches the
     //     track's width at maximum, so width cannot separate them either.
 
+    /// Every box the predicate keeps, filled or outlined, on the logical
+    /// rectangle -- an outline reports one a pixel smaller than it was asked
+    /// for, so an exact `w == 420.0` would miss every converted site.
     fn fills(cmds: &[RenderCommand], keep: impl Fn(f32, f32, f32, f32) -> bool) -> Vec<Color> {
         cmds.iter()
-            .filter_map(|c| match c {
-                RenderCommand::FillRect {
-                    x,
-                    y,
-                    width,
-                    height,
-                    color,
-                    ..
-                } if keep(*x, *y, *width, *height) => Some(*color),
-                _ => None,
-            })
+            .filter_map(appearance::painted_rect)
+            .filter(|(x, y, w, h, _)| keep(*x, *y, *w, *h))
+            .map(|t| t.4)
             .collect()
     }
 
@@ -2580,7 +2554,11 @@ mod tests {
                 assert_eq!(*pill, p.surface0, "unselected section pill {i} ({ctx})");
             }
             for (i, well) in choice_wells(&cmds).iter().enumerate() {
-                assert_eq!(*well, p.surface0, "choice well {i} ({ctx})");
+                assert_eq!(
+                    *well,
+                    p.painted(appearance::Surface::Card),
+                    "choice well {i} ({ctx})"
+                );
             }
             for (i, track) in toggle_tracks(&draw(
                 &on(TouchpadSettingsSection::Taps),
@@ -2606,7 +2584,7 @@ mod tests {
             assert_eq!(lines, vec![p.surface1], "the gesture table's rule ({ctx})");
             assert_eq!(
                 fills(&g, |_, _, w, h| w == 420.0 && h == 22.0),
-                vec![p.surface0],
+                vec![p.painted(appearance::Surface::Selected)],
                 "the cursor behind the selected gesture row ({ctx})"
             );
         }

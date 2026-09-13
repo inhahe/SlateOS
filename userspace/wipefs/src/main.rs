@@ -10,7 +10,7 @@
 
 use std::env;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Seek, SeekFrom, Write};
 use std::process;
 
 const VERSION: &str = "0.1.0";
@@ -42,7 +42,8 @@ struct DetectedSig {
     sig_type: String,
     name: String,
     magic_hex: String,
-    _length: usize,
+    /// Bytes of magic to overwrite when wiping this signature.
+    length: usize,
 }
 
 const SIGNATURES: &[FsSignature] = &[
@@ -197,12 +198,29 @@ fn detect_signatures(device: &str) -> std::io::Result<Vec<DetectedSig>> {
                 sig_type: sig_type.to_string(),
                 name: sig.name.to_string(),
                 magic_hex,
-                _length: sig.magic.len(),
+                length: sig.magic.len(),
             });
         }
     }
 
     Ok(results)
+}
+
+/// Overwrite a signature's magic bytes with zeros.
+///
+/// Nothing did this before: the wipe branch printed "wipefs: ext4 wiped at
+/// offset 0x438" and moved on without opening the device. Combined with the
+/// invented signature list removed in the previous commit, `wipefs -a` on a
+/// file with no filesystem on it announced destroying one that was never
+/// there, on a device it never touched.
+fn wipe_signature(device: &str, sig: &DetectedSig) -> io::Result<()> {
+    let mut f = fs::OpenOptions::new().write(true).open(device)?;
+    f.seek(SeekFrom::Start(sig.offset))?;
+    f.write_all(&vec![0u8; sig.length])?;
+    // Durability matters more here than almost anywhere: the point of the
+    // call is that the signature is GONE, and a caller who reads "wiped" and
+    // pulls the disk must not find it still there.
+    f.sync_all()
 }
 
 // ============================================================================
@@ -333,26 +351,40 @@ fn cmd_wipefs(args: &[String]) {
                         "wipefs: [dry-run] would wipe {} at offset {:#x} ({} {})",
                         device, sig.offset, sig.sig_type, sig.name
                     );
-                } else {
-                    if backup {
+                    continue;
+                }
+
+                // --backup printed "backed up <name> signature at <offset>"
+                // and wrote no file. A caller who asked for a backup and was
+                // told they had one must not then have the signature
+                // destroyed, so this refuses rather than wiping without it.
+                // Implementing it properly needs a file name and location
+                // matched against the reference tool, which is a separate
+                // change.
+                if backup {
+                    eprintln!(
+                        "wipefs: --backup is not implemented; refusing to wipe {} at offset {:#x} without the backup you asked for",
+                        sig.name, sig.offset
+                    );
+                    status = 1;
+                    continue;
+                }
+
+                match wipe_signature(device, sig) {
+                    Ok(()) => {
+                        let suffix = if force { " (force)" } else { "" };
                         let _ = writeln!(
                             out,
-                            "wipefs: backed up {} signature at {:#x}",
+                            "wipefs: {} wiped at offset {:#x}{suffix}",
                             sig.name, sig.offset
                         );
                     }
-                    if force {
-                        let _ = writeln!(
-                            out,
-                            "wipefs: {} wiped at offset {:#x} (force)",
+                    Err(e) => {
+                        eprintln!(
+                            "wipefs: {device}: cannot wipe {} at offset {:#x}: {e}",
                             sig.name, sig.offset
                         );
-                    } else {
-                        let _ = writeln!(
-                            out,
-                            "wipefs: {} wiped at offset {:#x}",
-                            sig.name, sig.offset
-                        );
+                        status = 1;
                     }
                 }
             }
@@ -711,7 +743,7 @@ mod tests {
             sig_type: "filesystem".to_string(),
             name: "ext4".to_string(),
             magic_hex: "53ef".to_string(),
-            _length: 2,
+            length: 2,
         };
         let c = sig.clone();
         assert_eq!(c.device, "/dev/sda");
@@ -750,5 +782,52 @@ mod tests {
         assert!(xfs.is_some());
         assert_eq!(xfs.unwrap().offset, 0);
         assert_eq!(xfs.unwrap().magic, b"XFSB");
+    }
+
+    #[test]
+    fn wiping_a_signature_actually_zeroes_the_magic_on_disk() {
+        // The branch this replaces printed "wipefs: ext4 wiped at offset
+        // 0x438" without opening the device at all. Asserting on the bytes
+        // rather than on the message is the whole point: the old code would
+        // have passed any test that only checked what was printed.
+        let dir =
+            std::env::temp_dir().join(format!("wipefs-wipe-{}-{}", std::process::id(), line!()));
+        let _ = fs::create_dir_all(&dir);
+        let img = dir.join("planted.img");
+        let mut data = vec![0u8; 4096];
+        data[0x438] = 0x53;
+        data[0x439] = 0xEF;
+        fs::write(&img, &data).expect("fixture");
+
+        let path = img.to_str().expect("the test path is ASCII");
+        let sigs = detect_signatures(path).expect("readable");
+        assert_eq!(sigs.len(), 1, "fixture did not plant one signature");
+        wipe_signature(path, &sigs[0]).expect("wipe must succeed on a writable file");
+
+        let after = fs::read(&img).expect("reread");
+        assert_eq!(after.len(), 4096, "the wipe must not resize the device");
+        assert_eq!(&after[0x438..0x43A], &[0, 0], "the magic survived the wipe");
+        assert!(
+            detect_signatures(path).expect("readable").is_empty(),
+            "the signature is still detected after being wiped"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wiping_a_device_that_cannot_be_opened_is_an_error() {
+        // The refusing half. A wipe that could not happen must not be
+        // reported as one.
+        let sig = DetectedSig {
+            device: "/nonexistent/device".to_string(),
+            offset: 0x438,
+            sig_type: "filesystem".to_string(),
+            name: "ext4".to_string(),
+            magic_hex: "53ef".to_string(),
+            length: 2,
+        };
+        let err = wipe_signature("/nonexistent/device", &sig)
+            .expect_err("wiping a device that cannot be opened must not succeed");
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
     }
 }

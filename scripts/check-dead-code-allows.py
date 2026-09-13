@@ -63,7 +63,6 @@ BASELINE = {
     "userspace/systemctl",
     "userspace/tcpdump",
     "userspace/upower",
-    "userspace/wpa",
 }
 
 NL = chr(10)

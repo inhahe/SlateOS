@@ -21,17 +21,14 @@
     clippy::struct_excessive_bools,
     clippy::cast_possible_truncation
 )]
-// WpaConfig parse/serialize/parse_global_field/parse_network_field, the
-// AuthAlg/KeyMgmt::from_str_ci helpers, KeyMgmt::Wpa & ::Wpa3 variants,
-// Proto::as_str, and the unread NetworkConfig::key_mgmt / ::proto and
-// WpaConfig::update_config / ::country fields encode the wpa_supplicant
-// configuration-file grammar (wpa_supplicant.conf), the EAPOL key-management
-// negotiation vocabulary, and the wpa_cli control interface. The current
-// multi-personality stub exercises only a subset; the full surface is
-// intentionally kept so the future driver-attached implementation can
-// drop in without reshaping public types. Dead-code lint cannot see across
-// that future boundary.
-#![allow(dead_code)]
+// The reasons the supplicant model is unused now live at each item, not in a
+// list here. What stood here was a blanket `#![allow(dead_code)]` with a
+// paragraph enumerating what it covered -- a better justification than most,
+// and it had still drifted twice over: it described "the current
+// multi-personality stub" after `wpa_supplicant` and `wpa_cli` were deleted
+// on 2026-09-10, and it named items (`AuthAlg`, `KeyMgmt::Wpa3`) against a
+// file that had moved on. An enumeration in a comment is the shape that goes
+// stale; an attribute on the item cannot.
 
 use std::collections::BTreeMap;
 use std::io::{self, Write};
@@ -56,12 +53,54 @@ const MAX_PASSPHRASE_LEN: usize = 63;
 const MIN_PASSPHRASE_LEN: usize = 8;
 
 /// Default control interface socket path.
+// Dead because the two personalities that used it were deleted, not because
+// it was never finished. `wpa_supplicant` and `wpa_cli` went on 2026-09-10
+// under design-decisions 1006: the supplicant printed "initialized
+// successfully" having opened no socket, and wpa_cli answered `scan_results`
+// from a fresh in-process object, reporting nothing in range having never
+// looked. What survives is `wpa_passphrase`, which computes a real PSK.
+//
+// This model is kept rather than deleted with them: it is exercised by the
+// crate's tests, and the blocker is a missing radio -- netlink, a driver, and
+// the association state machine in `net80211`, which is lane C's -- not a
+// missing design. Same standing as gdb's execution types, which wait on
+// ptrace. Marked per item so a genuinely dead addition here is still
+// reported.
+#[allow(dead_code)]
 const DEFAULT_CTRL_IFACE: &str = "/var/run/wpa_supplicant";
 
 /// Default configuration file path.
+// Dead because the two personalities that used it were deleted, not because
+// it was never finished. `wpa_supplicant` and `wpa_cli` went on 2026-09-10
+// under design-decisions 1006: the supplicant printed "initialized
+// successfully" having opened no socket, and wpa_cli answered `scan_results`
+// from a fresh in-process object, reporting nothing in range having never
+// looked. What survives is `wpa_passphrase`, which computes a real PSK.
+//
+// This model is kept rather than deleted with them: it is exercised by the
+// crate's tests, and the blocker is a missing radio -- netlink, a driver, and
+// the association state machine in `net80211`, which is lane C's -- not a
+// missing design. Same standing as gdb's execution types, which wait on
+// ptrace. Marked per item so a genuinely dead addition here is still
+// reported.
+#[allow(dead_code)]
 const DEFAULT_CONFIG_FILE: &str = "/etc/wpa_supplicant/wpa_supplicant.conf";
 
 /// Default driver name.
+// Dead because the two personalities that used it were deleted, not because
+// it was never finished. `wpa_supplicant` and `wpa_cli` went on 2026-09-10
+// under design-decisions 1006: the supplicant printed "initialized
+// successfully" having opened no socket, and wpa_cli answered `scan_results`
+// from a fresh in-process object, reporting nothing in range having never
+// looked. What survives is `wpa_passphrase`, which computes a real PSK.
+//
+// This model is kept rather than deleted with them: it is exercised by the
+// crate's tests, and the blocker is a missing radio -- netlink, a driver, and
+// the association state machine in `net80211`, which is lane C's -- not a
+// missing design. Same standing as gdb's execution types, which wait on
+// ptrace. Marked per item so a genuinely dead addition here is still
+// reported.
+#[allow(dead_code)]
 const DEFAULT_DRIVER: &str = "nl80211";
 
 /// Version string.
@@ -99,6 +138,20 @@ fn hex_encode_string(src: &[u8]) -> String {
 }
 
 /// Decode a hex string into bytes. Returns None on invalid input.
+// Dead because the two personalities that used it were deleted, not because
+// it was never finished. `wpa_supplicant` and `wpa_cli` went on 2026-09-10
+// under design-decisions 1006: the supplicant printed "initialized
+// successfully" having opened no socket, and wpa_cli answered `scan_results`
+// from a fresh in-process object, reporting nothing in range having never
+// looked. What survives is `wpa_passphrase`, which computes a real PSK.
+//
+// This model is kept rather than deleted with them: it is exercised by the
+// crate's tests, and the blocker is a missing radio -- netlink, a driver, and
+// the association state machine in `net80211`, which is lane C's -- not a
+// missing design. Same standing as gdb's execution types, which wait on
+// ptrace. Marked per item so a genuinely dead addition here is still
+// reported.
+#[allow(dead_code)]
 fn hex_decode(src: &[u8]) -> Option<Vec<u8>> {
     if !src.len().is_multiple_of(2) {
         return None;
@@ -114,6 +167,20 @@ fn hex_decode(src: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
+// Dead because the two personalities that used it were deleted, not because
+// it was never finished. `wpa_supplicant` and `wpa_cli` went on 2026-09-10
+// under design-decisions 1006: the supplicant printed "initialized
+// successfully" having opened no socket, and wpa_cli answered `scan_results`
+// from a fresh in-process object, reporting nothing in range having never
+// looked. What survives is `wpa_passphrase`, which computes a real PSK.
+//
+// This model is kept rather than deleted with them: it is exercised by the
+// crate's tests, and the blocker is a missing radio -- netlink, a driver, and
+// the association state machine in `net80211`, which is lane C's -- not a
+// missing design. Same standing as gdb's execution types, which wait on
+// ptrace. Marked per item so a genuinely dead addition here is still
+// reported.
+#[allow(dead_code)]
 fn hex_val(c: u8) -> Option<u8> {
     match c {
         b'0'..=b'9' => Some(c - b'0'),
@@ -146,6 +213,20 @@ fn wpa_psk(passphrase: &[u8], ssid: &[u8]) -> [u8; WPA_PSK_LEN] {
 
 /// WPA supplicant state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// Dead because the two personalities that used it were deleted, not because
+// it was never finished. `wpa_supplicant` and `wpa_cli` went on 2026-09-10
+// under design-decisions 1006: the supplicant printed "initialized
+// successfully" having opened no socket, and wpa_cli answered `scan_results`
+// from a fresh in-process object, reporting nothing in range having never
+// looked. What survives is `wpa_passphrase`, which computes a real PSK.
+//
+// This model is kept rather than deleted with them: it is exercised by the
+// crate's tests, and the blocker is a missing radio -- netlink, a driver, and
+// the association state machine in `net80211`, which is lane C's -- not a
+// missing design. Same standing as gdb's execution types, which wait on
+// ptrace. Marked per item so a genuinely dead addition here is still
+// reported.
+#[allow(dead_code)]
 enum WpaState {
     /// Initial state -- not connected.
     Disconnected,
@@ -161,6 +242,20 @@ enum WpaState {
     Completed,
 }
 
+// Dead because the two personalities that used it were deleted, not because
+// it was never finished. `wpa_supplicant` and `wpa_cli` went on 2026-09-10
+// under design-decisions 1006: the supplicant printed "initialized
+// successfully" having opened no socket, and wpa_cli answered `scan_results`
+// from a fresh in-process object, reporting nothing in range having never
+// looked. What survives is `wpa_passphrase`, which computes a real PSK.
+//
+// This model is kept rather than deleted with them: it is exercised by the
+// crate's tests, and the blocker is a missing radio -- netlink, a driver, and
+// the association state machine in `net80211`, which is lane C's -- not a
+// missing design. Same standing as gdb's execution types, which wait on
+// ptrace. Marked per item so a genuinely dead addition here is still
+// reported.
+#[allow(dead_code)]
 impl WpaState {
     fn as_str(self) -> &'static str {
         match self {
@@ -189,6 +284,20 @@ impl WpaState {
 
 /// Key management type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// Dead because the two personalities that used it were deleted, not because
+// it was never finished. `wpa_supplicant` and `wpa_cli` went on 2026-09-10
+// under design-decisions 1006: the supplicant printed "initialized
+// successfully" having opened no socket, and wpa_cli answered `scan_results`
+// from a fresh in-process object, reporting nothing in range having never
+// looked. What survives is `wpa_passphrase`, which computes a real PSK.
+//
+// This model is kept rather than deleted with them: it is exercised by the
+// crate's tests, and the blocker is a missing radio -- netlink, a driver, and
+// the association state machine in `net80211`, which is lane C's -- not a
+// missing design. Same standing as gdb's execution types, which wait on
+// ptrace. Marked per item so a genuinely dead addition here is still
+// reported.
+#[allow(dead_code)]
 enum KeyMgmt {
     WpaPsk,
     WpaEap,
@@ -196,6 +305,20 @@ enum KeyMgmt {
     None,
 }
 
+// Dead because the two personalities that used it were deleted, not because
+// it was never finished. `wpa_supplicant` and `wpa_cli` went on 2026-09-10
+// under design-decisions 1006: the supplicant printed "initialized
+// successfully" having opened no socket, and wpa_cli answered `scan_results`
+// from a fresh in-process object, reporting nothing in range having never
+// looked. What survives is `wpa_passphrase`, which computes a real PSK.
+//
+// This model is kept rather than deleted with them: it is exercised by the
+// crate's tests, and the blocker is a missing radio -- netlink, a driver, and
+// the association state machine in `net80211`, which is lane C's -- not a
+// missing design. Same standing as gdb's execution types, which wait on
+// ptrace. Marked per item so a genuinely dead addition here is still
+// reported.
+#[allow(dead_code)]
 impl KeyMgmt {
     fn as_str(self) -> &'static str {
         match self {
@@ -219,12 +342,40 @@ impl KeyMgmt {
 
 /// Pairwise cipher.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// Dead because the two personalities that used it were deleted, not because
+// it was never finished. `wpa_supplicant` and `wpa_cli` went on 2026-09-10
+// under design-decisions 1006: the supplicant printed "initialized
+// successfully" having opened no socket, and wpa_cli answered `scan_results`
+// from a fresh in-process object, reporting nothing in range having never
+// looked. What survives is `wpa_passphrase`, which computes a real PSK.
+//
+// This model is kept rather than deleted with them: it is exercised by the
+// crate's tests, and the blocker is a missing radio -- netlink, a driver, and
+// the association state machine in `net80211`, which is lane C's -- not a
+// missing design. Same standing as gdb's execution types, which wait on
+// ptrace. Marked per item so a genuinely dead addition here is still
+// reported.
+#[allow(dead_code)]
 enum PairwiseCipher {
     Ccmp,
     Tkip,
     None,
 }
 
+// Dead because the two personalities that used it were deleted, not because
+// it was never finished. `wpa_supplicant` and `wpa_cli` went on 2026-09-10
+// under design-decisions 1006: the supplicant printed "initialized
+// successfully" having opened no socket, and wpa_cli answered `scan_results`
+// from a fresh in-process object, reporting nothing in range having never
+// looked. What survives is `wpa_passphrase`, which computes a real PSK.
+//
+// This model is kept rather than deleted with them: it is exercised by the
+// crate's tests, and the blocker is a missing radio -- netlink, a driver, and
+// the association state machine in `net80211`, which is lane C's -- not a
+// missing design. Same standing as gdb's execution types, which wait on
+// ptrace. Marked per item so a genuinely dead addition here is still
+// reported.
+#[allow(dead_code)]
 impl PairwiseCipher {
     fn as_str(self) -> &'static str {
         match self {
@@ -246,12 +397,40 @@ impl PairwiseCipher {
 
 /// Group cipher.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// Dead because the two personalities that used it were deleted, not because
+// it was never finished. `wpa_supplicant` and `wpa_cli` went on 2026-09-10
+// under design-decisions 1006: the supplicant printed "initialized
+// successfully" having opened no socket, and wpa_cli answered `scan_results`
+// from a fresh in-process object, reporting nothing in range having never
+// looked. What survives is `wpa_passphrase`, which computes a real PSK.
+//
+// This model is kept rather than deleted with them: it is exercised by the
+// crate's tests, and the blocker is a missing radio -- netlink, a driver, and
+// the association state machine in `net80211`, which is lane C's -- not a
+// missing design. Same standing as gdb's execution types, which wait on
+// ptrace. Marked per item so a genuinely dead addition here is still
+// reported.
+#[allow(dead_code)]
 enum GroupCipher {
     Ccmp,
     Tkip,
     None,
 }
 
+// Dead because the two personalities that used it were deleted, not because
+// it was never finished. `wpa_supplicant` and `wpa_cli` went on 2026-09-10
+// under design-decisions 1006: the supplicant printed "initialized
+// successfully" having opened no socket, and wpa_cli answered `scan_results`
+// from a fresh in-process object, reporting nothing in range having never
+// looked. What survives is `wpa_passphrase`, which computes a real PSK.
+//
+// This model is kept rather than deleted with them: it is exercised by the
+// crate's tests, and the blocker is a missing radio -- netlink, a driver, and
+// the association state machine in `net80211`, which is lane C's -- not a
+// missing design. Same standing as gdb's execution types, which wait on
+// ptrace. Marked per item so a genuinely dead addition here is still
+// reported.
+#[allow(dead_code)]
 impl GroupCipher {
     fn as_str(self) -> &'static str {
         match self {
@@ -273,12 +452,40 @@ impl GroupCipher {
 
 /// Protocol version.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// Dead because the two personalities that used it were deleted, not because
+// it was never finished. `wpa_supplicant` and `wpa_cli` went on 2026-09-10
+// under design-decisions 1006: the supplicant printed "initialized
+// successfully" having opened no socket, and wpa_cli answered `scan_results`
+// from a fresh in-process object, reporting nothing in range having never
+// looked. What survives is `wpa_passphrase`, which computes a real PSK.
+//
+// This model is kept rather than deleted with them: it is exercised by the
+// crate's tests, and the blocker is a missing radio -- netlink, a driver, and
+// the association state machine in `net80211`, which is lane C's -- not a
+// missing design. Same standing as gdb's execution types, which wait on
+// ptrace. Marked per item so a genuinely dead addition here is still
+// reported.
+#[allow(dead_code)]
 enum WpaProto {
     Wpa,
     Rsn,  // WPA2
     Wpa3, // WPA3
 }
 
+// Dead because the two personalities that used it were deleted, not because
+// it was never finished. `wpa_supplicant` and `wpa_cli` went on 2026-09-10
+// under design-decisions 1006: the supplicant printed "initialized
+// successfully" having opened no socket, and wpa_cli answered `scan_results`
+// from a fresh in-process object, reporting nothing in range having never
+// looked. What survives is `wpa_passphrase`, which computes a real PSK.
+//
+// This model is kept rather than deleted with them: it is exercised by the
+// crate's tests, and the blocker is a missing radio -- netlink, a driver, and
+// the association state machine in `net80211`, which is lane C's -- not a
+// missing design. Same standing as gdb's execution types, which wait on
+// ptrace. Marked per item so a genuinely dead addition here is still
+// reported.
+#[allow(dead_code)]
 impl WpaProto {
     fn as_str(self) -> &'static str {
         match self {
@@ -295,6 +502,20 @@ impl WpaProto {
 
 /// A detected BSS from a scan.
 #[derive(Clone, Debug)]
+// Dead because the two personalities that used it were deleted, not because
+// it was never finished. `wpa_supplicant` and `wpa_cli` went on 2026-09-10
+// under design-decisions 1006: the supplicant printed "initialized
+// successfully" having opened no socket, and wpa_cli answered `scan_results`
+// from a fresh in-process object, reporting nothing in range having never
+// looked. What survives is `wpa_passphrase`, which computes a real PSK.
+//
+// This model is kept rather than deleted with them: it is exercised by the
+// crate's tests, and the blocker is a missing radio -- netlink, a driver, and
+// the association state machine in `net80211`, which is lane C's -- not a
+// missing design. Same standing as gdb's execution types, which wait on
+// ptrace. Marked per item so a genuinely dead addition here is still
+// reported.
+#[allow(dead_code)]
 struct BssEntry {
     /// BSSID as 6 bytes.
     bssid: [u8; 6],
@@ -312,6 +533,20 @@ struct BssEntry {
     proto: WpaProto,
 }
 
+// Dead because the two personalities that used it were deleted, not because
+// it was never finished. `wpa_supplicant` and `wpa_cli` went on 2026-09-10
+// under design-decisions 1006: the supplicant printed "initialized
+// successfully" having opened no socket, and wpa_cli answered `scan_results`
+// from a fresh in-process object, reporting nothing in range having never
+// looked. What survives is `wpa_passphrase`, which computes a real PSK.
+//
+// This model is kept rather than deleted with them: it is exercised by the
+// crate's tests, and the blocker is a missing radio -- netlink, a driver, and
+// the association state machine in `net80211`, which is lane C's -- not a
+// missing design. Same standing as gdb's execution types, which wait on
+// ptrace. Marked per item so a genuinely dead addition here is still
+// reported.
+#[allow(dead_code)]
 impl BssEntry {
     fn bssid_str(&self) -> String {
         format!(
@@ -332,6 +567,20 @@ impl BssEntry {
 }
 
 /// Format a BSSID from 6 bytes.
+// Dead because the two personalities that used it were deleted, not because
+// it was never finished. `wpa_supplicant` and `wpa_cli` went on 2026-09-10
+// under design-decisions 1006: the supplicant printed "initialized
+// successfully" having opened no socket, and wpa_cli answered `scan_results`
+// from a fresh in-process object, reporting nothing in range having never
+// looked. What survives is `wpa_passphrase`, which computes a real PSK.
+//
+// This model is kept rather than deleted with them: it is exercised by the
+// crate's tests, and the blocker is a missing radio -- netlink, a driver, and
+// the association state machine in `net80211`, which is lane C's -- not a
+// missing design. Same standing as gdb's execution types, which wait on
+// ptrace. Marked per item so a genuinely dead addition here is still
+// reported.
+#[allow(dead_code)]
 fn format_bssid(bssid: &[u8; 6]) -> String {
     format!(
         "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
@@ -340,6 +589,20 @@ fn format_bssid(bssid: &[u8; 6]) -> String {
 }
 
 /// Parse BSSID from "xx:xx:xx:xx:xx:xx" string.
+// Dead because the two personalities that used it were deleted, not because
+// it was never finished. `wpa_supplicant` and `wpa_cli` went on 2026-09-10
+// under design-decisions 1006: the supplicant printed "initialized
+// successfully" having opened no socket, and wpa_cli answered `scan_results`
+// from a fresh in-process object, reporting nothing in range having never
+// looked. What survives is `wpa_passphrase`, which computes a real PSK.
+//
+// This model is kept rather than deleted with them: it is exercised by the
+// crate's tests, and the blocker is a missing radio -- netlink, a driver, and
+// the association state machine in `net80211`, which is lane C's -- not a
+// missing design. Same standing as gdb's execution types, which wait on
+// ptrace. Marked per item so a genuinely dead addition here is still
+// reported.
+#[allow(dead_code)]
 fn parse_bssid(s: &str) -> Option<[u8; 6]> {
     let parts: Vec<&str> = s.split(':').collect();
     if parts.len() != 6 {
@@ -358,6 +621,20 @@ fn parse_bssid(s: &str) -> Option<[u8; 6]> {
 
 /// A configured network entry (from wpa_supplicant.conf or added via CLI).
 #[derive(Clone, Debug)]
+// Dead because the two personalities that used it were deleted, not because
+// it was never finished. `wpa_supplicant` and `wpa_cli` went on 2026-09-10
+// under design-decisions 1006: the supplicant printed "initialized
+// successfully" having opened no socket, and wpa_cli answered `scan_results`
+// from a fresh in-process object, reporting nothing in range having never
+// looked. What survives is `wpa_passphrase`, which computes a real PSK.
+//
+// This model is kept rather than deleted with them: it is exercised by the
+// crate's tests, and the blocker is a missing radio -- netlink, a driver, and
+// the association state machine in `net80211`, which is lane C's -- not a
+// missing design. Same standing as gdb's execution types, which wait on
+// ptrace. Marked per item so a genuinely dead addition here is still
+// reported.
+#[allow(dead_code)]
 struct NetworkConfig {
     /// Network ID (index in the network list).
     id: usize,
@@ -387,6 +664,20 @@ struct NetworkConfig {
     properties: BTreeMap<String, String>,
 }
 
+// Dead because the two personalities that used it were deleted, not because
+// it was never finished. `wpa_supplicant` and `wpa_cli` went on 2026-09-10
+// under design-decisions 1006: the supplicant printed "initialized
+// successfully" having opened no socket, and wpa_cli answered `scan_results`
+// from a fresh in-process object, reporting nothing in range having never
+// looked. What survives is `wpa_passphrase`, which computes a real PSK.
+//
+// This model is kept rather than deleted with them: it is exercised by the
+// crate's tests, and the blocker is a missing radio -- netlink, a driver, and
+// the association state machine in `net80211`, which is lane C's -- not a
+// missing design. Same standing as gdb's execution types, which wait on
+// ptrace. Marked per item so a genuinely dead addition here is still
+// reported.
+#[allow(dead_code)]
 impl NetworkConfig {
     fn new(id: usize) -> Self {
         Self {
@@ -417,6 +708,20 @@ impl NetworkConfig {
 
 /// Global configuration from wpa_supplicant.conf.
 #[derive(Clone, Debug)]
+// Dead because the two personalities that used it were deleted, not because
+// it was never finished. `wpa_supplicant` and `wpa_cli` went on 2026-09-10
+// under design-decisions 1006: the supplicant printed "initialized
+// successfully" having opened no socket, and wpa_cli answered `scan_results`
+// from a fresh in-process object, reporting nothing in range having never
+// looked. What survives is `wpa_passphrase`, which computes a real PSK.
+//
+// This model is kept rather than deleted with them: it is exercised by the
+// crate's tests, and the blocker is a missing radio -- netlink, a driver, and
+// the association state machine in `net80211`, which is lane C's -- not a
+// missing design. Same standing as gdb's execution types, which wait on
+// ptrace. Marked per item so a genuinely dead addition here is still
+// reported.
+#[allow(dead_code)]
 struct WpaConfig {
     /// Control interface socket path.
     ctrl_interface: String,
@@ -428,6 +733,20 @@ struct WpaConfig {
     networks: Vec<NetworkConfig>,
 }
 
+// Dead because the two personalities that used it were deleted, not because
+// it was never finished. `wpa_supplicant` and `wpa_cli` went on 2026-09-10
+// under design-decisions 1006: the supplicant printed "initialized
+// successfully" having opened no socket, and wpa_cli answered `scan_results`
+// from a fresh in-process object, reporting nothing in range having never
+// looked. What survives is `wpa_passphrase`, which computes a real PSK.
+//
+// This model is kept rather than deleted with them: it is exercised by the
+// crate's tests, and the blocker is a missing radio -- netlink, a driver, and
+// the association state machine in `net80211`, which is lane C's -- not a
+// missing design. Same standing as gdb's execution types, which wait on
+// ptrace. Marked per item so a genuinely dead addition here is still
+// reported.
+#[allow(dead_code)]
 impl WpaConfig {
     fn new() -> Self {
         Self {
@@ -646,6 +965,20 @@ impl WpaConfig {
 // ============================================================================
 
 /// Full supplicant runtime state.
+// Dead because the two personalities that used it were deleted, not because
+// it was never finished. `wpa_supplicant` and `wpa_cli` went on 2026-09-10
+// under design-decisions 1006: the supplicant printed "initialized
+// successfully" having opened no socket, and wpa_cli answered `scan_results`
+// from a fresh in-process object, reporting nothing in range having never
+// looked. What survives is `wpa_passphrase`, which computes a real PSK.
+//
+// This model is kept rather than deleted with them: it is exercised by the
+// crate's tests, and the blocker is a missing radio -- netlink, a driver, and
+// the association state machine in `net80211`, which is lane C's -- not a
+// missing design. Same standing as gdb's execution types, which wait on
+// ptrace. Marked per item so a genuinely dead addition here is still
+// reported.
+#[allow(dead_code)]
 struct SupplicantState {
     /// Current WPA state.
     wpa_state: WpaState,
@@ -671,6 +1004,20 @@ struct SupplicantState {
     config_path: String,
 }
 
+// Dead because the two personalities that used it were deleted, not because
+// it was never finished. `wpa_supplicant` and `wpa_cli` went on 2026-09-10
+// under design-decisions 1006: the supplicant printed "initialized
+// successfully" having opened no socket, and wpa_cli answered `scan_results`
+// from a fresh in-process object, reporting nothing in range having never
+// looked. What survives is `wpa_passphrase`, which computes a real PSK.
+//
+// This model is kept rather than deleted with them: it is exercised by the
+// crate's tests, and the blocker is a missing radio -- netlink, a driver, and
+// the association state machine in `net80211`, which is lane C's -- not a
+// missing design. Same standing as gdb's execution types, which wait on
+// ptrace. Marked per item so a genuinely dead addition here is still
+// reported.
+#[allow(dead_code)]
 impl SupplicantState {
     fn new() -> Self {
         Self {

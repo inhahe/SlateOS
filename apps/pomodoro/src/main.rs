@@ -49,6 +49,7 @@
 //! - Ambient sound selection (simulated: rain, cafe, forest, white noise)
 //! - Minimal distraction UI with large timer display
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::date::Date;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -61,23 +62,11 @@ use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-// ── Catppuccin Mocha palette ───────────────────────────────────────────────
-const BASE: Color = Color::from_hex(0x001E_1E2E);
-const CRUST: Color = Color::from_hex(0x0011_111B);
-const SURFACE0: Color = Color::from_hex(0x0031_3244);
-const SURFACE1: Color = Color::from_hex(0x0045_475A);
-const TEXT_COLOR: Color = Color::from_hex(0x00CD_D6F4);
-const SUBTEXT0: Color = Color::from_hex(0x00A6_ADC8);
-const SUBTEXT1: Color = Color::from_hex(0x00BA_C2DE);
-const BLUE: Color = Color::from_hex(0x0089_B4FA);
-const GREEN: Color = Color::from_hex(0x00A6_E3A1);
-const RED: Color = Color::from_hex(0x00F3_8BA8);
-const YELLOW: Color = Color::from_hex(0x00F9_E2AF);
-const PEACH: Color = Color::from_hex(0x00FA_B387);
-const LAVENDER: Color = Color::from_hex(0x00B4_BEFE);
-const TEAL: Color = Color::from_hex(0x0094_E2D5);
-const MAUVE: Color = Color::from_hex(0x00CB_A6F7);
-const OVERLAY0: Color = Color::from_hex(0x006C_7086);
+// The colours live in the user's palette, not here.
+//
+// 16 constants used to sit here -- Catppuccin Mocha -- so a light desktop got
+// a dark pomodoro timer. design-decisions 822; one of the 55 crates never
+// converted. Names and values agreed, so the mapping is by name.
 
 // ── Window geometry ────────────────────────────────────────────────────────
 
@@ -299,11 +288,11 @@ impl Phase {
         }
     }
 
-    pub fn color(self) -> Color {
+    pub fn color(self, p: &Palette) -> Color {
         match self {
-            Self::Work => RED,
-            Self::ShortBreak => GREEN,
-            Self::LongBreak => BLUE,
+            Self::Work => p.red,
+            Self::ShortBreak => p.green,
+            Self::LongBreak => p.blue,
         }
     }
 }
@@ -494,6 +483,8 @@ impl Screen {
 // ── Application State ──────────────────────────────────────────────────────
 
 pub struct PomodoroApp {
+    /// The user's colours, handed over by the framework (§822).
+    pub palette: Palette,
     // Timer core
     pub phase: Phase,
     pub state: TimerState,
@@ -554,6 +545,7 @@ impl PomodoroApp {
         let settings = Settings::default();
         let remaining = settings.duration_secs(Phase::Work);
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             phase: Phase::Work,
             state: TimerState::Idle,
             remaining_secs: remaining,
@@ -1253,7 +1245,7 @@ impl PomodoroApp {
         let mut frame = Frame::new(width, height);
         let layout = Layout::new(width, height, self.pending_notification.is_some());
 
-        fill(&mut frame, layout.window, BASE, 0.0);
+        fill(&mut frame, layout.window, self.palette.base, 0.0);
         self.draw_tabs(&mut frame, &layout);
 
         match self.screen {
@@ -1276,14 +1268,14 @@ impl PomodoroApp {
     }
 
     fn draw_tabs(&self, frame: &mut Frame, layout: &Layout) {
-        fill(frame, layout.tabs, CRUST, 0.0);
+        fill(frame, layout.tabs, self.palette.crust, 0.0);
         for (i, screen) in Screen::ALL.iter().enumerate() {
             let rect = layout.tab_rect(i);
             let active = self.screen == *screen;
             if active {
-                fill(frame, rect, SURFACE0, 6.0);
+                fill(frame, rect, self.palette.surface0, 6.0);
             }
-            let color = if active { TEXT_COLOR } else { OVERLAY0 };
+            let color = if active { self.palette.text } else { self.palette.overlay0 };
             centred(
                 frame,
                 rect,
@@ -1308,7 +1300,7 @@ impl PomodoroApp {
             head,
             self.phase.label(),
             18.0,
-            self.phase.color(),
+            self.palette.ink(self.phase.color(&self.palette)),
             true,
         );
         let round = Rect::new(head.x, head.bottom() + 2.0, head.w, 16.0);
@@ -1320,30 +1312,30 @@ impl PomodoroApp {
                 self.current_round, self.settings.rounds_per_set
             ),
             11.0,
-            SUBTEXT0,
+            self.palette.subtext0,
             false,
         );
 
         // The ring: an outer disc with the background punched back out of it.
         if layout.ring.w > 8.0 {
             let ring_w = (layout.ring.w * 0.08).clamp(4.0, 10.0);
-            fill(frame, layout.ring, SURFACE0, layout.ring.w / 2.0);
+            fill(frame, layout.ring, self.palette.surface0, layout.ring.w / 2.0);
             let inner = Rect::new(
                 layout.ring.x + ring_w,
                 layout.ring.y + ring_w,
                 (layout.ring.w - ring_w * 2.0).max(0.0),
                 (layout.ring.h - ring_w * 2.0).max(0.0),
             );
-            fill(frame, inner, BASE, inner.w / 2.0);
+            fill(frame, inner, self.palette.base, inner.w / 2.0);
 
             let time = Self::format_time(self.remaining_secs);
             let time_box = Rect::new(inner.x, inner.y + inner.h * 0.28, inner.w, layout.time_font);
-            centred(frame, time_box, &time, layout.time_font, TEXT_COLOR, true);
+            centred(frame, time_box, &time, layout.time_font, self.palette.text, true);
 
             let (state_label, state_color) = match self.state {
-                TimerState::Idle => ("Ready", OVERLAY0),
-                TimerState::Running => ("Running", GREEN),
-                TimerState::Paused => ("Paused", YELLOW),
+                TimerState::Idle => ("Ready", self.palette.overlay0),
+                TimerState::Running => ("Running", self.palette.green),
+                TimerState::Paused => ("Paused", self.palette.yellow),
             };
             let state_box = Rect::new(inner.x, time_box.bottom() + 4.0, inner.w, 14.0);
             if state_box.bottom() < inner.bottom() {
@@ -1352,18 +1344,18 @@ impl PomodoroApp {
         }
 
         // Progress bar.
-        fill(frame, layout.bar, SURFACE0, 3.0);
+        fill(frame, layout.bar, self.palette.surface0, 3.0);
         let filled = Rect::new(
             layout.bar.x,
             layout.bar.y,
             layout.bar.w * self.progress_fraction(),
             layout.bar.h,
         );
-        fill(frame, filled, self.phase.color(), 3.0);
+        fill(frame, filled, self.phase.color(&self.palette), 3.0);
 
         // Task line, or the input box while a label is being typed.
         if self.task_input_active {
-            fill(frame, layout.task, SURFACE1, 5.0);
+            fill(frame, layout.task, self.palette.surface1, 5.0);
             let text = format!("Task: {}_", self.current_task);
             label(
                 frame,
@@ -1371,7 +1363,7 @@ impl PomodoroApp {
                 layout.task.y + 2.0,
                 text,
                 (layout.task.h * 0.7).clamp(9.0, 12.0),
-                TEXT_COLOR,
+                self.palette.text,
                 layout.task.w - 12.0,
             );
         } else if self.current_task.is_empty() {
@@ -1380,7 +1372,7 @@ impl PomodoroApp {
                 layout.task,
                 &format!("Sound: {}", self.ambient_sound.label()),
                 (layout.task.h * 0.7).clamp(9.0, 12.0),
-                OVERLAY0,
+                self.palette.overlay0,
                 false,
             );
         } else {
@@ -1389,7 +1381,7 @@ impl PomodoroApp {
                 layout.task,
                 &format!("Task: {}", self.current_task),
                 (layout.task.h * 0.7).clamp(9.0, 12.0),
-                LAVENDER,
+                self.palette.lavender,
                 false,
             );
         }
@@ -1427,13 +1419,13 @@ impl PomodoroApp {
             let w = width * scale;
             let rect = Rect::new(x, layout.buttons.y, w, layout.buttons.h);
             let active = matches!(target, Target::StartPause) && self.state == TimerState::Running;
-            fill(frame, rect, if active { SURFACE1 } else { SURFACE0 }, 6.0);
+            fill(frame, rect, if active { self.palette.surface1 } else { self.palette.surface0 }, 6.0);
             centred(
                 frame,
                 rect,
                 text,
                 (rect.h * 0.38).clamp(8.0, 13.0),
-                TEXT_COLOR,
+                self.palette.text,
                 false,
             );
             frame.hit(target, rect);
@@ -1450,7 +1442,7 @@ impl PomodoroApp {
             layout.content.y + 8.0,
             "Statistics".into(),
             16.0,
-            BLUE,
+            self.palette.blue,
             w,
         );
 
@@ -1463,24 +1455,24 @@ impl PomodoroApp {
             (
                 "Today",
                 format!("{today} / {goal}"),
-                if today >= goal { GREEN } else { PEACH },
+                if today >= goal { self.palette.green } else { self.palette.peach },
             ),
-            ("Streak", format!("{} days", self.streak_days), MAUVE),
-            ("Total Pomodoros", format!("{}", self.total_pomodoros), TEAL),
+            ("Streak", format!("{} days", self.streak_days), self.palette.mauve),
+            ("Total Pomodoros", format!("{}", self.total_pomodoros), self.palette.teal),
             (
                 "Total Focus",
                 Self::format_time_long(self.total_focus_minutes.saturating_mul(60)),
-                BLUE,
+                self.palette.blue,
             ),
             (
                 "Focus Today",
                 Self::format_time_long(today_focus.saturating_mul(60)),
-                YELLOW,
+                self.palette.yellow,
             ),
             (
                 "Breaks Today",
                 Self::format_time_long(today_break.saturating_mul(60)),
-                GREEN,
+                self.palette.green,
             ),
         ];
 
@@ -1500,14 +1492,14 @@ impl PomodoroApp {
             if rect.bottom() > layout.content.bottom() {
                 break;
             }
-            fill(frame, rect, SURFACE0, 8.0);
+            fill(frame, rect, self.palette.surface0, 8.0);
             label(
                 frame,
                 rect.x + 10.0,
                 rect.y + 6.0,
                 (*name).to_string(),
                 10.0,
-                SUBTEXT0,
+                self.palette.subtext0,
                 rect.w - 20.0,
             );
             bold(
@@ -1532,7 +1524,7 @@ impl PomodoroApp {
             layout.content.y + 8.0,
             format!("Focus Log ({} entries)", self.log_entries.len()),
             16.0,
-            BLUE,
+            self.palette.blue,
             w,
         );
 
@@ -1543,7 +1535,7 @@ impl PomodoroApp {
                 layout.content.y + 40.0,
                 "No log entries yet".into(),
                 11.0,
-                OVERLAY0,
+                self.palette.overlay0,
                 w,
             );
             return;
@@ -1552,7 +1544,7 @@ impl PomodoroApp {
         let head_y = layout.content.y + 34.0;
         for (i, name) in ["Started", "Phase", "Task", "Result"].iter().enumerate() {
             let cx = cols.get(i).copied().unwrap_or(x);
-            bold(frame, cx, head_y, (*name).to_string(), 10.0, SUBTEXT0, w);
+            bold(frame, cx, head_y, (*name).to_string(), 10.0, self.palette.subtext0, w);
         }
 
         // Newest first, which is what a log is read as.
@@ -1574,9 +1566,9 @@ impl PomodoroApp {
         {
             let ey = body.y + i as f32 * LOG_ROW_H;
             let color = if entry.completed {
-                TEXT_COLOR
+                self.palette.text
             } else {
-                OVERLAY0
+                self.palette.overlay0
             };
             let task = if entry.task_label.is_empty() {
                 "-"
@@ -1611,7 +1603,7 @@ impl PomodoroApp {
             layout.content.y + 8.0,
             "Settings".into(),
             16.0,
-            BLUE,
+            self.palette.blue,
             w,
         );
         label(
@@ -1620,7 +1612,7 @@ impl PomodoroApp {
             layout.content.y + 30.0,
             "Click ‹ › or use Left/Right to adjust".into(),
             10.0,
-            OVERLAY0,
+            self.palette.overlay0,
             w,
         );
 
@@ -1631,7 +1623,7 @@ impl PomodoroApp {
             }
             let selected = i == self.settings_cursor;
             if selected {
-                fill(frame, rect, SURFACE0, 6.0);
+                fill(frame, rect, self.palette.surface0, 6.0);
             }
             // The row's own box goes down first so the steppers drawn over it
             // win the click: `hit_test` walks backwards.
@@ -1644,7 +1636,7 @@ impl PomodoroApp {
                 rect.y + (rect.h - font) / 2.0,
                 name.to_string(),
                 font,
-                if selected { TEXT_COLOR } else { SUBTEXT1 },
+                if selected { self.palette.text } else { self.palette.subtext1 },
                 rect.w * 0.45,
             );
 
@@ -1659,22 +1651,22 @@ impl PomodoroApp {
                 value_box,
                 &value,
                 font,
-                if selected { BLUE } else { SUBTEXT0 },
+                if selected { self.palette.blue } else { self.palette.subtext0 },
                 selected,
             );
             for (glyph, box_rect, target) in [
                 ("‹", less, Target::SettingLess(i)),
                 ("›", more, Target::SettingMore(i)),
             ] {
-                fill(frame, box_rect, SURFACE1, 4.0);
-                centred(frame, box_rect, glyph, font, TEXT_COLOR, true);
+                fill(frame, box_rect, self.palette.surface1, 4.0);
+                centred(frame, box_rect, glyph, font, self.palette.text, true);
                 frame.hit(target, box_rect);
             }
         }
     }
 
     fn draw_status_bar(&self, frame: &mut Frame, layout: &Layout) {
-        fill(frame, layout.status, CRUST, 0.0);
+        fill(frame, layout.status, self.palette.crust, 0.0);
         let font = (layout.status.h * 0.4).clamp(8.0, 11.0);
         label(
             frame,
@@ -1682,7 +1674,7 @@ impl PomodoroApp {
             layout.status.y + (layout.status.h - font) / 2.0,
             self.status_message.clone(),
             font,
-            SUBTEXT1,
+            self.palette.subtext1,
             layout.status.w * 0.6,
         );
 
@@ -1698,7 +1690,7 @@ impl PomodoroApp {
             layout.status.y + (layout.status.h - font) / 2.0,
             right,
             font,
-            self.phase.color(),
+            self.palette.ink(self.phase.color(&self.palette)),
             layout.status.w * 0.4,
         );
     }
@@ -1716,14 +1708,14 @@ impl PomodoroApp {
             color: Color::rgba(0, 0, 0, 80),
             corner_radii: CornerRadii::all(10.0),
         });
-        fill(frame, rect, SURFACE1, 10.0);
+        fill(frame, rect, self.palette.surface1, 10.0);
         bold(
             frame,
             rect.x + 14.0,
             rect.y + 10.0,
             text.to_string(),
             11.0,
-            TEXT_COLOR,
+            self.palette.text,
             rect.w - 28.0,
         );
         label(
@@ -1732,7 +1724,7 @@ impl PomodoroApp {
             rect.bottom() - 20.0,
             "Click here or press [N] to dismiss".into(),
             9.0,
-            OVERLAY0,
+            self.palette.overlay0,
             rect.w - 28.0,
         );
         frame.hit(Target::Notification, rect);
@@ -1742,6 +1734,11 @@ impl PomodoroApp {
 // ── Window ─────────────────────────────────────────────────────────────────
 
 impl App for PomodoroApp {
+    /// Adopt the user's colours (§822).
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         "Pomodoro".into()
     }
@@ -1857,6 +1854,28 @@ fn main() -> ExitCode {
 )]
 mod tests {
     use super::*;
+
+    /// Every colour the timer draws comes from the user's palette.
+    #[test]
+    fn every_colour_the_pomodoro_draws_comes_from_its_palette() {
+        for light in [false, true] {
+            let mut app = PomodoroApp::new(800.0, 600.0, 0);
+            app.palette = Palette::for_mode(light);
+            let tree = App::render(&mut app, 800.0, 600.0);
+            assert!(
+                tree.commands.len() > 20,
+                "the sweep examined {} commands, which is not a render",
+                tree.commands.len()
+            );
+            appearance::palette_check::assert_drawn_from(
+                &app.palette,
+                &tree.commands,
+                &[],
+                &format!("pomodoro (light={light})"),
+            );
+        }
+    }
+
     use guitk::event::Modifiers;
     use guitk::probe;
 
@@ -1929,9 +1948,9 @@ mod tests {
 
     #[test]
     fn phase_colors_are_distinct() {
-        assert_ne!(Phase::Work.color(), Phase::ShortBreak.color());
-        assert_ne!(Phase::Work.color(), Phase::LongBreak.color());
-        assert_ne!(Phase::ShortBreak.color(), Phase::LongBreak.color());
+        assert_ne!(Phase::Work.color(&Palette::for_mode(false)), Phase::ShortBreak.color(&Palette::for_mode(false)));
+        assert_ne!(Phase::Work.color(&Palette::for_mode(false)), Phase::LongBreak.color(&Palette::for_mode(false)));
+        assert_ne!(Phase::ShortBreak.color(&Palette::for_mode(false)), Phase::LongBreak.color(&Palette::for_mode(false)));
     }
 
     #[test]

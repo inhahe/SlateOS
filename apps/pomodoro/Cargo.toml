@@ -4,12 +4,18 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# The user's colours, per design-decisions 822.
+appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
 
 # The window and its heartbeat. Without it `main` built a PomodoroApp, dropped
 # it and exited — four screens, eight settings and a focus log, none of them
 # reachable, and no clock to count a pomodoro down with.
 oswindow = { path = "../../gui/window" }
+
+[dev-dependencies]
+# `appearance::palette_check`.
+appearance = { path = "../../gui/appearance", features = ["testing"] }
 
 [lints]
 workspace = true

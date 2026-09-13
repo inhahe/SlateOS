@@ -2429,7 +2429,7 @@ impl ScreenRecorderApp {
             y: badge_y,
             text: self.recording_state.label().to_string(),
             font_size: 13.0,
-            color: self.recording_state.color(&self.palette),
+            color: self.palette.ink(self.recording_state.color(&self.palette)),
             font_weight: FontWeightHint::Bold,
             max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0 - 16.0),
             overflow: TextOverflow::Ellipsis,

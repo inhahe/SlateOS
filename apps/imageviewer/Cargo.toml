@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS Image Viewer — photo and image viewing with zoom and slideshow"
 [dependencies]
+# The user's colours, per design-decisions 822.
+appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
 # Every field this viewer reads out of a BMP, PNG, MP4, Matroska or AVI file
 # comes from a byte offset that the file itself supplied. `byteread` is how
@@ -29,6 +31,8 @@ oswindow = { path = "../../gui/window" }
 # named from the process id and a counter, so two tests in one process can
 # never draw the same name the way a clock-tagged name could.
 [dev-dependencies]
+# `appearance::palette_check`.
+appearance = { path = "../../gui/appearance", features = ["testing"] }
 scratchdir = { path = "../../userspace/scratchdir" }
 
 [lints]

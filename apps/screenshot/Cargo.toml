@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS Screenshot — screen capture utility with region selection"
 [dependencies]
+# The user's colours, per design-decisions 822.
+appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
 
 # The app-facing compositor client. An app names `oswindow` and never
@@ -16,6 +18,8 @@ safeio = { path = "../safeio" }
 # `std::fs::write`. Cargo unifies this with the dependency above when building
 # tests, so the counters cost nothing in the shipped binary.
 [dev-dependencies]
+# `appearance::palette_check`.
+appearance = { path = "../../gui/appearance", features = ["testing"] }
 safeio = { path = "../safeio", features = ["audit"] }
 scratchdir = { path = "../../userspace/scratchdir" }
 

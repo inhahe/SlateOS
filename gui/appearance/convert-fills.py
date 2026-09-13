@@ -12,6 +12,8 @@ import sys
 import pathlib
 import collections
 
+NL = chr(10)
+
 ROLES = ("surface0", "surface1", "surface2", "mantle", "crust")
 
 # `volume` earns its place the hard way: `render_volume_bar` contains none of
@@ -81,6 +83,19 @@ SKIP = re.compile(
     r"bar_w|bar_x|bar_max|percent|pct_|histogram|chart|graph|sparkline",
     re.I,
 )
+
+# A stand-in for content that has not loaded -- an image viewer's thumbnail
+# slot, a page preview before the page is rendered. Not a surface of the
+# interface at all: it is where the content will be, and it stays a fill in
+# both themes for the same reason a control's groove does. Outlined, an empty
+# thumbnail slot is indistinguishable from a loaded one that happens to be
+# white.
+#
+# Lexical rather than geometric, unlike the five guards below, because the
+# shape of a placeholder is the shape of the thing it stands in for and so
+# says nothing. The word is always there -- the sites say "placeholder" in as
+# many words, because the author was explaining the same thing to the reader.
+PLACEHOLDER = re.compile(r"placeholder|stand.?in|would use actual", re.I)
 
 # A full-width structural band. Answered by C-Q14 on 2026-09-12: these keep
 # their fill by default and a StripStyle setting offers a hairline instead,
@@ -313,6 +328,11 @@ def convert(path: pathlib.Path, apply: bool):
                     i = j + 1
                     continue
 
+        if PLACEHOLDER.search(context):
+            skipped.append(f"{path.name}:{i+1}  a placeholder for absent content")
+            out.extend(lines[i : j + 1])
+            i = j + 1
+            continue
         if SKIP.search(context):
             skipped.append(f"{path.name}:{i+1}  needs a design decision, left as a fill")
             out.extend(lines[i : j + 1])
@@ -345,6 +365,51 @@ def convert(path: pathlib.Path, apply: bool):
     return total
 
 
+def ensure_imports(path):
+    """Bring `Surface` -- and `Edge` -- into scope in a file just rewritten.
+
+    `Edge` is the half that was forgotten the first time. The tool emits
+    `Surface::Strip(Edge::Bottom)`, so a file that gained its first strip needs
+    *two* names, and importing one of them compiles everywhere except the files
+    the strip guard actually fired on.
+
+    Deliberately no word-boundary escape anywhere below. Writing one through a
+    shell heredoc produced a literal backspace byte in this file -- twice --
+    and a regex containing one matches nothing while looking correct. The
+    membership test parses the import instead, which needs no escape at all.
+    """
+    text = path.read_text(encoding="utf-8")
+    want = [n for n in ("Surface", "Edge") if n + "::" in text]
+    if not want:
+        return
+    uses = list(re.finditer(r"^use appearance::(.+);$", text, re.M))
+    have = set()
+    for m in uses:
+        spec = m.group(1).strip()
+        if spec.startswith("{"):
+            have |= {x.strip() for x in spec.strip("{}").split(",") if x.strip()}
+        else:
+            have.add(spec)
+    missing = [n for n in want if n not in have]
+    if not missing:
+        return
+    if not uses:
+        print(f"    !! {path.name}: no appearance import to extend; add one by hand")
+        return
+    # One import line, not three. The first of the existing ones becomes the
+    # merged list and the rest are dropped, so repeated runs stay idempotent.
+    merged = "use appearance::{%s};" % ", ".join(sorted(have | set(missing)))
+    out = text[: uses[0].start()] + merged + text[uses[0].end() :]
+    for m in reversed(uses[1:]):
+        shift = len(merged) - (uses[0].end() - uses[0].start())
+        a, b = m.start() + shift, m.end() + shift
+        nl = 1 if b < len(out) and out[b] == NL else 0
+        out = out[:a] + out[b + nl :]
+    path.write_text(out, encoding="utf-8", newline=NL)
+
+
 if __name__ == "__main__":
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
-    convert(pathlib.Path(args[0]), "--apply" in sys.argv)
+    target = pathlib.Path(args[0])
+    if convert(target, "--apply" in sys.argv) and "--apply" in sys.argv:
+        ensure_imports(target)

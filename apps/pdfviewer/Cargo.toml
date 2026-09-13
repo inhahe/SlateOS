@@ -3,6 +3,8 @@ name = "pdfviewer"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
+# The user's colours, per design-decisions 822.
+appearance = { path = "../../gui/appearance" }
 # The print job format, not a printing library: design-decisions.md 540 says
 # the application depends on a message format. The page-range parser that
 # lives there was lifted out of this file.
@@ -11,6 +13,10 @@ guitk = { path = "../../gui/toolkit" }
 # The window itself: `app::launch` is what turns the renderer below into a
 # program the desktop can open, rather than a struct with a `main` that returns.
 oswindow = { path = "../../gui/window" }
+
+[dev-dependencies]
+# `appearance::palette_check`.
+appearance = { path = "../../gui/appearance", features = ["testing"] }
 
 [lints]
 workspace = true

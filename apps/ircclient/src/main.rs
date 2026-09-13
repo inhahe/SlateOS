@@ -89,8 +89,6 @@ impl SidebarRow {
 // Catppuccin Mocha palette
 // ============================================================================
 
-const PINK: Color = Color::from_hex(0xF5C2E7);
-
 // ============================================================================
 // IRC protocol message parsing
 // ============================================================================
@@ -750,6 +748,12 @@ impl ChatMessage {
         for byte in nick.bytes() {
             hash = hash.wrapping_mul(33).wrapping_add(byte as u32);
         }
+        // `red` where a hardcoded Mocha pink used to be. The shared palette
+        // has no pink rung, and the near alternatives -- sapphire, sky --
+        // would have given this list four blue-greens that nobody could tell
+        // apart, which defeats the only purpose it has. Red is a standard
+        // nick colour and this app draws its errors in a banner, not in the
+        // nick column, so it carries no second meaning here.
         let colors = [
             pal.blue,
             pal.green,
@@ -757,12 +761,15 @@ impl ChatMessage {
             pal.mauve,
             pal.teal,
             pal.sky,
-            PINK,
+            pal.red,
             pal.lavender,
             pal.yellow,
         ];
         let idx = (hash as usize).checked_rem(colors.len()).unwrap_or(0);
-        colors.get(idx).copied().unwrap_or(pal.text)
+        // Inked once around the result rather than nine times inside the
+        // list: a nick is always text, `ink` leaves an already-legible colour
+        // alone, and `pal.text` is floored in the palette. 837.
+        pal.ink(colors.get(idx).copied().unwrap_or(pal.text))
     }
 }
 

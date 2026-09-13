@@ -29,6 +29,7 @@
 
 #![allow(dead_code)]
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
@@ -1167,21 +1168,48 @@ impl ColumnProvider for ArchiveColumns {
 // Rendering helpers
 // ============================================================================
 
-/// Colours used by column rendering.
-struct ColumnColors;
+/// Colours used by column rendering, resolved from the user's palette.
+///
+/// These were eleven hardcoded constants — and a *light* set: `rgba(224, 224,
+/// 224, 255)` headers on a white chooser, black cell text. So on a dark
+/// desktop this table was a white rectangle. `design-decisions.md` §822 hands
+/// every application the user's colours; this is one of the crates that never
+/// took them.
+///
+/// Two of the eleven had to be moved off their nearest role to keep a
+/// distinction the table draws on purpose: the separator is `surface1` rather
+/// than `surface0` so it stays a visible rule, and the chooser's hover stays
+/// `surface0` so pointing at a row does not look like the rule.
+struct ColumnColors {
+    header_bg: Color,
+    header_text: Color,
+    sort_arrow: Color,
+    cell_text: Color,
+    cell_dim: Color,
+    separator: Color,
+    chooser_bg: Color,
+    chooser_border: Color,
+    chooser_hover: Color,
+    check_on: Color,
+    check_off: Color,
+}
 
 impl ColumnColors {
-    const HEADER_BG: Color = Color::rgba(224, 224, 224, 255);
-    const HEADER_TEXT: Color = Color::rgba(51, 51, 51, 255);
-    const SORT_ARROW: Color = Color::rgba(100, 100, 100, 255);
-    const CELL_TEXT: Color = Color::rgba(0, 0, 0, 255);
-    const CELL_DIM: Color = Color::rgba(128, 128, 128, 255);
-    const SEPARATOR: Color = Color::rgba(200, 200, 200, 255);
-    const CHOOSER_BG: Color = Color::rgba(255, 255, 255, 255);
-    const CHOOSER_BORDER: Color = Color::rgba(180, 180, 180, 255);
-    const CHOOSER_HOVER: Color = Color::rgba(230, 240, 255, 255);
-    const CHECK_ON: Color = Color::rgba(0, 120, 212, 255);
-    const CHECK_OFF: Color = Color::rgba(180, 180, 180, 255);
+    fn new(p: &Palette) -> Self {
+        Self {
+            header_bg: p.mantle,
+            header_text: p.text,
+            sort_arrow: p.subtext0,
+            cell_text: p.text,
+            cell_dim: p.subtext0,
+            separator: p.surface1,
+            chooser_bg: p.base,
+            chooser_border: p.surface1,
+            chooser_hover: p.surface0,
+            check_on: p.accent,
+            check_off: p.overlay0,
+        }
+    }
 }
 
 const HEADER_HEIGHT: f32 = 22.0;
@@ -1196,7 +1224,12 @@ const CHOOSER_PAD: f32 = 4.0;
 ///
 /// Returns render commands for a header bar at `y=0` across `total_width`,
 /// with labels, sort arrows, and column separators.
-pub fn render_column_header(manager: &ColumnManager, total_width: f32) -> Vec<RenderCommand> {
+pub fn render_column_header(
+    manager: &ColumnManager,
+    total_width: f32,
+    p: &Palette,
+) -> Vec<RenderCommand> {
+    let c = ColumnColors::new(p);
     let mut cmds = Vec::new();
 
     // Background bar.
@@ -1205,7 +1238,7 @@ pub fn render_column_header(manager: &ColumnManager, total_width: f32) -> Vec<Re
         y: 0.0,
         width: total_width,
         height: HEADER_HEIGHT,
-        color: ColumnColors::HEADER_BG,
+        color: c.header_bg,
         corner_radii: CornerRadii::ZERO,
     });
 
@@ -1243,7 +1276,7 @@ pub fn render_column_header(manager: &ColumnManager, total_width: f32) -> Vec<Re
             x: text_x,
             y: 4.0,
             text: def.label.clone(),
-            color: ColumnColors::HEADER_TEXT,
+            color: c.header_text,
             font_size: HEADER_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(w - 8.0),
@@ -1262,7 +1295,7 @@ pub fn render_column_header(manager: &ColumnManager, total_width: f32) -> Vec<Re
                     x: x + w - 14.0,
                     y: 5.0,
                     text: arrow.to_string(),
-                    color: ColumnColors::SORT_ARROW,
+                    color: c.sort_arrow,
                     font_size: 9.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
@@ -1278,7 +1311,7 @@ pub fn render_column_header(manager: &ColumnManager, total_width: f32) -> Vec<Re
                 y1: 2.0,
                 x2: x + w,
                 y2: HEADER_HEIGHT - 2.0,
-                color: ColumnColors::SEPARATOR,
+                color: c.separator,
                 width: 1.0,
             });
         }
@@ -1304,8 +1337,9 @@ pub fn render_column_values(
     path: &str,
     y: f32,
     total_width: f32,
+    p: &Palette,
 ) -> Vec<RenderCommand> {
-    render_column_values_from(manager, &manager.row_values(path), y, total_width, None)
+    render_column_values_from(manager, &manager.row_values(path), y, total_width, None, p)
 }
 
 /// Render one row from values the caller already has.
@@ -1330,7 +1364,9 @@ pub fn render_column_values_from(
     y: f32,
     total_width: f32,
     name_color: Option<Color>,
+    p: &Palette,
 ) -> Vec<RenderCommand> {
+    let c = ColumnColors::new(p);
     let mut cmds = Vec::new();
     let active = manager.active_columns();
     let widths = resolve_widths(manager, total_width);
@@ -1353,11 +1389,11 @@ pub fn render_column_values_from(
             let color = match (col_id, name_color) {
                 (ColumnId::NAME, Some(c)) => c,
                 _ => match value {
-                    ColumnValue::Empty => ColumnColors::CELL_DIM,
+                    ColumnValue::Empty => c.cell_dim,
                     ColumnValue::Size(_) | ColumnValue::Number(_) | ColumnValue::Percentage(_) => {
-                        ColumnColors::CELL_DIM
+                        c.cell_dim
                     }
-                    _ => ColumnColors::CELL_TEXT,
+                    _ => c.cell_text,
                 },
             };
 
@@ -1399,7 +1435,13 @@ pub fn render_column_values_from(
 ///
 /// Shows all known columns with checkboxes indicating visibility.
 /// `x`, `y` is the top-left corner of the dropdown.
-pub fn render_column_chooser(manager: &ColumnManager, x: f32, y: f32) -> Vec<RenderCommand> {
+pub fn render_column_chooser(
+    manager: &ColumnManager,
+    x: f32,
+    y: f32,
+    p: &Palette,
+) -> Vec<RenderCommand> {
+    let c = ColumnColors::new(p);
     let mut cmds = Vec::new();
 
     let all_defs = {
@@ -1418,7 +1460,7 @@ pub fn render_column_chooser(manager: &ColumnManager, x: f32, y: f32) -> Vec<Ren
         y,
         width: menu_w,
         height: menu_h,
-        color: ColumnColors::CHOOSER_BG,
+        color: c.chooser_bg,
         corner_radii: CornerRadii::all(4.0),
     });
     cmds.push(RenderCommand::StrokeRect {
@@ -1426,7 +1468,7 @@ pub fn render_column_chooser(manager: &ColumnManager, x: f32, y: f32) -> Vec<Ren
         y,
         width: menu_w,
         height: menu_h,
-        color: ColumnColors::CHOOSER_BORDER,
+        color: c.chooser_border,
         line_width: 1.0,
         corner_radii: CornerRadii::all(4.0),
     });
@@ -1458,11 +1500,7 @@ pub fn render_column_chooser(manager: &ColumnManager, x: f32, y: f32) -> Vec<Ren
             y: cb_y,
             width: cb_size,
             height: cb_size,
-            color: if is_active {
-                ColumnColors::CHECK_ON
-            } else {
-                ColumnColors::CHECK_OFF
-            },
+            color: if is_active { c.check_on } else { c.check_off },
             line_width: 1.0,
             corner_radii: CornerRadii::all(2.0),
         });
@@ -1473,7 +1511,7 @@ pub fn render_column_chooser(manager: &ColumnManager, x: f32, y: f32) -> Vec<Ren
                 y: cb_y + 2.0,
                 width: cb_size - 4.0,
                 height: cb_size - 4.0,
-                color: ColumnColors::CHECK_ON,
+                color: c.check_on,
                 corner_radii: CornerRadii::all(1.0),
             });
         }
@@ -1483,7 +1521,7 @@ pub fn render_column_chooser(manager: &ColumnManager, x: f32, y: f32) -> Vec<Ren
             x: cb_x + cb_size + 8.0,
             y: row_y + 5.0,
             text: def.label.clone(),
-            color: ColumnColors::HEADER_TEXT,
+            color: c.header_text,
             font_size: CHOOSER_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(menu_w - 40.0),
@@ -1496,7 +1534,7 @@ pub fn render_column_chooser(manager: &ColumnManager, x: f32, y: f32) -> Vec<Ren
             x: text::right_x(cat_text, x + menu_w - 8.0, 9.0, FontWeightHint::Regular),
             y: row_y + 7.0,
             text: cat_text.to_string(),
-            color: ColumnColors::CELL_DIM,
+            color: c.cell_dim,
             font_size: 9.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1694,7 +1732,7 @@ mod tests {
         let mgr = ColumnManager::with_defaults();
         let total = 800.0;
         let widths = resolve_widths(&mgr, total);
-        let cmds = render_column_header(&mgr, total);
+        let cmds = render_column_header(&mgr, total, &Palette::for_mode(false));
 
         let mut x = 0.0_f32;
         let mut checked = 0;
@@ -2426,14 +2464,20 @@ mod tests {
     #[test]
     fn test_render_column_header_nonempty() {
         let mgr = ColumnManager::with_defaults();
-        let cmds = render_column_header(&mgr, 800.0);
+        let cmds = render_column_header(&mgr, 800.0, &Palette::for_mode(false));
         assert!(!cmds.is_empty(), "header should produce render commands");
     }
 
     #[test]
     fn test_render_column_values_nonempty() {
         let mgr = ColumnManager::with_defaults();
-        let cmds = render_column_values(&mgr, "/test/file.txt", 0.0, 800.0);
+        let cmds = render_column_values(
+            &mgr,
+            "/test/file.txt",
+            0.0,
+            800.0,
+            &Palette::for_mode(false),
+        );
         assert!(!cmds.is_empty(), "row should produce render commands");
     }
 
@@ -2452,8 +2496,15 @@ mod tests {
     fn the_two_row_renderers_agree() {
         let mgr = ColumnManager::with_defaults();
         let path = "/test/file.txt";
-        let via_path = render_column_values(&mgr, path, 0.0, 800.0);
-        let via_values = render_column_values_from(&mgr, &mgr.row_values(path), 0.0, 800.0, None);
+        let via_path = render_column_values(&mgr, path, 0.0, 800.0, &Palette::for_mode(false));
+        let via_values = render_column_values_from(
+            &mgr,
+            &mgr.row_values(path),
+            0.0,
+            800.0,
+            None,
+            &Palette::for_mode(false),
+        );
         assert!(
             same_commands(&via_path, &via_values),
             "the path wrapper must draw exactly what it delegates to"
@@ -2496,6 +2547,7 @@ mod tests {
             0.0,
             800.0,
             None,
+            &Palette::for_mode(false),
         );
         let short = render_column_values_from(
             &mgr,
@@ -2503,6 +2555,7 @@ mod tests {
             0.0,
             800.0,
             None,
+            &Palette::for_mode(false),
         );
         assert!(
             same_commands(&short, &full),
@@ -2522,7 +2575,14 @@ mod tests {
         ];
         let tint = Color::rgba(0, 102, 204, 255);
 
-        let cmds = render_column_values_from(&mgr, &values, 0.0, 800.0, Some(tint));
+        let cmds = render_column_values_from(
+            &mgr,
+            &values,
+            0.0,
+            800.0,
+            Some(tint),
+            &Palette::for_mode(false),
+        );
         let colors: Vec<Color> = cmds
             .iter()
             .filter_map(|c| match c {
@@ -2531,7 +2591,10 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(colors, vec![tint, ColumnColors::CELL_TEXT]);
+        assert_eq!(
+            colors,
+            vec![tint, ColumnColors::new(&Palette::for_mode(false)).cell_text]
+        );
     }
 
     /// `StandardColumns::value` used to return `Empty` for Size and the two
@@ -2629,7 +2692,7 @@ mod tests {
     #[test]
     fn test_render_column_chooser_nonempty() {
         let mgr = ColumnManager::with_defaults();
-        let cmds = render_column_chooser(&mgr, 10.0, 30.0);
+        let cmds = render_column_chooser(&mgr, 10.0, 30.0, &Palette::for_mode(false));
         assert!(!cmds.is_empty(), "chooser should produce render commands");
     }
 

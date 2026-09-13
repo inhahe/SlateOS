@@ -3717,7 +3717,7 @@ impl UndeleteApp {
             x: inner_x,
             y: cy,
             text: format!("{}% data likely recoverable", file.recovery_percent),
-            color: file.confidence.color(&self.palette),
+            color: self.palette.ink(file.confidence.color(&self.palette)),
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(inner_w),

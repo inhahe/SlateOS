@@ -131237,6 +131237,77 @@ crate's own module docs where the next person to need one will read it.
 
 ---
 
+## TD-C-FIVE-APP-MODULES-ARE-COMPILED-TESTED-AND-UNREACHABLE
+
+**Date:** 2026-09-13. **Lane:** C.
+**Where:** `apps/procexplorer/src/features.rs` — 85 KB, 55 public items, 17
+public types, **37 passing tests**.
+
+**It is not one module; it is five.** Sweeping every app crate for a `mod x;`
+whose public types are never named in any other file of the crate:
+
+| module | types | size | tests | what it is |
+|---|---|---|---|---|
+| `procexplorer/features.rs` | 17 | 83 KB | 37 | window picker, deadlock analyser, affinity, priority, memory map, env viewer |
+| `imageviewer/video.rs` | 13 | 77 KB | 63 | video playback |
+| `sysinfo/hwquery.rs` | 5 | 73 KB | 35 | hardware query |
+| `installer/grub.rs` | 9 | 48 KB | 44 | GRUB configuration — in the *installer* |
+| `settings/remote.rs` | 10 | 46 KB | 35 | remote settings |
+
+**327 KB and 214 passing tests, reachable by nobody.** Verified three ways for
+each: the module is declared with `mod x;`, none of its public types is named
+in any sibling file, and there is no glob import that could be hiding the use.
+Corroborating evidence arrived independently — clippy reports dead-code
+warnings inside `sysinfo/hwquery.rs`, which is what an unreachable module looks
+like from the compiler's side.
+
+`installer/grub.rs` is the one to look at first if only one is looked at: an
+installer that cannot configure a bootloader is a different severity of problem
+from a process explorer missing a window picker.
+
+**A note on how easily this hides.** Earlier the same night I converted a
+hairline separator in `settings/remote.rs` — carefully, with a git-archaeology
+step to recover its original palette role. That work was real and it was spent
+on a file no user can reach. Nothing in the tree told me; the tests passed
+before and after.
+
+**In short:** the process explorer has a second module of features — a window
+picker that identifies a process by clicking its window, a blocking analyser
+that traces what a process is waiting on and detects deadlocks, CPU affinity
+control, priority control, a memory-map viewer and an environment browser. It
+is compiled, it is tested, and **no part of the application calls any of it**.
+A user cannot reach a single one of those features.
+
+**How sure.** `mod features;` is declared in `main.rs` and nothing else
+references it. Of the module's seventeen public types — `WindowPicker`,
+`BlockingAnalyzer`, `AffinityMask`, `PrioritySelector`, `EnvViewer`,
+`MemoryMap` and the rest — **not one is named anywhere in `main.rs`**. The only
+names in common are `new`, `render`, `all`, `color`, `label`, `select`, `size`
+and `hover`, which are methods on unrelated types.
+
+**Why nothing noticed.** It has 37 tests and they all pass, because they test
+the module directly. This is `known-issues.md` lesson 47 at module scale, and
+the irony is sharp: `procexplorer`'s own `tick_interval` doc cites that lesson
+by name — *"a system monitor that monitors nothing, with every one of its
+tests still passing"* — while this module sat beside it unreachable.
+
+**How it was found.** Not by reading, and not by the tests. A colour-literal
+count came back at 27 for the crate when `main.rs` had 1; the other 26 were in
+a file I had never opened, and opening it to convert its colours is what
+exposed that nothing calls it.
+
+**What the fix is.** A decision first, then work: either wire the features into
+the UI (they appear to be complete — the analyser has a deadlock detector and
+the affinity control has a mask editor), or delete the module. Both are
+defensible; shipping 85 KB of tested, unreachable features is not. This is
+worth the operator's input, because "delete a working deadlock detector" and
+"add six features to the process explorer" are very different amounts of work
+and only one of them is a bug fix.
+
+**Its 26 colour literals are deliberately left alone** until that is settled.
+Converting the colours of a module nobody can see would be the most literal
+possible instance of the thing this file exists to prevent.
+
 ## TD-C-SIXTY-EIGHT-APPS-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE
 
 **Date:** 2026-09-12. **Lane:** C.
@@ -131348,7 +131419,64 @@ have been through it.** For each crate:
    `push_surface`, and *text* in a categorical hue becomes `p.ink(hue)`
    (§837).
 5. Adopt `palette_check::assert_drawn_from` in the crate's render test, with
-   the genuinely non-theme colours declared in `derived`.
+   the genuinely non-theme colours declared in `derived`. **This needs a
+   *dev*-dependency of its own** — `palette_check` is behind `appearance`'s
+   `testing` feature, because `cfg(test)` is set only when `appearance` itself
+   is under test:
+
+   ```toml
+   [dev-dependencies]
+   appearance = { path = "../../gui/appearance", features = ["testing"] }
+   ```
+
+   Cargo unifies it with the ordinary dependency when building tests.
+
+**A correction to every count in this entry, and to how to take one.** The
+figures here were produced by treating everything before the first
+`#[cfg(test)]` as production code. That is wrong: a `#[cfg(test)] use
+guitk::probe;` at the top of a file cuts the slice at line 42, and
+`apps/pdfviewer` was therefore measured over **0.9%** of itself and reported
+as having no colour literals at all. It has thirty.
+
+Slicing at the first `#[cfg(test)]` *followed by* `mod` instead raises the
+tree-wide count from 1,313 to **1,535** — 17% of the population was invisible.
+Take the correction as the method rather than the number: a "production code
+only" filter needs to name what it is excluding, because one that silently
+excludes 99% of a file reports zero and looks like good news.
+
+(`Color::TRANSPARENT` is counted by that pattern and should not be. It is used
+as a sentinel — `if row_bg != Color::TRANSPARENT` — meaning "no background was
+set", not as a colour anyone chose.)
+
+**Two things a survey of `const` cannot tell you, found while converting:**
+
+* **Some constants are function-local.** A pattern anchored at `^const` misses
+  them entirely. 32 of them across six crates — `explorer` (17), `filediff`
+  (6), `emojipicker` (3), `unitconverter` (3), `launcher` (2), `lockscreen`
+  (1). `explorer` has *no* module-level colour constants at all, so an anchored
+  survey reports it as clean.
+* **Some colour literals are not interface at all.** `explorer`'s `thumbs.rs`
+  has nine file-type colours — green for images, amber for folders, red for
+  PDF — which look exactly like theme candidates. They feed
+  `canvas.fill_rect` into a **pixel buffer** that becomes a thumbnail image,
+  not a `RenderCommand`. They are generating *content*, in the same sense as
+  `apps/paint`'s swatch row, and converting them would theme the pictures
+  rather than the window. The tell is the destination, not the name: follow
+  the colour to whether it reaches the renderer or a raster.
+
+  (`explorer` is also the mirror of `procexplorer`: it hardcodes a **light**
+  theme — `rgb(224, 224, 224)`, white chooser backgrounds — so on a dark
+  desktop it is a white file manager. Both directions of the same defect exist
+  in the tree.)
+
+**Step 5 is not the paperwork; it is where the rest of the work is found.**
+`procexplorer` had 22 `const COLOR_*` values — and *also* 26 inline
+`Color::rgb(..)` literals that were never constants, plus two labels drawn in
+`Color::WHITE` on themed fills. A survey grepping for `const COLOR_` cannot see
+either class, so **the 987 figure above is an undercount**, and the only thing
+that reveals the remainder is adopting the guard and watching it fail. It
+failed twice within seconds of existing, on defects nobody would have found by
+reading.
 
 `procexplorer` shows how mechanical step 4 usually is — its thirteen named
 constants map almost one-to-one:
@@ -131454,6 +131582,52 @@ The guard `every_ink_clears_the_floor_on_every_ground_it_lands_on` does not
 catch them, because it tests the palette's arithmetic rather than which call
 sites use it — which is the same gap in a different place, and worth
 remembering when reading it.
+
+---
+
+**Update 2026-09-13 — the survey is now a program, and the easy half is done.**
+
+`gui/appearance/colour-methods.py` answers the question this entry could only
+pose: it follows each colour from the function that produces it to the command
+that draws it, through all three hops recorded above -- the call is the field,
+a local carries it, an argument carries it -- and solves parameter usage to a
+fixpoint, because a colour is routinely handed down two levels.
+
+| bucket | n | meaning |
+|---|---|---|
+| INK | 3 | every caller draws text, no exempt arm — **all done** |
+| PER-ARM | 5 | ditto, but one arm is `overlay0`/`text` — **all done** |
+| INK IF THE REST CHECK OUT | 3 | text callers plus ones the tool would not guess at — **all done, by hand** |
+| SPLIT | 37 | callers disagree: the same method draws text *and* fills |
+| NO TEXT CALLER | 29 | fills and strokes only; correctly left alone |
+| UNRESOLVED | 18 | the tool declines to classify |
+
+**What is left is the hard half, and it is the SPLIT column.** A method that
+returns the colour of a status *and* the colour of the badge behind it cannot
+be fixed in one place: inking it darkens the badge, and not inking it leaves
+the label unreadable on a pale theme. Each needs either two functions -- one
+for the ink, one for the fill -- or the ink moved to the text call sites. That
+is a per-method design decision about 37 methods, not a sweep.
+
+**Four ways the tool was wrong before it was right**, all now comments in it,
+because each is a shape this lane keeps meeting:
+
+1. Matching only the `color:` line reported 27 functions as never drawn. They
+   were drawn a line or two below, inside a conditional.
+2. Refusing a leading dot in the call pattern hid every *method*, which is most
+   of them; nine functions reported no caller at all, and a function with no
+   callers needs no decision -- the quietest way to be wrong.
+3. Matching by bare name across the tree gave `apps/weather`'s `color` 270 call
+   sites, including `gui/desktop`'s Bluetooth list.
+4. A `color,` shorthand was not recorded as a colour field, so it defaulted to
+   `Text`. `touchpad_status` feeds a 12px status dot *and* its label, both by
+   shorthand: read as two text sites it looked safe to ink, and inking it would
+   have darkened the dot.
+
+And one rule change that is the general form of all four: **an unresolved
+caller does not count as an absent one.** `rate_color` was in the INK bucket
+with eight callers the tool could not follow; two of them fill a stat card.
+Unknowns now block the verdict instead of being dropped from it.
 
 ## TD-C-THIRTEEN-LIGHT-ACCENTS-STILL-FAIL-ON-CARDS -- being fixed 2026-09-12, mechanism landed
 
@@ -139971,3 +140145,81 @@ look: `SessionType` (`Tty`, `X11`, `Wayland`, `Unspecified`),
 called, `CreateSessionParams` never built, and the inhibitor fields
 `who`, `why`, `uid` and `pid` never read. It models sessions in detail
 and never populates the model.
+
+## TD-C-SYSINFO-PARSES-HARDWARE-FIELDS-BY-DEFAULTING-TO-ZERO
+
+**In short:** the System Information app reads hardware facts -- how much
+memory you have, how fast the processor is -- out of files the kernel
+publishes. If one of those files contains something it cannot read, the app
+does not say so: it shows zero. A machine with a garbled memory file and a
+machine with no memory look identical on screen. Three helper functions that
+would report the problem properly were written, are tested, and are called by
+nothing.
+
+**Where it lives:** `apps/sysinfo/src/hwquery.rs`. About thirty sites of the
+form
+
+```rust
+total_mb: kv.get("total_mb").and_then(|v| v.parse().ok()).unwrap_or(0),
+```
+
+and, unused since they were written, `SyscallProvider::parse_u64` /
+`parse_u32` / `parse_f32`, each of which returns
+`HwQueryError::ParseError { detail }` naming the field and the text that
+failed. `cargo clippy -p sysinfo-app` reports them as never used, and that
+warning is deliberately left standing: it is the only thing in the tree
+currently pointing at this.
+
+**Why it is not simply a bug fix.** Swapping the thirty sites over to the
+helpers makes each field fallible, and then `read_cpu_info` has to decide what
+to do with one bad field out of twenty. Failing the whole read means one
+garbled line blanks the entire hardware panel, which is worse than what
+happens today. So the fix is not mechanical.
+
+**What the proper fix looks like.** Keep the struct total, add the report
+beside it: each `read_*` returns its struct plus a `Vec<FieldError>`, built by
+routing every site through the existing helpers and collecting the `Err`s
+rather than discarding them with `.ok()`. A field that failed keeps its
+default *and* is named, so the panel can draw it greyed with the raw text in a
+tooltip instead of printing a confident 0. That satisfies the project rule
+this violates -- never discard a `Result` with `.ok()` without a comment
+saying why the failure is safe to ignore -- without making one bad byte fatal.
+
+**How it was found:** clippy dead-code warnings surfaced while making the
+twelve application palette conversions warning-clean. The helpers looked like
+ordinary dead code; they are the intended implementation of a path that was
+never wired up.
+
+## BUG-C-THE-KEYBOARD-LAYOUT-TEST-FAILS-ABOUT-ONE-WORKSPACE-RUN-IN-TWO -- FIXED 2026-09-13
+
+**In short:** one test in the desktop shell failed now and then, and only when
+the whole project's tests ran at once. It checks that the Super+Space shortcut
+writes the new keyboard layout to the file the compositor reads. The cause was
+its neighbour: a second test fires the same shortcut, the shortcut *writes a
+file*, and that test was not given a scratch directory to write it in. So it
+wrote into the developer's real configuration directory normally -- and into
+this test's scratch directory whenever the two ran at the same moment.
+
+**Why that made the assertion fail.** `persist_input_layout` returns early
+when the file already holds the layout being switched to. Both tests start
+from the same builtin list and both switch to the same second layout. If the
+unscoped one wrote `de` first, the scoped one read `de` as its *before*, found
+the file already correct, skipped its own save, and read `de` again as its
+*after*. `assert_ne!(before, after)` then failed with nothing actually broken
+in the feature.
+
+**The fix:** `gui/desktop/src/lib.rs`,
+`super_space_switches_to_the_next_keyboard_layout` now runs inside
+`settingsfile::testing::with_scratch_config`, which both redirects the write
+and takes the process-wide lock that serialises it against the other test.
+
+**The general lesson, which is the reason this entry stays:** a test needs a
+scratch config if it *writes* settings, not only if it reads them. This one
+asserted purely on the shell's in-memory field and looked like a pure
+in-memory test; the write was two calls down, inside the action handler. The
+way to find the rest of them is to look at what the code under test *calls*,
+not at what the test asserts.
+
+**Evidence:** failed in the workspace run of 2026-09-13 (one failure in 579
+binaries); passed in the identical run immediately after; passed 8/8 in
+isolation, because in isolation the two tests do not overlap.

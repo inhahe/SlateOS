@@ -5,6 +5,8 @@ edition = "2024"
 description = "SlateOS Sound Mixer — per-app volume control"
 
 [dependencies]
+# The user's colours, per design-decisions 822.
+appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
 # The window. Without it `main` built a widget tree, dropped it, ticked the peak
 # meters ten times, built the tree again and dropped that too — so no fader ever
@@ -12,6 +14,10 @@ guitk = { path = "../../gui/toolkit" }
 # ship with no `Event::Mouse` arm anywhere in the file, and with a public
 # `handle_slider_click` whose two arguments nothing in the program computed.
 oswindow = { path = "../../gui/window" }
+
+[dev-dependencies]
+# `appearance::palette_check`.
+appearance = { path = "../../gui/appearance", features = ["testing"] }
 
 [lints]
 workspace = true

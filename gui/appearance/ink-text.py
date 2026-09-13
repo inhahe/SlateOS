@@ -15,6 +15,9 @@ import re
 import sys
 import pathlib
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from rustslice import production_end  # noqa: E402
+
 NL = chr(10)
 SENTINEL = chr(0)
 
@@ -130,25 +133,122 @@ def ink_expression(value, allowed=None):
     return inked
 
 
-def convert(path, apply):
+# ---------------------------------------------------------------------------
+# The second shape: a colour that arrives from a method
+# ---------------------------------------------------------------------------
+#
+# `color: tx.category.color(&self.palette)` names no role, so the sweep above
+# is silent about it. That is the blind spot recorded as TD-C-FORTY-NINE, and
+# 37 of the methods behind it cannot be fixed in their own body because the
+# same method also fills a badge -- inking inside would darken the fill.
+#
+# The ink goes at the draw site instead, which is where design decision 837
+# says it belongs: legibility is a property of the ink-and-ground pair, not of
+# the palette field. `p.ink(tx.category.color(&p))` leaves every fill caller
+# of that method exactly as it was.
+#
+# The palette to ask is not guessed: it is the argument the method was just
+# handed. A call with no palette argument is left alone, because there is
+# nothing to ask -- those crates are on the conversion list instead.
+METHOD_CALL = re.compile(
+    r"^(?P<recv>[A-Za-z_][\w.]*)\.(?P<name>[a-z_][\w]*)"
+    r"\(&?(?P<pal>[A-Za-z_][\w.]*)\)$"
+)
+
+
+def ink_a_call(value, allowed, inked_already):
+    """Wrap a colour-method call in `ink`, or return None to leave it.
+
+    Conservative on every axis. One argument only, and that argument must be
+    something this file actually knows to be a `Palette`; no rewriting of a
+    method that already inks its own body, which would be a no-op but a
+    confusing one; and nothing that draws on a ground of its own.
+    """
+    flat = " ".join(part.strip() for part in value.split(NL)).strip()
+    if ".ink(" in flat or GROUNDED.search(flat):
+        return None
+    m = METHOD_CALL.match(flat)
+    if not m:
+        return None
+    if m.group("name") in inked_already:
+        return None
+    pal = m.group("pal")
+    names, fields = allowed
+    if pal not in names and pal.rsplit(".", 1)[-1] not in fields:
+        return None
+    return pal + ".ink(" + flat + ")"
+
+
+def crate_of(path):
+    """`apps/weather/src/main.rs` -> `apps/weather`."""
+    parts = path.as_posix().split("/")
+    for i, part in enumerate(parts):
+        if part in ("apps", "gui") and i + 1 < len(parts):
+            return part + "/" + parts[i + 1]
+    return path.parent.as_posix()
+
+
+def already_inking(paths):
+    """Per crate, the method names whose own body calls `ink`.
+
+    Per crate, because `color` is defined in thirty of them. A tree-wide set
+    of bare names put `color` in it -- `jsonviewer` and `netscan` ink theirs --
+    and every `x.color(&p)` in the tree was then skipped as already handled.
+    One site survived that, which is how it was noticed: a sweep that finds
+    one site where it found many yesterday is reporting a bug in itself.
+    """
+    out = {}
+    for path in paths:
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        end = production_end(lines)
+        name = None
+        seen = out.setdefault(crate_of(path), set())
+        for i, line in enumerate(lines[:end]):
+            m = re.match(r"^\s*(?:pub[\w(): ]*)?fn\s+(\w+)", line)
+            if m:
+                name = m.group(1)
+            elif name and ".ink(" in line:
+                seen.add(name)
+    return out
+
+
+def convert(path, apply, inked_already=frozenset()):
     lines = path.read_text(encoding="utf-8").splitlines()
     allowed = palette_receivers(lines)
     out = []
     i = 0
     n = 0
-    in_test = False
+    # Not `end`: the loop below rebinds that to the *site's* last line, and a
+    # bound named twice is a bound that silently shrinks -- after the first
+    # site, `i >= end` was true for the whole rest of the file.
+    prod_end = production_end(lines)
     while i < len(lines):
-        if lines[i].strip().startswith("#[cfg(test)]"):
-            in_test = True
         m = COLOR.match(lines[i])
-        if in_test or not m or enclosing_kind(lines, i) != "Text":
+        if i >= prod_end or not m or enclosing_kind(lines, i) != "Text":
             out.append(lines[i])
             i += 1
             continue
         end, value = value_span(lines, i, m.group(2))
-        if end is None or ".ink(" in value or ROLE.search(value) is None:
-            out.extend(lines[i : (end if end is not None else i) + 1])
-            i = (end if end is not None else i) + 1
+        if end is None:
+            out.append(lines[i])
+            i += 1
+            continue
+        if ROLE.search(value) is None:
+            call = ink_a_call(value, allowed, inked_already)
+            if call is None:
+                out.extend(lines[i : end + 1])
+                i = end + 1
+                continue
+            out.append(m.group(1) + "color: " + call + ",")
+            n += 1
+            i = end + 1
+            continue
+        if ".ink(" in value:
+            out.extend(lines[i : end + 1])
+            i = end + 1
             continue
         # Every role in it was inside a `readable_on`, so there is nothing here.
         inked = ink_expression(value, allowed)
@@ -212,54 +312,6 @@ def default_paths():
     return found
 
 
-if __name__ == "__main__":
-    args = [a for a in sys.argv[1:] if not a.startswith("--")]
-    check = "--check" in sys.argv
-    paths = [pathlib.Path(a) for a in args] if args else default_paths()
-    total = 0
-    for path in paths:
-        c = convert(path, "--apply" in sys.argv)
-        if c:
-            print(str(path) + ": " + str(c))
-        total += c
-    if "--verify" in sys.argv:
-        examined = 0
-        stray = []
-        for path in paths:
-            seen, found = stray_inks(path)
-            examined += seen
-            stray.extend((path, ln, kind, text) for ln, kind, text in found)
-        for path, ln, kind, text in stray:
-            print(str(path) + ":" + str(ln) + "  ink() inside a " + kind + ": " + text[:70])
-        if stray:
-            print(str(len(stray)) + " site(s) ask for a text ink and do not draw text.")
-            sys.exit(1)
-        if examined == 0:
-            # Not a pass. Five separate times in this conversion a check has
-            # reported success over an empty population: a collector matching
-            # only `FillRect` after its subject became an outline, the
-            # `.all()` over the empty vector it returned, two geometry helpers
-            # in `notif_pane`, and a harness regex that dropped one character
-            # and compared 0 > 0. Every one of them was green.
-            print("no ink() call sites found at all; refusing to call that a pass")
-            sys.exit(2)
-        print("ok: all " + str(examined) + " ink() call sites are inside a Text command")
-        sys.exit(0)
-
-    if check:
-        # A gate, not a report. A site that draws text in a dual-use role
-        # without asking `ink` renders perfectly and cannot be read on a card,
-        # which is exactly the kind of defect nobody notices until someone
-        # switches themes. See design decision 837.
-        if total:
-            print(str(total) + " text site(s) still name a dual-use role directly.")
-            print("Run:  python gui/appearance/ink-text.py --apply  (then check the diff)")
-            sys.exit(1)
-        print("ok: every text site in " + str(len(paths)) + " files goes through ink()")
-        sys.exit(0)
-    print(str(total) + " text sites routed through ink()")
-
-
 # ---------------------------------------------------------------------------
 # The blind spots
 # ---------------------------------------------------------------------------
@@ -297,12 +349,8 @@ def blind_spots(path):
     """Text sites whose colour this script cannot classify."""
     lines = path.read_text(encoding="utf-8").splitlines()
     out = []
-    in_test = False
-    for i, line in enumerate(lines):
-        if lines[i].strip().startswith("#[cfg(test)]"):
-            in_test = True
-        if in_test:
-            continue
+    end = production_end(lines)
+    for i, line in enumerate(lines[:end]):
         if enclosing_kind(lines, i) != "Text":
             continue
         # A few lines of the value, since a conditional colour runs over
@@ -315,3 +363,66 @@ def blind_spots(path):
         elif CALL_VALUE.match(line) and not ROLE.search(value):
             out.append((i + 1, "a call", line.strip()))
     return out
+
+
+if __name__ == "__main__":
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    check = "--check" in sys.argv
+    paths = [pathlib.Path(a) for a in args] if args else default_paths()
+    inked_already = already_inking(paths)
+    total = 0
+    for path in paths:
+        c = convert(path, "--apply" in sys.argv, inked_already.get(crate_of(path), frozenset()))
+        if c:
+            print(str(path) + ": " + str(c))
+        total += c
+    if "--blind" in sys.argv:
+        # Was accepted and did nothing for a day: every `--` argument is
+        # filtered out of `args` above, so `--blind` parsed fine, ran the
+        # ordinary conversion and printed "0 text sites routed through ink()".
+        # A flag that silently means nothing is the same defect as a check
+        # over an empty population, in a smaller package.
+        found = 0
+        for path in paths:
+            for ln, kind, text in blind_spots(path):
+                print(str(path) + ":" + str(ln) + "  " + kind + ": " + text[:70])
+                found += 1
+        print(str(found) + " text site(s) this script cannot classify.")
+        sys.exit(0)
+
+    if "--verify" in sys.argv:
+        examined = 0
+        stray = []
+        for path in paths:
+            seen, found = stray_inks(path)
+            examined += seen
+            stray.extend((path, ln, kind, text) for ln, kind, text in found)
+        for path, ln, kind, text in stray:
+            print(str(path) + ":" + str(ln) + "  ink() inside a " + kind + ": " + text[:70])
+        if stray:
+            print(str(len(stray)) + " site(s) ask for a text ink and do not draw text.")
+            sys.exit(1)
+        if examined == 0:
+            # Not a pass. Five separate times in this conversion a check has
+            # reported success over an empty population: a collector matching
+            # only `FillRect` after its subject became an outline, the
+            # `.all()` over the empty vector it returned, two geometry helpers
+            # in `notif_pane`, and a harness regex that dropped one character
+            # and compared 0 > 0. Every one of them was green.
+            print("no ink() call sites found at all; refusing to call that a pass")
+            sys.exit(2)
+        print("ok: all " + str(examined) + " ink() call sites are inside a Text command")
+        sys.exit(0)
+
+    if check:
+        # A gate, not a report. A site that draws text in a dual-use role
+        # without asking `ink` renders perfectly and cannot be read on a card,
+        # which is exactly the kind of defect nobody notices until someone
+        # switches themes. See design decision 837.
+        if total:
+            print(str(total) + " text site(s) still name a dual-use role directly.")
+            print("Run:  python gui/appearance/ink-text.py --apply  (then check the diff)")
+            sys.exit(1)
+        print("ok: every text site in " + str(len(paths)) + " files goes through ink()")
+        sys.exit(0)
+    print(str(total) + " text sites routed through ink()")

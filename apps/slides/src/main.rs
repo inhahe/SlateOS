@@ -1707,7 +1707,7 @@ impl SlidesApp {
             x: self.window_width - 120.0,
             y: y + 5.0,
             text: view_label.to_string(),
-            color: self.palette.teal,
+            color: self.palette.ink(self.palette.teal),
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1815,7 +1815,7 @@ impl SlidesApp {
                 y: ty + thumb_h + 2.0,
                 text: format!("Slide {}", i.saturating_add(1)),
                 color: if is_current {
-                    self.palette.blue
+                    self.palette.ink(self.palette.blue)
                 } else {
                     self.palette.overlay0
                 },
@@ -2242,7 +2242,7 @@ impl SlidesApp {
                         x: lx,
                         y,
                         text: String::from("Element"),
-                        color: self.palette.blue,
+                        color: self.palette.ink(self.palette.blue),
                         font_size: 13.0,
                         font_weight: FontWeightHint::Bold,
                         max_width: None,
@@ -2573,7 +2573,7 @@ impl SlidesApp {
                     x: tx + 4.0,
                     y: ty + thumb_h - 14.0,
                     text: slide.transition.label().to_string(),
-                    color: self.palette.teal,
+                    color: self.palette.ink(self.palette.teal),
                     font_size: 8.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
@@ -2587,7 +2587,7 @@ impl SlidesApp {
                 y: ty + thumb_h + 4.0,
                 text: format!("{}. {}", i.saturating_add(1), slide.layout.label()),
                 color: if is_current {
-                    self.palette.blue
+                    self.palette.ink(self.palette.blue)
                 } else {
                     self.palette.subtext0
                 },

@@ -1573,7 +1573,7 @@ impl App {
                     y: sy + 4.0,
                     text: level.label().into(),
                     font_size: NORMAL_TEXT,
-                    color: level.color(&self.palette),
+                    color: self.palette.ink(level.color(&self.palette)),
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(60.0),
                     overflow: TextOverflow::Ellipsis,

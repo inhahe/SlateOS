@@ -4,12 +4,18 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS Network Speed Test — bandwidth and latency measurement utility"
 [dependencies]
+# The user's colours, per design-decisions 822.
+appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
 # The window and its event loop. Without this `fn main` was empty: the gauge,
 # the graph and the whole measurement existed only for the tests to call, and —
 # worse here than in most apps — nothing delivered `Event::Tick`, so a test
 # started by a user could never advance a single frame.
 oswindow = { path = "../../gui/window" }
+
+[dev-dependencies]
+# `appearance::palette_check`.
+appearance = { path = "../../gui/appearance", features = ["testing"] }
 
 [lints]
 workspace = true

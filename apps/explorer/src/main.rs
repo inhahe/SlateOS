@@ -29,13 +29,14 @@ mod dropzone;
 mod fileops;
 mod thumbs;
 
-use guitk::color::Color;
+use appearance::Palette;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::listview::ListViewport;
 use guitk::modal::{AlertDialog, DialogResult, InputDialog};
 use guitk::render::RenderTree;
 use guitk::scroll_window;
 use guitk::scrollbar;
+use guitk::theme::with_alpha;
 use guitk::wheel::Accumulator as WheelAccumulator;
 
 use columns::{ColumnId, ColumnManager, ColumnValue, FileInfo, SortOrder};
@@ -383,6 +384,9 @@ impl DragState {
 
 /// File explorer application state.
 pub struct ExplorerState {
+    /// The user's colours, handed over by the framework (§822).
+    pub palette: Palette,
+
     /// Current directory.
     pub current_path: PathBuf,
     /// Entries in current directory.
@@ -512,6 +516,7 @@ pub struct ExplorerState {
 impl ExplorerState {
     pub fn new(start_path: &Path) -> Self {
         let mut state = Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             current_path: start_path.to_path_buf(),
             entries: Vec::new(),
             viewport: ListViewport::new(0),
@@ -1547,7 +1552,7 @@ impl ExplorerState {
         zones.clear_zones();
 
         // Background
-        tree.fill_rect(0.0, 0.0, w, h, Color::from_hex(0xF5F5F5));
+        tree.fill_rect(0.0, 0.0, w, h, self.palette.mantle);
 
         // Toolbar (top)
         self.render_toolbar(&mut tree);
@@ -1606,6 +1611,7 @@ impl ExplorerState {
             drag.y,
             self.dropzone.list_area(),
             drag.valid,
+            &self.palette,
         ) {
             tree.push(cmd);
         }
@@ -1618,7 +1624,7 @@ impl ExplorerState {
             0.0,
             self.window_width as f32,
             toolbar_h,
-            Color::from_hex(0xE8E8E8),
+            self.palette.crust,
         );
 
         // Navigation buttons
@@ -1635,11 +1641,11 @@ impl ExplorerState {
         for btn_text in &buttons {
             if *btn_text == "|" {
                 // Separator
-                tree.fill_rect(x, 4.0, 1.0, toolbar_h - 8.0, Color::from_hex(0xC0C0C0));
+                tree.fill_rect(x, 4.0, 1.0, toolbar_h - 8.0, self.palette.surface1);
                 x += 12.0;
             } else {
-                tree.fill_rect(x, 4.0, 28.0, 28.0, Color::from_hex(0xD0D0D0));
-                tree.text(x + 6.0, 10.0, btn_text, Color::from_hex(0x333333), 14.0);
+                tree.fill_rect(x, 4.0, 28.0, 28.0, self.palette.surface0);
+                tree.text(x + 6.0, 10.0, btn_text, self.palette.text, 14.0);
                 x += 32.0;
             }
         }
@@ -1650,16 +1656,22 @@ impl ExplorerState {
         let bar_h = 28.0;
         let w = self.window_width as f32;
 
-        tree.fill_rect(0.0, bar_y, w, bar_h, Color::WHITE);
+        tree.fill_rect(0.0, bar_y, w, bar_h, self.palette.base);
         tree.stroke_rect(
             4.0,
             bar_y + 2.0,
             w - 8.0,
             bar_h - 4.0,
-            Color::from_hex(0xC0C0C0),
+            self.palette.surface1,
             1.0,
         );
-        tree.text(12.0, bar_y + 7.0, &self.address_text, Color::BLACK, 13.0);
+        tree.text(
+            12.0,
+            bar_y + 7.0,
+            &self.address_text,
+            self.palette.text,
+            13.0,
+        );
     }
 
     fn render_sidebar(&self, tree: &mut RenderTree, zones: &mut DropZoneManager) {
@@ -1667,20 +1679,20 @@ impl ExplorerState {
         let sidebar_h = self.window_height as f32 - 64.0 - 24.0; // minus toolbar and status bar
         let sw = self.sidebar_width;
 
-        tree.fill_rect(0.0, sidebar_y, sw, sidebar_h, Color::from_hex(0xF0F0F0));
+        tree.fill_rect(0.0, sidebar_y, sw, sidebar_h, self.palette.mantle);
         tree.stroke_rect(
             sw - 1.0,
             sidebar_y,
             1.0,
             sidebar_h,
-            Color::from_hex(0xD0D0D0),
+            self.palette.surface0,
             1.0,
         );
 
         // Quick access items
         for (i, (label, path)) in SIDEBAR_ITEMS.iter().enumerate() {
             let iy = sidebar_y + 8.0 + i as f32 * SIDEBAR_ROW_H;
-            tree.text(16.0, iy + 4.0, label, Color::from_hex(0x333333), 12.0);
+            tree.text(16.0, iy + 4.0, label, self.palette.text, 12.0);
             // The whole strip is the target, not just the glyphs: a drop aimed
             // at the gap beside a short name like "/tmp" is still aimed at
             // /tmp.
@@ -1847,14 +1859,14 @@ impl ExplorerState {
             track.y,
             track.width,
             track.height,
-            Color::from_hex(0xF0F0F0),
+            self.palette.mantle,
         );
         tree.fill_rounded_rect(
             thumb.x + 1.0,
             thumb.y,
             thumb.w - 2.0,
             thumb.h,
-            Color::from_hex(0xB0B0B0),
+            self.palette.surface2,
             guitk::style::CornerRadii::all(4.0),
         );
     }
@@ -1952,7 +1964,7 @@ impl ExplorerState {
                     cy + 2.0,
                     ICON_CELL_W - 4.0,
                     ICON_CELL_H - 4.0,
-                    Color::from_hex(0xCCE8FF),
+                    with_alpha(self.palette.accent, 40),
                     guitk::style::CornerRadii::all(4.0),
                 );
             }
@@ -1965,9 +1977,9 @@ impl ExplorerState {
 
             let label_y = ty + ICON_THUMB_SIZE + 6.0;
             let name_color = if entry.is_dir {
-                Color::from_hex(0x0066CC)
+                self.palette.accent
             } else {
-                Color::BLACK
+                self.palette.text
             };
             // Elided rather than clipped: a name cut mid-word with no mark is
             // read as the whole name, which is how one file gets mistaken for
@@ -2032,9 +2044,9 @@ impl ExplorerState {
             );
 
             if entry.selected {
-                tree.fill_rect(0.0, ry, w, LIST_ROW_H, Color::from_hex(0xCCE8FF));
+                tree.fill_rect(0.0, ry, w, LIST_ROW_H, with_alpha(self.palette.accent, 40));
             } else if i % 2 == 1 {
-                tree.fill_rect(0.0, ry, w, LIST_ROW_H, Color::from_hex(0xFAFAFA));
+                tree.fill_rect(0.0, ry, w, LIST_ROW_H, self.palette.base);
             }
 
             let ty = ry + (LIST_ROW_H - LIST_THUMB_SIZE) / 2.0;
@@ -2042,9 +2054,9 @@ impl ExplorerState {
 
             let name_x = 6.0 + LIST_THUMB_SIZE + 8.0;
             let name_color = if entry.is_dir {
-                Color::from_hex(0x0066CC)
+                self.palette.accent
             } else {
-                Color::BLACK
+                self.palette.text
             };
             tree.text_in(
                 name_x,
@@ -2103,9 +2115,9 @@ impl ExplorerState {
 
         tree.translate(x, y);
 
-        tree.fill_rect(0.0, 0.0, ICON_GUTTER, HEADER_H, Color::from_hex(0xE0E0E0));
+        tree.fill_rect(0.0, 0.0, ICON_GUTTER, HEADER_H, self.palette.crust);
         tree.translate(ICON_GUTTER, 0.0);
-        for cmd in columns::render_column_header(&self.columns, table_w) {
+        for cmd in columns::render_column_header(&self.columns, table_w, &self.palette) {
             tree.push(cmd);
         }
         tree.untranslate();
@@ -2121,12 +2133,12 @@ impl ExplorerState {
             zones.register_file_row(i, &entry.path, Rect::new(x, y + ey, w, ROW_H), entry.is_dir);
 
             if entry.selected {
-                tree.fill_rect(0.0, ey, w, ROW_H, Color::from_hex(0xCCE8FF));
+                tree.fill_rect(0.0, ey, w, ROW_H, with_alpha(self.palette.accent, 40));
             // Striped by *absolute* row, so the banding does not crawl as the
             // view scrolls -- a stripe that follows the screen position rather
             // than the file makes a scrolling list shimmer.
             } else if i % 2 == 1 {
-                tree.fill_rect(0.0, ey, w, ROW_H, Color::from_hex(0xFAFAFA));
+                tree.fill_rect(0.0, ey, w, ROW_H, self.palette.base);
             }
 
             let mut icon = [0u8; 4];
@@ -2134,19 +2146,24 @@ impl ExplorerState {
                 8.0,
                 ey + 3.0,
                 entry.file_type.icon_char().encode_utf8(&mut icon),
-                Color::BLACK,
+                self.palette.text,
                 12.0,
             );
 
             // Directory names stay visually distinct from file names, as they
             // were when this view drew its own three columns.
-            let name_color = entry.is_dir.then(|| Color::from_hex(0x0066CC));
+            let name_color = entry.is_dir.then_some(self.palette.accent);
 
             let values = self.row_values(entry);
             tree.translate(ICON_GUTTER, 0.0);
-            for cmd in
-                columns::render_column_values_from(&self.columns, &values, ey, table_w, name_color)
-            {
+            for cmd in columns::render_column_values_from(
+                &self.columns,
+                &values,
+                ey,
+                table_w,
+                name_color,
+                &self.palette,
+            ) {
                 tree.push(cmd);
             }
             tree.untranslate();
@@ -2159,12 +2176,12 @@ impl ExplorerState {
         let bar_y = self.window_height as f32 - 24.0;
         let w = self.window_width as f32;
 
-        tree.fill_rect(0.0, bar_y, w, 24.0, Color::from_hex(0xE8E8E8));
+        tree.fill_rect(0.0, bar_y, w, 24.0, self.palette.crust);
         tree.text(
             8.0,
             bar_y + 5.0,
             self.status_bar_text(),
-            Color::from_hex(0x555555),
+            self.palette.subtext0,
             11.0,
         );
     }
@@ -2347,6 +2364,15 @@ fn is_same_file(a: &Path, b: &Path) -> bool {
 const THUMB_TICK_MS: u64 = 60;
 
 impl oswindow::app::App for ExplorerState {
+    /// Adopt the user's colours (§822).
+    ///
+    /// Without this override the trait's default does nothing and the crate
+    /// keeps its own colours -- which here were a hardcoded *light* theme, so
+    /// a dark desktop got a white file manager.
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     /// The folder's name first, then the application's.
     ///
     /// That order is what a task bar full of windows needs: the strip of
@@ -2935,6 +2961,37 @@ mod tests {
     use super::*;
     use scratchdir::ScratchDir;
     use std::time::Duration;
+
+    /// Every colour the file manager draws comes from the user's palette.
+    ///
+    /// The guard §822 expects a converted crate to adopt, and the one that
+    /// finds what a survey of constants cannot: inline literals, and text
+    /// hardcoded on a themed fill.
+    ///
+    /// Thumbnails are deliberately out of its reach and that is correct --
+    /// `thumbs.rs` paints into a pixel buffer rather than emitting
+    /// `RenderCommand`s, so its file-type colours are content in the sense
+    /// `apps/paint`'s swatch row is content.
+    #[test]
+    fn every_colour_the_file_manager_draws_comes_from_its_palette() {
+        for light in [false, true] {
+            let scratch = temp_dir("palette");
+            let mut app = ExplorerState::new(&scratch.path("root"));
+            app.palette = Palette::for_mode(light);
+            let tree = app.render();
+            assert!(
+                tree.commands.len() > 20,
+                "the sweep examined {} commands, which is not a render",
+                tree.commands.len()
+            );
+            appearance::palette_check::assert_drawn_from(
+                &app.palette,
+                &tree.commands,
+                &[],
+                &format!("explorer (light={light})"),
+            );
+        }
+    }
 
     /// A private scratch directory for one test, removed when the returned
     /// guard drops.

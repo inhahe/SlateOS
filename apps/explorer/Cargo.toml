@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS File Explorer — graphical file manager with tree view"
 [dependencies]
+# The user's colours, per design-decisions 822.
+appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
 textfind = { path = "../../textfind" }
 # The thumbnailer reads BMP, PNG, GIF and JPEG headers at offsets the file
@@ -23,9 +25,13 @@ imagecodec = { path = "../../gui/imagecodec" }
 # could lay out a frame but had nowhere to put it and no way to be clicked.
 oswindow = { path = "../../gui/window" }
 
-# Test fixtures only: a private temp directory per test, removed on drop.
 [dev-dependencies]
+# Test fixtures only: a private temp directory per test, removed on drop.
 scratchdir = { path = "../../userspace/scratchdir" }
+
+# `appearance::palette_check`, the sweep that proves this crate draws from the
+# user's palette rather than from colours of its own.
+appearance = { path = "../../gui/appearance", features = ["testing"] }
 
 [lints]
 workspace = true

@@ -201,17 +201,27 @@ impl WeatherCondition {
     }
 
     /// Color hint for the weather condition icon.
+    /// The colour a condition's icon is drawn in.
+    ///
+    /// The icon is a glyph, so this is text, and every caller draws it as
+    /// such -- which is what lets the ink go here rather than at three draw
+    /// sites (837; `gui/appearance/colour-methods.py`).
+    ///
+    /// `subtext0`/`subtext1` are floored in the palette already and
+    /// `overlay0` is deliberately not -- it is the faintest legible mark. Fog
+    /// asked for `surface2`, a *background* rung, which is a legibility bug
+    /// rather than a style: inked, it becomes a mark you can actually see.
     pub fn icon_color(self, pal: &Palette) -> Color {
         match self {
-            Self::Clear => pal.yellow,
+            Self::Clear => pal.ink(pal.yellow),
             Self::PartlyCloudy => pal.subtext1,
             Self::Cloudy | Self::Overcast | Self::Haze => pal.overlay0,
-            Self::LightRain | Self::Rain | Self::HeavyRain => pal.blue,
-            Self::Thunderstorm => pal.peach,
-            Self::Snow | Self::LightSnow | Self::Sleet => pal.lavender,
-            Self::Fog => pal.surface2,
+            Self::LightRain | Self::Rain | Self::HeavyRain => pal.ink(pal.blue),
+            Self::Thunderstorm => pal.ink(pal.peach),
+            Self::Snow | Self::LightSnow | Self::Sleet => pal.ink(pal.lavender),
+            Self::Fog => pal.ink(pal.surface2),
             Self::Windy => pal.subtext0,
-            Self::Tornado | Self::Hurricane => pal.red,
+            Self::Tornado | Self::Hurricane => pal.ink(pal.red),
         }
     }
 }
@@ -2010,7 +2020,7 @@ impl WeatherApp {
             y: y + 34.0,
             text: format!("AQI: {}", self.current.aqi),
             font_size: 24.0,
-            color: aq.color(&self.palette),
+            color: self.palette.ink(aq.color(&self.palette)),
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2022,7 +2032,7 @@ impl WeatherApp {
             y: y + 40.0,
             text: aq.label().to_string(),
             font_size: 16.0,
-            color: aq.color(&self.palette),
+            color: self.palette.ink(aq.color(&self.palette)),
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,

@@ -869,47 +869,6 @@ that let them through is untouched.
 
 The cost grows with the number of app crates, which is growing.
 
-## A-Q8 — [A]+[C] Desktop icon layout exists in two places: `fs::deskicons` (kernel) and `gui/desktop/src/icons.rs` (shell). Which is the authority? — Status: OPEN
-
-**In short:** A user's desktop icons have positions on screen. Two independent
-modules model that layout: `kernel/src/fs/deskicons.rs` (Lane A, marked done in
-the roadmap, exports via `/proc/deskicons`) and `gui/desktop/src/icons.rs`
-(Lane C, never wired, a pinned island). Lane C cannot wire its module without
-duplicating the kernel's state, and cannot delete it because it is marked done
-and in Lane A's tree. Nothing is broken — the `icon_size` appearance setting is
-inert, exactly as it has always been.
-
-**Options:**
-
-- **(A) The kernel one is the model; the shell consumes it.** `icons.rs` is a
-  duplicate to delete. The shell reads icon positions from `/proc/deskicons`.
-  *What changes:* the shell becomes a renderer for state the kernel owns.
-- **(B) Layout belongs to the shell; the kernel one is persistence only.** Wire
-  `gui/desktop/src/icons.rs` as the layout authority. `fs::deskicons` is either
-  demoted to a read-only persistence layer or marked as tech debt to remove.
-  *What changes:* icon layout moves to userspace where the microkernel rule says
-  it belongs; `icon_size` becomes a live setting.
-- **(C) `fs::deskicons` predates the microkernel split and should not be in the
-  kernel at all.** Delete it, wire the shell module, persist positions in a
-  dotfile or YAML. *What changes:* one fewer kernel module, one fewer `/proc`
-  entry, icon state lives in userspace end to end.
-
-**Claude's recommendation:** B or C. The microkernel rule is unambiguous — icon
-layout is a userspace concern, not a scheduler/MM/IPC/cap/interrupt concern.
-B is the minimum viable move; C is the clean one.
-
-**If never answered:** the `icon_size` setting stays inert, Lane C does not wire
-`icons.rs`, and both modules continue to exist without either being used. No
-degradation, but the duplicate grows harder to resolve over time as either side
-accumulates callers.
-
-**Filed by:** Lane A (2026-09-07), prompted by Lane C's
-`c-a-two-desktop-icon-models-and-mine-cannot-be-wired-until-we-pick.md`.
-Response at
-`a-c-deskicons-is-a-persistence-layer-the-shell-is-the-layout-authority.md`.
-
----
-
 ## A-Q9 — [A] Networking now exists twice: inside the kernel, and as an ordinary program. The second one is finished and switched off. Should it become the default? — Status: OPEN (raised 2026-09-09)
 
 **In short:** this system can do its networking two ways. The way it uses today
@@ -1797,6 +1756,12 @@ answered question left in the body is pure cost — and, being older, it sorts
 
 ## Resolved — lane A
 
+- A-Q8 Desktop icon layout exists in two places, kernel and shell: which is the
+  authority? — resolved 2026-09-12 (933): **C, neither — it leaves the kernel.**
+  `fs::deskicons` and `/proc/deskicons` are deleted; `gui/desktop/src/icons.rs`
+  becomes the layout authority and persists positions in userspace, which also
+  makes the `icon_size` setting live. Lane C wires first, lane A deletes after,
+  so no reboot loses icon positions in between.
 - Q45 Convert the whole shell to bytes, or only the expanded word? — resolved
   2026-08-21 (§261): **B, the expanded word.** One data path — keystroke to
   syscall — goes byte-clean end to end; the source line stays text, as in bash.

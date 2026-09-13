@@ -312,7 +312,59 @@ that says the tables were measured against bash);
 
 ---
 
-## C-Q9 — [C] The backup tool and the search tools read the same-looking patterns by different rules. Should they be made the same? — Status: OPEN
+## C-Q9 — [C] The backup tool and the search tools read the same-looking patterns by different rules. Should they be made the same? — Status: ANSWERED BY THE OPERATOR 2026-09-07, TWO QUESTIONS BACK, NOW ANSWERED — awaiting a yes/no
+
+### Your reply of 2026-09-07, and the two questions in it
+
+> *"I don't already have any rules that use `[]` … But maybe we should change
+> file searching and indexing so that they **don't** contain character classes,
+> so that they match the backup program? A. what's normal in that regard, and
+> B. what's the likelihood that the user will really benefit from character
+> classes?"*
+
+Lane A had already recorded, at the top of this file, that this entry and B-Q8
+are open *because* the operator replied and asked for a clearer explanation —
+so the state was understood, not overlooked. What was missing was the clearer
+explanation. Here it is.
+
+**A. What is normal — measured, not asserted.**
+
+| the language | brackets? | where in this tree |
+|---|---|---|
+| POSIX `fnmatch(3)` | **yes**, including `[:alpha:]` classes | `posix/src/fnmatch.rs` implements them |
+| real `.gitignore` | **yes** — git's own documentation describes `[a-z]` ranges | — |
+| our search/index (`apps/globmatch`) | yes | the shared matcher |
+| our backup (`apps/backup`) | **no** | the odd one out |
+
+So the position is the reverse of how C-Q9 originally framed it. Backup is not
+"a different but equally normal dialect" — it claims to be gitignore-shaped and
+is **missing a feature real gitignore has**. Removing brackets from search and
+indexing, which your reply floats, would move the OS away from *both* norms and
+from its own `fnmatch`.
+
+**B. How likely is a user to benefit — also measured.**
+
+Zero patterns in the tree's shipped defaults, fixtures or YAML use a bracket.
+That number cuts both ways and is the most useful fact here:
+
+* It means the feature is **rarely reached for**, which is what you suspected.
+* It also means **nothing shipped would change meaning** if backup gained
+  brackets — which was the entire argument for leaving the split alone. The
+  risk that option A existed to avoid is, as far as this tree can show,
+  not there.
+
+**So my recommendation changes to: teach `apps/backup` bracket expressions**
+(option B), rather than either leaving the split or stripping the feature from
+search. It makes backup match the language it says it implements, matches our
+own `fnmatch`, and breaks no pattern that exists.
+
+**What I still cannot measure for you:** patterns *you* have written outside
+this tree. You said you have none using `[]`, which is why I am recommending
+rather than asking again — but if that is wrong, this is the one thing that
+would change the answer.
+
+**If it is never answered:** the split stays, both behaviours keep working, and
+the only cost is the surprise described above. Nothing degrades.
 
 **In short:** when you tell the backup program which folders to skip, you type a
 pattern like `*.tmp` or `build/**`. When you search for a file, you type a

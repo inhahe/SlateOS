@@ -131480,6 +131480,49 @@ reason the app half of the border conversion looked cheap: those crates were
 converted where they *did* use the palette, and the constants were never in
 scope.
 
+
+---
+
+**Update 2026-09-13 — every application outside the games is done, and the
+games are genuinely blocked.**
+
+The twelve applications this entry was written for are converted, and so is
+everything else that is not a game: calendar, emojipicker, unitconverter,
+diagram, launcher, stopwatch, mandelbrot, alarmclock, filediff. The widget
+layer under them went too --
+`TD-C-THE-TOOLKIT-S-WIDGETS-STILL-PAINT-THEMSELVES-DARK`.
+
+**Counting it properly took four tries, and that is the lesson.** A colour
+constant hid from a sweep in four different spellings:
+
+| spelling | example | what missed it |
+|---|---|---|
+| six-digit hex | `from_hex(0x1E1E2E)` | nothing — this is what every survey looked for |
+| decimal | `Color::rgb(49, 50, 68)` | `disabled.rs`, three constants, outlasted 119 others |
+| padded hex | `from_hex(0x001E_1E2E)` | `stopwatch`, fourteen — the crate read as having none |
+| an alias | `PLAYER1_COLOR = BLUE` | twelve, and no *value*-based survey can ever see them |
+
+The last one is the interesting case: its value is a name, so a sweep asking
+"which constants hold a Mocha value" is asking the wrong question of it.
+
+**What is left is the games, and they wait on C-Q16.** The measured split, so
+whoever picks this up does not have to re-measure:
+
+- **324 constants are Mocha neutrals** (base, mantle, surface0-2, text,
+  subtext0, overlay0) across 43 crates;
+- **335 are hues**, named `BLUE`, `YELLOW`, `LAVENDER` and so on -- the ramp
+  copied wholesale, not semantic names like an I-piece or a mine count;
+- **43 constants across 9 crates** are named for the play surface itself
+  (`BOARD_LIGHT`, `FELT`, `CARD_BG`, `SQUARE_DARK`).
+
+C-Q16 promises the games' *chrome* is fixed either way, and I looked for a
+slice that delivers that without pre-empting the answer. There is not one.
+The games do not separate chrome from board at the constant level: they copy
+the ramp and then use `SURFACE2` for a light square and `TEXT` for a label.
+Converting the ramp themes the board too, which is exactly what C-Q16 has not
+decided -- and hand-slicing it across 43 crates would be making the operator's
+decision forty-three times in private.
+
 ## TD-C-FORTY-NINE-COLOUR-METHODS-ARE-INVISIBLE-TO-THE-INK-SWEEP
 
 **Date:** 2026-09-12. **Lane:** C.

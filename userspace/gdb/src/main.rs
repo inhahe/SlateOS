@@ -52,7 +52,7 @@
 // protocol packets, and machine memory. Arithmetic is on offsets bounded
 // by section sizes / packet lengths, indexing/slicing is gated by
 // length checks at the call site (errors return Err, not panic).
-#![allow(clippy::arithmetic_side_effects, clippy::indexing_slicing, dead_code)]
+#![allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 
 use std::io::{self, Write};
 
@@ -60,7 +60,17 @@ use std::io::{self, Write};
 // Constants
 // ============================================================================
 
+// Reachable only from `main`, which the test harness replaces: this crate is
+// `#![cfg_attr(not(test), no_main)]`, so the whole CLI entry path is dead
+// in the test cfg and live in the real build. Scoped to `test` rather than
+// allowed outright, so a genuinely dead item here is still reported.
+#[cfg_attr(test, allow(dead_code))]
 const VERSION: &[u8] = b"0.1.0";
+// Reachable only from `main`, which the test harness replaces: this crate is
+// `#![cfg_attr(not(test), no_main)]`, so the whole CLI entry path is dead
+// in the test cfg and live in the real build. Scoped to `test` rather than
+// allowed outright, so a genuinely dead item here is still reported.
+#[cfg_attr(test, allow(dead_code))]
 const GDB_BANNER: &[u8] = b"Slate OS GDB 0.1.0 -- A GDB-like debugger\n\
     Copyright (C) 2026 Slate OS Project.\n\
     Type \"help\" for a list of commands.\n";
@@ -78,18 +88,32 @@ const EI_NIDENT: usize = 16;
 const ELFCLASS64: u8 = 2;
 const ELFDATA2LSB: u8 = 1;
 
+// The ELF constants below are a table, and a table is kept whole. `readelf`
+// prints `ET_DYN` for a shared object whether or not this build has reached
+// the code that says so, and a half-table is how the next reader concludes
+// the format has no such value. Each unread one is marked individually, so
+// the table stays complete without hiding a genuinely dead item elsewhere.
+#[allow(dead_code)]
 const ET_EXEC: u16 = 2;
+#[allow(dead_code)]
 const ET_DYN: u16 = 3;
 
+#[allow(dead_code)]
 const EM_X86_64: u16 = 62;
 
 const SHT_SYMTAB: u32 = 2;
+#[allow(dead_code)]
 const SHT_STRTAB: u32 = 3;
 const SHT_DYNSYM: u32 = 11;
 const SHT_PROGBITS: u32 = 1;
 
+// No STT_ value is read yet: symbol type is parsed into `Elf64Sym.sym_type`
+// and not yet consulted. The three names are what make that field legible.
+#[allow(dead_code)]
 const STT_FUNC: u8 = 2;
+#[allow(dead_code)]
 const STT_OBJECT: u8 = 1;
+#[allow(dead_code)]
 const STT_NOTYPE: u8 = 0;
 
 const PT_LOAD: u32 = 1;
@@ -126,13 +150,22 @@ const REG_NAMES: [&[u8]; REG_COUNT] = [
     b"r12", b"r13", b"r14", b"r15", b"rip", b"rflags", b"cs", b"ss", b"ds", b"es", b"fs", b"gs",
 ];
 
-// INT3 opcode for software breakpoints
+// INT3 opcode for software breakpoints. Never written, for the same reason
+// the execution types below are never constructed: patching 0xCC into a
+// process's text needs ptrace, and `posix::ptrace` returns ENOSYS. The
+// breakpoint commands record where you asked to stop; nothing installs one.
+#[allow(dead_code)]
 const INT3_OPCODE: u8 = 0xCC;
 
-// Maximum breakpoints, watchpoints, and threads
+// Maximum breakpoints and watchpoints, both enforced where the list grows.
+//
+// There was a MAX_THREADS here too. It is gone rather than enforced: the one
+// place that pushes a thread calls `threads.clear()` immediately before, so
+// the vector holds exactly one element and the limit could never be reached.
+// A bound that cannot be crossed is not a safeguard, it is a claim that
+// something is being guarded.
 const MAX_BREAKPOINTS: usize = 256;
 const MAX_WATCHPOINTS: usize = 64;
-const MAX_THREADS: usize = 256;
 const MAX_SYMBOLS: usize = 65536;
 const MAX_SECTIONS: usize = 256;
 const MAX_SEGMENTS: usize = 64;
@@ -146,6 +179,11 @@ const MAX_STACK_FRAMES: usize = 256;
 ///
 /// # Safety
 /// `ptr` must be a valid pointer to a null-terminated string or null.
+// Reachable only from `main`, which the test harness replaces: this crate is
+// `#![cfg_attr(not(test), no_main)]`, so the whole CLI entry path is dead
+// in the test cfg and live in the real build. Scoped to `test` rather than
+// allowed outright, so a genuinely dead item here is still reported.
+#[cfg_attr(test, allow(dead_code))]
 unsafe fn cstr_to_slice(ptr: *const u8) -> &'static [u8] {
     if ptr.is_null() {
         return b"";
@@ -435,6 +473,12 @@ fn read_u64_le(data: &[u8], off: usize) -> Option<u64> {
 
 /// Parsed ELF64 header.
 #[derive(Clone)]
+// The unread fields stay. This struct mirrors the on-disk record, and the
+// parser reads all of it; dropping the fields this build does not consult
+// would make the type disagree with the format it parses, and re-deriving an
+// offset later is how a parser starts reading the wrong bytes. Per-field
+// rather than crate-wide so a genuinely dead item here is still reported.
+#[allow(dead_code)]
 struct Elf64Header {
     e_type: u16,
     e_machine: u16,
@@ -450,6 +494,12 @@ struct Elf64Header {
 
 /// Parsed ELF64 section header.
 #[derive(Clone)]
+// The unread fields stay. This struct mirrors the on-disk record, and the
+// parser reads all of it; dropping the fields this build does not consult
+// would make the type disagree with the format it parses, and re-deriving an
+// offset later is how a parser starts reading the wrong bytes. Per-field
+// rather than crate-wide so a genuinely dead item here is still reported.
+#[allow(dead_code)]
 struct Elf64Shdr {
     sh_name: u32,
     sh_type: u32,
@@ -465,6 +515,12 @@ struct Elf64Shdr {
 
 /// Parsed ELF64 program header.
 #[derive(Clone)]
+// The unread fields stay. This struct mirrors the on-disk record, and the
+// parser reads all of it; dropping the fields this build does not consult
+// would make the type disagree with the format it parses, and re-deriving an
+// offset later is how a parser starts reading the wrong bytes. Per-field
+// rather than crate-wide so a genuinely dead item here is still reported.
+#[allow(dead_code)]
 struct Elf64Phdr {
     p_type: u32,
     p_flags: u32,
@@ -478,6 +534,12 @@ struct Elf64Phdr {
 
 /// Parsed ELF64 symbol.
 #[derive(Clone)]
+// The unread fields stay. This struct mirrors the on-disk record, and the
+// parser reads all of it; dropping the fields this build does not consult
+// would make the type disagree with the format it parses, and re-deriving an
+// offset later is how a parser starts reading the wrong bytes. Per-field
+// rather than crate-wide so a genuinely dead item here is still reported.
+#[allow(dead_code)]
 struct Elf64Sym {
     name_offset: u32,
     info: u8,
@@ -489,6 +551,12 @@ struct Elf64Sym {
 
 /// A resolved symbol with its name.
 #[derive(Clone)]
+// The unread fields stay. This struct mirrors the on-disk record, and the
+// parser reads all of it; dropping the fields this build does not consult
+// would make the type disagree with the format it parses, and re-deriving an
+// offset later is how a parser starts reading the wrong bytes. Per-field
+// rather than crate-wide so a genuinely dead item here is still reported.
+#[allow(dead_code)]
 struct Symbol {
     name: [u8; 128],
     name_len: usize,
@@ -506,6 +574,12 @@ impl Symbol {
 
 /// A section entry for our section table.
 #[derive(Clone)]
+// The unread fields stay. This struct mirrors the on-disk record, and the
+// parser reads all of it; dropping the fields this build does not consult
+// would make the type disagree with the format it parses, and re-deriving an
+// offset later is how a parser starts reading the wrong bytes. Per-field
+// rather than crate-wide so a genuinely dead item here is still reported.
+#[allow(dead_code)]
 struct Section {
     name: [u8; 64],
     name_len: usize,
@@ -514,12 +588,6 @@ struct Section {
     offset: u64,
     size: u64,
     flags: u64,
-}
-
-impl Section {
-    fn name_bytes(&self) -> &[u8] {
-        &self.name[..self.name_len]
-    }
 }
 
 /// Loaded ELF information.
@@ -580,14 +648,6 @@ impl ElfInfo {
             }
         }
         best
-    }
-
-    /// Find section by name.
-    fn find_section(&self, name: &[u8]) -> Option<&Section> {
-        self.sections
-            .iter()
-            .find(|&sec| bytes_eq(sec.name_bytes(), name))
-            .map(|v| v as _)
     }
 
     /// Get bytes at a given virtual address for a given length.
@@ -852,6 +912,13 @@ fn parse_elf(data: &[u8]) -> Result<ElfInfo, &'static [u8]> {
 
 /// Breakpoint types.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// Unconstructed until SlateOS has ptrace, and kept for that reason rather
+// than removed. `no_inferior` states the blocker to the user: `posix::ptrace`
+// validates its request and returns ENOSYS, so nothing can start, stop or
+// inspect a live process -- which is exactly why every variant describing a
+// *running* program is never built. The blocker is a missing syscall, not a
+// missing design.
+#[allow(dead_code)]
 enum BreakpointKind {
     Software,
     Hardware,
@@ -859,6 +926,13 @@ enum BreakpointKind {
 
 /// A breakpoint entry.
 #[derive(Clone)]
+// Unconstructed until SlateOS has ptrace, and kept for that reason rather
+// than removed. `no_inferior` states the blocker to the user: `posix::ptrace`
+// validates its request and returns ENOSYS, so nothing can start, stop or
+// inspect a live process -- which is exactly why every variant describing a
+// *running* program is never built. The blocker is a missing syscall, not a
+// missing design.
+#[allow(dead_code)]
 struct Breakpoint {
     id: u32,
     address: u64,
@@ -901,6 +975,13 @@ impl Breakpoint {
 
 /// Watchpoint access types.
 #[derive(Clone, Copy, PartialEq, Eq)]
+// Unconstructed until SlateOS has ptrace, and kept for that reason rather
+// than removed. `no_inferior` states the blocker to the user: `posix::ptrace`
+// validates its request and returns ENOSYS, so nothing can start, stop or
+// inspect a live process -- which is exactly why every variant describing a
+// *running* program is never built. The blocker is a missing syscall, not a
+// missing design.
+#[allow(dead_code)]
 enum WatchKind {
     Write,
     Read,
@@ -909,6 +990,13 @@ enum WatchKind {
 
 /// A watchpoint entry.
 #[derive(Clone)]
+// Unconstructed until SlateOS has ptrace, and kept for that reason rather
+// than removed. `no_inferior` states the blocker to the user: `posix::ptrace`
+// validates its request and returns ENOSYS, so nothing can start, stop or
+// inspect a live process -- which is exactly why every variant describing a
+// *running* program is never built. The blocker is a missing syscall, not a
+// missing design.
+#[allow(dead_code)]
 struct Watchpoint {
     id: u32,
     address: u64,
@@ -945,6 +1033,13 @@ impl Watchpoint {
 
 /// Thread state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// Unconstructed until SlateOS has ptrace, and kept for that reason rather
+// than removed. `no_inferior` states the blocker to the user: `posix::ptrace`
+// validates its request and returns ENOSYS, so nothing can start, stop or
+// inspect a live process -- which is exactly why every variant describing a
+// *running* program is never built. The blocker is a missing syscall, not a
+// missing design.
+#[allow(dead_code)]
 enum ThreadState {
     Running,
     Stopped,
@@ -979,6 +1074,13 @@ impl ThreadInfo {
 
 /// A single stack frame.
 #[derive(Clone)]
+// Unconstructed until SlateOS has ptrace, and kept for that reason rather
+// than removed. `no_inferior` states the blocker to the user: `posix::ptrace`
+// validates its request and returns ENOSYS, so nothing can start, stop or
+// inspect a live process -- which is exactly why every variant describing a
+// *running* program is never built. The blocker is a missing syscall, not a
+// missing design.
+#[allow(dead_code)]
 struct StackFrame {
     frame_num: u32,
     rip: u64,
@@ -2156,6 +2258,13 @@ fn gdb_handle_command(
 
 /// The inferior (debugged process) state.
 #[derive(Clone, Copy, PartialEq, Eq)]
+// Unconstructed until SlateOS has ptrace, and kept for that reason rather
+// than removed. `no_inferior` states the blocker to the user: `posix::ptrace`
+// validates its request and returns ENOSYS, so nothing can start, stop or
+// inspect a live process -- which is exactly why every variant describing a
+// *running* program is never built. The blocker is a missing syscall, not a
+// missing design.
+#[allow(dead_code)]
 enum InferiorState {
     NotStarted,
     Running,
@@ -2187,8 +2296,18 @@ struct Debugger {
     /// Debugger variables.
     vars: Vec<DebugVar>,
     /// Inferior state.
+    // Field-level, not on `Debugger`: this is the central struct and a
+    // blanket allow here would hide every dead field added after it. Never
+    // read for the ptrace reason above -- nothing sets a live process's
+    // state because no live process can exist.
+    #[allow(dead_code)]
     inferior_state: InferiorState,
     /// Quiet mode (suppress banner).
+    // Reachable only from `main`, which the test harness replaces: this crate is
+    // `#![cfg_attr(not(test), no_main)]`, so the whole CLI entry path is dead
+    // in the test cfg and live in the real build. Scoped to `test` rather than
+    // allowed outright, so a genuinely dead item here is still reported.
+    #[cfg_attr(test, allow(dead_code))]
     quiet: bool,
     /// Last list command address.
     last_list_addr: u64,
@@ -2197,8 +2316,10 @@ struct Debugger {
     /// Last examine address.
     last_examine_addr: u64,
     /// Whether we should run as gdbserver.
+    #[cfg_attr(test, allow(dead_code))]
     is_server: bool,
     /// Server listen port.
+    #[cfg_attr(test, allow(dead_code))]
     server_port: u16,
 }
 
@@ -2293,6 +2414,20 @@ impl Debugger {
 
         match addr {
             Some(a) => {
+                // Before the announcement, not after the push. The
+                // "Breakpoint N at 0x..." line below is written twenty lines
+                // before `breakpoints.push`, so a limit checked at the push
+                // would print that line and then silently not create it.
+                //
+                // `watchpoints` has had this check since it was written;
+                // `breakpoints` never did, so `break` accepted an unbounded
+                // number and MAX_BREAKPOINTS sat unread -- a limit that is
+                // declared, documented and not enforced.
+                if self.breakpoints.len() >= MAX_BREAKPOINTS {
+                    let _ = out.write_all(b"Too many breakpoints.\n");
+                    return;
+                }
+
                 let mut bp = Breakpoint::new(self.next_bp_id, a);
                 // Store the original byte at this address (if we have the ELF)
                 if let Some(ref elf) = self.elf {
@@ -3203,6 +3338,11 @@ impl Debugger {
     }
 
     /// Main interactive debugger loop (reads from stdin).
+    // Reachable only from `main`, which the test harness replaces: this crate is
+    // `#![cfg_attr(not(test), no_main)]`, so the whole CLI entry path is dead
+    // in the test cfg and live in the real build. Scoped to `test` rather than
+    // allowed outright, so a genuinely dead item here is still reported.
+    #[cfg_attr(test, allow(dead_code))]
     fn run_interactive(&mut self) -> i32 {
         let stdout = io::stdout();
         let mut out = io::BufWriter::new(stdout.lock());
@@ -3244,6 +3384,7 @@ impl Debugger {
     }
 
     /// Run as gdbserver.
+    #[cfg_attr(test, allow(dead_code))]
     fn run_server(&mut self) -> i32 {
         let stdout = io::stdout();
         let mut out = io::BufWriter::new(stdout.lock());
@@ -3308,6 +3449,11 @@ impl Debugger {
 }
 
 /// Helper trait for reading lines from stdin as bytes.
+// Reachable only from `main`, which the test harness replaces: this crate is
+// `#![cfg_attr(not(test), no_main)]`, so the whole CLI entry path is dead
+// in the test cfg and live in the real build. Scoped to `test` rather than
+// allowed outright, so a genuinely dead item here is still reported.
+#[cfg_attr(test, allow(dead_code))]
 trait ReadLineBytes {
     fn read_line_bytes(&self, buf: &mut [u8]) -> io::Result<usize>;
 }
@@ -3322,34 +3468,6 @@ impl<T: io::Read> ReadLineBytes for T {
         // read byte by byte.
         let _ = (self, buf);
         Err(io::Error::new(io::ErrorKind::Unsupported, "use alternate"))
-    }
-}
-
-/// Read one line from stdin into buf, returning bytes read (including newline).
-fn read_stdin_line(buf: &mut [u8]) -> io::Result<usize> {
-    let mut pos = 0;
-    let stdin = io::stdin();
-    let mut handle = stdin.lock();
-    loop {
-        let mut byte = [0u8; 1];
-        match io::Read::read(&mut handle, &mut byte) {
-            Ok(0) => return Ok(pos), // EOF
-            Ok(_) => {
-                if pos < buf.len() {
-                    buf[pos] = byte[0];
-                    pos += 1;
-                }
-                if byte[0] == b'\n' {
-                    return Ok(pos);
-                }
-            }
-            Err(e) => {
-                if pos > 0 {
-                    return Ok(pos);
-                }
-                return Err(e);
-            }
-        }
     }
 }
 
@@ -3386,6 +3504,11 @@ fn detect_personality(argv0: &[u8]) -> Personality {
 // ============================================================================
 
 /// Parsed command-line arguments.
+// Reachable only from `main`, which the test harness replaces: this crate is
+// `#![cfg_attr(not(test), no_main)]`, so the whole CLI entry path is dead
+// in the test cfg and live in the real build. Scoped to `test` rather than
+// allowed outright, so a genuinely dead item here is still reported.
+#[cfg_attr(test, allow(dead_code))]
 struct Args {
     personality: Personality,
     binary_path: Option<Vec<u8>>,
@@ -3398,6 +3521,11 @@ struct Args {
 }
 
 /// Parse arguments for the gdb personality.
+// Reachable only from `main`, which the test harness replaces: this crate is
+// `#![cfg_attr(not(test), no_main)]`, so the whole CLI entry path is dead
+// in the test cfg and live in the real build. Scoped to `test` rather than
+// allowed outright, so a genuinely dead item here is still reported.
+#[cfg_attr(test, allow(dead_code))]
 fn parse_args_gdb(argc: i32, argv: *const *const u8) -> Args {
     let mut args = Args {
         personality: Personality::Gdb,
@@ -3460,6 +3588,11 @@ fn parse_args_gdb(argc: i32, argv: *const *const u8) -> Args {
 }
 
 /// Parse arguments for the gdbserver personality.
+// Reachable only from `main`, which the test harness replaces: this crate is
+// `#![cfg_attr(not(test), no_main)]`, so the whole CLI entry path is dead
+// in the test cfg and live in the real build. Scoped to `test` rather than
+// allowed outright, so a genuinely dead item here is still reported.
+#[cfg_attr(test, allow(dead_code))]
 fn parse_args_server(argc: i32, argv: *const *const u8) -> Args {
     let mut args = Args {
         personality: Personality::GdbServer,
@@ -3522,6 +3655,11 @@ fn parse_args_server(argc: i32, argv: *const *const u8) -> Args {
 // Help / Version output
 // ============================================================================
 
+// Reachable only from `main`, which the test harness replaces: this crate is
+// `#![cfg_attr(not(test), no_main)]`, so the whole CLI entry path is dead
+// in the test cfg and live in the real build. Scoped to `test` rather than
+// allowed outright, so a genuinely dead item here is still reported.
+#[cfg_attr(test, allow(dead_code))]
 fn print_help_gdb(out: &mut dyn Write) {
     let _ = out.write_all(b"Usage: gdb [OPTIONS] [EXECUTABLE]\n\n");
     let _ = out.write_all(b"Options:\n");
@@ -3532,6 +3670,11 @@ fn print_help_gdb(out: &mut dyn Write) {
     let _ = out.write_all(b"  --args           Pass remaining arguments to inferior\n");
 }
 
+// Reachable only from `main`, which the test harness replaces: this crate is
+// `#![cfg_attr(not(test), no_main)]`, so the whole CLI entry path is dead
+// in the test cfg and live in the real build. Scoped to `test` rather than
+// allowed outright, so a genuinely dead item here is still reported.
+#[cfg_attr(test, allow(dead_code))]
 fn print_help_server(out: &mut dyn Write) {
     let _ = out.write_all(b"Usage: gdbserver [HOST:]PORT EXECUTABLE [ARGS...]\n\n");
     let _ = out.write_all(b"Options:\n");
@@ -3539,6 +3682,11 @@ fn print_help_server(out: &mut dyn Write) {
     let _ = out.write_all(b"  --version        Display version and exit\n");
 }
 
+// Reachable only from `main`, which the test harness replaces: this crate is
+// `#![cfg_attr(not(test), no_main)]`, so the whole CLI entry path is dead
+// in the test cfg and live in the real build. Scoped to `test` rather than
+// allowed outright, so a genuinely dead item here is still reported.
+#[cfg_attr(test, allow(dead_code))]
 fn print_version(out: &mut dyn Write) {
     let _ = out.write_all(b"Slate OS GDB ");
     let _ = out.write_all(VERSION);
@@ -4166,6 +4314,46 @@ mod tests {
     /// It used to evaluate to 0, so `print $rxa` -- one transposed pair
     /// away from `$rax` -- reported that the register held zero, and
     /// nothing distinguished that from a register that really did.
+    /// The breakpoint limit is enforced, and enforced *before* the line
+    /// that announces the breakpoint. `watchpoints` had this check from the
+    /// start; `breakpoints` never did, so MAX_BREAKPOINTS was declared,
+    /// documented and unread while `break` accepted any number.
+    #[test]
+    fn the_breakpoint_limit_refuses_without_announcing() {
+        let mut dbg = Debugger::new();
+        let mut out: Vec<u8> = Vec::new();
+        for i in 0..MAX_BREAKPOINTS {
+            // `format_hex` writes its own "0x" prefix; adding one here
+            // built `*0x0x1000`, which resolve_location rejected, and the
+            // setup assertion caught it.
+            let mut cmd = b"break *".to_vec();
+            let mut buf = [0u8; 20];
+            let n = format_hex(0x1000 + i as u64, &mut buf);
+            cmd.extend_from_slice(&buf[..n]);
+            dbg.process_command(&cmd, &mut out);
+        }
+        assert_eq!(dbg.breakpoints.len(), MAX_BREAKPOINTS, "setup");
+
+        // One more must refuse, and must not print a "Breakpoint N at ..."
+        // line for a breakpoint it did not create -- announcing then
+        // declining is the shape the check is positioned to avoid.
+        out.clear();
+        dbg.process_command(b"break *0x9999", &mut out);
+        assert_eq!(
+            dbg.breakpoints.len(),
+            MAX_BREAKPOINTS,
+            "grew past the limit"
+        );
+        // Byte windows, not `from_utf8_lossy`: CLAUDE.md forbids it outright,
+        // and this file already searches output this way elsewhere.
+        let has = |needle: &[u8]| out.windows(needle.len()).any(|w| w == needle);
+        assert!(has(b"Too many breakpoints"), "did not refuse");
+        assert!(
+            !has(b"Breakpoint "),
+            "announced a breakpoint it refused to create"
+        );
+    }
+
     #[test]
     fn an_unknown_register_is_refused_not_zero() {
         let mut regs = [0u64; REG_COUNT];

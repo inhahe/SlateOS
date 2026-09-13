@@ -49,13 +49,11 @@ BASELINE = {
     "userspace/dhcpcd",
     "userspace/findmnt",
     "userspace/finger",
-    "userspace/gdb",
     "userspace/getty",
     "userspace/irqbalance",
     "userspace/jq",
     "userspace/ldconfig",
     "userspace/login",
-    "userspace/logind",
     "userspace/ntpd",
     "userspace/objdump",
     "userspace/oils",
@@ -64,8 +62,22 @@ BASELINE = {
     "userspace/systemctl",
     "userspace/tcpdump",
     "userspace/upower",
-    "userspace/wpa",
 }
+
+# Conditions under which a crate-level dead_code allow is inherently narrow,
+# because the condition excludes the configuration that actually ships.
+#
+#   test        -- the harness replaces `main`, so the whole CLI entry path is
+#                  unreachable in that build and live in the real one.
+#   not(unix)   -- a crate whose `#[cfg(unix)]` half is compiled out on a
+#                  Windows host reports its entire unix side dead. `logind`
+#                  reports 31 such items and is clean on linux-gnu.
+#
+# Anything else -- `all()` above all, which is unconditional wearing a
+# condition -- is treated as a blanket allow. That distinction is the whole
+# point: the first version of this gate matched only `#![allow(`, so every
+# form below slipped past it untouched, including the tautological one.
+NARROW_CONDS = ("test", "not(unix)")
 
 NL = chr(10)
 
@@ -84,16 +96,69 @@ def strip_line_comments(text):
 
 
 def crate_level_dead_code(text):
-    """True if a crate-level ``#![allow(...)]`` names ``dead_code``.
+    """How a crate-level attribute allows ``dead_code``: ``None``, ``"plain"``
+    or ``"cfg"``.
 
     Paren-matched rather than line-matched, because the attribute is often
     split across lines and a line regex would miss exactly the ones that are
     hardest to notice by eye.
+
+    ``cfg_attr`` is matched too, and finding that it was not is the reason
+    this returns a kind rather than a bool. `#![cfg_attr(not(unix),
+    allow(dead_code))]` is legitimate in a crate whose unix half is compiled
+    out on the build host -- `logind` is exactly that -- but nothing stopped
+    `#![cfg_attr(all(), allow(dead_code))]`, which silences the crate
+    unconditionally and slipped straight past the first version of this gate.
+    A conditional allow is permitted and must be declared in ``CFG_SCOPED``
+    with its reason, so the narrow form stays available and stays visible.
     """
     text = strip_line_comments(text)
+    if _names_dead_code(text, "#![allow("):
+        return "plain"
+    cond = _cfg_attr_condition(text)
+    if cond is None:
+        return None
+    return "cfg" if cond.replace(" ", "") in NARROW_CONDS else "plain"
+
+
+def _cfg_attr_condition(text):
+    """The condition of a crate-level ``cfg_attr`` that allows dead_code."""
     i = 0
     while True:
-        i = text.find("#![allow(", i)
+        i = text.find("#![cfg_attr(", i)
+        if i < 0:
+            return None
+        j = text.index("(", i)
+        depth = 0
+        k = j
+        while k < len(text):
+            if text[k] == "(":
+                depth += 1
+            elif text[k] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            k += 1
+        body = text[j + 1:k]
+        if _names_dead_code("#![allow(" + body + ")]", "#![allow("):
+            # The condition is everything before the comma that separates it
+            # from the attribute, at paren depth zero.
+            d = 0
+            for n, ch in enumerate(body):
+                if ch == "(":
+                    d += 1
+                elif ch == ")":
+                    d -= 1
+                elif ch == "," and d == 0:
+                    return body[:n].strip()
+            return body.strip()
+        i = k + 1
+
+
+def _names_dead_code(text, opener):
+    i = 0
+    while True:
+        i = text.find(opener, i)
         if i < 0:
             return False
         j = text.index("(", i)
@@ -158,17 +223,21 @@ def selftest():
     import tempfile
 
     cases = [
-        ("#![allow(dead_code)]", True, "bare"),
-        ("#![allow(clippy::all, dead_code)]", True, "trailing in a list"),
+        ("#![allow(dead_code)]", "plain", "bare"),
+        ("#![allow(clippy::all, dead_code)]", "plain", "trailing in a list"),
         ("#![allow(" + NL + "    clippy::all," + NL + "    dead_code," + NL + ")]",
-         True, "split over lines"),
-        ("#![allow(clippy::all)]", False, "unrelated lint"),
-        ("#[allow(dead_code)]" + NL + "fn f() {}", False, "per-item is allowed"),
-        ("// dead_code is discussed here", False, "mentioned in a comment"),
-        ("#![allow(clippy::type_complexity)] // dead_code", False, "comment after"),
+         "plain", "split over lines"),
+        ("#![allow(clippy::all)]", None, "unrelated lint"),
+        ("#[allow(dead_code)]" + NL + "fn f() {}", None, "per-item is allowed"),
+        ("// dead_code is discussed here", None, "mentioned in a comment"),
+        ("#![allow(clippy::type_complexity)] // dead_code", None, "comment after"),
         ("#![allow(nonstandard_style)]" + NL + "#![allow(dead_code)]",
-         True, "second attribute"),
-        ("#![allow(clippy::dead_code_like_name)]", False, "substring is not the lint"),
+         "plain", "second attribute"),
+        ("#![allow(clippy::dead_code_like_name)]", None, "substring is not the lint"),
+        ("#![cfg_attr(not(unix), allow(dead_code))]", "cfg", "conditional form"),
+        ("#![cfg_attr(all(), allow(dead_code))]", "plain",
+         "a tautological cfg counts as blanket, not as scoped"),
+        ("#[cfg_attr(test, allow(dead_code))]" + NL + "fn f() {}", None, "per-item cfg_attr is allowed"),
     ]
     bad = 0
     for text, want, why in cases:
@@ -237,11 +306,20 @@ def main(argv=None):
                 text = fh.read()
         except OSError:
             continue
-        if crate_level_dead_code(text):
-            hits.setdefault(crate, []).append(path)
+        kind = crate_level_dead_code(text)
+        if kind:
+            hits.setdefault(crate, []).append((path, kind))
 
-    offenders = [(c, hits[c]) for c in sorted(hits) if c not in BASELINE]
-    clean_baseline = [c for c in BASELINE if c not in hits and c in crates]
+    # A conditional allow is fine if declared; an undeclared one of either
+    # kind is not. Checking the kind matters: `cfg_attr(all(), ...)` is
+    # unconditional in effect and must not pass as a scoped exception.
+    offenders = [
+        (c, [p for p, _ in hits[c]])
+        for c in sorted(hits)
+        if c not in BASELINE and any(k == "plain" for _, k in hits[c])
+    ]
+    plain_hits = {c for c, v in hits.items() if any(k == "plain" for _, k in v)}
+    clean_baseline = [c for c in BASELINE if c not in plain_hits and c in crates]
     # A baselined crate that no longer exists is also stale, and saying so
     # separately keeps the "go fix it" advice from being wrong.
     vanished = [c for c in BASELINE if c not in crates]
@@ -271,7 +349,9 @@ def main(argv=None):
         return 1
 
     print("check-dead-code-allows: %d file(s) in %d crate(s) scanned, "
-          "%d baselined, 0 new." % (len(files), len(crates), len(BASELINE)))
+          "%d baselined, %d narrowly cfg-scoped, 0 new."
+          % (len(files), len(crates), len(BASELINE),
+             len(hits) - len(plain_hits)))
     return 0
 
 

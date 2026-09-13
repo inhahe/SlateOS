@@ -9743,29 +9743,62 @@ mod tests {
     /// a window, a picture in it, and a composited frame.
     #[test]
     fn the_demo_scene_still_composites() {
-        let mut compositor = Compositor::new(1920, 1080, 60).expect("compositor");
-        let window_id = compositor.create_window("Welcome to Slate OS".to_string(), 640, 480, 1);
+        // One first frame, on a fresh compositor -- which is how every figure
+        // in the comment below was gathered. `compose_frame` rate-limits to the
+        // target interval and early-outs when nothing is damaged, so composing
+        // twice on one compositor does not give two samples; a new one does.
+        let sample = || {
+            let mut compositor = Compositor::new(1920, 1080, 60).expect("compositor");
+            let window_id =
+                compositor.create_window("Welcome to Slate OS".to_string(), 640, 480, 1);
 
-        let mut tree = RenderTree::new();
-        tree.fill_rect(10.0, 10.0, 200.0, 40.0, Color::BLUE);
-        tree.text(
-            20.0,
-            20.0,
-            "Hello from Slate OS Compositor!",
-            Color::WHITE,
-            14.0,
-        );
-        tree.fill_rect(10.0, 60.0, 620.0, 1.0, Color::LIGHT_GRAY);
-        compositor
-            .submit_render(window_id, tree.commands)
-            .expect("submit");
+            let mut tree = RenderTree::new();
+            tree.fill_rect(10.0, 10.0, 200.0, 40.0, Color::BLUE);
+            tree.text(
+                20.0,
+                20.0,
+                "Hello from Slate OS Compositor!",
+                Color::WHITE,
+                14.0,
+            );
+            tree.fill_rect(10.0, 60.0, 620.0, 1.0, Color::LIGHT_GRAY);
+            compositor
+                .submit_render(window_id, tree.commands)
+                .expect("submit");
 
-        assert!(compositor.compose_frame(), "nothing was drawn");
-        assert_eq!(compositor.window_count(), 1);
-        let frame_us = compositor.frame_stats().last_frame_time_us;
+            assert!(compositor.compose_frame(), "nothing was drawn");
+            assert_eq!(compositor.window_count(), 1);
+            compositor.frame_stats().last_frame_time_us
+        };
+
+        // THE BEST OF FIVE, and the reason is an incident rather than a
+        // preference. This ceiling fired twice on 2026-09-12, both times during
+        // a parallel `cargo test --workspace`:
+        //
+        //   67_074 us -- a real regression. Adding the 4.5:1 text floor made
+        //                palette resolution call `contrast_ratio`, which was
+        //                three `powf(2.4)` per colour, and the compositor
+        //                resolves a palette per blurred window per frame.
+        //                Fixed by tabling the sRGB curve; `contrast_ratio` went
+        //                436 ns -> 4 ns. The ceiling did exactly its job.
+        //   53_363 us -- contention. The same test, alone, took ~5_000 us.
+        //
+        // A single wall-clock sample taken while a dozen other test binaries
+        // are saturating twelve cores measures the machine's mood as much as
+        // the render path. The *minimum* over a few samples is the honest
+        // estimator of what the machine can do when it gets a slice; the median
+        // and the maximum measure the load around it. Taking the minimum keeps
+        // the bound able to catch the first case -- a tenfold regression is
+        // tenfold in every sample -- while not failing for the second.
+        //
+        // Five, not more, because each is a whole compositor and a frame: about
+        // 25 ms in total, which is not worth optimising and not worth arguing
+        // about.
+        let samples: [u64; 5] = std::array::from_fn(|_| sample());
+        let frame_us = samples.iter().copied().min().unwrap_or(u64::MAX);
         assert!(
             frame_us > 0,
-            "the frame took no measurable time, so it did no work"
+            "the fastest of five frames took no measurable time, so it did no work"
         );
 
         // A ceiling, because `> 0` alone only proves the clock runs.
@@ -9821,7 +9854,7 @@ mod tests {
         const FRAME_CEILING_US: u64 = 50_000;
         assert!(
             frame_us < FRAME_CEILING_US,
-            "a frame of this trivial scene took {frame_us} us, over the              {FRAME_CEILING_US} us ceiling; the measured median when this bound              was set was 4_977 us, so something in the render path has changed              by an order of magnitude"
+            "the fastest of five frames of this trivial scene took {frame_us} us, over the {FRAME_CEILING_US} us ceiling; the measured median when this bound was set was 4_977 us. All five: {samples:?}. Since this is the *minimum*, machine load is not the explanation -- something in the render path has changed by an order of magnitude"
         );
     }
 

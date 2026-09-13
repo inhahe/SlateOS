@@ -559,6 +559,28 @@ fn show_user(args: &[String]) {
     );
 }
 
+/// The user whose linger marker a command operates on.
+///
+/// Both commands used `unwrap_or("current user")`, so running either with no
+/// argument did not act on the caller -- it acted on a user literally named
+/// `current user`, creating `/run/user/linger/current user` and then
+/// announcing "Linger enabled for user 'current user'." The placeholder was
+/// a stand-in for a lookup this binary cannot do: nothing here maps a uid to
+/// a name, and `loginctl` on Linux gets the caller from the bus connection.
+///
+/// Naming a user that does not exist is worse than declining, so the
+/// argument is now required. The help text says `USER` rather than `[USER]`
+/// to match.
+fn linger_user<'a>(args: &'a [String], command: &str) -> &'a str {
+    match args.first() {
+        Some(u) if !u.is_empty() => u.as_str(),
+        _ => {
+            eprintln!("loginctl: {command} requires a user name");
+            process::exit(1);
+        }
+    }
+}
+
 /// Create or remove a user's linger marker file.
 ///
 /// Split out of `enable_linger`/`disable_linger` so the filesystem behaviour
@@ -596,7 +618,7 @@ fn set_linger_marker(marker: &std::path::Path, enable: bool) -> std::io::Result<
 }
 
 fn enable_linger(args: &[String]) {
-    let user = args.first().map(|s| s.as_str()).unwrap_or("current user");
+    let user = linger_user(args, "enable-linger");
     let marker = format!("{}/linger/{}", USER_RUNTIME_DIR, user);
     if let Err(e) = set_linger_marker(std::path::Path::new(&marker), true) {
         eprintln!(
@@ -609,7 +631,7 @@ fn enable_linger(args: &[String]) {
 }
 
 fn disable_linger(args: &[String]) {
-    let user = args.first().map(|s| s.as_str()).unwrap_or("current user");
+    let user = linger_user(args, "disable-linger");
     let marker = format!("{}/linger/{}", USER_RUNTIME_DIR, user);
     if let Err(e) = set_linger_marker(std::path::Path::new(&marker), false) {
         eprintln!(
@@ -1034,8 +1056,8 @@ fn print_loginctl_help() {
     println!("  list-users                 List logged-in users");
     println!("  user-status [USER]         Show user status");
     println!("  show-user [USER]           Show user properties");
-    println!("  enable-linger [USER]       Enable user lingering");
-    println!("  disable-linger [USER]      Disable user lingering");
+    println!("  enable-linger USER         Enable user lingering");
+    println!("  disable-linger USER        Disable user lingering");
     println!("  terminate-user USER        Terminate user sessions");
     println!("  kill-user USER             Kill user processes");
     println!();

@@ -228,6 +228,28 @@ pub struct ShellSession<T: Transport> {
     dirty: bool,
     running: bool,
     launches: Vec<PathBuf>,
+    /// Whether this session can be locked at all.
+    ///
+    /// False when the account that logged in has no password, which is
+    /// `design-decisions.md` 818: *an account with no password is never
+    /// locked* -- the lock screen does not appear, rather than appearing and
+    /// letting anyone dismiss it. A lock that anybody can clear is worse than
+    /// no lock, because it says the machine is protected.
+    ///
+    /// **The decision lives here because here is where the fact is.**
+    /// `apps/lockscreen` cannot make it: it runs only *after* the decision, and
+    /// has no trustworthy way to learn whose session it is locking -- deciding
+    /// from `$USER` would let an environment variable an attacker can set
+    /// decide whether the machine locks. `HotkeyAction::command` cannot make it
+    /// either; it is a pure mapping from action to program with no session in
+    /// scope. The session authenticated the user and holds the only honest
+    /// answer.
+    ///
+    /// Defaults to true: a session that never showed a login screen (no user
+    /// database, or a shell started for a display that was already open) has
+    /// not learned that the account is passwordless, and refusing to lock on a
+    /// guess is the failure 818 is trying to avoid pointing the other way.
+    lockable: bool,
     /// Everything currently moving. Empty means no wake-up is registered and
     /// the loop parks with no bound at all, which is what keeps an idle desktop
     /// idle.
@@ -482,6 +504,7 @@ impl<T: Transport> ShellSession<T> {
             dirty: false,
             running: false,
             launches: Vec::new(),
+            lockable: true,
             animations: AnimationManager::new(),
             autohide: AutoHideManager::new(AutoHideConfig {
                 enabled: false,
@@ -704,6 +727,10 @@ impl<T: Transport> ShellSession<T> {
             // one on, and refusing it here would make that setting mean
             // "unusable account" rather than "no password".
             authlib::Outcome::Accepted | authlib::Outcome::NoPassword => {
+                // 818, recorded at the one moment it is known. `NoPassword` is
+                // not a failure -- the screen opens either way -- but it is the
+                // fact that decides whether this session can ever be locked.
+                self.lockable = outcome != authlib::Outcome::NoPassword;
                 screen.auth_success();
                 // Nothing between this and the desktop: the screen's
                 // `LoggingIn` phase is a frame of feedback, not a step that can
@@ -751,6 +778,32 @@ impl<T: Transport> ShellSession<T> {
     /// inventing one here would put the policy in the window manager.
     pub fn take_login_power(&mut self) -> Option<LoginPowerAction> {
         self.login_power.take()
+    }
+
+    /// Record programs the user asked to start, minus any this session refuses.
+    ///
+    /// The one refusal is `design-decisions.md` 818: a session whose account
+    /// has no password is never locked, so a request to run the lock screen is
+    /// dropped rather than queued. Dropped **here**, where it is recorded,
+    /// rather than filtered in [`take_launches`](Self::take_launches) -- a lock
+    /// sitting in the queue until something drains it is a lock this session
+    /// has, however briefly, agreed to, and `launches` is readable in between.
+    ///
+    /// Every other launch passes through untouched. The Run box, a start-menu
+    /// click and a hotkey are the same ask and must stay indistinguishable to
+    /// whoever drains them.
+    fn queue_launches(&mut self, wanted: Vec<PathBuf>) {
+        for path in wanted {
+            if !self.lockable && path.as_os_str() == crate::hotkeys::LOCK_COMMAND {
+                // Not an error and not reported: 818 says the screen "simply
+                // does not appear". Telling the user their lock shortcut was
+                // refused would be describing a setting they did not make --
+                // the administrator left the account without a password, and
+                // this is what that means.
+                continue;
+            }
+            self.launches.push(path);
+        }
     }
 
     /// The programs the user has asked to start since this was last called.
@@ -1557,7 +1610,7 @@ impl<T: Transport> ShellSession<T> {
                 // `request` there is nothing here that can fail: the session
                 // does not start the program either, it only records that one
                 // was asked for.
-                self.launches.extend(outcome.launches);
+                self.queue_launches(outcome.launches);
             }
             // Somebody rewrote `input.yaml`. The one field the shell owns
             // there is which shortcut cycles the keyboard layout, and picking
@@ -1589,7 +1642,7 @@ impl<T: Transport> ShellSession<T> {
                 for request in outcome.requests {
                     self.request(request)?;
                 }
-                self.launches.extend(outcome.launches);
+                self.queue_launches(outcome.launches);
             }
             // The background surface is screen-sized by construction, so the
             // compositor resizing it *is* the display changing size. Everything
@@ -1928,7 +1981,7 @@ impl<T: Transport> ShellSession<T> {
             ShellAction::Pass => {}
             ShellAction::Consumed => self.dirty = true,
             ShellAction::Launch(path) => {
-                self.launches.push(path);
+                self.queue_launches(vec![path]);
                 self.dirty = true;
             }
             ShellAction::Control(request) => self.request(request)?,

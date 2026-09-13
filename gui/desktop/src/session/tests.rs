@@ -3434,6 +3434,93 @@ fn session_with_login() -> (Session, Desktop, scratchdir::ScratchDir) {
     (session, desktop, dir)
 }
 
+/// A login screen backed by an account with **no** password.
+///
+/// The other half of `session_with_login`: same shape, no `password_hash`
+/// line, which is what an administrator leaving an account open looks like on
+/// disk.
+fn session_with_passwordless_login() -> (Session, Desktop, scratchdir::ScratchDir) {
+    let dir = scratchdir::ScratchDir::new("shell-login-open");
+    let path = dir.path("users.yaml");
+    std::fs::write(
+        &path,
+        "users:
+             - username: alice
+   uid: 1000
+   display_name: Alice
+",
+    )
+    .unwrap();
+    let (events, desktop) = wired();
+    let session =
+        ShellSession::start_with_stores(events, &path).expect("the harness refused a surface");
+    (session, desktop, dir)
+}
+
+/// 818: an account with no password is never locked.
+///
+/// The lock shortcut produces a launch of `/usr/bin/lockscreen`, and since
+/// 2026-09-13 something actually runs it -- `gui/desktop`'s binary drains
+/// `take_launches` and spawns. So this stopped being latent the moment the
+/// shell got a process, which is why it is implemented now.
+///
+/// A lock that anybody can clear is worse than no lock: it tells the person
+/// standing at the machine that it is protected.
+#[test]
+fn a_session_with_no_password_does_not_lock() {
+    let (mut session, desktop, _dir) = session_with_passwordless_login();
+    // Enter on an account with no password: `authlib` answers `NoPassword`,
+    // the screen opens, and the session records that this one cannot lock.
+    type_password(&desktop, &mut session, "");
+    assert!(session.login().is_none(), "the desktop should be open");
+
+    press_lock_shortcut(&desktop, &mut session);
+    assert!(
+        session.take_launches().is_empty(),
+        "818: the lock screen must not even be asked for"
+    );
+}
+
+/// And the same shortcut on an account that *has* one still locks.
+///
+/// The negative control, and it is the half that makes the test above mean
+/// something: without it, a `queue_launches` that dropped every launch would
+/// pass.
+#[test]
+fn a_session_with_a_password_still_locks() {
+    let (mut session, desktop, _dir) = session_with_login();
+    type_password(&desktop, &mut session, "password");
+    assert!(session.login().is_none(), "the desktop should be open");
+
+    press_lock_shortcut(&desktop, &mut session);
+    let launched = session.take_launches();
+    assert_eq!(
+        launched,
+        vec![std::path::PathBuf::from("/usr/bin/lockscreen")],
+        "an account with a password locks as it always did"
+    );
+}
+
+/// Press Super+L on the open desktop, through the compositor.
+///
+/// Not `shell_mut().handle_hotkey(...)`: that returns the outcome to the
+/// caller, and the *session* is what decides whether a launch in it is queued.
+/// A test that called the shell directly would be testing the half that has
+/// never been in question.
+fn press_lock_shortcut(desktop: &Desktop, session: &mut Session) {
+    let window = session.panel().window();
+    desktop.borrow_mut().send_input(&[InputEvent::new(
+        window,
+        guitk::event::Event::Key(KeyEvent {
+            key: Key::L,
+            pressed: true,
+            modifiers: Modifiers::super_key(),
+            text: String::new(),
+        }),
+    )]);
+    session.pump().expect("pump");
+}
+
 /// Type `password` at the login screen and press Enter, through the real event
 /// path: the compositor delivers to the login surface, the session routes it.
 fn type_password(desktop: &Desktop, session: &mut Session, password: &str) {

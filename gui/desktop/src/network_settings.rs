@@ -3678,18 +3678,14 @@ mod tests {
             );
 
             // The well the tab content sits in: the full-width inset at x 8.
-            let well = cmds.iter().find_map(|c| match c {
-                RenderCommand::FillRect {
-                    x: 8.0,
-                    width: 584.0,
-                    color,
-                    ..
-                } => Some(*color),
-                _ => None,
-            });
+            let well = cmds
+                .iter()
+                .filter_map(appearance::painted_rect)
+                .find(|(x, _, w, _, _)| *x == 8.0 && *w == 584.0)
+                .map(|t| t.4);
             assert_eq!(
                 well,
-                Some(p.crust),
+                Some(p.painted(appearance::Surface::Card)),
                 "the content well is not p.crust (light={light})"
             );
         }

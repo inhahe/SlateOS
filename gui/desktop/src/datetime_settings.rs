@@ -1706,10 +1706,9 @@ mod tests {
     /// Every fill exactly `h` tall, in draw order.
     fn fills_h(cmds: &[RenderCommand], h: f32) -> Vec<Color> {
         cmds.iter()
-            .filter_map(|c| match c {
-                RenderCommand::FillRect { height, color, .. } if *height == h => Some(*color),
-                _ => None,
-            })
+            .filter_map(appearance::painted_rect)
+            .filter(|(_, _, _, height, _)| *height == h)
+            .map(|t| t.4)
             .collect()
     }
 
@@ -2009,14 +2008,14 @@ mod tests {
             let dt = render(&wound(DateTimeTab::DateTime), &p);
             assert_eq!(
                 fills_h(&dt, 80.0),
-                vec![p.surface0],
+                vec![p.painted(appearance::Surface::Card)],
                 "the clock card ({what})"
             );
 
             let tz = render(&wound(DateTimeTab::Timezone), &p);
             assert_eq!(
                 fills_h(&tz, 44.0),
-                vec![p.surface1],
+                vec![p.painted(appearance::Surface::Card)],
                 "the current-zone card ({what})"
             );
             assert_eq!(

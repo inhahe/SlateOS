@@ -1813,17 +1813,14 @@ mod tests {
                 "the panel's backdrop is not p.base (light={light})"
             );
 
-            let filter_bar = apps.iter().find_map(|c| match c {
-                RenderCommand::FillRect {
-                    height: 30.0,
-                    color,
-                    ..
-                } => Some(*color),
-                _ => None,
-            });
+            let filter_bar = apps
+                .iter()
+                .filter_map(appearance::painted_rect)
+                .find(|(_, _, _, h, _)| *h == 30.0)
+                .map(|t| t.4);
             assert_eq!(
                 filter_bar,
-                Some(p.surface0),
+                Some(p.painted(appearance::Surface::Card)),
                 "the filter field is not p.surface0 (light={light})"
             );
 
@@ -1853,18 +1850,15 @@ mod tests {
             }
 
             let boot = render(&wound(StartupTab::Boot, true), &p);
-            let card = boot.iter().find_map(|c| match c {
-                RenderCommand::FillRect {
-                    height: 48.0,
-                    color,
-                    ..
-                } => Some(*color),
-                _ => None,
-            });
+            let card = boot
+                .iter()
+                .filter_map(appearance::painted_rect)
+                .find(|(_, _, _, h, _)| *h == 48.0)
+                .map(|t| t.4);
             assert_eq!(
                 card,
-                Some(p.surface0),
-                "the last-boot-time card is not p.surface0 (light={light})"
+                Some(p.painted(appearance::Surface::Card)),
+                "the last-boot-time card is not the card surface (light={light})"
             );
         }
     }

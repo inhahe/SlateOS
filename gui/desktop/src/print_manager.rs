@@ -1075,20 +1075,15 @@ mod tests {
         hits[0]
     }
 
+    /// The one box of this size, whether the theme filled it or outlined it.
     fn fill_of_size(cmds: &[RenderCommand], w: f32, h: f32) -> Color {
         let hits: Vec<Color> = cmds
             .iter()
-            .filter_map(|c| match c {
-                RenderCommand::FillRect {
-                    width,
-                    height,
-                    color,
-                    ..
-                } if *width == w && *height == h => Some(*color),
-                _ => None,
-            })
+            .filter_map(appearance::painted_rect)
+            .filter(|(_, _, width, height, _)| *width == w && *height == h)
+            .map(|t| t.4)
             .collect();
-        assert_eq!(hits.len(), 1, "expected exactly one {w}x{h} fill");
+        assert_eq!(hits.len(), 1, "expected exactly one {w}x{h} box");
         hits[0]
     }
 
@@ -1239,7 +1234,7 @@ mod tests {
             // label inside it marks the choice.
             assert_eq!(
                 rgb(fill_of_size(&open, 280.0, 24.0)),
-                rgb(p.surface0),
+                rgb(p.painted(appearance::Surface::Card)),
                 "{mode}"
             );
             // Print button: the default action.

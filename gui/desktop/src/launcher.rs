@@ -1899,10 +1899,17 @@ mod tests {
                 vec![p.mantle],
                 "the search field is a rung below the dialog around it"
             );
+            // At the origin, which is the search field and nothing else. A
+            // bare `StrokeRect` pattern would now also collect every card.
             let strokes: Vec<Color> = cmds
                 .iter()
                 .filter_map(|c| match c {
-                    RenderCommand::StrokeRect { color, .. } => Some(*color),
+                    RenderCommand::StrokeRect {
+                        x: 0.0,
+                        y: 0.0,
+                        color,
+                        ..
+                    } => Some(*color),
                     _ => None,
                 })
                 .collect();
@@ -1911,8 +1918,8 @@ mod tests {
             // The selected row: a fill and a bar, and exactly one of each.
             assert_eq!(
                 fills_sized(&cmds, 596.0, ROW_HEIGHT),
-                vec![p.surface1],
-                "exactly one row is filled, at the raised rung"
+                vec![p.painted(appearance::Surface::Selected)],
+                "exactly one row is marked as selected"
             );
             assert_eq!(
                 fills_sized(&cmds, 3.0, ROW_HEIGHT - 16.0),

@@ -2149,7 +2149,15 @@ mod tests {
     fn outlines(cmds: &[RenderCommand]) -> Vec<Color> {
         cmds.iter()
             .filter_map(|c| match c {
-                RenderCommand::StrokeRect { color, .. } => Some(*color),
+                // 16x16 is the radio ring and the checkbox, and since the
+                // border theme landed it is what separates them from every
+                // other outline on the page -- a card is an outline now too.
+                RenderCommand::StrokeRect {
+                    width: 16.0,
+                    height: 16.0,
+                    color,
+                    ..
+                } => Some(*color),
                 _ => None,
             })
             .collect()

@@ -2015,9 +2015,15 @@ mod tests {
             .collect()
     }
 
+    /// Every box painted in colour `c`, filled or outlined.
+    ///
+    /// Counting `FillRect` alone would see nothing once a surface becomes an
+    /// outline, and an assertion of "exactly 1" would fail loudly -- but an
+    /// assertion of "0 of the wrong colour" would pass for the wrong reason.
     fn fills_exactly(cmds: &[RenderCommand], c: Color) -> usize {
         cmds.iter()
-            .filter(|k| matches!(k, RenderCommand::FillRect { color, .. } if *color == c))
+            .filter_map(appearance::painted_rect)
+            .filter(|(_, _, _, _, got)| *got == c)
             .count()
     }
 
@@ -2460,7 +2466,7 @@ mod tests {
                 let cmds = full_mgr().render(&p, &sample_readings());
 
                 assert_eq!(
-                    fills_exactly(&cmds, p.mantle),
+                    fills_exactly(&cmds, p.painted(appearance::Surface::Card)),
                     1,
                     "the picker's panel is not mantle (light={light})"
                 );

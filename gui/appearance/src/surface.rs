@@ -103,6 +103,33 @@ pub fn logical_rect(cmd: &guitk::render::RenderCommand) -> Option<(f32, f32, f32
     }
 }
 
+/// The logical rectangle and colour of a box, however the theme drew it.
+///
+/// The companion to [`logical_rect`] for tests that need the colour too. A
+/// test that used to read
+///
+/// ```text
+/// cmds.iter().find_map(|c| match c {
+///     RenderCommand::FillRect { height: 30.0, color, .. } => Some(*color),
+///     _ => None,
+/// })
+/// ```
+///
+/// sees nothing once that box becomes an outline, and -- worse -- keeps
+/// passing if every assertion it feeds is over the resulting empty set. That
+/// is not hypothetical: `privacy_settings` passed vacuously for exactly this
+/// reason. Written through this function the same test matches either shape.
+#[must_use]
+pub fn painted_rect(cmd: &guitk::render::RenderCommand) -> Option<(f32, f32, f32, f32, Color)> {
+    let color = match *cmd {
+        guitk::render::RenderCommand::FillRect { color, .. }
+        | guitk::render::RenderCommand::StrokeRect { color, .. } => color,
+        _ => return None,
+    };
+    let (x, y, w, h) = logical_rect(cmd)?;
+    Some((x, y, w, h, color))
+}
+
 /// What the theme painted at a given rectangle, whichever way it drew it.
 ///
 /// For tests that used to assert "the well is `p.crust`" by matching a
@@ -391,6 +418,28 @@ impl Palette {
                 corner_radii: radii,
             });
         }
+    }
+
+    /// The single colour this theme marks `what` with.
+    ///
+    /// For tests, and for the handful of callers that need a colour rather than
+    /// a paint. A box is filled *or* outlined depending on the theme, and a
+    /// test that used to say `p.surface0` now says `p.painted(Surface::Card)` --
+    /// one token, and correct under both themes.
+    ///
+    /// # Panics
+    ///
+    /// If `what` is drawn with nothing at all, which
+    /// `no_surface_is_invisible_in_either_theme` forbids. A panic here means
+    /// that invariant broke, and a test is the right place to hear about it.
+    #[must_use]
+    pub fn painted(&self, what: Surface) -> Color {
+        let paint = self.surface_paint(what);
+        paint
+            .fill
+            .or(paint.border)
+            .or(paint.separator.map(|(_, c)| c))
+            .expect("every surface is drawn with something")
     }
 
     /// Draw `what` as a rectangle, in whichever way the theme calls for.

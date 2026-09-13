@@ -1971,8 +1971,8 @@ mod tests {
             let highlight = fills(&hovered, |_, _, w, _| w == MW - 8.0);
             assert_eq!(highlight.len(), 1, "expected one hovered row highlight");
             assert_eq!(
-                highlight[0], p.surface0,
-                "the hovered row is not p.surface0 (light={light})"
+                highlight[0], p.painted(appearance::Surface::Selected),
+                "the hovered row is not the selected surface (light={light})"
             );
             assert_ne!(
                 highlight[0], background[0],

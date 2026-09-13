@@ -2162,21 +2162,15 @@ mod tests {
 
     fn fills_of_size(cmds: &[RenderCommand], w: f32, h: f32) -> Vec<Color> {
         cmds.iter()
-            .filter_map(|c| match c {
-                RenderCommand::FillRect {
-                    width,
-                    height,
-                    color,
-                    ..
-                } if *width == w && *height == h => Some(*color),
-                _ => None,
-            })
+            .filter_map(appearance::painted_rect)
+            .filter(|(_, _, width, height, _)| *width == w && *height == h)
+            .map(|t| t.4)
             .collect()
     }
 
     fn fill_of_size(cmds: &[RenderCommand], w: f32, h: f32) -> Color {
         let hits = fills_of_size(cmds, w, h);
-        assert_eq!(hits.len(), 1, "fill {w}x{h}: {} matches", hits.len());
+        assert_eq!(hits.len(), 1, "box {w}x{h}: {} matches", hits.len());
         hits[0]
     }
 

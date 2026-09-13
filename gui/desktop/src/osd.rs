@@ -3070,7 +3070,7 @@ mod tests {
             // T9, T10: the timeout slider's track and its accent fill.
             let track = fills_h(&s, 4.0);
             assert_eq!(track.len(), 2, "the timeout slider is a track and a fill");
-            assert_eq!(rgb(track[0]), rgb(p.surface0), "the timeout track");
+            assert_eq!(rgb(track[0]), rgb(p.painted(appearance::Surface::ControlTrack)), "the timeout track");
             assert_eq!(rgb(track[1]), rgb(p.accent), "the timeout fill");
             // T12: the checkboxes, both sides of their `if`.
             assert_eq!(

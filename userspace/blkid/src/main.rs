@@ -626,6 +626,10 @@ fn run_findfs(cfg: &Config, writer: &mut dyn Write) -> io::Result<i32> {
 // Help / version
 // ---------------------------------------------------------------------------
 
+// Reachable only from `main`, which the test harness replaces, so this is dead
+// in the test build and live in the real one. Scoped to `test` rather than
+// allowed outright, so a genuinely dead item here is still reported.
+#[cfg_attr(test, allow(dead_code))]
 fn print_help(personality: Personality) {
     match personality {
         Personality::Blkid => {
@@ -650,6 +654,7 @@ fn print_help(personality: Personality) {
     }
 }
 
+#[cfg_attr(test, allow(dead_code))]
 fn print_version(personality: Personality) {
     let name = match personality {
         Personality::Blkid => "blkid",

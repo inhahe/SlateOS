@@ -117963,6 +117963,34 @@ The gate that caught the underlying problem (`check-design-decisions-bands`,
 on a §675 entry missing its `**Lane:** A` field) worked exactly as designed.
 The only thing that failed was my reading of whether it had run.
 
+**Recurrence, 2026-09-12, in the `&&` position rather than the report.** Same
+defect, a shape this entry did not name:
+
+```bash
+# WRONG -- `&&` reads tail's status, so a FAILED push runs the next command
+git push origin lane-b 2>&1 | tail -5 && <merge to main>
+```
+
+The push was refused by the tooling-suite gate. `tail` exited 0, the chain
+continued, the merge found nothing new and said "Everything up-to-date", and
+the whole thing exited 0. I read that as success and reported it as such.
+Nothing had landed; two commits sat unpushed while I believed they were on
+`main`.
+
+What is worth adding is not the rule -- the rule was already here, correct,
+with a worked example -- but that **having written this entry did not stop me
+writing the shape.** That now holds for three separate rules in this file: this
+one, the `quote-names` gate (three pushes refused for hand-written `'{}'`), and
+the crate-level allow this session's gate 33 exists for. The pattern in all
+three is that the rule is *known* and the shape is *fluent*, so it arrives
+faster than the recollection does. The remedy that has actually worked is not
+better recall; it is a mechanical check -- `quote-names` catches its case every
+time, and gate 33 will catch its own. **A rule I keep breaking is a rule that
+wants a gate, and this one does not have one yet.** The obstacle is that no
+checker can see a pipeline typed into a terminal; what it could see is a
+pipeline inside a committed script, which is a narrower target and probably
+still worth having.
+
 ---
 
 ## A-CFG-UNIX-GATE-CAN-GO-RED-ON-A-TOOLCHAIN-UPDATE-ALONE — OPEN 2026-09-02

@@ -79,6 +79,18 @@ SOUNDS_LIKE_FAILURE = re.compile(
 # never observed. `test`/`[` report through the status only and print nothing.
 EXPECTED_ZERO = {"true", "echo", "printf", "yes", "test", "[", "false"}
 
+# Programs whose exit 0 with a diagnostic is *verified correct*, with the
+# evidence. Not a baseline to grow: each line is a measurement, and an entry
+# without one does not belong here.
+#
+# `ed` -- POSIX: naming a file that does not exist opens a new buffer, and
+#   quitting without a further error exits 0. Not reasoned from the standard
+#   but measured: `scripts/ed-diff.sh` runs 507 cases against GNU ed 1.20.1
+#   and compares stdout, stderr, the exit status and the bytes on disk.
+VERIFIED_ZERO = {
+    "ed": "507-case differential against GNU ed 1.20.1 (scripts/ed-diff.sh)",
+}
+
 # Daemons and interactive programs: launching them is either useless or
 # harmful, and the unknown-option sweep skips them for the same reason. Kept
 # as a literal list rather than a heuristic so adding one is a deliberate act.
@@ -183,7 +195,7 @@ def main(argv=None):
     try:
         for exe in exes:
             name = os.path.basename(exe)[: -len(".exe")]
-            if name in SKIP or name in EXPECTED_ZERO:
+            if name in SKIP or name in EXPECTED_ZERO or name in VERIFIED_ZERO:
                 skipped += 1
                 continue
             code, err = probe([exe, MISSING_PATH], work)
@@ -200,7 +212,8 @@ def main(argv=None):
 
     print("stderr-exit-zero-sweep: probed with a path that cannot exist")
     print("  binaries on disk:   %d" % len(exes))
-    print("  skipped:            %d" % skipped)
+    print("  skipped:            %d (incl. %d verified-correct)"
+          % (skipped, len(VERIFIED_ZERO)))
     print("  did not launch:     %d" % unlaunchable)
     print("  REPORTED AND EXITED 0: %d" % len(findings))
     if findings:

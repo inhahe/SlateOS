@@ -205,6 +205,8 @@ fn cmd_swapon(args: &[String]) {
         }
     }
 
+    let mut failed = false;
+
     if all_flag {
         // Enable all swap entries from fstab.
         let fstab_swaps = get_swap_fstab_entries();
@@ -219,7 +221,9 @@ fn cmd_swapon(args: &[String]) {
                 }
                 continue;
             }
-            activate_swap(&entry.device, priority, discard, verbose);
+            if !activate_swap(&entry.device, priority, discard, verbose) {
+                failed = true;
+            }
         }
     } else if devices.is_empty() {
         // No devices and no -a: already showed summary above.
@@ -229,8 +233,18 @@ fn cmd_swapon(args: &[String]) {
                 eprintln!("swapon: {}: already active", quotef_os(device));
                 continue;
             }
-            activate_swap(device, priority, discard, verbose);
+            if !activate_swap(device, priority, discard, verbose) {
+                failed = true;
+            }
         }
+    }
+
+    // util-linux exits non-zero when any device could not be activated. The
+    // loop continues past a failure -- one bad device should not stop the
+    // rest -- so the worst result is carried to the end rather than returned
+    // from the middle.
+    if failed {
+        process::exit(1);
     }
 }
 
@@ -329,12 +343,17 @@ fn swap_flags(priority: Option<i32>, discard: bool) -> i32 {
 /// `swapon` that could not have worked and then asked a different library
 /// why. That is the archetype `design-decisions.md` 768 describes, reproduced
 /// six days after that decision was written, by the lane that wrote it.
-fn activate_swap(device: &str, priority: Option<i32>, discard: bool, verbose: bool) {
+/// Activate one device. Returns whether it worked.
+///
+/// It used to return nothing, so `swapon /nonexistent` printed
+/// "failed to activate: ..." and the program exited 0 -- the message was
+/// right and the status said the opposite, which is the half a script reads.
+fn activate_swap(device: &str, priority: Option<i32>, discard: bool, verbose: bool) -> bool {
     let Ok(path) = std::ffi::CString::new(device) else {
         // A NUL inside the argument. `swapon(2)` takes a C string, so such a
         // path cannot be expressed to it at all; saying so beats truncating.
         eprintln!("swapon: {}: path contains a NUL byte", quotef_os(device));
-        return;
+        return false;
     };
     // The `errno` arrives with the failure instead of being fetched after it,
     // so there is no second library left to read it from by mistake.
@@ -356,8 +375,10 @@ fn activate_swap(device: &str, priority: Option<i32>, discard: bool, verbose: bo
                 quotef_os(device),
                 errno_text(e)
             );
+            return false;
         }
     }
+    true
 }
 
 /// A short description of an `errno` this program can actually receive.

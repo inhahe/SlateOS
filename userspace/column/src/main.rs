@@ -501,7 +501,18 @@ fn parse_args(args: &[String]) -> ParseResult {
 // ============================================================================
 
 /// Read all lines from the specified inputs.
-fn read_all_lines(file_paths: &[String], keep_empty: bool) -> io::Result<Vec<String>> {
+/// Read every named file, reporting whether any of them could not be opened.
+///
+/// The `continue` below is deliberate and stays: `column a missing b` should
+/// still format `a` and `b`. What was missing is that the failure never
+/// reached the status, so `column /nonexistent` printed
+/// "column: ...: No such file or directory" and exited 0. Measured against
+/// util-linux `column`, which exits 1 for the same input.
+fn read_all_lines(
+    file_paths: &[String],
+    keep_empty: bool,
+    unreadable: &mut bool,
+) -> io::Result<Vec<String>> {
     let mut lines = Vec::new();
     let stdin = io::stdin();
 
@@ -513,6 +524,7 @@ fn read_all_lines(file_paths: &[String], keep_empty: bool) -> io::Result<Vec<Str
                 Ok(f) => Box::new(BufReader::new(f)),
                 Err(e) => {
                     eprintln!("column: {}: {e}", quotef_os(path));
+                    *unreadable = true;
                     continue;
                 }
             }
@@ -729,11 +741,12 @@ fn fill_rows(words: &[String], term_width: usize, output_sep: &str) -> Vec<Strin
 
 /// Run fill mode: read all input, collect words, arrange into columns.
 fn run_fill_mode(config: &Config) -> io::Result<i32> {
-    let lines = read_all_lines(&config.file_paths, config.keep_empty)?;
+    let mut unreadable = false;
+    let lines = read_all_lines(&config.file_paths, config.keep_empty, &mut unreadable)?;
     let words = collect_words(&lines);
 
     if words.is_empty() {
-        return Ok(0);
+        return Ok(i32::from(unreadable));
     }
 
     let output_lines = if config.fill_rows {
@@ -750,7 +763,7 @@ fn run_fill_mode(config: &Config) -> io::Result<i32> {
     }
     out.flush()?;
 
-    Ok(0)
+    Ok(i32::from(unreadable))
 }
 
 // ============================================================================
@@ -851,7 +864,8 @@ fn pad_field(field: &str, target_width: usize, right_align: bool) -> String {
 /// Run table mode: parse input into fields, compute column widths, output
 /// aligned table.
 fn run_table_mode(config: &Config) -> io::Result<i32> {
-    let lines = read_all_lines(&config.file_paths, config.keep_empty)?;
+    let mut unreadable = false;
+    let lines = read_all_lines(&config.file_paths, config.keep_empty, &mut unreadable)?;
     let merge = !config.no_merge;
 
     // Parse each line into fields.
@@ -865,13 +879,13 @@ fn run_table_mode(config: &Config) -> io::Result<i32> {
     }
 
     if rows.is_empty() {
-        return Ok(0);
+        return Ok(i32::from(unreadable));
     }
 
     // Determine the number of columns.
     let ncols = rows.iter().map(|r| r.len()).max().unwrap_or(0);
     if ncols == 0 {
-        return Ok(0);
+        return Ok(i32::from(unreadable));
     }
 
     // Prepare header row if column names were specified.
@@ -952,7 +966,7 @@ fn run_table_mode(config: &Config) -> io::Result<i32> {
     }
 
     out.flush()?;
-    Ok(0)
+    Ok(i32::from(unreadable))
 }
 
 // ============================================================================

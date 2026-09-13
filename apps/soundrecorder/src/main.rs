@@ -1347,14 +1347,15 @@ impl PlaybackController {
         let bar_y = y + 10.0;
 
         // Track background
-        commands.push(RenderCommand::FillRect {
+        pal.push_surface(
+            &mut commands,
             x,
-            y: bar_y,
+            bar_y,
             width,
-            height: bar_height,
-            color: pal.surface0,
-            corner_radii: CornerRadii::all(3.0),
-        });
+            bar_height,
+            3.0,
+            Surface::ControlTrack,
+        );
 
         // Progress fill
         let fill_width = self.progress() * width;

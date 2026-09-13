@@ -16,6 +16,7 @@
 //! Network I/O is performed through Slate OS syscalls; simulated with
 //! representative data for initial development.
 
+use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::color::Color;
@@ -938,14 +939,15 @@ pub fn render_app(app: &NetManagerApp) -> RenderTree {
 
 /// Render the title bar at the top of the window.
 fn render_title_bar(frame: &mut Frame, pal: &Palette) {
-    frame.push(RenderCommand::FillRect {
-        x: 0.0,
-        y: 0.0,
-        width: frame.width,
-        height: TITLE_BAR_HEIGHT,
-        color: pal.mantle,
-        corner_radii: CornerRadii::ZERO,
-    });
+    pal.push_surface(
+        frame,
+        0.0,
+        0.0,
+        frame.width,
+        TITLE_BAR_HEIGHT,
+        0.0,
+        Surface::Strip(Edge::Bottom),
+    );
     frame.push(RenderCommand::Text {
         x: 14.0,
         y: 12.0,
@@ -963,14 +965,15 @@ fn render_toolbar(frame: &mut Frame, app: &NetManagerApp) {
     let y = TITLE_BAR_HEIGHT;
 
     // Toolbar background
-    frame.push(RenderCommand::FillRect {
-        x: 0.0,
+    app.palette.push_surface(
+        frame,
+        0.0,
         y,
-        width: frame.width,
-        height: TOOLBAR_HEIGHT,
-        color: app.palette.surface0,
-        corner_radii: CornerRadii::ZERO,
-    });
+        frame.width,
+        TOOLBAR_HEIGHT,
+        0.0,
+        Surface::Strip(Edge::Bottom),
+    );
 
     // Toolbar buttons
     let buttons = [
@@ -982,14 +985,15 @@ fn render_toolbar(frame: &mut Frame, app: &NetManagerApp) {
     for (label, target) in &buttons {
         let bw = text::measure(label, TOOLBAR_TEXT, FontWeightHint::Regular) + 24.0;
         let rect = Rect::new(bx, y + 4.0, bw, TOOLBAR_HEIGHT - 8.0);
-        frame.push(RenderCommand::FillRect {
-            x: rect.x,
-            y: rect.y,
-            width: rect.w,
-            height: rect.h,
-            color: app.palette.surface1,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        app.palette.push_surface(
+            frame,
+            rect.x,
+            rect.y,
+            rect.w,
+            rect.h,
+            4.0,
+            Surface::Strip(Edge::Bottom),
+        );
         frame.hit(*target, rect);
         frame.push(RenderCommand::Text {
             x: bx + 12.0,
@@ -1013,14 +1017,15 @@ fn render_toolbar(frame: &mut Frame, app: &NetManagerApp) {
     let tw = text::measure(toggle_label, TOOLBAR_TEXT, FontWeightHint::Regular) + 24.0;
     let tx = frame.width - tw - 12.0;
     let toggle_rect = Rect::new(tx, y + 4.0, tw, TOOLBAR_HEIGHT - 8.0);
-    frame.push(RenderCommand::FillRect {
-        x: toggle_rect.x,
-        y: toggle_rect.y,
-        width: toggle_rect.w,
-        height: toggle_rect.h,
-        color: app.palette.surface1,
-        corner_radii: CornerRadii::all(4.0),
-    });
+    app.palette.push_surface(
+        frame,
+        toggle_rect.x,
+        toggle_rect.y,
+        toggle_rect.w,
+        toggle_rect.h,
+        4.0,
+        Surface::Strip(Edge::Bottom),
+    );
     frame.hit(Target::ToggleEnabled, toggle_rect);
     frame.push(RenderCommand::Text {
         x: tx + 12.0,
@@ -1229,14 +1234,15 @@ fn render_detail_panel(frame: &mut Frame, app: &NetManagerApp) {
 /// Render tab headers at the top of the detail panel.
 fn render_tab_bar(frame: &mut Frame, app: &NetManagerApp, px: f32, py: f32, _pw: f32) {
     // Tab bar background
-    frame.push(RenderCommand::FillRect {
-        x: px,
-        y: py,
-        width: frame.width - px,
-        height: 30.0,
-        color: app.palette.surface0,
-        corner_radii: CornerRadii::ZERO,
-    });
+    app.palette.push_surface(
+        frame,
+        px,
+        py,
+        frame.width - px,
+        30.0,
+        0.0,
+        Surface::Strip(Edge::Bottom),
+    );
 
     let mut tx = px + 8.0;
     for tab in DetailTab::all() {
@@ -2245,14 +2251,15 @@ fn render_status_bar(frame: &mut Frame, app: &NetManagerApp) {
     let sy = frame.height - STATUS_BAR_HEIGHT;
 
     // Status bar background
-    frame.push(RenderCommand::FillRect {
-        x: 0.0,
-        y: sy,
-        width: frame.width,
-        height: STATUS_BAR_HEIGHT,
-        color: app.palette.mantle,
-        corner_radii: CornerRadii::ZERO,
-    });
+    app.palette.push_surface(
+        frame,
+        0.0,
+        sy,
+        frame.width,
+        STATUS_BAR_HEIGHT,
+        0.0,
+        Surface::Strip(Edge::Top),
+    );
 
     // Separator line
     frame.push(RenderCommand::Line {

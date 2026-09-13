@@ -38,6 +38,7 @@
 //! sidebar rows that clicked to nothing; see `known-issues.md` ->
 //! `C-RENDERER-AND-HIT-TEST-DERIVE-THE-SAME-LAYOUT-SEPARATELY`.
 
+use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use std::process::ExitCode;
@@ -2084,14 +2085,15 @@ impl DefragUI {
         let bar = layout.toolbar;
 
         // Toolbar background
-        frame.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: bar.w,
-            height: bar.h,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            frame,
+            0.0,
+            0.0,
+            bar.w,
+            bar.h,
+            0.0,
+            Surface::Strip(Edge::Bottom),
+        );
 
         // Everything below is clipped to the strip, so a button pushed off a
         // narrow window's right edge is not merely invisible -- its hit box is
@@ -2677,14 +2679,15 @@ impl DefragUI {
         let progress = &engine.progress;
 
         // Progress bar background
-        frame.push(RenderCommand::FillRect {
+        self.palette.push_surface(
+            frame,
             x,
             y,
-            width: w,
-            height: PROGRESS_BAR_HEIGHT,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+            w,
+            PROGRESS_BAR_HEIGHT,
+            4.0,
+            Surface::ControlTrack,
+        );
 
         // Progress fill
         let fill_w = w * progress.fraction();
@@ -3631,14 +3634,8 @@ impl DefragUI {
     fn render_status_bar(&self, frame: &mut Frame, layout: &Layout) {
         let bar = layout.status;
         let y = bar.y;
-        frame.push(RenderCommand::FillRect {
-            x: 0.0,
-            y,
-            width: bar.w,
-            height: bar.h,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(frame, 0.0, y, bar.w, bar.h, 0.0, Surface::Strip(Edge::Top));
         frame.clip(bar);
 
         // Left side: drive info

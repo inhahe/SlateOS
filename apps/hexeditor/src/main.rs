@@ -20,6 +20,7 @@
 //!
 //! Uses the guitk library for UI rendering with Catppuccin Mocha colors.
 
+use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 #[allow(unused_imports)]
@@ -2464,14 +2465,15 @@ impl HexEditor {
     /// Render the toolbar.
     fn render_toolbar(&self, tree: &mut RenderTree) {
         // Toolbar background.
-        tree.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: self.window_width,
-            height: TOOLBAR_HEIGHT,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            tree,
+            0.0,
+            0.0,
+            self.window_width,
+            TOOLBAR_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Bottom),
+        );
 
         // Toolbar buttons.
         let buttons = [
@@ -2515,14 +2517,15 @@ impl HexEditor {
         let y = TOOLBAR_HEIGHT;
 
         // Tab bar background.
-        tree.push(RenderCommand::FillRect {
-            x: 0.0,
+        self.palette.push_surface(
+            tree,
+            0.0,
             y,
-            width: self.window_width,
-            height: TAB_BAR_HEIGHT,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+            self.window_width,
+            TAB_BAR_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Bottom),
+        );
 
         let mut tab_x: f32 = 4.0;
 
@@ -2873,14 +2876,15 @@ impl HexEditor {
         let y = self.window_height - STATUS_BAR_HEIGHT;
 
         // Status bar background.
-        tree.push(RenderCommand::FillRect {
-            x: 0.0,
+        self.palette.push_surface(
+            tree,
+            0.0,
             y,
-            width: self.window_width,
-            height: STATUS_BAR_HEIGHT,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+            self.window_width,
+            STATUS_BAR_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Top),
+        );
 
         // Top separator.
         tree.push(RenderCommand::Line {

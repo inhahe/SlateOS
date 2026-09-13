@@ -33,6 +33,7 @@
 #![allow(clippy::fn_params_excessive_bools)]
 #![allow(clippy::wildcard_imports)]
 
+use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::color::Color;
@@ -1983,14 +1984,15 @@ impl MindMapApp {
     // ------ Toolbar ------
 
     fn render_toolbar(&self, cmds: &mut Vec<RenderCommand>) {
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: self.win_width,
-            height: TOOLBAR_HEIGHT,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            cmds,
+            0.0,
+            0.0,
+            self.win_width,
+            TOOLBAR_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Bottom),
+        );
 
         // Title
         cmds.push(RenderCommand::Text {
@@ -2049,14 +2051,15 @@ impl MindMapApp {
 
     fn render_tabs(&self, cmds: &mut Vec<RenderCommand>) {
         let y = TOOLBAR_HEIGHT;
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
+        self.palette.push_surface(
+            cmds,
+            0.0,
             y,
-            width: self.win_width,
-            height: TAB_HEIGHT,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::ZERO,
-        });
+            self.win_width,
+            TAB_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Bottom),
+        );
 
         let mut tx = 10.0;
         for (i, map) in self.maps.iter().enumerate() {
@@ -2718,14 +2721,15 @@ impl MindMapApp {
     fn render_status_bar(&self, cmds: &mut Vec<RenderCommand>) {
         let y = self.win_height - STATUS_BAR_HEIGHT;
 
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
+        self.palette.push_surface(
+            cmds,
+            0.0,
             y,
-            width: self.win_width,
-            height: STATUS_BAR_HEIGHT,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+            self.win_width,
+            STATUS_BAR_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Top),
+        );
 
         let map = self.active_map_ref();
         let status = format!(

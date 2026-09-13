@@ -29,6 +29,7 @@
 
 mod scan;
 
+use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::color::Color;
@@ -1593,14 +1594,15 @@ impl DiskAnalyzerUI {
     // -- toolbar ---------------------------------------------------------------
 
     fn render_toolbar(&self, frame: &mut Frame, width: f32) {
-        frame.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
+        self.palette.push_surface(
+            frame,
+            0.0,
+            0.0,
             width,
-            height: TOOLBAR_HEIGHT,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+            TOOLBAR_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Bottom),
+        );
 
         // Path input field. It shrinks with the window rather than running off
         // the edge, and never below the width of the buttons beside it.
@@ -1721,14 +1723,15 @@ impl DiskAnalyzerUI {
 
     fn render_breadcrumbs(&self, frame: &mut Frame, width: f32) {
         let y = TOOLBAR_HEIGHT;
-        frame.push(RenderCommand::FillRect {
-            x: 0.0,
+        self.palette.push_surface(
+            frame,
+            0.0,
             y,
             width,
-            height: BREADCRUMB_HEIGHT,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::ZERO,
-        });
+            BREADCRUMB_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Bottom),
+        );
 
         let last = self.breadcrumbs.len().saturating_sub(1);
         let mut bx = PADDING;
@@ -2159,14 +2162,15 @@ impl DiskAnalyzerUI {
     fn render_status_bar(&self, frame: &mut Frame, size: (f32, f32)) {
         let (width, height) = size;
         let y = height - STATUS_BAR_HEIGHT;
-        frame.push(RenderCommand::FillRect {
-            x: 0.0,
+        self.palette.push_surface(
+            frame,
+            0.0,
             y,
             width,
-            height: STATUS_BAR_HEIGHT,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+            STATUS_BAR_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Top),
+        );
 
         frame.push(RenderCommand::Text {
             x: PADDING,

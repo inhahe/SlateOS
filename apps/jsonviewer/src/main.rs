@@ -44,6 +44,7 @@
 #![allow(clippy::arithmetic_side_effects)]
 #![allow(clippy::indexing_slicing)]
 
+use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::Color;
@@ -2806,14 +2807,15 @@ impl App {
 
     fn render_toolbar(&self, cmds: &mut Vec<RenderCommand>) {
         // Toolbar background
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: self.width,
-            height: TOOLBAR_HEIGHT,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            cmds,
+            0.0,
+            0.0,
+            self.width,
+            TOOLBAR_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Bottom),
+        );
 
         // Title
         cmds.push(RenderCommand::Text {
@@ -2873,14 +2875,15 @@ impl App {
         let y = TOOLBAR_HEIGHT;
 
         // Tab bar background
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
+        self.palette.push_surface(
+            cmds,
+            0.0,
             y,
-            width: self.width,
-            height: TAB_BAR_HEIGHT,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+            self.width,
+            TAB_BAR_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Bottom),
+        );
 
         let mut tab_x = PADDING;
         for (i, doc) in self.documents.iter().enumerate() {
@@ -2972,14 +2975,15 @@ impl App {
     fn render_mode_bar(&self, cmds: &mut Vec<RenderCommand>) {
         let y = TOOLBAR_HEIGHT + TAB_BAR_HEIGHT;
 
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
+        self.palette.push_surface(
+            cmds,
+            0.0,
             y,
-            width: self.width,
-            height: 30.0,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+            self.width,
+            30.0,
+            0.0,
+            Surface::Strip(Edge::Bottom),
+        );
 
         let active_mode = self.active_doc().map_or(ViewMode::Tree, |d| d.view_mode);
         let mut mode_x = PADDING;
@@ -4000,14 +4004,15 @@ impl App {
     fn render_status_bar(&self, cmds: &mut Vec<RenderCommand>) {
         let y = self.height - STATUS_BAR_HEIGHT;
 
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
+        self.palette.push_surface(
+            cmds,
+            0.0,
             y,
-            width: self.width,
-            height: STATUS_BAR_HEIGHT,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::ZERO,
-        });
+            self.width,
+            STATUS_BAR_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Top),
+        );
 
         // Separator
         cmds.push(RenderCommand::Line {

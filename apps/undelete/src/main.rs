@@ -50,6 +50,7 @@
 #![allow(clippy::match_same_arms)]
 #![allow(clippy::cognitive_complexity)]
 
+use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 #[allow(unused_imports)]
@@ -3778,14 +3779,15 @@ impl UndeleteApp {
     fn render_results_footer(&self, cmds: &mut Vec<RenderCommand>) {
         let y = self.height - FOOTER_HEIGHT - STATUS_BAR_HEIGHT;
 
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
+        self.palette.push_surface(
+            cmds,
+            0.0,
             y,
-            width: self.width,
-            height: FOOTER_HEIGHT,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+            self.width,
+            FOOTER_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Top),
+        );
 
         // Separator
         self.palette
@@ -3862,14 +3864,15 @@ impl UndeleteApp {
     fn render_status_bar(&self, cmds: &mut Vec<RenderCommand>) {
         let y = self.height - STATUS_BAR_HEIGHT;
 
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
+        self.palette.push_surface(
+            cmds,
+            0.0,
             y,
-            width: self.width,
-            height: STATUS_BAR_HEIGHT,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::ZERO,
-        });
+            self.width,
+            STATUS_BAR_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Top),
+        );
 
         let stats = self.engine.stats();
         let mode_str = self.engine.scan_mode.display_name();

@@ -23,6 +23,7 @@
 
 #![allow(dead_code, clippy::too_many_arguments)]
 
+use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use std::collections::HashMap;
@@ -3165,14 +3166,15 @@ impl RssReaderApp {
     /// Render the toolbar with filter, sort, and search controls.
     fn render_toolbar(&self, cmds: &mut Vec<RenderCommand>, y: f32, height: f32) {
         // Toolbar background
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
+        self.palette.push_surface(
+            cmds,
+            0.0,
             y,
-            width: self.width,
+            self.width,
             height,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+            0.0,
+            Surface::Strip(Edge::Bottom),
+        );
 
         // Filter button
         let filter_x = 12.0;
@@ -4033,14 +4035,15 @@ impl RssReaderApp {
 
     /// Render the status bar at the bottom of the window.
     fn render_status_bar(&self, cmds: &mut Vec<RenderCommand>, y: f32, height: f32) {
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
+        self.palette.push_surface(
+            cmds,
+            0.0,
             y,
-            width: self.width,
+            self.width,
             height,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::ZERO,
-        });
+            0.0,
+            Surface::Strip(Edge::Top),
+        );
 
         // Top border
         cmds.push(RenderCommand::Line {

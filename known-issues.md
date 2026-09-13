@@ -132365,11 +132365,44 @@ The roles split in two, and the split is the design:
 `overlay0` stays exempt: it is the muted ink, WCAG 1.4.3 exempts inactive
 controls, and raising it would make a disabled control look enabled.
 
-**Still open:** the 315 dual-use *text* sites. `gui/appearance/ink-text.py`
-performs the transformation and is proven on 100 shell sites; 29 shell tests
-compare a text colour against a raw role and must follow. Until those land the
-dual-use roles are unchanged, which is exactly today's behaviour -- so nothing
-regresses in the meantime.
+**The 315 dual-use text sites are done.** `ink-text.py --check` reports "every
+text site in 380 files goes through `ink()`" and `--verify` confirms all 650
+`ink()` calls are inside a `Text` command -- the second being the guard
+against the opposite error, an ink applied to something that is not text.
+
+**What was left is what the script could not see, and 2026-09-13 shrank that
+from 183 to 126 and found five real failures in the gap.** `--blind` exists
+because "`--check` says zero" means "zero among the sites I can classify".
+Two of its four unclassifiable shapes turned out to be classifiable after all:
+
+| | before | after | how |
+|---|---|---|---|
+| `color:` whose value is a call | 81 | 33 | take the *balanced* value instead of a five-line window; a conditional whose every branch is a floored ink is legible by construction and only looked like a call because `if` contains a `(` |
+| `color,` shorthand | 102 | 83 + 10 | walk back to the nearest `let color =` in the same function and classify *that* |
+
+The 83 that remain are shorthands whose local came from a parameter, a
+destructuring or a loop -- genuinely outside a line-based script -- and the 33
+calls are colours produced by a method, which is the
+`TD-C-FORTY-NINE-COLOUR-METHODS` class.
+
+**The five findings, four fixed and one a false positive the script caused:**
+
+| where | what | verdict |
+|---|---|---|
+| `gui/desktop/src/update_settings.rs:818` | `if entry.success { p.green } else { p.red }` — an update row's status, and the next line puts it on a `Card` | **inked** |
+| `apps/systemrestore` | a diff's green/red/yellow — the whole of what a diff communicates | **inked** |
+| `apps/typingtutor` | green for a correct character, red for a wrong one — the entire feedback of the program | **inked** |
+| `apps/ircclient` | `blue` for the active channel | **inked** |
+| `apps/whiteboard` | a stroke's colour | **left alone**, and annotated: it is the drawing, in the sense `apps/paint`'s swatch row is the document |
+
+**The whiteboard one was reported because of a bug in the script's own span
+reader**, worth recording because it is the day's recurring shape: the value
+of a `let` was taken up to the next depth-zero *comma*, which is right for a
+struct field and wrong for a statement, so it ran past the `;`, swept up a
+palette role from unrelated code below, and accused the one file where the
+colour is the user's rather than the theme's. Fixed to stop at `;` as well.
+The four genuine ones were confirmed by reading the code, not by trusting the
+report, which is the only reason the false positive was recognisable as one.
 
 The guard `every_ink_clears_the_floor_on_every_ground_it_lands_on` covers both
 modes, both surface styles, both strip styles, the fourteen presets and two

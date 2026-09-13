@@ -815,7 +815,16 @@ impl UpdateSettingsUI {
 
         for entry in self.settings.history.iter().rev().take(20) {
             let status_icon = if entry.success { "✓" } else { "✕" };
-            let color = if entry.success { p.green } else { p.red };
+            // Inked: this is text, and the line below puts it on a Card.
+            // Unfloored `red` is 2.88:1 on the deepest card, which is the
+            // exact failure TD-C-THIRTEEN-LIGHT-ACCENTS-STILL-FAIL-ON-CARDS
+            // describes. Found by `ink-text.py --blind` only after the script
+            // learned to follow a `color,` shorthand back to its binding.
+            let color = if entry.success {
+                p.ink(p.green)
+            } else {
+                p.ink(p.red)
+            };
             p.push_surface(cmds, x, y, width, 32.0, 4.0, Surface::Card);
             cmds.push(RenderCommand::Text {
                 x: x + 8.0,

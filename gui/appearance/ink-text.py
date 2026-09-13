@@ -349,22 +349,114 @@ SHORTHAND = re.compile(r"^\s*color,\s*$")
 GROUNDED = re.compile(r"readable_on|on_accent|on_wallpaper|contrast_text")
 
 
+# Roles that are floored in the palette itself, so a text site naming one is
+# already legible and needs no `ink()`. The split is the design -- see
+# `known-issues.md` TD-C-THIRTEEN-LIGHT-ACCENTS-STILL-FAIL-ON-CARDS.
+# The inks that are floored in the palette itself, so a text site naming one
+# is already legible and needs no `ink()`. Deliberately NOT the surface roles:
+# `surface1` used as a text colour is not a floored ink, it is a background
+# being used as a foreground, and excluding those would hide a real question
+# behind a rule written for a different one.
+FLOORED = re.compile(r"\b[A-Za-z_][\w.]*\.(subtext0|subtext1|link|text)\b(?!\s*\()")
+
+
+def value_of(lines, i, first_rest):
+    """The whole `color:` value, however many lines it spans.
+
+    A fixed window was the previous rule -- five lines, joined -- and it is the
+    wrong shape twice over: a conditional ink running to six lines was judged
+    on its first five, and a *neighbouring* field within five lines of a short
+    value was read as part of it. The balanced span is the value and nothing
+    else.
+    """
+    depth, parts, j, rest = 0, [], i, first_rest
+    while j < len(lines):
+        buf = ""
+        for ch in rest:
+            depth += (ch in "([{") - (ch in ")]}")
+            # A semicolon ends a `let` as a comma ends a struct field, and
+            # stopping only at the comma was a real bug: the value of
+            # `let color = shape.stroke.effective_color();` ran on past the
+            # statement until it met a comma several lines later, swept up a
+            # palette role from unrelated code, and reported the site as
+            # naming a dual-use role. One false positive, in the one file
+            # where the colour is the user's drawing rather than the theme's.
+            if ch in ",;" and depth == 0:
+                parts.append(buf)
+                return NL.join(parts)
+            buf += ch
+        parts.append(buf)
+        j += 1
+        if j < len(lines):
+            rest = lines[j]
+    return NL.join(parts)
+
+
+FN = re.compile(r"^\s{0,8}(?:pub(?:\([\w:]+\))?\s+)?(?:async\s+)?(?:const\s+)?fn\s")
+LET_COLOR = re.compile(r"^\s*let\s+(?:mut\s+)?color\s*(?::[^=]*)?=\s*(.*)$")
+
+
+def binding_of(lines, i, fn_start):
+    """The value of the nearest `let color = ...` above line `i`.
+
+    The shorthand form -- `Text { .., color, .. }` -- names a local, so the
+    ink is wherever that local was bound. Walking back to it is the whole of
+    what the docstring above calls "a property of a function's body rather
+    than of the draw site"; it does not need something that understands Rust,
+    only the nearest binding of that one name.
+
+    `None` when there is no such binding in the function, which is the honest
+    answer: the local came from a parameter, a destructuring, or a loop, and
+    this script genuinely cannot see it.
+    """
+    for k in range(i - 1, fn_start - 1, -1):
+        m = LET_COLOR.match(lines[k])
+        if m:
+            return value_of(lines, k, m.group(1))
+    return None
+
+
 def blind_spots(path):
-    """Text sites whose colour this script cannot classify."""
+    """Text sites whose colour this script cannot classify.
+
+    Returns `(line, kind, text)`, where `kind` says *why* it could not be
+    classified -- which is the difference between a site that needs looking at
+    and one the classifier simply cannot see through.
+    """
     lines = path.read_text(encoding="utf-8").splitlines()
     out = []
     end = production_end(lines)
     for i, line in enumerate(lines[:end]):
         if enclosing_kind(lines, i) != "Text":
             continue
-        # A few lines of the value, since a conditional colour runs over
-        # several and the exclusion may be on any of them.
-        value = " ".join(l.strip() for l in lines[i : i + 5])
+        m = COLOR.match(line)
+        value = value_of(lines, i, m.group(2)) if m else line
         if GROUNDED.search(value) or ".ink(" in value:
             continue
         if SHORTHAND.match(line):
-            out.append((i + 1, "shorthand", line.strip()))
+            start = 0
+            for k in range(i, -1, -1):
+                if FN.match(lines[k]):
+                    start = k
+                    break
+            bound = binding_of(lines, i, start)
+            if bound is None:
+                out.append((i + 1, "shorthand, no local binding", line.strip()))
+            elif GROUNDED.search(bound) or ".ink(" in bound:
+                continue
+            elif FLOORED.search(bound) and not ROLE.search(bound):
+                continue
+            elif ROLE.search(bound):
+                out.append((i + 1, "shorthand naming a dual-use role", line.strip()))
+            else:
+                out.append((i + 1, "shorthand, colour from elsewhere", line.strip()))
         elif CALL_VALUE.match(line) and not ROLE.search(value):
+            # A conditional whose every branch names a floored role is not a
+            # blind spot: it is legible by construction, and the only reason
+            # it looked like one is that the value opens with `if` and so
+            # contains a `(`. Forty-seven of `gui/desktop`'s were this.
+            if FLOORED.search(value) and not ROLE.search(value):
+                continue
             out.append((i + 1, "a call", line.strip()))
     return out
 

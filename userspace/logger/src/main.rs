@@ -510,6 +510,24 @@ fn parse_args(args: &[String]) -> Options {
                     j += 1;
                 }
             }
+            // `--` ends option parsing, so `logger -- --weird` logs a
+            // message that begins with a dash.
+            "--" => {
+                for rest in &args[i + 1..] {
+                    opts.message_parts.push(rest.clone());
+                }
+                break;
+            }
+            // A long option this program does not have. Short ones were
+            // already refused a few arms up; long ones fell into the
+            // catch-all below and became the *message*, so `logger --zzq`
+            // wrote "--zzq" to the system log and exited 0. The log then
+            // holds a line nobody meant to write, attributed to the user who
+            // mistyped.
+            _ if arg.starts_with("--") => {
+                eprintln!("logger: unknown option: {arg}");
+                process::exit(1);
+            }
             _ => {
                 opts.message_parts.push(arg.clone());
             }

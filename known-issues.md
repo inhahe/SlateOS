@@ -118296,6 +118296,15 @@ in neither the population nor the shape the other one reads.
 | `more` | `cannot open ...: No such file` | exit 0 |
 | `credentials` | `Failed to set master password: the RNG is unavailable` | exit 0 -- **lane C's**, filed |
 
+`credentials` is a *different* defect from the unknown-option one lane C
+closed, and the two got tangled: their fix made my reproduction stop working
+without touching the bug. `credentials zzq-no-such-file` now exits 2 on the
+operand, correctly, before ever reaching the master-password call. **The probe
+went blind and the defect did not move** -- it is still there on a bare
+invocation. The sweep now runs two probes, one with a missing path and one
+with no arguments at all, because a failure path that needs no operand was
+invisible to the first.
+
 `sanitize` is the one to reread. It already counted the failure
 (`stats.errors += 1`) and already **printed** the count -- "Errors: 1" -- and
 then threw it away. Nothing was missing but the last step, so no amount of
@@ -140147,10 +140156,18 @@ caught in the listing it is preparing.
 
 ## B-SEVENTY-PROGRAMS-ACCEPT-AN-OPTION-THEY-DO-NOT-HAVE-AND-EXIT-ZERO (lane B, 2026-09-12) -- CLOSED for lane B 2026-09-13
 
-**Closed 2026-09-13.** The sweep reports 5 accepting, all of them lane C's
-(`clipboard`, `credentials`, `desktop`, `match3`, `pinball`), filed to that
-lane already. 550 binaries refuse correctly, against 510 when the last pass
-of this work began and 44 accepting.
+**Closed 2026-09-13, tree-wide.** The sweep reports **0 accepting** and 555
+refusing, against 510 refusing and 44 accepting when this pass began.
+
+The five I last recorded as open -- `clipboard`, `credentials`, `desktop`,
+`match3`, `pinball` -- were lane C's and were already fixed when I wrote that
+line; I had measured before their work merged. Lane C said so, I rebuilt all
+five and probed them directly rather than taking it, and they refuse with exit
+2 while `--help` still exits 0, so the refusal is not blanket. **44-to-5 was
+really 44-to-0**, and the only reason the wrong number was here is that a
+count is only as current as the last time somebody re-measured it -- which is
+the failure this file records in four other people's comments a few entries
+above.
 
 ### The block was the wording, and the wording was not the defect
 

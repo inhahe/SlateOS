@@ -16,6 +16,7 @@ mod features;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};
 use guitk::history::SampleHistory;
+use appearance::Palette;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::scroll_window;
 use guitk::table::{Column, Fit, Table};
@@ -129,53 +130,18 @@ const DEFAULT_REFRESH_MS: u64 = 2000;
 
 // -- Color palette ----------------------------------------------------------
 
-/// Dark header background.
-const COLOR_TOOLBAR_BG: Color = Color::rgb(40, 44, 52);
-/// Tab bar background.
-const COLOR_TAB_BG: Color = Color::rgb(50, 54, 62);
-/// Active tab highlight.
-const COLOR_TAB_ACTIVE: Color = Color::rgb(70, 130, 210);
-/// Main content background.
-const COLOR_CONTENT_BG: Color = Color::rgb(30, 33, 39);
-/// Table header row background.
-const COLOR_HEADER_BG: Color = Color::rgb(38, 42, 50);
-/// Even row background.
-const COLOR_ROW_EVEN: Color = Color::rgb(30, 33, 39);
-/// Odd row background.
-const COLOR_ROW_ODD: Color = Color::rgb(35, 38, 46);
-/// Selected row highlight.
-const COLOR_ROW_SELECTED: Color = Color::rgb(50, 80, 130);
-/// Hovered row highlight.
-const COLOR_ROW_HOVER: Color = Color::rgb(45, 50, 60);
-/// Status bar background.
-const COLOR_STATUS_BG: Color = Color::rgb(35, 38, 46);
-
-/// Primary text color.
-const COLOR_TEXT: Color = Color::rgb(210, 215, 225);
-/// Dimmed/secondary text color.
-const COLOR_TEXT_DIM: Color = Color::rgb(140, 145, 155);
-/// Accent color (buttons, links).
-const COLOR_ACCENT: Color = Color::rgb(80, 140, 220);
-/// Error/danger color.
-const COLOR_DANGER: Color = Color::rgb(220, 60, 60);
-
-/// Status: running.
-const COLOR_STATUS_RUNNING: Color = Color::rgb(80, 200, 80);
-/// Status: sleeping.
-const COLOR_STATUS_SLEEPING: Color = Color::rgb(80, 140, 220);
-/// Status: stopped.
-const COLOR_STATUS_STOPPED: Color = Color::rgb(220, 180, 40);
-/// Status: zombie.
-const COLOR_STATUS_ZOMBIE: Color = Color::rgb(220, 60, 60);
-
-/// Graph line color for CPU.
-const COLOR_GRAPH_CPU: Color = Color::rgb(80, 200, 120);
-/// Graph line color for network in.
-const COLOR_GRAPH_NET_IN: Color = Color::rgb(80, 160, 240);
-/// Graph line color for network out.
-const COLOR_GRAPH_NET_OUT: Color = Color::rgb(240, 140, 60);
-/// Graph grid line color.
-const COLOR_GRAPH_GRID: Color = Color::rgb(55, 60, 70);
+// The colours live in the user's palette, not here.
+//
+// This module used to declare 22 `const COLOR_*` values -- a complete
+// hardcoded dark theme, which meant a light desktop got a dark process
+// explorer. design-decisions 822 added `App::theme_changed`, and 79 crates
+// were converted against it; this was one of the 55 that were not. See
+// known-issues.md TD-C-SIXTY-EIGHT-APPS-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE.
+//
+// The mapping was almost one-to-one, which is the usual case: backgrounds to
+// `base`/`mantle`/`surface0`, the two text values to `text`/`subtext0`, and
+// the status and graph colours to the categorical hues they already were --
+// running is green, zombie is red, a network-out graph is peach.
 
 // ============================================================================
 // Process status
@@ -203,14 +169,23 @@ impl ProcessStatus {
         }
     }
 
-    /// Color associated with this status.
-    pub fn color(self) -> Color {
+    /// The colour this status reports itself in, as *text*.
+    ///
+    /// Takes the palette rather than returning a constant, which is the whole
+    /// of §822 in one method: a status is a *category*, and a category is a
+    /// hue of the user's theme rather than a fixed RGB triple.
+    ///
+    /// Inked per arm, not around the match. `Idle` returns `subtext0`, which
+    /// is already floored in the palette; the four categorical hues are
+    /// dual-use -- the same green fills a bar elsewhere -- so only the text
+    /// form of them is adjusted (§837).
+    pub fn color(self, p: &Palette) -> Color {
         match self {
-            Self::Running => COLOR_STATUS_RUNNING,
-            Self::Sleeping => COLOR_STATUS_SLEEPING,
-            Self::Stopped => COLOR_STATUS_STOPPED,
-            Self::Zombie => COLOR_STATUS_ZOMBIE,
-            Self::Idle => COLOR_TEXT_DIM,
+            Self::Running => p.ink(p.green),
+            Self::Sleeping => p.ink(p.blue),
+            Self::Stopped => p.ink(p.yellow),
+            Self::Zombie => p.ink(p.red),
+            Self::Idle => p.subtext0,
         }
     }
 }
@@ -545,6 +520,14 @@ pub struct ContextMenu {
 
 /// Top-level state for the process explorer application.
 pub struct ProcessExplorerState {
+    // -- Appearance ----------------------------------------------------------
+    /// The user's colours, handed over by the framework (§822).
+    ///
+    /// Defaulted rather than `Option`, so the first frame has *a* palette on a
+    /// machine with no settings file -- which is what `theme_changed`'s own
+    /// documentation asks for.
+    pub palette: Palette,
+
     // -- Window --------------------------------------------------------------
     /// Window width in pixels.
     pub window_width: u32,
@@ -637,6 +620,7 @@ impl ProcessExplorerState {
         };
 
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             window_width: 960,
             window_height: 680,
             active_tab: Tab::Processes,
@@ -1399,7 +1383,7 @@ impl ProcessExplorerState {
         let h = self.window_height as f32;
 
         // Background
-        tree.fill_rect(0.0, 0.0, w, h, COLOR_CONTENT_BG);
+        tree.fill_rect(0.0, 0.0, w, h, self.palette.base);
 
         // Toolbar
         self.render_toolbar(&mut tree);
@@ -1429,7 +1413,7 @@ impl ProcessExplorerState {
     /// Render the toolbar with action buttons and search box.
     fn render_toolbar(&self, tree: &mut RenderTree) {
         let w = self.window_width as f32;
-        tree.fill_rect(0.0, 0.0, w, TOOLBAR_HEIGHT, COLOR_TOOLBAR_BG);
+        tree.fill_rect(0.0, 0.0, w, TOOLBAR_HEIGHT, self.palette.mantle);
 
         let btn_h = 26.0;
         let btn_y = (TOOLBAR_HEIGHT - btn_h) / 2.0;
@@ -1437,27 +1421,38 @@ impl ProcessExplorerState {
 
         // End Process button
         let end_w = 90.0;
-        tree.fill_rect(bx, btn_y, end_w, btn_h, COLOR_DANGER);
+        tree.fill_rect(bx, btn_y, end_w, btn_h, self.palette.red);
         self.render_bold_text(
             tree,
             bx + 8.0,
             btn_y + 6.0,
             "End Process",
-            Color::WHITE,
+            // Derived from the fill under it, not guessed. White happens to
+            // work on this red and would not on a paler one -- and the user
+            // can choose the palette, so "happens to work" is not a property
+            // this can rely on.
+            appearance::readable_on(self.palette.red),
             11.0,
         );
         bx += end_w + 6.0;
 
         // New Task button
         let new_w = 80.0;
-        tree.fill_rect(bx, btn_y, new_w, btn_h, COLOR_ACCENT);
-        self.render_bold_text(tree, bx + 10.0, btn_y + 6.0, "New Task", Color::WHITE, 11.0);
+        tree.fill_rect(bx, btn_y, new_w, btn_h, self.palette.accent);
+        self.render_bold_text(
+            tree,
+            bx + 10.0,
+            btn_y + 6.0,
+            "New Task",
+            self.palette.on_accent(),
+            11.0,
+        );
         bx += new_w + 6.0;
 
         // Refresh button
         let ref_w = 70.0;
-        tree.fill_rect(bx, btn_y, ref_w, btn_h, Color::rgb(60, 65, 75));
-        tree.text(bx + 12.0, btn_y + 6.0, "Refresh", COLOR_TEXT, 11.0);
+        tree.fill_rect(bx, btn_y, ref_w, btn_h, self.palette.surface1);
+        tree.text(bx + 12.0, btn_y + 6.0, "Refresh", self.palette.text, 11.0);
         bx += ref_w + 6.0;
 
         // View mode toggle
@@ -1466,16 +1461,16 @@ impl ProcessExplorerState {
             ViewMode::List => "List",
             ViewMode::Tree => "Tree",
         };
-        tree.fill_rect(bx, btn_y, view_w, btn_h, Color::rgb(60, 65, 75));
-        tree.text(bx + 12.0, btn_y + 6.0, view_label, COLOR_TEXT, 11.0);
+        tree.fill_rect(bx, btn_y, view_w, btn_h, self.palette.surface1);
+        tree.text(bx + 12.0, btn_y + 6.0, view_label, self.palette.text, 11.0);
 
         // Filter / search box (right-aligned)
         let filter_w = 200.0;
         let filter_x = w - filter_w - 8.0;
         let filter_border = if self.filter_focused {
-            COLOR_ACCENT
+            self.palette.accent
         } else {
-            Color::rgb(70, 75, 85)
+            self.palette.surface1
         };
         tree.stroke_rect(filter_x, btn_y, filter_w, btn_h, filter_border, 1.0);
         tree.fill_rect(
@@ -1483,7 +1478,7 @@ impl ProcessExplorerState {
             btn_y + 1.0,
             filter_w - 2.0,
             btn_h - 2.0,
-            Color::rgb(25, 28, 34),
+            self.palette.mantle,
         );
 
         let filter_display = if self.filter_text.is_empty() {
@@ -1492,9 +1487,9 @@ impl ProcessExplorerState {
             &self.filter_text
         };
         let text_color = if self.filter_text.is_empty() {
-            COLOR_TEXT_DIM
+            self.palette.subtext0
         } else {
-            COLOR_TEXT
+            self.palette.text
         };
         tree.text(
             filter_x + 8.0,
@@ -1509,7 +1504,7 @@ impl ProcessExplorerState {
             // The caret sits where the glyphs actually end: a byte count put
             // it a whole character past every non-ASCII filter.
             let cursor_x = filter_x + 8.0 + text::width(&self.filter_text, 11.0);
-            tree.fill_rect(cursor_x, btn_y + 4.0, 1.0, btn_h - 8.0, COLOR_TEXT);
+            tree.fill_rect(cursor_x, btn_y + 4.0, 1.0, btn_h - 8.0, self.palette.text);
         }
     }
 
@@ -1519,7 +1514,7 @@ impl ProcessExplorerState {
     fn render_tab_bar(&self, tree: &mut RenderTree) {
         let w = self.window_width as f32;
         let y = TOOLBAR_HEIGHT;
-        tree.fill_rect(0.0, y, w, TAB_BAR_HEIGHT, COLOR_TAB_BG);
+        tree.fill_rect(0.0, y, w, TAB_BAR_HEIGHT, self.palette.mantle);
 
         let mut tx = 0.0f32;
         for tab in &Tab::ALL {
@@ -1528,15 +1523,15 @@ impl ProcessExplorerState {
             let is_active = *tab == self.active_tab;
 
             if is_active {
-                tree.fill_rect(tx, y, tab_w, TAB_BAR_HEIGHT, COLOR_TOOLBAR_BG);
+                tree.fill_rect(tx, y, tab_w, TAB_BAR_HEIGHT, self.palette.mantle);
                 // Active indicator line at bottom
-                tree.fill_rect(tx, y + TAB_BAR_HEIGHT - 2.0, tab_w, 2.0, COLOR_TAB_ACTIVE);
+                tree.fill_rect(tx, y + TAB_BAR_HEIGHT - 2.0, tab_w, 2.0, self.palette.accent);
             }
 
             let text_color = if is_active {
-                COLOR_TEXT
+                self.palette.text
             } else {
-                COLOR_TEXT_DIM
+                self.palette.subtext0
             };
             tree.text(tx + 12.0, y + 7.0, label, text_color, 12.0);
             tx += tab_w;
@@ -1550,8 +1545,8 @@ impl ProcessExplorerState {
         let w = self.window_width as f32;
         let y = self.window_height as f32 - STATUS_BAR_HEIGHT;
 
-        tree.fill_rect(0.0, y, w, STATUS_BAR_HEIGHT, COLOR_STATUS_BG);
-        tree.text(8.0, y + 5.0, &self.status_message, COLOR_TEXT_DIM, 11.0);
+        tree.fill_rect(0.0, y, w, STATUS_BAR_HEIGHT, self.palette.mantle);
+        tree.text(8.0, y + 5.0, &self.status_message, self.palette.subtext0, 11.0);
     }
 
     // -- Process tab --------------------------------------------------------
@@ -1564,7 +1559,7 @@ impl ProcessExplorerState {
         let content_y = TOOLBAR_HEIGHT + TAB_BAR_HEIGHT;
 
         // Column headers
-        tree.fill_rect(0.0, content_y, w, HEADER_HEIGHT, COLOR_HEADER_BG);
+        tree.fill_rect(0.0, content_y, w, HEADER_HEIGHT, self.palette.mantle);
 
         let mut col_x = 0.0f32;
         for col in &ProcessColumn::ALL {
@@ -1583,9 +1578,9 @@ impl ProcessExplorerState {
             };
 
             let label_color = if *col == self.sort_column {
-                COLOR_ACCENT
+                self.palette.accent
             } else {
-                COLOR_TEXT_DIM
+                self.palette.subtext0
             };
             // Fitted like the cells below it: the header gains a sort arrow
             // when it is the sort column, so its width is not the constant the
@@ -1605,7 +1600,7 @@ impl ProcessExplorerState {
                 content_y + 2.0,
                 1.0,
                 HEADER_HEIGHT - 4.0,
-                Color::rgb(55, 60, 70),
+                self.palette.surface0,
             );
             col_x += cw;
         }
@@ -1636,13 +1631,13 @@ impl ProcessExplorerState {
 
             // Row background
             let bg = if self.selected_index == Some(row_idx) {
-                COLOR_ROW_SELECTED
+                self.palette.surface1
             } else if self.hovered_index == Some(row_idx) {
-                COLOR_ROW_HOVER
+                self.palette.surface0
             } else if row_idx.is_multiple_of(2) {
-                COLOR_ROW_EVEN
+                self.palette.base
             } else {
-                COLOR_ROW_ODD
+                self.palette.surface0
             };
             tree.fill_rect(0.0, ry, w, ROW_HEIGHT, bg);
 
@@ -1671,7 +1666,7 @@ impl ProcessExplorerState {
                             ry + 4.0,
                             cell_w,
                             &proc.pid.to_string(),
-                            COLOR_TEXT_DIM,
+                            self.palette.subtext0,
                             11.0,
                         );
                     }
@@ -1682,7 +1677,7 @@ impl ProcessExplorerState {
                                 cx + CELL_PAD + indent - 14.0,
                                 ry + 4.0,
                                 "\u{2514}\u{2500}",
-                                Color::rgb(80, 85, 95),
+                                self.palette.surface2,
                                 11.0,
                             );
                         }
@@ -1694,7 +1689,7 @@ impl ProcessExplorerState {
                             ry + 4.0,
                             (cell_w - indent).max(0.0),
                             &proc.name,
-                            COLOR_TEXT,
+                            self.palette.text,
                             11.0,
                         );
                     }
@@ -1704,18 +1699,18 @@ impl ProcessExplorerState {
                             ry + 4.0,
                             cell_w,
                             proc.status.label(),
-                            proc.status.color(),
+                            proc.status.color(&self.palette),
                             11.0,
                         );
                     }
                     ProcessColumn::Cpu => {
                         let cpu_str = format!("{:.1}", proc.cpu_percent);
                         let cpu_color = if proc.cpu_percent > 50.0 {
-                            COLOR_DANGER
+                            self.palette.red
                         } else if proc.cpu_percent > 10.0 {
-                            COLOR_STATUS_STOPPED
+                            self.palette.yellow
                         } else {
-                            COLOR_TEXT
+                            self.palette.text
                         };
                         tree.text_in(cx + CELL_PAD, ry + 4.0, cell_w, &cpu_str, cpu_color, 11.0);
                     }
@@ -1725,7 +1720,7 @@ impl ProcessExplorerState {
                             ry + 4.0,
                             cell_w,
                             &format_bytes(proc.memory_bytes),
-                            COLOR_TEXT,
+                            self.palette.text,
                             11.0,
                         );
                     }
@@ -1735,7 +1730,7 @@ impl ProcessExplorerState {
                             ry + 4.0,
                             cell_w,
                             &proc.thread_count.to_string(),
-                            COLOR_TEXT_DIM,
+                            self.palette.subtext0,
                             11.0,
                         );
                     }
@@ -1745,7 +1740,7 @@ impl ProcessExplorerState {
                             ry + 4.0,
                             cell_w,
                             &proc.priority.to_string(),
-                            COLOR_TEXT_DIM,
+                            self.palette.subtext0,
                             11.0,
                         );
                     }
@@ -1755,7 +1750,7 @@ impl ProcessExplorerState {
                             ry + 4.0,
                             cell_w,
                             &proc.user,
-                            COLOR_TEXT_DIM,
+                            self.palette.subtext0,
                             11.0,
                         );
                     }
@@ -1781,27 +1776,27 @@ impl ProcessExplorerState {
         let graph_w = w - 32.0;
         let graph_h = 140.0;
 
-        self.render_bold_text(tree, graph_x, graph_y, "CPU Usage", COLOR_TEXT, 13.0);
+        self.render_bold_text(tree, graph_x, graph_y, "CPU Usage", self.palette.text, 13.0);
         let cpu_label = format!("{:.1}%", self.system_info.cpu_overall);
-        tree.text(graph_x + 100.0, graph_y, &cpu_label, COLOR_GRAPH_CPU, 13.0);
+        tree.text(graph_x + 100.0, graph_y, &cpu_label, self.palette.green, 13.0);
 
         let chart_y = graph_y + 20.0;
-        tree.fill_rect(graph_x, chart_y, graph_w, graph_h, Color::rgb(20, 22, 28));
+        tree.fill_rect(graph_x, chart_y, graph_w, graph_h, self.palette.crust);
         tree.stroke_rect(
             graph_x,
             chart_y,
             graph_w,
             graph_h,
-            Color::rgb(50, 55, 65),
+            self.palette.surface0,
             1.0,
         );
 
         // Grid lines (25%, 50%, 75%)
         for pct in &[25.0f32, 50.0, 75.0] {
             let gy = chart_y + graph_h * (1.0 - pct / 100.0);
-            self.render_dashed_hline(tree, graph_x + 1.0, gy, graph_w - 2.0, COLOR_GRAPH_GRID);
+            self.render_dashed_hline(tree, graph_x + 1.0, gy, graph_w - 2.0, self.palette.surface1);
             let pct_label = format!("{:.0}%", pct);
-            tree.text(graph_x + 2.0, gy - 10.0, &pct_label, COLOR_TEXT_DIM, 9.0);
+            tree.text(graph_x + 2.0, gy - 10.0, &pct_label, self.palette.subtext0, 9.0);
         }
 
         // CPU history line
@@ -1812,14 +1807,14 @@ impl ProcessExplorerState {
             graph_w,
             graph_h,
             &self.cpu_history,
-            COLOR_GRAPH_CPU,
+            self.palette.green,
             100.0,
         );
 
         let mut cur_y = chart_y + graph_h + section_gap;
 
         // -- Memory usage bars --
-        self.render_bold_text(tree, graph_x, cur_y, "Memory", COLOR_TEXT, 13.0);
+        self.render_bold_text(tree, graph_x, cur_y, "Memory", self.palette.text, 13.0);
         cur_y += 20.0;
 
         let bar_h = 20.0;
@@ -1830,18 +1825,18 @@ impl ProcessExplorerState {
             (
                 "Used",
                 self.system_info.used_memory,
-                Color::rgb(80, 140, 220),
+                self.palette.blue,
             ),
             (
                 "Cached",
                 self.system_info.cached_memory,
-                Color::rgb(120, 180, 80),
+                self.palette.green,
             ),
-            ("Free", self.system_info.free_memory, Color::rgb(60, 65, 75)),
+            ("Free", self.system_info.free_memory, self.palette.surface1),
         ];
 
         let total = self.system_info.total_memory.max(1);
-        tree.fill_rect(graph_x, cur_y, bar_w, bar_h, Color::rgb(35, 38, 46));
+        tree.fill_rect(graph_x, cur_y, bar_w, bar_h, self.palette.base);
         let mut fill_x = graph_x;
 
         for &(label, amount, color) in mem_items {
@@ -1866,7 +1861,7 @@ impl ProcessExplorerState {
                 legend_x + 14.0,
                 legend_y,
                 &legend_label,
-                COLOR_TEXT_DIM,
+                self.palette.subtext0,
                 10.0,
             );
         }
@@ -1876,22 +1871,22 @@ impl ProcessExplorerState {
             graph_x + bar_w + 8.0,
             cur_y + 3.0,
             &format!("Total: {}", format_bytes(self.system_info.total_memory)),
-            COLOR_TEXT,
+            self.palette.text,
             11.0,
         );
 
         cur_y += bar_h + 28.0;
 
         // -- Swap usage --
-        self.render_bold_text(tree, graph_x, cur_y, "Swap", COLOR_TEXT, 13.0);
+        self.render_bold_text(tree, graph_x, cur_y, "Swap", self.palette.text, 13.0);
         cur_y += 20.0;
 
         let swap_total = self.system_info.swap_total.max(1);
         let swap_frac = self.system_info.swap_used as f32 / swap_total as f32;
-        tree.fill_rect(graph_x, cur_y, bar_w, 14.0, Color::rgb(35, 38, 46));
+        tree.fill_rect(graph_x, cur_y, bar_w, 14.0, self.palette.base);
         let swap_fill_w = bar_w * swap_frac;
         if swap_fill_w > 0.5 {
-            tree.fill_rect(graph_x, cur_y, swap_fill_w, 14.0, Color::rgb(200, 120, 60));
+            tree.fill_rect(graph_x, cur_y, swap_fill_w, 14.0, self.palette.peach);
         }
         tree.text(
             graph_x + bar_w + 8.0,
@@ -1901,7 +1896,7 @@ impl ProcessExplorerState {
                 format_bytes(self.system_info.swap_used),
                 format_bytes(self.system_info.swap_total)
             ),
-            COLOR_TEXT_DIM,
+            self.palette.subtext0,
             11.0,
         );
         cur_y += 24.0 + section_gap;
@@ -1912,7 +1907,7 @@ impl ProcessExplorerState {
             graph_x,
             cur_y,
             "Per-Core Utilization",
-            COLOR_TEXT,
+            self.palette.text,
             13.0,
         );
         cur_y += 20.0;
@@ -1921,26 +1916,26 @@ impl ProcessExplorerState {
         let core_bar_gap = 4.0;
         for (i, &usage) in self.system_info.cpu_per_core.iter().enumerate() {
             let label = format!("Core {i}");
-            tree.text(graph_x, cur_y, &label, COLOR_TEXT_DIM, 10.0);
+            tree.text(graph_x, cur_y, &label, self.palette.subtext0, 10.0);
 
             let cb_x = graph_x + 50.0;
             let cb_w = bar_w - 50.0;
-            tree.fill_rect(cb_x, cur_y, cb_w, core_bar_h, Color::rgb(35, 38, 46));
+            tree.fill_rect(cb_x, cur_y, cb_w, core_bar_h, self.palette.base);
 
             let fill_w = cb_w * (usage / 100.0);
             let bar_color = if usage > 80.0 {
-                COLOR_DANGER
+                self.palette.red
             } else if usage > 50.0 {
-                COLOR_STATUS_STOPPED
+                self.palette.yellow
             } else {
-                COLOR_GRAPH_CPU
+                self.palette.green
             };
             if fill_w > 0.5 {
                 tree.fill_rect(cb_x, cur_y, fill_w, core_bar_h, bar_color);
             }
 
             let usage_str = format!("{usage:.0}%");
-            tree.text(cb_x + cb_w + 6.0, cur_y, &usage_str, COLOR_TEXT_DIM, 10.0);
+            tree.text(cb_x + cb_w + 6.0, cur_y, &usage_str, self.palette.subtext0, 10.0);
 
             cur_y += core_bar_h + core_bar_gap;
         }
@@ -1953,7 +1948,7 @@ impl ProcessExplorerState {
             graph_x,
             cur_y,
             &format!("Uptime: {uptime}"),
-            COLOR_TEXT,
+            self.palette.text,
             12.0,
         );
         cur_y += 18.0;
@@ -1964,7 +1959,7 @@ impl ProcessExplorerState {
             self.system_info.load_avg[1],
             self.system_info.load_avg[2],
         );
-        tree.text(graph_x, cur_y, &load, COLOR_TEXT, 12.0);
+        tree.text(graph_x, cur_y, &load, self.palette.text, 12.0);
     }
 
     // -- Network tab --------------------------------------------------------
@@ -1984,18 +1979,18 @@ impl ProcessExplorerState {
             graph_x,
             content_y,
             "Network Bandwidth",
-            COLOR_TEXT,
+            self.palette.text,
             13.0,
         );
 
         let chart_y = content_y + 20.0;
-        tree.fill_rect(graph_x, chart_y, graph_w, graph_h, Color::rgb(20, 22, 28));
+        tree.fill_rect(graph_x, chart_y, graph_w, graph_h, self.palette.crust);
         tree.stroke_rect(
             graph_x,
             chart_y,
             graph_w,
             graph_h,
-            Color::rgb(50, 55, 65),
+            self.palette.surface0,
             1.0,
         );
 
@@ -2013,7 +2008,7 @@ impl ProcessExplorerState {
             graph_w,
             graph_h,
             &self.net_in_history,
-            COLOR_GRAPH_NET_IN,
+            self.palette.blue,
             max_bw,
         );
         self.render_line_graph(
@@ -2023,22 +2018,22 @@ impl ProcessExplorerState {
             graph_w,
             graph_h,
             &self.net_out_history,
-            COLOR_GRAPH_NET_OUT,
+            self.palette.peach,
             max_bw,
         );
 
         // Legend
         let legend_y = chart_y + graph_h + 4.0;
-        tree.fill_rect(graph_x, legend_y + 2.0, 10.0, 10.0, COLOR_GRAPH_NET_IN);
-        tree.text(graph_x + 14.0, legend_y, "In", COLOR_TEXT_DIM, 10.0);
+        tree.fill_rect(graph_x, legend_y + 2.0, 10.0, 10.0, self.palette.blue);
+        tree.text(graph_x + 14.0, legend_y, "In", self.palette.subtext0, 10.0);
         tree.fill_rect(
             graph_x + 50.0,
             legend_y + 2.0,
             10.0,
             10.0,
-            COLOR_GRAPH_NET_OUT,
+            self.palette.peach,
         );
-        tree.text(graph_x + 64.0, legend_y, "Out", COLOR_TEXT_DIM, 10.0);
+        tree.text(graph_x + 64.0, legend_y, "Out", self.palette.subtext0, 10.0);
 
         // -- Connections table --
         let table_y = legend_y + 24.0;
@@ -2047,12 +2042,12 @@ impl ProcessExplorerState {
             graph_x,
             table_y,
             "Active Connections",
-            COLOR_TEXT,
+            self.palette.text,
             13.0,
         );
 
         let hdr_y = table_y + 20.0;
-        tree.fill_rect(0.0, hdr_y, w, HEADER_HEIGHT, COLOR_HEADER_BG);
+        tree.fill_rect(0.0, hdr_y, w, HEADER_HEIGHT, self.palette.mantle);
 
         // `Table` inserts a full gap before the first column, but this layout's
         // leading inset is a single `CELL_PAD` — matching the Processes tab —
@@ -2066,7 +2061,7 @@ impl ProcessExplorerState {
         net.header_weighted(
             &mut tree.commands,
             hdr_y + 5.0,
-            COLOR_TEXT_DIM,
+            self.palette.subtext0,
             NET_FONT,
             FontWeightHint::Regular,
         );
@@ -2078,7 +2073,7 @@ impl ProcessExplorerState {
                 hdr_y + 2.0,
                 1.0,
                 HEADER_HEIGHT - 4.0,
-                Color::rgb(55, 60, 70),
+                self.palette.surface0,
             );
         }
 
@@ -2096,9 +2091,9 @@ impl ProcessExplorerState {
         for (i, conn) in self.connections.iter().take(visible_rows).enumerate() {
             let ry = rows_y + i as f32 * ROW_HEIGHT;
             let bg = if i % 2 == 0 {
-                COLOR_ROW_EVEN
+                self.palette.base
             } else {
-                COLOR_ROW_ODD
+                self.palette.surface0
             };
             tree.fill_rect(0.0, ry, w, ROW_HEIGHT, bg);
 
@@ -2131,13 +2126,13 @@ impl ProcessExplorerState {
                 let color = if column == NET_STATE {
                     // State column gets color coding.
                     match field {
-                        "ESTABLISHED" => COLOR_STATUS_RUNNING,
-                        "LISTEN" => COLOR_STATUS_SLEEPING,
-                        "TIME_WAIT" | "CLOSE_WAIT" => COLOR_STATUS_STOPPED,
-                        _ => COLOR_TEXT,
+                        "ESTABLISHED" => self.palette.green,
+                        "LISTEN" => self.palette.blue,
+                        "TIME_WAIT" | "CLOSE_WAIT" => self.palette.yellow,
+                        _ => self.palette.text,
                     }
                 } else {
-                    COLOR_TEXT
+                    self.palette.text
                 };
                 net.cell(
                     &mut tree.commands,
@@ -2169,7 +2164,7 @@ impl ProcessExplorerState {
                     pad,
                     content_y + 20.0,
                     "No process selected. Select a process on the Processes tab.",
-                    COLOR_TEXT_DIM,
+                    self.palette.subtext0,
                     13.0,
                 );
                 return;
@@ -2182,7 +2177,7 @@ impl ProcessExplorerState {
             pad,
             content_y,
             &format!("{} (PID {})", proc.name, proc.pid),
-            COLOR_TEXT,
+            self.palette.text,
             15.0,
         );
 
@@ -2229,19 +2224,19 @@ impl ProcessExplorerState {
                 ly,
                 (label_w - INFO_GUTTER).max(0.0),
                 &format!("{label}:"),
-                COLOR_TEXT_DIM,
+                self.palette.subtext0,
                 11.0,
             );
-            tree.text_in(lx + label_w, ly, value_room, value, COLOR_TEXT, 11.0);
+            tree.text_in(lx + label_w, ly, value_room, value, self.palette.text, 11.0);
         }
 
         cur_y += INFO_ROWS as f32 * 18.0 + 12.0;
 
         // -- Memory breakdown --
-        tree.fill_rect(pad, cur_y, w - 2.0 * pad, 1.0, Color::rgb(55, 60, 70));
+        tree.fill_rect(pad, cur_y, w - 2.0 * pad, 1.0, self.palette.surface0);
         cur_y += 8.0;
 
-        self.render_bold_text(tree, pad, cur_y, "Memory", COLOR_TEXT, 12.0);
+        self.render_bold_text(tree, pad, cur_y, "Memory", self.palette.text, 12.0);
         cur_y += 18.0;
 
         let mem_fields: &[(&str, String)] = &[
@@ -2261,16 +2256,16 @@ impl ProcessExplorerState {
                 cur_y,
                 (mem_col_w - INFO_GUTTER).max(0.0),
                 &format!("{label}: {value}"),
-                COLOR_TEXT,
+                self.palette.text,
                 11.0,
             );
         }
         cur_y += 22.0;
 
         // -- Command line --
-        tree.fill_rect(pad, cur_y, w - 2.0 * pad, 1.0, Color::rgb(55, 60, 70));
+        tree.fill_rect(pad, cur_y, w - 2.0 * pad, 1.0, self.palette.surface0);
         cur_y += 8.0;
-        self.render_bold_text(tree, pad, cur_y, "Command Line", COLOR_TEXT, 12.0);
+        self.render_bold_text(tree, pad, cur_y, "Command Line", self.palette.text, 12.0);
         cur_y += 18.0;
         let cmd_display = if proc.command_line.is_empty() {
             "(none)"
@@ -2285,26 +2280,26 @@ impl ProcessExplorerState {
             cur_y,
             (w - 2.0 * pad).max(0.0),
             cmd_display,
-            COLOR_TEXT_DIM,
+            self.palette.subtext0,
             11.0,
         );
         cur_y += 22.0;
 
         // -- Thread list --
-        tree.fill_rect(pad, cur_y, w - 2.0 * pad, 1.0, Color::rgb(55, 60, 70));
+        tree.fill_rect(pad, cur_y, w - 2.0 * pad, 1.0, self.palette.surface0);
         cur_y += 8.0;
         self.render_bold_text(
             tree,
             pad,
             cur_y,
             &format!("Threads ({})", proc.threads.len()),
-            COLOR_TEXT,
+            self.palette.text,
             12.0,
         );
         cur_y += 18.0;
 
         // Thread table header
-        tree.fill_rect(pad, cur_y, w - 2.0 * pad, HEADER_HEIGHT, COLOR_HEADER_BG);
+        tree.fill_rect(pad, cur_y, w - 2.0 * pad, HEADER_HEIGHT, self.palette.mantle);
         let thread_cols: &[(&str, f32)] = &[
             ("TID", 60.0),
             ("Name", 200.0),
@@ -2318,7 +2313,7 @@ impl ProcessExplorerState {
                 cur_y + 5.0,
                 (col_w - CELL_PAD * 2.0).max(0.0),
                 label,
-                COLOR_TEXT_DIM,
+                self.palette.subtext0,
                 10.0,
             );
             tx += col_w;
@@ -2329,9 +2324,9 @@ impl ProcessExplorerState {
         for (ti, thread) in proc.threads.iter().take(max_thread_rows).enumerate() {
             let ry = cur_y + ti as f32 * ROW_HEIGHT;
             let bg = if ti % 2 == 0 {
-                COLOR_ROW_EVEN
+                self.palette.base
             } else {
-                COLOR_ROW_ODD
+                self.palette.surface0
             };
             tree.fill_rect(pad, ry, w - 2.0 * pad, ROW_HEIGHT, bg);
 
@@ -2340,10 +2335,10 @@ impl ProcessExplorerState {
             // 60/200/80 as literals — they agreed with the header by
             // coincidence, and nothing would have caught them drifting apart.
             let cells: [(String, Color); 4] = [
-                (thread.tid.to_string(), COLOR_TEXT_DIM),
-                (thread.name.clone(), COLOR_TEXT),
-                (thread.status.label().to_string(), thread.status.color()),
-                (format!("{:.1}", thread.cpu_percent), COLOR_TEXT),
+                (thread.tid.to_string(), self.palette.subtext0),
+                (thread.name.clone(), self.palette.text),
+                (thread.status.label().to_string(), thread.status.color(&self.palette)),
+                (format!("{:.1}", thread.cpu_percent), self.palette.text),
             ];
             let mut tcx = pad;
             for (&(_, col_w), (cell, color)) in thread_cols.iter().zip(cells.iter()) {
@@ -2362,14 +2357,14 @@ impl ProcessExplorerState {
 
         // -- Handles / capabilities --
         if !proc.handles.is_empty() {
-            tree.fill_rect(pad, cur_y, w - 2.0 * pad, 1.0, Color::rgb(55, 60, 70));
+            tree.fill_rect(pad, cur_y, w - 2.0 * pad, 1.0, self.palette.surface0);
             cur_y += 8.0;
             self.render_bold_text(
                 tree,
                 pad,
                 cur_y,
                 &format!("Handles ({})", proc.handles.len()),
-                COLOR_TEXT,
+                self.palette.text,
                 12.0,
             );
             cur_y += 18.0;
@@ -2388,7 +2383,7 @@ impl ProcessExplorerState {
                     cur_y,
                     (w - pad - DETAIL_INDENT - pad).max(0.0),
                     &entry,
-                    COLOR_TEXT_DIM,
+                    self.palette.subtext0,
                     10.0,
                 );
                 cur_y += 16.0;
@@ -2399,7 +2394,7 @@ impl ProcessExplorerState {
                     pad + 8.0,
                     cur_y,
                     &format!("... and {more} more"),
-                    COLOR_TEXT_DIM,
+                    self.palette.subtext0,
                     10.0,
                 );
                 cur_y += 16.0;
@@ -2409,14 +2404,14 @@ impl ProcessExplorerState {
 
         // -- Environment variables (collapsed summary) --
         if !proc.environment.is_empty() {
-            tree.fill_rect(pad, cur_y, w - 2.0 * pad, 1.0, Color::rgb(55, 60, 70));
+            tree.fill_rect(pad, cur_y, w - 2.0 * pad, 1.0, self.palette.surface0);
             cur_y += 8.0;
             self.render_bold_text(
                 tree,
                 pad,
                 cur_y,
                 &format!("Environment ({})", proc.environment.len()),
-                COLOR_TEXT,
+                self.palette.text,
                 12.0,
             );
             cur_y += 18.0;
@@ -2439,7 +2434,7 @@ impl ProcessExplorerState {
                     cur_y,
                     (w - pad - DETAIL_INDENT - pad).max(0.0),
                     &entry,
-                    COLOR_TEXT_DIM,
+                    self.palette.subtext0,
                     10.0,
                 );
                 cur_y += 16.0;
@@ -2450,7 +2445,7 @@ impl ProcessExplorerState {
                     pad + 8.0,
                     cur_y,
                     &format!("... and {more} more"),
-                    COLOR_TEXT_DIM,
+                    self.palette.subtext0,
                     10.0,
                 );
             }
@@ -2481,8 +2476,8 @@ impl ProcessExplorerState {
         );
 
         // Background
-        tree.fill_rect(menu.x, menu.y, menu_w, menu_h, Color::rgb(50, 54, 62));
-        tree.stroke_rect(menu.x, menu.y, menu_w, menu_h, Color::rgb(80, 85, 95), 1.0);
+        tree.fill_rect(menu.x, menu.y, menu_w, menu_h, self.palette.surface0);
+        tree.stroke_rect(menu.x, menu.y, menu_w, menu_h, self.palette.surface2, 1.0);
 
         for (i, action) in ContextAction::ALL.iter().enumerate() {
             let iy = menu.y + i as f32 * item_h;
@@ -2493,14 +2488,14 @@ impl ProcessExplorerState {
                     iy,
                     menu_w - 2.0,
                     item_h,
-                    Color::rgb(70, 100, 160),
+                    self.palette.blue,
                 );
             }
 
             let text_color = if *action == ContextAction::Kill {
-                COLOR_DANGER
+                self.palette.red
             } else {
-                COLOR_TEXT
+                self.palette.text
             };
             tree.text(menu.x + 12.0, iy + 5.0, action.label(), text_color, 11.0);
         }
@@ -2951,6 +2946,15 @@ fn format_uptime(secs: u64) -> String {
 // ============================================================================
 
 impl App for ProcessExplorerState {
+    /// Adopt the user's colours (§822).
+    ///
+    /// The trait's default does nothing, which is exactly how this crate came
+    /// to ship a hardcoded dark theme: not overriding it is silent, and the
+    /// app keeps whatever it was born with. 55 crates are still in that state.
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         "Process Explorer".to_string()
     }
@@ -3138,6 +3142,36 @@ mod tests {
     /// constants. Recomputing is what makes a layout test worthless: it
     /// re-derives the renderer's arithmetic and then checks the hit test
     /// against *that*, so the two can drift together and the test still
+    /// Every colour this app draws comes from the user's palette.
+    ///
+    /// The guard §822 expects each converted crate to adopt, and the reason
+    /// this crate stayed unconverted for so long: 47 shell modules run this
+    /// and, until now, zero applications did. Nothing was counting, so the 22
+    /// hardcoded constants cost nothing to write and nobody found out.
+    ///
+    /// Runs in *both* modes, because the defect it catches -- a literal that
+    /// belongs to one theme -- is invisible in the theme it was written for.
+    #[test]
+    fn every_colour_the_process_explorer_draws_comes_from_its_palette() {
+        for light in [false, true] {
+            let mut app = ProcessExplorerState::new();
+            app.palette = Palette::for_mode(light);
+            app.processes = app_with_a_shouting_process().processes;
+            for tab in [Tab::Processes, Tab::System, Tab::Network, Tab::Details] {
+                app.active_tab = tab;
+                appearance::palette_check::assert_drawn_from(
+                    &app.palette,
+                    &app.render_tree().commands,
+                    // Nothing is computed here: every colour this app draws is
+                    // a role. If that stops being true, the right answer is
+                    // usually to name the role, not to widen this list.
+                    &[],
+                    &format!("procexplorer {tab:?} (light={light})"),
+                );
+            }
+        }
+    }
+
     /// passes. This asks the renderer what it drew.
     fn rows_clip(app: &ProcessExplorerState) -> (f32, f32) {
         app.render_tree()

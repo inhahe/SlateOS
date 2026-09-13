@@ -216,6 +216,15 @@ pub struct Style {
     /// See [`selection_bg`](Self::selection_bg).
     pub selection_fg: Color,
 
+    /// How wide to draw a text caret, in pixels.
+    ///
+    /// A field for the same reason the two selection colours are: the caller
+    /// has the user's settings and this crate cannot reach them. The default
+    /// is the toolkit's own [`textedit::CARET_WIDTH`](crate::textedit::CARET_WIDTH);
+    /// a caller that reads `caret_width_scale` out of the appearance settings
+    /// multiplies by it. 839.
+    pub caret_width: f32,
+
     // Padding (inside border)
     pub padding: Edges,
 
@@ -255,6 +264,7 @@ impl Default for Style {
             foreground: Color::BLACK,
             selection_bg: Color::from_hex(0x0078D7),
             selection_fg: Color::WHITE,
+            caret_width: crate::textedit::CARET_WIDTH,
             padding: Edges::ZERO,
             margin: Edges::ZERO,
             border: Borders::default(),

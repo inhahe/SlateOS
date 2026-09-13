@@ -1329,6 +1329,12 @@ pub struct InputDialog {
     validation_error: Option<String>,
     /// Validation function stored as a flag; actual validation is done via `validate()`.
     has_validator: bool,
+    /// How wide to draw the caret, in pixels.
+    ///
+    /// Defaults to the toolkit's own width; a caller that has read the user's
+    /// `caret_width_scale` sets it with
+    /// [`with_caret_width`](Self::with_caret_width). 839.
+    caret_width: f32,
     // No `buttons: ButtonSet` here, deliberately. There was one, initialised to
     // `ok_cancel()` and never read: `render` draws the strings "OK" and
     // "Cancel" outright, and `InputPlacement` names its two hit rectangles
@@ -1356,6 +1362,17 @@ enum InputFocus {
 
 impl InputDialog {
     /// Create a new input dialog.
+    /// Draw this dialog's caret at `width` pixels.
+    ///
+    /// For a caller that has read `caret_width_scale` out of the appearance
+    /// settings: `CARET_WIDTH * scale`. A dialog raised without one keeps the
+    /// toolkit's default, which is what every caller did before 839.
+    #[must_use]
+    pub fn with_caret_width(mut self, width: f32) -> Self {
+        self.caret_width = width;
+        self
+    }
+
     pub fn prompt(title: &str, message: &str, placeholder: &str) -> Self {
         let mut overlay = ModalOverlay::new();
         overlay.dismiss_on_escape = true;
@@ -1371,6 +1388,7 @@ impl InputDialog {
             password_mode: false,
             validation_error: None,
             has_validator: false,
+            caret_width: crate::textedit::CARET_WIDTH,
             focused_element: InputFocus::TextField,
             result: None,
             overlay,
@@ -2057,7 +2075,7 @@ impl InputDialog {
                     // is the accent itself, not a surface of the theme (837).
                     selection_bg: palette.accent,
                     selection_fg: crate::palette::readable_on(palette.accent),
-                    caret_width: crate::textedit::CARET_WIDTH,
+                    caret_width: self.caret_width,
                 },
             );
         }

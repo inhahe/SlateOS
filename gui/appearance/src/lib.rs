@@ -1076,6 +1076,19 @@ pub struct AppearanceSettings {
     pub animation_speed: AnimationSpeed,
     /// Font settings.
     pub fonts: FontSettings,
+    /// How wide the text caret is drawn, as a multiple of the toolkit's
+    /// default.
+    ///
+    /// An accessibility setting, and a real one: a 2px caret on a 4K display
+    /// is a hairline, and a user who cannot see where they are typing cannot
+    /// type. It lived in `gui/desktop/src/a11y.rs` until 839, in a struct
+    /// nothing constructed, so the setting existed and did nothing.
+    ///
+    /// Here rather than in `gui/inputsettings` -- which is where the
+    /// *keyboard* accessibility settings went -- because a caret is drawn by
+    /// the toolkit, and the toolkit's settings arrive through this struct.
+    /// See design-decisions.md 839.
+    pub caret_width_scale: f32,
     /// Desktop icon size.
     pub icon_size: IconSize,
     /// Cursor size.
@@ -1133,6 +1146,7 @@ impl Default for AppearanceSettings {
             accent_titlebars: false,
             drop_shadows: true,
             scaling_percent: 100,
+            caret_width_scale: 1.0,
         }
     }
 }
@@ -1184,6 +1198,10 @@ impl AppearanceSettings {
         self.fonts.ui_size = self.fonts.ui_size.clamp(8.0, 32.0);
         self.fonts.mono_size = self.fonts.mono_size.clamp(6.0, 32.0);
         self.scaling_percent = self.scaling_percent.clamp(100, 300);
+        // Up to four times, not the a11y module's five: the caret is drawn
+        // inside a line box, and past about 4x it stops being a caret and
+        // starts covering the character after it.
+        self.caret_width_scale = self.caret_width_scale.clamp(0.5, 4.0);
     }
 }
 
@@ -1562,6 +1580,11 @@ impl AppearanceSettings {
                 .and_then(|v| TransparencyLevel::from_yaml_name(&v))
         );
 
+        read_into!(
+            s.caret_width_scale,
+            doc.get_f64(&["accessibility", "caret_width_scale"])
+                .map(|v| v as f32)
+        );
         read_into!(s.fonts.ui_font, doc.get_str(&["fonts", "ui_font"]));
         read_into!(
             s.fonts.ui_size,
@@ -1660,6 +1683,10 @@ impl AppearanceSettings {
         doc.set_str(&["theme", "transparency"], self.transparency.yaml_name());
 
         doc.set_str(&["fonts", "ui_font"], &self.fonts.ui_font);
+        doc.set_f64(
+            &["accessibility", "caret_width_scale"],
+            f64::from(self.caret_width_scale),
+        );
         doc.set_f64(&["fonts", "ui_size"], f64::from(self.fonts.ui_size));
         doc.set_str(&["fonts", "mono_font"], &self.fonts.mono_font);
         doc.set_f64(&["fonts", "mono_size"], f64::from(self.fonts.mono_size));
@@ -2021,6 +2048,7 @@ mod tests {
     fn all_non_default() -> AppearanceSettings {
         AppearanceSettings {
             theme_mode: ThemeMode::Light,
+            caret_width_scale: 2.5,
             // Non-default, which is this helper's whole contract: the
             // round-trip test must not be able to pass on a field it forgot.
             surface_style: SurfaceStyle::Cards,
@@ -4014,5 +4042,38 @@ mod tests {
             separation > 1.3,
             "main and secondary text are within {separation:.2} of each other,              so the hierarchy reads as flat"
         );
+    }
+
+    /// The caret width is a live setting, not a stored one.
+    ///
+    /// The test that matters for 839 is not that the value round-trips -- the
+    /// dead module in `a11y.rs` had a passing round-trip test for its own copy
+    /// of this setting, which is precisely why nobody noticed it was wired to
+    /// nothing. It is that a caller can get from the settings to a width in
+    /// pixels, which is the step that did not exist.
+    #[test]
+    fn the_caret_width_scale_reaches_a_width_in_pixels() {
+        let mut s = AppearanceSettings::default();
+        assert_eq!(
+            guitk::textedit::CARET_WIDTH * s.caret_width_scale,
+            guitk::textedit::CARET_WIDTH,
+            "the default scale must leave the toolkit's width alone"
+        );
+
+        s.caret_width_scale = 2.0;
+        assert_eq!(
+            guitk::textedit::CARET_WIDTH * s.caret_width_scale,
+            guitk::textedit::CARET_WIDTH * 2.0
+        );
+
+        // Clamped, and at four rather than the dead module's five: past about
+        // 4x a caret stops being a caret and starts covering the character
+        // after it.
+        s.caret_width_scale = 99.0;
+        s.validate();
+        assert_eq!(s.caret_width_scale, 4.0);
+        s.caret_width_scale = 0.01;
+        s.validate();
+        assert_eq!(s.caret_width_scale, 0.5);
     }
 }

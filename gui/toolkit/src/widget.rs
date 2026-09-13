@@ -905,7 +905,7 @@ impl Widget {
                 color: self.style.foreground,
                 selection_bg: self.style.selection_bg,
                 selection_fg: self.style.selection_fg,
-                caret_width: crate::textedit::CARET_WIDTH,
+                caret_width: self.style.caret_width,
             },
         );
     }

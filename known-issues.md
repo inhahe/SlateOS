@@ -140473,10 +140473,33 @@ risk the call site's own comment warns about: shaping happens there so the
 compositor lays text out exactly as the toolkit measured it, and a cache is a
 second layout path that can disagree with the first.
 
-**So the cost is in blending, not layout.** 240 strings of ~39 characters is
-about 9 400 glyphs, each alpha-blended into the framebuffer a pixel at a time.
-That is where to look next, and it is a different kind of fix -- the mask is
-already cached; what costs is putting it on the screen.
+**So the cost is in blending, not layout**, and measured with the windows
+spread the way the damage test needs them:
+
+| | best of five |
+|---|---|
+| frame with text | 20.3 ms |
+| same frame, text removed | 8.0 ms |
+| **text's share** | **12.3 ms of 20.3 -- 60% of the frame** |
+
+Of that 12.3 ms, shaping is 0.18 ms. The other 12.1 ms is putting about 9 400
+glyph masks on the screen: roughly **1.3 us a glyph**, or about **32 ns a
+covered pixel**, which is an order of magnitude more than an alpha blend
+should cost.
+
+**Where it goes, from reading the inner loop** (`SoftwareFramebuffer::draw_glyph`
+and `blend_pixel`). Per covered pixel: a clip test in `draw_glyph`, a *second*
+clip test inside `blend_pixel`, a `coverage as f32 / 255.0` division, a
+bounds-checked `get` followed by a separate bounds-checked `get_mut` for the
+same index, and three `blend_channel` calls. None of that is wrong; all of it
+is per-pixel work that could be per-glyph or per-row.
+
+**The obvious moves, cheapest first** -- and each should be measured on its
+own, because the last two hypotheses about this frame were both wrong:
+intersect the glyph's rectangle with the clip once per glyph instead of
+testing every pixel; fetch the destination pixel once rather than twice; and
+walk rows rather than calling per pixel. The `frame_budget` test is the guard
+for all of them.
 
 **A trap fixed on the way, worth its own paragraph.** `last_frame_time_us`
 was left *unchanged* when `compose_frame` took either early-out -- the

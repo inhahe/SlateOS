@@ -63,6 +63,7 @@
 //! 11. **`#![allow(dead_code)]` and eight `#[allow(unused_imports)]`** covered
 //!     all of the above.
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
@@ -75,21 +76,16 @@ use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 use std::time::Duration;
 
-// ── Catppuccin Mocha palette ───────────────────────────────────────────────
-const BASE: Color = Color::from_hex(0x1E_1E2E);
-const MANTLE: Color = Color::from_hex(0x18_1825);
-const CRUST: Color = Color::from_hex(0x11_111B);
-const SURFACE0: Color = Color::from_hex(0x31_3244);
-const SURFACE1: Color = Color::from_hex(0x45_475A);
-const OVERLAY1: Color = Color::from_hex(0x7F_849C);
-const TEXT_COLOR: Color = Color::from_hex(0xCD_D6F4);
-const SUBTEXT0: Color = Color::from_hex(0xA6_ADC8);
-const BLUE: Color = Color::from_hex(0x89_B4FA);
-const GREEN: Color = Color::from_hex(0xA6_E3A1);
-const RED: Color = Color::from_hex(0xF3_8BA8);
-const YELLOW: Color = Color::from_hex(0xF9_E2AF);
-const TEAL: Color = Color::from_hex(0x94_E2D5);
-const LAVENDER: Color = Color::from_hex(0xB4_BEFE);
+// The colours live in the user's palette, not here.
+//
+// 14 constants used to sit here -- Catppuccin Mocha again, so a light
+// desktop got a dark mixer. design-decisions 822 hands every application the
+// user's colours; this is one of the 55 crates never converted against it.
+//
+// Unlike `sysinfo` and `devicemanager`, these names and values agreed, so the
+// mapping is by name. `self.palette.overlay0` is the exception: the palette has no such
+// rung (it is declared and used nowhere), so that one goes to `overlay0` by
+// value.
 
 const WINDOW_WIDTH: f32 = 960.0;
 const WINDOW_HEIGHT: f32 = 620.0;
@@ -404,6 +400,8 @@ const PICKER_SHORTCUTS: &[(&str, &str)] = &[
 
 /// The mixer.
 pub struct MixerApp {
+    /// The user's colours, handed over by the framework (§822).
+    pub palette: Palette,
     master_volume: f32,
     master_muted: bool,
     streams: Vec<AudioStream>,
@@ -537,6 +535,7 @@ impl MixerApp {
         ];
 
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             master_volume: 0.75,
             master_muted: false,
             streams,
@@ -1446,13 +1445,17 @@ fn left_in(f: &mut Frame, r: Rect, s: &str, size: f32, color: Color, weight: Fon
 }
 
 /// The colour a level is drawn in: green until it is loud, then amber, then red.
-fn level_color(level: f32) -> Color {
+///
+/// A meter *fill*, not text, so the roles are used raw. Inking them here would
+/// darken the bar for no reason -- `ink` exists for a colour a reader has to
+/// read through, and nothing is drawn on top of this.
+fn level_color(level: f32, p: &Palette) -> Color {
     if level >= 0.9 {
-        RED
+        p.red
     } else if level >= 0.7 {
-        YELLOW
+        p.yellow
     } else {
-        GREEN
+        p.green
     }
 }
 
@@ -1464,7 +1467,7 @@ impl MixerApp {
     pub fn frame(&self, width: f32, height: f32) -> Frame {
         let l = Layout::new(width, height, self.streams.len());
         let mut f = Frame::new(width, height);
-        fill(&mut f, l.window, BASE, 0.0);
+        fill(&mut f, l.window, self.palette.base, 0.0);
 
         self.draw_devices(&mut f, &l);
         self.draw_columns(&mut f, &l);
@@ -1479,22 +1482,22 @@ impl MixerApp {
         if !l.shows(l.devices) {
             return;
         }
-        fill(f, l.devices, MANTLE, 0.0);
+        fill(f, l.devices, self.palette.mantle, 0.0);
         for (which, target) in [(0usize, Target::OutputDevice), (1, Target::InputDevice)] {
             let r = l.device_half(which);
             if r.w <= 0.0 || r.h <= 0.0 {
                 continue;
             }
             let (caption, device, accent) = if which == 0 {
-                ("Output", self.current_output_device(), BLUE)
+                ("Output", self.current_output_device(), self.palette.blue)
             } else {
-                ("Input", self.current_input_device(), TEAL)
+                ("Input", self.current_input_device(), self.palette.teal)
             };
             let open = matches!(
                 (which, self.picker),
                 (0, Picker::Output) | (1, Picker::Input)
             );
-            fill(f, r, if open { SURFACE1 } else { SURFACE0 }, 5.0);
+            fill(f, r, if open { self.palette.surface1 } else { self.palette.surface0 }, 5.0);
             f.hit(target, r);
 
             let inset = (r.w * 0.03).min(8.0);
@@ -1510,7 +1513,7 @@ impl MixerApp {
                 Rect::new(inner.x, inner.y, cap_w, inner.h),
                 caption,
                 l.font,
-                SUBTEXT0,
+                self.palette.subtext0,
                 FontWeightHint::Bold,
             );
             let name = device.map_or("None", |d| d.name.as_str());
@@ -1533,7 +1536,7 @@ impl MixerApp {
                     Rect::new(inner.x, r.y + r.h / 2.0, inner.w, (r.h / 2.0).max(0.0)),
                     &d.properties(),
                     (l.font * 0.82).max(1.0),
-                    OVERLAY1,
+                    self.palette.overlay0,
                     FontWeightHint::Regular,
                 );
             }
@@ -1553,7 +1556,7 @@ impl MixerApp {
             self.master_volume,
             self.master_muted,
             None,
-            LAVENDER,
+            self.palette.lavender,
         );
         for i in 0..self.streams.len() {
             let (Some(col), Some(stream)) = (l.column(i), self.stream_at(i)) else {
@@ -1568,7 +1571,7 @@ impl MixerApp {
                 stream.volume,
                 stream.muted,
                 Some(stream.peak_level),
-                if stream.playing { BLUE } else { OVERLAY1 },
+                if stream.playing { self.palette.blue } else { self.palette.overlay0 },
             );
         }
     }
@@ -1590,7 +1593,7 @@ impl MixerApp {
             return;
         }
         let selected = self.selection == sel;
-        fill(f, col, if selected { SURFACE0 } else { MANTLE }, 6.0);
+        fill(f, col, if selected { self.palette.surface0 } else { self.palette.mantle }, 6.0);
         if selected {
             stroke(f, col, accent, 2.0, 6.0);
         }
@@ -1611,20 +1614,20 @@ impl MixerApp {
             l.name_of(col),
             name,
             (l.font * 0.95).max(1.0),
-            if muted { OVERLAY1 } else { TEXT_COLOR },
+            if muted { self.palette.overlay0 } else { self.palette.text },
             FontWeightHint::Bold,
         );
 
         // The fader.
         let track = l.fader_of(col);
-        fill(f, track, CRUST, 3.0);
+        fill(f, track, self.palette.crust, 3.0);
         let filled = Rect::new(
             track.x,
             track.y + track.h * (1.0 - volume),
             track.w,
             track.h * volume,
         );
-        fill(f, filled, if muted { SURFACE1 } else { accent }, 3.0);
+        fill(f, filled, if muted { self.palette.surface1 } else { accent }, 3.0);
         f.hit(
             match sel {
                 Selection::Master => Target::MasterFader,
@@ -1637,14 +1640,14 @@ impl MixerApp {
         // master is not a stream and has no level of its own to show.
         if let Some(level) = peak {
             let meter = l.meter_of(col);
-            fill(f, meter, CRUST, 2.0);
+            fill(f, meter, self.palette.crust, 2.0);
             let lit = Rect::new(
                 meter.x,
                 meter.y + meter.h * (1.0 - level),
                 meter.w,
                 meter.h * level,
             );
-            fill(f, lit, level_color(level), 2.0);
+            fill(f, lit, level_color(level, &self.palette), 2.0);
         }
 
         centred_in(
@@ -1652,18 +1655,18 @@ impl MixerApp {
             l.readout_of(col),
             &format_volume_percent(volume),
             (l.font * 0.9).max(1.0),
-            if muted { OVERLAY1 } else { SUBTEXT0 },
+            if muted { self.palette.overlay0 } else { self.palette.subtext0 },
             FontWeightHint::Regular,
         );
 
         let mute = l.mute_of(col);
-        fill(f, mute, if muted { RED } else { SURFACE1 }, 4.0);
+        fill(f, mute, if muted { self.palette.red } else { self.palette.surface1 }, 4.0);
         centred_in(
             f,
             mute,
             if muted { "muted" } else { "mute" },
             (mute.h * 0.5).clamp(1.0, l.font),
-            if muted { CRUST } else { TEXT_COLOR },
+            if muted { self.palette.crust } else { self.palette.text },
             FontWeightHint::Bold,
         );
         f.hit(
@@ -1679,7 +1682,7 @@ impl MixerApp {
         if !l.shows(l.shortcuts) {
             return;
         }
-        fill(f, l.shortcuts, MANTLE, 0.0);
+        fill(f, l.shortcuts, self.palette.mantle, 0.0);
         let rows: &[(&str, &str)] = if self.picker == Picker::None {
             SHORTCUTS
         } else {
@@ -1700,7 +1703,7 @@ impl MixerApp {
                 cell,
                 &format!("{key} {what}"),
                 size,
-                LAVENDER,
+                self.palette.lavender,
                 FontWeightHint::Regular,
             );
         }
@@ -1724,8 +1727,8 @@ impl MixerApp {
         );
         f.hit(Target::ClosePicker, l.window);
 
-        fill(f, l.sheet, MANTLE, 8.0);
-        stroke(f, l.sheet, SURFACE1, 1.0, 8.0);
+        fill(f, l.sheet, self.palette.mantle, 8.0);
+        stroke(f, l.sheet, self.palette.surface1, 1.0, 8.0);
 
         let (title, devices, row_target): (&str, &[AudioDevice], fn(usize) -> Target) =
             match self.picker {
@@ -1740,7 +1743,7 @@ impl MixerApp {
             Rect::new(l.sheet.x, l.sheet.y, l.sheet.w, head),
             title,
             l.big,
-            TEXT_COLOR,
+            self.palette.text,
             FontWeightHint::Bold,
         );
 
@@ -1753,7 +1756,7 @@ impl MixerApp {
                 continue;
             };
             if i == self.picker_row {
-                fill(f, r, SURFACE0, 4.0);
+                fill(f, r, self.palette.surface0, 4.0);
             }
             let tick = if i == current { "* " } else { "  " };
             left_in(
@@ -1762,9 +1765,9 @@ impl MixerApp {
                 &format!("{tick}{}", d.name),
                 l.font,
                 if i == self.picker_row {
-                    TEXT_COLOR
+                    self.palette.text
                 } else {
-                    SUBTEXT0
+                    self.palette.subtext0
                 },
                 FontWeightHint::Regular,
             );
@@ -1791,6 +1794,11 @@ pub fn handle_event(app: &mut MixerApp, event: &Event) -> EventResult {
 }
 
 impl App for MixerApp {
+    /// Adopt the user's colours (§822).
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         "Sound Mixer".to_string()
     }
@@ -1873,6 +1881,28 @@ fn main() -> ExitCode {
 )]
 mod tests {
     use super::*;
+
+    /// Every colour the mixer draws comes from the user's palette.
+    #[test]
+    fn every_colour_the_mixer_draws_comes_from_its_palette() {
+        for light in [false, true] {
+            let mut app = MixerApp::new();
+            app.palette = Palette::for_mode(light);
+            let tree = app.render(900.0, 600.0);
+            assert!(
+                tree.commands.len() > 20,
+                "the sweep examined {} commands, which is not a render",
+                tree.commands.len()
+            );
+            appearance::palette_check::assert_drawn_from(
+                &app.palette,
+                &tree.commands,
+                &[],
+                &format!("mixer (light={light})"),
+            );
+        }
+    }
+
     use guitk::event::Modifiers;
 
     /// The window sizes every geometry invariant is checked at.
@@ -2339,8 +2369,8 @@ mod tests {
             for s in strings {
                 for size in [6.0_f32, 11.0, 22.0] {
                     let mut f = Frame::new(400.0, 400.0);
-                    centred_in(&mut f, boxes, s, size, TEXT_COLOR, FontWeightHint::Regular);
-                    left_in(&mut f, boxes, s, size, TEXT_COLOR, FontWeightHint::Regular);
+                    centred_in(&mut f, boxes, s, size, Palette::for_mode(false).text, FontWeightHint::Regular);
+                    left_in(&mut f, boxes, s, size, Palette::for_mode(false).text, FontWeightHint::Regular);
                     for c in f.commands() {
                         let RenderCommand::Text { x, max_width, .. } = c else {
                             continue;

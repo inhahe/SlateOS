@@ -574,6 +574,10 @@ fn cmd_inotifywait(args: &[String]) {
             }
             _ => {
                 eprintln!("inotifywait: unknown option: {}", args[i]);
+                // Stop. It used to report the option and keep parsing, so the
+                // watch ran with a command line the program had already said
+                // it did not understand.
+                process::exit(1);
             }
         }
         i += 1;
@@ -744,6 +748,10 @@ fn cmd_inotifywatch(args: &[String]) {
             }
             _ => {
                 eprintln!("inotifywatch: unknown option: {}", args[i]);
+                // Stop. It used to report the option and keep parsing, so the
+                // watch ran with a command line the program had already said
+                // it did not understand.
+                process::exit(1);
             }
         }
         i += 1;

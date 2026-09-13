@@ -83,9 +83,16 @@ from gittree import Tree  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# Roots scanned. Lane B's trees; a crate outside these is another lane's to
-# gate, and a gate scoped wider than its owner can fix is a gate that blocks
-# people who cannot act on it.
+# Roots scanned by DEFAULT. Lane B's trees; a crate outside these is another
+# lane's to gate, and a gate scoped wider than its owner can fix is a gate that
+# blocks people who cannot act on it.
+#
+# `--roots` overrides this for a caller who owns other trees, which is how lane
+# C wires the same checker over `gui/` and `apps/` without widening the default
+# and without a second copy of 1,400 lines of rules. Requested in
+# requests/c-b-a-roots-flag-would-let-lane-c-use-your-doc-link-gate.md; the
+# scoping argument there is the same one this comment already made, which is
+# why the answer was yes.
 ROOTS = ("userspace", "services", "init", "posix")
 
 # --------------------------------------------------------------------------
@@ -229,7 +236,7 @@ DOC_LINE = re.compile(r"^\s*(?:///|//!)(.*)$")
 REF_DEF = re.compile(r"^\s*\[`?([^`\]]+?)`?\]:\s*\S")
 
 
-def crate_roots(tree: Tree) -> list[str]:
+def crate_roots(tree: Tree, roots: tuple[str, ...] = ROOTS) -> list[str]:
     """Every crate directory (one holding a Cargo.toml) under the scanned roots.
 
     `files_under` already skips `target/`, so the manifests it yields are the
@@ -238,7 +245,7 @@ def crate_roots(tree: Tree) -> list[str]:
     rather than once per checker.
     """
     out = []
-    for root in ROOTS:
+    for root in roots:
         if not tree.is_dir(root):
             continue
         for manifest in tree.files_under(root):
@@ -869,6 +876,25 @@ def selftest() -> int:
             f"{path!r} types={sorted(types)} scope+={sorted(extra)} "
             f"-> flagged={got}, expected {want}",
         )
+    # --roots is plumbing, and plumbing is what rots without a case. The
+    # default must stay lane B's four trees, and a caller's list must replace
+    # them rather than be added to them -- a --roots that silently unioned with
+    # the default would make this gate fail on crates its runner cannot fix,
+    # which is the one property the flag exists to preserve.
+    ap_probe = build_parser()
+    check(
+        ap_probe.parse_args([]).roots is None,
+        "no --roots must leave roots unset so ROOTS is used",
+    )
+    check(
+        ap_probe.parse_args(["--roots", "gui", "apps"]).roots == ["gui", "apps"],
+        "--roots must take every directory given",
+    )
+    check(
+        ROOTS == ("userspace", "services", "init", "posix"),
+        f"the default roots changed to {ROOTS!r}; a wider default gates other lanes",
+    )
+
     # The link extractor must find both spellings and neither more nor less.
     got = sorted(link_targets("/// see [`a::b`] and [text](c::d) and `not_a_link`"))
     check(got == ["a::b", "c::d"], f"extractor got {got}")
@@ -1345,13 +1371,21 @@ def read_path_list(source: str) -> list[str]:
     return [ln for ln in lines if ln.strip()]
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """The command line, built separately so `--selftest` can inspect it."""
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--check", action="store_true",
                     help="accepted and ignored: failing on a dead link is the "
                          "default, and was not always (see main)")
     ap.add_argument("--selftest", "--self-test", action="store_true", help="verify the checker itself")
     ap.add_argument("--list", action="store_true", help="print findings and exit 0")
+    ap.add_argument(
+        "--roots", nargs="+", metavar="DIR", default=None,
+        help=("directories to scan for crates, replacing the default "
+              f"({' '.join(ROOTS)}). A caller who owns other trees wires its "
+              "own invocation rather than widening the default, so this gate "
+              "never fails on a crate its runner cannot fix."),
+    )
     ap.add_argument(
         "paths",
         nargs="*",
@@ -1372,7 +1406,11 @@ def main() -> int:
              "a commit cannot be hidden by a tidied worktree -- nor an "
              "uncommitted one block a push of unrelated clean commits.",
     )
-    args = ap.parse_args()
+    return ap
+
+
+def main() -> int:
+    args = build_parser().parse_args()
 
     if args.selftest:
         return selftest()
@@ -1395,6 +1433,11 @@ def main() -> int:
                   file=sys.stderr)
             return 2
 
+    # A caller that names roots carries them for every use below, including
+    # the "nothing to judge" message -- reporting the DEFAULT roots to someone
+    # who asked about `gui/` would send them looking in the wrong tree.
+    roots = tuple(args.roots) if args.roots else ROOTS
+
     try:
         tree = gittree.open_tree(ROOT, args.head)
     except gittree.GitTreeError as exc:
@@ -1404,7 +1447,7 @@ def main() -> int:
         print(f"check-doc-links: cannot read {args.head!r}: {exc}", file=sys.stderr)
         return 2
     with tree:
-        all_crates = crate_roots(tree)
+        all_crates = crate_roots(tree, roots)
         if not all_crates:
             # The corpus half of gate 6's `_inputs_missing` rule. Nothing under
             # any of `ROOTS` holds a Cargo.toml, so there is no crate to resolve
@@ -1420,7 +1463,7 @@ def main() -> int:
             # There is no baseline half. This checker has nothing to ratchet --
             # it resolves names against the same tree it read them from -- so
             # the corpus is its only input, and the rule is complete here.
-            print(f"check-doc-links: no crate found under {'/, '.join(ROOTS)}/ "
+            print(f"check-doc-links: no crate found under {'/, '.join(roots)}/ "
                   f"-- nothing to judge.", file=sys.stderr)
             return 2
 

@@ -29625,10 +29625,27 @@ and neither is right without the reset path.
 
 ## TD-GUI-ARROW-KEYS-MOVE-IN-LOGICAL-ORDER
 
-**Status: OPEN 2026-08-16** (lane C). Blocked on an operator decision, filed as
-`open-questions.md` -> **C-Q2**. Do not "fix" this without an answer there: the
-two candidate behaviours are both correct, and shipping one silently makes the
-question harder to ask.
+**Status: OPEN 2026-08-16, UNBLOCKED 2026-08-21** (lane C).
+
+**The question this waited on has been answered.** C-Q2 was decided by the
+operator on 2026-08-21 -- **visual**, the screen direction -- and written up as
+`design-decisions.md` §541 on 2026-08-24. This entry went on saying "do not fix
+this without an answer there" for another 23 days, which is how a decided
+question keeps looking like one still being thought about. Found by lane B's
+`scripts/check-stale-blockers.py`, which cross-references answered questions
+against entries that claim to be waiting on them.
+
+**What §541 obliges**, and how much of it is done:
+
+| | state |
+|---|---|
+| `gui/font/src/shape.rs` -- `ShapedRun::caret_left` / `caret_right`, the primitive | **done**, with tests |
+| `gui/toolkit/src/text.rs` -- `TextCursor` and its wrappers | not started |
+| `guitk::widget::TextInput`, `guitk::modal::InputDialog` -- the arrow-key handling | not started |
+| `apps/editor` | **deliberately out of scope**: §541 does not cover it either way, because it draws and scrolls its own caret |
+
+So the primitive exists and nothing calls it. The rest of this entry describes
+the behaviour; §541 is the authority on which behaviour was chosen.
 
 **What.** Left/Right arrow keys move the caret by one position in *logical*
 order -- the order the characters are stored and read -- in every text widget in

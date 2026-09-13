@@ -19,7 +19,7 @@ call graph outward from every `save()` on a settings type, one crate at a
 time, and reports any `#[test]` that can reach one without a scratch guard in
 its body.
 
-Usage:  python scripts/check-scratch-config.py [crate-substring ...]
+Usage:  python scripts/check-scratch-config.py [--self-test] [crate-substring ...]
 """
 
 # Every cargo invocation in this tree names the target explicitly; the default
@@ -33,6 +33,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import selftestflag  # noqa: E402
 
 NL = chr(10)
 BS = chr(92)
@@ -100,6 +103,121 @@ def package_of(crate):
     return m.group(1) if m else None
 
 
+# Fixtures for the static half. Each is a whole function, because `span` is
+# what decides where a body ends and a fixture of fragments would not exercise
+# it at all.
+SELF_TESTS = [
+    (
+        "a direct save is recognised",
+        """    fn persist(&self) {
+        let mut file = InputFile::load();
+        file.save().ok();
+    }
+""",
+        {"saves": True, "test": False},
+    ),
+    (
+        "a bare settingsfile::write is a save too",
+        """    fn persist(&self) {
+        settingsfile::write_atomic(path, bytes);
+    }
+""",
+        {"saves": True, "test": False},
+    ),
+    (
+        "a function that only reads is not a save",
+        """    fn read(&self) -> InputSettings {
+        InputFile::load().settings
+    }
+""",
+        {"saves": False, "test": False},
+    ),
+    (
+        "a #[test] attribute is seen through the blank line above it",
+        """    #[test]
+    fn a_chord_persists_the_layout() {
+        shell.handle_hotkey(&chord);
+    }
+""",
+        {"saves": False, "test": True},
+    ),
+    (
+        "a body ending in a nested brace does not swallow the next function",
+        """    fn first(&self) {
+        if x {
+            y();
+        }
+    }
+    fn second(&self) {
+        InputFile::load().save().ok();
+    }
+""",
+        {"saves": False, "test": False},
+    ),
+]
+
+
+def selftest():
+    """Grade the parts that can rot without the verdict changing.
+
+    Two halves can go quiet independently. The static half chooses which
+    crates to run; if `SAVES` stops matching, the crate list empties and the
+    empirical half runs nothing -- which `main` catches, but only because it
+    refuses an empty selection. The empirical half's own failure mode is worse:
+    if the probe directory is never inspected, or every crate is skipped for
+    want of a package name, `failures` stays empty and the run prints `ok`.
+    Both are checked here.
+    """
+    failed = 0
+    for name, source, expected in SELF_TESTS:
+        lines = source.splitlines()
+        m = FN.match(lines[0]) or FN.match(lines[1] if len(lines) > 1 else "")
+        if not m:
+            print("FAIL " + name + ": no function found at all")
+            failed += 1
+            continue
+        at = 0 if FN.match(lines[0]) else 1
+        lo, hi = span(lines, at)
+        body = NL.join(lines[lo:hi])
+        got = {
+            "saves": bool(SAVES.search(body)),
+            "test": any(TEST_ATTR.match(lines[k]) for k in range(max(0, at - 4), at)),
+        }
+        ok = got == expected
+        print(("ok   " if ok else "FAIL ") + name)
+        if not ok:
+            print("       expected " + str(expected) + ", got " + str(got))
+            failed += 1
+
+    # The empirical half: a file left in the probe must be seen. This is the
+    # step whose silent failure prints `ok`, so it is exercised directly
+    # rather than trusted.
+    probe = pathlib.Path(tempfile.mkdtemp(prefix="slateos-xdg-selftest-"))
+    try:
+        (probe / "slateos").mkdir()
+        (probe / "slateos" / "input.yaml").write_text("keyboard: {}" + NL, encoding="utf-8")
+        left = sorted(p for p in probe.rglob("*") if p.is_file())
+        ok = [p.relative_to(probe).as_posix() for p in left] == ["slateos/input.yaml"]
+        print(("ok   " if ok else "FAIL ") + "a file written into the probe is seen")
+        if not ok:
+            print("       the probe scan found " + str(left))
+            failed += 1
+    finally:
+        shutil.rmtree(probe, ignore_errors=True)
+
+    # And that a real crate resolves to a package name -- the path by which
+    # every crate could be skipped while the run still printed `ok`.
+    pkg = package_of("gui/desktop")
+    ok = pkg == "desktop"
+    print(("ok   " if ok else "FAIL ") + "a crate directory resolves to its package name")
+    if not ok:
+        print("       package_of('gui/desktop') returned " + repr(pkg))
+        failed += 1
+
+    print(NL + str(len(SELF_TESTS) + 2) + " self-test case(s), " + str(failed) + " failed")
+    return 1 if failed else 0
+
+
 def main(argv):
     """Run each save-capable crate's tests with the real config redirected.
 
@@ -114,6 +232,19 @@ def main(argv):
     test with no scratch directory of its own -- which in a developer's
     checkout would have been their own configuration.
     """
+    if selftestflag.wants_selftest(argv):
+        return selftest()
+    # Refuse an option we do not have rather than scanning anyway: a verdict
+    # printed under a flag the caller thought meant something is a verdict
+    # about a question nobody asked. `--self-test` was accepted and ignored
+    # here for exactly as long as this gate has existed.
+    unknown = selftestflag.unknown_options(argv)
+    if unknown:
+        for opt in unknown:
+            print("check-scratch-config: unrecognized option " + repr(opt))
+        print("usage: check-scratch-config.py [--self-test] [crate-substring ...]")
+        return 2
+
     crates = [c for c, v in sorted(scan().items()) if v["saves"]]
     wanted = [a for a in argv if not a.startswith("-")]
     if wanted:
@@ -123,11 +254,18 @@ def main(argv):
         return 2
 
     failures = []
+    checked = 0
     for crate in crates:
         pkg = package_of(crate)
         if not pkg:
-            print("  ?? " + crate + ": no Cargo.toml name; skipped")
+            # Counted as a failure, not skipped. Skipping was how every crate
+            # could drop out -- a renamed directory, a moved Cargo.toml -- and
+            # the run would still end with "ok: 12 crates wrote nothing",
+            # because the count was of crates *selected* rather than checked.
+            print("  FAIL " + crate + ": no Cargo.toml name, so nothing was checked")
+            failures.append(crate + ": no Cargo.toml name; the crate was not checked")
             continue
+        checked += 1
         probe = pathlib.Path(tempfile.mkdtemp(prefix="slateos-xdg-probe-"))
         env = dict(os.environ, XDG_CONFIG_HOME=str(probe), HOME=str(probe))
         run = subprocess.run(
@@ -150,7 +288,7 @@ def main(argv):
             print("  " + f)
         print(str(len(failures)) + " problem(s): a test wrote settings outside a scratch directory.")
         return 1
-    print("ok: " + str(len(crates)) + " save-capable crates wrote nothing to the real config")
+    print("ok: " + str(checked) + " save-capable crates wrote nothing to the real config")
     return 0
 
 

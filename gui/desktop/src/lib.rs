@@ -1535,6 +1535,14 @@ impl DesktopShell {
     /// that a later appearance change cannot forget it.
     pub fn set_appearance(&mut self, appearance: AppearanceSettings) {
         self.theme = DesktopTheme::from_settings(&appearance);
+        // The caret width goes to the surface that draws one. Pushed here
+        // rather than read at draw time because `render` is handed a
+        // `Palette`, and a palette is colours: 839 put the caret's width in
+        // the appearance settings, not in the theme's colour table. Pushing it
+        // from the one place that knows the settings changed is the same shape
+        // as `sync_animation_speed`, and for the same reason -- a second door
+        // the caller has to remember is a door somebody forgets.
+        self.run_dialog.set_caret_width(appearance.caret_width());
         guitk::scaling::set_global_scale(appearance.scale_factor());
         self.appearance = appearance;
     }

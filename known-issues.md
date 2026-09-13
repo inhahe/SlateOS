@@ -130604,7 +130604,7 @@ English word.
 | `magnifier` | none — `MagnifierConfig` is declared only here |
 | `visual_alerts` | a separate field of the same name in `apps/settings` |
 | `text_scale` | partial: `FontSettings::ui_size` is absolute, not a multiplier |
-| `caret_width` | **none** |
+| `caret_width` | `AppearanceSettings::caret_width_scale`, added 2026-09-13 by 839 and *read* since the `appearance_changed` hook landed -- see below |
 | `focus_indicator` | **none** |
 | `screen_reader` | **none** — the feature does not exist |
 
@@ -130615,6 +130615,40 @@ filter keys, mouse keys existing three times over with no two copies connected �
 and fixed it by moving one definition into `gui/inputsettings`, a crate the
 compositor, the Settings app and the shell can all see. That fix is the
 precedent; what is left in `a11y.rs` is the visual third, not yet done.
+
+**2026-09-13: three of these rows had one cause, and it was a missing hook.**
+`caret_width`, `cursor` and the desktop's `icon_size` were each logged
+separately as a setting with a working control and no reader. The cause is
+shared: `oswindow::app::App` handed an application a **`Palette`** and nothing
+else, and a palette is colours. There was no route by which a program could
+learn a non-colour appearance setting, so each was stored, clamped, persisted,
+round-trip-tested and inert.
+
+`App::appearance_changed(&mut self, &AppearanceSettings)` is that route, called
+immediately before `theme_changed` from the same two places. Its default does
+nothing, for the reason `theme_changed`'s own doc gives: 94 applications
+implement that hook and should adopt this one at their own pace rather than in
+a single commit touching every program in the tree.
+
+`caret_width` is read end to end now. `apps/launcher` takes it in
+`appearance_changed` and draws its caret at that width, with a test that asks
+for 3x and asserts the drawn line is three times wider; the shell's run dialog
+takes it through `DesktopShell::set_appearance`.
+
+**The test written to prove this had the very defect it was written against.**
+`the_caret_width_scale_reaches_a_width_in_pixels` asserted
+`CARET_WIDTH * s.caret_width_scale` -- it performed the multiplication a
+caller would have to perform, so it was a test of `*`, and it would have passed
+with no caller and no helper anywhere in the tree. Its own doc comment says
+the test that matters is *that a caller can get from the settings to a width in
+pixels*. It calls `AppearanceSettings::caret_width()` now.
+
+**One more unreachable module, found on the way.**
+`gui/desktop/src/launcher.rs`'s `LauncherState` is constructed only in its own
+tests -- the shell imports `AppEntry` and `Category` from that module and
+nothing else, and the launcher that runs is `apps/launcher`, which has its own.
+Wiring the caret into the shell's copy was the first thing tried and would have
+been theatre. It belongs on **C-Q17**'s list.
 
 **Why the tests did not catch it.** `text_scale` and `caret_width` each have
 passing tests that round-trip them through the config file and check clamping

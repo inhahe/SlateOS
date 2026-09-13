@@ -1175,6 +1175,15 @@ reasoning that it is independent of this answer: it compiles and is tested
 either way, and if it is ever wired up it now arrives with the right
 colours. The same will be true of the next sweep, and the one after.
 
+**A seventh, found on 2026-09-13.** `gui/desktop/src/launcher.rs`'s
+`LauncherState` is constructed only inside its own test module. The shell
+imports two *types* from that file -- `AppEntry` and `Category` -- and nothing
+else; the launcher that actually runs is `apps/launcher`, which has its own
+state machine of the same name. It was found by trying to wire an
+accessibility setting into it and noticing the setter would never be called.
+That is the second time in one day that this class has been found by *nearly
+doing work inside it*, which is the ongoing cost this question is about.
+
 **And the same shape turned up outside the five.** The desktop's icon layer
 (`DesktopIconLayer`, `gui/desktop/src/icons.rs`) is named nowhere but its own
 file, and it is what would read the *desktop icon size* setting -- so that

@@ -411,6 +411,13 @@ struct Suggestion {
 
 /// The Run dialog state and logic.
 pub struct RunDialog {
+    /// How wide to draw the caret, in pixels.
+    ///
+    /// The user's `caret_width_scale` already applied, because this struct is
+    /// drawn from a `Palette` and a palette is colours. Carried rather than
+    /// looked up per frame, and set from `DesktopShell::set_appearance` --
+    /// which is the only place that knows the settings changed.
+    caret_width: f32,
     /// Whether the dialog is currently visible.
     visible: bool,
     /// Text input state.
@@ -458,10 +465,18 @@ pub struct RunDialog {
 }
 
 impl RunDialog {
+    /// Adopt the user's caret width, in pixels.
+    ///
+    /// Called by `DesktopShell::set_appearance`; `appearance::AppearanceSettings::caret_width`
+    /// is what turns the stored scale into this number.
+    pub fn set_caret_width(&mut self, width: f32) {
+        self.caret_width = width;
+    }
     /// Create a new Run dialog (initially hidden).
     pub fn new() -> Self {
         Self {
             visible: false,
+            caret_width: guitk::textedit::CARET_WIDTH,
             input: TextInput::new(),
             history: Vec::new(),
             history_index: None,
@@ -1019,7 +1034,7 @@ impl RunDialog {
             caret_top,
             INPUT_HEIGHT - 8.0,
             p.text,
-            guitk::textedit::CARET_WIDTH,
+            self.caret_width,
         );
         cmds.extend(caret.commands);
 

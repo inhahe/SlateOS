@@ -340,6 +340,31 @@ pub trait App {
     /// dependency §810 removed. It is also not an input event: nothing about
     /// it is a user acting on this window, and an application matching
     /// exhaustively on `Event` should not have to grow an arm for it.
+    /// The user's appearance settings changed, in whole.
+    ///
+    /// [`theme_changed`](Self::theme_changed)'s sibling, and it exists because
+    /// **a palette is colours**. `caret_width_scale`, `icon_size`,
+    /// `cursor_size` and `cursor_scheme` are appearance settings that are not
+    /// colours, and until this hook there was no route by which an application
+    /// could learn any of them: each was stored, clamped, persisted, tested
+    /// for round-tripping, and read by nobody. Four separate `known-issues`
+    /// entries, one root cause.
+    ///
+    /// Called immediately before `theme_changed`, with the same settings the
+    /// palette is derived from, so an implementor may take either or both.
+    ///
+    /// **Why a default that does nothing**, which is the same question
+    /// `theme_changed` answers just below and the same answer: it lets the 94
+    /// applications implementing that one adopt this at their own pace rather
+    /// than in a single commit touching every program in the tree. The cost is
+    /// real and worth naming -- a hook nobody calls looks exactly like a hook
+    /// nobody needed -- which is why `scripts/check-overlay0-ink.py`'s sibling
+    /// question ("is this setting read by anything?") is a better guard than
+    /// the signature could ever be.
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        let _ = settings;
+    }
+
     fn theme_changed(&mut self, palette: &Palette) {
         let _ = palette;
     }
@@ -842,6 +867,7 @@ impl ThemeWatch {
             return false;
         }
         self.settings = settings;
+        app.appearance_changed(&self.settings);
         app.theme_changed(&Palette::from_settings(&self.settings));
         true
     }
@@ -854,6 +880,7 @@ impl ThemeWatch {
     /// to report.
     fn deliver<A: App + ?Sized>(&mut self, app: &mut A) {
         if !self.poll(app) {
+            app.appearance_changed(&self.settings);
             app.theme_changed(&Palette::from_settings(&self.settings));
         }
     }

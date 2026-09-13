@@ -288,10 +288,26 @@ impl Manifest {
             let parts: Vec<&str> = trimmed.splitn(5, ' ').collect();
             match parts.first().copied() {
                 Some("F") if parts.len() >= 5 => {
+                    // Rejected, not defaulted. These were
+                    // `parse().unwrap_or(0)`, so a corrupted size became zero
+                    // and a corrupted mtime became the epoch -- silently, in
+                    // the file that says what a backup CONTAINS. An
+                    // incremental backup decides what to copy by comparing
+                    // size and mtime against this manifest, so a size that
+                    // reads 0 makes the next incremental either re-copy the
+                    // file or skip it, depending on which way the comparison
+                    // falls. Every other malformed line here is already an
+                    // error; these two were the exception.
+                    let size = parts[2]
+                        .parse()
+                        .map_err(|_| format!("invalid size in manifest line: {trimmed}"))?;
+                    let mtime = parts[3]
+                        .parse()
+                        .map_err(|_| format!("invalid mtime in manifest line: {trimmed}"))?;
                     entries.push(ManifestEntry::File {
                         hash: parts[1].to_string(),
-                        size: parts[2].parse().unwrap_or(0),
-                        mtime: parts[3].parse().unwrap_or(0),
+                        size,
+                        mtime,
                         path: parts[4].to_string(),
                     });
                 }
@@ -894,10 +910,18 @@ fn cmd_restore(backup_path: &Path, dest: &Path, files_filter: &[String]) {
 
                 let dst = dest.join(path);
                 if let Some(parent) = dst.parent() {
+                    // Discarded deliberately: the symlink below is checked and
+                    // counted, and a parent that could not be created makes it
+                    // fail with the same cause against the path in the
+                    // manifest, which is the name the caller recognises.
                     let _ = fs::create_dir_all(parent);
                 }
 
-                // Remove existing file/link before creating symlink
+                // Remove any existing file or link first. Discarded for the
+                // same reason and one more: NotFound is the ordinary case --
+                // restoring into an empty directory -- so this failing is not
+                // evidence of anything on its own. If it fails for a reason
+                // that matters, `symlink` cannot create the link and says so.
                 let _ = fs::remove_file(&dst);
 
                 #[cfg(unix)]
@@ -926,6 +950,12 @@ fn cmd_restore(backup_path: &Path, dest: &Path, files_filter: &[String]) {
     );
     if errors > 0 {
         eprintln!("  {errors} error(s) during restore");
+        // Exit non-zero. This counted the errors, printed them, and returned
+        // -- so `backup restore` could fail on every single file and still
+        // exit 0. A restore is the one operation whose caller is most likely
+        // to be a script reacting to the status: the human running it is
+        // usually recovering from something that already went wrong.
+        process::exit(1);
     }
 }
 
@@ -1318,5 +1348,165 @@ fn main() {
             eprintln!("Run 'backup help' for usage.");
             process::exit(1);
         }
+    }
+}
+
+// ============================================================================
+// Tests
+//
+// This crate had none. 1,336 lines of backup and restore, and the pre-push
+// suite reported "0 passed" for it -- which is not a green suite, it is an
+// empty one, and the two read the same in a summary.
+//
+// The manifest is what these concentrate on. It is the file that says what a
+// backup CONTAINS: if it does not survive a serialize/parse round trip, the
+// data is still on disk and is no longer restorable, and nothing about the
+// backup run would have looked wrong at the time.
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample() -> Manifest {
+        Manifest {
+            backup_type: BackupType::Incremental,
+            parent_id: "backup-1000".to_string(),
+            created: 1_789_330_021,
+            source: "/home/alice".to_string(),
+            backup_id: "backup-2000".to_string(),
+            entries: vec![
+                ManifestEntry::File {
+                    hash: "abc123".to_string(),
+                    size: 4096,
+                    mtime: 1_700_000_000,
+                    path: "notes.txt".to_string(),
+                },
+                ManifestEntry::Directory {
+                    mtime: 1_700_000_001,
+                    path: "sub".to_string(),
+                },
+                ManifestEntry::Symlink {
+                    target: "notes.txt".to_string(),
+                    path: "sub/link".to_string(),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn a_manifest_survives_the_round_trip() {
+        let m = sample();
+        let parsed = Manifest::parse(&m.serialize()).expect("round trip");
+        assert_eq!(parsed.entries.len(), m.entries.len());
+        assert_eq!(parsed.parent_id, "backup-1000");
+        assert_eq!(parsed.backup_id, "backup-2000");
+        assert_eq!(parsed.created, 1_789_330_021);
+        assert_eq!(parsed.source, "/home/alice");
+        assert!(matches!(parsed.backup_type, BackupType::Incremental));
+        match parsed.entries.first() {
+            Some(ManifestEntry::File {
+                hash,
+                size,
+                mtime,
+                path,
+            }) => {
+                assert_eq!(hash, "abc123");
+                assert_eq!(*size, 4096);
+                assert_eq!(*mtime, 1_700_000_000);
+                assert_eq!(path, "notes.txt");
+            }
+            other => panic!("first entry is not the file: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_path_containing_spaces_survives() {
+        // The classic break in a space-separated format, and the one a user
+        // hits on their first Windows-shaped filename. `splitn(5, ' ')` is
+        // what makes it work; a plain `split` would lose everything after the
+        // first space in the name.
+        let mut m = sample();
+        m.entries = vec![ManifestEntry::File {
+            hash: "d00d".to_string(),
+            size: 7,
+            mtime: 1,
+            path: "My Documents/quarterly report final.txt".to_string(),
+        }];
+        let parsed = Manifest::parse(&m.serialize()).expect("round trip");
+        match parsed.entries.first() {
+            Some(ManifestEntry::File { path, .. }) => {
+                assert_eq!(path, "My Documents/quarterly report final.txt");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn text_that_is_not_a_manifest_is_refused() {
+        let err = Manifest::parse(
+            "hello, this is not a manifest
+",
+        )
+        .expect_err("must not parse as an empty backup");
+        assert!(err.contains("manifest"), "{err}");
+    }
+
+    #[test]
+    fn an_empty_file_is_refused_rather_than_read_as_an_empty_backup() {
+        // The distinction that matters: an empty manifest and a manifest
+        // listing no files would both restore nothing, but only one of them
+        // is a backup.
+        Manifest::parse("").expect_err("an empty file is not a manifest");
+    }
+
+    #[test]
+    fn a_malformed_entry_line_is_refused() {
+        let text = "# backup-manifest v1
+F onlytwo
+";
+        Manifest::parse(text).expect_err("a short entry line must not be skipped");
+    }
+
+    #[test]
+    fn a_size_that_is_not_a_number_is_refused_rather_than_zero() {
+        // It used to be `parse().unwrap_or(0)`. A size of zero is not an
+        // obviously wrong value -- empty files exist -- so the corruption
+        // would have survived into the next incremental backup's comparison.
+        let text = "# backup-manifest v1
+F abc123 notanumber 1700000000 notes.txt
+";
+        let err = Manifest::parse(text).expect_err("must refuse");
+        assert!(err.contains("size"), "{err}");
+    }
+
+    #[test]
+    fn an_mtime_that_is_not_a_number_is_refused_rather_than_the_epoch() {
+        let text = "# backup-manifest v1
+F abc123 4096 notanumber notes.txt
+";
+        let err = Manifest::parse(text).expect_err("must refuse");
+        assert!(err.contains("mtime"), "{err}");
+    }
+
+    #[test]
+    fn format_size_changes_unit_exactly_at_the_boundary() {
+        assert_eq!(format_size(0), "0 B");
+        assert_eq!(format_size(1023), "1023 B");
+        assert_eq!(format_size(1024), "1.0 KiB");
+        assert_eq!(format_size(1024 * 1024 - 1), "1024.0 KiB");
+        assert_eq!(format_size(1024 * 1024), "1.0 MiB");
+        assert_eq!(format_size(1024 * 1024 * 1024), "1.00 GiB");
+    }
+
+    #[test]
+    fn the_file_index_finds_a_file_by_path() {
+        let m = sample();
+        let idx = m.file_index();
+        assert_eq!(idx.get("notes.txt").map(|t| t.1), Some(4096));
+        assert!(
+            !idx.contains_key("sub"),
+            "a directory must not appear in the FILE index"
+        );
     }
 }

@@ -70772,12 +70772,32 @@ It is green. `cargo test --workspace` is not.
    harness for a `no_std` binary that defines its own panic handler. That is
    `TD-C-CARGO-BUILD-WORKSPACE-ON-THE-HOST-TARGET-FAILS-ON-THE-KERNEL`.
 
-   **What is still missing is the push-time half.** The boot test is hours;
-   this is a compile problem that a push could catch in a minute or two. The
-   pre-push hook's own standard for what belongs there is written at gate 17:
-   *"it also takes minutes and needs every dependency to build, which is not a
-   push-boundary budget"* -- so whether a warm workspace check clears that bar
-   is a measurement, not an opinion, and it has not been taken.
+   **The push-time half was the open question, and the measurement closes it:
+   no.** Timed on 2026-09-13 in `os-lane-c`:
+
+   | `cargo check --workspace --exclude kernel --all-targets` | |
+   |---|---|
+   | run after a `cargo test --workspace` | **3 m 10 s** |
+   | run again immediately after itself | **1.75 s** |
+
+   The check is nearly free *if the previous command was also a check*, and
+   costs three minutes if anything ran the tests first -- `check` and `test`
+   invalidate each other's fingerprints in the shared `target/`, which
+   `boot-test.sh` already says of `check` and `clippy`. Since this lane's
+   practice is `cargo test --workspace` **before** every push (item 1 above),
+   the realistic case is always the three-minute one, against a pre-push hook
+   that currently takes 90-115 s in total. It would triple the push.
+
+   **And it would not even cover the same population.** A push-time check
+   would run the Windows target; `boot-test.sh` runs the unix one, which is
+   what makes it see `#[cfg(unix)]` arms and unix-only test code at all.
+   Matching its coverage means a second target directory's worth of
+   artifacts, which the global build-output rules forbid leaving behind.
+
+   So the guard stays where it is, in the boot test. What this lane can do at
+   push time is what it already does: run the workspace tests, and read the
+   exit status rather than a filtered log -- item 2 above, which is the half
+   that actually catches this and costs nothing extra.
 
 **Severity.** Medium, and it is a *meta*-defect: it does not itself break
 anything a user can see, it removes the evidence that something else did. The

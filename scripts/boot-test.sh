@@ -6010,6 +6010,42 @@ check_lane_c_gui_gates() {
         return 1
     fi
 
+    # And the other half of the same question. `check-overlay0-ink.py` below
+    # asks whether text is drawn in the *disabled* grey; this asks whether an
+    # accent-family role reaches a text site without going through `ink()`,
+    # which floors it to 4.5:1 against whatever ground the active theme puts it
+    # on. Fourteen real failures on 2026-09-13 alone -- a typing tutor's
+    # correct/incorrect characters, a finance header's three figures, five
+    # button labels, four markdown heading levels -- every one of them text
+    # whose entire purpose is to be read.
+    #
+    # WHY IT NEEDS A GATE AT ALL. It had none: `ink-text.py` lives in
+    # `gui/appearance/` rather than `scripts/`, so `check-gates-are-wired.py`
+    # -- which scans `scripts/check-*.py` -- could not see that nothing ran it.
+    # A property maintained by remembering to run a script is a property that
+    # regresses the first time somebody does not.
+    if ! run_checker ink-text-selftest "$py" "$PROJECT_ROOT/gui/appearance/ink-text.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The ink-text classifier no longer" >&2
+        echo "agrees with its own fixtures.  Two of those nine cases are bugs" >&2
+        echo "it actually had -- a value read past its semicolon, and a Text" >&2
+        echo "command matched as a pattern counted as a draw site -- and both" >&2
+        echo "produced confident, specific, wrong answers." >&2
+        return 1
+    fi
+
+    echo "=== Checking that text drawn in an accent goes through ink() ==="
+    if ! run_checker ink-text "$py" "$PROJECT_ROOT/gui/appearance/ink-text.py" --check; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  Each site above draws text in an" >&2
+        echo "accent-family role without \`ink()\`, so it is whatever contrast" >&2
+        echo "that hue happens to have on that ground -- red is 2.88:1 on the" >&2
+        echo "deepest card, where 4.5 is the floor." >&2
+        echo "" >&2
+        echo "Run:  python gui/appearance/ink-text.py --apply   (then read the diff)" >&2
+        return 1
+    fi
+
     # Same shape again, over a different property: which *ink* text is drawn
     # in. `overlay0` is the palette's disabled grey and fails 4.5:1 on every
     # surface by design, which is correct for a switched-off control and wrong

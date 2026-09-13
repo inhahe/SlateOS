@@ -500,8 +500,183 @@ def blind_spots(path):
     return out
 
 
+# Fixtures, each a whole file, because every verdict here depends on where the
+# test module starts and where a value ends -- the two things a fixture of
+# snippets would quietly lose. `(source, converted, blind)`: how many sites the
+# conversion rewrites, and how many the blind report cannot classify.
+SELF_TESTS = [
+    (
+        "a dual-use role at a text site is converted",
+        """fn render(&self, cmds: &mut Vec<RenderCommand>, p: &Palette) {
+    cmds.push(RenderCommand::Text {
+        x: 1.0,
+        text: "hi".to_string(),
+        color: p.green,
+        font_size: 12.0,
+    });
+}
+""",
+        1,
+        0,
+    ),
+    (
+        "a role already inked is left alone",
+        """fn render(&self, cmds: &mut Vec<RenderCommand>, p: &Palette) {
+    cmds.push(RenderCommand::Text {
+        x: 1.0,
+        text: "hi".to_string(),
+        color: p.ink(p.green),
+        font_size: 12.0,
+    });
+}
+""",
+        0,
+        0,
+    ),
+    (
+        "a floored ink needs no ink() and is not a blind spot",
+        """fn render(&self, cmds: &mut Vec<RenderCommand>, p: &Palette) {
+    cmds.push(RenderCommand::Text {
+        x: 1.0,
+        text: "hi".to_string(),
+        color: p.subtext0,
+        font_size: 12.0,
+    });
+}
+""",
+        0,
+        0,
+    ),
+    (
+        "a fill is not a text site",
+        """fn render(&self, cmds: &mut Vec<RenderCommand>, p: &Palette) {
+    cmds.push(RenderCommand::Rect {
+        x: 1.0,
+        color: p.green,
+    });
+}
+""",
+        0,
+        0,
+    ),
+    (
+        "a Text command matched as a pattern is not a draw site",
+        """fn encode(cmd: &RenderCommand) {
+    match cmd {
+        RenderCommand::Text {
+            x,
+            text,
+            color,
+            font_size,
+            ..
+        } => write(x, text, color, font_size),
+        _ => {}
+    }
+}
+""",
+        0,
+        0,
+    ),
+    (
+        "a shorthand whose let ends at a semicolon does not read past it",
+        """fn render(&self, cmds: &mut Vec<RenderCommand>, p: &Palette) {
+    let color = shape.stroke.effective_color();
+    cmds.push(RenderCommand::Text {
+        x: 1.0,
+        text: "hi".to_string(),
+        color,
+        font_size: 12.0,
+    });
+    let other = vec![p.green, p.red];
+}
+""",
+        0,
+        1,
+    ),
+    (
+        "a shorthand bound to a dual-use role is a blind-spot finding",
+        """fn render(&self, cmds: &mut Vec<RenderCommand>, p: &Palette) {
+    let color = p.green;
+    cmds.push(RenderCommand::Text {
+        x: 1.0,
+        text: "hi".to_string(),
+        color,
+        font_size: 12.0,
+    });
+}
+""",
+        0,
+        1,
+    ),
+    (
+        "a colour the caller supplies is not unresolved",
+        """fn draw(&self, cmds: &mut Vec<RenderCommand>, color: Color) {
+    cmds.push(RenderCommand::Text {
+        x: 1.0,
+        text: "hi".to_string(),
+        color,
+        font_size: 12.0,
+    });
+}
+""",
+        0,
+        1,
+    ),
+    (
+        "a site inside the test module is not production code",
+        """fn render(&self) {}
+
+#[cfg(test)]
+mod tests {
+    fn a_label_is_green(p: &Palette) {
+        cmds.push(RenderCommand::Text {
+            x: 1.0,
+            text: "hi".to_string(),
+            color: p.green,
+            font_size: 12.0,
+        });
+    }
+}
+""",
+        0,
+        0,
+    ),
+]
+
+
+def self_test():
+    """Grade the classifier against files whose verdicts are known.
+
+    Two of the nine cases are bugs this script actually had on 2026-09-13, and
+    they are the reason it has a self-test at all: a `let`'s value was read to
+    the next depth-zero *comma* rather than its semicolon, so it ran past the
+    statement and accused an innocent file; and a `RenderCommand::Text` matched
+    as a *pattern* was counted as a draw site, which put six files that draw
+    nothing into the report. Both produced confident, specific, wrong answers.
+    """
+    import tempfile
+
+    failed = 0
+    for name, source, want_converted, want_blind in SELF_TESTS:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "fixture.rs"
+            path.write_text(source, encoding="utf-8", newline=NL)
+            got_converted = convert(path, False, frozenset())
+            got_blind = len(blind_spots(path))
+        ok = (got_converted, got_blind) == (want_converted, want_blind)
+        print(("ok   " if ok else "FAIL ") + name)
+        if not ok:
+            print("       expected " + str((want_converted, want_blind))
+                  + ", got " + str((got_converted, got_blind)))
+            failed += 1
+    print(NL + str(len(SELF_TESTS)) + " self-test case(s), " + str(failed) + " failed")
+    return 1 if failed else 0
+
+
 if __name__ == "__main__":
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    if "--self-test" in sys.argv or "--selftest" in sys.argv:
+        sys.exit(self_test())
     check = "--check" in sys.argv
     paths = [pathlib.Path(a) for a in args] if args else default_paths()
     inked_already = already_inking(paths)

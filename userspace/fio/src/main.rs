@@ -673,11 +673,11 @@ struct JobStats {
     elapsed_us: u64,
     read_lat: LatencyStats,
     write_lat: LatencyStats,
-    usr_cpu: f64,
-    sys_cpu: f64,
-    ctx_switches: u64,
-    major_faults: u64,
-    minor_faults: u64,
+    usr_cpu: Option<f64>,
+    sys_cpu: Option<f64>,
+    ctx_switches: Option<u64>,
+    major_faults: Option<u64>,
+    minor_faults: Option<u64>,
     io_depth_dist: [u64; 8], // 1, 2, 4, 8, 16, 32, 64, >=64
     errors: u64,
     verify_errors: u64,
@@ -707,11 +707,11 @@ impl JobStats {
             elapsed_us: 0,
             read_lat: LatencyStats::new(),
             write_lat: LatencyStats::new(),
-            usr_cpu: 0.0,
-            sys_cpu: 0.0,
-            ctx_switches: 0,
-            major_faults: 0,
-            minor_faults: 0,
+            usr_cpu: None,
+            sys_cpu: None,
+            ctx_switches: None,
+            major_faults: None,
+            minor_faults: None,
             io_depth_dist: [0; 8],
             errors: 0,
             verify_errors: 0,
@@ -875,6 +875,51 @@ fn apply_preset(job: &mut JobDef) {
 // ---------------------------------------------------------------------------
 
 /// Execute a single job and return statistics.
+/// This process's own CPU time and counters, from `/proc/self`.
+///
+/// `None` on a host with no `/proc`. The caller prints `-` rather than a
+/// number, because the alternative is what this replaced: `usr_cpu` was
+/// `ops_done * 0.001`, `sys_cpu` was `ops_done * 0.002`, `ctx` was
+/// `ops_done / 10` and `minf` was `ops_done / 100`. Arithmetic on the
+/// operation count, printed in the same table as measured bandwidth, which
+/// is what made it credible.
+struct SelfUsage {
+    utime_ticks: u64,
+    stime_ticks: u64,
+    minflt: u64,
+    majflt: u64,
+    ctx_switches: Option<u64>,
+}
+
+fn read_self_usage() -> Option<SelfUsage> {
+    let stat = fs::read("/proc/self/stat").ok()?;
+    let parsed = procinfo::ProcessStat::parse(&stat)?;
+    // The two switch counters live in `status`, not `stat`.
+    let ctx = fs::read("/proc/self/status").ok().and_then(|c| {
+        let st = procinfo::ProcessStatus::parse(&c);
+        match (st.voluntary_ctxt_switches, st.nonvoluntary_ctxt_switches) {
+            (None, None) => None,
+            (v, n) => Some(v.unwrap_or(0).saturating_add(n.unwrap_or(0))),
+        }
+    });
+    Some(SelfUsage {
+        utime_ticks: parsed.utime_ticks,
+        stime_ticks: parsed.stime_ticks,
+        minflt: parsed.minflt,
+        majflt: parsed.majflt,
+        ctx_switches: ctx,
+    })
+}
+
+/// A tick delta as a percentage of wall-clock seconds elapsed.
+fn cpu_percent(ticks: u64, elapsed_s: f64) -> Option<f64> {
+    if elapsed_s <= 0.0 {
+        return None;
+    }
+    let seconds = ticks as f64 / procinfo::TICKS_PER_SEC as f64;
+    Some(seconds / elapsed_s * 100.0)
+}
+
 fn execute_job(job: &JobDef) -> Result<JobStats, String> {
     let mut stats = JobStats::new(
         &job.name,
@@ -901,6 +946,7 @@ fn execute_job(job: &JobDef) -> Result<JobStats, String> {
         return Ok(stats);
     }
 
+    let usage_before = read_self_usage();
     let start = Instant::now();
     let runtime_limit = job.runtime.map(Duration::from_secs);
 
@@ -937,7 +983,6 @@ fn execute_job(job: &JobDef) -> Result<JobStats, String> {
     fill_pattern(&mut write_buf, job.verify_pattern);
 
     let mut block_idx: u64 = 0;
-    let mut ops_done: u64 = 0;
 
     // Track I/O depth distribution
     let depth_bucket = match job.iodepth {
@@ -1040,7 +1085,6 @@ fn execute_job(job: &JobDef) -> Result<JobStats, String> {
         }
 
         block_idx += 1;
-        ops_done += 1;
     }
 
     // Flush writes
@@ -1051,13 +1095,24 @@ fn execute_job(job: &JobDef) -> Result<JobStats, String> {
 
     stats.elapsed_us = start.elapsed().as_micros() as u64;
 
-    // Simulated CPU stats (in a real OS, read from /proc/self/stat)
+    // Measured, not modelled. Deltas across the job rather than the
+    // process's lifetime, so a second job does not inherit the first's.
     let elapsed_s = stats.elapsed_us as f64 / 1_000_000.0;
-    if elapsed_s > 0.0 {
-        stats.usr_cpu = (ops_done as f64 * 0.001).min(99.0);
-        stats.sys_cpu = (ops_done as f64 * 0.002).min(99.0);
-        stats.ctx_switches = ops_done / 10;
-        stats.minor_faults = ops_done / 100;
+    if let (Some(before), Some(after)) = (usage_before.as_ref(), read_self_usage()) {
+        stats.usr_cpu = cpu_percent(
+            after.utime_ticks.saturating_sub(before.utime_ticks),
+            elapsed_s,
+        );
+        stats.sys_cpu = cpu_percent(
+            after.stime_ticks.saturating_sub(before.stime_ticks),
+            elapsed_s,
+        );
+        stats.minor_faults = Some(after.minflt.saturating_sub(before.minflt));
+        stats.major_faults = Some(after.majflt.saturating_sub(before.majflt));
+        stats.ctx_switches = match (before.ctx_switches, after.ctx_switches) {
+            (Some(b), Some(a)) => Some(a.saturating_sub(b)),
+            _ => None,
+        };
     }
 
     // Run verification pass if requested
@@ -1217,13 +1272,17 @@ fn format_normal(stats: &mut JobStats, show_percentiles: bool) -> String {
     }
 
     // CPU and I/O depth
+    // `-` where the kernel did not tell us, which is not the same claim as
+    // a zero.
+    let pct = |v: Option<f64>| v.map_or_else(|| "-".to_string(), |p| format!("{p:.2}%"));
+    let num = |v: Option<u64>| v.map_or_else(|| "-".to_string(), |n| n.to_string());
     out.push_str(&format!(
-        "  cpu: usr={usr:.2}%, sys={sys:.2}%, ctx={ctx}, majf={majf}, minf={minf}\n",
-        usr = stats.usr_cpu,
-        sys = stats.sys_cpu,
-        ctx = stats.ctx_switches,
-        majf = stats.major_faults,
-        minf = stats.minor_faults,
+        "  cpu: usr={usr}, sys={sys}, ctx={ctx}, majf={majf}, minf={minf}\n",
+        usr = pct(stats.usr_cpu),
+        sys = pct(stats.sys_cpu),
+        ctx = num(stats.ctx_switches),
+        majf = num(stats.major_faults),
+        minf = num(stats.minor_faults),
     ));
 
     let total_depth: u64 = stats.io_depth_dist.iter().sum();
@@ -1394,9 +1453,17 @@ fn format_json(all_stats: &[JobStats], include_percentiles: bool) -> String {
             stats.rw, stats.bs, stats.iodepth, stats.numjobs));
 
         // CPU usage
+        // `null` rather than 0: JSON has a way to say "not measured", and
+        // using it is the difference between a reading and a guess.
+        let jf = |v: Option<f64>| v.map_or_else(|| "null".to_string(), |p| format!("{p:.6}"));
+        let ju = |v: Option<u64>| v.map_or_else(|| "null".to_string(), |n| n.to_string());
         out.push_str(&format!(
-            "      \"usr_cpu\": {:.6},\n      \"sys_cpu\": {:.6},\n      \"ctx\": {},\n      \"majf\": {},\n      \"minf\": {},\n",
-            stats.usr_cpu, stats.sys_cpu, stats.ctx_switches, stats.major_faults, stats.minor_faults,
+            "      \"usr_cpu\": {},\n      \"sys_cpu\": {},\n      \"ctx\": {},\n      \"majf\": {},\n      \"minf\": {},\n",
+            jf(stats.usr_cpu),
+            jf(stats.sys_cpu),
+            ju(stats.ctx_switches),
+            ju(stats.major_faults),
+            ju(stats.minor_faults),
         ));
 
         out.push_str(&format!("      \"elapsed\": {}\n", stats.elapsed_us / 1000));

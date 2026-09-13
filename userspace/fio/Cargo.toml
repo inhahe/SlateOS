@@ -7,4 +7,8 @@ description = "SlateOS flexible I/O tester"
 # `sha2` for verify mode. This crate carried its own SHA-256, so its readback
 # check could only ever agree with itself.
 [dependencies]
+# The one `/proc` parser. `fio`'s cpu line needs `/proc/self/stat` and
+# `/proc/self/status`, and a second parser for those files is exactly what
+# this crate exists to prevent.
+procinfo = { path = "../../procinfo" }
 sha2 = { path = "../../sha2" }

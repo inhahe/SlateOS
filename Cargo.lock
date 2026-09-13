@@ -838,6 +838,7 @@ dependencies = [
 name = "fio"
 version = "0.1.0"
 dependencies = [
+ "procinfo",
  "sha2",
 ]
 

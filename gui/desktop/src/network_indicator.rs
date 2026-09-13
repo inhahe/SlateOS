@@ -581,7 +581,15 @@ impl NetworkIndicator {
         } else {
             p.overlay0
         };
-        p.push_surface(&mut cmds, x + pad, cy, inner * 0.48, 28.0, 6.0, Surface::Card);
+        p.push_surface(
+            &mut cmds,
+            x + pad,
+            cy,
+            inner * 0.48,
+            28.0,
+            6.0,
+            Surface::Card,
+        );
         cmds.push(RenderCommand::Text {
             x: x + pad + 8.0,
             y: cy + 6.0,
@@ -604,7 +612,15 @@ impl NetworkIndicator {
         } else {
             p.overlay0
         };
-        p.push_surface(&mut cmds, x + pad + inner * 0.52, cy, inner * 0.48, 28.0, 6.0, Surface::Card);
+        p.push_surface(
+            &mut cmds,
+            x + pad + inner * 0.52,
+            cy,
+            inner * 0.48,
+            28.0,
+            6.0,
+            Surface::Card,
+        );
         cmds.push(RenderCommand::Text {
             x: x + pad + inner * 0.52 + 8.0,
             y: cy + 6.0,

@@ -587,7 +587,15 @@ impl ClipboardViewer {
 
         // Entry count badge.
         let count_text = format!("{}", self.history.len());
-        p.push_surface(&mut cmds, x + w - 50.0, y + 8.0, 30.0, 20.0, 10.0, Surface::Card);
+        p.push_surface(
+            &mut cmds,
+            x + w - 50.0,
+            y + 8.0,
+            30.0,
+            20.0,
+            10.0,
+            Surface::Card,
+        );
         cmds.push(RenderCommand::Text {
             x: x + w - 44.0,
             y: y + 11.0,
@@ -698,7 +706,15 @@ impl ClipboardViewer {
 
                 // Row background.
                 if is_selected {
-                    p.push_surface(&mut cmds, x + 4.0, ey, w - 8.0, entry_h - 2.0, 4.0, Surface::Selected);
+                    p.push_surface(
+                        &mut cmds,
+                        x + 4.0,
+                        ey,
+                        w - 8.0,
+                        entry_h - 2.0,
+                        4.0,
+                        Surface::Selected,
+                    );
                 }
 
                 // Format badge.

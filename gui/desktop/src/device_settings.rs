@@ -4,7 +4,7 @@
 //! display, input) with driver status, safely-remove functionality,
 //! auto-mount preferences, and power management per device.
 
-use appearance::{Palette, readable_on, Surface};
+use appearance::{Palette, Surface, readable_on};
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
@@ -640,7 +640,15 @@ impl DeviceSettingsUI {
         let content_y = tab_y + 44.0;
         let content_h = height - (content_y - y) - 16.0;
 
-        p.push_surface(&mut cmds, x + 8.0, content_y, width - 16.0, content_h, 6.0, Surface::Card);
+        p.push_surface(
+            &mut cmds,
+            x + 8.0,
+            content_y,
+            width - 16.0,
+            content_h,
+            6.0,
+            Surface::Card,
+        );
 
         let cx = x + 24.0;
         let cy = content_y + 16.0;

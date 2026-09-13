@@ -2096,7 +2096,10 @@ mod tests {
             );
             assert_eq!(
                 fills(&draw(&full_ui(2), &p), INNER, 48.0),
-                vec![p.painted(appearance::Surface::Card), p.painted(appearance::Surface::Card)],
+                vec![
+                    p.painted(appearance::Surface::Card),
+                    p.painted(appearance::Surface::Card)
+                ],
                 "an app row is in the wrong role"
             );
             assert_eq!(

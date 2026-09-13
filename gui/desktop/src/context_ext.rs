@@ -776,7 +776,15 @@ pub fn render_context_menu(
             ContextMenuEntry::Builtin(item) => {
                 let hovered = hovered_index == Some(i);
                 if hovered {
-                    p.push_surface(&mut commands, x + 4.0, cy, width - 8.0, item_height, 4.0, Surface::Selected);
+                    p.push_surface(
+                        &mut commands,
+                        x + 4.0,
+                        cy,
+                        width - 8.0,
+                        item_height,
+                        4.0,
+                        Surface::Selected,
+                    );
                 }
 
                 // Icon.
@@ -829,7 +837,15 @@ pub fn render_context_menu(
             } => {
                 let hovered = hovered_index == Some(i);
                 if hovered {
-                    p.push_surface(&mut commands, x + 4.0, cy, width - 8.0, item_height, 4.0, Surface::Selected);
+                    p.push_surface(
+                        &mut commands,
+                        x + 4.0,
+                        cy,
+                        width - 8.0,
+                        item_height,
+                        4.0,
+                        Surface::Selected,
+                    );
                 }
 
                 // Icon (or app icon fallback).
@@ -981,7 +997,15 @@ impl ExtensionSettingsUI {
         cy += 32.0;
 
         // Search bar.
-        p.push_surface(&mut commands, x + padding, cy, width - padding * 2.0, 28.0, 6.0, Surface::Card);
+        p.push_surface(
+            &mut commands,
+            x + padding,
+            cy,
+            width - padding * 2.0,
+            28.0,
+            6.0,
+            Surface::Card,
+        );
         let search_display = if self.search_text.is_empty() {
             "Search extensions...".to_string()
         } else {
@@ -1971,7 +1995,8 @@ mod tests {
             let highlight = fills(&hovered, |_, _, w, _| w == MW - 8.0);
             assert_eq!(highlight.len(), 1, "expected one hovered row highlight");
             assert_eq!(
-                highlight[0], p.painted(appearance::Surface::Selected),
+                highlight[0],
+                p.painted(appearance::Surface::Selected),
                 "the hovered row is not the selected surface (light={light})"
             );
             assert_ne!(

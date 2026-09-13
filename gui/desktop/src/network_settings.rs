@@ -5,7 +5,7 @@
 //! VPN profiles, and firewall rules. Communicates with the network
 //! stack via IPC for actual configuration changes.
 
-use appearance::{Palette, readable_on, Surface};
+use appearance::{Palette, Surface, readable_on};
 use guitk::color::Color;
 use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -1195,7 +1195,15 @@ impl NetworkSettingsUI {
         let content_y = tab_y + 44.0;
         let content_h = height - (content_y - y) - 16.0;
 
-        p.push_surface(&mut cmds, x + 8.0, content_y, width - 16.0, content_h, 6.0, Surface::Card);
+        p.push_surface(
+            &mut cmds,
+            x + 8.0,
+            content_y,
+            width - 16.0,
+            content_h,
+            6.0,
+            Surface::Card,
+        );
 
         // Render active tab
         let cx = x + 24.0;

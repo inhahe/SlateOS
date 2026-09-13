@@ -38,7 +38,7 @@
 //!    placeholder is `p.overlay0` and text the user actually typed is
 //!    `p.text`, so "Search languages…" cannot be mistaken for a query.
 
-use appearance::{Palette, readable_on, Surface};
+use appearance::{Palette, Surface, readable_on};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
@@ -1562,7 +1562,11 @@ mod tests {
             // Under the bordered theme the card is an outline rather than a
             // rung, so what separates it from the rows around it is that it
             // has a boundary at all.
-            assert_eq!(fills_sized(lang, 552.0, 50.0), vec![p.painted(appearance::Surface::Card)], "card");
+            assert_eq!(
+                fills_sized(lang, 552.0, 50.0),
+                vec![p.painted(appearance::Surface::Card)],
+                "card"
+            );
             assert_eq!(
                 text_color(lang, "Current: English (United States)"),
                 p.text,

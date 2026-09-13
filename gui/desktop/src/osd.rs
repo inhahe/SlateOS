@@ -1127,7 +1127,15 @@ impl OsdSettingsUI {
         cy += 22.0;
         let timeout_frac = (self.config.timeout_ms as f32 - 500.0) / 4500.0;
         let track_w = width - padding * 2.0 - 20.0;
-        p.push_surface(&mut commands, x + padding, cy, track_w, 4.0, 2.0, Surface::ControlTrack);
+        p.push_surface(
+            &mut commands,
+            x + padding,
+            cy,
+            track_w,
+            4.0,
+            2.0,
+            Surface::ControlTrack,
+        );
         commands.push(RenderCommand::FillRect {
             x: x + padding,
             y: cy,
@@ -3070,7 +3078,11 @@ mod tests {
             // T9, T10: the timeout slider's track and its accent fill.
             let track = fills_h(&s, 4.0);
             assert_eq!(track.len(), 2, "the timeout slider is a track and a fill");
-            assert_eq!(rgb(track[0]), rgb(p.painted(appearance::Surface::ControlTrack)), "the timeout track");
+            assert_eq!(
+                rgb(track[0]),
+                rgb(p.painted(appearance::Surface::ControlTrack)),
+                "the timeout track"
+            );
             assert_eq!(rgb(track[1]), rgb(p.accent), "the timeout fill");
             // T12: the checkboxes, both sides of their `if`.
             assert_eq!(

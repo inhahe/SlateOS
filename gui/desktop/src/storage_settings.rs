@@ -658,7 +658,15 @@ impl StorageSettingsUI {
 
             // Usage bar
             let bar_y = y + 30.0;
-            p.push_surface(cmds, x + 12.0, bar_y, width - 24.0, 12.0, 6.0, Surface::Card);
+            p.push_surface(
+                cmds,
+                x + 12.0,
+                bar_y,
+                width - 24.0,
+                12.0,
+                6.0,
+                Surface::Card,
+            );
 
             // Stacked category bars
             let bar_w = width - 24.0;
@@ -891,7 +899,15 @@ impl StorageSettingsUI {
                 overflow: TextOverflow::Ellipsis,
             });
             // Change button placeholder
-            p.push_surface(cmds, x + width - 70.0, y + 6.0, 56.0, 22.0, 4.0, Surface::Card);
+            p.push_surface(
+                cmds,
+                x + width - 70.0,
+                y + 6.0,
+                56.0,
+                22.0,
+                4.0,
+                Surface::Card,
+            );
             cmds.push(RenderCommand::Text {
                 x: x + width - 62.0,
                 y: y + 10.0,

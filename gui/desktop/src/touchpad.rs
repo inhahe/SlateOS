@@ -12,7 +12,7 @@
 //! - Disable while typing
 //! - Custom gesture → action bindings
 
-use appearance::{Edge, Palette, readable_on, Surface};
+use appearance::{Edge, Palette, Surface, readable_on};
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::scroll_window;

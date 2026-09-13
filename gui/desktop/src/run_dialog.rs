@@ -952,7 +952,15 @@ impl RunDialog {
 
         let mut paint = p.surface_paint(Surface::Panel);
         paint.border = Some(p.accent);
-        p.push_paint_radii(&mut cmds, input_x, y + INPUT_Y_OFFSET, input_w, INPUT_HEIGHT, CornerRadii::all(4.0), paint);
+        p.push_paint_radii(
+            &mut cmds,
+            input_x,
+            y + INPUT_Y_OFFSET,
+            input_w,
+            INPUT_HEIGHT,
+            CornerRadii::all(4.0),
+            paint,
+        );
 
         // Selection highlight (if any).
         if self.input.has_selection() {
@@ -1037,14 +1045,30 @@ impl RunDialog {
 
             let mut paint = p.surface_paint(Surface::Panel);
             paint.border = Some(paint.border.unwrap_or(p.surface1));
-            p.push_paint_radii(&mut cmds, dropdown_x, dropdown_y, input_w, dropdown_h, CornerRadii::all(4.0), paint);
+            p.push_paint_radii(
+                &mut cmds,
+                dropdown_x,
+                dropdown_y,
+                input_w,
+                dropdown_h,
+                CornerRadii::all(4.0),
+                paint,
+            );
 
             for (i, suggestion) in self.suggestions.iter().enumerate() {
                 let row_y = dropdown_y + i as f32 * AUTOCOMPLETE_ROW_HEIGHT;
                 let is_selected = self.suggestion_index == Some(i);
 
                 if is_selected {
-                    p.push_surface(&mut cmds, dropdown_x + 1.0, row_y, input_w - 2.0, AUTOCOMPLETE_ROW_HEIGHT, 0.0, Surface::Selected);
+                    p.push_surface(
+                        &mut cmds,
+                        dropdown_x + 1.0,
+                        row_y,
+                        input_w - 2.0,
+                        AUTOCOMPLETE_ROW_HEIGHT,
+                        0.0,
+                        Surface::Selected,
+                    );
                 }
 
                 cmds.push(RenderCommand::Text {

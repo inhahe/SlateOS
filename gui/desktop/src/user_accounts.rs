@@ -10,7 +10,7 @@
 //! - User switching UI
 //! - Account activity log
 
-use appearance::{Palette, readable_on, Surface};
+use appearance::{Palette, Surface, readable_on};
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
@@ -948,7 +948,15 @@ impl AccountSettingsUI {
 
         // Status message
         if let Some(msg) = &self.status_message {
-            p.push_surface(&mut cmds, x + 16.0, y + height - 32.0, width - 32.0, 24.0, 4.0, Surface::Card);
+            p.push_surface(
+                &mut cmds,
+                x + 16.0,
+                y + height - 32.0,
+                width - 32.0,
+                24.0,
+                4.0,
+                Surface::Card,
+            );
             cmds.push(RenderCommand::Text {
                 x: x + 24.0,
                 y: y + height - 28.0,

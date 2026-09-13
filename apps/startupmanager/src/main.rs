@@ -2638,7 +2638,15 @@ impl StartupUI {
         }
         let mut paint = pal.surface_paint(Surface::Card);
         paint.border = Some(border);
-        pal.push_paint_radii(frame, rect.x, rect.y, rect.w, rect.h, CornerRadii::all(8.0), paint);
+        pal.push_paint_radii(
+            frame,
+            rect.x,
+            rect.y,
+            rect.w,
+            rect.h,
+            CornerRadii::all(8.0),
+            paint,
+        );
         frame.push(RenderCommand::Text {
             x: rect.x + PADDING,
             y: rect.y + 12.0,

@@ -10,7 +10,7 @@
 //! - Auto-connect for known devices
 //! - System tray indicator
 
-use appearance::{Edge, Palette, readable_on, Surface};
+use appearance::{Edge, Palette, Surface, readable_on};
 use guitk::color::Color;
 use guitk::ratio;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};

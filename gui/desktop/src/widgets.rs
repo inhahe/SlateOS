@@ -1274,7 +1274,15 @@ impl DesktopWidgetManager {
         });
         let mut paint = p.surface_paint(Surface::Card);
         paint.border = Some(paint.border.unwrap_or(p.surface1));
-        p.push_paint_radii(commands, px, py, picker_w, picker_h, CornerRadii::all(12.0), paint);
+        p.push_paint_radii(
+            commands,
+            px,
+            py,
+            picker_w,
+            picker_h,
+            CornerRadii::all(12.0),
+            paint,
+        );
 
         // Title.
         commands.push(RenderCommand::Text {

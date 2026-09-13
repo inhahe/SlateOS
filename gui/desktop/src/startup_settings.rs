@@ -3,7 +3,7 @@
 //! Manages applications that run automatically at login, including
 //! startup delay, impact assessment, and per-app enable/disable control.
 
-use appearance::{Palette, readable_on, Surface};
+use appearance::{Palette, Surface, readable_on};
 use guitk::color::Color;
 use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};

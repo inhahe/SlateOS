@@ -1997,7 +1997,15 @@ impl QrApp {
 
         let mut paint = self.palette.surface_paint(Surface::Card);
         paint.border = Some(paint.border.unwrap_or(self.palette.surface2));
-        self.palette.push_paint_radii(cmds, lx, cy, max_w, 60.0, CornerRadii::all(CORNER_RADIUS), paint);
+        self.palette.push_paint_radii(
+            cmds,
+            lx,
+            cy,
+            max_w,
+            60.0,
+            CornerRadii::all(CORNER_RADIUS),
+            paint,
+        );
 
         let display_text = if self.input_text.is_empty() {
             match self.input_mode {

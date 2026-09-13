@@ -3094,8 +3094,15 @@ impl RssReaderApp {
     /// Render the title bar with app name and quick actions.
     fn render_title_bar(&self, cmds: &mut Vec<RenderCommand>, height: f32) {
         // Title bar background
-        self.palette
-            .push_surface(cmds, 0.0, 0.0, self.width, height, 0.0, Surface::Strip(Edge::Bottom));
+        self.palette.push_surface(
+            cmds,
+            0.0,
+            0.0,
+            self.width,
+            height,
+            0.0,
+            Surface::Strip(Edge::Bottom),
+        );
 
         // RSS icon (simplified as text)
         cmds.push(RenderCommand::Text {
@@ -3217,8 +3224,15 @@ impl RssReaderApp {
         if self.search_active {
             paint.border = Some(self.palette.blue);
         }
-        self.palette
-            .push_paint_radii(cmds, search_x, y + 6.0, 240.0, 24.0, CornerRadii::all(4.0), paint);
+        self.palette.push_paint_radii(
+            cmds,
+            search_x,
+            y + 6.0,
+            240.0,
+            24.0,
+            CornerRadii::all(4.0),
+            paint,
+        );
 
         let search_display = if self.search_query.is_empty() {
             "Search articles... (Ctrl+F)".to_string()

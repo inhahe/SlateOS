@@ -2035,7 +2035,15 @@ fn render_theme_preview(tree: &mut RenderTree, pal: &Palette, x: f32, y: f32, wi
     // A toolbar, so the strip choice has somewhere to show. Drawn first and
     // full width: a strip spans its window, which is the whole reason it is
     // not just another card.
-    pal.draw_surface(tree, x, y, width, STRIP_H, 0.0, Surface::Strip(Edge::Bottom));
+    pal.draw_surface(
+        tree,
+        x,
+        y,
+        width,
+        STRIP_H,
+        0.0,
+        Surface::Strip(Edge::Bottom),
+    );
     tree.text(x + PAD, y + 5.0, "Network", pal.text, 10.0);
 
     let mut ry = y + STRIP_H + PAD;

@@ -30,8 +30,8 @@
 // future-proofing.
 #![allow(clippy::arithmetic_side_effects, clippy::indexing_slicing, dead_code)]
 
-use appearance::Palette;
 use appearance::Edge;
+use appearance::Palette;
 use appearance::Surface;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -2832,8 +2832,15 @@ impl TorrentApp {
         });
 
         // Header bar
-        self.palette
-            .push_surface(&mut cmds, 0.0, 0.0, width, header_h, 0.0, Surface::Strip(Edge::Bottom));
+        self.palette.push_surface(
+            &mut cmds,
+            0.0,
+            0.0,
+            width,
+            header_h,
+            0.0,
+            Surface::Strip(Edge::Bottom),
+        );
 
         // Title
         cmds.push(RenderCommand::Text {

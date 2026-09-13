@@ -3458,7 +3458,15 @@ impl SchedulerUI {
         }
         let mut paint = self.palette.surface_paint(Surface::Card);
         paint.border = Some(paint.border.unwrap_or(self.palette.surface2));
-        self.palette.push_paint_radii(frame, rect.x, rect.y, rect.w, rect.h, CornerRadii::all(4.0), paint);
+        self.palette.push_paint_radii(
+            frame,
+            rect.x,
+            rect.y,
+            rect.w,
+            rect.h,
+            CornerRadii::all(4.0),
+            paint,
+        );
 
         let text_y = centre_line(rect, FONT_SIZE);
 

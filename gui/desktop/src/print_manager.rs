@@ -775,7 +775,15 @@ impl PrintDialog {
             .get(self.selected_printer_idx)
             .map(|p| p.name.as_str())
             .unwrap_or("None");
-        p.push_surface(&mut cmds, dx + 100.0, dy + 62.0, 280.0, 24.0, 4.0, Surface::Card);
+        p.push_surface(
+            &mut cmds,
+            dx + 100.0,
+            dy + 62.0,
+            280.0,
+            24.0,
+            4.0,
+            Surface::Card,
+        );
         cmds.push(RenderCommand::Text {
             x: dx + 108.0,
             y: dy + 66.0,
@@ -882,7 +890,15 @@ impl PrintDialog {
             max_width: None,
             overflow: TextOverflow::Clip,
         });
-        p.push_surface(&mut cmds, dx + dw - 100.0, btn_y, 80.0, 28.0, 6.0, Surface::Card);
+        p.push_surface(
+            &mut cmds,
+            dx + dw - 100.0,
+            btn_y,
+            80.0,
+            28.0,
+            6.0,
+            Surface::Card,
+        );
         cmds.push(RenderCommand::Text {
             x: dx + dw - 84.0,
             y: btn_y + 7.0,

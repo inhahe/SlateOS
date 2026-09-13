@@ -1710,7 +1710,8 @@ impl UnitConverterApp {
         // Background.
         let mut paint = self.palette.surface_paint(Surface::Card);
         paint.border = Some(paint.border.unwrap_or(self.palette.surface1));
-        self.palette.push_paint_radii(tree, dd_x, dd_y, dd_w, dd_h, CornerRadii::all(8.0), paint);
+        self.palette
+            .push_paint_radii(tree, dd_x, dd_y, dd_w, dd_h, CornerRadii::all(8.0), paint);
 
         // Items.
         for (i, unit) in units.iter().enumerate() {

@@ -756,7 +756,15 @@ impl BackupSettingsUI {
         let content_y = tab_y + 44.0;
         let content_h = height - (content_y - y) - 16.0;
 
-        p.push_surface(&mut cmds, x + 8.0, content_y, width - 16.0, content_h, 6.0, Surface::Card);
+        p.push_surface(
+            &mut cmds,
+            x + 8.0,
+            content_y,
+            width - 16.0,
+            content_h,
+            6.0,
+            Surface::Card,
+        );
 
         let cx = x + 24.0;
         let cy = content_y + 16.0;
@@ -1428,7 +1436,15 @@ impl BackupSettingsUI {
             });
 
             // Pattern
-            p.push_surface(cmds, x + 56.0, row_y + 8.0, text::padded_width(&rule.pattern, 8.0, 11.0, FontWeightHint::Bold), 20.0, 3.0, Surface::ControlTrack);
+            p.push_surface(
+                cmds,
+                x + 56.0,
+                row_y + 8.0,
+                text::padded_width(&rule.pattern, 8.0, 11.0, FontWeightHint::Bold),
+                20.0,
+                3.0,
+                Surface::ControlTrack,
+            );
             cmds.push(RenderCommand::Text {
                 x: x + 64.0,
                 y: row_y + 10.0,

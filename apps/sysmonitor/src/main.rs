@@ -2668,7 +2668,15 @@ impl SysMonitorState {
         // Background
         let mut paint = self.palette.surface_paint(Surface::Panel);
         paint.border = Some(paint.border.unwrap_or(self.palette.surface2));
-        self.palette.push_paint_radii(tree, menu.x, menu.y, menu_w, menu_h, CornerRadii::all(4.0), paint);
+        self.palette.push_paint_radii(
+            tree,
+            menu.x,
+            menu.y,
+            menu_w,
+            menu_h,
+            CornerRadii::all(4.0),
+            paint,
+        );
 
         for (i, action) in ContextAction::ALL.iter().enumerate() {
             let iy = menu.y + i as f32 * item_h;

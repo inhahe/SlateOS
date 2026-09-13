@@ -726,7 +726,15 @@ impl LauncherState {
             let is_selected = i == self.selected_index;
 
             if is_selected {
-                p.push_surface(&mut cmds, 0.0, row_y, input_width, ROW_HEIGHT, 6.0, Surface::Selected);
+                p.push_surface(
+                    &mut cmds,
+                    0.0,
+                    row_y,
+                    input_width,
+                    ROW_HEIGHT,
+                    6.0,
+                    Surface::Selected,
+                );
                 cmds.push(RenderCommand::FillRect {
                     x: 0.0,
                     y: row_y + 8.0,

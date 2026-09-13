@@ -2117,7 +2117,15 @@ fn render_template_field(
     let rect = Rect::new(x + 60.0, y - 2.0, (w - 60.0).max(0.0), field.height);
     let mut paint = pal.surface_paint(Surface::Card);
     paint.border = Some(field_border(field.focused, pal));
-    pal.push_paint_radii(frame, rect.x, rect.y, rect.w, rect.h, CornerRadii::all(3.0), paint);
+    pal.push_paint_radii(
+        frame,
+        rect.x,
+        rect.y,
+        rect.w,
+        rect.h,
+        CornerRadii::all(3.0),
+        paint,
+    );
 
     let display = if field.value.is_empty() && !field.focused {
         field.placeholder.to_string()

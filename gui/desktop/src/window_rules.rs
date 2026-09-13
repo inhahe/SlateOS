@@ -35,7 +35,7 @@
 //! wanted to. See `known-issues.md`
 //! `TD-C-TWELVE-OF-SEVENTEEN-WINDOW-RULE-ACTIONS-HAVE-NOWHERE-TO-GO`.
 
-use appearance::{Edge, Palette, readable_on, Surface};
+use appearance::{Edge, Palette, Surface, readable_on};
 use guitk::color::Color;
 use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -1049,7 +1049,15 @@ impl RulesSettingsUI {
 
             // Row background.
             if selected {
-                p.push_surface(cmds, x + 4.0, ry, w - 8.0, row_h - 4.0, 4.0, Surface::Selected);
+                p.push_surface(
+                    cmds,
+                    x + 4.0,
+                    ry,
+                    w - 8.0,
+                    row_h - 4.0,
+                    4.0,
+                    Surface::Selected,
+                );
             }
 
             let mut cx = x + 8.0;

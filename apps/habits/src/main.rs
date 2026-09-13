@@ -2142,7 +2142,8 @@ impl HabitTrackerApp {
 
         let mut paint = self.palette.surface_paint(Surface::Card);
         paint.border = Some(paint.border.unwrap_or(self.palette.surface1));
-        self.palette.push_paint_radii(cmds, fx, fy, fw, fh, CornerRadii::all(12.0), paint);
+        self.palette
+            .push_paint_radii(cmds, fx, fy, fw, fh, CornerRadii::all(12.0), paint);
 
         cmds.push(RenderCommand::Text {
             x: fx + 20.0,

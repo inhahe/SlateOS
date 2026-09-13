@@ -5842,7 +5842,15 @@ impl SpreadsheetApp {
         // Background
         let mut paint = self.palette.surface_paint(Surface::Card);
         paint.border = Some(paint.border.unwrap_or(self.palette.surface1));
-        self.palette.push_paint_radii(cmds, dlg_x, dlg_y, dlg_w, dlg_h, CornerRadii::all(8.0), paint);
+        self.palette.push_paint_radii(
+            cmds,
+            dlg_x,
+            dlg_y,
+            dlg_w,
+            dlg_h,
+            CornerRadii::all(8.0),
+            paint,
+        );
 
         // Title
         cmds.push(RenderCommand::Text {

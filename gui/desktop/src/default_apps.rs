@@ -44,7 +44,7 @@
 //!    any test run at the stock accent. Only an off-palette accent exposes
 //!    it, which is why the fixture uses one.
 
-use appearance::{Palette, readable_on, Surface};
+use appearance::{Palette, Surface, readable_on};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
@@ -821,7 +821,15 @@ impl DefaultAppsUI {
         row_y += 24.0;
 
         // Reset all button
-        p.push_surface(cmds, x + width - 100.0, row_y - 20.0, 100.0, 24.0, 4.0, Surface::Card);
+        p.push_surface(
+            cmds,
+            x + width - 100.0,
+            row_y - 20.0,
+            100.0,
+            24.0,
+            4.0,
+            Surface::Card,
+        );
         cmds.push(RenderCommand::Text {
             x: x + width - 88.0,
             y: row_y - 16.0,
@@ -1186,7 +1194,15 @@ impl DefaultAppsUI {
 
             // System badge
             if app.is_system {
-                p.push_surface(cmds, x + width - 68.0, row_y + 8.0, 52.0, 18.0, 3.0, Surface::Card);
+                p.push_surface(
+                    cmds,
+                    x + width - 68.0,
+                    row_y + 8.0,
+                    52.0,
+                    18.0,
+                    3.0,
+                    Surface::Card,
+                );
                 cmds.push(RenderCommand::Text {
                     x: x + width - 62.0,
                     y: row_y + 10.0,
@@ -1833,7 +1849,10 @@ mod tests {
             // where the same site is a `surface1` fill.
             let painted = |what| {
                 let paint = p.surface_paint(what);
-                paint.fill.or(paint.border).expect("a surface is drawn somehow")
+                paint
+                    .fill
+                    .or(paint.border)
+                    .expect("a surface is drawn somehow")
             };
             let marked = painted(appearance::Surface::Selected);
             // Every ordinary box is a `Surface::Card` now, so they share one

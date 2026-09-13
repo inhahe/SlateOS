@@ -2256,7 +2256,15 @@ impl DiskAnalyzerUI {
 
         let mut paint = self.palette.surface_paint(Surface::Panel);
         paint.border = Some(paint.border.unwrap_or(self.palette.overlay0));
-        self.palette.push_paint_radii(frame, tx, ty, tw, th, CornerRadii::all(CORNER_RADIUS), paint);
+        self.palette.push_paint_radii(
+            frame,
+            tx,
+            ty,
+            tw,
+            th,
+            CornerRadii::all(CORNER_RADIUS),
+            paint,
+        );
 
         let mut line_y = ty + 6.0;
         for line in self.tooltip_text.split('\n') {

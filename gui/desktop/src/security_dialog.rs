@@ -62,7 +62,7 @@
 //! }
 //! ```
 
-use appearance::{Palette, readable_on, Surface};
+use appearance::{Palette, Surface, readable_on};
 #[cfg(test)]
 use guitk::event::Modifiers;
 use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -1034,7 +1034,15 @@ impl SecurityDialog {
 
             let mut paint = p.surface_paint(Surface::Card);
             paint.border = Some(paint.border.unwrap_or(p.surface1));
-            p.push_paint_radii(&mut cmds, dx + PADDING, panel_y, panel_w, panel_h, CornerRadii::all(DETAIL_PANEL_RADIUS), paint);
+            p.push_paint_radii(
+                &mut cmds,
+                dx + PADDING,
+                panel_y,
+                panel_w,
+                panel_h,
+                CornerRadii::all(DETAIL_PANEL_RADIUS),
+                paint,
+            );
 
             let dp = 8.0; // detail panel inner padding
             let mut ty = panel_y + dp;

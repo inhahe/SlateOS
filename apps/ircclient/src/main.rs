@@ -3,8 +3,8 @@
 //! Implements IRC protocol message parsing, channel management,
 //! user tracking, message history, and a multi-panel chat UI.
 
-use appearance::Palette;
 use appearance::Edge;
+use appearance::Palette;
 use appearance::Surface;
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
@@ -1907,8 +1907,15 @@ impl IrcClientApp {
     }
 
     fn render_title_bar(&self, cmds: &mut Vec<RenderCommand>) {
-        self.palette
-            .push_surface(cmds, 0.0, 0.0, self.width, 30.0, 0.0, Surface::Strip(Edge::Bottom));
+        self.palette.push_surface(
+            cmds,
+            0.0,
+            0.0,
+            self.width,
+            30.0,
+            0.0,
+            Surface::Strip(Edge::Bottom),
+        );
 
         // Connection status
         cmds.push(RenderCommand::FillRect {

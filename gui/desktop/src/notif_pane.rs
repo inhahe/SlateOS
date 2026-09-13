@@ -52,7 +52,7 @@
 //!
 //! [`NotificationPane::events`]: NotificationPane
 
-use appearance::{Palette, readable_on, Surface};
+use appearance::{Palette, Surface, readable_on};
 use guitk::color::Color;
 use guitk::event::{EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::idseq::IdSeq;
@@ -1717,7 +1717,15 @@ impl NotificationPane {
         if is_hovered {
             let btn_x = x + card_width - DISMISS_BTN_SIZE - 8.0;
             let btn_y = y + 6.0;
-            p.push_surface(cmds, btn_x, btn_y, DISMISS_BTN_SIZE, DISMISS_BTN_SIZE, DISMISS_BTN_SIZE / 2.0, Surface::Selected);
+            p.push_surface(
+                cmds,
+                btn_x,
+                btn_y,
+                DISMISS_BTN_SIZE,
+                DISMISS_BTN_SIZE,
+                DISMISS_BTN_SIZE / 2.0,
+                Surface::Selected,
+            );
             // "X" glyph.
             cmds.push(RenderCommand::Text {
                 x: btn_x + 5.0,
@@ -1770,7 +1778,15 @@ impl NotificationPane {
             }
 
             // App card.
-            p.push_surface(cmds, PANE_PADDING, y, card_width, APP_CARD_HEIGHT, CARD_RADIUS, Surface::Card);
+            p.push_surface(
+                cmds,
+                PANE_PADDING,
+                y,
+                card_width,
+                APP_CARD_HEIGHT,
+                CARD_RADIUS,
+                Surface::Card,
+            );
 
             // App name.
             cmds.push(RenderCommand::Text {

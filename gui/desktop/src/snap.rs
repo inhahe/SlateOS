@@ -119,7 +119,7 @@
 //! conversion at all — it is a bug the conversion exposed, because it is
 //! invisible while the accent is hard-coded to blue.
 
-use appearance::{Palette, readable_on, Surface};
+use appearance::{Palette, Surface, readable_on};
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
@@ -703,7 +703,15 @@ impl SnapManager {
             }
 
             // Thumbnail background.
-            p.push_surface(&mut cmds, ix, iy, THUMB_SIZE, THUMB_SIZE, 4.0, Surface::ControlTrack);
+            p.push_surface(
+                &mut cmds,
+                ix,
+                iy,
+                THUMB_SIZE,
+                THUMB_SIZE,
+                4.0,
+                Surface::ControlTrack,
+            );
 
             // Mini-zone rectangles inside the thumbnail. Built at the
             // thumbnail's own origin rather than at zero and offset by the

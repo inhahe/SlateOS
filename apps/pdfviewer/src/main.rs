@@ -36,6 +36,7 @@
 
 use std::process::ExitCode;
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
@@ -58,50 +59,17 @@ use std::path::{Path, PathBuf};
 // Catppuccin Mocha theme colors
 // ============================================================================
 
-// Full palette is defined for use across the application. Not all colors are
-// referenced yet but they are part of the theme and available for future use.
-#[allow(dead_code)]
-const BASE: Color = Color::rgb(30, 30, 46);
-#[allow(dead_code)]
-const MANTLE: Color = Color::rgb(24, 24, 37);
-#[allow(dead_code)]
-const CRUST: Color = Color::rgb(17, 17, 27);
-#[allow(dead_code)]
-const SURFACE0: Color = Color::rgb(49, 50, 68);
-#[allow(dead_code)]
-const SURFACE1: Color = Color::rgb(69, 71, 90);
-#[allow(dead_code)]
-const SURFACE2: Color = Color::rgb(88, 91, 112);
-#[allow(dead_code)]
-const OVERLAY0: Color = Color::rgb(108, 112, 134);
-#[allow(dead_code)]
-const TEXT_COLOR: Color = Color::rgb(205, 214, 244);
-#[allow(dead_code)]
-const SUBTEXT1: Color = Color::rgb(186, 194, 222);
-#[allow(dead_code)]
-const SUBTEXT0: Color = Color::rgb(166, 173, 200);
-#[allow(dead_code)]
-const BLUE: Color = Color::rgb(137, 180, 250);
-#[allow(dead_code)]
-const LAVENDER: Color = Color::rgb(180, 190, 254);
-#[allow(dead_code)]
-const SAPPHIRE: Color = Color::rgb(116, 199, 236);
-#[allow(dead_code)]
-const GREEN: Color = Color::rgb(166, 227, 161);
-#[allow(dead_code)]
-const YELLOW: Color = Color::rgb(249, 226, 175);
-#[allow(dead_code)]
-const PEACH: Color = Color::rgb(250, 179, 135);
-#[allow(dead_code)]
-const RED: Color = Color::rgb(243, 139, 168);
-#[allow(dead_code)]
-const MAUVE: Color = Color::rgb(203, 166, 247);
-#[allow(dead_code)]
-const ROSEWATER: Color = Color::rgb(245, 224, 220);
-#[allow(dead_code)]
-const FLAMINGO: Color = Color::rgb(242, 205, 205);
-#[allow(dead_code)]
-const TEAL: Color = Color::rgb(148, 226, 213);
+// The colours live in the user's palette, not here.
+//
+// 21 constants used to sit here -- Catppuccin Mocha -- so a light desktop got
+// a dark PDF viewer. design-decisions 822; one of the 55 crates never
+// converted. Names and values agreed, and ROSEWATER and FLAMINGO went with
+// them: both were declared and never used, and the shared palette has no rung
+// for either.
+//
+// The *page* is not converted. A PDF page is white because the document is
+// white, and this viewer has its own `dark_mode` for reading -- neither is the
+// desktop theme's to decide, any more than the pixels of the page are.
 
 // ============================================================================
 // Layout constants
@@ -1209,6 +1177,8 @@ pub type PrintFn = fn(&PdfDocument, &[usize]) -> bool;
 
 /// The complete PDF viewer application state.
 pub struct PdfViewerApp {
+    /// The user's colours, handed over by the framework (§822).
+    pub palette: Palette,
     pub tabs: Vec<DocumentTab>,
     pub active_tab: usize,
     pub search: SearchState,
@@ -1268,6 +1238,7 @@ impl std::fmt::Debug for PdfViewerApp {
             .field("next_annotation_id", &self.next_annotation_id)
             .field("can_open", &self.open.is_some())
             .field("can_print", &self.print.is_some())
+            .field("palette", &self.palette)
             .field("wheel", &self.wheel)
             .finish()
     }
@@ -1278,6 +1249,7 @@ impl PdfViewerApp {
         let mut id_gen = IdGenerator::new();
         let initial_tab = DocumentTab::new(id_gen.next_id());
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             tabs: vec![initial_tab],
             active_tab: 0,
             search: SearchState::new(),
@@ -1492,7 +1464,7 @@ impl PdfViewerApp {
             y: 0.0,
             width: layout.window.w,
             height: layout.window.h,
-            color: BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1525,7 +1497,7 @@ impl PdfViewerApp {
             y: 0.0,
             width: bar.w,
             height: bar.h,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1535,7 +1507,7 @@ impl PdfViewerApp {
             y1: bar.bottom(),
             x2: bar.w,
             y2: bar.bottom(),
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -1583,7 +1555,7 @@ impl PdfViewerApp {
                 x: btn_x,
                 y: btn_y + 9.0,
                 text: page_text,
-                color: TEXT_COLOR,
+                color: self.palette.text,
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(120.0),
@@ -1598,7 +1570,7 @@ impl PdfViewerApp {
             y1: btn_y + 2.0,
             x2: btn_x,
             y2: btn_y + btn_h - 2.0,
-            color: SURFACE1,
+            color: self.palette.surface1,
             width: 1.0,
         });
         btn_x += 12.0;
@@ -1629,7 +1601,7 @@ impl PdfViewerApp {
                 x: btn_x,
                 y: btn_y + 9.0,
                 text: zoom_label,
-                color: SUBTEXT1,
+                color: self.palette.subtext1,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(140.0),
@@ -1644,7 +1616,7 @@ impl PdfViewerApp {
             y1: btn_y + 2.0,
             x2: btn_x,
             y2: btn_y + btn_h - 2.0,
-            color: SURFACE1,
+            color: self.palette.surface1,
             width: 1.0,
         });
         btn_x += 12.0;
@@ -1756,7 +1728,7 @@ impl PdfViewerApp {
             y,
             width: w,
             height: h,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::all(4.0),
         });
         frame.push(RenderCommand::StrokeRect {
@@ -1764,7 +1736,7 @@ impl PdfViewerApp {
             y,
             width: w,
             height: h,
-            color: SURFACE0,
+            color: self.palette.surface0,
             line_width: 1.0,
             corner_radii: CornerRadii::all(4.0),
         });
@@ -1772,7 +1744,7 @@ impl PdfViewerApp {
             x: x + 4.0,
             y: y + (h - 12.0) / 2.0,
             text: label.to_string(),
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(w - 8.0),
@@ -1806,7 +1778,7 @@ impl PdfViewerApp {
             y,
             width: w,
             height: h,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(4.0),
         });
         frame.push(RenderCommand::StrokeRect {
@@ -1814,7 +1786,7 @@ impl PdfViewerApp {
             y,
             width: w,
             height: h,
-            color: SURFACE1,
+            color: self.palette.surface1,
             line_width: 1.0,
             corner_radii: CornerRadii::all(4.0),
         });
@@ -1825,7 +1797,7 @@ impl PdfViewerApp {
             x: text_x,
             y: text_y,
             text: label.to_string(),
-            color: TEXT_COLOR,
+            color: self.palette.text,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(w - 8.0),
@@ -1844,7 +1816,7 @@ impl PdfViewerApp {
             y,
             width: strip.w,
             height: strip.h,
-            color: CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1853,7 +1825,7 @@ impl PdfViewerApp {
             y1: strip.bottom(),
             x2: strip.w,
             y2: strip.bottom(),
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -1867,8 +1839,16 @@ impl PdfViewerApp {
 
         for (i, tab) in self.tabs.iter().enumerate() {
             let is_active = i == self.active_tab;
-            let bg = if is_active { BASE } else { CRUST };
-            let fg = if is_active { TEXT_COLOR } else { SUBTEXT0 };
+            let bg = if is_active {
+                self.palette.base
+            } else {
+                self.palette.crust
+            };
+            let fg = if is_active {
+                self.palette.text
+            } else {
+                self.palette.subtext0
+            };
 
             frame.hit(Target::Tab(i), Rect::new(tab_x, y + 2.0, tab_w, tab_h));
 
@@ -1894,7 +1874,7 @@ impl PdfViewerApp {
                     y1: y + 2.0,
                     x2: tab_x + tab_w,
                     y2: y + 2.0,
-                    color: BLUE,
+                    color: self.palette.blue,
                     width: 2.0,
                 });
             }
@@ -1948,7 +1928,7 @@ impl PdfViewerApp {
                 x: close_x,
                 y: close_y,
                 text: "x".to_string(),
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -1965,14 +1945,14 @@ impl PdfViewerApp {
             y: y + 6.0,
             width: 28.0,
             height: 24.0,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(4.0),
         });
         frame.push(RenderCommand::Text {
             x: tab_x + 8.0,
             y: y + 10.0,
             text: "+".to_string(),
-            color: SUBTEXT1,
+            color: self.palette.subtext1,
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -2003,7 +1983,7 @@ impl PdfViewerApp {
             y: sidebar_y,
             width: sidebar_w,
             height: sidebar_h,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2013,7 +1993,7 @@ impl PdfViewerApp {
             y1: sidebar_y,
             x2: sidebar_w,
             y2: sidebar_y + sidebar_h,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -2027,8 +2007,16 @@ impl PdfViewerApp {
         for (i, (panel, label)) in panels.iter().enumerate() {
             let px = i as f32 * panel_tab_w;
             let is_active = tab.sidebar_panel == *panel;
-            let bg = if is_active { BASE } else { MANTLE };
-            let fg = if is_active { BLUE } else { SUBTEXT0 };
+            let bg = if is_active {
+                self.palette.base
+            } else {
+                self.palette.mantle
+            };
+            let fg = if is_active {
+                self.palette.blue
+            } else {
+                self.palette.subtext0
+            };
 
             frame.hit(
                 Target::Panel(*panel),
@@ -2095,7 +2083,7 @@ impl PdfViewerApp {
                 x: 16.0,
                 y: start_y + 20.0,
                 text: "No document loaded".to_string(),
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - 32.0),
@@ -2127,19 +2115,21 @@ impl PdfViewerApp {
                     y: y - 2.0,
                     width: thumb_w + 4.0,
                     height: thumb_h + 4.0 + 18.0,
-                    color: BLUE,
+                    color: self.palette.blue,
                     line_width: 2.0,
                     corner_radii: CornerRadii::all(4.0),
                 });
             }
 
-            // Thumbnail page (white rectangle as placeholder)
+            // Thumbnail page (a page stand-in until the page is rendered).
+            // Drawn the colour of a page, not a palette rung -- a thumbnail
+            // that did not match the page it previews would be misleading.
             frame.push(RenderCommand::FillRect {
                 x: 16.0,
                 y,
                 width: thumb_w,
                 height: thumb_h,
-                color: Color::rgb(240, 240, 240),
+                color: self.page_color(),
                 corner_radii: CornerRadii::all(2.0),
             });
 
@@ -2149,7 +2139,11 @@ impl PdfViewerApp {
                 x: 16.0,
                 y: y + thumb_h + 2.0,
                 text: label,
-                color: if is_current { TEXT_COLOR } else { SUBTEXT0 },
+                color: if is_current {
+                    self.palette.text
+                } else {
+                    self.palette.subtext0
+                },
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(thumb_w),
@@ -2157,6 +2151,19 @@ impl PdfViewerApp {
             });
 
             y += thumb_h + 24.0;
+        }
+    }
+
+    /// What a page looks like.
+    ///
+    /// Deliberately *not* from the palette. A PDF page is white because the
+    /// document is white; the viewer's own reading mode may invert it. Neither
+    /// is the desktop theme's decision -- see the note at the top of this file.
+    fn page_color(&self) -> Color {
+        if self.dark_mode {
+            Color::rgb(40, 42, 54)
+        } else {
+            Color::rgb(255, 255, 255)
         }
     }
 
@@ -2173,7 +2180,7 @@ impl PdfViewerApp {
                 x: 16.0,
                 y: start_y + 20.0,
                 text: "No document loaded".to_string(),
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - 32.0),
@@ -2187,7 +2194,7 @@ impl PdfViewerApp {
                 x: 16.0,
                 y: start_y + 20.0,
                 text: "No bookmarks".to_string(),
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - 32.0),
@@ -2230,7 +2237,7 @@ impl PdfViewerApp {
                     x: indent - 12.0,
                     y: y + 4.0,
                     text: arrow.to_string(),
-                    color: OVERLAY0,
+                    color: self.palette.overlay0,
                     font_size: 10.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
@@ -2243,7 +2250,11 @@ impl PdfViewerApp {
                 x: indent,
                 y: y + 4.0,
                 text: bm.title.clone(),
-                color: if is_on_current_page { BLUE } else { TEXT_COLOR },
+                color: if is_on_current_page {
+                    self.palette.ink(self.palette.blue)
+                } else {
+                    self.palette.text
+                },
                 font_size: 12.0,
                 font_weight: if is_on_current_page {
                     FontWeightHint::Bold
@@ -2271,7 +2282,7 @@ impl PdfViewerApp {
                 x: 16.0,
                 y: start_y + 20.0,
                 text: "No document loaded".to_string(),
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - 32.0),
@@ -2291,7 +2302,7 @@ impl PdfViewerApp {
                 x: 16.0,
                 y: start_y + 20.0,
                 text: "No annotations".to_string(),
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - 32.0),
@@ -2311,7 +2322,7 @@ impl PdfViewerApp {
             };
             let type_color = match &ann.annotation_type {
                 AnnotationType::Highlight { color } => *color,
-                AnnotationType::Note { .. } => YELLOW,
+                AnnotationType::Note { .. } => self.palette.yellow,
                 AnnotationType::Freehand { color, .. } => *color,
                 AnnotationType::Underline { color } => *color,
                 AnnotationType::Strikethrough { color } => *color,
@@ -2332,7 +2343,7 @@ impl PdfViewerApp {
                 x: 30.0,
                 y: y + 2.0,
                 text: format!("{} - Page {}", type_label, ann.page_index.saturating_add(1)),
-                color: TEXT_COLOR,
+                color: self.palette.text,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - 46.0),
@@ -2363,7 +2374,7 @@ impl PdfViewerApp {
             y: area_y,
             width: area_w,
             height: area_h,
-            color: CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2395,7 +2406,7 @@ impl PdfViewerApp {
             x: cx,
             y: cy,
             text: "PDF Viewer".to_string(),
-            color: TEXT_COLOR,
+            color: self.palette.text,
             font_size: 24.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
@@ -2406,7 +2417,7 @@ impl PdfViewerApp {
             x: cx,
             y: cy + 36.0,
             text: "Open a PDF to begin".to_string(),
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 14.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(200.0),
@@ -2419,7 +2430,7 @@ impl PdfViewerApp {
                 x: cx,
                 y: cy + 72.0,
                 text: "Recent Files:".to_string(),
-                color: SUBTEXT1,
+                color: self.palette.subtext1,
                 font_size: 13.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(300.0),
@@ -2449,7 +2460,11 @@ impl PdfViewerApp {
                     x: cx + 8.0,
                     y: ry,
                     text: format!("{}. {}", i.saturating_add(1), name),
-                    color: if self.can_open() { BLUE } else { OVERLAY0 },
+                    color: if self.can_open() {
+                        self.palette.ink(self.palette.blue)
+                    } else {
+                        self.palette.overlay0
+                    },
                     font_size: 12.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(280.0),
@@ -2575,11 +2590,7 @@ impl PdfViewerApp {
         });
 
         // Page background (white for the document page)
-        let page_bg = if self.dark_mode {
-            Color::rgb(40, 42, 54)
-        } else {
-            Color::rgb(255, 255, 255)
-        };
+        let page_bg = self.page_color();
         frame.push(RenderCommand::FillRect {
             x,
             y,
@@ -2595,14 +2606,14 @@ impl PdfViewerApp {
             y,
             width: w,
             height: h,
-            color: SURFACE1,
+            color: self.palette.surface1,
             line_width: 1.0,
             corner_radii: CornerRadii::all(2.0),
         });
 
         // Render text spans (placeholder content)
         let text_color = if self.dark_mode {
-            TEXT_COLOR
+            self.palette.text
         } else {
             Color::rgb(30, 30, 30)
         };
@@ -2663,14 +2674,14 @@ impl PdfViewerApp {
                     y: ay,
                     width: 20.0 * zoom,
                     height: 20.0 * zoom,
-                    color: YELLOW,
+                    color: self.palette.yellow,
                     corner_radii: CornerRadii::all(3.0),
                 });
                 frame.push(RenderCommand::Text {
                     x: ax + 3.0 * zoom,
                     y: ay + 3.0 * zoom,
                     text: "N".to_string(),
-                    color: CRUST,
+                    color: self.palette.crust,
                     font_size: 12.0 * zoom,
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
@@ -2738,9 +2749,19 @@ impl PdfViewerApp {
             }
             let is_current = self.search.current_match == Some(i);
             let color = if is_current {
-                Color::rgba(PEACH.r, PEACH.g, PEACH.b, 120)
+                Color::rgba(
+                    self.palette.peach.r,
+                    self.palette.peach.g,
+                    self.palette.peach.b,
+                    120,
+                )
             } else {
-                Color::rgba(YELLOW.r, YELLOW.g, YELLOW.b, 80)
+                Color::rgba(
+                    self.palette.yellow.r,
+                    self.palette.yellow.g,
+                    self.palette.yellow.b,
+                    80,
+                )
             };
 
             let hx = page_x + result.rect.x * zoom;
@@ -2763,7 +2784,7 @@ impl PdfViewerApp {
                     y: hy,
                     width: hw,
                     height: hh,
-                    color: PEACH,
+                    color: self.palette.peach,
                     line_width: 2.0,
                     corner_radii: CornerRadii::all(2.0),
                 });
@@ -2810,7 +2831,7 @@ impl PdfViewerApp {
             y: bar_y,
             width: bar_w,
             height: bar_h,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(8.0),
         });
 
@@ -2822,7 +2843,11 @@ impl PdfViewerApp {
             y: bar_y,
             width: bar_w,
             height: bar_h,
-            color: if self.search_focused { BLUE } else { SURFACE1 },
+            color: if self.search_focused {
+                self.palette.blue
+            } else {
+                self.palette.surface1
+            },
             line_width: if self.search_focused { 2.0 } else { 1.0 },
             corner_radii: CornerRadii::all(8.0),
         });
@@ -2840,7 +2865,7 @@ impl PdfViewerApp {
             x: bar_x + 12.0,
             y: bar_y + 13.0,
             text: "S".to_string(),
-            color: OVERLAY0,
+            color: self.palette.overlay0,
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -2854,9 +2879,9 @@ impl PdfViewerApp {
             self.search.query.clone()
         };
         let query_color = if self.search.query.is_empty() {
-            OVERLAY0
+            self.palette.overlay0
         } else {
-            TEXT_COLOR
+            self.palette.text
         };
         frame.push(RenderCommand::Text {
             x: bar_x + 32.0,
@@ -2876,7 +2901,7 @@ impl PdfViewerApp {
                 x: bar_x + 220.0,
                 y: bar_y + 14.0,
                 text: count_label,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(80.0),
@@ -2920,7 +2945,7 @@ impl PdfViewerApp {
             y,
             width: band.w,
             height: band.h,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2930,7 +2955,7 @@ impl PdfViewerApp {
             y1: y,
             x2: band.w,
             y2: y,
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
 
@@ -2948,7 +2973,7 @@ impl PdfViewerApp {
                     x: sx,
                     y: y + 7.0,
                     text: name,
-                    color: SUBTEXT1,
+                    color: self.palette.subtext1,
                     font_size: 11.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(200.0),
@@ -2966,7 +2991,7 @@ impl PdfViewerApp {
                     tab.current_page.saturating_add(1),
                     tab.page_count()
                 ),
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(100.0),
@@ -2983,7 +3008,7 @@ impl PdfViewerApp {
                 x: sx,
                 y: y + 7.0,
                 text: mode_str.to_string(),
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(100.0),
@@ -2997,7 +3022,7 @@ impl PdfViewerApp {
                     x: sx,
                     y: y + 7.0,
                     text: format!("{}deg", tab.rotation.degrees()),
-                    color: SUBTEXT0,
+                    color: self.palette.subtext0,
                     font_size: 11.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(60.0),
@@ -3022,7 +3047,7 @@ impl PdfViewerApp {
                 x: band.w - 80.0,
                 y: y + 7.0,
                 text: format!("{}%", zoom_pct as u32),
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(60.0),
@@ -3589,6 +3614,11 @@ pub fn page_at_offset(doc: &PdfDocument, offset: f32, zoom: f32) -> usize {
 // ============================================================================
 
 impl App for PdfViewerApp {
+    /// Adopt the user's colours (§822).
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         match self.active_tab() {
             Some(tab) if tab.document.is_some() => format!("{} - PDF Viewer", tab.title()),
@@ -3711,6 +3741,36 @@ mod tests {
     )]
 
     use super::*;
+
+    /// Every colour the viewer's chrome draws comes from the user's palette.
+    ///
+    /// The page is declared derived, not exempted. A PDF page is white because
+    /// the document is white, and the viewer's own `dark_mode` inverts it for
+    /// reading -- neither is the desktop theme's decision.
+    #[test]
+    fn every_colour_the_pdf_chrome_draws_comes_from_its_palette() {
+        for light in [false, true] {
+            let mut app = PdfViewerApp::new(1100.0, 800.0);
+            app.palette = Palette::for_mode(light);
+            let tree = App::render(&mut app, 1100.0, 800.0);
+            assert!(
+                tree.commands.len() > 10,
+                "the sweep examined {} commands, which is not a render",
+                tree.commands.len()
+            );
+            appearance::palette_check::assert_drawn_from(
+                &app.palette,
+                &tree.commands,
+                &[
+                    Color::rgb(255, 255, 255),
+                    Color::rgb(40, 42, 54),
+                    Color::rgb(30, 30, 30),
+                ],
+                &format!("pdfviewer (light={light})"),
+            );
+        }
+    }
+
     // Only the tests build a range: nothing in the viewer's UI sets one yet.
     // See known-issues TD-C-THE-PDF-VIEWER-PRINTS-EVERY-PAGE-OR-NOTHING.
     use printjob::PageRange;
@@ -4554,7 +4614,7 @@ mod tests {
         let doc = PdfDocument::create_sample(PathBuf::from("/test.pdf"), 2);
         app.load_document(doc);
         let rect = PageRect::new(50.0, 50.0, 100.0, 20.0);
-        let id = app.add_highlight(rect, YELLOW);
+        let id = app.add_highlight(rect, Palette::for_mode(false).yellow);
         assert!(id.is_some());
         let page = &app.active_tab().unwrap().document.as_ref().unwrap().pages[0];
         assert_eq!(page.annotations.len(), 1);
@@ -4577,7 +4637,7 @@ mod tests {
         app.load_document(doc);
         let rect = PageRect::new(0.0, 0.0, 100.0, 100.0);
         let pts = vec![(10.0, 10.0), (50.0, 50.0), (90.0, 10.0)];
-        let id = app.add_freehand(rect, pts, RED, 2.0);
+        let id = app.add_freehand(rect, pts, Palette::for_mode(false).red, 2.0);
         assert!(id.is_some());
     }
 
@@ -4595,14 +4655,23 @@ mod tests {
         // A fresh app has one tab and no document in it.
         assert!(app.active_tab().unwrap().document.is_none());
         let rect = PageRect::new(10.0, 10.0, 20.0, 20.0);
-        assert!(app.add_highlight(rect, YELLOW).is_none());
+        assert!(
+            app.add_highlight(rect, Palette::for_mode(false).yellow)
+                .is_none()
+        );
         assert!(app.add_note(rect, "n".to_string()).is_none());
-        assert!(app.add_freehand(rect, vec![(0.0, 0.0)], RED, 1.0).is_none());
+        assert!(
+            app.add_freehand(rect, vec![(0.0, 0.0)], Palette::for_mode(false).red, 1.0)
+                .is_none()
+        );
 
         // Now give it a document: the first annotation that lands should get
         // the first id, not the fourth.
         app.load_document(PdfDocument::create_sample(PathBuf::from("/t.pdf"), 1));
-        assert_eq!(app.add_highlight(rect, YELLOW), Some(1));
+        assert_eq!(
+            app.add_highlight(rect, Palette::for_mode(false).yellow),
+            Some(1)
+        );
     }
 
     /// The three wrappers share one counter, so their ids interleave without
@@ -4613,9 +4682,9 @@ mod tests {
         app.load_document(PdfDocument::create_sample(PathBuf::from("/t.pdf"), 1));
         let rect = PageRect::new(10.0, 10.0, 20.0, 20.0);
         let ids = [
-            app.add_highlight(rect, YELLOW),
+            app.add_highlight(rect, Palette::for_mode(false).yellow),
             app.add_note(rect, "n".to_string()),
-            app.add_freehand(rect, vec![(0.0, 0.0)], RED, 1.0),
+            app.add_freehand(rect, vec![(0.0, 0.0)], Palette::for_mode(false).red, 1.0),
         ];
         assert_eq!(ids, [Some(1), Some(2), Some(3)]);
     }
@@ -4626,7 +4695,9 @@ mod tests {
         let doc = PdfDocument::create_sample(PathBuf::from("/test.pdf"), 1);
         app.load_document(doc);
         let rect = PageRect::new(10.0, 10.0, 50.0, 20.0);
-        let id = app.add_highlight(rect, YELLOW).unwrap();
+        let id = app
+            .add_highlight(rect, Palette::for_mode(false).yellow)
+            .unwrap();
         assert!(app.remove_annotation(id));
         let page = &app.active_tab().unwrap().document.as_ref().unwrap().pages[0];
         assert!(page.annotations.is_empty());
@@ -4771,7 +4842,10 @@ mod tests {
         let mut app = PdfViewerApp::new(1280.0, 720.0);
         let doc = PdfDocument::create_sample(PathBuf::from("/test.pdf"), 1);
         app.load_document(doc);
-        app.add_highlight(PageRect::new(50.0, 100.0, 200.0, 14.0), YELLOW);
+        app.add_highlight(
+            PageRect::new(50.0, 100.0, 200.0, 14.0),
+            Palette::for_mode(false).yellow,
+        );
         app.add_note(
             PageRect::new(300.0, 200.0, 20.0, 20.0),
             "Test note".to_string(),
@@ -4779,7 +4853,7 @@ mod tests {
         app.add_freehand(
             PageRect::new(0.0, 0.0, 100.0, 100.0),
             vec![(10.0, 10.0), (50.0, 50.0)],
-            RED,
+            Palette::for_mode(false).red,
             2.0,
         );
         let tree = app.frame(1280.0, 720.0).into_tree();

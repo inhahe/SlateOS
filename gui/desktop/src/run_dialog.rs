@@ -37,6 +37,7 @@
 //! ```
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::event::{EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
@@ -949,14 +950,7 @@ impl RunDialog {
         let input_x = x + PADDING + 40.0;
         let input_w = DIALOG_WIDTH - PADDING * 2.0 - 40.0;
 
-        cmds.push(RenderCommand::FillRect {
-            x: input_x,
-            y: y + INPUT_Y_OFFSET,
-            width: input_w,
-            height: INPUT_HEIGHT,
-            color: p.crust,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        p.push_surface(&mut cmds, input_x, y + INPUT_Y_OFFSET, input_w, INPUT_HEIGHT, 4.0, Surface::Panel);
 
         // Input field border.
         cmds.push(RenderCommand::StrokeRect {
@@ -1050,14 +1044,7 @@ impl RunDialog {
             let dropdown_y = y + INPUT_Y_OFFSET + INPUT_HEIGHT + 2.0;
             let dropdown_h = self.suggestions.len() as f32 * AUTOCOMPLETE_ROW_HEIGHT;
 
-            cmds.push(RenderCommand::FillRect {
-                x: dropdown_x,
-                y: dropdown_y,
-                width: input_w,
-                height: dropdown_h,
-                color: p.mantle,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            p.push_surface(&mut cmds, dropdown_x, dropdown_y, input_w, dropdown_h, 4.0, Surface::Panel);
 
             cmds.push(RenderCommand::StrokeRect {
                 x: dropdown_x,
@@ -1074,14 +1061,7 @@ impl RunDialog {
                 let is_selected = self.suggestion_index == Some(i);
 
                 if is_selected {
-                    cmds.push(RenderCommand::FillRect {
-                        x: dropdown_x + 1.0,
-                        y: row_y,
-                        width: input_w - 2.0,
-                        height: AUTOCOMPLETE_ROW_HEIGHT,
-                        color: p.surface0,
-                        corner_radii: CornerRadii::ZERO,
-                    });
+                    p.push_surface(&mut cmds, dropdown_x + 1.0, row_y, input_w - 2.0, AUTOCOMPLETE_ROW_HEIGHT, 0.0, Surface::Selected);
                 }
 
                 cmds.push(RenderCommand::Text {

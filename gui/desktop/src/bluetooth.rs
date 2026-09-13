@@ -10,7 +10,7 @@
 //! - Auto-connect for known devices
 //! - System tray indicator
 
-use appearance::{Palette, readable_on};
+use appearance::{Edge, Palette, readable_on, Surface};
 use guitk::color::Color;
 use guitk::ratio;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -622,14 +622,7 @@ impl BluetoothSettingsUI {
         });
 
         // Title bar.
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: w,
-            height: 40.0,
-            color: p.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        p.push_surface(&mut cmds, x, y, w, 40.0, 0.0, Surface::Strip(Edge::Bottom));
         cmds.push(RenderCommand::Text {
             x: x + 16.0,
             y: y + 12.0,
@@ -814,14 +807,7 @@ impl BluetoothSettingsUI {
         w: f32,
     ) {
         // Row background.
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: w,
-            height: 44.0,
-            color: p.surface0,
-            corner_radii: CornerRadii::all(6.0),
-        });
+        p.push_surface(cmds, x, y, w, 44.0, 6.0, Surface::Card);
 
         // Icon circle.
         cmds.push(RenderCommand::FillRect {

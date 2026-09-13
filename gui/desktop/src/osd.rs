@@ -6,6 +6,7 @@
 //! after a configurable timeout.
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -1126,14 +1127,7 @@ impl OsdSettingsUI {
         cy += 22.0;
         let timeout_frac = (self.config.timeout_ms as f32 - 500.0) / 4500.0;
         let track_w = width - padding * 2.0 - 20.0;
-        commands.push(RenderCommand::FillRect {
-            x: x + padding,
-            y: cy,
-            width: track_w,
-            height: 4.0,
-            color: p.surface0,
-            corner_radii: CornerRadii::all(2.0),
-        });
+        p.push_surface(&mut commands, x + padding, cy, track_w, 4.0, 2.0, Surface::ControlTrack);
         commands.push(RenderCommand::FillRect {
             x: x + padding,
             y: cy,
@@ -2469,15 +2463,20 @@ mod tests {
 
     /// Colours of every `FillRect` of exactly `w` x `h`, in draw order.
     fn fills(cmds: &[RenderCommand], w: f32, h: f32) -> Vec<Color> {
+        // Both kinds, on the logical rectangle. Since §829 a box may be an
+        // outline rather than a fill, and an outline reports a rectangle a
+        // pixel smaller than the one asked for.
         cmds.iter()
-            .filter_map(|c| match c {
-                RenderCommand::FillRect {
-                    width,
-                    height,
-                    color,
-                    ..
-                } if (*width - w).abs() < 0.01 && (*height - h).abs() < 0.01 => Some(*color),
-                _ => None,
+            .filter_map(|c| {
+                let (_, _, cw, ch) = appearance::logical_rect(c)?;
+                if (cw - w).abs() > 0.01 || (ch - h).abs() > 0.01 {
+                    return None;
+                }
+                match *c {
+                    RenderCommand::FillRect { color, .. }
+                    | RenderCommand::StrokeRect { color, .. } => Some(color),
+                    _ => None,
+                }
             })
             .collect()
     }

@@ -9,6 +9,7 @@
 //! via a capability-gated registration API.
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -1271,14 +1272,7 @@ impl DesktopWidgetManager {
             color: p.shadow(),
             corner_radii: CornerRadii::all(12.0),
         });
-        commands.push(RenderCommand::FillRect {
-            x: px,
-            y: py,
-            width: picker_w,
-            height: picker_h,
-            color: p.mantle,
-            corner_radii: CornerRadii::all(12.0),
-        });
+        p.push_surface(commands, px, py, picker_w, picker_h, 12.0, Surface::Card);
         commands.push(RenderCommand::StrokeRect {
             x: px,
             y: py,

@@ -5,6 +5,7 @@
 //! reclamation policies.
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::ratio;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -657,14 +658,7 @@ impl StorageSettingsUI {
 
             // Usage bar
             let bar_y = y + 30.0;
-            cmds.push(RenderCommand::FillRect {
-                x: x + 12.0,
-                y: bar_y,
-                width: width - 24.0,
-                height: 12.0,
-                color: p.surface1,
-                corner_radii: CornerRadii::all(6.0),
-            });
+            p.push_surface(cmds, x + 12.0, bar_y, width - 24.0, 12.0, 6.0, Surface::Card);
 
             // Stacked category bars
             let bar_w = width - 24.0;
@@ -875,14 +869,7 @@ impl StorageSettingsUI {
         ];
 
         for (label, path) in entries {
-            cmds.push(RenderCommand::FillRect {
-                x,
-                y,
-                width,
-                height: 36.0,
-                color: p.mantle,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            p.push_surface(cmds, x, y, width, 36.0, 4.0, Surface::Card);
             cmds.push(RenderCommand::Text {
                 x: x + 12.0,
                 y: y + 4.0,
@@ -904,14 +891,7 @@ impl StorageSettingsUI {
                 overflow: TextOverflow::Ellipsis,
             });
             // Change button placeholder
-            cmds.push(RenderCommand::FillRect {
-                x: x + width - 70.0,
-                y: y + 6.0,
-                width: 56.0,
-                height: 22.0,
-                color: p.surface0,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            p.push_surface(cmds, x + width - 70.0, y + 6.0, 56.0, 22.0, 4.0, Surface::Card);
             cmds.push(RenderCommand::Text {
                 x: x + width - 62.0,
                 y: y + 10.0,

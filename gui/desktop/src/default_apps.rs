@@ -44,7 +44,7 @@
 //!    any test run at the stock accent. Only an off-palette accent exposes
 //!    it, which is why the fixture uses one.
 
-use appearance::{Palette, readable_on};
+use appearance::{Palette, readable_on, Surface};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
@@ -741,14 +741,7 @@ impl DefaultAppsUI {
             let is_active = *tab == self.active_tab;
 
             if is_active {
-                cmds.push(RenderCommand::FillRect {
-                    x: tab_x,
-                    y: tab_y,
-                    width: tw,
-                    height: 32.0,
-                    color: p.surface0,
-                    corner_radii: CornerRadii::all(6.0),
-                });
+                p.push_surface(&mut cmds, tab_x, tab_y, tw, 32.0, 6.0, Surface::Selected);
             }
 
             cmds.push(RenderCommand::Text {
@@ -828,14 +821,7 @@ impl DefaultAppsUI {
         row_y += 24.0;
 
         // Reset all button
-        cmds.push(RenderCommand::FillRect {
-            x: x + width - 100.0,
-            y: row_y - 20.0,
-            width: 100.0,
-            height: 24.0,
-            color: p.surface1,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        p.push_surface(cmds, x + width - 100.0, row_y - 20.0, 100.0, 24.0, 4.0, Surface::Card);
         cmds.push(RenderCommand::Text {
             x: x + width - 88.0,
             y: row_y - 16.0,
@@ -854,14 +840,7 @@ impl DefaultAppsUI {
             let default_app = self.settings.default_for_category(*category);
             let card_h = if is_expanded { 100.0 } else { 56.0 };
 
-            cmds.push(RenderCommand::FillRect {
-                x,
-                y: row_y,
-                width,
-                height: card_h,
-                color: p.surface0,
-                corner_radii: CornerRadii::all(6.0),
-            });
+            p.push_surface(cmds, x, row_y, width, card_h, 6.0, Surface::Card);
 
             // Icon
             cmds.push(RenderCommand::Text {
@@ -985,14 +964,7 @@ impl DefaultAppsUI {
         let mut row_y = y;
 
         // Search bar
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y: row_y,
-            width,
-            height: 32.0,
-            color: p.surface0,
-            corner_radii: CornerRadii::all(6.0),
-        });
+        p.push_surface(cmds, x, row_y, width, 32.0, 6.0, Surface::Card);
 
         let search_text = if self.search_query.is_empty() {
             "Search file types...".to_string()
@@ -1073,24 +1045,10 @@ impl DefaultAppsUI {
                     .iter()
                     .any(|a| a.extension == **ext);
 
-                cmds.push(RenderCommand::FillRect {
-                    x,
-                    y: row_y,
-                    width,
-                    height: 32.0,
-                    color: p.surface0,
-                    corner_radii: CornerRadii::all(4.0),
-                });
+                p.push_surface(cmds, x, row_y, width, 32.0, 4.0, Surface::Card);
 
                 // Extension
-                cmds.push(RenderCommand::FillRect {
-                    x: x + 8.0,
-                    y: row_y + 6.0,
-                    width: 48.0,
-                    height: 20.0,
-                    color: p.surface1,
-                    corner_radii: CornerRadii::all(3.0),
-                });
+                p.push_surface(cmds, x + 8.0, row_y + 6.0, 48.0, 20.0, 3.0, Surface::Card);
                 cmds.push(RenderCommand::Text {
                     x: x + 14.0,
                     y: row_y + 9.0,
@@ -1162,14 +1120,7 @@ impl DefaultAppsUI {
         row_y += 24.0;
 
         // Search bar
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y: row_y,
-            width,
-            height: 32.0,
-            color: p.surface0,
-            corner_radii: CornerRadii::all(6.0),
-        });
+        p.push_surface(cmds, x, row_y, width, 32.0, 6.0, Surface::Card);
 
         let search_text = if self.search_query.is_empty() {
             "Search apps...".to_string()
@@ -1207,14 +1158,7 @@ impl DefaultAppsUI {
             .collect();
 
         for app in &apps {
-            cmds.push(RenderCommand::FillRect {
-                x,
-                y: row_y,
-                width,
-                height: 56.0,
-                color: p.surface0,
-                corner_radii: CornerRadii::all(6.0),
-            });
+            p.push_surface(cmds, x, row_y, width, 56.0, 6.0, Surface::Card);
 
             // App name
             cmds.push(RenderCommand::Text {
@@ -1242,14 +1186,7 @@ impl DefaultAppsUI {
 
             // System badge
             if app.is_system {
-                cmds.push(RenderCommand::FillRect {
-                    x: x + width - 68.0,
-                    y: row_y + 8.0,
-                    width: 52.0,
-                    height: 18.0,
-                    color: p.surface1,
-                    corner_radii: CornerRadii::all(3.0),
-                });
+                p.push_surface(cmds, x + width - 68.0, row_y + 8.0, 52.0, 18.0, 3.0, Surface::Card);
                 cmds.push(RenderCommand::Text {
                     x: x + width - 62.0,
                     y: row_y + 10.0,
@@ -1705,15 +1642,24 @@ mod tests {
 
     /// The colours of every `FillRect` of exactly `w` x `h`.
     fn fills_sized(cmds: &[RenderCommand], w: f32, h: f32) -> Vec<Color> {
+        // Both kinds, on the *logical* rectangle. Since §829 a box of a given
+        // size may be an outline rather than a fill, and an outline's command
+        // reports a rectangle a pixel smaller than the one asked for -- so an
+        // exact `width == w` on the raw command would miss every converted
+        // site. This collects what was painted at that size either way, and
+        // the assertions compare against what `surface_paint` says for the
+        // kind the draw site named.
         cmds.iter()
-            .filter_map(|c| match c {
-                RenderCommand::FillRect {
-                    width,
-                    height,
-                    color,
-                    ..
-                } if *width == w && *height == h => Some(*color),
-                _ => None,
+            .filter_map(|c| {
+                let (_, _, cw, ch) = appearance::logical_rect(c)?;
+                if (cw - w).abs() > 0.01 || (ch - h).abs() > 0.01 {
+                    return None;
+                }
+                match *c {
+                    RenderCommand::FillRect { color, .. }
+                    | RenderCommand::StrokeRect { color, .. } => Some(color),
+                    _ => None,
+                }
             })
             .collect()
     }
@@ -1770,9 +1716,17 @@ mod tests {
     /// be selected by width.
     fn fills_high(cmds: &[RenderCommand], h: f32) -> Vec<Color> {
         cmds.iter()
-            .filter_map(|c| match c {
-                RenderCommand::FillRect { height, color, .. } if *height == h => Some(*color),
-                _ => None,
+            // Both kinds, on the logical rectangle -- see `fills_sized`.
+            .filter_map(|c| {
+                let (_, _, _, ch) = appearance::logical_rect(c)?;
+                if (ch - h).abs() > 0.01 {
+                    return None;
+                }
+                match *c {
+                    RenderCommand::FillRect { color, .. }
+                    | RenderCommand::StrokeRect { color, .. } => Some(color),
+                    _ => None,
+                }
             })
             .collect()
     }
@@ -1871,6 +1825,22 @@ mod tests {
     fn every_site_draws_the_role_it_claims() {
         for light in [false, true] {
             let p = accented(light);
+            // Tab strip: one fill behind the active tab, and three labels of
+            // which exactly the active one is accented.
+            // The active tab is `Surface::Selected`, which §834 makes an accent
+            // outline -- it was a `surface0` fill. Asked of the palette rather
+            // than named, so this stays true under the optional card theme too,
+            // where the same site is a `surface1` fill.
+            let painted = |what| {
+                let paint = p.surface_paint(what);
+                paint.fill.or(paint.border).expect("a surface is drawn somehow")
+            };
+            let marked = painted(appearance::Surface::Selected);
+            // Every ordinary box is a `Surface::Card` now, so they share one
+            // colour. They did not before -- the reset button was `surface1`
+            // and the category cards `surface0` -- and that difference was
+            // never decided, which is the normalisation §833 records.
+            let carded = painted(appearance::Surface::Card);
             let by_tab = every_tab(&p);
             let cats = &by_tab[0].1;
 
@@ -1878,14 +1848,14 @@ mod tests {
             assert_eq!(text_color(cats, "Default Applications"), p.text, "title");
 
             // The well is the recess inside the panel: 584 x 684 at this size.
+            // Still a raw `crust` fill: this one is not drawn through
+            // `push_surface`, so the conversion left it untouched.
             assert_eq!(fills_sized(cats, 584.0, 684.0), vec![p.crust], "well");
 
-            // Tab strip: one fill behind the active tab, and three labels of
-            // which exactly the active one is accented.
             assert_eq!(
                 fills_high(cats, 32.0),
-                vec![p.surface0],
-                "only the active tab is filled"
+                vec![marked],
+                "only the active tab is marked"
             );
             assert_eq!(text_color(cats, "Default apps"), p.accent, "active tab");
             assert_eq!(text_color(cats, "File types"), p.subtext0, "idle tab");
@@ -1895,11 +1865,7 @@ mod tests {
                 "the other idle tab"
             );
 
-            assert_eq!(
-                fills_sized(cats, 100.0, 24.0),
-                vec![p.surface1],
-                "reset button"
-            );
+            assert_eq!(fills_sized(cats, 100.0, 24.0), vec![carded], "reset button");
             assert_eq!(text_color(cats, "Reset all"), p.peach, "reset label");
             assert_eq!(
                 text_color(cats, "Choose default apps for each type of content"),
@@ -1915,7 +1881,7 @@ mod tests {
             assert_eq!(short.len(), 11, "eleven collapsed category cards");
             assert_eq!(tall.len(), 1, "one expanded category card");
             assert!(
-                short.iter().chain(tall.iter()).all(|c| *c == p.surface0),
+                short.iter().chain(tall.iter()).all(|c| *c == carded),
                 "every category card sits on the same rung, expanded or not"
             );
 
@@ -1949,9 +1915,7 @@ mod tests {
             // lines under each app's name.
             let apps = &by_tab[2].1;
             assert!(
-                fills_sized(apps, 552.0, 56.0)
-                    .iter()
-                    .all(|c| *c == p.surface0),
+                fills_sized(apps, 552.0, 56.0).iter().all(|c| *c == carded),
                 "app rows"
             );
             assert_eq!(
@@ -1975,7 +1939,7 @@ mod tests {
             );
             assert_eq!(
                 fills_sized(apps, 552.0, 32.0),
-                vec![p.surface0],
+                vec![carded],
                 "the Installed apps search box"
             );
             assert_eq!(
@@ -1989,10 +1953,8 @@ mod tests {
                 "ten of the eleven apps are system apps and get a badge"
             );
             assert!(
-                fills_sized(apps, 52.0, 18.0)
-                    .iter()
-                    .all(|c| *c == p.surface1),
-                "the System badge is a raised pill"
+                fills_sized(apps, 52.0, 18.0).iter().all(|c| *c == carded),
+                "the System badge is drawn as a card"
             );
             assert!(
                 text_colors(apps, "System").iter().all(|c| *c == p.overlay0),
@@ -2002,9 +1964,7 @@ mod tests {
             // The File types tab: the extension pill and its lavender token.
             let types = &by_tab[1].1;
             assert!(
-                fills_sized(types, 48.0, 20.0)
-                    .iter()
-                    .all(|c| *c == p.surface1),
+                fills_sized(types, 48.0, 20.0).iter().all(|c| *c == carded),
                 "extension pills"
             );
             assert_eq!(text_color(types, ".flac"), p.lavender, "extension token");
@@ -2018,9 +1978,9 @@ mod tests {
                 types_rows.len() >= 2,
                 "a search box and at least one extension row"
             );
-            assert_eq!(types_rows[0], p.surface0, "the File types search box");
+            assert_eq!(types_rows[0], carded, "the File types search box");
             assert!(
-                types_rows[1..].iter().all(|c| *c == p.surface0),
+                types_rows[1..].iter().all(|c| *c == carded),
                 "every extension row sits on the same rung as the box above it"
             );
             // An extension whose handler is the shipped default takes ordinary
@@ -2077,13 +2037,19 @@ mod tests {
                 chips[0], p.accent,
                 "the current app's chip is the filled one"
             );
+            // Still a literal `surface1` fill: a chip is not a container, so
+            // the conversion left it alone and its colour is unchanged.
             assert_eq!(
                 chips[1], p.surface1,
                 "a rival app's chip is merely raised, not accented"
             );
             let on_cats = all_colors(cats).iter().filter(|c| **c == p.accent).count();
+            // Thirteen since §834, not twelve: the active tab now carries an
+            // accent OUTLINE as well as an accent label, so the tab contributes
+            // two accent-coloured commands instead of one. That is the decision
+            // working rather than a leak -- every other accent here is unchanged.
             assert_eq!(
-                on_cats, 12,
+                on_cats, 13,
                 "the Categories tab should accent its own tab, the app named \
                  under each of the *ten* cards that have one, and the current \
                  chip — found {on_cats}"
@@ -2094,8 +2060,11 @@ mod tests {
                 let cmds = &by_tab[i].1;
                 assert_eq!(text_color(cmds, name), p.accent, "the open tab");
                 let n = all_colors(cmds).iter().filter(|c| **c == p.accent).count();
+                // Two since §834: the open tab's label and the accent outline
+                // around it. Nothing else on these tabs is accented, which is
+                // the property this was written to check and still checks.
                 assert_eq!(
-                    n, 1,
+                    n, 2,
                     "the {name} tab has nothing in force to mark, so its own \
                      tab should be the only accented thing — found {n}"
                 );

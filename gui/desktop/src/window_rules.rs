@@ -35,7 +35,7 @@
 //! wanted to. See `known-issues.md`
 //! `TD-C-TWELVE-OF-SEVENTEEN-WINDOW-RULE-ACTIONS-HAVE-NOWHERE-TO-GO`.
 
-use appearance::{Palette, readable_on};
+use appearance::{Edge, Palette, readable_on, Surface};
 use guitk::color::Color;
 use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -926,14 +926,7 @@ impl RulesSettingsUI {
         });
 
         // Title bar.
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: w,
-            height: 40.0,
-            color: p.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        p.push_surface(&mut cmds, x, y, w, 40.0, 0.0, Surface::Strip(Edge::Bottom));
         cmds.push(RenderCommand::Text {
             x: x + 16.0,
             y: y + 12.0,
@@ -1056,14 +1049,7 @@ impl RulesSettingsUI {
 
             // Row background.
             if selected {
-                cmds.push(RenderCommand::FillRect {
-                    x: x + 4.0,
-                    y: ry,
-                    width: w - 8.0,
-                    height: row_h - 4.0,
-                    color: p.surface0,
-                    corner_radii: CornerRadii::all(4.0),
-                });
+                p.push_surface(cmds, x + 4.0, ry, w - 8.0, row_h - 4.0, 4.0, Surface::Selected);
             }
 
             let mut cx = x + 8.0;
@@ -1286,14 +1272,7 @@ impl RulesSettingsUI {
             max_width: None,
             overflow: TextOverflow::Clip,
         });
-        cmds.push(RenderCommand::FillRect {
-            x: input_x,
-            y: cy,
-            width: input_w,
-            height: 24.0,
-            color: p.surface0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        p.push_surface(cmds, input_x, cy, input_w, 24.0, 4.0, Surface::Card);
         cmds.push(RenderCommand::Text {
             x: input_x + 8.0,
             y: cy + 5.0,
@@ -1370,14 +1349,7 @@ impl RulesSettingsUI {
                 max_width: None,
                 overflow: TextOverflow::Clip,
             });
-            cmds.push(RenderCommand::FillRect {
-                x: input_x,
-                y: cy,
-                width: input_w,
-                height: 24.0,
-                color: p.surface0,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            p.push_surface(cmds, input_x, cy, input_w, 24.0, 4.0, Surface::Card);
             cmds.push(RenderCommand::Text {
                 x: input_x + 8.0,
                 y: cy + 5.0,
@@ -1410,14 +1382,7 @@ impl RulesSettingsUI {
             max_width: None,
             overflow: TextOverflow::Clip,
         });
-        cmds.push(RenderCommand::FillRect {
-            x: input_x,
-            y: cy,
-            width: 80.0,
-            height: 24.0,
-            color: p.surface0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        p.push_surface(cmds, input_x, cy, 80.0, 24.0, 4.0, Surface::Card);
         cmds.push(RenderCommand::Text {
             x: input_x + 8.0,
             y: cy + 5.0,
@@ -1449,14 +1414,7 @@ impl RulesSettingsUI {
             max_width: None,
             overflow: TextOverflow::Clip,
         });
-        cmds.push(RenderCommand::FillRect {
-            x: input_x + 92.0,
-            y: cy,
-            width: 80.0,
-            height: 28.0,
-            color: p.surface2,
-            corner_radii: CornerRadii::all(6.0),
-        });
+        p.push_surface(cmds, input_x + 92.0, cy, 80.0, 28.0, 6.0, Surface::Card);
         cmds.push(RenderCommand::Text {
             x: input_x + 108.0,
             y: cy + 7.0,

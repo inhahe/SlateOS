@@ -38,7 +38,7 @@
 //!    placeholder is `p.overlay0` and text the user actually typed is
 //!    `p.text`, so "Search languages…" cannot be mistaken for a query.
 
-use appearance::{Palette, readable_on};
+use appearance::{Palette, readable_on, Surface};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
@@ -607,14 +607,7 @@ impl LanguageSettingsUI {
 
         // Current language
         if let Some(lang) = self.settings.current_language() {
-            cmds.push(RenderCommand::FillRect {
-                x,
-                y: cy,
-                width,
-                height: 50.0,
-                color: p.surface1,
-                corner_radii: CornerRadii::all(8.0),
-            });
+            p.push_surface(cmds, x, cy, width, 50.0, 8.0, Surface::Card);
             cmds.push(RenderCommand::Text {
                 x: x + 12.0,
                 y: cy + 6.0,
@@ -639,14 +632,7 @@ impl LanguageSettingsUI {
         }
 
         // Search box
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y: cy,
-            width,
-            height: 30.0,
-            color: p.surface0,
-            corner_radii: CornerRadii::all(6.0),
-        });
+        p.push_surface(cmds, x, cy, width, 30.0, 6.0, Surface::Card);
         let search_text = if self.language_search.is_empty() {
             "Search languages...".to_string()
         } else {
@@ -1425,15 +1411,24 @@ mod tests {
 
     /// Every `FillRect` of exactly `w` x `h`, in draw order.
     fn fills_sized(cmds: &[RenderCommand], w: f32, h: f32) -> Vec<Color> {
+        // Both kinds, on the *logical* rectangle. Since §829 a box of a given
+        // size may be an outline rather than a fill, and an outline's command
+        // reports a rectangle a pixel smaller than the one asked for -- so an
+        // exact `width == w` on the raw command would miss every converted
+        // site. This collects what was painted at that size either way, and
+        // the assertions compare against what `surface_paint` says for the
+        // kind the draw site named.
         cmds.iter()
-            .filter_map(|c| match c {
-                RenderCommand::FillRect {
-                    width,
-                    height,
-                    color,
-                    ..
-                } if *width == w && *height == h => Some(*color),
-                _ => None,
+            .filter_map(|c| {
+                let (_, _, cw, ch) = appearance::logical_rect(c)?;
+                if (cw - w).abs() > 0.01 || (ch - h).abs() > 0.01 {
+                    return None;
+                }
+                match *c {
+                    RenderCommand::FillRect { color, .. }
+                    | RenderCommand::StrokeRect { color, .. } => Some(color),
+                    _ => None,
+                }
             })
             .collect()
     }

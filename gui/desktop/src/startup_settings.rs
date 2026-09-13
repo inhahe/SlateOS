@@ -3,7 +3,7 @@
 //! Manages applications that run automatically at login, including
 //! startup delay, impact assessment, and per-app enable/disable control.
 
-use appearance::{Palette, readable_on};
+use appearance::{Palette, readable_on, Surface};
 use guitk::color::Color;
 use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -666,14 +666,7 @@ impl StartupSettingsUI {
         let mut cy = y;
 
         // Filter bar
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y: cy,
-            width,
-            height: 30.0,
-            color: p.surface0,
-            corner_radii: CornerRadii::all(6.0),
-        });
+        p.push_surface(cmds, x, cy, width, 30.0, 6.0, Surface::Card);
         let filter_text = if self.filter.is_empty() {
             "Filter startup apps...".to_string()
         } else {
@@ -885,14 +878,7 @@ impl StartupSettingsUI {
 
         // Last boot time
         if let Some(ms) = cfg.last_boot_time_ms {
-            cmds.push(RenderCommand::FillRect {
-                x,
-                y: cy,
-                width,
-                height: 48.0,
-                color: p.surface0,
-                corner_radii: CornerRadii::all(8.0),
-            });
+            p.push_surface(cmds, x, cy, width, 48.0, 8.0, Surface::Card);
             cmds.push(RenderCommand::Text {
                 x: x + 12.0,
                 y: cy + 6.0,

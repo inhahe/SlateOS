@@ -5,6 +5,7 @@
 //! flyout listing available WiFi networks.
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::step;
@@ -483,14 +484,7 @@ impl NetworkIndicator {
         };
 
         // Icon background circle
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: 24.0,
-            height: 24.0,
-            color: p.surface0,
-            corner_radii: CornerRadii::all(12.0),
-        });
+        p.push_surface(&mut cmds, x, y, 24.0, 24.0, 12.0, Surface::Card);
 
         // Icon text (emoji or signal bars)
         let label = if self.state.airplane_mode {
@@ -577,14 +571,7 @@ impl NetworkIndicator {
         } else {
             p.overlay0
         };
-        cmds.push(RenderCommand::FillRect {
-            x: x + pad,
-            y: cy,
-            width: inner * 0.48,
-            height: 28.0,
-            color: p.surface0,
-            corner_radii: CornerRadii::all(6.0),
-        });
+        p.push_surface(&mut cmds, x + pad, cy, inner * 0.48, 28.0, 6.0, Surface::Card);
         cmds.push(RenderCommand::Text {
             x: x + pad + 8.0,
             y: cy + 6.0,
@@ -607,14 +594,7 @@ impl NetworkIndicator {
         } else {
             p.overlay0
         };
-        cmds.push(RenderCommand::FillRect {
-            x: x + pad + inner * 0.52,
-            y: cy,
-            width: inner * 0.48,
-            height: 28.0,
-            color: p.surface0,
-            corner_radii: CornerRadii::all(6.0),
-        });
+        p.push_surface(&mut cmds, x + pad + inner * 0.52, cy, inner * 0.48, 28.0, 6.0, Surface::Card);
         cmds.push(RenderCommand::Text {
             x: x + pad + inner * 0.52 + 8.0,
             y: cy + 6.0,

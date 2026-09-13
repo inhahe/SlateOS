@@ -7,6 +7,7 @@
 //! on-screen keyboard toggle.
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -1048,14 +1049,7 @@ impl LoginScreen {
             LoginBackground::Theme
             | LoginBackground::SameAsDesktop(_)
             | LoginBackground::CustomImage(_) => {
-                commands.push(RenderCommand::FillRect {
-                    x: 0.0,
-                    y: 0.0,
-                    width: self.screen_width,
-                    height: self.screen_height,
-                    color: p.crust,
-                    corner_radii: CornerRadii::ZERO,
-                });
+                p.push_surface(commands, 0.0, 0.0, self.screen_width, self.screen_height, 0.0, Surface::Card);
             }
         }
     }
@@ -1209,14 +1203,7 @@ impl LoginScreen {
             } else {
                 p.surface1
             };
-            commands.push(RenderCommand::FillRect {
-                x: field_x,
-                y: field_y,
-                width: field_w,
-                height: field_h,
-                color: p.surface0,
-                corner_radii: CornerRadii::all(8.0),
-            });
+            p.push_surface(commands, field_x, field_y, field_w, field_h, 8.0, Surface::Card);
             commands.push(RenderCommand::StrokeRect {
                 x: field_x,
                 y: field_y,
@@ -1468,14 +1455,7 @@ impl LoginScreen {
         let mx = self.screen_width - menu_w - 16.0;
         let my = self.screen_height - 40.0 - menu_h - 8.0;
 
-        commands.push(RenderCommand::FillRect {
-            x: mx,
-            y: my,
-            width: menu_w,
-            height: menu_h,
-            color: p.mantle,
-            corner_radii: CornerRadii::all(8.0),
-        });
+        p.push_surface(commands, mx, my, menu_w, menu_h, 8.0, Surface::Panel);
         commands.push(RenderCommand::StrokeRect {
             x: mx,
             y: my,

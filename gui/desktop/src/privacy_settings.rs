@@ -5,6 +5,7 @@
 //! telemetry opt-out, and app background access controls.
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
@@ -612,14 +613,7 @@ impl PrivacySettingsUI {
                 });
             } else {
                 for app in &apps {
-                    cmds.push(RenderCommand::FillRect {
-                        x,
-                        y,
-                        width,
-                        height: 32.0,
-                        color: p.mantle,
-                        corner_radii: CornerRadii::all(4.0),
-                    });
+                    p.push_surface(cmds, x, y, width, 32.0, 4.0, Surface::Card);
                     cmds.push(RenderCommand::Text {
                         x: x + 8.0,
                         y: y + 8.0,
@@ -658,14 +652,7 @@ impl PrivacySettingsUI {
             for (i, kind) in PermissionKind::ALL.iter().enumerate() {
                 let enabled = self.settings.is_globally_enabled(*kind);
                 let count = self.settings.allowed_count(*kind);
-                cmds.push(RenderCommand::FillRect {
-                    x,
-                    y,
-                    width,
-                    height: 40.0,
-                    color: p.mantle,
-                    corner_radii: CornerRadii::all(6.0),
-                });
+                p.push_surface(cmds, x, y, width, 40.0, 6.0, Surface::Card);
                 cmds.push(RenderCommand::Text {
                     x: x + 8.0,
                     y: y + 4.0,
@@ -749,14 +736,7 @@ impl PrivacySettingsUI {
         // Show last 20 entries (newest first).
         let show = log.iter().rev().take(20);
         for entry in show {
-            cmds.push(RenderCommand::FillRect {
-                x,
-                y,
-                width,
-                height: 28.0,
-                color: p.mantle,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            p.push_surface(cmds, x, y, width, 28.0, 4.0, Surface::Card);
             let icon = entry.permission.icon();
             let status = if entry.allowed { "✓" } else { "✕" };
             let color = if entry.allowed { p.green } else { p.red };
@@ -1408,15 +1388,20 @@ mod tests {
     }
 
     fn fills(cmds: &[RenderCommand], w: f32, h: f32) -> Vec<Color> {
+        // Both kinds, on the logical rectangle. Since §829 a box may be an
+        // outline rather than a fill, and an outline reports a rectangle a
+        // pixel smaller than the one asked for.
         cmds.iter()
-            .filter_map(|c| match c {
-                RenderCommand::FillRect {
-                    width,
-                    height,
-                    color,
-                    ..
-                } if (*width - w).abs() < 0.01 && (*height - h).abs() < 0.01 => Some(*color),
-                _ => None,
+            .filter_map(|c| {
+                let (_, _, cw, ch) = appearance::logical_rect(c)?;
+                if (cw - w).abs() > 0.01 || (ch - h).abs() > 0.01 {
+                    return None;
+                }
+                match *c {
+                    RenderCommand::FillRect { color, .. }
+                    | RenderCommand::StrokeRect { color, .. } => Some(color),
+                    _ => None,
+                }
             })
             .collect()
     }

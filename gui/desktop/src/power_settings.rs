@@ -5,6 +5,7 @@
 //! health overview with charge history and estimated remaining time.
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::ratio;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -559,14 +560,7 @@ impl PowerSettingsUI {
         width: f32,
     ) -> f32 {
         // Background bar
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width,
-            height: 40.0,
-            color: p.mantle,
-            corner_radii: CornerRadii::all(6.0),
-        });
+        p.push_surface(cmds, x, y, width, 40.0, 6.0, Surface::Card);
 
         // Charge bar
         let charge_color = match self.battery.charge_pct {
@@ -719,14 +713,7 @@ impl PowerSettingsUI {
         y += 24.0;
 
         for (label, batt, ac) in rows {
-            cmds.push(RenderCommand::FillRect {
-                x,
-                y,
-                width,
-                height: 28.0,
-                color: p.mantle,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            p.push_surface(cmds, x, y, width, 28.0, 4.0, Surface::Card);
             cmds.push(RenderCommand::Text {
                 x: x + 12.0,
                 y: y + 6.0,

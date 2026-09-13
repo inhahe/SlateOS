@@ -12,7 +12,7 @@
 //! - Disable while typing
 //! - Custom gesture → action bindings
 
-use appearance::{Palette, readable_on};
+use appearance::{Edge, Palette, readable_on, Surface};
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::scroll_window;
@@ -728,14 +728,7 @@ impl TouchpadSettingsUI {
         });
 
         // Title bar.
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: w,
-            height: 40.0,
-            color: p.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        p.push_surface(&mut cmds, x, y, w, 40.0, 0.0, Surface::Strip(Edge::Bottom));
         cmds.push(RenderCommand::Text {
             x: x + 16.0,
             y: y + 12.0,
@@ -1057,14 +1050,7 @@ impl TouchpadSettingsUI {
             let i = rows.start.saturating_add(row);
             let selected = i == self.selected_gesture_idx;
             if selected {
-                cmds.push(RenderCommand::FillRect {
-                    x: x - 4.0,
-                    y: cy - 2.0,
-                    width: 420.0,
-                    height: 22.0,
-                    color: p.surface0,
-                    corner_radii: CornerRadii::all(4.0),
-                });
+                p.push_surface(cmds, x - 4.0, cy - 2.0, 420.0, 22.0, 4.0, Surface::Selected);
             }
 
             cmds.push(RenderCommand::Text {
@@ -1333,14 +1319,7 @@ impl TouchpadSettingsUI {
             max_width: None,
             overflow: TextOverflow::Clip,
         });
-        cmds.push(RenderCommand::FillRect {
-            x: x + 250.0,
-            y,
-            width: 200.0,
-            height: 22.0,
-            color: p.surface0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        p.push_surface(cmds, x + 250.0, y, 200.0, 22.0, 4.0, Surface::Card);
         cmds.push(RenderCommand::Text {
             x: x + 258.0,
             y: y + 4.0,

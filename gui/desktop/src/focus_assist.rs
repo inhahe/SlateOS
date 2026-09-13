@@ -59,7 +59,7 @@
 //! *picker*: the accent is how "chosen" is spelled everywhere else in the
 //! shell, and a page that spelled it differently would be the odd one out.
 
-use appearance::{Palette, readable_on};
+use appearance::{Palette, readable_on, Surface};
 use guitk::color::Color;
 use guitk::daywindow::DailyWindow;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -628,14 +628,7 @@ impl FocusAssistManager {
             });
         } else {
             for rule in &self.auto_rules {
-                commands.push(RenderCommand::FillRect {
-                    x: x + padding,
-                    y: cy,
-                    width: width - padding * 2.0,
-                    height: 28.0,
-                    color: p.surface0,
-                    corner_radii: CornerRadii::all(6.0),
-                });
+                p.push_surface(&mut commands, x + padding, cy, width - padding * 2.0, 28.0, 6.0, Surface::Card);
                 commands.push(RenderCommand::Text {
                     x: x + padding + 8.0,
                     y: cy + 6.0,

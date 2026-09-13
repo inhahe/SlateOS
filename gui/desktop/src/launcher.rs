@@ -64,6 +64,7 @@
 //!    rather than a colour.
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::event::{Key, KeyEvent};
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -725,14 +726,7 @@ impl LauncherState {
             let is_selected = i == self.selected_index;
 
             if is_selected {
-                cmds.push(RenderCommand::FillRect {
-                    x: 0.0,
-                    y: row_y,
-                    width: input_width,
-                    height: ROW_HEIGHT,
-                    color: p.surface1,
-                    corner_radii: CornerRadii::all(6.0),
-                });
+                p.push_surface(&mut cmds, 0.0, row_y, input_width, ROW_HEIGHT, 6.0, Surface::Selected);
                 cmds.push(RenderCommand::FillRect {
                     x: 0.0,
                     y: row_y + 8.0,
@@ -1167,15 +1161,24 @@ mod tests {
 
     /// The colours of every `FillRect` of exactly `w` x `h`.
     fn fills_sized(cmds: &[RenderCommand], w: f32, h: f32) -> Vec<Color> {
+        // Both kinds, on the *logical* rectangle. Since §829 a box of a given
+        // size may be an outline rather than a fill, and an outline's command
+        // reports a rectangle a pixel smaller than the one asked for -- so an
+        // exact `width == w` on the raw command would miss every converted
+        // site. This collects what was painted at that size either way, and
+        // the assertions compare against what `surface_paint` says for the
+        // kind the draw site named.
         cmds.iter()
-            .filter_map(|c| match c {
-                RenderCommand::FillRect {
-                    width,
-                    height,
-                    color,
-                    ..
-                } if *width == w && *height == h => Some(*color),
-                _ => None,
+            .filter_map(|c| {
+                let (_, _, cw, ch) = appearance::logical_rect(c)?;
+                if (cw - w).abs() > 0.01 || (ch - h).abs() > 0.01 {
+                    return None;
+                }
+                match *c {
+                    RenderCommand::FillRect { color, .. }
+                    | RenderCommand::StrokeRect { color, .. } => Some(color),
+                    _ => None,
+                }
             })
             .collect()
     }

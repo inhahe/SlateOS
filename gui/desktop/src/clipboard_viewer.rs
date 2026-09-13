@@ -5,6 +5,7 @@
 //! Integrates with the gui/clipboard service.
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::idseq::IdSeq;
 use guitk::listview::ListViewport;
@@ -586,14 +587,7 @@ impl ClipboardViewer {
 
         // Entry count badge.
         let count_text = format!("{}", self.history.len());
-        cmds.push(RenderCommand::FillRect {
-            x: x + w - 50.0,
-            y: y + 8.0,
-            width: 30.0,
-            height: 20.0,
-            color: p.surface1,
-            corner_radii: CornerRadii::all(10.0),
-        });
+        p.push_surface(&mut cmds, x + w - 50.0, y + 8.0, 30.0, 20.0, 10.0, Surface::Card);
         cmds.push(RenderCommand::Text {
             x: x + w - 44.0,
             y: y + 11.0,
@@ -704,14 +698,7 @@ impl ClipboardViewer {
 
                 // Row background.
                 if is_selected {
-                    cmds.push(RenderCommand::FillRect {
-                        x: x + 4.0,
-                        y: ey,
-                        width: w - 8.0,
-                        height: entry_h - 2.0,
-                        color: p.surface1,
-                        corner_radii: CornerRadii::all(4.0),
-                    });
+                    p.push_surface(&mut cmds, x + 4.0, ey, w - 8.0, entry_h - 2.0, 4.0, Surface::Selected);
                 }
 
                 // Format badge.

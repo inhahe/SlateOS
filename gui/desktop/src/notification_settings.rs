@@ -5,6 +5,7 @@
 //! sound settings, and notification history retention.
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
@@ -1060,14 +1061,7 @@ impl NotificationSettingsUI {
         let mut cy = y;
 
         // Search field
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y: cy,
-            width,
-            height: 30.0,
-            color: p.surface0,
-            corner_radii: CornerRadii::all(6.0),
-        });
+        p.push_surface(cmds, x, cy, width, 30.0, 6.0, Surface::Card);
         let search_text = if self.app_filter.is_empty() {
             "Search apps...".to_string()
         } else {
@@ -1258,14 +1252,7 @@ impl NotificationSettingsUI {
 
         // Filter badge (if active)
         if let Some(ref filter_app) = self.history_app_filter {
-            cmds.push(RenderCommand::FillRect {
-                x,
-                y: cy,
-                width: 200.0,
-                height: 22.0,
-                color: p.surface1,
-                corner_radii: CornerRadii::all(11.0),
-            });
+            p.push_surface(cmds, x, cy, 200.0, 22.0, 11.0, Surface::Card);
             cmds.push(RenderCommand::Text {
                 x: x + 8.0,
                 y: cy + 4.0,

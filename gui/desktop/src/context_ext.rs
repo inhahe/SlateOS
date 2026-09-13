@@ -13,6 +13,7 @@
 //! - Rate limit: if a handler takes >200ms, skip it with "loading..." entry.
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::idseq::IdSeq;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
@@ -775,14 +776,7 @@ pub fn render_context_menu(
             ContextMenuEntry::Builtin(item) => {
                 let hovered = hovered_index == Some(i);
                 if hovered {
-                    commands.push(RenderCommand::FillRect {
-                        x: x + 4.0,
-                        y: cy,
-                        width: width - 8.0,
-                        height: item_height,
-                        color: p.surface0,
-                        corner_radii: CornerRadii::all(4.0),
-                    });
+                    p.push_surface(&mut commands, x + 4.0, cy, width - 8.0, item_height, 4.0, Surface::Selected);
                 }
 
                 // Icon.
@@ -835,14 +829,7 @@ pub fn render_context_menu(
             } => {
                 let hovered = hovered_index == Some(i);
                 if hovered {
-                    commands.push(RenderCommand::FillRect {
-                        x: x + 4.0,
-                        y: cy,
-                        width: width - 8.0,
-                        height: item_height,
-                        color: p.surface0,
-                        corner_radii: CornerRadii::all(4.0),
-                    });
+                    p.push_surface(&mut commands, x + 4.0, cy, width - 8.0, item_height, 4.0, Surface::Selected);
                 }
 
                 // Icon (or app icon fallback).
@@ -994,14 +981,7 @@ impl ExtensionSettingsUI {
         cy += 32.0;
 
         // Search bar.
-        commands.push(RenderCommand::FillRect {
-            x: x + padding,
-            y: cy,
-            width: width - padding * 2.0,
-            height: 28.0,
-            color: p.surface0,
-            corner_radii: CornerRadii::all(6.0),
-        });
+        p.push_surface(&mut commands, x + padding, cy, width - padding * 2.0, 28.0, 6.0, Surface::Card);
         let search_display = if self.search_text.is_empty() {
             "Search extensions...".to_string()
         } else {
@@ -1743,17 +1723,20 @@ mod tests {
     }
 
     fn fills(cmds: &[RenderCommand], keep: impl Fn(f32, f32, f32, f32) -> bool) -> Vec<Color> {
+        // Both kinds, on the logical rectangle. Since §829 a box may be an
+        // outline rather than a fill, and an outline reports a rectangle a
+        // pixel smaller than the one asked for.
         cmds.iter()
-            .filter_map(|cmd| match cmd {
-                RenderCommand::FillRect {
-                    x,
-                    y,
-                    width,
-                    height,
-                    color,
-                    ..
-                } if keep(*x, *y, *width, *height) => Some(*color),
-                _ => None,
+            .filter_map(|cmd| {
+                let (x, y, width, height) = appearance::logical_rect(cmd)?;
+                if !keep(x, y, width, height) {
+                    return None;
+                }
+                match *cmd {
+                    RenderCommand::FillRect { color, .. }
+                    | RenderCommand::StrokeRect { color, .. } => Some(color),
+                    _ => None,
+                }
             })
             .collect()
     }

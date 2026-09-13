@@ -4,6 +4,7 @@
 //! and additional clocks for multiple timezones.
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
@@ -621,14 +622,7 @@ impl DateTimeSettingsUI {
 
         // Current time display
         if let Some((hour, minute)) = self.settings.local_time(self.current_utc) {
-            cmds.push(RenderCommand::FillRect {
-                x,
-                y: cy,
-                width,
-                height: 80.0,
-                color: p.surface0,
-                corner_radii: CornerRadii::all(12.0),
-            });
+            p.push_surface(cmds, x, cy, width, 80.0, 12.0, Surface::Card);
 
             let time_str = format!("{:02}:{:02}", hour, minute);
             cmds.push(RenderCommand::Text {
@@ -711,14 +705,7 @@ impl DateTimeSettingsUI {
 
         // Current timezone
         if let Some(tz) = self.settings.current_timezone() {
-            cmds.push(RenderCommand::FillRect {
-                x,
-                y: cy,
-                width,
-                height: 44.0,
-                color: p.surface1,
-                corner_radii: CornerRadii::all(8.0),
-            });
+            p.push_surface(cmds, x, cy, width, 44.0, 8.0, Surface::Card);
             cmds.push(RenderCommand::Text {
                 x: x + 12.0,
                 y: cy + 6.0,
@@ -763,14 +750,7 @@ impl DateTimeSettingsUI {
         cy += 40.0;
 
         // Search
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y: cy,
-            width,
-            height: 30.0,
-            color: p.surface0,
-            corner_radii: CornerRadii::all(6.0),
-        });
+        p.push_surface(cmds, x, cy, width, 30.0, 6.0, Surface::Card);
         let search_text = if self.tz_search.is_empty() {
             "Search timezones...".to_string()
         } else {
@@ -899,14 +879,7 @@ impl DateTimeSettingsUI {
 
         // Status
         let status_color = ntp.status.color(p);
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y: cy,
-            width,
-            height: 36.0,
-            color: p.surface0,
-            corner_radii: CornerRadii::all(6.0),
-        });
+        p.push_surface(cmds, x, cy, width, 36.0, 6.0, Surface::ControlTrack);
         cmds.push(RenderCommand::FillRect {
             x: x + 8.0,
             y: cy + 12.0,
@@ -981,14 +954,7 @@ impl DateTimeSettingsUI {
         cy += 24.0;
 
         for server in &ntp.servers {
-            cmds.push(RenderCommand::FillRect {
-                x,
-                y: cy,
-                width,
-                height: 28.0,
-                color: p.surface0,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            p.push_surface(cmds, x, cy, width, 28.0, 4.0, Surface::Card);
             cmds.push(RenderCommand::Text {
                 x: x + 10.0,
                 y: cy + 6.0,
@@ -1061,14 +1027,7 @@ impl DateTimeSettingsUI {
                 .iter()
                 .find(|t| t.tz_id == clock.tz_id);
 
-            cmds.push(RenderCommand::FillRect {
-                x,
-                y: cy,
-                width,
-                height: 60.0,
-                color: p.surface0,
-                corner_radii: CornerRadii::all(8.0),
-            });
+            p.push_surface(cmds, x, cy, width, 60.0, 8.0, Surface::Card);
 
             // Clock label
             cmds.push(RenderCommand::Text {

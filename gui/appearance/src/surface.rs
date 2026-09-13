@@ -103,6 +103,50 @@ pub fn logical_rect(cmd: &guitk::render::RenderCommand) -> Option<(f32, f32, f32
     }
 }
 
+/// What the theme painted at a given rectangle, whichever way it drew it.
+///
+/// For tests that used to assert "the well is `p.crust`" by matching a
+/// `FillRect` on colour. Since §829 that box may be an outline instead, and
+/// since §835 a strip may be a hairline, so the colour a test should expect is
+/// no longer a constant -- it is whatever `surface_paint` says for the kind the
+/// draw site named. The assertion becomes
+///
+/// ```ignore
+/// assert_eq!(paint_at(&cmds, x, y, w, h), p.surface_paint(Surface::Card));
+/// ```
+///
+/// which is true under both themes and stays true when either changes. Matching
+/// is on the *logical* rectangle, so a caller passes the geometry the draw site
+/// asked for and does not have to know about the half-pixel stroke inset.
+#[must_use]
+pub fn paint_at(
+    cmds: &[guitk::render::RenderCommand],
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+) -> SurfacePaint {
+    let mut found = SurfacePaint::none();
+    for cmd in cmds {
+        let Some((cx, cy, cw, ch)) = logical_rect(cmd) else {
+            continue;
+        };
+        let same = (cx - x).abs() < 0.01
+            && (cy - y).abs() < 0.01
+            && (cw - width).abs() < 0.01
+            && (ch - height).abs() < 0.01;
+        if !same {
+            continue;
+        }
+        match *cmd {
+            guitk::render::RenderCommand::FillRect { color, .. } => found.fill = Some(color),
+            guitk::render::RenderCommand::StrokeRect { color, .. } => found.border = Some(color),
+            _ => {}
+        }
+    }
+    found
+}
+
 /// What a box *is*, which is what a draw site knows.
 ///
 /// Deliberately not a list of shades. A caller that knew it wanted `surface1`

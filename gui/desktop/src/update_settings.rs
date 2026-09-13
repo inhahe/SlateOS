@@ -5,6 +5,7 @@
 //! which the system should not restart.
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
@@ -477,14 +478,7 @@ impl UpdateSettingsUI {
 
         // Status banner
         let status = self.settings.status;
-        cmds.push(RenderCommand::FillRect {
-            x: x + pad,
-            y: cy,
-            width: inner,
-            height: 36.0,
-            color: p.mantle,
-            corner_radii: CornerRadii::all(6.0),
-        });
+        p.push_surface(&mut cmds, x + pad, cy, inner, 36.0, 6.0, Surface::Card);
         cmds.push(RenderCommand::Text {
             x: x + pad + 12.0,
             y: cy + 10.0,
@@ -822,14 +816,7 @@ impl UpdateSettingsUI {
         for entry in self.settings.history.iter().rev().take(20) {
             let status_icon = if entry.success { "✓" } else { "✕" };
             let color = if entry.success { p.green } else { p.red };
-            cmds.push(RenderCommand::FillRect {
-                x,
-                y,
-                width,
-                height: 32.0,
-                color: p.mantle,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            p.push_surface(cmds, x, y, width, 32.0, 4.0, Surface::Card);
             cmds.push(RenderCommand::Text {
                 x: x + 8.0,
                 y: y + 4.0,

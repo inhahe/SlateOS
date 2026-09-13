@@ -71143,7 +71143,7 @@ pass. A single green run would not have been evidence for a load-sensitive race.
 `requests/c-b-three-flaky-tests-fail-the-workspace-gate.md`. Lane C has not
 touched the file.
 
-## TD-C-A-ZONE-BUILD-FAILS-UNLESS-YOU-KNOW-TO-SAY-NIGHTLY (lane C, 2026-08-22)
+## TD-C-A-ZONE-BUILD-FAILS-UNLESS-YOU-KNOW-TO-SAY-NIGHTLY (lane C, 2026-08-22) -- CLOSED 2026-09-13 for every zone lane C owns
 
 **In short:** Every zone's `.cargo/config.toml` tells you to build by running
 `cargo build` from inside the zone directory. Do exactly that and you get
@@ -71182,6 +71182,37 @@ route out. The route out is one word.
 requirement, quote the exact error, and say plainly that the fix is not a `-Z`
 flag. `gui/`'s header also said *"Zone config for apps/"*, copied verbatim from
 `apps/`, and now names its own zone.
+
+**Update 2026-09-13 (lane C) — `net/` is done, and it was the last zone this
+lane owns.** Its config carried the copied header twice over: the first line
+said *"Zone config for apps/ — userspace GUI/CLI applications"* and the merge
+paragraph said *"from inside apps/<name>/"*. Both now name `net/`, and the
+`+nightly` paragraph is there.
+
+**Checked in this zone rather than assumed from the sibling configs**, which is
+the whole lesson of the entry above — the two other zones were fixed by copying
+a paragraph, and a paragraph copied once is a paragraph that can be copied
+wrong. From `net/`: `cargo build` gives exactly
+
+```
+error: `.json` target specs require -Zjson-target-spec
+```
+
+and `cargo +nightly build` finishes in 3 m 59 s, rebuilding std. Both numbers
+are in the header now.
+
+**What is left is not lane C's and is not worth a request file:**
+
+- `CLAUDE.md` line 41 should say "and only on a nightly toolchain". That file
+  may be edited only on an explicit operator instruction, so it waits for one.
+  It is deliberately *not* in `open-questions.md`: that queue is for decisions,
+  this is a five-word correction with an obvious answer, and padding the queue
+  with items that need no thought is how a reader learns to skim it.
+- The workspace-root `.cargo/config.toml:62` `build-slateos` alias comment
+  already *shows* `cargo +nightly build-slateos` in its example without saying
+  why the `+nightly` is load-bearing. Minor, recorded here rather than filed:
+  the example is correct as it stands, and a cross-lane request for one
+  clarifying clause costs both lanes more than the clause is worth.
 
 **Still open, and why lane C did not do it:**
 

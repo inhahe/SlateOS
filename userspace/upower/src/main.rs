@@ -9,7 +9,6 @@
 //   upowerd [OPTIONS]
 
 #![deny(clippy::all)]
-#![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::env;
@@ -64,12 +63,22 @@ enum DeviceType {
     LinePower,
     Battery,
     Ups,
+    // Battery vocabulary the current output does not render. Kept whole: a
+    // state table missing the states nobody has needed yet is how the next
+    // reader concludes the property has no such value.
+    #[allow(dead_code)]
     Monitor,
+    #[allow(dead_code)]
     Mouse,
+    #[allow(dead_code)]
     Keyboard,
+    #[allow(dead_code)]
     Phone,
+    #[allow(dead_code)]
     MediaPlayer,
+    #[allow(dead_code)]
     Tablet,
+    #[allow(dead_code)]
     Computer,
 }
 
@@ -90,6 +99,7 @@ impl DeviceType {
         }
     }
 
+    #[allow(dead_code)]
     fn from_str_loose(s: &str) -> Self {
         match s.to_ascii_lowercase().as_str() {
             "line-power" | "linepower" | "mains" => Self::LinePower,
@@ -548,8 +558,11 @@ impl BacklightDevice {
 
 #[derive(Debug, Clone)]
 struct HistoryEntry {
+    #[allow(dead_code)]
     timestamp: u64,
+    #[allow(dead_code)]
     value: f64,
+    #[allow(dead_code)]
     state: BatteryState,
 }
 
@@ -622,6 +635,7 @@ impl DaemonConfig {
         cfg
     }
 
+    #[allow(dead_code)]
     fn from_str(content: &str) -> Self {
         let mut cfg = Self::default();
         for line in content.lines() {
@@ -1176,10 +1190,12 @@ impl HistoryTracker {
         });
     }
 
+    #[allow(dead_code)]
     fn charge_len(&self) -> usize {
         self.charge_history.len()
     }
 
+    #[allow(dead_code)]
     fn rate_len(&self) -> usize {
         self.rate_history.len()
     }

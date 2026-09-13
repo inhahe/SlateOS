@@ -23,7 +23,6 @@
 // the real acpi tool must consume to compute instantaneous discharge
 // rate and time-to-empty. Dead-code lint cannot see across that future
 // boundary.
-#![allow(dead_code)]
 
 #[cfg(not(test))]
 use std::env;
@@ -40,10 +39,13 @@ struct BatteryInfo {
     present: bool,
     status: BatteryStatus,
     percentage: Option<u32>,
-    capacity_full: Option<u64>,  // microWh
-    capacity_now: Option<u64>,   // microWh
-    voltage_now: Option<u64>,    // microV
-    current_now: Option<i64>,    // microA (negative = discharging)
+    capacity_full: Option<u64>, // microWh
+    // Battery fields read from sysfs and not printed by the current output.
+    #[allow(dead_code)]
+    capacity_now: Option<u64>, // microWh
+    voltage_now: Option<u64>, // microV
+    #[allow(dead_code)]
+    current_now: Option<i64>, // microA (negative = discharging)
     time_remaining: Option<u64>, // minutes
     technology: String,
     model: String,

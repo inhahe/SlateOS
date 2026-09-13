@@ -11,7 +11,6 @@
 // FstabEntry::{dump, pass} are columns 5 and 6 of /etc/fstab (dump-frequency
 // and fsck-pass-number). The real findmnt -o DUMP,PASS surface must produce
 // them. Dead-code lint cannot see across that future boundary.
-#![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::env;
@@ -24,6 +23,8 @@ use std::process;
 // ============================================================================
 
 const VERSION: &str = "0.1.0";
+// fstab columns parsed and not printed by the current output.
+#[allow(dead_code)]
 const PROC_MOUNTS: &str = "/proc/mounts";
 const PROC_MOUNTINFO: &str = "/proc/self/mountinfo";
 const FSTAB_PATH: &str = "/etc/fstab";
@@ -62,7 +63,9 @@ struct FstabEntry {
     target: String,
     fstype: String,
     options: String,
+    #[allow(dead_code)]
     dump: u32,
+    #[allow(dead_code)]
     pass: u32,
 }
 

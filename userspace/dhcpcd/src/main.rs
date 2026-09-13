@@ -31,7 +31,6 @@
 // speak. They are kept as documentation for the DORA edge cases the
 // stub doesn't yet exercise (DECLINE on duplicate-address detection,
 // log/trace formatting).
-#![allow(dead_code)]
 
 use quoting::quoteaf_os;
 use std::env;
@@ -53,6 +52,11 @@ const DHCP_SERVER_PORT: u16 = 67;
 const DHCP_CLIENT_PORT: u16 = 68;
 
 /// Minimum DHCP message size (without BOOTP padding).
+// DHCP messages and names this client does not send. DECLINE needs
+// duplicate-address detection and INFORM needs a configured-but-unleased
+// interface, neither of which this client performs yet. Kept as the
+// protocol's vocabulary, and covered by tests.
+#[allow(dead_code)]
 const DHCP_MIN_LEN: usize = 236;
 
 /// Fixed DHCP header size before options.
@@ -121,10 +125,12 @@ mod cfg_mask {
 const DHCP_DISCOVER: u8 = 1;
 const DHCP_OFFER: u8 = 2;
 const DHCP_REQUEST: u8 = 3;
+#[allow(dead_code)]
 const DHCP_DECLINE: u8 = 4;
 const DHCP_ACK: u8 = 5;
 const DHCP_NAK: u8 = 6;
 const DHCP_RELEASE: u8 = 7;
+#[allow(dead_code)]
 const DHCP_INFORM: u8 = 8;
 
 // ============================================================================
@@ -169,6 +175,7 @@ enum DhcpState {
 }
 
 impl DhcpState {
+    #[allow(dead_code)]
     fn name(self) -> &'static str {
         match self {
             Self::Init => "INIT",
@@ -223,6 +230,7 @@ fn mac_to_string(mac: &[u8]) -> String {
 }
 
 /// Return the name of a DHCP message type.
+#[allow(dead_code)]
 fn msg_type_name(t: u8) -> &'static str {
     match t {
         DHCP_DISCOVER => "DISCOVER",
@@ -634,6 +642,7 @@ fn build_release(xid: u32, mac: &[u8; 6], ciaddr: u32, server_id: u32) -> Vec<u8
 }
 
 /// Build a DHCPDECLINE packet.
+#[allow(dead_code)]
 fn build_decline(xid: u32, mac: &[u8; 6], requested_ip: u32, server_id: u32) -> Vec<u8> {
     let msg = DhcpMessage::new_request(xid, mac);
     let mut buf = Vec::with_capacity(DHCP_MAX_LEN);

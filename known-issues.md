@@ -131140,6 +131140,38 @@ found the shell's copies, it is already a shared crate, and it takes a
 `derived` list precisely so categories 2 and 3 can be declared rather than
 excused.
 
+**The recipe, spelled out, because §822 already built the seam and 79 crates
+have been through it.** For each crate:
+
+1. `appearance = { path = "../../gui/appearance" }` in `Cargo.toml`, with the
+   comment the converted ones carry: *"The user's colours, per
+   design-decisions 822."*
+2. A `palette: Palette` field on the application struct, initialised
+   `Palette::from_settings(&AppearanceSettings::default())` — so the first
+   frame has *a* palette even on a machine with no settings file.
+3. `fn theme_changed(&mut self, palette: &Palette) { self.palette = *palette; }`
+   — the `oswindow::app::App` method §822 added for exactly this. It is
+   already called by `drive`; an app that does not override it silently keeps
+   its defaults, which is what all 55 of these are doing.
+4. Replace the constants: a background becomes a role, a box becomes
+   `push_surface`, and *text* in a categorical hue becomes `p.ink(hue)`
+   (§837).
+5. Adopt `palette_check::assert_drawn_from` in the crate's render test, with
+   the genuinely non-theme colours declared in `derived`.
+
+`procexplorer` shows how mechanical step 4 usually is — its thirteen named
+constants map almost one-to-one:
+
+| its constant | the role |
+|---|---|
+| `COLOR_CONTENT_BG` | `base` |
+| `COLOR_TOOLBAR_BG`, `COLOR_STATUS_BG` | `Surface::Strip` |
+| `COLOR_ROW_ODD`, `COLOR_ROW_HOVER` | `surface0` |
+| `COLOR_ROW_SELECTED` | `Surface::Selected` |
+| `COLOR_TAB_ACTIVE`, `COLOR_ACCENT` | `accent` |
+| `COLOR_TEXT`, `COLOR_TEXT_DIM` | `text`, `subtext0` |
+| `COLOR_DANGER` | `red` |
+
 **What the proper fix looks like.** Crate by crate, in the order the table
 above suggests: thread the `Palette` the app already receives (or add it),
 replace the category-1 constants with roles, adopt `assert_drawn_from` in the

@@ -140457,11 +140457,26 @@ is wide enough that a single run should not be quoted:
 | one window redrawn | 2.6 ms | 7 ms |
 | nothing changed | 0 -- the frame is skipped | |
 
-**Where to look first.** About eight of a full recomposite's milliseconds are
-text: the same scene with the text removed measured 5.4 ms against 13.8 ms
-when both were taken stacked. Whether glyphs are re-shaped every frame or
-cached is the first question, and it is answerable with the instrument that
-now exists.
+**Where the text time goes -- measured, and not where I guessed.** About eight
+of a full recomposite's milliseconds are text: the same scene without it
+measured 5.4 ms against 13.8 ms. The obvious suspect was shaping. Every
+`RenderCommand::Text` calls `font.shape(text)` inside the draw loop
+(`gui/compositor/src/lib.rs`), and there is no shaping cache anywhere in
+`gui/font` or `gui/compositor` -- a glyph *raster* cache exists, but it caches
+a glyph's bitmap, not a run's layout.
+
+That hypothesis is **wrong**, and it took two minutes to find out. Shaping a
+39-character string costs **755 ns**, so the scene's 240 text commands cost
+about **181 us** -- 1.3% of a 13.8 ms frame. A shaping cache would buy
+nothing, and would have been a day's work plus an eviction policy plus the
+risk the call site's own comment warns about: shaping happens there so the
+compositor lays text out exactly as the toolkit measured it, and a cache is a
+second layout path that can disagree with the first.
+
+**So the cost is in blending, not layout.** 240 strings of ~39 characters is
+about 9 400 glyphs, each alpha-blended into the framebuffer a pixel at a time.
+That is where to look next, and it is a different kind of fix -- the mask is
+already cached; what costs is putting it on the screen.
 
 **A trap fixed on the way, worth its own paragraph.** `last_frame_time_us`
 was left *unchanged* when `compose_frame` took either early-out -- the

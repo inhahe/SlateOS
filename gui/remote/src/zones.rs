@@ -488,7 +488,7 @@ impl SnapSlot {
     /// This slot's position in the flat numbering shared by both ends.
     ///
     /// The `saturating_add` cannot saturate: the largest
-    /// [`first_slot`](SnapLayoutPreset::first_slot) is 16 and the largest zone
+    /// `first_slot` is 16 and the largest zone
     /// within it is 5. It is written that way so the function is total without
     /// an unreachable panicking branch, and
     /// `an_index_and_the_slot_it_names_are_inverses` proves the arithmetic is

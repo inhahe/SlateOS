@@ -419,7 +419,7 @@ impl BlurKind {
 /// (activate, minimise), its context menu (maximise, restore, close), an
 /// Alt-Tab switcher (activate), the keyboard shortcuts that tile a window to
 /// one half of the screen (snap left/right), and the zone picker that tiles it
-/// into one cell of a named layout ([`SnapToZone`](Self::SnapToZone)).
+/// into one cell of a named layout (`ShellControlAction::SnapToZone`).
 ///
 /// Deliberately not move/resize: placing windows is the compositor's, and a
 /// shell that could move any window would be a second window manager — the
@@ -773,7 +773,7 @@ impl WindowSpec {
     /// because a title is a document name and reusing it would give every
     /// window of the same program a different id — the exact opposite of what
     /// the field is for. Callers that want one should set it, or go through
-    /// [`oswindow::app`], whose default reads the executable's name.
+    /// `oswindow::app`, whose default reads the executable's name.
     #[must_use]
     pub fn new(title: impl Into<String>, width: u32, height: u32) -> Self {
         Self {
@@ -944,7 +944,7 @@ pub enum RequestBody {
     /// answer: a shell that sent them separately could leave a window
     /// half-restrained if the second frame were refused.
     ShellSetWindowPolicy { window: u64, policy: WindowPolicy },
-    /// Ask about the display. Answered with [`ResponseBody::DisplayInfo`].
+    /// Ask about the display. Answered with `ResponseBody::DisplayInfo`.
     GetDisplayInfo,
     /// Start or stop receiving the desktop's window list.
     ///

@@ -64,7 +64,7 @@ pub const INPUT_MAGIC: [u8; 4] = *b"INPT";
 /// that a settings change reaches a running program instead of waiting for it
 /// to be restarted. Incompatible on the same terms as the volume keys above
 /// and not merely by convention: an unknown tag is
-/// [`DecodeError::BadEventTag`], which fails the *whole frame*, so a version-2
+/// `DecodeError::BadEventTag`, which fails the *whole frame*, so a version-2
 /// peer handed one of these would drop the input batch it arrived in rather
 /// than ignore an event it did not know.
 pub const INPUT_VERSION: u8 = 3;

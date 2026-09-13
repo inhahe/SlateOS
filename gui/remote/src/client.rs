@@ -76,14 +76,15 @@ pub trait Transport {
     fn write(&mut self, bytes: &[u8]) -> Result<(), Self::Error>;
 
     /// Whether the connection is still usable. Once this returns `false`,
-    /// [`Client::run`] stops.
+    /// the caller's event loop stops -- `oswindow::EventLoop::run` in
+    /// practice.
     fn is_open(&self) -> bool {
         true
     }
 
     /// Block until there is plausibly something to read.
     ///
-    /// The default does nothing, which turns [`Client::run`] into a spin loop —
+    /// The default does nothing, which turns an event loop into a spin loop —
     /// correct, and unacceptable in production. Every real transport overrides
     /// it. It is defaulted rather than required so that a test transport, whose
     /// data is all present up front, need not implement a wait that would
@@ -163,9 +164,15 @@ impl<E: core::fmt::Debug + core::fmt::Display> std::error::Error for ClientError
 /// order, and files replies under the correlation id of the request that asked
 /// for them.
 ///
-/// [`Client`] is the single-window convenience built on top; `oswindow` is the
-/// multi-window one. Neither reimplements the framing, and an application
-/// should touch neither this type nor the wire — see the module docs.
+/// `oswindow::EventLoop` is the convenience built on top of this; it does not
+/// reimplement the framing, and an application should touch neither this type
+/// nor the wire -- see the module docs.
+///
+/// (These three sentences named a `Client` type until 2026-09-13. There is no
+/// such type in this crate and `grep` finds no trace of one, so the
+/// documentation was directing a reader to look for something that does not
+/// exist -- which is worse than a link that merely fails to resolve, because
+/// the prose reads as though it does.)
 pub struct Connection<T: Transport> {
     transport: T,
     /// Bytes read but not yet a whole frame. A stream does not respect frame
@@ -649,7 +656,7 @@ impl<T: Transport> Connection<T> {
     /// short of it. A `size` of zero releases a reservation made earlier. The
     /// area returned is what the compositor actually granted, which may be less
     /// than was asked for — see
-    /// [`RequestBody::ReserveEdge`](crate::control::RequestBody::ReserveEdge).
+    /// [`crate::control::RequestBody::ReserveEdge`].
     ///
     /// # Errors
     ///

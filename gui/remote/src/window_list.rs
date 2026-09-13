@@ -7,7 +7,7 @@
 //! exactly one thing short for a **shell** — a taskbar has to list the windows
 //! it did not open, and had no way to ask.
 //!
-//! Stacking layers ([`Layer`](crate::control::Layer)) fixed the other half of
+//! Stacking layers ([`crate::control::Layer`]) fixed the other half of
 //! the same problem: a taskbar can now *stay* in front of the windows it is
 //! supposed to list. This module is what lets it know what they are.
 //!

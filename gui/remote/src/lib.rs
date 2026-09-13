@@ -64,7 +64,7 @@
 //! * **flags** = reserved, must be zero
 //! * **n_cmds** = number of render commands in this frame, little-endian u32
 //!
-//! Each command starts with a [`Tag`] byte followed by a fixed payload.
+//! Each command starts with a `Tag` byte followed by a fixed payload.
 //! All scalars are little-endian; `f32` is encoded by `to_le_bytes` of the
 //! IEEE-754 bit pattern. Strings are length-prefixed (u32 LE) UTF-8.
 //!
@@ -156,9 +156,9 @@ pub const MAGIC: [u8; 4] = *b"ORDR";
 /// Current protocol version. Increment on any breaking change to the wire
 /// format; never reuse a version number.
 ///
-/// **2** — `Tag::Text` gained a trailing overflow byte ([`TextOverflowTag`])
+/// **2** — `Tag::Text` gained a trailing overflow byte (`TextOverflowTag`)
 /// when `RenderCommand::Text` gained its `overflow` field
-/// (`design-decisions.md` §427). Unlike the [`FontFamilyTag`] addition below,
+/// (`design-decisions.md` §427). Unlike the `FontFamilyTag` addition below,
 /// this changes the payload of an *existing* tag: a version-1 decoder reading a
 /// version-2 frame would take that byte as the next command's tag and
 /// desynchronise for the rest of the frame — silently, since 0x00 and 0x01 are
@@ -242,7 +242,7 @@ enum Tag {
     /// Added after `PROTOCOL_VERSION` reached 2, without bumping it — a *new*
     /// tag byte, so every frame an older encoder produces still decodes
     /// identically, and an older decoder meeting one fails cleanly with
-    /// [`DecodeError::BadTag`] naming the byte. See [`FontFamilyTag`] for the
+    /// [`DecodeError::BadTag`] naming the byte. See `FontFamilyTag` for the
     /// same argument at length.
     RichText = 0x0D,
 }
@@ -431,7 +431,7 @@ pub enum DecodeError {
     BadMouseKind(u8),
     /// A control frame's message count exceeds [`control::MAX_MESSAGES_PER_FRAME`].
     TooManyMessages(u32),
-    /// A [`CursorShape`](control::CursorShape) byte is not in this decoder's table.
+    /// A [`control::CursorShape`] byte is not in this decoder's table.
     BadCursorShape(u8),
     /// A window-list frame's entry count exceeds
     /// [`window_list::MAX_WINDOWS_PER_LIST`].

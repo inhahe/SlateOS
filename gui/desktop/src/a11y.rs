@@ -387,90 +387,6 @@ impl CursorSettings {
 }
 
 // ============================================================================
-// Focus indicator
-// ============================================================================
-
-/// Enhanced focus indicator settings (for keyboard navigation).
-#[derive(Debug, Clone)]
-pub struct FocusIndicator {
-    /// Whether to show enhanced focus ring.
-    pub enabled: bool,
-    /// Focus ring colour, or `None` to follow the theme's accent.
-    ///
-    /// See [`CursorSettings::locator_color`] for why this is an `Option`
-    /// rather than a field pre-filled with a colour. Resolve it with
-    /// [`Self::ring`].
-    pub color: Option<Color>,
-    /// Ring width in pixels.
-    pub width: f32,
-    /// Ring offset from element edge.
-    pub offset: f32,
-    /// Whether to animate the ring (pulse).
-    pub animate: bool,
-}
-
-impl Default for FocusIndicator {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            color: None,
-            width: 2.0,
-            offset: 2.0,
-            animate: false,
-        }
-    }
-}
-
-impl FocusIndicator {
-    /// The colour the ring is drawn in, resolved against `p`.
-    pub fn ring(&self, p: &Palette) -> Color {
-        self.color.unwrap_or(p.accent)
-    }
-
-    /// Give the ring back to the theme after a colour was chosen.
-    pub fn follow_accent(&mut self) {
-        self.color = None;
-    }
-
-    /// Render the focus ring around an element.
-    pub fn render(
-        &self,
-        p: &Palette,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
-        frame: u64,
-    ) -> Vec<RenderCommand> {
-        if !self.enabled {
-            return Vec::new();
-        }
-
-        let alpha = if self.animate {
-            // Pulse between 128 and 255.
-            let phase = ((frame % 60) as f32 / 60.0) * std::f32::consts::PI * 2.0;
-            (phase.sin() * 64.0 + 191.0) as u8
-        } else {
-            255
-        };
-
-        let base = self.ring(p);
-        let ring_color = Color::rgba(base.r, base.g, base.b, alpha);
-        let o = self.offset;
-
-        vec![RenderCommand::StrokeRect {
-            x: x - o,
-            y: y - o,
-            width: w + o * 2.0,
-            height: h + o * 2.0,
-            color: ring_color,
-            line_width: self.width,
-            corner_radii: CornerRadii::all(4.0),
-        }]
-    }
-}
-
-// ============================================================================
 // Master accessibility config
 // ============================================================================
 
@@ -487,8 +403,6 @@ pub struct AccessibilityConfig {
     pub magnifier: MagnifierConfig,
     /// Cursor settings.
     pub cursor: CursorSettings,
-    /// Focus indicator settings.
-    pub focus_indicator: FocusIndicator,
     /// Screen reader enabled.
     pub screen_reader: bool,
     /// Text scale factor (1.0 = default, up to 3.0).
@@ -507,7 +421,6 @@ impl Default for AccessibilityConfig {
             reduced_motion: false,
             magnifier: MagnifierConfig::default(),
             cursor: CursorSettings::default(),
-            focus_indicator: FocusIndicator::default(),
             screen_reader: false,
             text_scale: 1.0,
             caret_width: 1.0,
@@ -851,23 +764,6 @@ mod tests {
     // -- Focus Indicator --
 
     #[test]
-    fn test_focus_indicator_disabled() {
-        let mut fi = FocusIndicator::default();
-        fi.enabled = false;
-        let cmds = fi.render(&accented(false), 10.0, 20.0, 100.0, 50.0, 0);
-        assert!(cmds.is_empty());
-    }
-
-    #[test]
-    fn test_focus_indicator_renders() {
-        let fi = FocusIndicator::default();
-        let cmds = fi.render(&accented(false), 10.0, 20.0, 100.0, 50.0, 0);
-        assert_eq!(cmds.len(), 1);
-    }
-
-    // -- Config Round-Trip --
-
-    #[test]
     fn test_config_default() {
         let cfg = AccessibilityConfig::default();
         assert!(cfg.high_contrast.is_none());
@@ -955,22 +851,6 @@ mod tests {
                         &cmds,
                         &derived,
                         &format!("magnifier {shape:?} (crosshairs {crosshairs})"),
-                    );
-                }
-            }
-            // The focus ring, animated and not: the animated form rebuilds the
-            // colour channel by channel, which is exactly where a role can be
-            // dropped without the unanimated form noticing.
-            for animate in [false, true] {
-                let mut fi = FocusIndicator::default();
-                fi.animate = animate;
-                for frame in [0_u64, 15, 30, 45] {
-                    let cmds = fi.render(&p, 10.0, 20.0, 100.0, 50.0, frame);
-                    appearance::palette_check::assert_drawn_from(
-                        &p,
-                        &cmds,
-                        &derived,
-                        &format!("focus ring (animate {animate}, frame {frame})"),
                     );
                 }
             }
@@ -1154,17 +1034,6 @@ mod tests {
                 })
                 .expect("the lens draws a rim");
             assert_eq!(rim, p.accent);
-
-            let ring = FocusIndicator::default().render(&p, 0.0, 0.0, 10.0, 10.0, 0);
-            match ring.as_slice() {
-                [RenderCommand::StrokeRect { color, .. }] => {
-                    assert_eq!(
-                        (color.r, color.g, color.b),
-                        (p.accent.r, p.accent.g, p.accent.b)
-                    );
-                }
-                other => panic!("expected one StrokeRect, got {other:?}"),
-            }
         }
     }
 
@@ -1192,15 +1061,6 @@ mod tests {
         assert_ne!(CHOSEN, dark.accent);
         assert_ne!(CHOSEN, light.accent);
 
-        let mut fi = FocusIndicator::default();
-        assert_eq!(fi.ring(&dark), dark.accent);
-        assert_eq!(fi.ring(&light), light.accent);
-        assert_ne!(fi.ring(&dark), fi.ring(&light), "an unset ring must move");
-
-        fi.color = Some(CHOSEN);
-        assert_eq!(fi.ring(&dark), CHOSEN);
-        assert_eq!(fi.ring(&light), CHOSEN, "a chosen ring must not move");
-
         let mut cs = CursorSettings::default();
         assert_eq!(cs.locator(&dark), dark.accent);
         assert_eq!(cs.locator(&light), light.accent);
@@ -1216,12 +1076,6 @@ mod tests {
     #[test]
     fn following_the_accent_is_reachable_again_after_choosing() {
         let p = accented(false);
-        let mut fi = FocusIndicator::default();
-        fi.color = Some(Color::from_hex(0x0012_3456));
-        fi.follow_accent();
-        assert!(fi.color.is_none());
-        assert_eq!(fi.ring(&p), p.accent);
-
         let mut cs = CursorSettings::default();
         cs.locator_color = Some(Color::from_hex(0x0012_3456));
         cs.follow_accent_locator();

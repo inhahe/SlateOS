@@ -3,8 +3,6 @@
 //! A subset of jq's functionality: JSON parsing, pretty printing, and
 //! filter expressions for querying and transforming JSON data.
 
-#![allow(dead_code)]
-
 /// Status for a runtime error, as distinct from the 2 this program already
 /// uses for a usage or I/O failure.
 ///
@@ -85,6 +83,11 @@ impl Value {
         }
     }
 
+    // `Value::as_str` has no caller: every site that needs the text of a
+    // string matches `Value::String(s)` directly. Kept as the pair of
+    // `as_f64`, which is used -- a `Value` with an accessor for numbers and
+    // none for strings invites the next reader to add a second one.
+    #[allow(dead_code)]
     fn as_str(&self) -> Option<&str> {
         match self {
             Value::String(s) => Some(s),
@@ -540,12 +543,10 @@ enum Filter {
     SortBy(Box<Filter>),             // sort_by(f)
     GroupBy(Box<Filter>),            // group_by(f)
     UniqueBy(Box<Filter>),           // unique_by(f)
-    Limit(usize, Box<Filter>),       // limit(n; f)
     Has(String),                     // has("key")
     Contains(Box<Filter>),           // contains(f)
     ToEntries,                       // to_entries
     FromEntries,                     // from_entries
-    Ascii,                           // ascii_downcase / ascii_upcase
     AsciiDown,
     AsciiUp,
     Compare(CmpOp, Box<Filter>, Box<Filter>), // ==, !=, <, >, <=, >=
@@ -559,47 +560,55 @@ enum Filter {
     Recurse,                                  // ..
     TypeSelect(TypeClass), // numbers/strings/booleans/arrays/objects/nulls/values/iterables/scalars
     Env,                   // env
-    Null,                  // null literal filter
     Input,                 // input
     Debug,                 // debug
-    Def(String, Vec<String>, Box<Filter>, Box<Filter>), // def name(args): body; rest
+    // Constructed, and its payload never read: `eval`'s catch-all reports
+    // "filter not implemented" and returns before destructuring. Kept rather
+    // than reduced to a unit variant, because the parser really did parse this
+    // argument and throwing it away here would mean re-deriving the grammar
+    // when the filter is implemented. Each errors with exit 5, so nothing
+    // silently ignores an argument the user supplied.
+    #[allow(dead_code)]
     FuncCall(String, Vec<Filter>), // user-defined function call
     StringInterp(Vec<StringPart>), // string with \(expr) interpolations
-    Optional(Box<Filter>), // f?
-    Assign(Box<Filter>, Box<Filter>), // .field = expr (update)
-    UpdateAssign(Box<Filter>, Box<Filter>), // .field |= expr
-    Label(String, Box<Filter>), // label $name | f
     Range(Box<Filter>, Box<Filter>), // range(a; b)
-    Split(String),         // split("delim")
-    Join(String),          // join("delim")
-    Test(String),          // test("regex") — simple substring match
-    Ltrimstr(String),      // ltrimstr("prefix")
-    Rtrimstr(String),      // rtrimstr("suffix")
-    Startswith(String),    // startswith("prefix")
-    Endswith(String),      // endswith("suffix")
-    Tostring,              // tostring
-    Tonumber,              // tonumber
-    Floor,                 // floor
-    Ceil,                  // ceil
-    Round,                 // round
-    Fabs,                  // fabs
-    Sqrt,                  // sqrt
-    Indices(String),       // indices("str")
-    Inside(Box<Filter>),   // inside(f)
+    Split(String),                 // split("delim")
+    Join(String),                  // join("delim")
+    Test(String),                  // test("regex") — simple substring match
+    Ltrimstr(String),              // ltrimstr("prefix")
+    Rtrimstr(String),              // rtrimstr("suffix")
+    Startswith(String),            // startswith("prefix")
+    Endswith(String),              // endswith("suffix")
+    Tostring,                      // tostring
+    Tonumber,                      // tonumber
+    Floor,                         // floor
+    Ceil,                          // ceil
+    Round,                         // round
+    Fabs,                          // fabs
+    Sqrt,                          // sqrt
+    #[allow(dead_code)]
+    Indices(String), // indices("str")
+    #[allow(dead_code)]
+    Inside(Box<Filter>), // inside(f)
+    #[allow(dead_code)]
     Limit2(Box<Filter>, Box<Filter>), // limit(n; f) — two-arg
+    #[allow(dead_code)]
     Any(Option<Box<Filter>>), // any / any(f)
+    #[allow(dead_code)]
     All(Option<Box<Filter>>), // all / all(f)
-    MinMax(bool),          // min / max (bool=true for max)
+    MinMax(bool),                  // min / max (bool=true for max)
+    #[allow(dead_code)]
     MinMaxBy(bool, Box<Filter>), // min_by(f) / max_by(f)
-    Paths,                 // paths / leaf_paths
-    GetPath(Box<Filter>),  // getpath(f)
+    Paths,                         // paths / leaf_paths
+    #[allow(dead_code)]
+    GetPath(Box<Filter>), // getpath(f)
+    #[allow(dead_code)]
     Delpaths(Box<Filter>), // delpaths(f)
-    Ascii2(bool),          // ascii_downcase(false) / ascii_upcase(true)
-    Explode,               // explode
-    Implode,               // implode
-    Tojson,                // tojson
-    Fromjson,              // fromjson
-    Format(FormatKind),    // @base64, @csv, @tsv, @html, @uri, @json, @text
+    Explode,                       // explode
+    Implode,                       // implode
+    Tojson,                        // tojson
+    Fromjson,                      // fromjson
+    Format(FormatKind),            // @base64, @csv, @tsv, @html, @uri, @json, @text
 }
 
 #[derive(Clone, Debug)]

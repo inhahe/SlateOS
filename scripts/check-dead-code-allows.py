@@ -57,7 +57,6 @@ BASELINE = {
     "userspace/finger",
     "userspace/getty",
     "userspace/irqbalance",
-    "userspace/jq",
     "userspace/ldconfig",
     "userspace/login",
     "userspace/ntpd",

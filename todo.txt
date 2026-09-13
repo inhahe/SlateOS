@@ -57463,7 +57463,7 @@ What it affects: `userspace/route/src/main.rs`, the arm that used to
 so nobody later "fixes" it back toward the reference without reading
 this. Easy to reverse if the operator prefers (a).
 
-### `userspace/sanitize`: pure functions now tested, option loop still not (lane B, 2026-09-12) -- PARTLY DONE
+### `userspace/sanitize` had no tests and renamed files in place (lane B, 2026-09-12) -- DONE
 
 Found while fixing its option parsing. `cargo test -p sanitize` reports
 `0 passed` — the crate has no test module at all — for a program whose
@@ -57481,7 +57481,8 @@ whole interesting surface, and would have caught at least one question I
 could not answer while reading it: what `--max-len` does to a name whose
 extension is longer than the limit.
 
-The option parsing itself is not reachable from a test — it reads
-`env::args()` inside `main` — which is worth fixing at the same time by
-splitting the loop into a function over `&[String]`, the shape `flock`,
-`nproc` and `prlimit` already use.
+**Closed, same day.** The loop is now `parse_args(&[String]) -> Parsed`,
+returning `Run`/`Usage`/`Error` instead of calling `process::exit` from
+seven places, so the destructive case is reachable from a test: there is
+one asserting that `--dry-runn docs` is refused and never becomes a path.
+13 tests where there were none.

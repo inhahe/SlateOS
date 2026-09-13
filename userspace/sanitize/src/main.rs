@@ -416,14 +416,23 @@ fn print_usage() {
     println!("  sanitize --strip '()[]' -r .");
 }
 
-fn main() {
-    let args: Vec<String> = env::args().collect();
+/// What a command line asked for.
+///
+/// Returned rather than acted on, so a test can see a refusal. The parse
+/// used to live inside `main` reading `env::args()`, which made the
+/// destructive case -- a mistyped `--dry-run` -- reachable only by running
+/// the binary.
+#[derive(Debug)]
+enum Parsed {
+    /// Run with this configuration over these paths.
+    Run(Config, Vec<String>),
+    /// `--help`: print usage, succeed.
+    Usage,
+    /// Refuse, printing this and exiting 1.
+    Error(String),
+}
 
-    if args.len() < 2 {
-        print_usage();
-        process::exit(0);
-    }
-
+fn parse_args(args: &[String]) -> Parsed {
     let mut config = Config::default_config();
     let mut paths: Vec<String> = Vec::new();
     let mut i = 1;
@@ -448,8 +457,7 @@ fn main() {
             }
             "--mode" => {
                 if i + 1 >= args.len() {
-                    eprintln!("error: --mode requires a value");
-                    process::exit(1);
+                    return Parsed::Error("error: --mode requires a value".to_string());
                 }
                 config.mode = match args[i + 1].as_str() {
                     "conservative" | "con" => SanitizeMode::Conservative,
@@ -457,24 +465,23 @@ fn main() {
                     "windows" | "win" => SanitizeMode::Windows,
                     "minimal" | "min" => SanitizeMode::Minimal,
                     other => {
-                        eprintln!("error: unknown mode: {other}");
-                        process::exit(1);
+                        return Parsed::Error(format!("error: unknown mode: {other}"));
                     }
                 };
                 i += 2;
             }
             "--max-len" => {
                 if i + 1 >= args.len() {
-                    eprintln!("error: --max-len requires a value");
-                    process::exit(1);
+                    return Parsed::Error("error: --max-len requires a value".to_string());
                 }
                 config.max_length = args[i + 1].parse().unwrap_or(200);
                 i += 2;
             }
             "--replace" => {
                 if i + 2 >= args.len() {
-                    eprintln!("error: --replace requires two arguments: <char> <replacement>");
-                    process::exit(1);
+                    return Parsed::Error(
+                        "error: --replace requires two arguments: <char> <replacement>".to_string(),
+                    );
                 }
                 let from_str = &args[i + 1];
                 let to_str = args[i + 2].clone();
@@ -485,15 +492,13 @@ fn main() {
             }
             "--strip" => {
                 if i + 1 >= args.len() {
-                    eprintln!("error: --strip requires a character list");
-                    process::exit(1);
+                    return Parsed::Error("error: --strip requires a character list".to_string());
                 }
                 config.strip_chars.extend(args[i + 1].chars());
                 i += 2;
             }
             "--help" | "-h" | "help" => {
-                print_usage();
-                process::exit(0);
+                return Parsed::Usage;
             }
             // Everything after `--` is a path, however it is spelled. This
             // program exists to rename files with awkward names, so a file
@@ -514,9 +519,11 @@ fn main() {
             // user asked for a preview and got the real thing. A renaming
             // tool cannot treat a mistyped flag as an operand.
             other if other.starts_with('-') && other.len() > 1 => {
-                eprintln!("sanitize: {}", usageerror::unknown_option(other.as_bytes()));
-                eprintln!("Run 'sanitize --help' for usage.");
-                process::exit(1);
+                return Parsed::Error(format!(
+                    "sanitize: {}
+Run 'sanitize --help' for usage.",
+                    usageerror::unknown_option(other.as_bytes())
+                ));
             }
             other => {
                 paths.push(other.to_string());
@@ -524,6 +531,29 @@ fn main() {
             }
         }
     }
+
+    Parsed::Run(config, paths)
+}
+
+fn main() {
+    let args: Vec<String> = env::args().collect();
+
+    if args.len() < 2 {
+        print_usage();
+        process::exit(0);
+    }
+
+    let (config, paths) = match parse_args(&args) {
+        Parsed::Run(config, paths) => (config, paths),
+        Parsed::Usage => {
+            print_usage();
+            process::exit(0);
+        }
+        Parsed::Error(message) => {
+            eprintln!("{message}");
+            process::exit(1);
+        }
+    };
 
     if paths.is_empty() {
         eprintln!("error: no paths specified");
@@ -580,6 +610,68 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── the command line, now reachable ──
+
+    fn argv(words: &[&str]) -> Vec<String> {
+        std::iter::once("sanitize".to_string())
+            .chain(words.iter().map(|w| (*w).to_string()))
+            .collect()
+    }
+
+    /// The destructive case. Before the refusal, this set no dry-run flag,
+    /// added `--dry-runn` as a path, and renamed everything under `docs`.
+    #[test]
+    fn a_mistyped_flag_is_refused_and_never_becomes_a_path() {
+        match parse_args(&argv(&["--dry-runn", "docs"])) {
+            Parsed::Error(msg) => {
+                assert!(msg.contains("unrecognized option"), "{msg}");
+                assert!(msg.contains("--dry-runn"), "{msg}");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_correct_flag_still_sets_dry_run() {
+        match parse_args(&argv(&["--dry-run", "docs"])) {
+            Parsed::Run(config, paths) => {
+                assert!(config.dry_run);
+                assert_eq!(paths, vec!["docs"]);
+            }
+            other => panic!("expected a run, got {other:?}"),
+        }
+    }
+
+    /// This program exists to rename awkward names, so it must be able to
+    /// accept one that begins with a dash.
+    #[test]
+    fn double_dash_hands_over_a_dashed_filename() {
+        match parse_args(&argv(&["--", "-n", "--dry-run"])) {
+            Parsed::Run(config, paths) => {
+                assert!(!config.dry_run, "words after -- are names, not flags");
+                assert_eq!(paths, vec!["-n", "--dry-run"]);
+            }
+            other => panic!("expected a run, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn help_is_a_request_not_an_error() {
+        assert!(matches!(parse_args(&argv(&["--help"])), Parsed::Usage));
+    }
+
+    #[test]
+    fn a_bad_mode_and_a_missing_value_are_both_refused() {
+        assert!(matches!(
+            parse_args(&argv(&["--mode", "sideways", "d"])),
+            Parsed::Error(_)
+        ));
+        assert!(matches!(
+            parse_args(&argv(&["--max-len"])),
+            Parsed::Error(_)
+        ));
+    }
 
     /// The crash this crate shipped with. `String::truncate` and `&s[..n]`
     /// panic when `n` is not a UTF-8 character boundary, and this program

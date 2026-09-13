@@ -140538,7 +140538,62 @@ It now polls `/proc/2/stat` until the state is `S`, using the `read` builtin so
 it forks **nothing** -- a forked `awk` would take PID 3 and could itself be
 caught in the listing it is preparing.
 
-## B-SEVENTY-PROGRAMS-ACCEPT-AN-OPTION-THEY-DO-NOT-HAVE-AND-EXIT-ZERO (lane B, 2026-09-12) -- CLOSED for lane B 2026-09-13
+## B-SEVENTY-PROGRAMS-ACCEPT-AN-OPTION-THEY-DO-NOT-HAVE-AND-EXIT-ZERO (lane B, 2026-09-12) -- REOPENED 2026-09-13, then closed again with a second probe
+
+### REOPENED 2026-09-13: the 0-accepting figure was measured by a probe that cannot see half the class
+
+The count below was true of what it measured and the measurement was too
+narrow. The sweep runs `<prog> --zzq-not-an-option` **with no other
+arguments**, and reads the exit code. That cannot distinguish
+
+    the program rejected the option            (what we want to know)
+    the program ignored the option and then
+      failed its own missing-operand check     (what also exits 1)
+
+Nine programs were in the second group and read as refusing. They printed
+"unknown option: X" from inside the argument loop and *kept parsing*, so the
+refusal only ever appeared when the bad option was the sole argument. Add an
+operand and it evaporates:
+
+    $ cgcreate --zzq-not-an-option -g cpu:/zzqproceed
+    cgcreate: unknown option: --zzq-not-an-option
+    cgcreate: created /sys/fs/cgroup/zzqproceed
+    $ echo $?
+    0
+
+The diagnostic is printed AFTER the work. Two more said nothing at all --
+`lscgroup --zzq-not-an-option` produced output byte-identical to `lscgroup`,
+exit 0 -- and `lssubsys` hid the other way round, exiting 1 because
+/proc/cgroups does not exist on the dev host rather than because it rejected
+anything. Same false reading from opposite causes.
+
+**The distinguishing probe is the option PLUS valid work.** A one-argument
+probe measures "this command refuses something", not "this command refuses
+this option", and those come apart exactly when the command has work it could
+otherwise do -- which is every case that matters.
+
+Found statically instead, by looking for unknown-option diagnostics with no
+stop in the same block: 122 such diagnostics in lane B's tree, 11 without a
+stop, 6 of them real. The other 5 are correct as written (three are match arms
+whose tail expression IS the exit code; one is `getopt(1)` deliberately
+accumulating a flag so it can report every bad option rather than the first;
+one has its `return 1` one block further out than the detector looked).
+
+Fixed 2026-09-13: cgcreate, cgdelete, cgset, cgget, cgclassify, lscgroup,
+lssubsys (`7dd5c80ec`), wipefs and blkdiscard (`a2cb51758`), fuser,
+inotifywait, inotifywatch and udisksd (`c142fa0d0`). All re-probed with an
+operand present. `cgexec` was deliberately left alone: everything after its
+options is the command to run, so `cgexec -g cpu:/x ls --colour` must pass
+`--colour` through, and its catch-all arm is a correct end-of-options marker.
+
+The two data-destruction cases are the ones to remember the class by. `wipefs`
+and `blkdiscard` both printed the refusal and then operated on the device --
+an argument the program did not understand is precisely the moment not to
+proceed.
+
+### The original close, which stands for what it measured
+
+
 
 **Closed 2026-09-13, tree-wide.** The sweep reports **0 accepting** and 555
 refusing, against 510 refusing and 44 accepting when this pass began.
@@ -141146,7 +141201,43 @@ length names, NUL padding, and a buffer holding several events.
 defect is worse than the ones already fixed today; the implementation is
 more than a single change.
 
-## B-PROGRAMS-THAT-INVENT-THEIR-OUTPUT (lane B, 2026-09-12) -- 11 found, 10 fixed, 1 filed
+## B-PROGRAMS-THAT-INVENT-THEIR-OUTPUT (lane B, 2026-09-12) -- 14 found, 13 fixed, 1 filed
+
+### Three more found 2026-09-13, all in `userspace/wipefs`, all destructive
+
+Found by accident: a probe for a different class (an unknown option that does
+not stop) printed a signature table for a file that could not have one. The
+class detector never ran on this crate, which is worth noting -- the sweep that
+produced the 11 below probes BEHAVIOUR, and these three only show up if you
+look at what the program did to the device rather than at what it printed.
+
+| program | what it invented | fate |
+|---|---|---|
+| `wipefs` | an ext4 signature at 0x438 and a DOS partition table at 0x1fe, for any device with no real signatures | `generate_default_sigs` deleted (`43d4bf7f9`) |
+| `wipefs -a` | "ext4 wiped at offset 0x438" without ever opening the device | writes zeros over the magic and `sync_all`s (`ed1efd233`) |
+| `blkdiscard` | "discard entire device from X at offset 0", never touching the device | `--zeroout` implemented; discard/secure refuse, naming the missing ioctl (`9f7a85397`) |
+
+The first was measured on a **sixteen-byte file**, reported as carrying both
+signatures -- one of them at an offset past the end of the file. The fabricated
+ext4 row was even distinguishable from a real one: the genuine signature table
+calls it `ext2/ext3/ext4` and the invented row said `ext4`.
+
+`test_generate_default_sigs` asserted the fabrication was exactly two rows
+named ext4 and dos, so the suite would have caught anyone REMOVING it. That is
+the second time in this lane a test has pinned an invention in place (the
+first was systemctl's thirteen).
+
+Two further defects in the same crate, same reading but not fabrication:
+
+* an unreadable device returned the same empty result as a clean one, so
+  `wipefs /dev/does-not-exist` printed a header and exited 0;
+* `blkdiscard -o notanumber` silently became offset 0 -- the START of the
+  device -- and `-l notanumber` silently became ENTIRE DEVICE. Both typos
+  failed in the direction of destroying more.
+
+### The original eleven
+
+
 
 A class, not a bug. A program prints something shaped like a measurement,
 an action or an event, and the value did not come from the system. It is

@@ -48,7 +48,7 @@
 //! (`loginctl unlock-session`, which systemd gates with polkit), and a screen
 //! lock that could call it would not be a lock.
 
-use crate::Daemon;
+use crate::{CreateSessionParams, Daemon, SessionClass, SessionType};
 use libservicebus::{Credentials, Message, fields};
 
 /// The well-known name logind registers on the service registry.
@@ -211,6 +211,7 @@ pub fn dispatch(
     caller: Option<Credentials>,
 ) -> Reply {
     match member {
+        "CreateSession" => create_session(daemon, payload, caller),
         "ListSessions" => list_sessions(daemon, caller),
         "GetSession" => one_arg(payload, |id| get_session(daemon, id, caller)),
         "LockSession" => one_arg(payload, |id| lock_session(daemon, id, caller)),
@@ -361,6 +362,89 @@ fn authenticate_session(daemon: &mut Daemon, payload: &[u8], caller: Option<Cred
 }
 
 /// `SetIdleHint(id, "0"|"1", timestamp)`
+/// `CreateSession` -- the method that was missing, and the reason every other
+/// method here answered about an empty world.
+///
+/// `Daemon::create_session` has been implemented and tested all along; nothing
+/// could reach it. `logind` served seven methods and every one of them was
+/// read-or-modify, so no message could add a session, and `ListSessions`
+/// returned nothing because nothing existed rather than because nobody was
+/// logged in. See known-issues.md ->
+/// B-LOGIND-IMPLEMENTS-THE-WRITE-SIDE-AND-EXPOSES-NONE-OF-IT.
+///
+/// **Administrator only.** Registering a user's session is what a login
+/// service does on their behalf; it is not something a user does for
+/// themselves, and a caller able to mint sessions for any uid could
+/// impersonate one. `Required::Administrator` is checked before anything is
+/// decoded, so an unprivileged caller cannot use argument validation as an
+/// oracle either.
+///
+/// Twelve arguments, in the declaration order of `CreateSessionParams`:
+/// uid, user, type, class, seat, vtnr, tty, remote, remote-host, service,
+/// desktop, leader-pid. Numbers are decimal text and `remote` is `0` or `1`,
+/// both matching `SetIdleHint`.
+///
+/// Returns the new session id, which the caller needs for every subsequent
+/// call and cannot predict.
+fn create_session(daemon: &mut Daemon, payload: &[u8], caller: Option<Credentials>) -> Reply {
+    // Before decoding, not after: the session id argument is unused at
+    // Administrator level, and checking first keeps a rejected caller from
+    // learning anything from which argument was faulted.
+    if let Err(e) = authorize(daemon, "", caller, Required::Administrator) {
+        return Reply::Error(e);
+    }
+
+    let Some(args) = fields::decode_exact(payload, 12) else {
+        return Reply::Error(ERR_INVALID_ARGUMENTS);
+    };
+    let text = |i: usize| args.get(i).and_then(|b| core::str::from_utf8(b).ok());
+    let (Some(uid), Some(user), Some(ty), Some(class), Some(seat), Some(vtnr)) = (
+        text(0).and_then(|s| s.parse::<u32>().ok()),
+        text(1),
+        text(2),
+        text(3),
+        text(4),
+        text(5).and_then(|s| s.parse::<u32>().ok()),
+    ) else {
+        return Reply::Error(ERR_INVALID_ARGUMENTS);
+    };
+    let (Some(tty), Some(remote), Some(remote_host), Some(service), Some(desktop), Some(pid)) = (
+        text(6),
+        args.get(7).and_then(|b| match *b {
+            b"0" => Some(false),
+            b"1" => Some(true),
+            _ => None,
+        }),
+        text(8),
+        text(9),
+        text(10),
+        text(11).and_then(|s| s.parse::<u32>().ok()),
+    ) else {
+        return Reply::Error(ERR_INVALID_ARGUMENTS);
+    };
+
+    let params = CreateSessionParams {
+        uid,
+        user,
+        session_type: SessionType::from_str(ty),
+        class: SessionClass::from_str(class),
+        seat_id: seat,
+        vt_nr: vtnr,
+        tty,
+        remote,
+        remote_host,
+        service,
+        desktop,
+        leader_pid: pid,
+    };
+    match daemon.create_session(params) {
+        Ok(id) => Reply::Return(fields::encode(&[id.as_bytes()])),
+        // The only failure `create_session` reports is the session cap, and
+        // its own message is better than a generic one.
+        Err(e) => Reply::Error(e),
+    }
+}
+
 fn set_idle_hint(daemon: &mut Daemon, payload: &[u8], caller: Option<Credentials>) -> Reply {
     let Some(args) = fields::decode_exact(payload, 3) else {
         return Reply::Error(ERR_INVALID_ARGUMENTS);
@@ -475,6 +559,99 @@ mod tests {
 
     fn call(d: &mut Daemon, member: &str, args: &[&[u8]], who: Option<Credentials>) -> Reply {
         dispatch(d, member, &fields::encode(args), who)
+    }
+
+    // -- CreateSession ----------------------------------------------------
+
+    /// The twelve arguments in order, for the tests below to vary one at a
+    /// time. uid, user, type, class, seat, vtnr, tty, remote, remote-host,
+    /// service, desktop, leader-pid.
+    fn create_args() -> Vec<&'static [u8]> {
+        vec![
+            b"1000", b"alice", b"tty", b"user", b"seat0", b"3", b"tty3", b"0", b"", b"login", b"",
+            b"4242",
+        ]
+    }
+
+    #[test]
+    fn create_session_adds_a_session_and_returns_its_id() {
+        let mut d = Daemon::new(DaemonConfig::default());
+        assert!(d.sessions.is_empty(), "starts empty");
+
+        let reply = call(&mut d, "CreateSession", &create_args(), Some(creds(0)));
+        assert!(!reply.is_error(), "root was refused: {reply:?}");
+        let Reply::Return(body) = reply else {
+            panic!("no id returned");
+        };
+        let id = fields::decode_exact(&body, 1).expect("one field")[0].to_vec();
+        let id = String::from_utf8(id).expect("logind mints decimal ids");
+
+        // Every field arrived, not merely the ones the id depends on.
+        let s = &d.sessions[&id];
+        assert_eq!(s.uid, 1000);
+        assert_eq!(s.user, "alice");
+        assert_eq!(s.session_type, SessionType::Tty);
+        assert_eq!(s.class, SessionClass::User);
+        assert_eq!(s.vt_nr, 3);
+        assert_eq!(s.tty, "tty3");
+        assert!(!s.remote);
+        assert_eq!(s.service, "login");
+        assert_eq!(s.leader_pid, 4242);
+
+        // And the read side can now see it, which is the whole point.
+        let listed = call(&mut d, "ListSessions", &[], Some(creds(0)));
+        assert!(!listed.is_error());
+        assert!(!call(&mut d, "GetSession", &[id.as_bytes()], Some(creds(1000))).is_error());
+    }
+
+    /// Creating a session is an administrator action. A caller who could mint
+    /// one for any uid could impersonate that user to every other method
+    /// here, so this is the security property of the method and not a
+    /// nicety.
+    #[test]
+    fn only_root_may_create_a_session() {
+        let mut d = Daemon::new(DaemonConfig::default());
+        let denied = call(&mut d, "CreateSession", &create_args(), Some(creds(1000)));
+        assert!(denied.is_error(), "an ordinary user created a session");
+        assert!(d.sessions.is_empty(), "a refused call still created one");
+
+        // Including for their own uid: the argument says 1000 and so does the
+        // caller, and it is still refused.
+        let unknown = call(&mut d, "CreateSession", &create_args(), None);
+        assert!(
+            unknown.is_error(),
+            "an unidentified caller created a session"
+        );
+        assert!(d.sessions.is_empty());
+    }
+
+    #[test]
+    fn create_session_rejects_a_malformed_argument_list() {
+        let mut d = Daemon::new(DaemonConfig::default());
+        // Too few.
+        assert!(call(&mut d, "CreateSession", &[b"1000"], Some(creds(0))).is_error());
+        // A uid that is not a number, and a `remote` that is not 0 or 1.
+        for (i, bad) in [(0usize, &b"root"[..]), (7, &b"yes"[..]), (5, &b"-1"[..])] {
+            let mut args = create_args();
+            args[i] = bad;
+            assert!(
+                call(&mut d, "CreateSession", &args, Some(creds(0))).is_error(),
+                "argument {i} = {bad:?} was accepted"
+            );
+        }
+        assert!(d.sessions.is_empty(), "a rejected call created a session");
+    }
+
+    #[test]
+    fn create_session_honours_the_session_cap() {
+        let mut d = Daemon::new(DaemonConfig {
+            max_sessions: 1,
+            ..DaemonConfig::default()
+        });
+        assert!(!call(&mut d, "CreateSession", &create_args(), Some(creds(0))).is_error());
+        let over = call(&mut d, "CreateSession", &create_args(), Some(creds(0)));
+        assert!(over.is_error(), "the cap was not enforced over the bus");
+        assert_eq!(d.sessions.len(), 1);
     }
 
     // -- the unidentified caller ------------------------------------------

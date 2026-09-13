@@ -770,7 +770,7 @@ mod tests {
             );
             assert!(
                 found[0].ratio >= 4.5,
-                "`{name}` is back under the floor at {:.2}:1;                  TD-C-TEXT-ON-THE-LIGHT-THEMES-TWO-PALEST-SURFACES has reopened",
+                "`{name}` is back under the floor at {:.2}:1; TD-C-TEXT-ON-THE-LIGHT-THEMES-TWO-PALEST-SURFACES has reopened",
                 found[0].ratio
             );
         }

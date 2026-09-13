@@ -5797,7 +5797,7 @@ mod tests {
                         .rposition(|(t, r)| Some(*t) == hit && r.contains(cx, cy));
                     assert!(
                         reached.is_some_and(|j| j >= i),
-                        "{name}: a click on {target:?} at {size:?} reached {hit:?},                          which was painted under it"
+                        "{name}: a click on {target:?} at {size:?} reached {hit:?}, which was painted under it"
                     );
                 }
             }

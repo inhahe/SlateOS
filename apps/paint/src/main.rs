@@ -6343,7 +6343,7 @@ mod tests {
                 assert_eq!(
                     (got_x, got_y),
                     (cx, cy),
-                    "at zoom {zoom} scroll ({sx}, {sy}), the click at ({wx}, {wy})                      resolved to ({got_x}, {got_y}) rather than ({cx}, {cy})"
+                    "at zoom {zoom} scroll ({sx}, {sy}), the click at ({wx}, {wy}) resolved to ({got_x}, {got_y}) rather than ({cx}, {cy})"
                 );
             }
         }
@@ -6527,7 +6527,7 @@ mod tests {
         let worst = 2 * r * r;
         assert!(
             worst < i64::from(i32::MAX),
-            "a {MAX_CANVAS_DIMENSION}px canvas forms {worst}, over i32::MAX;              the rasterizer's arithmetic_side_effects suppressions no longer hold"
+            "a {MAX_CANVAS_DIMENSION}px canvas forms {worst}, over i32::MAX; the rasterizer's arithmetic_side_effects suppressions no longer hold"
         );
     }
 

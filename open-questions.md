@@ -1270,6 +1270,69 @@ arrow on the development host, which is also what makes the current state easy
 to miss. Three settings stay inert — `cursor_size`, `cursor_scheme` and the
 whole `CursorShape` vocabulary — and every accessibility question about pointer
 size stays unanswerable. Nothing degrades with time; it simply does not exist.
+## C-Q19 — [C] An event you coloured like your accent is invisible on today's date. Whose colour wins? — Status: OPEN
+
+**In short:** every calendar event can carry a colour you pick, and the month
+grid marks the event's day with a small dot in it. Today's date is drawn as a
+filled circle in your accent colour. Pick an event colour close to your accent
+and the dot lands on that circle and vanishes — the event is still there, the
+mark saying so is not. It affects one cell in forty-two, only when you chose a
+colour, and only when that colour is near your accent. The question is whether
+the system may quietly darken *your* colour to keep it visible.
+
+**Where it bites:** `gui/desktop/src/calendar.rs`, `render_day_cell`.
+
+**Why this is being asked now rather than in August**, when it was first
+noticed and filed as
+`known-issues.md` → `TD-C-A-USER-CHOSEN-EVENT-COLOUR-CAN-VANISH-INTO-THE-TODAY-DISC`:
+the option that was least attractive then is cheap now. `appearance::legible_on`
+landed on 2026-09-12 and does exactly one thing — move a colour the smallest
+distance that clears the 4.5:1 floor, and nothing at all when it already does.
+It **preserves hue**: green becomes `#245A18`, blue stays `#0036A3`. So option
+C below is no longer "invent a darkening rule", it is one call.
+
+**And there is an argument on record against it**, written at the call site
+when the current behaviour was chosen: *"An event the user coloured keeps that
+colour everywhere, even on today's disc: it is their data and the calendar
+does not get to overrule it."* That principle is applied elsewhere in this
+lane and was applied twice on 2026-09-13 — `apps/whiteboard`'s stroke colours
+and `apps/screenshot`'s annotations are both left unfloored because they are
+the user's drawing, not the theme's. This entry is the one place where the
+same principle produces something the user cannot see.
+
+**The options**
+
+**A. Leave it. The colour you picked is drawn, always.**
+*What changes:* nothing. An event coloured like your accent has no visible
+mark on today's date.
+For: your data is never altered, and the principle stays simple enough to
+state in one line. Against: the one case it costs is the case where the mark
+exists to be seen.
+
+**B. Draw a thin ring around every coloured dot.**
+*What changes:* every event dot in the grid gains a one-pixel outline in the
+cell's own background colour, today's or not.
+For: no colour is ever altered, and it fixes the general problem rather than
+today's instance. Against: it changes the look of all forty-two cells to solve
+one, and a ring on a six-pixel dot is most of the dot.
+
+**C. Darken or lighten the dot only when it would otherwise be invisible.**
+*What changes:* a dot whose colour is near your accent shifts far enough to be
+seen, on today's cell only. Every other dot is untouched, including the same
+colour on any other day.
+For: one call to the mechanism the rest of the theme already uses, and it is a
+no-op for nearly every colour. Against: it is still the system changing a
+colour you chose, which is the thing A exists to refuse.
+
+**My recommendation: C**, but weakly, and I nearly implemented it without
+asking — the call-site comment is what stopped me. The reason to prefer it is
+that a mark you cannot see is not a smaller failure than a colour shifted by a
+shade. The reason to hesitate is that **A is the rule this lane follows
+everywhere else**, and an exception needs to be worth the inconsistency.
+
+**If it is never answered:** nothing degrades. The event is still in the day's
+detail card, whose colour bar sits on `mantle` and is unaffected, so the
+information is reachable — just not from the grid.
 ## B-Q9 — [B] We wrote our own copy of a shell because we could not build the original. We can now. Keep the copy, or switch to the original? — Status: OPEN
 
 **In short:** the *shell* is the program that runs the commands you type. SlateOS

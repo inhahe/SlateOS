@@ -3859,14 +3859,14 @@ mod tests {
         let twice = 1.0 - (1.0 - alpha(0.0165)) * (1.0 - alpha(0.0165));
         assert!(
             (once - twice).abs() < 1e-5,
-            "one 33ms step eased {once} and two 16.5ms steps eased {twice};              the easing is not a rate"
+            "one 33ms step eased {once} and two 16.5ms steps eased {twice}; the easing is not a rate"
         );
 
         // And the constant is the one that reproduces the old look: 0.4 of the
         // way in a 33ms tick, which is what the per-call blend did.
         assert!(
             (alpha(TICK_SECS) - 0.4).abs() < 0.005,
-            "at the player's own tick rate the easing is {}, not the 0.4 the              blend it replaced used",
+            "at the player's own tick rate the easing is {}, not the 0.4 the blend it replaced used",
             alpha(TICK_SECS)
         );
     }

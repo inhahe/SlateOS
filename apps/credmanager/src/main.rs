@@ -8577,7 +8577,7 @@ mod tests {
             .expect("Settings straddles the right edge at 700px");
         assert!(
             straddling.right() <= 700.0 + 0.01,
-            "the visible part of a straddling button must stop at the window              edge, not run past it to {}",
+            "the visible part of a straddling button must stop at the window edge, not run past it to {}",
             straddling.right()
         );
     }
@@ -9175,7 +9175,7 @@ mod tests {
         assert_eq!(
             state.vault.entries.len(),
             before,
-            "a credential whose name is blank is one the list cannot show and              the user cannot find again"
+            "a credential whose name is blank is one the list cannot show and the user cannot find again"
         );
     }
 
@@ -9188,7 +9188,7 @@ mod tests {
         let id = state.selected_entry_id.expect("selected");
         assert!(
             state.filtered_ids.contains(&id),
-            "the list is rebuilt from the vault, so it has to be rebuilt when              the vault gains an entry"
+            "the list is rebuilt from the vault, so it has to be rebuilt when the vault gains an entry"
         );
     }
 
@@ -9201,7 +9201,7 @@ mod tests {
         assert_eq!(
             state.new_entry.as_ref().map(|f| f.value(0)),
             Some("typed"),
-            "an out-of-range focus must not move the cursor somewhere there              is no field to receive it"
+            "an out-of-range focus must not move the cursor somewhere there is no field to receive it"
         );
     }
 
@@ -9228,7 +9228,7 @@ mod tests {
         assert_eq!(
             state.vault.entries.len(),
             before + 1,
-            "a form that cannot be finished from the keyboard needs the mouse              for its last step"
+            "a form that cannot be finished from the keyboard needs the mouse for its last step"
         );
     }
 
@@ -9246,7 +9246,7 @@ mod tests {
             .collect();
         assert!(
             !copies.is_empty(),
-            "every field's Copy button was painted and none of them              registered a hit box"
+            "every field's Copy button was painted and none of them registered a hit box"
         );
         // And each one is reachable at its own rectangle.
         for (target, rect) in frame.hits() {
@@ -9270,7 +9270,7 @@ mod tests {
         assert_eq!(
             state.clipboard.content.as_deref(),
             Some("hunter2"),
-            "a copy stamped with zero is one the auto-clear thinks is already              ancient"
+            "a copy stamped with zero is one the auto-clear thinks is already ancient"
         );
     }
 
@@ -9281,7 +9281,7 @@ mod tests {
         state.selected_entry_id = None;
         assert!(
             copyable_fields(&state).is_empty(),
-            "with nothing selected there is no field to copy, whatever ids              happen to exist in the vault"
+            "with nothing selected there is no field to copy, whatever ids happen to exist in the vault"
         );
         assert_eq!(
             press(&mut state, Target::CopyField(0)),

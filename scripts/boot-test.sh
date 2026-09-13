@@ -6010,6 +6010,34 @@ check_lane_c_gui_gates() {
         return 1
     fi
 
+    # A message that prints with a gap in the middle of its sentence, at the
+    # moment somebody is reading a failure quickly. `rustfmt` joins a line
+    # continuation and leaves the indentation inside the literal; nothing
+    # warns, because the result is a perfectly valid string.
+    #
+    # Cheap enough to sit here -- 0.7 s over 382 files -- and it decides by
+    # POSITION: only a literal that is an argument to an assertion macro. The
+    # first attempt matched four-or-more spaces inside any string, which is a
+    # rule about shape, and it rewrote a screenshot app's column-aligned
+    # shortcut list and a JSON fixture's indentation. Three of its five
+    # self-test fixtures are those false positives.
+    if ! run_checker collapsed-messages-selftest "$py" "$PROJECT_ROOT/scripts/check-collapsed-messages.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The collapsed-message rule no longer" >&2
+        echo "agrees with its own fixtures, three of which are strings whose" >&2
+        echo "runs of spaces are the content and must not be touched." >&2
+        return 1
+    fi
+
+    echo "=== Checking that no assertion message has a collapsed continuation ==="
+    if ! run_checker collapsed-messages "$py" "$PROJECT_ROOT/scripts/check-collapsed-messages.py"; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  Each message above prints with a gap" >&2
+        echo "in the middle of a sentence.  Repair them with:" >&2
+        echo "    python scripts/check-collapsed-messages.py --apply" >&2
+        return 1
+    fi
+
     # And the other half of the same question. `check-overlay0-ink.py` below
     # asks whether text is drawn in the *disabled* grey; this asks whether an
     # accent-family role reaches a text site without going through `ink()`,
@@ -6077,6 +6105,34 @@ check_lane_c_gui_gates() {
         echo "floor -- unreadable, and it will render and test perfectly." >&2
         echo "WCAG exempts *disabled* controls so that off can look off; it does" >&2
         echo "not exempt a heading.  Live text belongs in \`subtext0\` (9.58:1)." >&2
+        return 1
+    fi
+
+    # The tech-debt index, which is a machine interface whether or not anyone
+    # meant it to be: every triage figure quoted in this project comes out of
+    # a grep on `known-issues.md`'s headings. Two shapes have already made one
+    # of those figures wrong -- a lowercase `-- fixed` marker that a
+    # case-sensitive grep counts as open, and a closed entry quoting its own
+    # original text under a second `##` heading, so every count sees it twice.
+    # Neither is visible by reading; both are one regex to refuse.
+    if ! run_checker known-issues-index-selftest "$py" \
+        "$PROJECT_ROOT/scripts/check-known-issues-index.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The known-issues index gate no longer" >&2
+        echo "agrees with its own fixtures, so its verdict on the file means" >&2
+        echo "nothing.  An anchored regex that lost its MULTILINE flag matched" >&2
+        echo "zero of 223 headings once already." >&2
+        return 1
+    fi
+
+    echo "=== Checking that the tech-debt index can still be counted ==="
+    if ! run_checker known-issues-index "$py" \
+        "$PROJECT_ROOT/scripts/check-known-issues-index.py"; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  A heading above breaks the contract" >&2
+        echo "every triage grep depends on: either two entries share a slug, so" >&2
+        echo "each is counted twice, or a status marker is lowercase, so a" >&2
+        echo "case-sensitive grep counts a closed entry as open." >&2
         return 1
     fi
 

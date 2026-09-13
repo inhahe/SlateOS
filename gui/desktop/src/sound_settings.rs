@@ -2156,7 +2156,7 @@ mod tests {
                     assert_eq!(
                         *track,
                         p.painted(appearance::Surface::ControlTrack),
-                        "the {what} bar {i}'s track is not the control track                          (light={light})"
+                        "the {what} bar {i}'s track is not the control track (light={light})"
                     );
                 }
             }

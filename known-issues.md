@@ -3,7 +3,15 @@
 Bugs and technical debt. **Fixed entries move to `known-issues-resolved.md`**
 once the fix has survived a full boot test on `main`, so this file stays a list
 of what is *still* wrong; until then they stay here carrying a
-`**Status: FIXED**` stamp. Nothing is ever deleted — the archive keeps each
+`**Status: FIXED**` stamp.
+
+**Write the stamp in capitals.** On 2026-09-13 five lane-C entries carried a
+lowercase `fixed` or a `DONE` buried in a sentence, and a triage grep for
+`FIXED|RESOLVED|CLOSED` therefore counted them among the open work — 39 where
+34 was the truth. One of them was then picked up as "the best next task" and
+turned out to have been finished three weeks earlier. A marker that is only
+sometimes machine-readable is worse than none, because it is the *readable*
+ones that get filtered out and the rest that get worked. Nothing is ever deleted — the archive keeps each
 entry's full text and commit hashes. **The migration is incremental, so grep
 both files** (as of 2026-08-16 all three lanes' resolved entries are archived,
 bar a handful fixed that same day and still awaiting a boot test on `main`).
@@ -38521,7 +38529,7 @@ same day: `Server::run_with` now polls `Compositor::input_settings` and pushes
 any change through `Present::reload_input` into the device —
 `design-decisions.md` §548.)*
 
-## TD-C-A-POINTER-SPEED-CHANGE-DOES-NOT-REACH-THE-POINTER (lane C, 2026-08-24) — **fixed 2026-08-24**
+## TD-C-A-POINTER-SPEED-CHANGE-DOES-NOT-REACH-THE-POINTER (lane C, 2026-08-24) — FIXED 2026-08-24
 
 **In short:** the Settings → Mouse page can change the pointer speed, the
 acceleration profile, the button mapping and the key-repeat rate, and the file
@@ -55760,8 +55768,18 @@ the compositor currently has no way to tell a trusted shell apart from an
 ordinary application.
 
 **Where:** `gui/compositor/src/wire.rs` — `ClientLink::answer_requests`
-intercepts `RequestBody::SubscribeWindowList` and calls
-`set_window_list_subscription` unconditionally. `gui/remote/src/control.rs` —
+intercepts `RequestBody::SubscribeWindowList` and grants the subscription.
+
+**Corrected 2026-09-13: it is no longer *unconditional*, and the difference
+matters for whoever picks this up.** The grant now runs through
+`link.require_shell()` — one of sixteen call sites of the single privilege
+seam — and refuses with that function's `Err` when it ever returns one. So the
+plumbing this entry asks for is in place; what is missing is only the
+capability that would make `require_shell` answer. That function's own doc
+says as much, and says why a check written today against a client-supplied
+value would be worse than none. The remaining work is in the kernel, not here,
+and the fix when it lands is a body in `require_shell` rather than an edit at
+this call site. `gui/remote/src/control.rs` —
 the request itself. `gui/compositor/src/lib.rs` — `Compositor::window_list`,
 which returns the whole desktop by design (see below).
 
@@ -55830,7 +55848,7 @@ unreachable (`TD-C-THREE-SETTINGS-PAGES-ARE-BUILT-AND-REACHED-BY-NOTHING`), so
 the design exists and nothing reads it. It is retained for that reason: it is
 the only statement in the tree of what the gate should ask.
 
-## TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE — PART 1 DONE 2026-08-22, PART 2 DONE 2026-08-24
+## TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE — FIXED 2026-08-24 (part 1 2026-08-22, part 2 2026-08-24)
 
 **Status, 2026-08-22.** Part 1 below is **done**: `appearance::Palette` exists,
 carries the light ladder as well as the dark one, and `DecorationColors` and
@@ -73872,7 +73890,7 @@ The original entry follows.
 
 ---
 
-## TD-B-GETOPT-HAS-NO-DRIVER-FOR-OPTIONS-THAT-TAKE-VALUES (original entry, lane B, 2026-08-22)
+**TD-B-GETOPT-HAS-NO-DRIVER-FOR-OPTIONS-THAT-TAKE-VALUES** — as originally filed (lane B, 2026-08-22):
 
 **In short:** Our command-line tools share a helper that produces the *error
 messages* for bad options ("invalid option -- 'q'"). It does not do the actual
@@ -74744,6 +74762,28 @@ the disc's own brightness, and `p.lavender` is only ever drawn on the card. The
 **Why it is filed rather than fixed:** the three available answers are each
 defensible and each visible to the user, so this is a design choice, not an
 oversight to patch.
+
+**2026-09-13: now in the operator's queue as `open-questions.md` → C-Q19, and
+the reason it moved is that one option got cheap.** `appearance::legible_on`
+landed on 2026-09-12: it moves a colour the smallest distance that clears
+4.5:1, does nothing when it already does, and preserves hue. So "nudge the
+brightness" is no longer a rule somebody has to invent, it is one call.
+
+**I started implementing it and stopped at the call site's own comment**,
+which says *"An event the user coloured keeps that colour everywhere, even on
+today's disc: it is their data and the calendar does not get to overrule it."*
+That is the same principle that left `apps/whiteboard`'s strokes and
+`apps/screenshot`'s annotations unfloored earlier the same day, and overruling
+it here on the strength of a mechanism the decision predates would have been
+inconsistency dressed as progress. The comment is the reason this is a
+question rather than a commit.
+
+**One thing the aborted attempt did leave behind, and it is worth having.** The
+test written for it passed *without* the fix, because the fixture's event never
+landed on the rendered cell and no dot was drawn at all. A negative control --
+assert that a dot exists before asserting anything about its colour -- turned a
+vacuous pass into a loud failure. Whatever is decided here, the test for it
+needs that control first.
 
 | Option | *What changes:* |
 |---|---|
@@ -83457,7 +83497,7 @@ change, but not one that breaks any current caller: no app in the tree routes
 events through `WidgetTree::handle_event` today — they were all doing their own
 key handling, which is itself a sign that this path was not usable.
 
-## TD-C-NO-MODAL-DIALOG-KNOWS-WHERE-IT-IS-WHEN-IT-IS-CLICKED (lane C, 2026-08-24) — **fixed 2026-08-24**
+## TD-C-NO-MODAL-DIALOG-KNOWS-WHERE-IT-IS-WHEN-IT-IS-CLICKED (lane C, 2026-08-24) — FIXED 2026-08-24
 
 `ModalOverlay` has a `content_rect` — the dialog's own rectangle, which
 `handle_mouse` tests a click against to decide whether it landed outside the
@@ -130632,7 +130672,7 @@ stops being free the next time something is added to it.
 
 ### The original entry, for the record
 
-## TD-C-THE-COMPOSITOR-FRAME-BUDGET-HAS-NO-INSTRUMENT
+**TD-C-THE-COMPOSITOR-FRAME-BUDGET-HAS-NO-INSTRUMENT** — as originally filed:
 
 **Date:** 2026-09-11. **Lane:** C. Found by lane A while checking whether the
 border conversion cost anything.
@@ -131281,7 +131321,62 @@ also what Windows does, and what this shortcut is modelled on.
 
 ---
 
-## TD-C-THE-COMPOSE-PATH-HAS-NO-TIMING-GUARD-IN-THE-DEFAULT-RUN
+## TD-C-A-TEST-THAT-WRITES-TO-AN-ABSOLUTE-POSIX-PATH-WRITES-TO-THE-DEV-DRIVE-ROOT
+
+**Date:** 2026-09-13. **Lane:** C filed it; **the fix is lane B's** --
+`userspace/**`, which lane C must not write. Filed to them as
+`requests/c-b-tests-create-real-directories-at-the-drive-root.md`.
+
+**In short:** on this Windows development machine a path beginning with `/` is
+not an absent Linux path, it is a path on whatever drive the tests are running
+from. `/sys/fs/cgroup` means `E:\sys\fs\cgroup`, and a test that creates it
+succeeds. One did, during a workspace run this afternoon, and two `systemctl`
+tests that assert "this machine has no cgroups" then failed on every run
+afterwards -- not intermittently, permanently, until the directory was deleted
+by hand.
+
+**The evidence, because "it was load" is the usual first guess and was wrong
+here:**
+
+| run | result | left `E:\sys` behind? |
+|---|---|---|
+| `cargo test --workspace` | 25 484 passed, **2 failed** | yes |
+| `cargo test -p cgroup` alone | 13 passed | no |
+| `cargo test -p systemctl` alone, after deleting `E:\sys` | **154 passed** | no |
+
+So neither crate's own suite creates it and neither has a logic bug. A third
+crate's tests create the path and these two then fail for everybody.
+
+**It is a family.** `E:\run\firejail\40084.sandbox`, `E:\var\lib\audit\rules.state`
+and `E:\dev\test_dev` all exist on this machine for the same reason, from
+`let _ = fs::create_dir_all("/run/polkit-1")` and six siblings in `polkit`,
+`powerctl` and `udevd`. On the target OS those lines are right. On the dev host
+they are silent writes to the root of the operator's data drive, and the
+discarded `Result` means neither success nor failure is ever reported.
+
+**Why it matters more than the litter does.** The state the test asserts about
+is not state the test controls. "This machine has no cgroups" is an ambient
+fact any test in any crate can falsify from the far side of the workspace, and
+the failure then surfaces in a crate that did not change. Lane C has already
+paid for this shape once, in
+`BUG-C-THE-KEYBOARD-LAYOUT-TEST-FAILS-ABOUT-ONE-WORKSPACE-RUN-IN-TWO`, where a
+test wrote settings outside a scratch directory and a neighbour read them --
+which is what gate 35 now refuses.
+
+**What the proper fix is** (lane B's to make): make the cgroup root injectable
+so the two tests point at a scratch path they own -- the sibling test
+`the_tree_is_the_directories_that_are_actually_there` already uses
+`scratchdir::ScratchDir` and shows the shape -- and fix whichever test creates
+`/sys/fs/cgroup/<name>`. A gate refusing `create_dir_all` on a literal starting
+`/` inside `#[cfg(test)]` would catch the whole family; **lane C has
+deliberately not added one**, because it would refuse lane B's pushes and that
+is their decision to make, not ours.
+
+**Done on the machine, not in any tree:** `E:\sys` was deleted, since it was
+failing two tests and is tracked by no repository. `E:\run`, `E:\var` and
+`E:\dev` were left alone in case something depends on them.
+
+## TD-C-THE-COMPOSE-PATH-HAS-NO-TIMING-GUARD-IN-THE-DEFAULT-RUN -- FIXED 2026-09-13
 
 **Date:** 2026-09-13. **Lane:** C.
 **Where:** `gui/compositor/src/lib.rs` —
@@ -131325,7 +131420,41 @@ scheduled step rather than as part of the correctness run, and diff against
 
 ---
 
-## TD-C-ASSERTION-MESSAGES-CARRY-COLLAPSED-LINE-CONTINUATIONS
+**FIXED 2026-09-13 by the first of those — the default run now carries an
+operation count, `compositor::tests::composing_a_frame_evaluates_no_transfer_
+function`.** It asserts that composing a frame evaluates the sRGB transfer
+function **zero** times.
+
+**Why that is the right quantity, rather than the palette-resolve count this
+entry proposed.** Resolving a palette per blurred window per frame is a
+design choice that may legitimately change, so pinning its count would make a
+future refactor look like a regression. What may *not* change is a resolve
+being expensive — and the specific regression was `contrast_ratio` doing three
+`powf(2.4)` per colour inside the render path. `guitk::theme` precomputes all
+256 channel values once per process, so the correct number of evaluations
+during a frame is not "few", it is zero. Zero has no noise floor, which is
+exactly what the wall-clock ceiling lacked.
+
+**The counter is compiled into every build, not behind `#[cfg(test)]`.** A
+`cfg(test)` counter in `guitk` would see only `guitk`'s own unit tests: the
+compositor, the desktop and the widgets all link the *non-test* build, so the
+latch would sit at zero while the code it guards ran hot — a check reporting
+success over a population it cannot see, which is the same defect this entry
+is about. The cost is 256 relaxed atomic increments per process, once, because
+the instrumented path is cold by construction. Instrumenting the cold path is
+free precisely when the regression you fear is "this path became hot".
+
+**Proved able to fire before being believed.** Reverting `relative_luminance`
+to recompute the curve per call — the original regression's shape — makes the
+new test report **9216** evaluations for one frame of a three-command scene
+(36 luminance calls x 256 channel values) and fail loudly. Three orders of
+magnitude from the asserted zero, on any machine in any mood. The `#[ignore]`d
+wall-clock test stays where it is, for the frame-time figure it still gives
+when run deliberately.
+
+---
+
+## TD-C-ASSERTION-MESSAGES-CARRY-COLLAPSED-LINE-CONTINUATIONS -- FIXED 2026-09-13
 
 **Date:** 2026-09-13. **Lane:** C.
 **Where:** about 60 string literals across ~30 files under `gui/**` and
@@ -131355,6 +131484,28 @@ pass:
   formatting. Excluding runs that follow `
 ` is not enough, because a regex
   for four-or-more spaces also matches starting one space into a six-space run.
+
+**FIXED 2026-09-13, by exactly the rule this entry recommended.**
+`scripts/check-collapsed-messages.py` rewrites a literal only when it is an
+argument to `assert!`, `assert_eq!`, `panic!`, `expect` and their relatives --
+found by walking back from the literal while the paren depth says we are still
+inside a call. **53 messages repaired across 30 files, and zero hits in
+`apps/screenshot`**, the false positive that forced the first attempt back.
+Every one of the 83 changed lines is a string literal; nothing else moved.
+
+It is a gate now, not just a repair: 0.7 s over 382 files, wired into
+`check_lane_c_gui_gates`. Three of its five self-test fixtures are the false
+positives from the reverted attempt -- a shortcut list, a JSON body, a table
+row with alignment specifiers -- so the rule that would rewrite them fails its
+own tests rather than being caught by review a second time.
+
+**The recurring lesson, stated once because it landed three times today.** The
+shape rule and the position rule find almost the same set, and the difference
+is entirely false positives: `check-overlay0-ink.py` asks whether a role is
+the colour *argument* of a text draw rather than whether the word appears
+nearby; `ink-text.py` asks whether a `RenderCommand::Text` is a value or a
+pattern; this asks whether a literal is a message or a layout. In each case
+the shape version was confidently wrong about a population it could not see.
 
 **The proper fix** is to decide by *position*, not by shape: only rewrite a
 literal that is an argument to `assert!`, `assert_eq!`, `panic!` or `expect`.
@@ -132313,7 +132464,7 @@ Converting the ramp themes the board too, which is exactly what C-Q16 has not
 decided -- and hand-slicing it across 43 crates would be making the operator's
 decision forty-three times in private.
 
-## TD-C-FORTY-NINE-COLOUR-METHODS-ARE-INVISIBLE-TO-THE-INK-SWEEP
+## TD-C-FORTY-NINE-COLOUR-METHODS-ARE-INVISIBLE-TO-THE-INK-SWEEP -- FIXED 2026-09-13
 
 **Date:** 2026-09-12. **Lane:** C.
 **Where:** 49 sites across 22 crates; `gui/appearance/ink-text.py --blind`
@@ -132381,6 +132532,37 @@ row look decided. The rule that came out of the shell: **ink at the point where
 every path through it is text.** For `osd::render_icon_text_osd` that is the
 body, because its colour parameter has exactly one use. For a method with arms
 it is the arms, individually, skipping any exempt one.
+
+**FIXED 2026-09-13. `colour-methods.py` now reports no method with a text
+caller that is neither inked at the site nor inked by the body.** The 39 that
+take a palette were done over the intervening day; the last one and the tool's
+own reporting were finished today.
+
+**The last real one was `resmon::Resource::color`, and it is the entry's rule
+in miniature.** The same hue plots a sparkline -- a line, which takes no
+contrast floor and whose test asserts the metric's exact hue appears in the
+plot -- and labels the metric, which does take the floor. Inking the *method*
+floors the graph and breaks that test; inking the *call site* floors both,
+because one binding fed both commands. It needs two bindings: the plot keeps
+the raw hue and the label takes `p.ink` of it. Three tests pinned the label to
+the raw hue and had to follow, exactly as this entry's sibling predicted.
+
+**The other two reports were not findings at all, and the tool said so badly.**
+`privacy_settings::PermissionState::color` and
+`network_settings::WiFiSecurity::color` are both already inked *per arm* --
+the second carries a comment saying so -- and a method that inks internally
+leaves its call sites bare by design. They were reported because both names
+are `color`, `defs` is keyed on `(crate, name)`, and `gui/desktop` has many
+types with a `color` method: inside an ambiguous name the `inked` flag answers
+about whichever definition was seen last.
+
+So those sites now print `CANNOT TELL WHICH METHOD` rather than `NOT INKED`.
+The population is unchanged; what changed is that the tool no longer states a
+verdict it cannot reach. Twenty minutes went into chasing two already-correct
+files before that distinction was made, which is the same cost this entry
+opens by describing: *"the script reported zero for those files and was right
+about the question it asks, which is not the question anyone reading the
+number thinks it is."*
 
 **How urgent.** Low and non-worsening. These sites draw exactly what they drew
 before §837, so nothing regressed; they are simply not yet *improved*, and the
@@ -132478,7 +132660,7 @@ test code, so it flagged `launcher`'s own fixtures.
 colour methods still take no palette at all (`procexplorer`'s two), and threading
 one in is that entry's work, not this one's.
 
-## TD-C-THIRTEEN-LIGHT-ACCENTS-STILL-FAIL-ON-CARDS -- being fixed 2026-09-12, mechanism landed
+## TD-C-THIRTEEN-LIGHT-ACCENTS-STILL-FAIL-ON-CARDS -- FIXED 2026-09-13 (mechanism 2026-09-12, the 315 dual-use sites 2026-09-13)
 
 **Update, 2026-09-12 (lane C).** Answered, and the entry below was wrong in
 three ways worth recording before the correction.
@@ -132628,7 +132810,7 @@ through `ink` would have passed while `p.subtext0` was unreadable.
 
 ### The original entry, for the record
 
-## TD-C-THIRTEEN-LIGHT-ACCENTS-STILL-FAIL-ON-CARDS
+**TD-C-THIRTEEN-LIGHT-ACCENTS-STILL-FAIL-ON-CARDS** — as originally filed:
 
 **Date:** 2026-09-09. **Lane:** C.
 **Where:** `gui/appearance/src/lib.rs` — `LIGHT_LAVENDER` through

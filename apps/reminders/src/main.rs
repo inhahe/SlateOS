@@ -3735,7 +3735,7 @@ mod tests {
         let skew = local - rebuilt;
         assert!(
             (0..120).contains(&skew),
-            "the reading does not convert back to the instant it came from:              off by {skew} s (local {local}, rebuilt {rebuilt}, read {now:?})"
+            "the reading does not convert back to the instant it came from: off by {skew} s (local {local}, rebuilt {rebuilt}, read {now:?})"
         );
     }
 

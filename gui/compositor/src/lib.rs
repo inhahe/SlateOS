@@ -4809,7 +4809,14 @@ impl DecorationTheme {
     /// Resolve the frame colours from the user's settings, packed for the
     /// framebuffer.
     fn from_settings(settings: &AppearanceSettings) -> Self {
-        let colors = appearance::DecorationColors::from_settings(settings);
+        Self::from_settings_with(settings, &appearance::Palette::from_settings(settings))
+    }
+
+    /// [`from_settings`](Self::from_settings) for a caller holding the palette
+    /// these settings resolve to -- which, in this crate, is everyone: the
+    /// compositor caches one in [`Compositor::palette`].
+    fn from_settings_with(settings: &AppearanceSettings, palette: &appearance::Palette) -> Self {
+        let colors = appearance::DecorationColors::from_settings_with(settings, palette);
         Self {
             title_bar_focused: color_to_argb(&colors.title_focused_bg),
             title_bar_unfocused: color_to_argb(&colors.title_unfocused_bg),
@@ -4915,6 +4922,22 @@ pub struct Compositor {
     render_engine: RenderEngine,
     /// Decoration theme.
     theme: DecorationTheme,
+    /// The resolved palette, kept beside [`Compositor::theme`] and for the
+    /// same reason: it is a pure function of `appearance`, so it belongs
+    /// wherever that changes rather than wherever it is read.
+    ///
+    /// It is read by [`blur_behind_window`](Compositor::blur_behind_window),
+    /// which runs per blurred window per frame. Resolving it there is how a
+    /// 4K frame came to take 67 ms instead of 6.9 on 2026-09-11: the 4.5:1
+    /// text floor made `Palette::from_settings` call `contrast_ratio`, which
+    /// was three `powf(2.4)` per colour, and a render loop multiplied it.
+    /// Tabling the sRGB curve took the resolve from 87_395 ns to 273 ns,
+    /// which is why this is not a performance fix -- 273 ns per blurred
+    /// window is already nothing. It is a structural one. A settings struct
+    /// resolved inside a render loop is free only until the next thing is
+    /// added to it, and that is not a property anyone can see from the call
+    /// site.
+    palette: appearance::Palette,
     /// The user's appearance preferences, as far as the compositor can act on
     /// them: how round window corners are and whether windows cast shadows.
     ///
@@ -5141,6 +5164,7 @@ impl Compositor {
             double_click_interval: Duration::from_millis(u64::from(DEFAULT_DOUBLE_CLICK_MS)),
             render_engine: RenderEngine::new(),
             theme: DecorationTheme::default(),
+            palette: appearance::Palette::from_settings(&AppearanceSettings::default()),
             // The defaults, not the user's file: a constructor that read
             // `$HOME` would make every test of this crate depend on the machine
             // running it. `main` loads the file and calls `set_appearance`.
@@ -5197,7 +5221,11 @@ impl Compositor {
         self.appearance = settings;
         // Resolved once here rather than per frame: the packing is arithmetic
         // on eleven colours, and they change only when this is called.
-        self.theme = DecorationTheme::from_settings(&self.appearance);
+        // One resolve, then everything derived from it. Two lines that each
+        // resolved their own palette is what the resolution counter caught the
+        // first time it was asserted on.
+        self.palette = appearance::Palette::from_settings(&self.appearance);
+        self.theme = DecorationTheme::from_settings_with(&self.appearance, &self.palette);
         self.full_recomposite = true;
     }
 
@@ -8554,14 +8582,17 @@ impl Compositor {
         }
         let kind = win.blur_behind;
         let rect = win.frame_rect();
-        let palette = appearance::Palette::from_settings(&self.appearance);
+        // Borrowed, not resolved. See the field: this is a render loop, and
+        // what is cheap to compute here today is only cheap until the next
+        // colour rule is added to `Palette::from_settings`.
+        let palette = &self.palette;
         let effect = match kind {
             BlurKind::None => return,
-            BlurKind::Taskbar => blur::BlurEffect::taskbar(&palette),
-            BlurKind::TitleBar => blur::BlurEffect::title_bar(&palette),
-            BlurKind::Menu => blur::BlurEffect::menu(&palette),
-            BlurKind::Notification => blur::BlurEffect::notification(&palette),
-            BlurKind::Standard => blur::BlurEffect::standard(&palette),
+            BlurKind::Taskbar => blur::BlurEffect::taskbar(palette),
+            BlurKind::TitleBar => blur::BlurEffect::title_bar(palette),
+            BlurKind::Menu => blur::BlurEffect::menu(palette),
+            BlurKind::Notification => blur::BlurEffect::notification(palette),
+            BlurKind::Standard => blur::BlurEffect::standard(palette),
         };
         let Some(fb) = self.backend.as_software_mut() else {
             return;
@@ -10314,6 +10345,163 @@ mod tests {
         assert!(
             frame_us < FRAME_CEILING_US,
             "the fastest of five frames of this trivial scene took {frame_us} us, over the {FRAME_CEILING_US} us ceiling; the measured median when this bound was set was 4_977 us. All five: {samples:?}. Since this is the *minimum*, machine load is not the explanation -- something in the render path has changed by an order of magnitude"
+        );
+    }
+
+    /// The load-independent half of the frame guard: composing a frame must
+    /// not evaluate the sRGB transfer function at all.
+    ///
+    /// **This is the test `the_demo_scene_composites_inside_the_frame_ceiling`
+    /// should have been.** That one is `#[ignore]`d because it measures
+    /// wall-clock time, and two of its three firings were a busy machine
+    /// rather than a regression -- 67_074 us was real, 54_434 and 53_363 were
+    /// contention, and no ceiling separates those. This one asks the same
+    /// question as a count, so the machine's mood cannot answer it.
+    ///
+    /// The regression it replaces the ceiling for is the exact one that fired:
+    /// the 4.5:1 text floor made palette resolution call `contrast_ratio`,
+    /// which was three `powf(2.4)` per colour, and the compositor resolves a
+    /// palette per blurred window per frame. `guitk::theme` now precomputes
+    /// all 256 channel values once, so the correct number of evaluations
+    /// during a frame is not "few" -- it is zero, and zero has no noise floor.
+    ///
+    /// Note what is *not* asserted: how many times the palette is resolved.
+    /// That is now once per appearance change rather than per blurred window
+    /// per frame, and `the_palette_is_resolved_when_it_changes_not_per_frame`
+    /// pins it. The two tests are deliberately separate, because they fail for
+    /// different reasons: this one fails when a colour *decision* moves into
+    /// the render path, whichever function carries it.
+    ///
+    /// **Proved able to fire, rather than assumed to be.** Reverting
+    /// `relative_luminance` to recompute the curve per call -- the shape of
+    /// the original regression -- makes this report **9216** evaluations for
+    /// one frame of this three-command scene. That is 36 luminance calls
+    /// times the 256 channel values, and it is three orders of magnitude from
+    /// the asserted zero on any machine in any mood, which is the whole
+    /// difference between this and the ceiling it replaces.
+    #[test]
+    fn composing_a_frame_evaluates_no_transfer_function() {
+        // Warm first. The table is a `LazyLock`, so whichever test touches
+        // colour first pays its 256 evaluations; measuring across that build
+        // would report 256 and say nothing about the frame.
+        let _ = guitk::theme::relative_luminance(Color::WHITE);
+
+        // NEGATIVE CONTROL, and it is not ceremony. The assertion below is
+        // `delta == 0`, which a counter that is never incremented -- wrong
+        // feature gate, dead `cfg`, a future refactor that drops the
+        // `fetch_add` -- passes perfectly while seeing nothing. Requiring the
+        // total to have *reached* the table size first is what makes the zero
+        // mean "the frame did none" rather than "nobody is counting".
+        let warm = guitk::theme::transfer_function_evaluations();
+        assert!(
+            warm >= 256,
+            "the transfer-function counter reads {warm} after the 256-entry \
+             table was built, so it is not wired to anything and the rest of \
+             this test cannot mean what it says"
+        );
+
+        let mut compositor = Compositor::new(1920, 1080, 60).expect("compositor");
+        let window_id = compositor.create_window("Welcome to Slate OS".to_string(), 640, 480, 1);
+        let mut tree = RenderTree::new();
+        tree.fill_rect(10.0, 10.0, 200.0, 40.0, Color::BLUE);
+        tree.text(
+            20.0,
+            20.0,
+            "Hello from Slate OS Compositor!",
+            Color::WHITE,
+            14.0,
+        );
+        tree.fill_rect(10.0, 60.0, 620.0, 1.0, Color::LIGHT_GRAY);
+        compositor
+            .submit_render(window_id, tree.commands)
+            .expect("submit");
+        assert!(compositor.compose_frame(), "nothing was drawn");
+
+        let after = guitk::theme::transfer_function_evaluations();
+        let delta = after.saturating_sub(warm);
+        assert_eq!(
+            delta, 0,
+            "composing one frame evaluated the sRGB transfer function {delta} \
+             time(s). It is a 256-entry table built once per process, so a \
+             frame should evaluate it zero times -- a non-zero count means a \
+             colour decision has moved into the render path, which is what \
+             took a 4K frame from 6.9 ms to 67 ms on 2026-09-11."
+        );
+    }
+
+    /// The palette is resolved when the appearance changes, not when a frame
+    /// is drawn.
+    ///
+    /// `blur_behind_window` used to call `Palette::from_settings` itself, once
+    /// per blurred window per frame. That is how the 4.5:1 text floor turned a
+    /// 6.9 ms 4K frame into a 67 ms one: the floor added a `contrast_ratio` to
+    /// palette resolution, and a render loop multiplied it. Tabling the sRGB
+    /// curve took the resolve to 273 ns, which closed the incident but left
+    /// the shape -- a settings struct resolved inside a render loop is free
+    /// only until the next rule is added to it, and nothing at the call site
+    /// showed that.
+    ///
+    /// Both halves are asserted, because only the pair says "moved" rather
+    /// than "removed": a frame resolves none, and a *changed* appearance
+    /// resolves one. Deleting the resolve entirely would pass the first
+    /// assertion and fail the second.
+    ///
+    /// The second half found a real duplicate the first time it ran: it read 2
+    /// rather than 1, because `set_appearance` resolved a palette for its own
+    /// cache and `DecorationColors::from_settings` resolved an identical one a
+    /// line later. `from_settings_with` now takes the palette the caller
+    /// already holds. An exact count found that; `<= 2` would not have.
+    #[test]
+    fn the_palette_is_resolved_when_it_changes_not_per_frame() {
+        let mut compositor = Compositor::new(1920, 1080, 60).expect("compositor");
+        let window_id = compositor.create_window_from_spec(
+            &WindowSpec {
+                blur_behind: BlurKind::Standard,
+                ..WindowSpec::new("blurred", 640, 480)
+            },
+            1,
+        );
+        let mut tree = RenderTree::new();
+        tree.fill_rect(10.0, 10.0, 200.0, 40.0, Color::BLUE);
+        compositor
+            .submit_render(window_id, tree.commands)
+            .expect("submit");
+
+        let before = guitk::palette::palette_resolutions();
+        assert!(compositor.compose_frame(), "nothing was drawn");
+        let per_frame = guitk::palette::palette_resolutions().saturating_sub(before);
+        assert_eq!(
+            per_frame, 0,
+            "composing one frame with a blurred window resolved the palette \
+             {per_frame} time(s). It is a pure function of the appearance \
+             settings, so it belongs where those change -- see \
+             `Compositor::set_appearance`."
+        );
+
+        // The other half. A settings value that differs from the current one,
+        // because `set_appearance` returns early when nothing changed -- which
+        // is itself deliberate, and would otherwise make this assertion pass
+        // for the wrong reason.
+        let changed = AppearanceSettings {
+            window_corners: WindowCorners::ExtraRounded,
+            ..AppearanceSettings::default()
+        };
+        assert_ne!(
+            changed,
+            AppearanceSettings::default(),
+            "the fixture must differ from the settings the compositor already \
+             holds, or `set_appearance` returns early and the assertion below \
+             passes by resolving nothing rather than by resolving once"
+        );
+        let before = guitk::palette::palette_resolutions();
+        compositor.set_appearance(changed);
+        let on_change = guitk::palette::palette_resolutions().saturating_sub(before);
+        assert_eq!(
+            on_change, 1,
+            "changing the appearance resolved the palette {on_change} time(s), \
+             expected exactly one. Zero means the cached palette is now stale \
+             and the desktop will draw the previous theme until something \
+             else happens to refresh it."
         );
     }
 

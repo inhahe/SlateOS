@@ -382,7 +382,7 @@ Router: 2001:db8::1 (Box)
     #[test]
     fn header_and_router_lines_are_not_entries() {
         for line in [
-            "ID   NAME            PROVIDER   HOSTNAME                  STATUS     IP",
+            "ID   NAME PROVIDER   HOSTNAME STATUS IP",
             "Router: 192.168.1.1 (SomeRouter X2)",
             "Dynamic DNS & Port Forwarding",
             "DDNS entries:  2",

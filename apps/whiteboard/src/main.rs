@@ -5365,7 +5365,7 @@ mod tests {
         );
         assert!(
             swatches[1].1.x > swatches[0].1.x,
-            "and differ in x -- a one-column palette would be taller than the              toolbar it lives in"
+            "and differ in x -- a one-column palette would be taller than the toolbar it lives in"
         );
         assert!(
             swatches[2].1.y > swatches[0].1.y,
@@ -5382,7 +5382,7 @@ mod tests {
         }
         assert!(
             app.page_tabs()[0].1.width > narrow,
-            "a tab that does not grow with its name draws the name outside              itself"
+            "a tab that does not grow with its name draws the name outside itself"
         );
     }
 

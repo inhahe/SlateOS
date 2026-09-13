@@ -114,6 +114,44 @@ BASELINE = Path(__file__).resolve().parent / "control-bytes-baseline.txt"
 # a byte that two gates both refuse gets counted twice and fixed once.
 ALLOWED = frozenset({0x09, 0x0A, 0x0D})
 
+# A COLLAPSED `\\t` CANNOT BE CAUGHT HERE, and this is the measurement that
+# says so -- written down because the rule was added on 2026-09-13, ran, and
+# had to be taken out again.
+#
+# TAB is allowed above because text legitimately contains it. That is also a
+# hole in the exact thing this gate is for: a heredoc collapses `\\t` to a TAB
+# the same way it collapses `\\b` to a backspace, and
+# `E:\\dev\\test_dev` reached `known-issues.md` that day as
+# `E:\dev<TAB>est_dev`. Every other collapsed escape on the line was refused;
+# that one went through and was found by reading.
+#
+# The rule tried was "a TAB preceded by a non-whitespace character, in `.md`
+# or `.rs`". Across the 4328 tracked files of those two suffixes it matches
+# **285 lines in 11 files**, and every one inspected is content:
+#
+#   userspace/oils/src/interp.rs   227  `-p<TAB>print all defined aliases...`
+#   known-issues-resolved.md        27  quoted C source in a fenced block
+#   procinfo/src/tests.rs            5  a `/proc` fixture, which is TSV
+#   requests/*.md                   12  pasted `git ls-files --eol` output
+#
+# A column separator and a collapsed escape are the same byte in the same
+# position, so no shape rule separates them -- the difference is only in what
+# the author meant. The guard against this failure is therefore not here: it
+# is to build the string from `chr(92)` rather than from a heredoc, which is
+# what the rest of this file's advice already says.
+#
+# WORTH KNOWING HOW THE 285 WERE NEARLY MISSED. The rule was adopted on a
+# measurement of *zero* files, from
+#
+#     git ls-files -z "*.md" "*.rs" | xargs -0 grep -lP "\S\t" 2>/dev/null
+#
+# in which `grep -P` exits 2 with "supports only unibyte and UTF-8 locales" on
+# this host, and `2>/dev/null` hid it. An empty result from a command that
+# never ran is indistinguishable from a clean tree -- which is the defect this
+# whole gate family exists to refuse, committed while writing a gate against
+# it. Measure with something that fails loudly, and assert the population is
+# non-empty before believing a zero.
+
 # A tracked-file count below this means the scan found nothing to look at --
 # wrong directory, a failed `git ls-files`, a pathspec that matched nothing --
 # rather than a clean tree. Measured 2026-09-11: 6453 tracked paths.

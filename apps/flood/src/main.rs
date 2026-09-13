@@ -813,7 +813,7 @@ impl FloodIt {
             return;
         }
         let body = format!(
-            "Moves {}/{}     Filled {}/{}",
+            "Moves {}/{} Filled {}/{}",
             self.moves,
             self.max_moves,
             self.filled_count(),
@@ -2222,7 +2222,7 @@ mod tests {
         for &side in &SIZES {
             app.apply(Action::SetSize(side));
             let want = format!(
-                "Moves {}/{}     Filled {}/{}",
+                "Moves {}/{} Filled {}/{}",
                 app.moves(),
                 app.max_moves(),
                 app.filled_count(),

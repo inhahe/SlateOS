@@ -4202,7 +4202,7 @@ mod tests {
         assert_eq!(
             *PRINTED.lock().unwrap(),
             vec![1, 2],
-            "the range was resolved against some page count other than the              open document's"
+            "the range was resolved against some page count other than the open document's"
         );
 
         // A range naming no page of this document never reaches the printer.

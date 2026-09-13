@@ -2842,7 +2842,7 @@ mod tests {
                         let (_, by) = band.centre();
                         assert!(
                             (ry - by).abs() < 0.02,
-                            "{name} at {w}x{h}: {s:?} is centred on {ry} in a band                              centred on {by} ({band:?}); a run centred on its font                              size rather than on its line lands exactly here --                              inside the band, and off its middle"
+                            "{name} at {w}x{h}: {s:?} is centred on {ry} in a band centred on {by} ({band:?}); a run centred on its font size rather than on its line lands exactly here -- inside the band, and off its middle"
                         );
                         checked += 1;
                         *per.entry(name).or_insert(0_u32) += 1;

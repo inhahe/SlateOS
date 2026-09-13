@@ -3290,7 +3290,7 @@ mod tests {
         assert_eq!(
             app.screen_tab_at(SIDEBAR_WIDTH + 40.0, rect.y + rect.height / 2.0),
             None,
-            "the tabs end where the sidebar does, and the station list starts              there"
+            "the tabs end where the sidebar does, and the station list starts there"
         );
     }
 

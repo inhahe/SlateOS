@@ -13248,6 +13248,27 @@ needed. What survives is *not* a missing feature but the cost of that
 choice: **the listener and every connection it accepts share one SPSC
 session behind one lock, so a server's accepted connections are served
 strictly one at a time — one slow client holds up the others.** That
+**PLAN (2026-09-12, after A-Q9 resolved C-then-D): the fix is smaller than the
+phrase 'asynchronous rewrite' suggests, because the daemon is already fair.**
+`ring_tcp_recv` routes through `ring_pump` precisely so *concurrent connections
+on the same ring can all receive without starving one another*
+(D-NETSTACK-RX-DEMUX). Nothing daemon-side serialises. The blocking is entirely
+kernel-side, with one cause: `socket.rs::with_stream_conn` takes
+`s.session.lock()` and holds it for the whole closure, and a blocking `recv`
+passes `aux = 0`, so `submit_and_reap` does a round-trip the daemon does not
+answer until data arrives. The session mutex is held across a *network* wait.
+
+**The fix: never ask the daemon to block.** Always submit `RECV_NONBLOCK` at the
+ring level; on `ERR_WOULD_BLOCK` drop the lock and wait above it, then retry.
+The lock is then held only for a round-trip the daemon answers immediately. No
+daemon-ABI change, no change to the one-SQE-per-round model, Q23 Option A's
+shared session intact.
+
+The real work is where the waiting goes (`recv`'s caller, not `recv_on`), how it
+meets the existing poll/epoll readiness path, and not turning a blocking read
+into a spin -- looping on `WOULD_BLOCK` without yielding would remove the
+head-of-line block by burning a core instead.
+
 head-of-line blocking is the last thing standing between here and the 5.7
 default flip, and removing it is an asynchronous rewrite of the session
 layer, not a patch. It is why `open-questions.md` A-Q9 recommends fixing
@@ -117962,6 +117983,92 @@ assertion here is boot-time, so an unrun harness has demonstrated nothing."
 The gate that caught the underlying problem (`check-design-decisions-bands`,
 on a §675 entry missing its `**Lane:** A` field) worked exactly as designed.
 The only thing that failed was my reading of whether it had run.
+
+**Recurrence, 2026-09-12, in the `&&` position rather than the report.** Same
+defect, a shape this entry did not name:
+
+```bash
+# WRONG -- `&&` reads tail's status, so a FAILED push runs the next command
+git push origin lane-b 2>&1 | tail -5 && <merge to main>
+```
+
+The push was refused by the tooling-suite gate. `tail` exited 0, the chain
+continued, the merge found nothing new and said "Everything up-to-date", and
+the whole thing exited 0. I read that as success and reported it as such.
+Nothing had landed; two commits sat unpushed while I believed they were on
+`main`.
+
+What is worth adding is not the rule -- the rule was already here, correct,
+with a worked example -- but that **having written this entry did not stop me
+writing the shape.** That now holds for three separate rules in this file: this
+one, the `quote-names` gate (three pushes refused for hand-written `'{}'`), and
+the crate-level allow this session's gate 33 exists for. The pattern in all
+three is that the rule is *known* and the shape is *fluent*, so it arrives
+faster than the recollection does. The remedy that has actually worked is not
+better recall; it is a mechanical check -- `quote-names` catches its case every
+time, and gate 33 will catch its own. **A rule I keep breaking is a rule that
+wants a gate, and this one does not have one yet.** The obstacle is that no
+checker can see a pipeline typed into a terminal; what it could see is a
+pipeline inside a committed script, which is a narrower target and probably
+still worth having.
+
+---
+
+## B-LOGIND-IMPLEMENTS-THE-WRITE-SIDE-AND-EXPOSES-NONE-OF-IT — OPEN 2026-09-12
+
+**Lane:** B. **Severity:** medium — nothing is wrong with what runs; what runs
+can never do anything.
+
+**What it is.** `userspace/logind` implements session, seat and inhibitor
+management in full, and no message can reach any of it. `bus::dispatch` offers
+eight methods and they are all read-or-modify: `ListSessions`, `GetSession`,
+`LockSession`, `UnlockSession`, `ForceUnlockSession`, `TerminateSession`,
+`AuthenticateSession`, `SetIdleHint`. Anything else answers
+`ERR_UNKNOWN_METHOD`. So these are implemented, tested, and unreachable:
+
+| Method | What cannot happen |
+|---|---|
+| `Daemon::create_session` | no session can ever exist |
+| `Daemon::allocate_session_id` | — |
+| `Daemon::add_inhibitor`, `remove_inhibitors_by_pid`, `is_inhibited_any` | nothing can hold a sleep/shutdown lock |
+| `Daemon::switch_vt` | no VT switch |
+| `Daemon::create_seat`, `remove_seat` | one hardcoded seat, forever |
+| `Daemon::update_idle_state` | the idle timer never advances |
+
+The consequence is that every query answers truthfully about a world that is
+permanently empty: `ListSessions` returns nothing because there is nothing,
+not because nobody is logged in.
+
+**And nothing outside would call it either.** `userspace/login` and
+`userspace/getty` contain no reference to logind — not a stub, not a TODO, no
+`SERVICE_NAME`. On a real system those are precisely the programs that
+register a session. So the gap is two-sided: a method that is not exposed, and
+callers that do not know the daemon exists.
+
+**How it surfaced.** Not by reading logind. It fell out of removing the
+crate-level `#![allow(dead_code)]`: 22 items, and once grouped they were one
+thing. The blanket allow had made a whole unreachable subsystem look like
+scattered lint noise.
+
+**What the proper fix is.** Expose the write side and give it callers:
+
+1. `CreateSession` on the bus, with `bus::authorize` deciding who may — that
+   function exists and already has the `Required` vocabulary for it.
+2. `login` and `getty` call it after authentication, and release on exit.
+3. `AddInhibitor`/`ReleaseInhibitor`, `SwitchVT`, and seat add/remove, in that
+   order of usefulness.
+
+All three crates are lane B's, so nothing here is blocked on another lane.
+It is not started because it defines a new bus contract and deserves its own
+work rather than being folded into a lint cleanup — and because `serve` is
+`#[cfg(unix)]`, so it cannot be exercised end-to-end on this host, only unit
+tested. Shipping a session lifecycle that cannot be run once is how a program
+comes to report work it never did, which is the failure this file already has
+an entry about.
+
+**Not to be confused with** the daemon event loop, which a comment in
+`main.rs` claimed was missing until 2026-09-12. It exists. That comment also
+cited a todo.txt note that has never existed.
 
 ---
 

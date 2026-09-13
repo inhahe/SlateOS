@@ -869,141 +869,6 @@ that let them through is untouched.
 
 The cost grows with the number of app crates, which is growing.
 
-## A-Q8 — [A]+[C] Desktop icon layout exists in two places: `fs::deskicons` (kernel) and `gui/desktop/src/icons.rs` (shell). Which is the authority? — Status: OPEN
-
-**In short:** A user's desktop icons have positions on screen. Two independent
-modules model that layout: `kernel/src/fs/deskicons.rs` (Lane A, marked done in
-the roadmap, exports via `/proc/deskicons`) and `gui/desktop/src/icons.rs`
-(Lane C, never wired, a pinned island). Lane C cannot wire its module without
-duplicating the kernel's state, and cannot delete it because it is marked done
-and in Lane A's tree. Nothing is broken — the `icon_size` appearance setting is
-inert, exactly as it has always been.
-
-**Options:**
-
-- **(A) The kernel one is the model; the shell consumes it.** `icons.rs` is a
-  duplicate to delete. The shell reads icon positions from `/proc/deskicons`.
-  *What changes:* the shell becomes a renderer for state the kernel owns.
-- **(B) Layout belongs to the shell; the kernel one is persistence only.** Wire
-  `gui/desktop/src/icons.rs` as the layout authority. `fs::deskicons` is either
-  demoted to a read-only persistence layer or marked as tech debt to remove.
-  *What changes:* icon layout moves to userspace where the microkernel rule says
-  it belongs; `icon_size` becomes a live setting.
-- **(C) `fs::deskicons` predates the microkernel split and should not be in the
-  kernel at all.** Delete it, wire the shell module, persist positions in a
-  dotfile or YAML. *What changes:* one fewer kernel module, one fewer `/proc`
-  entry, icon state lives in userspace end to end.
-
-**Claude's recommendation:** B or C. The microkernel rule is unambiguous — icon
-layout is a userspace concern, not a scheduler/MM/IPC/cap/interrupt concern.
-B is the minimum viable move; C is the clean one.
-
-**If never answered:** the `icon_size` setting stays inert, Lane C does not wire
-`icons.rs`, and both modules continue to exist without either being used. No
-degradation, but the duplicate grows harder to resolve over time as either side
-accumulates callers.
-
-**Filed by:** Lane A (2026-09-07), prompted by Lane C's
-`c-a-two-desktop-icon-models-and-mine-cannot-be-wired-until-we-pick.md`.
-Response at
-`a-c-deskicons-is-a-persistence-layer-the-shell-is-the-layout-authority.md`.
-
----
-
-## A-Q9 — [A] Networking now exists twice: inside the kernel, and as an ordinary program. The second one is finished and switched off. Should it become the default? — Status: OPEN (raised 2026-09-09)
-
-**In short:** this system can do its networking two ways. The way it uses today
-runs inside the kernel — the innermost, most privileged part of the system,
-where a bug can take down or take over the whole machine. The other way runs it
-as an ordinary background program, so a bug there can only break networking.
-The second way is **built, working, and tested**, but it is switched off unless
-you ask for it. The question is whether to make it the one everybody gets. It is
-not a small flip: the two are not equally mature, and the new one has one known
-rough edge.
-
-**Why this is the operator's call and not mine.** The project's own design rule
-says networking belongs outside the kernel, so on principle the answer is yes.
-But the version inside the kernel has had months of features and fixes poured
-into it, and the replacement has not. Choosing the architecturally-correct
-option over the better-tested one is a judgement about what this system is for
-right now — a decision about risk appetite, not about code.
-
-**Glossary.** *Kernel* — the core of the OS; code there can do anything, so a
-fault is fatal or exploitable. *Daemon* — an ordinary program running in the
-background with no special powers. *Socket* — the handle a program uses to talk
-over the network. *Default* — what you get without setting anything.
-
-### Where things stand
-
-| | in the kernel (today's default) | the daemon (built, off by default) |
-|---|---|---|
-| matches the design rule | **no** | **yes** |
-| a bug there can crash the machine | **yes** | no — only networking stops |
-| maturity | months of work: congestion control, retransmission, out-of-order reassembly, fragmentation, keepalives | newer; feature parity reached, less mileage |
-| tested | every boot | every boot, *when switched on* |
-
-Everything a program needs has been brought across and each piece is checked on
-every boot with the switch on: connecting out, listening for incoming
-connections, IPv4 and IPv6, TCP and UDP, non-blocking mode, and name lookup.
-Real programs have driven it end to end — small stock-Linux test programs fetch
-a web page and resolve a name through it and exit 0.
-
-**The one known rough edge.** A *server* — a program accepting several incoming
-connections at once — currently serves them strictly one at a time through a
-single shared channel to the daemon. So one slow or stalled client can hold up
-the others. Clients (a browser, a package download) are unaffected; this only
-bites a program accepting connections. It is a known interim design, recorded as
-`D-NETSOCK-SYNC`, and removing it needs an asynchronous rewrite of that path,
-not a patch.
-
-### The options
-
-**A. Flip the default to the daemon now.**
-*What changes:* every program's networking goes through the background program
-instead of the kernel. A networking bug stops networking instead of stopping the
-machine. A server handling several connections at once gets slower under load
-until the rough edge above is fixed.
-
-**B. Leave the kernel one as the default; keep the daemon opt-in.**
-*What changes:* nothing visible. The daemon stays exercised only on boots that
-ask for it, which means it drifts from reality at whatever rate the two diverge.
-
-**C. Flip the default, but fix the server rough edge first.**
-*What changes:* nothing visible for now; later, the same as A but without the
-slowdown. Costs an asynchronous rewrite of the server path before anything
-changes.
-
-**D. Flip the default and delete the in-kernel one.**
-*What changes:* the same as A, plus there is no way back without reverting the
-deletion. Removes ~40 files from the kernel and makes the design rule true
-rather than merely available.
-
-**My recommendation: C, then D.** A is the right destination and B is how a
-finished migration quietly rots, but flipping while a server can serialise its
-own clients would trade a correctness win for a visible performance regression —
-and the first person to hit it would reasonably read it as "the new networking
-is slow" rather than "one known interim edge". C removes that objection before
-anyone can form it. D should follow C rather than accompany it, because keeping
-the old path for one release is what makes C reversible if something unmeasured
-turns up.
-
-**If this is never answered:** nothing breaks, and that is the trap. The kernel
-keeps serving the network and the daemon keeps passing its tests on the boots
-that enable it — so the cost is invisible and compounding: two networking stacks
-to keep working, a design rule the project states but does not follow, and a
-finished migration whose value is not being collected. The work is done. Only
-the decision is missing.
-
-**Where it bites:** `kernel/src/net/` (the resident stack, ~40 files),
-`kernel/src/net/netstack_client.rs` (the kernel's client for the daemon),
-`kernel/src/net/socket.rs` (the socket objects), `services/netstack/`
-(the daemon), and the `net.userspace` boot switch read by
-`fs::kernparam::is_set`. Roadmap: "TCP/IP stack" → Phase 5, increment 5.7.
-Prior decisions: `design-decisions.md` §63 (Path B chosen), §66 (staged
-cutover), §71 (Q23, shared session for server sockets).
-
----
-
 ## C-Q12 — [C] There are two system trays, and neither can do what the spec asks. Which one is the real one? — Status: OPEN
 
 **In short:** the little row of icons at the right-hand end of the taskbar —
@@ -1901,6 +1766,19 @@ answered question left in the body is pure cost — and, being older, it sorts
 
 ## Resolved — lane A
 
+- A-Q9 Networking exists twice, in the kernel and as a daemon: should the daemon
+  become the default? — resolved 2026-09-12 (934): **C, then D.** Fix the
+  head-of-line block first (`D-NETSOCK-SYNC`: a listener and all its accepted
+  connections share one session behind one lock), then flip `net.userspace` on by
+  default, then delete the in-kernel stack. The order is the decision: flipping
+  first would ship the rough edge to everyone, and deleting is the only step with
+  no way back but a revert.
+- A-Q8 Desktop icon layout exists in two places, kernel and shell: which is the
+  authority? — resolved 2026-09-12 (933): **C, neither — it leaves the kernel.**
+  `fs::deskicons` and `/proc/deskicons` are deleted; `gui/desktop/src/icons.rs`
+  becomes the layout authority and persists positions in userspace, which also
+  makes the `icon_size` setting live. Lane C wires first, lane A deletes after,
+  so no reboot loses icon positions in between.
 - Q45 Convert the whole shell to bytes, or only the expanded word? — resolved
   2026-08-21 (§261): **B, the expanded word.** One data path — keystroke to
   syscall — goes byte-clean end to end; the source line stays text, as in bash.

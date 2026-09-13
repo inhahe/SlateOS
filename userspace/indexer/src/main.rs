@@ -653,6 +653,21 @@ fn matches_glob_segments(
                 return false;
             }
             pos = seg.len();
+
+            // ...and if it is ALSO the last segment with no trailing
+            // wildcard, the pattern has no wildcard at all and the name must
+            // be exactly this segment.
+            //
+            // Without this the branch above was the only one taken for a
+            // wildcard-free pattern -- the "last segment must match the end"
+            // arm below is an `else if` and is unreachable when `i == 0` --
+            // so `indexer find notes.txt` also returned notes.txt.bak,
+            // notes.txt.swp and notes.txtANYTHING. A plausible list of the
+            // wrong files, which is the failure a user is least likely to
+            // notice.
+            if i == segments.len() - 1 && !ends_wild {
+                return name.len() == seg.len();
+            }
         } else if i == segments.len() - 1 && !ends_wild {
             // Last segment must match end.
             if !name[pos..].ends_with(*seg) {
@@ -1315,5 +1330,131 @@ fn main() {
             eprintln!("Run 'indexer help' for usage.");
             process::exit(1);
         }
+    }
+}
+
+// ============================================================================
+// Tests
+//
+// This crate had none. The glob matcher is what `indexer find` is, and a
+// matcher that is subtly wrong returns a plausible list of the wrong files --
+// which is the failure a user is least likely to notice.
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Match `pattern` against `name` exactly as `search_pattern` does.
+    fn glob(pattern: &str, name: &str) -> bool {
+        let p = pattern.to_lowercase();
+        let segments: Vec<&str> = p.split('*').collect();
+        matches_glob_segments(
+            &name.to_lowercase(),
+            &segments,
+            p.starts_with('*'),
+            p.ends_with('*'),
+        )
+    }
+
+    #[test]
+    fn a_pattern_with_no_wildcard_is_an_exact_match() {
+        // The defect this pins. Without a wildcard the matcher took its
+        // "first segment must match the start" branch and never checked the
+        // end, so `indexer find notes.txt` also returned notes.txt.bak,
+        // notes.txt.swp and notes.txtANYTHING -- a plausible list of the
+        // wrong files.
+        assert!(glob("notes.txt", "notes.txt"));
+        assert!(!glob("notes.txt", "notes.txt.bak"));
+        assert!(!glob("notes.txt", "notes.txtextra"));
+        assert!(!glob("notes.txt", "my-notes.txt"));
+    }
+
+    #[test]
+    fn a_trailing_wildcard_is_a_prefix_match() {
+        assert!(glob("notes*", "notes.txt"));
+        assert!(glob("notes*", "notes"));
+        assert!(!glob("notes*", "my-notes.txt"));
+    }
+
+    #[test]
+    fn a_leading_wildcard_is_a_suffix_match() {
+        assert!(glob("*.txt", "notes.txt"));
+        assert!(glob("*.txt", ".txt"));
+        assert!(!glob("*.txt", "notes.txt.bak"));
+    }
+
+    #[test]
+    fn wildcards_at_both_ends_are_a_substring_match() {
+        assert!(glob("*note*", "my-notes.txt"));
+        assert!(glob("*note*", "note"));
+        assert!(!glob("*note*", "readme.md"));
+    }
+
+    #[test]
+    fn a_middle_wildcard_anchors_both_ends() {
+        assert!(glob("notes*.txt", "notes-final.txt"));
+        assert!(glob("notes*.txt", "notes.txt"));
+        assert!(!glob("notes*.txt", "my-notes-final.txt"));
+        assert!(!glob("notes*.txt", "notes-final.md"));
+    }
+
+    #[test]
+    fn several_wildcards_must_match_in_order() {
+        assert!(glob("a*b*c", "axxbyyc"));
+        assert!(!glob("a*b*c", "axxcyyb"), "out of order must not match");
+    }
+
+    #[test]
+    fn matching_ignores_case_because_search_pattern_lowercases_both_sides() {
+        assert!(glob("NOTES.TXT", "notes.txt"));
+        assert!(glob("*.TXT", "Notes.Txt"));
+    }
+
+    fn entry(path: &str, ext: &str, size: u64, mtime: u64, is_dir: bool) -> IndexEntry {
+        IndexEntry {
+            path: path.to_string(),
+            extension: ext.to_string(),
+            size,
+            mtime,
+            is_dir,
+        }
+    }
+
+    fn db_of(entries: Vec<IndexEntry>) -> IndexDb {
+        let mut db = IndexDb::new();
+        db.entries = entries;
+        db
+    }
+
+    #[test]
+    fn searching_by_extension_excludes_directories_and_ignores_a_leading_dot() {
+        let db = db_of(vec![
+            entry("/a/notes.txt", "txt", 10, 0, false),
+            entry("/a/txt", "txt", 0, 0, true),
+            entry("/a/photo.png", "png", 20, 0, false),
+        ]);
+        let hits = search_extension(&db, ".txt");
+        assert_eq!(hits.len(), 1, "a directory must not be an extension hit");
+        assert_eq!(hits[0].path, "/a/notes.txt");
+        // With and without the dot must agree.
+        assert_eq!(search_extension(&db, "txt").len(), 1);
+    }
+
+    #[test]
+    fn searching_by_size_is_inclusive_of_the_threshold() {
+        let db = db_of(vec![
+            entry("/a/small", "", 999, 0, false),
+            entry("/a/exact", "", 1000, 0, false),
+            entry("/a/big", "", 1001, 0, false),
+        ]);
+        let hits = search_large(&db, 1000);
+        let names: Vec<&str> = hits.iter().map(|e| e.path.as_str()).collect();
+        assert!(
+            names.contains(&"/a/exact"),
+            "the threshold itself: {names:?}"
+        );
+        assert!(names.contains(&"/a/big"), "{names:?}");
+        assert!(!names.contains(&"/a/small"), "{names:?}");
     }
 }

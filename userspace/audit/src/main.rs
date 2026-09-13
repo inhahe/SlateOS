@@ -1763,15 +1763,78 @@ fn run_auditctl(args: &[String]) -> i32 {
         return 1;
     }
 
-    let result = process_auditctl_args(args, &mut store);
+    let mut out = AuditctlOutput::default();
+    let result = process_auditctl_args(args, &mut store, &mut out);
 
-    // Save the state after modifications.
-    save_rule_store(&store, &state_path);
+    // Save BEFORE anything is announced, and only if an arm actually changed
+    // the store. Nothing buffered is printed on failure: every line in it
+    // either claims a change that was not persisted or lists a store that was
+    // not persisted, so printing it would reproduce, on stdout, exactly the
+    // false success this ordering exists to prevent.
+    if out.dirty
+        && let Err(e) = save_rule_store(&store, &state_path)
+    {
+        eprintln!(
+            "auditctl: cannot write the audit rule store {}: {e}",
+            state_path.display()
+        );
+        eprintln!("auditctl: the change was NOT saved");
+        return 1;
+    }
+
+    out.flush();
 
     result
 }
 
-fn process_auditctl_args(args: &[String], store: &mut RuleStore) -> i32 {
+/// `auditctl`'s stdout, held back until the store is durably written.
+///
+/// Every mutating arm announces itself in the present tense -- "Rule added
+/// successfully" -- and the announcement used to be printed the instant the
+/// IN-MEMORY store changed, many arms before the single save at the end of
+/// `run_auditctl`. That save discarded its error with `let _ =`, so a full
+/// disk or a read-only `/var` produced the success line, exit 0, and no rule:
+/// the terminal and the exit status both said the work was done and neither
+/// was true. Buffering stdout and flushing it only after the write lands
+/// makes the announcement a statement about the file rather than about a
+/// value that is about to be dropped.
+///
+/// Ordering is preserved because the listing output (`-l`, `-s`) goes through
+/// the same buffer -- interleaving immediate reads with deferred writes would
+/// have reordered the output of `auditctl -w /etc/passwd -l`.
+#[derive(Default)]
+struct AuditctlOutput {
+    /// Whether any arm changed the store. A read-only invocation leaves this
+    /// false and the file is then not rewritten at all -- `auditctl -l`, which
+    /// only lists, used to rewrite every rule it had just read.
+    dirty: bool,
+    text: String,
+}
+
+impl AuditctlOutput {
+    /// Buffer one line. Mirrors `println!`.
+    fn println(&mut self, line: &str) {
+        self.text.push_str(line);
+        self.text.push('\n');
+    }
+
+    /// Buffer text that already carries its own line endings. Mirrors `print!`.
+    fn print(&mut self, text: &str) {
+        self.text.push_str(text);
+    }
+
+    /// Record that the store was modified, so the caller knows to save.
+    fn changed(&mut self) {
+        self.dirty = true;
+    }
+
+    /// Release the buffered output. Called only once the save has succeeded.
+    fn flush(&self) {
+        print!("{}", self.text);
+    }
+}
+
+fn process_auditctl_args(args: &[String], store: &mut RuleStore, out: &mut AuditctlOutput) -> i32 {
     if args.is_empty() {
         print_auditctl_help();
         return 0;
@@ -1826,7 +1889,8 @@ fn process_auditctl_args(args: &[String], store: &mut RuleStore) -> i32 {
                 }
 
                 store.add_rule(AuditRule::Watch { path, perms, key });
-                println!("Rule added successfully");
+                out.changed();
+                out.println("Rule added successfully");
             }
             "-a" => {
                 // Add syscall rule: -a action,filter [-S syscall] [-F field=value] [-k key]
@@ -1903,7 +1967,8 @@ fn process_auditctl_args(args: &[String], store: &mut RuleStore) -> i32 {
                     fields,
                     key,
                 });
-                println!("Rule added successfully");
+                out.changed();
+                out.println("Rule added successfully");
             }
             "-d" => {
                 // Delete syscall rule: -d action,filter [-S syscall]
@@ -1944,7 +2009,8 @@ fn process_auditctl_args(args: &[String], store: &mut RuleStore) -> i32 {
                 }
 
                 if store.delete_rule(action, filter, syscall) {
-                    println!("Rule deleted successfully");
+                    out.changed();
+                    out.println("Rule deleted successfully");
                 } else {
                     eprintln!("auditctl: rule not found");
                     return 1;
@@ -1952,20 +2018,21 @@ fn process_auditctl_args(args: &[String], store: &mut RuleStore) -> i32 {
             }
             "-D" => {
                 let count = store.delete_all();
-                println!("Deleted {count} rules");
+                out.changed();
+                out.println(&format!("Deleted {count} rules"));
             }
             "-l" => {
                 let rules = store.list_rules();
                 if rules.is_empty() {
-                    println!("No rules");
+                    out.println("No rules");
                 } else {
                     for rule in rules {
-                        println!("{rule}");
+                        out.println(&format!("{rule}"));
                     }
                 }
             }
             "-s" => {
-                print!("{}", store.status);
+                out.print(&store.status.to_string());
             }
             "-e" => {
                 i += 1;
@@ -1976,15 +2043,18 @@ fn process_auditctl_args(args: &[String], store: &mut RuleStore) -> i32 {
                 match args[i].as_str() {
                     "0" => {
                         store.status.enabled = 0;
-                        println!("Auditing disabled");
+                        out.changed();
+                        out.println("Auditing disabled");
                     }
                     "1" => {
                         store.status.enabled = 1;
-                        println!("Auditing enabled");
+                        out.changed();
+                        out.println("Auditing enabled");
                     }
                     "2" => {
                         store.status.enabled = 2;
-                        println!("Auditing locked (immutable)");
+                        out.changed();
+                        out.println("Auditing locked (immutable)");
                     }
                     other => {
                         eprintln!("auditctl: invalid enable value: {other}");
@@ -2001,7 +2071,8 @@ fn process_auditctl_args(args: &[String], store: &mut RuleStore) -> i32 {
                 match args[i].parse::<u32>() {
                     Ok(v) => {
                         store.status.backlog_limit = v;
-                        println!("Backlog limit set to {v}");
+                        out.changed();
+                        out.println(&format!("Backlog limit set to {v}"));
                     }
                     Err(_) => {
                         eprintln!("auditctl: invalid backlog limit: {}", args[i]);
@@ -2018,7 +2089,8 @@ fn process_auditctl_args(args: &[String], store: &mut RuleStore) -> i32 {
                 match args[i].parse::<u32>() {
                     Ok(v) => {
                         store.status.rate_limit = v;
-                        println!("Rate limit set to {v}");
+                        out.changed();
+                        out.println(&format!("Rate limit set to {v}"));
                     }
                     Err(_) => {
                         eprintln!("auditctl: invalid rate limit: {}", args[i]);
@@ -2031,7 +2103,7 @@ fn process_auditctl_args(args: &[String], store: &mut RuleStore) -> i32 {
                 return 0;
             }
             "-v" | "--version" => {
-                println!("auditctl {VERSION}");
+                out.println(&format!("auditctl {VERSION}"));
                 return 0;
             }
             other => {
@@ -2157,7 +2229,15 @@ fn load_rule_store(store: &mut RuleStore, state_path: &Path) -> std::io::Result<
             // Parse rule from stored representation
             let rule_args: Vec<String> = rest.split_whitespace().map(|s| s.to_string()).collect();
             let mut temp_store = RuleStore::new();
-            process_auditctl_args(&rule_args, &mut temp_store);
+            // The buffer is discarded on purpose. Re-parsing a stored rule
+            // goes through the same code path that ADDS one, which announces
+            // "Rule added successfully" -- so before the output was buffered,
+            // `auditctl -l` printed that line once per rule already in the
+            // file, claiming to have added the very rules it was about to
+            // list. Measured on a two-rule store: two success lines ahead of
+            // the listing.
+            let mut replay = AuditctlOutput::default();
+            process_auditctl_args(&rule_args, &mut temp_store, &mut replay);
             for r in temp_store.rules {
                 store.rules.push(r);
             }
@@ -2167,8 +2247,13 @@ fn load_rule_store(store: &mut RuleStore, state_path: &Path) -> std::io::Result<
 }
 
 /// Save rule store to a simulated state file.
-fn save_rule_store(store: &RuleStore, state_path: &Path) {
+fn save_rule_store(store: &RuleStore, state_path: &Path) -> std::io::Result<()> {
     if let Some(parent) = state_path.parent() {
+        // Discarded deliberately: `create_dir_all` succeeds when the
+        // directory already exists, which is the ordinary case, and when it
+        // genuinely cannot be created the `fs::write` below fails with the
+        // same underlying cause -- which IS reported. Propagating here would
+        // only change which of two identical errors the caller sees.
         let _ = fs::create_dir_all(parent);
     }
     let mut content = String::new();
@@ -2178,7 +2263,7 @@ fn save_rule_store(store: &RuleStore, state_path: &Path) {
     for rule in &store.rules {
         content.push_str(&format!("rule={rule}\n"));
     }
-    let _ = fs::write(state_path, content);
+    fs::write(state_path, content)
 }
 
 fn audit_state_path() -> PathBuf {
@@ -3647,7 +3732,7 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
             .into_iter()
             .map(|s| s.to_string())
             .collect();
-        let rc = process_auditctl_args(&args, &mut store);
+        let rc = process_auditctl_args(&args, &mut store, &mut AuditctlOutput::default());
         assert_eq!(rc, 0);
         assert_eq!(store.rules.len(), 1);
         if let AuditRule::Watch {
@@ -3680,7 +3765,7 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
         .into_iter()
         .map(|s| s.to_string())
         .collect();
-        let rc = process_auditctl_args(&args, &mut store);
+        let rc = process_auditctl_args(&args, &mut store, &mut AuditctlOutput::default());
         assert_eq!(rc, 0);
         assert_eq!(store.rules.len(), 1);
     }
@@ -3699,7 +3784,7 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
             .into_iter()
             .map(|s| s.to_string())
             .collect();
-        let rc = process_auditctl_args(&args, &mut store);
+        let rc = process_auditctl_args(&args, &mut store, &mut AuditctlOutput::default());
         assert_eq!(rc, 0);
         assert!(store.rules.is_empty());
     }
@@ -3718,7 +3803,7 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
             key: None,
         });
         let args: Vec<String> = vec!["-D"].into_iter().map(|s| s.to_string()).collect();
-        let rc = process_auditctl_args(&args, &mut store);
+        let rc = process_auditctl_args(&args, &mut store, &mut AuditctlOutput::default());
         assert_eq!(rc, 0);
         assert!(store.rules.is_empty());
     }
@@ -3727,7 +3812,7 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
     fn test_auditctl_enable() {
         let mut store = RuleStore::new();
         let args: Vec<String> = vec!["-e", "0"].into_iter().map(|s| s.to_string()).collect();
-        let rc = process_auditctl_args(&args, &mut store);
+        let rc = process_auditctl_args(&args, &mut store, &mut AuditctlOutput::default());
         assert_eq!(rc, 0);
         assert_eq!(store.status.enabled, 0);
     }
@@ -3736,7 +3821,7 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
     fn test_auditctl_enable_lock() {
         let mut store = RuleStore::new();
         let args: Vec<String> = vec!["-e", "2"].into_iter().map(|s| s.to_string()).collect();
-        let rc = process_auditctl_args(&args, &mut store);
+        let rc = process_auditctl_args(&args, &mut store, &mut AuditctlOutput::default());
         assert_eq!(rc, 0);
         assert_eq!(store.status.enabled, 2);
     }
@@ -3748,7 +3833,7 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
             .into_iter()
             .map(|s| s.to_string())
             .collect();
-        let rc = process_auditctl_args(&args, &mut store);
+        let rc = process_auditctl_args(&args, &mut store, &mut AuditctlOutput::default());
         assert_eq!(rc, 0);
         assert_eq!(store.status.backlog_limit, 16384);
     }
@@ -3760,7 +3845,7 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
             .into_iter()
             .map(|s| s.to_string())
             .collect();
-        let rc = process_auditctl_args(&args, &mut store);
+        let rc = process_auditctl_args(&args, &mut store, &mut AuditctlOutput::default());
         assert_eq!(rc, 0);
         assert_eq!(store.status.rate_limit, 100);
     }
@@ -3772,7 +3857,7 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
             .into_iter()
             .map(|s| s.to_string())
             .collect();
-        let rc = process_auditctl_args(&args, &mut store);
+        let rc = process_auditctl_args(&args, &mut store, &mut AuditctlOutput::default());
         assert_eq!(rc, 1);
     }
 
@@ -3783,7 +3868,7 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
             .into_iter()
             .map(|s| s.to_string())
             .collect();
-        let rc = process_auditctl_args(&args, &mut store);
+        let rc = process_auditctl_args(&args, &mut store, &mut AuditctlOutput::default());
         assert_eq!(rc, 1);
     }
 
@@ -3794,7 +3879,7 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
             .into_iter()
             .map(|s| s.to_string())
             .collect();
-        let rc = process_auditctl_args(&args, &mut store);
+        let rc = process_auditctl_args(&args, &mut store, &mut AuditctlOutput::default());
         assert_eq!(rc, 1);
     }
 
@@ -3802,7 +3887,7 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
     fn test_auditctl_invalid_enable_value() {
         let mut store = RuleStore::new();
         let args: Vec<String> = vec!["-e", "5"].into_iter().map(|s| s.to_string()).collect();
-        let rc = process_auditctl_args(&args, &mut store);
+        let rc = process_auditctl_args(&args, &mut store, &mut AuditctlOutput::default());
         assert_eq!(rc, 1);
     }
 
@@ -3813,7 +3898,7 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
             .into_iter()
             .map(|s| s.to_string())
             .collect();
-        let rc = process_auditctl_args(&args, &mut store);
+        let rc = process_auditctl_args(&args, &mut store, &mut AuditctlOutput::default());
         assert_eq!(rc, 1);
     }
 
@@ -3824,7 +3909,7 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
             .into_iter()
             .map(|s| s.to_string())
             .collect();
-        let rc = process_auditctl_args(&args, &mut store);
+        let rc = process_auditctl_args(&args, &mut store, &mut AuditctlOutput::default());
         assert_eq!(rc, 1);
     }
 
@@ -3835,7 +3920,7 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
             .into_iter()
             .map(|s| s.to_string())
             .collect();
-        let rc = process_auditctl_args(&args, &mut store);
+        let rc = process_auditctl_args(&args, &mut store, &mut AuditctlOutput::default());
         assert_eq!(rc, 1);
     }
 
@@ -3843,7 +3928,7 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
     fn test_auditctl_missing_w_arg() {
         let mut store = RuleStore::new();
         let args: Vec<String> = vec!["-w"].into_iter().map(|s| s.to_string()).collect();
-        let rc = process_auditctl_args(&args, &mut store);
+        let rc = process_auditctl_args(&args, &mut store, &mut AuditctlOutput::default());
         assert_eq!(rc, 1);
     }
 
@@ -3851,7 +3936,7 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
     fn test_auditctl_missing_a_arg() {
         let mut store = RuleStore::new();
         let args: Vec<String> = vec!["-a"].into_iter().map(|s| s.to_string()).collect();
-        let rc = process_auditctl_args(&args, &mut store);
+        let rc = process_auditctl_args(&args, &mut store, &mut AuditctlOutput::default());
         assert_eq!(rc, 1);
     }
 
@@ -3859,7 +3944,7 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
     fn test_auditctl_missing_d_arg() {
         let mut store = RuleStore::new();
         let args: Vec<String> = vec!["-d"].into_iter().map(|s| s.to_string()).collect();
-        let rc = process_auditctl_args(&args, &mut store);
+        let rc = process_auditctl_args(&args, &mut store, &mut AuditctlOutput::default());
         assert_eq!(rc, 1);
     }
 
@@ -3867,7 +3952,7 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
     fn test_auditctl_missing_e_arg() {
         let mut store = RuleStore::new();
         let args: Vec<String> = vec!["-e"].into_iter().map(|s| s.to_string()).collect();
-        let rc = process_auditctl_args(&args, &mut store);
+        let rc = process_auditctl_args(&args, &mut store, &mut AuditctlOutput::default());
         assert_eq!(rc, 1);
     }
 
@@ -3875,7 +3960,7 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
     fn test_auditctl_missing_b_arg() {
         let mut store = RuleStore::new();
         let args: Vec<String> = vec!["-b"].into_iter().map(|s| s.to_string()).collect();
-        let rc = process_auditctl_args(&args, &mut store);
+        let rc = process_auditctl_args(&args, &mut store, &mut AuditctlOutput::default());
         assert_eq!(rc, 1);
     }
 
@@ -3883,7 +3968,7 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
     fn test_auditctl_missing_r_arg() {
         let mut store = RuleStore::new();
         let args: Vec<String> = vec!["-r"].into_iter().map(|s| s.to_string()).collect();
-        let rc = process_auditctl_args(&args, &mut store);
+        let rc = process_auditctl_args(&args, &mut store, &mut AuditctlOutput::default());
         assert_eq!(rc, 1);
     }
 
@@ -3894,7 +3979,7 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
             .into_iter()
             .map(|s| s.to_string())
             .collect();
-        let rc = process_auditctl_args(&args, &mut store);
+        let rc = process_auditctl_args(&args, &mut store, &mut AuditctlOutput::default());
         assert_eq!(rc, 1);
     }
 
@@ -3902,7 +3987,7 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
     fn test_auditctl_help_returns_zero() {
         let mut store = RuleStore::new();
         let args: Vec<String> = vec!["-h"].into_iter().map(|s| s.to_string()).collect();
-        let rc = process_auditctl_args(&args, &mut store);
+        let rc = process_auditctl_args(&args, &mut store, &mut AuditctlOutput::default());
         assert_eq!(rc, 0);
     }
 
@@ -3910,7 +3995,7 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
     fn test_auditctl_version_returns_zero() {
         let mut store = RuleStore::new();
         let args: Vec<String> = vec!["-v"].into_iter().map(|s| s.to_string()).collect();
-        let rc = process_auditctl_args(&args, &mut store);
+        let rc = process_auditctl_args(&args, &mut store, &mut AuditctlOutput::default());
         assert_eq!(rc, 0);
     }
 
@@ -3918,7 +4003,7 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
     fn test_auditctl_empty_args() {
         let mut store = RuleStore::new();
         let args: Vec<String> = vec![];
-        let rc = process_auditctl_args(&args, &mut store);
+        let rc = process_auditctl_args(&args, &mut store, &mut AuditctlOutput::default());
         assert_eq!(rc, 0); // shows help
     }
 
@@ -3929,13 +4014,13 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
             .into_iter()
             .map(|s| s.to_string())
             .collect();
-        process_auditctl_args(&args1, &mut store);
+        process_auditctl_args(&args1, &mut store, &mut AuditctlOutput::default());
 
         let args2: Vec<String> = vec!["-a", "always,exit", "-S", "mount", "-k", "mounts"]
             .into_iter()
             .map(|s| s.to_string())
             .collect();
-        process_auditctl_args(&args2, &mut store);
+        process_auditctl_args(&args2, &mut store, &mut AuditctlOutput::default());
 
         assert_eq!(store.rules.len(), 2);
     }
@@ -3958,7 +4043,7 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
         .into_iter()
         .map(|s| s.to_string())
         .collect();
-        let rc = process_auditctl_args(&args, &mut store);
+        let rc = process_auditctl_args(&args, &mut store, &mut AuditctlOutput::default());
         assert_eq!(rc, 0);
         if let AuditRule::Syscall { ref fields, .. } = store.rules[0] {
             assert_eq!(fields.len(), 2);
@@ -3974,7 +4059,7 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
             .into_iter()
             .map(|s| s.to_string())
             .collect();
-        let rc = process_auditctl_args(&args, &mut store);
+        let rc = process_auditctl_args(&args, &mut store, &mut AuditctlOutput::default());
         assert_eq!(rc, 1);
     }
 
@@ -4487,5 +4572,120 @@ type=PATH msg=audit(1735689600.000:2): name=\"/tmp\"";
             .filter(|r| record_matches(r, &criteria))
             .collect();
         assert_eq!(matches.len(), 2); // open+mount succeeded, write failed
+    }
+
+    // ---- announcing a change the file never received --------------------
+
+    #[test]
+    fn a_listing_neither_announces_nor_saves() {
+        // `auditctl -l` only reads. It used to do two things it should not:
+        // print "Rule added successfully" once per rule already in the file
+        // (because `load_rule_store` replays each stored rule through the
+        // same arm that ADDS one), and then rewrite the store it had just
+        // listed. Measured before the fix on a two-rule store: two success
+        // lines ahead of the listing.
+        let mut store = RuleStore::new();
+        store.add_rule(AuditRule::Watch {
+            path: "/etc/passwd".to_string(),
+            perms: WatchPerms {
+                read: true,
+                write: true,
+                execute: true,
+                attribute: true,
+            },
+            key: None,
+        });
+        let args = vec!["-l".to_string()];
+        let mut out = AuditctlOutput::default();
+        let rc = process_auditctl_args(&args, &mut store, &mut out);
+        assert_eq!(rc, 0);
+        assert!(
+            !out.text.contains("Rule added"),
+            "a listing announced an addition: {}",
+            out.text
+        );
+        assert!(
+            !out.dirty,
+            "a read-only listing asked for the store to be rewritten"
+        );
+        assert!(out.text.contains("/etc/passwd"), "the rule was not listed");
+    }
+
+    #[test]
+    fn a_change_is_buffered_not_printed_so_the_save_can_veto_it() {
+        // The announcement must still be pending when the save runs. If this
+        // regresses to a direct `println!`, the string leaves for stdout
+        // before anything has been written to disk and no later failure can
+        // retract it.
+        let mut store = RuleStore::new();
+        let args = vec!["-w".to_string(), "/etc/shadow".to_string()];
+        let mut out = AuditctlOutput::default();
+        let rc = process_auditctl_args(&args, &mut store, &mut out);
+        assert_eq!(rc, 0);
+        assert!(out.dirty, "an addition did not mark the store as changed");
+        assert!(
+            out.text.contains("Rule added successfully"),
+            "the announcement was not buffered: {}",
+            out.text
+        );
+    }
+
+    #[test]
+    fn a_save_that_cannot_succeed_returns_an_error_rather_than_nothing() {
+        // `save_rule_store` returned `()` and discarded the write error with
+        // `let _ =`, so a full disk or a read-only directory produced the
+        // success line and exit 0. The path below cannot be created: its
+        // parent is an existing FILE, not a directory.
+        let dir = std::env::temp_dir().join(format!(
+            "audit-save-fails-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = fs::create_dir_all(&dir);
+        let blocker = dir.join("not-a-directory");
+        fs::write(&blocker, b"x").expect("fixture");
+        let store = RuleStore::new();
+        let err = save_rule_store(&store, &blocker.join("child").join("rules.state"))
+            .expect_err("a write under a plain file must not report success");
+        assert!(
+            !matches!(err.kind(), std::io::ErrorKind::Other) || err.raw_os_error().is_some(),
+            "the error should carry the OS cause: {err:?}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_save_that_succeeds_round_trips_through_the_file() {
+        // The other half of the two-probe rule: proof the save works at all,
+        // so the test above cannot pass by the save being broken outright.
+        let dir =
+            std::env::temp_dir().join(format!("audit-save-ok-{}-{}", std::process::id(), line!()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("nested").join("rules.state");
+        let mut store = RuleStore::new();
+        store.add_rule(AuditRule::Watch {
+            path: "/etc/group".to_string(),
+            perms: WatchPerms {
+                read: false,
+                write: true,
+                execute: false,
+                attribute: false,
+            },
+            key: Some("grp".to_string()),
+        });
+        save_rule_store(&store, &path).expect("save must succeed under a fresh directory");
+        let mut reloaded = RuleStore::new();
+        load_rule_store(&mut reloaded, &path).expect("reload");
+        assert_eq!(reloaded.rules.len(), 1);
+        let listed: Vec<String> = reloaded
+            .list_rules()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert!(
+            listed.iter().any(|r| r.contains("/etc/group")),
+            "{listed:?}"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 }

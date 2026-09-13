@@ -10317,6 +10317,79 @@ mod tests {
         );
     }
 
+    /// The load-independent half of the frame guard: composing a frame must
+    /// not evaluate the sRGB transfer function at all.
+    ///
+    /// **This is the test `the_demo_scene_composites_inside_the_frame_ceiling`
+    /// should have been.** That one is `#[ignore]`d because it measures
+    /// wall-clock time, and two of its three firings were a busy machine
+    /// rather than a regression -- 67_074 us was real, 54_434 and 53_363 were
+    /// contention, and no ceiling separates those. This one asks the same
+    /// question as a count, so the machine's mood cannot answer it.
+    ///
+    /// The regression it replaces the ceiling for is the exact one that fired:
+    /// the 4.5:1 text floor made palette resolution call `contrast_ratio`,
+    /// which was three `powf(2.4)` per colour, and the compositor resolves a
+    /// palette per blurred window per frame. `guitk::theme` now precomputes
+    /// all 256 channel values once, so the correct number of evaluations
+    /// during a frame is not "few" -- it is zero, and zero has no noise floor.
+    ///
+    /// Note what is *not* asserted: how many times the palette is resolved.
+    /// Per blurred window per frame is the current design and may legitimately
+    /// change. What may not change is a resolve being expensive, and that is
+    /// what this pins.
+    ///
+    /// **Proved able to fire, rather than assumed to be.** Reverting
+    /// `relative_luminance` to recompute the curve per call -- the shape of
+    /// the original regression -- makes this report **9216** evaluations for
+    /// one frame of this three-command scene. That is 36 luminance calls
+    /// times the 256 channel values, and it is three orders of magnitude from
+    /// the asserted zero on any machine in any mood, which is the whole
+    /// difference between this and the ceiling it replaces.
+    #[test]
+    fn composing_a_frame_evaluates_no_transfer_function() {
+        // Warm first. The table is a `LazyLock`, so whichever test touches
+        // colour first pays its 256 evaluations; measuring across that build
+        // would report 256 and say nothing about the frame.
+        let _ = guitk::theme::relative_luminance(Color::WHITE);
+
+        // NEGATIVE CONTROL, and it is not ceremony. The assertion below is
+        // `delta == 0`, which a counter that is never incremented -- wrong
+        // feature gate, dead `cfg`, a future refactor that drops the
+        // `fetch_add` -- passes perfectly while seeing nothing. Requiring the
+        // total to have *reached* the table size first is what makes the zero
+        // mean "the frame did none" rather than "nobody is counting".
+        let warm = guitk::theme::transfer_function_evaluations();
+        assert!(
+            warm >= 256,
+            "the transfer-function counter reads {warm} after the 256-entry \
+             table was built, so it is not wired to anything and the rest of \
+             this test cannot mean what it says"
+        );
+
+        let mut compositor = Compositor::new(1920, 1080, 60).expect("compositor");
+        let window_id = compositor.create_window("Welcome to Slate OS".to_string(), 640, 480, 1);
+        let mut tree = RenderTree::new();
+        tree.fill_rect(10.0, 10.0, 200.0, 40.0, Color::BLUE);
+        tree.text(20.0, 20.0, "Hello from Slate OS Compositor!", Color::WHITE, 14.0);
+        tree.fill_rect(10.0, 60.0, 620.0, 1.0, Color::LIGHT_GRAY);
+        compositor
+            .submit_render(window_id, tree.commands)
+            .expect("submit");
+        assert!(compositor.compose_frame(), "nothing was drawn");
+
+        let after = guitk::theme::transfer_function_evaluations();
+        let delta = after.saturating_sub(warm);
+        assert_eq!(
+            delta, 0,
+            "composing one frame evaluated the sRGB transfer function {delta} \
+             time(s). It is a 256-entry table built once per process, so a \
+             frame should evaluate it zero times -- a non-zero count means a \
+             colour decision has moved into the render path, which is what \
+             took a 4K frame from 6.9 ms to 67 ms on 2026-09-11."
+        );
+    }
+
     #[test]
     fn test_window_id_uniqueness() {
         let id1 = WindowId::allocate();

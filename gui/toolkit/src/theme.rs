@@ -96,8 +96,53 @@ fn channel_table() -> &'static [f32; 256] {
 /// piecewise one -- a bare `powf(2.2)`, which this used to use, is a fair
 /// approximation in the middle and wrong near black, where the standard is
 /// linear.
+/// How many times [`srgb_to_linear`] has been evaluated in this process.
+///
+/// **This is a load-independent regression guard, and it is compiled into
+/// every build on purpose.** The thing it watches for is a colour decision
+/// migrating from where the palette is built to inside a pixel loop: on
+/// 2026-09-11 `contrast_ratio` was doing three `powf(2.4)` per colour once
+/// per blit, and a 4K frame took 67 ms instead of 6.9. The timing test that
+/// caught it had to be `#[ignore]`d, because two of its three firings were a
+/// merely busy machine and a wall-clock ceiling cannot separate those.
+///
+/// A count can. The transfer function has 256 possible inputs and
+/// [`channel_table`] precomputes all of them once, so *256 for the life of
+/// the process* is not a budget chosen to leave headroom -- it is the
+/// design property itself, and any per-pixel or per-frame evaluation blows
+/// straight past it no matter how fast or loaded the machine is.
+///
+/// **Why not `#[cfg(test)]`.** A counter behind `cfg(test)` would see only
+/// this crate's own unit tests. Every caller that could regress -- the
+/// compositor, the desktop, the widgets -- links the *non-test* build of
+/// `guitk`, so the latch would sit at zero while the very code it guards ran
+/// hot, and report success over a population it cannot see. The cost of
+/// compiling it in is 256 relaxed increments per process, once, because the
+/// path being instrumented is by construction cold. Instrumenting the cold
+/// path is free precisely when the regression is "this path became hot".
+static TRANSFER_EVALUATIONS: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// How many times the sRGB transfer function has been evaluated so far.
+///
+/// Expected to reach 256 -- one per possible channel value, when
+/// [`channel_table`] is first built -- and never to move again. See
+/// [`TRANSFER_EVALUATIONS`] for why this is public and always compiled.
+///
+/// The count is cumulative and process-wide, so a caller comparing before and
+/// after some operation should take a difference rather than an absolute.
+#[must_use]
+pub fn transfer_function_evaluations() -> u64 {
+    TRANSFER_EVALUATIONS.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 #[must_use]
 fn srgb_to_linear(v: u8) -> f32 {
+    // Relaxed: this is a diagnostic total, not a synchronisation point. No
+    // reader draws a conclusion about *ordering* from it, only about
+    // magnitude, and 256 is three orders of magnitude from any regression
+    // this would catch.
+    TRANSFER_EVALUATIONS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     let v = f32::from(v) / 255.0;
     if v <= 0.039_28 {
         v / 12.92

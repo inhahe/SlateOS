@@ -61,6 +61,7 @@ const DEFAULT_CONF: &str = "/etc/sysctl.conf";
 // ============================================================================
 
 /// What the user asked us to do.
+#[derive(Debug)]
 enum Action {
     /// List every parameter under both trees.
     ListAll,
@@ -593,5 +594,130 @@ fn main() {
         Action::Search { pattern } => {
             search_params(&pattern);
         }
+    }
+}
+
+// ============================================================================
+// Tests
+//
+// This crate had none. The functions worth pinning are the two that convert
+// between a parameter NAME and a filesystem path, because sysctl writes kernel
+// parameters: resolving `kernel.hostname` to the wrong file is not a cosmetic
+// failure.
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_proc_sys_path_becomes_a_dotted_name() {
+        assert_eq!(
+            path_to_name(Path::new("/proc/sys/kernel/hostname")),
+            "kernel.hostname"
+        );
+    }
+
+    #[test]
+    fn a_sys_kernel_path_becomes_a_dotted_name() {
+        assert_eq!(
+            path_to_name(Path::new("/sys/kernel/debug/foo")),
+            "debug.foo"
+        );
+    }
+
+    #[test]
+    fn a_deeply_nested_parameter_keeps_every_component() {
+        assert_eq!(
+            path_to_name(Path::new("/proc/sys/net/ipv4/conf/all/forwarding")),
+            "net.ipv4.conf.all.forwarding"
+        );
+    }
+
+    #[test]
+    fn a_path_under_neither_tree_is_converted_as_given() {
+        // Not an error: `path_to_name` is also used on paths already relative
+        // to a tree, so an unrecognised prefix is passed through rather than
+        // rejected. Pinned because it is a deliberate choice, not an accident.
+        assert_eq!(
+            path_to_name(Path::new("kernel/hostname")),
+            "kernel.hostname"
+        );
+    }
+
+    #[test]
+    fn collapse_value_joins_a_multi_line_value_with_tabs() {
+        // A sysctl value can be multi-line -- `net.ipv4.tcp_rmem` is three
+        // numbers on one line, but some are genuinely several. The listing
+        // must stay one parameter per line or a caller splitting on newlines
+        // sees a value as a parameter name.
+        assert_eq!(
+            collapse_value(
+                "1
+2
+3"
+            ),
+            "1	2	3"
+        );
+        assert_eq!(collapse_value("single"), "single");
+        assert_eq!(collapse_value(""), "");
+    }
+
+    #[test]
+    fn collapse_value_leaves_a_trailing_newline_out_rather_than_ending_in_a_tab() {
+        // `lines()` does not yield a final empty string for a trailing
+        // newline, so this does not produce "1	".
+        assert_eq!(
+            collapse_value(
+                "1
+"
+            ),
+            "1"
+        );
+    }
+
+    fn argv(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn no_arguments_is_help_rather_than_listing_everything() {
+        // The important half: a bare `sysctl` must not decide to dump every
+        // kernel parameter, and must not decide to write anything.
+        assert!(matches!(parse_args(&argv(&["sysctl"])), Action::Help));
+    }
+
+    #[test]
+    fn the_read_and_write_forms_are_distinguished() {
+        match parse_args(&argv(&["sysctl", "kernel.hostname"])) {
+            Action::Read { name, .. } => assert_eq!(name, "kernel.hostname"),
+            other => panic!("a bare name must be a read, got {other:?}"),
+        }
+        match parse_args(&argv(&["sysctl", "-w", "kernel.hostname", "slate"])) {
+            Action::Write { name, value } => {
+                assert_eq!(name, "kernel.hostname");
+                assert_eq!(value, "slate");
+            }
+            other => panic!("-w must be a write, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_uses_the_default_file_only_when_no_path_follows() {
+        match parse_args(&argv(&["sysctl", "-p"])) {
+            Action::LoadFile { path } => assert_eq!(path, DEFAULT_CONF),
+            other => panic!("{other:?}"),
+        }
+        match parse_args(&argv(&["sysctl", "-p", "/etc/other.conf"])) {
+            Action::LoadFile { path } => assert_eq!(path, "/etc/other.conf"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_name_under_neither_tree_resolves_to_nothing() {
+        // `name_to_path` answers None rather than inventing a path, which is
+        // what stops a typo from being written to a file that then exists.
+        assert!(name_to_path("zzq.not.a.real.parameter").is_none());
     }
 }

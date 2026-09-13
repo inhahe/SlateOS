@@ -515,7 +515,17 @@ def main(show_all):
                     handled = defs[(crate, name)]["inked"] or world.text_is_handled(
                         rel, i, name
                     )
-                    mark = "" if handled else "  NOT INKED"
+                    # "NOT INKED" is a *finding*; inside an ambiguous name it
+                    # would be a guess. Two methods called `color` in one crate
+                    # mean `defs[(crate, name)]` holds one of them, so `inked`
+                    # answers about whichever was seen last -- and on
+                    # 2026-09-13 that sent a reader to three sites, two of
+                    # which were already inked per arm by the *other* method of
+                    # the same name. Say which it is.
+                    if defs[(crate, name)]["ambiguous"]:
+                        mark = "  CANNOT TELL WHICH METHOD"
+                    else:
+                        mark = "" if handled else "  NOT INKED"
                     defs[(crate, name)]["sites"][kind].append(
                         rel + ":" + str(i + 1) + mark
                     )

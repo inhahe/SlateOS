@@ -545,7 +545,16 @@ impl ResourceMonitor {
         w: f32,
         h: f32,
     ) {
+        // Two bindings, and the split is the point. `Resource::color` is
+        // dual-use *inside this one function*: the same hue plots the
+        // sparkline below -- a line, which takes no contrast floor and whose
+        // test asserts the metric's exact hue appears in the plot -- and
+        // labels the metric, which does take the floor. Inking one binding
+        // for both floors the graph and breaks that test, which is how this
+        // was found. Ink where every path is text; here that is the label
+        // alone. 837.
         let color = resource.color(p);
+        let label_ink = p.ink(color);
         let data = self.graph_data(resource);
 
         // Panel background.
@@ -564,7 +573,7 @@ impl ResourceMonitor {
             x: x + 6.0,
             y: label_y,
             text: resource.label().to_string(),
-            color,
+            color: label_ink,
             font_size: 11.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(w * 0.4),
@@ -1638,7 +1647,7 @@ mod tests {
             for (resource, label) in GRAPHED {
                 assert_eq!(
                     text_color(&cmds, label),
-                    resource.color(&p),
+                    p.ink(resource.color(&p)),
                     "the {label} label is not drawn in its own metric's hue"
                 );
             }
@@ -1738,7 +1747,10 @@ mod tests {
             for (resource, label) in GRAPHED {
                 assert_eq!(
                     text_color(&cmds, label),
-                    resource.color(&p),
+                    // Inked: a label is text and takes the 4.5:1 floor. The
+                    // hue it names is `resource.color`; what is drawn is that
+                    // hue moved as far as the floor requires and no further.
+                    p.ink(resource.color(&p)),
                     "the {label} panel is drawn in another metric's hue"
                 );
             }
@@ -1828,11 +1840,21 @@ mod tests {
 
             // Expanded alone carries the labels, and each names the graph
             // beneath it: same hue, two commands, one claim.
+            //
+            // The label is the *inked* hue and the line is the raw one, and
+            // that is the claim rather than an exception to it. A line takes
+            // no contrast floor; a label does, and `ink` moves it the smallest
+            // distance that clears 4.5:1 -- here one to three values per
+            // channel, which is why the association the test is named for
+            // survives it. Asserting both against the raw hue would pass while
+            // the label sat under the floor, which is the failure the dual-use
+            // split exists to prevent. Same shape as the power panel's badge
+            // and gauge.
             let cmds = monitor(DisplayMode::Expanded).render(&p);
             let plotted = line_colors(&cmds, 1.5);
             for (resource, label) in GRAPHED {
                 let hue = resource.color(&p);
-                assert_eq!(text_color(&cmds, label), hue, "the {label} label");
+                assert_eq!(text_color(&cmds, label), p.ink(hue), "the {label} label");
                 assert!(
                     plotted.contains(&hue),
                     "the {label} label is drawn in a hue no line on the screen \

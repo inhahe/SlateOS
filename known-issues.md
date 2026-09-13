@@ -131171,7 +131171,7 @@ also what Windows does, and what this shortcut is modelled on.
 
 ---
 
-## TD-C-THE-COMPOSE-PATH-HAS-NO-TIMING-GUARD-IN-THE-DEFAULT-RUN
+## TD-C-THE-COMPOSE-PATH-HAS-NO-TIMING-GUARD-IN-THE-DEFAULT-RUN -- FIXED 2026-09-13
 
 **Date:** 2026-09-13. **Lane:** C.
 **Where:** `gui/compositor/src/lib.rs` —
@@ -131212,6 +131212,40 @@ exactly checkable, and free.
 **Second-best fix:** run the `#[ignore]`d benchmarks on a quiet machine as a
 scheduled step rather than as part of the correctness run, and diff against
 `bench/baselines.toml` the way `scripts/bench-history.py` does for the kernel.
+
+---
+
+**FIXED 2026-09-13 by the first of those — the default run now carries an
+operation count, `compositor::tests::composing_a_frame_evaluates_no_transfer_
+function`.** It asserts that composing a frame evaluates the sRGB transfer
+function **zero** times.
+
+**Why that is the right quantity, rather than the palette-resolve count this
+entry proposed.** Resolving a palette per blurred window per frame is a
+design choice that may legitimately change, so pinning its count would make a
+future refactor look like a regression. What may *not* change is a resolve
+being expensive — and the specific regression was `contrast_ratio` doing three
+`powf(2.4)` per colour inside the render path. `guitk::theme` precomputes all
+256 channel values once per process, so the correct number of evaluations
+during a frame is not "few", it is zero. Zero has no noise floor, which is
+exactly what the wall-clock ceiling lacked.
+
+**The counter is compiled into every build, not behind `#[cfg(test)]`.** A
+`cfg(test)` counter in `guitk` would see only `guitk`'s own unit tests: the
+compositor, the desktop and the widgets all link the *non-test* build, so the
+latch would sit at zero while the code it guards ran hot — a check reporting
+success over a population it cannot see, which is the same defect this entry
+is about. The cost is 256 relaxed atomic increments per process, once, because
+the instrumented path is cold by construction. Instrumenting the cold path is
+free precisely when the regression you fear is "this path became hot".
+
+**Proved able to fire before being believed.** Reverting `relative_luminance`
+to recompute the curve per call — the original regression's shape — makes the
+new test report **9216** evaluations for one frame of a three-command scene
+(36 luminance calls x 256 channel values) and fail loudly. Three orders of
+magnitude from the asserted zero, on any machine in any mood. The `#[ignore]`d
+wall-clock test stays where it is, for the frame-time figure it still gives
+when run deliberately.
 
 ---
 
@@ -132225,7 +132259,7 @@ Converting the ramp themes the board too, which is exactly what C-Q16 has not
 decided -- and hand-slicing it across 43 crates would be making the operator's
 decision forty-three times in private.
 
-## TD-C-FORTY-NINE-COLOUR-METHODS-ARE-INVISIBLE-TO-THE-INK-SWEEP
+## TD-C-FORTY-NINE-COLOUR-METHODS-ARE-INVISIBLE-TO-THE-INK-SWEEP -- FIXED 2026-09-13
 
 **Date:** 2026-09-12. **Lane:** C.
 **Where:** 49 sites across 22 crates; `gui/appearance/ink-text.py --blind`
@@ -132293,6 +132327,37 @@ row look decided. The rule that came out of the shell: **ink at the point where
 every path through it is text.** For `osd::render_icon_text_osd` that is the
 body, because its colour parameter has exactly one use. For a method with arms
 it is the arms, individually, skipping any exempt one.
+
+**FIXED 2026-09-13. `colour-methods.py` now reports no method with a text
+caller that is neither inked at the site nor inked by the body.** The 39 that
+take a palette were done over the intervening day; the last one and the tool's
+own reporting were finished today.
+
+**The last real one was `resmon::Resource::color`, and it is the entry's rule
+in miniature.** The same hue plots a sparkline -- a line, which takes no
+contrast floor and whose test asserts the metric's exact hue appears in the
+plot -- and labels the metric, which does take the floor. Inking the *method*
+floors the graph and breaks that test; inking the *call site* floors both,
+because one binding fed both commands. It needs two bindings: the plot keeps
+the raw hue and the label takes `p.ink` of it. Three tests pinned the label to
+the raw hue and had to follow, exactly as this entry's sibling predicted.
+
+**The other two reports were not findings at all, and the tool said so badly.**
+`privacy_settings::PermissionState::color` and
+`network_settings::WiFiSecurity::color` are both already inked *per arm* --
+the second carries a comment saying so -- and a method that inks internally
+leaves its call sites bare by design. They were reported because both names
+are `color`, `defs` is keyed on `(crate, name)`, and `gui/desktop` has many
+types with a `color` method: inside an ambiguous name the `inked` flag answers
+about whichever definition was seen last.
+
+So those sites now print `CANNOT TELL WHICH METHOD` rather than `NOT INKED`.
+The population is unchanged; what changed is that the tool no longer states a
+verdict it cannot reach. Twenty minutes went into chasing two already-correct
+files before that distinction was made, which is the same cost this entry
+opens by describing: *"the script reported zero for those files and was right
+about the question it asks, which is not the question anyone reading the
+number thinks it is."*
 
 **How urgent.** Low and non-worsening. These sites draw exactly what they drew
 before §837, so nothing regressed; they are simply not yet *improved*, and the

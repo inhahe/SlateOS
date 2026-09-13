@@ -140494,12 +140494,32 @@ bounds-checked `get` followed by a separate bounds-checked `get_mut` for the
 same index, and three `blend_channel` calls. None of that is wrong; all of it
 is per-pixel work that could be per-glyph or per-row.
 
-**The obvious moves, cheapest first** -- and each should be measured on its
-own, because the last two hypotheses about this frame were both wrong:
-intersect the glyph's rectangle with the clip once per glyph instead of
-testing every pixel; fetch the destination pixel once rather than twice; and
-walk rows rather than calling per pixel. The `frame_budget` test is the guard
-for all of them.
+**The first obvious move was tried and made it 30% slower.** Intersecting the
+glyph's rectangle with the clip once per glyph, and iterating the surviving
+range instead of testing every pixel, measured:
+
+| | full recomposite | one window |
+|---|---|---|
+| as shipped | 19.5 - 25.7 ms | 2.5 - 3.0 ms |
+| with the clip hoisted | 27.1 - 33.7 ms | 3.0 - 4.8 ms |
+
+Three runs each, alternated on the same machine, because the run-to-run
+spread here is wide enough that a single before-and-after proves nothing.
+Reverted.
+
+Why it lost is a guess and is left as one: the hoisted version replaces two
+loop counters with `fx - ox` and `fy - oy` arithmetic per pixel, and for a
+glyph that is nowhere near an edge -- which is nearly all of them -- the
+range it computes is the range the old loop already walked, so it pays for
+work it does not save.
+
+**What that means for the next attempt.** Three hypotheses about this frame
+have now been wrong: that shaping was the cost, that the compositor was 7x
+over budget, and that hoisting the clip would help. All three were cheap to
+disprove and would have been expensive to act on. The next person should get
+a profiler onto `draw_glyph` rather than reason about its inner loop from
+reading it -- the reading has been wrong every time. The `frame_budget` test
+is the guard, and the alternating-runs method above is how to use it.
 
 **A trap fixed on the way, worth its own paragraph.** `last_frame_time_us`
 was left *unchanged* when `compose_frame` took either early-out -- the

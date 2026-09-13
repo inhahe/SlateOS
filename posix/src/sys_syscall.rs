@@ -108,6 +108,15 @@ pub const SYS_GETTID: u64 = 186;
 /// Linux `__NR_getrandom`.
 pub const SYS_GETRANDOM: u64 = 318;
 
+/// Linux `__NR_futex`.
+///
+/// Routed here because `toolchain/stubs` used to define its own `syscall`
+/// with this number in it, shadowing this function at link time -- and that
+/// version passed only THREE of futex's six arguments, hardcoding the
+/// timeout to NULL. A `FUTEX_WAIT` with a timeout therefore waited forever
+/// instead of timing out.
+pub const SYS_FUTEX: u64 = 202;
+
 /// Linux `__NR_pidfd_send_signal`.
 pub const SYS_PIDFD_SEND_SIGNAL: u64 = 424;
 
@@ -269,8 +278,8 @@ pub extern "C" fn syscall(
     a2: SyscallArg,
     a3: SyscallArg,
     a4: SyscallArg,
-    _a5: SyscallArg,
-    _a6: SyscallArg,
+    a5: SyscallArg,
+    a6: SyscallArg,
 ) -> SyscallArg {
     // Linux numbers are non-negative; a negative one cannot match.
     let Ok(n) = u64::try_from(number) else {
@@ -296,6 +305,19 @@ pub extern "C" fn syscall(
             // exactly register width, so it passes through unchanged — it
             // is the one entry here that is not a 0/-1 status.
             crate::unistd::getrandom(ptr_arg(a1), trunc_usize(a2), trunc_u32(a3))
+        }
+        SYS_FUTEX => {
+            // All SIX arguments, which is the point of routing it here: the
+            // stub that used to answer this number dropped the timeout, the
+            // second address and the bitmask.
+            crate::linux_futex::futex(
+                ptr_arg(a1).cast::<u32>(),
+                trunc_i32(a2),
+                trunc_u32(a3),
+                ptr_arg(a4).cast_const().cast::<crate::stat::Timespec>(),
+                ptr_arg(a5).cast::<u32>(),
+                trunc_u32(a6),
+            ) as SyscallArg
         }
         SYS_PIDFD_OPEN => ret_i32(crate::process::pidfd_open(trunc_i32(a1), trunc_u32(a2))),
         SYS_PIDFD_SEND_SIGNAL => ret_i32(crate::process::pidfd_send_signal(

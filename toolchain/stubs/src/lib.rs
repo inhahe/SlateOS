@@ -15,7 +15,7 @@
     clippy::not_unsafe_ptr_arg_deref,
     non_camel_case_types,
     clippy::all,
-    clippy::pedantic,
+    clippy::pedantic
 )]
 
 use core::ffi::c_void;
@@ -68,137 +68,47 @@ pub extern "C" fn _Unwind_GetCFA(_context: *mut _Unwind_Context) -> usize {
 }
 
 // -----------------------------------------------------------------------
-// Linux syscall() stub
+// REMOVED 2026-09-13: syscall(), killpg(), posix_spawnattr_setsigdefault()
 //
-// Rust std calls libc::syscall() directly for a few things:
-//   - SYS_gettid (186) — get thread ID
-//   - SYS_getrandom (318) — get random bytes
-//   - SYS_futex (202) — futex operations
+// All three were defined here AND in the posix crate, as `no_mangle` C
+// symbols in two archives that are both linked into every userspace binary.
+// `.cargo/config.toml` passes `--allow-multiple-definition`, so the duplicate
+// was not an error -- the linker silently took whichever it saw first, and
+// `-lstubs` is passed before rustc's own `-lc`.
 //
-// Our POSIX layer provides dedicated functions for these (gettid,
-// getrandom, futex), but std also calls the raw syscall() wrapper.
-// This stub maps the most common Linux syscall numbers to our OS's
-// equivalents via the dedicated POSIX functions.
-// -----------------------------------------------------------------------
-
-// Linux syscall numbers (x86_64)
-const SYS_GETTID: i64 = 186;
-const SYS_GETRANDOM: i64 = 318;
-const SYS_FUTEX: i64 = 202;
-
-// Our OS syscall numbers
-const SLATEOS_SYS_TASK_ID: u64 = 2;
-
-/// Issue a raw syscall with up to 3 arguments using our OS's ABI.
-///
-/// # Safety
-///
-/// Caller must provide valid arguments for the syscall number.
-#[inline(always)]
-unsafe fn raw_syscall3(nr: u64, a0: u64, a1: u64, a2: u64) -> i64 {
-    let ret: i64;
-    // SAFETY: SYSCALL instruction with our OS's ABI.
-    // RAX = syscall number, RDI/RSI/RDX = args 0-2.
-    // SYSCALL clobbers RCX (saves RIP) and R11 (saves RFLAGS).
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            in("rax") nr,
-            in("rdi") a0,
-            in("rsi") a1,
-            in("rdx") a2,
-            lateout("rax") ret,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
-    }
-    ret
-}
-
-/// Linux-compatible syscall() dispatcher.
-///
-/// Maps commonly-used Linux syscall numbers to our OS's equivalents.
-/// Variadic arguments are captured via a fixed-size register read.
-///
-/// # Safety
-///
-/// Arguments must be valid for the requested syscall.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn syscall(num: i64, arg0: u64, arg1: u64, arg2: u64) -> i64 {
-    match num {
-        SYS_GETTID => unsafe { raw_syscall3(SLATEOS_SYS_TASK_ID, 0, 0, 0) },
-        SYS_GETRANDOM => {
-            // std calls getrandom(buf, len, flags) — delegate to our
-            // POSIX getrandom() which is already linked.
-            unsafe extern "C" {
-                fn getrandom(buf: *mut u8, len: usize, flags: u32) -> isize;
-            }
-            unsafe { getrandom(arg0 as *mut u8, arg1 as usize, arg2 as u32) as i64 }
-        }
-        SYS_FUTEX => {
-            // Delegate to our POSIX futex() implementation.
-            unsafe extern "C" {
-                fn futex(
-                    uaddr: *mut u32,
-                    op: i32,
-                    val: u32,
-                    timeout: u64,
-                    uaddr2: *mut u32,
-                    val3: u32,
-                ) -> i32;
-            }
-            unsafe { futex(arg0 as *mut u32, arg1 as i32, arg2 as u32, 0, core::ptr::null_mut(), 0) as i64 }
-        }
-        _ => {
-            // Unknown syscall — return ENOSYS (-38).
-            -38
-        }
-    }
-}
-
-// -----------------------------------------------------------------------
-// pthread stack-introspection functions
+// The three stubs were the WORSE half of each pair, and this file's own
+// header says what should have happened: "As our POSIX layer grows, symbols
+// should be moved from here to proper implementations in the posix crate."
+// The moving happened; the deleting did not.
 //
-// `pthread_getattr_np`, `pthread_attr_getstack`, and
-// `pthread_attr_getguardsize` are now implemented for real in the posix
-// crate (posix/src/pthread.rs), backed by the actual per-thread stack
-// bounds and the kernel main-stack geometry.  They are no longer stubbed
-// here — providing them in both crates would cause duplicate-symbol link
-// errors.
-// -----------------------------------------------------------------------
-
-// -----------------------------------------------------------------------
-// POSIX function stubs
+//   killpg                          stub: `-1`, and despite its doc comment
+//                                   saying "errno=ENOSYS" it set no errno at
+//                                   all, so a caller's perror() printed a
+//                                   stale unrelated error.
+//                                   posix: EINVAL on a negative group, a
+//                                   checked negation, delegation to kill().
 //
-// Functions that Nushell (via std or dependency crates) references but
-// that our POSIX layer doesn't provide yet.  These should be moved to
-// proper implementations in the posix crate as the OS matures.
+//   posix_spawnattr_setsigdefault   stub: `0` -- success, no-op. A caller
+//                                   believed the spawned child would have
+//                                   those signals reset to default.
+//                                   posix: real, and already tested.
+//
+//   syscall                         stub took FOUR parameters where posix's
+//                                   takes seven, so three argument registers
+//                                   were silently dropped. It routed only
+//                                   gettid/getrandom/futex, and its futex
+//                                   arm hardcoded timeout=NULL, uaddr2=NULL
+//                                   and val3=0 -- a FUTEX_WAIT with a
+//                                   timeout waited forever.
+//                                   posix's now routes 202 with all six
+//                                   arguments; that arm was added in the same
+//                                   commit that deleted this one, because
+//                                   deleting it first would have removed
+//                                   futex from `syscall()` entirely.
+//
+// What is left below is the four `_Unwind_*` stubs, which are still genuine:
+// there is no unwinder, and with panic=abort nothing unwinds.
 // -----------------------------------------------------------------------
-
-/// Opaque sigset_t — matches musl's representation.
-#[repr(C)]
-pub struct sigset_t {
-    _bits: [u64; 16],
-}
-
-/// Set the default signal mask for a spawn attributes object.
-/// Stub: returns 0 (success, no-op — signals not yet implemented).
-#[unsafe(no_mangle)]
-pub extern "C" fn posix_spawnattr_setsigdefault(
-    _attr: *mut c_void,
-    _sigdefault: *const sigset_t,
-) -> i32 {
-    0 // success, no-op
-}
-
-/// Send a signal to a process group.
-/// Stub: returns -1 with errno=ENOSYS (signals not yet implemented).
-#[unsafe(no_mangle)]
-pub extern "C" fn killpg(_pgrp: i32, _sig: i32) -> i32 {
-    // TODO: implement once POSIX signal support exists
-    -1 // failure — ENOSYS
-}
 
 // -----------------------------------------------------------------------
 // Panic handler — required for no_std staticlib
@@ -210,6 +120,8 @@ pub extern "C" fn killpg(_pgrp: i32, _sig: i32) -> i32 {
 fn panic(_: &core::panic::PanicInfo) -> ! {
     loop {
         // SAFETY: halt CPU — this stub library should never panic.
-        unsafe { core::arch::asm!("hlt", options(nomem, nostack)); }
+        unsafe {
+            core::arch::asm!("hlt", options(nomem, nostack));
+        }
     }
 }

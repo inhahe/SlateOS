@@ -5287,7 +5287,10 @@ impl DesktopShell {
             return None;
         }
         let mut tree = RenderTree::new();
-        tree.commands.extend(self.desktop_menu.render());
+        tree.commands.extend(
+            self.desktop_menu
+                .render(&Palette::from_settings(&self.appearance)),
+        );
         Some(tree)
     }
 

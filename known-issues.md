@@ -130866,7 +130866,32 @@ problem than being unreachable. Together they are about 30,000 lines.
 
 ---
 
-## TD-C-THE-GUI-PROCESS-EXPLORER-HAS-NO-DATA-SOURCE-AND-ONE-EXISTS
+## TD-C-THE-GUI-PROCESS-EXPLORER-HAS-NO-DATA-SOURCE-AND-ONE-EXISTS -- FIXED 2026-09-13
+
+**Fixed 2026-09-13.** `ProcessExplorerState::refresh` reads the real `/proc`
+through the shared `procinfo` crate -- the one this lane asked lane B to
+factor out, so that using it rather than writing a parser here is the whole
+point of its existing.
+
+Four judgements are in the code rather than here:
+
+- **A failure is not an error to show.** `/proc` is absent on a developer
+  host and on a machine where it has not been mounted yet. The refresh keeps
+  the list it had rather than emptying the window on a boot-order accident.
+- **A process that vanishes between the listing and the read is skipped**,
+  not fatal. Racing with the thing being measured is what a process list is.
+- **`cpu_percent` stays zero.** A percentage needs two samples and a refresh
+  is one; `update_histories` is where a rate belongs. Inventing a number
+  there would be the same mistake this entry was written about.
+- **`D` maps to Sleeping** rather than gaining a variant: to a user,
+  uninterruptible sleep is a process that is not running and cannot be
+  stopped, which is what Sleeping already means in this window.
+
+The test runs against a fixture directory via `ProcFs::at`, not the
+machine's own `/proc` -- a real process list changes between the two lines of
+an assertion. It asserts the mapping this crate actually wrote: the state
+letter, both page-to-byte conversions, ticks to milliseconds, and that a
+directory with no `stat` is skipped rather than fatal.
 
 **Date:** 2026-09-08. **Lane:** C.
 **Where:** `apps/procexplorer/src/main.rs` — `ProcessExplorer::refresh`.

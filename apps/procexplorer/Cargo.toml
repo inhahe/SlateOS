@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS Process Explorer — graphical system monitor and task manager"
 [dependencies]
+# Real processes, not invented ones. The shared `/proc` reader, which exists
+# because this lane asked for it -- see requests/c-b-the-proc-readers-in-
+# userspace-sysinfo-should-be-a-crate-both-sysinfos-can-use.md.
+procinfo = { path = "../../procinfo" }
 # The user's colours, per design-decisions 822.
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }

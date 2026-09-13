@@ -194,6 +194,28 @@ impl ProcessStatus {
 // Process info
 // ============================================================================
 
+/// The clock ticks a second holds, as `/proc` counts them.
+///
+/// 100 on every platform this runs on; named rather than spelled `100` at the
+/// one site that divides by it.
+const TICKS_PER_SECOND: u64 = 100;
+
+/// A `/proc` state letter as this window's own status.
+///
+/// `D` -- uninterruptible sleep -- maps to `Sleeping` rather than gaining a
+/// variant: to a user it is a process that is not running and cannot be
+/// stopped, which is what `Sleeping` already means here. `T` and `t` are both
+/// stopped, one by a signal and one by a debugger.
+fn status_from_proc(state: u8) -> ProcessStatus {
+    match state {
+        b'R' => ProcessStatus::Running,
+        b'S' | b'D' => ProcessStatus::Sleeping,
+        b'T' | b't' => ProcessStatus::Stopped,
+        b'Z' => ProcessStatus::Zombie,
+        _ => ProcessStatus::Idle,
+    }
+}
+
 /// Information about a single process.
 #[derive(Clone, Debug)]
 pub struct ProcessInfo {
@@ -658,14 +680,87 @@ impl ProcessExplorerState {
     /// processes, read system stats, and list network connections. Here
     /// we define the API shape; the actual syscalls are provided by the
     /// kernel's process and network subsystems.
+    /// Every process `/proc` will admit to, or `None` if it cannot be read.
+    ///
+    /// Split out from [`refresh`](Self::refresh) so a test can point it at a
+    /// directory of fixture files with `ProcFs::at`, which is the only way to
+    /// test this without the machine's own process list -- a list that
+    /// changes between the two lines of an assertion.
+    fn read_processes(fs: &procinfo::ProcFs) -> Option<Vec<ProcessInfo>> {
+        let pids = fs.process_ids().ok()?;
+        let mut out = Vec::with_capacity(pids.len());
+        for pid in pids {
+            // A process that exits between the directory listing and the read
+            // is the normal case, not an error: skip it and carry on. Racing
+            // with the thing being measured is what a process list *is*.
+            let Ok(Some(stat)) = fs.process_stat(pid) else {
+                continue;
+            };
+            let statm = fs.process_statm(pid).ok().flatten();
+            let cmdline = fs
+                .process_cmdline(pid)
+                .ok()
+                .flatten()
+                .map(|args| {
+                    args.iter()
+                        .map(|a| String::from_utf8_lossy(a).into_owned())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .unwrap_or_default();
+            let ticks = stat.utime_ticks.saturating_add(stat.stime_ticks);
+            out.push(ProcessInfo {
+                pid: u32::try_from(stat.pid).unwrap_or(u32::MAX),
+                ppid: u32::try_from(stat.ppid).unwrap_or(u32::MAX),
+                name: String::from_utf8_lossy(&stat.comm).into_owned(),
+                status: status_from_proc(stat.state),
+                // Left at zero deliberately: a percentage needs two samples
+                // and this is one. `update_histories` is where a rate
+                // belongs, and inventing a number here would be the same
+                // mistake this function was written to remove.
+                cpu_percent: 0.0,
+                memory_bytes: stat.rss_kib().saturating_mul(1024),
+                virtual_bytes: stat.vsize_bytes,
+                shared_bytes: statm
+                    .map(|m| {
+                        m.shared_pages
+                            .saturating_mul(procinfo::PAGE_SIZE_KIB * 1024)
+                    })
+                    .unwrap_or(0),
+                thread_count: u32::try_from(stat.num_threads).unwrap_or(0),
+                priority: i32::try_from(stat.priority).unwrap_or(0),
+                user: String::new(),
+                command_line: cmdline,
+                start_time_secs: 0,
+                cpu_time_ms: ticks.saturating_mul(1000) / TICKS_PER_SECOND,
+                threads: Vec::new(),
+                handles: Vec::new(),
+                environment: Vec::new(),
+                tree_depth: 0,
+            });
+        }
+        Some(out)
+    }
+
     pub fn refresh(&mut self) {
-        // Placeholder: in production, call kernel syscalls here:
-        //   - sys_process_list() -> Vec<ProcessInfo>
-        //   - sys_system_info() -> SystemInfo
-        //   - sys_net_connections() -> Vec<ConnectionInfo>
+        // Reads the real `/proc`. Until 2026-09-13 this was a comment saying
+        // that one day it would call syscalls that do not exist, and the
+        // window showed `load_demo_data`'s invented processes -- a process
+        // explorer that explores nothing, which is worse than one that says
+        // it cannot.
         //
-        // For now, the data vectors are populated externally or via
-        // `load_demo_data()` for development/testing.
+        // `procinfo` is the shared reader, and using it rather than writing a
+        // parser here is the whole point of its existing: two parsers of
+        // `/proc/stat` in one repository are two things to keep in step. See
+        // known-issues.md TD-C-THE-GUI-PROCESS-EXPLORER-HAS-NO-DATA-SOURCE.
+        //
+        // A failure is not an error to show the user. `/proc` is absent on a
+        // developer host and on any machine where it has not been mounted
+        // yet, and an explorer that empties itself on a boot-order accident
+        // is worse than one that keeps the last list it had.
+        if let Some(processes) = Self::read_processes(&procinfo::ProcFs::new()) {
+            self.processes = processes;
+        }
 
         self.rebuild_visible_list();
         self.update_histories();
@@ -4031,5 +4126,64 @@ mod tests {
         state.ms_since_refresh = 0;
         state.handle_event(&Event::Tick { elapsed_ms: 5_000 });
         assert_eq!(state.ms_since_refresh, 0, "a long tick must still refresh");
+    }
+
+    /// The explorer reads the processes `/proc` actually has.
+    ///
+    /// Against a fixture directory rather than the machine's own `/proc`: a
+    /// real process list changes between the two lines of an assertion, and a
+    /// test that asserts about it is a test that fails on a busy afternoon.
+    /// `ProcFs::at` exists for exactly this.
+    ///
+    /// What is asserted is the mapping, because that is what this crate
+    /// wrote: the state letter, the page-to-byte conversions, the tick-to-
+    /// millisecond one, and the fact that a process which vanishes between
+    /// the listing and the read is skipped rather than fatal.
+    #[test]
+    fn the_explorer_reads_the_processes_proc_has() {
+        let dir = std::env::temp_dir().join(format!(
+            "procexplorer-proc-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("41")).unwrap();
+        std::fs::create_dir_all(dir.join("42")).unwrap();
+
+        // 41: running, 300 pages resident, 8 threads, 250 ticks of CPU.
+        std::fs::write(
+            dir.join("41/stat"),
+            b"41 (shell) R 1 41 41 0 -1 0 0 0 0 0 200 50 0 0 20 0 8 0 900               4096000 300 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0",
+        )
+        .unwrap();
+        std::fs::write(dir.join("41/statm"), b"1000 300 64 0 0 0 0").unwrap();
+        std::fs::write(dir.join("41/cmdline"), b"/bin/shell -i ").unwrap();
+
+        // 42 has a directory and no `stat`: the shape of a process that
+        // exited while the list was being walked.
+        let fs = procinfo::ProcFs::at(&dir);
+        let found = ProcessExplorerState::read_processes(&fs).expect("readable");
+
+        assert_eq!(
+            found.len(),
+            1,
+            "the half-gone process is skipped, not fatal"
+        );
+        let p = found.first().expect("one process");
+        assert_eq!(p.pid, 41);
+        assert_eq!(p.ppid, 1);
+        assert_eq!(p.name, "shell");
+        assert_eq!(p.status, ProcessStatus::Running);
+        assert_eq!(p.thread_count, 8);
+        assert_eq!(
+            p.memory_bytes,
+            300 * procinfo::PAGE_SIZE_KIB * 1024,
+            "resident pages become bytes through the shared page size"
+        );
+        assert_eq!(p.virtual_bytes, 4_096_000);
+        assert_eq!(p.cpu_time_ms, 2500, "250 ticks at 100 a second");
+        assert_eq!(p.command_line, "/bin/shell -i");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -690,13 +690,19 @@ fn extract_brace_arg(key: &str, prefix: &str) -> Option<String> {
 /// Persistent device property database stored in /run/udev/data/.
 /// Each device gets a file keyed by `b<major>:<minor>` or `n<ifindex>`.
 struct DeviceDatabase {
-    base_dir: String,
+    /// A `PathBuf`, not a `String`. A device database path is a path, and
+    /// making callers hand over a `&str` meant the tests had to decode a
+    /// `PathBuf` to pass one -- with `to_str().expect()`, which panics on any
+    /// path that is not UTF-8. The pre-push argv-utf8 gate refused that, and
+    /// was right: the fix is not a narrower expect but a type that never asks
+    /// the question.
+    base_dir: PathBuf,
 }
 
 impl DeviceDatabase {
-    fn new(base_dir: &str) -> Self {
+    fn new(base_dir: impl Into<PathBuf>) -> Self {
         Self {
-            base_dir: base_dir.to_string(),
+            base_dir: base_dir.into(),
         }
     }
 
@@ -714,9 +720,9 @@ impl DeviceDatabase {
     /// Store device properties to the database.
     fn store(&self, key: &str, props: &HashMap<String, String>) -> Result<(), String> {
         let dir = &self.base_dir;
-        fs::create_dir_all(dir).map_err(|e| format!("mkdir {dir}: {e}"))?;
+        fs::create_dir_all(dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
 
-        let path = format!("{dir}/{key}");
+        let path = dir.join(key);
         let mut content = String::new();
         // Sort keys for deterministic output.
         let mut keys: Vec<&String> = props.keys().collect();
@@ -726,13 +732,13 @@ impl DeviceDatabase {
                 content.push_str(&format!("E:{k}={v}\n"));
             }
         }
-        fs::write(&path, &content).map_err(|e| format!("write {path}: {e}"))?;
+        fs::write(&path, &content).map_err(|e| format!("write {}: {e}", path.display()))?;
         Ok(())
     }
 
     /// Load device properties from the database.
     fn load(&self, key: &str) -> HashMap<String, String> {
-        let path = format!("{}/{}", self.base_dir, key);
+        let path = self.base_dir.join(key);
         let mut props = HashMap::new();
         if let Ok(content) = fs::read_to_string(&path) {
             for line in content.lines() {
@@ -748,9 +754,9 @@ impl DeviceDatabase {
 
     /// Remove a device's database entry.
     fn remove(&self, key: &str) -> Result<(), String> {
-        let path = format!("{}/{}", self.base_dir, key);
-        if Path::new(&path).exists() {
-            fs::remove_file(&path).map_err(|e| format!("rm {path}: {e}"))?;
+        let path = self.base_dir.join(key);
+        if path.exists() {
+            fs::remove_file(&path).map_err(|e| format!("rm {}: {e}", path.display()))?;
         }
         Ok(())
     }
@@ -3372,7 +3378,7 @@ mod tests {
                 _source_file: "test".to_string(),
                 _source_line: 1,
             }],
-            db: DeviceDatabase::new(scratch.path("db").to_str().expect("scratch path is ASCII")),
+            db: DeviceDatabase::new(scratch.path("db")),
             log_level: LogLevel::Error,
             event_count: 0,
             _resolve_names_early: false,
@@ -3404,7 +3410,7 @@ mod tests {
         let scratch = scratchdir::ScratchDir::new("udevd-reload-rules");
         let mut state = DaemonState {
             rules: Vec::new(),
-            db: DeviceDatabase::new(scratch.path("db").to_str().expect("scratch path is ASCII")),
+            db: DeviceDatabase::new(scratch.path("db")),
             log_level: LogLevel::Error,
             event_count: 0,
             _resolve_names_early: false,

@@ -5257,26 +5257,62 @@ pub extern "C" fn tee(fd_in: Fd, fd_out: Fd, len: usize, flags: u32) -> isize {
 /// Core of `tee(2)` on the OS target: peek buffered bytes out of the source
 /// pipe (`in_handle`, a read end) and write copies into the destination pipe
 /// (`out_handle`, a write end) without consuming the source.  See [`tee`].
-#[cfg(target_os = "none")]
-fn tee_transfer(in_handle: u64, out_handle: u64, len: usize, flags: u32) -> isize {
-    let nonblock = flags & SPLICE_F_NONBLOCK != 0;
+/// The three pipe operations `tee_transfer` needs, behind a trait so the
+/// transfer LOOP can be driven without a kernel.
+///
+/// The loop below is the interesting part of `tee(2)` -- short destination
+/// writes, `EAGAIN`, partial progress, an offset that advances only by bytes
+/// actually duplicated -- and until this trait existed it was
+/// `#[cfg(target_os = "none")]` with no host counterpart and no test that
+/// referenced it. 88 lines of shipped data-copy logic that nothing executed:
+/// the host build returns `ENOSYS` from `tee` before reaching any of it, so
+/// posix's 20,703 tests covered the argument validation and stopped there.
+///
+/// Only the syscall IMPLEMENTATION is target-gated now. The loop is compiled
+/// and tested on both.
+///
+/// `any(target_os = "none", test)` rather than unconditional: on a host
+/// build that is not running tests nothing calls this, and an unused trait
+/// is a warning the workspace denies. The idiom is already used 22 times in
+/// this crate.
+#[cfg(any(target_os = "none", test))]
+trait TeePipes {
+    /// Copy up to `buf.len()` bytes buffered at `offset` WITHOUT consuming
+    /// them. Returns the count, 0 for nothing buffered there, or a negative
+    /// raw error.
+    fn peek(&mut self, offset: u64, buf: &mut [u8]) -> i64;
+    /// Write `buf` to the destination. Returns the count written, 0 for "no
+    /// space and no error", or a negative raw error.
+    fn write(&mut self, buf: &[u8], nonblock: bool) -> i64;
+    /// Block until the source has data or reaches EOF. Returns >0 for data,
+    /// 0 for "writers gone and drained", or a negative raw error.
+    fn wait_readable(&mut self) -> i64;
+}
+
+/// `tee(2)`'s transfer loop, over any [`TeePipes`].
+///
+/// Peek buffered bytes out of the source and write copies into the
+/// destination without consuming the source.
+#[cfg(any(target_os = "none", test))]
+fn tee_transfer_over<P: TeePipes>(pipes: &mut P, len: usize, nonblock: bool) -> isize {
     let mut buf = [0u8; 4096];
     let mut total: usize = 0;
-    // Logical offset into the source's buffered data.  Advances only by bytes
-    // we've successfully duplicated, so a short destination write re-peeks the
-    // not-yet-copied tail on the next pass.
+    // Logical offset into the source's buffered data. Advances only by bytes
+    // successfully duplicated, so the next CHUNK is peeked from where the last
+    // one actually ended rather than from where it was asked to end.
+    //
+    // Corrected 2026-09-13: this said a short destination write "re-peeks the
+    // not-yet-copied tail on the next pass". It does not -- the inner loop
+    // keeps writing until the whole peeked chunk is placed, and the one case
+    // that cannot (`nw == 0`, destination full) breaks out of the outer loop
+    // too, so there is no next pass. Found by writing a test that asserted the
+    // re-peek and watching it fail with peeks == 1.
     let mut offset: u64 = 0;
 
     while total < len {
         let chunk = len.saturating_sub(total).min(buf.len());
         // Non-destructive copy of up to `chunk` bytes at `offset`.
-        let n = syscall4(
-            SYS_PIPE_PEEK,
-            in_handle,
-            offset,
-            buf.as_mut_ptr() as u64,
-            chunk as u64,
-        );
+        let n = pipes.peek(offset, &mut buf[..chunk]);
         if n < 0 {
             if total > 0 {
                 break;
@@ -5286,7 +5322,7 @@ fn tee_transfer(in_handle: u64, out_handle: u64, len: usize, flags: u32) -> isiz
         if n == 0 {
             // Nothing buffered at `offset`.
             if total > 0 {
-                // Already duplicated something this call — report it.
+                // Already duplicated something this call -- report it.
                 break;
             }
             if nonblock {
@@ -5294,12 +5330,12 @@ fn tee_transfer(in_handle: u64, out_handle: u64, len: usize, flags: u32) -> isiz
                 return -1;
             }
             // Block until the source has data or reaches EOF.
-            let ready = syscall1(SYS_PIPE_WAIT_READABLE, in_handle);
+            let ready = pipes.wait_readable();
             if ready < 0 {
                 return errno::translate(ready) as isize;
             }
             if ready == 0 {
-                // Writers all gone, buffer drained — 0 bytes to duplicate.
+                // Writers all gone, buffer drained -- 0 bytes to duplicate.
                 return 0;
             }
             // Data available now; re-peek from the same offset.
@@ -5310,15 +5346,7 @@ fn tee_transfer(in_handle: u64, out_handle: u64, len: usize, flags: u32) -> isiz
         let to_write = n as usize;
         let mut written: usize = 0;
         while written < to_write {
-            // SAFETY: written < to_write <= buf.len(), so the pointer stays
-            // inside `buf`.
-            let ptr = unsafe { buf.as_ptr().add(written) } as u64;
-            let remaining = to_write.saturating_sub(written) as u64;
-            let nw = if nonblock {
-                syscall3(SYS_PIPE_TRY_WRITE, out_handle, ptr, remaining)
-            } else {
-                syscall3(SYS_PIPE_WRITE, out_handle, ptr, remaining)
-            };
+            let nw = pipes.write(&buf[written..to_write], nonblock);
             if nw < 0 {
                 // Destination error.  If we've made progress, return it so the
                 // caller sees a short transfer (Linux behaviour on EAGAIN/EPIPE
@@ -5329,7 +5357,7 @@ fn tee_transfer(in_handle: u64, out_handle: u64, len: usize, flags: u32) -> isiz
                 return errno::translate(nw) as isize;
             }
             if nw == 0 {
-                // No space and no error (nonblocking, full pipe) — stop.
+                // No space and no error (nonblocking, full pipe) -- stop.
                 break;
             }
             written = written.saturating_add(nw as usize);
@@ -5339,12 +5367,55 @@ fn tee_transfer(in_handle: u64, out_handle: u64, len: usize, flags: u32) -> isiz
         offset = offset.saturating_add(written as u64);
         if written < to_write {
             // Couldn't place the whole peeked chunk (destination full under
-            // SPLICE_F_NONBLOCK) — stop with a short transfer.
+            // SPLICE_F_NONBLOCK) -- stop with a short transfer.
             break;
         }
     }
 
     total as isize
+}
+
+/// [`TeePipes`] over the real kernel handles.
+#[cfg(target_os = "none")]
+struct SyscallPipes {
+    in_handle: u64,
+    out_handle: u64,
+}
+
+#[cfg(target_os = "none")]
+impl TeePipes for SyscallPipes {
+    fn peek(&mut self, offset: u64, buf: &mut [u8]) -> i64 {
+        syscall4(
+            SYS_PIPE_PEEK,
+            self.in_handle,
+            offset,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+        )
+    }
+
+    fn write(&mut self, buf: &[u8], nonblock: bool) -> i64 {
+        let ptr = buf.as_ptr() as u64;
+        let n = buf.len() as u64;
+        if nonblock {
+            syscall3(SYS_PIPE_TRY_WRITE, self.out_handle, ptr, n)
+        } else {
+            syscall3(SYS_PIPE_WRITE, self.out_handle, ptr, n)
+        }
+    }
+
+    fn wait_readable(&mut self) -> i64 {
+        syscall1(SYS_PIPE_WAIT_READABLE, self.in_handle)
+    }
+}
+
+#[cfg(target_os = "none")]
+fn tee_transfer(in_handle: u64, out_handle: u64, len: usize, flags: u32) -> isize {
+    let mut pipes = SyscallPipes {
+        in_handle,
+        out_handle,
+    };
+    tee_transfer_over(&mut pipes, len, flags & SPLICE_F_NONBLOCK != 0)
 }
 
 /// Splice user pages into, or out of, a pipe.
@@ -7691,6 +7762,231 @@ pub extern "C" fn statx(
 
 #[cfg(test)]
 mod tests {
+
+    // ---- tee(2)'s transfer loop -------------------------------------------
+    //
+    // Until `TeePipes` existed this loop was `#[cfg(target_os = "none")]` with
+    // no host counterpart and no test that named it. The host build returns
+    // ENOSYS from `tee` before reaching it, so posix's 20,703 tests covered the
+    // argument validation and nothing past it -- 88 lines of shipped data-copy
+    // logic, with short writes and EAGAIN in it, that no test ever executed.
+
+    /// A pipe pair in memory, with the knobs the loop's edge cases need.
+    struct FakePipes {
+        src: Vec<u8>,
+        dst: Vec<u8>,
+        /// Cap on each destination write, to force short writes.
+        max_write: usize,
+        /// Accept this many writes, then answer 0 ("full, no error").
+        writes_before_full: Option<usize>,
+        /// Raw error to return from the next peek, once.
+        peek_err: Option<i64>,
+        /// What `wait_readable` answers, in order.
+        wait_answers: Vec<i64>,
+        /// Data that appears in `src` when `wait_readable` returns > 0.
+        arrives_on_wait: Vec<u8>,
+        peeks: usize,
+        writes: usize,
+    }
+
+    impl FakePipes {
+        fn with_source(src: &[u8]) -> Self {
+            Self {
+                src: src.to_vec(),
+                dst: Vec::new(),
+                max_write: usize::MAX,
+                writes_before_full: None,
+                peek_err: None,
+                wait_answers: Vec::new(),
+                arrives_on_wait: Vec::new(),
+                peeks: 0,
+                writes: 0,
+            }
+        }
+    }
+
+    impl TeePipes for FakePipes {
+        fn peek(&mut self, offset: u64, buf: &mut [u8]) -> i64 {
+            self.peeks += 1;
+            if let Some(e) = self.peek_err.take() {
+                return e;
+            }
+            let off = offset as usize;
+            if off >= self.src.len() {
+                return 0;
+            }
+            let avail = self.src.len() - off;
+            let n = avail.min(buf.len());
+            buf[..n].copy_from_slice(&self.src[off..off + n]);
+            n as i64
+        }
+
+        fn write(&mut self, buf: &[u8], _nonblock: bool) -> i64 {
+            self.writes += 1;
+            if let Some(limit) = self.writes_before_full
+                && self.writes > limit
+            {
+                return 0;
+            }
+            let n = buf.len().min(self.max_write);
+            self.dst.extend_from_slice(&buf[..n]);
+            n as i64
+        }
+
+        fn wait_readable(&mut self) -> i64 {
+            if self.wait_answers.is_empty() {
+                return 0;
+            }
+            let a = self.wait_answers.remove(0);
+            if a > 0 {
+                let more = core::mem::take(&mut self.arrives_on_wait);
+                self.src.extend_from_slice(&more);
+            }
+            a
+        }
+    }
+
+    #[test]
+    fn tee_duplicates_without_consuming_the_source() {
+        let mut p = FakePipes::with_source(b"hello world");
+        let n = tee_transfer_over(&mut p, 11, false);
+        assert_eq!(n, 11);
+        assert_eq!(p.dst, b"hello world");
+        assert_eq!(p.src, b"hello world", "tee must NOT consume the source");
+    }
+
+    #[test]
+    fn tee_stops_at_the_requested_length() {
+        let mut p = FakePipes::with_source(b"hello world");
+        let n = tee_transfer_over(&mut p, 5, false);
+        assert_eq!(n, 5);
+        assert_eq!(p.dst, b"hello");
+    }
+
+    #[test]
+    fn a_short_destination_write_re_peeks_the_tail_without_losing_or_duplicating() {
+        // The reason the offset advances by BYTES WRITTEN rather than by bytes
+        // peeked. With a 4-byte cap the loop must re-peek at 4, 8 ... and the
+        // destination must end up with each byte exactly once, in order.
+        let mut p = FakePipes::with_source(b"abcdefghij");
+        p.max_write = 4;
+        let n = tee_transfer_over(&mut p, 10, false);
+        assert_eq!(n, 10, "every byte should be transferred");
+        assert_eq!(p.dst, b"abcdefghij", "bytes lost, duplicated or reordered");
+        // And exactly ONE peek, which is not what I assumed when writing this.
+        // A capped write does not cause a re-peek: the inner loop keeps
+        // writing until the whole peeked chunk is placed, so the outer loop
+        // only comes round again for a NEW chunk. The re-peek path is the
+        // destination-full one (`nw == 0`), covered below.
+        assert_eq!(p.peeks, 1, "a capped write must not re-peek the same chunk");
+    }
+
+    #[test]
+    fn a_full_destination_under_nonblock_is_a_short_transfer_not_an_error() {
+        // write() answering 0 means no space and no error. Linux reports the
+        // partial count rather than failing.
+        let mut p = FakePipes::with_source(b"abcdefghij");
+        p.max_write = 4;
+        p.writes_before_full = Some(1);
+        let n = tee_transfer_over(&mut p, 10, true);
+        assert_eq!(n, 4, "should report what it managed");
+        assert_eq!(p.dst, b"abcd");
+    }
+
+    #[test]
+    fn an_empty_source_under_nonblock_is_eagain() {
+        let mut p = FakePipes::with_source(b"");
+        let n = tee_transfer_over(&mut p, 8, true);
+        assert_eq!(n, -1);
+    }
+
+    #[test]
+    fn an_empty_source_blocks_and_then_transfers_what_arrives() {
+        let mut p = FakePipes::with_source(b"");
+        p.wait_answers = vec![1];
+        p.arrives_on_wait = b"late".to_vec();
+        let n = tee_transfer_over(&mut p, 8, false);
+        assert_eq!(n, 4);
+        assert_eq!(p.dst, b"late");
+    }
+
+    #[test]
+    fn a_drained_source_with_no_writers_is_zero_not_an_error() {
+        // wait_readable answering 0 means writers all gone and the buffer
+        // drained. That is end of input: tee reports 0 rather than failing.
+        let mut p = FakePipes::with_source(b"");
+        p.wait_answers = vec![0];
+        let n = tee_transfer_over(&mut p, 8, false);
+        assert_eq!(n, 0);
+        assert!(p.dst.is_empty());
+    }
+
+    #[test]
+    fn a_peek_error_with_no_progress_surfaces_the_error() {
+        let mut p = FakePipes::with_source(b"abcdefghij");
+        p.peek_err = Some(-1);
+        let n = tee_transfer_over(&mut p, 8, false);
+        assert!(n < 0, "an immediate peek failure must be an error");
+        assert!(p.dst.is_empty());
+    }
+
+    #[test]
+    fn a_peek_error_after_progress_reports_the_progress_rather_than_discarding_it() {
+        // The `if total > 0 { break }` arm. The first pass copies 4 bytes, the
+        // second peek fails, and the 4 already duplicated must still be
+        // reported -- discarding them would make a mid-transfer hiccup look
+        // like nothing happened.
+        struct FailSecondPeek {
+            inner: FakePipes,
+        }
+        impl TeePipes for FailSecondPeek {
+            fn peek(&mut self, offset: u64, buf: &mut [u8]) -> i64 {
+                if self.inner.peeks >= 1 {
+                    self.inner.peeks += 1;
+                    return -1;
+                }
+                self.inner.peek(offset, buf)
+            }
+            fn write(&mut self, buf: &[u8], nb: bool) -> i64 {
+                self.inner.write(buf, nb)
+            }
+            fn wait_readable(&mut self) -> i64 {
+                self.inner.wait_readable()
+            }
+        }
+        // The source must exceed the 4 KiB buffer, or the first peek returns
+        // everything and there is never a second one to fail -- which is what
+        // the first version of this test got wrong.
+        let src: Vec<u8> = (0..5_000u32).map(|i| (i % 251) as u8).collect();
+        let inner = FakePipes::with_source(&src);
+        let mut p = FailSecondPeek { inner };
+        let n = tee_transfer_over(&mut p, src.len(), false);
+        assert_eq!(
+            n, 4096,
+            "the first chunk was duplicated and must be reported"
+        );
+        assert_eq!(p.inner.dst.len(), 4096);
+        assert_eq!(
+            p.inner.dst[..],
+            src[..4096],
+            "the reported bytes must be the right ones"
+        );
+    }
+
+    #[test]
+    fn a_length_larger_than_the_internal_buffer_transfers_every_chunk() {
+        // The buffer is 4 KiB; 10,000 bytes needs three passes, and the offset
+        // has to carry across them.
+        let src: Vec<u8> = (0..10_000u32).map(|i| (i % 251) as u8).collect();
+        let mut p = FakePipes::with_source(&src);
+        let n = tee_transfer_over(&mut p, src.len(), false);
+        assert_eq!(n, src.len() as isize);
+        assert_eq!(p.dst, src, "a chunk boundary lost or repeated data");
+        assert!(
+            p.peeks >= 3,
+            "10,000 bytes should need at least three peeks"
+        );
+    }
     use super::*;
 
     // -- translate_open_flags --

@@ -2309,7 +2309,23 @@ impl LoginManager {
 // Application entry point
 // ============================================================================
 
+/// Refuse arguments, because this program takes none.
+///
+/// Not an option table: there are no options. Anything on the command line is
+/// a misunderstanding about what this program is, and answering it by running
+/// anyway is how a caller comes to believe it did what they asked.
+fn refuse_arguments(prog: &str) {
+    let extra: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(first) = extra.first() {
+        eprintln!("{prog}: unknown option: {first}");
+        eprintln!("{prog}: this program takes no arguments");
+        std::process::exit(1);
+    }
+}
+
 fn main() {
+    refuse_arguments("loginmgr");
+
     let mut manager = LoginManager::new();
 
     // Check for auto-login configuration.

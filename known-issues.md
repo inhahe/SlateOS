@@ -129738,10 +129738,17 @@ both describe, at four copies rather than three.
 per-client registry with reaping, then a subscription frame so a tray learns
 the list. `gui/remote/src/window_list.rs` is the model to copy and says why in
 its own first paragraph -- "a taskbar has to list the windows it did not open,
-and had no way to ask" is the same sentence with "icons" in it. Deciding
-*which* of the four is the real tray is the first question, and it is a real
-one: `apps/systray` is a separate window, the shell's tray is part of the
-taskbar, and they cannot both be where icons go.
+and had no way to ask" is the same sentence with "icons" in it. **Which of the four is the real tray is now answered** -- `design-decisions.md`
+842, and it needed no new judgement: 815's dividing line (*"is this something
+the desktop shows you, or a screen you open?"*) puts an always-visible taskbar
+strip in the shell plainly. `gui/desktop`'s tray is the real one, `apps/systray`
+is the copy, and its unique parts -- quick settings, the volume and network
+popups -- are also things the desktop shows you, so they move to the shell
+rather than to Settings. The argument from sunk work -- keep the bigger, newer
+`apps/systray` -- loses on geometry: a tray is a strip inside the taskbar, and
+the taskbar is the shell's. A separate window would have to be parented inside
+another process's panel and kept there through every resize, theme change and
+scale change.
 
 **Not started here, deliberately**, and the reason is this entry's own subject:
 layers that exist without their consumers are what produced four models in the

@@ -63822,7 +63822,51 @@ green.
 
 ---
 
-## TD-C-RUSTDOC-LINKS-GO-NOWHERE-IN-FIVE-GUI-CRATES
+## TD-C-RUSTDOC-LINKS-GO-NOWHERE-IN-FIVE-GUI-CRATES -- FIXED 2026-09-13
+
+**Fixed 2026-09-13: all five crates report zero.** And the number worth
+keeping is not 129, it is the rate.
+
+| | warnings |
+|---|---|
+| counted 2026-08-21, when this entry was written | 55 |
+| counted 2026-09-13, before the fix | 129 |
+| after | 0 |
+
+`compositor` went from 8 to 39 and `guitk` from 11 to 25 in three weeks, in a
+codebase where nobody forgets to run the tests and nobody runs `cargo doc`.
+This entry predicted it in its own last line -- *a warning count nobody
+watches is one nobody will ever bring to zero* -- and the prediction is now
+measured rather than asserted: about a warning a day.
+
+**Two classes were worse than a broken link**, and both are invisible to a
+reader of the source: `Signal<T>` and `Vec<StyledSpan>` written without
+backticks, where rustdoc reads `<T>` as an HTML tag and swallows the rest of
+the paragraph -- two paragraphs of module documentation were simply not on
+the page; and three sentences in `guiremote` describing a `Client` type that
+does not exist and leaves no trace in `grep`.
+
+**Why there is no gate yet, and what the gap actually is.** The obvious move
+is a `cargo doc` check in the push hook. It is affordable -- measured at 1.3 s
+when nothing changed and 8.6 s after touching `guitk`, against a hook that
+already runs seventy-one checkers and compiles sixty crates for one of them.
+But a gate for this already exists: `scripts/check-doc-links.py`, written
+2026-09-01 after the same discovery in `coreutils`. It does not cover these
+crates **on purpose**:
+
+```python
+# Roots scanned. Lane B's trees; a crate outside these is another lane's to
+# gate, and a gate scoped wider than its owner can fix is a gate that blocks
+# people who cannot act on it.
+ROOTS = ("userspace", "services", "init", "posix")
+```
+
+So widening it is the wrong fix and lane C simply has no equivalent. The right
+one is a sibling scoped to `gui/**` and `apps/**` that skips when no file of
+theirs is in the push -- the short-circuit that script already implements --
+and it has to be wired into whatever `scripts/check-gates-are-wired.py`
+watches, or it is a gate nobody asks. That is the next piece of work and it is
+logged as its own entry rather than left in this one.
 
 **In short:** The GUI crates' generated documentation has 55 broken or
 misleading cross-references. Some are links that point at nothing at all, so a

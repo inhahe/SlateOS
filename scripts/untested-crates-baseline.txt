@@ -16,4 +16,3 @@ userspace/indexer  # 1319 lines, ws
 userspace/man  # 1198 lines, ws
 userspace/nano  # 1923 lines, ws
 userspace/shell  # 204 lines, ws
-userspace/sysctl  # 597 lines, ws

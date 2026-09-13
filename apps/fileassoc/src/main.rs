@@ -4737,7 +4737,7 @@ mod tests {
         assert_eq!(
             reg.file_types["txt"].default_app_id.as_ref(),
             Some(&openers[0]),
-            "uninstalling the handler orphaned the file type instead of              falling back to the one before it"
+            "uninstalling the handler orphaned the file type instead of falling back to the one before it"
         );
     }
 

@@ -1571,7 +1571,7 @@ mod tests {
         );
         assert!(
             frame_was_busy(false, false, &comp),
-            "a frame with a keystroke pending was treated as idle, so the              backoff would deliver it up to IDLE_INTERVAL late"
+            "a frame with a keystroke pending was treated as idle, so the backoff would deliver it up to IDLE_INTERVAL late"
         );
     }
 

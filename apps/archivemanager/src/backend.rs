@@ -648,7 +648,7 @@ impl fmt::Display for SaveError {
             Self::NoSource => f.write_str("this archive was not read from a file"),
             Self::WouldExhaustMemory { projected, limit } => write!(
                 f,
-                "rewriting this archive needs about {} of memory and this                  program will use up to {}; nothing was changed",
+                "rewriting this archive needs about {} of memory and this program will use up to {}; nothing was changed",
                 guitk::bytes::iec(*projected),
                 guitk::bytes::iec(*limit)
             ),

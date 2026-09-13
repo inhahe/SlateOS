@@ -3821,7 +3821,7 @@ mod tests {
                                 let ratio = contrast_ratio(ink, *ground);
                                 if ratio < TEXT_CONTRAST_FLOOR {
                                     failures.push(format!(
-                                        "light={light} {surface_style:?}/{strip_style:?}                                          accent=#{:06X}: {name} on #{:06X} is {ratio:.2}",
+                                        "light={light} {surface_style:?}/{strip_style:?} accent=#{:06X}: {name} on #{:06X} is {ratio:.2}",
                                         (u32::from(accent.r) << 16)
                                             | (u32::from(accent.g) << 8)
                                             | u32::from(accent.b),
@@ -3868,7 +3868,7 @@ mod tests {
                     assert_eq!(
                         p.ink(p.text),
                         p.text,
-                        "p.text needs adjusting under {surface_style:?}/{strip_style:?}                          (light={light}), so its draw sites can no longer say `p.text`"
+                        "p.text needs adjusting under {surface_style:?}/{strip_style:?} (light={light}), so its draw sites can no longer say `p.text`"
                     );
                 }
             }
@@ -3892,7 +3892,7 @@ mod tests {
                 assert_eq!(
                     p.ink(once),
                     once,
-                    "inking twice moved it again, so the first pass had not                      finished (light={light})"
+                    "inking twice moved it again, so the first pass had not finished (light={light})"
                 );
             }
         }
@@ -4036,7 +4036,7 @@ mod tests {
                 "subtext1 on surface1",
                 "subtext1 on surface2",
             ],
-            "the card theme's known-failing set changed; if something new fell              below the floor it needs fixing, and if something was fixed this              list should shrink to match"
+            "the card theme's known-failing set changed; if something new fell below the floor it needs fixing, and if something was fixed this list should shrink to match"
         );
     }
 
@@ -4053,7 +4053,7 @@ mod tests {
         let separation = contrast_ratio(LIGHT_TEXT, LIGHT_SUBTEXT0);
         assert!(
             separation > 1.3,
-            "main and secondary text are within {separation:.2} of each other,              so the hierarchy reads as flat"
+            "main and secondary text are within {separation:.2} of each other, so the hierarchy reads as flat"
         );
     }
 

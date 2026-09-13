@@ -4650,7 +4650,7 @@ mod tests {
         assert_eq!(
             app.current_offset(),
             offset,
-            "a click beside the card is a dismissal, not a click on the row              it happens to be level with"
+            "a click beside the card is a dismissal, not a click on the row it happens to be level with"
         );
     }
 

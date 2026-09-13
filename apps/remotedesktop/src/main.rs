@@ -3631,7 +3631,7 @@ mod tests {
         assert_eq!(
             app.tick_interval(),
             None,
-            "a completed transfer still in the list should not keep waking the              machine"
+            "a completed transfer still in the list should not keep waking the machine"
         );
 
         // Nor should a cancelled one.

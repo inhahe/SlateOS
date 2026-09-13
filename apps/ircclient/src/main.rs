@@ -3906,7 +3906,7 @@ mod tests {
             assert_eq!(
                 app.nick_at(rect.x + 20.0, probe),
                 None,
-                "the chat column reaches over y={probe} now, and a click                  there must not open a private chat with whoever used to be                  listed"
+                "the chat column reaches over y={probe} now, and a click there must not open a private chat with whoever used to be listed"
             );
             probe += 4.0;
         }
@@ -3922,7 +3922,7 @@ mod tests {
         assert_eq!(app.input_history_idx, None);
         assert!(
             !app.handle_event(&key(Key::Down)),
-            "past the newest there is nowhere further to go, so the key              costs no frame"
+            "past the newest there is nowhere further to go, so the key costs no frame"
         );
     }
 

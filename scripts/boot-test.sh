@@ -6010,6 +6010,34 @@ check_lane_c_gui_gates() {
         return 1
     fi
 
+    # A message that prints with a gap in the middle of its sentence, at the
+    # moment somebody is reading a failure quickly. `rustfmt` joins a line
+    # continuation and leaves the indentation inside the literal; nothing
+    # warns, because the result is a perfectly valid string.
+    #
+    # Cheap enough to sit here -- 0.7 s over 382 files -- and it decides by
+    # POSITION: only a literal that is an argument to an assertion macro. The
+    # first attempt matched four-or-more spaces inside any string, which is a
+    # rule about shape, and it rewrote a screenshot app's column-aligned
+    # shortcut list and a JSON fixture's indentation. Three of its five
+    # self-test fixtures are those false positives.
+    if ! run_checker collapsed-messages-selftest "$py" "$PROJECT_ROOT/scripts/check-collapsed-messages.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The collapsed-message rule no longer" >&2
+        echo "agrees with its own fixtures, three of which are strings whose" >&2
+        echo "runs of spaces are the content and must not be touched." >&2
+        return 1
+    fi
+
+    echo "=== Checking that no assertion message has a collapsed continuation ==="
+    if ! run_checker collapsed-messages "$py" "$PROJECT_ROOT/scripts/check-collapsed-messages.py"; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  Each message above prints with a gap" >&2
+        echo "in the middle of a sentence.  Repair them with:" >&2
+        echo "    python scripts/check-collapsed-messages.py --apply" >&2
+        return 1
+    fi
+
     # And the other half of the same question. `check-overlay0-ink.py` below
     # asks whether text is drawn in the *disabled* grey; this asks whether an
     # accent-family role reaches a text site without going through `ink()`,

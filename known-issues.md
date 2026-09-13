@@ -131193,7 +131193,7 @@ scheduled step rather than as part of the correctness run, and diff against
 
 ---
 
-## TD-C-ASSERTION-MESSAGES-CARRY-COLLAPSED-LINE-CONTINUATIONS
+## TD-C-ASSERTION-MESSAGES-CARRY-COLLAPSED-LINE-CONTINUATIONS -- FIXED 2026-09-13
 
 **Date:** 2026-09-13. **Lane:** C.
 **Where:** about 60 string literals across ~30 files under `gui/**` and
@@ -131223,6 +131223,28 @@ pass:
   formatting. Excluding runs that follow `
 ` is not enough, because a regex
   for four-or-more spaces also matches starting one space into a six-space run.
+
+**FIXED 2026-09-13, by exactly the rule this entry recommended.**
+`scripts/check-collapsed-messages.py` rewrites a literal only when it is an
+argument to `assert!`, `assert_eq!`, `panic!`, `expect` and their relatives --
+found by walking back from the literal while the paren depth says we are still
+inside a call. **53 messages repaired across 30 files, and zero hits in
+`apps/screenshot`**, the false positive that forced the first attempt back.
+Every one of the 83 changed lines is a string literal; nothing else moved.
+
+It is a gate now, not just a repair: 0.7 s over 382 files, wired into
+`check_lane_c_gui_gates`. Three of its five self-test fixtures are the false
+positives from the reverted attempt -- a shortcut list, a JSON body, a table
+row with alignment specifiers -- so the rule that would rewrite them fails its
+own tests rather than being caught by review a second time.
+
+**The recurring lesson, stated once because it landed three times today.** The
+shape rule and the position rule find almost the same set, and the difference
+is entirely false positives: `check-overlay0-ink.py` asks whether a role is
+the colour *argument* of a text draw rather than whether the word appears
+nearby; `ink-text.py` asks whether a `RenderCommand::Text` is a value or a
+pattern; this asks whether a literal is a message or a layout. In each case
+the shape version was confidently wrong about a population it could not see.
 
 **The proper fix** is to decide by *position*, not by shape: only rewrite a
 literal that is an argument to `assert!`, `assert_eq!`, `panic!` or `expect`.

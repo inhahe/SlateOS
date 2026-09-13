@@ -4398,7 +4398,7 @@ mod tests {
             + (app.history.len() as f32 + 1.0) * ROW_HEIGHT;
         assert!(
             past_the_end < app.content_bottom_edge(),
-            "fixture has no room below the table, so it cannot tell a click              past the last row from a click outside the pane",
+            "fixture has no room below the table, so it cannot tell a click past the last row from a click outside the pane",
         );
         app
     }

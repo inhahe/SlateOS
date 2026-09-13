@@ -10534,7 +10534,7 @@ mod run_box_wiring_tests {
             );
             assert!(
                 !shell.load_input_settings(),
-                "a second read of an unchanged file reported a change, which                  would repaint the desktop on every announcement"
+                "a second read of an unchanged file reported a change, which would repaint the desktop on every announcement"
             );
         });
     }
@@ -10591,7 +10591,7 @@ mod run_box_wiring_tests {
             let after = inputsettings::InputFile::load().settings.keyboard.layout;
             assert_ne!(
                 before, after,
-                "the chord changed the shell's model but not the file the                  compositor reads, so the keys would not have moved"
+                "the chord changed the shell's model but not the file the compositor reads, so the keys would not have moved"
             );
             assert_eq!(
                 after,

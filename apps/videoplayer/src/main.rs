@@ -6565,13 +6565,13 @@ mod tests {
         assert_eq!(
             app.tick_interval(),
             Some(FRAME_TICK),
-            "pausing says 'Paused' on screen, and that message still has to              be taken off it"
+            "pausing says 'Paused' on screen, and that message still has to be taken off it"
         );
         app.tick(app.preferences.osd_duration_ms);
         assert_eq!(
             app.tick_interval(),
             None,
-            "once the message is gone a paused player has nothing left to              advance"
+            "once the message is gone a paused player has nothing left to advance"
         );
         app.handle_event(&press(Key::Up));
         assert_eq!(app.tick_interval(), Some(FRAME_TICK));
@@ -6775,7 +6775,7 @@ mod tests {
         assert!(Press::Plain(Key::Right).matches(&plain_right));
         assert!(
             !Press::Shift(Key::Right).matches(&plain_right),
-            "the sixty-second seek must not answer an unshifted arrow,              whatever order the table happens to be in"
+            "the sixty-second seek must not answer an unshifted arrow, whatever order the table happens to be in"
         );
         let shifted = KeyEvent {
             modifiers: shift(),
@@ -6801,7 +6801,7 @@ mod tests {
         assert_eq!(
             app.seek_preview_position,
             Some(duration),
-            "the time shown under a pointer dragged off the right of the bar              must be the end of the film, not a time past it"
+            "the time shown under a pointer dragged off the right of the bar must be the end of the film, not a time past it"
         );
         app.handle_event(&mouse(bar.x - bar.width, y, MouseEventKind::Move));
         assert_eq!(app.seek_preview_position, Some(Duration::ZERO));

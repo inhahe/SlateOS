@@ -1635,7 +1635,7 @@ mod tests {
             let responses = exchange(&mut comp, &mut shell, vec![ordinary]);
             assert!(
                 !matches!(responses[0].body, ResponseBody::Ok),
-                "{name} accepted a foreign window, which is what the shell                  variants exist to avoid"
+                "{name} accepted a foreign window, which is what the shell variants exist to avoid"
             );
         }
     }

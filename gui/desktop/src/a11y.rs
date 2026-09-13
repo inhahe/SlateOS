@@ -1316,7 +1316,7 @@ mod tests {
                 "WhiteOnBlack background is light text",
                 "YellowOnBlack background is light text",
             ],
-            "the set of high-contrast colours that are also palette roles              changed; if a role moved onto one of these values, that is the              signal to revisit it rather than to widen this list"
+            "the set of high-contrast colours that are also palette roles changed; if a role moved onto one of these values, that is the signal to revisit it rather than to widen this list"
         );
     }
 

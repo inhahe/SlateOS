@@ -7557,7 +7557,7 @@ removable=true
         assert_eq!(
             drawn.len(),
             rows.count,
-            "and the draw loop stops at the bottom of the pane rather than              running the whole list through a clip",
+            "and the draw loop stops at the bottom of the pane rather than running the whole list through a clip",
         );
     }
 

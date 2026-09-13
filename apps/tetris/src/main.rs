@@ -3375,7 +3375,7 @@ mod tests {
             for (pos, count) in row.iter().enumerate() {
                 assert!(
                     *count > 0,
-                    "piece {piece} was never dealt at position {pos} in {bags} bags;                      the table is {counts:?}"
+                    "piece {piece} was never dealt at position {pos} in {bags} bags; the table is {counts:?}"
                 );
             }
         }

@@ -4216,7 +4216,7 @@ mod tests {
         assert_ne!(app.selected_torrent, Some(id), "and the selection moved on");
         assert!(
             app.status_message.starts_with("Removed:"),
-            "Delete should take the entry off the list and leave the files              alone -- deleting someone's download because they pressed Delete              on a row is the one irreversible thing this program does. Status              says {:?}",
+            "Delete should take the entry off the list and leave the files alone -- deleting someone's download because they pressed Delete on a row is the one irreversible thing this program does. Status says {:?}",
             app.status_message
         );
     }

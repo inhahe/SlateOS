@@ -69,7 +69,7 @@ const MAX_REPLACE_LEN: usize = 512;
 const MAX_MATCHES: usize = 1000;
 const _: () = assert!(
     MAX_INPUT_LEN > MAX_PATTERN_LEN,
-    "the text being searched is expected to dwarf the pattern it is searched      with; if that stops being true the field limits want rethinking rather      than swapping"
+    "the text being searched is expected to dwarf the pattern it is searched with; if that stops being true the field limits want rethinking rather than swapping"
 );
 
 /// How many saved patterns the library will hold.

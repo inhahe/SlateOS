@@ -7195,7 +7195,7 @@ mod tests {
                 InputSettings::read_from(&inputsettings::config::load(inputsettings::CONFIG_NAME));
             assert!(
                 saved.accessibility.sticky.enabled,
-                "the switch moved on screen but input.yaml still says off, so                  the compositor will never hear about it"
+                "the switch moved on screen but input.yaml still says off, so the compositor will never hear about it"
             );
         });
     }
@@ -7240,7 +7240,7 @@ mod tests {
         );
         assert_ne!(
             dark, light,
-            "the settings pages drew identically on the dark and light themes,              so they are still painting themselves from constants"
+            "the settings pages drew identically on the dark and light themes, so they are still painting themselves from constants"
         );
 
         // High contrast is the case that matters most, and the one a
@@ -9181,7 +9181,7 @@ mod against_the_real_compositor {
 
         assert!(
             bordered_strokes >= 2,
-            "the bordered preview drew {bordered_strokes} outlines; it has at least a row and a              selected row"
+            "the bordered preview drew {bordered_strokes} outlines; it has at least a row and a selected row"
         );
         assert_eq!(
             filled_strokes, 0,
@@ -9219,7 +9219,7 @@ mod against_the_real_compositor {
         let filled = strokes_for(crate::SurfaceStyle::Cards);
         assert!(
             bordered > filled,
-            "the page drew {bordered} outlines under Borders and {filled} under Cards; it is not              passing the setting through to the preview"
+            "the page drew {bordered} outlines under Borders and {filled} under Cards; it is not passing the setting through to the preview"
         );
     }
 

@@ -1,0 +1,8 @@
+# Symbols exported by BOTH posix and toolchain/stubs.
+#
+# Empty, and it should stay that way. Both archives are linked into every
+# userspace binary and --allow-multiple-definition means a duplicate is not a
+# link error -- the linker takes whichever it sees first, and -lstubs comes
+# before -lc. A line here must say why a duplicate is deliberate; on
+# 2026-09-13 all three that existed were stale stubs shadowing real posix
+# implementations, and the answer was to delete them.

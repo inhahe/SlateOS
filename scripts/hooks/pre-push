@@ -107,6 +107,13 @@
 #      therefore worse -- `cargo test -p posix` runs on the HOST, and nothing
 #      here ever built the libc for the target every binary links. 1.9 s warm.
 #
+#  41. Refuse a C symbol exported by BOTH `posix` and `toolchain/stubs`.
+#      Their archives are both linked into every userspace binary, and
+#      `--allow-multiple-definition` means the duplicate is not a link
+#      error -- the linker takes whichever it sees first, and `-lstubs`
+#      comes before `-lc`. Three stale stubs were shadowing real posix
+#      implementations when this was written.
+#
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented; wrong again the moment gate 13 was written, when the
 # section and the bypass landed in `0ab4b55bc` and this list did not; and
@@ -4680,6 +4687,79 @@ the breakage with.
 
 To push anyway:
     ALLOW_PINNED_TARGET_BUILD=1 git push origin ...
+EOF
+    exit 1
+fi
+
+
+# ---------------------------------------------------------------------------
+# Gate 41 -- duplicate-exports.  A C symbol exported by BOTH posix and
+# toolchain/stubs.
+#
+# Both are built into archives -- libc.a and libstubs.a -- linked into every
+# userspace binary.  A duplicate does NOT fail the link, because
+# .cargo/config.toml passes --allow-multiple-definition; the linker takes
+# whichever it sees first and -lstubs is passed before rustc's own -lc.
+#
+# On 2026-09-13 three symbols were in both, and the stub was the worse half
+# each time: killpg returned -1 and set no errno despite a comment claiming
+# ENOSYS; posix_spawnattr_setsigdefault returned success for a no-op; and
+# syscall took four parameters where posix's takes seven, silently dropping
+# three argument registers.
+#
+# Reads SOURCE, not the archives, for two reasons.  The sysroot is built by
+# hand, and libstubs.a was ten hours older than its source when this was
+# written -- a gate reading it would have graded a stale artifact.  And the
+# archives carry 294 duplicate unmangled symbols of which 291 are compiler-rt
+# and libm, legitimately in both, so a baseline of 291 lines would be a place
+# for a real finding to hide.  The source scan sees only what someone wrote
+# no_mangle on, and found exactly the three.
+# ---------------------------------------------------------------------------
+dupexp="${repo_root:-.}/scripts/check-duplicate-exports.py"
+skip_dupexp=0
+# Bypass: ALLOW_DUPLICATE_EXPORTS=1 git push origin <branch>
+if [ "${ALLOW_DUPLICATE_EXPORTS:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_DUPLICATE_EXPORTS=1 set -- skipping the duplicate-exports gate." >&2
+    skip_dupexp=1
+fi
+[ -n "$py" ] || skip_dupexp=1
+[ -f "$dupexp" ] || skip_dupexp=1
+touches posix/ toolchain/stubs/ scripts/check-duplicate-exports.py scripts/duplicate-exports-baseline.txt || skip_dupexp=1
+note_gate duplicate-exports "$skip_dupexp"
+
+dupexp_failed=0
+if [ "$skip_dupexp" != "1" ]; then
+    # The checker before its verdict.  Its silent failure is a regex that
+    # stops matching: it would then find zero exports, zero duplicates, and
+    # read as a clean tree.  Both attribute spellings and the corpus size are
+    # self-test cases.
+    if ! run_checker duplicate-exports-selftest "$py" "$dupexp" --selftest; then
+        echo "pre-push: check-duplicate-exports.py FAILED ITS OWN SELF-TEST -- its verdict is not trustworthy." >&2
+        dupexp_failed=1
+    else
+        if ! run_checker duplicate-exports "$py" "$dupexp"; then
+            dupexp_failed=1
+        fi
+    fi
+fi
+
+if [ "$dupexp_failed" != "0" ]; then
+    cat >&2 <<EOF
+
+pre-push: REFUSING to push -- a C symbol is exported by both posix and
+toolchain/stubs.
+
+This will not fail the link. Both archives go into every userspace binary and
+--allow-multiple-definition is passed, so the linker takes whichever it sees
+first -- and -lstubs comes before -lc, so the STUB wins.
+
+If posix has the real implementation, delete the stub. That is the policy the
+stubs file's own header already states. But check first that posix's covers
+everything the stub did: when this happened for \`syscall\`, posix's table was
+missing futex, and deleting the stub alone would have removed it.
+
+To push anyway:
+    ALLOW_DUPLICATE_EXPORTS=1 git push origin ...
 EOF
     exit 1
 fi

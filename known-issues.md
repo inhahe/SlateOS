@@ -131881,7 +131881,7 @@ also what Windows does, and what this shortcut is modelled on.
 
 ---
 
-## TD-C-A-TEST-THAT-WRITES-TO-AN-ABSOLUTE-POSIX-PATH-WRITES-TO-THE-DEV-DRIVE-ROOT
+## TD-C-A-TEST-THAT-WRITES-TO-AN-ABSOLUTE-POSIX-PATH-WRITES-TO-THE-DEV-DRIVE-ROOT -- FIXED 2026-09-13 by lane B
 
 **Date:** 2026-09-13. **Lane:** C filed it; **the fix is lane B's** --
 `userspace/**`, which lane C must not write. Filed to them as
@@ -131991,6 +131991,38 @@ is in the list, and `E:\Boot` is a self-test fixture in two halves -- one
 asserting it is not reported, one asserting that a constructed lowercase path
 *would* have matched it. The second is what makes the first mean something: it
 fails if anyone reverts the scan to `is_dir`.
+
+**CLOSED 2026-09-13. Both writers are fixed and the tree is clean, measured
+rather than taken on report.**
+
+Lane B attributed and fixed both (their notice is quoted below). Verifying
+it needed one thing this lane had been getting wrong: `lane-c` was **104
+commits behind `origin/main`**, so neither fix was in the tree being
+tested. A run against that tree recreated `E:\var\run` and `E:\dev`, and
+reporting *that* as their fix failing would have been a confident wrong
+claim of exactly the kind this file collects. `git merge-base
+--is-ancestor` answers it in one command and should be the first thing run
+before judging another lane's work.
+
+After merging `origin/main`:
+
+| step | result |
+|---|---|
+| clear the drive root | 2 directories removed |
+| `cargo test --workspace --no-fail-fast` | 581 targets, **PASS** |
+| list the drive root again | **no POSIX-looking directories** |
+
+Which is the whole claim: a full run of the workspace now writes nothing
+at the root of the operator's data drive. The three runs that returned 0, 2
+and 6 failures on the same tree cannot happen again from this cause.
+
+**`scripts/check-drive-root-litter.py` stays**, and is more useful now than
+when it was written. Its baseline is no longer "noisy, ignore the known
+ones" but **empty**, so any non-empty report is a new writer rather than a
+list to triage. It remains pinned as deliberately unwired in
+`check-gates-are-wired.py`: it is a diagnostic about the machine rather
+than the tree, and the right moment to reconsider wiring it is now that a
+clean root is the expected state.
 
 **Done on the machine, not in any tree:** `E:\sys` was deleted, since it was
 failing two tests and is tracked by no repository. `E:\run`, `E:\var` and

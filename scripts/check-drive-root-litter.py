@@ -23,6 +23,13 @@ the path first, and which that is depends on scheduling.
 So the result of a workspace run on this machine is not a property of the tree
 alone. This tells you, in one command, whether a red run is real.
 
+BASELINE, 2026-09-13: **empty**. Lane B fixed both writers (`logind`'s SYSTEM
+faillock at `/var/run/authlib/tally`, and `udevd`), and a full `cargo test
+--workspace` against a cleared root now leaves it clear -- 581 targets, pass,
+nothing written. So a non-empty report from this script is a NEW writer, not a
+known list to triage past. That is a much stronger thing for it to say than it
+could say when it was written.
+
 DELIBERATELY DOES NOT DELETE ANYTHING BY DEFAULT. `E:/etc` is test debris and
 `E:/etc` is also a plausible thing for a human to have made on purpose, and
 this cannot tell them apart. `--clean` removes them; without it this only

@@ -131051,6 +131051,21 @@ crate's own module docs where the next person to need one will read it.
 **Date:** 2026-09-12. **Lane:** C.
 **Where:** `apps/**` — 987 `const NAME: Color` declarations across 68 crates.
 
+**It is an unfinished migration, not a new defect — which is the useful
+framing.** §822 (2026-09-08) decided how applications receive the user's
+colours and says in its own preamble that it is *"the seam 135 applications
+will be converted against"*. **79 crates were converted. 55 were not, and
+nothing anywhere listed which.** A converted app's `Cargo.toml` says
+
+    # The user's colours, per design-decisions 822.
+    appearance = { path = "../../gui/appearance" }
+
+and an unconverted one simply has no such line — `explorer` and `procexplorer`
+both depend on `guitk` and `oswindow` and nothing else. So the per-crate recipe
+is known and already exercised 79 times: add the dependency, thread the
+`Palette` the trait hands over, replace the constants with roles, adopt
+`assert_drawn_from`. This entry is the missing list.
+
 **In short:** the desktop shell was cured, in September, of a defect where every
 one of its 49 modules declared its own private copy of the colour scheme —
 which meant a user who chose the light theme got a light taskbar and dark

@@ -1732,7 +1732,7 @@ impl FileDialog {
             x: cancel_x + (BUTTON_WIDTH - 42.0) / 2.0,
             y: input_y + 8.0,
             text: String::from("Cancel"),
-            color: palette.red,
+            color: palette.ink(palette.red),
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,

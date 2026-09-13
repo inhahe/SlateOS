@@ -2766,7 +2766,7 @@ impl DiskImagerApp {
         // did not use. All of it is `guitk::modal::AlertDialog` now.
         let (w, h) = (self.window_width, self.window_height);
         if let Some(dialog) = self.confirm_dialog.as_mut() {
-            dialog.render(w, h, rt);
+            dialog.render(&self.palette, w, h, rt);
         }
 
         // Overlay: file-open dialog, last so it is over the confirm dialog

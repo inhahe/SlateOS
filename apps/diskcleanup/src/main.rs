@@ -1596,7 +1596,7 @@ impl CleanupUI {
         // this used to be, where every other screen had to be taught that
         // "confirming" was a state it could be in.
         if let Some(dialog) = self.confirm.as_mut() {
-            dialog.render(width, height, &mut tree);
+            dialog.render(&self.palette, width, height, &mut tree);
         }
 
         tree

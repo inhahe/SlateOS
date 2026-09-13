@@ -1581,9 +1581,9 @@ impl ExplorerState {
         // sit above it too.
         match self.modal.as_mut() {
             Some(Modal::Confirm { dialog, .. } | Modal::Notice { dialog }) => {
-                dialog.render(w, h, &mut tree);
+                dialog.render(&self.palette, w, h, &mut tree);
             }
-            Some(Modal::Rename { dialog, .. }) => dialog.render(w, h, &mut tree),
+            Some(Modal::Rename { dialog, .. }) => dialog.render(&self.palette, w, h, &mut tree),
             None => {}
         }
 

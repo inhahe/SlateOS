@@ -15,33 +15,34 @@ use crate::color::Color;
 use crate::event::{
     Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
 };
+use crate::palette::Palette;
 use crate::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use crate::style::CornerRadii;
 use crate::text::TextCursor;
 
 // --- Catppuccin Mocha palette ---
 
-const COLOR_BASE: Color = Color::from_hex(0x1E1E2E);
-const COLOR_MANTLE: Color = Color::from_hex(0x181825);
-const COLOR_CRUST: Color = Color::from_hex(0x11111B);
-const COLOR_SURFACE0: Color = Color::from_hex(0x313244);
-const COLOR_SURFACE1: Color = Color::from_hex(0x45475A);
-const COLOR_SURFACE2: Color = Color::from_hex(0x585B70);
-const COLOR_TEXT: Color = Color::from_hex(0xCDD6F4);
-const COLOR_SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const COLOR_SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
-const COLOR_BLUE: Color = Color::from_hex(0x89B4FA);
-const COLOR_RED: Color = Color::from_hex(0xF38BA8);
-const COLOR_YELLOW: Color = Color::from_hex(0xF9E2AF);
-const COLOR_OVERLAY0: Color = Color::from_hex(0x6C7086);
-const COLOR_OVERLAY1: Color = Color::from_hex(0x7F849C);
-const COLOR_LAVENDER: Color = Color::from_hex(0xB4BEFE);
+// The colours come from the user's palette, threaded in by the caller.
+//
+// Fifteen Catppuccin Mocha constants used to sit here. Until 838 moved
+// `Palette` down into this crate a widget could not name one, so an alert
+// on a light desktop was a dark box -- in the file manager, the disk
+// cleaner, the imager and the partition manager, all of which raise these.
+//
+// `palette.overlay0` had no rung in the shared palette and was the dimmer of
+// two muted greys; it is `overlay0`, the one rung that exists for exactly
+// that job. The scrim and the shadow stay: both are black at an alpha, and
+// black is not the theme's to tint.
 
 /// The scrim behind a dialog, at full fade-in. Its alpha is the *peak* the
-/// fade animates towards, not a fixed value — [`ModalOverlay::render`] scales
+/// fade animates towards, not a fixed value -- [`ModalOverlay::render`] scales
 /// it by the current opacity. Kept as one constant so the scrim's colour and
 /// the number the fade multiplies are the same thing; they were two, and the
 /// constant was the copy nobody read.
+///
+/// Not converted with the rest: a scrim darkens whatever is behind it, and
+/// black at an alpha is what does that. Tinting it with a theme colour would
+/// wash the window underneath rather than dim it.
 const COLOR_SCRIM: Color = Color::rgba(0, 0, 0, 160);
 
 // --- Layout constants ---
@@ -393,11 +394,11 @@ impl DialogIcon {
     }
 
     /// Color for the icon glyph.
-    fn color(self) -> Color {
+    fn color(self, palette: &Palette) -> Color {
         match self {
-            Self::Info => COLOR_BLUE,
-            Self::Warning => COLOR_YELLOW,
-            Self::Error => COLOR_RED,
+            Self::Info => palette.blue,
+            Self::Warning => palette.yellow,
+            Self::Error => palette.red,
             Self::None => Color::TRANSPARENT,
         }
     }
@@ -891,7 +892,13 @@ impl AlertDialog {
     /// is what makes "you can only click what was drawn" true by construction.
     /// The separate call existed once (`ModalOverlay::set_content_rect`) and
     /// nothing outside the tests ever made it.
-    pub fn render(&mut self, parent_width: f32, parent_height: f32, tree: &mut RenderTree) {
+    pub fn render(
+        &mut self,
+        palette: &Palette,
+        parent_width: f32,
+        parent_height: f32,
+        tree: &mut RenderTree,
+    ) {
         if !self.overlay.active && self.overlay.opacity <= 0.0 {
             return;
         }
@@ -923,7 +930,7 @@ impl AlertDialog {
             y: layout.y,
             width: layout.width,
             height: layout.height,
-            color: COLOR_BASE,
+            color: palette.base,
             corner_radii: CornerRadii::all(DIALOG_CORNER_RADIUS),
         });
 
@@ -933,7 +940,7 @@ impl AlertDialog {
             y: layout.y,
             width: layout.width,
             height: TITLE_BAR_HEIGHT,
-            color: COLOR_MANTLE,
+            color: palette.mantle,
             corner_radii: CornerRadii {
                 top_left: DIALOG_CORNER_RADIUS,
                 top_right: DIALOG_CORNER_RADIUS,
@@ -947,7 +954,7 @@ impl AlertDialog {
             x: layout.x + CONTENT_PADDING,
             y: layout.y + (TITLE_BAR_HEIGHT - FONT_SIZE_TITLE) / 2.0,
             text: self.title.clone(),
-            color: COLOR_TEXT,
+            color: palette.text,
             font_size: FONT_SIZE_TITLE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(layout.width - CONTENT_PADDING * 2.0),
@@ -978,7 +985,7 @@ impl AlertDialog {
                 x: icon_x + (ICON_SIZE - FONT_SIZE_TITLE) / 2.0,
                 y: icon_y + (ICON_SIZE - FONT_SIZE_TITLE) / 2.0,
                 text: glyph.to_string(),
-                color: self.icon.color(),
+                color: palette.ink(self.icon.color(palette)),
                 font_size: FONT_SIZE_TITLE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
@@ -998,12 +1005,18 @@ impl AlertDialog {
         // still sits level with its icon.
         let block_height = self.text_block_height();
         let first_line_y = content_y + (ICON_SIZE - block_height).max(0.0) / 2.0;
-        let message_height = self.message_para(text_x, first_line_y).draw(tree);
-        self.detail_para(text_x, first_line_y + message_height + DETAIL_GAP)
+        let message_height = self
+            .message_para(palette.subtext1, text_x, first_line_y)
             .draw(tree);
+        self.detail_para(
+            palette.ink(palette.yellow),
+            text_x,
+            first_line_y + message_height + DETAIL_GAP,
+        )
+        .draw(tree);
 
         // Buttons (bottom-right aligned).
-        self.render_buttons(tree, &layout);
+        self.render_buttons(palette, tree, &layout);
 
         self.placement = Some(layout);
     }
@@ -1014,7 +1027,7 @@ impl AlertDialog {
     /// than repeating the arithmetic. The two used to be separate copies of the
     /// same sum, which is a hit area that can drift away from the button under
     /// it with no test able to see it happen.
-    fn render_buttons(&self, tree: &mut RenderTree, layout: &DialogLayout) {
+    fn render_buttons(&self, palette: &Palette, tree: &mut RenderTree, layout: &DialogLayout) {
         for (i, btn) in self.buttons.buttons.iter().enumerate() {
             // Width comes from the layout, not from the constant: buttons carry
             // their own labels now, so they are no longer all the same width and
@@ -1030,9 +1043,9 @@ impl AlertDialog {
             // rather than substituting one shared highlight colour, so a hovered
             // destructive button is still visibly the destructive one.
             let (base_bg, text_color) = match btn.role() {
-                ButtonRole::Primary => (COLOR_BLUE, COLOR_CRUST),
-                ButtonRole::Secondary => (COLOR_SURFACE1, COLOR_TEXT),
-                ButtonRole::Destructive => (COLOR_RED, COLOR_CRUST),
+                ButtonRole::Primary => (palette.blue, palette.crust),
+                ButtonRole::Secondary => (palette.surface1, palette.text),
+                ButtonRole::Destructive => (palette.red, palette.crust),
             };
             let bg_color = if is_hovered {
                 base_bg.lerp(Color::WHITE, HOVER_LIGHTEN)
@@ -1055,7 +1068,7 @@ impl AlertDialog {
                     y: y - 2.0,
                     width: btn_w + 4.0,
                     height: btn_h + 4.0,
-                    color: COLOR_LAVENDER,
+                    color: palette.lavender,
                     line_width: 2.0,
                     corner_radii: CornerRadii::all(BUTTON_CORNER_RADIUS + 2.0),
                 });
@@ -1122,8 +1135,8 @@ impl AlertDialog {
     /// here and drawn a line at a time. One paragraph serves both the drawing
     /// and `compute_height`, so the box is always as tall as the text it
     /// holds and the text never taller than the box.
-    fn message_para(&self, x: f32, y: f32) -> crate::text::Paragraph<'_> {
-        crate::text::Paragraph::new(&self.message, COLOR_SUBTEXT1)
+    fn message_para(&self, ink: Color, x: f32, y: f32) -> crate::text::Paragraph<'_> {
+        crate::text::Paragraph::new(&self.message, ink)
             .at(x, y, self.message_max_width())
             .font(FONT_SIZE, FontWeightHint::Regular)
             .line_height(MESSAGE_LINE_HEIGHT)
@@ -1134,8 +1147,8 @@ impl AlertDialog {
     /// none. Wrapped at the message's own column and in the detail's smaller
     /// face, so the sizing and the drawing cannot disagree about how many
     /// lines there are.
-    fn detail_para(&self, x: f32, y: f32) -> crate::text::Paragraph<'_> {
-        crate::text::Paragraph::new(self.detail.as_deref().unwrap_or(""), COLOR_YELLOW)
+    fn detail_para(&self, ink: Color, x: f32, y: f32) -> crate::text::Paragraph<'_> {
+        crate::text::Paragraph::new(self.detail.as_deref().unwrap_or(""), ink)
             .at(x, y, self.message_max_width())
             .font(FONT_SIZE_SMALL, FontWeightHint::Regular)
             .line_height(DETAIL_LINE_HEIGHT)
@@ -1233,8 +1246,11 @@ impl AlertDialog {
 
     /// Height of the message and, under it, the detail — the whole text column.
     fn text_block_height(&self) -> f32 {
-        let message = self.message_para(0.0, 0.0).height();
-        let detail = self.detail_para(0.0, 0.0).height();
+        // Any ink: a paragraph needs a colour to be built, and its *height*
+        // does not depend on which. Threading a palette down here to be
+        // discarded would make a measurement look like a drawing.
+        let message = self.message_para(Color::TRANSPARENT, 0.0, 0.0).height();
+        let detail = self.detail_para(Color::TRANSPARENT, 0.0, 0.0).height();
         if detail > 0.0 {
             message + DETAIL_GAP + detail
         } else {
@@ -1847,7 +1863,13 @@ impl InputDialog {
     ///
     /// Takes `&mut self` so that the rectangles it draws become the rectangles
     /// a click is tested against; see [`AlertDialog::render`].
-    pub fn render(&mut self, parent_width: f32, parent_height: f32, tree: &mut RenderTree) {
+    pub fn render(
+        &mut self,
+        palette: &Palette,
+        parent_width: f32,
+        parent_height: f32,
+        tree: &mut RenderTree,
+    ) {
         if !self.overlay.active && self.overlay.opacity <= 0.0 {
             return;
         }
@@ -1898,7 +1920,7 @@ impl InputDialog {
             y,
             width,
             height,
-            color: COLOR_BASE,
+            color: palette.base,
             corner_radii: CornerRadii::all(DIALOG_CORNER_RADIUS),
         });
 
@@ -1908,7 +1930,7 @@ impl InputDialog {
             y,
             width,
             height: TITLE_BAR_HEIGHT,
-            color: COLOR_MANTLE,
+            color: palette.mantle,
             corner_radii: CornerRadii {
                 top_left: DIALOG_CORNER_RADIUS,
                 top_right: DIALOG_CORNER_RADIUS,
@@ -1922,7 +1944,7 @@ impl InputDialog {
             x: x + CONTENT_PADDING,
             y: y + (TITLE_BAR_HEIGHT - FONT_SIZE_TITLE) / 2.0,
             text: self.title.clone(),
-            color: COLOR_TEXT,
+            color: palette.text,
             font_size: FONT_SIZE_TITLE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - CONTENT_PADDING * 2.0),
@@ -1936,7 +1958,7 @@ impl InputDialog {
                 x: x + CONTENT_PADDING,
                 y: content_y + n as f32 * MESSAGE_LINE_HEIGHT,
                 text: line.clone(),
-                color: COLOR_SUBTEXT1,
+                color: palette.subtext1,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - CONTENT_PADDING * 2.0),
@@ -1949,11 +1971,11 @@ impl InputDialog {
         let input_width = width - CONTENT_PADDING * 2.0;
         let field_rect = (x + CONTENT_PADDING, content_y, input_width, INPUT_HEIGHT);
         let input_border_color = if self.focused_element == InputFocus::TextField {
-            COLOR_BLUE
+            palette.blue
         } else if self.validation_error.is_some() {
-            COLOR_RED
+            palette.red
         } else {
-            COLOR_SURFACE2
+            palette.surface2
         };
 
         tree.push(RenderCommand::FillRect {
@@ -1961,7 +1983,7 @@ impl InputDialog {
             y: content_y,
             width: input_width,
             height: INPUT_HEIGHT,
-            color: COLOR_SURFACE0,
+            color: palette.surface0,
             corner_radii: CornerRadii::all(INPUT_CORNER_RADIUS),
         });
 
@@ -1995,7 +2017,7 @@ impl InputDialog {
                 x: text_x,
                 y: text_y,
                 text: display_text,
-                color: COLOR_OVERLAY0,
+                color: palette.overlay0,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(text_avail),
@@ -2007,7 +2029,7 @@ impl InputDialog {
                     text_x,
                     text_y,
                     FONT_SIZE,
-                    COLOR_TEXT,
+                    palette.text,
                     crate::textedit::CARET_WIDTH,
                 );
             }
@@ -2029,7 +2051,7 @@ impl InputDialog {
                     line_height: FONT_SIZE,
                     font_size: FONT_SIZE,
                     weight: FontWeightHint::Regular,
-                    color: COLOR_TEXT,
+                    color: palette.text,
                     caret_width: crate::textedit::CARET_WIDTH,
                 },
             );
@@ -2044,7 +2066,7 @@ impl InputDialog {
                 x: x + CONTENT_PADDING,
                 y: content_y,
                 text: error.clone(),
-                color: COLOR_RED,
+                color: palette.ink(palette.red),
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(input_width),
@@ -2063,7 +2085,7 @@ impl InputDialog {
             y: buttons_y,
             width: BUTTON_MIN_WIDTH,
             height: BUTTON_HEIGHT,
-            color: COLOR_BLUE,
+            color: palette.blue,
             corner_radii: CornerRadii::all(BUTTON_CORNER_RADIUS),
         });
         if ok_focused {
@@ -2072,7 +2094,7 @@ impl InputDialog {
                 y: buttons_y - 2.0,
                 width: BUTTON_MIN_WIDTH + 4.0,
                 height: BUTTON_HEIGHT + 4.0,
-                color: COLOR_LAVENDER,
+                color: palette.lavender,
                 line_width: 2.0,
                 corner_radii: CornerRadii::all(BUTTON_CORNER_RADIUS + 2.0),
             });
@@ -2081,7 +2103,7 @@ impl InputDialog {
             x: btn_start_x + (BUTTON_MIN_WIDTH - 18.0) / 2.0,
             y: buttons_y + (BUTTON_HEIGHT - FONT_SIZE) / 2.0,
             text: String::from("OK"),
-            color: COLOR_CRUST,
+            color: palette.crust,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -2096,7 +2118,7 @@ impl InputDialog {
             y: buttons_y,
             width: BUTTON_MIN_WIDTH,
             height: BUTTON_HEIGHT,
-            color: COLOR_SURFACE1,
+            color: palette.surface1,
             corner_radii: CornerRadii::all(BUTTON_CORNER_RADIUS),
         });
         if cancel_focused {
@@ -2105,7 +2127,7 @@ impl InputDialog {
                 y: buttons_y - 2.0,
                 width: BUTTON_MIN_WIDTH + 4.0,
                 height: BUTTON_HEIGHT + 4.0,
-                color: COLOR_LAVENDER,
+                color: palette.lavender,
                 line_width: 2.0,
                 corner_radii: CornerRadii::all(BUTTON_CORNER_RADIUS + 2.0),
             });
@@ -2114,7 +2136,7 @@ impl InputDialog {
             x: cancel_x + (BUTTON_MIN_WIDTH - 42.0) / 2.0,
             y: buttons_y + (BUTTON_HEIGHT - FONT_SIZE) / 2.0,
             text: String::from("Cancel"),
-            color: COLOR_TEXT,
+            color: palette.text,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -2338,7 +2360,13 @@ impl ProgressDialog {
     ///
     /// Takes `&mut self` so that the Cancel button it draws is the Cancel
     /// button a click is tested against; see [`AlertDialog::render`].
-    pub fn render(&mut self, parent_width: f32, parent_height: f32, tree: &mut RenderTree) {
+    pub fn render(
+        &mut self,
+        palette: &Palette,
+        parent_width: f32,
+        parent_height: f32,
+        tree: &mut RenderTree,
+    ) {
         if !self.overlay.active && self.overlay.opacity <= 0.0 {
             return;
         }
@@ -2386,7 +2414,7 @@ impl ProgressDialog {
             y,
             width,
             height,
-            color: COLOR_BASE,
+            color: palette.base,
             corner_radii: CornerRadii::all(DIALOG_CORNER_RADIUS),
         });
 
@@ -2396,7 +2424,7 @@ impl ProgressDialog {
             y,
             width,
             height: TITLE_BAR_HEIGHT,
-            color: COLOR_MANTLE,
+            color: palette.mantle,
             corner_radii: CornerRadii {
                 top_left: DIALOG_CORNER_RADIUS,
                 top_right: DIALOG_CORNER_RADIUS,
@@ -2410,7 +2438,7 @@ impl ProgressDialog {
             x: x + CONTENT_PADDING,
             y: y + (TITLE_BAR_HEIGHT - FONT_SIZE_TITLE) / 2.0,
             text: self.title.clone(),
-            color: COLOR_TEXT,
+            color: palette.text,
             font_size: FONT_SIZE_TITLE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - CONTENT_PADDING * 2.0),
@@ -2423,7 +2451,7 @@ impl ProgressDialog {
             x: x + CONTENT_PADDING,
             y: content_y,
             text: self.status_text.clone(),
-            color: COLOR_SUBTEXT1,
+            color: palette.subtext1,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - CONTENT_PADDING * 2.0),
@@ -2441,7 +2469,7 @@ impl ProgressDialog {
             y: content_y,
             width: bar_width,
             height: PROGRESS_BAR_HEIGHT,
-            color: COLOR_SURFACE0,
+            color: palette.surface0,
             corner_radii: CornerRadii::all(PROGRESS_BAR_RADIUS),
         });
 
@@ -2455,7 +2483,7 @@ impl ProgressDialog {
                         y: content_y,
                         width: fill_width,
                         height: PROGRESS_BAR_HEIGHT,
-                        color: COLOR_BLUE,
+                        color: palette.blue,
                         corner_radii: CornerRadii::all(PROGRESS_BAR_RADIUS),
                     });
                 }
@@ -2470,7 +2498,7 @@ impl ProgressDialog {
                     y: content_y,
                     width: segment_width,
                     height: PROGRESS_BAR_HEIGHT,
-                    color: COLOR_BLUE,
+                    color: palette.blue,
                     corner_radii: CornerRadii::all(PROGRESS_BAR_RADIUS),
                 });
             }
@@ -2485,7 +2513,7 @@ impl ProgressDialog {
                 x: x + width - CONTENT_PADDING - 40.0,
                 y: content_y - PROGRESS_BAR_HEIGHT - 10.0 - FONT_SIZE_SMALL,
                 text: format!("{pct}%"),
-                color: COLOR_SUBTEXT0,
+                color: palette.subtext0,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -2501,7 +2529,7 @@ impl ProgressDialog {
                 x: x + CONTENT_PADDING,
                 y: content_y,
                 text: detail.clone(),
-                color: COLOR_OVERLAY0,
+                color: palette.overlay0,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(bar_width),
@@ -2527,14 +2555,14 @@ impl ProgressDialog {
                 y: btn_y,
                 width: BUTTON_MIN_WIDTH,
                 height: BUTTON_HEIGHT,
-                color: COLOR_SURFACE1,
+                color: palette.surface1,
                 corner_radii: CornerRadii::all(BUTTON_CORNER_RADIUS),
             });
             tree.push(RenderCommand::Text {
                 x: btn_x + (BUTTON_MIN_WIDTH - 42.0) / 2.0,
                 y: btn_y + (BUTTON_HEIGHT - FONT_SIZE) / 2.0,
                 text: String::from("Cancel"),
-                color: COLOR_RED,
+                color: palette.ink(palette.red),
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -2804,7 +2832,7 @@ impl NonModalDialog {
     }
 
     /// Render the non-modal dialog.
-    pub fn render(&self, tree: &mut RenderTree) {
+    pub fn render(&self, palette: &Palette, tree: &mut RenderTree) {
         if !self.visible {
             return;
         }
@@ -2829,7 +2857,7 @@ impl NonModalDialog {
             y: self.y,
             width: self.width,
             height: self.height,
-            color: COLOR_BASE,
+            color: palette.base,
             corner_radii: CornerRadii::all(DIALOG_CORNER_RADIUS),
         });
 
@@ -2839,7 +2867,7 @@ impl NonModalDialog {
             y: self.y,
             width: self.width,
             height: TITLE_BAR_HEIGHT,
-            color: COLOR_MANTLE,
+            color: palette.mantle,
             corner_radii: CornerRadii {
                 top_left: DIALOG_CORNER_RADIUS,
                 top_right: DIALOG_CORNER_RADIUS,
@@ -2853,7 +2881,7 @@ impl NonModalDialog {
             x: self.x + CONTENT_PADDING,
             y: self.y + (TITLE_BAR_HEIGHT - FONT_SIZE_TITLE) / 2.0,
             text: self.title.clone(),
-            color: COLOR_TEXT,
+            color: palette.text,
             font_size: FONT_SIZE_TITLE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(self.width - CONTENT_PADDING * 2.0 - CLOSE_BUTTON_SIZE - 8.0),
@@ -2864,9 +2892,9 @@ impl NonModalDialog {
         let close_x = self.x + self.width - CONTENT_PADDING - CLOSE_BUTTON_SIZE;
         let close_y = self.y + (TITLE_BAR_HEIGHT - CLOSE_BUTTON_SIZE) / 2.0;
         let close_bg = if self.close_hovered {
-            COLOR_SURFACE2
+            palette.surface2
         } else {
-            COLOR_SURFACE0
+            palette.surface0
         };
         tree.push(RenderCommand::FillRect {
             x: close_x,
@@ -2881,9 +2909,9 @@ impl NonModalDialog {
             y: close_y + (CLOSE_BUTTON_SIZE - FONT_SIZE) / 2.0,
             text: String::from("X"),
             color: if self.close_hovered {
-                COLOR_RED
+                palette.ink(palette.red)
             } else {
-                COLOR_OVERLAY1
+                palette.overlay0
             },
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
@@ -2924,7 +2952,7 @@ impl NonModalDialog {
                 y1: hy + handle_size - 2.0,
                 x2: hx + handle_size - 2.0,
                 y2: hy + 4.0,
-                color: COLOR_OVERLAY0,
+                color: palette.overlay0,
                 width: 1.0,
             });
             tree.push(RenderCommand::Line {
@@ -2932,7 +2960,7 @@ impl NonModalDialog {
                 y1: hy + handle_size - 2.0,
                 x2: hx + handle_size - 2.0,
                 y2: hy + 8.0,
-                color: COLOR_OVERLAY0,
+                color: palette.overlay0,
                 width: 1.0,
             });
         }
@@ -3211,6 +3239,7 @@ mod tests {
 
     #[test]
     fn the_button_a_click_lands_on_is_the_button_that_was_drawn() {
+        let palette = Palette::for_mode(false);
         // The drawn rectangle and the hit rectangle used to be two separate
         // copies of `BUTTON_MIN_WIDTH`, which agreed only while every button
         // was the same width. Press each button at the centre of the rectangle
@@ -3221,7 +3250,7 @@ mod tests {
         ]));
         dialog.show();
         let mut tree = RenderTree::new();
-        dialog.render(800.0, 600.0, &mut tree);
+        dialog.render(&palette, 800.0, 600.0, &mut tree);
 
         let drawn: Vec<(f32, f32, f32, f32)> = tree
             .commands
@@ -3244,7 +3273,7 @@ mod tests {
             let mut d = dialog.clone();
             d.show();
             let mut t = RenderTree::new();
-            d.render(800.0, 600.0, &mut t);
+            d.render(&palette, 800.0, 600.0, &mut t);
             d.handle_event(&mouse_at(
                 x + w / 2.0,
                 y + h / 2.0,
@@ -3256,6 +3285,7 @@ mod tests {
 
     #[test]
     fn the_detail_sits_under_the_message_and_makes_the_dialog_taller() {
+        let palette = Palette::for_mode(false);
         let plain = AlertDialog::destructive("Erase", "Erase /dev/sda?", "Erase Disk");
         let with_detail = plain.clone().with_detail(
             "All data on /dev/sda will be permanently destroyed. This cannot be undone.",
@@ -3272,7 +3302,7 @@ mod tests {
         let mut d = with_detail;
         d.show();
         let mut tree = RenderTree::new();
-        d.render(800.0, 600.0, &mut tree);
+        d.render(&palette, 800.0, 600.0, &mut tree);
         let detail_ys: Vec<f32> = tree
             .commands
             .iter()
@@ -3282,7 +3312,9 @@ mod tests {
                     color,
                     font_size,
                     ..
-                } if *color == COLOR_YELLOW && (*font_size - FONT_SIZE_SMALL).abs() < 0.01 => {
+                } if *color == palette.ink(palette.yellow)
+                    && (*font_size - FONT_SIZE_SMALL).abs() < 0.01 =>
+                {
                     Some(*y)
                 }
                 _ => None,
@@ -3293,7 +3325,7 @@ mod tests {
             .commands
             .iter()
             .filter_map(|c| match c {
-                RenderCommand::Text { y, color, .. } if *color == COLOR_SUBTEXT1 => Some(*y),
+                RenderCommand::Text { y, color, .. } if *color == palette.subtext1 => Some(*y),
                 _ => None,
             })
             .collect();
@@ -3306,8 +3338,9 @@ mod tests {
 
     /// Every line the dialog draws in the detail's colour and size.
     fn drawn_detail(dialog: &mut AlertDialog) -> Vec<String> {
+        let palette = Palette::for_mode(false);
         let mut tree = RenderTree::new();
-        dialog.render(800.0, 600.0, &mut tree);
+        dialog.render(&palette, 800.0, 600.0, &mut tree);
         tree.commands
             .iter()
             .filter_map(|c| match c {
@@ -3316,7 +3349,9 @@ mod tests {
                     color,
                     font_size,
                     ..
-                } if *color == COLOR_YELLOW && (*font_size - FONT_SIZE_SMALL).abs() < 0.01 => {
+                } if *color == palette.ink(palette.yellow)
+                    && (*font_size - FONT_SIZE_SMALL).abs() < 0.01 =>
+                {
                     Some(text.clone())
                 }
                 _ => None,
@@ -3363,6 +3398,7 @@ mod tests {
 
     #[test]
     fn text_never_reaches_the_button_row() {
+        let palette = Palette::for_mode(false);
         // Whatever is cut, what is left has to stay above the controls that
         // dismiss the dialog: prose over the Cancel button is worse than
         // prose not shown.
@@ -3372,7 +3408,7 @@ mod tests {
         dialog.show();
 
         let mut tree = RenderTree::new();
-        dialog.render(800.0, 600.0, &mut tree);
+        dialog.render(&palette, 800.0, 600.0, &mut tree);
         // The top of the row as the *buttons* report it, not as a separate
         // bookkeeping number: prose has to clear the controls that are on
         // screen, and those are the only ones that matter.
@@ -3382,7 +3418,7 @@ mod tests {
             .1;
         for cmd in &tree.commands {
             if let RenderCommand::Text { y, text, color, .. } = cmd
-                && (*color == COLOR_SUBTEXT1 || *color == COLOR_YELLOW)
+                && (*color == palette.subtext1 || *color == palette.ink(palette.yellow))
             {
                 assert!(
                     *y < buttons_y,
@@ -3394,10 +3430,11 @@ mod tests {
 
     #[test]
     fn hover_follows_the_pointer_onto_and_off_the_buttons() {
+        let palette = Palette::for_mode(false);
         let mut dialog = AlertDialog::confirm("T", "M");
         dialog.show();
         let mut tree = RenderTree::new();
-        dialog.render(800.0, 600.0, &mut tree);
+        dialog.render(&palette, 800.0, 600.0, &mut tree);
         assert_eq!(dialog.hovered_button(), None);
 
         let (bx, by, bw, bh) = dialog.placement.as_ref().expect("drawn").button_rects[0];
@@ -3760,12 +3797,13 @@ mod tests {
 
     #[test]
     fn test_alert_render_produces_output() {
+        let palette = Palette::for_mode(false);
         let mut dialog = AlertDialog::info("Hello", "World");
         dialog.show();
         dialog.overlay.opacity = 1.0;
 
         let mut tree = RenderTree::new();
-        dialog.render(800.0, 600.0, &mut tree);
+        dialog.render(&palette, 800.0, 600.0, &mut tree);
 
         // Should produce multiple commands (scrim, shadow, bg, title bar, text, buttons).
         assert!(tree.len() > 5);
@@ -3773,8 +3811,9 @@ mod tests {
 
     /// Every message line an alert drew, as (y, text), in draw order.
     fn alert_message_lines(dialog: &mut AlertDialog) -> Vec<(f32, String)> {
+        let palette = Palette::for_mode(false);
         let mut tree = RenderTree::new();
-        dialog.render(800.0, 600.0, &mut tree);
+        dialog.render(&palette, 800.0, 600.0, &mut tree);
         tree.commands
             .iter()
             .filter_map(|c| match c {
@@ -3784,7 +3823,7 @@ mod tests {
                     font_size,
                     color,
                     ..
-                } if (*font_size - FONT_SIZE).abs() < 0.01 && *color == COLOR_SUBTEXT1 => {
+                } if (*font_size - FONT_SIZE).abs() < 0.01 && *color == palette.subtext1 => {
                     Some((*y, text.clone()))
                 }
                 _ => None,
@@ -3852,6 +3891,7 @@ mod tests {
 
     #[test]
     fn an_input_dialog_field_clears_a_wrapped_prompt() {
+        let palette = Palette::for_mode(false);
         // The prompt used to get a flat one-line allowance, so the input field
         // was drawn over the second line of anything longer.
         let prompt = "Enter the full path of the directory to index, including \
@@ -3861,7 +3901,7 @@ mod tests {
         dialog.overlay.opacity = 1.0;
 
         let mut tree = RenderTree::new();
-        dialog.render(800.0, 600.0, &mut tree);
+        dialog.render(&palette, 800.0, 600.0, &mut tree);
 
         let lines: Vec<f32> = tree
             .commands
@@ -3872,7 +3912,9 @@ mod tests {
                     font_size,
                     color,
                     ..
-                } if (*font_size - FONT_SIZE).abs() < 0.01 && *color == COLOR_SUBTEXT1 => Some(*y),
+                } if (*font_size - FONT_SIZE).abs() < 0.01 && *color == palette.subtext1 => {
+                    Some(*y)
+                }
                 _ => None,
             })
             .collect();
@@ -4385,6 +4427,7 @@ mod tests {
     /// **A failure here counting more marks than characters is that bug back.**
     #[test]
     fn the_mask_has_one_mark_per_character_not_per_byte() {
+        let palette = Palette::for_mode(false);
         // 8 characters; 16 bytes — the old code drew exactly twice as many
         // marks as the user typed. ASCII, Latin-1, Greek, Hebrew, CJK, emoji:
         // one, two, two, two, three and four bytes respectively.
@@ -4399,7 +4442,7 @@ mod tests {
         dialog.overlay.opacity = 1.0;
 
         let mut tree = RenderTree::new();
-        dialog.render(800.0, 600.0, &mut tree);
+        dialog.render(&palette, 800.0, 600.0, &mut tree);
         // `RichText`, not `Text`: the field's contents are drawn by
         // `textedit::draw`, which colours the selection per glyph.
         let masks: Vec<&String> = tree
@@ -4429,8 +4472,9 @@ mod tests {
     /// Every vertical `Line` in a rendered dialog, by x. The caret is the only
     /// thing in this dialog drawn as a zero-width line.
     fn caret_xs(dialog: &mut InputDialog) -> Vec<f32> {
+        let palette = Palette::for_mode(false);
         let mut tree = RenderTree::new();
-        dialog.render(800.0, 600.0, &mut tree);
+        dialog.render(&palette, 800.0, 600.0, &mut tree);
         tree.commands
             .iter()
             .filter_map(|c| match c {
@@ -4533,13 +4577,14 @@ mod tests {
 
     #[test]
     fn an_input_dialogs_selection_is_painted_behind_the_text() {
+        let palette = Palette::for_mode(false);
         let mut dialog = opened(InputDialog::prompt("T", "P:", "").with_initial_text("abcdef"));
         dialog.handle_event(&shifted(Key::Home, false));
         dialog.handle_event(&shifted(Key::Right, true));
         dialog.handle_event(&shifted(Key::Right, true));
 
         let mut tree = RenderTree::new();
-        dialog.render(800.0, 600.0, &mut tree);
+        dialog.render(&palette, 800.0, 600.0, &mut tree);
         let painted = tree.commands.iter().any(|c| {
             matches!(c, RenderCommand::FillRect { color, .. }
                 if *color == crate::textedit::SELECTION_BACKGROUND)
@@ -4640,6 +4685,7 @@ mod tests {
 
     #[test]
     fn an_input_dialog_longer_than_its_box_scrolls_to_keep_the_caret_in_view() {
+        let palette = Palette::for_mode(false);
         // Without a scroll offset the caret is painted past the right edge of
         // the field, over whatever is beside it.
         let long = "x".repeat(400);
@@ -4647,7 +4693,7 @@ mod tests {
         let caret = caret_xs(&mut dialog)[0];
 
         let mut tree = RenderTree::new();
-        dialog.render(800.0, 600.0, &mut tree);
+        dialog.render(&palette, 800.0, 600.0, &mut tree);
         let clip = tree.commands.iter().find_map(|c| match c {
             RenderCommand::PushClip {
                 x, width, height, ..
@@ -4664,12 +4710,13 @@ mod tests {
 
     #[test]
     fn test_input_dialog_render() {
+        let palette = Palette::for_mode(false);
         let mut dialog = InputDialog::prompt("Name", "Enter name:", "placeholder");
         dialog.show();
         dialog.overlay.opacity = 1.0;
 
         let mut tree = RenderTree::new();
-        dialog.render(800.0, 600.0, &mut tree);
+        dialog.render(&palette, 800.0, 600.0, &mut tree);
         assert!(tree.len() > 5);
     }
 
@@ -4775,13 +4822,14 @@ mod tests {
 
     #[test]
     fn test_progress_render() {
+        let palette = Palette::for_mode(false);
         let mut dialog = ProgressDialog::determinate("Downloading", "50%");
         dialog.show();
         dialog.overlay.opacity = 1.0;
         dialog.set_progress(0.5);
 
         let mut tree = RenderTree::new();
-        dialog.render(800.0, 600.0, &mut tree);
+        dialog.render(&palette, 800.0, 600.0, &mut tree);
         assert!(tree.len() > 5);
     }
 
@@ -4941,13 +4989,14 @@ mod tests {
 
     #[test]
     fn test_nonmodal_set_content() {
+        let palette = Palette::for_mode(false);
         let mut dialog = NonModalDialog::new("Test");
         let content = vec![RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
             width: 100.0,
             height: 50.0,
-            color: COLOR_BLUE,
+            color: palette.blue,
             corner_radii: CornerRadii::ZERO,
         }];
         dialog.set_content(content);
@@ -4956,13 +5005,14 @@ mod tests {
 
     #[test]
     fn test_nonmodal_render() {
+        let palette = Palette::for_mode(false);
         let mut dialog = NonModalDialog::new("Test Dialog")
             .with_position(50.0, 50.0)
             .with_size(300.0, 200.0);
         dialog.show();
 
         let mut tree = RenderTree::new();
-        dialog.render(&mut tree);
+        dialog.render(&palette, &mut tree);
 
         // Should have shadow, bg, title bar, title text, close button.
         assert!(tree.len() >= 5);
@@ -4970,9 +5020,10 @@ mod tests {
 
     #[test]
     fn test_nonmodal_render_hidden_is_empty() {
+        let palette = Palette::for_mode(false);
         let dialog = NonModalDialog::new("Test");
         let mut tree = RenderTree::new();
-        dialog.render(&mut tree);
+        dialog.render(&palette, &mut tree);
         assert!(tree.is_empty());
     }
 
@@ -5000,8 +5051,15 @@ mod tests {
 
     #[test]
     fn test_dialog_icon_colors_distinct() {
-        assert_ne!(DialogIcon::Info.color(), DialogIcon::Warning.color());
-        assert_ne!(DialogIcon::Warning.color(), DialogIcon::Error.color());
+        let palette = Palette::for_mode(false);
+        assert_ne!(
+            DialogIcon::Info.color(&palette),
+            DialogIcon::Warning.color(&palette)
+        );
+        assert_ne!(
+            DialogIcon::Warning.color(&palette),
+            DialogIcon::Error.color(&palette)
+        );
     }
 
     // --- Where a dialog is when it is clicked ---
@@ -5075,6 +5133,7 @@ mod tests {
 
     #[test]
     fn an_alerts_buttons_are_clickable_where_they_were_drawn_on_any_size_of_parent() {
+        let palette = Palette::for_mode(false);
         // 800x600 is the size the old hit test assumed, and is included so that
         // the test says plainly that it was not wrong *there* — it was wrong
         // everywhere else, which is every real desktop.
@@ -5084,7 +5143,7 @@ mod tests {
             dialog.overlay.opacity = 1.0;
 
             let mut tree = RenderTree::new();
-            dialog.render(parent_w, parent_h, &mut tree);
+            dialog.render(&palette, parent_w, parent_h, &mut tree);
             let buttons = drawn_buttons(&tree);
             assert_eq!(buttons.len(), 2, "confirm draws OK and Cancel");
 
@@ -5119,13 +5178,14 @@ mod tests {
 
     #[test]
     fn a_click_outside_a_drawn_alert_still_dismisses_it() {
+        let palette = Palette::for_mode(false);
         // The guard above must not have turned click-outside off altogether.
         let mut dialog = AlertDialog::info("Heads up", "The file was moved.");
         dialog.show();
         dialog.overlay.opacity = 1.0;
 
         let mut tree = RenderTree::new();
-        dialog.render(1920.0, 1080.0, &mut tree);
+        dialog.render(&palette, 1920.0, 1080.0, &mut tree);
 
         dialog.handle_event(&press_at(4.0, 4.0));
         assert_eq!(dialog.result(), Some(&DialogResult::Dismissed));
@@ -5133,11 +5193,12 @@ mod tests {
 
     #[test]
     fn an_input_dialogs_ok_button_can_be_clicked() {
+        let palette = Palette::for_mode(false);
         let mut dialog =
             opened(InputDialog::prompt("Rename", "New name:", "").with_initial_text("notes.txt"));
 
         let mut tree = RenderTree::new();
-        dialog.render(1920.0, 1080.0, &mut tree);
+        dialog.render(&palette, 1920.0, 1080.0, &mut tree);
         let buttons = drawn_buttons(&tree);
         assert_eq!(buttons.len(), 2, "the input dialog draws OK and Cancel");
 
@@ -5158,6 +5219,7 @@ mod tests {
     /// button being broken rather than the input being wrong.
     #[test]
     fn clicking_ok_on_a_rejected_input_moves_the_focus_ring_to_it_and_stays_open() {
+        let palette = Palette::for_mode(false);
         let mut dialog =
             opened(InputDialog::prompt("Rename", "New name:", "").with_initial_text("no/slashes"));
         dialog.set_validation_error(Some("A name cannot contain '/'"));
@@ -5168,7 +5230,7 @@ mod tests {
         );
 
         let mut tree = RenderTree::new();
-        dialog.render(1920.0, 1080.0, &mut tree);
+        dialog.render(&palette, 1920.0, 1080.0, &mut tree);
         let buttons = drawn_buttons(&tree);
 
         let (cx, cy) = button_centre(buttons[0]);
@@ -5188,11 +5250,12 @@ mod tests {
 
     #[test]
     fn an_input_dialogs_cancel_button_can_be_clicked() {
+        let palette = Palette::for_mode(false);
         let mut dialog =
             opened(InputDialog::prompt("Rename", "New name:", "").with_initial_text("notes.txt"));
 
         let mut tree = RenderTree::new();
-        dialog.render(1920.0, 1080.0, &mut tree);
+        dialog.render(&palette, 1920.0, 1080.0, &mut tree);
         let buttons = drawn_buttons(&tree);
 
         let (cx, cy) = button_centre(buttons[1]);
@@ -5202,6 +5265,7 @@ mod tests {
 
     #[test]
     fn clicking_the_input_dialogs_field_focuses_it_and_puts_the_caret_where_it_landed() {
+        let palette = Palette::for_mode(false);
         let mut dialog = opened(InputDialog::prompt("T", "P:", "").with_initial_text("WWWiii"));
         // Tab away first, so the click has a focus to move as well as a caret
         // to place.
@@ -5209,7 +5273,7 @@ mod tests {
         assert_eq!(dialog.focused_element, InputFocus::OkButton);
 
         let mut tree = RenderTree::new();
-        dialog.render(1920.0, 1080.0, &mut tree);
+        dialog.render(&palette, 1920.0, 1080.0, &mut tree);
         let text_x = drawn_text_x(&tree);
         let field = dialog.placement.as_ref().expect("just drawn").field;
         let mid_y = field.1 + field.3 / 2.0;
@@ -5237,6 +5301,7 @@ mod tests {
 
     #[test]
     fn clicking_in_a_scrolled_input_dialog_field_accounts_for_what_scrolled_off() {
+        let palette = Palette::for_mode(false);
         // A field opens with its caret at the end, so a value longer than the
         // box opens scrolled to its tail: the glyph under the left edge is in
         // the middle of the string. A click that forgot the scroll offset would
@@ -5245,7 +5310,7 @@ mod tests {
         let mut dialog = opened(InputDialog::prompt("T", "P:", "").with_initial_text(&long));
 
         let mut tree = RenderTree::new();
-        dialog.render(1920.0, 1080.0, &mut tree);
+        dialog.render(&palette, 1920.0, 1080.0, &mut tree);
         let p = dialog.placement.clone().expect("just drawn");
         let (field, text_x) = (p.field, p.text_x);
         let mid_y = field.1 + field.3 / 2.0;
@@ -5271,6 +5336,7 @@ mod tests {
     /// caret has left it, so the deletion would come with no warning at all.
     #[test]
     fn clicking_in_the_input_dialogs_field_gives_up_the_selection_it_landed_on() {
+        let palette = Palette::for_mode(false);
         let mut dialog = opened(InputDialog::prompt("T", "P:", "").with_initial_text("abcdef"));
         dialog.handle_event(&shifted(Key::Home, true));
         assert_eq!(
@@ -5280,7 +5346,7 @@ mod tests {
         );
 
         let mut tree = RenderTree::new();
-        dialog.render(1920.0, 1080.0, &mut tree);
+        dialog.render(&palette, 1920.0, 1080.0, &mut tree);
         let p = dialog.placement.clone().expect("just drawn");
         let mid_y = p.field.1 + p.field.3 / 2.0;
         let three_in = crate::text::measure("abc", FONT_SIZE, FontWeightHint::Regular);
@@ -5301,11 +5367,12 @@ mod tests {
     /// empty box followed by a keystroke would take the whole dialog down.
     #[test]
     fn clicking_in_an_empty_input_field_leaves_the_caret_at_the_start() {
+        let palette = Palette::for_mode(false);
         let mut dialog = opened(InputDialog::prompt("T", "P:", "type something here"));
         assert!(dialog.input_text.is_empty());
 
         let mut tree = RenderTree::new();
-        dialog.render(1920.0, 1080.0, &mut tree);
+        dialog.render(&palette, 1920.0, 1080.0, &mut tree);
         let p = dialog.placement.clone().expect("just drawn");
         let mid_y = p.field.1 + p.field.3 / 2.0;
         let far_in = crate::text::measure("type something", FONT_SIZE, FontWeightHint::Regular);
@@ -5335,6 +5402,7 @@ mod tests {
 
     #[test]
     fn a_click_in_a_password_field_lands_on_a_character_of_the_secret() {
+        let palette = Palette::for_mode(false);
         // The marks are one byte each and the secret is not, so the offset a
         // click resolves to in the drawn row has to be walked back through the
         // secret's characters. Reading it as a byte offset directly would put
@@ -5347,7 +5415,7 @@ mod tests {
         );
 
         let mut tree = RenderTree::new();
-        dialog.render(1920.0, 1080.0, &mut tree);
+        dialog.render(&palette, 1920.0, 1080.0, &mut tree);
         let text_x = drawn_text_x(&tree);
         let field = dialog.placement.as_ref().expect("just drawn").field;
         let mid_y = field.1 + field.3 / 2.0;
@@ -5378,12 +5446,13 @@ mod tests {
 
     #[test]
     fn a_cancelable_progress_dialogs_cancel_button_can_be_clicked() {
+        let palette = Palette::for_mode(false);
         let mut dialog = ProgressDialog::determinate("Copying", "12 of 340 files").with_cancel();
         dialog.show();
         dialog.overlay.opacity = 1.0;
 
         let mut tree = RenderTree::new();
-        dialog.render(1920.0, 1080.0, &mut tree);
+        dialog.render(&palette, 1920.0, 1080.0, &mut tree);
         let buttons = drawn_buttons(&tree);
         assert_eq!(
             buttons.len(),
@@ -5401,6 +5470,7 @@ mod tests {
 
     #[test]
     fn a_progress_dialog_without_a_cancel_button_cannot_be_cancelled_by_a_click() {
+        let palette = Palette::for_mode(false);
         // There is no button, so there must be no hit area either — a stale
         // rectangle left over from a dialog that used to have one would cancel
         // a job on a click into blank space.
@@ -5409,7 +5479,7 @@ mod tests {
         dialog.overlay.opacity = 1.0;
 
         let mut tree = RenderTree::new();
-        dialog.render(1920.0, 1080.0, &mut tree);
+        dialog.render(&palette, 1920.0, 1080.0, &mut tree);
         assert!(drawn_buttons(&tree).is_empty());
 
         for x in [900.0_f32, 960.0, 1020.0] {

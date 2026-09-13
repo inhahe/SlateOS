@@ -1091,6 +1091,26 @@ fn detect_invocation(argv0: &str) -> InvokedAs {
     }
 }
 
+/// The first `-`-prefixed argument that is not in `known`, if any.
+///
+/// Only `-`-prefixed arguments are judged. A bare word may be a job id or a
+/// time specification depending on the personality, and refusing those would
+/// be a different change from the one this makes.
+///
+/// `--` ends option parsing, as everywhere else, so `atrm -- -3` can name a
+/// job whose id begins with a dash.
+fn unknown_option<'a>(args: &'a [String], known: &[&str]) -> Option<&'a str> {
+    for a in args {
+        if a == "--" {
+            return None;
+        }
+        if a.starts_with('-') && a != "-" && !known.contains(&a.as_str()) {
+            return Some(a);
+        }
+    }
+    None
+}
+
 fn parse_args() -> Result<Args, Error> {
     let argv: Vec<String> = env::args().collect();
     let invoked = if argv.is_empty() {
@@ -1107,6 +1127,9 @@ fn parse_args() -> Result<Args, Error> {
     match invoked {
         InvokedAs::Atd => {
             // atd [--once]
+            if let Some(bad) = unknown_option(&argv[1..], &["--once"]) {
+                return Err(Error::Usage(format!("unknown option: {bad}")));
+            }
             let once = argv[1..].iter().any(|a| a == "--once");
             return Ok(Args {
                 action: Action::Daemon(once),
@@ -1117,6 +1140,14 @@ fn parse_args() -> Result<Args, Error> {
         }
         InvokedAs::Atq => {
             // atq [--json]
+            //
+            // This loop used to look for `--json` and ignore everything else,
+            // so `atq --zzq` printed "no pending jobs" and exited 0 -- the
+            // queue reported as empty by a command that had not been asked
+            // anything it understood.
+            if let Some(bad) = unknown_option(&argv[1..], &["--json"]) {
+                return Err(Error::Usage(format!("unknown option: {bad}")));
+            }
             for arg in &argv[1..] {
                 if arg == "--json" {
                     json = true;
@@ -1533,11 +1564,29 @@ fn run() -> Result<(), Error> {
     }
 }
 
+/// The name the user typed, for diagnostics.
+///
+/// A multicall binary that prefixes every message with `at:` tells someone
+/// who ran `atq` about a program they did not invoke. The basename is what
+/// `detect_invocation` already keys on, so this adds no new notion of
+/// identity -- only uses the existing one where it is read.
+fn invoked_name() -> String {
+    env::args()
+        .next()
+        .map(|a| {
+            let base = a.rsplit('/').next().unwrap_or(&a);
+            let base = base.rsplit('\\').next().unwrap_or(base);
+            base.trim_end_matches(".exe").to_string()
+        })
+        .filter(|b| !b.is_empty())
+        .unwrap_or_else(|| "at".to_string())
+}
+
 fn main() {
     match run() {
         Ok(()) => {}
         Err(e) => {
-            eprintln!("at: {e}");
+            eprintln!("{}: {e}", invoked_name());
             process::exit(1);
         }
     }
@@ -1559,6 +1608,45 @@ fn main() {
 )]
 mod tests {
     use super::*;
+
+    /// A `-`-prefixed argument nobody recognises is refused.
+    ///
+    /// `atq` used to scan for `--json` and ignore everything else, so
+    /// `atq --zzq` printed "no pending jobs" and exited 0 -- an empty queue
+    /// reported by a command that had not understood the question. `atd` had
+    /// the same shape and was never flagged, because the sweep skips daemons
+    /// rather than risk launching one.
+    #[test]
+    fn an_unrecognised_dash_argument_is_refused() {
+        let args = |v: &[&str]| -> Vec<String> { v.iter().map(|s| (*s).to_string()).collect() };
+
+        assert_eq!(
+            unknown_option(&args(&["--zzq"]), &["--json"]),
+            Some("--zzq")
+        );
+        assert_eq!(unknown_option(&args(&["--json"]), &["--json"]), None);
+        assert_eq!(unknown_option(&args(&["--once"]), &["--once"]), None);
+
+        // A bare word is not judged: it may be a job id or a time
+        // specification depending on the personality.
+        assert_eq!(
+            unknown_option(&args(&["noon", "tomorrow"]), &["--json"]),
+            None
+        );
+
+        // `--` ends option parsing, so a job id starting with a dash is
+        // reachable.
+        assert_eq!(unknown_option(&args(&["--", "-3"]), &["--json"]), None);
+
+        // A lone `-` is conventionally stdin, not an option.
+        assert_eq!(unknown_option(&args(&["-"]), &["--json"]), None);
+
+        // The first offender is the one reported, even after a good option.
+        assert_eq!(
+            unknown_option(&args(&["--json", "--nope", "--worse"]), &["--json"]),
+            Some("--nope")
+        );
+    }
 
     #[test]
     fn day_of_week_survives_a_month_outside_the_calendar() {

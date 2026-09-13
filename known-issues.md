@@ -131171,6 +131171,61 @@ also what Windows does, and what this shortcut is modelled on.
 
 ---
 
+## TD-C-A-TEST-THAT-WRITES-TO-AN-ABSOLUTE-POSIX-PATH-WRITES-TO-THE-DEV-DRIVE-ROOT
+
+**Date:** 2026-09-13. **Lane:** C filed it; **the fix is lane B's** --
+`userspace/**`, which lane C must not write. Filed to them as
+`requests/c-b-tests-create-real-directories-at-the-drive-root.md`.
+
+**In short:** on this Windows development machine a path beginning with `/` is
+not an absent Linux path, it is a path on whatever drive the tests are running
+from. `/sys/fs/cgroup` means `E:\sys\fs\cgroup`, and a test that creates it
+succeeds. One did, during a workspace run this afternoon, and two `systemctl`
+tests that assert "this machine has no cgroups" then failed on every run
+afterwards -- not intermittently, permanently, until the directory was deleted
+by hand.
+
+**The evidence, because "it was load" is the usual first guess and was wrong
+here:**
+
+| run | result | left `E:\sys` behind? |
+|---|---|---|
+| `cargo test --workspace` | 25 484 passed, **2 failed** | yes |
+| `cargo test -p cgroup` alone | 13 passed | no |
+| `cargo test -p systemctl` alone, after deleting `E:\sys` | **154 passed** | no |
+
+So neither crate's own suite creates it and neither has a logic bug. A third
+crate's tests create the path and these two then fail for everybody.
+
+**It is a family.** `E:\run\firejail\40084.sandbox`, `E:\var\lib\audit\rules.state`
+and `E:\dev\test_dev` all exist on this machine for the same reason, from
+`let _ = fs::create_dir_all("/run/polkit-1")` and six siblings in `polkit`,
+`powerctl` and `udevd`. On the target OS those lines are right. On the dev host
+they are silent writes to the root of the operator's data drive, and the
+discarded `Result` means neither success nor failure is ever reported.
+
+**Why it matters more than the litter does.** The state the test asserts about
+is not state the test controls. "This machine has no cgroups" is an ambient
+fact any test in any crate can falsify from the far side of the workspace, and
+the failure then surfaces in a crate that did not change. Lane C has already
+paid for this shape once, in
+`BUG-C-THE-KEYBOARD-LAYOUT-TEST-FAILS-ABOUT-ONE-WORKSPACE-RUN-IN-TWO`, where a
+test wrote settings outside a scratch directory and a neighbour read them --
+which is what gate 35 now refuses.
+
+**What the proper fix is** (lane B's to make): make the cgroup root injectable
+so the two tests point at a scratch path they own -- the sibling test
+`the_tree_is_the_directories_that_are_actually_there` already uses
+`scratchdir::ScratchDir` and shows the shape -- and fix whichever test creates
+`/sys/fs/cgroup/<name>`. A gate refusing `create_dir_all` on a literal starting
+`/` inside `#[cfg(test)]` would catch the whole family; **lane C has
+deliberately not added one**, because it would refuse lane B's pushes and that
+is their decision to make, not ours.
+
+**Done on the machine, not in any tree:** `E:\sys` was deleted, since it was
+failing two tests and is tracked by no repository. `E:\run`, `E:\var` and
+`E:\dev` were left alone in case something depends on them.
+
 ## TD-C-THE-COMPOSE-PATH-HAS-NO-TIMING-GUARD-IN-THE-DEFAULT-RUN -- FIXED 2026-09-13
 
 **Date:** 2026-09-13. **Lane:** C.

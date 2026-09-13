@@ -1307,11 +1307,16 @@ const _SYS_UNLINK: u64 = 623;
 const _SYS_MKDIR: u64 = 624;
 
 /// Create device node, apply permissions, and create symlinks.
-fn apply_device_node(event: &DeviceEvent, rule_result: &RuleResult, log_level: LogLevel) {
+fn apply_device_node(
+    event: &DeviceEvent,
+    rule_result: &RuleResult,
+    log_level: LogLevel,
+    dev_dir: &str,
+) {
     // Determine the device node name.
     let dev_name = rule_result.name.as_deref().unwrap_or(&event.kernel_name);
 
-    let dev_path = format!("{DEV_DIR}/{dev_name}");
+    let dev_path = format!("{dev_dir}/{dev_name}");
 
     match event.action {
         DeviceAction::Add => {
@@ -1363,13 +1368,13 @@ fn apply_device_node(event: &DeviceEvent, rule_result: &RuleResult, log_level: L
 
             // Create rule-defined symlinks.
             for link in &rule_result.symlinks {
-                create_dev_symlink(link, dev_name, log_level);
+                create_dev_symlink(link, dev_name, log_level, dev_dir);
             }
 
             // Create persistent naming symlinks.
             let persistent = compute_persistent_links(event);
             for link in &persistent {
-                create_dev_symlink(link, dev_name, log_level);
+                create_dev_symlink(link, dev_name, log_level, dev_dir);
             }
         }
         DeviceAction::Remove => {
@@ -1380,7 +1385,7 @@ fn apply_device_node(event: &DeviceEvent, rule_result: &RuleResult, log_level: L
 
             // Remove symlinks.
             for link in &rule_result.symlinks {
-                let link_path = format!("{DEV_DIR}/{link}");
+                let link_path = format!("{dev_dir}/{link}");
                 let _ = fs::remove_file(&link_path);
             }
         }
@@ -1394,8 +1399,8 @@ fn apply_device_node(event: &DeviceEvent, rule_result: &RuleResult, log_level: L
 }
 
 /// Create a symlink under /dev/.
-fn create_dev_symlink(link: &str, target_name: &str, log_level: LogLevel) {
-    let link_path = format!("{DEV_DIR}/{link}");
+fn create_dev_symlink(link: &str, target_name: &str, log_level: LogLevel, dev_dir: &str) {
+    let link_path = format!("{dev_dir}/{link}");
     if let Some(parent) = Path::new(&link_path).parent() {
         let _ = fs::create_dir_all(parent);
     }
@@ -1464,6 +1469,13 @@ struct DaemonState {
     log_level: LogLevel,
     event_count: u64,
     _resolve_names_early: bool,
+    /// Where device nodes and their symlinks go. A field rather than the
+    /// `DEV_DIR` constant because a test that exercises `process_event` used
+    /// the real one, and on Windows a leading-slash path is DRIVE-RELATIVE:
+    /// `/dev` resolves to `E:\dev` and `create_dir_all` on it succeeds. The
+    /// test therefore created a real directory at the root of the operator's
+    /// data drive, where later runs of other crates found it.
+    dev_dir: String,
 }
 
 impl DaemonState {
@@ -1474,6 +1486,7 @@ impl DaemonState {
             log_level,
             event_count: 0,
             _resolve_names_early: resolve_names_early,
+            dev_dir: DEV_DIR.to_string(),
         }
     }
 
@@ -1532,7 +1545,7 @@ impl DaemonState {
         }
 
         // Create/remove device nodes.
-        apply_device_node(event, &result, self.log_level);
+        apply_device_node(event, &result, self.log_level, &self.dev_dir);
     }
 }
 
@@ -3344,6 +3357,14 @@ mod tests {
 
     #[test]
     fn daemon_state_process_event() {
+        // Both roots are the test's own. `dev_dir` used to be the real
+        // "/dev", and processing this event calls `apply_device_node`, which
+        // creates the parent directory -- so on Windows, where a
+        // leading-slash path is drive-relative, running this test created
+        // `E:\dev` on the operator's data drive. `/tmp/...` had the same
+        // shape. Neither directory is anything the test asserts about, which
+        // is what made the write invisible.
+        let scratch = scratchdir::ScratchDir::new("udevd-process-event");
         let mut state = DaemonState {
             rules: vec![Rule {
                 matches: vec![MatchKey::Kernel("test*".to_string())],
@@ -3351,10 +3372,15 @@ mod tests {
                 _source_file: "test".to_string(),
                 _source_line: 1,
             }],
-            db: DeviceDatabase::new("/tmp/udevd_test_db_nonexistent"),
+            db: DeviceDatabase::new(scratch.path("db").to_str().expect("scratch path is ASCII")),
             log_level: LogLevel::Error,
             event_count: 0,
             _resolve_names_early: false,
+            dev_dir: scratch
+                .path("dev")
+                .to_str()
+                .expect("scratch path is ASCII")
+                .to_string(),
         };
 
         let ev = DeviceEvent {
@@ -3375,12 +3401,18 @@ mod tests {
 
     #[test]
     fn daemon_reload_rules() {
+        let scratch = scratchdir::ScratchDir::new("udevd-reload-rules");
         let mut state = DaemonState {
             rules: Vec::new(),
-            db: DeviceDatabase::new("/tmp/udevd_test_db_nonexistent2"),
+            db: DeviceDatabase::new(scratch.path("db").to_str().expect("scratch path is ASCII")),
             log_level: LogLevel::Error,
             event_count: 0,
             _resolve_names_early: false,
+            dev_dir: scratch
+                .path("dev")
+                .to_str()
+                .expect("scratch path is ASCII")
+                .to_string(),
         };
         // Reload from a nonexistent directory produces 0 rules -- no crash.
         state.reload_rules();

@@ -131,6 +131,9 @@ const probe = script + `
   globalThis.__q = {
     q13: document.getElementById('q13').innerHTML,
     q14: document.getElementById('q14').innerHTML,
+    // Taken from the *decided* preset, so the figures the C-Q15 table shows
+    // are the ones the shipped theme produces.
+    acc: document.getElementById('accfloor').innerHTML,
   };
 
   // The plan's role table must be live, not a hardcoded copy that drifts away
@@ -275,7 +278,7 @@ if (!global.__brd) bad++;
 }
 {
   const q = global.__q || {};
-  const q13 = q.q13 || '', q14 = q.q14 || '';
+  const q13 = q.q13 || '', q14 = q.q14 || '', acc = q.acc || '';
   // `MARK` lives inside the probe that runs against the page; out here it has
   // to be spelled again.
   const MARKED = '#ff00ff';
@@ -289,6 +292,18 @@ if (!global.__brd) bad++;
     ['C-Q13 options actually differ', new Set(
       q13.split('<h3>').slice(1).map(s => (s.split(MARKED).length - 1))
     ).size > 1],
+    // The accent-floor table, which is the evidence behind C-Q15. Checked
+    // for the two things that would make it a decoration: a row per accent,
+    // and the filled column actually moving further than the outlined one.
+    // If those two ever agreed, the table would be showing a difference
+    // that is not there.
+    ['C-Q15 has a row per accent', (acc.match(/<tr><td><span/g) || []).length === 14],
+    ['C-Q15 filled moves further than outlined', (() => {
+      const moved = [...acc.matchAll(/<td class="num">(\d+|&mdash;)<\/td>/g)].map(m => m[1]);
+      const n = v => (v === '&mdash;' ? 0 : Number(v));
+      const sum = a => a.reduce((x, y) => x + n(y), 0);
+      return sum(moved.filter((_, i) => i % 2 === 1)) > sum(moved.filter((_, i) => i % 2 === 0));
+    })()],
     ['C-Q14 draws three options', (q14.match(/<h3>/g) || []).length === 3],
     ['C-Q14 draws a window per option', (q14.match(/class="win"/g) || []).length === 3],
     ['C-Q14 options actually differ', new Set(q14.split('<h3>').slice(1)).size === 3],

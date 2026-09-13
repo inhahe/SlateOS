@@ -49,7 +49,6 @@ BASELINE = {
     "userspace/dhcpcd",
     "userspace/findmnt",
     "userspace/finger",
-    "userspace/gdb",
     "userspace/getty",
     "userspace/irqbalance",
     "userspace/jq",

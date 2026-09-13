@@ -28,19 +28,12 @@ use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-// ============================================================================
-// Catppuccin Mocha palette
-// ============================================================================
-
-// Catppuccin Mocha palette — kept complete even though a few entries are
-// not currently referenced; future event-category styling will pick them up.
-
-// Pink, flamingo and rosewater are palette roles now, not constants.
-// They survived this crate's conversion for one reason: the shared
-// palette had no rung for them, which was true of five applications at
-// once and so was the palette's gap rather than this file's.
-#[allow(dead_code)]
-#[allow(dead_code)]
+// The colours come from the user's palette (822, 838).
+//
+// The last three -- pink, flamingo and rosewater -- outlasted this
+// crate's conversion because the shared palette had no rung for them.
+// That was true of five applications at once, so it was the palette's
+// gap rather than this file's, and the palette has them now.
 // ============================================================================
 // Date and time types
 // ============================================================================

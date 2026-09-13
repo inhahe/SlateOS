@@ -35,7 +35,6 @@ use std::fmt::Write as FmtWrite;
 // ============================================================================
 
 mod theme {
-    use guitk::color::Color;
 
     // Pink, flamingo and rosewater are palette roles now, not constants.
     // They survived this crate's conversion for one reason: the shared

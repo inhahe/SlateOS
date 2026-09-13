@@ -16,6 +16,7 @@ guitk = { path = "../toolkit" }
 # `guitk` deliberately has no palette (design-decisions 810) and a test
 # that fails if a colour literal returns to it.
 appearance = { path = "../appearance" }
+inputsettings = { path = "../inputsettings" }
 guiremote = { path = "../remote" }
 
 [dev-dependencies]

@@ -3,7 +3,15 @@
 //! A subset of jq's functionality: JSON parsing, pretty printing, and
 //! filter expressions for querying and transforming JSON data.
 
-#![allow(dead_code)]
+/// Status for a runtime error, as distinct from the 2 this program already
+/// uses for a usage or I/O failure.
+///
+/// **Unverified against a reference jq**, which is not installed here: jq's
+/// manual documents 2 for usage/system problems and 3 for a compile error,
+/// and 5 is its runtime-error status. Recorded as a judgment call in
+/// todo.txt. What is certain, and was the actual defect, is that it must not
+/// be 0.
+const RUNTIME_ERROR_EXIT: i32 = 5;
 
 use quoting::{quoteaf, quoteaf_os};
 use std::collections::BTreeMap;
@@ -75,6 +83,11 @@ impl Value {
         }
     }
 
+    // `Value::as_str` has no caller: every site that needs the text of a
+    // string matches `Value::String(s)` directly. Kept as the pair of
+    // `as_f64`, which is used -- a `Value` with an accessor for numbers and
+    // none for strings invites the next reader to add a second one.
+    #[allow(dead_code)]
     fn as_str(&self) -> Option<&str> {
         match self {
             Value::String(s) => Some(s),
@@ -530,12 +543,10 @@ enum Filter {
     SortBy(Box<Filter>),             // sort_by(f)
     GroupBy(Box<Filter>),            // group_by(f)
     UniqueBy(Box<Filter>),           // unique_by(f)
-    Limit(usize, Box<Filter>),       // limit(n; f)
     Has(String),                     // has("key")
     Contains(Box<Filter>),           // contains(f)
     ToEntries,                       // to_entries
     FromEntries,                     // from_entries
-    Ascii,                           // ascii_downcase / ascii_upcase
     AsciiDown,
     AsciiUp,
     Compare(CmpOp, Box<Filter>, Box<Filter>), // ==, !=, <, >, <=, >=
@@ -549,47 +560,55 @@ enum Filter {
     Recurse,                                  // ..
     TypeSelect(TypeClass), // numbers/strings/booleans/arrays/objects/nulls/values/iterables/scalars
     Env,                   // env
-    Null,                  // null literal filter
     Input,                 // input
     Debug,                 // debug
-    Def(String, Vec<String>, Box<Filter>, Box<Filter>), // def name(args): body; rest
+    // Constructed, and its payload never read: `eval`'s catch-all reports
+    // "filter not implemented" and returns before destructuring. Kept rather
+    // than reduced to a unit variant, because the parser really did parse this
+    // argument and throwing it away here would mean re-deriving the grammar
+    // when the filter is implemented. Each errors with exit 5, so nothing
+    // silently ignores an argument the user supplied.
+    #[allow(dead_code)]
     FuncCall(String, Vec<Filter>), // user-defined function call
     StringInterp(Vec<StringPart>), // string with \(expr) interpolations
-    Optional(Box<Filter>), // f?
-    Assign(Box<Filter>, Box<Filter>), // .field = expr (update)
-    UpdateAssign(Box<Filter>, Box<Filter>), // .field |= expr
-    Label(String, Box<Filter>), // label $name | f
     Range(Box<Filter>, Box<Filter>), // range(a; b)
-    Split(String),         // split("delim")
-    Join(String),          // join("delim")
-    Test(String),          // test("regex") — simple substring match
-    Ltrimstr(String),      // ltrimstr("prefix")
-    Rtrimstr(String),      // rtrimstr("suffix")
-    Startswith(String),    // startswith("prefix")
-    Endswith(String),      // endswith("suffix")
-    Tostring,              // tostring
-    Tonumber,              // tonumber
-    Floor,                 // floor
-    Ceil,                  // ceil
-    Round,                 // round
-    Fabs,                  // fabs
-    Sqrt,                  // sqrt
-    Indices(String),       // indices("str")
-    Inside(Box<Filter>),   // inside(f)
+    Split(String),                 // split("delim")
+    Join(String),                  // join("delim")
+    Test(String),                  // test("regex") — simple substring match
+    Ltrimstr(String),              // ltrimstr("prefix")
+    Rtrimstr(String),              // rtrimstr("suffix")
+    Startswith(String),            // startswith("prefix")
+    Endswith(String),              // endswith("suffix")
+    Tostring,                      // tostring
+    Tonumber,                      // tonumber
+    Floor,                         // floor
+    Ceil,                          // ceil
+    Round,                         // round
+    Fabs,                          // fabs
+    Sqrt,                          // sqrt
+    #[allow(dead_code)]
+    Indices(String), // indices("str")
+    #[allow(dead_code)]
+    Inside(Box<Filter>), // inside(f)
+    #[allow(dead_code)]
     Limit2(Box<Filter>, Box<Filter>), // limit(n; f) — two-arg
+    #[allow(dead_code)]
     Any(Option<Box<Filter>>), // any / any(f)
+    #[allow(dead_code)]
     All(Option<Box<Filter>>), // all / all(f)
-    MinMax(bool),          // min / max (bool=true for max)
+    MinMax(bool),                  // min / max (bool=true for max)
+    #[allow(dead_code)]
     MinMaxBy(bool, Box<Filter>), // min_by(f) / max_by(f)
-    Paths,                 // paths / leaf_paths
-    GetPath(Box<Filter>),  // getpath(f)
+    Paths,                         // paths / leaf_paths
+    #[allow(dead_code)]
+    GetPath(Box<Filter>), // getpath(f)
+    #[allow(dead_code)]
     Delpaths(Box<Filter>), // delpaths(f)
-    Ascii2(bool),          // ascii_downcase(false) / ascii_upcase(true)
-    Explode,               // explode
-    Implode,               // implode
-    Tojson,                // tojson
-    Fromjson,              // fromjson
-    Format(FormatKind),    // @base64, @csv, @tsv, @html, @uri, @json, @text
+    Explode,                       // explode
+    Implode,                       // implode
+    Tojson,                        // tojson
+    Fromjson,                      // fromjson
+    Format(FormatKind),            // @base64, @csv, @tsv, @html, @uri, @json, @text
 }
 
 #[derive(Clone, Debug)]
@@ -642,6 +661,10 @@ struct FilterParser<'a> {
 #[derive(Clone, Debug)]
 enum Token {
     Dot,
+    /// A string containing at least one interpolation. Each part is
+    /// `(is_expr, text)`: literal text, or the raw source between the
+    /// parentheses, parsed as a filter when the token is consumed.
+    StrInterp(Vec<(bool, String)>),
     Pipe,
     Comma,
     LParen,
@@ -834,31 +857,85 @@ fn tokenize_filter(input: &str) -> Result<Vec<Token>, String> {
             }
             b'"' => {
                 i += 1;
-                let mut s = String::new();
+                // Parts of a possibly-interpolated string. `lit` accumulates
+                // literal text; on an interpolation the parenthesised source
+                // is captured whole and parsed later, so nesting is handled
+                // by counting here rather than by the escape table below --
+                // which used to swallow it: its catch-all pushed the
+                // backslash and the character straight through, so an
+                // interpolation lexed as ordinary literal text and jq echoed
+                // it back with the backslash JSON-escaped, exit 0. A wrong
+                // answer rather than a refusal, which is the worse kind.
+                let mut parts: Vec<(bool, String)> = Vec::new();
+                let mut lit = String::new();
                 while i < bytes.len() && bytes[i] != b'"' {
+                    if bytes[i] == b'\\' && i + 1 < bytes.len() && bytes[i + 1] == b'(' {
+                        i += 2;
+                        let src_start = i;
+                        let mut depth = 1usize;
+                        let mut in_str = false;
+                        while i < bytes.len() {
+                            let c = bytes[i];
+                            if in_str {
+                                if c == b'\\' {
+                                    i += 1;
+                                } else if c == b'"' {
+                                    in_str = false;
+                                }
+                            } else if c == b'"' {
+                                in_str = true;
+                            } else if c == b'(' {
+                                depth += 1;
+                            } else if c == b')' {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                            }
+                            i += 1;
+                        }
+                        if depth != 0 || i >= bytes.len() {
+                            return Err("unterminated interpolation in string".to_string());
+                        }
+                        let src =
+                            std::str::from_utf8(&bytes[src_start..i]).map_err(|e| e.to_string())?;
+                        if !lit.is_empty() {
+                            parts.push((false, std::mem::take(&mut lit)));
+                        }
+                        parts.push((true, src.to_string()));
+                        i += 1;
+                        continue;
+                    }
                     if bytes[i] == b'\\' && i + 1 < bytes.len() {
                         i += 1;
                         match bytes[i] {
-                            b'n' => s.push('\n'),
-                            b't' => s.push('\t'),
-                            b'\\' => s.push('\\'),
-                            b'"' => s.push('"'),
-                            b'/' => s.push('/'),
-                            b'r' => s.push('\r'),
+                            b'n' => lit.push('\n'),
+                            b't' => lit.push('\t'),
+                            b'\\' => lit.push('\\'),
+                            b'"' => lit.push('"'),
+                            b'/' => lit.push('/'),
+                            b'r' => lit.push('\r'),
                             other => {
-                                s.push('\\');
-                                s.push(other as char);
+                                lit.push('\\');
+                                lit.push(other as char);
                             }
                         }
                     } else {
-                        s.push(bytes[i] as char);
+                        lit.push(bytes[i] as char);
                     }
                     i += 1;
                 }
                 if i < bytes.len() {
                     i += 1;
                 } // skip closing "
-                tokens.push(Token::Str(s));
+                if parts.is_empty() {
+                    tokens.push(Token::Str(lit));
+                } else {
+                    if !lit.is_empty() {
+                        parts.push((false, lit));
+                    }
+                    tokens.push(Token::StrInterp(parts));
+                }
             }
             b'0'..=b'9' => {
                 let start = i;
@@ -876,7 +953,26 @@ fn tokenize_filter(input: &str) -> Result<Vec<Token>, String> {
                     .map_err(|e: std::num::ParseFloatError| e.to_string())?;
                 tokens.push(Token::Num(n));
             }
-            b'a'..=b'z' | b'A'..=b'Z' | b'_' | b'$' => {
+            b'$' => {
+                // `$name`, consumed and refused. There is no variable token
+                // in this program and no binding form, so there is nothing
+                // to evaluate -- but the refusal has to CONSUME the `$`.
+                //
+                // This used to fall into the identifier arm below, whose
+                // inner loop advances only over alphanumerics and `_`. On a
+                // `$` the body never ran, `i` never moved, and the outer
+                // `while i < bytes.len()` spun forever: `jq -n '$x'` hung
+                // until it was killed. Any filter containing a variable did,
+                // which includes the ordinary `--arg name value` idiom.
+                let start = i;
+                i += 1;
+                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                    i += 1;
+                }
+                let name = std::str::from_utf8(&bytes[start..i]).map_err(|e| e.to_string())?;
+                return Err(format!("variables are not supported: {name}"));
+            }
+            b'a'..=b'z' | b'A'..=b'Z' | b'_' => {
                 let start = i;
                 while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
                     i += 1;
@@ -1155,6 +1251,22 @@ impl<'a> FilterParser<'a> {
             Some(Token::Str(s)) => {
                 self.advance();
                 Ok(Filter::Literal(Value::String(s)))
+            }
+            Some(Token::StrInterp(raw)) => {
+                self.advance();
+                // Each interpolated piece is parsed as a full filter here,
+                // which is why the lexer captured its source rather than
+                // trying to tokenise it inline: an interpolation may contain
+                // anything a filter may, parentheses and strings included.
+                let mut parts = Vec::with_capacity(raw.len());
+                for (is_expr, text) in raw {
+                    if is_expr {
+                        parts.push(StringPart::Expr(parse_filter(&text)?));
+                    } else {
+                        parts.push(StringPart::Lit(text));
+                    }
+                }
+                Ok(Filter::StringInterp(parts))
             }
             Some(Token::True) => {
                 self.advance();
@@ -1589,6 +1701,27 @@ fn eval(filter: &Filter, input: &Value) -> Result<Vec<Value>, String> {
     match filter {
         Filter::Identity => Ok(vec![input.clone()]),
         Filter::Literal(v) => Ok(vec![v.clone()]),
+        Filter::StringInterp(parts) => {
+            let mut out = String::new();
+            for part in parts {
+                match part {
+                    StringPart::Lit(t) => out.push_str(t),
+                    StringPart::Expr(f) => {
+                        for v in eval(f, input)? {
+                            // A string interpolates as its own text, not as
+                            // its JSON form: jq gives "a" for "\(.x)" with
+                            // x="a", not "\"a\"". Everything else takes its
+                            // compact JSON rendering.
+                            match v {
+                                Value::String(sv) => out.push_str(&sv),
+                                other => out.push_str(&format_json(&other, true, 0)),
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(vec![Value::String(out)])
+        }
         Filter::Field(name) => match input {
             Value::Object(map) => Ok(vec![map.get(name).cloned().unwrap_or(Value::Null)]),
             Value::Null => Ok(vec![Value::Null]),
@@ -2472,12 +2605,17 @@ fn main() {
     let indent = if opts.tab { 1 } else { opts.indent };
     let mut any_output = false;
     let mut last_was_falsy = false;
+    // A runtime error used to be written to stderr and then forgotten, so
+    // `jq 'explode'` printed "filter not implemented" and exited 0. Any
+    // script guarding with `|| fallback` never took the fallback.
+    let mut had_error = false;
 
     let process_value = |val: &Value,
                          filter: &Filter,
                          opts: &Options,
                          any: &mut bool,
-                         falsy: &mut bool| {
+                         falsy: &mut bool,
+                         failed: &mut bool| {
         match eval(filter, val) {
             Ok(results) => {
                 for result in &results {
@@ -2497,13 +2635,21 @@ fn main() {
             }
             Err(e) => {
                 write_stderr(&format!("jq: error: {}\n", e));
+                *failed = true;
             }
         }
     };
 
     if opts.null_input {
         let input = Value::Null;
-        process_value(&input, &filter, &opts, &mut any_output, &mut last_was_falsy);
+        process_value(
+            &input,
+            &filter,
+            &opts,
+            &mut any_output,
+            &mut last_was_falsy,
+            &mut had_error,
+        );
     } else if opts.files.is_empty() {
         // Read from stdin
         let mut input_str = String::new();
@@ -2519,10 +2665,24 @@ fn main() {
                 .collect();
             if opts.slurp {
                 let arr = Value::Array(lines);
-                process_value(&arr, &filter, &opts, &mut any_output, &mut last_was_falsy);
+                process_value(
+                    &arr,
+                    &filter,
+                    &opts,
+                    &mut any_output,
+                    &mut last_was_falsy,
+                    &mut had_error,
+                );
             } else {
                 for line in &lines {
-                    process_value(line, &filter, &opts, &mut any_output, &mut last_was_falsy);
+                    process_value(
+                        line,
+                        &filter,
+                        &opts,
+                        &mut any_output,
+                        &mut last_was_falsy,
+                        &mut had_error,
+                    );
                 }
             }
         } else if opts.slurp {
@@ -2546,7 +2706,14 @@ fn main() {
                 }
             }
             let arr = Value::Array(values);
-            process_value(&arr, &filter, &opts, &mut any_output, &mut last_was_falsy);
+            process_value(
+                &arr,
+                &filter,
+                &opts,
+                &mut any_output,
+                &mut last_was_falsy,
+                &mut had_error,
+            );
         } else {
             // Parse potentially multiple JSON values from stdin
             let trimmed = input_str.trim();
@@ -2558,9 +2725,14 @@ fn main() {
                         break;
                     }
                     match parser.parse_value() {
-                        Ok(v) => {
-                            process_value(&v, &filter, &opts, &mut any_output, &mut last_was_falsy)
-                        }
+                        Ok(v) => process_value(
+                            &v,
+                            &filter,
+                            &opts,
+                            &mut any_output,
+                            &mut last_was_falsy,
+                            &mut had_error,
+                        ),
                         Err(e) => {
                             write_stderr(&format!("jq: parse error: {}\n", e));
                             std::process::exit(2);
@@ -2587,9 +2759,14 @@ fn main() {
                         break;
                     }
                     match parser.parse_value() {
-                        Ok(v) => {
-                            process_value(&v, &filter, &opts, &mut any_output, &mut last_was_falsy)
-                        }
+                        Ok(v) => process_value(
+                            &v,
+                            &filter,
+                            &opts,
+                            &mut any_output,
+                            &mut last_was_falsy,
+                            &mut had_error,
+                        ),
                         Err(e) => {
                             write_stderr(&format!("jq: {}: parse error: {}\n", file, e));
                             break;
@@ -2598,6 +2775,12 @@ fn main() {
                 }
             }
         }
+    }
+
+    // A runtime error outranks --exit-status: `-e` reports on the last
+    // output value, and an error means there was no such value to report on.
+    if had_error {
+        std::process::exit(RUNTIME_ERROR_EXIT);
     }
 
     if opts.exit_status && last_was_falsy {
@@ -3185,6 +3368,86 @@ mod tests {
             parse_json(r#""\u0041""#).unwrap(),
             Value::String("A".into())
         );
+    }
+
+    /// String interpolation, which used to be echoed back as literal text.
+    ///
+    /// The escape table's catch-all pushed the backslash and the character
+    /// through unchanged, so an interpolation lexed as ordinary text and the
+    /// program printed it with the backslash JSON-escaped and exited 0 --
+    /// a wrong answer rather than a refusal. The AST types for this
+    /// (`StringInterp`, `StringPart`) already existed and had never been
+    /// constructed, which is what pointed here.
+    #[test]
+    fn strings_interpolate() {
+        let input = parse_json(r#"{"a":1,"s":"hi","arr":[1,2]}"#).expect("valid json");
+        let go = |src: &str| -> String {
+            let f = parse_filter(src).expect("parses");
+            match eval(&f, &input).expect("evaluates").remove(0) {
+                Value::String(s) => s,
+                other => panic!("not a string: {other:?}"),
+            }
+        };
+        assert_eq!(go(r#""x\(.a)y""#), "x1y");
+        // A string interpolates as its own text, not as its JSON form.
+        assert_eq!(go(r#""\(.s)""#), "hi");
+        // Anything else takes its compact JSON rendering.
+        assert_eq!(go(r#""\(.arr)""#), "[1,2]");
+        // More than one, and literal text on both sides of each.
+        assert_eq!(go(r#""a\(.a)b\(.a)c""#), "a1b1c");
+        // A plain string still lexes as a plain string.
+        assert_eq!(go(r#""plain""#), "plain");
+    }
+
+    /// The tokenizer terminates on every byte it accepts.
+    ///
+    /// `$` used to enter the identifier arm, whose inner loop advances only
+    /// over alphanumerics and `_`, so it consumed nothing and the outer loop
+    /// spun forever. `jq -n '$x'` hung until killed. This asserts the
+    /// specific case and then the general property, because the next
+    /// non-advancing arm will not be `$`.
+    #[test]
+    fn the_tokenizer_always_advances() {
+        assert!(
+            tokenize_filter("$o").is_err(),
+            "$o must be refused, not hang"
+        );
+        assert!(tokenize_filter("label $o | 1").is_err());
+
+        // Every byte that can start a token, alone and in context. A
+        // non-advancing arm hangs the suite rather than failing it, which is
+        // the point: a test that hangs is still a test that caught it.
+        for b in 0x20u8..0x7f {
+            let c = b as char;
+            for probe in [c.to_string(), format!(".a {c} 1"), format!("{c}x")] {
+                // Only that it returns at all. Err is a fine answer here.
+                let _ = tokenize_filter(&probe);
+            }
+        }
+    }
+
+    /// An unimplemented filter is an error, and an error is not exit 0.
+    ///
+    /// `eval` already returned `Err` for these -- the message was right and
+    /// the status was 0, so `jq 'explode' || fallback` never took the
+    /// fallback. This asserts the error half at the unit level; the status
+    /// half is asserted on the built binary, since `process::exit` cannot be
+    /// observed from inside a test.
+    #[test]
+    fn unimplemented_filters_return_err() {
+        let input = parse_json("[1,2]").expect("valid json");
+        for f in ["explode", "paths", "any", "implode"] {
+            let filter = parse_filter(f).expect("parses");
+            assert!(
+                eval(&filter, &input).is_err(),
+                "{f} silently succeeded instead of reporting it is unimplemented"
+            );
+        }
+        // And the ones that do work still do.
+        for f in ["length", "tojson", "@base64"] {
+            let filter = parse_filter(f).expect("parses");
+            assert!(eval(&filter, &input).is_ok(), "{f} regressed");
+        }
     }
 
     #[test]

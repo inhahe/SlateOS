@@ -32,7 +32,7 @@
 // offsets bounded by archive/file length and ASCII-decimal sizes parsed
 // from headers; indexing is gated by preceding length checks. Errors
 // return Err.
-#![allow(clippy::arithmetic_side_effects, clippy::indexing_slicing, dead_code)]
+#![allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 
 use quoting::quoteaf_os;
 use std::env;
@@ -58,9 +58,13 @@ const AR_HDR_SIZE: usize = 60;
 const AR_BSD_NAME_PREFIX: &str = "#1/";
 
 /// GNU/SysV symbol table name
+// Archive-format constants and fields the current reader does not consult.
+// Kept so the type matches the ar format rather than the subset read.
+#[allow(dead_code)]
 const AR_SYMTAB_NAME: &str = "/";
 
 /// GNU/SysV string table name
+#[allow(dead_code)]
 const AR_STRTAB_NAME: &str = "//";
 
 // ============================================================================
@@ -141,6 +145,7 @@ impl ArHeader {
 
     /// Format using BSD extended name encoding (`#1/N` prefix, name prepended
     /// to data).
+    #[allow(dead_code)]
     fn to_bytes_bsd(&self, extra_data_size: u64) -> Vec<u8> {
         let name_len = self.name.len();
         let padded_name_len = (name_len + 3) & !3; // pad to 4-byte boundary
@@ -568,6 +573,7 @@ struct ElfSymbol {
     name_offset: u32,
     info: u8,
     shndx: u16,
+    #[allow(dead_code)]
     name: String,
 }
 

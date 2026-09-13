@@ -13248,6 +13248,95 @@ needed. What survives is *not* a missing feature but the cost of that
 choice: **the listener and every connection it accepts share one SPSC
 session behind one lock, so a server's accepted connections are served
 strictly one at a time — one slow client holds up the others.** That
+**STATUS 2026-09-13: the head-of-line block is GONE and the default is FLIPPED.**
+
+Both halves of A-Q9 option C are on main. `81ef382d0` moved the wait above the
+session lock -- all three kernel recv paths ask the daemon for a non-blocking
+receive and back off here (16 yields, then 1 ms interruptible sleeps), so no
+reply is ever withheld while the shared session is held. `3614fcb14` flipped
+`net.userspace` on by default; `net.userspace=0` opts back out.
+
+Validated on a boot that reached QEMU: `[spawn] Starting persistent userspace
+netstack daemon (net.userspace on)` with **nothing on the kernel cmdline**, the
+daemon claiming the NIC and registering `net.stack`, a real HTTP fetch over IPC
+returning `HTTP/1.1 200 OK`, and 0 non-DRM self-test failures.
+
+**The head-of-line removal has ONE witness, and it is the code change itself.**
+
+Stated plainly because 932 requires it. What the passing boot proves is that
+the daemon path still works end to end -- HTTP over IPC returned 200. It does
+**not** prove that two accepted connections now progress independently, which
+is the property the fix exists for. A boot with the fix reverted would look
+exactly as green: every existing netstack self-test uses one connection at a
+time, so none of them can tell the two states apart.
+
+**Design, worked out 2026-09-13 so the next attempt is implementation rather
+than rediscovery.** The whole API needed is already public in `net::socket`:
+`create`, `bind_stream`, `listen`, `accept`, `connect`, `send`, `recv`, `close`.
+
+1. `srv = create(AF_INET)`, `bind_stream(srv, PORT)`, `listen(srv, 2)`.
+2. Connect and accept **twice** over loopback -- `a1`, `a2` -- so both accepted
+   fds share the listener's session, which is the configuration that used to
+   serialise (Q23 Option A).
+3. `sched::spawn` a task that sets an `AtomicBool` and then does a *blocking*
+   `recv(a1, ...)`. `a1` has no data, so under the old code it holds the shared
+   session mutex indefinitely.
+4. Main task waits for that flag, yields a few times so the spawned task is
+   genuinely inside `recv`, then `send(c2, msg)` and a blocking `recv(a2, ...)`
+   **with a deadline**.
+5. `a2` returning the payload before the deadline is the witness. Missing the
+   deadline is the failure.
+6. Release the blocked reader by sending on `c1`, join, then close all handles.
+
+**The step that makes or breaks it is 4.** If the main task reaches its read
+before the spawned one is inside `recv`, there is no contention and the test
+passes whether or not the fix is present -- it would be a test of nothing,
+which is the exact failure this entry is about. The flag plus the yields are
+not incidental; they are what makes the two states distinguishable.
+
+Deliberately not written at 00:17 after a long session: a racy self-test in the
+boot path is worse than no self-test, because it costs three lanes a rerun each
+time it flaps and it teaches everyone to ignore a red boot.
+
+**Scoping note, so the next attempt does not start in the wrong place.** The
+obvious base is `netstack_client::self_test_listen_accept`, which already does
+listen -> connect -> accept -> echo over loopback. It is the wrong base: it
+drives `NetstackConn` directly, and the head-of-line block is not there. The
+lock is `socket.rs`'s `with_stream_conn` over `SessionRef::Shared`, which only
+the fd layer (`net::socket::{create,listen,accept,recv}`) goes through. A test
+built on `NetstackConn` would bypass the mutex it exists to exercise and pass
+whether or not the fix is present -- the same trap as a marker that names a
+neighbour's banner.
+
+It also needs `sched::spawn` for the second task, and a **deadline** on the
+second read: under the old code that read never returns, and a self-test that
+hangs the boot converts a clear regression into a 2400 s timeout with no
+diagnosis. Fail on the deadline, do not wait on it.
+
+What a real witness needs: a listener, two accepted connections, one of them
+with no data pending, and an assertion that a read on the *other* completes.
+That needs two tasks -- sequentially there is nothing to observe, because a
+blocking read on an idle connection has nobody to be blocking. The existing
+`self_test_listen_accept` is the shape to build it from, and it is a real piece
+of work rather than an addition to that test.
+
+**This belongs in option D's trigger.** Deleting the resident stack on the
+strength of a property nothing checks would leave no way to notice if the fix
+ever regressed and no fallback when it did. Boots accumulating daemon-default
+mileage is necessary; a concurrency witness is what makes the deletion safe.
+
+**What is left is option D: delete the resident stack (~40 files).** It is not
+done here on purpose. design-decisions 934 sets the bar as the replacement
+having *run* as the default, not merely being it, and at the time of writing it
+has done so once. D is also the only step with no way back but a revert.
+
+**The trigger, so this is actionable rather than remembered:** once a handful of
+boots across the lanes have run daemon-default with no netstack regression, do
+the deletion. Evidence accumulates without anyone arranging it -- every lane's
+boot now exercises the daemon. When D lands, `userspace_enabled()` and the
+`net.userspace` parameter go with it: there will be nothing to fall back to, and
+an opt-out that selects a deleted stack is worse than no opt-out.
+
 **PLAN (2026-09-12, after A-Q9 resolved C-then-D): the fix is smaller than the
 phrase 'asynchronous rewrite' suggests, because the daemon is already fair.**
 `ring_tcp_recv` routes through `ring_pump` precisely so *concurrent connections
@@ -118014,6 +118103,82 @@ still worth having.
 
 ---
 
+## B-THE-BLANKET-DEAD-CODE-SWEEP — CLOSED 2026-09-13 (lane B)
+
+**Lane:** B. **Status:** the line of work is finished. Every blanket
+`#![allow(dead_code)]` in `userspace/`, `services/`, `init/` and `posix/`
+is gone, `scripts/check-dead-code-allows.py` holds the line at zero, and
+the eight remaining allows are narrowly conditional (`cfg(test)` or
+`cfg(not(unix))`) and pass on the shipping target.
+
+**What it started as, and what it turned into.** Lint hygiene. It became
+the most productive defect-finding technique of the session, and the
+reasoning is mechanical enough to reuse: **a model nothing constructs
+means nothing populates it, and something is usually pretending it did.**
+
+| crate | what came out of it |
+|---|---|
+| `gdb` | `MAX_BREAKPOINTS` declared, documented, never enforced; a 105-line duplicate tokeniser resolving `$rax` to its *index* |
+| `wpa` | the supplicant model, orphaned when two fabricating personalities were deleted |
+| `logind` | the entire write side implemented and reachable from nothing — filed separately |
+| `systemctl` | **six commands printing work they never did**, including `enable` naming an exact symlink path and `poweroff` announcing a shutdown |
+| `objdump` | nothing. A clean crate, and worth recording as such |
+| `jq` | exit **0** on a runtime error; `$x` **hung forever**; `"\(.a)"` returned a **wrong answer** |
+| `finger` | six helpers orphaned by the deleted `w`, five of them the *fixed* versions of a fabrication |
+| `irqbalance` | an unrecognised option was ignored, so the program **daemonised** instead of failing |
+| the tail | protocol headers parsed whole and rendered in part — bookkeeping, as expected once counts fell to single digits |
+
+Nine crates produced a real defect; one produced a clean bill. Against
+the grep for the word "stub", which produced a 45-comment reading list
+containing two real findings, that is a far better filter — and it is
+worth knowing it is now **spent**, because it only fires where a blanket
+allow was hiding the evidence.
+
+**The best of the findings were not visible in the code.** `jq -n '$x'`
+produced no output to read; it had to be typed into the binary. The dead
+enum variant was the index that said which feature to type. Reading the
+source would not have found it, and neither would any test that existed.
+
+**Four crate-level justifications, four that covered less than they
+suppressed.** This is the durable lesson:
+
+| crate | the comment above the allow |
+|---|---|
+| `gdb` | eight careful lines justifying its two neighbours, silent on `dead_code` |
+| `wpa` | enumerated what it covered — and described personalities deleted three days earlier |
+| `logind` | claimed the daemon event loop was unimplemented (it exists), citing a todo.txt note that never existed |
+| `finger` | right about three fields, wrong about a fourth, and predated the orphans entirely |
+
+**A list in a comment goes stale; an attribute on the item cannot.** That
+is a stronger argument for the per-item form than "the comment did not
+mention the lint", and it is why the gate permits per-item allows without
+limit and refuses the blanket form outright.
+
+**Method, for whoever repeats this.** `RUSTFLAGS="--force-warn dead_code"
+cargo check -p <crate> --target <triple> --message-format=json`,
+deduplicated by (file, line, message).
+
+* `--force-warn` overrides a crate-level `#![allow]`; `-W` does not.
+* `check` rather than `build`: no linking, so a linux target can be
+  measured from a Windows host without a cross-linker.
+* **Measure bin-only; verify deletions with `--all-targets`.** The two
+  answer different questions, and I got this wrong twice — once deleting
+  something the tests used, once reporting `main` as dead because the
+  test harness supplies its own.
+* A warning naming several fields points at **one** of them. Annotating
+  the reported line leaves the rest warning; I fixed that by hand three
+  times before automating it.
+
+**Numbers.** 180 findings on `x86_64-unknown-linux-gnu` at the start
+across 22 crates; 175 of those appear on every target. The count moved
+three times before it was right — 208 measured on a non-unix host, then
+180, and the crate total was an undercount until the detector learned to
+read `cfg_attr`. Each move came from widening the instrument, not from
+the tree changing, which is worth stating because a reader cannot tell
+those apart from the number alone.
+
+---
+
 ## B-LOGIND-IMPLEMENTS-THE-WRITE-SIDE-AND-EXPOSES-NONE-OF-IT — OPEN 2026-09-12
 
 **Lane:** B. **Severity:** medium — nothing is wrong with what runs; what runs
@@ -139692,7 +139857,7 @@ length names, NUL padding, and a buffer holding several events.
 defect is worse than the ones already fixed today; the implementation is
 more than a single change.
 
-## B-PROGRAMS-THAT-INVENT-THEIR-OUTPUT (lane B, 2026-09-12) -- 10 found, 9 fixed, 1 filed
+## B-PROGRAMS-THAT-INVENT-THEIR-OUTPUT (lane B, 2026-09-12) -- 11 found, 10 fixed, 1 filed
 
 A class, not a bug. A program prints something shaped like a measurement,
 an action or an event, and the value did not come from the system. It is
@@ -139711,6 +139876,7 @@ exactly like the working version.
 | `gdb` | `print $rxa` -- any unknown register -- evaluated to `0` | returns `No such register` |
 | `prlimit` | "setting NOFILE for PID N" with no syscall at all | calls `prlimit64` |
 | `mkinitramfs` | `compression: Gzip`, then wrote the cpio uncompressed | calls `deflate::gzip` |
+| `systemctl` | six commands: `enable` named a symlink path, `poweroff` announced a shutdown, `list-timers` invented a timer | all refuse via `no_unit_interface` |
 | `inotifywait` | a `newfile.txt` creation on every run | reads the kernel's event stream |
 | `chattr` | `+i` stored in a `<file>.attrs` sidecar; the file stayed writable | filed to A for `FS_IOC_SETFLAGS` |
 
@@ -139729,6 +139895,26 @@ invented action misleads whoever called it; this one also **wrote a
 file**, so the lie outlived the process and was still there for the next
 program to trust. A refusal that leaves a plausible artifact behind is
 the same bug in a quieter form, which is why it now writes nothing.
+
+`systemctl` is one program but six commands, and it spans the whole
+ordering by itself: `list-timers` invented a *reading* (`logwatch.timer`,
+next `Mon 2026-01-02 00:00:00`, `23h left`, on a system with no timer
+units), `enable` invented an *action*, and `poweroff` invented an
+*event*. `enable` is the most expensive single instance found so far, for
+a reason `mkinitramfs` only half has: it printed an **exact path** --
+`Created symlink /etc/slateos/system/multi-user.target.wants/sshd.service
+-> /usr/lib/slateos/system/sshd.service.` -- so the administrator is left
+with a specific file to believe in. No file was written, so there is not
+even a wrong artifact to find; there is a confident sentence and an empty
+directory, and the belief that the service starts at boot survives until
+the next boot disproves it.
+
+It also shows the class can be **half-fixed and look finished**. The
+query half of `systemctl` was already honest -- `is-active` refuses and
+carries a comment recording that it used to exit 0 for four hard-coded
+names -- while every command that *acts* still claimed. Whoever repaired
+the read side did not think to check the write side, and the file reads
+as tended.
 
 The count in this heading read `7 found, 6 fixed` while the table below
 it listed eight, from the last time it was extended without being
@@ -139754,6 +139940,28 @@ not a finding list. What actually identified them:
 - **A success banner before the work.** Twice: `inotifywait` printed
   "Watches established (1 total)" and `firejail` printed "Child process
   initialized", both immediately before refusing.
+
+### Unused model code is the best detector found so far
+
+Not in the original list of heuristics because it was not known then.
+Removing a crate's blanket `#![allow(dead_code)]` and reading what rustc
+then reports has found, in four crates:
+
+| crate | what the dead model meant |
+|---|---|
+| `gdb` | a duplicate tokeniser nobody called, and an unenforced breakpoint limit |
+| `wpa` | the personalities that used it were deleted for fabricating |
+| `logind` | the entire write side is implemented and exposed to nothing |
+| `systemctl` | six commands that print and do nothing, so the unit model is never populated |
+
+The reasoning is mechanical, which is why it works: **a model nothing
+constructs means nothing populates it, and something is usually
+pretending it did.** It is a far better filter than grepping for the word
+"stub" -- that produced a reading list of 45 comments of which two were
+real, while this produced a finding in four crates out of four.
+
+The cost is that it only fires where a blanket allow was hiding the
+evidence, so it runs out when the 19 remaining crates are cleaned.
 
 ### Negative results, so nobody re-checks them
 

@@ -31,7 +31,7 @@
 // bytes. Arithmetic operates on section offsets and instruction lengths
 // already bounded by ELF header limits, and indexing/slicing is gated by
 // length checks. Errors return Err rather than panic.
-#![allow(clippy::arithmetic_side_effects, clippy::indexing_slicing, dead_code)]
+#![allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 
 use std::env;
 use std::fs::File;
@@ -101,16 +101,31 @@ const SHT_PROGBITS: u32 = 1;
 const SHT_SYMTAB: u32 = 2;
 const SHT_STRTAB: u32 = 3;
 const SHT_RELA: u32 = 4;
+// A complete SHT_ table. These eight have no reader in this program --
+// objdump's `-h` prints Idx/Name/Size/VMA/LMA/File off/Algn/Flags and has no
+// Type column; that is `readelf -S`. Kept whole anyway: a section-type table
+// missing the half nobody has needed yet is how the next reader concludes
+// the format has no such value. `section_type_str`, which was the only thing
+// that would have named them, is deleted -- it had no caller and no format
+// in this program to serve.
+#[allow(dead_code)]
 const SHT_HASH: u32 = 5;
+#[allow(dead_code)]
 const SHT_DYNAMIC: u32 = 6;
+#[allow(dead_code)]
 const SHT_NOTE: u32 = 7;
 const SHT_NOBITS: u32 = 8;
 const SHT_REL: u32 = 9;
 const SHT_DYNSYM: u32 = 11;
+#[allow(dead_code)]
 const SHT_INIT_ARRAY: u32 = 14;
+#[allow(dead_code)]
 const SHT_FINI_ARRAY: u32 = 15;
+#[allow(dead_code)]
 const SHT_GNU_HASH: u32 = 0x6fff_fef5;
+#[allow(dead_code)]
 const SHT_GNU_VERSYM: u32 = 0x6fff_fff0;
+#[allow(dead_code)]
 const SHT_GNU_VERNEED: u32 = 0x6fff_fffe;
 
 // Section header flags
@@ -174,7 +189,6 @@ enum Error {
     BadUtf8 {
         what: &'static str,
     },
-    SectionNotFound(String),
 }
 
 impl std::fmt::Display for Error {
@@ -195,7 +209,6 @@ impl std::fmt::Display for Error {
             Self::InvalidClass(c) => write!(f, "unknown ELF class: {c}"),
             Self::InvalidEncoding(e) => write!(f, "unknown ELF data encoding: {e}"),
             Self::BadUtf8 { what } => write!(f, "{what}: contains invalid UTF-8"),
-            Self::SectionNotFound(name) => write!(f, "section not found: {name}"),
         }
     }
 }
@@ -397,6 +410,11 @@ fn read_cstr(data: &[u8], offset: usize) -> Result<&str> {
 #[derive(Debug, Clone)]
 struct ElfHeader {
     class: u8,
+    // Read from the on-disk record and not consulted. The struct mirrors the
+    // ELF64 layout; dropping a field this build does not use would make the type
+    // disagree with the format it parses, and re-deriving an offset later is how
+    // a parser starts reading the wrong bytes.
+    #[allow(dead_code)]
     data: u8,
     little_endian: bool,
     osabi: u8,
@@ -436,6 +454,11 @@ struct SectionHeader {
     sh_offset: u64,
     sh_size: u64,
     sh_link: u32,
+    // Read from the on-disk record and not consulted. The struct mirrors the
+    // ELF64 layout; dropping a field this build does not use would make the type
+    // disagree with the format it parses, and re-deriving an offset later is how
+    // a parser starts reading the wrong bytes.
+    #[allow(dead_code)]
     sh_info: u32,
     sh_addralign: u64,
     sh_entsize: u64,
@@ -446,6 +469,11 @@ struct SectionHeader {
 struct Symbol {
     st_name: u32,
     st_info: u8,
+    // Read from the on-disk record and not consulted. The struct mirrors the
+    // ELF64 layout; dropping a field this build does not use would make the type
+    // disagree with the format it parses, and re-deriving an offset later is how
+    // a parser starts reading the wrong bytes.
+    #[allow(dead_code)]
     st_other: u8,
     st_shndx: u16,
     st_value: u64,
@@ -872,28 +900,6 @@ fn osabi_str(o: u8) -> &'static str {
         ELFOSABI_FREEBSD => "UNIX - FreeBSD",
         255 => "Slate OS",
         _ => "Unknown",
-    }
-}
-
-fn section_type_str(t: u32) -> &'static str {
-    match t {
-        SHT_NULL => "NULL",
-        SHT_PROGBITS => "PROGBITS",
-        SHT_SYMTAB => "SYMTAB",
-        SHT_STRTAB => "STRTAB",
-        SHT_RELA => "RELA",
-        SHT_HASH => "HASH",
-        SHT_DYNAMIC => "DYNAMIC",
-        SHT_NOTE => "NOTE",
-        SHT_NOBITS => "NOBITS",
-        SHT_REL => "REL",
-        SHT_DYNSYM => "DYNSYM",
-        SHT_INIT_ARRAY => "INIT_ARRAY",
-        SHT_FINI_ARRAY => "FINI_ARRAY",
-        SHT_GNU_HASH => "GNU_HASH",
-        SHT_GNU_VERSYM => "GNU_VERSYM",
-        SHT_GNU_VERNEED => "GNU_VERNEED",
-        _ => "UNKNOWN",
     }
 }
 
@@ -2847,19 +2853,6 @@ mod tests {
             "WAX"
         );
         assert_eq!(section_flags_str(SHF_MERGE | SHF_STRINGS), "MS");
-    }
-
-    #[test]
-    fn test_section_type_names() {
-        assert_eq!(section_type_str(SHT_NULL), "NULL");
-        assert_eq!(section_type_str(SHT_PROGBITS), "PROGBITS");
-        assert_eq!(section_type_str(SHT_SYMTAB), "SYMTAB");
-        assert_eq!(section_type_str(SHT_STRTAB), "STRTAB");
-        assert_eq!(section_type_str(SHT_NOBITS), "NOBITS");
-        assert_eq!(section_type_str(SHT_RELA), "RELA");
-        assert_eq!(section_type_str(SHT_REL), "REL");
-        assert_eq!(section_type_str(SHT_DYNAMIC), "DYNAMIC");
-        assert_eq!(section_type_str(SHT_DYNSYM), "DYNSYM");
     }
 
     // --------------- Symbol parsing tests ---------------

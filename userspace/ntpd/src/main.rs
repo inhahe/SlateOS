@@ -12,7 +12,6 @@
 // the daemon will exercise once it ships with `ntpdate -p` (human-
 // readable status print) and full RFC 5905 server-mode support. Kept
 // as documentation for the continuing daemon implementation.
-#![allow(dead_code)]
 
 use std::env;
 use std::fmt;
@@ -130,6 +129,10 @@ struct NtpTimestamp {
 
 impl NtpTimestamp {
     /// Create from the two 32-bit halves.
+    // Calendar helpers used by the tests and not by the daemon, which reports
+    // times as unix seconds. Kept as the conversion pair for the day they are
+    // rendered.
+    #[allow(dead_code)]
     fn new(seconds: u32, fraction: u32) -> Self {
         Self { seconds, fraction }
     }
@@ -149,6 +152,7 @@ impl NtpTimestamp {
     }
 
     /// Convert to Unix seconds (returns None if before Unix epoch).
+    #[allow(dead_code)]
     fn to_unix_secs(self) -> Option<u64> {
         let ntp = u64::from(self.seconds);
         if ntp < NTP_UNIX_DELTA {
@@ -163,6 +167,7 @@ impl NtpTimestamp {
     }
 
     /// Build from a floating-point seconds value.
+    #[allow(dead_code)]
     fn from_f64(val: f64) -> Self {
         let seconds = val as u32;
         let fraction = ((val - f64::from(seconds)) * 4_294_967_296.0) as u32;
@@ -430,6 +435,7 @@ fn days_in_month(year: u32, month: u32) -> Option<u32> {
 }
 
 /// Day of year (1-based) for a given date.
+#[allow(dead_code)]
 fn day_of_year(year: u32, month: u32, day: u32) -> Option<u32> {
     if !(1..=12).contains(&month) {
         return None;
@@ -443,6 +449,7 @@ fn day_of_year(year: u32, month: u32, day: u32) -> Option<u32> {
 
 /// Convert a `DateTime` (assumed UTC) to Unix timestamp (seconds since
 /// 1970-01-01 00:00:00 UTC). Only valid for years >= 1970.
+#[allow(dead_code)]
 fn datetime_to_unix(dt: &DateTime) -> Result<u64, String> {
     if dt.year < 1970 {
         return Err("year before Unix epoch (1970)".into());
@@ -516,6 +523,7 @@ fn format_iso8601(unix_secs: u64) -> String {
 }
 
 /// Format a Unix timestamp in a human-readable style.
+#[allow(dead_code)]
 fn format_human(unix_secs: u64) -> String {
     let dt = unix_to_datetime(unix_secs);
     static MONTHS: [&str; 12] = [

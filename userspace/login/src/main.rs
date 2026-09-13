@@ -18,7 +18,6 @@
 // Tracked-but-not-yet-wired fields and constants are kept to document the
 // intended interface as the login implementation grows (PAM/shadow have
 // many fields that the current minimal flow doesn't read yet).
-#![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::env;
@@ -32,6 +31,9 @@ use std::process;
 // ---------------------------------------------------------------------------
 
 const MAX_LOGIN_ATTEMPTS: u32 = 5;
+// Login vocabulary not reachable in this build: there is no timeout path
+// and no /etc/issue rendering yet. Kept as the shape of the feature.
+#[allow(dead_code)]
 const LOGIN_TIMEOUT_SECS: u64 = 60;
 const DEFAULT_PATH: &str = "/usr/local/bin:/usr/bin:/bin";
 const DEFAULT_ROOT_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
@@ -51,6 +53,7 @@ const PASSWD_COMMAND: &str = "/usr/bin/passwd";
 const LASTLOG_FILE: &str = "/var/log/lastlog";
 const FAILLOG_FILE: &str = "/var/log/faillog";
 const MAIL_DIR: &str = "/var/mail";
+#[allow(dead_code)]
 const ISSUE_FILE: &str = "/etc/issue";
 const HUSHLOGIN_FILE: &str = ".hushlogin";
 
@@ -65,6 +68,7 @@ enum LoginError {
     NoLogin(String),
     InvalidUser(String),
     SystemError(String),
+    #[allow(dead_code)]
     Timeout,
 }
 
@@ -90,6 +94,7 @@ struct PasswdEntry {
     username: String,
     uid: u32,
     gid: u32,
+    #[allow(dead_code)]
     gecos: String,
     home_dir: PathBuf,
     shell: PathBuf,

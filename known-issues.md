@@ -139135,3 +139135,71 @@ length names, NUL padding, and a buffer holding several events.
 **Not started.** Recorded now because the diagnosis is complete and the
 defect is worse than the ones already fixed today; the implementation is
 more than a single change.
+
+## B-PROGRAMS-THAT-INVENT-THEIR-OUTPUT (lane B, 2026-09-12) -- 7 found, 6 fixed, 1 filed
+
+A class, not a bug. A program prints something shaped like a measurement,
+an action or an event, and the value did not come from the system. It is
+distinct from an unimplemented feature, which announces itself; this looks
+exactly like the working version.
+
+### Found, in ascending order of what it costs
+
+| program | what it invented | fate |
+|---|---|---|
+| `firejail` | `Child process initialized in 0.8ms` -- a literal, before refusing to run anything | line removed |
+| `blkzone` | two hardcoded disk zones, for any device on any machine | deleted (§1006; needs ioctls this build lacks) |
+| `systemd-cgls` | a fixed cgroup tree: `init.scope` pid 1, `dbus.service` pid 100 | walks `/sys/fs/cgroup` |
+| `systemd-cgtop` | five cgroups with invented task counts, CPU and memory | reads `pids.current`/`memory.current` |
+| `fio` | `usr`/`sys`/`ctx`/`minf` computed from the operation count | reads `/proc/self/stat` |
+| `prlimit` | "setting NOFILE for PID N" with no syscall at all | calls `prlimit64` |
+| `inotifywait` | a `newfile.txt` creation on every run | reads the kernel's event stream |
+| `chattr` | `+i` stored in a `<file>.attrs` sidecar; the file stayed writable | filed to A for `FS_IOC_SETFLAGS` |
+
+**The severity ordering is the useful part.** `blkzone` and `cgtop`
+invented *readings*, which mislead a reader. `prlimit` and `chattr`
+invented *actions*, which mislead a program -- a caller lowers a limit or
+sets the immutable bit and is told it worked. `inotifywait` invented an
+*event*, which makes a program **act**: `while inotifywait -e create dir;
+do rebuild; done` never stops.
+
+### How they were found, since the grep is the weakest part
+
+A grep for `// stub|fake|placeholder|simulated|hardcoded|dummy` gives 45
+hits in lane B and most are honest host-test shims. It is a reading list,
+not a finding list. What actually identified them:
+
+- **Reading a file for an unrelated reason.** `getfacl`'s wrong group
+  lookup, `prlimit`'s missing syscall and `sanitize`'s UTF-8 panic were all
+  found while fixing that file's *option parsing*.
+- **A variable whose only consumer is the output.** After fixing `fio`,
+  clippy reported `ops_done` as assigned and never read: the operation
+  counter existed solely to manufacture four numbers.
+- **A test that asserts a constant.** Five tests in this tree pinned
+  fabrications in place -- `systemd-cgls`, `systemd-cgtop` and three in
+  `inotify`. A test asserting `system.slice` appears in cgroup output is
+  either testing the kernel or testing a literal, and it was the literal.
+- **A success banner before the work.** Twice: `inotifywait` printed
+  "Watches established (1 total)" and `firejail` printed "Child process
+  initialized", both immediately before refusing.
+
+### Negative results, so nobody re-checks them
+
+`capsh` and `chroot` are flagged by the same grep and are both honest.
+`capsh` refuses with "refusing to exec ... with unchanged capabilities" --
+its "Simulated process state" is a section header over state accumulated
+before exec. `chroot` routes every privilege-changing operation through an
+`enosys()` helper returning "not implemented in this kernel". `firejail`'s
+refusal path was right too; only its banner was wrong.
+
+### Still open
+
+`chattr`'s `read_attrs` still consults the sidecar and invents an
+`EXT4_EXTENTS_FL` default when there is none. Left deliberately: whether
+`lsattr` survives depends on A's answer to
+`requests/b-a-chattr-needs-fs-ioc-getflags-or-it-should-be-deleted.md`,
+and there is no honest reading to give it meanwhile.
+
+About 38 of the 45 stub comments are untriaged. They are mostly in
+crates whose whole purpose is host-side development support, but that is
+an impression rather than a result.

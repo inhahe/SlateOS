@@ -122,6 +122,25 @@ fn is_accounted_for(p: &Palette, c: Color, derived: &[Color]) -> bool {
     {
         return true;
     }
+    // A role that a site asked `Palette::ink` for, because it was drawing text
+    // in it. Those are dual-use colours -- an accent is also a switch that is
+    // on -- so the palette keeps them as chosen and the *text* gets a version
+    // that clears 4.5:1 on whatever this theme puts underneath it. The result
+    // is a legitimate colour of this palette that is not one of its roles.
+    //
+    // Accepted here rather than declared per-module as `derived`, which was
+    // the alternative: `derived` exists for a colour a module *computes* and
+    // therefore owns, and this is computed by the palette for every module at
+    // once. Forty-five modules declaring the same eleven values would be
+    // forty-five places to forget one, and the whole point of this sweep is
+    // that forgetting is what it catches.
+    if p.roles()
+        .iter()
+        .map(|(_, r)| p.ink(*r))
+        .any(|r| r.r == c.r && r.g == c.g && r.b == c.b)
+    {
+        return true;
+    }
     derived
         .iter()
         .any(|d| d.r == c.r && d.g == c.g && d.b == c.b)

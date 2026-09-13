@@ -139244,36 +139244,68 @@ covered by
     #![allow(clippy::arithmetic_side_effects, clippy::indexing_slicing, dead_code)]
 
 whose eight-line comment justifies the first two lints and never
-mentions the third. That shape -- a defensible suppression with an
-undefensible one appended to it -- is in **22 lane-B crates**, and it is
-hiding **208 distinct findings**:
+mentions the third. That shape -- a defensible suppression with an indefensible one
+appended to it -- is in **22 lane-B crates**. Measured on
+`x86_64-unknown-linux-gnu`, the closest installed target to the
+unix-like one SlateOS userspace actually builds for, it is hiding **180
+findings**, of which **175 are present on every target** (the table
+below sums to the 180):
 
 | Crate | Findings | | Crate | Findings |
 |---|---|---|---|---|
-| `logind` | 50 | | `dhcpcd` | 7 |
 | `gdb` | 27 | | `upower`, `tcpdump` | 5 each |
 | `wpa` | 25 | | `ntpd`, `ar`, `login` | 4 each |
-| `systemctl` | 19 | | `getty` | 3 |
-| `objdump` | 13 | | `resolvectl`, `findmnt`, `ss`, `ldconfig` | 2 each |
-| `jq` | 12 | | `irqbalance`, `acpi`, `blkid` | 1 each |
-| `finger` | 10 | | `posix`, `libservicebus` | 8, 1 |
+| `logind` | 22 | | `getty` | 3 |
+| `systemctl` | 19 | | `resolvectl`, `findmnt`, `ss`, `ldconfig` | 2 each |
+| `objdump` | 13 | | `irqbalance`, `acpi`, `blkid` | 1 each |
+| `jq` | 12 | | `posix`, `libservicebus` | 8, 1 |
+| `finger` | 10 | | `dhcpcd` | 7 |
 
-By kind: 48 constants, 39 functions, 27 fields, 21 associated items, 17
-field groups, 13 enums, 12 methods, 10 structs.
+**A dead-code census is target-specific, and naming the target is part
+of the number.** I first published 208 here, measured on
+`x86_64-pc-windows-gnu` -- which is not unix, so every `#[cfg(unix)]`
+path was compiled out and counted as dead. `logind`'s real `serve` is
+unix-gated, so on that host its entire bus layer -- `handle_message` ->
+`dispatch` -> `authorize`, and the `ERR_*`/`OUTCOME_*` constants -- had
+no caller. I had it written up as a session daemon whose authorization
+function nothing calls. It is live; I caught it only because
+`handle_message` visibly calls `dispatch`, which contradicted the
+compiler and was worth stopping for.
 
-Measured, not estimated: `RUSTFLAGS="--force-warn dead_code" cargo check
--p <each> --target x86_64-pc-windows-gnu --message-format=json`,
-deduplicated by (file, line, message). `--force-warn` is the instrument
-that matters here -- it overrides a crate-level `#![allow]`, which `-W`
-does not, so nothing short of it can see past these lines. The count
-includes path dependencies pulled in by those crates, which is why
-`posix` and `libservicebus` appear without being on the list of 22.
+| Target | Findings |
+|---|---|
+| `x86_64-pc-windows-gnu` | 208 |
+| `x86_64-unknown-linux-gnu` | 180 |
+| **real on both** | **175** |
+| windows-only (cfg artifact) | 33, of which 28 are `logind` |
+| linux-only (missed at first) | 5 |
 
-Not all 208 are bugs. 48 are constants, and a complete table of ELF or
-DBus constants where only some are read is legitimate. The defect is
-that the allow is **crate-wide**, so a genuine finding like gdb's cannot
-be told from a deliberate table -- and the annotation that would say
-which is which was never required, because the lint never fired. The fix
-is per-item `#[allow(dead_code)]` with a reason, and `dead_code` struck
+Every crate's count is identical across the two targets except `logind`,
+50 -> 22. Only four of the 22 crates contain `cfg(unix)` at all --
+`oils` 31 occurrences, `getty` 6, `login` 5, `logind` 2 -- which is what
+bounds the artifact.
+
+Method, so it can be repeated: `RUSTFLAGS="--force-warn dead_code" cargo
+check -p <each> --target <triple> --message-format=json`, deduplicated
+by (file, line, message). Two details matter. `--force-warn` overrides a
+crate-level `#![allow]` where `-W` does not, so nothing weaker can see
+past these lines at all. And `check` rather than `build` is what makes
+the second target possible: checking does not link, so a linux target
+can be measured from Windows without a cross-linker.
+
+Not all 175 are bugs. 48 are constants, and a complete ELF or DBus
+constant table with some entries unread is legitimate. The defect is
+that the allow is **crate-wide**, so a real finding like gdb's cannot be
+told from a deliberate table -- and the annotation that would say which
+is which was never required, because the lint never fired. The fix is
+per-item `#[allow(dead_code)]` with a reason, and `dead_code` struck
 from the 22 crate-level lists; then the next `tokenize_expr` announces
 itself. That is 22 crates of work and is not started.
+
+`logind`'s surviving 22 are not a constant table and deserve their own
+look: `SessionType` (`Tty`, `X11`, `Wayland`, `Unspecified`),
+`SessionClass` (`User`, `Greeter`, `LockScreen`) and `SessionState`
+(`Opening`, `Online`) are never **constructed**, their `from_str` never
+called, `CreateSessionParams` never built, and the inhibitor fields
+`who`, `why`, `uid` and `pid` never read. It models sessions in detail
+and never populates the model.

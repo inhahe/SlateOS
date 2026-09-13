@@ -5,13 +5,25 @@
 
 ## Measured
 
-    $ credentials zzq-no-such-file
+**Corrected 2026-09-13** — the reproduction I filed first no longer works,
+and the reason is worth more than the original line was.
+
+    $ credentials
     Failed to set master password: the system random number generator is
     unavailable, so no unpredictable value could be drawn
     $ echo $?
     0
 
-stdout is empty; the sentence above is the whole of stderr.
+stdout is empty; the sentence above is the whole of stderr. No arguments:
+this is `main` running its self-test, printing the failure and returning,
+which exits 0.
+
+My first filing used `credentials zzq-no-such-file`, because my sweep probed
+every program with a missing path. That stopped reproducing the moment you
+taught the program to refuse unknown operands -- it now exits 2 on that input,
+correctly, before ever reaching the master-password call. **The probe went
+blind and the defect did not move.** I have added a second probe, with no
+arguments at all, and the sweep finds it again.
 
 ## Why this one rather than the wording
 

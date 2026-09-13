@@ -25,8 +25,8 @@ terminal is told the truth. A script reading `$?` is told the run succeeded.
 Only the one nobody watches is believed -- and a grep for the message marks
 the program as *already fixed*, because the message is right.
 
-THE PROBE. Each binary is run in an empty directory with a path that does not
-exist. A program that takes a file should fail; a program that takes no
+THE PROBES, plural. Each binary is run in an empty directory twice: once with
+a path that does not exist, and once with no arguments at all. A program that takes a file should fail; a program that takes no
 operand should refuse the operand. Either way the correct status is non-zero.
 Flagged only when stderr looks like a *failure* rather than a warning -- see
 `SOUNDS_LIKE_FAILURE` -- so an advisory note on stderr is not a finding.
@@ -168,6 +168,33 @@ ANNOUNCES_A_FALLBACK = re.compile(
 )
 
 
+def looks_like_help(text):
+    """True if this stderr is a usage screen rather than a report of failure.
+
+    Some programs answer a bare invocation by explaining themselves, and
+    several here print that explanation to stderr rather than stdout -- `at`,
+    `crontab` and `readelf` all do, and all three print `--help` to stderr
+    too, so the stream does not separate help from error the way it does
+    elsewhere. A program that responds to being given nothing by saying what
+    it takes has not failed at anything.
+
+    Recognised by shape rather than by the word "usage": several lines, at
+    least two of which are option entries. A real failure is a sentence or
+    two and lists no flags -- `credentials` reports its master-password
+    failure in one line, and stays a finding.
+    """
+    lines = [l for l in text.splitlines() if l.strip()]
+    if len(lines) < 3:
+        return False
+    flagish = sum(1 for l in lines if l.lstrip().startswith("-"))
+    if flagish >= 2:
+        return True
+    # `at` and `crontab` lay their synopsis out as `at <timespec>   ...`, so
+    # the entries begin with the program name rather than a dash. A usage
+    # *header* plus several lines is the same thing in another shape.
+    return any(l.strip().rstrip(":").lower() == "usage" for l in lines)
+
+
 def first_failure_line(text):
     """The first stderr line that reads as a report of failure, or None."""
     for line in text.splitlines():
@@ -224,6 +251,17 @@ def selftest():
             print("  selftest FAIL (wording %r): wanted %s got %s" % (text, want, got))
             bad += 1
 
+    # A usage screen is not a failure report, and a one-line failure is.
+    helpish = "Usage: prog [OPTIONS] FILE" + chr(10) + "  -a  do a" + chr(10) + "  -b  do b"
+    usage_headed = ("USAGE:" + chr(10) + "  at <timespec>  schedule" + chr(10)
+                    + "  at -l          list")
+    for text, want_help in ((helpish, True), (usage_headed, True),
+                            ("Failed to set master password: the RNG is unavailable", False),
+                            ("cannot open x" + chr(10) + "cannot open y", False)):
+        if looks_like_help(text) != want_help:
+            print("  selftest FAIL (help-shape %r): wanted %s" % (text[:28], want_help))
+            bad += 1
+
     print("stderr-exit-zero-sweep: selftest %s (%d cases)"
           % ("FAILED" if bad else "ok", len(cases) + 4))
     return 1 if bad else 0
@@ -256,15 +294,28 @@ def main(argv=None):
             if name in SKIP or name in EXPECTED_ZERO or name in VERIFIED_ZERO:
                 skipped += 1
                 continue
-            code, err = probe([exe, MISSING_PATH], work)
-            if code is None:
-                unlaunchable += 1
-                continue
-            if code != 0:
-                continue
-            line = first_failure_line(err)
-            if line:
-                findings.append((name, line))
+            # Two probes, because one was not enough. The first version
+            # passed only a missing path, and a program whose failure path
+            # runs with *no* arguments was invisible to it: `credentials`
+            # reports "Failed to set master password: the RNG is unavailable"
+            # and exits 0 on a bare run, and the argument probe stopped
+            # reaching it the moment that program learned to refuse unknown
+            # operands. The instrument went blind and the defect did not
+            # move.
+            for argv in ([exe, MISSING_PATH], [exe]):
+                code, err = probe(argv, work)
+                if code is None:
+                    unlaunchable += 1
+                    break
+                if code != 0:
+                    continue
+                if looks_like_help(err):
+                    continue
+                line = first_failure_line(err)
+                if line:
+                    how = "" if len(argv) == 1 else " (with an operand)"
+                    findings.append((name + how, line))
+                    break
     finally:
         shutil.rmtree(work, ignore_errors=True)
 

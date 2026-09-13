@@ -15,6 +15,7 @@ use crate::row_strip::RowStrip;
 use crate::scrollbar;
 use crate::step;
 use crate::style::CornerRadii;
+use crate::surface::Surface;
 
 // ─── Re-export the shared item-id type from the context-menu module ────────
 
@@ -900,14 +901,15 @@ impl MenuBar {
             let is_open = self.open_index == Some(i);
 
             if is_open {
-                cmds.push(RenderCommand::FillRect {
-                    x: *x_off,
-                    y: 0.0,
-                    width: *w,
-                    height: BAR_HEIGHT,
-                    color: palette.surface0,
-                    corner_radii: CornerRadii::ZERO,
-                });
+                palette.push_surface(
+                    &mut cmds,
+                    *x_off,
+                    0.0,
+                    *w,
+                    BAR_HEIGHT,
+                    0.0,
+                    Surface::Selected,
+                );
             }
 
             let text_y = (BAR_HEIGHT - FONT_SIZE) / 2.0;
@@ -1649,14 +1651,15 @@ fn render_entries(
                 ..
             } => {
                 if hover == Some(i) && *enabled {
-                    cmds.push(RenderCommand::FillRect {
-                        x: panel_x + 4.0,
-                        y: cur_y,
-                        width: panel_w - 8.0,
-                        height: ITEM_HEIGHT,
-                        color: palette.surface0,
-                        corner_radii: CornerRadii::all(ITEM_HOVER_RADIUS),
-                    });
+                    palette.push_surface(
+                        cmds,
+                        panel_x + 4.0,
+                        cur_y,
+                        panel_w - 8.0,
+                        ITEM_HEIGHT,
+                        ITEM_HOVER_RADIUS,
+                        Surface::Selected,
+                    );
                 }
 
                 let tc = if *enabled {
@@ -1693,14 +1696,15 @@ fn render_entries(
 
             MenuBarEntry::Check { label, checked, .. } => {
                 if hover == Some(i) {
-                    cmds.push(RenderCommand::FillRect {
-                        x: panel_x + 4.0,
-                        y: cur_y,
-                        width: panel_w - 8.0,
-                        height: ITEM_HEIGHT,
-                        color: palette.surface0,
-                        corner_radii: CornerRadii::all(ITEM_HOVER_RADIUS),
-                    });
+                    palette.push_surface(
+                        cmds,
+                        panel_x + 4.0,
+                        cur_y,
+                        panel_w - 8.0,
+                        ITEM_HEIGHT,
+                        ITEM_HOVER_RADIUS,
+                        Surface::Selected,
+                    );
                 }
 
                 let text_y = cur_y + (ITEM_HEIGHT - FONT_SIZE) / 2.0;
@@ -1732,14 +1736,15 @@ fn render_entries(
 
             MenuBarEntry::SubMenu { label, .. } => {
                 if hover == Some(i) {
-                    cmds.push(RenderCommand::FillRect {
-                        x: panel_x + 4.0,
-                        y: cur_y,
-                        width: panel_w - 8.0,
-                        height: ITEM_HEIGHT,
-                        color: palette.surface0,
-                        corner_radii: CornerRadii::all(ITEM_HOVER_RADIUS),
-                    });
+                    palette.push_surface(
+                        cmds,
+                        panel_x + 4.0,
+                        cur_y,
+                        panel_w - 8.0,
+                        ITEM_HEIGHT,
+                        ITEM_HOVER_RADIUS,
+                        Surface::Selected,
+                    );
                 }
 
                 let text_y = cur_y + (ITEM_HEIGHT - FONT_SIZE) / 2.0;
@@ -2013,16 +2018,32 @@ mod tests {
         bar.render(&palette, 800)
             .into_iter()
             .find_map(|cmd| match cmd {
-                // Exact equality on purpose: these are the very floats the
-                // renderer pushed, not a measurement of them.
+                // Matched by POSITION, not by colour, and either command kind.
+                // The highlight is `Surface::Selected` since 834, so it is an
+                // accent stroke under Borders and a `surface1` fill under
+                // Cards. Every caller of this asks *which row* is highlighted
+                // -- how tall the dropdown is, where a submenu hangs -- and
+                // none of them is about the colour.
+                //
+                // Exact equality on the geometry on purpose: these are the
+                // very floats the renderer pushed, not a measurement of them.
                 RenderCommand::FillRect {
                     x: rx,
                     y,
                     width,
                     height,
-                    color,
                     ..
-                } if rx == x && width == w && color == palette.surface0 => Some((y, height)),
+                } if rx == x && width == w => Some((y, height)),
+                // A 1px stroke is emitted half a pixel inside its box, so the
+                // line sits within it: `x + 0.5, width - 1.0`. Undone here so
+                // both styles answer in the same coordinates.
+                RenderCommand::StrokeRect {
+                    x: rx,
+                    y,
+                    width,
+                    height,
+                    ..
+                } if rx == x + 0.5 && width == w - 1.0 => Some((y - 0.5, height + 1.0)),
                 _ => None,
             })
     }

@@ -824,60 +824,37 @@ fn cmd_show(
     Ok(1)
 }
 
-fn cmd_unit_action(
-    out: &mut dyn Write,
-    action: &str,
-    unit_name: &str,
-    flags: &SystemctlFlags,
-) -> io::Result<i32> {
-    // Validate unit name has a type suffix.
-    let name_with_suffix = if unit_name.contains('.') {
+/// `sshd` means `sshd.service`, as systemd does. Extracted so it stays
+/// testable: it used to be observable through the "Starting sshd.service..."
+/// line, and that line was a claim this program had no business making.
+fn with_unit_suffix(unit_name: &str) -> String {
+    if unit_name.contains('.') {
         unit_name.to_string()
     } else {
-        format!("{}.service", unit_name)
-    };
-
-    if !flags.quiet {
-        let scope = if flags.user_scope {
-            "--user"
-        } else {
-            "--system"
-        };
-        match action {
-            "start" => writeln!(out, "Starting {} ({})...", name_with_suffix, scope)?,
-            "stop" => writeln!(out, "Stopping {} ({})...", name_with_suffix, scope)?,
-            "restart" => writeln!(out, "Restarting {} ({})...", name_with_suffix, scope)?,
-            "reload" => writeln!(out, "Reloading {} ({})...", name_with_suffix, scope)?,
-            "enable" => {
-                writeln!(
-                    out,
-                    "Created symlink /etc/slateos/system/multi-user.target.wants/{} -> /usr/lib/slateos/system/{}.",
-                    name_with_suffix, name_with_suffix
-                )?;
-                if flags.now {
-                    writeln!(out, "Starting {} ({})...", name_with_suffix, scope)?;
-                }
-            }
-            "disable" => {
-                writeln!(
-                    out,
-                    "Removed /etc/slateos/system/multi-user.target.wants/{}.",
-                    name_with_suffix
-                )?;
-                if flags.now {
-                    writeln!(out, "Stopping {} ({})...", name_with_suffix, scope)?;
-                }
-            }
-            "mask" => writeln!(
-                out,
-                "Created symlink /etc/slateos/system/{} -> /dev/null.",
-                name_with_suffix
-            )?,
-            "unmask" => writeln!(out, "Removed /etc/slateos/system/{}.", name_with_suffix)?,
-            _ => writeln!(out, "Unknown action: {}", action)?,
-        }
+        format!("{unit_name}.service")
     }
-    Ok(0)
+}
+
+/// `start`, `stop`, `restart`, `reload`, `enable`, `disable`, `mask`, `unmask`.
+///
+/// Every one of these printed a sentence describing work it had not done and
+/// exited 0. `enable` was the worst: it named an exact path --
+/// "Created symlink /etc/slateos/system/multi-user.target.wants/sshd.service
+/// -> /usr/lib/slateos/system/sshd.service." -- so an administrator had a
+/// specific file to believe in, and the belief outlived the command. Nothing
+/// was ever created; the function printed and returned `Ok(0)`.
+///
+/// The query half of this program was already honest -- `is-active` prints
+/// `unknown` and exits 1, with a comment recording that it used to exit 0 for
+/// four hard-coded names. This is the other half.
+fn cmd_unit_action(
+    _out: &mut dyn Write,
+    action: &str,
+    unit_name: &str,
+    _flags: &SystemctlFlags,
+) -> io::Result<i32> {
+    no_unit_interface(&format!("{action} {}", with_unit_suffix(unit_name)));
+    Ok(1)
 }
 
 fn cmd_is_active(out: &mut dyn Write, unit_name: &str, _flags: &SystemctlFlags) -> io::Result<i32> {
@@ -905,11 +882,11 @@ fn cmd_is_failed(out: &mut dyn Write, unit_name: &str, _flags: &SystemctlFlags) 
     Ok(1)
 }
 
-fn cmd_daemon_reload(out: &mut dyn Write, flags: &SystemctlFlags) -> io::Result<i32> {
-    if !flags.quiet {
-        writeln!(out, "Reloading daemon configuration...")?;
-    }
-    Ok(0)
+fn cmd_daemon_reload(_out: &mut dyn Write, _flags: &SystemctlFlags) -> io::Result<i32> {
+    // Printed "Reloading daemon configuration..." and exited 0 without a
+    // service manager to ask.
+    no_unit_interface("reload the service manager's configuration");
+    Ok(1)
 }
 
 fn cmd_cat_unit(_out: &mut dyn Write, unit_name: &str) -> io::Result<i32> {
@@ -917,56 +894,49 @@ fn cmd_cat_unit(_out: &mut dyn Write, unit_name: &str) -> io::Result<i32> {
     Ok(1)
 }
 
-fn cmd_edit_unit(out: &mut dyn Write, unit_name: &str) -> io::Result<i32> {
-    writeln!(
-        out,
-        "Editing /etc/slateos/system/{}.d/override.conf...",
-        unit_name
-    )?;
-    writeln!(out, "(editor not available in this environment)")?;
-    Ok(0)
+fn cmd_edit_unit(_out: &mut dyn Write, unit_name: &str) -> io::Result<i32> {
+    // Printed "Editing /etc/slateos/system/<unit>.d/override.conf..." then
+    // "(editor not available in this environment)" and exited 0. The second
+    // line is honest and the first names a file it did not open; exiting 0
+    // told any caller the edit had happened.
+    no_unit_interface(&format!("edit {unit_name}"));
+    Ok(1)
 }
 
-fn cmd_power(out: &mut dyn Write, action: &str, flags: &SystemctlFlags) -> io::Result<i32> {
-    if !flags.quiet {
-        match action {
-            "poweroff" => writeln!(out, "System is powering off...")?,
-            "reboot" => writeln!(out, "System is rebooting...")?,
-            "halt" => writeln!(out, "System is halting...")?,
-            "suspend" => writeln!(out, "System is suspending...")?,
-            "hibernate" => writeln!(out, "System is hibernating...")?,
-            _ => writeln!(out, "Unknown power action: {}", action)?,
-        }
-    }
-    Ok(0)
+/// `poweroff`, `reboot`, `halt`, `suspend`, `hibernate`.
+///
+/// These printed "System is powering off..." and exited 0 with the machine
+/// still running. That is the most expensive shape in this class: an
+/// announced *event*, which a caller acts on. A shutdown script that runs
+/// `systemctl poweroff` and then stops waiting has been told the machine is
+/// going down.
+///
+/// `userspace/powerctl` is the program that would do this, and it reports
+/// `-ENOSYS` because the kernel exposes no interface for it. Saying so is
+/// the whole of what this can honestly do.
+fn cmd_power(_out: &mut dyn Write, action: &str, _flags: &SystemctlFlags) -> io::Result<i32> {
+    eprintln!(
+        "systemctl: cannot {action}: this system exposes no power interface;          `powerctl` reports ENOSYS for the same reason"
+    );
+    Ok(1)
 }
 
-fn cmd_isolate(out: &mut dyn Write, target: &str, flags: &SystemctlFlags) -> io::Result<i32> {
-    if !flags.quiet {
-        writeln!(out, "Isolating {}...", target)?;
-        writeln!(out, "Stopping all units not required by {}.", target)?;
-    }
-    Ok(0)
+fn cmd_isolate(_out: &mut dyn Write, target: &str, _flags: &SystemctlFlags) -> io::Result<i32> {
+    // Printed "Isolating X..." and "Stopping all units not required by X." --
+    // the second sentence asserting that units had been stopped -- then
+    // exited 0 having enumerated nothing and stopped nothing.
+    no_unit_interface(&format!("isolate {target}"));
+    Ok(1)
 }
 
-fn cmd_list_timers(out: &mut dyn Write, flags: &SystemctlFlags) -> io::Result<i32> {
-    if !flags.no_legend {
-        writeln!(
-            out,
-            "{:<24} {:<24} {:<24} {:<24} UNIT",
-            "NEXT", "LEFT", "LAST", "PASSED"
-        )?;
-    }
-    writeln!(
-        out,
-        "{:<24} {:<24} {:<24} {:<24} logwatch.timer",
-        "Mon 2026-01-02 00:00:00", "23h left", "Mon 2026-01-01 00:00:00", "1h ago"
-    )?;
-    if !flags.no_legend {
-        writeln!(out)?;
-        writeln!(out, "1 timers listed.")?;
-    }
-    Ok(0)
+fn cmd_list_timers(_out: &mut dyn Write, _flags: &SystemctlFlags) -> io::Result<i32> {
+    // Printed one invented row -- `logwatch.timer`, next "Mon 2026-01-02
+    // 00:00:00", "23h left", last "Mon 2026-01-01 00:00:00", "1h ago" --
+    // followed by "1 timers listed.", on a system with no timer units and no
+    // way to enumerate them. Specific dates on a named unit are what make an
+    // invented reading convincing.
+    no_unit_interface("list timers");
+    Ok(1)
 }
 
 fn cmd_list_sockets(_out: &mut dyn Write, _flags: &SystemctlFlags) -> io::Result<i32> {
@@ -3145,28 +3115,42 @@ mod tests {
         let (out, code) = capture(|buf| {
             cmd_unit_action(buf, "start", "sshd.service", &SystemctlFlags::default())
         });
-        assert_eq!(code, 0);
-        assert!(out.contains("Starting sshd.service"));
+        // Refuses, and prints nothing on stdout. Empty stdout is the
+        // assertion that matters: the fabrication was a stdout line, and a
+        // caller parsing stdout must come away with no claim at all.
+        assert_eq!(code, 1);
+        assert!(out.is_empty(), "printed on stdout: {out:?}");
     }
 
     #[test]
     fn test_stop_unit() {
         let (out, code) =
             capture(|buf| cmd_unit_action(buf, "stop", "sshd.service", &SystemctlFlags::default()));
-        assert_eq!(code, 0);
-        assert!(out.contains("Stopping sshd.service"));
+        // Refuses, and prints nothing on stdout. Empty stdout is the
+        // assertion that matters: the fabrication was a stdout line, and a
+        // caller parsing stdout must come away with no claim at all.
+        assert_eq!(code, 1);
+        assert!(out.is_empty(), "printed on stdout: {out:?}");
     }
 
     #[test]
     fn test_enable_with_now() {
-        let flags = SystemctlFlags {
-            now: true,
-            ..Default::default()
-        };
-        let (out, code) = capture(|buf| cmd_unit_action(buf, "enable", "sshd.service", &flags));
-        assert_eq!(code, 0);
-        assert!(out.contains("Created symlink"));
-        assert!(out.contains("Starting"));
+        let (out, code) = capture(|buf| {
+            cmd_unit_action(
+                buf,
+                "enable",
+                "sshd.service",
+                &SystemctlFlags {
+                    now: true,
+                    ..Default::default()
+                },
+            )
+        });
+        // Refuses, and prints nothing on stdout. Empty stdout is the
+        // assertion that matters: the fabrication was a stdout line, and a
+        // caller parsing stdout must come away with no claim at all.
+        assert_eq!(code, 1);
+        assert!(out.is_empty(), "printed on stdout: {out:?}");
     }
 
     #[test]
@@ -3174,34 +3158,44 @@ mod tests {
         let (out, code) = capture(|buf| {
             cmd_unit_action(buf, "disable", "sshd.service", &SystemctlFlags::default())
         });
-        assert_eq!(code, 0);
-        assert!(out.contains("Removed"));
+        // Refuses, and prints nothing on stdout. Empty stdout is the
+        // assertion that matters: the fabrication was a stdout line, and a
+        // caller parsing stdout must come away with no claim at all.
+        assert_eq!(code, 1);
+        assert!(out.is_empty(), "printed on stdout: {out:?}");
     }
 
     #[test]
     fn test_mask_unit() {
         let (out, code) =
             capture(|buf| cmd_unit_action(buf, "mask", "sshd.service", &SystemctlFlags::default()));
-        assert_eq!(code, 0);
-        assert!(out.contains("/dev/null"));
+        // Refuses, and prints nothing on stdout. Empty stdout is the
+        // assertion that matters: the fabrication was a stdout line, and a
+        // caller parsing stdout must come away with no claim at all.
+        assert_eq!(code, 1);
+        assert!(out.is_empty(), "printed on stdout: {out:?}");
     }
 
     #[test]
     fn test_auto_append_service() {
-        let (out, code) =
-            capture(|buf| cmd_unit_action(buf, "start", "sshd", &SystemctlFlags::default()));
-        assert_eq!(code, 0);
-        assert!(out.contains("sshd.service"));
+        // `sshd` means `sshd.service`. Asserted on the rule directly now that
+        // the line that used to reveal it is gone.
+        assert_eq!(with_unit_suffix("sshd"), "sshd.service");
+        assert_eq!(with_unit_suffix("sshd.service"), "sshd.service");
+        assert_eq!(with_unit_suffix("foo.socket"), "foo.socket");
     }
 
     #[test]
     fn test_quiet_suppresses_output() {
+        // --quiet must not turn a refusal into a silent success. It used to
+        // suppress the whole fabricated line and still exit 0, which is the
+        // quietest possible way to report work that did not happen.
         let flags = SystemctlFlags {
             quiet: true,
             ..Default::default()
         };
         let (out, code) = capture(|buf| cmd_unit_action(buf, "start", "sshd.service", &flags));
-        assert_eq!(code, 0);
+        assert_eq!(code, 1, "--quiet must not make a refusal look like success");
         assert!(out.is_empty());
     }
 
@@ -3210,8 +3204,11 @@ mod tests {
     #[test]
     fn test_daemon_reload() {
         let (out, code) = capture(|buf| cmd_daemon_reload(buf, &SystemctlFlags::default()));
-        assert_eq!(code, 0);
-        assert!(out.contains("Reloading"));
+        // Refuses, and prints nothing on stdout. Empty stdout is the
+        // assertion that matters: the fabrication was a stdout line, and a
+        // caller parsing stdout must come away with no claim at all.
+        assert_eq!(code, 1);
+        assert!(out.is_empty(), "printed on stdout: {out:?}");
     }
 
     // --- cat unit ---
@@ -3238,15 +3235,21 @@ mod tests {
     #[test]
     fn test_poweroff() {
         let (out, code) = capture(|buf| cmd_power(buf, "poweroff", &SystemctlFlags::default()));
-        assert_eq!(code, 0);
-        assert!(out.contains("powering off"));
+        // Refuses, and prints nothing on stdout. Empty stdout is the
+        // assertion that matters: the fabrication was a stdout line, and a
+        // caller parsing stdout must come away with no claim at all.
+        assert_eq!(code, 1);
+        assert!(out.is_empty(), "printed on stdout: {out:?}");
     }
 
     #[test]
     fn test_reboot() {
         let (out, code) = capture(|buf| cmd_power(buf, "reboot", &SystemctlFlags::default()));
-        assert_eq!(code, 0);
-        assert!(out.contains("rebooting"));
+        // Refuses, and prints nothing on stdout. Empty stdout is the
+        // assertion that matters: the fabrication was a stdout line, and a
+        // caller parsing stdout must come away with no claim at all.
+        assert_eq!(code, 1);
+        assert!(out.is_empty(), "printed on stdout: {out:?}");
     }
 
     // --- isolate ---
@@ -3255,8 +3258,11 @@ mod tests {
     fn test_isolate() {
         let (out, code) =
             capture(|buf| cmd_isolate(buf, "rescue.target", &SystemctlFlags::default()));
-        assert_eq!(code, 0);
-        assert!(out.contains("Isolating rescue.target"));
+        // Refuses, and prints nothing on stdout. Empty stdout is the
+        // assertion that matters: the fabrication was a stdout line, and a
+        // caller parsing stdout must come away with no claim at all.
+        assert_eq!(code, 1);
+        assert!(out.is_empty(), "printed on stdout: {out:?}");
     }
 
     // --- list-timers ---
@@ -3264,9 +3270,11 @@ mod tests {
     #[test]
     fn test_list_timers() {
         let (out, code) = capture(|buf| cmd_list_timers(buf, &SystemctlFlags::default()));
-        assert_eq!(code, 0);
-        assert!(out.contains("logwatch.timer"));
-        assert!(out.contains("NEXT"));
+        // Refuses, and prints nothing on stdout. Empty stdout is the
+        // assertion that matters: the fabrication was a stdout line, and a
+        // caller parsing stdout must come away with no claim at all.
+        assert_eq!(code, 1);
+        assert!(out.is_empty(), "printed on stdout: {out:?}");
     }
 
     // --- list-sockets ---
@@ -3693,9 +3701,11 @@ mod tests {
     #[test]
     fn test_edit_unit() {
         let (out, code) = capture(|buf| cmd_edit_unit(buf, "sshd.service"));
-        assert_eq!(code, 0);
-        assert!(out.contains("Editing"));
-        assert!(out.contains("override.conf"));
+        // Refuses, and prints nothing on stdout. Empty stdout is the
+        // assertion that matters: the fabrication was a stdout line, and a
+        // caller parsing stdout must come away with no claim at all.
+        assert_eq!(code, 1);
+        assert!(out.is_empty(), "printed on stdout: {out:?}");
     }
 
     // --- Specifier N (unescaped name) ---

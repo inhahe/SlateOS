@@ -3626,7 +3626,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] iostat: CPU and I/O statistics (extended stats, delta mode, per-device, human-readable)
   - [x] vmstat: virtual memory stats (procs, memory, swap, I/O, CPU, interval reporting)
   - [x] traceroute: network path tracing (ICMP TTL increment, reverse DNS, per-hop RTT)
-  - [ ] logrotate: log rotation (config parsing, daily/weekly/monthly, compress, state tracking)
+  - [x] logrotate: log rotation — config parsing (stanzas with glob patterns, globals inherited per stanza and overridable without leaking back), daily/weekly/monthly/size schedules, `rotate N` retention, real gzip via the shared `deflate` crate, `missingok`, `notifempty`, `--dry-run`, `--force`, `--state`. Frequency is decided against the STATE FILE, not the log's mtime. An unimplemented directive (`olddir`, `postrotate`, …) is an ERROR with its line number rather than a silent skip — a config file states what should happen to a machine's logs, and ignoring part of it puts files somewhere nobody asked for and reports success. 28 tests.
   - [x] dd: data copy/convert (block sizes, conversions, progress display, skip/seek)
   - [x] who/w: logged-in users (utmp parsing, idle tracking, w mode with uptime header)
   - [x] env/printenv: environment variable display/modify with command execution

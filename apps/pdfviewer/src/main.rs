@@ -36,7 +36,7 @@
 
 use std::process::ExitCode;
 
-use appearance::Palette;
+use appearance::{Edge, Palette, Surface};
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
@@ -1723,14 +1723,8 @@ impl PdfViewerApp {
         h: f32,
         label: &str,
     ) {
-        frame.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: w,
-            height: h,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        self.palette
+            .push_surface(frame, x, y, w, h, 4.0, Surface::Card);
         frame.push(RenderCommand::StrokeRect {
             x,
             y,
@@ -1773,14 +1767,8 @@ impl PdfViewerApp {
         target: Target,
     ) {
         frame.hit(target, Rect::new(x, y, w, h));
-        frame.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: w,
-            height: h,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        self.palette
+            .push_surface(frame, x, y, w, h, 4.0, Surface::Card);
         frame.push(RenderCommand::StrokeRect {
             x,
             y,
@@ -1811,14 +1799,15 @@ impl PdfViewerApp {
         let y = strip.y;
 
         // Tab bar background
-        frame.push(RenderCommand::FillRect {
-            x: 0.0,
+        self.palette.push_surface(
+            frame,
+            0.0,
             y,
-            width: strip.w,
-            height: strip.h,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::ZERO,
-        });
+            strip.w,
+            strip.h,
+            0.0,
+            Surface::Strip(Edge::Bottom),
+        );
 
         frame.push(RenderCommand::Line {
             x1: 0.0,
@@ -1940,14 +1929,8 @@ impl PdfViewerApp {
 
         // New tab button (+)
         frame.hit(Target::NewTab, Rect::new(tab_x, y + 6.0, 28.0, 24.0));
-        frame.push(RenderCommand::FillRect {
-            x: tab_x,
-            y: y + 6.0,
-            width: 28.0,
-            height: 24.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        self.palette
+            .push_surface(frame, tab_x, y + 6.0, 28.0, 24.0, 4.0, Surface::Card);
         frame.push(RenderCommand::Text {
             x: tab_x + 8.0,
             y: y + 10.0,
@@ -2369,14 +2352,8 @@ impl PdfViewerApp {
         frame.hit(Target::Document, area);
 
         // Dark background
-        frame.push(RenderCommand::FillRect {
-            x: area_x,
-            y: area_y,
-            width: area_w,
-            height: area_h,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(frame, area_x, area_y, area_w, area_h, 0.0, Surface::Card);
 
         let Some(doc) = &tab.document else {
             // No document — show welcome message
@@ -2940,14 +2917,8 @@ impl PdfViewerApp {
 
         frame.clip(band);
 
-        frame.push(RenderCommand::FillRect {
-            x: 0.0,
-            y,
-            width: band.w,
-            height: band.h,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(frame, 0.0, y, band.w, band.h, 0.0, Surface::Card);
 
         // Top border
         frame.push(RenderCommand::Line {

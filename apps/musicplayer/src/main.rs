@@ -15,6 +15,7 @@
 
 #[allow(unused_imports)]
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -1811,14 +1812,15 @@ fn render_playlist_view(state: &PlayerState, tree: &mut RenderTree, content_heig
         });
 
         // Format badge
-        tree.push(RenderCommand::FillRect {
-            x: state.width - 120.0,
-            y: row_y + 8.0,
-            width: 36.0,
-            height: 18.0,
-            color: state.palette.surface1,
-            corner_radii: CornerRadii::all(3.0),
-        });
+        state.palette.push_surface(
+            tree,
+            state.width - 120.0,
+            row_y + 8.0,
+            36.0,
+            18.0,
+            3.0,
+            Surface::Card,
+        );
         tree.push(RenderCommand::Text {
             x: state.width - 116.0,
             y: text_y,
@@ -1876,14 +1878,15 @@ fn render_controls(state: &PlayerState, tree: &mut RenderTree) {
     };
 
     // Progress track (background)
-    tree.push(RenderCommand::FillRect {
-        x: progress_x,
-        y: progress_y,
-        width: progress_width,
-        height: PROGRESS_BAR_HEIGHT,
-        color: state.palette.surface1,
-        corner_radii: CornerRadii::all(3.0),
-    });
+    state.palette.push_surface(
+        tree,
+        progress_x,
+        progress_y,
+        progress_width,
+        PROGRESS_BAR_HEIGHT,
+        3.0,
+        Surface::ControlTrack,
+    );
 
     // Progress fill
     let fill_width = progress_width * progress_fraction;

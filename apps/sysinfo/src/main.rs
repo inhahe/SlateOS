@@ -18,6 +18,7 @@ pub mod hwquery;
 
 #[allow(unused_imports)]
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};
@@ -2388,14 +2389,15 @@ impl SysInfoState {
         // Export button.
         let export_x = search_x + search_w + 16.0;
         let btn_w = 70.0;
-        tree.push(RenderCommand::FillRect {
-            x: export_x,
-            y: search_y,
-            width: btn_w,
-            height: search_h,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(3.0),
-        });
+        self.palette.push_surface(
+            tree,
+            export_x,
+            search_y,
+            btn_w,
+            search_h,
+            3.0,
+            Surface::Card,
+        );
         tree.push(RenderCommand::Text {
             x: export_x + 10.0,
             y: search_y + 4.0,
@@ -2409,14 +2411,8 @@ impl SysInfoState {
 
         // Copy button.
         let copy_x = export_x + btn_w + 8.0;
-        tree.push(RenderCommand::FillRect {
-            x: copy_x,
-            y: search_y,
-            width: btn_w,
-            height: search_h,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(3.0),
-        });
+        self.palette
+            .push_surface(tree, copy_x, search_y, btn_w, search_h, 3.0, Surface::Card);
         tree.push(RenderCommand::Text {
             x: copy_x + 14.0,
             y: search_y + 4.0,

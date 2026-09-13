@@ -21,7 +21,7 @@
 //! development.
 
 #[allow(unused_imports)]
-use appearance::Palette;
+use appearance::{Edge, Palette, Surface};
 use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};
@@ -2005,14 +2005,15 @@ fn render_properties_panel(state: &DeviceManagerState, cmds: &mut Vec<RenderComm
     let panel_height = state.panel_bottom() - top;
 
     // Panel background
-    cmds.push(RenderCommand::FillRect {
-        x: panel_x,
-        y: top,
-        width: panel_width,
-        height: panel_height,
-        color: state.palette.crust,
-        corner_radii: CornerRadii::ZERO,
-    });
+    state.palette.push_surface(
+        cmds,
+        panel_x,
+        top,
+        panel_width,
+        panel_height,
+        0.0,
+        Surface::Card,
+    );
 
     if state.shows_tab_bar() {
         render_tab_bar(state, cmds, panel_x, top, panel_width);
@@ -2126,14 +2127,15 @@ fn render_tab_bar(
     y: f32,
     width: f32,
 ) {
-    cmds.push(RenderCommand::FillRect {
+    state.palette.push_surface(
+        cmds,
         x,
         y,
         width,
-        height: TAB_BAR_HEIGHT,
-        color: state.palette.mantle,
-        corner_radii: CornerRadii::ZERO,
-    });
+        TAB_BAR_HEIGHT,
+        0.0,
+        Surface::Strip(Edge::Bottom),
+    );
 
     let tabs = PropertiesTab::all();
     let tab_width = width / tabs.len() as f32;
@@ -2974,14 +2976,15 @@ fn render_resource_view(
 fn render_status_bar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) {
     let y = state.height - STATUS_BAR_HEIGHT;
 
-    cmds.push(RenderCommand::FillRect {
-        x: 0.0,
+    state.palette.push_surface(
+        cmds,
+        0.0,
         y,
-        width: state.width,
-        height: STATUS_BAR_HEIGHT,
-        color: state.palette.mantle,
-        corner_radii: CornerRadii::ZERO,
-    });
+        state.width,
+        STATUS_BAR_HEIGHT,
+        0.0,
+        Surface::Strip(Edge::Top),
+    );
 
     cmds.push(RenderCommand::Line {
         x1: 0.0,

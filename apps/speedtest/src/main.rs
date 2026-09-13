@@ -21,6 +21,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::fold;
@@ -1742,14 +1743,8 @@ impl SpeedTestUI {
     fn draw_server_selector(&self, frame: &mut Frame, l: &Layout) {
         let r = l.server;
 
-        frame.push(RenderCommand::FillRect {
-            x: r.x,
-            y: r.y,
-            width: r.w,
-            height: r.h,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        self.palette
+            .push_surface(frame, r.x, r.y, r.w, r.h, 4.0, Surface::Card);
         frame.hit(Target::ServerButton, r);
 
         let server_name = self
@@ -1792,14 +1787,8 @@ impl SpeedTestUI {
         let base_y = l.server.bottom() + 10.0;
         let total_h = self.servers.len() as f32 * item_h;
 
-        frame.push(RenderCommand::FillRect {
-            x,
-            y: base_y,
-            width: w,
-            height: total_h,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        self.palette
+            .push_surface(frame, x, base_y, w, total_h, 4.0, Surface::Card);
         frame.push(RenderCommand::StrokeRect {
             x,
             y: base_y,
@@ -1813,14 +1802,15 @@ impl SpeedTestUI {
         for (i, server) in self.servers.iter().enumerate() {
             let iy = base_y + i as f32 * item_h;
             if i == self.selected_server {
-                frame.push(RenderCommand::FillRect {
-                    x: x + 2.0,
-                    y: iy + 1.0,
-                    width: w - 4.0,
-                    height: item_h - 2.0,
-                    color: self.palette.surface1,
-                    corner_radii: CornerRadii::all(2.0),
-                });
+                self.palette.push_surface(
+                    frame,
+                    x + 2.0,
+                    iy + 1.0,
+                    w - 4.0,
+                    item_h - 2.0,
+                    2.0,
+                    Surface::Selected,
+                );
             }
             frame.push(RenderCommand::Text {
                 x: x + 10.0,
@@ -2386,14 +2376,15 @@ impl SpeedTestUI {
 
                 // Hover highlight.
                 if self.history_hover == Some(idx) {
-                    frame.push(RenderCommand::FillRect {
-                        x: panel.x + 4.0,
-                        y: ry,
-                        width: (panel.w - 8.0).max(0.0),
-                        height: HISTORY_ROW_HEIGHT,
-                        color: self.palette.surface0,
-                        corner_radii: CornerRadii::all(3.0),
-                    });
+                    self.palette.push_surface(
+                        frame,
+                        panel.x + 4.0,
+                        ry,
+                        (panel.w - 8.0).max(0.0),
+                        HISTORY_ROW_HEIGHT,
+                        3.0,
+                        Surface::Selected,
+                    );
                 }
 
                 frame.push(RenderCommand::Text {
@@ -2451,18 +2442,19 @@ impl SpeedTestUI {
     fn draw_export_button(&self, frame: &mut Frame, l: &Layout) {
         let r = l.export;
 
-        frame.push(RenderCommand::FillRect {
-            x: r.x,
-            y: r.y,
-            width: r.w,
-            height: r.h,
-            color: if self.export_button_hover {
-                self.palette.surface1
+        self.palette.push_surface(
+            frame,
+            r.x,
+            r.y,
+            r.w,
+            r.h,
+            4.0,
+            if self.export_button_hover {
+                Surface::Selected
             } else {
-                self.palette.surface0
+                Surface::Card
             },
-            corner_radii: CornerRadii::all(4.0),
-        });
+        );
         let label_w = text::measure("Export", 11.0, FontWeightHint::Regular);
         frame.push(RenderCommand::Text {
             x: r.x + (r.w - label_w).max(0.0) / 2.0,
@@ -3605,13 +3597,15 @@ mod tests {
 
     /// Where the renderer painted the hover highlight, if it painted one.
     fn painted_highlight(ui: &SpeedTestUI) -> Option<f32> {
-        ui.render().commands.iter().find_map(|cmd| match cmd {
-            RenderCommand::FillRect { x, y, height, .. }
-                if *x == layout().history.x + 4.0 && *height == HISTORY_ROW_HEIGHT =>
-            {
-                Some(*y)
-            }
-            _ => None,
+        // Through `painted_rect`, not a `FillRect` arm. The highlight is a
+        // `Surface::Selected`, which under the bordered theme is a stroke and
+        // not a fill -- and a `FillRect`-only finder does not fail when that
+        // happens, it returns `None` and every assertion over it goes quiet.
+        // This is the same defect `painted_rect` was written for.
+        ui.render().commands.iter().find_map(|cmd| {
+            appearance::painted_rect(cmd).and_then(|(x, y, _w, h, _c)| {
+                (x == layout().history.x + 4.0 && h == HISTORY_ROW_HEIGHT).then_some(y)
+            })
         })
     }
 

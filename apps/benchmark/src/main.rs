@@ -21,7 +21,7 @@
 use std::collections::VecDeque;
 use std::process::ExitCode;
 
-use appearance::Palette;
+use appearance::{Edge, Palette, Surface};
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::fold;
@@ -1875,14 +1875,15 @@ impl BenchmarkApp {
 
     fn render_title_bar(&self, frame: &mut Frame, layout: &Layout) {
         let bar = layout.title;
-        frame.push(RenderCommand::FillRect {
-            x: bar.x,
-            y: bar.y,
-            width: bar.w,
-            height: bar.h,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            frame,
+            bar.x,
+            bar.y,
+            bar.w,
+            bar.h,
+            0.0,
+            Surface::Strip(Edge::Bottom),
+        );
         frame.push(RenderCommand::Text {
             x: 16.0,
             y: bar.y + 12.0,
@@ -1926,14 +1927,15 @@ impl BenchmarkApp {
             let is_active = *tab == self.active_tab;
 
             if is_active {
-                frame.push(RenderCommand::FillRect {
-                    x: slot.x,
-                    y: slot.y,
-                    width: slot.w,
-                    height: slot.h,
-                    color: self.palette.surface0,
-                    corner_radii: CornerRadii::ZERO,
-                });
+                self.palette.push_surface(
+                    frame,
+                    slot.x,
+                    slot.y,
+                    slot.w,
+                    slot.h,
+                    0.0,
+                    Surface::Selected,
+                );
                 // Active indicator line.
                 frame.push(RenderCommand::FillRect {
                     x: slot.x,
@@ -2063,14 +2065,15 @@ impl BenchmarkApp {
                 let cy = y + row as f32 * (card_height + 10.0);
 
                 // Card background.
-                frame.push(RenderCommand::FillRect {
-                    x: cx,
-                    y: cy,
-                    width: card_width,
-                    height: card_height,
-                    color: self.palette.surface0,
-                    corner_radii: CornerRadii::all(6.0),
-                });
+                self.palette.push_surface(
+                    frame,
+                    cx,
+                    cy,
+                    card_width,
+                    card_height,
+                    6.0,
+                    Surface::Card,
+                );
 
                 // Category name.
                 frame.push(RenderCommand::Text {
@@ -2308,14 +2311,15 @@ impl BenchmarkApp {
             y += 30.0;
 
             // Column headers.
-            frame.push(RenderCommand::FillRect {
+            self.palette.push_surface(
+                frame,
                 x,
                 y,
-                width: content.w - 2.0 * CONTENT_PADDING,
-                height: ROW_HEIGHT,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::ZERO,
-            });
+                content.w - 2.0 * CONTENT_PADDING,
+                ROW_HEIGHT,
+                0.0,
+                Surface::Card,
+            );
             frame.push(RenderCommand::Text {
                 x: x + 8.0,
                 y: y + 4.0,
@@ -2530,14 +2534,8 @@ impl BenchmarkApp {
 
         // Column headers.
         let row_width = content.w - 2.0 * CONTENT_PADDING;
-        frame.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: row_width,
-            height: ROW_HEIGHT,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette
+            .push_surface(frame, x, y, row_width, ROW_HEIGHT, 0.0, Surface::Card);
         let headers = ["#", "Overall", "CPU", "Memory", "Disk", "Graphics", "Time"];
         let col_positions = [8.0, 40.0, 130.0, 220.0, 320.0, 410.0, 520.0];
         for (i, header) in headers.iter().enumerate() {
@@ -2724,14 +2722,15 @@ impl BenchmarkApp {
     fn render_status_bar(&self, frame: &mut Frame, layout: &Layout) {
         let bar = layout.status;
         let y = bar.y;
-        frame.push(RenderCommand::FillRect {
-            x: bar.x,
+        self.palette.push_surface(
+            frame,
+            bar.x,
             y,
-            width: bar.w,
-            height: bar.h,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+            bar.w,
+            bar.h,
+            0.0,
+            Surface::Strip(Edge::Top),
+        );
 
         // Status text.
         let status = if self.progress.phase.is_running() {

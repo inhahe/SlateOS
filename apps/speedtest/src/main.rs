@@ -2130,16 +2130,18 @@ impl SpeedTestUI {
         // at x=240 in a 900 px window and left the whole row overlapping the
         // graph panel below it.
         let col_w = (r.w / 3.0).max(0.0);
+        // The three results are the whole of what this screen reports, so
+        // each heading's figure is inked.
         let columns = [
             (
                 "Download",
                 format!("{:.1} Mbps", self.download_tester.avg_mbps()),
-                self.palette.blue,
+                self.palette.ink(self.palette.blue),
             ),
             (
                 "Upload",
                 format!("{:.1} Mbps", self.upload_tester.avg_mbps()),
-                self.palette.mauve,
+                self.palette.ink(self.palette.mauve),
             ),
             (
                 "Latency / Jitter",
@@ -2148,7 +2150,7 @@ impl SpeedTestUI {
                     self.latency_tester.avg_rtt().unwrap_or(0.0),
                     self.latency_tester.jitter().unwrap_or(0.0),
                 ),
-                self.palette.teal,
+                self.palette.ink(self.palette.teal),
             ),
         ];
 

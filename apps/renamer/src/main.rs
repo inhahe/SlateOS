@@ -1541,12 +1541,13 @@ impl RenamerApp {
         });
 
         // Toolbar buttons. Pair label with color so we never index out of bounds.
+        // Inked: these are button *labels*, so each takes the 4.5:1 floor.
         let buttons = [
-            ("Add Files", self.palette.blue),
-            ("Rename", self.palette.green),
-            ("Undo", self.palette.peach),
-            ("Redo", self.palette.peach),
-            ("Clear", self.palette.red),
+            ("Add Files", self.palette.ink(self.palette.blue)),
+            ("Rename", self.palette.ink(self.palette.green)),
+            ("Undo", self.palette.ink(self.palette.peach)),
+            ("Redo", self.palette.ink(self.palette.peach)),
+            ("Clear", self.palette.ink(self.palette.red)),
         ];
         let mut bx = 220.0;
         for (label, color) in buttons {

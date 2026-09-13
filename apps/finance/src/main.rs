@@ -1156,15 +1156,28 @@ impl FinanceApp {
         let savings = self.month_savings();
         let hx = self.width - 460.0;
         for (label, amount, color, offset) in [
-            ("Income", income, self.palette.green, 0.0_f32),
-            ("Expenses", expenses, self.palette.red, 150.0),
+            // The three figures are the whole of what this header says, so
+            // each is inked. Income green, expenses red, savings teal or red
+            // by sign -- all dual-use roles, all text.
+            (
+                "Income",
+                income,
+                self.palette.ink(self.palette.green),
+                0.0_f32,
+            ),
+            (
+                "Expenses",
+                expenses,
+                self.palette.ink(self.palette.red),
+                150.0,
+            ),
             (
                 "Savings",
                 savings,
                 if savings >= 0 {
-                    self.palette.teal
+                    self.palette.ink(self.palette.teal)
                 } else {
-                    self.palette.red
+                    self.palette.ink(self.palette.red)
                 },
                 300.0,
             ),

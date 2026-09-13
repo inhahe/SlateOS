@@ -132409,6 +132409,47 @@ only `let color = ..` missed every one of them:
 All are text whose whole purpose is to be read, and `lavender` and `teal` are
 among the palest accents. All inked.
 
+**A third pass, same day, on the bucket the script had lumped as "no local
+binding": six more.** Two refinements made them visible, and both were
+*subtractions* from the report rather than additions:
+
+* **A `RenderCommand::Text { .. }` that is a pattern is not a draw site.** The
+  compositor's `execute_command`, the wire encoder and `palette_check` all
+  destructure one, and their `color,` is a binding being introduced rather
+  than a colour being chosen. Six reports, none of which drew anything.
+* **A function that takes `color: Color` is not an unresolved colour.** It is
+  the correct shape for a toolkit primitive -- `RenderTree::text` must not ink,
+  because it does not know the ground -- and it accounts for **65** of the
+  remainder. They are resolved one frame up, at call sites the script does
+  convert.
+
+With those two out of the way the residue was eight, small enough to read, and
+six were real:
+
+| where | what |
+|---|---|
+| `apps/clipmanager` | the Use/Delete template buttons, and a seven-label action row |
+| `apps/finance` | Income / Expenses / Savings — the three figures a finance header exists to show |
+| `apps/renamer` | five button labels |
+| `apps/speedtest` | Download / Upload / Latency — the whole of what that screen reports |
+| `apps/startupmanager` | `status_color`'s enabled arm |
+
+All were **loop-destructured tuples** -- `for (label, color, target) in [..]`
+-- which is how a set of labelled, coloured things gets drawn in one pass, and
+which no binding pattern reaches.
+
+`startupmanager`'s is the neatest statement of the whole split: its
+`status_color` returns `pal.green` when enabled and `pal.overlay0` when not.
+The first is inked and the second must not be -- `overlay0` is the disabled
+ink, WCAG 1.4.3 exempts an inactive control, and flooring it would make a
+disabled entry look enabled. One method, two roles, two answers.
+
+**The report still says eight**, because the shape is unchanged even where the
+value is now right: the script reports what it cannot classify, not what is
+wrong. Three of the eight were checked and are correct as they stand --
+`apps/slides` (a slide's own element colours, content), `apps/pdfviewer`, and
+`startupmanager`'s two floored cells.
+
 **And one of those broke a test in exactly the way this entry predicted.**
 `power::every_choice_this_module_makes_hands_over_the_role_it_claims` compared
 the badge against `rgb(p.peach)` — the raw field. It compares against

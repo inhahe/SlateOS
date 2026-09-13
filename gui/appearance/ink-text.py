@@ -401,6 +401,14 @@ FN = re.compile(r"^\s{0,8}(?:pub(?:\([\w:]+\))?\s+)?(?:async\s+)?(?:const\s+)?fn
 LET_COLOR = re.compile(r"^\s*let\s+(?:mut\s+)?(?:color\s*(?::[^=]*)?|\([^)]*\bcolor\b[^)]*\))\s*=\s*(.*)$")
 
 
+# A function that takes its ink as an argument. This is the correct shape for
+# a toolkit primitive -- `RenderTree::text(x, y, text, color, size)` must not
+# ink, because it does not know what ground the caller is drawing on -- so a
+# site inside one is not an unresolved colour. It is a colour resolved one
+# frame up, at a call site this script does convert.
+COLOR_PARAM = re.compile(r"\bcolor\s*:\s*&?\s*Color\b")
+
+
 def binding_of(lines, i, fn_start):
     """The value of the nearest `let color = ...` above line `i`.
 
@@ -421,6 +429,26 @@ def binding_of(lines, i, fn_start):
     return None
 
 
+# A `RenderCommand::Text { .. }` that is a *pattern* rather than a value: a
+# match arm or an `if let` destructuring one, as the compositor's
+# `execute_command` and the wire encoder both do. Its `color,` is a binding
+# being introduced, not a colour being chosen, and reporting it as an
+# unclassifiable ink sends the reader to a file that draws nothing.
+#
+# The discriminator is what precedes the brace on its own line. A value is
+# built inside something -- `push(`, `= `, `vec![` -- and a pattern stands at
+# the start of its line as a match arm.
+TEXT_VALUE = re.compile(r"[=(!\[,]\s*RenderCommand::Text\s*\{")
+
+
+def is_text_pattern(lines, i):
+    """Whether the `Text` block enclosing line `i` is a pattern, not a value."""
+    for k in range(i, max(-1, i - 24), -1):
+        if "RenderCommand::Text" in lines[k]:
+            return not TEXT_VALUE.search(lines[k])
+    return False
+
+
 def blind_spots(path):
     """Text sites whose colour this script cannot classify.
 
@@ -439,6 +467,8 @@ def blind_spots(path):
         if GROUNDED.search(value) or ".ink(" in value:
             continue
         if SHORTHAND.match(line):
+            if is_text_pattern(lines, i):
+                continue
             start = 0
             for k in range(i, -1, -1):
                 if FN.match(lines[k]):
@@ -446,7 +476,11 @@ def blind_spots(path):
                     break
             bound = binding_of(lines, i, start)
             if bound is None:
-                out.append((i + 1, "shorthand, no local binding", line.strip()))
+                sig = NL.join(lines[start:start + 12])
+                kind = ("shorthand, inked by the caller"
+                        if COLOR_PARAM.search(sig)
+                        else "shorthand, no local binding")
+                out.append((i + 1, kind, line.strip()))
             elif GROUNDED.search(bound) or ".ink(" in bound:
                 continue
             elif FLOORED.search(bound) and not ROLE.search(bound):

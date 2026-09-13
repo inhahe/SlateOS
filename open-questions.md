@@ -1116,6 +1116,61 @@ appearance, which is what they have today. This question is genuinely safe to
 leave — it is here because forty crates is too many to change on my own guess
 about taste, not because anything is blocked.
 
+## C-Q17 — [C] Five finished features are built into the system but cannot be used. Wire them up, or delete them? — Status: OPEN
+
+**In short:** five applications each contain a complete, tested feature that no
+part of the program can reach — the code is compiled into the system and there
+is no button, menu or keystroke that leads to it. Between them that is 327 KB
+of code and 214 tests, all passing. I can wire them into their applications or
+remove them, and those are very different amounts of work, so I would rather
+ask than guess.
+
+**What they are**
+
+| where | what it does | size |
+|---|---|---|
+| the installer | configures the GRUB bootloader | 48 KB |
+| the image viewer | plays video | 77 KB |
+| the process explorer | click a window to find its process; show what a process is waiting on and detect deadlocks; set CPU affinity and priority; browse a process's memory map and environment | 83 KB |
+| system information | queries hardware details | 73 KB |
+| settings | a remote-settings page | 46 KB |
+
+**Why nobody noticed.** Each has its own tests and they all pass, because a
+test calls the code directly — it does not have to find a way in through the
+interface. This is the pattern `known-issues.md` records as lesson 47, and the
+sharp version of it: the process explorer's *own source* quotes that lesson
+while this module sat beside it.
+
+**The options**
+
+**A. Wire them up.** *What changes:* the installer can set up a bootloader, the
+image viewer plays video, the process explorer gains six tools, and so on.
+For: the code appears finished, and someone wrote and tested all of it. Against:
+it is the largest of the three options, and each one needs interface design —
+a menu item, a panel, a keyboard shortcut — that does not exist yet.
+
+**B. Delete them.** *What changes:* nothing a user can see; the system gets
+327 KB smaller. For: honest — the tree stops claiming to have features it
+cannot offer. Against: throws away working code, including a deadlock detector
+and a bootloader configurator that are not trivial to rewrite.
+
+**C. One at a time, by value.** *What changes:* the installer's bootloader gets
+wired up because an installer that cannot install a bootloader is a real gap;
+the rest are judged individually. For: puts the effort where it matters.
+Against: needs a judgement per module rather than one decision.
+
+**My recommendation: C, starting with the installer.** An installer that cannot
+configure a bootloader is a different severity of problem from a process
+explorer without a window picker, and treating them as one question gets the
+installer either over- or under-served. I would not delete anything until each
+has been looked at — deletion is the only irreversible option here.
+
+**If it is never answered:** nothing breaks and nothing degrades; the system
+keeps carrying code it cannot run. The cost is ongoing rather than sudden —
+every sweep, every conversion and every audit pays attention to these files.
+I spent real effort on one of them tonight before discovering it was
+unreachable.
+
 ## B-Q9 — [B] We wrote our own copy of a shell because we could not build the original. We can now. Keep the copy, or switch to the original? — Status: OPEN
 
 **In short:** the *shell* is the program that runs the commands you type. SlateOS

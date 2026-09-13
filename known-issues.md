@@ -847,7 +847,7 @@ deleting the crate. That is real work rather than a deletion, it should fix the
 newline defect on the way in rather than carry it across, and it wants doing
 deliberately — so it is recorded here with the harness that will judge it.
 
-## TD-B-DIFF-HARNESSES-HAVE-NO-PER-CASE-BOUND-AND-ORPHAN-ACROSS-WSL (lane B, 2026-09-11)
+## TD-B-DIFF-HARNESSES-HAVE-NO-PER-CASE-BOUND-AND-ORPHAN-ACROSS-WSL (lane B, 2026-09-11) -- RESOLVED
 
 **RESOLVED 2026-09-12, and the shape of the fix is the interesting part.**
 Every harness is now bounded, including the ones nobody has written yet, and
@@ -23792,7 +23792,7 @@ file" and light-accent sections of `gui/desktop/src/appearance_settings.rs`;
 `DesktopTheme` and `DesktopShell::{set_appearance, load_appearance}` in
 `gui/desktop/src/main.rs`; `yamldoc/src/lib.rs`.
 
-## TD-THREE-INDEPENDENT-APPEARANCE-MODELS
+## TD-THREE-INDEPENDENT-APPEARANCE-MODELS -- FIXED
 
 **Fixed 2026-08-14** (steps 1 and 2 of the proper fix below; step 3 was
 "leave the toolkit alone", which stands). `gui/appearance` now owns the model,
@@ -25475,7 +25475,7 @@ strictly adjacent glyphs) but is not what HarfBuzz does. No corpus string
 puts a mark inside a legacy-kerned pair, so it is not currently visible in
 the sweep. Changing it is a separate, separately-measurable step.
 
-## TD-FONT-FALLS-BACK-PAST-A-SCRIPT-THE-FACE-REGISTERS
+## TD-FONT-FALLS-BACK-PAST-A-SCRIPT-THE-FACE-REGISTERS -- FIXED
 
 **Fixed.** Script selection and language-system selection are two separate
 steps in OpenType, and only the first one falls back. We ran them as one: a
@@ -25526,7 +25526,7 @@ everything there. Reached only by a run whose script the face registers under
 none of the first three, so it is a narrower case than this one, and
 separately measurable.
 
-## TD-GPOS-ASKS-ONLY-FOR-POSITIONING-SOUNDING-FEATURES
+## TD-GPOS-ASKS-ONLY-FOR-POSITIONING-SOUNDING-FEATURES -- FIXED
 
 **Fixed.** `gpos.rs` asked the face for seven feature tags — `abvm`, `blwm`,
 `curs`, `dist`, `kern`, `mark`, `mkmk` — on the reasoning that those are the
@@ -25568,7 +25568,7 @@ widens from 7 bits to 14 and the four positional bits move up with it;
 corpus exercises it (`agree` and `misplaced` are unchanged at 11826/22), so
 this half is correctness by symmetry rather than a measured fix.
 
-## TD-FONT-SCRIPT-FALLBACK-STOPS-BEFORE-LATIN
+## TD-FONT-SCRIPT-FALLBACK-STOPS-BEFORE-LATIN -- FIXED
 
 **Fixed.** Our script fallback chain was the run's script, its older OpenType
 spelling, `DFLT`, `dflt`. HarfBuzz's has a fifth entry —
@@ -25596,7 +25596,7 @@ checks both halves — the `latn`-registering face answers a Hebrew run, and an
 11826 -> 11828, `misplaced` 22 -> 20.
 
 
-## TD-FONT-BINARY-SEARCH-PROBES-IN-A-DIFFERENT-ORDER-FROM-EVERY-OTHER-ENGINE
+## TD-FONT-BINARY-SEARCH-PROBES-IN-A-DIFFERENT-ORDER-FROM-EVERY-OTHER-ENGINE -- FIXED
 
 **Fixed.** `gui/font/src/otl.rs`'s shared `binary_search` walked a half-open
 interval `[lo, hi)` with `mid = lo + (hi - lo) / 2`. C's `bsearch`, and
@@ -70910,6 +70910,29 @@ It is green. `cargo test --workspace` is not.
    push time is what it already does: run the workspace tests, and read the
    exit status rather than a filtered log -- item 2 above, which is the half
    that actually catches this and costs nothing extra.
+
+**Update 2026-09-13 (lane C) — a fourth trap, in the gate itself.**
+
+`scripts/workspace-test.py` exists precisely to make the three log-reading
+mistakes impossible, and it was missing the one this entry is about. Every
+check in it asked whether something went *wrong*; none asked whether anything
+*happened*. A run producing no `test result` line at all -- a `--target` typo, a
+filter matching nothing, cargo's output going somewhere other than the log --
+reached the end with no failures and a zero exit, printed `targets passed: 0`,
+and then printed `PASS` on the next line. The two disagree and the second is
+the one anybody acts on.
+
+It now exits 2 there, not 1: the tree is not red, the measurement is missing,
+and those deserve different answers. Proved able to fire by making `RESULT_OK`
+match nothing and watching a genuinely green `-p guitk --lib` run come back
+*NO TARGET REPORTED A RESULT* instead of *PASS*.
+
+That is this entry's own defect one level up. A crate whose test binary does not
+compile reports nothing and reads as clean; a *gate* that reports nothing reads
+as clean for the same reason and over a much larger population. The guard is
+eight lines and would have caught both of the afternoon's redirection mistakes
+-- `2>&1 > log` puts cargo's output on the terminal and leaves the log empty,
+which is exactly the zero this now refuses.
 
 **Severity.** Medium, and it is a *meta*-defect: it does not itself break
 anything a user can see, it removes the evidence that something else did. The
@@ -120411,7 +120434,7 @@ longer exists.
 
 ---
 
-## TD-B-THE-UNIX-HALF-OF-COREUTILS-IS-NEITHER-LINTED-NOR-TESTED-BY-DEFAULT (lane B, 2026-09-03)
+## TD-B-THE-UNIX-HALF-OF-COREUTILS-IS-NEITHER-LINTED-NOR-TESTED-BY-DEFAULT (lane B, 2026-09-03) -- RESOLVED
 
 **RESOLVED 2026-09-04.** All four steps landed. The checker exists (step 1),
 pre-push gate 12 runs it (step 2), and its scope is no longer one crate but is
@@ -120584,7 +120607,7 @@ report produced by a check that was not performed.
 
 ---
 
-## TD-B-THE-FOUR-BASH-ORACLES-ARE-PINNED-NOT-WIRED (lane B, 2026-09-03)
+## TD-B-THE-FOUR-BASH-ORACLES-ARE-PINNED-NOT-WIRED (lane B, 2026-09-03) -- RESOLVED
 
 **RESOLVED 2026-09-03.** All four steps of the proper fix below landed, in the
 order it prescribed, and the four `PINNED` entries were deleted in the same

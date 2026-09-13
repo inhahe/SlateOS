@@ -145,6 +145,30 @@ def main(argv: list[str]) -> int:
               f" test — build or launch error. See {log_path}")
         return runner.returncode
 
+    # A fourth trap, added 2026-09-13 by lane C, and the same shape as the
+    # three above: ZERO PASSING TARGETS IS NOT A PASS.
+    #
+    # Every check to this point asks whether something went wrong. None asks
+    # whether anything happened. A run that produced no `test result` line at
+    # all -- a target triple with no std, a `--target` typo, a filter that
+    # matched nothing, cargo output going somewhere other than this log --
+    # reaches here with no failures and a zero exit, and prints
+    # "targets passed: 0" immediately above "PASS". The two lines disagree and
+    # the second is the one people act on.
+    #
+    # This is the defect the whole file is about, one level up, and it is what
+    # `TD-C-A-TEST-BINARY-CAN-BE-BROKEN-WITHOUT-ANYONE-NOTICING` describes at
+    # the scale of one crate: a population that reports nothing is
+    # indistinguishable from a population with nothing wrong, unless somebody
+    # counts it. Exit 2 rather than 1, because the tree is not red -- the
+    # measurement is missing.
+    if ok_targets == 0:
+        print("[workspace-test] NO TARGET REPORTED A RESULT - this is not a pass.")
+        print("    A run with nothing to report and nothing wrong looks exactly")
+        print("    like a clean one. Check the target triple, any package")
+        print(f"    filter, and that cargo output reached {log_path}.")
+        return 2
+
     print("[workspace-test] PASS")
     return 0
 

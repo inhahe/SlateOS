@@ -91,7 +91,23 @@ pub enum LoginPhase {
 #[derive(Clone, Debug)]
 pub struct LoginUser {
     /// User ID.
-    pub uid: u32,
+    /// The account's numeric id, or `None` when the database does not say.
+    ///
+    /// **`Option`, and zero is exactly why.** This was `u32`, filled from
+    /// `account.uid.unwrap_or(0)`, and zero is not a neutral placeholder --
+    /// it is root. `loginusers::Account` keeps the honest `Option` because
+    /// "the file does not say" and "the file says 0" are different facts, and
+    /// flattening them at the last step meant an account with a hand-edited
+    /// `users.yaml` missing the field was displayed as the administrator.
+    ///
+    /// It was safe only while nothing read this, which is a property of the
+    /// *rest of the tree* rather than of this type -- the entry that recorded
+    /// it had to say "do not add a reader without changing the type first",
+    /// and a rule that depends on somebody remembering is not a fix. Whoever
+    /// starts a session resolves the name against the database itself, which
+    /// it must do regardless: this screen's copy can be stale by the time a
+    /// password is accepted.
+    pub uid: Option<u32>,
     /// Display name.
     pub display_name: String,
     /// Username (for authentication).
@@ -109,7 +125,12 @@ pub struct LoginUser {
 }
 
 impl LoginUser {
-    pub fn new(uid: u32, username: &str, display_name: &str) -> Self {
+    /// A user for the screen to offer.
+    ///
+    /// `uid` is an `Option` for the reason [`uid`](Self::uid) gives: a caller
+    /// that does not know the id must be able to say so rather than pick a
+    /// number, and every number it could pick means something.
+    pub fn new(uid: Option<u32>, username: &str, display_name: &str) -> Self {
         Self {
             uid,
             display_name: display_name.to_string(),
@@ -346,7 +367,9 @@ fn users_from(accounts: &[loginusers::Account]) -> Vec<LoginUser> {
             // caller must resolve the name rather than trust this field. See
             // `known-issues.md` TD-C-LOGINUSER-INVENTS-A-UID-IT-DOES-NOT-KNOW.
             let mut user = LoginUser::new(
-                account.uid.unwrap_or(0),
+                // Not `unwrap_or(0)`. See `LoginUser::uid`: the unknown
+                // travels, because zero here is root.
+                account.uid,
                 &account.username,
                 &account.display_name,
             );
@@ -1513,6 +1536,7 @@ impl LoginScreen {
 
 #[cfg(test)]
 mod tests {
+
     // A test module's job is to fail loudly the instant the code under test is
     // wrong, so the defensive lints that forbid exactly that in production code
     // are off here — as `CLAUDE.md` prescribes.
@@ -1535,10 +1559,10 @@ mod tests {
 
     fn make_users() -> Vec<LoginUser> {
         vec![
-            LoginUser::new(1000, "alice", "Alice")
+            LoginUser::new(Some(1000), "alice", "Alice")
                 .with_admin()
                 .with_last_login(),
-            LoginUser::new(1001, "bob", "Bob"),
+            LoginUser::new(Some(1001), "bob", "Bob"),
         ]
     }
 
@@ -1769,8 +1793,8 @@ mod tests {
     #[test]
     fn autologin_user() {
         let users = vec![
-            LoginUser::new(1, "a", "A"),
-            LoginUser::new(2, "b", "B").with_autologin(),
+            LoginUser::new(Some(1), "a", "A"),
+            LoginUser::new(Some(2), "b", "B").with_autologin(),
         ];
         let s = LoginScreen::new(1920.0, 1080.0, users);
         let auto = s.autologin_user().unwrap();
@@ -1815,7 +1839,7 @@ mod tests {
 
     #[test]
     fn login_user_builder() {
-        let u = LoginUser::new(1, "test", "Test User")
+        let u = LoginUser::new(Some(1), "test", "Test User")
             .with_avatar("\u{1F468}")
             .with_admin()
             .with_autologin()
@@ -2084,7 +2108,11 @@ mod tests {
         v.push(("locked".to_string(), s));
 
         // One user: no back arrow.
-        let mut s = LoginScreen::new(1920.0, 1080.0, vec![LoginUser::new(1, "solo", "Solo")]);
+        let mut s = LoginScreen::new(
+            1920.0,
+            1080.0,
+            vec![LoginUser::new(Some(1), "solo", "Solo")],
+        );
         s.select_user(0);
         v.push(("single user".to_string(), s));
 
@@ -3050,8 +3078,11 @@ mod tests {
     /// other choice on it and no way forward except the row already selected.
     #[test]
     fn with_a_single_account_escape_clears_the_field_instead_of_going_back() {
-        let mut screen =
-            LoginScreen::new(1920.0, 1080.0, vec![LoginUser::new(1000, "alice", "Alice")]);
+        let mut screen = LoginScreen::new(
+            1920.0,
+            1080.0,
+            vec![LoginUser::new(Some(1000), "alice", "Alice")],
+        );
         screen.select_user(0);
         screen.handle_key(&typed("secret"));
         screen.handle_key(&press(Key::Escape));
@@ -3148,6 +3179,52 @@ mod tests {
         (dir, path)
     }
 
+    /// An account whose database entry has no id is offered with no id.
+    ///
+    /// Not with id 0. Zero is root, and a `users.yaml` edited by hand with the
+    /// `uid:` line left out describes a person far more often than it
+    /// describes the administrator -- `loginusers::offered` keeps such a
+    /// record deliberately, because dropping the machine's only account is a
+    /// worse failure than listing one extra.
+    ///
+    /// This could not be written while `LoginUser::uid` was a `u32`: there was
+    /// no value it could have asserted, because the unknown had already been
+    /// spent by `unwrap_or(0)` before anything could look. That is the shape of
+    /// the defect rather than an inconvenience of testing it -- a type that
+    /// cannot represent "unknown" makes the wrong answer unobservable.
+    #[test]
+    fn an_account_with_no_id_is_not_offered_as_root() {
+        let (_dir, path) = db_with(
+            "users:\n\
+             - username: alice\n   uid: 1000\n   password_hash: x\n\
+             - username: mystery\n   password_hash: x\n",
+        );
+        let users = users_from_db(&path);
+
+        let mystery = users
+            .iter()
+            .find(|u| u.username == "mystery")
+            .expect("an account with no uid must still be offered");
+        assert_eq!(
+            mystery.uid, None,
+            "an account whose file does not say its id must not claim one"
+        );
+        assert_ne!(
+            mystery.uid,
+            Some(0),
+            "and above all must not claim to be root"
+        );
+
+        // The negative control: the account that *does* say keeps what it
+        // says, so `None` above means "the file was silent" rather than "this
+        // parser reports None for everything".
+        let alice = users
+            .iter()
+            .find(|u| u.username == "alice")
+            .expect("alice is in the fixture");
+        assert_eq!(alice.uid, Some(1000));
+    }
+
     /// The screen offers the accounts the shared filter offers — no more, and
     /// with the same verdict on whether each needs a password.
     #[test]
@@ -3208,7 +3285,11 @@ mod tests {
     /// only row and they were already looking at the field behind it.
     #[test]
     fn a_single_account_opens_straight_at_the_password_field() {
-        let screen = LoginScreen::new(1920.0, 1080.0, vec![LoginUser::new(1000, "alice", "Alice")]);
+        let screen = LoginScreen::new(
+            1920.0,
+            1080.0,
+            vec![LoginUser::new(Some(1000), "alice", "Alice")],
+        );
         assert_eq!(screen.phase, LoginPhase::PasswordEntry);
         assert_eq!(screen.current_user().unwrap().username, "alice");
     }

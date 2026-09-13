@@ -95,9 +95,8 @@ const RECV_TIMEOUT_NS: u64 = 12_000_000_000;
 /// absent case differs, and that is the whole of the flip.
 #[must_use]
 pub fn userspace_enabled() -> bool {
-    crate::fs::kernparam::get("net.userspace").is_none_or(|v| {
-        v.is_empty() || v == "1" || v == "yes" || v == "true"
-    })
+    crate::fs::kernparam::get("net.userspace")
+        .is_none_or(|v| v.is_empty() || v == "1" || v == "yes" || v == "true")
 }
 
 /// A connection's local endpoint, as reported by the daemon for `getsockname`.

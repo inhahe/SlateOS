@@ -131557,6 +131557,52 @@ catch them, because it tests the palette's arithmetic rather than which call
 sites use it — which is the same gap in a different place, and worth
 remembering when reading it.
 
+---
+
+**Update 2026-09-13 — the survey is now a program, and the easy half is done.**
+
+`gui/appearance/colour-methods.py` answers the question this entry could only
+pose: it follows each colour from the function that produces it to the command
+that draws it, through all three hops recorded above -- the call is the field,
+a local carries it, an argument carries it -- and solves parameter usage to a
+fixpoint, because a colour is routinely handed down two levels.
+
+| bucket | n | meaning |
+|---|---|---|
+| INK | 3 | every caller draws text, no exempt arm — **all done** |
+| PER-ARM | 5 | ditto, but one arm is `overlay0`/`text` — **all done** |
+| INK IF THE REST CHECK OUT | 3 | text callers plus ones the tool would not guess at — **all done, by hand** |
+| SPLIT | 37 | callers disagree: the same method draws text *and* fills |
+| NO TEXT CALLER | 29 | fills and strokes only; correctly left alone |
+| UNRESOLVED | 18 | the tool declines to classify |
+
+**What is left is the hard half, and it is the SPLIT column.** A method that
+returns the colour of a status *and* the colour of the badge behind it cannot
+be fixed in one place: inking it darkens the badge, and not inking it leaves
+the label unreadable on a pale theme. Each needs either two functions -- one
+for the ink, one for the fill -- or the ink moved to the text call sites. That
+is a per-method design decision about 37 methods, not a sweep.
+
+**Four ways the tool was wrong before it was right**, all now comments in it,
+because each is a shape this lane keeps meeting:
+
+1. Matching only the `color:` line reported 27 functions as never drawn. They
+   were drawn a line or two below, inside a conditional.
+2. Refusing a leading dot in the call pattern hid every *method*, which is most
+   of them; nine functions reported no caller at all, and a function with no
+   callers needs no decision -- the quietest way to be wrong.
+3. Matching by bare name across the tree gave `apps/weather`'s `color` 270 call
+   sites, including `gui/desktop`'s Bluetooth list.
+4. A `color,` shorthand was not recorded as a colour field, so it defaulted to
+   `Text`. `touchpad_status` feeds a 12px status dot *and* its label, both by
+   shorthand: read as two text sites it looked safe to ink, and inking it would
+   have darkened the dot.
+
+And one rule change that is the general form of all four: **an unresolved
+caller does not count as an absent one.** `rate_color` was in the INK bucket
+with eight callers the tool could not follow; two of them fill a stat card.
+Unknowns now block the verdict instead of being dropped from it.
+
 ## TD-C-THIRTEEN-LIGHT-ACCENTS-STILL-FAIL-ON-CARDS -- being fixed 2026-09-12, mechanism landed
 
 **Update, 2026-09-12 (lane C).** Answered, and the entry below was wrong in

@@ -13,9 +13,15 @@ a DWARF and ELF parser, and says nothing about the third. That is the shape
 this gate is about: a defensible suppression with an indefensible one appended
 to it, where the comment covers the neighbours and the reader's eye passes on.
 
-Twenty-two crates in this lane share it, hiding 180 findings measured on
-``x86_64-unknown-linux-gnu`` (175 of which appear on every target). See
-known-issues.md -> B-PROGRAMS-THAT-INVENT-THEIR-OUTPUT.
+Twenty-two crates shared that shape when this was written, hiding 180
+findings measured on ``x86_64-unknown-linux-gnu``. Both numbers are history
+and are deliberately not restated as current: the live count is
+``len(BASELINE)`` and the run prints it. A docstring that carries a total is
+a total that goes stale, which is the same failure as the comments this gate
+exists to replace -- gdb's justified two lints and not the third, wpa's
+described personalities deleted three days earlier, and logind's cited a
+todo.txt note that has never existed. See known-issues.md ->
+B-PROGRAMS-THAT-INVENT-THEIR-OUTPUT.
 
 WHAT IT DOES NOT FORBID. A per-item ``#[allow(dead_code)]`` is fine and is the
 intended destination -- a complete ELF or DBus constant table with some entries
@@ -59,7 +65,6 @@ BASELINE = {
     "userspace/oils",
     "userspace/resolvectl",
     "userspace/ss",
-    "userspace/systemctl",
     "userspace/tcpdump",
     "userspace/upower",
 }

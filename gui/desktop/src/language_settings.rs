@@ -644,7 +644,7 @@ impl LanguageSettingsUI {
             text: search_text,
             font_size: 13.0,
             color: if self.language_search.is_empty() {
-                p.overlay0
+                p.subtext0
             } else {
                 p.text
             },
@@ -737,7 +737,7 @@ impl LanguageSettingsUI {
             y: cy + 4.0,
             text: format!("{} languages available", filtered.len()),
             font_size: 11.0,
-            color: p.overlay0,
+            color: p.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -1602,7 +1602,7 @@ mod tests {
             assert_eq!(text_color(lang, "Polski"), p.subtext0, "row native name");
             assert_eq!(
                 text_color(lang, "3 languages available"),
-                p.overlay0,
+                p.subtext0,
                 "the count line is the dimmest thing on the tab"
             );
 
@@ -1823,12 +1823,12 @@ mod tests {
             let mut ui = full_ui();
             ui.language_search = String::new();
             let empty = ui.render(&p, 600.0, 800.0);
-            assert_eq!(text_color(&empty, "Search languages..."), p.overlay0);
+            assert_eq!(text_color(&empty, "Search languages..."), p.subtext0);
 
             let typed = full_ui().render(&p, 600.0, 800.0);
             assert_eq!(text_color(&typed, "n"), p.text);
             assert_ne!(
-                p.overlay0, p.text,
+                p.subtext0, p.text,
                 "if these were equal a user could not tell a placeholder from \
                  a query they typed"
             );
@@ -1877,7 +1877,7 @@ mod tests {
             0x0089_B4FA, // blue
             0x00F9_E2AF, // yellow
             0x00B4_BEFE, // lavender
-            0x006C_7086, // overlay0
+            0x006C_7086, // subtext0
         ];
         let p = accented(true);
         for (tab, cmds) in every_tab(&p) {

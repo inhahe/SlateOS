@@ -683,7 +683,7 @@ impl StartupSettingsUI {
             text: filter_text,
             font_size: 13.0,
             color: if self.filter.is_empty() {
-                p.overlay0
+                p.subtext0
             } else {
                 p.text
             },
@@ -699,7 +699,7 @@ impl StartupSettingsUI {
             y: cy,
             text: format!("Sort: {}", self.sort.label()),
             font_size: 11.0,
-            color: p.overlay0,
+            color: p.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(200.0),
             overflow: TextOverflow::Ellipsis,
@@ -741,7 +741,7 @@ impl StartupSettingsUI {
                 y: cy + 20.0,
                 text: "No startup apps".into(),
                 font_size: 13.0,
-                color: p.overlay0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 20.0),
                 overflow: TextOverflow::Ellipsis,
@@ -803,7 +803,7 @@ impl StartupSettingsUI {
                     y: cy + 40.0,
                     text: format!("Delay: {}", entry.delay_text()),
                     font_size: 10.0,
-                    color: p.overlay0,
+                    color: p.subtext0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(200.0),
                     overflow: TextOverflow::Ellipsis,

@@ -1793,7 +1793,7 @@ fn render_title_bar(frame: &mut Frame, app: &VpnManager) {
         color: if on {
             app.palette.mantle
         } else {
-            app.palette.overlay0
+            app.palette.subtext0
         },
         font_weight: FontWeightHint::Bold,
         max_width: None,
@@ -1978,7 +1978,7 @@ fn render_sidebar(frame: &mut Frame, app: &VpnManager, content_y: f32, content_h
         text: caret_text(&app.search_query, focused, "Search profiles..."),
         font_size: 12.0,
         color: if empty && !focused {
-            app.palette.overlay0
+            app.palette.subtext0
         } else {
             app.palette.text
         },
@@ -2620,7 +2620,7 @@ fn render_tab_connection(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, 
             y,
             text: String::from("No connection data available"),
             font_size: 13.0,
-            color: app.palette.overlay0,
+            color: app.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2696,7 +2696,7 @@ fn render_tab_split_tunnel(frame: &mut Frame, app: &VpnManager, px: f32, py: f32
             y,
             text: String::from("No IP ranges configured"),
             font_size: 12.0,
-            color: app.palette.overlay0,
+            color: app.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2787,7 +2787,7 @@ fn render_tab_split_tunnel(frame: &mut Frame, app: &VpnManager, px: f32, py: f32
         text: caret_text(&app.allowed_ip_input, focused, "10.0.0.0/8"),
         font_size: 12.0,
         color: if app.allowed_ip_input.is_empty() && !focused {
-            app.palette.overlay0
+            app.palette.subtext0
         } else {
             app.palette.text
         },
@@ -2969,7 +2969,7 @@ fn render_tab_log(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw: f32
             y,
             text: String::from("No log entries"),
             font_size: 12.0,
-            color: app.palette.overlay0,
+            color: app.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -3129,7 +3129,7 @@ fn render_tab_log(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw: f32
             y: rows_top + (window.count as f32) * LOG_ENTRY_HEIGHT,
             text: format!("{hidden} more"),
             font_size: 10.0,
-            color: app.palette.overlay0,
+            color: app.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -3506,7 +3506,7 @@ fn render_status_bar(frame: &mut Frame, app: &VpnManager) {
         color: if active > 0 {
             app.palette.ink(app.palette.green)
         } else {
-            app.palette.overlay0
+            app.palette.subtext0
         },
         font_weight: FontWeightHint::Regular,
         max_width: None,
@@ -3794,7 +3794,7 @@ fn render_dialog_field(
         text: caret_text(value, focused, "..."),
         font_size: 12.0,
         color: if value.is_empty() && !focused {
-            pal.overlay0
+            pal.subtext0
         } else {
             pal.text
         },

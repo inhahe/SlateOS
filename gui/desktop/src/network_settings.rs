@@ -1405,7 +1405,7 @@ impl NetworkSettingsUI {
             y: row_y,
             text: format!("Hostname: {}", self.settings.hostname),
             font_size: 12.0,
-            color: p.overlay0,
+            color: p.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1463,7 +1463,7 @@ impl NetworkSettingsUI {
             text: search_text,
             font_size: 12.0,
             color: if self.wifi_search.is_empty() {
-                p.overlay0
+                p.subtext0
             } else {
                 p.text
             },
@@ -1497,7 +1497,7 @@ impl NetworkSettingsUI {
                     "Wi-Fi is disabled".to_string()
                 },
                 font_size: 12.0,
-                color: p.overlay0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1691,7 +1691,7 @@ impl NetworkSettingsUI {
                 y: row_y,
                 text: "No Ethernet interfaces detected".to_string(),
                 font_size: 14.0,
-                color: p.overlay0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1766,7 +1766,7 @@ impl NetworkSettingsUI {
                     y: prop_y,
                     text: format!("{label}:"),
                     font_size: 11.0,
-                    color: p.overlay0,
+                    color: p.subtext0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -1907,7 +1907,7 @@ impl NetworkSettingsUI {
                         value.clone()
                     },
                     font_size: 12.0,
-                    color: if value.is_empty() { p.overlay0 } else { p.text },
+                    color: if value.is_empty() { p.subtext0 } else { p.text },
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -2013,7 +2013,7 @@ impl NetworkSettingsUI {
                 y: row_y,
                 text: "None configured".to_string(),
                 font_size: 11.0,
-                color: p.overlay0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -2049,7 +2049,7 @@ impl NetworkSettingsUI {
                 self.settings.dns.cache_size
             ),
             font_size: 11.0,
-            color: p.overlay0,
+            color: p.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2156,7 +2156,7 @@ impl NetworkSettingsUI {
                     color: if self.settings.proxy.pac_url.is_some() {
                         p.text
                     } else {
-                        p.overlay0
+                        p.subtext0
                     },
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - 24.0),
@@ -2408,7 +2408,7 @@ impl NetworkSettingsUI {
                 y: row_y,
                 text: "No custom rules. Using default policies.".to_string(),
                 font_size: 12.0,
-                color: p.overlay0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,

@@ -1338,7 +1338,7 @@ impl FileSearchApp {
             text: search_text,
             font_size: 13.0,
             color: if self.criteria.query.is_empty() {
-                self.palette.overlay0
+                self.palette.subtext0
             } else {
                 self.palette.text
             },
@@ -1584,7 +1584,7 @@ impl FileSearchApp {
                 y: y + h / 2.0,
                 text: msg.to_string(),
                 font_size: 14.0,
-                color: self.palette.overlay0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,

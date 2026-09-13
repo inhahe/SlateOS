@@ -619,7 +619,7 @@ impl BlockingAnalyzer {
                         x: x + FEATURE_TEXT_PAD + indent - 16.0,
                         y: cy + 4.0,
                         text: "->".to_string(),
-                        color: palette.overlay0,
+                        color: palette.subtext0,
                         font_size: FEATURE_FONT_SIZE,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
@@ -1611,7 +1611,7 @@ impl EnvViewer {
                     format!(" (filtered from {})", self.entries.len())
                 }
             ),
-            color: palette.overlay0,
+            color: palette.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - FEATURE_TEXT_PAD * 2.0),

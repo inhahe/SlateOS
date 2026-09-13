@@ -873,7 +873,7 @@ pub fn render_context_menu(
                     text: display_label,
                     font_size: 13.0,
                     color: if *slow {
-                        p.overlay0
+                        p.subtext0
                     } else if hovered {
                         p.text
                     } else {
@@ -1017,7 +1017,7 @@ impl ExtensionSettingsUI {
             text: search_display,
             font_size: 12.0,
             color: if self.search_text.is_empty() {
-                p.overlay0
+                p.subtext0
             } else {
                 p.text
             },
@@ -1085,7 +1085,7 @@ impl ExtensionSettingsUI {
                     y: cy + 26.0,
                     text: ext.app_name.clone(),
                     font_size: 11.0,
-                    color: p.overlay0,
+                    color: p.subtext0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -1112,7 +1112,7 @@ impl ExtensionSettingsUI {
                         y: cy + 26.0,
                         text: format!("{:.0}ms avg", ext.response_time_avg_ms),
                         font_size: 10.0,
-                        color: p.overlay0,
+                        color: p.subtext0,
                         font_weight: FontWeightHint::Light,
                         max_width: None,
                         overflow: TextOverflow::Clip,

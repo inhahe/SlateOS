@@ -1708,7 +1708,7 @@ fn render_card(
             x: x + padding,
             y: y + card_h,
             text: comment_text,
-            color: pal.overlay0,
+            color: pal.subtext0,
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1844,7 +1844,7 @@ fn render_column_header(
             color: if col.is_over_wip_limit() {
                 pal.ink(pal.red)
             } else {
-                pal.overlay0
+                pal.subtext0
             },
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
@@ -2487,7 +2487,7 @@ fn render_archive_view(tree: &mut RenderTree, app: &KanbanApp, width: f32, y_sta
             x: 20.0,
             y: y_start + 50.0,
             text: "No archived cards.".to_string(),
-            color: app.palette.overlay0,
+            color: app.palette.subtext0,
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,

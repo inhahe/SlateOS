@@ -2180,7 +2180,7 @@ impl SystemTray {
                 x,
                 y: y + POPUP_FONT_SIZE + 2.0,
                 text: String::from(subtitle),
-                color: pal.overlay0,
+                color: pal.subtext0,
                 font_size: POPUP_FONT_SIZE - 2.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - TOGGLE_WIDTH - 8.0),

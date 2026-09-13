@@ -1817,7 +1817,7 @@ impl SlidesApp {
                 color: if is_current {
                     self.palette.ink(self.palette.blue)
                 } else {
-                    self.palette.overlay0
+                    self.palette.subtext0
                 },
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
@@ -1923,7 +1923,7 @@ impl SlidesApp {
                     self.current_index.saturating_add(1),
                     self.slides.len(),
                 ),
-                color: self.palette.overlay0,
+                color: self.palette.subtext0,
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -2477,7 +2477,7 @@ impl SlidesApp {
             y: notes_y + 24.0,
             text: display.to_string(),
             color: if notes_text.is_empty() {
-                self.palette.overlay0
+                self.palette.subtext0
             } else {
                 self.palette.text
             },

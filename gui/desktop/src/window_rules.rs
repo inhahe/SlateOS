@@ -965,7 +965,7 @@ impl RulesSettingsUI {
             y: y + 28.0,
             text: mode_text.to_string(),
             font_size: 10.0,
-            color: p.overlay0,
+            color: p.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1129,7 +1129,7 @@ impl RulesSettingsUI {
                 y: ry + 8.0,
                 text: format!("{} act.", ac),
                 font_size: 11.0,
-                color: if ac > 0 { p.ink(p.green) } else { p.overlay0 },
+                color: if ac > 0 { p.ink(p.green) } else { p.subtext0 },
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1208,7 +1208,7 @@ impl RulesSettingsUI {
                         FontWeightHint::Regular,
                     ),
                     font_size: 10.0,
-                    color: p.overlay0,
+                    color: p.subtext0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -1291,7 +1291,7 @@ impl RulesSettingsUI {
             },
             font_size: 12.0,
             color: if self.editing_name.is_empty() {
-                p.overlay0
+                p.subtext0
             } else {
                 p.text
             },
@@ -1368,7 +1368,7 @@ impl RulesSettingsUI {
                 },
                 font_size: 12.0,
                 color: if self.editing_criteria_value.is_empty() {
-                    p.overlay0
+                    p.subtext0
                 } else {
                     p.text
                 },

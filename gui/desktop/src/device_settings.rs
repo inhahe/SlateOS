@@ -863,7 +863,7 @@ impl DeviceSettingsUI {
             text: search_text,
             font_size: 12.0,
             color: if self.search_query.is_empty() {
-                p.overlay0
+                p.subtext0
             } else {
                 p.text
             },
@@ -1143,7 +1143,7 @@ impl DeviceSettingsUI {
                 y: row_y + 8.0,
                 text: "No removable devices connected.".to_string(),
                 font_size: 13.0,
-                color: p.overlay0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,

@@ -22,14 +22,25 @@ draw site knows whether the thing being drawn is switched off.
 
 **The three verdicts**, and why the middle one is allowed:
 
-  live       no disabled/enabled word anywhere in the enclosing function.
-             Refused.
-  ambiguous  such a word is in the function but not beside the draw. Allowed,
-             because "not beside a condition" is not the same as "not
-             conditional", and a disabled label that stops looking disabled is
-             this same bug pointing the other way. Counted, so the number is
-             visible; see TD-C-OVERLAY0-IS-A-DISABLED-INK.
-  exempt     the draw sits with its own enabled/disabled test. Allowed.
+**Exempt means one thing: the draw is a switched-off state.** Three positions
+say so, and nothing else does -- the ink expression itself, the enclosing
+function's name (`fn render_disabled_button`), and any block that structurally
+encloses the draw (`if !self.enabled { .. }`).
+
+**What is deliberately not exempt**, because the first version of this gate got
+all of these wrong and let live text through:
+
+  * **Emptiness.** `if list.is_empty() { draw("No devices found") }` is an
+    empty-state message -- often the only thing in the pane, and the one
+    sentence the user has to read. WCAG exempts *disabled controls*; it says
+    nothing about empty lists. Sixty-nine draws hid behind `is_empty` alone.
+  * **The word appearing in the drawn string or in a comment.** `text: "No
+    updates available."`, `text: "Disabled".to_string()`, and a comment reading
+    "the placeholder is not editable text" all satisfied a proximity rule, and
+    none of them is a condition. Strings and comments are blanked before any
+    match.
+  * **Proximity at all.** A nine-line window missed `fn render_disabled_button`
+    by one line.
 
 Usage:  python scripts/check-overlay0-ink.py [--list]
 """
@@ -48,9 +59,45 @@ NL = chr(10)
 # directories draws with them.
 ROOTS = ("gui", "apps")
 
+# Being switched off, and nothing else. `is_empty`, `is_none`, `available`
+# and `active` were here and are not: an empty list is not a disabled
+# control, and "available" mostly turned up inside the sentence being drawn.
+# Boundaries are non-alphanumeric rather than `\b`, because an underscore is a
+# word character: `\bdisabled\b` does not match inside
+# `render_disabled_button` or `wifi_enabled`, which is most of how these
+# words actually appear in code.
 EXEMPT = re.compile(
-    r"\b(enabled|disabled|is_empty|is_none|available|unavailable|active|inactive|"
-    r"selectable|editable|locked|greyed|grayed|readonly|read_only)\b", re.I)
+    r"(?<![A-Za-z0-9])(enabled|disabled|unavailable|inactive|insensitive"
+    r"|selectable|editable|locked|greyed|grayed|readonly)(?![A-Za-z0-9])", re.I)
+STRING = re.compile(r'"(?:[^"\\]|\\.)*"')
+COMMENT = re.compile(r"//.*$")
+
+
+def code_only(line):
+    """The line with string literals and comments blanked out.
+
+    A condition is code. `text: "No updates available."` is not a condition,
+    and neither is a comment mentioning a disabled state -- both matched the
+    first version of this gate and exempted live text.
+    """
+    return COMMENT.sub("", STRING.sub('""', line))
+
+
+def enclosing_conditions(lines, i, fn_start):
+    """Every block opener that encloses line `i`, innermost first.
+
+    Walks out one brace at a time rather than reading the lines above, which
+    is the difference between "the draw is inside `if !enabled {`" and "the
+    word `enabled` occurs somewhere nearby".
+    """
+    out, depth = [], 0
+    for k in range(i - 1, fn_start - 1, -1):
+        line = lines[k]
+        depth += line.count("}") - line.count("{")
+        if depth < 0:
+            out.append(line)
+            depth = 0
+    return out
 FIELD = re.compile(r"^\s*color:\s*(.*)$")
 FN = re.compile(r"^\s{0,8}(pub\s+)?(const\s+)?(async\s+)?fn\s")
 OV = re.compile(r"\boverlay0\b")
@@ -79,15 +126,37 @@ def arg_spans(text, start):
 
 
 def verdict(lines, i):
-    """`exempt`, `ambiguous` or `live` for a draw whose ink is on line `i`."""
-    if EXEMPT.search(NL.join(lines[max(0, i - 9):i + 2])):
+    """`exempt` or `live` for a draw whose ink is on line `i`.
+
+    There is no third answer any more. The old `ambiguous` verdict meant "a
+    disabled-word occurs somewhere in this function", which described 169 live
+    draws and 10 real ones -- and its 9-line proximity half missed
+    `fn render_disabled_button` by a single line.
+    """
+    # The ink expression itself: `if self.enabled { .. } else { p.overlay0 }`,
+    # which may run over a few lines.
+    if EXEMPT.search(code_only(NL.join(lines[max(0, i - 3):i + 1]))):
         return "exempt"
     start = 0
-    for k in range(i, max(0, i - 400), -1):
+    # `-1` as the stop, not `0`: a `range(i, 0, -1)` never yields index 0, and
+    # a free function at the top of a file has its signature exactly there.
+    # That off-by-one hid `fn render_disabled_button` from its own name.
+    for k in range(i, max(-1, i - 400), -1):
         if FN.match(lines[k]):
             start = k
             break
-    return "ambiguous" if EXEMPT.search(NL.join(lines[start:i + 2])) else "live"
+    # The function's own name. `fn render_disabled_button` says everything it
+    # draws is the disabled rendering, and it is the only place that says so:
+    # there is no condition inside, because the caller already decided.
+    if EXEMPT.search(code_only(lines[start])):
+        return "exempt"
+    # A block that encloses the draw -- `if !self.enabled { .. }`. Found by
+    # walking out one brace at a time, which is the difference between "the
+    # draw is inside the condition" and "the words are near each other".
+    for opener in enclosing_conditions(lines, i, start):
+        if EXEMPT.search(code_only(opener)):
+            return "exempt"
+    return "live"
 
 
 def sites(path):
@@ -103,7 +172,30 @@ def sites(path):
     # The struct form, where the ink is a field several lines below the call.
     for i in range(end):
         fm = FIELD.match(lines[i])
-        if not fm or not OV.search(fm.group(1)):
+        if not fm:
+            continue
+        # The value, which is not always on this line. A conditional ink --
+        #
+        #     color: if self.query.is_empty() {
+        #         p.overlay0
+        #     } else {
+        #         p.text
+        #     },
+        #
+        # puts the role three lines below its field, and a rule that reads only
+        # the `color:` line cannot see it. Five draws hid there, four of them
+        # placeholders, and they were found by a failing test rather than by
+        # this gate -- which is the failure this whole file exists to prevent.
+        value, depth, j = fm.group(1), 0, i
+        while j < end:
+            for ch in (fm.group(1) if j == i else lines[j]):
+                depth += (ch in "([{") - (ch in ")]}")
+            if depth <= 0 and (j > i or fm.group(1).rstrip().endswith(",")):
+                break
+            j += 1
+            if j < end:
+                value += NL + lines[j]
+        if not OV.search(value):
             continue
         kind = None
         for k in range(i, max(0, i - 24), -1):
@@ -150,7 +242,87 @@ SELF_TESTS = [
         {"live": 1},
     ),
     (
-        "the same draw beside its own enabled test is exempt",
+        "the ink expression's own enabled test is exempt",
+        """fn render(&self, cmds: &mut Vec<RenderCommand>) {
+    cmds.push(RenderCommand::Text {
+        x: 8.0,
+        y: 8.0,
+        text: "Wi-Fi".to_string(),
+        color: if self.enabled { p.text } else { p.overlay0 },
+        font_size: 13.0,
+    });
+}
+""",
+        {"exempt": 1},
+    ),
+    (
+        "a block that encloses the draw is exempt",
+        """fn render(&self, cmds: &mut Vec<RenderCommand>) {
+    if !self.enabled {
+        cmds.push(RenderCommand::Text {
+            x: 8.0,
+            y: 8.0,
+            text: "Wi-Fi".to_string(),
+            color: self.palette.overlay0,
+            font_size: 13.0,
+        });
+    }
+}
+""",
+        {"exempt": 1},
+    ),
+    (
+        "the function's own name is exempt, however far above it is",
+        """fn render_disabled_button(tree: &mut RenderTree, pal: &Palette, label: &str) {
+    fill_rounded(
+        tree,
+        x,
+        y,
+        button_width(label),
+        BUTTON_HEIGHT,
+        pal.surface0,
+        6.0,
+    );
+    tree.text(x + 12.0, y + 8.0, label, pal.overlay0, 13.0);
+}
+""",
+        {"exempt": 1},
+    ),
+    (
+        "an early return on !enabled leaves the rest of the function LIVE",
+        """fn render(&self, cmds: &mut Vec<RenderCommand>) {
+    if !self.enabled {
+        return;
+    }
+    cmds.push(RenderCommand::Text {
+        x: 8.0,
+        y: 8.0,
+        text: "Hourly Forecast".to_string(),
+        color: self.palette.overlay0,
+        font_size: 13.0,
+    });
+}
+""",
+        {"live": 1},
+    ),
+    (
+        "an empty-state message is live text, not a disabled control",
+        """fn render(&self, cmds: &mut Vec<RenderCommand>) {
+    if self.devices.is_empty() {
+        cmds.push(RenderCommand::Text {
+            x: 8.0,
+            y: 8.0,
+            text: "No devices found".to_string(),
+            color: self.palette.overlay0,
+            font_size: 13.0,
+        });
+    }
+}
+""",
+        {"live": 1},
+    ),
+    (
+        "a let-binding above an unrelated draw does not exempt it",
         """fn render(&self, cmds: &mut Vec<RenderCommand>) {
     let ink = if self.enabled { p.text } else { p.overlay0 };
     cmds.push(RenderCommand::Text {
@@ -162,31 +334,25 @@ SELF_TESTS = [
     });
 }
 """,
-        {"exempt": 1},
+        {"live": 1},
     ),
     (
-        "a conditional elsewhere in the function is ambiguous, not clean",
+        "a conditional ink puts the role lines below its field",
         """fn render(&self, cmds: &mut Vec<RenderCommand>) {
-    if !self.enabled {
-        return;
-    }
-    let a = 1;
-    let b = 2;
-    let c = 3;
-    let d = 4;
-    let e = 5;
-    let f = 6;
-    let g = 7;
     cmds.push(RenderCommand::Text {
         x: 8.0,
         y: 8.0,
-        text: "Hourly Forecast".to_string(),
-        color: self.palette.overlay0,
+        text: search_text,
+        color: if self.query.is_empty() {
+            p.overlay0
+        } else {
+            p.text
+        },
         font_size: 13.0,
     });
 }
 """,
-        {"ambiguous": 1},
+        {"live": 1},
     ),
     (
         "the positional call form is seen too",
@@ -294,8 +460,7 @@ def main():
     # scan from one that found nothing because it looked nowhere.
     print(
         f"ok -- no live text inked overlay0 ({files} file(s), {total} overlay0 "
-        f"text draw(s): {counts['exempt']} beside their own enabled/disabled "
-        f"test, {counts['ambiguous']} conditional somewhere in the function)."
+        f"text draw(s), all {counts['exempt']} of them a switched-off state)."
     )
     return 0
 

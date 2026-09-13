@@ -2261,7 +2261,7 @@ impl StartupUI {
             y: l.search.y + ((l.search.h - FONT_SIZE) / 2.0).max(0.0),
             text: display.to_string(),
             color: if empty {
-                self.palette.overlay0
+                self.palette.subtext0
             } else {
                 self.palette.text
             },
@@ -2473,7 +2473,7 @@ impl StartupUI {
                 x: PADDING,
                 y: l.details.y + (l.details.h / 2.0 - FONT_SIZE / 2.0).max(0.0),
                 text: String::from("Select an entry to view details"),
-                color: self.palette.overlay0,
+                color: self.palette.subtext0,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Option::None,
@@ -2819,7 +2819,7 @@ impl StartupUI {
             x: input.x + 6.0,
             y: input.y + ((input.h - FONT_SIZE) / 2.0).max(0.0),
             text: if empty { label } else { value }.to_string(),
-            color: if empty { pal.overlay0 } else { pal.text },
+            color: if empty { pal.subtext0 } else { pal.text },
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some((input.w - 12.0).max(0.0)),

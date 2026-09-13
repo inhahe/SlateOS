@@ -2232,7 +2232,7 @@ impl FileAssocUI {
                 y: r.y + (r.h - FONT_SIZE).max(0.0) / 2.0,
                 text: shown,
                 color: if empty {
-                    self.palette.overlay0
+                    self.palette.subtext0
                 } else {
                     self.palette.text
                 },
@@ -2310,7 +2310,7 @@ impl FileAssocUI {
             x: PADDING,
             y: l.sidebar.y + SIDEBAR_ITEM_HEIGHT + 6.0,
             text: String::from("CATEGORIES"),
-            color: self.palette.overlay0,
+            color: self.palette.subtext0,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
             max_width: Some((l.sidebar.w - 2.0 * PADDING).max(0.0)),
@@ -2398,7 +2398,7 @@ impl FileAssocUI {
                 x: (r.right() - 30.0).max(0.0),
                 y: r.y + 10.0,
                 text: format!("{count}"),
-                color: self.palette.overlay0,
+                color: self.palette.subtext0,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -2547,7 +2547,7 @@ impl FileAssocUI {
                 color: if ft.default_app_id.is_some() {
                     self.palette.ink(self.palette.green)
                 } else {
-                    self.palette.overlay0
+                    self.palette.subtext0
                 },
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
@@ -2570,7 +2570,7 @@ impl FileAssocUI {
                 x: l.rows.x + (l.rows.w - w).max(0.0) / 2.0,
                 y: l.rows.y + 40.0,
                 text: String::from(msg),
-                color: self.palette.overlay0,
+                color: self.palette.subtext0,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(l.rows.w),
@@ -2713,7 +2713,7 @@ impl FileAssocUI {
                 x,
                 y,
                 text: String::from("No compatible apps"),
-                color: self.palette.overlay0,
+                color: self.palette.subtext0,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(content_w),
@@ -2909,7 +2909,7 @@ impl FileAssocUI {
                 color: if selected {
                     self.palette.mantle
                 } else {
-                    self.palette.overlay0
+                    self.palette.subtext0
                 },
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
@@ -2923,7 +2923,7 @@ impl FileAssocUI {
                 x: l.dialog.x + PADDING,
                 y: list.y + PADDING,
                 text: format!("No app handles .{}", self.dialog_target_ext),
-                color: self.palette.overlay0,
+                color: self.palette.subtext0,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some((l.dialog.w - 2.0 * PADDING).max(0.0)),
@@ -3008,7 +3008,7 @@ impl FileAssocUI {
                     value.to_string()
                 },
                 color: if empty {
-                    self.palette.overlay0
+                    self.palette.subtext0
                 } else {
                     self.palette.text
                 },

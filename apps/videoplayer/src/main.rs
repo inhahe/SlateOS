@@ -3124,7 +3124,7 @@ impl VideoPlayerApp {
                 y: top + video_h / 2.0 - 20.0,
                 text: "No file loaded".to_string(),
                 font_size: 18.0,
-                color: self.palette.overlay0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(300.0),
                 overflow: TextOverflow::Ellipsis,
@@ -3697,7 +3697,7 @@ impl VideoPlayerApp {
                 color: if is_current {
                     self.palette.ink(self.palette.blue)
                 } else {
-                    self.palette.overlay0
+                    self.palette.subtext0
                 },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(24.0),
@@ -3977,7 +3977,7 @@ impl VideoPlayerApp {
                 y: top + 100.0,
                 text: "No file loaded".to_string(),
                 font_size: 16.0,
-                color: self.palette.overlay0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(200.0),
                 overflow: TextOverflow::Ellipsis,
@@ -4111,7 +4111,7 @@ impl VideoPlayerApp {
                 y: bands_y + 4.0,
                 text: "+12".to_string(),
                 font_size: 9.0,
-                color: self.palette.overlay0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -4121,7 +4121,7 @@ impl VideoPlayerApp {
                 y: center_y - 6.0,
                 text: "0".to_string(),
                 font_size: 9.0,
-                color: self.palette.overlay0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -4131,7 +4131,7 @@ impl VideoPlayerApp {
                 y: bands_y + bands_h - 12.0,
                 text: "-12".to_string(),
                 font_size: 9.0,
-                color: self.palette.overlay0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,

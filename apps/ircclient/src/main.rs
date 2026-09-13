@@ -2237,7 +2237,7 @@ impl IrcClientApp {
                 y: y + 2.0,
                 text: msg.timestamp.clone(),
                 font_size: 10.0,
-                color: self.palette.overlay0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(60.0),
                 overflow: TextOverflow::Ellipsis,

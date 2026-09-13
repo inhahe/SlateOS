@@ -1070,7 +1070,7 @@ fn render_remote_desktop_section(
         x + FIELD_LABEL_WIDTH,
         y - 4.0,
         config.encryption_level.description(),
-        pal.overlay0,
+        pal.subtext0,
         11.0,
     );
     y += 12.0;
@@ -1092,7 +1092,7 @@ fn render_remote_desktop_section(
             x + 16.0,
             y + 4.0,
             "No users configured (all authenticated users can connect).",
-            pal.overlay0,
+            pal.subtext0,
             12.0,
         );
         y += 28.0;

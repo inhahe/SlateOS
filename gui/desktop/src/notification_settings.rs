@@ -1073,7 +1073,7 @@ impl NotificationSettingsUI {
             text: search_text,
             font_size: 13.0,
             color: if self.app_filter.is_empty() {
-                p.overlay0
+                p.subtext0
             } else {
                 p.text
             },
@@ -1090,7 +1090,7 @@ impl NotificationSettingsUI {
                 y: cy + 10.0,
                 text: "No registered apps".into(),
                 font_size: 13.0,
-                color: p.overlay0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 20.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1375,7 +1375,7 @@ impl NotificationSettingsUI {
                     entries.len(),
                 ),
                 font_size: 11.0,
-                color: p.overlay0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(120.0),
                 overflow: TextOverflow::Ellipsis,

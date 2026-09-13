@@ -1358,7 +1358,7 @@ impl RadioApp {
                 y: ty,
                 text: "Genres [Left/Right]".into(),
                 font_size: 10.0,
-                color: self.palette.overlay0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(w - 24.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1462,7 +1462,7 @@ impl RadioApp {
                     y: ty + (window.count as f32) * GENRE_ROW_HEIGHT + 3.0,
                     text: format!("{hidden} more"),
                     font_size: 9.0,
-                    color: self.palette.overlay0,
+                    color: self.palette.subtext0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(w - 36.0),
                     overflow: TextOverflow::Ellipsis,
@@ -1476,7 +1476,7 @@ impl RadioApp {
             y: y + h - SEARCH_HINT_HEIGHT,
             text: "[/] Search".into(),
             font_size: 9.0,
-            color: self.palette.overlay0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(w - 24.0),
             overflow: TextOverflow::Ellipsis,
@@ -1533,7 +1533,7 @@ impl RadioApp {
                 y: start_y + 10.0,
                 text: "No stations".into(),
                 font_size: 12.0,
-                color: self.palette.overlay0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(w - 40.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1640,7 +1640,7 @@ impl RadioApp {
                         fav_mark
                     ),
                     font_size: 9.0,
-                    color: self.palette.overlay0,
+                    color: self.palette.subtext0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(w - 40.0),
                     overflow: TextOverflow::Ellipsis,
@@ -1671,7 +1671,7 @@ impl RadioApp {
                 y: start_y + (shown as f32) * row_h,
                 text: format!("{hidden} more"),
                 font_size: 9.0,
-                color: self.palette.overlay0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(w - 40.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1886,7 +1886,7 @@ impl RadioApp {
             text: display,
             font_size: 14.0,
             color: if self.search_query.is_empty() {
-                self.palette.overlay0
+                self.palette.subtext0
             } else {
                 self.palette.text
             },

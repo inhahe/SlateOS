@@ -625,7 +625,7 @@ impl FocusAssistManager {
                 y: cy,
                 text: "No automatic rules configured".to_string(),
                 font_size: 12.0,
-                color: p.overlay0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -656,7 +656,7 @@ impl FocusAssistManager {
                     y: cy + 7.0,
                     text: rule.mode().label().to_string(),
                     font_size: 10.0,
-                    color: p.overlay0,
+                    color: p.subtext0,
                     font_weight: FontWeightHint::Light,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -1210,14 +1210,14 @@ mod tests {
         for light in [false, true] {
             let p = accented(light);
             let mgr = busy(); // AlarmsOnly chosen: the third row.
-            let mut want = vec![p.text, p.blue, p.overlay0];
+            let mut want = vec![p.text, p.blue, p.subtext0];
             for chosen in [false, false, true, false] {
                 want.push(if chosen { p.surface0 } else { p.mantle });
                 // The chosen row's icon is accent *text*, so it is inked;
                 // the row's fill above it is not. Same accent, two values.
                 want.push(if chosen { p.ink(p.accent) } else { p.subtext0 });
                 want.push(if chosen { p.text } else { p.subtext0 });
-                want.push(p.overlay0);
+                want.push(p.subtext0);
             }
             // The rule row is the one surface this page draws through the
             // theme; the four mode rows above are still plain fills.
@@ -1225,7 +1225,7 @@ mod tests {
                 p.text,
                 p.painted(appearance::Surface::Card),
                 p.text,
-                p.overlay0,
+                p.subtext0,
             ]);
             assert_eq!(
                 colors(&mgr.render_settings(&p, 0.0, 0.0, 400.0)),
@@ -1251,9 +1251,9 @@ mod tests {
                 // the row's fill above it is not. Same accent, two values.
                 want.push(if chosen { p.ink(p.accent) } else { p.subtext0 });
                 want.push(if chosen { p.text } else { p.subtext0 });
-                want.push(p.overlay0);
+                want.push(p.subtext0);
             }
-            want.extend([p.text, p.overlay0]);
+            want.extend([p.text, p.subtext0]);
             assert_eq!(
                 colors(&make_mgr().render_settings(&p, 0.0, 0.0, 400.0)),
                 want,
@@ -1387,8 +1387,14 @@ mod tests {
 
     /// The suppressed-notification line exists only when there is one to
     /// report, so a test that never suppressed anything checks nothing.
+    ///
+    /// It used to assert `overlay0` and was named for it. That was recording
+    /// the implementation rather than asserting a property: "3 notifications
+    /// suppressed" is the whole point of the line -- live information the user
+    /// is meant to read -- and `overlay0` is 2.30:1 against the page, which is
+    /// the disabled ink. See TD-C-OVERLAY0-IS-A-DISABLED-INK.
     #[test]
-    fn the_suppressed_line_is_overlay_and_only_drawn_when_there_is_one() {
+    fn the_suppressed_line_is_readable_and_only_drawn_when_there_is_one() {
         let p = accented(false);
         let mut mgr = make_mgr();
         mgr.set_mode(FocusMode::TotalSilence);
@@ -1401,8 +1407,8 @@ mod tests {
             "suppressing a notification did not add the line that reports it"
         );
         assert_eq!(
-            loud[2], p.overlay0,
-            "the suppressed-count line is not overlay0"
+            loud[2], p.subtext0,
+            "the suppressed-count line is not the secondary ink"
         );
     }
 

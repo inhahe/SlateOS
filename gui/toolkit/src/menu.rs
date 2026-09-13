@@ -581,7 +581,7 @@ impl ContextMenu {
                                 - Self::estimate_text_width(shortcut_text, FONT_SIZE),
                             y: text_y,
                             text: shortcut_text.clone(),
-                            color: palette.overlay0,
+                            color: palette.subtext0,
                             font_size: FONT_SIZE,
                             font_weight: FontWeightHint::Regular,
                             max_width: None,

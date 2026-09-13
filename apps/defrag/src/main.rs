@@ -2456,7 +2456,7 @@ impl DefragUI {
                 color: if is_active {
                     self.palette.text
                 } else {
-                    self.palette.overlay0
+                    self.palette.subtext0
                 },
                 font_size: FONT_SIZE,
                 font_weight: if is_active {
@@ -3475,7 +3475,7 @@ impl DefragUI {
                     format!("{}|", self.exclude_input)
                 },
                 color: if self.exclude_input.is_empty() {
-                    self.palette.overlay0
+                    self.palette.subtext0
                 } else {
                     self.palette.text
                 },

@@ -2566,7 +2566,7 @@ impl RemoteDesktopApp {
                 y: content_y + 20.0,
                 text: "No active sessions".into(),
                 font_size: 13.0,
-                color: self.palette.overlay0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - 2.0 * SECTION_PADDING),
                 overflow: TextOverflow::Ellipsis,
@@ -2716,7 +2716,7 @@ impl RemoteDesktopApp {
                 y: content_y + content_h / 2.0 - 10.0,
                 text: "Select a session to view details".into(),
                 font_size: 14.0,
-                color: self.palette.overlay0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(400.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2778,7 +2778,7 @@ impl RemoteDesktopApp {
                 y: list_y + 20.0,
                 text: "No file transfers. Drag files here to start.".into(),
                 font_size: 13.0,
-                color: self.palette.overlay0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(pw - 80.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2948,7 +2948,7 @@ impl RemoteDesktopApp {
                 y: list_y + 20.0,
                 text: "No connection history".into(),
                 font_size: 13.0,
-                color: self.palette.overlay0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(pw - 80.0),
                 overflow: TextOverflow::Ellipsis,
@@ -3088,7 +3088,7 @@ impl RemoteDesktopApp {
             color: if active_count > 0 {
                 self.palette.ink(self.palette.green)
             } else {
-                self.palette.overlay0
+                self.palette.subtext0
             },
             font_weight: FontWeightHint::Regular,
             max_width: Some(100.0),

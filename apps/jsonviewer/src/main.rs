@@ -4128,7 +4128,7 @@ impl App {
                 self.search_query.clone()
             },
             color: if self.search_query.is_empty() {
-                self.palette.overlay0
+                self.palette.subtext0
             } else {
                 self.palette.text
             },
@@ -4200,7 +4200,7 @@ impl App {
             x: self.width - SIDEBAR_WIDTH - 30.0,
             y: bar_y + 18.0,
             text: String::from("Esc"),
-            color: self.palette.overlay0,
+            color: self.palette.subtext0,
             font_size: SMALL_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: None,

@@ -1682,7 +1682,7 @@ fn render_entries(
                         x: panel_x + panel_w - DROPDOWN_HPAD - estimate_text_width(sc, FONT_SIZE),
                         y: text_y,
                         text: sc.clone(),
-                        color: palette.overlay0,
+                        color: palette.subtext0,
                         font_size: FONT_SIZE,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,

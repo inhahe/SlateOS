@@ -2053,7 +2053,7 @@ impl QrApp {
             x: lx,
             y: cy,
             text: format!("HISTORY ({})", self.history.len()),
-            color: self.palette.overlay0,
+            color: self.palette.subtext0,
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(max_w),

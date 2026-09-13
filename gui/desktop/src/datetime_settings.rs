@@ -762,7 +762,7 @@ impl DateTimeSettingsUI {
             text: search_text,
             font_size: 13.0,
             color: if self.tz_search.is_empty() {
-                p.overlay0
+                p.subtext0
             } else {
                 p.text
             },
@@ -1012,7 +1012,7 @@ impl DateTimeSettingsUI {
                 y: cy + 20.0,
                 text: "No additional clocks. Add one to track time in another city.".into(),
                 font_size: 13.0,
-                color: p.overlay0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 20.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1079,7 +1079,7 @@ impl DateTimeSettingsUI {
                     y: cy + 44.0,
                     text: "Hidden".into(),
                     font_size: 10.0,
-                    color: p.overlay0,
+                    color: p.subtext0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(60.0),
                     overflow: TextOverflow::Ellipsis,

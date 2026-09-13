@@ -1759,8 +1759,6 @@ pub fn render_settings_panel(
                 x: badge_x + 6.0,
                 y: badge_y + (KEY_BADGE_HEIGHT - KEY_FONT_SIZE) / 2.0,
                 text: (*part).to_string(),
-                // Judgement 4: dimmer than the header. A badge quotes a key;
-                // it is not a heading.
                 color: p.subtext0,
                 font_size: KEY_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
@@ -3234,7 +3232,7 @@ mod tests {
             assert!(badge_ink.iter().all(|c| *c == p.subtext0), "badge ink");
 
             for detail in &details {
-                assert_eq!(text_color(&cmds, detail), p.overlay0, "detail ink");
+                assert_eq!(text_color(&cmds, detail), p.subtext0, "detail ink");
             }
 
             // Both branches of the label, in one render: row 0 is selected
@@ -3513,10 +3511,22 @@ mod tests {
                 "in {mode} mode a key badge is lettered as loudly as the \
                  heading; a badge quotes a key, it is not a heading"
             );
+            // Not *quieter* than the badge, only not louder. This panel used
+            // to have three levels of ink -- heading, badge, app name -- and
+            // the quietest was `overlay0`, the disabled grey at 2.30:1 against
+            // the page. Raising it to a readable ink costs the third level,
+            // and the light theme cannot give it back: `LIGHT_SUBTEXT0` and
+            // `LIGHT_SUBTEXT1` are 1.10 apart, which that constant's own doc
+            // comment calls "the same luminance to any eye" -- every ink
+            // clearing 4.5:1 on `surface2` is crowded into one narrow band.
+            //
+            // So the badge is told apart from the app name by *having a
+            // badge*, the rounded fill counted above, rather than by being a
+            // different grey. Legibility wins the conflict: it is the floor,
+            // and a hierarchy is a preference.
             assert!(
-                quieter(detail, ink),
-                "in {mode} mode the app name beside an action is as loud as \
-                 the key badges; it is an argument, not an action"
+                !quieter(ink, detail),
+                "in {mode} mode the app name beside an action is LOUDER than the key badges; it is an argument, not an action"
             );
         }
     }

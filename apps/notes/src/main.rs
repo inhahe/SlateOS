@@ -3100,7 +3100,7 @@ impl NotesApp {
                             x: x + EDITOR_PADDING + 8.0,
                             y: ly + 4.0,
                             text: language.clone(),
-                            color: self.palette.overlay0,
+                            color: self.palette.subtext0,
                             font_size: 10.0,
                             font_weight: FontWeightHint::Light,
                             max_width: Some(max_w - 16.0),

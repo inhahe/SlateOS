@@ -1246,7 +1246,7 @@ impl LoginScreen {
                 text: display,
                 font_size: 14.0,
                 color: if self.password_input.is_empty() {
-                    p.overlay0
+                    p.subtext0
                 } else {
                     p.text
                 },
@@ -2380,12 +2380,12 @@ mod tests {
             assert_eq!(panel_text(&cmds, "Bob", 16.0), p.text, "{mode}: a name");
             assert_eq!(
                 panel_text(&cmds, "Administrator", 11.0),
-                p.overlay0,
+                p.subtext0,
                 "{mode}: an account type"
             );
             assert_eq!(
                 panel_text(&cmds, "Standard", 11.0),
-                p.overlay0,
+                p.subtext0,
                 "{mode}: an account type"
             );
         }
@@ -2476,7 +2476,7 @@ mod tests {
             );
             assert_eq!(
                 panel_text(&cmds, "Password", 14.0),
-                p.overlay0,
+                p.subtext0,
                 "{mode}: the placeholder"
             );
 

@@ -2035,7 +2035,7 @@ impl InputDialog {
                 x: text_x,
                 y: text_y,
                 text: display_text,
-                color: palette.overlay0,
+                color: palette.subtext0,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(text_avail),
@@ -2552,7 +2552,7 @@ impl ProgressDialog {
                 x: x + CONTENT_PADDING,
                 y: content_y,
                 text: detail.clone(),
-                color: palette.overlay0,
+                color: palette.subtext0,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(bar_width),
@@ -2934,7 +2934,7 @@ impl NonModalDialog {
             color: if self.close_hovered {
                 palette.ink(palette.red)
             } else {
-                palette.overlay0
+                palette.subtext0
             },
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,

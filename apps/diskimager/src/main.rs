@@ -3040,7 +3040,7 @@ impl DiskImagerApp {
                 x: x + PANEL_PADDING + 40.0,
                 y: ey + 40.0,
                 text: drive.summary(),
-                color: self.palette.overlay0,
+                color: self.palette.subtext0,
                 font_size: SMALL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 60.0),
@@ -3272,7 +3272,7 @@ impl DiskImagerApp {
             color: if can_write {
                 self.palette.crust
             } else {
-                self.palette.overlay0
+                self.palette.subtext0
             },
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
@@ -3493,7 +3493,7 @@ impl DiskImagerApp {
             color: if can_create {
                 self.palette.crust
             } else {
-                self.palette.overlay0
+                self.palette.subtext0
             },
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
@@ -3616,7 +3616,7 @@ impl DiskImagerApp {
                         x: px + indent,
                         y: ey + 2.0,
                         text: arrow.to_string(),
-                        color: self.palette.overlay0,
+                        color: self.palette.subtext0,
                         font_size: SMALL_FONT_SIZE,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
@@ -3667,7 +3667,7 @@ impl DiskImagerApp {
                         x: size_x,
                         y: ey + 2.0,
                         text: size_text,
-                        color: self.palette.overlay0,
+                        color: self.palette.subtext0,
                         font_size: SMALL_FONT_SIZE,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
@@ -3873,7 +3873,7 @@ impl DiskImagerApp {
             color: if can_hash {
                 self.palette.crust
             } else {
-                self.palette.overlay0
+                self.palette.subtext0
             },
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
@@ -4171,7 +4171,7 @@ impl DiskImagerApp {
                     &drive.serial
                 }
             ),
-            color: self.palette.overlay0,
+            color: self.palette.subtext0,
             font_size: SMALL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - PANEL_PADDING * 2.0),

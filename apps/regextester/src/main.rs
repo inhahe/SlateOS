@@ -2254,7 +2254,7 @@ impl App {
                     y: content_y + 20.0,
                     text: "Enter a pattern to begin".into(),
                     font_size: NORMAL_TEXT,
-                    color: self.palette.overlay0,
+                    color: self.palette.subtext0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - 24.0),
                     overflow: TextOverflow::Ellipsis,
@@ -2360,7 +2360,7 @@ impl App {
                 color: if is_current {
                     self.palette.ink(self.palette.blue)
                 } else {
-                    self.palette.overlay0
+                    self.palette.subtext0
                 },
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width - 16.0),
@@ -2587,7 +2587,7 @@ impl App {
                 y: list_y + 40.0,
                 text: "No patterns in this category".into(),
                 font_size: NORMAL_TEXT,
-                color: self.palette.overlay0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(300.0),
                 overflow: TextOverflow::Ellipsis,

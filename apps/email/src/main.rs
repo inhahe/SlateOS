@@ -2567,7 +2567,7 @@ impl EmailApp {
             text: search_text,
             font_size: 12.0,
             color: if self.search_query.is_empty() {
-                self.palette.overlay0
+                self.palette.subtext0
             } else {
                 self.palette.text
             },
@@ -2785,7 +2785,7 @@ impl EmailApp {
                 y: y + h / 2.0 - 10.0,
                 text: "No messages".to_string(),
                 font_size: 14.0,
-                color: self.palette.overlay0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -3070,7 +3070,7 @@ impl EmailApp {
             y: py,
             text: format!("Date: {}", msg.date),
             font_size: 11.0,
-            color: self.palette.overlay0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,

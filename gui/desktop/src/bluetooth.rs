@@ -787,7 +787,7 @@ impl BluetoothSettingsUI {
                 y: cy + 2.0,
                 text: format!("{hidden} more - scroll to see the rest"),
                 font_size: 10.0,
-                color: p.overlay0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,

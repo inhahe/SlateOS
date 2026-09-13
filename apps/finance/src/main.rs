@@ -1416,7 +1416,7 @@ impl FinanceApp {
             text: search_text,
             font_size: 13.0,
             color: if self.search_query.is_empty() && !self.search_active {
-                self.palette.overlay0
+                self.palette.subtext0
             } else {
                 self.palette.text
             },
@@ -1501,7 +1501,7 @@ impl FinanceApp {
                 y: ry + 10.0,
                 text: tx.date.format(),
                 font_size: 12.0,
-                color: self.palette.overlay0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(80.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1543,7 +1543,7 @@ impl FinanceApp {
                     y: ry + 10.0,
                     text: String::from("\u{1F501}"),
                     font_size: 11.0,
-                    color: self.palette.overlay0,
+                    color: self.palette.subtext0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(20.0),
                     overflow: TextOverflow::Ellipsis,

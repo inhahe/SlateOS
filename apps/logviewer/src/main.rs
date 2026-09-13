@@ -1220,7 +1220,7 @@ impl App {
             color: if self.auto_scroll {
                 self.palette.ink(self.palette.green)
             } else {
-                self.palette.overlay0
+                self.palette.subtext0
             },
             font_weight: FontWeightHint::Regular,
             max_width: Some(80.0),
@@ -1268,7 +1268,7 @@ impl App {
                 color: if active {
                     self.palette.crust
                 } else {
-                    self.palette.overlay0
+                    self.palette.subtext0
                 },
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(w),
@@ -1294,7 +1294,7 @@ impl App {
             text: search_text.into(),
             font_size: SMALL_TEXT,
             color: if self.filter.search_query.is_empty() {
-                self.palette.overlay0
+                self.palette.subtext0
             } else {
                 self.palette.text
             },
@@ -1532,7 +1532,7 @@ impl App {
                 y: y + height / 2.0,
                 text: empty.into(),
                 font_size: NORMAL_TEXT,
-                color: self.palette.overlay0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(250.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1894,7 +1894,7 @@ impl App {
                     FontWeightHint::Regular,
                 ),
                 font_size: SMALL_TEXT,
-                color: self.palette.overlay0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(panel_w - 48.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1915,7 +1915,7 @@ impl App {
             y: y + height / 2.0,
             text: empty.into(),
             font_size: NORMAL_TEXT,
-            color: self.palette.overlay0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(300.0),
             overflow: TextOverflow::Ellipsis,

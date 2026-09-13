@@ -2238,7 +2238,7 @@ impl WhiteboardApp {
             color: if self.show_grid {
                 self.palette.ink(self.palette.green)
             } else {
-                self.palette.overlay0
+                self.palette.subtext0
             },
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
@@ -2259,7 +2259,7 @@ impl WhiteboardApp {
             color: if self.snap_to_grid {
                 self.palette.ink(self.palette.blue)
             } else {
-                self.palette.overlay0
+                self.palette.subtext0
             },
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,

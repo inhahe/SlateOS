@@ -3911,7 +3911,7 @@ pub fn render_tab_bar(
             y: tab_y + 6.0,
             text: "x".to_string(),
             font_size: 11.0,
-            color: pal.overlay0,
+            color: pal.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,

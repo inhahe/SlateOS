@@ -1624,7 +1624,7 @@ impl RecordingHistory {
                 x,
                 y: y + 24.0,
                 text: "No recordings yet.".into(),
-                color: pal.overlay0,
+                color: pal.subtext0,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,

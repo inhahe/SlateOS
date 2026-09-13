@@ -1738,7 +1738,7 @@ impl PdfViewerApp {
             x: x + 4.0,
             y: y + (h - 12.0) / 2.0,
             text: label.to_string(),
-            color: self.palette.subtext0,
+            color: self.palette.overlay0,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(w - 8.0),
@@ -1917,7 +1917,7 @@ impl PdfViewerApp {
                 x: close_x,
                 y: close_y,
                 text: "x".to_string(),
-                color: self.palette.overlay0,
+                color: self.palette.subtext0,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -2220,7 +2220,7 @@ impl PdfViewerApp {
                     x: indent - 12.0,
                     y: y + 4.0,
                     text: arrow.to_string(),
-                    color: self.palette.overlay0,
+                    color: self.palette.subtext0,
                     font_size: 10.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
@@ -2440,7 +2440,7 @@ impl PdfViewerApp {
                     color: if self.can_open() {
                         self.palette.ink(self.palette.blue)
                     } else {
-                        self.palette.overlay0
+                        self.palette.subtext0
                     },
                     font_size: 12.0,
                     font_weight: FontWeightHint::Regular,

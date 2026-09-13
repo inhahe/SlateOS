@@ -1312,7 +1312,7 @@ impl AccountSettingsUI {
                 y: row_y,
                 text: "No activity recorded.".to_string(),
                 font_size: 12.0,
-                color: p.overlay0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width),
                 overflow: TextOverflow::Ellipsis,

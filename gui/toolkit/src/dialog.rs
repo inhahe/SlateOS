@@ -1421,7 +1421,7 @@ impl FileDialog {
             x: indicator_x,
             y: header_y + 6.0,
             text: String::from(indicator),
-            color: palette.overlay0,
+            color: palette.subtext0,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: None,

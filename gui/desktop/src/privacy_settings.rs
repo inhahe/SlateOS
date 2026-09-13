@@ -615,7 +615,7 @@ impl PrivacySettingsUI {
                     y,
                     text: "No apps have requested this permission.".into(),
                     font_size: 12.0,
-                    color: p.overlay0,
+                    color: p.subtext0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width),
                     overflow: TextOverflow::Ellipsis,
@@ -648,7 +648,7 @@ impl PrivacySettingsUI {
                         y: y + 8.0,
                         text: format!("{}×", app.access_count),
                         font_size: 11.0,
-                        color: p.overlay0,
+                        color: p.subtext0,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(width * 0.2),
                         overflow: TextOverflow::Ellipsis,
@@ -699,7 +699,7 @@ impl PrivacySettingsUI {
                     y: y + 22.0,
                     text: kind.description().into(),
                     font_size: 10.0,
-                    color: p.overlay0,
+                    color: p.subtext0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - 16.0),
                     overflow: TextOverflow::Ellipsis,
@@ -726,7 +726,7 @@ impl PrivacySettingsUI {
                 y,
                 text: "No activity recorded yet.".into(),
                 font_size: 13.0,
-                color: p.overlay0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width),
                 overflow: TextOverflow::Ellipsis,
@@ -1626,13 +1626,13 @@ mod tests {
             );
             assert_eq!(
                 rgb(text_containing(&bare, "No apps have requested")),
-                rgb(p.overlay0),
+                rgb(p.subtext0),
                 "{mode}"
             );
             assert_eq!(rgb(text_containing(&full, "App 0")), rgb(p.text), "{mode}");
             assert_eq!(
                 rgb(text_containing(&full, "0\u{d7}")),
-                rgb(p.overlay0),
+                rgb(p.subtext0),
                 "{mode}"
             );
             // The app-state label defers to `PermissionState::color`. Asserting
@@ -1673,13 +1673,13 @@ mod tests {
             );
             assert_eq!(
                 rgb(text_containing(&over, PermissionKind::Camera.description())),
-                rgb(p.overlay0),
+                rgb(p.subtext0),
                 "{mode}"
             );
             // render_activity_tab
             assert_eq!(
                 rgb(text_containing(&none, "No activity recorded")),
-                rgb(p.overlay0),
+                rgb(p.subtext0),
                 "{mode}"
             );
             assert_eq!(

@@ -3756,7 +3756,7 @@ impl NetScanApp {
                     x: text::center_x(empty, area_w / 2.0, 13.0, FontWeightHint::Regular),
                     y: content_y + area_h / 2.0,
                     text: empty.to_string(),
-                    color: self.palette.overlay0,
+                    color: self.palette.subtext0,
                     font_size: 13.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
@@ -3857,7 +3857,7 @@ impl NetScanApp {
                     x: PADDING + 12.0,
                     y: content_y + 30.0,
                     text: format!("{hidden} more hosts not shown"),
-                    color: self.palette.overlay0,
+                    color: self.palette.subtext0,
                     font_size: LEGEND_TEXT,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
@@ -3904,7 +3904,7 @@ impl NetScanApp {
                 x: text::center_x(empty, area_w / 2.0, 13.0, FontWeightHint::Regular),
                 y: content_y + area_h / 2.0,
                 text: empty.to_string(),
-                color: self.palette.overlay0,
+                color: self.palette.subtext0,
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -3932,7 +3932,7 @@ impl NetScanApp {
                 x: PADDING,
                 y: content_y + 30.0,
                 text: "No scan history yet".to_string(),
-                color: self.palette.overlay0,
+                color: self.palette.subtext0,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -4001,7 +4001,7 @@ impl NetScanApp {
                 x: PADDING + 4.0,
                 y: row_y + 7.0,
                 text: entry.id.to_string(),
-                color: self.palette.overlay0,
+                color: self.palette.subtext0,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -4086,7 +4086,7 @@ impl NetScanApp {
                             removed.len()
                         ),
                         color: if added.is_empty() && removed.is_empty() {
-                            self.palette.overlay0
+                            self.palette.subtext0
                         } else {
                             self.palette.ink(self.palette.yellow)
                         },

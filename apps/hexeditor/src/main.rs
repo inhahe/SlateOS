@@ -2633,7 +2633,7 @@ impl HexEditor {
                 x: 4.0,
                 y,
                 text: offset_str,
-                color: self.palette.overlay0,
+                color: self.palette.subtext0,
                 font_size: HEX_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(char_w * 11.0),

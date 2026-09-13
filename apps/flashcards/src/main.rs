@@ -1730,7 +1730,7 @@ impl FlashcardsApp {
                     y: y + 52.0,
                     text: deck.description.clone(),
                     font_size: 11.0,
-                    color: self.palette.overlay0,
+                    color: self.palette.subtext0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(content_w - 48.0),
                     overflow: TextOverflow::Ellipsis,
@@ -1982,7 +1982,7 @@ impl FlashcardsApp {
                     matching.len()
                 ),
                 font_size: 11.0,
-                color: self.palette.overlay0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(150.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2053,7 +2053,7 @@ impl FlashcardsApp {
             },
             font_size: 13.0,
             color: if self.editor_front.is_empty() {
-                self.palette.overlay0
+                self.palette.subtext0
             } else {
                 self.palette.text
             },
@@ -2093,7 +2093,7 @@ impl FlashcardsApp {
             },
             font_size: 13.0,
             color: if self.editor_back.is_empty() {
-                self.palette.overlay0
+                self.palette.subtext0
             } else {
                 self.palette.text
             },
@@ -2133,7 +2133,7 @@ impl FlashcardsApp {
             },
             font_size: 13.0,
             color: if self.editor_tags.is_empty() {
-                self.palette.overlay0
+                self.palette.subtext0
             } else {
                 self.palette.text
             },

@@ -130130,7 +130130,7 @@ detour today on the way to merging a caret-width change.
 target regardless of `--target` on the command line and let the plain workspace
 command work. That is lane A's file, so it is written here rather than done.
 
-## TD-C-OVERLAY0-IS-A-DISABLED-INK-AND-SOME-LIVE-TEXT-IS-DRAWN-IN-IT
+## TD-C-OVERLAY0-IS-A-DISABLED-INK-AND-SOME-LIVE-TEXT-IS-DRAWN-IN-IT -- FIXED 2026-09-13
 
 **Date:** 2026-09-09. **Lane:** C.
 **Where:** `gui/appearance/src/lib.rs` (`LIGHT_OVERLAY0 = #9CA0B0`); about ten
@@ -130181,6 +130181,56 @@ place to fix it. Samples from the live set, to show they are not disabled
 states: `apps/benchmark`'s "Press F5 or click Run to start benchmarking",
 `apps/finance`'s "Total Balance" label, `apps/weather`'s chart axis
 temperatures.
+
+**FIXED 2026-09-13. 473 draws moved to `subtext0`; 14 were genuinely
+disabled and stayed.** `scripts/check-overlay0-ink.py` refuses the live shape
+from now on, and is wired into `check_lane_c_gui_gates`.
+
+**Getting the rule right took four goes, and every wrong version reported a
+clean tree.** Recorded because each failure is the same shape -- a check that
+passes over a population it cannot see:
+
+| the rule said | what it missed |
+|---|---|
+| `overlay0` on the same line as a `tree.text(` call | the struct form, where the ink is five lines below the call. This is the one that made the original entry say "about ten". |
+| a disabled-word within nine lines | `fn render_disabled_button`, whose signature is *ten* lines above its draw |
+| `\benabled\b` | an underscore is a word character, so it never matched `render_disabled_button` or `wifi_enabled` -- which is most of how these words appear in code |
+| `is_empty` counts as disabled | 69 empty-state messages. `if list.is_empty() { draw("No devices found") }` is the one sentence in an empty pane, and WCAG exempts *disabled controls*, not empty lists. |
+| the word anywhere nearby | `text: "No updates available."`, `text: "Disabled".to_string()`, and a comment reading "the placeholder is not editable text" -- none of them a condition |
+| `color:` with the role on that line | a conditional ink spanning five lines. 64 draws, mostly search-box placeholders. Found by a failing test, not by the gate. |
+
+The gate decides by **position** now: the ink expression (however many lines
+it spans), the enclosing function's *name*, or a block that structurally
+encloses the draw -- with string literals and comments blanked before any
+match. Twelve self-test fixtures, four of which expect no finding, so a
+detector that has stopped looking fails rather than passes.
+
+**Three decisions that were not mechanical.**
+
+* **Placeholders became readable.** This entry asked for them to be decided
+  rather than assumed. WCAG exempts disabled controls and says nothing about
+  placeholders, so "Search..." is now legible rather than ghostly.
+* **A hierarchy lost its third level.** `gui/desktop/src/hotkeys.rs` drew
+  heading / key badge / app name as `text` / `subtext0` / `overlay0`. The
+  light theme cannot give the third level back: `LIGHT_SUBTEXT0`'s own doc
+  comment says it and `LIGHT_SUBTEXT1` are 1.10 apart, "the same luminance to
+  any eye", because every ink clearing 4.5:1 on `surface2` is crowded into one
+  band. The badge is now told apart by *having a badge*. Legibility is the
+  floor; a hierarchy is a preference.
+* **`PermissionState::NotDecided` stayed `overlay0`**, and this is a recorded
+  disagreement rather than a decision. Its doc comment argues that raising it
+  would make "a not-decided row start looking decided". WCAG 1.4.3 exempts
+  *inactive* components, and a permission awaiting a choice is fully operable
+  -- "Not decided" is the status the user is there to read. Left alone because
+  it was argued explicitly by whoever wrote it, and overruling that silently
+  would be worse than leaving it. **It is also invisible to the gate**, which
+  sees draw sites and not colour-returning methods, so it is one of the
+  `TD-C-FORTY-NINE-COLOUR-METHODS` class.
+
+**One bug the sweep introduced and the tests caught.** A desktop widget built
+its colour channel by channel -- three separate `if` expressions for red,
+green and blue -- so the sweep moved the red and left the other two, producing
+a colour in no palette at all. Collapsed to one conditional.
 
 **The bug is the sites where nothing is disabled.** `apps/editor`'s status bar
 is the clearest: `tree.text(8.0, bar_y + 5.0, &pos_text, …overlay0, 11.0)` draws

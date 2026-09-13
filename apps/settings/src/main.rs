@@ -1568,7 +1568,7 @@ fn render_disabled_button(tree: &mut RenderTree, pal: &Palette, x: f32, y: f32, 
         pal.surface0,
         6.0,
     );
-    tree.text(x + 12.0, y + 8.0, label, pal.subtext0, 13.0);
+    tree.text(x + 12.0, y + 8.0, label, pal.overlay0, 13.0);
 }
 
 /// Draw a read-only text field showing `value`, inset within a row at `y`.
@@ -2780,7 +2780,7 @@ impl SettingsState {
                 24.0,
                 search_y + 12.0,
                 "\u{1F50D} Search settings...",
-                pal.overlay0,
+                pal.subtext0,
                 13.0,
             );
         } else {
@@ -4025,7 +4025,7 @@ impl SettingsState {
                 fill_rounded(tree, x, y, 580.0, 44.0, pal.surface0, 6.0);
                 tree.text(x + 12.0, y + 8.0, &kb, pal.text, 13.0);
                 tree.text(x + 120.0, y + 8.0, &desc, pal.subtext0, 12.0);
-                tree.text(x + 12.0, y + 26.0, &date, pal.overlay0, 11.0);
+                tree.text(x + 12.0, y + 26.0, &date, pal.subtext0, 11.0);
                 fill_rounded(tree, x + 490.0, y + 12.0, 72.0, 20.0, status_color, 4.0);
                 tree.text(x + 500.0, y + 15.0, status_label, pal.crust, 11.0);
             });

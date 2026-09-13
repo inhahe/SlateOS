@@ -657,7 +657,7 @@ impl LauncherState {
                 x: 12.0,
                 y: text_y,
                 text: "Search...".to_string(),
-                color: p.overlay0,
+                color: p.subtext0,
                 font_size: INPUT_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -831,7 +831,7 @@ impl LauncherState {
                 x: input_width / 2.0 - 40.0,
                 y: results_y_start + 16.0,
                 text: "No results found".to_string(),
-                color: p.overlay0,
+                color: p.subtext0,
                 font_size: NAME_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -1999,9 +1999,14 @@ mod tests {
                 p.text,
                 "a typed query"
             );
+            // `subtext0`, not `overlay0`. WCAG exempts *disabled* controls from
+            // the 4.5:1 floor so that off can look off; it does not exempt a
+            // placeholder, which is live text telling the user what to type.
+            // See TD-C-OVERLAY0-IS-A-DISABLED-INK, which flagged the three
+            // placeholder uses as needing a decision rather than an assumption.
             assert_eq!(
                 text_color(&cmds, "Search..."),
-                p.overlay0,
+                p.subtext0,
                 "the placeholder in an empty field"
             );
 
@@ -2010,7 +2015,7 @@ mod tests {
             none.update_results();
             assert_eq!(
                 text_color(&none.render(&p), "No results found"),
-                p.overlay0,
+                p.subtext0,
                 "the no-results line"
             );
         }
@@ -2227,7 +2232,7 @@ mod tests {
             let p = accented(light);
             assert_eq!(
                 text_color(&five_categories().render(&p), "Search..."),
-                p.overlay0,
+                p.subtext0,
                 "the placeholder"
             );
 
@@ -2241,7 +2246,7 @@ mod tests {
                 "the typed query"
             );
             assert_ne!(
-                p.overlay0, p.text,
+                p.subtext0, p.text,
                 "if these were equal a user could not tell a prompt from the \
                  text they had typed"
             );

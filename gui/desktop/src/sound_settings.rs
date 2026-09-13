@@ -752,7 +752,7 @@ impl SoundSettingsUI {
                 y,
                 text: "No output devices detected.".into(),
                 font_size: 13.0,
-                color: p.overlay0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width),
                 overflow: TextOverflow::Ellipsis,
@@ -825,7 +825,7 @@ impl SoundSettingsUI {
                 y,
                 text: "No input devices detected.".into(),
                 font_size: 13.0,
-                color: p.overlay0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width),
                 overflow: TextOverflow::Ellipsis,
@@ -931,7 +931,7 @@ impl SoundSettingsUI {
                 y,
                 text: "No applications are currently producing audio.".into(),
                 font_size: 13.0,
-                color: p.overlay0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width),
                 overflow: TextOverflow::Ellipsis,
@@ -2072,7 +2072,7 @@ mod tests {
                 assert_eq!(t.len(), 1, "tab {tab} does not say it is empty");
                 assert_eq!(
                     rgb(t[0]),
-                    rgb(p.overlay0),
+                    rgb(p.subtext0),
                     "an empty-list line is not in the faintest role (light={light})"
                 );
             }

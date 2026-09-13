@@ -1171,24 +1171,19 @@ impl DesktopWidgetManager {
                     y,
                     text: display.to_string(),
                     font_size: 12.0,
-                    color: Color::rgba(
-                        if w.state_text.is_empty() {
-                            p.overlay0.r
+                    // One conditional, not three. Choosing the ink per
+                    // channel let a sweep move the red and leave the green and
+                    // blue behind, which produces a colour that is in no
+                    // palette at all -- and it read as three separate
+                    // decisions when it was always one.
+                    color: {
+                        let ink = if w.state_text.is_empty() {
+                            p.subtext0
                         } else {
-                            p.text.r
-                        },
-                        if w.state_text.is_empty() {
-                            p.overlay0.g
-                        } else {
-                            p.text.g
-                        },
-                        if w.state_text.is_empty() {
-                            p.overlay0.b
-                        } else {
-                            p.text.b
-                        },
-                        alpha,
-                    ),
+                            p.text
+                        };
+                        Color::rgba(ink.r, ink.g, ink.b, alpha)
+                    },
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width),
                     overflow: TextOverflow::Ellipsis,
@@ -2283,8 +2278,8 @@ mod tests {
             assert_eq!(written.len(), 1);
             assert_eq!(
                 rgb(empty[0]),
-                rgb(p.overlay0),
-                "an empty note's placeholder is not overlay0 (light={light})"
+                rgb(p.subtext0),
+                "an empty note's placeholder is not subtext0 (light={light})"
             );
             assert_eq!(
                 rgb(written[0]),
@@ -2372,7 +2367,7 @@ mod tests {
                 ("Memory", 10.0, p.subtext0),
                 ("Disk", 10.0, p.subtext0),
                 (WRITTEN_NOTE, 12.0, p.text),
-                (EMPTY_NOTE, 12.0, p.overlay0),
+                (EMPTY_NOTE, 12.0, p.subtext0),
                 (WidgetKind::BatteryStatus.icon(), 28.0, p.ink(p.green)),
                 ("85%", 20.0, p.text),
                 ("3h 42m remaining", 11.0, p.subtext0),
@@ -2489,7 +2484,7 @@ mod tests {
                     ("Add Widget", 16.0, p.text, "the picker's title"),
                     (WidgetKind::Clock.icon(), 16.0, p.blue, "a row's icon"),
                     (WidgetKind::Clock.label(), 13.0, p.text, "a row's label"),
-                    ("1x1", 10.0, p.overlay0, "a row's size hint"),
+                    ("1x1", 10.0, p.subtext0, "a row's size hint"),
                 ] {
                     let t = texts_saying(&cmds, glyph, size);
                     assert!(!t.is_empty(), "{what} is not drawn (light={light})");

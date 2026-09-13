@@ -3244,7 +3244,7 @@ impl PodcastApp {
             color: if self.auto_play_next {
                 self.palette.ink(self.palette.green)
             } else {
-                self.palette.overlay0
+                self.palette.subtext0
             },
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
@@ -3278,7 +3278,7 @@ impl PodcastApp {
                 x: content_x + 16.0,
                 y: row_y + 10.0,
                 text: format!("{}.", idx.saturating_add(1)),
-                color: self.palette.overlay0,
+                color: self.palette.subtext0,
                 font_size: 14.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(30.0),
@@ -3314,7 +3314,7 @@ impl PodcastApp {
                 x: content_x + content_w - 100.0,
                 y: row_y + 10.0,
                 text: format_duration(item.duration_secs),
-                color: self.palette.overlay0,
+                color: self.palette.subtext0,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(80.0),
@@ -3446,7 +3446,7 @@ impl PodcastApp {
                     x: bar_x + bar_w - 70.0,
                     y: info_y + 6.0,
                     text: format!("{:.0}%", item.progress * 100.0),
-                    color: self.palette.overlay0,
+                    color: self.palette.subtext0,
                     font_size: 12.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(60.0),
@@ -3505,7 +3505,7 @@ impl PodcastApp {
                     x: bar_x + bar_w - 90.0,
                     y: info_y,
                     text: ep.file_size_display(),
-                    color: self.palette.overlay0,
+                    color: self.palette.subtext0,
                     font_size: 11.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(80.0),
@@ -3594,7 +3594,7 @@ impl PodcastApp {
                 x: content_x + content_w - 130.0,
                 y: row_y + 30.0,
                 text: entry.listened_at.clone(),
-                color: self.palette.overlay0,
+                color: self.palette.subtext0,
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(120.0),
@@ -3829,7 +3829,7 @@ impl PodcastApp {
             y: input_y + 10.0,
             text: display_text.to_string(),
             color: if self.search_query.is_empty() {
-                self.palette.overlay0
+                self.palette.subtext0
             } else {
                 self.palette.text
             },
@@ -3857,7 +3857,7 @@ impl PodcastApp {
                 x: pad,
                 y: results_y,
                 text: format!("{} results", self.search_results.len()),
-                color: self.palette.overlay0,
+                color: self.palette.subtext0,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(text_w),

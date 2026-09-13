@@ -1385,7 +1385,7 @@ fn render_tag_strip(frame: &mut Frame, state: &AppState, x: f32, y: f32, w: f32,
         color: if state.tag_filter.is_none() {
             state.palette.ink(state.palette.blue)
         } else {
-            state.palette.overlay0
+            state.palette.subtext0
         },
         font_size: 10.0,
         font_weight: FontWeightHint::Bold,
@@ -1419,7 +1419,7 @@ fn render_tag_strip(frame: &mut Frame, state: &AppState, x: f32, y: f32, w: f32,
             color: if active {
                 state.palette.ink(state.palette.teal)
             } else {
-                state.palette.overlay0
+                state.palette.subtext0
             },
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
@@ -1486,7 +1486,7 @@ fn render_history_panel(frame: &mut Frame, state: &AppState, rect: Rect, visible
             } else {
                 "Nothing matches the current filter".to_string()
             },
-            color: state.palette.overlay0,
+            color: state.palette.subtext0,
             font_size: 14.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some((list_w - 32.0).max(0.0)),
@@ -1515,7 +1515,7 @@ fn render_history_panel(frame: &mut Frame, state: &AppState, rect: Rect, visible
             x: detail_x + 16.0,
             y: y + 24.0,
             text: "Select an entry to preview".to_string(),
-            color: state.palette.overlay0,
+            color: state.palette.subtext0,
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1785,7 +1785,7 @@ fn render_detail_panel(
         y: field.y + 4.0,
         text: tag_display,
         color: if tag_input.is_empty() && !tag_focused {
-            pal.overlay0
+            pal.subtext0
         } else {
             pal.text
         },
@@ -1901,7 +1901,7 @@ fn render_templates_panel(frame: &mut Frame, state: &AppState, x: f32, y: f32, w
             x: x + pad,
             y: cy,
             text: "No templates defined. Create one below.".to_string(),
-            color: state.palette.overlay0,
+            color: state.palette.subtext0,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -2139,7 +2139,7 @@ fn render_template_field(
         y,
         text: display,
         color: if field.value.is_empty() && !field.focused {
-            pal.overlay0
+            pal.subtext0
         } else {
             pal.text
         },

@@ -2413,7 +2413,7 @@ impl StickyNotesApp {
                 } else {
                     "No notes match"
                 }),
-                color: self.palette.overlay0,
+                color: self.palette.subtext0,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - 24.0),

@@ -874,7 +874,7 @@ impl LauncherState {
             y: (INPUT_HEIGHT - PADDING) / 2.0 - INPUT_FONT_SIZE / 2.0 + 2.0,
             text: "Search...".to_string(),
             color: if self.query.is_empty() {
-                self.palette.overlay0
+                self.palette.subtext0
             } else {
                 Color::TRANSPARENT
             },
@@ -1070,7 +1070,7 @@ impl LauncherState {
                     x: input_width - badge_width - 40.0,
                     y: row_y + (ROW_HEIGHT - DESC_FONT_SIZE) / 2.0,
                     text: hint,
-                    color: self.palette.overlay0,
+                    color: self.palette.subtext0,
                     font_size: 10.0,
                     font_weight: FontWeightHint::Light,
                     max_width: None,
@@ -1085,7 +1085,7 @@ impl LauncherState {
                 x: input_width / 2.0 - 40.0,
                 y: results_y_start + 16.0,
                 text: "No results found".to_string(),
-                color: self.palette.overlay0,
+                color: self.palette.subtext0,
                 font_size: NAME_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,

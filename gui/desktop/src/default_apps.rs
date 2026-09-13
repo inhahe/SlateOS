@@ -893,7 +893,7 @@ impl DefaultAppsUI {
                 color: if default_app.is_some() {
                     p.ink(p.accent)
                 } else {
-                    p.overlay0
+                    p.subtext0
                 },
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -990,7 +990,7 @@ impl DefaultAppsUI {
             text: search_text,
             font_size: 12.0,
             color: if self.search_query.is_empty() {
-                p.overlay0
+                p.subtext0
             } else {
                 p.text
             },
@@ -1146,7 +1146,7 @@ impl DefaultAppsUI {
             text: search_text,
             font_size: 12.0,
             color: if self.search_query.is_empty() {
-                p.overlay0
+                p.subtext0
             } else {
                 p.text
             },
@@ -1212,7 +1212,7 @@ impl DefaultAppsUI {
                     y: row_y + 10.0,
                     text: "System".to_string(),
                     font_size: 10.0,
-                    color: p.overlay0,
+                    color: p.subtext0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -1228,7 +1228,7 @@ impl DefaultAppsUI {
                     y: row_y + 42.0,
                     text: categories.join(", "),
                     font_size: 10.0,
-                    color: p.overlay0,
+                    color: p.subtext0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - 32.0),
                     overflow: TextOverflow::Ellipsis,
@@ -1934,7 +1934,7 @@ mod tests {
                 text_colors(cats, "\u{25BC}")
                     .iter()
                     .chain(text_colors(cats, "\u{25B2}").iter())
-                    .all(|c| *c == p.overlay0),
+                    .all(|c| *c == p.subtext0),
                 "a chevron is the dimmest thing on the card"
             );
 
@@ -1961,7 +1961,7 @@ mod tests {
             let joins = text_colors(apps, "Music player");
             assert!(joins.len() >= 2, "at least two apps handle music");
             assert!(
-                joins.iter().all(|c| *c == p.overlay0),
+                joins.iter().all(|c| *c == p.subtext0),
                 "the categories an app handles are the dimmest line on its row"
             );
             assert_eq!(
@@ -1984,7 +1984,7 @@ mod tests {
                 "the System badge is drawn as a card"
             );
             assert!(
-                text_colors(apps, "System").iter().all(|c| *c == p.overlay0),
+                text_colors(apps, "System").iter().all(|c| *c == p.subtext0),
                 "the System badge's own label is dimmer than the pill"
             );
 
@@ -2140,7 +2140,7 @@ mod tests {
                 "Web browser and Email ship with no handler"
             );
             assert!(
-                none_set.iter().all(|c| *c == p.overlay0),
+                none_set.iter().all(|c| *c == p.subtext0),
                 "an unset category is dim, not accented"
             );
 
@@ -2301,7 +2301,7 @@ mod tests {
                 let empty = ui.render(&p, 0.0, 0.0, W, H);
                 assert_eq!(
                     text_color(&empty, placeholder),
-                    p.overlay0,
+                    p.subtext0,
                     "{tab:?}'s placeholder"
                 );
 
@@ -2316,7 +2316,7 @@ mod tests {
                 );
             }
             assert_ne!(
-                p.overlay0, p.text,
+                p.subtext0, p.text,
                 "if these were equal a user could not tell a placeholder from \
                  a query they had typed"
             );

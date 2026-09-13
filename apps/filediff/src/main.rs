@@ -1619,7 +1619,7 @@ impl FileDiffApp {
             color: if self.sync_scroll {
                 self.palette.ink(self.palette.green)
             } else {
-                self.palette.overlay0
+                self.palette.subtext0
             },
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Regular,

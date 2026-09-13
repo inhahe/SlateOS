@@ -2445,7 +2445,7 @@ impl ScreenRecorderApp {
                 self.fps_preset.label()
             ),
             font_size: 11.0,
-            color: self.palette.overlay0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0),
             overflow: TextOverflow::Ellipsis,
@@ -3015,7 +3015,7 @@ impl ScreenRecorderApp {
                 y: entry_y + 42.0,
                 text: entry.timestamp_display(),
                 font_size: 10.0,
-                color: self.palette.overlay0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(list_w - 96.0),
                 overflow: TextOverflow::Ellipsis,

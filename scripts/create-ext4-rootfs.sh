@@ -713,14 +713,34 @@ fi
 # SlateOS self-test (self_test_linux_real_glibc_make) writes a trivial Makefile,
 # runs `make`, and asserts the recipe's output, proving make's startup, Makefile
 # parse, and recipe dispatch (make -> /bin/sh -> /bin/emit) all work end to end.
+# WHICH make ends up at /bin/make, stated here because it used to be decided by
+# accident. This block and the `make-slateos.elf` block far below BOTH wrote
+# `$STAGE/bin/make`, and the later one silently won -- so on any tree where the
+# spike artifact exists (which is every tree that has run make-spike/run.sh),
+# /bin/make was OUR cross-compiled make and this copy was 3 MB of dead work.
+#
+# That mattered beyond the wasted copy: `self_test_linux_real_glibc_make` reads
+# /mnt/bin/make -- the same file -- and its name, its comments and the
+# ld-linux/libc.so.6 it stages alongside all describe a glibc PIE. It was
+# running a static binary linked against our own libc.a.
+#
+# The corroboration is the bug that rung found: it died in
+# `posix_spawn_file_actions_init` writing 4,624 bytes into an 80-byte object,
+# which is OUR `posix` crate. A genuine glibc make calls glibc's posix_spawn
+# and could not have reached that code at all.
+#
+# So the precedence is explicit now, and the host copy is a FALLBACK rather
+# than a first write that gets overwritten.
 MAKE_SRC="$(command -v make || true)"
-if [ -n "$MAKE_SRC" ] && [ -e "$MAKE_SRC" ]; then
+if [ -e "$ROOT_DIR/build/spike/make-slateos.elf" ]; then
+    echo "[rootfs] /bin/make: using our own build (staged below); host make not copied"
+elif [ -n "$MAKE_SRC" ] && [ -e "$MAKE_SRC" ]; then
     cp -L "$MAKE_SRC" "$STAGE/bin/make"
-    echo "[rootfs] staged build tool: /bin/make ($MAKE_SRC)"
+    echo "[rootfs] staged build tool: /bin/make ($MAKE_SRC) — host glibc make, FALLBACK"
     echo "[rootfs] make binary DT_NEEDED:"
     readelf -d "$STAGE/bin/make" 2>/dev/null | grep -E 'NEEDED|RUNPATH' | sed 's/^/  /'
 else
-    echo "[rootfs] WARNING: make not found — the make self-test will no-op"
+    echo "[rootfs] WARNING: no make at all — neither our build nor a host one; the make self-test will no-op"
 fi
 
 # --- a REAL C compiler: tcc (TinyCC) ------------------------------------------

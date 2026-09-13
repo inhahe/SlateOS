@@ -4170,6 +4170,16 @@ fi
 # a gate scoped to what changed cannot see a crate that was already wrong.  The
 # unnarrowed run is the answer to that, and `python scripts/check-scratch-config.py`
 # with no arguments is it -- run it when the tree is quiet, not on every push.
+#
+# THE CRATE LIST BEING EMPTY OF SAVE-CAPABLE CRATES IS A PASS, and the checker
+# has to be the one that knows it.  On this gate's first real firing it refused
+# a push that touched four crates, none of which can write settings: the
+# checker's "no save-capable crates selected; refusing to call that a pass"
+# guard fired, which is right for a human who named a crate by hand and wrong
+# for a narrowing that did its job.  The three cases are separate there now --
+# a substring matching nothing is still a refusal, a tree with no save-capable
+# crate at all is still a refusal, and *these named crates cannot save* is an
+# `ok` that says what it looked at.
 scratchcfg="${repo_root:-.}/scripts/check-scratch-config.py"
 skip_scratchcfg=0
 # Bypass: ALLOW_SCRATCH_CONFIG=1 git push origin <branch>

@@ -374,6 +374,27 @@ fn cmd_list() {
     }
 }
 
+/// Persist one piece of tuned's state, or stop and say why.
+///
+/// Every call site was `let _ = std::fs::write(...)` with the success line
+/// printed regardless, so `tuned-adm off` reported "Tuning disabled." whether
+/// or not the marker had actually gone, and `tuned-adm auto_profile` reported
+/// applying a profile whose two state files may both have failed to write.
+fn write_state_or_exit(path: &str, content: &str) {
+    // The directory holds every file this function writes; creating it here
+    // means a first run on a clean system does not fail for want of it, and
+    // the error names the directory rather than surfacing later as a
+    // confusing "path not found" on the file.
+    if let Err(e) = std::fs::create_dir_all(PROFILES_DIR) {
+        eprintln!("tuned-adm: cannot create {}: {e}", quoteaf_os(PROFILES_DIR));
+        process::exit(1);
+    }
+    if let Err(e) = std::fs::write(path, content) {
+        eprintln!("tuned-adm: cannot write {}: {e}", quoteaf_os(path));
+        process::exit(1);
+    }
+}
+
 fn cmd_profile(args: &[String]) {
     if args.is_empty() {
         eprintln!("Error: profile name required");
@@ -389,12 +410,8 @@ fn cmd_profile(args: &[String]) {
         process::exit(1);
     }
 
-    let _ = std::fs::create_dir_all(PROFILES_DIR);
-    if let Err(e) = std::fs::write(ACTIVE_PROFILE, name) {
-        eprintln!("Error setting profile: {}", e);
-        process::exit(1);
-    }
-    let _ = std::fs::write(PROFILE_MODE, "manual");
+    write_state_or_exit(ACTIVE_PROFILE, name);
+    write_state_or_exit(PROFILE_MODE, "manual");
     println!("Applied profile: {}", name);
 }
 
@@ -485,15 +502,28 @@ fn cmd_auto_profile() {
             .unwrap_or_else(|| "balanced".to_string())
     };
 
-    let _ = std::fs::create_dir_all(PROFILES_DIR);
-    let _ = std::fs::write(ACTIVE_PROFILE, &rec);
-    let _ = std::fs::write(PROFILE_MODE, "auto");
+    write_state_or_exit(ACTIVE_PROFILE, &rec);
+    write_state_or_exit(PROFILE_MODE, "auto");
     println!("Applied recommended profile: {}", rec);
 }
 
 fn cmd_off() {
-    let _ = std::fs::remove_file(ACTIVE_PROFILE);
-    let _ = std::fs::write(PROFILE_MODE, "manual");
+    // An absent marker and an unremovable one are different answers. NotFound
+    // means no profile was active, which is the state being asked for; any
+    // other error means the profile is STILL active and saying otherwise
+    // describes a machine that does not exist.
+    match std::fs::remove_file(ACTIVE_PROFILE) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            eprintln!(
+                "tuned-adm: cannot remove {}: {e}",
+                quoteaf_os(ACTIVE_PROFILE)
+            );
+            process::exit(1);
+        }
+    }
+    write_state_or_exit(PROFILE_MODE, "manual");
     println!("Tuning disabled.");
 }
 

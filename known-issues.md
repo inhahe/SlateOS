@@ -70911,6 +70911,29 @@ It is green. `cargo test --workspace` is not.
    exit status rather than a filtered log -- item 2 above, which is the half
    that actually catches this and costs nothing extra.
 
+**Update 2026-09-13 (lane C) — a fourth trap, in the gate itself.**
+
+`scripts/workspace-test.py` exists precisely to make the three log-reading
+mistakes impossible, and it was missing the one this entry is about. Every
+check in it asked whether something went *wrong*; none asked whether anything
+*happened*. A run producing no `test result` line at all -- a `--target` typo, a
+filter matching nothing, cargo's output going somewhere other than the log --
+reached the end with no failures and a zero exit, printed `targets passed: 0`,
+and then printed `PASS` on the next line. The two disagree and the second is
+the one anybody acts on.
+
+It now exits 2 there, not 1: the tree is not red, the measurement is missing,
+and those deserve different answers. Proved able to fire by making `RESULT_OK`
+match nothing and watching a genuinely green `-p guitk --lib` run come back
+*NO TARGET REPORTED A RESULT* instead of *PASS*.
+
+That is this entry's own defect one level up. A crate whose test binary does not
+compile reports nothing and reads as clean; a *gate* that reports nothing reads
+as clean for the same reason and over a much larger population. The guard is
+eight lines and would have caught both of the afternoon's redirection mistakes
+-- `2>&1 > log` puts cargo's output on the terminal and leaves the log empty,
+which is exactly the zero this now refuses.
+
 **Severity.** Medium, and it is a *meta*-defect: it does not itself break
 anything a user can see, it removes the evidence that something else did. The
 specific instance is closed; the hole that let it persist for a day is only

@@ -22675,11 +22675,38 @@ for them to disagree *at*.
 This is `TD-THREE-INDEPENDENT-APPEARANCE-MODELS` recurring with one more copy
 and, unlike that case, without even one working consumer to be the authority.
 
-**Caveat on this one.** I have verified that the compositor has no cursor size.
-I have *not* traced whether some lower layer (a DRM/KMS hardware cursor plane,
-or the input driver) sizes the pointer independently — if one does, the picture
-changes from "nothing reads it" to "something reads it and the settings cannot
-reach it", which is a different fix. That should be checked before work starts.
+**Caveat on this one -- TRACED 2026-09-13, and the answer is "nothing reads
+it".** The caveat asked whether some lower layer sizes the pointer
+independently. It does not. Across all three presenters, every occurrence of
+the word:
+
+| presenter | cursor code |
+|---|---|
+| `present/host.rs` (the Windows dev host) | one `LoadCursorW(IDC_ARROW)` at window-class registration |
+| `present/evdev.rs` and `evdev/sys.rs` | none — the two hits are the word in prose, about an event ring and a keyboard |
+| `present/drm.rs` | **zero occurrences** |
+
+The kernel does have cursor-plane support (`kernel/src/drm/crtc.rs`,
+`drm/uapi.rs` -- "recommended/maximum hardware cursor plane width"), so the
+hardware path exists; the compositor's DRM presenter never reaches for it. So
+the picture stays "nothing reads it", and wiring `cursor_size` to anything
+today would be theatre in the `icon_size` sense: a setting read by code that
+draws nothing.
+
+**And the same trace turns up a second inert thing, larger than the size.**
+`CursorShape` is computed on every pointer move (`cursor_at`), stored
+(`update_cursor_shape`), and exposed by `Compositor::cursor_shape()` -- which
+is read by **two tests and nothing else**. So the I-beam over a text field, the
+resize arrows on a window edge, the hand over a link: all decided, none drawn.
+On the dev host you get Windows' arrow everywhere, because the host window
+class names one cursor once and never changes it.
+
+**Which makes the order of work clear, and it is not this entry.** Four models
+disagreeing about a size matters only once something draws a pointer. The
+first piece is a cursor renderer -- a compositor-drawn pointer on the DRM path,
+or `SetCursor` per shape on the host path -- and *then* the size setting has
+somewhere to land. Reconciling the four models first would be reconciling four
+descriptions of a thing that does not exist.
 
 ### Why this matters more than the count suggests
 

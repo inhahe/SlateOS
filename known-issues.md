@@ -61924,6 +61924,70 @@ turned up on checking it, and both make the remaining work larger:
    one toggle (Mouse Keys); there is no double-click-speed control in the
    settings application at all.
 
+**Update 2026-09-13 (lane C) — six of the eight settings now reach the pointer,
+and the two that do not are one design decision, not eight missing calls.**
+
+Every piece the four-part plan above asked for exists. `gui/inputsettings` is
+the third crate, `ReloadInput` is control verb `0x14`, `apps/settings` has a
+Mouse page with a double-click slider, and `Compositor::set_input_settings`
+applies the value. The road is tested end to end from both ends:
+`a_drag_on_the_mouse_page_reaches_the_file_the_compositor_reads` reads the value
+back through a fresh `InputSettings::read_from` rather than from this process's
+own model, and `a_double_click_change_asks_the_compositor_to_re_read_the_input_file`
+checks the notification is sent.
+
+**What consumes what, measured today rather than inferred from this entry:**
+
+| setting | reaches | where |
+|---|---|---|
+| `double_click_ms` | the compositor's gesture | `set_input_settings` |
+| `accel_gain`, `accel_threshold` | the pointer | `present/evdev.rs:291` |
+| `button_mapping` | left-handed swap | `present/evdev.rs:668` |
+| `natural_scroll` | scroll direction | `present/evdev.rs:732` |
+| `scroll_speed` | scroll magnitude | `present/evdev.rs:737` |
+| **`scroll_mode`** | **nothing** | — |
+| **`scroll_lines`** | **nothing** | — |
+
+The entry's own reasoning for why most of these could not be wired -- "the
+compositor is fed absolute coordinates by `handle_mouse_button`/
+`handle_mouse_move` rather than raw deltas" -- stopped being true when the
+evdev path landed. There are raw deltas now, and five settings ride them.
+
+**The two that remain are one question, and it is bigger than it looks.**
+`scroll_lines` is lines-per-notch and `scroll_mode` is Lines/Pages/Smooth.
+`guitk::wheel` already owns the notch-to-row conversion and already has the
+shape that would take the setting -- `rows_at(dy, rows_per_notch)` exists, and
+`ROWS_PER_NOTCH = 3.0` cites `SPI_GETWHEELSCROLLLINES`, which is precisely
+what `scroll_lines` is. So the arithmetic is not the problem. The delivery is.
+
+*Measured:* `.rows(` has **176** call sites outside `wheel.rs`, `rows_f` 6 and
+`wheel::pixels` 28. Threading a setting through those is not a refactor, it is
+176 chances to forget -- the defect this lane spent the day removing. So the
+setting has to arrive at a chokepoint, and there are three:
+
+| | *What changes* | Cost |
+|---|---|---|
+| **A. Scale at the source.** The compositor multiplies `dy` by `scroll_lines / 3` before sending. | Every consumer honours the setting having changed nothing. | Breaks the documented contract that `dy` is **notches**, `1.0` per detent -- the invariant `event.rs` spends twenty lines defending after twelve consumers each invented their own pixel constant. A trackpad's fractions would also mean something new. |
+| **B. A process-wide rows-per-notch in `guitk::wheel`,** set when input settings change; `rows`/`rows_f`/`pixels` read it. | Same, and the notch stays a notch. | A global that 176 sites read and tests write is the cross-test interference that made the palette counter flake this morning before it was made thread-local. Tests would have to use `rows_at` explicitly. |
+| **C. Leave `scroll_lines` unwired and delete it and `scroll_mode`.** | The two controls disappear from the Mouse page. | Honest, and much smaller. But `SPI_GETWHEELSCROLLLINES` exists on every platform because users do change it. |
+
+`scroll_mode` is the harder half regardless of which is chosen: **Pages** means
+a notch scrolls one viewport, which only the consumer knows the height of, so
+no source-side or global scaling can express it. Any real implementation of
+Pages is per-consumer whatever happens at the chokepoint.
+
+**Recommendation: B for `scroll_lines`, and file `scroll_mode` separately.**
+B keeps the wire contract that the tree has already paid to establish, and the
+test-interference cost is bounded and known. `scroll_mode` is a different
+question -- it is about what a scroll *means* in each view, not about how big
+one is -- and bundling it here is what this entry warned against the first
+time.
+
+**Not started, deliberately.** This is a decision with real alternatives that
+changes scrolling everywhere, and it should begin a session rather than end
+one. What is above is the whole of the preparation: the measurement, the three
+chokepoints, and why A is tempting and wrong.
+
 **So the proper fix is now four pieces, not one call:**
 
 - **(a) A shared `gui/inputsettings` crate**, the counterpart of `appearance` —

@@ -2194,8 +2194,14 @@ impl RemindersApp {
             .push_surface(cmds, x, y, w, h, 0.0, Surface::Sidebar);
 
         // Right border
-        self.palette
-            .push_surface(cmds, x + w - 1.0, y, 1.0, h, 0.0, Surface::Card);
+        cmds.push(RenderCommand::FillRect {
+            x: x + w - 1.0,
+            y: y,
+            width: 1.0,
+            height: h,
+            color: self.palette.surface0,
+            corner_radii: CornerRadii::ZERO,
+        });
 
         let mut row_y = y + PADDING;
 
@@ -2719,8 +2725,14 @@ impl RemindersApp {
             .push_surface(cmds, x, y, w, h, 0.0, Surface::Card);
 
         // Left border
-        self.palette
-            .push_surface(cmds, x, y, 1.0, h, 0.0, Surface::Card);
+        cmds.push(RenderCommand::FillRect {
+            x: x,
+            y: y,
+            width: 1.0,
+            height: h,
+            color: self.palette.surface0,
+            corner_radii: CornerRadii::ZERO,
+        });
 
         let pad = PADDING;
         let mut row_y = y + pad;
@@ -2771,8 +2783,14 @@ impl RemindersApp {
         row_y += 32.0;
 
         // Separator
-        self.palette
-            .push_surface(cmds, x + pad, row_y, content_w, 1.0, 0.0, Surface::Card);
+        cmds.push(RenderCommand::FillRect {
+            x: x + pad,
+            y: row_y,
+            width: content_w,
+            height: 1.0,
+            color: self.palette.surface0,
+            corner_radii: CornerRadii::ZERO,
+        });
         row_y += 12.0;
 
         // Detail fields
@@ -2903,8 +2921,14 @@ impl RemindersApp {
 
         // Description
         if !task.description.is_empty() {
-            self.palette
-                .push_surface(cmds, x + pad, row_y, content_w, 1.0, 0.0, Surface::Card);
+            cmds.push(RenderCommand::FillRect {
+                x: x + pad,
+                y: row_y,
+                width: content_w,
+                height: 1.0,
+                color: self.palette.surface0,
+                corner_radii: CornerRadii::ZERO,
+            });
             row_y += 12.0;
 
             cmds.push(RenderCommand::Text {
@@ -2947,8 +2971,14 @@ impl RemindersApp {
 
         // Subtasks
         if !task.subtasks.is_empty() {
-            self.palette
-                .push_surface(cmds, x + pad, row_y, content_w, 1.0, 0.0, Surface::Card);
+            cmds.push(RenderCommand::FillRect {
+                x: x + pad,
+                y: row_y,
+                width: content_w,
+                height: 1.0,
+                color: self.palette.surface0,
+                corner_radii: CornerRadii::ZERO,
+            });
             row_y += 12.0;
 
             let done_count = task.subtasks.iter().filter(|s| s.completed).count();
@@ -3039,8 +3069,14 @@ impl RemindersApp {
         // Snooze options (if task has a due date and is not completed)
         if task.due.is_some() && !task.completed {
             row_y += 8.0;
-            self.palette
-                .push_surface(cmds, x + pad, row_y, content_w, 1.0, 0.0, Surface::Card);
+            cmds.push(RenderCommand::FillRect {
+                x: x + pad,
+                y: row_y,
+                width: content_w,
+                height: 1.0,
+                color: self.palette.surface0,
+                corner_radii: CornerRadii::ZERO,
+            });
             row_y += 12.0;
 
             cmds.push(RenderCommand::Text {

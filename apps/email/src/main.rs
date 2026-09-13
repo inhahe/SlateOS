@@ -2959,8 +2959,14 @@ impl EmailApp {
 
     fn render_reading_pane(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, _h: f32) {
         // Separator line
-        self.palette
-            .push_surface(cmds, x, y, 1.0, _h, 0.0, Surface::Card);
+        cmds.push(RenderCommand::FillRect {
+            x: x,
+            y: y,
+            width: 1.0,
+            height: _h,
+            color: self.palette.surface0,
+            corner_radii: CornerRadii::ZERO,
+        });
 
         let msg = if let Some(m) = self
             .selected_message
@@ -3065,8 +3071,14 @@ impl EmailApp {
         py += 24.0;
 
         // Separator
-        self.palette
-            .push_surface(cmds, px, py, max_w, 1.0, 0.0, Surface::Card);
+        cmds.push(RenderCommand::FillRect {
+            x: px,
+            y: py,
+            width: max_w,
+            height: 1.0,
+            color: self.palette.surface0,
+            corner_radii: CornerRadii::ZERO,
+        });
         py += 12.0;
 
         // Body preview

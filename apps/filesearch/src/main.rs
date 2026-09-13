@@ -1688,8 +1688,14 @@ impl FileSearchApp {
 
     fn render_preview(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, h: f32) {
         // Separator
-        self.palette
-            .push_surface(cmds, x, y, 1.0, h, 0.0, Surface::Card);
+        cmds.push(RenderCommand::FillRect {
+            x: x,
+            y: y,
+            width: 1.0,
+            height: h,
+            color: self.palette.surface0,
+            corner_radii: CornerRadii::ZERO,
+        });
 
         let entry = if let Some(e) = self.selected_entry() {
             e

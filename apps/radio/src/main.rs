@@ -1483,8 +1483,14 @@ impl RadioApp {
         });
 
         // Separator
-        self.palette
-            .push_surface(cmds, x + w - 1.0, y, 1.0, h, 0.0, Surface::Card);
+        cmds.push(RenderCommand::FillRect {
+            x: x + w - 1.0,
+            y: y,
+            width: 1.0,
+            height: h,
+            color: self.palette.surface0,
+            corner_radii: CornerRadii::ZERO,
+        });
     }
 
     fn render_station_list(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, h: f32) {
@@ -1678,8 +1684,14 @@ impl RadioApp {
             .push_surface(cmds, x, y, w, h, 0.0, Surface::Card);
 
         // Separator
-        self.palette
-            .push_surface(cmds, x, y, w, 1.0, 0.0, Surface::Card);
+        cmds.push(RenderCommand::FillRect {
+            x: x,
+            y: y,
+            width: w,
+            height: 1.0,
+            color: self.palette.surface0,
+            corner_radii: CornerRadii::ZERO,
+        });
 
         if let Some(idx) = self.current_station {
             if let Some(station) = self.stations.get(idx) {
@@ -1778,7 +1790,7 @@ impl RadioApp {
 
         // Volume bar
         self.palette
-            .push_surface(cmds, vol_x, y + 22.0, 80.0, 4.0, 2.0, Surface::Card);
+            .push_surface(cmds, vol_x, y + 22.0, 80.0, 4.0, 2.0, Surface::ControlTrack);
         let vol_fill = if self.muted {
             0.0
         } else {

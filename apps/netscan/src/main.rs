@@ -3559,8 +3559,14 @@ impl NetScanApp {
 
         // Port list header
         dy += 8.0;
-        self.palette
-            .push_surface(tree, x, dy, w, 1.0, 0.0, Surface::Card);
+        tree.push(RenderCommand::FillRect {
+            x: x,
+            y: dy,
+            width: w,
+            height: 1.0,
+            color: self.palette.surface1,
+            corner_radii: CornerRadii::ZERO,
+        });
         dy += 6.0;
         tree.push(RenderCommand::Text {
             x,

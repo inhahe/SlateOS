@@ -1099,7 +1099,13 @@ impl SoundSettingsUI {
         muted: bool,
     ) -> f32 {
         let bar_h = 6.0_f32;
-        p.push_surface(cmds, x, y, width, bar_h, 3.0, Surface::Card);
+        // The groove, not a card: the accent fill drawn over it conveys how
+        // far the volume is dragged, and a magnitude you read off an area
+        // needs an area to read it against. The converter had no word to go
+        // on here -- `render_volume_bar` contains none of `slider`, `track`
+        // or `groove` -- and called it a card; two of this module's own
+        // tests caught it.
+        p.push_surface(cmds, x, y, width, bar_h, 3.0, Surface::ControlTrack);
         let frac = volume as f32 / 100.0;
         let fill_color = if muted { p.red } else { p.accent };
         cmds.push(RenderCommand::FillRect {

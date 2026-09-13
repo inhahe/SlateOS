@@ -7,7 +7,6 @@
 #![allow(dead_code)]
 
 use appearance::Palette;
-use appearance::Surface;
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
@@ -646,7 +645,14 @@ fn text_bold(tree: &mut RenderTree, x: f32, y: f32, content: &str, color: Color,
 /// Draw a section header with underline.
 fn render_section_header(pal: &Palette, tree: &mut RenderTree, x: f32, y: f32, title: &str) -> f32 {
     text_bold(tree, x, y, title, pal.text, 16.0);
-    pal.push_surface(tree, x, y + 24.0, CONTENT_WIDTH, 1.0, 0.0, Surface::Card);
+    tree.push(RenderCommand::FillRect {
+        x: x,
+        y: y + 24.0,
+        width: CONTENT_WIDTH,
+        height: 1.0,
+        color: pal.surface1,
+        corner_radii: CornerRadii::ZERO,
+    });
     y + 36.0
 }
 

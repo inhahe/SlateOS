@@ -3507,8 +3507,14 @@ impl UndeleteApp {
             .push_surface(cmds, x, y, width, height, 0.0, Surface::Card);
 
         // Left border
-        self.palette
-            .push_surface(cmds, x, y, 1.0, height, 0.0, Surface::Card);
+        cmds.push(RenderCommand::FillRect {
+            x: x,
+            y: y,
+            width: 1.0,
+            height: height,
+            color: self.palette.surface0,
+            corner_radii: CornerRadii::ZERO,
+        });
 
         if let Some(file) = self.selected_file() {
             self.render_file_preview(cmds, file, x, y, width);
@@ -3584,8 +3590,14 @@ impl UndeleteApp {
         cy += 64.0;
 
         // Separator
-        self.palette
-            .push_surface(cmds, inner_x, cy, inner_w, 1.0, 0.0, Surface::Card);
+        cmds.push(RenderCommand::FillRect {
+            x: inner_x,
+            y: cy,
+            width: inner_w,
+            height: 1.0,
+            color: self.palette.surface0,
+            corner_radii: CornerRadii::ZERO,
+        });
         cy += 12.0;
 
         // Metadata rows
@@ -3714,8 +3726,14 @@ impl UndeleteApp {
         cy += 24.0;
 
         // Source description
-        self.palette
-            .push_surface(cmds, inner_x, cy, inner_w, 1.0, 0.0, Surface::Card);
+        cmds.push(RenderCommand::FillRect {
+            x: inner_x,
+            y: cy,
+            width: inner_w,
+            height: 1.0,
+            color: self.palette.surface0,
+            corner_radii: CornerRadii::ZERO,
+        });
         cy += 12.0;
 
         cmds.push(RenderCommand::Text {
@@ -3790,8 +3808,14 @@ impl UndeleteApp {
         );
 
         // Separator
-        self.palette
-            .push_surface(cmds, 0.0, y, self.width, 1.0, 0.0, Surface::Card);
+        cmds.push(RenderCommand::FillRect {
+            x: 0.0,
+            y: y,
+            width: self.width,
+            height: 1.0,
+            color: self.palette.surface0,
+            corner_radii: CornerRadii::ZERO,
+        });
 
         // Selection info
         let selected = self.engine.selected_count();

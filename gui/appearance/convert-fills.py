@@ -14,9 +14,16 @@ import collections
 
 ROLES = ("surface0", "surface1", "surface2", "mantle", "crust")
 
+# `volume` earns its place the hard way: `render_volume_bar` contains none of
+# the words below -- no `slider`, no `track`, no `groove` -- so its 6px groove
+# was classified a Card and drawn as an outline with the accent fill spilling
+# across it. sound_settings and radio both had one, and two of sound_settings'
+# own tests caught it. A groove is recognisable by what is drawn *over* it,
+# which is not something a line-oriented pass can see, so the word list is the
+# only lever there is.
 CHROME = re.compile(
     r"track|trough|groove|scrollbar|scroll_bar|thumb|slider|progress|gauge|"
-    r"meter|switch|toggle|knob|handle|tick|grip",
+    r"meter|switch|toggle|knob|handle|tick|grip|volume",
     re.I,
 )
 PANEL = re.compile(r"menu|popup|dropdown|dialog|modal|tooltip|notification|toast|flyout", re.I)

@@ -3109,8 +3109,14 @@ impl PodcastApp {
         detail_y += 36.0;
 
         // Divider.
-        self.palette
-            .push_surface(cmds, pad, detail_y, text_w, 1.0, 0.0, Surface::Card);
+        cmds.push(RenderCommand::FillRect {
+            x: pad,
+            y: detail_y,
+            width: text_w,
+            height: 1.0,
+            color: self.palette.surface0,
+            corner_radii: CornerRadii::ZERO,
+        });
         detail_y += 16.0;
 
         // Description.
@@ -3139,8 +3145,14 @@ impl PodcastApp {
 
         // Notes section.
         if episode.notes.has_content() {
-            self.palette
-                .push_surface(cmds, pad, detail_y, text_w, 1.0, 0.0, Surface::Card);
+            cmds.push(RenderCommand::FillRect {
+                x: pad,
+                y: detail_y,
+                width: text_w,
+                height: 1.0,
+                color: self.palette.surface0,
+                corner_radii: CornerRadii::ZERO,
+            });
             detail_y += 16.0;
 
             cmds.push(RenderCommand::Text {
@@ -3988,8 +4000,14 @@ impl PodcastApp {
         );
 
         // Top border.
-        self.palette
-            .push_surface(cmds, 0.0, bar_y, self.width, 1.0, 0.0, Surface::Card);
+        cmds.push(RenderCommand::FillRect {
+            x: 0.0,
+            y: bar_y,
+            width: self.width,
+            height: 1.0,
+            color: self.palette.surface0,
+            corner_radii: CornerRadii::ZERO,
+        });
 
         // Progress bar across the top.
         let progress = if self.playback_duration_secs > 0 {

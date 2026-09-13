@@ -1596,8 +1596,14 @@ fn render_disk_map(tree: &mut RenderTree, app: &PartitionManagerApp) {
     }
 
     // "Unallocated" in legend
-    app.palette
-        .push_surface(tree, lx, legend_y, 10.0, 10.0, 2.0, Surface::Card);
+    tree.push(RenderCommand::FillRect {
+        x: lx,
+        y: legend_y,
+        width: 10.0,
+        height: 10.0,
+        color: app.palette.surface0,
+        corner_radii: CornerRadii::all(2.0),
+    });
     tree.push(RenderCommand::Text {
         x: lx + 14.0,
         y: legend_y,

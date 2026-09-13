@@ -1749,7 +1749,12 @@ fn run_auditctl(args: &[String]) -> i32 {
     // had -- and `auditctl -l`, which changes nothing, would do it. What the
     // caller loses if we proceed is their whole audit policy, which is
     // design-decisions 1019's refuse case.
-    if let Err(e) = load_rule_store(&mut store) {
+    // Resolved once, here, and handed to both calls: reading the variable
+    // twice would let the store be loaded from one path and saved to another
+    // if it changed in between.
+    let state_path = audit_state_path();
+
+    if let Err(e) = load_rule_store(&mut store, &state_path) {
         eprintln!("auditctl: cannot read the audit rule store: {e}");
         eprintln!(
             "auditctl: refusing to continue -- the next save would replace \
@@ -1761,7 +1766,7 @@ fn run_auditctl(args: &[String]) -> i32 {
     let result = process_auditctl_args(args, &mut store);
 
     // Save the state after modifications.
-    save_rule_store(&store);
+    save_rule_store(&store, &state_path);
 
     result
 }
@@ -2101,9 +2106,23 @@ fn print_auditctl_help() {
 /// Reading bytes rather than text is deliberate too: `read_to_string` fails
 /// for the whole file on a single byte that is not UTF-8, so one stray byte
 /// anywhere in the store used to empty all of it.
-fn load_rule_store(store: &mut RuleStore) -> std::io::Result<()> {
-    let state_path = audit_state_path();
-    let raw = optionalfile::read_bytes_or_empty(&state_path)?;
+/// Load the rule store from `state_path`.
+///
+/// The path is a parameter rather than an `env::var` read inside this
+/// function, and that is not a style preference. It used to call
+/// `audit_state_path()` itself, so the only way to point a test at a fixture
+/// was to set `AUDIT_STATE_FILE` -- and `cargo test` runs a binary's tests as
+/// threads of one process, where an environment variable is shared by all of
+/// them. Two tests doing that raced: one pointed at a missing file expecting
+/// `Ok`, the other at a non-UTF-8 file expecting `Err`, and whichever lost the
+/// interleave read the other's fixture. Reported by lane C, who saw it fail
+/// inside `cargo test --workspace` on a loaded machine while three runs of
+/// `cargo test -p audit` passed.
+///
+/// An environment variable read from inside a library function is awkward to
+/// test by construction; this is that awkwardness surfacing as a flake.
+fn load_rule_store(store: &mut RuleStore, state_path: &Path) -> std::io::Result<()> {
+    let raw = optionalfile::read_bytes_or_empty(state_path)?;
     let content = String::from_utf8(raw).map_err(|e| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -2148,9 +2167,8 @@ fn load_rule_store(store: &mut RuleStore) -> std::io::Result<()> {
 }
 
 /// Save rule store to a simulated state file.
-fn save_rule_store(store: &RuleStore) {
-    let state_path = audit_state_path();
-    if let Some(parent) = Path::new(&state_path).parent() {
+fn save_rule_store(store: &RuleStore, state_path: &Path) {
+    if let Some(parent) = state_path.parent() {
         let _ = fs::create_dir_all(parent);
     }
     let mut content = String::new();
@@ -2160,7 +2178,7 @@ fn save_rule_store(store: &RuleStore) {
     for rule in &store.rules {
         content.push_str(&format!("rule={rule}\n"));
     }
-    let _ = fs::write(&state_path, content);
+    let _ = fs::write(state_path, content);
 }
 
 fn audit_state_path() -> PathBuf {
@@ -2448,11 +2466,14 @@ mod tests {
             line!()
         ));
         let _ = fs::create_dir_all(&dir);
-        // SAFETY: single-threaded test; the variable is read by
-        // `audit_state_path` on this thread only.
-        unsafe { env::set_var("AUDIT_STATE_FILE", dir.join("nope.state")) };
+        // The path is passed, not exported. This used to set
+        // `AUDIT_STATE_FILE` under a SAFETY comment claiming the test was
+        // single-threaded -- true of the test and false of the process:
+        // `cargo test` runs a binary's tests as threads sharing one
+        // environment, so this test and the non-UTF-8 one below overwrote
+        // each other's variable and read each other's fixture.
         let mut store = RuleStore::new();
-        assert!(load_rule_store(&mut store).is_ok());
+        assert!(load_rule_store(&mut store, &dir.join("nope.state")).is_ok());
         assert!(store.rules.is_empty());
         let _ = fs::remove_dir_all(&dir);
     }
@@ -2472,10 +2493,8 @@ mod tests {
         let _ = fs::create_dir_all(&dir);
         let path = dir.join("rules.state");
         fs::write(&path, b"rule=-w /etc/passwd\nrule=\xff\xfe bad\n").unwrap();
-        // SAFETY: single-threaded test, as above.
-        unsafe { env::set_var("AUDIT_STATE_FILE", &path) };
         let mut store = RuleStore::new();
-        let err = load_rule_store(&mut store).expect_err("must not read as empty");
+        let err = load_rule_store(&mut store, &path).expect_err("must not read as empty");
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
         let _ = fs::remove_dir_all(&dir);
     }

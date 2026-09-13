@@ -313,6 +313,14 @@ const TRAY_PADDING: f32 = 8.0;
 /// that widened the tray as notifications arrived would shuffle the window
 /// buttons sideways every time something was posted.
 const TRAY_BELL_WIDTH: f32 = 24.0;
+
+/// How wide one application tray icon's slot is.
+///
+/// The same as the bell, so the tray reads as a row of equal things rather
+/// than a ragged line -- and fixed rather than measured, so that a program
+/// changing its glyph cannot reflow the tray and move every window button
+/// sideways.
+const TRAY_ICON_SLOT: f32 = 24.0;
 /// The bell the tray draws when nothing is being silenced.
 ///
 /// Not read by the renderer, which asks the focus manager for the glyph of
@@ -974,6 +982,18 @@ pub struct DesktopShell {
     /// the keyboard and one chosen in a panel cannot disagree, and the choice
     /// survives a restart the way a user expects.
     pub input_methods: input_method::InputMethodManager,
+    /// The icons other programs have put in the tray.
+    ///
+    /// Held rather than derived: they come from the compositor over `TRAY`
+    /// frames, which is the only place they exist. The shell does not own them
+    /// and cannot invent one -- `design-decisions.md` 842 put the tray here,
+    /// and `guiremote::tray` put the registry in the compositor so that a shell
+    /// restarting does not lose every program's icon.
+    ///
+    /// Order is the compositor's (registration order) and is kept as given: a
+    /// tray whose icons move when an unrelated program registers one is a tray
+    /// where the user's muscle memory is wrong.
+    tray_icons: Vec<guiremote::tray::TrayIcon>,
     pub alt_tab_active: bool,
     /// Alt+Tab selection index.
     pub alt_tab_index: usize,
@@ -1446,6 +1466,7 @@ impl DesktopShell {
             // Which one is *active* is corrected from `input.yaml` by
             // `load_input_settings`; this is only the list.
             input_methods: input_method::InputMethodManager::with_builtins(),
+            tray_icons: Vec::new(),
             alt_tab_active: false,
             alt_tab_index: 0,
             overview: overview::OverviewState::new(),
@@ -4079,6 +4100,24 @@ impl DesktopShell {
         // something is — so one slot carries both "here is your history" and
         // "here is why it has been quiet", without the tray growing a second
         // item and shuffling every window button sideways.
+        // The application icons, left of everything the shell draws itself.
+        //
+        // Drawn in the bar's own ink rather than a colour the program chose:
+        // 842 put the tray in the shell, and the tray is shell chrome. A
+        // program picking its own colour would be choosing against a palette
+        // it cannot see -- the defect `Palette::ink` exists to prevent -- and
+        // on a taskbar the one pair this theme guarantees legible is the bar's
+        // foreground on the bar.
+        for (rect, icon) in self.tray_icon_rects().iter().zip(&self.tray_icons) {
+            tree.text(
+                rect.x,
+                tray_text_y,
+                &icon.glyph,
+                self.theme.taskbar_fg,
+                self.font_size(TextRole::Glyph),
+            );
+        }
+
         let bell = self.bell_rect();
         let unread = self.notifications.attention_count();
         tree.text(
@@ -4537,10 +4576,86 @@ impl DesktopShell {
         let content = self.clock_width()
             + self.scale(TRAY_BELL_WIDTH)
             + self.desktop_indicator_width()
-            + self.layout_indicator_width();
+            + self.layout_indicator_width()
+            // The application icons are part of the tray's width, or the
+            // window buttons would be laid out into space the icons occupy and
+            // the rightmost button would sit under them.
+            + self.app_tray_width();
         // Padding at the right edge, between each pair of items, and at the
         // left of the tray.
         (content + padding * 4.0).max(self.scale(TRAY_MIN_WIDTH))
+    }
+
+    /// The icons other programs have put in the tray.
+    #[must_use]
+    pub fn tray_icons(&self) -> &[guiremote::tray::TrayIcon] {
+        &self.tray_icons
+    }
+
+    /// Adopt a tray list from the compositor.
+    ///
+    /// Answers whether anything changed, so the session can repaint only when
+    /// it must. The compositor already sends a frame only when the list it
+    /// would send differs, so this is a second net rather than the first --
+    /// kept because `apply_window_list` has one for the same reason, and
+    /// because a shell that repainted on every frame it received would repaint
+    /// on reconnection for a list identical to the one it already had.
+    pub fn apply_tray_icons(&mut self, icons: Vec<guiremote::tray::TrayIcon>) -> bool {
+        if self.tray_icons == icons {
+            return false;
+        }
+        self.tray_icons = icons;
+        true
+    }
+
+    /// How wide one tray icon's slot is.
+    ///
+    /// Every icon gets the same slot regardless of its glyph, so the tray does
+    /// not reflow when a program swaps a narrow glyph for a wide one -- the
+    /// same reason the clock is measured rather than assumed, pointing the
+    /// other way: the clock's width is a property of the *user's* format and
+    /// changes rarely; an icon's is a property of another program and can
+    /// change at any moment.
+    fn tray_icon_slot(&self) -> f32 {
+        self.scale(TRAY_ICON_SLOT)
+    }
+
+    /// How much width the application icons take, padding included.
+    fn app_tray_width(&self) -> f32 {
+        if self.tray_icons.is_empty() {
+            return 0.0;
+        }
+        let slot = self.tray_icon_slot();
+        let padding = self.scale(TRAY_PADDING);
+        // One padding between the block and the shell's own items, not one per
+        // icon: the icons sit as a run, which is what makes them read as one
+        // region rather than four unrelated glyphs.
+        slot.mul_add(self.tray_icons.len() as f32, padding)
+    }
+
+    /// Where each application icon is drawn, left to right.
+    ///
+    /// Placed from the shell's own tray items rather than from the display
+    /// edge, so that a wider clock pushes the icons left instead of drawing
+    /// over them -- the rule the rest of the tray already follows.
+    #[must_use]
+    pub fn tray_icon_rects(&self) -> Vec<Rect> {
+        let bar = self.taskbar_rect();
+        let slot = self.tray_icon_slot();
+        let padding = self.scale(TRAY_PADDING);
+        // The left edge of everything the shell itself draws in the tray.
+        let shell_items = self.clock_width()
+            + self.scale(TRAY_BELL_WIDTH)
+            + self.desktop_indicator_width()
+            + self.layout_indicator_width()
+            + padding * 4.0;
+        let mut x = (bar.w - shell_items - self.app_tray_width() + padding).max(0.0);
+        let mut rects = Vec::with_capacity(self.tray_icons.len());
+        for _ in &self.tray_icons {
+            rects.push(Rect::new(x, bar.y, slot, bar.h));
+            x += slot;
+        }
+        rects
     }
 
     /// The notification bell's clickable area, immediately left of the clock.
@@ -8887,6 +9002,103 @@ mod overview_wiring_tests {
     fn bell_centre(s: &DesktopShell) -> (f32, f32) {
         let r = s.bell_rect();
         (r.x + r.w / 2.0, r.y + r.h / 2.0)
+    }
+
+    fn tray_icon(id: u32, glyph: &str, tooltip: &str) -> guiremote::tray::TrayIcon {
+        guiremote::tray::TrayIcon {
+            owner: 99,
+            id,
+            glyph: glyph.to_string(),
+            tooltip: tooltip.to_string(),
+        }
+    }
+
+    /// An icon a program registered is drawn in the taskbar.
+    ///
+    /// The end of the road `guiremote::tray` opened: a program asks the
+    /// compositor, the compositor tells the shell, the shell draws it. This
+    /// asserts the last step by reading the render tree, because every earlier
+    /// step is already covered and none of them proves a pixel.
+    #[test]
+    fn a_registered_icon_reaches_the_taskbar() {
+        let mut s = DesktopShell::new(1920, 1080);
+        let before = s
+            .render_taskbar()
+            .commands
+            .iter()
+            .filter(|c| matches!(c, RenderCommand::Text { text, .. } if text == "\u{1F50B}"))
+            .count();
+        assert_eq!(
+            before, 0,
+            "the fixture glyph must not already be on the bar"
+        );
+
+        assert!(s.apply_tray_icons(vec![tray_icon(1, "\u{1F50B}", "Battery")]));
+        let after = s
+            .render_taskbar()
+            .commands
+            .iter()
+            .filter(|c| matches!(c, RenderCommand::Text { text, .. } if text == "\u{1F50B}"))
+            .count();
+        assert_eq!(after, 1, "the icon the program registered was not drawn");
+    }
+
+    /// The icons widen the tray, so window buttons are not laid out underneath
+    /// them.
+    ///
+    /// The failure this prevents is not a missing icon -- it is a taskbar
+    /// button drawn in the space an icon occupies, which looks like a rendering
+    /// bug anywhere except where it is.
+    #[test]
+    fn icons_take_room_from_the_window_buttons_rather_than_overlapping() {
+        let mut s = DesktopShell::new(1920, 1080);
+        let bare = s.tray_width();
+        assert!(s.apply_tray_icons(vec![tray_icon(1, "A", "one"), tray_icon(2, "B", "two"),]));
+        let with_icons = s.tray_width();
+        assert!(
+            with_icons > bare,
+            "two icons did not widen the tray: {bare} then {with_icons}"
+        );
+    }
+
+    /// Every icon gets a slot inside the bar, left to right, without overlap.
+    #[test]
+    fn each_icon_has_its_own_slot_on_the_bar() {
+        let mut s = DesktopShell::new(1920, 1080);
+        s.apply_tray_icons(vec![
+            tray_icon(1, "A", "one"),
+            tray_icon(2, "B", "two"),
+            tray_icon(3, "C", "three"),
+        ]);
+        let rects = s.tray_icon_rects();
+        assert_eq!(rects.len(), 3);
+        let bar = s.taskbar_rect();
+        for pair in rects.windows(2) {
+            let (a, b) = (pair[0], pair[1]);
+            assert!(a.x + a.w <= b.x + 0.01, "icons overlap: {a:?} then {b:?}");
+        }
+        for r in &rects {
+            assert!(
+                r.x >= 0.0 && r.x + r.w <= bar.w,
+                "an icon is off the bar: {r:?}"
+            );
+        }
+    }
+
+    /// Re-applying the same list is not a change.
+    ///
+    /// The shell repaints on `true`, so answering it for a list identical to
+    /// the one already held would repaint the desktop every time a client
+    /// reconnected and was sent the list it already had.
+    #[test]
+    fn an_unchanged_tray_list_reports_no_change() {
+        let mut s = DesktopShell::new(1920, 1080);
+        let icons = vec![tray_icon(1, "A", "one")];
+        assert!(
+            s.apply_tray_icons(icons.clone()),
+            "the first list is a change"
+        );
+        assert!(!s.apply_tray_icons(icons), "the same list again is not");
     }
 
     #[test]

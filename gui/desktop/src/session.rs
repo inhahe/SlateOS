@@ -224,6 +224,9 @@ pub struct ShellSession<T: Transport> {
     escape_held: bool,
     /// The last window-list revision folded into `shell`.
     revision: u64,
+    /// The tray revision this session has folded in, so a frame that says
+    /// nothing new does not repaint.
+    tray_revision: u64,
     /// Whether the chrome needs repainting before the next block.
     dirty: bool,
     running: bool,
@@ -445,6 +448,10 @@ impl<T: Transport> ShellSession<T> {
         };
 
         events.watch_desktop(true)?;
+        // The tray, on the same terms: a shell is told what other programs put
+        // there, because the compositor holds the registry and the shell holds
+        // the strip it is drawn in.
+        events.watch_tray(true)?;
 
         // The shortcuts, claimed on the panel — the one surface that is mapped
         // for the whole session. The popup surface is unmapped whenever no menu
@@ -501,6 +508,7 @@ impl<T: Transport> ShellSession<T> {
             // Nothing is open on a fresh desktop, and nothing was grabbed above.
             escape_held: false,
             revision: 0,
+            tray_revision: 0,
             dirty: false,
             running: false,
             launches: Vec::new(),
@@ -1256,6 +1264,20 @@ impl<T: Transport> ShellSession<T> {
                 self.request(request)?;
             }
             self.dirty = true;
+            worked = true;
+        }
+
+        // The tray, on its own revision. Separate from the window list
+        // deliberately: the two arrive in different frames and change for
+        // unrelated reasons, and folding them together would repaint the
+        // taskbar for a tray change and vice versa.
+        let tray_latest = self.events.tray_revision();
+        if tray_latest != self.tray_revision {
+            self.tray_revision = tray_latest;
+            let icons = self.events.tray_icons().to_vec();
+            if self.shell.apply_tray_icons(icons) {
+                self.dirty = true;
+            }
             worked = true;
         }
 

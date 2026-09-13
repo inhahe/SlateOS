@@ -3832,7 +3832,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] cpupower/cpufreq-info/cpufreq-set/turbostat: CPU frequency/power control (topology discovery, governor management, 661 lines)
   - [x] thermald/thermal-monitor/thermal-conf: thermal management (zone monitoring, cooling devices, trip points, 678 lines)
   - [x] fwupdmgr/fwupd/fwupdtool: firmware update daemon (LVFS remotes, device discovery, HSI security, 740 lines)
-  - [x] sbctl/sbsign/sbverify/sbkeysync: secure boot management (key enrollment, EFI signing, rotation, 645 lines)
+  - [~] sbctl/sbsign/sbverify/sbkeysync: secure boot management. **Only the READ half exists.** `status` genuinely reads the efivars `SecureBoot`/`SetupMode` variables and the key directories. Key enrollment, EFI signing and rotation are announced and never happen -- `fs::write` appears **zero** times in the crate, and `create-keys` prints "Created: PK.key" and five more for files it does not write. Blocked on a userspace interface to the kernel's `fs::secureboot` (roadmap 2783, which is real); filed as `requests/b-a-sbctl-needs-a-userspace-door-to-fs-secureboot.md`. See known-issues B-PROGRAMS-THAT-INVENT-THEIR-OUTPUT.
   - [ ] podman/buildah/skopeo: container runtime (full CRUD for containers/images/volumes/networks/pods, 4264 lines, 240 tests)
   - [x] snap/snapd/snap-confine: snap package manager (22+ subcommands, store/confinement/assertions, 3361 lines, 147 tests)
   - [x] resolvectl/systemd-resolve/systemd-resolved: DNS resolver service (DNS/DoT/DoH, per-link config, cache stats, 1968 lines, 131 tests)

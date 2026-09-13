@@ -200,49 +200,63 @@ fn cmd_status() {
     );
 }
 
-fn cmd_create_keys() {
-    let _ = std::fs::create_dir_all(PK_DIR);
-    let _ = std::fs::create_dir_all(KEK_DIR);
-    let _ = std::fs::create_dir_all(DB_DIR);
+/// Refuse a subcommand that would have to WRITE secure-boot state.
+///
+/// `fs::write` appears nowhere in this crate. Not one of these commands ever
+/// created a key, signed an image, or changed a firmware variable -- they
+/// printed success and returned, and `sbctl sign` in particular told a user
+/// their kernel image was signed while leaving the file byte-for-byte
+/// unchanged. That is the kind of claim nothing downstream can correct: the
+/// failure surfaces later, as a firmware refusal to boot, to somebody who has
+/// no reason to suspect this tool.
+///
+/// Two different things are missing behind these, and the message says which,
+/// because they have different owners and different prospects:
+///
+/// * **A door to the kernel.** `fs::secureboot` is real -- key enrolment,
+///   image verification, `/proc/secureboot` -- and `posix/` exposes none of
+///   it. Filed as
+///   `requests/b-a-sbctl-needs-a-userspace-door-to-fs-secureboot.md`.
+/// * **A crypto stack.** Generating a PK/KEK/db keypair needs RSA and X.509,
+///   and signing an EFI binary needs Authenticode. Neither exists in this
+///   tree, and neither belongs in the kernel, so that half is not waiting on
+///   lane A at all.
+fn refuse_write(action: &str, missing: &str) -> ! {
+    eprintln!("sbctl: cannot {action}: {missing}");
+    eprintln!("sbctl: nothing was changed");
+    process::exit(1);
+}
 
-    println!("Creating secure boot keys...");
-    println!("  Created: {}/PK.key", PK_DIR);
-    println!("  Created: {}/PK.pem", PK_DIR);
-    println!("  Created: {}/KEK.key", KEK_DIR);
-    println!("  Created: {}/KEK.pem", KEK_DIR);
-    println!("  Created: {}/db.key", DB_DIR);
-    println!("  Created: {}/db.pem", DB_DIR);
-    println!();
-    println!("Keys created successfully.");
-    println!("Next steps:");
-    println!("  1. sbctl enroll-keys  — Enroll keys in firmware");
-    println!("  2. sbctl sign <file>  — Sign EFI binaries");
+const NEEDS_KERNEL_DOOR: &str = "userspace has no interface to the kernel's secure-boot key store; see requests/b-a-sbctl-needs-a-userspace-door-to-fs-secureboot.md";
+
+const NEEDS_CRYPTO: &str =
+    "this system has no RSA or X.509 implementation, so no key pair or signature can be produced";
+
+fn cmd_create_keys() {
+    // It also used to create the three key DIRECTORIES, empty, which is why
+    // `status` then reported "PK: Not enrolled" immediately after this
+    // command said the keys were created: `status` decides by asking whether
+    // the directory is non-empty. The tool contradicted its own success
+    // message on the very next invocation.
+    refuse_write("create secure boot keys", NEEDS_CRYPTO);
 }
 
 fn cmd_enroll_keys(args: &[String]) {
+    // The options are still parsed, so an unknown one is still rejected and
+    // the refusal below names what the caller actually asked for.
     let with_microsoft = args.iter().any(|a| a == "--microsoft" || a == "-m");
-    let with_tpm = args.iter().any(|a| a == "--tpm-eventlog");
-    let yes = args.iter().any(|a| a == "-y" || a == "--yes");
 
-    if !yes {
-        println!("WARNING: Enrolling custom Secure Boot keys will replace all existing keys.");
-        if with_microsoft {
-            println!("Microsoft keys will be included for Windows compatibility.");
-        }
-        println!("Proceed? [y/N]");
-    }
-
-    println!("Enrolling keys...");
-    println!("  PK:  enrolled");
-    println!("  KEK: enrolled");
-    println!("  db:  enrolled");
-    if with_microsoft {
-        println!("  Microsoft keys included in db");
-    }
-    if with_tpm {
-        println!("  TPM event log verified");
-    }
-    println!("Keys enrolled successfully.");
+    // The prompt is gone with the rest. It printed "Proceed? [y/N]" and then
+    // never read stdin -- it enrolled (that is, printed that it had enrolled)
+    // whatever the user would have typed. A confirmation that does not wait
+    // for an answer is worse than none: it teaches the reader that this tool
+    // asks before doing something irreversible, which it does not.
+    let what = if with_microsoft {
+        "enroll keys including Microsoft's"
+    } else {
+        "enroll keys"
+    };
+    refuse_write(what, NEEDS_KERNEL_DOOR);
 }
 
 fn cmd_sign(args: &[String]) {
@@ -273,15 +287,23 @@ fn cmd_sign(args: &[String]) {
         process::exit(1);
     }
 
-    for file in &files {
-        let out = output.as_deref().unwrap_or(file);
-        println!("Signing {} -> {}", quoteaf_os(file), quoteaf_os(out));
-        println!("  Using key: {}/db.key", DB_DIR);
-
-        if save {
-            println!("  Saved to files database.");
-        }
-    }
+    // This printed "Signing X -> Y" and "Using key: .../db.key" for every
+    // file and opened none of them. Of everything in this crate it is the
+    // most dangerous line, because a signature is exactly the claim a user
+    // cannot check by looking: the file is byte-for-byte unchanged, so the
+    // lie is discovered by firmware, at boot, long after anyone would
+    // connect it to this command.
+    //
+    // The refusal names what was asked for -- every file, and the output path
+    // if one was given -- so a script's log says which signing did not happen
+    // rather than merely that one did not.
+    let named = files.iter().map(quoteaf_os).collect::<Vec<_>>().join(", ");
+    let what = match (&output, save) {
+        (Some(o), _) => format!("sign {named} to {}", quoteaf_os(o)),
+        (None, true) => format!("sign {named} and record it in the files database"),
+        (None, false) => format!("sign {named}"),
+    };
+    refuse_write(&what, NEEDS_CRYPTO);
 }
 
 fn cmd_verify(args: &[String]) {
@@ -328,23 +350,15 @@ fn cmd_remove_file(args: &[String]) {
 }
 
 fn cmd_rotate_keys() {
-    println!("Rotating secure boot keys...");
-    println!("  Generated new key pair");
-    println!("  Re-signing all tracked files...");
-
-    let files = read_signed_files();
-    for f in &files {
-        println!("    Signing: {}", f.path);
-    }
-    println!("  Enrolling new keys...");
-    println!("Key rotation complete.");
+    // Announced "Generated new key pair", then re-signing every tracked file
+    // by name, then enrolling. Three fabrications in one command.
+    refuse_write("rotate secure boot keys", NEEDS_CRYPTO);
 }
 
 fn cmd_reset() {
-    println!("Resetting secure boot to setup mode...");
-    println!("  Removing PK...");
-    println!("  Firmware is now in Setup Mode.");
-    println!("Reset complete. Run 'sbctl enroll-keys' to re-enroll.");
+    // Announced removing the PK and putting the firmware in Setup Mode. That
+    // is a change to firmware state that this program cannot make at all.
+    refuse_write("reset secure boot to setup mode", NEEDS_KERNEL_DOOR);
 }
 
 fn cmd_list_enrolled() {
@@ -416,18 +430,15 @@ fn cmd_bundle(args: &[String]) {
         process::exit(1);
     }
 
-    println!("Creating unified kernel image...");
-    if !kernel.is_empty() {
-        println!("  Kernel:  {}", kernel);
-    }
-    if !initrd.is_empty() {
-        println!("  Initrd:  {}", initrd);
-    }
-    if !cmdline.is_empty() {
-        println!("  Cmdline: {}", cmdline);
-    }
-    println!("  Output:  {}", output);
-    println!("Bundle created successfully.");
+    // "Bundle created successfully." for a file that was never opened. A
+    // unified kernel image is a PE binary with the kernel, initrd and cmdline
+    // in named sections, and it is signed -- so it needs the same crypto the
+    // rest of this crate is missing, plus a PE writer.
+    let _ = (&kernel, &initrd, &cmdline);
+    refuse_write(
+        &format!("create the unified kernel image {}", quoteaf_os(&output)),
+        NEEDS_CRYPTO,
+    );
 }
 
 // ── sbsign personality ─────────────────────────────────────────────────

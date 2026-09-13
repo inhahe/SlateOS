@@ -6019,12 +6019,21 @@ check_lane_c_gui_gates() {
     # button labels, four markdown heading levels -- every one of them text
     # whose entire purpose is to be read.
     #
-    # WHY IT NEEDS A GATE AT ALL. It had none: `ink-text.py` lives in
-    # `gui/appearance/` rather than `scripts/`, so `check-gates-are-wired.py`
-    # -- which scans `scripts/check-*.py` -- could not see that nothing ran it.
-    # A property maintained by remembering to run a script is a property that
-    # regresses the first time somebody does not.
-    if ! run_checker ink-text-selftest "$py" "$PROJECT_ROOT/gui/appearance/ink-text.py" --self-test; then
+    # WHY IT NEEDS A GATE AT ALL. It had none: the classifier lives in
+    # `gui/appearance/ink-text.py`, beside the crate whose roles it knows, and
+    # `check-gates-are-wired.py` scans `scripts/check-*.py` -- so the tool that
+    # finds unwired gates could not see that this one was unwired. A property
+    # maintained by remembering to run a script is a property that regresses
+    # the first time somebody does not.
+    #
+    # The gate is `scripts/check-text-ink.py`, a few lines that import the tool
+    # and run its check. Naming the tool directly here was the first attempt
+    # and `check-gate-call-sites.py` refused the push: it resolves a gate's
+    # script against `scripts/`, so a path anywhere else reads as a file that
+    # does not exist. Two checkers assume gates live in `scripts/`, both
+    # assumptions are reasonable, and one wrapper is cheaper than changing
+    # either.
+    if ! run_checker ink-text-selftest "$py" "$PROJECT_ROOT/scripts/check-text-ink.py" --self-test; then
         echo "" >&2
         echo "ERROR: refusing to build.  The ink-text classifier no longer" >&2
         echo "agrees with its own fixtures.  Two of those nine cases are bugs" >&2
@@ -6035,7 +6044,7 @@ check_lane_c_gui_gates() {
     fi
 
     echo "=== Checking that text drawn in an accent goes through ink() ==="
-    if ! run_checker ink-text "$py" "$PROJECT_ROOT/gui/appearance/ink-text.py" --check; then
+    if ! run_checker ink-text "$py" "$PROJECT_ROOT/scripts/check-text-ink.py"; then
         echo "" >&2
         echo "ERROR: refusing to build.  Each site above draws text in an" >&2
         echo "accent-family role without \`ink()\`, so it is whatever contrast" >&2

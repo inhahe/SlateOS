@@ -4101,6 +4101,43 @@ EOF
     exit 1
 fi
 
+# Gate 34 -- help-vs-parser.  An option a program advertises and never reads.
+hvp="${repo_root:-.}/scripts/check-help-vs-parser.py"
+skip_hvp=0
+# Bypass: ALLOW_HELP_VS_PARSER=1 git push origin <branch>
+if [ "${ALLOW_HELP_VS_PARSER:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_HELP_VS_PARSER=1 set - skipping the help-vs-parser gate." >&2
+    skip_hvp=1
+fi
+[ -n "$py" ] || skip_hvp=1
+[ -f "$hvp" ] || skip_hvp=1
+note_gate help-vs-parser "$skip_hvp"
+hvp_failed=0
+if [ "$skip_hvp" != "1" ]; then
+    if ! run_checker help-vs-parser-selftest "$py" "$hvp" --self-test; then
+        echo "pre-push: check-help-vs-parser.py FAILED ITS OWN SELF-TEST - its verdict is not trustworthy." >&2
+        hvp_failed=1
+    else
+        if ! run_checker help-vs-parser "$py" "$hvp"; then
+            hvp_failed=1
+        fi
+    fi
+fi
+if [ "$hvp_failed" != "0" ]; then
+    cat >&2 <<EOF
+pre-push: REFUSING to push - a program advertises an option it never reads.
+The count went 180 to 0 over this session; this keeps it there. An option
+in --help that the parser never looks at is a promise to every script
+that reads the help text, and it fails silently at the call site rather
+than at the program.
+
+To push anyway:
+    ALLOW_HELP_VS_PARSER=1 git push $remote_name ...
+
+EOF
+    exit 1
+fi
+
 if [ "$skip" -eq 0 ] && [ -f "$repo_root/scripts/check-lane-signals.py" ]; then
     if ! "$py" "$repo_root/scripts/check-lane-signals.py" --quiet >&2; then
         echo "" >&2

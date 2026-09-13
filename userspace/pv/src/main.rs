@@ -852,6 +852,11 @@ fn run_shred(args: &[String]) -> Result<(), String> {
             let mut perms = meta.permissions();
             #[allow(clippy::permissions_set_readonly_false)]
             perms.set_readonly(false);
+            // Discarded deliberately: this is --force's best effort to clear a
+            // read-only bit, and it is not the operation the caller asked for.
+            // If it fails, the open-for-write below fails and IS reported,
+            // naming the file. Reporting here as well would turn one failure
+            // into two messages about the same file.
             let _ = fs::set_permissions(path, perms);
         }
 

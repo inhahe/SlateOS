@@ -451,6 +451,10 @@ fn cmd_set_x11_keymap(
     );
 
     if let Some(parent) = Path::new(X11_CONF).parent() {
+        // Discarded deliberately: the write below is checked and reports the
+        // same underlying cause against the path the caller cares about.
+        // `create_dir_all` also succeeds when the directory already exists,
+        // which is every run after the first.
         let _ = fs::create_dir_all(parent);
     }
 

@@ -3263,10 +3263,22 @@ fn cmd_repo(args: &[String]) {
                         process::exit(1);
                     }
                     println!("Removed repository {}", quoteaf_os(name));
-                    // Also remove cached index
+                    // The repository itself is gone by here -- that removal
+                    // was checked above and its failure exits. What is left is
+                    // the cached index, and a stale one is visible: it can
+                    // still be listed. So the failure is reported rather than
+                    // discarded, but it does not change the exit status,
+                    // because the thing the caller asked for DID happen.
                     let db = PackageDb::new();
                     let index_path = db.repo_index_path(name);
-                    let _ = fs::remove_file(index_path);
+                    if let Err(e) = fs::remove_file(&index_path)
+                        && e.kind() != std::io::ErrorKind::NotFound
+                    {
+                        eprintln!(
+                            "pkg: warning: the repository is removed but its                              cached index {} could not be deleted: {e}",
+                            quoteaf_os(&index_path)
+                        );
+                    }
                 }
                 Err(e) => {
                     eprintln!("pkg: {e}");

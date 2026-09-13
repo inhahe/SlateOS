@@ -15,12 +15,17 @@
 //   pinky [OPTIONS] [user...]
 
 #![cfg_attr(not(test), no_main)]
-// Several fields are read from utmp/finger structures whose full layout we
-// preserve even when the current minimal output doesn't render every
-// column (pid, home_phone, idle_sort, OldMail status). The MailStatus
-// variants share the `Mail` postfix because that matches the finger
-// protocol's terminology.
-#![allow(dead_code, clippy::enum_variant_names)]
+// The MailStatus variants share the `Mail` postfix because that matches the
+// finger protocol's terminology.
+//
+// `dead_code` used to be allowed here too, under a note listing "pid,
+// home_phone, idle_sort, OldMail status" as fields whose utmp layout is
+// preserved. That was right about three of them and wrong about
+// `idle_sort`, which is a `Config` field and not a utmp one -- and it
+// predated the six functions orphaned when the `w` personality was
+// deleted, so it covered five items and silenced eleven. The reasons now
+// sit on the items.
+#![allow(clippy::enum_variant_names)]
 
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -61,6 +66,10 @@ struct UtmpEntry {
     tty: Vec<u8>,
     host: Vec<u8>,
     login_time: u64,
+    // Parsed from the utmp record and not rendered by the current output. Kept
+    // so the struct matches the on-disk layout rather than the subset finger
+    // prints today.
+    #[allow(dead_code)]
     pid: u32,
     /// Seconds since the terminal was last written to, or `None` when that
     /// could not be found out. THIS WAS `u64` AND ALWAYS ZERO -- set where the
@@ -68,6 +77,8 @@ struct UtmpEntry {
     /// as "  .  ", meaning active right now. Every user, always, including one
     /// away for three hours.
     idle_secs: Option<u64>,
+    // Same: parsed from utmp, not rendered.
+    #[allow(dead_code)]
     what: Vec<u8>,
 }
 
@@ -81,6 +92,10 @@ struct UserInfo {
     shell: Vec<u8>,
     office: Vec<u8>,
     office_phone: Vec<u8>,
+    // Parsed from the utmp record and not rendered by the current output. Kept
+    // so the struct matches the on-disk layout rather than the subset finger
+    // prints today.
+    #[allow(dead_code)]
     home_phone: Vec<u8>,
     plan: Option<String>,
     project: Option<String>,
@@ -91,6 +106,10 @@ struct UserInfo {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MailStatus {
     NoMail,
+    // `finger` reports mail status as present/absent; nothing distinguishes
+    // mail that has been read from mail that has not, so this variant has no
+    // producer. Kept as part of the protocol's vocabulary.
+    #[allow(dead_code)]
     OldMail,
     NewMail,
 }
@@ -106,6 +125,11 @@ struct Config {
     no_header: bool,
     short_format: bool,
     long_format: bool,
+    // No option sets this. It is not an option that is parsed and ignored --
+    // there is no `-i` here to set it -- it is a `Config` field that has only
+    // ever held its default. The crate-level note this replaces described it as
+    // a preserved utmp field, which it is not.
+    #[allow(dead_code)]
     idle_sort: bool,
     show_help: bool,
     show_version: bool,
@@ -378,6 +402,17 @@ fn get_user_info(username: &str) -> UserInfo {
 /// a machine that booted within the last minute, which is a perfectly ordinary
 /// thing for a real system to say and gave a caller no way to tell the two
 /// apart.
+// Orphaned when the `w` personality was deleted: `detect_personality` now
+// says "finger is the default now that w is gone". These are the *fixed*
+// versions of what `w` needed -- `get_load_avg` used to return a hardcoded
+// "load average: 0.00, 0.00, 0.00" and now reads /proc and returns None
+// when it cannot, with `(unknown)` rendered for the absent case.
+//
+// Kept rather than deleted with the personality, because they are the
+// honest replacements for the reason it was removed and they are covered by
+// 15 tests. `get_current_time` went, being the one of the six with no
+// caller and no test.
+#[allow(dead_code)]
 fn get_uptime_str() -> String {
     format_uptime_field(std::fs::read_to_string("/proc/uptime").ok().as_deref())
 }
@@ -388,6 +423,7 @@ fn get_uptime_str() -> String {
 /// read or is short. It used to return **`"load average: 0.00, 0.00, 0.00"`**,
 /// which is what an idle machine reports -- and an idle machine is exactly
 /// what someone running `w` might be trying to confirm.
+#[allow(dead_code)]
 fn get_load_avg() -> String {
     format_load_field(std::fs::read_to_string("/proc/loadavg").ok().as_deref())
 }
@@ -396,10 +432,12 @@ fn get_load_avg() -> String {
 ///
 /// Parenthesised so that it cannot be read as a value: an uptime may be
 /// `0:00` and a load average may be `0.00`, but neither is ever `(unknown)`.
+#[allow(dead_code)]
 const UNKNOWN_FIELD: &str = "(unknown)";
 
 /// Split out of [`get_uptime_str`] so the no-file and malformed-file paths can
 /// be tested, which they could not be while the read was inside the formatter.
+#[allow(dead_code)]
 fn format_uptime_field(content: Option<&str>) -> String {
     let Some(secs) = content
         .and_then(|c| c.split_whitespace().next().map(str::to_string))
@@ -420,17 +458,13 @@ fn format_uptime_field(content: Option<&str>) -> String {
 }
 
 /// Split out of [`get_load_avg`] for the same reason.
+#[allow(dead_code)]
 fn format_load_field(content: Option<&str>) -> String {
     let parts: Vec<&str> = content.unwrap_or_default().split_whitespace().collect();
     match parts.get(..3) {
         Some([one, five, fifteen]) => format!("load average: {one}, {five}, {fifteen}"),
         _ => format!("load average: {UNKNOWN_FIELD}"),
     }
-}
-
-fn get_current_time() -> String {
-    // Simplified — would read from system clock
-    "00:00:00".to_string()
 }
 
 fn format_idle(secs: Option<u64>) -> String {
@@ -699,6 +733,10 @@ fn write_col(writer: &mut dyn Write, bytes: &[u8], width: usize) -> io::Result<(
 // Help / version
 // ---------------------------------------------------------------------------
 
+// Reachable only from `main`, which the test harness replaces (this crate is
+// `#![cfg_attr(not(test), no_main)]`), so it is dead in the test build and
+// live in the real one. Scoped to `test` rather than allowed outright.
+#[cfg_attr(test, allow(dead_code))]
 fn print_help(personality: Personality) {
     match personality {
         Personality::Finger => {
@@ -733,6 +771,10 @@ fn print_help(personality: Personality) {
     }
 }
 
+// Reachable only from `main`, which the test harness replaces (this crate is
+// `#![cfg_attr(not(test), no_main)]`), so it is dead in the test build and
+// live in the real one. Scoped to `test` rather than allowed outright.
+#[cfg_attr(test, allow(dead_code))]
 fn print_version(personality: Personality) {
     let name = match personality {
         Personality::Finger => "finger",

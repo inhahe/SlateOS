@@ -2697,7 +2697,11 @@ impl EmailApp {
                 y: my + 7.0,
                 text: format!("{icon} {}", mb.name),
                 font_size: 12.0,
-                color: if is_sel { self.palette.ink(self.palette.blue) } else { self.palette.subtext1 },
+                color: if is_sel {
+                    self.palette.ink(self.palette.blue)
+                } else {
+                    self.palette.subtext1
+                },
                 font_weight: if is_sel {
                     FontWeightHint::Bold
                 } else {

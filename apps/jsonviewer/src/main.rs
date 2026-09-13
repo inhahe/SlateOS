@@ -3172,7 +3172,11 @@ impl App {
                     x: indent_x,
                     y: row_y + 14.0,
                     text: node.label.clone(),
-                    color: if node.expandable { self.palette.ink(self.palette.mauve) } else { self.palette.ink(self.palette.blue) },
+                    color: if node.expandable {
+                        self.palette.ink(self.palette.mauve)
+                    } else {
+                        self.palette.ink(self.palette.blue)
+                    },
                     font_size: NORMAL_TEXT,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(width * 0.4),

@@ -1609,7 +1609,11 @@ mod tests {
             // The Region tab: both heading rungs, a label/value pair, and the
             // currency rows, whose current entry is raised the same way.
             let region = &by_tab[2].1;
-            assert_eq!(text_color(region, "Measurement"), p.ink(p.lavender), "heading");
+            assert_eq!(
+                text_color(region, "Measurement"),
+                p.ink(p.lavender),
+                "heading"
+            );
             assert_eq!(
                 text_color(region, "Available Currencies"),
                 p.subtext1,

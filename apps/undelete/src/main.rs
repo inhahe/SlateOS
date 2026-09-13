@@ -3120,7 +3120,11 @@ impl UndeleteApp {
             x: PADDING,
             y: all_y + 6.0,
             text: format!("All Files ({})", self.engine.files.len()),
-            color: if all_selected { self.palette.ink(self.palette.blue) } else { self.palette.subtext1 },
+            color: if all_selected {
+                self.palette.ink(self.palette.blue)
+            } else {
+                self.palette.subtext1
+            },
             font_size: FONT_SIZE,
             font_weight: if all_selected {
                 FontWeightHint::Bold
@@ -3163,7 +3167,11 @@ impl UndeleteApp {
                 x: PADDING + 16.0,
                 y: item_y + 6.0,
                 text: format!("{} ({})", cat.display_name(), count),
-                color: if is_selected { self.palette.ink(self.palette.blue) } else { self.palette.subtext1 },
+                color: if is_selected {
+                    self.palette.ink(self.palette.blue)
+                } else {
+                    self.palette.subtext1
+                },
                 font_size: FONT_SIZE,
                 font_weight: if is_selected {
                     FontWeightHint::Bold

@@ -1342,7 +1342,11 @@ impl WeatherApp {
                 y: y + 16.0,
                 text: label.to_string(),
                 font_size: 13.0,
-                color: if is_active { self.palette.ink(self.palette.blue) } else { self.palette.subtext0 },
+                color: if is_active {
+                    self.palette.ink(self.palette.blue)
+                } else {
+                    self.palette.subtext0
+                },
                 font_weight: if is_active {
                     FontWeightHint::Bold
                 } else {
@@ -1949,7 +1953,11 @@ impl WeatherApp {
                 y: ry,
                 text: format!("{}%", day.precip_pct),
                 font_size: 13.0,
-                color: if day.precip_pct > 50 { self.palette.ink(self.palette.blue) } else { self.palette.subtext0 },
+                color: if day.precip_pct > 50 {
+                    self.palette.ink(self.palette.blue)
+                } else {
+                    self.palette.subtext0
+                },
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -2142,7 +2150,11 @@ impl WeatherApp {
                 y: cy,
                 text: format!("{}%", hf.precip_pct),
                 font_size: 13.0,
-                color: if hf.precip_pct > 30 { self.palette.ink(self.palette.blue) } else { self.palette.subtext0 },
+                color: if hf.precip_pct > 30 {
+                    self.palette.ink(self.palette.blue)
+                } else {
+                    self.palette.subtext0
+                },
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,

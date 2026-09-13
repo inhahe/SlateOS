@@ -1590,7 +1590,13 @@ impl RadioApp {
                     y: ry + 4.0,
                     text: station.name.clone(),
                     font_size: 13.0,
-                    color: if is_playing { self.palette.ink(self.palette.green) } else if is_sel { self.palette.text } else { self.palette.subtext1 },
+                    color: if is_playing {
+                        self.palette.ink(self.palette.green)
+                    } else if is_sel {
+                        self.palette.text
+                    } else {
+                        self.palette.subtext1
+                    },
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(w - 100.0),
                     overflow: TextOverflow::Ellipsis,
@@ -1695,7 +1701,11 @@ impl RadioApp {
                     y: y + 8.0,
                     text: station.name.clone(),
                     font_size: 14.0,
-                    color: if self.play_state == PlayState::Playing { self.palette.ink(self.palette.green) } else { self.palette.text },
+                    color: if self.play_state == PlayState::Playing {
+                        self.palette.ink(self.palette.green)
+                    } else {
+                        self.palette.text
+                    },
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(250.0),
                     overflow: TextOverflow::Ellipsis,
@@ -1768,7 +1778,11 @@ impl RadioApp {
             y: y + 8.0,
             text: vol_label,
             font_size: 10.0,
-            color: if self.muted { self.palette.ink(self.palette.red) } else { self.palette.subtext1 },
+            color: if self.muted {
+                self.palette.ink(self.palette.red)
+            } else {
+                self.palette.subtext1
+            },
             font_weight: FontWeightHint::Regular,
             max_width: Some(80.0),
             overflow: TextOverflow::Ellipsis,

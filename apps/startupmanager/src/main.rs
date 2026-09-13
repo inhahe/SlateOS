@@ -2287,7 +2287,11 @@ impl StartupUI {
                 x: rect.x + 4.0,
                 y: rect.y + ((rect.h - FONT_SIZE_SMALL) / 2.0).max(0.0),
                 text: label,
-                color: if active { self.palette.ink(self.palette.blue) } else { self.palette.text },
+                color: if active {
+                    self.palette.ink(self.palette.blue)
+                } else {
+                    self.palette.text
+                },
                 font_size: FONT_SIZE_SMALL,
                 font_weight: if active {
                     FontWeightHint::Bold

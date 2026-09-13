@@ -1884,7 +1884,8 @@ mod tests {
                 let icon = texts_saying(&hovered, EXT_ICON);
                 assert_eq!(icon.len(), 1, "expected one extension icon (light={light})");
                 assert_eq!(
-                    icon[0], p.ink(p.accent),
+                    icon[0],
+                    p.ink(p.accent),
                     "a hovered extension's icon is not the accent (light={light})"
                 );
 

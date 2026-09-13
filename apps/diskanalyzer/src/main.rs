@@ -1762,7 +1762,11 @@ impl DiskAnalyzerUI {
                 x: bx,
                 y: y + 8.0,
                 text: segment.clone(),
-                color: if i == last { self.palette.text } else { self.palette.ink(self.palette.blue) },
+                color: if i == last {
+                    self.palette.text
+                } else {
+                    self.palette.ink(self.palette.blue)
+                },
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(BREADCRUMB_MAX_SEGMENT),
@@ -2172,7 +2176,13 @@ impl DiskAnalyzerUI {
             x: PADDING,
             y: y + 6.0,
             text: self.status_text(),
-            color: if self.scan_error.is_some() { self.palette.ink(self.palette.red) } else if !self.complete { self.palette.ink(self.palette.yellow) } else { self.palette.subtext0 },
+            color: if self.scan_error.is_some() {
+                self.palette.ink(self.palette.red)
+            } else if !self.complete {
+                self.palette.ink(self.palette.yellow)
+            } else {
+                self.palette.subtext0
+            },
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 2.0 * PADDING),

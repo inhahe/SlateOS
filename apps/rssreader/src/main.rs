@@ -3370,7 +3370,11 @@ impl RssReaderApp {
             y: cy + 6.0,
             text: "Starred".to_string(),
             font_size: 13.0,
-            color: if is_starred_selected { self.palette.ink(self.palette.yellow) } else { self.palette.subtext0 },
+            color: if is_starred_selected {
+                self.palette.ink(self.palette.yellow)
+            } else {
+                self.palette.subtext0
+            },
             font_weight: FontWeightHint::Regular,
             max_width: Some(panel_width - 60.0),
             overflow: TextOverflow::Ellipsis,

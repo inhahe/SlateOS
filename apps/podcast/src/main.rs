@@ -3241,7 +3241,11 @@ impl PodcastApp {
                 "Auto-play: {}",
                 if self.auto_play_next { "On" } else { "Off" }
             ),
-            color: if self.auto_play_next { self.palette.ink(self.palette.green) } else { self.palette.overlay0 },
+            color: if self.auto_play_next {
+                self.palette.ink(self.palette.green)
+            } else {
+                self.palette.overlay0
+            },
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(content_w - 32.0),

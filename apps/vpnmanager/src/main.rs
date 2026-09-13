@@ -3496,7 +3496,11 @@ fn render_status_bar(frame: &mut Frame, app: &VpnManager) {
         y: y + 8.0,
         text: format!("{active} connected"),
         font_size: 11.0,
-        color: if active > 0 { app.palette.ink(app.palette.green) } else { app.palette.overlay0 },
+        color: if active > 0 {
+            app.palette.ink(app.palette.green)
+        } else {
+            app.palette.overlay0
+        },
         font_weight: FontWeightHint::Regular,
         max_width: None,
         overflow: TextOverflow::Clip,

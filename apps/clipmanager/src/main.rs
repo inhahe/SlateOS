@@ -1321,7 +1321,11 @@ fn render_tab_bar(frame: &mut Frame, state: &AppState, x: f32, y: f32, w: f32, h
             x: rect.x + 16.0,
             y: y + 8.0,
             text: label.to_string(),
-            color: if is_active { state.palette.ink(state.palette.blue) } else { state.palette.subtext0 },
+            color: if is_active {
+                state.palette.ink(state.palette.blue)
+            } else {
+                state.palette.subtext0
+            },
             font_size: 13.0,
             font_weight: if is_active {
                 FontWeightHint::Bold
@@ -1378,7 +1382,11 @@ fn render_tag_strip(frame: &mut Frame, state: &AppState, x: f32, y: f32, w: f32,
         x: all.x + 7.0,
         y: all.y + 4.0,
         text: "All".to_string(),
-        color: if state.tag_filter.is_none() { state.palette.ink(state.palette.blue) } else { state.palette.overlay0 },
+        color: if state.tag_filter.is_none() {
+            state.palette.ink(state.palette.blue)
+        } else {
+            state.palette.overlay0
+        },
         font_size: 10.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
@@ -1408,7 +1416,11 @@ fn render_tag_strip(frame: &mut Frame, state: &AppState, x: f32, y: f32, w: f32,
             x: chip.x + 6.0,
             y: chip.y + 4.0,
             text: tag.clone(),
-            color: if active { state.palette.ink(state.palette.teal) } else { state.palette.overlay0 },
+            color: if active {
+                state.palette.ink(state.palette.teal)
+            } else {
+                state.palette.overlay0
+            },
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1917,7 +1929,11 @@ fn render_templates_panel(frame: &mut Frame, state: &AppState, x: f32, y: f32, w
                 x: row.x + 8.0,
                 y: row.y + 8.0,
                 text: tmpl.name.clone(),
-                color: if is_sel { state.palette.ink(state.palette.blue) } else { state.palette.text },
+                color: if is_sel {
+                    state.palette.ink(state.palette.blue)
+                } else {
+                    state.palette.text
+                },
                 font_size: 13.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(180.0),

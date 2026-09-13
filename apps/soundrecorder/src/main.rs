@@ -1655,7 +1655,11 @@ impl RecordingHistory {
                 x: x + 8.0,
                 y: ey + 4.0,
                 text: entry.filename.clone(),
-                color: if is_selected { pal.ink(pal.blue) } else { pal.text },
+                color: if is_selected {
+                    pal.ink(pal.blue)
+                } else {
+                    pal.text
+                },
                 font_size: 13.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width * 0.5),

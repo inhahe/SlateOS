@@ -668,7 +668,11 @@ impl SoundSettingsUI {
                 }
             ),
             font_size: 14.0,
-            color: if self.settings.master_muted { p.ink(p.red) } else { p.text },
+            color: if self.settings.master_muted {
+                p.ink(p.red)
+            } else {
+                p.text
+            },
             font_weight: FontWeightHint::Regular,
             max_width: Some(inner),
             overflow: TextOverflow::Ellipsis,
@@ -953,7 +957,11 @@ impl SoundSettingsUI {
                 y: y + 6.0,
                 text: format!("{}%{}", entry.volume, muted_txt),
                 font_size: 13.0,
-                color: if entry.muted { p.ink(p.red) } else { p.subtext0 },
+                color: if entry.muted {
+                    p.ink(p.red)
+                } else {
+                    p.subtext0
+                },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width * 0.4),
                 overflow: TextOverflow::Ellipsis,
@@ -1012,7 +1020,11 @@ impl SoundSettingsUI {
                 y: y + 6.0,
                 text: status.into(),
                 font_size: 12.0,
-                color: if sc.enabled { p.ink(p.green) } else { p.overlay0 },
+                color: if sc.enabled {
+                    p.ink(p.green)
+                } else {
+                    p.overlay0
+                },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width * 0.15),
                 overflow: TextOverflow::Ellipsis,
@@ -1891,7 +1903,11 @@ mod tests {
             // render(): the muted master label.
             let m = texts_saying(&draw(&muted_ui(0), &p), "Master Volume: 60% (Muted)", 14.0);
             assert_eq!(m.len(), 1);
-            assert_eq!(rgb(m[0]), rgb(p.ink(p.red)), "a muted master label is not red");
+            assert_eq!(
+                rgb(m[0]),
+                rgb(p.ink(p.red)),
+                "a muted master label is not red"
+            );
 
             // render_output_tab.
             let out = draw(&full_ui(0), &p);

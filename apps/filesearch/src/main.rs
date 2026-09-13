@@ -1453,7 +1453,11 @@ impl FileSearchApp {
                 y: fy + 4.0,
                 text: format!("{} {cat}", category_icon(*cat)),
                 font_size: 11.0,
-                color: if is_sel { self.palette.ink(self.palette.blue) } else { self.palette.subtext1 },
+                color: if is_sel {
+                    self.palette.ink(self.palette.blue)
+                } else {
+                    self.palette.subtext1
+                },
                 font_weight: if is_sel {
                     FontWeightHint::Bold
                 } else {
@@ -1499,7 +1503,11 @@ impl FileSearchApp {
                 y: fy + 4.0,
                 text: sf.label().to_string(),
                 font_size: 11.0,
-                color: if is_sel { self.palette.ink(self.palette.blue) } else { self.palette.subtext1 },
+                color: if is_sel {
+                    self.palette.ink(self.palette.blue)
+                } else {
+                    self.palette.subtext1
+                },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(w - 24.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1535,7 +1543,11 @@ impl FileSearchApp {
                 y: fy + 4.0,
                 text: df.label().to_string(),
                 font_size: 11.0,
-                color: if is_sel { self.palette.ink(self.palette.blue) } else { self.palette.subtext1 },
+                color: if is_sel {
+                    self.palette.ink(self.palette.blue)
+                } else {
+                    self.palette.subtext1
+                },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(w - 24.0),
                 overflow: TextOverflow::Ellipsis,

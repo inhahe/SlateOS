@@ -685,7 +685,11 @@ impl PrivacySettingsUI {
                     y: y + 4.0,
                     text: status,
                     font_size: 12.0,
-                    color: if enabled { p.ink(p.green) } else { p.ink(p.red) },
+                    color: if enabled {
+                        p.ink(p.green)
+                    } else {
+                        p.ink(p.red)
+                    },
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width * 0.4),
                     overflow: TextOverflow::Ellipsis,
@@ -1838,7 +1842,11 @@ mod tests {
                 rgb(p.ink(p.green)),
                 "{mode}"
             );
-            assert_eq!(rgb(text_containing(&act, "\u{2715}")), rgb(p.ink(p.red)), "{mode}");
+            assert_eq!(
+                rgb(text_containing(&act, "\u{2715}")),
+                rgb(p.ink(p.red)),
+                "{mode}"
+            );
 
             // render_general_tab: the radio row, fill and label, both ways.
             let tab2 = draw("general: level 0, toggles true", &p);

@@ -1688,7 +1688,11 @@ fn render_card(
             x: x + padding,
             y: y + card_h,
             text: progress_text,
-            color: if done == total { pal.ink(pal.green) } else { pal.ink(pal.yellow) },
+            color: if done == total {
+                pal.ink(pal.green)
+            } else {
+                pal.ink(pal.yellow)
+            },
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1837,7 +1841,11 @@ fn render_column_header(
             x: badge_x + 24.0,
             y: y + 11.0,
             text: wip_text,
-            color: if col.is_over_wip_limit() { pal.ink(pal.red) } else { pal.overlay0 },
+            color: if col.is_over_wip_limit() {
+                pal.ink(pal.red)
+            } else {
+                pal.overlay0
+            },
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -2658,7 +2666,11 @@ fn render_stats_view(tree: &mut RenderTree, app: &KanbanApp, _width: f32, y_star
             x: 370.0,
             y: cy,
             text: wip_text,
-            color: if stat.over_wip { app.palette.ink(app.palette.red) } else { app.palette.subtext0 },
+            color: if stat.over_wip {
+                app.palette.ink(app.palette.red)
+            } else {
+                app.palette.subtext0
+            },
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,

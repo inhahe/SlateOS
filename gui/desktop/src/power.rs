@@ -2643,7 +2643,10 @@ mod tests {
         let sp = Palette::for_mode(false);
         let mut clock = ScreenSaver::new(ScreenSaverStyle::Clock, 800, 600);
         let cmds = clock.render_frame();
-        assert_eq!(rgb(text_exact(&cmds, "12:00", 72.0)), rgb(sp.ink(sp.lavender)));
+        assert_eq!(
+            rgb(text_exact(&cmds, "12:00", 72.0)),
+            rgb(sp.ink(sp.lavender))
+        );
         let mut logo = ScreenSaver::new(ScreenSaverStyle::BouncingLogo, 800, 600);
         let cmds = logo.render_frame();
         assert_eq!(

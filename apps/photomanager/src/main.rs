@@ -2843,7 +2843,11 @@ impl PhotoApp {
             x: ss_x + 8.0,
             y: 14.0,
             text: "Slideshow".to_owned(),
-            color: if self.slideshow.is_some() { self.palette.ink(self.palette.green) } else { self.palette.subtext0 },
+            color: if self.slideshow.is_some() {
+                self.palette.ink(self.palette.green)
+            } else {
+                self.palette.subtext0
+            },
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(70.0),

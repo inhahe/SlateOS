@@ -2428,7 +2428,11 @@ impl SchedulerUI {
                     x: tx,
                     y,
                     text: label.to_string(),
-                    color: if selected { self.palette.ink(self.palette.blue) } else { self.palette.subtext0 },
+                    color: if selected {
+                        self.palette.ink(self.palette.blue)
+                    } else {
+                        self.palette.subtext0
+                    },
                     font_size: FONT_SIZE,
                     font_weight: if selected {
                         FontWeightHint::Bold

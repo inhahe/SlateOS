@@ -1925,7 +1925,8 @@ mod tests {
                 let names = row_labels(&tz);
                 assert_eq!(names.len(), 10, "ten zone rows are named ({what})");
                 assert_eq!(
-                    names[6], p.ink(accent),
+                    names[6],
+                    p.ink(accent),
                     "the name of the zone in force does not follow the accent \
                      ({what})"
                 );

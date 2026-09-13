@@ -4078,7 +4078,11 @@ impl NetScanApp {
                             added.len(),
                             removed.len()
                         ),
-                        color: if added.is_empty() && removed.is_empty() { self.palette.overlay0 } else { self.palette.ink(self.palette.yellow) },
+                        color: if added.is_empty() && removed.is_empty() {
+                            self.palette.overlay0
+                        } else {
+                            self.palette.ink(self.palette.yellow)
+                        },
                         font_size: 12.0,
                         font_weight: FontWeightHint::Bold,
                         max_width: None,

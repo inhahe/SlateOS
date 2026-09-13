@@ -1624,8 +1624,7 @@ mod tests {
                     ]
                     .concat(),
                     RecordingState::Processing => {
-                        [vec![p.mantle, p.text, p.ink(p.peach)], stats.to_vec()]
-                            .concat()
+                        [vec![p.mantle, p.text, p.ink(p.peach)], stats.to_vec()].concat()
                     }
                     _ => vec![p.mantle, p.text, p.ink(p.peach)],
                 };

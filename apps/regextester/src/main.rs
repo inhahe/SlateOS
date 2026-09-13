@@ -1789,7 +1789,11 @@ impl App {
                 y: 15.0,
                 text: label.into(),
                 font_size: NORMAL_TEXT,
-                color: if active { self.palette.ink(self.palette.blue) } else { self.palette.subtext0 },
+                color: if active {
+                    self.palette.ink(self.palette.blue)
+                } else {
+                    self.palette.subtext0
+                },
                 font_weight: tab_weight,
                 max_width: Some(w),
                 overflow: TextOverflow::Ellipsis,
@@ -2227,7 +2231,11 @@ impl App {
                 y: y + 8.0,
                 text: (*label).into(),
                 font_size: SMALL_TEXT,
-                color: if selected { self.palette.ink(self.palette.blue) } else { self.palette.subtext0 },
+                color: if selected {
+                    self.palette.ink(self.palette.blue)
+                } else {
+                    self.palette.subtext0
+                },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(tw),
                 overflow: TextOverflow::Ellipsis,
@@ -2349,7 +2357,11 @@ impl App {
                 y: row_y + 2.0,
                 text: format!("#{} [{}-{}]", mi.saturating_add(1), m.start, m.end),
                 font_size: SMALL_TEXT,
-                color: if is_current { self.palette.ink(self.palette.blue) } else { self.palette.overlay0 },
+                color: if is_current {
+                    self.palette.ink(self.palette.blue)
+                } else {
+                    self.palette.overlay0
+                },
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width - 16.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2454,7 +2466,13 @@ impl App {
                 y: content_y + 5.0,
                 text: label.into(),
                 font_size: SMALL_TEXT,
-                color: if selected { cat.map_or(self.palette.ink(self.palette.blue), |c| c.color(&self.palette)) } else { self.palette.subtext0 },
+                color: if selected {
+                    cat.map_or(self.palette.ink(self.palette.blue), |c| {
+                        c.color(&self.palette)
+                    })
+                } else {
+                    self.palette.subtext0
+                },
                 font_weight: if selected {
                     FontWeightHint::Bold
                 } else {

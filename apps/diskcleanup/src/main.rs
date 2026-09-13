@@ -1721,7 +1721,11 @@ impl CleanupUI {
                 x: width - 120.0,
                 y: y + 10.0,
                 text: size_text,
-                color: if size_bytes > 0 { self.palette.ink(self.palette.yellow) } else { self.palette.subtext0 },
+                color: if size_bytes > 0 {
+                    self.palette.ink(self.palette.yellow)
+                } else {
+                    self.palette.subtext0
+                },
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(110.0),
@@ -2063,7 +2067,11 @@ impl CleanupUI {
             },
             // Green means "done, and good". A preview is neither, so it gets
             // the same neutral colour as the count above it.
-            color: if result.simulated { self.palette.text } else { self.palette.ink(self.palette.green) },
+            color: if result.simulated {
+                self.palette.text
+            } else {
+                self.palette.ink(self.palette.green)
+            },
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - PADDING * 2.0),

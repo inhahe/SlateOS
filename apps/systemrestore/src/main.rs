@@ -4194,7 +4194,11 @@ impl SystemRestoreUI {
             x: self.window_width - 200.0,
             y: bar_y + STATUS_BAR_HEIGHT / 2.0 - FONT_SIZE_SMALL / 2.0,
             text: schedule_text,
-            color: if self.manager.schedule.enabled { self.palette.ink(self.palette.green) } else { self.palette.overlay0 },
+            color: if self.manager.schedule.enabled {
+                self.palette.ink(self.palette.green)
+            } else {
+                self.palette.overlay0
+            },
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(180.0),

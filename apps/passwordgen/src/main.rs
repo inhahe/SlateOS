@@ -1588,7 +1588,11 @@ impl PasswordApp {
                 x: tx + 10.0,
                 y: 14.0,
                 text: tab.label().to_owned(),
-                color: if is_active { self.palette.ink(self.palette.blue) } else { self.palette.subtext0 },
+                color: if is_active {
+                    self.palette.ink(self.palette.blue)
+                } else {
+                    self.palette.subtext0
+                },
                 font_size: 11.0,
                 font_weight: if is_active {
                     FontWeightHint::Bold

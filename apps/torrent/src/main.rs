@@ -2926,7 +2926,11 @@ impl TorrentApp {
                 y: fy + 7.0,
                 text: format!("{} ({})", filter.label(), count),
                 font_size: 12.0,
-                color: if is_sel { self.palette.ink(self.palette.blue) } else { self.palette.subtext1 },
+                color: if is_sel {
+                    self.palette.ink(self.palette.blue)
+                } else {
+                    self.palette.subtext1
+                },
                 font_weight: if is_sel {
                     FontWeightHint::Bold
                 } else {
@@ -2968,7 +2972,11 @@ impl TorrentApp {
                 y: fy + 5.0,
                 text: label.clone(),
                 font_size: 12.0,
-                color: if is_sel { self.palette.ink(self.palette.blue) } else { self.palette.subtext0 },
+                color: if is_sel {
+                    self.palette.ink(self.palette.blue)
+                } else {
+                    self.palette.subtext0
+                },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(sidebar_w - 24.0),
                 overflow: TextOverflow::Ellipsis,
@@ -3012,7 +3020,11 @@ impl TorrentApp {
                 y: header_h + 12.0,
                 text: tab.label().to_string(),
                 font_size: 12.0,
-                color: if is_active { self.palette.ink(self.palette.blue) } else { self.palette.subtext0 },
+                color: if is_active {
+                    self.palette.ink(self.palette.blue)
+                } else {
+                    self.palette.subtext0
+                },
                 font_weight: if is_active {
                     FontWeightHint::Bold
                 } else {

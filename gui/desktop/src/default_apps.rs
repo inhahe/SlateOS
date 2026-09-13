@@ -749,7 +749,11 @@ impl DefaultAppsUI {
                 y: tab_y + 8.0,
                 text: label.to_string(),
                 font_size: 13.0,
-                color: if is_active { p.ink(p.accent) } else { p.subtext0 },
+                color: if is_active {
+                    p.ink(p.accent)
+                } else {
+                    p.subtext0
+                },
                 font_weight: if is_active {
                     FontWeightHint::Bold
                 } else {
@@ -886,7 +890,11 @@ impl DefaultAppsUI {
                 y: row_y + 30.0,
                 text: app_name.to_string(),
                 font_size: 12.0,
-                color: if default_app.is_some() { p.ink(p.accent) } else { p.overlay0 },
+                color: if default_app.is_some() {
+                    p.ink(p.accent)
+                } else {
+                    p.overlay0
+                },
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1872,7 +1880,11 @@ mod tests {
                 vec![marked],
                 "only the active tab is marked"
             );
-            assert_eq!(text_color(cats, "Default apps"), p.ink(p.accent), "active tab");
+            assert_eq!(
+                text_color(cats, "Default apps"),
+                p.ink(p.accent),
+                "active tab"
+            );
             assert_eq!(text_color(cats, "File types"), p.subtext0, "idle tab");
             assert_eq!(
                 text_color(cats, "Installed apps"),
@@ -1982,7 +1994,11 @@ mod tests {
                 fills_sized(types, 48.0, 20.0).iter().all(|c| *c == carded),
                 "extension pills"
             );
-            assert_eq!(text_color(types, ".flac"), p.ink(p.lavender), "extension token");
+            assert_eq!(
+                text_color(types, ".flac"),
+                p.ink(p.lavender),
+                "extension token"
+            );
             // The search box and the extension rows are both `width` x 32, so
             // geometry cannot tell them apart — but `fills_sized` preserves
             // command order and the box is drawn first, which is enough to
@@ -2040,7 +2056,11 @@ mod tests {
             // Categories: the open tab, the app named under each of the
             // twelve cards, and the current app's chip in the expanded one.
             let cats = &by_tab[0].1;
-            assert_eq!(text_color(cats, "Default apps"), p.ink(p.accent), "the open tab");
+            assert_eq!(
+                text_color(cats, "Default apps"),
+                p.ink(p.accent),
+                "the open tab"
+            );
             assert_eq!(
                 text_color_sized(cats, "Music Player", 12.0),
                 p.ink(p.accent),

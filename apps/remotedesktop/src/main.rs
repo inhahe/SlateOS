@@ -3085,7 +3085,11 @@ impl RemoteDesktopApp {
             y: y + 7.0,
             text: format!("{active_count} active"),
             font_size: 11.0,
-            color: if active_count > 0 { self.palette.ink(self.palette.green) } else { self.palette.overlay0 },
+            color: if active_count > 0 {
+                self.palette.ink(self.palette.green)
+            } else {
+                self.palette.overlay0
+            },
             font_weight: FontWeightHint::Regular,
             max_width: Some(100.0),
             overflow: TextOverflow::Ellipsis,

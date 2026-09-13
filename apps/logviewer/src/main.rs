@@ -1217,7 +1217,11 @@ impl App {
             y: 14.0,
             text: auto_label.into(),
             font_size: SMALL_TEXT,
-            color: if self.auto_scroll { self.palette.ink(self.palette.green) } else { self.palette.overlay0 },
+            color: if self.auto_scroll {
+                self.palette.ink(self.palette.green)
+            } else {
+                self.palette.overlay0
+            },
             font_weight: FontWeightHint::Regular,
             max_width: Some(80.0),
             overflow: TextOverflow::Ellipsis,

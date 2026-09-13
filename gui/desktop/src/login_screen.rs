@@ -1128,7 +1128,11 @@ impl LoginScreen {
                 y: uy + 14.0,
                 text: user.avatar.clone(),
                 font_size: 28.0,
-                color: if selected { p.ink(p.accent) } else { p.subtext0 },
+                color: if selected {
+                    p.ink(p.accent)
+                } else {
+                    p.subtext0
+                },
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -2366,7 +2370,8 @@ mod tests {
             let avatars = texts(&cmds, AVATAR, 28.0);
             assert_eq!(avatars.len(), 2, "{mode}: two avatars");
             assert_eq!(
-                avatars[0].2, p.ink(p.accent),
+                avatars[0].2,
+                p.ink(p.accent),
                 "{mode}: the accent marks which row you are on"
             );
             assert_eq!(avatars[1].2, p.subtext0, "{mode}: an unselected avatar");

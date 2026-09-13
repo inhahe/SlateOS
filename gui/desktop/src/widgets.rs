@@ -2495,7 +2495,11 @@ mod tests {
                     assert!(!t.is_empty(), "{what} is not drawn (light={light})");
                     for c in t {
                         assert_eq!(c, role, "{what} is the wrong role (light={light})");
-                        assert_ne!(c, p.ink(p.accent), "{what} followed the accent (light={light})");
+                        assert_ne!(
+                            c,
+                            p.ink(p.accent),
+                            "{what} followed the accent (light={light})"
+                        );
                     }
                 }
             }

@@ -528,7 +528,11 @@ impl FocusAssistManager {
             font_size: 14.0,
             // Engaged or not is *state*, so this is a hue role and not the
             // accent — the accent is reserved for "you chose this".
-            color: if mode == FocusMode::Off { p.subtext0 } else { p.ink(p.blue) },
+            color: if mode == FocusMode::Off {
+                p.subtext0
+            } else {
+                p.ink(p.blue)
+            },
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -569,7 +573,11 @@ impl FocusAssistManager {
                 font_size: 16.0,
                 // Here `BLUE` meant "chosen", not "this much silence" — the
                 // picker's only accent site.
-                color: if selected { p.ink(p.accent) } else { p.subtext0 },
+                color: if selected {
+                    p.ink(p.accent)
+                } else {
+                    p.subtext0
+                },
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1207,11 +1215,7 @@ mod tests {
                 want.push(if chosen { p.surface0 } else { p.mantle });
                 // The chosen row's icon is accent *text*, so it is inked;
                 // the row's fill above it is not. Same accent, two values.
-                want.push(if chosen {
-                    p.ink(p.accent)
-                } else {
-                    p.subtext0
-                });
+                want.push(if chosen { p.ink(p.accent) } else { p.subtext0 });
                 want.push(if chosen { p.text } else { p.subtext0 });
                 want.push(p.overlay0);
             }
@@ -1245,11 +1249,7 @@ mod tests {
                 want.push(if chosen { p.surface0 } else { p.mantle });
                 // The chosen row's icon is accent *text*, so it is inked;
                 // the row's fill above it is not. Same accent, two values.
-                want.push(if chosen {
-                    p.ink(p.accent)
-                } else {
-                    p.subtext0
-                });
+                want.push(if chosen { p.ink(p.accent) } else { p.subtext0 });
                 want.push(if chosen { p.text } else { p.subtext0 });
                 want.push(p.overlay0);
             }

@@ -809,7 +809,12 @@ impl OsdManager {
             y: oy + 14.0,
             text: "\u{266B}".to_string(),
             font_size: 28.0,
-            color: Color::rgba(p.ink(p.lavender).r, p.ink(p.lavender).g, p.ink(p.lavender).b, text_alpha),
+            color: Color::rgba(
+                p.ink(p.lavender).r,
+                p.ink(p.lavender).g,
+                p.ink(p.lavender).b,
+                text_alpha,
+            ),
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2898,7 +2903,11 @@ mod tests {
                 &p,
             );
             // S9: the music note.
-            assert_eq!(rgb(text_at(&media, 28.0)), rgb(p.ink(p.lavender)), "media note");
+            assert_eq!(
+                rgb(text_at(&media, 28.0)),
+                rgb(p.ink(p.lavender)),
+                "media note"
+            );
             // S10: the title.
             assert_eq!(rgb(text_at(&media, 14.0)), rgb(p.text), "media title");
             // S11: the artist, one step down.
@@ -2909,7 +2918,11 @@ mod tests {
             // ---- render_icon_text_osd ----
             let batt = overlay(OsdKind::BatteryLow { percent: 7 }, &p);
             // S14: the icon takes the kind's own colour.
-            assert_eq!(rgb(text_at(&batt, 20.0)), rgb(p.ink(p.red)), "icon-text icon");
+            assert_eq!(
+                rgb(text_at(&batt, 20.0)),
+                rgb(p.ink(p.red)),
+                "icon-text icon"
+            );
             // S15: the label is plain text.
             assert_eq!(rgb(text_at(&batt, 14.0)), rgb(p.text), "icon-text label");
 
@@ -3405,7 +3418,11 @@ mod tests {
             // The tick sits on `p.green`, whose value differs by mode.
             let tick = text_saying(&settings(&p), "\u{2713}");
             assert_eq!(rgb(tick), rgb(appearance::readable_on(p.green)));
-            assert_ne!(rgb(tick), rgb(p.ink(p.green)), "the tick is invisible on its box");
+            assert_ne!(
+                rgb(tick),
+                rgb(p.ink(p.green)),
+                "the tick is invisible on its box"
+            );
 
             // The Preview label sits on the accent, which the user chooses.
             p.accent = DARK;

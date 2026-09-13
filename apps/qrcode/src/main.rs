@@ -1806,7 +1806,11 @@ impl QrApp {
                 x: tx + 10.0,
                 y: 14.0,
                 text: ct.label().to_owned(),
-                color: if is_active { self.palette.ink(self.palette.blue) } else { self.palette.subtext0 },
+                color: if is_active {
+                    self.palette.ink(self.palette.blue)
+                } else {
+                    self.palette.subtext0
+                },
                 font_size: 11.0,
                 font_weight: if is_active {
                     FontWeightHint::Bold
@@ -1960,7 +1964,11 @@ impl QrApp {
                 x: mx + 8.0,
                 y: cy + 5.0,
                 text: mode.label().to_owned(),
-                color: if is_active { self.palette.ink(self.palette.lavender) } else { self.palette.subtext0 },
+                color: if is_active {
+                    self.palette.ink(self.palette.lavender)
+                } else {
+                    self.palette.subtext0
+                },
                 font_size: 10.0,
                 font_weight: if is_active {
                     FontWeightHint::Bold
@@ -2480,7 +2488,11 @@ impl QrApp {
                 x: lx + 8.0,
                 y: cy + 5.0,
                 text: ec.label().to_owned(),
-                color: if is_active { self.palette.ink(self.palette.green) } else { self.palette.subtext0 },
+                color: if is_active {
+                    self.palette.ink(self.palette.green)
+                } else {
+                    self.palette.subtext0
+                },
                 font_size: 10.0,
                 font_weight: if is_active {
                     FontWeightHint::Bold
@@ -2526,7 +2538,11 @@ impl QrApp {
                 x: lx + 8.0,
                 y: cy + 5.0,
                 text: ms.label().to_owned(),
-                color: if is_active { self.palette.ink(self.palette.yellow) } else { self.palette.subtext0 },
+                color: if is_active {
+                    self.palette.ink(self.palette.yellow)
+                } else {
+                    self.palette.subtext0
+                },
                 font_size: 10.0,
                 font_weight: if is_active {
                     FontWeightHint::Bold

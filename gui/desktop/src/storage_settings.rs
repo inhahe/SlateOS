@@ -646,7 +646,11 @@ impl StorageSettingsUI {
                     drive.used_pct()
                 ),
                 font_size: 12.0,
-                color: if drive.is_low_space() { p.ink(p.red) } else { p.subtext0 },
+                color: if drive.is_low_space() {
+                    p.ink(p.red)
+                } else {
+                    p.subtext0
+                },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width * 0.38),
                 overflow: TextOverflow::Ellipsis,

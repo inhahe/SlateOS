@@ -23,9 +23,12 @@ use guitk::color::Color;
 use guitk::event::{Event, Key, MouseButton, MouseEvent, MouseEventKind};
 #[cfg(test)]
 use guitk::event::{KeyEvent, Modifiers};
-use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::rng::{RandomSource, SeededRng, seed_from_system};
 use guitk::style::CornerRadii;
+use oswindow::app::{self, App, Response};
+use std::process::ExitCode;
+use std::time::Duration;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
 const BASE: Color = Color::from_hex(0x1E1E2E);
@@ -48,6 +51,14 @@ const GRID_SIZE: usize = 8;
 const CELL_SIZE: f32 = 48.0;
 const CELL_GAP: f32 = 2.0;
 const PADDING: f32 = 16.0;
+/// How often the board is asked to advance itself.
+///
+/// 16 ms is one frame at 60 Hz, which is what the cascade animation and the
+/// Timed-mode clock were written against: `handle_tick` takes the elapsed
+/// milliseconds and both scale by it, so a slower tick is correct but visibly
+/// steppy, and a faster one is work nobody can see.
+const TICK: Duration = Duration::from_millis(16);
+
 const HEADER_HEIGHT: f32 = 60.0;
 const FOOTER_HEIGHT: f32 = 40.0;
 const HEADER_FONT_SIZE: f32 = 18.0;
@@ -1024,7 +1035,12 @@ impl Match3 {
     // ── Rendering ───────────────────────────────────────────────────
 
     /// Produce the full render command list for the current frame.
-    fn render(&self) -> Vec<RenderCommand> {
+    /// Named `render_commands` and not `render`: `App::render` is also on
+    /// this type and takes two arguments, and at *different* arity the
+    /// compiler still resolved a bare `self.render_commands()` inside the trait impl
+    /// to the trait method and reported a missing-argument error rather than
+    /// calling this one. A distinct name says which is meant everywhere.
+    fn render_commands(&self) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
         let win_w = Self::window_width();
         let win_h = Self::window_height();
@@ -1640,9 +1656,10 @@ fn classify_argument(first: Option<&std::ffi::OsStr>) -> ArgVerdict {
 }
 
 /// Act on [`classify_argument`], exiting for every verdict but `Run`.
-fn refuse_arguments() {
-    let first = std::env::args_os().nth(1);
-    match classify_argument(first.as_deref()) {
+/// Takes the first argument that is *not* `--display ADDR`, because that one
+/// is the strap's and every application accepts it.
+fn refuse_arguments(first: Option<&std::ffi::OsStr>) {
+    match classify_argument(first) {
         ArgVerdict::Run => {}
         ArgVerdict::Help => {
             println!("usage: match3");
@@ -1671,9 +1688,85 @@ fn refuse_arguments() {
     }
 }
 
-fn main() {
-    refuse_arguments();
-    let _app = Match3::new();
+impl App for Match3 {
+    fn title(&self) -> String {
+        "Match 3".to_string()
+    }
+
+    fn app_id(&self) -> String {
+        "match3".to_string()
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        // The board decides the window, not the other way round: every
+        // coordinate in `render` is derived from `CELL_SIZE` and `GRID_SIZE`,
+        // so asking for anything else would draw a board the window does not
+        // fit. Rounded up, because a fractional pixel of window is a row of
+        // background the grid does not reach.
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "both are a positive constant sum well under u32::MAX"
+        )]
+        {
+            (
+                Self::window_width().ceil() as u32,
+                Self::window_height().ceil() as u32,
+            )
+        }
+    }
+
+    fn tick_interval(&self) -> Option<Duration> {
+        // The board animates without input: cascades fall, the hint timer
+        // counts, and Timed mode runs down. Returning `None` here would make
+        // all three advance only when the player happened to move.
+        Some(TICK)
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        self.handle_event(event);
+        // `Redraw` unconditionally, and it is a statement about this program
+        // rather than laziness. `handle_event` returns `()`, so there is no
+        // honest way to answer "did that change the picture" from here -- and
+        // for a board mid-cascade the answer is yes even for an event it
+        // ignored. Claiming `Idle` on a guess would freeze a falling column
+        // until the player clicked.
+        Response::Redraw
+    }
+
+    fn render(&mut self, _width: f32, _height: f32) -> RenderTree {
+        // The size is ignored because the window is fixed: `initial_size`
+        // asks for exactly the board, and the board has no layout that could
+        // use a different one. A resize therefore leaves the extra space as
+        // background rather than stretching the grid, which is the right
+        // answer for a game whose cells are hit-tested by pixel arithmetic.
+        RenderTree {
+            commands: self.render_commands(),
+        }
+    }
+}
+
+fn main() -> ExitCode {
+    // Parsed rather than indexed, so `--display` reaches the connection
+    // instead of being refused as an argument this game does not take. That
+    // option belongs to every application equally and is not part of what
+    // `refuse_arguments` is about.
+    let args = match app::Args::from_env() {
+        Ok(args) => args,
+        Err(e) => {
+            eprintln!("match3: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    // `Args::from_env` has already refused an argument that is not UTF-8, so
+    // what reaches here is decodable; `escape_ascii` in the refusal still
+    // earns its place for the non-ASCII ones.
+    refuse_arguments(args.rest.first().map(|a| std::ffi::OsStr::new(a.as_str())));
+    let mut game = Match3::new();
+    app::launch_with("match3", args.display.as_deref(), &mut game)
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -2803,7 +2896,7 @@ mod tests {
     #[test]
     fn test_render_produces_commands() {
         let game = Match3::new();
-        let cmds = game.render();
+        let cmds = game.render_commands();
         assert!(!cmds.is_empty());
     }
 
@@ -2811,10 +2904,10 @@ mod tests {
     fn test_render_game_over_overlay() {
         let mut game = Match3::new();
         game.end_game();
-        let cmds = game.render();
+        let cmds = game.render_commands();
         // Should have more commands than an idle game (overlay).
         let idle_game = Match3::new();
-        let idle_cmds = idle_game.render();
+        let idle_cmds = idle_game.render_commands();
         assert!(cmds.len() > idle_cmds.len());
     }
 
@@ -3070,7 +3163,107 @@ mod tests {
         // Tick forward.
         game.handle_event(&Event::Tick { elapsed_ms: 100 });
         // Render should not panic.
-        let cmds = game.render();
+        let cmds = game.render_commands();
         assert!(!cmds.is_empty());
+    }
+}
+
+/// The wiring itself, driven through the real strap against a stand-in
+/// compositor.
+///
+/// Every other test in this file exercises the game's own model. None of them
+/// would notice if the `App` impl were deleted, or if `initial_size` returned
+/// `(0, 0)`, or if `render` handed back an empty tree -- the program would
+/// compile, launch, and show nothing. That is precisely the failure
+/// `TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR` is about, and it is invisible to a
+/// model test by construction.
+///
+/// So this opens a window *through the trait* -- the title and the size are
+/// the ones the game reports, not ones the test chose -- scripts real input,
+/// and asserts frames came out and the close request was obeyed.
+///
+/// **Proved able to fail rather than assumed to be.** Replacing the body of
+/// `App::render` with an empty `RenderTree` -- the shape of a wiring that
+/// compiles and shows nothing -- makes this report *the game submitted 2
+/// frame(s) for this window and every one was empty, so the window would be
+/// blank*, while all 120 of the model tests keep passing.
+#[cfg(test)]
+mod reaches_a_window {
+    // A failure here should point at the line that failed, which is what a
+    // panicking assertion does. The defensive lints exist to keep panics out
+    // of code that runs on a user's data; this is a harness. Same list, and
+    // the same reason, as `mod tests` above.
+    #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+
+    use super::*;
+    use oswindow::InputEvent;
+    use oswindow::testing;
+
+    #[test]
+    fn the_game_opens_a_window_draws_and_closes() {
+        let (mut events, desktop) = testing::desktop();
+        let mut game = Match3::new();
+
+        let window = app::open(&mut events, &game).expect("the compositor should grant a window");
+
+        {
+            let mut desk = desktop.borrow_mut();
+            // A tick, because this game animates without input and a frame
+            // that only ever follows a click would look frozen.
+            desk.script.push_back(vec![InputEvent::new(
+                window,
+                Event::Tick { elapsed_ms: 16 },
+            )]);
+            desk.script
+                .push_back(vec![InputEvent::new(window, Event::CloseRequested)]);
+        }
+
+        app::drive(&mut events, window, &mut game).expect("the loopback connection cannot fail");
+
+        let desk = desktop.borrow();
+        // NEGATIVE CONTROL FIRST. `submitted` being non-empty is what makes
+        // the command count below mean "the game drew" rather than "nothing
+        // ran and the filter found nothing".
+        assert!(
+            !desk.submitted.is_empty(),
+            "no frame was submitted at all, so this test cannot say anything \
+             about what was drawn"
+        );
+        let commands: usize = desk
+            .submitted
+            .iter()
+            .filter(|(w, _)| *w == window)
+            .map(|(_, n)| *n)
+            .sum();
+        assert!(
+            commands > 0,
+            "the game submitted {} frame(s) for this window and every one was \
+             empty, so the window would be blank",
+            desk.submitted.len()
+        );
+    }
+
+    /// The window the game asks for is the board it draws, not a number.
+    ///
+    /// `initial_size` is the one part of the `App` impl a compositor obeys
+    /// without question, and a wrong answer there is not a crash -- it is a
+    /// window with the playfield clipped or floating in a margin. Deriving the
+    /// expectation from the same constants the renderer uses is what stops
+    /// this from being a copy of the answer.
+    #[test]
+    fn the_window_it_asks_for_is_the_size_of_the_board() {
+        let game = Match3::new();
+        let (w, h) = game.initial_size();
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "the same positive constants the impl casts"
+        )]
+        let expected = (
+            Match3::window_width().ceil() as u32,
+            Match3::window_height().ceil() as u32,
+        );
+        assert_eq!((w, h), expected, "the window does not match the board");
+        assert!(w > 0 && h > 0, "a zero dimension is an invisible window");
     }
 }

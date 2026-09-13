@@ -1655,6 +1655,7 @@ name = "match3"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
 ]
 
 [[package]]
@@ -2085,6 +2086,7 @@ name = "pinball"
 version = "0.1.0"
 dependencies = [
  "guitk",
+ "oswindow",
  "randrange",
 ]
 

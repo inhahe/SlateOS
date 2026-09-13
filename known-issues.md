@@ -22664,6 +22664,27 @@ claim on its own:
   `guitk::scaling`'s own `icon_size()` method in that module's tests — a
   scaling-context accessor with the same name, unrelated to this preference.
 
+**Correction, 2026-09-13: `icon_size` is not missing a reader, and that
+matters for what to do about it.** `gui/desktop/src/icons.rs` is a complete
+desktop icon layer -- 1974 lines, a grid, drag and selection, a `render`, and
+its own tests. It is exactly the thing that would read this setting. Nothing
+in the tree ever constructs it: `grep` for `DesktopIconLayer` across every
+`.rs` file finds the type, its own module, and nothing else, and `lib.rs`'s
+`pub mod icons;` is the only reference to the module at all.
+
+So the honest state of this row is **blocked on C-Q17**, not "waiting for
+someone to write the consumer". Wiring `icon_size` into that layer today would
+connect a dead setting to a dead renderer and change nothing a user can see,
+while looking in the git log exactly like a fix. It is listed in
+`TD-C-FOUR-SHELL-FEATURES-ARE-BUILT-AND-NEVER-CONSTRUCTED` for the same
+reason, and C-Q17 is the question of whether those get wired up or deleted.
+
+The same is true, for a different reason, of `cursor_scheme` and `cursor_size`:
+nothing draws a pointer at all, which is C-Q18. **All three remaining rows of
+this entry are therefore waiting on an operator decision rather than on work,**
+which was not clear from the table above and is the sort of thing that gets a
+reader to spend an afternoon before noticing.
+
 ### The cursor-size tangle
 
 One user-facing setting, four independent models, no reader:
@@ -36522,7 +36543,7 @@ are still laid out end to end, which is still the assumption that screen order
 equals byte order, and still needs the widened render primitive described
 above.
 
-## TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR (lane C, 2026-08-17)
+## TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR (lane C, 2026-08-17) -- FIXED 2026-09-13
 
 *(Filed 2026-08-17 as `TD-EDITOR-HAS-NO-INPUT-LOOP`, and renamed the same day.
 The original entry blamed `apps/editor` for a gap that turned out to be
@@ -37278,6 +37299,51 @@ arithmetic findings are not fixed here** — they are the largest single pile in
 `TD-C-APPS-CARRY-1812-CLIPPY-FINDINGS-AND-588-OF-THEM-ARE-IN-PRODUCTION`.
 
 Baseline 46 → 45.
+
+
+**Update 2026-09-13 — the count was 135 and the truth was two.**
+
+`match3` and `pinball` are wired, and with them every application in this tree
+that draws reaches a window. The remaining figure in the heading above ("135 to
+go") had been stale since the strap landed: each app converted after it stopped
+updating the number, and nothing measured the total again.
+
+Measured, with a rule about *position* rather than shape — a `fn main(` at
+column 0, because `find("fn main(")` matches the fixture strings that
+`archivemanager`, `filediff` and `snippets` keep in their test data, and that
+mistake is what first reported eight unwired apps instead of five:
+
+| | count |
+|---|---|
+| app crates | 143 |
+| launch from `main` | **135** |
+| have no `main` at all — `diffcore`, `globmatch`, `safeio` | 3 (libraries) |
+| command-line tools, correctly not windowed — `backup`, `indexer`, `installer` | 3 |
+| **genuinely unwired** — `match3`, `pinball` | **2**, now 0 |
+
+**What wiring a game costs, now that the strap exists:** an `App` impl of five
+methods, a `TICK`, a `launch_with` in `main`, and one rename. Both games had an
+inherent `render(&self) -> Vec<RenderCommand>`, and inside the `App` impl a
+bare `self.render()` resolves to the *trait* method even at a different arity —
+the compiler reports two missing arguments rather than calling the inherent
+one. Both are now `render_commands`, which is the same collision
+`apps/filediff` solved by naming its own method `render_tree`.
+
+**Each game gained two tests, because 120 model tests apiece could not see
+this.** None of them would notice an `App` impl that was deleted, returned
+`(0, 0)` from `initial_size`, or handed back an empty tree: the program would
+compile, launch and show nothing, which is the exact failure this entry is
+about. `mod reaches_a_window` opens a window *through the trait* against
+`oswindow::testing`, scripts a tick and a close, and asserts frames came out
+with commands in them. Proved able to fail: an empty `RenderTree` makes it
+report *the game submitted 2 frame(s) for this window and every one was empty,
+so the window would be blank* while all 120 model tests keep passing.
+
+**This entry is now closed.** What it asked for — applications connected to the
+compositor — is done from `guiremote`'s input direction through to the last
+game. What remains in the neighbourhood is separate and separately filed:
+`TD-COMPOSITOR-POLLS-INSTEAD-OF-WAITING`, `TD-COMPOSITOR-HAS-NO-SCANOUT`, and
+the 43 games' theming, which waits on C-Q16.
 
 ## TD-ONLY-ONE-KEYBOARD-LAYOUT (lane C, 2026-08-17)
 
@@ -131371,6 +131437,27 @@ so the two tests point at a scratch path they own -- the sibling test
 `/` inside `#[cfg(test)]` would catch the whole family; **lane C has
 deliberately not added one**, because it would refuse lane B's pushes and that
 is their decision to make, not ours.
+
+**Second instance the same afternoon, and it is the reason this matters.**
+`init/loginmgr` failed six tests in the 14:2x workspace run, all with
+*save_user_database writes the whole database, not a subset*, because something
+had written `E:\etc\passwd`, `E:\etc\shadow` and `E:\etc\users.yaml`. With
+`E:\etc` deleted, `cargo test -p loginmgr` is 46 passed, 0 failed, and running
+it alone does not recreate the directory.
+
+Three workspace runs of the same tree today returned **2 failed, then 0 failed,
+then 6 failed**, in two unrelated subsystems, purely on what happened to be left
+at the drive root. So the real cost is not the litter: it is that **no workspace
+test result on this machine is currently trustworthy**, including the one lane C
+runs before every push and any run used to judge a merge to `main` green.
+`E:\etc` was deleted for the same reason `E:\sys` was.
+
+**Proved by cleaning rather than inferred from timestamps, 2026-09-13 14:3x.**
+The drive root was cleared, one `cargo test --workspace --no-fail-fast` was run,
+and the root listed again: `E:\var\run` and `E:\dev` were back, from nothing,
+in one observed cycle. That run was **60 641 passed, 0 failed** — so the failures
+above really are the litter and not the tree. It also raises the count: at least
+two distinct paths are written during one ordinary run.
 
 **Done on the machine, not in any tree:** `E:\sys` was deleted, since it was
 failing two tests and is tracked by no repository. `E:\run`, `E:\var` and

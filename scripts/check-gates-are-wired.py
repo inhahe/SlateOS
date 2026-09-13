@@ -150,6 +150,22 @@ PINNED: dict[str, str] = {
     # stop them rotting while they waited -- went with them: a self-test run
     # beside a real check that is now also run is duplicated work, and lane C's
     # version runs the fixture immediately before the check it guards.
+    "check-drive-root-litter.py":
+        "lane C, and DELIBERATELY unwired: it is a diagnostic about the "
+        "MACHINE, not about the tree. It reports POSIX-looking directories at "
+        "the drive root -- E:/etc, E:/sys, E:/var -- which tests that open a "
+        "path beginning with a slash create, because on Windows such a path is "
+        "drive-relative rather than absolute. Those directories then change "
+        "what a later run of an unrelated crate sees: on 2026-09-13 the same "
+        "tree gave 2, then 0, then 6 failures on three workspace runs, in "
+        "userspace/systemctl and init/loginmgr, neither of which had a bug. "
+        "Wiring it would refuse lane A and lane B builds over state their own "
+        "tests create and lane C must not fix -- userspace/** and init/** are "
+        "theirs. The repair is filed as "
+        "requests/c-b-tests-create-real-directories-at-the-drive-root.md; when "
+        "that lands, the litter stops appearing and this can be wired as a "
+        "cheap guard, or deleted. Until then it is the one command that "
+        "answers >is this red run real<. Decided by lane C 2026-09-13.",
     "check-evdev-elf-asm.py":
         "lane C, and DELIBERATELY unwired: it imports `capstone`, a "
         "third-party disassembler that nothing in this repository declares as "

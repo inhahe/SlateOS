@@ -14365,11 +14365,15 @@ mod tests {
     ///
     /// The `< 2ms/4K` target is judged on a release build (ideally on real
     /// hardware); the recorded dev-host baseline lives in
-    /// `bench/baselines.toml` under `[compositor_frame_4k]`. As of 2026-07-02
-    /// the compositor is still over target (~15.8ms/frame release on the dev host
-    /// after the row-wise `fill_rect` rewrite + redundant-bg-fill occlusion cull,
-    /// down from ~48.6ms — see known-issues BENCH-COMPOSITOR-SLOW; the remaining
-    /// gap is memory-bandwidth bound on a full recomposite). This test therefore
+    /// `bench/baselines.toml` under `[compositor_frame_4k]`, which as of
+    /// 2026-08-16 records **7.0 ms** and was confirmed at 6.88 ms on
+    /// 2026-09-13. This comment said ~15.8 ms for six weeks after that, which
+    /// is the 2026-07-02 figure: a doc comment naming a number that a data
+    /// file also names will drift from it, and the file is the one that gets
+    /// updated. Read the baseline, not this sentence. The compositor is still
+    /// over the 2 ms target — by 3.4x, not the 8x the old figure implied — and
+    /// the remaining gap is memory-bandwidth bound on a full recomposite (see
+    /// known-issues BENCH-COMPOSITOR-SLOW). This test therefore
     /// does NOT assert the 2ms target (it would always fail on a full-recomposite
     /// stress).
     /// It prints a PASS/OVER verdict for tracking and hard-fails only on a
@@ -14626,10 +14630,18 @@ mod tests {
             bmin as f64 / 1_000_000.0
         );
 
-        // Catastrophic-regression guard only (see doc): the current baseline
-        // is ~16ms (still over the 2ms target, tracked separately); a mean past
-        // 80ms (~5x the baseline, and worse than the pre-optimization ~50ms)
-        // means a super-linear blow-up crept into the path.
+        // Catastrophic-regression guard only (see doc): the baseline is
+        // 7.0 ms (`bench/baselines.toml`, 2026-08-16; 6.88 ms measured
+        // 2026-09-13), still over the 2 ms target and tracked separately. A
+        // mean past 80 ms means a super-linear blow-up crept into the path.
+        //
+        // The bound is deliberately left at 80 ms rather than retightened to
+        // ~5x the current baseline. It is a *catastrophe* guard, and the thing
+        // it must not do is fire on a slow or loaded machine -- this file has
+        // already had one wall-clock assertion that could not tell a real
+        // regression from a busy host, and moving this one to 35 ms would
+        // recreate that. The number that tracks the baseline is in
+        // `bench/baselines.toml`, where it can be compared without a rebuild.
         assert!(
             mean_ms < 80.0,
             "compositor 4K recomposite mean {mean_ms:.3}ms is a catastrophic regression (>80ms)"

@@ -141139,10 +141139,18 @@ does not show the earlier measurement was wrong. What it does show:
 * **Shaping is more than half of the text cost** (0.35 of 0.63), which is a
   different shape from "shaping is 1.3% of the frame" and worth keeping in
   view: the cheap half is the one with a cache.
-* **The frame is 6.88 ms, not the ~16 ms this file records as the baseline.**
-  That number is stale by a factor of two. `bench/baselines.toml` should be
-  re-taken before anybody reasons from it -- including the assertion in this
-  bench, whose 80 ms catastrophe guard was set against the old figure.
+* **The frame is 6.88 ms, and the recorded baseline agrees.** I wrote in the
+  first version of this paragraph that `bench/baselines.toml` was "stale by a
+  factor of two" and should be re-taken. **That was wrong, and I had not read
+  the file when I wrote it.** `[compositor_frame_4k]` says
+  `measured_ns = 7041000` -- 7.0 ms, dev host, release, 2026-08-16 -- which
+  matches this measurement to 2%. The stale ~16 ms is in two *comments*: this
+  bench's doc ("~15.8ms/frame release") and its catastrophe-guard note, both
+  of which predate the 2026-08-16 improvement the baseline file recorded.
+  Correcting a stale number by asserting a different file is stale, without
+  opening it, is the same mistake this entry keeps documenting -- and it is
+  left written down here rather than quietly fixed, because the pattern is
+  the point.
 
 **So the 2 ms target is missed by 3.4x, not by 8x**, and the thing to attack
 in this scene is `window_render`'s 5.5 ms, of which text is one eighth.

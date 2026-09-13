@@ -1775,10 +1775,20 @@ generator. So §1005 remains a reconstruction from citations alone.
 
 **One thing worth your attention regardless of how you answer.** That
 file is untracked, so it is in no branch, no lane can see it, and nothing
-backs it up. It carries your answers to roughly thirty questions across
-all three lanes. I have not copied it into the repository, because it is
-yours and it may be deliberately scratch — but if it is lost, so are the
-answers.
+backs it up. I first wrote here that losing it would lose the answers,
+and then checked instead of leaving it asserted: it would not. Every
+2026-09-07 answer I sampled — Q46, Q47, Q56, Q57, A-Q3, C-Q6, C-Q7 — is
+already relayed into this file's resolved lists, and B-Q8 records your
+reply to it in full.
+
+What would be lost is narrower and, on today's evidence, still worth
+something: the **verbatim wording**. §1006 is the demonstration. The
+decision survived in thirty-three citations; the *reason* ("a command's
+existence itself is a claim") and the *scope* (delete what does not
+work, not merely what can never work) did not survive the relay into
+those citations, and I have been applying the compressed version all
+day. A relayed summary keeps the choice and loses the argument for it,
+which is exactly what a decision record is supposed to preserve.
 
 I have applied both repeatedly today — deleting `nohup`, `nice` and
 `renice` from the `timeout` crate, and deleting `blkzone`, which printed

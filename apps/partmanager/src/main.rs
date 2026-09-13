@@ -2649,18 +2649,9 @@ fn render_create_partition_dialog(tree: &mut RenderTree, app: &PartitionManagerA
     });
 
     // Background
-    app.palette
-        .push_surface(tree, dx, dy, dw, dh, 8.0, Surface::Card);
-
-    tree.push(RenderCommand::StrokeRect {
-        x: dx,
-        y: dy,
-        width: dw,
-        height: dh,
-        color: app.palette.surface2,
-        line_width: 1.0,
-        corner_radii: CornerRadii::all(8.0),
-    });
+    let mut paint = app.palette.surface_paint(Surface::Card);
+    paint.border = Some(paint.border.unwrap_or(app.palette.surface2));
+    app.palette.push_paint_radii(tree, dx, dy, dw, dh, CornerRadii::all(8.0), paint);
 
     // Title
     tree.push(RenderCommand::Text {

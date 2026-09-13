@@ -1559,10 +1559,10 @@ mod tests {
             assert_eq!(fills_sized(lang, 600.0, 800.0), vec![p.base], "panel");
             assert_eq!(text_color(lang, "Language & Region"), p.text, "title");
 
-            // The current-language card sits one rung above the list rows it
-            // summarises, so it is `surface1` while an ordinary row is
-            // `surface0`.
-            assert_eq!(fills_sized(lang, 552.0, 50.0), vec![p.surface1], "card");
+            // Under the bordered theme the card is an outline rather than a
+            // rung, so what separates it from the rows around it is that it
+            // has a boundary at all.
+            assert_eq!(fills_sized(lang, 552.0, 50.0), vec![p.painted(appearance::Surface::Card)], "card");
             assert_eq!(
                 text_color(lang, "Current: English (United States)"),
                 p.text,

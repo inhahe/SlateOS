@@ -2666,17 +2666,9 @@ impl SysMonitorState {
         });
 
         // Background
-        self.palette
-            .push_surface(tree, menu.x, menu.y, menu_w, menu_h, 4.0, Surface::Panel);
-        tree.push(RenderCommand::StrokeRect {
-            x: menu.x,
-            y: menu.y,
-            width: menu_w,
-            height: menu_h,
-            color: self.palette.surface2,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        let mut paint = self.palette.surface_paint(Surface::Panel);
+        paint.border = Some(paint.border.unwrap_or(self.palette.surface2));
+        self.palette.push_paint_radii(tree, menu.x, menu.y, menu_w, menu_h, CornerRadii::all(4.0), paint);
 
         for (i, action) in ContextAction::ALL.iter().enumerate() {
             let iy = menu.y + i as f32 * item_h;

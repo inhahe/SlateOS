@@ -1668,7 +1668,7 @@ mod tests {
     /// accent?" is the question these tests are asking and an exclusion
     /// phrased that way would answer itself.
     fn is_selected_row(c: &RenderCommand) -> bool {
-        appearance::painted_rect(c).is_some_and(|(_, _, _, h, _)| h == 50.0)
+        appearance::painted_rect(c).is_some_and(|(_, _, _, h, _)| (h - 50.0).abs() < 0.01)
     }
 
     fn is_tab(c: &RenderCommand) -> bool {

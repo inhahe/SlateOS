@@ -1995,17 +1995,9 @@ impl QrApp {
         });
         cy += 16.0;
 
-        self.palette
-            .push_surface(cmds, lx, cy, max_w, 60.0, CORNER_RADIUS, Surface::Card);
-        cmds.push(RenderCommand::StrokeRect {
-            x: lx,
-            y: cy,
-            width: max_w,
-            height: 60.0,
-            color: self.palette.surface2,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
+        let mut paint = self.palette.surface_paint(Surface::Card);
+        paint.border = Some(paint.border.unwrap_or(self.palette.surface2));
+        self.palette.push_paint_radii(cmds, lx, cy, max_w, 60.0, CornerRadii::all(CORNER_RADIUS), paint);
 
         let display_text = if self.input_text.is_empty() {
             match self.input_mode {

@@ -3672,8 +3672,17 @@ impl ScreenRecorderApp {
         let cx = self.window_width / 2.0 - 50.0;
         let cy = self.window_height / 2.0 - 50.0;
 
-        self.palette
-            .push_surface(&mut cmds, cx, cy, 100.0, 100.0, 50.0, Surface::Card);
+        // A drawn disc, not a card: the blue ring over it is the graphic and
+        // this is its ground. Outlined, the ground vanishes and the number
+        // inside lands on whatever the window happens to be.
+        cmds.push(RenderCommand::FillRect {
+            x: cx,
+            y: cy,
+            width: 100.0,
+            height: 100.0,
+            color: self.palette.surface0,
+            corner_radii: CornerRadii::all(50.0),
+        });
         cmds.push(RenderCommand::StrokeRect {
             x: cx,
             y: cy,

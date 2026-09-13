@@ -2636,16 +2636,9 @@ impl StartupUI {
         if rect.is_empty() {
             return;
         }
-        pal.push_surface(frame, rect.x, rect.y, rect.w, rect.h, 8.0, Surface::Card);
-        frame.push(RenderCommand::StrokeRect {
-            x: rect.x,
-            y: rect.y,
-            width: rect.w,
-            height: rect.h,
-            color: border,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(8.0),
-        });
+        let mut paint = pal.surface_paint(Surface::Card);
+        paint.border = Some(border);
+        pal.push_paint_radii(frame, rect.x, rect.y, rect.w, rect.h, CornerRadii::all(8.0), paint);
         frame.push(RenderCommand::Text {
             x: rect.x + PADDING,
             y: rect.y + 12.0,

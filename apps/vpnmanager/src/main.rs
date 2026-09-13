@@ -3313,17 +3313,9 @@ fn render_add_dialog(frame: &mut Frame, app: &VpnManager) {
     let dy = (frame.height - dialog_h) / 2.0;
 
     // Dialog background
-    app.palette
-        .push_surface(frame, dx, dy, dialog_w, dialog_h, 12.0, Surface::Panel);
-    frame.push(RenderCommand::StrokeRect {
-        x: dx,
-        y: dy,
-        width: dialog_w,
-        height: dialog_h,
-        color: app.palette.surface1,
-        line_width: 1.0,
-        corner_radii: CornerRadii::all(12.0),
-    });
+    let mut paint = app.palette.surface_paint(Surface::Panel);
+    paint.border = Some(paint.border.unwrap_or(app.palette.surface1));
+    app.palette.push_paint_radii(frame, dx, dy, dialog_w, dialog_h, CornerRadii::all(12.0), paint);
 
     // Title
     frame.push(RenderCommand::Text {

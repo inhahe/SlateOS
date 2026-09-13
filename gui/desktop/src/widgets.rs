@@ -1272,16 +1272,9 @@ impl DesktopWidgetManager {
             color: p.shadow(),
             corner_radii: CornerRadii::all(12.0),
         });
-        p.push_surface(commands, px, py, picker_w, picker_h, 12.0, Surface::Card);
-        commands.push(RenderCommand::StrokeRect {
-            x: px,
-            y: py,
-            width: picker_w,
-            height: picker_h,
-            color: p.surface1,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(12.0),
-        });
+        let mut paint = p.surface_paint(Surface::Card);
+        paint.border = Some(paint.border.unwrap_or(p.surface1));
+        p.push_paint_radii(commands, px, py, picker_w, picker_h, CornerRadii::all(12.0), paint);
 
         // Title.
         commands.push(RenderCommand::Text {

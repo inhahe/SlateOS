@@ -3213,19 +3213,12 @@ impl RssReaderApp {
 
         // Search box
         let search_x = self.width - 260.0;
-        self.palette
-            .push_surface(cmds, search_x, y + 6.0, 240.0, 24.0, 4.0, Surface::Card);
+        let mut paint = self.palette.surface_paint(Surface::Card);
         if self.search_active {
-            cmds.push(RenderCommand::StrokeRect {
-                x: search_x,
-                y: y + 6.0,
-                width: 240.0,
-                height: 24.0,
-                color: self.palette.blue,
-                line_width: 1.0,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            paint.border = Some(self.palette.blue);
         }
+        self.palette
+            .push_paint_radii(cmds, search_x, y + 6.0, 240.0, 24.0, CornerRadii::all(4.0), paint);
 
         let search_display = if self.search_query.is_empty() {
             "Search articles... (Ctrl+F)".to_string()

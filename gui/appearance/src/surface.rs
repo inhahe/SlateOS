@@ -373,7 +373,36 @@ impl Palette {
         radii: CornerRadii,
         what: Surface,
     ) {
-        let paint = self.surface_paint(what);
+        self.push_paint_radii(out, x, y, width, height, radii, self.surface_paint(what));
+    }
+
+    /// Draw a paint that a *state* has altered, rather than one a theme chose.
+    ///
+    /// There is exactly one legitimate reason to reach past
+    /// [`push_surface_radii`](Self::push_surface_radii): a site whose box takes
+    /// a different outline when something is wrong with it. The login screen's
+    /// password field is the case -- a rejected password outlines it in
+    /// `p.red`, and under the bordered theme that would otherwise be a *second*
+    /// border drawn concentric with the theme's own, at the same rectangle, one
+    /// in red and one in black.
+    ///
+    /// Note the shape of the fix: the state **replaces** a member of the paint
+    /// rather than drawing another rectangle over it. A site that stacks a
+    /// second rectangle looks right under whichever theme was in front of the
+    /// author and wrong under the other one.
+    ///
+    /// This is not a way to pick colours at a draw site. Start from
+    /// `surface_paint`, change the one member the state owns, and pass it here.
+    pub fn push_paint_radii<S: CommandSink + ?Sized>(
+        &self,
+        out: &mut S,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        radii: CornerRadii,
+        paint: SurfacePaint,
+    ) {
         if let Some(fill) = paint.fill {
             out.emit(guitk::render::RenderCommand::FillRect {
                 x,
@@ -433,6 +462,12 @@ impl Palette {
     /// `no_surface_is_invisible_in_either_theme` forbids. A panic here means
     /// that invariant broke, and a test is the right place to hear about it.
     #[must_use]
+    // Total by construction: every arm of `surface_paint` above returns a
+    // paint with at least one of the three set, and
+    // `no_surface_is_invisible_in_either_theme` asserts exactly that over the
+    // cross product of styles and kinds. Returning `Option` instead would put
+    // an `.expect` at each of the ~40 call sites rather than removing one.
+    #[allow(clippy::expect_used)]
     pub fn painted(&self, what: Surface) -> Color {
         let paint = self.surface_paint(what);
         paint

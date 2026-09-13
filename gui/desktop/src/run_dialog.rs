@@ -950,18 +950,9 @@ impl RunDialog {
         let input_x = x + PADDING + 40.0;
         let input_w = DIALOG_WIDTH - PADDING * 2.0 - 40.0;
 
-        p.push_surface(&mut cmds, input_x, y + INPUT_Y_OFFSET, input_w, INPUT_HEIGHT, 4.0, Surface::Panel);
-
-        // Input field border.
-        cmds.push(RenderCommand::StrokeRect {
-            x: input_x,
-            y: y + INPUT_Y_OFFSET,
-            width: input_w,
-            height: INPUT_HEIGHT,
-            color: p.accent,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        let mut paint = p.surface_paint(Surface::Panel);
+        paint.border = Some(p.accent);
+        p.push_paint_radii(&mut cmds, input_x, y + INPUT_Y_OFFSET, input_w, INPUT_HEIGHT, CornerRadii::all(4.0), paint);
 
         // Selection highlight (if any).
         if self.input.has_selection() {
@@ -1044,17 +1035,9 @@ impl RunDialog {
             let dropdown_y = y + INPUT_Y_OFFSET + INPUT_HEIGHT + 2.0;
             let dropdown_h = self.suggestions.len() as f32 * AUTOCOMPLETE_ROW_HEIGHT;
 
-            p.push_surface(&mut cmds, dropdown_x, dropdown_y, input_w, dropdown_h, 4.0, Surface::Panel);
-
-            cmds.push(RenderCommand::StrokeRect {
-                x: dropdown_x,
-                y: dropdown_y,
-                width: input_w,
-                height: dropdown_h,
-                color: p.surface1,
-                line_width: 1.0,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            let mut paint = p.surface_paint(Surface::Panel);
+            paint.border = Some(paint.border.unwrap_or(p.surface1));
+            p.push_paint_radii(&mut cmds, dropdown_x, dropdown_y, input_w, dropdown_h, CornerRadii::all(4.0), paint);
 
             for (i, suggestion) in self.suggestions.iter().enumerate() {
                 let row_y = dropdown_y + i as f32 * AUTOCOMPLETE_ROW_HEIGHT;

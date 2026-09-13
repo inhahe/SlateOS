@@ -2020,7 +2020,7 @@ mod tests {
             );
             assert_eq!(
                 fills_h(&tz, 30.0),
-                vec![p.surface0],
+                vec![p.painted(appearance::Surface::Card)],
                 "the search field ({what})"
             );
             let rows = fills_h(&tz, 36.0);

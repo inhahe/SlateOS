@@ -2585,7 +2585,7 @@ mod tests {
             assert_eq!(lines, vec![p.surface1], "the gesture table's rule ({ctx})");
             assert_eq!(
                 fills(&g, |_, _, w, h| w == 420.0 && h == 22.0),
-                vec![p.surface0],
+                vec![p.painted(appearance::Surface::Selected)],
                 "the cursor behind the selected gesture row ({ctx})"
             );
         }

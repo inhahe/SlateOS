@@ -5840,19 +5840,9 @@ impl SpreadsheetApp {
         });
 
         // Background
-        self.palette
-            .push_surface(cmds, dlg_x, dlg_y, dlg_w, dlg_h, 8.0, Surface::Card);
-
-        // Border
-        cmds.push(RenderCommand::StrokeRect {
-            x: dlg_x,
-            y: dlg_y,
-            width: dlg_w,
-            height: dlg_h,
-            color: self.palette.surface1,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(8.0),
-        });
+        let mut paint = self.palette.surface_paint(Surface::Card);
+        paint.border = Some(paint.border.unwrap_or(self.palette.surface1));
+        self.palette.push_paint_radii(cmds, dlg_x, dlg_y, dlg_w, dlg_h, CornerRadii::all(8.0), paint);
 
         // Title
         cmds.push(RenderCommand::Text {

@@ -2212,19 +2212,15 @@ impl FileAssocUI {
         // something that does not look like it should.
         if !l.search.is_empty() {
             let r = l.search;
-            self.palette
-                .push_surface(frame, r.x, r.y, r.w, r.h, 4.0, Surface::Card);
+            // Focus recolours the field's outline; it does not add a second
+            // one inside the first, which is what a separate stroke was under
+            // the bordered theme.
+            let mut paint = self.palette.surface_paint(Surface::Card);
             if self.search_focused {
-                frame.push(RenderCommand::StrokeRect {
-                    x: r.x,
-                    y: r.y,
-                    width: r.w,
-                    height: r.h,
-                    color: self.palette.blue,
-                    line_width: 1.0,
-                    corner_radii: CornerRadii::all(4.0),
-                });
+                paint.border = Some(self.palette.blue);
             }
+            self.palette
+                .push_paint_radii(frame, r.x, r.y, r.w, r.h, CornerRadii::all(4.0), paint);
             let empty = self.search_query.is_empty();
             let shown = if empty {
                 String::from("Search by extension or description...")
@@ -2990,20 +2986,13 @@ impl FileAssocUI {
                 max_width: Some(r.w),
                 overflow: TextOverflow::Ellipsis,
             });
-            self.palette
-                .push_surface(frame, r.x, r.y, r.w, r.h, 4.0, Surface::Card);
             let focused = self.new_field == *field;
+            let mut paint = self.palette.surface_paint(Surface::Card);
             if focused {
-                frame.push(RenderCommand::StrokeRect {
-                    x: r.x,
-                    y: r.y,
-                    width: r.w,
-                    height: r.h,
-                    color: self.palette.blue,
-                    line_width: 1.0,
-                    corner_radii: CornerRadii::all(4.0),
-                });
+                paint.border = Some(self.palette.blue);
             }
+            self.palette
+                .push_paint_radii(frame, r.x, r.y, r.w, r.h, CornerRadii::all(4.0), paint);
             let value = self.new_field_text(*field);
             let empty = value.is_empty();
             frame.push(RenderCommand::Text {

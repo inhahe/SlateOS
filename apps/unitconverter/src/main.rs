@@ -1708,18 +1708,9 @@ impl UnitConverterApp {
         });
 
         // Background.
-        self.palette
-            .push_surface(tree, dd_x, dd_y, dd_w, dd_h, 8.0, Surface::Card);
-
-        tree.push(RenderCommand::StrokeRect {
-            x: dd_x,
-            y: dd_y,
-            width: dd_w,
-            height: dd_h,
-            color: self.palette.surface1,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(8.0),
-        });
+        let mut paint = self.palette.surface_paint(Surface::Card);
+        paint.border = Some(paint.border.unwrap_or(self.palette.surface1));
+        self.palette.push_paint_radii(tree, dd_x, dd_y, dd_w, dd_h, CornerRadii::all(8.0), paint);
 
         // Items.
         for (i, unit) in units.iter().enumerate() {

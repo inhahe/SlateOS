@@ -1246,7 +1246,7 @@ mod tests {
             // Cancel button: not the default action.
             assert_eq!(
                 rgb(fill_of_size(&open, 80.0, 28.0)),
-                rgb(p.surface1),
+                rgb(p.painted(appearance::Surface::Card)),
                 "{mode}"
             );
         }

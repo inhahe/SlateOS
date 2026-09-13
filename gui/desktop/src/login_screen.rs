@@ -1208,21 +1208,27 @@ impl LoginScreen {
 
             // Judgement 3: a rejected password must read as a rejection under
             // every accent, so this is `p.red` and never `p.accent`.
-            let border_color = if self.error_message.is_some() {
+            //
+            // The rejection *replaces* the field's outline rather than adding
+            // one. Drawn as a second rectangle it was a red ring concentric
+            // with the theme's black one under the bordered theme -- and a
+            // text field needs an edge under the card theme, which fills
+            // without outlining, so the neutral case supplies one.
+            let mut paint = p.surface_paint(Surface::Card);
+            paint.border = Some(if self.error_message.is_some() {
                 p.red
             } else {
-                p.surface1
-            };
-            p.push_surface(commands, field_x, field_y, field_w, field_h, 8.0, Surface::Card);
-            commands.push(RenderCommand::StrokeRect {
-                x: field_x,
-                y: field_y,
-                width: field_w,
-                height: field_h,
-                color: border_color,
-                line_width: 1.5,
-                corner_radii: CornerRadii::all(8.0),
+                paint.border.unwrap_or(p.surface1)
             });
+            p.push_paint_radii(
+                commands,
+                field_x,
+                field_y,
+                field_w,
+                field_h,
+                CornerRadii::all(8.0),
+                paint,
+            );
 
             // Password text or placeholder.
             let display = if self.password_input.is_empty() {
@@ -1465,16 +1471,11 @@ impl LoginScreen {
         let mx = self.screen_width - menu_w - 16.0;
         let my = self.screen_height - 40.0 - menu_h - 8.0;
 
+        // `Surface::Panel` carries the edge in both themes -- `surface1` under
+        // cards, the border colour under borders -- so the explicit stroke
+        // that used to follow this call was a second ring at the same
+        // rectangle.
         p.push_surface(commands, mx, my, menu_w, menu_h, 8.0, Surface::Panel);
-        commands.push(RenderCommand::StrokeRect {
-            x: mx,
-            y: my,
-            width: menu_w,
-            height: menu_h,
-            color: p.surface1,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(8.0),
-        });
 
         for (i, (icon, label)) in POWER_MENU_LABELS.iter().enumerate() {
             let iy = self.power_menu_row_rect(i).y;

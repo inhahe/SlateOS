@@ -20,6 +20,7 @@
 //! SystemRestoreUI     -- guitk-based GUI with tree view, timeline, details panel
 //! ```
 
+use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::color::Color;
@@ -3085,14 +3086,15 @@ impl SystemRestoreUI {
         let toolbar_y = HEADER_HEIGHT;
 
         // Toolbar background.
-        rt.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: toolbar_y,
-            width: self.window_width,
-            height: TOOLBAR_HEIGHT,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            rt,
+            0.0,
+            toolbar_y,
+            self.window_width,
+            TOOLBAR_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Bottom),
+        );
 
         // View mode tabs.
         let mut tab_x = PADDING;
@@ -4129,14 +4131,15 @@ impl SystemRestoreUI {
     fn render_status_bar(&self, rt: &mut RenderTree) {
         let bar_y = self.window_height - STATUS_BAR_HEIGHT;
 
-        rt.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: bar_y,
-            width: self.window_width,
-            height: STATUS_BAR_HEIGHT,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            rt,
+            0.0,
+            bar_y,
+            self.window_width,
+            STATUS_BAR_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Top),
+        );
 
         // Left: view mode and filter info.
         let filter_text = if let Some(ft) = self.type_filter {
@@ -4972,14 +4975,15 @@ impl SystemRestoreUI {
 
             // Progress bar background.
             let bar_y = oy + 50.0;
-            rt.push(RenderCommand::FillRect {
-                x: ox + PADDING,
-                y: bar_y,
-                width: overlay_w - 2.0 * PADDING,
-                height: PROGRESS_BAR_HEIGHT,
-                color: self.palette.surface0,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            self.palette.push_surface(
+                rt,
+                ox + PADDING,
+                bar_y,
+                overlay_w - 2.0 * PADDING,
+                PROGRESS_BAR_HEIGHT,
+                4.0,
+                Surface::ControlTrack,
+            );
 
             // Progress bar fill.
             let fill_width = (overlay_w - 2.0 * PADDING) * progress.fraction();

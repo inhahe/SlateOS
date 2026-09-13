@@ -38,6 +38,7 @@
 #![allow(clippy::fn_params_excessive_bools)]
 #![allow(clippy::wildcard_imports)]
 
+use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::Color;
@@ -1503,14 +1504,15 @@ impl SlidesApp {
     /// Render the toolbar at the top.
     fn render_toolbar(&self, cmds: &mut Vec<RenderCommand>) {
         // Toolbar background.
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: self.window_width,
-            height: TOOLBAR_HEIGHT,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            cmds,
+            0.0,
+            0.0,
+            self.window_width,
+            TOOLBAR_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Bottom),
+        );
 
         // Separator line.
         cmds.push(RenderCommand::Line {
@@ -1635,14 +1637,15 @@ impl SlidesApp {
     /// Render the status bar at the bottom.
     fn render_status_bar(&self, cmds: &mut Vec<RenderCommand>) {
         let y = self.window_height - STATUS_BAR_HEIGHT;
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
+        self.palette.push_surface(
+            cmds,
+            0.0,
             y,
-            width: self.window_width,
-            height: STATUS_BAR_HEIGHT,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::ZERO,
-        });
+            self.window_width,
+            STATUS_BAR_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Top),
+        );
         cmds.push(RenderCommand::Line {
             x1: 0.0,
             y1: y,

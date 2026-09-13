@@ -20,6 +20,7 @@
 
 #![allow(dead_code, clippy::too_many_arguments)]
 
+use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 #[allow(unused_imports)]
@@ -2660,14 +2661,15 @@ impl ScreenRecorderApp {
     fn render_annotation_toolbar(&self, x: f32, y: f32, width: f32) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
 
-        cmds.push(RenderCommand::FillRect {
+        self.palette.push_surface(
+            &mut cmds,
             x,
             y,
             width,
-            height: 40.0,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(SMALL_RADIUS),
-        });
+            40.0,
+            SMALL_RADIUS,
+            Surface::Strip(Edge::Bottom),
+        );
 
         let tools = AnnotationTool::all();
         let tool_btn_w: f32 = 80.0;
@@ -3585,14 +3587,15 @@ impl ScreenRecorderApp {
 
         let bar_y = self.window_height - STATUS_BAR_HEIGHT;
 
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: bar_y,
-            width: self.window_width,
-            height: STATUS_BAR_HEIGHT,
-            color: self.palette.crust,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.palette.push_surface(
+            &mut cmds,
+            0.0,
+            bar_y,
+            self.window_width,
+            STATUS_BAR_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Top),
+        );
 
         // Top border
         cmds.push(RenderCommand::Line {

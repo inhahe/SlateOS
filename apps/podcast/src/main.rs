@@ -17,6 +17,7 @@
 //!
 //! Uses the guitk library for UI rendering.
 
+use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use std::collections::HashMap;
@@ -2799,14 +2800,15 @@ impl PodcastApp {
     }
 
     fn render_filter_bar(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32) {
-        cmds.push(RenderCommand::FillRect {
+        self.palette.push_surface(
+            cmds,
             x,
             y,
             width,
-            height: TOOLBAR_HEIGHT,
-            color: self.palette.mantle,
-            corner_radii: CornerRadii::ZERO,
-        });
+            TOOLBAR_HEIGHT,
+            0.0,
+            Surface::Strip(Edge::Bottom),
+        );
 
         let pill_y = y + 4.0;
         for (filter, pill_x, label_width) in self.filter_pills(x) {
@@ -3786,14 +3788,15 @@ impl PodcastApp {
 
         // Search input field.
         let input_y = HEADER_HEIGHT + 12.0;
-        cmds.push(RenderCommand::FillRect {
-            x: pad,
-            y: input_y,
-            width: text_w,
-            height: SEARCH_BAR_HEIGHT,
-            color: self.palette.surface0,
-            corner_radii: CornerRadii::all(8.0),
-        });
+        self.palette.push_surface(
+            cmds,
+            pad,
+            input_y,
+            text_w,
+            SEARCH_BAR_HEIGHT,
+            8.0,
+            Surface::Card,
+        );
         cmds.push(RenderCommand::StrokeRect {
             x: pad,
             y: input_y,

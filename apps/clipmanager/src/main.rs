@@ -4,6 +4,7 @@
 //! content type, tagging, pinning, template management with placeholder substitution,
 //! batch operations, statistics, and export/import. Inspired by CopyQ and Ditto.
 
+use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use std::collections::{HashSet, VecDeque};
@@ -1294,14 +1295,9 @@ fn render_search_bar(frame: &mut Frame, state: &AppState, x: f32, y: f32, w: f32
 }
 
 fn render_tab_bar(frame: &mut Frame, state: &AppState, x: f32, y: f32, w: f32, h: f32) {
-    frame.push(RenderCommand::FillRect {
-        x,
-        y,
-        width: w,
-        height: h,
-        color: state.palette.mantle,
-        corner_radii: CornerRadii::all(4.0),
-    });
+    state
+        .palette
+        .push_surface(frame, x, y, w, h, 4.0, Surface::Strip(Edge::Bottom));
 
     let mut tx = x + 4.0;
     for (label, tab) in [
@@ -2157,14 +2153,9 @@ fn render_template_field(
 }
 
 fn render_toolbar(frame: &mut Frame, state: &AppState, x: f32, y: f32, w: f32, h: f32) {
-    frame.push(RenderCommand::FillRect {
-        x,
-        y,
-        width: w,
-        height: h,
-        color: state.palette.mantle,
-        corner_radii: CornerRadii::all(4.0),
-    });
+    state
+        .palette
+        .push_surface(frame, x, y, w, h, 4.0, Surface::Strip(Edge::Bottom));
 
     let mut bx = x + 8.0;
     for (label, color, target) in [

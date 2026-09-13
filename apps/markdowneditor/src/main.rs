@@ -28,6 +28,7 @@
 //!
 //! Uses the guitk library for UI rendering.
 
+use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use guitk::color::Color;
@@ -3742,14 +3743,15 @@ pub fn render_toolbar(
     let mut cmds = Vec::new();
 
     // Toolbar background.
-    cmds.push(RenderCommand::FillRect {
+    pal.push_surface(
+        &mut cmds,
         x,
         y,
         width,
-        height: TOOLBAR_HEIGHT,
-        color: pal.mantle,
-        corner_radii: CornerRadii::ZERO,
-    });
+        TOOLBAR_HEIGHT,
+        0.0,
+        Surface::Strip(Edge::Bottom),
+    );
 
     // Bottom border.
     cmds.push(RenderCommand::Line {
@@ -3783,14 +3785,15 @@ pub fn render_toolbar(
         let btn_width = text::width(&button.label, TOOLBAR_FONT_SIZE) + 16.0;
 
         // Button background.
-        cmds.push(RenderCommand::FillRect {
-            x: btn_x,
-            y: btn_y,
-            width: btn_width,
-            height: btn_height,
-            color: pal.surface0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+        pal.push_surface(
+            &mut cmds,
+            btn_x,
+            btn_y,
+            btn_width,
+            btn_height,
+            4.0,
+            Surface::Strip(Edge::Bottom),
+        );
 
         // Button label.
         cmds.push(RenderCommand::Text {
@@ -3828,14 +3831,15 @@ pub fn render_tab_bar(
     let mut cmds = Vec::new();
 
     // Tab bar background.
-    cmds.push(RenderCommand::FillRect {
+    pal.push_surface(
+        &mut cmds,
         x,
         y,
         width,
-        height: TAB_BAR_HEIGHT,
-        color: pal.crust,
-        corner_radii: CornerRadii::ZERO,
-    });
+        TAB_BAR_HEIGHT,
+        0.0,
+        Surface::Strip(Edge::Bottom),
+    );
 
     let mut tab_x = x + 4.0;
     let tab_y = y + 4.0;
@@ -3937,14 +3941,15 @@ pub fn render_status_bar(
     let mut cmds = Vec::new();
 
     // Status bar background.
-    cmds.push(RenderCommand::FillRect {
+    pal.push_surface(
+        &mut cmds,
         x,
         y,
         width,
-        height: STATUS_BAR_HEIGHT,
-        color: pal.mantle,
-        corner_radii: CornerRadii::ZERO,
-    });
+        STATUS_BAR_HEIGHT,
+        0.0,
+        Surface::Strip(Edge::Top),
+    );
 
     // Top border.
     cmds.push(RenderCommand::Line {

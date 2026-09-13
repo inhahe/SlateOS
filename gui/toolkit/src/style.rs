@@ -6,6 +6,31 @@
 
 use crate::color::Color;
 
+/// How thick a keyboard focus ring is drawn, before the user's scale.
+///
+/// Here rather than in one widget's module because a focus ring is shared
+/// visual vocabulary: whatever draws one should draw the same one, or a
+/// keyboard user learns the indicator per-widget. `CARET_WIDTH` lives in
+/// `textedit` because only a text field has a caret; this does not have that
+/// excuse.
+///
+/// **Scale it, do not read it directly.** `AppearanceSettings::focus_ring_width`
+/// is `FOCUS_RING_WIDTH * focus_ring_scale`, and the scale is the whole point:
+/// WCAG 2.4.11 asks for a focus indicator a user can actually see, and two
+/// physical pixels on a dense display is not that for everyone. A widget that
+/// multiplied for itself would be a widget that could forget to, which is
+/// exactly how the dead `a11y.rs` copy of this setting came to have passing
+/// tests and no reader.
+///
+/// **The colour is deliberately not a setting.** A ring is drawn over an
+/// unknown background, so a fixed colour cannot be guaranteed legible; the
+/// widget picks a palette role that contrasts with what it just drew. Making
+/// the hue user-settable would let a user choose an invisible ring while
+/// believing they had made it more visible, which is worse than not offering
+/// the choice. Width is safe in a way hue is not: thicker is never less
+/// visible.
+pub const FOCUS_RING_WIDTH: f32 = 2.0;
+
 /// Edge insets (padding, margins, borders).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Edges {

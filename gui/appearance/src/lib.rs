@@ -1089,6 +1089,15 @@ pub struct AppearanceSettings {
     /// the toolkit, and the toolkit's settings arrive through this struct.
     /// See design-decisions.md 839.
     pub caret_width_scale: f32,
+    /// How much thicker than normal to draw the keyboard focus ring.
+    ///
+    /// Here for the same reason `caret_width_scale` is: the ring is drawn by
+    /// the toolkit, and the toolkit's settings arrive through this struct. It
+    /// is the last of the two fields
+    /// `TD-C-STICKY-FILTER-AND-MOUSE-KEYS-ARE-BUILT-TESTED-AND-CONNECTED-TO-NOTHING`
+    /// left standing as a record of a wanted feature -- `caret_width` was the
+    /// other, and 839 built it.
+    pub focus_ring_scale: f32,
     /// Desktop icon size.
     pub icon_size: IconSize,
     /// Cursor size.
@@ -1147,6 +1156,7 @@ impl Default for AppearanceSettings {
             drop_shadows: true,
             scaling_percent: 100,
             caret_width_scale: 1.0,
+            focus_ring_scale: 1.0,
         }
     }
 }
@@ -1163,6 +1173,17 @@ impl AppearanceSettings {
     #[must_use]
     pub fn caret_width(&self) -> f32 {
         guitk::textedit::CARET_WIDTH * self.caret_width_scale
+    }
+
+    /// The focus-ring width this user asked for, in pixels.
+    ///
+    /// The same one step between a stored scale and something a widget can
+    /// draw that [`caret_width`](Self::caret_width) is, and it exists for the
+    /// same reason: a scale is not a width, and a caller that multiplies for
+    /// itself is a caller that can forget to.
+    #[must_use]
+    pub fn focus_ring_width(&self) -> f32 {
+        guitk::style::FOCUS_RING_WIDTH * self.focus_ring_scale
     }
 
     /// The accent colour to actually draw with.
@@ -1215,6 +1236,11 @@ impl AppearanceSettings {
         // inside a line box, and past about 4x it stops being a caret and
         // starts covering the character after it.
         self.caret_width_scale = self.caret_width_scale.clamp(0.5, 4.0);
+        // The same range as the caret, and for the same reason: below 0.5 a
+        // ring is thinner than the hairline it is meant to replace, and above
+        // 4 it starts covering the control it surrounds. A focus indicator
+        // that hides the button is not an accessibility win.
+        self.focus_ring_scale = self.focus_ring_scale.clamp(0.5, 4.0);
     }
 }
 
@@ -1618,6 +1644,11 @@ impl AppearanceSettings {
             doc.get_f64(&["accessibility", "caret_width_scale"])
                 .map(|v| v as f32)
         );
+        read_into!(
+            s.focus_ring_scale,
+            doc.get_f64(&["accessibility", "focus_ring_scale"])
+                .map(|v| v as f32)
+        );
         read_into!(s.fonts.ui_font, doc.get_str(&["fonts", "ui_font"]));
         read_into!(
             s.fonts.ui_size,
@@ -1719,6 +1750,10 @@ impl AppearanceSettings {
         doc.set_f64(
             &["accessibility", "caret_width_scale"],
             f64::from(self.caret_width_scale),
+        );
+        doc.set_f64(
+            &["accessibility", "focus_ring_scale"],
+            f64::from(self.focus_ring_scale),
         );
         doc.set_f64(&["fonts", "ui_size"], f64::from(self.fonts.ui_size));
         doc.set_str(&["fonts", "mono_font"], &self.fonts.mono_font);
@@ -2082,6 +2117,7 @@ mod tests {
         AppearanceSettings {
             theme_mode: ThemeMode::Light,
             caret_width_scale: 2.5,
+            focus_ring_scale: 3.0,
             // Non-default, which is this helper's whole contract: the
             // round-trip test must not be able to pass on a field it forgot.
             surface_style: SurfaceStyle::Cards,
@@ -4075,6 +4111,35 @@ mod tests {
             separation > 1.3,
             "main and secondary text are within {separation:.2} of each other, so the hierarchy reads as flat"
         );
+    }
+
+    /// `FOCUS_RING_WIDTH * s.focus_ring_scale`, which is a test of `*` in the
+    /// same sense `the_caret_width_scale_reaches_a_width_in_pixels` is: the
+    /// point is not the arithmetic, it is that the step exists at all and has
+    /// exactly one home. A scale multiplied at each call site is a scale that
+    /// some call site will fail to multiply.
+    #[test]
+    fn the_focus_ring_scale_reaches_a_width_in_pixels() {
+        let mut s = AppearanceSettings::default();
+        assert!(
+            (s.focus_ring_width() - guitk::style::FOCUS_RING_WIDTH).abs() < 0.001,
+            "an unscaled setting should be the toolkit's own width"
+        );
+        s.focus_ring_scale = 2.0;
+        assert!(
+            (s.focus_ring_width() - guitk::style::FOCUS_RING_WIDTH * 2.0).abs() < 0.001,
+            "doubling the scale should double the width"
+        );
+
+        // The clamp, at both ends. A ring thinner than half the hairline is
+        // not an indicator, and one four times thicker already covers the
+        // control it surrounds.
+        s.focus_ring_scale = 99.0;
+        s.validate();
+        assert!((s.focus_ring_scale - 4.0).abs() < 0.001);
+        s.focus_ring_scale = 0.01;
+        s.validate();
+        assert!((s.focus_ring_scale - 0.5).abs() < 0.001);
     }
 
     /// The caret width is a live setting, not a stored one.

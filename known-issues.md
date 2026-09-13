@@ -138732,7 +138732,23 @@ On a machine where `/dev/sda` exists it would have exited 0. It was found
 only because `blkzone`, its argv[0] sibling, was flagged and the crate was
 opened anyway. So the count of 70 is a floor, not a total.
 
-### Still open (45), regenerated 2026-09-12 from the sweep itself
+### Still open (45 -- 40 lane B, 5 lane C), regenerated 2026-09-12
+
+**Five of these are not lane B's.** `clipboard`, `credentials` and
+`desktop` are in `gui/`; `match3` and `pinball` are in `apps/`. The list
+below is the sweep's raw output, which knows about binaries and not about
+lane boundaries, and reading it as this lane's backlog would be wrong.
+They are filed to C as
+`requests/b-c-five-gui-and-app-programs-accept-an-option-they-do-not-have.md`.
+
+**All 40 of lane B's are blocked on a reference.** Checked: not one of
+them has an upstream installed in the WSL environment this lane measures
+against, so every refusal wording would have to be invented rather than
+measured, which is what §371 forbids. The exception is the handful with
+no upstream at all -- `sanitize`, `shell`, `servicebus`, `loginmgr` look
+like SlateOS originals -- where there is nothing to match and the house
+wording in `userspace/usageerror` is a free choice rather than a guess.
+That subset is the only part of this entry that is actionable today.
 
 Not hand-maintained. The previous list here had drifted: it still named
 `route`, `dnsdomainname`, `lshw` and `objdump` as open hours after they

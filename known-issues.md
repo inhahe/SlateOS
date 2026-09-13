@@ -29623,7 +29623,7 @@ descriptors underneath it. Left as tech debt: changing it to leak instead
 would trade a rare wrong-packet for a permanent queue drain on a flaky device,
 and neither is right without the reset path.
 
-## TD-GUI-ARROW-KEYS-MOVE-IN-LOGICAL-ORDER
+## TD-GUI-ARROW-KEYS-MOVE-IN-LOGICAL-ORDER -- FIXED, and this entry was three weeks stale
 
 **Status: OPEN 2026-08-16, UNBLOCKED 2026-08-21** (lane C).
 
@@ -29640,12 +29640,38 @@ against entries that claim to be waiting on them.
 | | state |
 |---|---|
 | `gui/font/src/shape.rs` -- `ShapedRun::caret_left` / `caret_right`, the primitive | **done**, with tests |
-| `gui/toolkit/src/text.rs` -- `TextCursor` and its wrappers | not started |
-| `guitk::widget::TextInput`, `guitk::modal::InputDialog` -- the arrow-key handling | not started |
+| `gui/toolkit/src/text.rs` -- `TextCursor` (carrying `affinity`) and `caret_left`/`caret_right` | **done** |
+| `guitk::widget::TextInput`, `guitk::modal::InputDialog` -- the arrow-key handling | **done**, both calling the wrappers above |
 | `apps/editor` | **deliberately out of scope**: §541 does not cover it either way, because it draws and scrolls its own caret |
 
-So the primitive exists and nothing calls it. The rest of this entry describes
-the behaviour; §541 is the authority on which behaviour was chosen.
+**So the whole thing is done, and has been for some time.** The evidence is two
+end-to-end tests, both passing:
+
+* `guitk::widget::tests::the_arrows_move_by_the_screen_and_keep_the_side_they_are_on`
+* `guitk::modal::tests::a_plain_input_dialog_moves_its_caret_by_the_screen`
+
+Both walk `ab` + two Hebrew letters + `cd` in each direction and assert the
+exact offset sequence -- `7, 6, 4, 6, 1, 0` leftwards and `1, 2, 4, 2, 7, 8`
+rightwards. The repeated offset is the interesting part and is the regression
+test for §541's measured trap: one byte offset is visited twice per walk,
+because the two gaps where the directions meet sit at opposite ends of the
+Hebrew on screen and each answers to *both* offsets. A widget that kept only
+the byte cannot tell the second 6 from the first and skips the whole word in
+one press -- worse than the logical motion this replaced.
+
+Home and End stay logical, also as §541 says, and `Backspace` still deletes the
+previous character *in the string*: deleting and moving are allowed to
+disagree, because "the previous character" is what a reader of that script
+means regardless of which side of the caret it is drawn on.
+
+**Why this entry is being closed rather than worked.** It said "blocked on
+C-Q2, do not fix this without an answer" for 23 days after the operator
+answered, and the fix had in fact already landed. Two separate staleness
+failures in one entry, and the first hid the second: a reader who believed the
+blocker stopped reading before the code. Found by lane B's
+`scripts/check-stale-blockers.py`, which cross-references answered questions
+against entries claiming to wait on them -- a shape worth having a gate for
+precisely because a question *sounds* like it is still being thought about.
 
 **What.** Left/Right arrow keys move the caret by one position in *logical*
 order -- the order the characters are stored and read -- in every text widget in

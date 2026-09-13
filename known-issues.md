@@ -109573,6 +109573,48 @@ test half was blocked on this (it is now unblocked), and any future "it is
 covered by a self-test" claim about these six subsystems is worth checking
 against the log first.
 
+### And the follow-up question: is the shipped code EXECUTED?
+
+Gate 40 proves posix compiles for the target it ships to. It says nothing
+about whether any test runs the shipped arms. Measured 2026-09-13:
+
+**231 items are `#[cfg(target_os = "none")]` -- 2,397 lines, median 7.**
+
+Most of that is thin shims and the median says so. The tail was inspected item
+by item rather than counted:
+
+| item | lines | verdict |
+|---|---|---|
+| `setjmp.rs` | 145 | raw `global_asm!`. Cannot run on the host at all -- it exports the symbol `setjmp`, which would collide with the host libc -- and its `JmpBuf` layout is checked by `const` assertions that compile on BOTH targets. Fine as it stands. |
+| `file.rs` `tee_transfer` | 88 | **was a real gap; fixed.** See below. |
+| `spawn.rs` `execl_body` | 80 | varargs-ABI handling. Not host-testable, and deliberately not forced -- see below. |
+| `sys_capability.rs` `store` | 72 | has a host twin at line 338, and the twin IS tested. |
+| `aio.rs` `imp` | ~30 | paired storage: a `static mut` bare metal, `thread_local!` on the host so 20,703 tests can run in parallel at all. Deliberate, and the shared logic above it is tested. |
+
+**`tee_transfer` was the one real gap.** No host counterpart, zero test
+references, and the host build returns ENOSYS from `tee` before reaching it --
+so the argument validation was tested and the 88-line copy loop, with short
+writes and EAGAIN in it, was not. Fixed: the three pipe operations are behind a
+`TeePipes` trait, only the syscall impl is target-gated, and eleven tests drive
+the loop against an in-memory fake. Two of those tests were wrong first, and
+one of the corrections fixed a comment in the shipped code that described a
+re-peek the loop does not do.
+
+**`execl_body` was left alone, on purpose.** Its risky part -- the stack/heap
+threshold -- was checked by hand and is correct: `argc < 64` uses the 64-slot
+stack array, so 63 arguments plus the terminating NULL exactly fit, and 64
+goes to the heap. Everything else in it is x86-64 SysV varargs handling, and
+the host target has a different varargs ABI. A trait over the varargs cursor
+would let the loop be driven by a fake, but the fake would have nothing to do
+with the ABI, which is where the entire risk lives. That is testing the wrong
+thing, and it is worth writing down so the analysis is not repeated.
+
+**What actually covers the bare-metal arms** is the Path-Z ring-3 rungs: bash,
+pkgconf, CPython and make all link `libc.a` and run on target every boot, and
+CPython alone references 478 libc symbols. That is real coverage; it is just
+not unit-test coverage, and the distinction matters when someone reads "20,703
+tests" and concludes the libc is tested.
+
 ### The class gate is now built — and three of its first four findings were wrong (lane A, 2026-08-31)
 
 **Status of the class:** the gate exists and is wired into `boot-test.sh`. It

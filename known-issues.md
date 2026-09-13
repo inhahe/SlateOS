@@ -23958,6 +23958,26 @@ spawned in the window manager: policy about *how* a program starts (namespace,
 capabilities, cgroup, environment) belongs to the service that owns process
 creation, not to the shell.
 
+**Update 2026-09-13: a launch is now executed, and this entry stays open**
+**for the half that is not.** `gui/desktop`'s binary drains
+`ShellSession::take_launches` and spawns, so the start menu starts programs
+and §818 became implementable — a queue nobody drains makes every
+feature downstream of it unfinishable, which is what that entry was stuck
+behind.
+
+**The rule this entry states is kept.** Nothing in `DesktopShell` or
+`ShellSession` starts anything; the intent is still a value everywhere in
+the library, and the `Command::spawn` is in the binary, which is already
+outside the boundary being protected. `design-decisions.md` 843 records the
+reasoning and, more importantly, what it does not claim: `Command::spawn`
+inherits this process's environment and privileges, which is exactly the
+policy-by-omission described above. That is acceptable on a development
+host and is not acceptable on SlateOS.
+
+**So the proper fix below is unchanged** — it becomes a channel send to
+the process server. What has changed is that the swap is now one function,
+`drain()` in `main.rs`, rather than a missing edge.
+
 **Where.** `gui/desktop/src/main.rs` — `ShellAction` and `handle_mouse`;
 `gui/desktop/src/launcher.rs` — `LauncherAction::Launch`.
 

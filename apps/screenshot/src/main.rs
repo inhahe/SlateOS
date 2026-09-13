@@ -11,6 +11,8 @@
 //!
 //! Uses the guitk library for UI rendering.
 
+use appearance::Palette;
+use guitk::theme::with_alpha;
 use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -37,19 +39,16 @@ const BUTTON_SPACING: f32 = 8.0;
 const ANNOTATION_TOOLBAR_HEIGHT: f32 = 36.0;
 const STATUS_BAR_HEIGHT: f32 = 28.0;
 
-const BG_COLOR: Color = Color::rgb(30, 30, 30);
-const TOOLBAR_BG: Color = Color::rgb(48, 48, 48);
-const STATUS_BG: Color = Color::rgb(38, 38, 38);
-const BUTTON_BG: Color = Color::rgb(60, 60, 60);
-const BUTTON_HOVER_BG: Color = Color::rgb(80, 80, 80);
-const BUTTON_ACTIVE_BG: Color = Color::rgb(50, 110, 190);
-const TEXT_PRIMARY: Color = Color::rgb(230, 230, 230);
-const TEXT_SECONDARY: Color = Color::rgb(160, 160, 160);
 #[allow(dead_code)]
-const ACCENT_COLOR: Color = Color::rgb(70, 140, 220);
-const BORDER_COLOR: Color = Color::rgb(70, 70, 70);
+// A scrim over the captured image, and black on purpose: it darkens whatever
+// was on screen, which is not the theme's to tint. `palette_check` exempts
+// black at any alpha for exactly this.
 const OVERLAY_COLOR: Color = Color::rgba(0, 0, 0, 140);
-const SELECTION_BORDER: Color = Color::rgba(70, 140, 220, 220);
+
+// The next two are *annotations* -- marks the user draws onto the picture and
+// that are saved with it. They are content in the sense `apps/paint`'s swatch
+// row is content: a red arrow should still be red when the file is opened on
+// another machine, so they do not follow this desktop's theme.
 const HIGHLIGHT_COLOR: Color = Color::rgba(255, 255, 0, 80);
 const ANNOTATION_RED: Color = Color::rgb(220, 50, 50);
 #[allow(dead_code)]
@@ -634,7 +633,7 @@ impl RegionSelector {
     }
 
     /// Render the selection overlay.
-    pub fn render(&self, tree: &mut RenderTree) {
+    pub fn render(&self, tree: &mut RenderTree, p: &Palette) {
         if !self.active {
             return;
         }
@@ -655,7 +654,7 @@ impl RegionSelector {
             tree.fill_rect(sel_x, sel_y, sel_w, sel_h, Color::TRANSPARENT);
 
             // Selection border.
-            tree.stroke_rect(sel_x, sel_y, sel_w, sel_h, SELECTION_BORDER, 2.0);
+            tree.stroke_rect(sel_x, sel_y, sel_w, sel_h, with_alpha(p.accent, 220), 2.0);
 
             // Dimension label near the bottom-right of the selection.
             let label = self.dimensions_label();
@@ -671,7 +670,7 @@ impl RegionSelector {
                 20.0,
                 Color::rgba(0, 0, 0, 180),
             );
-            tree.text(label_x, label_y, &label, TEXT_PRIMARY, 13.0);
+            tree.text(label_x, label_y, &label, p.text, 13.0);
         }
 
         // Crosshair at current mouse position.
@@ -764,6 +763,8 @@ pub struct Notification {
 
 /// Top-level application state for the screenshot utility.
 pub struct ScreenshotApp {
+    /// The user's colours, handed over by the framework (§822).
+    pub palette: Palette,
     /// Current capture mode selected in the menu.
     pub mode: CaptureMode,
     /// Current application view.
@@ -819,6 +820,7 @@ impl ScreenshotApp {
     /// Create a new screenshot application with the given window size.
     pub fn new(width: f32, height: f32) -> Self {
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             mode: CaptureMode::FullScreen,
             view: AppView::Menu,
             window_width: width,
@@ -1455,19 +1457,19 @@ impl ScreenshotApp {
 
     fn render_menu(&self, tree: &mut RenderTree) {
         // Background.
-        tree.fill_rect(0.0, 0.0, self.window_width, self.window_height, BG_COLOR);
+        tree.fill_rect(0.0, 0.0, self.window_width, self.window_height, self.palette.base);
 
         // Toolbar.
-        tree.fill_rect(0.0, 0.0, self.window_width, TOOLBAR_HEIGHT, TOOLBAR_BG);
+        tree.fill_rect(0.0, 0.0, self.window_width, TOOLBAR_HEIGHT, self.palette.surface0);
         tree.push(RenderCommand::Line {
             x1: 0.0,
             y1: TOOLBAR_HEIGHT,
             x2: self.window_width,
             y2: TOOLBAR_HEIGHT,
-            color: BORDER_COLOR,
+            color: self.palette.surface1,
             width: 1.0,
         });
-        tree.text(16.0, 12.0, "Screenshot", TEXT_PRIMARY, 18.0);
+        tree.text(16.0, 12.0, "Screenshot", self.palette.text, 18.0);
 
         // Menu buttons.
         let modes = menu_modes();
@@ -1477,9 +1479,9 @@ impl ScreenshotApp {
             let bx = 20.0 + (i as f32) * (BUTTON_WIDTH + BUTTON_SPACING);
             let by = menu_y;
             let bg = if self.hovered_button == Some(i) {
-                BUTTON_HOVER_BG
+                self.palette.surface2
             } else {
-                BUTTON_BG
+                self.palette.surface1
             };
 
             tree.fill_rounded_rect(
@@ -1490,8 +1492,8 @@ impl ScreenshotApp {
                 bg,
                 CornerRadii::all(4.0),
             );
-            tree.stroke_rect(bx, by, BUTTON_WIDTH, BUTTON_HEIGHT, BORDER_COLOR, 1.0);
-            tree.text(bx + 10.0, by + 8.0, mode.label(), TEXT_PRIMARY, 13.0);
+            tree.stroke_rect(bx, by, BUTTON_WIDTH, BUTTON_HEIGHT, self.palette.surface1, 1.0);
+            tree.text(bx + 10.0, by + 8.0, mode.label(), self.palette.text, 13.0);
         }
 
         // Hotkey hints.
@@ -1503,7 +1505,7 @@ impl ScreenshotApp {
             "Shift+PrintScreen    Delayed (3s)",
         ];
         for (i, hint) in hints.iter().enumerate() {
-            tree.text(20.0, hints_y + i as f32 * 22.0, hint, TEXT_SECONDARY, 12.0);
+            tree.text(20.0, hints_y + i as f32 * 22.0, hint, self.palette.subtext0, 12.0);
         }
 
         // Status bar.
@@ -1512,7 +1514,7 @@ impl ScreenshotApp {
             self.window_height - STATUS_BAR_HEIGHT,
             self.window_width,
             STATUS_BAR_HEIGHT,
-            STATUS_BG,
+            self.palette.surface0,
         );
         let status_text = format!(
             "Mode: {}  |  Save to: {}",
@@ -1523,13 +1525,13 @@ impl ScreenshotApp {
             10.0,
             self.window_height - STATUS_BAR_HEIGHT + 7.0,
             &status_text,
-            TEXT_SECONDARY,
+            self.palette.subtext0,
             12.0,
         );
     }
 
     fn render_region_select(&self, tree: &mut RenderTree) {
-        self.region_selector.render(tree);
+        self.region_selector.render(tree, &self.palette);
     }
 
     fn render_countdown(&self, tree: &mut RenderTree) {
@@ -1551,7 +1553,7 @@ impl ScreenshotApp {
             x: cx,
             y: cy,
             text: count_str,
-            color: TEXT_PRIMARY,
+            color: self.palette.text,
             font_size: 72.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -1563,18 +1565,18 @@ impl ScreenshotApp {
             cx - 60.0,
             cy + 80.0,
             "Press Escape to cancel",
-            TEXT_SECONDARY,
+            self.palette.subtext0,
             14.0,
         );
     }
 
     fn render_preview(&self, tree: &mut RenderTree) {
         // Background.
-        tree.fill_rect(0.0, 0.0, self.window_width, self.window_height, BG_COLOR);
+        tree.fill_rect(0.0, 0.0, self.window_width, self.window_height, self.palette.base);
 
         // Main toolbar.
-        tree.fill_rect(0.0, 0.0, self.window_width, TOOLBAR_HEIGHT, TOOLBAR_BG);
-        tree.text(16.0, 12.0, "Preview", TEXT_PRIMARY, 18.0);
+        tree.fill_rect(0.0, 0.0, self.window_width, TOOLBAR_HEIGHT, self.palette.surface0);
+        tree.text(16.0, 12.0, "Preview", self.palette.text, 18.0);
 
         // Action buttons in toolbar.
         for (i, action) in PREVIEW_ACTIONS.iter().enumerate() {
@@ -1584,8 +1586,8 @@ impl ScreenshotApp {
                 PreviewButton::Copy => "Copy",
                 _ => "Discard",
             };
-            tree.fill_rounded_rect(bx, by, bw, bh, BUTTON_BG, CornerRadii::all(4.0));
-            tree.text(bx + 12.0, by + 8.0, label, TEXT_PRIMARY, 12.0);
+            tree.fill_rounded_rect(bx, by, bw, bh, self.palette.surface1, CornerRadii::all(4.0));
+            tree.text(bx + 12.0, by + 8.0, label, self.palette.text, 12.0);
         }
 
         // Annotation toolbar.
@@ -1601,18 +1603,18 @@ impl ScreenshotApp {
         for (i, tool) in PREVIEW_TOOLS.iter().enumerate() {
             let (tx, ty, tw, th) = preview_tool_rect(i);
             let bg = if self.annotation_tool == *tool {
-                BUTTON_ACTIVE_BG
+                self.palette.accent
             } else {
-                BUTTON_BG
+                self.palette.surface1
             };
             tree.fill_rounded_rect(tx, ty, tw, th, bg, CornerRadii::all(3.0));
-            tree.text(tx + 8.0, ty + 7.0, tool.label(), TEXT_PRIMARY, 11.0);
+            tree.text(tx + 8.0, ty + 7.0, tool.label(), self.palette.text, 11.0);
         }
 
         // Undo button.
         let (ux, uy, uw, uh) = preview_undo_rect();
-        tree.fill_rounded_rect(ux, uy, uw, uh, BUTTON_BG, CornerRadii::all(3.0));
-        tree.text(ux + 10.0, uy + 7.0, "Undo", TEXT_PRIMARY, 11.0);
+        tree.fill_rounded_rect(ux, uy, uw, uh, self.palette.surface1, CornerRadii::all(3.0));
+        tree.text(ux + 10.0, uy + 7.0, "Undo", self.palette.text, 11.0);
 
         // Content area: show the captured image.
         let content_y = TOOLBAR_HEIGHT + ANNOTATION_TOOLBAR_HEIGHT;
@@ -1630,7 +1632,7 @@ impl ScreenshotApp {
 
             // Image info overlay.
             let info = format!("{}x{}", capture.width, capture.height);
-            tree.text(10.0, content_y + 10.0, &info, TEXT_SECONDARY, 12.0);
+            tree.text(10.0, content_y + 10.0, &info, self.palette.subtext0, 12.0);
         }
 
         // Render committed annotations.
@@ -1655,7 +1657,7 @@ impl ScreenshotApp {
                 Color::rgba(0, 0, 0, 180),
             );
             let display = format!("Text: {}_", self.annotation_text_input);
-            tree.text(10.0, input_y + 7.0, &display, TEXT_PRIMARY, 13.0);
+            tree.text(10.0, input_y + 7.0, &display, self.palette.text, 13.0);
         }
 
         // Status bar.
@@ -1664,7 +1666,7 @@ impl ScreenshotApp {
             self.window_height - STATUS_BAR_HEIGHT,
             self.window_width,
             STATUS_BAR_HEIGHT,
-            STATUS_BG,
+            self.palette.surface0,
         );
         let ann_count = self.annotations.len();
         let status = format!(
@@ -1676,7 +1678,7 @@ impl ScreenshotApp {
             10.0,
             self.window_height - STATUS_BAR_HEIGHT + 7.0,
             &status,
-            TEXT_SECONDARY,
+            self.palette.subtext0,
             12.0,
         );
     }
@@ -1696,11 +1698,11 @@ impl ScreenshotApp {
             CornerRadii::all(6.0),
         );
         tree.stroke_rect(nx, ny, nw, nh, Color::rgba(50, 160, 80, 200), 1.0);
-        tree.text(nx + 12.0, ny + 8.0, &notif.message, TEXT_PRIMARY, 12.0);
+        tree.text(nx + 12.0, ny + 8.0, &notif.message, self.palette.text, 12.0);
 
         if let Some(ref path) = notif.file_path {
             let path_str = format!("{}", path.display());
-            tree.text(nx + 12.0, ny + 26.0, &path_str, TEXT_SECONDARY, 11.0);
+            tree.text(nx + 12.0, ny + 26.0, &path_str, self.palette.subtext0, 11.0);
         }
     }
 }
@@ -2118,6 +2120,11 @@ fn menu_modes() -> Vec<CaptureMode> {
 // ============================================================================
 
 impl App for ScreenshotApp {
+    /// Adopt the user's colours (§822).
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         "Screenshot".to_owned()
     }
@@ -2206,6 +2213,32 @@ fn main() -> ExitCode {
 )]
 mod tests {
     use super::*;
+
+    /// Every colour the screenshot tool's chrome draws comes from the palette.
+    ///
+    /// The annotation colours are declared as derived rather than exempted:
+    /// they are marks the user draws *into* the picture and that are saved
+    /// with it, so they are content, not theme.
+    #[test]
+    fn every_colour_the_screenshot_chrome_draws_comes_from_its_palette() {
+        for light in [false, true] {
+            let mut app = ScreenshotApp::new(1280.0, 800.0);
+            app.palette = Palette::for_mode(light);
+            let tree = App::render(&mut app, 1280.0, 800.0);
+            assert!(
+                tree.commands.len() > 10,
+                "the sweep examined {} commands, which is not a render",
+                tree.commands.len()
+            );
+            appearance::palette_check::assert_drawn_from(
+                &app.palette,
+                &tree.commands,
+                &[HIGHLIGHT_COLOR, ANNOTATION_RED],
+                &format!("screenshot (light={light})"),
+            );
+        }
+    }
+
 
     // ------------------------------------------------------------------
     // The clock, and the command line
@@ -3626,7 +3659,7 @@ mod tests {
         sel.update_drag(500.0, 400.0);
 
         let mut tree = RenderTree::new();
-        sel.render(&mut tree);
+        sel.render(&mut tree, &Palette::for_mode(false));
         assert!(!tree.is_empty());
     }
 
@@ -3659,7 +3692,7 @@ mod tests {
             start_y: 10.0,
             end_x: 80.0,
             end_y: 26.0,
-            color: TEXT_PRIMARY,
+            color: Palette::for_mode(false).text,
             text: "Hello".to_string(),
         });
         app.annotations.push(Annotation {

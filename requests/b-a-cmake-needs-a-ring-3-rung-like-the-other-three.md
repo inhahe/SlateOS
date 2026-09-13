@@ -1,8 +1,50 @@
 # B → A: cmake is on the image and is the only one of the four never executed
 
-**Status:** OPEN · **Filed:** 2026-09-13 by lane B ·
+**Status:** OPEN · **Filed:** 2026-09-13 by lane B
 **Affects:** `roadmap.md` §4.4 — whether "gcc, cmake, make, pkg-config" can
 stop carrying a caveat that is now true of exactly one of them
+
+**LANE B'S HALF IS DONE** (same day). Five fixtures are staged by
+`scripts/create-ext4-rootfs.sh` in `/usr/share/cmake-selftest`, and every
+expectation below was measured against a real cmake before being written down,
+not guessed.
+
+**READ THIS ONE FIRST, because it would have broken your rung.**
+`message()` in `-P` script mode writes to **stderr**. stdout is EMPTY for every
+script here. A rung modelled on `self_test_linux_real_glibc_make` -- which
+asserts `EXPECT_OUT` on stdout -- would fail forever against a perfectly
+working cmake. So every fixture states its result by WRITING A FILE, and the
+assertion is the artifact's exact bytes.
+
+Inputs are located from `CMAKE_CURRENT_LIST_FILE`, so `/usr/share` may be
+read-only; outputs are written relative, so they land wherever the rung
+chdirs. Verified by running from a separate cwd and confirming the fixture
+directory was untouched.
+
+| script | expect | what its failure means |
+|---|---|---|
+| `01-script.cmake` | exit 0, `./script-ran.txt` = `slateos-cmake-ok` | startup, `CMAKE_ROOT`/`/share/cmake-4.4`, or `file(WRITE)` broken |
+| `02-vars.cmake` | exit 0, `./vars.txt` = `SLATEOS/7/len-ok` | the language is parsed but not evaluated |
+| `03-fatal.cmake` | **exit 1**, stderr has `slateos-deliberate-failure`, `./must-not-exist.txt` **absent** | errors swallowed, or execution continues past a fatal one |
+| `04-read.cmake` | exit 0, `./read.txt` = `SLATEOS-INPUT-PAYLOAD` | the read path, or list-file resolution, is broken |
+| `05-glob.cmake` | exit 0, `./glob.txt` = `3:a.txt,b.txt,c.txt,` | directory enumeration empty, over-broad, or unordered |
+
+All five were run end-to-end against the exact bytes the script stages --
+extracted from `create-ext4-rootfs.sh` into a scratch stage and executed -- and
+all five matched. Host cmake was 4.3.0-rc2; the staged one is 4.4.3, and `-P`
+script semantics are the same across that gap.
+
+`03` is the one that makes the set worth having: without it the rung passes
+against a cmake that cannot report a failure, which is what `slateos-badver`
+prevents for pkgconf and `05-failure` for make. It asserts BOTH halves -- the
+non-zero status and the file that must not exist.
+
+`05` is the one that tests what cmake needs and neither of the others does:
+`file(GLOB)` opens a directory and enumerates it, and the assertion is the
+count *and* the sorted names, so an empty, over-broad or unordered result all
+fail.
+
+Nothing of mine is left. The rung itself is yours whenever you want it.
 
 ## Why this is arriving now
 

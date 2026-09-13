@@ -1196,3 +1196,112 @@ fn main() {
         }
     }
 }
+
+// ============================================================================
+// Tests
+//
+// This crate had none. The functions pinned here are the ones that turn troff
+// source into what a reader sees: if `.SH NAME` or an escape is parsed wrongly
+// the page still renders, just wrongly, and nothing reports it.
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn troff_arguments_split_on_spaces_outside_quotes() {
+        assert_eq!(split_troff_args("ls 1"), vec!["ls", "1"]);
+        assert_eq!(
+            split_troff_args(r#""two words" single"#),
+            vec!["two words", "single"]
+        );
+        // Runs of spaces collapse rather than producing empty arguments --
+        // `.TH  ls   1` is valid troff and must not yield "".
+        assert_eq!(split_troff_args("ls   1"), vec!["ls", "1"]);
+        assert!(split_troff_args("").is_empty());
+        assert!(split_troff_args("   ").is_empty());
+    }
+
+    #[test]
+    fn a_quoted_argument_keeps_its_spaces() {
+        // The reason quoting exists here: a .TH title is one argument.
+        assert_eq!(
+            split_troff_args(r#""GNU Coreutils" 1"#),
+            vec!["GNU Coreutils", "1"]
+        );
+    }
+
+    #[test]
+    fn a_known_section_number_gets_its_title_and_an_unknown_one_does_not_guess() {
+        assert_eq!(section_title_for("1"), "User Commands");
+        assert_eq!(section_title_for("8"), "System Administration");
+        // 6 (Games) is deliberately not in the table. An unknown section must
+        // fall back rather than return the title of a neighbouring number.
+        assert_eq!(section_title_for("6"), "Manual");
+        assert_eq!(section_title_for("x"), "Manual");
+        assert_eq!(section_title_for(""), "Manual");
+    }
+
+    #[test]
+    fn font_escapes_become_terminal_escapes() {
+        let out = inline_format(r"\fBbold\fR plain");
+        assert!(out.starts_with(ESC_BOLD), "bold did not open: {out:?}");
+        assert!(out.contains("bold"), "the word itself was eaten: {out:?}");
+        assert!(out.contains(ESC_RESET), "bold was never closed: {out:?}");
+        assert!(out.ends_with(" plain"), "{out:?}");
+        // The escape itself must not survive into the output.
+        assert!(
+            !out.contains(r"\fB"),
+            "a raw troff escape reached the reader"
+        );
+    }
+
+    #[test]
+    fn the_special_characters_a_man_page_actually_uses_are_translated() {
+        // `\-` is the one that matters most: it is how every man page writes
+        // the hyphen of an option, and leaving it as a backslash puts `\-v`
+        // in front of the reader.
+        assert_eq!(inline_format(r"\-v"), "-v");
+        assert_eq!(inline_format(r"a \(em b"), "a -- b");
+        assert_eq!(inline_format(r"a \(en b"), "a - b");
+        assert_eq!(inline_format(r"a \e b"), r"a \ b");
+    }
+
+    #[test]
+    fn an_unknown_two_character_special_is_passed_through_rather_than_dropped() {
+        // Better a wrong glyph than a silently missing word.
+        assert_eq!(inline_format(r"\(xy"), "xy");
+    }
+
+    #[test]
+    fn the_name_line_is_found_and_stripped_of_formatting() {
+        // A raw string with real line breaks: the troff source contains a
+        // backslash, and writing it with escapes would mean escaping the
+        // escape.
+        let src = r"
+.TH LS 1
+.SH NAME
+ls \- list directory contents
+.SH SYNOPSIS
+";
+        assert_eq!(
+            extract_name_line(src).as_deref(),
+            Some("ls - list directory contents")
+        );
+    }
+
+    #[test]
+    fn a_name_section_that_is_empty_yields_nothing_rather_than_the_next_section() {
+        // `.SH NAME` immediately followed by another section: whatis must
+        // report nothing, not the SYNOPSIS line.
+        let src = "\n.SH NAME\n.SH SYNOPSIS\nls [OPTION]...\n";
+        assert_eq!(extract_name_line(src), None);
+    }
+
+    #[test]
+    fn a_page_with_no_name_section_yields_nothing() {
+        assert_eq!(extract_name_line(".TH LS 1\n.SH SYNOPSIS\nls\n"), None);
+        assert_eq!(extract_name_line(""), None);
+    }
+}

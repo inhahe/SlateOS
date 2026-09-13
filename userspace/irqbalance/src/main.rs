@@ -276,7 +276,13 @@ fn balance_once(opts: &BalanceOpts) -> Vec<(u32, u64)> {
 // CLI
 // ============================================================================
 
-fn parse_args(args: &[String]) -> BalanceOpts {
+/// Parse options, or name the first one we do not recognise.
+///
+/// Returns `Err` rather than exiting so the refusal can be tested without
+/// running the binary -- which matters here: two orphaned test processes
+/// have held a lock on `irqbalance.exe` since 13:06, so it cannot be built
+/// on the windows target at all right now.
+fn parse_args(args: &[String]) -> Result<BalanceOpts, String> {
     let mut opts = BalanceOpts {
         oneshot: false,
         debug: false,
@@ -368,18 +374,36 @@ fn parse_args(args: &[String]) -> BalanceOpts {
                 }
             }
             "--deepidle" => opts.deep_idle = true,
-            _ => {}
+            // Refused, not ignored. `_ => {}` meant an unrecognised option
+            // fell through option handling into the daemon loop below, so
+            // `irqbalance --list` did not fail -- it *daemonised*, and never
+            // returned. A typo in a unit file or an init script started a
+            // permanent background process instead of reporting a mistake.
+            //
+            // Exit 1 and this wording are the measured local convention, not
+            // a guess: `ntpd`, `dhcpcd`, `getty`, `logind` and `udevd` all
+            // exit 1 here, and `ntpd` and `getty` use exactly this sentence.
+            // (All five hand-write it; `userspace/usageerror` exists and none
+            // of them use it, which is a tidy-up for its own change rather
+            // than one to start here.)
+            other => return Err(other.to_string()),
         }
         i += 1;
     }
 
-    opts
+    Ok(opts)
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
     let rest: Vec<String> = args.into_iter().skip(1).collect();
-    let opts = parse_args(&rest);
+    let opts = match parse_args(&rest) {
+        Ok(o) => o,
+        Err(bad) => {
+            eprintln!("irqbalance: unknown option: {bad}");
+            process::exit(1);
+        }
+    };
 
     if opts.oneshot {
         let migrations = balance_once(&opts);
@@ -429,6 +453,46 @@ mod tests {
     }
 
     /// The tail of a `/proc/interrupts` line, as it really looks.
+    /// An unrecognised option is refused, not ignored.
+    ///
+    /// `_ => {}` used to swallow it, and because option parsing is followed
+    /// by the daemon loop, the program did not fail -- it daemonised. So
+    /// `irqbalance --list` never returned, and a typo in an init script
+    /// started a permanent background process instead of reporting a
+    /// mistake. Two orphaned processes on this host, alive for hours and
+    /// holding a lock on the binary, are what led here.
+    #[test]
+    fn an_unknown_option_is_refused() {
+        assert_eq!(
+            parse_args(&["--list".to_string()]).err().as_deref(),
+            Some("--list")
+        );
+        // The first unrecognised option wins, and earlier options having
+        // parsed does not make the command acceptable.
+        assert_eq!(
+            parse_args(&["--oneshot".to_string(), "--nope".to_string()])
+                .err()
+                .as_deref(),
+            Some("--nope")
+        );
+        // And every option the help text lists still parses.
+        for ok in [
+            "--oneshot",
+            "--debug",
+            "--foreground",
+            "--deepidle",
+            "--banirq=16",
+            "--banmod=ahci",
+            "--hintpolicy=exact",
+            "--powerthresh=5",
+        ] {
+            assert!(
+                parse_args(&[ok.to_string()]).is_ok(),
+                "{ok} is advertised and was refused"
+            );
+        }
+    }
+
     #[test]
     fn a_module_matches_an_action_name_exactly() {
         let tail = "IR-PCI-MSI-0000:00:14.0  0-edge  xhci_hcd";
@@ -457,7 +521,7 @@ mod tests {
             stat(17, "IR-PCI-MSI  1-edge  nvme0q0"),
             stat(18, "IR-IO-APIC  18-fasteoi  ahci"),
         ];
-        let mut opts = parse_args(&[]);
+        let mut opts = parse_args(&[]).expect("known options");
         opts.banned_modules = vec!["xhci_hcd".to_string(), "ahci".to_string()];
         let banned = banned_irqs_for(&stats, &opts);
         assert!(banned.contains(&16), "{banned:?}");
@@ -468,7 +532,7 @@ mod tests {
     #[test]
     fn banmod_and_banirq_combine_without_duplicating() {
         let stats = vec![stat(16, "IR-PCI-MSI  0-edge  xhci_hcd")];
-        let mut opts = parse_args(&["--banirq=16".to_string()]);
+        let mut opts = parse_args(&["--banirq=16".to_string()]).expect("known options");
         opts.banned_modules = vec!["xhci_hcd".to_string()];
         let banned = banned_irqs_for(&stats, &opts);
         assert_eq!(banned, vec![16], "named twice, banned once");
@@ -476,11 +540,13 @@ mod tests {
 
     #[test]
     fn banmod_is_parsed_from_the_command_line() {
-        let opts = parse_args(&["--banmod=xhci_hcd".to_string(), "--banmod=ahci".to_string()]);
+        let opts = parse_args(&["--banmod=xhci_hcd".to_string(), "--banmod=ahci".to_string()])
+            .expect("known options");
         assert_eq!(opts.banned_modules, vec!["xhci_hcd", "ahci"]);
         // An empty value names no module and is not one.
         assert!(
             parse_args(&["--banmod=".to_string()])
+                .expect("known options")
                 .banned_modules
                 .is_empty()
         );
@@ -628,14 +694,14 @@ mod tests {
     #[test]
     fn test_parse_args_oneshot() {
         let args = vec!["-o".to_string()];
-        let opts = parse_args(&args);
+        let opts = parse_args(&args).expect("known options");
         assert!(opts.oneshot);
     }
 
     #[test]
     fn test_parse_args_debug() {
         let args = vec!["-d".to_string()];
-        let opts = parse_args(&args);
+        let opts = parse_args(&args).expect("known options");
         assert!(opts.debug);
         assert!(opts.foreground);
     }
@@ -643,21 +709,21 @@ mod tests {
     #[test]
     fn test_parse_args_interval() {
         let args = vec!["-t".to_string(), "5".to_string()];
-        let opts = parse_args(&args);
+        let opts = parse_args(&args).expect("known options");
         assert_eq!(opts.interval, 5);
     }
 
     #[test]
     fn test_parse_args_ban_irq() {
         let args = vec!["--banirq=16".to_string(), "--banirq=17".to_string()];
-        let opts = parse_args(&args);
+        let opts = parse_args(&args).expect("known options");
         assert_eq!(opts.banned_irqs, vec![16, 17]);
     }
 
     #[test]
     fn test_parse_args_hint_policy() {
         let args = vec!["--hintpolicy=exact".to_string()];
-        let opts = parse_args(&args);
+        let opts = parse_args(&args).expect("known options");
         assert_eq!(opts.hint_policy, HintPolicy::Exact);
     }
 

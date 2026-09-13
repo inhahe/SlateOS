@@ -97,8 +97,19 @@ def snapshot():
         return set()
     return {
         e for e in entries
-        if e in POSIX_ROOTS and os.path.isdir(os.path.join(DRIVE, e))
+        if is_posix_root_name(e) and os.path.isdir(os.path.join(DRIVE, e))
     }
+
+
+def is_posix_root_name(name):
+    """Is `name` a POSIX filesystem root, spelled as a POSIX write would?
+
+    Extracted so the self-test can assert BOTH directions -- that Windows'
+    `Boot` is not matched AND that a lowercase `boot` still is. Lane C's
+    version of this check asserts both and mine asserted only the first, which
+    would pass just as happily if the scan were reverted to matching nothing.
+    """
+    return name in POSIX_ROOTS
 
 
 def parse_passed(output):
@@ -304,6 +315,15 @@ def selftest():
        "a genuine lowercase /boot write must still be caught")
     ck("Boot" not in snap,
        "Windows' E:/Boot is being reported as POSIX litter: " + repr(snap))
+    # Both directions, which is lane C's shape and better than mine was. The
+    # first assertion alone passes just as happily if the scan is reverted to
+    # matching nothing at all; the second is what fails in that case.
+    ck(not is_posix_root_name("Boot"),
+       "Windows' capitalised Boot must not match")
+    ck(is_posix_root_name("boot"),
+       "a lowercase /boot -- what a POSIX write actually creates -- MUST match")
+    ck(is_posix_root_name("dev") and is_posix_root_name("var"),
+       "the two roots actually observed here must match")
     # The count must sum every test binary, not report the first. A crate with
     # a lib test and a bin test has two `test result:` lines, and taking one
     # would understate the crate -- plausibly, which is the bad kind of wrong.

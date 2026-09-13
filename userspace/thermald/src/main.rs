@@ -604,11 +604,46 @@ fn print_conf_help() {
 
 // ── Main dispatch ──────────────────────────────────────────────────────
 
+/// The first `-`-prefixed argument that is not in `known`, if any.
+///
+/// Only `-`-prefixed arguments are judged. `--` ends option parsing and a
+/// lone `-` is left alone, as elsewhere in this tree.
+fn first_unknown_option<'a>(args: &'a [String], known: &[&str]) -> Option<&'a str> {
+    for a in args {
+        if a == "--" {
+            return None;
+        }
+        if a.starts_with('-') && a != "-" && !known.contains(&a.as_str()) {
+            return Some(a);
+        }
+    }
+    None
+}
+
 fn run_thermald(args: Vec<String>) -> i32 {
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     if rest.iter().any(|a| a == "-h" || a == "--help") {
         print_thermald_help();
         return 0;
+    }
+    // `thermald --zzq` announced "starting thermal management daemon" and
+    // began managing the machine's thermal policy, having not parsed what it
+    // was asked. The set is what `print_thermald_help` advertises.
+    if let Some(bad) = first_unknown_option(
+        &rest,
+        &[
+            "-n",
+            "--no-daemon",
+            "-d",
+            "--debug",
+            "--adaptive",
+            "--no-dbus",
+            "-h",
+            "--help",
+        ],
+    ) {
+        eprintln!("thermald: unknown option: {bad}");
+        return 1;
     }
     run_daemon_mode(&rest);
     0
@@ -755,6 +790,29 @@ mod tests {
                 _mode: "enabled".to_string(),
             },
         ]
+    }
+
+    /// Thermal management does not start on an unparsed request.
+    ///
+    /// `thermald --zzq` announced "starting thermal management daemon" and
+    /// began managing the machine's thermal policy.
+    #[test]
+    fn thermald_refuses_an_option_it_does_not_have() {
+        let a = |v: &[&str]| -> Vec<String> { v.iter().map(|s| (*s).to_string()).collect() };
+        let known = [
+            "-n",
+            "--no-daemon",
+            "-d",
+            "--debug",
+            "--adaptive",
+            "--no-dbus",
+            "-h",
+            "--help",
+        ];
+        assert_eq!(first_unknown_option(&a(&["--zzq"]), &known), Some("--zzq"));
+        assert_eq!(first_unknown_option(&a(&["--adaptive"]), &known), None);
+        assert_eq!(first_unknown_option(&a(&["--no-dbus", "-d"]), &known), None);
+        assert_eq!(first_unknown_option(&a(&["--", "--zzq"]), &known), None);
     }
 
     #[test]

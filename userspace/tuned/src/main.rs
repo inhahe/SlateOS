@@ -625,6 +625,22 @@ fn run_tuned_adm(args: Vec<String>) -> i32 {
     0
 }
 
+/// The first `-`-prefixed argument that is not in `known`, if any.
+///
+/// Only `-`-prefixed arguments are judged. `--` ends option parsing and a
+/// lone `-` is left alone, as elsewhere in this tree.
+fn first_unknown_option<'a>(args: &'a [String], known: &[&str]) -> Option<&'a str> {
+    for a in args {
+        if a == "--" {
+            return None;
+        }
+        if a.starts_with('-') && a != "-" && !known.contains(&a.as_str()) {
+            return Some(a);
+        }
+    }
+    None
+}
+
 fn run_tuned(args: Vec<String>) -> i32 {
     let rest: Vec<String> = args.into_iter().skip(1).collect();
 
@@ -633,11 +649,42 @@ fn run_tuned(args: Vec<String>) -> i32 {
         return 0;
     }
 
+    // `run_daemon` asks whether the flags it wants are present and ignores
+    // the rest, so `tuned --zzq` started tuning and reported "no active
+    // profile, using 'balanced'" -- a statement about the machine's power
+    // profile from a command that had not parsed what it was asked. The set
+    // is what `print_tuned_help` advertises.
+    if let Some(bad) = first_unknown_option(
+        &rest,
+        &[
+            "-d",
+            "--daemon",
+            "-n",
+            "--no-daemon",
+            "-D",
+            "--debug",
+            "-h",
+            "--help",
+        ],
+    ) {
+        eprintln!("tuned: unknown option: {bad}");
+        return 1;
+    }
+
     run_daemon(&rest);
     0
 }
 
-fn run_tuned_gui(_args: Vec<String>) -> i32 {
+fn run_tuned_gui(args: Vec<String>) -> i32 {
+    // `_args` was accurate: this ignored everything. It has no options of its
+    // own beyond help, so anything else is unknown -- and answering "GUI not
+    // available" to a question that was not understood is still an answer
+    // nobody asked for.
+    let rest: Vec<String> = args.into_iter().skip(1).collect();
+    if let Some(bad) = first_unknown_option(&rest, &["-h", "--help"]) {
+        eprintln!("tuned-gui: unknown option: {bad}");
+        return 1;
+    }
     println!("tuned-gui: graphical tuning configuration");
     println!("(GUI not available in this build — use tuned-adm CLI)");
     0
@@ -673,6 +720,30 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A power profile is not reported for a request that was not parsed.
+    ///
+    /// `tuned --zzq` printed "no active profile, using 'balanced'" and began
+    /// tuning. `tuned-gui` ignored its arguments entirely.
+    #[test]
+    fn tuned_refuses_an_option_it_does_not_have() {
+        let a = |v: &[&str]| -> Vec<String> { v.iter().map(|s| (*s).to_string()).collect() };
+        let known = [
+            "-d",
+            "--daemon",
+            "-n",
+            "--no-daemon",
+            "-D",
+            "--debug",
+            "-h",
+            "--help",
+        ];
+        assert_eq!(first_unknown_option(&a(&["--zzq"]), &known), Some("--zzq"));
+        assert_eq!(first_unknown_option(&a(&["-D"]), &known), None);
+        assert_eq!(first_unknown_option(&a(&["--no-daemon"]), &known), None);
+        assert_eq!(first_unknown_option(&a(&["--", "--zzq"]), &known), None);
+        assert_eq!(first_unknown_option(&a(&["-"]), &known), None);
+    }
 
     #[test]
     fn test_builtin_profiles_count() {

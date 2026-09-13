@@ -2052,6 +2052,11 @@ impl InputDialog {
                     font_size: FONT_SIZE,
                     weight: FontWeightHint::Regular,
                     color: palette.text,
+                    // The accent, which is what a selection is for. Its ink
+                    // is `readable_on` rather than a palette role: the ground
+                    // is the accent itself, not a surface of the theme (837).
+                    selection_bg: palette.accent,
+                    selection_fg: crate::palette::readable_on(palette.accent),
                     caret_width: crate::textedit::CARET_WIDTH,
                 },
             );
@@ -4587,7 +4592,7 @@ mod tests {
         dialog.render(&palette, 800.0, 600.0, &mut tree);
         let painted = tree.commands.iter().any(|c| {
             matches!(c, RenderCommand::FillRect { color, .. }
-                if *color == crate::textedit::SELECTION_BACKGROUND)
+                if *color == palette.accent)
         });
         assert!(painted, "a selection nobody can see is not a selection");
     }

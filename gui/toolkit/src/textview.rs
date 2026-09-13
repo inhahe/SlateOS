@@ -8,9 +8,11 @@
 
 use crate::color::Color;
 use crate::event::{Event, EventResult, Key, KeyEvent, MouseEvent, MouseEventKind};
+use crate::palette::Palette;
 use crate::render::{FontFamily, FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use crate::step;
 use crate::style::CornerRadii;
+use crate::theme::with_alpha;
 use crate::wheel;
 use textfind::Case;
 
@@ -18,30 +20,21 @@ use textfind::Case;
 // Catppuccin Mocha palette (dark theme)
 // ---------------------------------------------------------------------------
 
-/// Background color (Mocha Base).
-const BG_COLOR: Color = Color::from_hex(0x1E1E2E);
-/// Surface color (Mocha Surface0) for gutters/code blocks.
-const SURFACE_COLOR: Color = Color::from_hex(0x313244);
-/// Text color (Mocha Text).
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-/// Subtext (Mocha Subtext0) for line numbers.
-const SUBTEXT_COLOR: Color = Color::from_hex(0xA6ADC8);
-/// Selection highlight (Mocha Blue at 40% opacity).
-const SELECTION_COLOR: Color = Color::rgba(137, 180, 250, 102);
-/// Search match highlight (Mocha Yellow at 50% opacity).
-const SEARCH_MATCH_COLOR: Color = Color::rgba(249, 226, 175, 128);
-/// Current search match highlight (Mocha Peach at 60% opacity).
-const CURRENT_MATCH_COLOR: Color = Color::rgba(250, 179, 135, 153);
-/// Link color (Mocha Blue).
-const LINK_COLOR: Color = Color::from_hex(0x89B4FA);
-/// Heading color (Mocha Mauve).
-const HEADING_COLOR: Color = Color::from_hex(0xCBA6F7);
-/// Code block background (Mocha Mantle).
-const CODE_BG_COLOR: Color = Color::from_hex(0x181825);
-/// Horizontal rule color (Mocha Overlay0).
-const HR_COLOR: Color = Color::from_hex(0x6C7086);
-/// Bullet/list marker color (Mocha Teal).
-const LIST_MARKER_COLOR: Color = Color::from_hex(0x94E2D5);
+// The colours come from the user's palette, threaded in by the caller.
+//
+// Twelve Catppuccin Mocha constants used to sit here, so a rendered
+// document was dark on a light desktop. 838 moved `Palette` into this
+// crate so a widget could name one.
+//
+// The three washes -- the selection, a search hit, the current hit -- were
+// `rgba` literals spelling blue, yellow and peach out by hand. They are
+// `with_alpha` over the role now, so a user who changes the accent does
+// not end up with a selection matching nothing else on screen.
+//
+// `palette.link` became `palette.link`, which is the one role that exists
+// for a link (832) -- and it is read at *render* time rather than baked
+// into `RichSpan::link`, a constructor with no palette to ask and no
+// notion of when the theme last changed.
 
 // ---------------------------------------------------------------------------
 // Font metrics
@@ -224,7 +217,12 @@ const ANSI_COLORS: [Color; 16] = [
 /// outside the table means the range check was wrong, and rendering the default
 /// foreground is a better answer to that than a panic in a terminal view.
 fn ansi_color(index: usize) -> Color {
-    ANSI_COLORS.get(index).copied().unwrap_or(TEXT_COLOR)
+    // The table's own white, not the palette's text. An ANSI colour is
+    // fixed by the escape sequence -- colour 1 is red because the
+    // protocol says so -- so taking a palette here would push the
+    // user's colours down into the parser. Every call site passes
+    // 0..=15, so this arm is unreachable in any case.
+    ANSI_COLORS.get(index).copied().unwrap_or(ANSI_COLORS[7])
 }
 
 /// Convert a 256-color index to an RGB Color.
@@ -1217,9 +1215,9 @@ impl SimpleTextView {
     }
 
     /// Render the widget to a RenderTree.
-    pub fn render(&self, tree: &mut RenderTree) {
+    pub fn render(&self, palette: &Palette, tree: &mut RenderTree) {
         // Background
-        tree.fill_rect(0.0, 0.0, self.width, self.height, BG_COLOR);
+        tree.fill_rect(0.0, 0.0, self.width, self.height, palette.base);
 
         // Clip to widget bounds
         tree.clip(0.0, 0.0, self.width, self.height);
@@ -1237,7 +1235,7 @@ impl SimpleTextView {
 
         // Draw gutter background
         if self.config.show_line_numbers && gutter_w > 0.0 {
-            tree.fill_rect(0.0, 0.0, gutter_w, self.height, SURFACE_COLOR);
+            tree.fill_rect(0.0, 0.0, gutter_w, self.height, palette.surface0);
         }
 
         for view_line in 0..visible {
@@ -1267,7 +1265,7 @@ impl SimpleTextView {
                     x: num_x,
                     y,
                     text: num_str,
-                    color: SUBTEXT_COLOR,
+                    color: palette.subtext0,
                     font_size: self.config.font_size,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
@@ -1295,7 +1293,13 @@ impl SimpleTextView {
                 if sel_start < sel_end {
                     let x1 = gutter_w + col_x(self, sel_start);
                     let x2 = gutter_w + col_x(self, sel_end);
-                    tree.fill_rect(x1, y, x2 - x1, self.config.line_height, SELECTION_COLOR);
+                    tree.fill_rect(
+                        x1,
+                        y,
+                        x2 - x1,
+                        self.config.line_height,
+                        with_alpha(palette.blue, 102),
+                    );
                 }
             }
 
@@ -1303,9 +1307,9 @@ impl SimpleTextView {
             for (match_idx, &(ml, ms, me)) in self.search.matches.iter().enumerate() {
                 if ml == line_idx {
                     let color = if self.search.current_match == Some(match_idx) {
-                        CURRENT_MATCH_COLOR
+                        with_alpha(palette.peach, 153)
                     } else {
-                        SEARCH_MATCH_COLOR
+                        with_alpha(palette.yellow, 128)
                     };
                     let x1 = gutter_w + col_x(self, ms);
                     let x2 = gutter_w + col_x(self, me);
@@ -1317,7 +1321,7 @@ impl SimpleTextView {
             let mut x = gutter_w;
             if let Some(spans) = self.lines.get(line_idx) {
                 for span in spans {
-                    let fg = resolve_span_fg(&span.style);
+                    let fg = resolve_span_fg(palette, &span.style);
                     let weight = Self::span_weight(span);
                     // What this span will be drawn as. A nominal column count
                     // times a cell width is equal to it only where every
@@ -1325,7 +1329,7 @@ impl SimpleTextView {
                     let span_width = self.measure(&span.text, weight);
 
                     // Background color
-                    if let Some(bg) = resolve_span_bg(&span.style) {
+                    if let Some(bg) = resolve_span_bg(palette, &span.style) {
                         tree.fill_rect(x, y, span_width, self.config.line_height, bg);
                     }
 
@@ -1364,18 +1368,18 @@ impl SimpleTextView {
 }
 
 /// Resolve the effective foreground color for a span.
-fn resolve_span_fg(style: &AnsiStyle) -> Color {
-    let base = style.fg.unwrap_or(TEXT_COLOR);
+fn resolve_span_fg(palette: &Palette, style: &AnsiStyle) -> Color {
+    let base = style.fg.unwrap_or(palette.text);
     if style.reverse {
-        style.bg.unwrap_or(BG_COLOR)
+        style.bg.unwrap_or(palette.base)
     } else if style.dim {
         // Dim: blend halfway toward the background. `u8::midpoint` does the
         // widen-add-halve in one step, so there is no intermediate that has to
         // be a `u16` to avoid overflowing.
         Color::rgba(
-            u8::midpoint(base.r, BG_COLOR.r),
-            u8::midpoint(base.g, BG_COLOR.g),
-            u8::midpoint(base.b, BG_COLOR.b),
+            u8::midpoint(base.r, palette.base.r),
+            u8::midpoint(base.g, palette.base.g),
+            u8::midpoint(base.b, palette.base.b),
             base.a,
         )
     } else {
@@ -1384,9 +1388,9 @@ fn resolve_span_fg(style: &AnsiStyle) -> Color {
 }
 
 /// Resolve the effective background color for a span.
-fn resolve_span_bg(style: &AnsiStyle) -> Option<Color> {
+fn resolve_span_bg(palette: &Palette, style: &AnsiStyle) -> Option<Color> {
     if style.reverse {
-        Some(style.fg.unwrap_or(TEXT_COLOR))
+        Some(style.fg.unwrap_or(palette.text))
     } else {
         style.bg
     }
@@ -1554,7 +1558,11 @@ impl RichSpan {
         Self {
             text: text.into(),
             style: RichSpanStyle {
-                fg_color: Some(LINK_COLOR),
+                // No colour: the renderer draws a span that *is* a link
+                // in the palette's `link` role. A constructor has no
+                // palette to ask, and one baked in here would freeze
+                // at whatever the theme was when the span was built.
+                fg_color: None,
                 underline: true,
                 link: Some(url.into()),
                 ..Default::default()
@@ -2561,18 +2569,18 @@ impl RichTextView {
     // ----- Rendering -----
 
     /// Render the widget to a RenderTree.
-    pub fn render(&mut self, tree: &mut RenderTree) {
+    pub fn render(&mut self, palette: &Palette, tree: &mut RenderTree) {
         self.ensure_layout();
 
         // Background
-        tree.fill_rect(0.0, 0.0, self.width, self.height, BG_COLOR);
+        tree.fill_rect(0.0, 0.0, self.width, self.height, palette.base);
         tree.clip(0.0, 0.0, self.width, self.height);
 
         let gutter_w = self.gutter_width();
 
         // Gutter background
         if self.config.show_line_numbers && gutter_w > 0.0 {
-            tree.fill_rect(0.0, 0.0, gutter_w, self.height, SURFACE_COLOR);
+            tree.fill_rect(0.0, 0.0, gutter_w, self.height, palette.surface0);
         }
 
         // Only render visible lines
@@ -2597,7 +2605,7 @@ impl RichTextView {
                     y1: render_y + 1.0,
                     x2: self.width - 8.0,
                     y2: render_y + 1.0,
-                    color: HR_COLOR,
+                    color: palette.overlay0,
                     width: 1.0,
                 });
                 continue;
@@ -2610,7 +2618,7 @@ impl RichTextView {
                     render_y,
                     self.width - gutter_w,
                     wl.line_height,
-                    CODE_BG_COLOR,
+                    palette.mantle,
                 );
             }
 
@@ -2626,7 +2634,7 @@ impl RichTextView {
                     y: render_y,
                     width: *iw,
                     height: *ih,
-                    color: SUBTEXT_COLOR,
+                    color: palette.subtext0,
                     line_width: 1.0,
                     corner_radii: CornerRadii::all(2.0),
                 });
@@ -2640,7 +2648,7 @@ impl RichTextView {
                     x: num_x,
                     y: render_y,
                     text: num_str,
-                    color: SUBTEXT_COLOR,
+                    color: palette.subtext0,
                     font_size: self.config.font_size,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
@@ -2668,7 +2676,7 @@ impl RichTextView {
                     x: gutter_w + indent_px,
                     y: render_y,
                     text: marker,
-                    color: LIST_MARKER_COLOR,
+                    color: palette.ink(palette.teal),
                     font_size: self.config.font_size,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
@@ -2702,7 +2710,7 @@ impl RichTextView {
                         render_y,
                         bw,
                         wl.line_height,
-                        SELECTION_COLOR,
+                        with_alpha(palette.blue, 102),
                     );
                 }
             }
@@ -2711,9 +2719,9 @@ impl RichTextView {
             for (match_idx, &(ml, ms, me)) in self.search.matches.iter().enumerate() {
                 if ml == vis_idx {
                     let color = if self.search.current_match == Some(match_idx) {
-                        CURRENT_MATCH_COLOR
+                        with_alpha(palette.peach, 153)
                     } else {
-                        SEARCH_MATCH_COLOR
+                        with_alpha(palette.yellow, 128)
                     };
                     for (bx, bw) in self.selection_boxes_of_cols(wl, ms, me) {
                         tree.fill_rect(
@@ -2746,9 +2754,13 @@ impl RichTextView {
                 let (font_size, weight) = self.span_font(span, heading_level);
 
                 let fg = if is_heading {
-                    HEADING_COLOR
+                    palette.mauve
                 } else {
-                    span.style.fg_color.unwrap_or(TEXT_COLOR)
+                    span.style.fg_color.unwrap_or(if span.style.link.is_some() {
+                        palette.link
+                    } else {
+                        palette.text
+                    })
                 };
 
                 // Measured once and reused for the background, the underline,
@@ -3843,11 +3855,12 @@ mod tests {
 
     #[test]
     fn test_simple_render_produces_commands() {
+        let palette = Palette::for_mode(false);
         let mut view = simple_view(400.0, 160.0);
         view.set_text("hello\nworld");
 
         let mut tree = RenderTree::new();
-        view.render(&mut tree);
+        view.render(&palette, &mut tree);
 
         // Should have at least: background fill + clip + text commands + unclip
         assert!(tree.len() >= 4);
@@ -3855,6 +3868,7 @@ mod tests {
 
     #[test]
     fn test_rich_render_produces_commands() {
+        let palette = Palette::for_mode(false);
         let mut view = RichTextView::new(400.0, 200.0);
         view.set_blocks(vec![RichBlock::Paragraph {
             spans: vec![RichSpan::plain("hello")],
@@ -3863,18 +3877,19 @@ mod tests {
         }]);
 
         let mut tree = RenderTree::new();
-        view.render(&mut tree);
+        view.render(&palette, &mut tree);
         assert!(tree.len() >= 3);
     }
 
     #[test]
     fn test_simple_render_with_line_numbers() {
+        let palette = Palette::for_mode(false);
         let mut view = simple_view(400.0, 160.0);
         view.config.show_line_numbers = true;
         view.set_text("line 1\nline 2\nline 3");
 
         let mut tree = RenderTree::new();
-        view.render(&mut tree);
+        view.render(&palette, &mut tree);
 
         // Should have gutter background + line number texts
         let text_cmds: Vec<_> = tree
@@ -3892,12 +3907,13 @@ mod tests {
     /// and it is invisible in any assertion about positions alone.
     #[test]
     fn the_simple_grid_is_drawn_in_the_family_it_was_measured_in() {
+        let palette = Palette::for_mode(false);
         let mut view = simple_view(400.0, 160.0);
         view.config.show_line_numbers = true;
         view.set_text("wide WWWW\nnarrow iiii\nmixed Wi0#");
 
         let mut tree = RenderTree::new();
-        view.render(&mut tree);
+        view.render(&palette, &mut tree);
 
         let mut depth = 0_i32;
         let mut deepest = 0_i32;
@@ -3956,6 +3972,7 @@ mod tests {
 
     #[test]
     fn test_simple_render_with_selection() {
+        let palette = Palette::for_mode(false);
         let mut view = simple_view(400.0, 160.0);
         view.set_text("hello world");
         view.selection = Some(Selection::new(
@@ -3964,7 +3981,7 @@ mod tests {
         ));
 
         let mut tree = RenderTree::new();
-        view.render(&mut tree);
+        view.render(&palette, &mut tree);
 
         // Should have a selection highlight rect
         let fill_rects: Vec<_> = tree
@@ -3972,7 +3989,7 @@ mod tests {
             .iter()
             .filter(|c| {
                 if let RenderCommand::FillRect { color, .. } = c {
-                    *color == SELECTION_COLOR
+                    *color == with_alpha(palette.blue, 102)
                 } else {
                     false
                 }

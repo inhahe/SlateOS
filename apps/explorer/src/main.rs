@@ -29,6 +29,7 @@ mod dropzone;
 mod fileops;
 mod thumbs;
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::listview::ListViewport;
@@ -383,6 +384,9 @@ impl DragState {
 
 /// File explorer application state.
 pub struct ExplorerState {
+    /// The user's colours, handed over by the framework (§822).
+    pub palette: Palette,
+
     /// Current directory.
     pub current_path: PathBuf,
     /// Entries in current directory.
@@ -512,6 +516,7 @@ pub struct ExplorerState {
 impl ExplorerState {
     pub fn new(start_path: &Path) -> Self {
         let mut state = Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             current_path: start_path.to_path_buf(),
             entries: Vec::new(),
             viewport: ListViewport::new(0),
@@ -2105,7 +2110,7 @@ impl ExplorerState {
 
         tree.fill_rect(0.0, 0.0, ICON_GUTTER, HEADER_H, Color::from_hex(0xE0E0E0));
         tree.translate(ICON_GUTTER, 0.0);
-        for cmd in columns::render_column_header(&self.columns, table_w) {
+        for cmd in columns::render_column_header(&self.columns, table_w, &self.palette) {
             tree.push(cmd);
         }
         tree.untranslate();
@@ -2145,7 +2150,14 @@ impl ExplorerState {
             let values = self.row_values(entry);
             tree.translate(ICON_GUTTER, 0.0);
             for cmd in
-                columns::render_column_values_from(&self.columns, &values, ey, table_w, name_color)
+                columns::render_column_values_from(
+                    &self.columns,
+                    &values,
+                    ey,
+                    table_w,
+                    name_color,
+                    &self.palette,
+                )
             {
                 tree.push(cmd);
             }
@@ -2347,6 +2359,15 @@ fn is_same_file(a: &Path, b: &Path) -> bool {
 const THUMB_TICK_MS: u64 = 60;
 
 impl oswindow::app::App for ExplorerState {
+    /// Adopt the user's colours (§822).
+    ///
+    /// Without this override the trait's default does nothing and the crate
+    /// keeps its own colours -- which here were a hardcoded *light* theme, so
+    /// a dark desktop got a white file manager.
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     /// The folder's name first, then the application's.
     ///
     /// That order is what a task bar full of windows needs: the strip of

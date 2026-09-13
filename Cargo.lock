@@ -764,6 +764,7 @@ dependencies = [
 name = "explorer"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "byteread",
  "guitk",
  "imagecodec",
@@ -2794,6 +2795,7 @@ dependencies = [
 name = "sysinfo-app"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]

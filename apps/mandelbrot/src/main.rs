@@ -34,6 +34,7 @@
 //! colour scheme is deliberately *not* part of that key, because recolouring a
 //! cached grid is free, which is why `C` is instant even at 2000 iterations.
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
@@ -45,12 +46,11 @@ use oswindow::app::{self, App, Response};
 use std::cell::RefCell;
 use std::process::ExitCode;
 
-// ── Catppuccin Mocha ────────────────────────────────────────────────
-const COL_MANTLE: Color = Color::from_hex(0x181825);
-const COL_TEXT: Color = Color::from_hex(0xCDD6F4);
-const COL_SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-const COL_BLUE: Color = Color::from_hex(0x89B4FA);
-const COL_OVERLAY0: Color = Color::from_hex(0x6C7086);
+// The chrome's colours come from the user's palette (822).
+//
+// The *fractal* is not themed and must not be: its colours are computed
+// from the escape iteration, so they are the picture rather than the
+// interface around it.
 
 const WINDOW_WIDTH: f32 = 800.0;
 const WINDOW_HEIGHT: f32 = 600.0;
@@ -354,6 +354,8 @@ struct Tile {
 // ── App ─────────────────────────────────────────────────────────────
 
 pub struct MandelbrotApp {
+    /// The user's colours, handed over by the framework (§822).
+    pub palette: Palette,
     center_x: f64,
     center_y: f64,
     /// Width of the view in complex-plane units.
@@ -385,6 +387,7 @@ pub struct MandelbrotApp {
 impl MandelbrotApp {
     pub fn new() -> Self {
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             center_x: -0.5,
             center_y: 0.0,
             scale: 3.5,
@@ -806,7 +809,7 @@ impl MandelbrotApp {
             l.info.y + (l.info.h - text::line_height(l.font, FontWeightHint::Regular)) / 2.0,
             &self.info_text(),
             l.font,
-            COL_TEXT,
+            self.palette.text,
             FontWeightHint::Regular,
             // The readout is long and the window may be narrow. Letting the
             // toolkit elide it keeps the leading coordinates, which are the
@@ -846,7 +849,11 @@ impl MandelbrotApp {
                 cy,
                 text_label,
                 l.small,
-                if on { COL_TEXT } else { COL_OVERLAY0 },
+                if on {
+                    self.palette.text
+                } else {
+                    self.palette.overlay0
+                },
                 FontWeightHint::Regular,
             );
             // Recorded whether or not it can act, so that a click on a dim
@@ -866,7 +873,7 @@ impl MandelbrotApp {
             y: p.y,
             width: p.w,
             height: p.h,
-            color: COL_MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::all((p.w / 30.0).min(12.0)),
         });
 
@@ -880,7 +887,7 @@ impl MandelbrotApp {
             p.y + title,
             "Mandelbrot Explorer",
             title,
-            COL_TEXT,
+            self.palette.text,
             FontWeightHint::Bold,
         );
 
@@ -899,7 +906,7 @@ impl MandelbrotApp {
                 y,
                 key_name,
                 l.small,
-                COL_BLUE,
+                self.palette.blue,
                 FontWeightHint::Bold,
                 Some((desc_x - key_x).max(0.0)),
             );
@@ -909,7 +916,7 @@ impl MandelbrotApp {
                 y,
                 desc,
                 l.small,
-                COL_SUBTEXT0,
+                self.palette.subtext0,
                 FontWeightHint::Regular,
                 Some((p.right() - pad - desc_x).max(0.0)),
             );
@@ -1033,6 +1040,11 @@ fn handle_event(app: &mut MandelbrotApp, event: &Event) -> EventResult {
 }
 
 impl App for MandelbrotApp {
+    /// Adopt the user's colours (§822).
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         "Mandelbrot".to_string()
     }

@@ -35,13 +35,13 @@ use guitk::event::{
     Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 #[allow(unused_imports)]
-use guitk::layout::{FlexAlign, FlexDirection, FlexItem, FlexJustify, SizeConstraint};
-#[allow(unused_imports)]
 use guitk::render::{FontFamily, FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::{Borders, CornerRadii, Edges, FontWeight, Style, TextAlign};
 use guitk::text;
 use guitk::textfind;
+#[allow(unused_imports)]
+use guitk::theme::with_alpha;
 use guitk::wheel;
 #[allow(unused_imports)]
 use guitk::widget::{Widget, WidgetId, WidgetTree};
@@ -67,19 +67,13 @@ use diffcore::{
 
 /// Catppuccin Mocha theme colors used throughout the diff tool.
 pub mod colors {
-    use guitk::color::Color;
 
-    // Diff-specific background colors (semi-transparent effect via muted shades)
-    pub const ADD_BG: Color = Color::rgba(166, 227, 161, 30);
-    pub const DEL_BG: Color = Color::rgba(243, 139, 168, 30);
-    pub const ADD_LINE_BG: Color = Color::rgba(166, 227, 161, 50);
-    pub const DEL_LINE_BG: Color = Color::rgba(243, 139, 168, 50);
-
-    // Search highlights. The focused match is opaque and the rest are washes,
-    // so "which one is 4 of 17" is answerable at a glance rather than by
-    // counting down the panel.
-    pub const SEARCH_BG: Color = Color::rgba(249, 226, 175, 60);
-    pub const SEARCH_CURRENT_BG: Color = Color::rgba(250, 179, 135, 150);
+    // The washes come from the user's palette (822).
+    //
+    // They were `Color::rgba(166, 227, 161, 30)` and friends: the Mocha hues
+    // spelled out in decimal with an alpha, which is green-at-30 written the
+    // long way. `with_alpha` over the role says the same thing and follows the
+    // theme.
 }
 
 // ============================================================================
@@ -1808,8 +1802,8 @@ impl FileDiffApp {
     ) {
         let (bg_color, prefix, text_color) = match edit.op {
             DiffOp::Equal => (self.palette.base, " ", self.palette.text),
-            DiffOp::Insert => (colors::ADD_BG, "+", self.palette.green),
-            DiffOp::Delete => (colors::DEL_BG, "-", self.palette.red),
+            DiffOp::Insert => (with_alpha(self.palette.green, 30), "+", self.palette.green),
+            DiffOp::Delete => (with_alpha(self.palette.red, 30), "-", self.palette.red),
         };
 
         // Background
@@ -1867,7 +1861,14 @@ impl FileDiffApp {
 
         // Text content
         let text_x = prefix_x + char_width() * 2.0;
-        render_search_highlights(tree, text_x, y, &edit.text, search);
+        render_search_highlights(
+            &Palette::for_mode(false),
+            tree,
+            text_x,
+            y,
+            &edit.text,
+            search,
+        );
         tree.push(RenderCommand::Text {
             x: text_x,
             y: y + 3.0,
@@ -1934,8 +1935,8 @@ impl FileDiffApp {
     ) {
         let bg_color = match row.op {
             DiffOp::Equal => self.palette.base,
-            DiffOp::Insert => colors::ADD_BG,
-            DiffOp::Delete => colors::DEL_BG,
+            DiffOp::Insert => with_alpha(self.palette.green, 30),
+            DiffOp::Delete => with_alpha(self.palette.red, 30),
         };
 
         // Background
@@ -1987,7 +1988,14 @@ impl FileDiffApp {
         // the run's own colour visible, or finding a word would erase the
         // reason it was interesting.
         let text_x = GUTTER_WIDTH + PANEL_PADDING + char_width() * 2.0;
-        render_search_highlights(tree, text_x, y, &row.text, search);
+        render_search_highlights(
+            &Palette::for_mode(false),
+            tree,
+            text_x,
+            y,
+            &row.text,
+            search,
+        );
         if row.spans.is_empty() {
             tree.push(RenderCommand::Text {
                 x: text_x,
@@ -2034,8 +2042,8 @@ impl FileDiffApp {
 
             if span.changed {
                 let highlight_color = match row.op {
-                    DiffOp::Insert => colors::ADD_LINE_BG,
-                    DiffOp::Delete => colors::DEL_LINE_BG,
+                    DiffOp::Insert => with_alpha(self.palette.green, 50),
+                    DiffOp::Delete => with_alpha(self.palette.red, 50),
                     DiffOp::Equal => self.palette.base,
                 };
                 tree.push(RenderCommand::FillRect {
@@ -2431,6 +2439,7 @@ fn render_panel_header(
 /// exact string drawn there, because a match's offsets are byte offsets into
 /// *that* string and nothing else.
 fn render_search_highlights(
+    palette: &Palette,
     tree: &mut RenderTree,
     text_x: f32,
     y: f32,
@@ -2479,9 +2488,9 @@ fn render_search_highlights(
             ),
             height: LINE_HEIGHT,
             color: if overlay.current == Some(*m) {
-                colors::SEARCH_CURRENT_BG
+                with_alpha(palette.peach, 150)
             } else {
-                colors::SEARCH_BG
+                with_alpha(palette.yellow, 60)
             },
             corner_radii: CornerRadii::ZERO,
         });
@@ -2491,8 +2500,8 @@ fn render_search_highlights(
 /// Render a single diff line (used in side-by-side mode).
 fn render_diff_line(tree: &mut RenderTree, pal: &Palette, params: &DiffLineParams<'_>) {
     let bg_color = match params.op {
-        Some(DiffOp::Insert) => colors::ADD_BG,
-        Some(DiffOp::Delete) => colors::DEL_BG,
+        Some(DiffOp::Insert) => with_alpha(pal.green, 30),
+        Some(DiffOp::Delete) => with_alpha(pal.red, 30),
         Some(DiffOp::Equal) | None => pal.base,
     };
 
@@ -2546,6 +2555,7 @@ fn render_diff_line(tree: &mut RenderTree, pal: &Palette, params: &DiffLineParam
 
         // Before the text, so the boxes are behind it.
         render_search_highlights(
+            pal,
             tree,
             params.x + GUTTER_WIDTH + PANEL_PADDING,
             params.y,
@@ -4159,9 +4169,9 @@ mod tests {
         let mut current = 0;
         for cmd in &tree.commands {
             if let RenderCommand::FillRect { color, .. } = cmd {
-                if *color == colors::SEARCH_BG {
+                if *color == with_alpha(Palette::for_mode(false).yellow, 60) {
                     plain += 1;
-                } else if *color == colors::SEARCH_CURRENT_BG {
+                } else if *color == with_alpha(Palette::for_mode(false).peach, 150) {
                     current += 1;
                 }
             }
@@ -4269,7 +4279,9 @@ mod tests {
             .find_map(|c| match c {
                 RenderCommand::FillRect {
                     x, width, color, ..
-                } if *color == colors::SEARCH_CURRENT_BG => Some((*x, *width)),
+                } if *color == with_alpha(Palette::for_mode(false).peach, 150) => {
+                    Some((*x, *width))
+                }
                 _ => None,
             })
             .expect("the focused match is drawn");
@@ -4296,7 +4308,14 @@ mod tests {
             panel: 0,
             current: None,
         };
-        render_search_highlights(&mut tree, 0.0, 0.0, "anything", empty);
+        render_search_highlights(
+            &Palette::for_mode(false),
+            &mut tree,
+            0.0,
+            0.0,
+            "anything",
+            empty,
+        );
         assert!(tree.commands.is_empty());
     }
 
@@ -4334,6 +4353,7 @@ mod tests {
         ];
         let mut tree = RenderTree::new();
         render_search_highlights(
+            &Palette::for_mode(false),
             &mut tree,
             0.0,
             0.0,

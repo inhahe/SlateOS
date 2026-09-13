@@ -1631,6 +1631,7 @@ dependencies = [
 name = "mandelbrot"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -2718,6 +2719,7 @@ dependencies = [
 name = "stopwatch"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]

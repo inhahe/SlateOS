@@ -41,21 +41,12 @@ use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // ============================================================================
-// Catppuccin Mocha theme colors
-// ============================================================================
-
-#[allow(dead_code)]
-const OVERLAY1: Color = Color::from_hex(0x7F849C);
-
-#[allow(dead_code)]
-const ROSEWATER: Color = Color::from_hex(0xF5E0DC);
-#[allow(dead_code)]
-const FLAMINGO: Color = Color::from_hex(0xF2CDCD);
-
-#[allow(dead_code)]
-const MAROON: Color = Color::from_hex(0xEBA0AC);
-#[allow(dead_code)]
-const PINK: Color = Color::from_hex(0xF5C2E7);
+// The colours come from the user's palette (822).
+//
+// These five outlasted this crate's conversion because four of them --
+// rosewater, flamingo, maroon, pink -- had no rung in the shared palette
+// until it gained them. OVERLAY1 still has none and is overlay0, the rung
+// that exists for the faintest legible mark.
 
 // ============================================================================
 // Constants
@@ -893,7 +884,7 @@ impl Alarm {
             x + PADDING,
             y + 46.0 + if self.label.is_empty() { 0.0 } else { 16.0 },
             self.repeat_summary(),
-            OVERLAY1,
+            pal.overlay0,
             11.0,
             FontWeightHint::Regular,
             width * 0.5,
@@ -1604,7 +1595,7 @@ impl Stopwatch {
                 cx,
                 table_y + 4.0,
                 title,
-                OVERLAY1,
+                pal.overlay0,
                 12.0,
                 FontWeightHint::Bold,
                 w,

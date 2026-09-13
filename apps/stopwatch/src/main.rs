@@ -25,6 +25,7 @@
 //!   consulted after every event, so it answers `Some(16ms)` while running and
 //!   `None` otherwise — a stopped stopwatch does not hold the desktop awake.
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
@@ -41,20 +42,13 @@ use std::time::Duration;
 // Palette
 // ---------------------------------------------------------------------------
 
-const BASE: Color = Color::from_hex(0x001E_1E2E);
-const MANTLE: Color = Color::from_hex(0x0018_1825);
-const SURFACE0: Color = Color::from_hex(0x0031_3244);
-const SURFACE1: Color = Color::from_hex(0x0045_475A);
-const TEXT: Color = Color::from_hex(0x00CD_D6F4);
-const SUBTEXT0: Color = Color::from_hex(0x00A6_ADC8);
-const BLUE: Color = Color::from_hex(0x0089_B4FA);
-const GREEN: Color = Color::from_hex(0x00A6_E3A1);
-const RED: Color = Color::from_hex(0x00F3_8BA8);
-const YELLOW: Color = Color::from_hex(0x00F9_E2AF);
-const PEACH: Color = Color::from_hex(0x00FA_B387);
-const LAVENDER: Color = Color::from_hex(0x00B4_BEFE);
-const OVERLAY0: Color = Color::from_hex(0x006C_7086);
-const TEAL: Color = Color::from_hex(0x0094_E2D5);
+// The colours come from the user's palette (822).
+//
+// Fourteen Catppuccin Mocha constants used to sit here, spelled
+// `Color::from_hex(0x001E_1E2E)` -- eight digits with a leading zero byte
+// and an underscore. The same values as every other copy in the tree, in a
+// spelling no survey looking for `0x` followed by six digits could see,
+// which is the only reason this crate outlasted fifty-four others.
 
 // ---------------------------------------------------------------------------
 // Layout
@@ -310,6 +304,8 @@ pub struct SessionRecord {
 // ---------------------------------------------------------------------------
 
 pub struct StopwatchApp {
+    /// The user's colours, handed over by the framework (§822).
+    pub palette: Palette,
     width: f32,
     height: f32,
 
@@ -352,6 +348,7 @@ impl StopwatchApp {
     #[must_use]
     pub fn new(width: f32, height: f32) -> Self {
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             width,
             height,
             mode: AppMode::Stopwatch,
@@ -764,11 +761,11 @@ impl StopwatchApp {
     fn draw_header(&self, frame: &mut Frame, layout: &Layout) {
         let (title, tint) = match self.view {
             AppView::Main => match self.mode {
-                AppMode::Stopwatch => ("STOPWATCH", BLUE),
-                AppMode::Countdown => ("COUNTDOWN", PEACH),
+                AppMode::Stopwatch => ("STOPWATCH", self.palette.blue),
+                AppMode::Countdown => ("COUNTDOWN", self.palette.peach),
             },
-            AppView::History => ("SESSION HISTORY", LAVENDER),
-            AppView::CountdownSetup => ("SET COUNTDOWN", PEACH),
+            AppView::History => ("SESSION HISTORY", self.palette.lavender),
+            AppView::CountdownSetup => ("SET COUNTDOWN", self.palette.peach),
         };
 
         // The state chip is anchored to the right edge, and the title is given
@@ -795,11 +792,11 @@ impl StopwatchApp {
         );
 
         let (state_text, state_color) = match self.state {
-            TimerState::Stopped => ("STOPPED", OVERLAY0),
-            TimerState::Running => ("RUNNING", GREEN),
-            TimerState::Paused => ("PAUSED", YELLOW),
+            TimerState::Stopped => ("STOPPED", self.palette.overlay0),
+            TimerState::Running => ("RUNNING", self.palette.green),
+            TimerState::Paused => ("PAUSED", self.palette.yellow),
         };
-        fill(frame, chip, SURFACE0, CHIP_H * 0.5);
+        fill(frame, chip, self.palette.surface0, CHIP_H * 0.5);
         centered_label(
             frame,
             chip,
@@ -828,16 +825,29 @@ impl StopwatchApp {
         for (text, base_w, active, target) in buttons {
             let w = base_w * scale;
             let r = Rect::new(x, layout.buttons.y, w, layout.buttons.h);
-            fill(frame, r, if active { SURFACE1 } else { SURFACE0 }, 6.0);
+            fill(
+                frame,
+                r,
+                if active {
+                    self.palette.surface1
+                } else {
+                    self.palette.surface0
+                },
+                6.0,
+            );
             if active {
-                stroke(frame, r, BLUE, 1.5, 6.0);
+                stroke(frame, r, self.palette.blue, 1.5, 6.0);
             }
             centered_label(
                 frame,
                 r,
                 text,
                 font,
-                if active { BLUE } else { TEXT },
+                if active {
+                    self.palette.blue
+                } else {
+                    self.palette.text
+                },
                 FontWeightHint::Bold,
             );
             frame.hit(target, r);
@@ -847,11 +857,11 @@ impl StopwatchApp {
 
     fn draw_main(&self, frame: &mut Frame, layout: &Layout) {
         let time_color = if self.countdown_finished {
-            RED
+            self.palette.red
         } else if self.state == TimerState::Running {
-            TEXT
+            self.palette.text
         } else {
-            SUBTEXT0
+            self.palette.subtext0
         };
         label(
             frame,
@@ -865,8 +875,15 @@ impl StopwatchApp {
         );
 
         if let Some(band) = layout.alert {
-            fill(frame, band, RED, 6.0);
-            centered_label(frame, band, "TIME'S UP!", 20.0, BASE, FontWeightHint::Bold);
+            fill(frame, band, self.palette.red, 6.0);
+            centered_label(
+                frame,
+                band,
+                "TIME'S UP!",
+                20.0,
+                self.palette.base,
+                FontWeightHint::Bold,
+            );
         }
 
         if self.mode == AppMode::Stopwatch {
@@ -889,7 +906,7 @@ impl StopwatchApp {
                 area.y,
                 "No laps yet.",
                 14.0,
-                OVERLAY0,
+                self.palette.overlay0,
                 FontWeightHint::Regular,
                 Some(area.w),
             );
@@ -907,7 +924,7 @@ impl StopwatchApp {
                 area.y,
                 text,
                 12.0,
-                SUBTEXT0,
+                self.palette.subtext0,
                 FontWeightHint::Bold,
                 Some(w.max(8.0)),
             );
@@ -917,7 +934,7 @@ impl StopwatchApp {
             c0,
             area.y + LIST_HEAD_H - 6.0,
             area.right(),
-            SURFACE1,
+            self.palette.surface1,
         );
 
         let rows = layout.lap_rows();
@@ -945,11 +962,11 @@ impl StopwatchApp {
         {
             let ly = body.y + vis_i as f32 * ROW_H;
             let tint = if Some(lap.number) == best {
-                GREEN
+                self.palette.green
             } else if Some(lap.number) == worst {
-                RED
+                self.palette.red
             } else {
-                TEXT
+                self.palette.text
             };
             label(
                 frame,
@@ -977,7 +994,7 @@ impl StopwatchApp {
                 ly,
                 format_time_ms(lap.split_ms),
                 15.0,
-                SUBTEXT0,
+                self.palette.subtext0,
                 FontWeightHint::Regular,
                 Some(area.right() - c2),
             );
@@ -988,7 +1005,7 @@ impl StopwatchApp {
             // Pinned to the floor of the list rather than trailing the last
             // row, so it does not wander up and down as laps arrive.
             let y = area.bottom() - STATS_H + 4.0;
-            rule(frame, c0, y - 6.0, area.right(), SURFACE1);
+            rule(frame, c0, y - 6.0, area.right(), self.palette.surface1);
             label(
                 frame,
                 c0,
@@ -1001,7 +1018,7 @@ impl StopwatchApp {
                     end
                 ),
                 14.0,
-                TEAL,
+                self.palette.teal,
                 FontWeightHint::Regular,
                 Some(area.w),
             );
@@ -1017,7 +1034,7 @@ impl StopwatchApp {
                 area.y,
                 "No sessions recorded yet.",
                 16.0,
-                SUBTEXT0,
+                self.palette.subtext0,
                 FontWeightHint::Regular,
                 Some(area.w),
             );
@@ -1037,7 +1054,7 @@ impl StopwatchApp {
                 area.y,
                 text,
                 12.0,
-                SUBTEXT0,
+                self.palette.subtext0,
                 FontWeightHint::Bold,
                 Some((next - x - 8.0).max(8.0)),
             );
@@ -1047,7 +1064,7 @@ impl StopwatchApp {
             area.x,
             area.y + LIST_HEAD_H - 6.0,
             area.right(),
-            SURFACE1,
+            self.palette.surface1,
         );
 
         let rows = layout.history_rows();
@@ -1091,7 +1108,7 @@ impl StopwatchApp {
                 ry,
                 mode_str,
                 14.0,
-                TEXT,
+                self.palette.text,
                 FontWeightHint::Regular,
                 Some(w0),
             );
@@ -1101,7 +1118,7 @@ impl StopwatchApp {
                 ry,
                 format_time_short(rec.total_ms),
                 14.0,
-                GREEN,
+                self.palette.green,
                 FontWeightHint::Bold,
                 Some(w1),
             );
@@ -1111,7 +1128,7 @@ impl StopwatchApp {
                 ry,
                 rec.lap_count.to_string(),
                 14.0,
-                PEACH,
+                self.palette.peach,
                 FontWeightHint::Regular,
                 Some(w2),
             );
@@ -1124,7 +1141,7 @@ impl StopwatchApp {
                 ry,
                 best,
                 14.0,
-                TEAL,
+                self.palette.teal,
                 FontWeightHint::Regular,
                 Some(w3),
             );
@@ -1138,9 +1155,18 @@ impl StopwatchApp {
 
         for (i, card) in cards.iter().enumerate() {
             let active = i == self.countdown_setup_field;
-            fill(frame, *card, if active { SURFACE0 } else { MANTLE }, 8.0);
+            fill(
+                frame,
+                *card,
+                if active {
+                    self.palette.surface0
+                } else {
+                    self.palette.mantle
+                },
+                8.0,
+            );
             if active {
-                stroke(frame, *card, BLUE, 2.0, 8.0);
+                stroke(frame, *card, self.palette.blue, 2.0, 8.0);
             }
             // Recorded before the steppers, so a click on ▲ is a step and not a
             // selection: `hit_test` walks backwards and the later box wins.
@@ -1152,7 +1178,7 @@ impl StopwatchApp {
                 card.y + 8.0,
                 labels.get(i).copied().unwrap_or(""),
                 12.0,
-                SUBTEXT0,
+                self.palette.subtext0,
                 FontWeightHint::Regular,
                 Some((card.w - 20.0).max(8.0)),
             );
@@ -1165,7 +1191,11 @@ impl StopwatchApp {
                 card.y + card.h - value_font * 1.4,
                 format!("{value:02}"),
                 value_font,
-                if active { BLUE } else { TEXT },
+                if active {
+                    self.palette.blue
+                } else {
+                    self.palette.text
+                },
                 FontWeightHint::Bold,
                 Some((card.w - STEP_W - 16.0).max(8.0)),
             );
@@ -1182,8 +1212,15 @@ impl StopwatchApp {
                 (up, "\u{25B2}", Target::SetupUp(i)),
                 (down, "\u{25BC}", Target::SetupDown(i)),
             ] {
-                fill(frame, r, SURFACE1, 4.0);
-                centered_label(frame, r, glyph, 11.0, TEXT, FontWeightHint::Bold);
+                fill(frame, r, self.palette.surface1, 4.0);
+                centered_label(
+                    frame,
+                    r,
+                    glyph,
+                    11.0,
+                    self.palette.text,
+                    FontWeightHint::Bold,
+                );
                 frame.hit(target, r);
             }
         }
@@ -1196,7 +1233,11 @@ impl StopwatchApp {
             y,
             format!("Total: {}", format_time_ms(total)),
             18.0,
-            if total == 0 { RED } else { TEAL },
+            if total == 0 {
+                self.palette.red
+            } else {
+                self.palette.teal
+            },
             FontWeightHint::Regular,
             Some(layout.body().w),
         );
@@ -1207,7 +1248,7 @@ impl StopwatchApp {
                 y + 26.0,
                 "A countdown of zero will not start.",
                 13.0,
-                OVERLAY0,
+                self.palette.overlay0,
                 FontWeightHint::Regular,
                 Some(layout.body().w),
             );
@@ -1224,7 +1265,7 @@ impl StopwatchApp {
             self.countdown_finished && self.view == AppView::Main,
         );
 
-        fill(&mut frame, layout.window, BASE, 0.0);
+        fill(&mut frame, layout.window, self.palette.base, 0.0);
         self.draw_header(&mut frame, &layout);
         self.draw_buttons(&mut frame, &layout);
         match self.view {
@@ -1432,6 +1473,11 @@ pub fn handle_event(state: &mut StopwatchApp, event: &Event) -> EventResult {
 // ---------------------------------------------------------------------------
 
 impl App for StopwatchApp {
+    /// Adopt the user's colours (§822).
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         String::from("Stopwatch")
     }

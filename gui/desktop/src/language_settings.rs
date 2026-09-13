@@ -1576,7 +1576,7 @@ mod tests {
 
             assert_eq!(
                 fills_sized(lang, 552.0, 30.0),
-                vec![p.surface0],
+                vec![p.painted(appearance::Surface::Card)],
                 "search box"
             );
 

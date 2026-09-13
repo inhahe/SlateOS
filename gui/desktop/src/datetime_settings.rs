@@ -2033,7 +2033,7 @@ mod tests {
             let ntp = render(&wound(DateTimeTab::Ntp), &p);
             assert_eq!(
                 fills_h(&ntp, 36.0),
-                vec![p.surface0],
+                vec![p.painted(appearance::Surface::ControlTrack)],
                 "the sync-status card ({what})"
             );
             let servers = fills_h(&ntp, 28.0);

@@ -2173,23 +2173,8 @@ mod tests {
 
     fn fills_of_size(cmds: &[RenderCommand], w: f32, h: f32) -> Vec<Color> {
         cmds.iter()
-            .filter_map(appearance::painted_rect)
-            .filter(|(_, _, width, height, _)| *width == w && *height == h)
-            .map(|t| t.4)
-            .collect()
-    }
-
-    fn fill_of_size(cmds: &[RenderCommand], w: f32, h: f32) -> Color {
-        let hits = fills_of_size(cmds, w, h);
-        assert_eq!(hits.len(), 1, "box {w}x{h}: {} matches", hits.len());
-        hits[0]
-    }
-
-    fn stroke_of_size(cmds: &[RenderCommand], w: f32, h: f32) -> Color {
-        let hits: Vec<Color> = cmds
-            .iter()
             .filter_map(|c| match c {
-                RenderCommand::StrokeRect {
+                RenderCommand::FillRect {
                     width,
                     height,
                     color,
@@ -2197,6 +2182,43 @@ mod tests {
                 } if *width == w && *height == h => Some(*color),
                 _ => None,
             })
+            .collect()
+    }
+
+    /// The one box of this size, filled or outlined.
+    ///
+    /// Separate from [`fill_of_size`] rather than replacing it: the power menu
+    /// is a fill *and* a border at one rectangle, so a helper that collected
+    /// both could not tell its two assertions apart.
+    fn box_of_size(cmds: &[RenderCommand], w: f32, h: f32) -> Color {
+        let hits: Vec<Color> = cmds
+            .iter()
+            .filter_map(appearance::painted_rect)
+            .filter(|(_, _, width, height, _)| *width == w && *height == h)
+            .map(|t| t.4)
+            .collect();
+        assert_eq!(hits.len(), 1, "box {w}x{h}: {} matches", hits.len());
+        hits[0]
+    }
+
+    fn fill_of_size(cmds: &[RenderCommand], w: f32, h: f32) -> Color {
+        let hits = fills_of_size(cmds, w, h);
+        assert_eq!(hits.len(), 1, "fill {w}x{h}: {} matches", hits.len());
+        hits[0]
+    }
+
+    /// The one outline of this size, measured on the rectangle it encloses.
+    ///
+    /// A stroke stores its path, which the theme insets by half a line so the
+    /// border lands inside the box -- so a 260x36 field records a 259x35
+    /// `StrokeRect`, and matching the stored width finds nothing at all.
+    fn stroke_of_size(cmds: &[RenderCommand], w: f32, h: f32) -> Color {
+        let hits: Vec<Color> = cmds
+            .iter()
+            .filter(|c| matches!(c, RenderCommand::StrokeRect { .. }))
+            .filter_map(appearance::painted_rect)
+            .filter(|(_, _, width, height, _)| *width == w && *height == h)
+            .map(|t| t.4)
             .collect();
         assert_eq!(hits.len(), 1, "stroke {w}x{h}: {} matches", hits.len());
         hits[0]
@@ -2362,10 +2384,17 @@ mod tests {
                 p.on_wallpaper(),
                 "{mode}: the name sits on the background, not on a panel"
             );
+            // Whatever the theme fills a card with, and nothing at all if it
+            // fills nothing -- written as a vector rather than an `if let` so
+            // that the bordered theme is asserted about too, instead of
+            // quietly skipping the check.
             assert_eq!(
-                fill_of_size(&cmds, 260.0, 36.0),
-                p.surface0,
-                "{mode}: the password field"
+                fills_of_size(&cmds, 260.0, 36.0),
+                p.surface_paint(appearance::Surface::Card)
+                    .fill
+                    .into_iter()
+                    .collect::<Vec<_>>(),
+                "{mode}: the password field's ground"
             );
             assert_eq!(
                 stroke_of_size(&cmds, 260.0, 36.0),
@@ -2415,7 +2444,9 @@ mod tests {
             let cmds = s.render(&p);
             assert_eq!(
                 stroke_of_size(&cmds, 260.0, 36.0),
-                p.surface1,
+                p.surface_paint(appearance::Surface::Card)
+                    .border
+                    .unwrap_or(p.surface1),
                 "{mode}: a field at rest"
             );
             assert_eq!(
@@ -2469,12 +2500,16 @@ mod tests {
 
             assert_eq!(
                 fill_of_size(&cmds, 160.0, 140.0),
-                p.mantle,
+                p.surface_paint(appearance::Surface::Panel)
+                    .fill
+                    .unwrap_or(p.mantle),
                 "{mode}: the power menu"
             );
             assert_eq!(
                 stroke_of_size(&cmds, 160.0, 140.0),
-                p.surface1,
+                p.surface_paint(appearance::Surface::Panel)
+                    .border
+                    .unwrap_or(p.surface1),
                 "{mode}: its border"
             );
             assert_eq!(

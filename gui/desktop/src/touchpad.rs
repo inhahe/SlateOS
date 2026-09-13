@@ -2217,19 +2217,14 @@ mod tests {
     //     that order; the fill's width varies with the value and reaches the
     //     track's width at maximum, so width cannot separate them either.
 
+    /// Every box the predicate keeps, filled or outlined, on the logical
+    /// rectangle -- an outline reports one a pixel smaller than it was asked
+    /// for, so an exact `w == 420.0` would miss every converted site.
     fn fills(cmds: &[RenderCommand], keep: impl Fn(f32, f32, f32, f32) -> bool) -> Vec<Color> {
         cmds.iter()
-            .filter_map(|c| match c {
-                RenderCommand::FillRect {
-                    x,
-                    y,
-                    width,
-                    height,
-                    color,
-                    ..
-                } if keep(*x, *y, *width, *height) => Some(*color),
-                _ => None,
-            })
+            .filter_map(appearance::painted_rect)
+            .filter(|(x, y, w, h, _)| keep(*x, *y, *w, *h))
+            .map(|t| t.4)
             .collect()
     }
 

@@ -2666,15 +2666,9 @@ mod tests {
         // Save and Cancel: the two 80x28 buttons at the foot of the form.
         let buttons = |cmds: &[RenderCommand]| -> Vec<Color> {
             cmds.iter()
-                .filter_map(|c| match c {
-                    RenderCommand::FillRect {
-                        width: 80.0,
-                        height: 28.0,
-                        color,
-                        ..
-                    } => Some(*color),
-                    _ => None,
-                })
+                .filter_map(appearance::painted_rect)
+                .filter(|(_, _, w, h, _)| *w == 80.0 && *h == 28.0)
+                .map(|t| t.4)
                 .collect()
         };
         assert_eq!(buttons(&blue).len(), 2, "Save and Cancel both draw");

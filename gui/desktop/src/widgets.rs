@@ -2461,13 +2461,20 @@ mod tests {
                 assert_eq!(
                     fills_exactly(&cmds, p.painted(appearance::Surface::Card)),
                     1,
-                    "the picker's panel is not mantle (light={light})"
+                    "the picker's panel is not the card surface (light={light})"
                 );
+                // Whatever the theme outlines a card with -- `surface1` under
+                // cards, the border colour under borders. Naming one of them
+                // here would make this test pass under one theme only.
+                let edge = p
+                    .surface_paint(appearance::Surface::Card)
+                    .border
+                    .unwrap_or(p.surface1);
                 let border = strokes_of_width(&cmds, 1.0);
                 assert_eq!(
-                    border.iter().filter(|c| **c == p.surface1).count(),
+                    border.iter().filter(|c| **c == edge).count(),
                     1,
-                    "the picker's border is not surface1 (light={light})"
+                    "the picker's border is not the card edge (light={light})"
                 );
 
                 for (glyph, size, role, what) in [

@@ -23,7 +23,8 @@ use guitk::style::CornerRadii;
 //    mode, and the filled part of every volume bar. The first two are radio
 //    groups — exactly one member is chosen, and the chosen one is *you are
 //    here*. The third is the slider rule: a volume bar is a control the user
-//    drags, its track is a surface (`surface1`) and its fill is the accent.
+//    drags, its track is the one control-track surface and its fill is the
+//    accent.
 //    Held per-site by `the_three_accent_sites_follow_the_accent`.
 //
 // 2. **A muted volume bar is red, and stays red.** Mute is the one state that
@@ -2100,7 +2101,7 @@ mod tests {
             );
             assert_eq!(
                 fills(&draw(&full_ui(3), &p), INNER, 28.0),
-                vec![p.mantle; 12],
+                vec![p.painted(appearance::Surface::Card); 12],
                 "a system-sound row is in the wrong role"
             );
             assert_eq!(
@@ -2138,8 +2139,9 @@ mod tests {
                 assert_eq!(b.len(), 6, "the output tab does not draw three bars");
                 for (i, track) in b.iter().step_by(2).enumerate() {
                     assert_eq!(
-                        *track, p.surface1,
-                        "the {what} bar {i}'s track is not `surface1` (light={light})"
+                        *track,
+                        p.painted(appearance::Surface::ControlTrack),
+                        "the {what} bar {i}'s track is not the control track                          (light={light})"
                     );
                 }
             }

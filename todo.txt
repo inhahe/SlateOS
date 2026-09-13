@@ -57462,3 +57462,26 @@ What it affects: `userspace/route/src/main.rs`, the arm that used to
 `break` on an unknown flag. The divergence is named in a comment there
 so nobody later "fixes" it back toward the reference without reading
 this. Easy to reverse if the operator prefers (a).
+
+### `userspace/sanitize`: pure functions now tested, option loop still not (lane B, 2026-09-12) -- PARTLY DONE
+
+Found while fixing its option parsing. `cargo test -p sanitize` reports
+`0 passed` — the crate has no test module at all — for a program whose
+entire job is renaming files on disk.
+
+**Update, same day:** the pure functions now have 8 tests, added with the
+fix for a panic they would have caught -- `truncate_chars` splitting a
+UTF-8 character. What is still untested is below.
+
+The part that most wants tests is pure and easy to reach: the
+name-transformation itself (spaces, control characters, `--mode`,
+`--max-len`, `--replace`, `--strip`, `--lowercase`). None of it needs a
+filesystem. A table of input names and expected outputs would cover the
+whole interesting surface, and would have caught at least one question I
+could not answer while reading it: what `--max-len` does to a name whose
+extension is longer than the limit.
+
+The option parsing itself is not reachable from a test — it reads
+`env::args()` inside `main` — which is worth fixing at the same time by
+splitting the loop into a function over `&[String]`, the shape `flock`,
+`nproc` and `prlimit` already use.

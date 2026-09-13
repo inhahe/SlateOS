@@ -180,9 +180,17 @@ fn sanitize_name(name: &str, config: &Config) -> String {
         if let Some(dot_pos) = result.rfind('.') {
             let ext = &result[dot_pos..];
             let max_base = config.max_length.saturating_sub(ext.len());
-            result = format!("{}{}", &result[..max_base], ext);
+            result = if max_base == 0 {
+                // The extension alone is longer than the limit. Keeping it
+                // whole and calling the result truncated would return a name
+                // *over* the limit, which is the one thing this branch is
+                // for.
+                truncate_chars(&result, config.max_length)
+            } else {
+                format!("{}{}", truncate_chars(&result[..dot_pos], max_base), ext)
+            };
         } else {
-            result.truncate(config.max_length);
+            result = truncate_chars(&result, config.max_length);
         }
     }
 
@@ -192,6 +200,30 @@ fn sanitize_name(name: &str, config: &Config) -> String {
     }
 
     result
+}
+
+/// At most `max` **bytes**, never splitting a character.
+///
+/// # Why this is not `String::truncate`
+///
+/// It was, and `String::truncate` panics when the index is not a UTF-8
+/// character boundary. So did `&result[..max_base]` beside it. This program
+/// exists to clean up awkward file names, and a name with non-ASCII in it is
+/// squarely awkward -- `sanitize --max-len 5` on a file called `€€€€` took
+/// the whole program down with
+/// `assertion failed: self.is_char_boundary(new_len)`.
+///
+/// The limit stays a byte count rather than becoming a character count,
+/// because that is what a filesystem's name limit is.
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    s.get(..end).unwrap_or("").to_string()
 }
 
 fn collapse_repeats(s: &str, ch: char) -> String {
@@ -538,5 +570,100 @@ fn main() {
 
     if config.dry_run && stats.renamed > 0 {
         println!("(dry run — run without -n to apply changes)");
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The crash this crate shipped with. `String::truncate` and `&s[..n]`
+    /// panic when `n` is not a UTF-8 character boundary, and this program
+    /// exists to clean up awkward names -- non-ASCII is squarely awkward.
+    /// `sanitize --max-len 5` on a file called `€€€€` took the whole program
+    /// down with `assertion failed: self.is_char_boundary(new_len)`.
+    #[test]
+    fn truncation_never_splits_a_character() {
+        // Three bytes each, so a limit of 5 lands mid-character.
+        assert_eq!(truncate_chars("€€€€", 5), "€");
+        assert_eq!(truncate_chars("€€€€", 6), "€€");
+        // A limit below the first character yields nothing rather than
+        // half of one.
+        assert_eq!(truncate_chars("€", 1), "");
+        assert_eq!(truncate_chars("€", 2), "");
+        assert_eq!(truncate_chars("€", 3), "€");
+    }
+
+    #[test]
+    fn truncation_leaves_a_short_name_alone() {
+        assert_eq!(truncate_chars("short.txt", 200), "short.txt");
+        assert_eq!(truncate_chars("", 5), "");
+    }
+
+    /// The limit is a byte count, because that is what a filesystem's name
+    /// limit is -- four euro signs are 4 characters and 12 bytes.
+    #[test]
+    fn the_limit_counts_bytes_not_characters() {
+        assert_eq!("€€€€".chars().count(), 4);
+        assert_eq!("€€€€".len(), 12);
+        assert!(truncate_chars("€€€€", 7).len() <= 7);
+    }
+
+    #[test]
+    fn an_extension_is_kept_when_the_base_is_cut() {
+        let cfg = Config {
+            max_length: 12,
+            ..Config::default_config()
+        };
+        let out = sanitize_name("averylongbasename.txt", &cfg);
+        assert!(out.len() <= 12, "{out}");
+        assert!(out.ends_with(".txt"), "{out}");
+    }
+
+    /// An extension longer than the whole limit used to produce a name
+    /// *over* the limit, which is the one thing the truncation branch is
+    /// for.
+    #[test]
+    fn an_over_long_extension_still_respects_the_limit() {
+        let cfg = Config {
+            max_length: 4,
+            ..Config::default_config()
+        };
+        let out = sanitize_name("a.averylongextension", &cfg);
+        assert!(out.len() <= 4, "{out}");
+    }
+
+    #[test]
+    fn a_name_with_spaces_is_the_ordinary_case() {
+        let cfg = Config::default_config();
+        assert_eq!(sanitize_name("my file .txt", &cfg), "my_file_.txt");
+    }
+
+    #[test]
+    fn splitting_a_name_finds_the_last_dot_only() {
+        assert_eq!(
+            split_name_ext("archive.tar.gz"),
+            ("archive.tar".to_string(), "gz".to_string())
+        );
+        // A leading dot is not an extension separator.
+        assert_eq!(
+            split_name_ext(".hidden"),
+            (".hidden".to_string(), String::new())
+        );
+        assert_eq!(
+            split_name_ext("noext"),
+            ("noext".to_string(), String::new())
+        );
+    }
+
+    #[test]
+    fn repeats_collapse_to_one() {
+        assert_eq!(collapse_repeats("a___b", '_'), "a_b");
+        assert_eq!(collapse_repeats("___", '_'), "_");
+        assert_eq!(collapse_repeats("ab", '_'), "ab");
     }
 }

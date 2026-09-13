@@ -312,9 +312,9 @@ that says the tables were measured against bash);
 
 ---
 
-## C-Q9 — [C] The backup tool and the search tools read the same-looking patterns by different rules. Should they be made the same? — Status: ANSWERED BY THE OPERATOR 2026-09-07, TWO QUESTIONS BACK, NOW ANSWERED — awaiting a yes/no
+## C-Q9 — [C] The backup tool and the search tools read the same-looking patterns by different rules. Should they be made the same? — Status: OPEN
 
-### Your reply of 2026-09-07, and the two questions in it
+### Your reply of 2026-09-07, and the two questions in it — now answered, so this is waiting only on a yes/no
 
 > *"I don't already have any rules that use `[]` … But maybe we should change
 > file searching and indexing so that they **don't** contain character classes,

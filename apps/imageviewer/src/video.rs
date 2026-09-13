@@ -5,7 +5,9 @@
 //! shortcuts.  Actual codec decoding is deferred to a future hardware-
 //! accelerated decoder service; this module handles container parsing,
 //! player state, control rendering, and frame presentation.
-// SWEEP-DISABLED#![allow(dead_code)]
+
+#![allow(dead_code)]
+
 use appearance::Palette;
 use appearance::Surface;
 use guitk::color::Color;

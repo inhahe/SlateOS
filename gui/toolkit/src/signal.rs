@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 //! Signals and slots event system for widget-to-widget communication.
 //!
 //! Inspired by Qt's signals/slots but designed for Rust's ownership model.

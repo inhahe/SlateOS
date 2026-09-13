@@ -1,14 +1,19 @@
 # Crates with no #[test] anywhere. Written by check-untested-crates.py --write-baseline.
 # This list may only SHRINK. A crate that gains its first test must be removed from it.
-services/hello  # 70 lines
-services/httpget  # 303 lines
-services/init  # 2454 lines
-services/netstack  # 4329 lines
-services/ticker  # 167 lines
-services/udpget  # 525 lines
-userspace/file  # 1212 lines
-userspace/indexer  # 1319 lines
-userspace/man  # 1198 lines
-userspace/nano  # 1923 lines
-userspace/shell  # 204 lines
-userspace/sysctl  # 597 lines
+#
+# `ws` = the root Cargo.toml lists it, so `cargo test -p <name>` reaches it.
+# `separate` = it is not a workspace member; it builds for the SlateOS target on its own,
+#   and `cargo test -p` answers "did not match any packages". Adding a test to one of
+#   these is a different job from adding one to a workspace member.
+services/hello  # 70 lines, separate
+services/httpget  # 303 lines, separate
+services/init  # 2454 lines, separate
+services/netstack  # 4329 lines, separate
+services/ticker  # 167 lines, separate
+services/udpget  # 525 lines, separate
+userspace/file  # 1212 lines, ws
+userspace/indexer  # 1319 lines, ws
+userspace/man  # 1198 lines, ws
+userspace/nano  # 1923 lines, ws
+userspace/shell  # 204 lines, ws
+userspace/sysctl  # 597 lines, ws

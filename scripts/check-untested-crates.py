@@ -85,6 +85,43 @@ def count_tests(crate):
     return tests, lines
 
 
+def workspace_member_globs():
+    """The `members` globs from the root Cargo.toml.
+
+    Read from the file rather than asked of `cargo metadata`, so this stays a
+    pure file scan that costs no build lock. The globs are simple enough --
+    `userspace/*`, `posix`, `kernel` -- that a prefix match is exact for all of
+    them, and a member entry with a `?` or `[...]` in it would be new.
+    """
+    try:
+        with open(os.path.join(ROOT, "Cargo.toml"), encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return []
+    m = re.search(r"^members\s*=\s*\[(.*?)\]", text, re.S | re.M)
+    if not m:
+        return []
+    return re.findall(r'"([^"]+)"', m.group(1))
+
+
+def in_workspace(crate, globs):
+    """Can `cargo test -p <this crate>` reach it?
+
+    Six of the twelve untested crates are `services/*`, which the root
+    Cargo.toml does not list -- they build for the SlateOS target on their own.
+    `cargo test -p netstack` answers "package ID specification did not match
+    any packages", so "add a test" is not the same instruction for them, and a
+    baseline that did not say which kind a crate was would send the next reader
+    at a wall.
+    """
+    for g in globs:
+        if g == crate:
+            return True
+        if g.endswith("/*") and crate.startswith(g[:-1]) and "/" not in crate[len(g) - 1:]:
+            return True
+    return False
+
+
 def read_baseline():
     try:
         with open(BASELINE, encoding="utf-8") as fh:
@@ -140,6 +177,18 @@ def selftest():
     n, _ = count_tests("userspace/backup")
     ck(n > 0, "userspace/backup should have tests now, found " + str(n))
 
+    # Workspace membership, because it decides what "add a test" even means.
+    globs = workspace_member_globs()
+    ck(globs, "the root Cargo.toml named no workspace members")
+    ck(in_workspace("userspace/backup", globs),
+       "userspace/* is a workspace member glob")
+    ck(not in_workspace("services/init", globs),
+       "services/* is NOT in the workspace; `cargo test -p init` cannot reach it")
+    ck(in_workspace("posix", globs),
+       "a bare (non-glob) member entry must match too")
+    ck(not in_workspace("userspace/foo/bar", globs),
+       "a glob one level deep must not match two levels")
+
     print("selftest: " + str(checks - bad) + "/" + str(checks) + " cases pass")
     return 1 if bad else 0
 
@@ -169,14 +218,26 @@ def main():
         if n == 0:
             untested.append((c, lines))
 
+    globs = workspace_member_globs()
+
     if args.write_baseline:
         with open(BASELINE, "w", encoding="utf-8", newline=NL) as fh:
             fh.write("# Crates with no #[test] anywhere. Written by"
                      " check-untested-crates.py --write-baseline." + NL)
             fh.write("# This list may only SHRINK. A crate that gains its"
                      " first test must be removed from it." + NL)
+            fh.write("#" + NL)
+            fh.write("# `ws` = the root Cargo.toml lists it, so"
+                     " `cargo test -p <name>` reaches it." + NL)
+            fh.write("# `separate` = it is not a workspace member; it builds"
+                     " for the SlateOS target on its own," + NL)
+            fh.write("#   and `cargo test -p` answers \"did not match any"
+                     " packages\". Adding a test to one of" + NL)
+            fh.write("#   these is a different job from adding one to a"
+                     " workspace member." + NL)
             for c, lines in sorted(untested):
-                fh.write(c + "  # " + str(lines) + " lines" + NL)
+                kind = "ws" if in_workspace(c, globs) else "separate"
+                fh.write(c + "  # " + str(lines) + " lines, " + kind + NL)
         print("wrote " + str(len(untested)) + " crate(s) to " + BASELINE)
         return 0
 
@@ -193,7 +254,8 @@ def main():
 
     for c, lines in sorted(untested):
         mark = "NEW " if c in set(new) else "    "
-        print(mark + c + "  (" + format(lines, ",") + " lines)")
+        kind = "workspace member" if in_workspace(c, globs) else "built separately"
+        print(mark + c + "  (" + format(lines, ",") + " lines, " + kind + ")")
 
     if stale:
         print("", file=sys.stderr)

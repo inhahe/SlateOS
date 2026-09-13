@@ -139136,7 +139136,7 @@ length names, NUL padding, and a buffer holding several events.
 defect is worse than the ones already fixed today; the implementation is
 more than a single change.
 
-## B-PROGRAMS-THAT-INVENT-THEIR-OUTPUT (lane B, 2026-09-12) -- 7 found, 6 fixed, 1 filed
+## B-PROGRAMS-THAT-INVENT-THEIR-OUTPUT (lane B, 2026-09-12) -- 10 found, 9 fixed, 1 filed
 
 A class, not a bug. A program prints something shaped like a measurement,
 an action or an event, and the value did not come from the system. It is
@@ -139152,16 +139152,32 @@ exactly like the working version.
 | `systemd-cgls` | a fixed cgroup tree: `init.scope` pid 1, `dbus.service` pid 100 | walks `/sys/fs/cgroup` |
 | `systemd-cgtop` | five cgroups with invented task counts, CPU and memory | reads `pids.current`/`memory.current` |
 | `fio` | `usr`/`sys`/`ctx`/`minf` computed from the operation count | reads `/proc/self/stat` |
+| `gdb` | `print $rxa` -- any unknown register -- evaluated to `0` | returns `No such register` |
 | `prlimit` | "setting NOFILE for PID N" with no syscall at all | calls `prlimit64` |
+| `mkinitramfs` | `compression: Gzip`, then wrote the cpio uncompressed | calls `deflate::gzip` |
 | `inotifywait` | a `newfile.txt` creation on every run | reads the kernel's event stream |
 | `chattr` | `+i` stored in a `<file>.attrs` sidecar; the file stayed writable | filed to A for `FS_IOC_SETFLAGS` |
 
-**The severity ordering is the useful part.** `blkzone` and `cgtop`
-invented *readings*, which mislead a reader. `prlimit` and `chattr`
-invented *actions*, which mislead a program -- a caller lowers a limit or
-sets the immutable bit and is told it worked. `inotifywait` invented an
-*event*, which makes a program **act**: `while inotifywait -e create dir;
-do rebuild; done` never stops.
+**The severity ordering is the useful part.** `blkzone`, `cgtop` and
+`gdb` invented *readings*, which mislead a reader -- and `gdb` is the
+sharpest case, because a debugger's entire product is readings, so there
+is nothing else in its output to cross-check one against. `prlimit`,
+`chattr` and `mkinitramfs` invented *actions*, which mislead a program --
+a caller lowers a limit, sets the immutable bit, or compresses an image,
+and is told it worked. `inotifywait` invented an *event*, which makes a
+program **act**: `while inotifywait -e create dir; do rebuild; done`
+never stops.
+
+`mkinitramfs` extends the ordering past where I first drew it. An
+invented action misleads whoever called it; this one also **wrote a
+file**, so the lie outlived the process and was still there for the next
+program to trust. A refusal that leaves a plausible artifact behind is
+the same bug in a quieter form, which is why it now writes nothing.
+
+The count in this heading read `7 found, 6 fixed` while the table below
+it listed eight, from the last time it was extended without being
+re-totalled -- the same present-tense drift this file keeps recording in
+other people's documents.
 
 ### How they were found, since the grep is the weakest part
 
@@ -139200,6 +139216,64 @@ refusal path was right too; only its banner was wrong.
 `requests/b-a-chattr-needs-fs-ioc-getflags-or-it-should-be-deleted.md`,
 and there is no honest reading to give it meanwhile.
 
-About 38 of the 45 stub comments are untriaged. They are mostly in
-crates whose whole purpose is host-side development support, but that is
-an impression rather than a result.
+The 45 stub comments are now triaged, and the impression I recorded here
+first -- "mostly in crates whose whole purpose is host-side development
+support" -- was wrong in the way that mattered. Most are honest, but not
+because of where they live:
+
+| Comment says | Actually | Verdict |
+|---|---|---|
+| `scp` "Stub: send/receive a file" | returns `Err(RemoteNotSupported)` | honest |
+| `last` "we would do reverse DNS" | prints the real IP instead | honest, reduced |
+| `crond` `weekday: 0, // placeholder` | a test input the function ignores | honest |
+| `dbus` "placeholder for length" | write-zero-then-backfill | not a stub at all |
+| `powerctl`, `swapon` "stubbed to `-ENOSYS`" | say so and return it | honest |
+| `mkinitramfs` "would call compression library" | **returned its input unchanged** | fabricating |
+| `gdb` "resolved by the caller" | **no caller; wrong by design** | dead |
+
+Two things this cost me that the grep could not have told me. The
+`mkinitramfs` one was the single most expensive of the eight fabrication
+instances, and it sat in the list the whole time: the comment named the
+missing dependency, and the dependency was a workspace crate four
+directories up. A stub comment that names what it is waiting for is
+worth checking against the tree before believing it.
+
+The `gdb` one is why this class stayed invisible. Its 105 dead lines are
+covered by
+
+    #![allow(clippy::arithmetic_side_effects, clippy::indexing_slicing, dead_code)]
+
+whose eight-line comment justifies the first two lints and never
+mentions the third. That shape -- a defensible suppression with an
+undefensible one appended to it -- is in **22 lane-B crates**, and it is
+hiding **208 distinct findings**:
+
+| Crate | Findings | | Crate | Findings |
+|---|---|---|---|---|
+| `logind` | 50 | | `dhcpcd` | 7 |
+| `gdb` | 27 | | `upower`, `tcpdump` | 5 each |
+| `wpa` | 25 | | `ntpd`, `ar`, `login` | 4 each |
+| `systemctl` | 19 | | `getty` | 3 |
+| `objdump` | 13 | | `resolvectl`, `findmnt`, `ss`, `ldconfig` | 2 each |
+| `jq` | 12 | | `irqbalance`, `acpi`, `blkid` | 1 each |
+| `finger` | 10 | | `posix`, `libservicebus` | 8, 1 |
+
+By kind: 48 constants, 39 functions, 27 fields, 21 associated items, 17
+field groups, 13 enums, 12 methods, 10 structs.
+
+Measured, not estimated: `RUSTFLAGS="--force-warn dead_code" cargo check
+-p <each> --target x86_64-pc-windows-gnu --message-format=json`,
+deduplicated by (file, line, message). `--force-warn` is the instrument
+that matters here -- it overrides a crate-level `#![allow]`, which `-W`
+does not, so nothing short of it can see past these lines. The count
+includes path dependencies pulled in by those crates, which is why
+`posix` and `libservicebus` appear without being on the list of 22.
+
+Not all 208 are bugs. 48 are constants, and a complete table of ELF or
+DBus constants where only some are read is legitimate. The defect is
+that the allow is **crate-wide**, so a genuine finding like gdb's cannot
+be told from a deliberate table -- and the annotation that would say
+which is which was never required, because the lint never fired. The fix
+is per-item `#[allow(dead_code)]` with a reason, and `dead_code` struck
+from the 22 crate-level lists; then the next `tokenize_expr` announces
+itself. That is 22 crates of work and is not started.

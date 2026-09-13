@@ -200,6 +200,11 @@ fn cmd_cgcreate(args: &[String]) {
         process::exit(1);
     }
 
+    // The worst result across every group. `cgcreate` reported each failure
+    // and then exited 0, so `cgcreate -g cpu:/x && systemctl ...` ran the
+    // second half after the first had failed.
+    let mut status = 0;
+
     for group in &groups {
         let path = cgroup_path(group);
         match fs::create_dir_all(&path) {
@@ -215,14 +220,31 @@ fn cmd_cgcreate(args: &[String]) {
                     // Write to parent's subtree_control.
                     if let Some(parent) = path.parent() {
                         let ctrl_file = parent.join("cgroup.subtree_control");
-                        let _ = fs::write(&ctrl_file, &ctrl_str);
+                        // Checked. This was `let _ =`, so a cgroup whose
+                        // controllers could not be enabled was announced as
+                        // "created" with nothing to say it was inert -- and an
+                        // inert cgroup accounts and limits nothing, which is
+                        // the entire reason for making one.
+                        if let Err(e) = fs::write(&ctrl_file, &ctrl_str) {
+                            eprintln!(
+                                "cgcreate: created {} but could not enable {}: {e}",
+                                path.display(),
+                                ctrl_str
+                            );
+                            status = 1;
+                        }
                     }
                 }
             }
             Err(e) => {
                 eprintln!("cgcreate: failed to create {}: {e}", path.display());
+                status = 1;
             }
         }
+    }
+
+    if status != 0 {
+        process::exit(status);
     }
 }
 
@@ -286,6 +308,7 @@ fn cmd_cgdelete(args: &[String]) {
         process::exit(1);
     }
 
+    let mut status = 0;
     for group in &groups {
         let path = cgroup_path(group);
         let result = if recursive {
@@ -295,8 +318,14 @@ fn cmd_cgdelete(args: &[String]) {
         };
         match result {
             Ok(()) => eprintln!("cgdelete: removed {}", path.display()),
-            Err(e) => eprintln!("cgdelete: failed to remove {}: {e}", path.display()),
+            Err(e) => {
+                eprintln!("cgdelete: failed to remove {}: {e}", path.display());
+                status = 1;
+            }
         }
+    }
+    if status != 0 {
+        process::exit(status);
     }
 }
 
@@ -724,11 +753,18 @@ fn cmd_cgclassify(args: &[String]) {
     }
 
     let procs_path = cgroup_path(&group).join("cgroup.procs");
+    let mut status = 0;
     for pid in &pids {
         match fs::write(&procs_path, pid.to_string()) {
             Ok(()) => eprintln!("cgclassify: moved PID {pid} to {group}"),
-            Err(e) => eprintln!("cgclassify: failed to move PID {pid} to {group}: {e}"),
+            Err(e) => {
+                eprintln!("cgclassify: failed to move PID {pid} to {group}: {e}");
+                status = 1;
+            }
         }
+    }
+    if status != 0 {
+        process::exit(status);
     }
 }
 

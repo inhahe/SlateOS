@@ -1342,9 +1342,29 @@ impl DecorationColors {
     }
 
     /// Resolve the frame colours from what the user chose.
+    ///
+    /// Resolves a palette to do it. A caller that already holds one -- the
+    /// compositor caches one per appearance change -- should call
+    /// [`from_settings_with`](Self::from_settings_with) and hand it over,
+    /// rather than pay for a second identical resolve.
     #[must_use]
     pub fn from_settings(settings: &AppearanceSettings) -> Self {
-        let mut colors = Self::from_palette(&Palette::from_settings(settings));
+        Self::from_settings_with(settings, &Palette::from_settings(settings))
+    }
+
+    /// [`from_settings`](Self::from_settings) for a caller that already holds
+    /// the palette for these settings.
+    ///
+    /// **The palette must be the one these settings resolve to.** Passing an
+    /// unrelated palette gives window frames from one theme and content from
+    /// another, which no assertion here can catch -- the types are the same.
+    /// The split exists because the two-resolve version was invisible until a
+    /// counter was put on `Palette::from_settings`: `Compositor::set_appearance`
+    /// resolved one for its own cache and this resolved a second, identical,
+    /// one line later.
+    #[must_use]
+    pub fn from_settings_with(settings: &AppearanceSettings, palette: &Palette) -> Self {
+        let mut colors = Self::from_palette(palette);
 
         if settings.accent_titlebars {
             let accent = settings.effective_accent();

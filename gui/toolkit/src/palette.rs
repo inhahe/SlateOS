@@ -363,6 +363,43 @@ pub fn legible_on(ink: Color, bg: Color) -> Color {
 // The resolved palette
 // ============================================================================
 
+thread_local! {
+    /// How many times [`Palette::from_settings`] has been called **on this**
+    /// **thread**.
+    ///
+    /// Always compiled, for the reason `guitk::theme::TRANSFER_EVALUATIONS` gives
+    /// at length: a `#[cfg(test)]` counter here would see only this crate's own
+    /// unit tests, and every caller that could regress -- the compositor above
+    /// all -- links the non-test build.
+    ///
+    /// **Thread-local, and that is not a micro-optimisation.** The first version
+    /// was an `AtomicU64` and the test asserting "a frame resolves none" passed
+    /// alone and failed in the full crate run with a delta of 13. Nothing was
+    /// wrong with the frame: a test binary runs its tests in parallel, several
+    /// hundred of them resolve palettes, and a process-wide delta measured all of
+    /// them. The counter answered a question about the process while being read as
+    /// a question about one frame -- the same mistake, in a new disguise, that the
+    /// counter was added to catch.
+    ///
+    /// Thread affinity is also the honest scope for the thing being asserted. "Is
+    /// a palette being resolved inside a render loop" is a question about the
+    /// thread doing the rendering, and the compositor renders on one.
+    ///
+    /// `theme::TRANSFER_EVALUATIONS` stays global on purpose, because it counts an
+    /// event that happens exactly 256 times per *process* -- `LazyLock` guarantees
+    /// one table build -- so no other thread can contribute to a delta there. The
+    /// distinction is per-process event versus per-caller event, not a preference.
+    static PALETTE_RESOLUTIONS: core::cell::Cell<u64> = const { core::cell::Cell::new(0) };
+}
+
+/// How many palettes this thread has resolved so far.
+///
+/// Cumulative, so a caller asking "did that operation resolve one?" takes a
+/// difference rather than an absolute. See [`PALETTE_RESOLUTIONS`].
+#[must_use]
+pub fn palette_resolutions() -> u64 {
+    PALETTE_RESOLUTIONS.with(core::cell::Cell::get)
+}
 /// Every colour the shell paints with, resolved for one set of choices.
 ///
 /// **What this is for.** The desktop shell had 549 `const … : Color` of its
@@ -778,8 +815,25 @@ impl Palette {
     }
 
     /// Resolve the whole palette from what the user chose.
+    ///
+    /// **Resolve this when the settings change, not when a frame is drawn.**
+    /// It is 273 ns today, so the cost is not the argument -- the structure
+    /// is. On 2026-09-11 the compositor called this per blurred window per
+    /// frame, the 4.5:1 text floor added a `contrast_ratio` to it, and a 4K
+    /// frame went from 6.9 ms to 67 ms. Tabling the sRGB curve took the
+    /// resolve from 87_395 ns to 273 ns and closed *that* regression, but the
+    /// render loop it sat in is still a render loop, and the next colour rule
+    /// added here is free only by luck.
+    ///
+    /// [`PALETTE_RESOLUTIONS`] counts the calls so that structure can be
+    /// asserted rather than hoped for;
+    /// `compositor::tests::the_palette_is_resolved_when_it_changes_not_per_frame`
+    /// is the assertion.
     #[must_use]
     pub fn from_settings<S: PaletteSource>(settings: &S) -> Self {
+        // A thread-local increment: no atomic, no contention, and scoped to
+        // the thread whose render loop is the thing under suspicion.
+        PALETTE_RESOLUTIONS.with(|n| n.set(n.get().saturating_add(1)));
         // Before the mode, not after: a high-contrast palette replaces the
         // theme rather than adjusting it, so there is nothing from the
         // light/dark branch to keep. Transparency is dropped with it -- see

@@ -55073,7 +55073,7 @@ fix was three lines, but the reason it will not come back is the extraction.
 
 ---
 
-## TD-C-CLOCKDISPLAY-RENDER-HAS-NO-CALLER
+## TD-C-CLOCKDISPLAY-RENDER-HAS-NO-CALLER -- FIXED 2026-08-21
 
 **In short:** `ClockDisplay` has a second way to put a clock on screen —
 `ClockDisplay::render`, plus the one-line wrapper `CalendarView::render_tray_clock`
@@ -83989,7 +83989,7 @@ leaves `norm_tables.rs` byte-identical (SHA-256 `434108c5…`), and
 matching. Any other crate that mixes generated and hand-written modules will
 hit the same wall the first time its root is touched; the same fix applies.
 
-## TD-C-THE-NUMERIC-KEYPAD-TYPES-NOTHING-BECAUSE-NOTHING-TRACKS-NUM-LOCK (lane C, 2026-08-24)
+## TD-C-THE-NUMERIC-KEYPAD-TYPES-NOTHING-BECAUSE-NOTHING-TRACKS-NUM-LOCK (lane C, 2026-08-24) -- FIXED 2026-08-24
 
 **In short.** On a real SlateOS machine the number keys on the right-hand
 block of the keyboard — the calculator-style pad — type nothing at all. The
@@ -129679,7 +129679,7 @@ without changing the type first.
 
 ---
 
-## TD-C-AN-INSERTED-IMPORT-SILENTLY-REATTACHED-AN-ATTRIBUTE-IN-TEN-APPS
+## TD-C-AN-INSERTED-IMPORT-SILENTLY-REATTACHED-AN-ATTRIBUTE-IN-TEN-APPS -- FIXED the same day
 
 **Date:** 2026-09-08. **Lane:** C. **Fixed the same day.**
 **Where:** `wire_app.py`, the conversion kit's import step; ten applications
@@ -130437,7 +130437,21 @@ router no longer has. The page flags that ("address out of date") by comparing
 each entry's last published address with the router's external address, because
 the status alone does not show it.
 
-## TD-C-A-TEST-LOCK-SERIALISES-WRITERS-AGAINST-EACH-OTHER-BUT-NOT-AGAINST-READERS
+## TD-C-A-TEST-LOCK-SERIALISES-WRITERS-AGAINST-EACH-OTHER-BUT-NOT-AGAINST-READERS -- FIXED 2026-09-08
+
+**Marker added 2026-09-13, not the fix.** The fix landed on 2026-09-08 and
+this entry's body has described it in the past tense ever since -- the
+reentrant `ConfigTurn`, the thread-local depth, `TestDesktop` holding one for
+its lifetime. Only the heading was never marked, so the entry read as open
+work. It was picked up as the next task today and four screens of it were
+read before the code was checked and found to already carry the fix, with all
+94 tests passing.
+
+That is the cost of an unmarked heading, and it is the same shape as every
+other near-miss in this file: a confident statement about a population nobody
+has re-checked. Three other entries had it too -- the numeric keypad, the
+clock display, the reattached attribute -- all fixed in August, all still
+reading as open in September.
 
 **Date:** 2026-09-08. **Lane:** C.
 **Where:** `gui/settingsfile/src/…` — `testing::with_scratch_config`;

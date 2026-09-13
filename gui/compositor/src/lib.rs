@@ -7793,6 +7793,9 @@ impl Compositor {
 
         // Check if we should compose (frame timing).
         if !self.frame_stats.should_compose() {
+            // See the note below on the damage check: a frame that did not
+            // happen took no time, and must not report the last one's.
+            self.frame_stats.last_frame_time_us = 0;
             return false;
         }
 
@@ -7810,6 +7813,15 @@ impl Compositor {
 
         // Check if there's anything to composite.
         if !self.full_recomposite && !self.damage.has_damage() {
+            // Zero, not the previous frame's figure. A skipped frame that
+            // leaves `last_frame_time_us` alone reports a *stale* number, and
+            // it does not look stale: it looks like a beautifully repeatable
+            // measurement. Two separate attempts to measure an idle frame on
+            // 2026-09-13 both got the previous frame's time five times in a
+            // row and read it as a result. A statistic named "last frame
+            // time" must mean the last frame, and a frame that did not happen
+            // took no time.
+            self.frame_stats.last_frame_time_us = 0;
             return false;
         }
 

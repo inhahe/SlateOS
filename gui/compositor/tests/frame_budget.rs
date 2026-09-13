@@ -100,6 +100,15 @@ fn one_frame() -> u64 {
     let mut compositor = Compositor::new(3840, 2160, 144).expect("compositor");
     for i in 0..8 {
         let id = compositor.create_window(format!("Window {i}"), 960, 720, 1);
+        // Placed apart, and this is not cosmetic: eight windows left at the
+        // same origin all overlap, so damaging one damages every one of them
+        // and the partial path becomes a full recomposite wearing a different
+        // name. Measured stacked, one window's redraw cost 73% of the whole
+        // desktop's; placed apart it costs an eighth, which is what damage
+        // tracking is for.
+        compositor
+            .move_window(id, (i % 4) * 960, (i / 4) * 1080)
+            .expect("move");
         compositor
             .submit_render(id, window_tree(960.0, 720.0).commands)
             .expect("submit");
@@ -108,13 +117,50 @@ fn one_frame() -> u64 {
     compositor.frame_stats().last_frame_time_us
 }
 
+/// One window redraws its own content: the steady state of a running desktop.
+///
+/// The refresh rate is absurd on purpose. `FrameStats::should_compose` gates
+/// on the refresh interval, so a second `compose_frame` inside it returns
+/// early -- at 144 Hz this experiment cannot be run at all. Handing the
+/// compositor a 100 kHz display turns the rate limiter from an obstacle into
+/// a parameter.
+fn steady_frame() -> u64 {
+    let mut compositor = Compositor::new(3840, 2160, 100_000).expect("compositor");
+    let mut first = None;
+    for i in 0..8 {
+        let id = compositor.create_window(format!("Window {i}"), 960, 720, 1);
+        compositor
+            .move_window(id, (i % 4) * 960, (i / 4) * 1080)
+            .expect("move");
+        compositor
+            .submit_render(id, window_tree(960.0, 720.0).commands)
+            .expect("submit");
+        first.get_or_insert(id);
+    }
+    compositor.compose_frame();
+
+    let id = first.expect("eight windows");
+    compositor
+        .submit_render(id, window_tree(960.0, 720.0).commands)
+        .expect("submit");
+    compositor.compose_frame();
+    compositor.frame_stats().last_frame_time_us
+}
+
 /// A ceiling on a *debug* frame, to catch a regression in kind.
 ///
-/// Two and a half times the measured 160 000 us rather than just over it. The
-/// first draft was 200 000, which the measurement cleared by 1.25x -- a bound
-/// that tight fails on a busy afternoon and teaches everyone to re-run it,
-/// which is how a bound stops being read at all.
-const FRAME_CEILING_US: u64 = 400_000;
+/// Three times the measured ~360 000 us rather than just over it.
+///
+/// This number moved twice while the test was being written, and both moves
+/// are the same lesson. The first draft was 200 000 against a 160 000 us
+/// measurement -- 1.25x -- and one of the five samples on the very next run
+/// exceeded it. The second was 400 000, and then *placing the windows apart*
+/// (which is what makes the damage test meaningful) more than doubled the
+/// full-recomposite cost, because eight spread windows cover far more of a
+/// 4K screen than eight stacked ones. A bound with 10% headroom fails on a
+/// busy afternoon and teaches everyone to re-run it, which is how a bound
+/// stops being read at all.
+const FRAME_CEILING_US: u64 = 1_200_000;
 
 #[test]
 fn a_full_desktop_composites_inside_the_frame_budget() {
@@ -132,4 +178,23 @@ fn a_full_desktop_composites_inside_the_frame_budget() {
     );
 
     println!("eight 960x720 windows at 3840x2160, debug: {best} us (best of {samples:?})");
+}
+
+/// The steady state -- one window of eight redrawing -- is a fraction of a
+/// full recomposite, which is what says damage tracking is doing its job.
+#[test]
+fn redrawing_one_window_costs_a_fraction_of_the_whole_desktop() {
+    let full = (0..5).map(|_| one_frame()).min().expect("five samples");
+    let steady = (0..5).map(|_| steady_frame()).min().expect("five samples");
+
+    println!("full recomposite {full} us, one window redrawn {steady} us");
+
+    // A third, not an eighth. The ratio is what is being asserted -- that the
+    // partial path is genuinely partial -- and a tight ratio would fail for
+    // the ordinary reason that these are two different measurements on a
+    // shared machine. An eighth is what it actually measures.
+    assert!(
+        steady * 3 < full,
+        "redrawing one window of eight cost {steady} us against {full} us for          the whole desktop. Damage tracking is not narrowing the work: check          whether the windows overlap, which makes every partial recomposite a          full one."
+    );
 }

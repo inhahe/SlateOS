@@ -140420,50 +140420,54 @@ can see at all, because their value is a name. That work belongs to
 `TD-C-SIXTY-EIGHT-APPS-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE` and to C-Q16,
 which asks whether the games should follow the theme in the first place.
 
-## TD-C-A-4K-DESKTOP-FRAME-MEASURES-SEVEN-TIMES-THE-BUDGET
+## TD-C-A-4K-DESKTOP-FRAME-IS-OVER-THE-BUDGET-AND-THE-FULL-RECOMPOSITE-IS-A-HITCH
 
 **Date:** 2026-09-13. **Lane:** C.
 **Where:** `gui/compositor`, measured by `tests/frame_budget.rs`.
 
 **In short:** the target says a whole desktop should be drawn in under 2
-milliseconds so a fast display never waits. The first measurement anyone has
-taken says it takes about 14. That is the first time the question has been
-answerable at all -- until today nothing measured it -- so this entry is a
-*measurement*, not yet a diagnosis.
+milliseconds so a fast display never waits. Measured for the first time
+today, an ordinary frame -- one window redrawing itself -- takes between 3 and
+7 milliseconds, and the frame after a window is opened, moved or resized takes
+20 to 45. The second number is the more interesting one: it is long enough to
+be seen as a hitch when a window is dragged.
 
-**The numbers.** Eight 960x720 windows on a 3840x2160 surface, each a
-background, a title strip and 29 rows of text; about 480 draw commands. Best
-of five fresh compositors:
+**This entry replaces one written an hour earlier that said seven times over
+budget.** That figure came from a scene with all eight windows left at the
+same origin, which is the worst case twice over: every window overlaps, so
+damage to one is damage to all, and the partial path becomes a full
+recomposite wearing a different name. Placing the windows apart -- which is
+what a desktop looks like -- changed the conclusion completely. The lesson is
+not about compositors; it is that the first measurement of anything should be
+distrusted until the scene it measures has been looked at.
 
-| build | best of five |
-|---|---|
-| debug | ~160 000 us |
-| release | ~13 800 us |
-| release, same scene without text | ~5 400 us |
+**Damage tracking works.** That was the open question and it now has an
+answer: redrawing one window of eight costs about an eighth of a full
+recomposite, which is what the partial path is for. There is a regression
+test on the *ratio* rather than on either number, because a ratio survives a
+busy machine and an absolute figure does not.
 
-So roughly eight of the fourteen milliseconds are text, and the remaining six
-are everything else including the 8.3-megapixel surface itself.
+**The measurements** (release, best of five, 3840x2160, eight 960x720
+windows of about 60 draw commands each). The spread is machine load, and it
+is wide enough that a single run should not be quoted:
 
-**Why this is not yet a diagnosis, stated so nobody has to re-derive it:**
+| | best seen | worst seen |
+|---|---|---|
+| full recomposite | 20 ms | 45 ms |
+| one window redrawn | 2.6 ms | 7 ms |
+| nothing changed | 0 -- the frame is skipped | |
 
-1. **It is one scene, and a heavy one.** 29 rows of text per window in eight
-   windows is a busy desktop, not an idle one. The number to compare against
-   2 ms is the one a *typical* desktop produces, and nobody has defined that.
-2. **The obvious next experiment does not work the obvious way.**
-   `FrameStats::should_compose` rate-limits to the refresh interval, so a
-   second `compose_frame` called immediately returns early *without updating*
-   `last_frame_time_us`. An idle-frame comparison written the natural way
-   reports the previous frame's number five times over and looks like a
-   perfectly stable measurement. It is not a measurement at all. Any attempt
-   to find out whether damage tracking is working has to get past that first.
+**Where to look first.** About eight of a full recomposite's milliseconds are
+text: the same scene with the text removed measured 5.4 ms against 13.8 ms
+when both were taken stacked. Whether glyphs are re-shaped every frame or
+cached is the first question, and it is answerable with the instrument that
+now exists.
 
-**What to do next.** Find out where the fourteen milliseconds go before
-changing anything: whether the surface is fully repainted every frame or the
-damage region is honoured, and whether text is re-shaped per frame or cached.
-Both are answerable with the instrument that now exists.
-
-**Related:** this entry exists because half one of
-`TD-C-THE-COMPOSITOR-FRAME-BUDGET-HAS-NO-INSTRUMENT` was finally done. Half
-two -- a ceiling on the demo scene -- caught a 30x regression within a day of
-being added, which is the argument for doing this sort of thing at all.
-
+**A trap fixed on the way, worth its own paragraph.** `last_frame_time_us`
+was left *unchanged* when `compose_frame` took either early-out -- the
+rate-limit check or the nothing-to-draw check. A skipped frame therefore
+reported the previous frame's time, and it did not look stale: it looked like
+a beautifully repeatable measurement. Two separate attempts to measure an
+idle frame got the same number five times in a row and read it as a result.
+Both paths now set it to zero, because a frame that did not happen took no
+time.

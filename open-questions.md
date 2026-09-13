@@ -1745,6 +1745,41 @@ and then the notes were never appended.
 | **§1005** | `coreutils` is the one home for a coreutils command. It resolved the open question "we have two of several commands — which ones do we keep?", superseded an earlier §8, and un-suspended an entry that §8 had put on hold. |
 | **§1006** | Described as *your* ruling: "delete every fabricating command" — a command that does not work is deleted rather than kept as a stub that refuses. |
 
+**Update, 2026-09-12: your own words for §1006 exist, and I found them.**
+There is an untracked file `open-questions-answers.txt` in the
+integration checkout (`E:\visual studio projects\os`), dated 2026-09-07
+— the same date as both missing numbers. It answers the lane-B question
+"2,288 of the 2,756 commands in `userspace/` report success for work
+they never did. Which ones do we keep?" with:
+
+> Why not delet all of them that don't work, rather than just the ones
+> that can never work? You said yourself tat a command's existence
+> itself is a claim, and it could be misleading not only to scripts and
+> installers, but users who see the command's existence. The ones that
+> don't work but could work later can simply be added when we actually
+> implement them?
+
+That is §1006, in your words rather than my reconstruction of them, and
+it says something the 33 citations had lost: the reason is that **a
+command's existence is itself a claim**, and the standard is *does not
+work* rather than *can never work*. The citations had compressed this to
+"delete every fabricating command", which is the same rule with its
+justification and its scope removed.
+
+**This changes my recommendation for §1006 but not for §1005.** For
+§1006, option 1 is no longer a reconstruction — it is a quotation, and I
+would be transcribing rather than paraphrasing you. For §1005 (`coreutils`
+is the one home for a coreutils command) that file contains nothing: it
+holds only two lane-B answers, and the other is about the random-number
+generator. So §1005 remains a reconstruction from citations alone.
+
+**One thing worth your attention regardless of how you answer.** That
+file is untracked, so it is in no branch, no lane can see it, and nothing
+backs it up. It carries your answers to roughly thirty questions across
+all three lanes. I have not copied it into the repository, because it is
+yours and it may be deliberately scratch — but if it is lost, so are the
+answers.
+
 I have applied both repeatedly today — deleting `nohup`, `nice` and
 `renice` from the `timeout` crate, and deleting `blkzone`, which printed
 two hardcoded disk zones for any device on any machine. So the rules are

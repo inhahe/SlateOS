@@ -211,7 +211,7 @@ pub enum Surface {
     ///
     /// Carries which edge faces the content, because a toolbar's separator sits
     /// along its bottom and a status bar's along its top, and nothing about the
-    /// rectangle says which. Under [`StripStyle::Filled`] the edge is unused.
+    /// rectangle says which. Under [`crate::palette::StripStyle::Filled`] the edge is unused.
     ///
     /// Its own kind rather than a `Panel`, because a band spanning the window
     /// reads as a band and not as a box -- outlining one looks like a box that
@@ -241,7 +241,7 @@ pub struct SurfacePaint {
     pub border: Option<Color>,
     /// A hairline along one edge, if this surface is separated rather than
     /// filled or boxed. `None` for every kind except [`Surface::Strip`] under
-    /// [`StripStyle::Separator`] -- which is the cost §835 records for keeping
+    /// [`crate::palette::StripStyle::Separator`] -- which is the cost §835 records for keeping
     /// that option.
     pub separator: Option<(Edge, Color)>,
 }

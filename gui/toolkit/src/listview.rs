@@ -108,7 +108,7 @@ impl ListViewport {
     ///
     /// Deliberately re-derived from `len` on every call rather than trusting
     /// [`Self::first_visible`]: a list can shrink between the call that last
-    /// ran [`Self::reveal`] and the render that asks what to draw, and this is
+    /// ran `reveal` and the render that asks what to draw, and this is
     /// the render's last chance to notice. Delegating to
     /// [`scroll_window::visible_count`] is what makes "shrank underneath us"
     /// show the *last page* rather than blank space — the same rule the

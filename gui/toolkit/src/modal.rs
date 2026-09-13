@@ -775,7 +775,7 @@ impl AlertDialog {
     /// Where button `index` was last drawn, as `(x, y, width, height)`.
     ///
     /// `None` before the first frame, and `None` for an index past the end.
-    /// This is the same rectangle [`handle_mouse`](Self::handle_mouse) hit-tests
+    /// This is the same rectangle `handle_mouse` hit-tests
     /// against — deliberately so, because there is only one of it: a caller that
     /// wants to aim at a button (a test, or a screen reader placing a focus
     /// ring) must aim at what was actually drawn rather than at a second,

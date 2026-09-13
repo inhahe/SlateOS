@@ -1824,7 +1824,7 @@ fn parent_path(path: &OsStr) -> OsString {
     }
 }
 
-/// Join a directory path and a child name, on `/` alone. See [`parent_path`]
+/// Join a directory path and a child name, on `/` alone. See `parent_path`
 /// for why this does not use [`Path::join`].
 fn join_path(dir: &OsStr, name: &OsStr) -> OsString {
     let mut out = OsString::new();
@@ -1942,9 +1942,9 @@ fn matches_any_pattern(filename: &OsStr, patterns: &[&str]) -> bool {
 /// the user already has — the desktop shell's Run box opens its chooser in the
 /// directory of whatever is currently typed — has to name that path's
 /// directory, and a second hand-rolled "cut at the last slash" is a second
-/// place for the rules in [`parent_path`] to be got wrong.
+/// place for the rules in `parent_path` to be got wrong.
 ///
-/// See [`parent_path`] for why this is a byte split on `/` and not
+/// See `parent_path` for why this is a byte split on `/` and not
 /// [`Path::parent`]. Nothing is decoded, so a directory whose name has no UTF-8
 /// spelling comes back as the bytes that name it. A path with no `/` in it at
 /// all, and the root itself, both yield `/`.

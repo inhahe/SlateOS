@@ -17,7 +17,7 @@
 //! knowing nothing about it.
 //!
 //! Since `design-decisions.md` §427 that cut is at least *marked* — the command
-//! carries a [`TextOverflow`](crate::render::TextOverflow) and the compositor
+//! carries a [`crate::render::TextOverflow`] and the compositor
 //! draws the `…`. That fixes the reader being unable to tell a fragment from a
 //! whole value. It does not answer where the column ends, which is the question
 //! below and the reason this module exists.

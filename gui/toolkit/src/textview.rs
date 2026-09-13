@@ -336,7 +336,7 @@ fn parse_csi(cursor: &mut StrCursor<'_>, style: &mut AnsiStyle) {
 }
 
 /// Parse a string containing ANSI escape sequences into styled spans.
-/// Returns one Vec<StyledSpan> per line.
+/// Returns one `Vec<StyledSpan>` per line.
 pub fn parse_ansi(input: &str) -> Vec<Vec<StyledSpan>> {
     let mut lines: Vec<Vec<StyledSpan>> = Vec::new();
     let mut current_line: Vec<StyledSpan> = Vec::new();

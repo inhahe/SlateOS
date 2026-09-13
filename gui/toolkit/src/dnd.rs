@@ -339,7 +339,7 @@ impl DragDropManager {
     /// Begin a potential drag operation.
     ///
     /// The drag will not be considered active until the pointer moves beyond
-    /// the configured [`drag_threshold`](Self::drag_threshold). This prevents
+    /// the configured `drag_threshold`. This prevents
     /// accidental drags from simple clicks.
     pub fn begin_drag(
         &mut self,

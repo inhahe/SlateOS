@@ -4157,7 +4157,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(dir.join("41/statm"), b"1000 300 64 0 0 0 0").unwrap();
-        std::fs::write(dir.join("41/cmdline"), b"/bin/shell -i ").unwrap();
+        std::fs::write(dir.join("41/cmdline"), b"/bin/shell\0-i\0").unwrap();
 
         // 42 has a directory and no `stat`: the shape of a process that
         // exited while the list was being walked.

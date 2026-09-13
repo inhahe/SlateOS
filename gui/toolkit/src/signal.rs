@@ -6,7 +6,7 @@
 //!
 //! # Architecture
 //!
-//! - **Signal<T>** — a typed event emitter. Connected handlers are called
+//! - **`Signal<T>`** — a typed event emitter. Connected handlers are called
 //!   synchronously when the signal is emitted.
 //! - **Slot** — any `Fn(&T)` or `FnMut(&T)` closure connected to a signal.
 //! - **SignalGroup** — manages multiple connections for bulk disconnect.

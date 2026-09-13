@@ -124,14 +124,14 @@ pub enum MenuAction {
 /// So the panel is now capped at the viewport and the rows inside it scroll.
 /// The three things that had to be true for that to be safe:
 ///
-/// - **The rows move, the panel does not.** [`Self::scroll`] is subtracted in
+/// - **The rows move, the panel does not.** `scroll` is subtracted in
 ///   exactly one place — the origin handed to [`RowStrip`] — because a scroll
-///   offset is just a different origin, and [`Self::index_at_y`] inverts the
+///   offset is just a different origin, and `index_at_y` inverts the
 ///   same strip the renderer draws from. Nothing else in the file subtracts it.
 /// - **A scrolled-away row must answer for nothing.** The strip alone is not
 ///   enough: a row scrolled above the panel still has a `y` in the strip's
 ///   coordinates, and `index_at` would happily name it for a pointer that is
-///   over the *menu bar* above. [`Self::index_at_y`] therefore bounds the
+///   over the *menu bar* above. `index_at_y` therefore bounds the
 ///   answer to the visible region as well, which is the same shape of guard
 ///   the app-side row lists need and for the same reason.
 /// - **Keyboard navigation has to bring its row with it.** Arrowing down past
@@ -749,7 +749,7 @@ impl ContextMenu {
     /// This match used to appear four times in this file — once summing the
     /// heights for [`Self::content_height`], once placing the rows in
     /// [`Self::render`], once subtracting them back off in
-    /// [`Self::index_at_y`], and once adding them up again in
+    /// `index_at_y`, and once adding them up again in
     /// [`Self::y_offset_for_index`] to hang a submenu. Four walks of one list
     /// is four chances for three of them to be right; when they disagree the
     /// user clicks one row and gets the one above it.
@@ -763,9 +763,9 @@ impl ContextMenu {
     /// Where every row sits, in screen coordinates, with the scroll offset
     /// already applied.
     ///
-    /// The renderer draws from this and [`Self::index_at_y`] answers from it,
+    /// The renderer draws from this and `index_at_y` answers from it,
     /// so the rows on screen are the rows that answer. This is the **only**
-    /// place [`Self::scroll`] is subtracted; a second subtraction anywhere else
+    /// place `scroll` is subtracted; a second subtraction anywhere else
     /// would be a second description of where the rows are.
     fn strip(&self) -> RowStrip {
         RowStrip::new(
@@ -805,7 +805,7 @@ impl ContextMenu {
         self.viewport_bottom() - self.viewport_top()
     }
 
-    /// The largest [`Self::scroll`] that still shows content, i.e. how much
+    /// The largest `scroll` that still shows content, i.e. how much
     /// taller the list is than the room it has. Zero whenever the menu fits.
     fn max_scroll(&self) -> f32 {
         (self.content_height() - self.panel_height()).max(0.0)

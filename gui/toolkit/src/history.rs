@@ -10,7 +10,7 @@
 //! negative infinity in one and from zero in another, so the same samples gave
 //! two different answers; and only one of the three could report an average.
 //!
-//! Written here once, the wrap goes through [`step`](crate::step), which carries the "the
+//! Written here once, the wrap goes through [`crate::step`], which carries the "the
 //! buffer is not empty" condition inside the expression that depends on it, so
 //! a capacity of zero is a history that holds nothing rather than a division by
 //! zero or an index off the end.

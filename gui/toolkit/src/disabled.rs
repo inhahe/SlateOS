@@ -973,7 +973,7 @@ impl FormValidator {
     /// Validate a single field by its widget ID. Returns the validation state.
     ///
     /// A widget this form does not own is reported valid and left alone; see
-    /// [`UNREGISTERED`].
+    /// `UNREGISTERED`.
     pub fn validate_field(&mut self, widget_id: WidgetId, value: &str) -> &ValidationState {
         match self.fields.iter_mut().find(|f| f.widget_id == widget_id) {
             Some(field) => {

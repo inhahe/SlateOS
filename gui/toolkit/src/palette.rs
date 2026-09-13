@@ -263,7 +263,7 @@ pub const DARK_EXTREME: Color = Color::from_hex(0x11111B);
 /// user can choose. A threshold cannot make that promise; it is exactly as
 /// good as the values that happen to be in the palette on the day it is tuned.
 ///
-/// Deliberately not [`guitk::theme::contrast_text`], which answers the same
+/// Deliberately not [`crate::theme::contrast_text`], which answers the same
 /// question with pure black and pure white. That is the right answer for a
 /// widget that may be drawn on any background; this is the right answer for a
 /// surface that belongs to a specific palette. The two now share their
@@ -377,10 +377,10 @@ pub fn legible_on(ink: Color, bg: Color) -> Color {
 /// **Why a resolved struct rather than a lookup.** By the time a colour is in
 /// here the mode, the accent and the transparency level have all been folded
 /// in, so a render function does nothing but read a field. A renderer handed
-/// [`AppearanceSettings`] instead would re-derive the same colour at every
+/// `AppearanceSettings` instead would re-derive the same colour at every
 /// frame and would be free to derive it slightly differently in each of the
 /// dozens of places it is drawn — which is the duplication above, relocated
-/// rather than removed. This is the same argument [`DecorationColors`] and
+/// rather than removed. This is the same argument `DecorationColors` and
 /// `DesktopTheme` already make; this type is the one they are both built from.
 ///
 /// **Roles, not colours.** The fields are named for what a colour *does* in a
@@ -509,9 +509,9 @@ pub struct Palette {
     /// The colour this desktop is themed around, as the user chose it.
     ///
     /// Already resolved for the mode and for a custom colour — this is
-    /// [`AppearanceSettings::effective_accent`], not the enum.
+    /// `AppearanceSettings::effective_accent`, not the enum.
     pub accent: Color,
-    /// How opaque a floating surface is: [`TransparencyLevel::panel_alpha`].
+    /// How opaque a floating surface is: `TransparencyLevel::panel_alpha`.
     ///
     /// Carried rather than applied to every field because most surfaces are
     /// *not* floating. A list row inside a panel must stay opaque no matter
@@ -551,7 +551,7 @@ impl Palette {
     ///
     /// [`accent`](Self::accent) is the mode's blue, which is what the accent
     /// setting defaults to; [`panel_alpha`](Self::panel_alpha) is opaque.
-    /// Callers that have an [`AppearanceSettings`] should use
+    /// Callers that have an `AppearanceSettings` should use
     /// [`from_settings`](Self::from_settings) instead — this exists for the
     /// two places that legitimately have only a mode: a test asserting a
     /// property of one palette, and a preview swatch.
@@ -1039,7 +1039,7 @@ impl Palette {
     /// chosen against the others; they were each chosen alone. A renderer that
     /// fades the shadow outward starts here and falls to nothing.
     ///
-    /// Distinct from [`DecorationColors::shadow`], which is the shadow under a
+    /// Distinct from `DecorationColors::shadow`, which is the shadow under a
     /// *window* and is weaker: a window sits on the desktop, a popup sits on
     /// top of a window, and the second wants more separation than the first.
     #[must_use]
@@ -1129,7 +1129,7 @@ impl Palette {
     }
 }
 
-/// How a box is told apart from what is behind it. See [`surface`].
+/// How a box is told apart from what is behind it. See [`crate::surface`].
 ///
 /// `Borders` is the default as of §829. `Cards` is the arrangement that shipped
 /// before it, kept because the operator asked for it to remain available -- and
@@ -1145,7 +1145,7 @@ pub enum SurfaceStyle {
 }
 
 /// How a full-width structural band -- a toolbar, a status bar, a tab strip --
-/// is told apart from the content beside it. See [`surface::Surface::Strip`].
+/// is told apart from the content beside it. See [`crate::surface::Surface::Strip`].
 ///
 /// A separate setting from [`SurfaceStyle`] rather than a third variant of it,
 /// because the two are orthogonal: someone may want outlined boxes with banded

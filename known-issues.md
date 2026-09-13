@@ -130889,6 +130889,59 @@ crate's own module docs where the next person to need one will read it.
 
 ---
 
+## TD-C-THIRTEEN-LIGHT-ACCENTS-STILL-FAIL-ON-CARDS -- being fixed 2026-09-12, mechanism landed
+
+**Update, 2026-09-12 (lane C).** Answered, and the entry below was wrong in
+three ways worth recording before the correction.
+
+**It was not thirteen, and it was not light-only.** Dark mode has the same
+defect and nobody had looked: 13 of its 16 inks fail on its deepest card, red
+worst at 2.88:1. Nor is the default theme exempt -- a toolbar is a `mantle`
+band with labels on it, and light accents sit at 4.28 there, under the floor.
+
+**"Colour the cards differently" cannot work, and this is provable.** The
+palest accent (maroon) only clears 4.5 against greys lighter than `#EFEFEF`.
+The page is `#EFF1F5`. So there is no card shade *darker than the page* that
+all fourteen accents survive, and the ink is what has to move.
+
+**The fear recorded below -- fourteen near-black accents, "a user picking green
+would get something indistinguishable from blue" -- does not hold.** Scaling
+toward an extreme preserves hue. Green becomes `#245A18` and blue stays
+`#0036A3`; measured over the fourteen, the closest pair after adjustment is
+teal/sapphire, which are near-duplicates in the source palette already.
+
+**What landed.** `appearance::legible_on(ink, bg)` moves an ink only as far as
+the floor requires, toward whichever pole is legible on that ground.
+`Palette::ink(colour)` applies it against every surface the *active theme* puts
+text on -- which is a consequence of the two style settings, not a fixed list,
+and getting that wrong is precisely what the old guard did.
+
+The roles split in two, and the split is the design:
+
+| roles | how they are fixed | why |
+|---|---|---|
+| `subtext0`, `subtext1`, `link` | floored in the palette | they exist to be read, are never fills, and the user does not choose them -- 546 of 861 sites, none touched |
+| `accent`, `red`, `green`, … | site asks `p.ink(…)` | dual-use: an accent is also a switch that is on, `red` is also an error bar, and those must not move |
+
+`overlay0` stays exempt: it is the muted ink, WCAG 1.4.3 exempts inactive
+controls, and raising it would make a disabled control look enabled.
+
+**Still open:** the 315 dual-use *text* sites. `gui/appearance/ink-text.py`
+performs the transformation and is proven on 100 shell sites; 29 shell tests
+compare a text colour against a raw role and must follow. Until those land the
+dual-use roles are unchanged, which is exactly today's behaviour -- so nothing
+regresses in the meantime.
+
+The guard `every_ink_clears_the_floor_on_every_ground_it_lands_on` covers both
+modes, both surface styles, both strip styles, the fourteen presets and two
+hostile custom accents, and checks each role *the way a draw site reads it* --
+the floored field for the three, `p.ink(field)` for the rest. Checking both
+through `ink` would have passed while `p.subtext0` was unreadable.
+
+---
+
+### The original entry, for the record
+
 ## TD-C-THIRTEEN-LIGHT-ACCENTS-STILL-FAIL-ON-CARDS
 
 **Date:** 2026-09-09. **Lane:** C.

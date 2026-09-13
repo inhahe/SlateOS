@@ -476,12 +476,17 @@ impl Default for StartupSettings {
 /// took forty seconds is red on a red desktop and red on a green one. The
 /// bands are ten and thirty seconds.
 fn boot_time_color(ms: u64, p: &Palette) -> Color {
+    // Inked here rather than at the draw site, because every path through
+    // this function is text: its one caller is the `color:` of the boot-time
+    // reading. A status colour that is also a fill somewhere cannot do this
+    // -- see `gui/appearance/colour-methods.py`, which sorts the tree's
+    // ninety-five colour methods by exactly that question. 837.
     if ms < 10_000 {
-        p.green
+        p.ink(p.green)
     } else if ms < 30_000 {
-        p.yellow
+        p.ink(p.yellow)
     } else {
-        p.red
+        p.ink(p.red)
     }
 }
 
@@ -2081,12 +2086,12 @@ mod tests {
     #[test]
     fn the_boot_time_bands_are_where_they_say_they_are() {
         let p = Palette::for_mode(false);
-        assert_eq!(boot_time_color(0, &p), p.green);
-        assert_eq!(boot_time_color(9_999, &p), p.green);
-        assert_eq!(boot_time_color(10_000, &p), p.yellow);
-        assert_eq!(boot_time_color(29_999, &p), p.yellow);
-        assert_eq!(boot_time_color(30_000, &p), p.red);
-        assert_eq!(boot_time_color(u64::MAX, &p), p.red);
+        assert_eq!(boot_time_color(0, &p), p.ink(p.green));
+        assert_eq!(boot_time_color(9_999, &p), p.ink(p.green));
+        assert_eq!(boot_time_color(10_000, &p), p.ink(p.yellow));
+        assert_eq!(boot_time_color(29_999, &p), p.ink(p.yellow));
+        assert_eq!(boot_time_color(30_000, &p), p.ink(p.red));
+        assert_eq!(boot_time_color(u64::MAX, &p), p.ink(p.red));
     }
 
     /// The high-impact warning is the red it warns about, made translucent.

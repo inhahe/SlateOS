@@ -161,11 +161,31 @@ def params_of(lines, i):
     return out
 
 
-def arg_index(line, callee, needle):
-    """Which argument of `callee(...)` on `line` contains `needle`."""
-    m = re.search(r"[^\w.]" + re.escape(callee) + r"\s*\(", " " + line)
+def method_offset(text, callee):
+    """1 if `callee` is called as a method here, 0 otherwise.
+
+    `params_of` counts `self` as a parameter so that the slots line up with
+    the declaration; a method *call* does not pass it. Without this shift
+    every method's parameters were read one to the left -- `render_stat_card`
+    reported its title parameter's use for its colour parameter -- which is
+    the quietest possible way to be wrong, since both are plausible.
+    """
+    return 1 if re.search(r"[.]" + re.escape(callee) + r"\s*\(", text) else 0
+
+
+def arg_index(line, callee, needle, needle_may_be_a_method=False):
+    """Which argument of `callee(...)` on `line` contains `needle`.
+
+    The callee pattern allows a leading dot: the enclosing call is very often
+    a method -- `self.render_stat_card(..)` -- and refusing one found none of
+    those, leaving eight of `rate_color`'s ten callers unresolved. The
+    *needle* refuses one by default, because there a leading dot means a field
+    read (`self.color`) rather than the local being tracked.
+    """
+    m = re.search(r"[^\w]" + re.escape(callee) + r"\s*\(", " " + line)
     if not m:
         return None
+    edge = r"[^\w]" if needle_may_be_a_method else r"[^\w.]"
     depth, idx, cur = 0, 0, ""
     for ch in (" " + line)[m.end():]:
         if ch in "([{":
@@ -175,15 +195,43 @@ def arg_index(line, callee, needle):
                 break
             depth -= 1
         if ch == "," and depth == 0:
-            if re.search(r"[^\w.]" + re.escape(needle) + r"[^\w]", " " + cur + " "):
+            if re.search(edge + re.escape(needle) + r"[^\w]", " " + cur + " "):
                 return idx
             idx += 1
             cur = ""
         else:
             cur += ch
-    if re.search(r"[^\w.]" + re.escape(needle) + r"[^\w]", " " + cur + " "):
+    if re.search(edge + re.escape(needle) + r"[^\w]", " " + cur + " "):
         return idx
     return None
+
+
+def statement_at(lines, i):
+    """Line `i` joined with the lines it is a continuation of.
+
+    A call is routinely split over several lines by rustfmt::
+
+        self.render_stat_card(
+            cmds, x, y, w, h, "7-Day Average", &text,
+            rate_color(avg_7, &self.palette),
+        );
+
+    Reading only the line the inner call sits on finds `rate_color` and no
+    enclosing call at all, so the site is unresolved -- and an unresolved
+    site used to fall through to a verdict of INK. `rate_color` feeds a
+    card's fill through that parameter; inking it would have darkened the
+    card.
+    """
+    bal = 0
+    for j in range(i, max(-1, i - 16), -1):
+        bal += lines[j].count("(") - lines[j].count(")")
+        # An unmatched `(` in lines[j..i] is the enclosing call's own paren.
+        # Stopping the moment the *first* line balances -- which it usually
+        # does, since `rate_color(x, &p),` opens and closes -- finds no
+        # enclosing call at all, and that was the original bug.
+        if bal > 0:
+            return " ".join(line.strip() for line in lines[j : i + 1])
+    return lines[i]
 
 
 class World:
@@ -223,12 +271,13 @@ class World:
             if SHORTHAND.match(line) and name == "color":
                 kinds.add(field.get(j) or "unresolved")
                 continue
-            for callee in set(CALL.findall(line)):
+            stmt = statement_at(lines, j)
+            for callee in set(CALL.findall(stmt)):
                 if callee == name or callee not in self.fns:
                     continue
-                k = arg_index(line, callee, name)
+                k = arg_index(stmt, callee, name)
                 if k is not None:
-                    deps.add((callee, k))
+                    deps.add((callee, k + method_offset(stmt, callee)))
         return kinds, deps
 
     def _solve_params(self):
@@ -264,12 +313,15 @@ class World:
         if i in field:
             return {field[i]}
         kinds = set()
-        for callee in set(CALL.findall(lines[i])):
+        stmt = statement_at(lines, i)
+        for callee in set(CALL.findall(stmt)):
             if callee == produced_by or callee not in self.fns:
                 continue
-            k = arg_index(lines[i], callee, produced_by)
+            k = arg_index(stmt, callee, produced_by, needle_may_be_a_method=True)
             if k is not None:
-                kinds |= self.param_kind.get((callee, k), set())
+                kinds |= self.param_kind.get(
+                    (callee, k + method_offset(stmt, callee)), set()
+                )
         m = LET.match(lines[i])
         if m:
             name = m.group(1) or m.group(2)
@@ -324,7 +376,8 @@ def main(show_all):
 
     buckets = collections.defaultdict(list)
     for (_crate, name), d in sorted(defs.items()):
-        drawn = {k: v for k, v in d["kinds"].items() if k != "unresolved"}
+        drawn = dict(d["kinds"])
+        unknown = drawn.pop("unresolved", 0)
         text = drawn.pop("Text", 0)
         if not text and not drawn:
             buckets["UNRESOLVED"].append((name, d))
@@ -332,13 +385,20 @@ def main(show_all):
             buckets["NO TEXT CALLER"].append((name, d))
         elif drawn:
             buckets["SPLIT"].append((name, d))
+        elif unknown:
+            # Not INK. A caller this tool could not follow is not a caller
+            # that draws text -- it is a caller nobody has looked at, and
+            # `rate_color` was declared safe to ink on exactly that basis
+            # while eight of its callers were filling the stat cards.
+            buckets["INK IF THE REST CHECK OUT"].append((name, d))
         elif d["exempt"]:
             buckets["PER-ARM"].append((name, d))
         else:
             buckets["INK"].append((name, d))
 
     print(str(len(defs)) + " colour-returning functions name a dual-use role in their body")
-    for key in ("INK", "PER-ARM", "SPLIT", "NO TEXT CALLER", "UNRESOLVED"):
+    for key in ("INK", "PER-ARM", "INK IF THE REST CHECK OUT", "SPLIT",
+                "NO TEXT CALLER", "UNRESOLVED"):
         rows = buckets.get(key, [])
         if not rows:
             continue

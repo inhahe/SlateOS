@@ -1038,6 +1038,19 @@ fn key_rows(mode: CalcMode) -> Vec<&'static [&'static str]> {
 /// Keyed on the label because the label *is* the key's identity here -- the
 /// same string [`Target::Key`] carries and [`handle_button`] dispatches on.
 fn key_colors(label: &str, pal: &Palette) -> (Color, Color) {
+    let (bg, fg) = key_faces(label, pal);
+    // `ink_on(fg, bg)`, not `ink(fg)`. A key's label sits on the key, not on
+    // the page, so the pair is what has to be legible -- and this function
+    // returns both halves, which is the whole reason it can be fixed here at
+    // all. `=` is `base` on `blue` and stays that way; `C` is `red` on
+    // `surface1` and is raised if that particular accent fails on that
+    // particular rung. 837.
+    (bg, pal.ink_on(fg, bg))
+}
+
+/// The two colours a key is made of, before either is checked against the
+/// other: the face it is painted and the colour its label is written in.
+fn key_faces(label: &str, pal: &Palette) -> (Color, Color) {
     match label {
         "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "." => (pal.surface0, pal.text),
         "=" => (pal.blue, pal.base),

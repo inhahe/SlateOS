@@ -1418,11 +1418,18 @@ impl PortState {
         }
     }
 
+    /// The colour a port state is written in.
+    ///
+    /// Inked here rather than at the draw site: every path through this
+    /// reaches the `color:` of a `Text`, which is its only caller. A status
+    /// colour that also fills a badge cannot do the same -- the tree's
+    /// ninety-five colour methods are sorted by that question in
+    /// `gui/appearance/colour-methods.py`. 837.
     pub fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::Open => pal.green,
-            Self::Closed => pal.red,
-            Self::Filtered => pal.yellow,
+            Self::Open => pal.ink(pal.green),
+            Self::Closed => pal.ink(pal.red),
+            Self::Filtered => pal.ink(pal.yellow),
         }
     }
 }

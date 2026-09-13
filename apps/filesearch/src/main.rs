@@ -1690,8 +1690,8 @@ impl FileSearchApp {
     fn render_preview(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, h: f32) {
         // Separator
         cmds.push(RenderCommand::FillRect {
-            x: x,
-            y: y,
+            x,
+            y,
             width: 1.0,
             height: h,
             color: self.palette.surface0,

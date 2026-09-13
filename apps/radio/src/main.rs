@@ -1485,7 +1485,7 @@ impl RadioApp {
         // Separator
         cmds.push(RenderCommand::FillRect {
             x: x + w - 1.0,
-            y: y,
+            y,
             width: 1.0,
             height: h,
             color: self.palette.surface0,
@@ -1685,8 +1685,8 @@ impl RadioApp {
 
         // Separator
         cmds.push(RenderCommand::FillRect {
-            x: x,
-            y: y,
+            x,
+            y,
             width: w,
             height: 1.0,
             color: self.palette.surface0,

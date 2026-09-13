@@ -12,8 +12,8 @@ mod snapshots;
 
 use appearance::Palette;
 use appearance::{
-    AccentColor, AnimationSpeed, AppearanceFile, ColorFilter, HighContrastScheme, Surface,
-    SurfaceStyle, ThemeMode, TransparencyLevel,
+    AccentColor, AnimationSpeed, AppearanceFile, ColorFilter, Edge, HighContrastScheme, StripStyle,
+    Surface, SurfaceStyle, ThemeMode, TransparencyLevel,
 };
 #[allow(unused_imports)]
 use guitk::color::Color;
@@ -1981,10 +1981,28 @@ const fn surface_style_label(style: SurfaceStyle) -> &'static str {
     }
 }
 
+/// The two strip styles, in the order the settings pill shows them.
+///
+/// Filled first because it is the default: 835 chose to keep today's
+/// appearance for window chrome and offer the hairline as the alternative.
+const STRIP_STYLES: [StripStyle; 2] = [StripStyle::Filled, StripStyle::Separator];
+
+/// What each strip style is called in the interface.
+///
+/// Named for what the user sees at the top of a window, not for the enum. A
+/// "strip" is not a word anyone outside this code uses, so the label says
+/// where the thing is instead of what it is called.
+const fn strip_style_label(style: StripStyle) -> &'static str {
+    match style {
+        StripStyle::Filled => "Shaded",
+        StripStyle::Separator => "A line",
+    }
+}
+
 /// How wide the theme preview is drawn.
 const PREVIEW_WIDTH: f32 = 260.0;
 /// How tall the theme preview is drawn.
-const PREVIEW_HEIGHT: f32 = 176.0;
+const PREVIEW_HEIGHT: f32 = 198.0;
 
 /// A miniature window showing what the current theme and colours actually do.
 ///
@@ -2000,6 +2018,8 @@ const PREVIEW_HEIGHT: f32 = 176.0;
 fn render_theme_preview(tree: &mut RenderTree, pal: &Palette, x: f32, y: f32, width: f32) {
     const ROW_H: f32 = 30.0;
     const PAD: f32 = 9.0;
+    /// Tall enough to read a label in, which is all a strip has to be.
+    const STRIP_H: f32 = 22.0;
     let inner = width - PAD * 2.0;
 
     // The page the miniature sits on.
@@ -2012,7 +2032,13 @@ fn render_theme_preview(tree: &mut RenderTree, pal: &Palette, x: f32, y: f32, wi
         corner_radii: CornerRadii::all(7.0),
     });
 
-    let mut ry = y + PAD;
+    // A toolbar, so the strip choice has somewhere to show. Drawn first and
+    // full width: a strip spans its window, which is the whole reason it is
+    // not just another card.
+    pal.draw_surface(tree, x, y, width, STRIP_H, 0.0, Surface::Strip(Edge::Bottom));
+    tree.text(x + PAD, y + 5.0, "Network", pal.text, 10.0);
+
+    let mut ry = y + STRIP_H + PAD;
 
     // A section heading, in main text: since §830 a heading is *not* the
     // secondary colour, which is the distinction this line exists to show.
@@ -2080,6 +2106,7 @@ enum PillId {
     Transparency,
     AnimationSpeed,
     SurfaceStyle,
+    StripStyle,
 }
 
 /// A one-of-many choice laid out as something other than a pill row: a grid of
@@ -3190,11 +3217,36 @@ impl SettingsState {
             30.0,
         );
 
-        // The preview's palette carries the style, so it cannot be handed one
-        // palette and a different style -- the mismatch a separate argument
-        // made possible, and which the page-level test was written to catch.
+        // Orthogonal to the choice above, and 835 says so explicitly: a strip
+        // answers to its own setting, so `Surface::Strip` ignores
+        // `surface_style` in exactly the way `ControlTrack` does. Two
+        // questions, two controls.
+        s.section("Toolbars and Status Bars");
+        let strip = self.appearance.settings.strip_style;
+        let strips: Vec<(&str, bool)> = STRIP_STYLES
+            .iter()
+            .map(|st| (strip_style_label(*st), *st == strip))
+            .collect();
+        s.pill_row("Separated by", PillId::StripStyle, &strips);
+        s.note(
+            match strip {
+                StripStyle::Filled => {
+                    "Shaded. A toolbar or status bar is a band of a different                      shade from the page, as it is today."
+                }
+                StripStyle::Separator => {
+                    "A line. The bar is the same colour as the page, with a                      hairline along the edge that faces the content."
+                }
+            },
+            30.0,
+        );
+
+        // The preview's palette carries both styles, so it cannot be handed
+        // one palette and a different style -- the mismatch a separate
+        // argument made possible, and which the page-level test was written
+        // to catch.
         let mut preview_pal = *pal;
         preview_pal.surface_style = style;
+        preview_pal.strip_style = strip;
         s.draw(move |tree, x, y| {
             render_theme_preview(tree, &preview_pal, x, y, PREVIEW_WIDTH);
         });
@@ -4742,6 +4794,11 @@ impl SettingsState {
             RowHit::Pill(crate::PillId::SurfaceStyle, idx) => {
                 if let Some(style) = SURFACE_STYLES.get(idx) {
                     self.appearance.settings.surface_style = *style;
+                }
+            }
+            RowHit::Pill(crate::PillId::StripStyle, idx) => {
+                if let Some(style) = STRIP_STYLES.get(idx) {
+                    self.appearance.settings.strip_style = *style;
                 }
             }
             RowHit::Select(SelectId::ThemeMode, idx) => {
@@ -9000,6 +9057,92 @@ mod against_the_real_compositor {
         assert_eq!(
             state.appearance.settings.surface_style,
             crate::SurfaceStyle::Borders
+        );
+    }
+
+    /// Choosing a strip style on the Themes page changes the setting.
+    #[test]
+    fn the_strip_style_pill_changes_the_setting() {
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::Themes;
+        assert_eq!(
+            state.appearance.settings.strip_style,
+            crate::StripStyle::Filled,
+            "filled is the default -- 835 kept today's appearance"
+        );
+        state.apply_row_hit(RowHit::Pill(crate::PillId::StripStyle, 1), 0.0);
+        assert_eq!(
+            state.appearance.settings.strip_style,
+            crate::StripStyle::Separator
+        );
+        state.apply_row_hit(RowHit::Pill(crate::PillId::StripStyle, 0), 0.0);
+        assert_eq!(
+            state.appearance.settings.strip_style,
+            crate::StripStyle::Filled
+        );
+    }
+
+    #[test]
+    fn an_out_of_range_strip_pill_is_ignored() {
+        let mut state = SettingsState::new();
+        state.apply_row_hit(RowHit::Pill(crate::PillId::StripStyle, 99), 0.0);
+        assert_eq!(
+            state.appearance.settings.strip_style,
+            crate::StripStyle::Filled
+        );
+    }
+
+    /// The two strip styles draw the preview's toolbar differently.
+    ///
+    /// A control that changes a setting nothing draws is worse than no control
+    /// at all, so this asserts on the pixels rather than on the enum: the
+    /// filled strip is a band as tall as the toolbar, the separated one a
+    /// hairline along its lower edge, and they are not the same colour either.
+    #[test]
+    fn the_preview_shows_which_strip_style_is_chosen() {
+        use guitk::render::{RenderCommand, RenderTree};
+
+        let band = |style| {
+            let mut pal = crate::Palette::for_mode(true);
+            pal.strip_style = style;
+            let mut tree = RenderTree::new();
+            crate::render_theme_preview(&mut tree, &pal, 0.0, 0.0, crate::PREVIEW_WIDTH);
+            // Full width, at the origin, and shorter than the preview itself.
+            // Every row is inset by a padding, so the only two boxes that span
+            // the whole width are the page and the toolbar on it -- the last
+            // clause is what separates those two.
+            tree.commands
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::FillRect {
+                        x: 0.0,
+                        width,
+                        height,
+                        color,
+                        ..
+                    } if (*width - crate::PREVIEW_WIDTH).abs() < 0.01
+                        && *height < crate::PREVIEW_HEIGHT =>
+                    {
+                        Some((*height, *color))
+                    }
+                    _ => None,
+                })
+                .expect("the preview draws a toolbar")
+        };
+
+        let (filled_h, filled_c) = band(crate::StripStyle::Filled);
+        let (lined_h, lined_c) = band(crate::StripStyle::Separator);
+        assert!(
+            filled_h > lined_h,
+            "the shaded strip is a band ({filled_h}) and the other a line ({lined_h})"
+        );
+        assert!(
+            (lined_h - 1.0).abs() < 0.01,
+            "a separator is one pixel, not {lined_h}"
+        );
+        assert_ne!(
+            filled_c, lined_c,
+            "a band and a rule do not read as the same mark"
         );
     }
 

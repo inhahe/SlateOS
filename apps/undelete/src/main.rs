@@ -3508,10 +3508,10 @@ impl UndeleteApp {
 
         // Left border
         cmds.push(RenderCommand::FillRect {
-            x: x,
-            y: y,
+            x,
+            y,
             width: 1.0,
-            height: height,
+            height,
             color: self.palette.surface0,
             corner_radii: CornerRadii::ZERO,
         });
@@ -3810,7 +3810,7 @@ impl UndeleteApp {
         // Separator
         cmds.push(RenderCommand::FillRect {
             x: 0.0,
-            y: y,
+            y,
             width: self.width,
             height: 1.0,
             color: self.palette.surface0,

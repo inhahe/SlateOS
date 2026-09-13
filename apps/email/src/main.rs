@@ -2960,8 +2960,8 @@ impl EmailApp {
     fn render_reading_pane(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, _h: f32) {
         // Separator line
         cmds.push(RenderCommand::FillRect {
-            x: x,
-            y: y,
+            x,
+            y,
             width: 1.0,
             height: _h,
             color: self.palette.surface0,

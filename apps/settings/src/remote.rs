@@ -646,7 +646,7 @@ fn text_bold(tree: &mut RenderTree, x: f32, y: f32, content: &str, color: Color,
 fn render_section_header(pal: &Palette, tree: &mut RenderTree, x: f32, y: f32, title: &str) -> f32 {
     text_bold(tree, x, y, title, pal.text, 16.0);
     tree.push(RenderCommand::FillRect {
-        x: x,
+        x,
         y: y + 24.0,
         width: CONTENT_WIDTH,
         height: 1.0,

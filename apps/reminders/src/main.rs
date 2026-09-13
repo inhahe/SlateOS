@@ -2203,7 +2203,7 @@ impl RemindersApp {
         // Right border
         cmds.push(RenderCommand::FillRect {
             x: x + w - 1.0,
-            y: y,
+            y,
             width: 1.0,
             height: h,
             color: self.palette.surface0,
@@ -2733,8 +2733,8 @@ impl RemindersApp {
 
         // Left border
         cmds.push(RenderCommand::FillRect {
-            x: x,
-            y: y,
+            x,
+            y,
             width: 1.0,
             height: h,
             color: self.palette.surface0,

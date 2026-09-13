@@ -3560,7 +3560,7 @@ impl NetScanApp {
         // Port list header
         dy += 8.0;
         tree.push(RenderCommand::FillRect {
-            x: x,
+            x,
             y: dy,
             width: w,
             height: 1.0,

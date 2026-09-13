@@ -35,10 +35,12 @@
 
 #![cfg_attr(not(test), no_main)]
 
+use quoting::quoteaf_os;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // ============================================================================
@@ -1418,6 +1420,7 @@ fn cmd_vacuum_size(max_bytes: u64) {
     }
 
     let mut total_removed = 0usize;
+    let mut failures = 0usize;
     let bytes_to_remove = current_total - max_bytes;
     let mut bytes_removed: u64 = 0;
 
@@ -1434,6 +1437,7 @@ fn cmd_vacuum_size(max_bytes: u64) {
 
         let lines: Vec<&str> = content.lines().collect();
         let mut keep_from = 0;
+        let mut entries_cut = 0usize;
 
         for (idx, line) in lines.iter().enumerate() {
             if bytes_removed >= bytes_to_remove {
@@ -1441,7 +1445,7 @@ fn cmd_vacuum_size(max_bytes: u64) {
             }
             // Count bytes of this line plus the newline.
             bytes_removed += (line.len() as u64) + 1;
-            total_removed += 1;
+            entries_cut += 1;
             keep_from = idx + 1;
         }
 
@@ -1453,7 +1457,18 @@ fn cmd_vacuum_size(max_bytes: u64) {
             s.push('\n');
             s
         };
-        let _ = fs::write(file, new_content);
+        // Counted only once the file has accepted the truncation. The
+        // discarded `let _ =` here was the odd one out: `cmd_vacuum_time`
+        // above already guards its identical write with `.is_ok()` and only
+        // then adds to its total, so the two halves of the same command
+        // disagreed about whether a failed write counts as removed entries.
+        match fs::write(file, new_content) {
+            Ok(()) => total_removed = total_removed.saturating_add(entries_cut),
+            Err(e) => {
+                eprintln!("journalctl: cannot truncate {}: {e}", quoteaf_os(file));
+                failures += 1;
+            }
+        }
     }
 
     let (_, new_total) = journal_disk_usage();
@@ -1462,6 +1477,10 @@ fn cmd_vacuum_size(max_bytes: u64) {
         total_removed,
         format_size(new_total)
     );
+    if failures > 0 {
+        eprintln!("journalctl: {failures} journal file(s) could not be truncated");
+        process::exit(1);
+    }
 }
 
 // ============================================================================

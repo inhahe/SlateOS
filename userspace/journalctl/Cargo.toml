@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS journalctl - journal log viewer and manager"
 [dependencies]
+# Diagnostics name journal file paths, and a path may hold spaces or
+# newlines; scripts/quote-names.py enforces that they are quoted.
+quoting = { path = "../quoting" }

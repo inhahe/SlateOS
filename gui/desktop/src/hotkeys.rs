@@ -527,7 +527,13 @@ pub enum HotkeyAction {
 /// nothing, and the typo is invisible to every other test in this file.
 const TASK_MANAGER_COMMAND: &str = "/usr/bin/procexplorer";
 const SETTINGS_COMMAND: &str = "/usr/bin/settings";
-const LOCK_COMMAND: &str = "/usr/bin/lockscreen";
+/// The lock screen, named here and read by `ShellSession` too.
+///
+/// `pub(crate)` rather than private because the session has to recognise a
+/// lock *launch* to implement `design-decisions.md` 818 -- a session with no
+/// password is never locked -- and comparing against a second copy of the
+/// string is how the two would drift. One name, two readers.
+pub(crate) const LOCK_COMMAND: &str = "/usr/bin/lockscreen";
 /// The flags are the screenshot tool's own; see `apps/screenshot/src/main.rs`,
 /// which parses `--fullscreen`/`-f` and `--region`/`-r` as its first argument.
 /// A flag it does not know would leave it sitting in its interactive menu, which

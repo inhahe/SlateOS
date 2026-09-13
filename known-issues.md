@@ -74798,7 +74798,7 @@ copied from this table into an assertion.
 
 ---
 
-## TD-C-THE-CALENDARS-EVENT-COLOUR-ONLY-SHOWED-WHEN-A-DAY-WAS-SELECTED (lane C, 2026-08-23)
+## TD-C-THE-CALENDARS-EVENT-COLOUR-ONLY-SHOWED-WHEN-A-DAY-WAS-SELECTED (lane C, 2026-08-23) -- FIXED 2026-08-23
 
 **Status:** FIXED 2026-08-23, commit `c36aeb469`, as part of the module-43
 palette conversion.
@@ -106276,7 +106276,7 @@ worsen with time.
 
 ---
 
-## TD-B-TAR-IGNORES-MEMBER-NAME-FILTERS-ON-EXTRACT-AND-LIST
+## TD-B-TAR-IGNORES-MEMBER-NAME-FILTERS-ON-EXTRACT-AND-LIST -- WITHDRAWN 2026-08-30
 
 **Status:** **withdrawn** 2026-08-30, the same day it was filed — it was never
 true of the `tar` that ships. Kept rather than deleted because *why* it was
@@ -124553,7 +124553,7 @@ nothing builds into it any more — but it is not free: `rd /s /q` ran 45 minute
 against it and freed nothing. `robocopy /MIR` from an empty directory is the
 usual faster route on Windows and is worth trying before another `rd`.
 
-## TD-B-SSHD-TELLS-EVERY-CLIENT-ITS-ENVIRONMENT-VARIABLES-WERE-ACCEPTED-AND-THROWS-THEM-AWAY (lane B)
+## TD-B-SSHD-TELLS-EVERY-CLIENT-ITS-ENVIRONMENT-VARIABLES-WERE-ACCEPTED-AND-THROWS-THEM-AWAY (lane B) -- FIXED 2026-09-05
 
 **Status:** FIXED — 2026-09-05 (filed and fixed the same day; see "How it was
 fixed" at the end)
@@ -124654,7 +124654,7 @@ environment); clippy clean on both.
 
 ---
 
-## TD-B-SSHD-ALLOWUSERS-IS-DOCUMENTED-AS-A-PATTERN-LIST-AND-COMPARED-AS-A-STRING (lane B)
+## TD-B-SSHD-ALLOWUSERS-IS-DOCUMENTED-AS-A-PATTERN-LIST-AND-COMPARED-AS-A-STRING (lane B) -- FIXED 2026-09-05
 
 **Status:** FIXED — 2026-09-05 (filed and fixed within the hour; see "How it
 was fixed" at the end)
@@ -125036,7 +125036,7 @@ to agree. Filed as
 `TD-B-THE-SSH-WIRE-LAYER-IS-WRITTEN-TWICE-AND-NOTHING-MAKES-THE-TWO-COPIES-AGREE`
 below.
 
-## TD-B-THE-SSH-WIRE-LAYER-IS-WRITTEN-TWICE-AND-NOTHING-MAKES-THE-TWO-COPIES-AGREE (lane B)
+## TD-B-THE-SSH-WIRE-LAYER-IS-WRITTEN-TWICE-AND-NOTHING-MAKES-THE-TWO-COPIES-AGREE (lane B) -- FIXED 2026-09-05
 
 **Status:** FIXED, 2026-09-05. **All four items below are done.** Item 4 — the
 interop test, the one that matters most and the reason this entry existed — is

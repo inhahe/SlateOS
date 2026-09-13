@@ -77,6 +77,11 @@
 #      neighbouring test's scratch dir -- which is where an intermittent
 #      failure came from. Narrowed to the crates a push touches, because the
 #      verdict is empirical and costs 105 s over the whole tree.
+#  36. Refuse a program that names an option it does not understand and then
+#      acts on the command line anyway. `cgcreate --zzq -g cpu:/x` printed
+#      the refusal AFTER creating the cgroup and exited 0. Static, because
+#      the behavioural probe runs the bad option alone and cannot tell a
+#      rejection from a missing-operand failure -- eleven read as green.
 #
 #  36. Refuse a `known-issues.md` whose headings cannot be counted: two
 #      entries sharing a slug, or a lowercase status marker. Every triage
@@ -4340,6 +4345,83 @@ if [ "$skip" -eq 0 ] && [ -f "$repo_root/scripts/check-lane-signals.py" ]; then
         :
     fi
 fi
+
+# ---------------------------------------------------------------------------
+# Gate 36 -- option-stops.  An unknown-option diagnostic that does not stop the
+# command.
+#
+# A program that prints "unknown option: X" and then carries on has told the
+# caller it did not understand the command line and acted on it anyway.
+# Measured before the fixes:
+#
+#     $ cgcreate --zzq-not-an-option -g cpu:/zzqproceed
+#     cgcreate: unknown option: --zzq-not-an-option
+#     cgcreate: created /sys/fs/cgroup/zzqproceed ; echo $? -> 0
+#
+# The diagnostic is printed AFTER the work. Static rather than behavioural
+# because the behavioural sweep runs the bad option ALONE, which cannot tell
+# a rejection from a missing-operand failure -- eleven programs read as green
+# that way, which is how the class came to be recorded closed at 0.
+#
+# Baseline is empty: all thirteen are fixed, and the five shapes that look
+# like the defect but are not (a tail expression that IS the exit code,
+# getopt(1)'s accumulated flag, a return one block out) are recognised by the
+# checker rather than baselined. 1.4 s per sha.
+# ---------------------------------------------------------------------------
+optstops="${repo_root:-.}/scripts/check-option-stops.py"
+skip_optstops=0
+# Bypass: ALLOW_OPTION_STOPS=1 git push origin <branch>
+if [ "${ALLOW_OPTION_STOPS:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_OPTION_STOPS=1 set -- skipping the option-stops gate." >&2
+    skip_optstops=1
+fi
+[ -n "$py" ] || skip_optstops=1
+[ -f "$optstops" ] || skip_optstops=1
+touches userspace/ services/ init/ posix/         scripts/check-option-stops.py scripts/option-stops-baseline.txt         || skip_optstops=1
+[ -n "${pushed_shas# }" ] || skip_optstops=1
+note_gate option-stops "$skip_optstops"
+
+optstops_failed=0
+if [ "$skip_optstops" != "1" ]; then
+    # The checker before its verdict. Its first draft called getopt(1) a defect
+    # -- getopt sets its error flag on the line BEFORE the message, and a
+    # tail-only scan cannot see it -- so one of its eleven findings was false.
+    if ! run_checker option-stops-selftest "$py" "$optstops" --selftest; then
+        echo "pre-push: check-option-stops.py FAILED ITS OWN SELF-TEST -- its verdict is not trustworthy." >&2
+        optstops_failed=1
+    else
+        for sha in $pushed_shas; do
+            if ! run_checker "option-stops-$sha" "$py" "$optstops" --head "$sha"; then
+                optstops_failed=1
+            fi
+        done
+    fi
+fi
+
+if [ "$optstops_failed" != "0" ]; then
+    cat >&2 <<EOF
+
+pre-push: REFUSING to push -- a program above names an option it does not
+understand and then acts on the command line anyway.
+
+That is worse than ignoring the option. The program has already told the caller
+it did not understand; going on to do the work makes the message a lie rather
+than a warning. Two of the thirteen found this way destroy data -- wipefs and
+blkdiscard both printed the refusal and then operated on the device.
+
+The fix is one line: a \`process::exit(1)\` or \`return 1\` in the arm.
+
+If the arm is a deliberate end-of-options marker -- as in \`cgexec\`, where
+everything after the options is the command to run, so \`cgexec -g cpu:/x ls
+--colour\` must pass --colour through -- add the file:line to
+scripts/option-stops-baseline.txt with the reason.
+
+To push anyway:
+    ALLOW_OPTION_STOPS=1 git push origin ...
+EOF
+    exit 1
+fi
+
 
 # ---------------------------------------------------------------------------
 # The gate tally, printed here because here is after every gate.  See the note

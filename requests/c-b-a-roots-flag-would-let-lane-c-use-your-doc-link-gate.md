@@ -24,9 +24,9 @@ Measured as you would run it:
 
 **The 18 are worth your attention now rather than after you wire it.** Your
 request says the five GUI crates are at zero; they are not, as of this commit.
-Three examples: `gui/compositor/src/lib.rs:3690` links `[\`blend_mask\`]`,
-`gui/font/src/gsub.rs:1163` links `[\`Lig::id\`]`, `gui/font/src/indic_shape.rs:29`
-links `[\`Plan::old_spec\`]` — none of which name anything in their crate.
+Three examples: `gui/compositor/src/lib.rs:3690` links to a `blend_mask`,
+`gui/font/src/gsub.rs:1163` links `Lig::id`, `gui/font/src/indic_shape.rs:29`
+links `Plan::old_spec` — none of which name anything in their crate.
 Run the command above for the full list. That is the drift rate your entry
 predicted, measured a third time.
 

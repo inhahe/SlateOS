@@ -1742,7 +1742,6 @@ impl Palette {
         legible_on(color, ground)
     }
 
-
     /// The surfaces this theme actually draws text on.
     ///
     /// A fixed array of slots rather than a `Vec`, so that resolving a

@@ -2046,13 +2046,19 @@ mod tests {
     fn an_option_this_program_does_not_have_is_not_silently_accepted() {
         use std::ffi::OsStr;
         assert_eq!(classify_argument(None), ArgVerdict::Run);
-        assert_eq!(classify_argument(Some(OsStr::new("--help"))), ArgVerdict::Help);
+        assert_eq!(
+            classify_argument(Some(OsStr::new("--help"))),
+            ArgVerdict::Help
+        );
         assert_eq!(classify_argument(Some(OsStr::new("-h"))), ArgVerdict::Help);
         assert_eq!(
             classify_argument(Some(OsStr::new("--version"))),
             ArgVerdict::Version
         );
-        assert_eq!(classify_argument(Some(OsStr::new("-V"))), ArgVerdict::Version);
+        assert_eq!(
+            classify_argument(Some(OsStr::new("-V"))),
+            ArgVerdict::Version
+        );
         assert_eq!(
             classify_argument(Some(OsStr::new("--zzq-not-an-option"))),
             ArgVerdict::Refuse,

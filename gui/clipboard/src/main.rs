@@ -285,39 +285,25 @@ pub enum ClipboardRequest {
         sensitive: bool,
     },
     /// Request clipboard data in a preferred format.
-    Paste {
-        preferred_format: ClipboardFormat,
-    },
+    Paste { preferred_format: ClipboardFormat },
     /// Query which formats are available in the current clipboard.
     GetFormats,
     /// List recent history entries (metadata only).
     GetHistory,
     /// Retrieve full data for a specific history entry.
-    GetHistoryEntry {
-        index: usize,
-    },
+    GetHistoryEntry { index: usize },
     /// Pin a history entry to prevent eviction.
-    PinEntry {
-        index: usize,
-    },
+    PinEntry { index: usize },
     /// Unpin a previously pinned history entry.
-    UnpinEntry {
-        index: usize,
-    },
+    UnpinEntry { index: usize },
     /// Remove all non-pinned entries from history.
     ClearHistory,
     /// Search history entries by text content.
-    SearchHistory {
-        query: String,
-    },
+    SearchHistory { query: String },
     /// Subscribe to clipboard change notifications.
-    Subscribe {
-        subscriber_pid: u64,
-    },
+    Subscribe { subscriber_pid: u64 },
     /// Unsubscribe from clipboard change notifications.
-    Unsubscribe {
-        subscriber_pid: u64,
-    },
+    Unsubscribe { subscriber_pid: u64 },
 }
 
 /// Responses sent back to applications from the clipboard service.
@@ -429,9 +415,7 @@ impl ClipboardService {
             ClipboardRequest::UnpinEntry { index } => self.handle_pin(index, false),
             ClipboardRequest::ClearHistory => self.handle_clear_history(),
             ClipboardRequest::SearchHistory { query } => self.handle_search(&query),
-            ClipboardRequest::Subscribe { subscriber_pid } => {
-                self.handle_subscribe(subscriber_pid)
-            }
+            ClipboardRequest::Subscribe { subscriber_pid } => self.handle_subscribe(subscriber_pid),
             ClipboardRequest::Unsubscribe { subscriber_pid } => {
                 self.handle_unsubscribe(subscriber_pid)
             }
@@ -489,11 +473,7 @@ impl ClipboardService {
             return ClipboardResponse::Formats(Vec::new());
         };
 
-        let formats = entry
-            .available_formats()
-            .into_iter()
-            .cloned()
-            .collect();
+        let formats = entry.available_formats().into_iter().cloned().collect();
         ClipboardResponse::Formats(formats)
     }
 
@@ -601,10 +581,7 @@ impl ClipboardService {
     fn push_history(&mut self, entry: ClipboardEntry) {
         if self.history.len() >= HISTORY_CAPACITY {
             // Find and remove the oldest non-pinned entry.
-            let evict_idx = self
-                .history
-                .iter()
-                .position(|e| !e.pinned);
+            let evict_idx = self.history.iter().position(|e| !e.pinned);
 
             if let Some(idx) = evict_idx {
                 self.history.remove(idx);
@@ -624,7 +601,9 @@ impl ClipboardService {
         if let Some(entry) = &self.current
             && entry.sensitive
         {
-            let elapsed = now.duration_since(entry.timestamp).unwrap_or(Duration::ZERO);
+            let elapsed = now
+                .duration_since(entry.timestamp)
+                .unwrap_or(Duration::ZERO);
             if elapsed >= SENSITIVE_EXPIRY {
                 self.current = None;
             }
@@ -876,14 +855,8 @@ fn run_self_test(service: &mut ClipboardService) {
     // Test basic copy/paste cycle.
     let copy_request = ClipboardRequest::Copy {
         formats: vec![
-            (
-                ClipboardFormat::PlainText,
-                b"Hello, Slate OS!".to_vec(),
-            ),
-            (
-                ClipboardFormat::Html,
-                b"<b>Hello</b>, Slate OS!".to_vec(),
-            ),
+            (ClipboardFormat::PlainText, b"Hello, Slate OS!".to_vec()),
+            (ClipboardFormat::Html, b"<b>Hello</b>, Slate OS!".to_vec()),
         ],
         source: SourceApp {
             name: String::from("self-test"),
@@ -921,13 +894,19 @@ mod tests {
     fn an_option_this_program_does_not_have_is_not_silently_accepted() {
         use std::ffi::OsStr;
         assert_eq!(classify_argument(None), ArgVerdict::Run);
-        assert_eq!(classify_argument(Some(OsStr::new("--help"))), ArgVerdict::Help);
+        assert_eq!(
+            classify_argument(Some(OsStr::new("--help"))),
+            ArgVerdict::Help
+        );
         assert_eq!(classify_argument(Some(OsStr::new("-h"))), ArgVerdict::Help);
         assert_eq!(
             classify_argument(Some(OsStr::new("--version"))),
             ArgVerdict::Version
         );
-        assert_eq!(classify_argument(Some(OsStr::new("-V"))), ArgVerdict::Version);
+        assert_eq!(
+            classify_argument(Some(OsStr::new("-V"))),
+            ArgVerdict::Version
+        );
         assert_eq!(
             classify_argument(Some(OsStr::new("--zzq-not-an-option"))),
             ArgVerdict::Refuse,
@@ -1267,23 +1246,15 @@ mod tests {
     #[test]
     fn test_subscribe_and_unsubscribe() {
         let mut svc = ClipboardService::new();
-        svc.handle_request(ClipboardRequest::Subscribe {
-            subscriber_pid: 42,
-        });
-        svc.handle_request(ClipboardRequest::Subscribe {
-            subscriber_pid: 43,
-        });
+        svc.handle_request(ClipboardRequest::Subscribe { subscriber_pid: 42 });
+        svc.handle_request(ClipboardRequest::Subscribe { subscriber_pid: 43 });
         assert_eq!(svc.pending_notifications().len(), 2);
 
         // Duplicate subscribe should not add twice.
-        svc.handle_request(ClipboardRequest::Subscribe {
-            subscriber_pid: 42,
-        });
+        svc.handle_request(ClipboardRequest::Subscribe { subscriber_pid: 42 });
         assert_eq!(svc.pending_notifications().len(), 2);
 
-        svc.handle_request(ClipboardRequest::Unsubscribe {
-            subscriber_pid: 42,
-        });
+        svc.handle_request(ClipboardRequest::Unsubscribe { subscriber_pid: 42 });
         assert_eq!(svc.pending_notifications().len(), 1);
         assert_eq!(svc.pending_notifications()[0], 43);
     }
@@ -1320,22 +1291,14 @@ mod tests {
 
     #[test]
     fn test_preview_plain_text_short() {
-        let entry = ClipboardEntry::new(
-            text_entry("short text"),
-            make_source("app"),
-            false,
-        );
+        let entry = ClipboardEntry::new(text_entry("short text"), make_source("app"), false);
         assert_eq!(entry.preview(), "short text");
     }
 
     #[test]
     fn test_preview_plain_text_long() {
         let long_text = "a".repeat(200);
-        let entry = ClipboardEntry::new(
-            text_entry(&long_text),
-            make_source("app"),
-            false,
-        );
+        let entry = ClipboardEntry::new(text_entry(&long_text), make_source("app"), false);
         let preview = entry.preview();
         assert!(preview.ends_with("..."));
         assert!(preview.len() <= PREVIEW_MAX_CHARS + 3);
@@ -1392,11 +1355,7 @@ mod tests {
 
     #[test]
     fn test_entry_category() {
-        let text_entry_val = ClipboardEntry::new(
-            text_entry("hi"),
-            make_source("app"),
-            false,
-        );
+        let text_entry_val = ClipboardEntry::new(text_entry("hi"), make_source("app"), false);
         assert_eq!(text_entry_val.category(), EntryCategory::Text);
 
         let img_entry = ClipboardEntry::new(

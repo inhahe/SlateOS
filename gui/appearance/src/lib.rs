@@ -18,6 +18,29 @@
 //! [`config`] is part of the contract for the same reason the schema is: two
 //! processes writing one file must agree not only on what the keys mean but
 //! on which file it is and how it is replaced.
+//!
+//! # The two scanners that keep this crate's decisions true
+//!
+//! Both live beside this file, are tracked, and are the *standing* checks for
+//! properties nothing in `cargo test` can see -- because they are properties
+//! of the call sites, not of this crate.
+//!
+//! | script | the question it answers |
+//! |---|---|
+//! | `convert-fills.py` | does any box still fill a surface role directly, instead of asking [`Palette::surface_paint`]? (§829) |
+//! | `ink-text.py` | does any text still name a dual-use role directly, instead of asking [`Palette::ink`]? (§837) |
+//!
+//! `ink-text.py` has three modes and the difference between them is the point:
+//! `--check` counts sites that should be converted, `--verify` finds the
+//! opposite error -- a fill or a stroke that asked for a *text* ink -- and
+//! `--blind` reports the sites neither can classify, because their colour
+//! arrives from a method rather than naming a role.
+//!
+//! That third mode exists because "`--check` says zero" reads as "the
+//! conversion is complete" when it means "complete among the sites I can
+//! classify". 108 methods return a themed colour and none of them name a role
+//! at the draw site; see `known-issues.md`
+//! `TD-C-FORTY-NINE-COLOUR-METHODS-ARE-INVISIBLE-TO-THE-INK-SWEEP`.
 
 /// Where settings files live and how they are replaced.
 ///

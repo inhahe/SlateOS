@@ -72908,6 +72908,37 @@ and it extends to a colour nobody has seen -- a ratio is a promise about every
 colour in the cube, where a table is only as good as the values in it the day
 it was written. Against: 315 sites to convert, and site 316 can forget.
 
+**Where the ink goes, which the conversion had to work out.** Not "at the call
+site" -- that was tried and is wrong. The rule that survived 409 sites:
+
+> **Ink at the point where you can see that every path through it is text.**
+
+For `osd::render_icon_text_osd` that is the function body, because its colour
+parameter has exactly one use in it. For `PermissionState::color` it is the
+individual arms, because one arm returns `overlay0` -- the muted ink WCAG 1.4.3
+exempts -- and raising that makes a *not decided* row look decided. "Is it a
+helper?" is the wrong question; "does it have an exempt path?" is the right one.
+And there is a precondition that only showed up later: you must check the
+*callers* too, because a colour method used for a fill as well as text cannot
+be inked in its body at all.
+
+**What the scanner cannot see, stated plainly because the number is
+reassuring and wrong.** `ink-text.py` classifies by the role named at the draw
+site. Four ways a colour reaches a `RenderCommand::Text` without naming one --
+every one found by a failing test, none by the scanner:
+
+| | example |
+|---|---|
+| a method in the `color:` field | `app.state.color(p)` |
+| a helper's return value | `osd::icon_info -> (glyph, Color)` |
+| an argument to a draw helper | `render_icon_text_osd(.., p.red, ..)` |
+| a local passed by field shorthand | `let color = ..; Text { .., color, .. }` |
+
+So "`--check` reports zero" means *zero among the sites it can classify*. 108
+methods return a themed colour and name no role at a draw site; they are
+`TD-C-FORTY-NINE-COLOUR-METHODS-ARE-INVISIBLE-TO-THE-INK-SWEEP`. The scanner
+grew a `--blind` mode to report that gap rather than imply its absence.
+
 **About that last cost.** It is the same objection §829 answered for surfaces,
 and it gets the same answer: a scanner. `gui/appearance/ink-text.py` performs
 the conversion and, run without `--apply`, counts what is left -- so "did

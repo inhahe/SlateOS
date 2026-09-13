@@ -22735,6 +22735,39 @@ speed concept); `gui/desktop/src/lib.rs` (`set_appearance`, the natural feed);
 `gui/compositor/src/lib.rs` (`CursorShape`, no size).
 
 
+
+---
+
+**Checked again 2026-09-13, and one of the three is a different problem than
+this entry describes.**
+
+`icon_size` has no reader because **the thing that would read it is itself
+unreachable**. Desktop icons are drawn by `DesktopIconLayer` in
+`gui/desktop/src/icons.rs`, and that type is named nowhere outside its own
+file -- `grep -rn DesktopIconLayer` over the whole tree returns only
+`icons.rs`. So there is no live consumer to wire the setting to, and adding
+one would be theatre: a setting read by code nothing runs is still a setting
+that does nothing, and it would *look* fixed on the next audit.
+
+That moves `icon_size` out of this entry's class -- "nobody wrote the
+reader" -- and into
+`TD-C-TWENTY-FOUR-THOUSAND-LINES-BEHIND-ALLOW-DEAD-CODE`, whose fix is a
+decision about whether the desktop icon layer is wired up or deleted. The
+same question C-Q17 asks about five other modules.
+
+`cursor_size` and `cursor_scheme` are in the same shape but worse: a search
+of `gui/compositor` and `gui/desktop` finds no reader of either, and the
+compositor is where a cursor is actually drawn. `gui/inputsettings` has its
+*own* `cursor_size` (clamped 16-128) that is equally unread there, which is
+the four-places-one-setting problem this entry already names.
+
+**Why this matters for the entry rather than just for the code:** the fix
+this entry prescribes -- give the setting a reader -- is only right for a
+setting whose consumer exists. For these three the honest sequence is the
+other way round: decide whether the consumer lives, and only then wire the
+preference to it. Doing it in the prescribed order produces a green audit and
+an unchanged desktop.
+
 ## TD-APPS-ESTIMATE-TEXT-WIDTH — apps still guess at text width instead of measuring it
 
 **Status.** **Closed for the original defect** as of 2026-08-14. `gui/**` was

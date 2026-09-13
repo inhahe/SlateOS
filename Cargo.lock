@@ -1486,6 +1486,7 @@ version = "0.1.0"
 dependencies = [
  "authlib",
  "guitk",
+ "quoting",
  "userdb",
 ]
 
@@ -2517,6 +2518,9 @@ version = "0.1.0"
 [[package]]
 name = "shell"
 version = "0.1.0"
+dependencies = [
+ "quoting",
+]
 
 [[package]]
 name = "shuf"

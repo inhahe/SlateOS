@@ -2314,10 +2314,15 @@ impl LoginManager {
 /// Not an option table: there are no options. Anything on the command line is
 /// a misunderstanding about what this program is, and answering it by running
 /// anyway is how a caller comes to believe it did what they asked.
+///
+/// `args_os`, not `args`: the latter **panics** on an argument that is not
+/// valid Unicode, so a guard written with it would crash on exactly the input
+/// it exists to reject -- a worse outcome than the silence it replaced. An
+/// argument is OS-boundary data and may hold any byte but `/` and NUL. The
+/// pre-push `argv-utf8` gate caught this in my first version of the guard.
 fn refuse_arguments(prog: &str) {
-    let extra: Vec<String> = std::env::args().skip(1).collect();
-    if let Some(first) = extra.first() {
-        eprintln!("{prog}: unknown option: {first}");
+    if let Some(first) = std::env::args_os().nth(1) {
+        eprintln!("{prog}: unknown option: {}", quoting::quoteaf_os(&first));
         eprintln!("{prog}: this program takes no arguments");
         std::process::exit(1);
     }

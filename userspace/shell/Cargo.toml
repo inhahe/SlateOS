@@ -16,3 +16,8 @@ edition = "2024"
 # claim, and the next reader should find this note rather than the old
 # description.
 description = "Toolchain validation program (std + POSIX sysroot smoke test); NOT the OS shell"
+
+[dependencies]
+# An argument may hold any byte but `/` and NUL, so a diagnostic that names
+# one has to escape what does not decode rather than assume UTF-8.
+quoting = { path = "../quoting" }

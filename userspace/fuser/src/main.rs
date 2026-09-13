@@ -560,6 +560,12 @@ fn fuser_main(args: &[String]) -> i32 {
             }
             other => {
                 eprintln!("fuser: unknown option {}", quoteaf_os(other));
+                // Stop rather than continue. `fuser --zzq /etc/passwd` used to
+                // print this and then report on the file anyway, exiting 0 --
+                // the refusal was only ever visible when the bad option was
+                // the sole argument, because the empty-path check then caught
+                // it for an unrelated reason.
+                return 1;
             }
         }
         i += 1;

@@ -669,6 +669,10 @@ fn udisksd_main(args: &[String]) -> i32 {
             }
             other => {
                 eprintln!("udisksd: unknown option {}", quoteaf_os(other));
+                // A daemon that did not understand its own command line must
+                // not go on to start. This used to fall through to
+                // "udisksd: starting (debug=..., replace=...)".
+                return 1;
             }
         }
     }

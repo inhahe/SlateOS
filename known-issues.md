@@ -131715,6 +131715,42 @@ possible instance of the thing this file exists to prevent.
 
 ## TD-C-SIXTY-EIGHT-APPS-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE
 
+**RE-MEASURED 2026-09-13: the applications are done. What is left is the
+games, and they are blocked on C-Q16.**
+
+All twelve applications this entry named as "the real defect" now carry the
+`appearance` dependency and declare **zero** private `Color` constants --
+`procexplorer`, `sysinfo`, `imageviewer`, `pdfviewer`, `musicplayer`,
+`speedtest`, `explorer`, `devicemanager`, `pomodoro`, `screenshot`,
+`benchmark`, `mixer`. The five stragglers in crates that already had a
+palette were finished the same day:
+
+| crate | was | now |
+|---|---|---|
+| `sysmonitor` | `PINK = 0xF5C2E7` | `palette.pink` -- the role exists, it was a duplicate |
+| `partmanager` | `COLOR_FLAMINGO`, dead | deleted; `palette.flamingo` exists |
+| `launcher` | `BASE = rgba(30,30,46,240)` | `with_alpha(palette.base, 240)`. It was a hardcoded Mocha base, so on a light theme this dialog was the one dark rectangle on the screen. |
+| `launcher` | `SHADOW = rgba(0,0,0,100)` | `palette.shadow()` |
+| `lockscreen` | `OVERLAY`, dead | deleted -- kept "so the palette is complete" when the palette had already moved into `guitk` |
+
+`apps/screenshot`'s four stay, and their comments already say why: a
+screenshot's dimming scrim is not the theme's to tint, and an annotation the
+user draws onto the picture is content that must still be red when the file
+is opened on another machine.
+
+**The remaining population is exactly the 43 games** -- 686 constants, none of
+them with an `appearance` dependency -- plus six crates with **no colours at
+all** (`backup`, `diffcore`, `globmatch`, `indexer`, `installer`, `safeio`),
+which have no dependency because they have no interface. Those six were
+inside the original count of 68 and are not a defect.
+
+So this entry is now a duplicate of the games question. **See C-Q16**, which
+asks exactly the thing the section below anticipated: a themed chessboard is
+not obviously better than a chessboard, and the sweep that converts an
+application would recolour the board. Nothing here is actionable until that
+is answered.
+
+
 **Date:** 2026-09-12. **Lane:** C.
 **Where:** `apps/**` — 987 `const NAME: Color` declarations across 68 crates.
 

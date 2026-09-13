@@ -49,12 +49,6 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 // ============================================================================
-// Catppuccin Mocha palette
-// ============================================================================
-
-const PINK: Color = Color::from_hex(0xF5C2E7);
-
-// ============================================================================
 // Layout constants
 // ============================================================================
 
@@ -2583,7 +2577,7 @@ impl SysMonitorState {
                 graph_w,
                 graph_h,
                 &iface.tx_history,
-                PINK,
+                self.palette.pink,
                 max_traffic,
             );
 
@@ -2611,7 +2605,7 @@ impl SysMonitorState {
                 y: graph_y + graph_h + 2.0,
                 width: 8.0,
                 height: 8.0,
-                color: PINK,
+                color: self.palette.pink,
                 corner_radii: CornerRadii::all(2.0),
             });
             tree.push(RenderCommand::Text {

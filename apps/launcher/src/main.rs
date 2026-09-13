@@ -26,20 +26,6 @@ use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // ============================================================================
-// Theme — Catppuccin Mocha palette
-// ============================================================================
-
-/// Catppuccin Mocha dark theme colors.
-mod theme {
-    use guitk::color::Color;
-
-    /// Base background (slightly transparent for floating dialog feel).
-    pub const BASE: Color = Color::rgba(30, 30, 46, 240);
-    /// Shadow color for the dialog box.
-    pub const SHADOW: Color = Color::rgba(0, 0, 0, 100);
-}
-
-// ============================================================================
 // Layout constants
 // ============================================================================
 
@@ -814,7 +800,7 @@ impl LauncherState {
             offset_y: 4.0,
             blur: 24.0,
             spread: 8.0,
-            color: theme::SHADOW,
+            color: self.palette.shadow(),
             corner_radii: radii,
         });
 
@@ -824,7 +810,11 @@ impl LauncherState {
             y: dialog_y,
             width: DIALOG_WIDTH,
             height: dialog_height,
-            color: theme::BASE,
+            // The user's base, kept slightly transparent for the floating
+            // feel the dialog has always had. It was a hardcoded Mocha base,
+            // so on a light theme this dialog was the one dark rectangle on
+            // the screen.
+            color: guitk::theme::with_alpha(self.palette.base, 240),
             corner_radii: radii,
         });
 

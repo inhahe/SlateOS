@@ -16,6 +16,9 @@ description = "SlateOS Login Manager — display manager and session launcher"
 # guess every five minutes at this screen could switch to a text console and
 # resume at full speed, and vice versa. See `design-decisions.md` §354.
 [dependencies]
+# An argument may hold any byte but `/` and NUL, so a diagnostic that names
+# one has to escape what does not decode rather than assume UTF-8.
+quoting = { path = "../../userspace/quoting" }
 authlib = { path = "../../userspace/authlib" }
 guitk = { path = "../../gui/toolkit" }
 userdb = { path = "../../userspace/userdb" }

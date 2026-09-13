@@ -285,7 +285,51 @@ fn parse_size_value(s: &str) -> u64 {
 
 // ── Commands ───────────────────────────────────────────────────────────
 
-fn cmd_list(args: &[String]) {
+/// Report the first `-`-prefixed argument that is not in `known`.
+///
+/// Only options are judged. Every subcommand here takes positionals -- a pid
+/// or an executable name -- so a bare word is data, and `--` ends option
+/// parsing.
+///
+/// `known_with_value` names the options that consume the next argument. That
+/// distinction is the point of this check rather than a detail of it: with
+/// `--since` mistyped as `--sinse`, the old code dropped the option *and*
+/// then took `yesterday` as an executable-name filter, so the query silently
+/// became a different query. "No coredumps found." is a believable answer to
+/// the wrong question.
+fn first_unknown_option<'a>(
+    args: &'a [String],
+    known: &[&str],
+    known_with_value: &[&str],
+) -> Option<&'a str> {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--" {
+            return None;
+        }
+        if !a.starts_with('-') || a == "-" {
+            continue;
+        }
+        let name = a.split_once('=').map_or(a.as_str(), |(k, _)| k);
+        if !known.contains(&name) && !known_with_value.contains(&name) {
+            return Some(a);
+        }
+        if known_with_value.contains(&name) && !a.contains('=') {
+            it.next();
+        }
+    }
+    None
+}
+
+fn cmd_list(args: &[String]) -> i32 {
+    if let Some(bad) = first_unknown_option(
+        args,
+        &["--no-legend", "-r", "--reverse"],
+        &["-S", "--since", "-U", "--until"],
+    ) {
+        eprintln!("coredumpctl: unknown option: {bad}");
+        return 1;
+    }
     let no_legend = args.iter().any(|a| a == "--no-legend");
     let reverse = args.iter().any(|a| a == "-r" || a == "--reverse");
     let mut since_filter = String::new();
@@ -344,7 +388,7 @@ fn cmd_list(args: &[String]) {
         if !no_legend {
             println!("No coredumps found.");
         }
-        return;
+        return 0;
     }
 
     if !no_legend {
@@ -371,6 +415,7 @@ fn cmd_list(args: &[String]) {
     if !no_legend {
         println!("\n{} entries listed.", dumps.len());
     }
+    0
 }
 
 fn cmd_info(args: &[String]) {
@@ -448,7 +493,11 @@ fn cmd_info(args: &[String]) {
     }
 }
 
-fn cmd_dump(args: &[String]) {
+fn cmd_dump(args: &[String]) -> i32 {
+    if let Some(bad) = first_unknown_option(args, &[], &["-o", "--output"]) {
+        eprintln!("coredumpctl: unknown option: {bad}");
+        return 1;
+    }
     let dumps = read_coredumps();
     let mut output_path = String::new();
 
@@ -512,9 +561,14 @@ fn cmd_dump(args: &[String]) {
             process::exit(1);
         }
     }
+    0
 }
 
-fn cmd_debug(args: &[String]) {
+fn cmd_debug(args: &[String]) -> i32 {
+    if let Some(bad) = first_unknown_option(args, &[], &["-d", "--debugger"]) {
+        eprintln!("coredumpctl: unknown option: {bad}");
+        return 1;
+    }
     let dumps = read_coredumps();
 
     let mut debugger = "gdb".to_string();
@@ -568,6 +622,7 @@ fn cmd_debug(args: &[String]) {
     };
     println!("Launching {} for {} (PID {})...", debugger, exe, dump.pid);
     println!("{} {} {}", debugger, exe, dump._coredump_path);
+    0
 }
 
 fn cmd_config() {
@@ -615,8 +670,13 @@ fn run_coredump_extract(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    cmd_dump(&rest);
-    0
+    // The status is returned, not discarded. When `cmd_dump` gained a return
+    // value in the previous commit this caller kept dropping it, so the
+    // option guard inside fired, printed, and the personality reported
+    // success anyway -- the same message-right/status-wrong shape that
+    // commit was fixing elsewhere. Rust does not warn on a discarded `i32`,
+    // and the sweep is what caught it.
+    cmd_dump(&rest)
 }
 
 // ── Help ───────────────────────────────────────────────────────────────
@@ -660,20 +720,27 @@ fn run_coredumpctl(args: Vec<String>) -> i32 {
         return 0;
     }
 
+    // The subcommands that parse options now return a status, so a refused
+    // option reaches the shell instead of being printed under a 0.
     match cmd.as_str() {
         "list" => cmd_list(&cmd_args),
-        "info" | "show" => cmd_info(&cmd_args),
+        "info" | "show" => {
+            cmd_info(&cmd_args);
+            0
+        }
         "dump" | "extract" => cmd_dump(&cmd_args),
         "debug" | "gdb" => cmd_debug(&cmd_args),
-        "config" => cmd_config(),
+        "config" => {
+            cmd_config();
+            0
+        }
         _ => {
             // Might be a PID or exe name for implicit list
             let mut all_args = vec![cmd.to_string()];
             all_args.extend(cmd_args);
-            cmd_list(&all_args);
+            cmd_list(&all_args)
         }
     }
-    0
 }
 
 fn main() {
@@ -704,6 +771,49 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A mistyped filter must not quietly become a different filter.
+    ///
+    /// `_ => {}` dropped an unknown option, and the *value* that followed a
+    /// mistyped one then fell through to the positional arm as an
+    /// executable-name filter. So `coredumpctl --sinse yesterday` searched
+    /// for an executable called "yesterday" and answered "No coredumps
+    /// found." -- a believable answer to a question nobody asked, in a tool
+    /// whose whole job is telling you whether a crash was recorded.
+    #[test]
+    fn a_mistyped_filter_is_refused_not_reinterpreted() {
+        let a = |v: &[&str]| -> Vec<String> { v.iter().map(|s| (*s).to_string()).collect() };
+        let flags = ["--no-legend", "-r", "--reverse"];
+        let valued = ["-S", "--since", "-U", "--until"];
+
+        assert_eq!(
+            first_unknown_option(&a(&["--sinse", "yesterday"]), &flags, &valued),
+            Some("--sinse")
+        );
+        // The correctly spelled one passes, and its value is not judged.
+        assert_eq!(
+            first_unknown_option(&a(&["--since", "yesterday"]), &flags, &valued),
+            None
+        );
+        assert_eq!(
+            first_unknown_option(&a(&["--since=yesterday"]), &flags, &valued),
+            None
+        );
+        // Positionals are a pid or an executable name.
+        assert_eq!(first_unknown_option(&a(&["1234"]), &flags, &valued), None);
+        assert_eq!(
+            first_unknown_option(&a(&["/usr/bin/sshd"]), &flags, &valued),
+            None
+        );
+        assert_eq!(
+            first_unknown_option(&a(&["--no-legend", "-r"]), &flags, &valued),
+            None
+        );
+        assert_eq!(
+            first_unknown_option(&a(&["--", "--odd"]), &flags, &valued),
+            None
+        );
+    }
 
     #[test]
     fn test_signal_name() {

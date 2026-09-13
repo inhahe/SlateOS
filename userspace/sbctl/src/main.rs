@@ -553,6 +553,18 @@ fn run_sbkeysync(args: Vec<String>) -> i32 {
         return 0;
     }
 
+    // Announced "Synchronizing secure boot keys..." for any argument at all.
+    // Secure-boot key material is not a place to act on a request that was
+    // not understood.
+    if let Some(bad) = rest.iter().find(|a| {
+        a.starts_with('-')
+            && *a != "-"
+            && !matches!(a.as_str(), "--dry-run" | "-n" | "--verbose" | "-v")
+    }) {
+        eprintln!("sbkeysync: unknown option: {}", quoting::quoteaf_os(bad));
+        return 1;
+    }
+
     if dry_run {
         println!("Dry run — no changes will be made");
     }

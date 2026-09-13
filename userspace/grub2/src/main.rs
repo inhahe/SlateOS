@@ -875,6 +875,25 @@ fn print_set_default_usage() {
     println!("  -V, --version  Show version");
 }
 
+/// Reject a `-`-prefixed argument that is not one of this program's options.
+///
+/// `grub-set-default` and `grub-reboot` take a menu entry -- a number or a
+/// title -- and treated *anything* that was not `--help`/`--version` as one.
+/// So `grub-set-default --zzq-not-an-option` did not fail: it wrote
+/// `saved_entry=--zzq-not-an-option` into the grubenv and reported success.
+/// A mistyped option became the persisted default boot entry, naming a menu
+/// entry that does not exist.
+///
+/// Only `-`-prefixed arguments are refused. A GRUB menu title beginning with
+/// a dash would be pathological, and a numeric index never does; `--` still
+/// ends option parsing for anyone who has one.
+fn reject_option_as_entry(entry: &str) -> Result<(), GrubError> {
+    if entry.starts_with('-') && entry != "-" {
+        return Err(GrubError::InvalidArgs(format!("unknown option: {entry}")));
+    }
+    Ok(())
+}
+
 fn run_set_default(args: &[String]) -> Result<(), GrubError> {
     run_set_default_with_path(args, DEFAULT_GRUBENV)
 }
@@ -895,6 +914,7 @@ fn run_set_default_with_path(args: &[String], env_path: &str) -> Result<(), Grub
         println!("grub-set-default (Slate OS) {VERSION}");
         return Ok(());
     }
+    reject_option_as_entry(entry)?;
 
     let mut env = read_grubenv(env_path);
     env.set("saved_entry", entry);
@@ -938,6 +958,7 @@ fn run_reboot_with_path(args: &[String], env_path: &str) -> Result<(), GrubError
         println!("grub-reboot (Slate OS) {VERSION}");
         return Ok(());
     }
+    reject_option_as_entry(entry)?;
 
     let mut env = read_grubenv(env_path);
     env.set("next_entry", entry);
@@ -1420,7 +1441,16 @@ fn strip_partition(dev: &str) -> String {
 // update-grub (wrapper)
 // ============================================================================
 
-fn run_update_grub(_args: &[String]) -> Result<(), GrubError> {
+fn run_update_grub(args: &[String]) -> Result<(), GrubError> {
+    // The parameter was `_args`, which is an accurate name for what this did
+    // with them: nothing. `update-grub --zzq` regenerated the boot
+    // configuration and reported success, having been asked something it did
+    // not understand. It takes no options, so anything is unknown -- but the
+    // announcement comes after the check, not before, so a refusal does not
+    // claim an update first.
+    if let Some(bad) = args.iter().find(|a| a.starts_with('-') && *a != "-") {
+        return Err(GrubError::InvalidArgs(format!("unknown option: {bad}")));
+    }
     println!("Updating GRUB configuration...");
     let mkconfig_args = vec!["-o".to_string(), DEFAULT_GRUB_CFG.to_string()];
     run_mkconfig(&mkconfig_args)
@@ -2753,6 +2783,66 @@ GRUB_DISABLE_OS_PROBER="true"
         assert_eq!(env2.get("saved_entry"), Some("Slate OS, with Linux 5.10.0"));
 
         cleanup(&dir);
+    }
+
+    /// A mistyped option must not become the boot entry.
+    ///
+    /// `grub-set-default --zzq-not-an-option` wrote
+    /// `saved_entry=--zzq-not-an-option` into the grubenv and printed
+    /// "Default boot entry set to: --zzq-not-an-option". Not a fabricated
+    /// action -- a real one, persisting a default boot entry that names no
+    /// menu entry. `grub-reboot` did the same to `next_entry`.
+    ///
+    /// The assertion that matters is that the grubenv is *unchanged*: a
+    /// refusal that still wrote would pass a test which only checked the
+    /// exit status.
+    #[test]
+    fn an_option_is_not_accepted_as_a_boot_entry() {
+        let dir = temp_dir("option_not_entry");
+        let path = dir.join("grubenv");
+        let path_str = path.to_str().unwrap();
+
+        let mut env = GrubEnv::new();
+        env.set("saved_entry", "2");
+        env.set("next_entry", "3");
+        write_grubenv(path_str, &env).unwrap();
+
+        for bad in ["--zzq-not-an-option", "-x", "--default=1"] {
+            let args = vec![bad.to_string()];
+            assert!(
+                run_set_default_with_path(&args, path_str).is_err(),
+                "grub-set-default accepted {bad} as an entry"
+            );
+            assert!(
+                run_reboot_with_path(&args, path_str).is_err(),
+                "grub-reboot accepted {bad} as an entry"
+            );
+        }
+
+        // Nothing was written by any of the six refused calls.
+        let after = read_grubenv(path_str);
+        assert_eq!(after.get("saved_entry"), Some("2"));
+        assert_eq!(after.get("next_entry"), Some("3"));
+
+        // And a real entry still sets, including a numeric index and a title
+        // with spaces -- the refusal must not have cost the feature.
+        run_set_default_with_path(&["0".to_string()], path_str).expect("numeric index");
+        run_reboot_with_path(&["Slate OS, recovery".to_string()], path_str).expect("title");
+        let ok = read_grubenv(path_str);
+        assert_eq!(ok.get("saved_entry"), Some("0"));
+        assert_eq!(ok.get("next_entry"), Some("Slate OS, recovery"));
+
+        cleanup(&dir);
+    }
+
+    /// `update-grub` took no options and ignored the ones it was given, so
+    /// `update-grub --zzq` regenerated the boot configuration and reported
+    /// success. The check precedes the "Updating..." line, so a refusal does
+    /// not announce an update first.
+    #[test]
+    fn update_grub_refuses_an_option_it_does_not_have() {
+        assert!(run_update_grub(&["--zzq-not-an-option".to_string()]).is_err());
+        assert!(run_update_grub(&["-x".to_string()]).is_err());
     }
 
     // ========================================================================

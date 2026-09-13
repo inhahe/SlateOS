@@ -641,6 +641,63 @@ fn print_numastat_help() {
 
 // ── Main dispatch ──────────────────────────────────────────────────────
 
+/// The first `-`-prefixed argument that is not in `known`, if any.
+///
+/// `known_with_value` names options that consume the next argument, so
+/// `-m 0` does not report `0` as unknown.
+///
+/// Only `-`-prefixed arguments are judged, and that distinction carries real
+/// weight here: `numactl [options] command [args]` means a bare word is the
+/// *program to run*, and `--` ends option parsing so a command whose name
+/// starts with a dash is still reachable.
+fn first_unknown_option<'a>(
+    args: &'a [String],
+    known: &[&str],
+    known_with_value: &[&str],
+) -> Option<&'a str> {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--" {
+            return None;
+        }
+        if !a.starts_with('-') || a == "-" {
+            continue;
+        }
+        let name = a.split_once('=').map_or(a.as_str(), |(k, _)| k);
+        if !known.contains(&name) && !known_with_value.contains(&name) {
+            return Some(a);
+        }
+        if known_with_value.contains(&name) && !a.contains('=') {
+            it.next();
+        }
+    }
+    None
+}
+
+/// Options `numactl` itself accepts, from `print_numactl_help`.
+const NUMACTL_FLAGS: &[&str] = &[
+    "-H",
+    "--hardware",
+    "-s",
+    "--show",
+    "-l",
+    "--localalloc",
+    "-h",
+    "--help",
+];
+const NUMACTL_VALUED: &[&str] = &[
+    "-N",
+    "--cpunodebind",
+    "-m",
+    "--membind",
+    "-i",
+    "--interleave",
+    "-p",
+    "--preferred",
+    "-C",
+    "--physcpubind",
+];
+
 fn run_numactl(args: Vec<String>) -> i32 {
     let rest: Vec<String> = args.into_iter().skip(1).collect();
 
@@ -653,6 +710,15 @@ fn run_numactl(args: Vec<String>) -> i32 {
     if first == "-h" || first == "--help" {
         print_numactl_help();
         return 0;
+    }
+
+    // `_ => cmd_run(&rest)` treats anything unrecognised as the program to
+    // run under a NUMA policy, which is right for `numactl -m 0 ./prog` and
+    // wrong for a mistyped option: `numactl --zzq` printed "policy: default"
+    // and exited 0 rather than reporting the typo.
+    if let Some(bad) = first_unknown_option(&rest, NUMACTL_FLAGS, NUMACTL_VALUED) {
+        eprintln!("numactl: unknown option: {bad}");
+        return 1;
     }
 
     match first {
@@ -671,12 +737,25 @@ fn run_numastat(args: Vec<String>) -> i32 {
         return 0;
     }
 
+    // Printed the per-node table for any argument at all.
+    if let Some(bad) = first_unknown_option(&rest, &["-m", "-n", "-h", "--help"], &["-p"]) {
+        eprintln!("numastat: unknown option: {bad}");
+        return 1;
+    }
+
     cmd_numastat(&rest);
     0
 }
 
 fn run_numademo(args: Vec<String>) -> i32 {
     let rest: Vec<String> = args.into_iter().skip(1).collect();
+    // No argument handling at all: `numademo --zzq` ran the benchmark and
+    // reported it. Its one argument is a size, which is a bare word, so any
+    // option is unknown.
+    if let Some(bad) = first_unknown_option(&rest, &["-h", "--help"], &[]) {
+        eprintln!("numademo: unknown option: {bad}");
+        return 1;
+    }
     cmd_numademo(&rest);
     0
 }
@@ -725,6 +804,45 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An option is refused; a command to run under a policy is not.
+    ///
+    /// `numactl [options] command [args]` means the catch-all that took
+    /// `--zzq` also takes every real program name, so this has to
+    /// distinguish them rather than refuse both. `numactl --zzq` printed
+    /// "policy: default" and exited 0.
+    #[test]
+    fn an_option_is_refused_but_a_command_is_not() {
+        let a = |v: &[&str]| -> Vec<String> { v.iter().map(|s| (*s).to_string()).collect() };
+
+        assert_eq!(
+            first_unknown_option(&a(&["--zzq"]), NUMACTL_FLAGS, NUMACTL_VALUED),
+            Some("--zzq")
+        );
+        // The program to run, and its arguments, are bare words.
+        assert_eq!(
+            first_unknown_option(&a(&["-m", "0", "/bin/true"]), NUMACTL_FLAGS, NUMACTL_VALUED),
+            None
+        );
+        // Long forms and the `=` spelling both resolve.
+        assert_eq!(
+            first_unknown_option(&a(&["--membind", "0"]), NUMACTL_FLAGS, NUMACTL_VALUED),
+            None
+        );
+        assert_eq!(
+            first_unknown_option(&a(&["--interleave=all"]), NUMACTL_FLAGS, NUMACTL_VALUED),
+            None
+        );
+        // `--` lets a command whose name starts with a dash still run.
+        assert_eq!(
+            first_unknown_option(&a(&["--", "-oddprog"]), NUMACTL_FLAGS, NUMACTL_VALUED),
+            None
+        );
+        assert_eq!(
+            first_unknown_option(&a(&["-H"]), NUMACTL_FLAGS, NUMACTL_VALUED),
+            None
+        );
+    }
 
     #[test]
     fn test_parse_nodelist() {

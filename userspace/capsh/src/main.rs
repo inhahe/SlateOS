@@ -1417,6 +1417,13 @@ fn run_captest(args: &[String]) -> i32 {
         return 0;
     }
 
+    // `captest` takes no options beyond help, and used to run the whole
+    // capability report for anything at all.
+    if let Some(bad) = args.iter().find(|a| a.starts_with('-') && *a != "-") {
+        eprintln!("captest: unknown option: {}", quoting::quoteaf_os(bad));
+        return 1;
+    }
+
     println!("=== Capability Support Test ===");
     println!();
 

@@ -445,6 +445,17 @@ fn main() {
     };
 
     if prog_name == "rfkill-event" {
+        // Took no options and listened regardless, so `rfkill-event --zzq`
+        // announced "Listening for rfkill events..." having not parsed the
+        // request.
+        if let Some(bad) = args
+            .iter()
+            .skip(1)
+            .find(|a| a.starts_with('-') && *a != "-")
+        {
+            eprintln!("rfkill-event: unknown option: {}", quoting::quoteaf_os(bad));
+            std::process::exit(1);
+        }
         cmd_event();
         return;
     }

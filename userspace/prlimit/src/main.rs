@@ -752,6 +752,13 @@ fn cmd_ulimit(args: &[String]) {
             "-t" => resource = Resource::CpuTime,
             "-u" => resource = Resource::Processes,
             "-v" => resource = Resource::AddressSpace,
+            // A resource limit reported for a request that was not parsed
+            // is still a number someone will act on: `ulimit --zzq` printed
+            // "unlimited".
+            other if other.starts_with('-') && other != "-" => {
+                eprintln!("ulimit: unknown option: {}", quoting::quoteaf_os(other));
+                process::exit(1);
+            }
             _ => {}
         }
     }

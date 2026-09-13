@@ -273,6 +273,38 @@ fn print_pairs(out: &mut io::StdoutLock<'_>, irqs: &[IrqInfo]) {
 // CLI
 // ============================================================================
 
+/// Report the first `-`-prefixed argument that is not in `known`.
+///
+/// `known_with_value` names the options that consume the next argument, so
+/// the value is not itself judged -- and so a *mistyped* valued option
+/// cannot leave its value to be reinterpreted as something else, which is
+/// how `coredumpctl` turned a lost filter into a wrong one.
+///
+/// `--` ends option parsing; a lone `-` is left alone.
+fn first_unknown_option<'a>(
+    args: &'a [String],
+    known: &[&str],
+    known_with_value: &[&str],
+) -> Option<&'a str> {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--" {
+            return None;
+        }
+        if !a.starts_with('-') || a == "-" {
+            continue;
+        }
+        let name = a.split_once('=').map_or(a.as_str(), |(k, _)| k);
+        if !known.contains(&name) && !known_with_value.contains(&name) {
+            return Some(a);
+        }
+        if known_with_value.contains(&name) && !a.contains('=') {
+            it.next();
+        }
+    }
+    None
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     let mut opts = LsirqOpts {
@@ -335,6 +367,31 @@ fn main() {
         i += 1;
     }
 
+    // `lsirq --zzq` printed the whole interrupt table and exited 0. The
+    // check sits after the loop rather than inside it so `--help` and
+    // `--version` still short-circuit first, as they did before.
+    if let Some(bad) = first_unknown_option(
+        &args[1..],
+        &[
+            "-J",
+            "--json",
+            "-P",
+            "--pairs",
+            "-n",
+            "--noheadings",
+            "-s",
+            "--softirq",
+            "-h",
+            "--help",
+            "-V",
+            "--version",
+        ],
+        &["-S", "--sort", "-o", "--output"],
+    ) {
+        eprintln!("lsirq: unknown option: {bad}");
+        std::process::exit(1);
+    }
+
     let (_cpus, mut irqs) = if opts.softirq {
         parse_softirqs()
     } else {
@@ -377,6 +434,47 @@ mod tests {
             hwirq: String::new(),
             name: name.to_string(),
         }
+    }
+
+    /// The interrupt table is not printed for a request that was not parsed.
+    ///
+    /// `lsirq --zzq` printed every interrupt and exited 0.
+    #[test]
+    fn an_unknown_option_is_refused() {
+        let a = |v: &[&str]| -> Vec<String> { v.iter().map(|s| (*s).to_string()).collect() };
+        let flags = [
+            "-J",
+            "--json",
+            "-P",
+            "--pairs",
+            "-n",
+            "--noheadings",
+            "-s",
+            "--softirq",
+        ];
+        let valued = ["-S", "--sort", "-o", "--output"];
+
+        assert_eq!(
+            first_unknown_option(&a(&["--zzq"]), &flags, &valued),
+            Some("--zzq")
+        );
+        assert_eq!(first_unknown_option(&a(&["-J"]), &flags, &valued), None);
+        // A column list is a value, not an option -- `-o IRQ,TOTAL` must not
+        // report IRQ,TOTAL as unknown.
+        assert_eq!(
+            first_unknown_option(&a(&["-o", "IRQ,TOTAL"]), &flags, &valued),
+            None
+        );
+        assert_eq!(
+            first_unknown_option(&a(&["--sort=TOTAL"]), &flags, &valued),
+            None
+        );
+        // And a mistyped valued option is caught before its value can be
+        // reinterpreted, which is the coredumpctl lesson.
+        assert_eq!(
+            first_unknown_option(&a(&["--sortt", "TOTAL"]), &flags, &valued),
+            Some("--sortt")
+        );
     }
 
     #[test]

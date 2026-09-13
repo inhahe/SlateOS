@@ -2,4 +2,22 @@
 name = "shell"
 version = "0.1.0"
 edition = "2024"
-description = "Userspace POSIX-compatible shell — default interactive shell for the OS"
+# NOT a shell, despite the crate name. This is a toolchain validation
+# program: it exercises std features to check that the custom Rust target and
+# the POSIX sysroot work. The description used to read "Userspace
+# POSIX-compatible shell — default interactive shell for the OS", which was
+# false in every part -- the OS's shell is `oils` (osh), and `login` execs
+# /bin/osh.
+#
+# The crate name and its /usr/bin/shell output path are not changed here:
+# the path is registered in kernel/src/fs/kernelbuild.rs, which is lane A's
+# file. Nothing execs it as a shell, so this is a naming problem rather than
+# a functional one -- but a binary called `shell` that is not one is still a
+# claim, and the next reader should find this note rather than the old
+# description.
+description = "Toolchain validation program (std + POSIX sysroot smoke test); NOT the OS shell"
+
+[dependencies]
+# An argument may hold any byte but `/` and NUL, so a diagnostic that names
+# one has to escape what does not decode rather than assume UTF-8.
+quoting = { path = "../quoting" }

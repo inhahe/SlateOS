@@ -111,6 +111,10 @@ pub fn host_path() -> OsString {
 /// The end-to-end tests spawn the real `osh`; a child inherits the *process*
 /// environment, so the shell variable that fixes the in-process tests never
 /// reaches it and the `PATH` has to be set on the `Command` itself.
+// Reachable only from `main`, which the test harness replaces, so this is dead
+// in the test build and live in the real one. Scoped to `test` rather than
+// allowed outright, so a genuinely dead item here is still reported.
+#[cfg_attr(test, allow(dead_code))]
 pub fn scrub(cmd: &mut std::process::Command) -> &mut std::process::Command {
     cmd.env("PATH", host_path())
 }

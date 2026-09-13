@@ -1328,6 +1328,24 @@ fn run(args: &[String], out: &mut dyn Write) -> i32 {
         // machine lives in `net80211`, which is lane C's. Restoring these
         // means driving that, which is an interface decision for both lanes.
         _ => {
+            // Invoked by its own name, this explains that it must be
+            // symlinked -- which is the right answer to a wrong invocation
+            // and stays exit 0. An unrecognised *option* is a different
+            // question, and printing the same guidance for it said nothing
+            // about the option at all.
+            // `-v`/`--version` is answered rather than refused. It was
+            // already reaching this arm and getting the guidance text, which
+            // happens to contain the version -- so the answer was right by
+            // accident. Saying it deliberately keeps that working and makes
+            // the reason legible.
+            if rest.iter().any(|a| *a == "-v" || *a == "--version") {
+                let _ = writeln!(out, "wpa {VERSION}");
+                return 0;
+            }
+            if let Some(bad) = rest.iter().find(|a| a.starts_with('-') && **a != "-") {
+                let _ = writeln!(out, "wpa: unknown option: {bad}");
+                return 1;
+            }
             let _ = writeln!(out, "wpa multi-personality binary v{}", VERSION);
             let _ = writeln!(out);
             let _ = writeln!(out, "Invoke as wpa_passphrase.");

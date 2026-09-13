@@ -179,6 +179,10 @@ struct SocketEntry {
 
 #[derive(Debug, Clone)]
 struct Config {
+    // Reachable only from `main`, which the test harness replaces, so this is dead
+    // in the test build and live in the real one. Scoped to `test` rather than
+    // allowed outright, so a genuinely dead item here is still reported.
+    #[cfg_attr(test, allow(dead_code))]
     personality: Personality,
     show_tcp: bool,
     show_udp: bool,
@@ -927,6 +931,7 @@ fn run_sockstat(cfg: &Config, writer: &mut dyn Write) -> io::Result<()> {
 // Help / version
 // ---------------------------------------------------------------------------
 
+#[cfg_attr(test, allow(dead_code))]
 fn print_help(personality: Personality) {
     match personality {
         Personality::Ss => {
@@ -976,6 +981,7 @@ fn print_help(personality: Personality) {
     }
 }
 
+#[cfg_attr(test, allow(dead_code))]
 fn print_version(personality: Personality) {
     let name = match personality {
         Personality::Ss => "ss",

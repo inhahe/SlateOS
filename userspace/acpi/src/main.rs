@@ -585,6 +585,10 @@ fn run_acpi(cfg: &Config, writer: &mut dyn Write) -> io::Result<()> {
 // Help / version
 // ---------------------------------------------------------------------------
 
+// Reachable only from `main`, which the test harness replaces, so this is dead
+// in the test build and live in the real one. Scoped to `test` rather than
+// allowed outright, so a genuinely dead item here is still reported.
+#[cfg_attr(test, allow(dead_code))]
 fn print_help() {
     println!("Usage: acpi [OPTIONS]");
     println!();
@@ -603,6 +607,7 @@ fn print_help() {
     println!("  --version          Show version");
 }
 
+#[cfg_attr(test, allow(dead_code))]
 fn print_version() {
     println!("acpi (Slate OS) 0.1.0");
 }

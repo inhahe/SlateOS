@@ -2338,6 +2338,15 @@ fn run_autrace(args: &[String]) -> i32 {
                 println!("autrace: deleting audit rules used by autrace");
                 return 0;
             }
+            // A `-`-prefixed argument is an option this program does not
+            // have, not the program to trace. `_ => break` left it to be
+            // picked up as `args[i]` below, so `autrace --zzq` announced
+            // "tracing program '--zzq'" -- an action claimed against a
+            // program that does not exist.
+            other if other.starts_with('-') && other != "-" => {
+                eprintln!("autrace: unknown option: {}", quoteaf_os(other));
+                return 1;
+            }
             _ => break,
         }
     }

@@ -3518,6 +3518,13 @@ struct Args {
     command_file: Option<Vec<u8>>,
     server_port: u16,
     pass_args: bool,
+    /// The first `-`-prefixed argument neither personality recognised.
+    ///
+    /// Kept as bytes rather than reported at the parse site: an argument may
+    /// hold any byte but `/` and NUL, and this crate takes `argv` as raw
+    /// pointers, so there is nothing to gain by forcing it through `str` on
+    /// the way to a diagnostic.
+    unknown_option: Option<Vec<u8>>,
 }
 
 /// Parse arguments for the gdb personality.
@@ -3536,6 +3543,7 @@ fn parse_args_gdb(argc: i32, argv: *const *const u8) -> Args {
         command_file: None,
         server_port: 0,
         pass_args: false,
+        unknown_option: None,
     };
 
     // SAFETY: We trust that argc and argv are valid from the C runtime.
@@ -3576,8 +3584,15 @@ fn parse_args_gdb(argc: i32, argv: *const *const u8) -> Args {
                 }
             }
             _ => {
-                if arg[0] != b'-' && args.binary_path.is_none() {
-                    args.binary_path = Some(arg.to_vec());
+                if arg[0] != b'-' {
+                    if args.binary_path.is_none() {
+                        args.binary_path = Some(arg.to_vec());
+                    }
+                } else if arg != b"-" && args.unknown_option.is_none() {
+                    // Was silently dropped, so `gdb --zzq` printed its banner
+                    // and opened a debugger prompt. A non-dash argument is
+                    // the binary to debug and is left alone.
+                    args.unknown_option = Some(arg.to_vec());
                 }
             }
         }
@@ -3603,6 +3618,7 @@ fn parse_args_server(argc: i32, argv: *const *const u8) -> Args {
         command_file: None,
         server_port: 1234,
         pass_args: false,
+        unknown_option: None,
     };
 
     let arg_ptrs: Vec<&[u8]> = (0..argc as usize)
@@ -3720,6 +3736,19 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
         Personality::Gdb => parse_args_gdb(argc, argv),
         Personality::GdbServer => parse_args_server(argc, argv),
     };
+
+    // Before help and version, so a refused option is not answered with a
+    // help screen and an exit 0.
+    if let Some(ref bad) = args.unknown_option {
+        let _ = out.write_all(b"gdb: unknown option: ");
+        let _ = out.write_all(bad);
+        let _ = out.write_all(
+            b"
+",
+        );
+        let _ = out.flush();
+        return 1;
+    }
 
     if args.show_help {
         match args.personality {

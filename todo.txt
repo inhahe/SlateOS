@@ -4527,6 +4527,40 @@
 
 ## Judgment Calls
 
+### Refusing an unknown option without an upstream to quote (2026-09-13, Claude autonomous)
+
+**The block.** 39 lane-B programs accept `--zzq-not-an-option` and exit 0, so
+a typo in a script is not caught. Most have no upstream installed in the WSL
+reference environment, and §371 forbids inventing a wording, so they sat
+blocked -- the known-issues entry says "blocked on the reference environment
+rather than on anyone's time".
+
+**What I decided.** Fix them anyway, using the tree's own measured convention
+where no upstream is available, and say in the source that the wording is
+ours rather than upstream's.
+
+**Why this is not the thing §371 forbids.** §371 is about not *asserting a
+measurement you did not take* -- writing `unrecognized option` and implying
+GNU says so. Writing our own diagnostic, labelled as ours, asserts nothing
+about upstream. And the defect being fixed is not the wording: it is that a
+program accepts an option it does not have and reports success. That is wrong
+regardless of what any upstream prints.
+
+**The convention, measured rather than chosen.** Sampled across programs in
+this tree that already refuse correctly: `<prog>: unknown option: <arg>` and
+exit 1, in `ntpd`, `getty`, `findmnt`, `acpi`, `blkid`, `upower` and `ss`.
+`resolvectl` differs and keeps its own -- it has a real reference and quotes
+it. `dhcpcd` prefixes `error:`; not followed, being the minority form.
+
+**What is reversible, and how cheaply.** The exit status is the part that
+matters and is almost certainly right. If a wording later turns out to differ
+from an installed upstream, it is one line per program, and the tests assert
+the refusal rather than the sentence.
+
+**Trigger to revisit:** a reference environment with these packages installed.
+Then re-measure and correct any that differ, which the existing
+`scripts/unknown-option-sweep.py` will make easy to find.
+
 ### jq's runtime-error exit status is 5, and that is unverified (2026-09-12, Claude autonomous)
 
 **What was decided.** `jq` printed `jq: error: ...` to stderr and exited **0**,

@@ -664,6 +664,47 @@ fn hwinfo_main(args: &[String]) -> i32 {
         }
     }
 
+    // hwinfo's own parser accepted anything; only its `lshw` personality had
+    // been fixed. `hwinfo --zzq` printed the full hardware inventory and
+    // exited 0. The single-dash long forms (`-short`, `-json`, `-xml`,
+    // `-class`) are lshw's spelling and are kept.
+    // `args` here is already past argv[0] -- `hwinfo_main` is called with
+    // `&rest`. Slicing again skipped the first option, so the guard compiled,
+    // read correctly, and examined nothing.
+    if let Some(bad) = first_unknown_option(
+        args,
+        &[
+            "--all",
+            "--cpu",
+            "--disk",
+            "--display",
+            "--gfxcard",
+            "--input",
+            "--json",
+            "--memory",
+            "--mouse",
+            "--netcard",
+            "--network",
+            "--pci",
+            "--ram",
+            "--short",
+            "--sound",
+            "--storage",
+            "--usb",
+            "--xml",
+            "-short",
+            "-json",
+            "-xml",
+            "-h",
+            "--help",
+            "--version",
+        ],
+        &["-class"],
+    ) {
+        eprintln!("hwinfo: unknown option: {bad}");
+        return 1;
+    }
+
     let all_devices = probe_all();
 
     let devices: Vec<&HwDevice> = if let Some(ref class) = opts.filter_class {
@@ -816,6 +857,38 @@ fn lshw_main(args: &[String]) -> i32 {
 // Main dispatch
 // ============================================================================
 
+/// Report the first `-`-prefixed argument that is not in `known`.
+///
+/// `known_with_value` names the options that consume the next argument, so
+/// the value is not itself judged -- and so a *mistyped* valued option
+/// cannot leave its value to be reinterpreted as something else, which is
+/// how `coredumpctl` turned a lost filter into a wrong one.
+///
+/// `--` ends option parsing; a lone `-` is left alone.
+fn first_unknown_option<'a>(
+    args: &'a [String],
+    known: &[&str],
+    known_with_value: &[&str],
+) -> Option<&'a str> {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--" {
+            return None;
+        }
+        if !a.starts_with('-') || a == "-" {
+            continue;
+        }
+        let name = a.split_once('=').map_or(a.as_str(), |(k, _)| k);
+        if !known.contains(&name) && !known_with_value.contains(&name) {
+            return Some(a);
+        }
+        if known_with_value.contains(&name) && !a.contains('=') {
+            it.next();
+        }
+    }
+    None
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
 
@@ -850,6 +923,37 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The hardware inventory is not printed for a request that was not
+    /// parsed.
+    ///
+    /// Only the `lshw` personality had been fixed; `hwinfo --zzq` still
+    /// printed the full inventory and exited 0.
+    #[test]
+    fn hwinfo_refuses_an_unknown_option() {
+        let a = |v: &[&str]| -> Vec<String> { v.iter().map(|s| (*s).to_string()).collect() };
+        let flags = ["--all", "--cpu", "--short", "-short", "-json", "--json"];
+        let valued = ["-class"];
+
+        assert_eq!(
+            first_unknown_option(&a(&["--zzq"]), &flags, &valued),
+            Some("--zzq")
+        );
+        // lshw's single-dash long forms are real spellings here and stay.
+        assert_eq!(first_unknown_option(&a(&["-short"]), &flags, &valued), None);
+        assert_eq!(
+            first_unknown_option(&a(&["--short"]), &flags, &valued),
+            None
+        );
+        assert_eq!(
+            first_unknown_option(&a(&["-class", "disk"]), &flags, &valued),
+            None
+        );
+        assert_eq!(
+            first_unknown_option(&a(&["--", "--zzq"]), &flags, &valued),
+            None
+        );
+    }
 
     #[test]
     fn test_classify_pci_display() {

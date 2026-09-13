@@ -140507,6 +140507,17 @@ Three runs each, alternated on the same machine, because the run-to-run
 spread here is wide enough that a single before-and-after proves nothing.
 Reverted.
 
+**And the instrument itself had to be made lighter.** Five compositions of an
+eight-window 4K desktop saturate memory bandwidth for a second or two, and run
+alongside the rest of the workspace that was enough to push the *neighbouring*
+timing test -- `the_demo_scene_still_composites`, whose ceiling has ten times
+its median as headroom -- to 27x its median, and fail it. A timing test heavy
+enough to break other timing tests is worse than no timing test. The 4K
+measurement is `#[ignore]`d with the command to run it in its doc comment; the
+damage-tracking test stays in the ordinary suite at 1920x1080, which it can
+afford because it asserts a *ratio* and does not care how many pixels either
+side walks.
+
 Why it lost is a guess and is left as one: the hoisted version replaces two
 loop counters with `fx - ox` and `fy - oy` arithmetic per pixel, and for a
 glyph that is nowhere near an edge -- which is nearly all of them -- the

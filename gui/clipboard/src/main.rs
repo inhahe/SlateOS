@@ -776,7 +776,69 @@ fn find_char_boundary(s: &str, max_bytes: usize) -> usize {
 // Service Event Loop (main entry point)
 // ---------------------------------------------------------------------------
 
+/// What to do about this program's first command-line argument.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArgVerdict {
+    /// No argument: get on with it.
+    Run,
+    Help,
+    Version,
+    /// Anything else. This program has no options.
+    Refuse,
+}
+
+/// Classify the first argument, if there is one.
+///
+/// Filed by lane B on 2026-09-12: this program accepted
+/// `--zzq-not-an-option` and exited 0, which to anything reading an exit
+/// status says the option was honoured. It was not -- nothing here had ever
+/// looked at `argv`. That is the more common shape of what lane B swept out
+/// of `userspace/`: not a parse loop with a careless `_ => {}` arm, but no
+/// parse at all.
+///
+/// Takes `&OsStr`, not `&str`, and that is the point of the signature. An
+/// argument can hold any byte; decoding it first would mean an undecodable
+/// option name arriving here as replacement characters, which is a string
+/// nobody passed. Undecodable is simply not one of the two options this
+/// program has, so it is refused like any other.
+///
+/// `--help` and `--version` are answered rather than refused, so that the
+/// refusal is a statement about the interface rather than the absence of one.
+fn classify_argument(first: Option<&std::ffi::OsStr>) -> ArgVerdict {
+    match first.and_then(std::ffi::OsStr::to_str) {
+        None if first.is_none() => ArgVerdict::Run,
+        Some("--help" | "-h") => ArgVerdict::Help,
+        Some("--version" | "-V") => ArgVerdict::Version,
+        _ => ArgVerdict::Refuse,
+    }
+}
+
+/// Act on [`classify_argument`], exiting for every verdict but `Run`.
+fn refuse_arguments() {
+    let first = std::env::args_os().nth(1);
+    match classify_argument(first.as_deref()) {
+        ArgVerdict::Run => {}
+        ArgVerdict::Help => {
+            println!("usage: clipboard");
+            println!();
+            println!("The clipboard service. Takes no options.");
+            std::process::exit(0);
+        }
+        ArgVerdict::Version => {
+            println!("clipboard {}", env!("CARGO_PKG_VERSION"));
+            std::process::exit(0);
+        }
+        ArgVerdict::Refuse => {
+            let bad = first.unwrap_or_default();
+            eprintln!("clipboard: unrecognized option: {bad:?}");
+            eprintln!("usage: clipboard");
+            std::process::exit(2);
+        }
+    }
+}
+
 fn main() {
+    refuse_arguments();
     // Initialize the clipboard service.
     let mut service = ClipboardService::new();
 
@@ -854,6 +916,27 @@ fn run_self_test(service: &mut ClipboardService) {
     clippy::indexing_slicing
 )]
 mod tests {
+
+    #[test]
+    fn an_option_this_program_does_not_have_is_not_silently_accepted() {
+        use std::ffi::OsStr;
+        assert_eq!(classify_argument(None), ArgVerdict::Run);
+        assert_eq!(classify_argument(Some(OsStr::new("--help"))), ArgVerdict::Help);
+        assert_eq!(classify_argument(Some(OsStr::new("-h"))), ArgVerdict::Help);
+        assert_eq!(
+            classify_argument(Some(OsStr::new("--version"))),
+            ArgVerdict::Version
+        );
+        assert_eq!(classify_argument(Some(OsStr::new("-V"))), ArgVerdict::Version);
+        assert_eq!(
+            classify_argument(Some(OsStr::new("--zzq-not-an-option"))),
+            ArgVerdict::Refuse,
+            "the option lane B's sweep uses"
+        );
+        // An empty argument is still an argument, and `clipboard` takes none.
+        assert_eq!(classify_argument(Some(OsStr::new(""))), ArgVerdict::Refuse);
+    }
+
     use super::*;
 
     fn make_source(name: &str) -> SourceApp {

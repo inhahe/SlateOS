@@ -1083,12 +1083,15 @@ fn run_firejail(args: &[String]) -> i32 {
     // system and namespace support. This frontend parses the configuration
     // and issues the appropriate syscalls.
 
-    if !config.quiet {
-        println!(
-            "Child process initialized in {:.1}ms",
-            0.8 // Placeholder timing.
-        );
-    }
+    // No "Child process initialized in 0.8ms" here any more. There is no
+    // child: this frontend parses the configuration and then refuses to run
+    // the program unconfined, a few lines below. The message announced an
+    // event that had not happened and timed it with a literal `0.8`.
+    //
+    // Second instance of that shape today -- `inotifywait` printed
+    // "Watches established (1 total)" and then discovered it could not
+    // watch. A success banner emitted before the work is a claim about the
+    // future, and this program's future is a refusal.
 
     // Write sandbox info.
     let sandbox_dir = Path::new(DEFAULT_SANDBOX_DIR);

@@ -20,6 +20,7 @@ use std::num::NonZeroU64;
 use std::process::ExitCode;
 use std::time::Duration;
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::fold;
@@ -45,23 +46,11 @@ const FALLBACK_SEED: u64 = 0x5350_4545_4454_5354;
 // Catppuccin Mocha Theme Colors
 // ============================================================================
 
-const BASE: Color = Color::rgb(30, 30, 46);
-const MANTLE: Color = Color::rgb(24, 24, 37);
-const CRUST: Color = Color::rgb(17, 17, 27);
-const SURFACE0: Color = Color::rgb(49, 50, 68);
-const SURFACE1: Color = Color::rgb(69, 71, 90);
-const SURFACE2: Color = Color::rgb(88, 91, 112);
-const TEXT_COLOR: Color = Color::rgb(205, 214, 244);
-const SUBTEXT0: Color = Color::rgb(166, 173, 200);
-const SUBTEXT1: Color = Color::rgb(186, 194, 222);
-const BLUE: Color = Color::rgb(137, 180, 250);
-const SAPPHIRE: Color = Color::rgb(116, 199, 236);
-const GREEN: Color = Color::rgb(166, 227, 161);
-const PEACH: Color = Color::rgb(250, 179, 135);
-const RED: Color = Color::rgb(243, 139, 168);
-const MAUVE: Color = Color::rgb(203, 166, 247);
-const YELLOW: Color = Color::rgb(249, 226, 175);
-const TEAL: Color = Color::rgb(148, 226, 213);
+// The colours live in the user's palette, not here.
+//
+// 17 constants used to sit here -- Catppuccin Mocha -- so a light desktop got
+// a dark speed-test window. design-decisions 822; one of the 55 crates never
+// converted. Names and values agreed, so the mapping is by name.
 
 // ============================================================================
 // Layout Constants
@@ -1119,13 +1108,13 @@ fn point_on_circle(cx: f32, cy: f32, radius: f32, angle_deg: f32) -> (f32, f32) 
 }
 
 /// Color for a given gauge fraction (gradient from green to yellow to red).
-fn gauge_color_at(fraction: f32) -> Color {
+fn gauge_color_at(fraction: f32, p: &Palette) -> Color {
     if fraction < 0.33 {
-        GREEN
+        p.green
     } else if fraction < 0.66 {
-        YELLOW
+        p.yellow
     } else {
-        PEACH
+        p.peach
     }
 }
 
@@ -1135,6 +1124,8 @@ fn gauge_color_at(fraction: f32) -> Color {
 
 /// Main application state for the speed test utility.
 pub struct SpeedTestUI {
+    /// The user's colours, handed over by the framework (§822).
+    pub palette: Palette,
     /// Current phase.
     phase: SpeedTestPhase,
     /// Configuration for the test.
@@ -1201,6 +1192,7 @@ impl SpeedTestUI {
 
     fn with_rng(rng: SeededRng) -> Self {
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             rng,
             phase: SpeedTestPhase::Idle,
             config: SpeedTestConfig::default(),
@@ -1683,7 +1675,7 @@ impl SpeedTestUI {
             y: 0.0,
             width,
             height,
-            color: CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1717,14 +1709,14 @@ impl SpeedTestUI {
             y: 0.0,
             width: l.width,
             height: TITLE_BAR_HEIGHT,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
         frame.push(RenderCommand::Text {
             x: 16.0,
             y: 12.0,
             text: "Network Speed Test".into(),
-            color: TEXT_COLOR,
+            color: self.palette.text,
             font_size: 16.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -1739,7 +1731,7 @@ impl SpeedTestUI {
             x: (l.width - 16.0 - phase_w).max(l.title_text_right),
             y: 14.0,
             text: phase,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some((l.width - 16.0 - l.title_text_right).max(0.0)),
@@ -1755,7 +1747,7 @@ impl SpeedTestUI {
             y: r.y,
             width: r.w,
             height: r.h,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(4.0),
         });
         frame.hit(Target::ServerButton, r);
@@ -1768,7 +1760,7 @@ impl SpeedTestUI {
             x: r.x + 10.0,
             y: r.y + 7.0,
             text: server_name.into(),
-            color: TEXT_COLOR,
+            color: self.palette.text,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some((r.w - 30.0).max(0.0)),
@@ -1785,7 +1777,7 @@ impl SpeedTestUI {
             x: r.right() - 20.0,
             y: r.y + 7.0,
             text: arrow_text.into(),
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1805,7 +1797,7 @@ impl SpeedTestUI {
             y: base_y,
             width: w,
             height: total_h,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(4.0),
         });
         frame.push(RenderCommand::StrokeRect {
@@ -1813,7 +1805,7 @@ impl SpeedTestUI {
             y: base_y,
             width: w,
             height: total_h,
-            color: SURFACE1,
+            color: self.palette.surface1,
             line_width: 1.0,
             corner_radii: CornerRadii::all(4.0),
         });
@@ -1826,7 +1818,7 @@ impl SpeedTestUI {
                     y: iy + 1.0,
                     width: w - 4.0,
                     height: item_h - 2.0,
-                    color: SURFACE1,
+                    color: self.palette.surface1,
                     corner_radii: CornerRadii::all(2.0),
                 });
             }
@@ -1835,9 +1827,9 @@ impl SpeedTestUI {
                 y: iy + 6.0,
                 text: format!("{} ({})", server.name, server.location),
                 color: if i == self.selected_server {
-                    BLUE
+                    self.palette.blue
                 } else {
-                    TEXT_COLOR
+                    self.palette.text
                 },
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
@@ -1867,7 +1859,7 @@ impl SpeedTestUI {
                 y1: oy0,
                 x2: ox1,
                 y2: oy1,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 width: track,
             });
         }
@@ -1883,7 +1875,7 @@ impl SpeedTestUI {
             let a1 = gauge_fraction_to_angle(frac1);
             let (ox0, oy0) = point_on_circle(cx, cy, outer_r - track / 2.0, a0);
             let (ox1, oy1) = point_on_circle(cx, cy, outer_r - track / 2.0, a1);
-            let color = gauge_color_at(frac0);
+            let color = gauge_color_at(frac0, &self.palette);
             frame.push(RenderCommand::Line {
                 x1: ox0,
                 y1: oy0,
@@ -1905,7 +1897,7 @@ impl SpeedTestUI {
                 y1: ty0,
                 x2: tx1,
                 y2: ty1,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 width: 1.5,
             });
             let (lx, ly) = point_on_circle(cx, cy, outer_r + 20.0, angle);
@@ -1918,7 +1910,7 @@ impl SpeedTestUI {
                 x: lx - 10.0,
                 y: ly - 5.0,
                 text: label,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: 9.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -1935,7 +1927,7 @@ impl SpeedTestUI {
             y1: cy,
             x2: nx,
             y2: ny,
-            color: TEXT_COLOR,
+            color: self.palette.text,
             width: 2.0,
         });
 
@@ -1945,7 +1937,7 @@ impl SpeedTestUI {
             y: cy - 6.0,
             width: 12.0,
             height: 12.0,
-            color: TEXT_COLOR,
+            color: self.palette.text,
             corner_radii: CornerRadii::all(6.0),
         });
     }
@@ -1967,7 +1959,7 @@ impl SpeedTestUI {
             x: cx - speed_w / 2.0,
             y: cy + r * 0.23,
             text: speed_text,
-            color: TEXT_COLOR,
+            color: self.palette.text,
             font_size: value_size,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -1979,7 +1971,7 @@ impl SpeedTestUI {
             x: cx - unit_w / 2.0,
             y: cy + r * 0.47,
             text: "Mbps".into(),
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: unit_size,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1994,7 +1986,7 @@ impl SpeedTestUI {
                 x: cx - latency_w / 2.0,
                 y: cy + r * 0.6,
                 text: latency,
-                color: SUBTEXT1,
+                color: self.palette.subtext1,
                 font_size: latency_size,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -2006,7 +1998,7 @@ impl SpeedTestUI {
     fn draw_phase_indicators(&self, frame: &mut Frame, l: &Layout) {
         let phases = [TestKind::Latency, TestKind::Download, TestKind::Upload];
         let labels = ["Latency", "Download", "Upload"];
-        let icons = [TEAL, BLUE, MAUVE];
+        let icons = [self.palette.teal, self.palette.blue, self.palette.mauve];
         let step = (l.phase_row.w / 3.0).max(0.0);
         let y = l.phase_row.y;
 
@@ -2015,9 +2007,9 @@ impl SpeedTestUI {
 
             let (dot_color, text_color) = match &self.phase {
                 SpeedTestPhase::Testing(active) if active == kind => {
-                    (icons.get(i).copied().unwrap_or(TEXT_COLOR), TEXT_COLOR)
+                    (icons.get(i).copied().unwrap_or(self.palette.text), self.palette.text)
                 }
-                SpeedTestPhase::Complete => (GREEN, SUBTEXT0),
+                SpeedTestPhase::Complete => (self.palette.green, self.palette.subtext0),
                 _ => {
                     // Check if this phase has already been completed in the
                     // current test sequence.
@@ -2036,9 +2028,9 @@ impl SpeedTestUI {
                         }
                     };
                     if done {
-                        (GREEN, SUBTEXT0)
+                        (self.palette.green, self.palette.subtext0)
                     } else {
-                        (SURFACE2, SURFACE2)
+                        (self.palette.surface2, self.palette.surface2)
                     }
                 }
             };
@@ -2073,7 +2065,7 @@ impl SpeedTestUI {
                     x: arrow_x,
                     y: y - 1.0,
                     text: "\u{2192}".into(),
-                    color: SURFACE2,
+                    color: self.palette.surface2,
                     font_size: 12.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
@@ -2087,13 +2079,13 @@ impl SpeedTestUI {
         let r = l.start;
 
         let (bg, label) = if self.phase.is_testing() {
-            (SURFACE1, "Testing...")
+            (self.palette.surface1, "Testing...")
         } else if self.start_button_hover {
-            (SAPPHIRE, "Start Test")
+            (self.palette.sapphire, "Start Test")
         } else if self.phase.is_complete() {
-            (BLUE, "Re-Test")
+            (self.palette.blue, "Re-Test")
         } else {
-            (BLUE, "Start Test")
+            (self.palette.blue, "Start Test")
         };
 
         frame.push(RenderCommand::FillRect {
@@ -2109,7 +2101,7 @@ impl SpeedTestUI {
             x: r.x + (r.w - label_w).max(0.0) / 2.0,
             y: r.y + (r.h - 14.0) / 2.0,
             text: label.into(),
-            color: if bg == SAPPHIRE { CRUST } else { TEXT_COLOR },
+            color: if bg == self.palette.sapphire { self.palette.crust } else { self.palette.text },
             font_size: 14.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(r.w),
@@ -2128,7 +2120,7 @@ impl SpeedTestUI {
                     x: r.x + (r.w - w).max(0.0) / 2.0,
                     y: r.y + 8.0,
                     text,
-                    color: RED,
+                    color: self.palette.red,
                     font_size: 12.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(r.w),
@@ -2147,12 +2139,12 @@ impl SpeedTestUI {
             (
                 "Download",
                 format!("{:.1} Mbps", self.download_tester.avg_mbps()),
-                BLUE,
+                self.palette.blue,
             ),
             (
                 "Upload",
                 format!("{:.1} Mbps", self.upload_tester.avg_mbps()),
-                MAUVE,
+                self.palette.mauve,
             ),
             (
                 "Latency / Jitter",
@@ -2161,7 +2153,7 @@ impl SpeedTestUI {
                     self.latency_tester.avg_rtt().unwrap_or(0.0),
                     self.latency_tester.jitter().unwrap_or(0.0),
                 ),
-                TEAL,
+                self.palette.teal,
             ),
         ];
 
@@ -2172,7 +2164,7 @@ impl SpeedTestUI {
                 x: cx - heading_w / 2.0,
                 y: r.y,
                 text: heading.into(),
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(col_w),
@@ -2200,7 +2192,7 @@ impl SpeedTestUI {
             y: panel.y,
             width: panel.w,
             height: panel.h,
-            color: BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::all(8.0),
         });
         frame.push(RenderCommand::StrokeRect {
@@ -2208,7 +2200,7 @@ impl SpeedTestUI {
             y: panel.y,
             width: panel.w,
             height: panel.h,
-            color: SURFACE0,
+            color: self.palette.surface0,
             line_width: 1.0,
             corner_radii: CornerRadii::all(8.0),
         });
@@ -2217,7 +2209,7 @@ impl SpeedTestUI {
             x: panel.x + 12.0,
             y: panel.y + 8.0,
             text: "Speed Over Time".into(),
-            color: TEXT_COLOR,
+            color: self.palette.text,
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some((panel.w - 24.0).max(0.0)),
@@ -2247,7 +2239,7 @@ impl SpeedTestUI {
                 y1: gy,
                 x2: plot_x + plot_w,
                 y2: gy,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 width: 0.5,
             });
             let val = max_speed * f64::from(frac);
@@ -2255,7 +2247,7 @@ impl SpeedTestUI {
                 x: panel.x + 4.0,
                 y: gy - 5.0,
                 text: format!("{val:.0}"),
-                color: SURFACE2,
+                color: self.palette.surface2,
                 font_size: 9.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(42.0),
@@ -2281,7 +2273,7 @@ impl SpeedTestUI {
                     y1: y0,
                     x2: x1,
                     y2: y1,
-                    color: BLUE,
+                    color: self.palette.blue,
                     width: 2.0,
                 });
             }
@@ -2296,7 +2288,7 @@ impl SpeedTestUI {
                     x: lx - 8.0,
                     y: plot_y + plot_h + 4.0,
                     text: format!("{t:.0}s"),
-                    color: SURFACE2,
+                    color: self.palette.surface2,
                     font_size: 9.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
@@ -2310,7 +2302,7 @@ impl SpeedTestUI {
                 x: plot_x + (plot_w - w) / 2.0,
                 y: plot_y + plot_h / 2.0 - 5.0,
                 text: "No data yet".into(),
-                color: SURFACE2,
+                color: self.palette.surface2,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -2328,7 +2320,7 @@ impl SpeedTestUI {
             y: panel.y,
             width: panel.w,
             height: panel.h,
-            color: BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::all(8.0),
         });
         frame.push(RenderCommand::StrokeRect {
@@ -2336,7 +2328,7 @@ impl SpeedTestUI {
             y: panel.y,
             width: panel.w,
             height: panel.h,
-            color: SURFACE0,
+            color: self.palette.surface0,
             line_width: 1.0,
             corner_radii: CornerRadii::all(8.0),
         });
@@ -2350,7 +2342,7 @@ impl SpeedTestUI {
             x: panel.x + 12.0,
             y: panel.y + 8.0,
             text: format!("History ({})", self.history.len()),
-            color: TEXT_COLOR,
+            color: self.palette.text,
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some((panel.w - 24.0).max(0.0)),
@@ -2368,7 +2360,7 @@ impl SpeedTestUI {
                 x: panel.x + 12.0,
                 y: list.y + 10.0,
                 text: "Run a test to see results".into(),
-                color: SURFACE2,
+                color: self.palette.surface2,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some((panel.w - 24.0).max(0.0)),
@@ -2394,7 +2386,7 @@ impl SpeedTestUI {
                         y: ry,
                         width: (panel.w - 8.0).max(0.0),
                         height: HISTORY_ROW_HEIGHT,
-                        color: SURFACE0,
+                        color: self.palette.surface0,
                         corner_radii: CornerRadii::all(3.0),
                     });
                 }
@@ -2403,7 +2395,7 @@ impl SpeedTestUI {
                     x: panel.x + 12.0,
                     y: ry + 6.0,
                     text: result.summary_line(),
-                    color: SUBTEXT1,
+                    color: self.palette.subtext1,
                     font_size: 10.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some((panel.w - 24.0).max(0.0)),
@@ -2425,7 +2417,7 @@ impl SpeedTestUI {
                 y: list.bottom(),
                 width: panel.w,
                 height: HISTORY_STATS_HEIGHT,
-                color: MANTLE,
+                color: self.palette.mantle,
                 corner_radii: CornerRadii {
                     top_left: 0.0,
                     top_right: 0.0,
@@ -2442,7 +2434,7 @@ impl SpeedTestUI {
                     self.history.avg_upload(),
                     self.history.avg_latency(),
                 ),
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_size: 9.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some((panel.w - 16.0).max(0.0)),
@@ -2460,9 +2452,9 @@ impl SpeedTestUI {
             width: r.w,
             height: r.h,
             color: if self.export_button_hover {
-                SURFACE1
+                self.palette.surface1
             } else {
-                SURFACE0
+                self.palette.surface0
             },
             corner_radii: CornerRadii::all(4.0),
         });
@@ -2471,7 +2463,7 @@ impl SpeedTestUI {
             x: r.x + (r.w - label_w).max(0.0) / 2.0,
             y: r.y + (r.h - 11.0) / 2.0,
             text: "Export".into(),
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(r.w),
@@ -2509,6 +2501,11 @@ impl Default for SpeedTestUI {
 // ============================================================================
 
 impl App for SpeedTestUI {
+    /// Adopt the user's colours (§822).
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         "Network Speed Test".to_string()
     }
@@ -2607,6 +2604,28 @@ mod tests {
     )]
 
     use super::*;
+
+    /// Every colour the speed test draws comes from the user's palette.
+    #[test]
+    fn every_colour_the_speed_test_draws_comes_from_its_palette() {
+        for light in [false, true] {
+            let mut app = SpeedTestUI::new();
+            app.palette = Palette::for_mode(light);
+            let tree = App::render(&mut app, 900.0, 640.0);
+            assert!(
+                tree.commands.len() > 20,
+                "the sweep examined {} commands, which is not a render",
+                tree.commands.len()
+            );
+            appearance::palette_check::assert_drawn_from(
+                &app.palette,
+                &tree.commands,
+                &[],
+                &format!("speedtest (light={light})"),
+            );
+        }
+    }
+
     // Not in the production imports above, because nothing outside the tests
     // names a modifier set: the app reads `key.modifiers.ctrl` off the event it
     // was handed and never constructs one.

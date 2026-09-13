@@ -72643,3 +72643,75 @@ output differs and both halves of the code look right, stop re-reading the
 halves and ask which runs first. Moving one emission after a read was worth nine
 harness cases in `patch`; the emission and the read were both correct before and
 after.
+
+## 834. Selection is a change of colour, not of weight
+
+**Date:** 2026-09-12
+**Lane:** C
+**Decided by:** Operator (answering C-Q13; Claude recommended A and the operator took it, then corrected the thickness)
+
+**In short:** when you pick a row in a list, its outline turns blue-green. It
+does not also get thicker. The operator chose the "everything selected takes the
+accent" option and then rejected the part of the mock-up that drew the selected
+outline at double weight — colour alone carries it.
+
+**Why the thinner one is right, beyond taste.** A 2px outline on a 1px layout
+costs a pixel. A row that grows when selected shifts everything below it, so a
+list twitches as the selection travels down it, and a click target moves under
+the pointer between frames. Colour changes nothing about geometry.
+
+It is also one signal for one fact. Colour *and* weight says "selected" twice,
+which is the same objection as marking a link with colour alone was the opposite
+of — there the second signal was necessary because colour is not perceivable to
+everyone; here the outline is present either way and only its colour changes, so
+the weight adds nothing a reader could use.
+
+**The implementation already did this**, which is worth recording because it
+means the mock-up was wrong rather than the code. `Palette::push_surface_radii`
+has always stroked at `line_width: 1.0` for every `Surface`, selected or not.
+Only `scripts/contrast-explorer.html` drew selection at 2px, so the operator was
+rejecting a picture of a thing that was never built.
+
+**What this settles for the shell.** The 158 `gui/desktop` sites blocked on
+C-Q13 can now be converted: `Surface::Selected` is an accent outline, everywhere,
+at one pixel. The two shell tests that encode the older accent policy —
+`launcher::the_accent_marks_where_you_are_and_never_what_a_thing_is` and
+`clipboard_viewer::only_the_active_filter_tab_follows_the_accent` — are now
+superseded by an operator decision and should be rewritten to the new rule
+rather than preserved.
+
+## 835. Full-width strips stay filled, with a separator style offered beside it
+
+**Date:** 2026-09-12
+**Lane:** C
+**Decided by:** Operator (answering C-Q14; Claude recommended A, the operator chose B as the default and asked for A as an option)
+
+**In short:** a toolbar or a status bar keeps the pale band it has today. The
+alternative — no band, just a hairline along one edge — becomes something a user
+can switch on, rather than the default or a discarded idea.
+
+**Why B as the default.** A strip that spans the window reads as a band rather
+than as a box; window chrome is a different material from content, and it is
+reasonable for it to look like one. It is also what ships today, so 211 draw
+sites need no change to keep working.
+
+**Why A survives as an option rather than being dropped.** It is what most
+desktops do and it is the lighter treatment, and the cost of keeping it is one
+`Surface` member and one arm in the decision point — which is what that type
+exists for. Dropping it would mean the question gets re-asked the first time
+somebody finds the bands heavy.
+
+**The shape it takes.** `Surface::Strip` carries which edge faces the content,
+because a toolbar's separator sits along its bottom and a status bar's along its
+top, and the drawing code cannot infer that from the rectangle. A
+`StripStyle` setting chooses `Filled` or `Separator`. It is a separate setting
+from `SurfaceStyle` rather than a third variant of it, because the two are
+orthogonal: someone may want outlined boxes with banded chrome, or filled cards
+with hairline chrome, and folding them into one enum would offer four
+combinations as two.
+
+**What it costs, stated because it is the objection to A.** A third way of
+drawing a surface. `SurfacePaint` grows a `separator` field that is `None` for
+every other kind, and the tests that assert a box is "filled or outlined" have to
+learn a third answer. That is the price of the option and the operator took it
+knowingly.

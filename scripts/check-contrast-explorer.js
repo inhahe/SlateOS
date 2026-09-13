@@ -76,10 +76,19 @@ const probe = script + `
   render();
   globalThis.__bord = document.getElementById('fp').innerHTML.includes(MARK);
 
-  // The decided preset must exist and must be flat -- nothing shaded.
+  // The decided preset must carry the decided inks AND a real ladder.
+  //
+  // This used to assert the ladder was FLAT, which is how the bug got in: the
+  // preset set every rung to the page colour on the reasoning that borders fill
+  // nothing, and the cards column beside it then drew every box invisibly. The
+  // guard agreed with the defect because it had been written from the same
+  // wrong premise. A distinct s0/s1/s2 is what makes the comparison column show
+  // anything at all.
   const b = PRESETS.brd;
   globalThis.__brd = !!b && b.main === '#000000' && b.sec1 === b.acc &&
-                     b.ladder.s0 === b.ladder.s1;
+                     b.ladder.s0 !== b.ladder.s1 &&
+                     b.ladder.s1 !== b.ladder.s2 &&
+                     b.ladder.s0 !== b.page;
 
   // There must be a worked link example. The palette gives a link and a caption
   // one colour, so the underline is the only thing telling them apart -- a claim
@@ -237,7 +246,7 @@ if (!global.__ink) bad++;
 }
 console.log((global.__bord ? 'ok    ' : 'FAIL  ') + 'the border colour reaches the examples');
 if (!global.__bord) bad++;
-console.log((global.__brd ? 'ok    ' : 'FAIL  ') + 'the decided preset is present and flat');
+console.log((global.__brd ? 'ok    ' : 'FAIL  ') + 'the decided preset has the decided inks and a real ladder');
 if (!global.__brd) bad++;
 {
   const pl = global.__plan || {};

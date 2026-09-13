@@ -136,6 +136,25 @@ pub enum Surface {
     /// and a scrollbar trough would vanish. These were the sites a blind sweep
     /// would have converted and should not have.
     ControlTrack,
+    /// A full-width structural band: a toolbar, a status bar, a tab strip.
+    ///
+    /// Carries which edge faces the content, because a toolbar's separator sits
+    /// along its bottom and a status bar's along its top, and nothing about the
+    /// rectangle says which. Under [`StripStyle::Filled`] the edge is unused.
+    ///
+    /// Its own kind rather than a `Panel`, because a band spanning the window
+    /// reads as a band and not as a box -- outlining one looks like a box that
+    /// failed to fit, which is why almost no desktop does it. §835.
+    Strip(Edge),
+}
+
+/// Which edge of a strip faces the content it is separated from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Edge {
+    /// The separator runs along the top -- a status bar, content above it.
+    Top,
+    /// The separator runs along the bottom -- a toolbar, content below it.
+    Bottom,
 }
 
 /// The paint for one box: a fill, an outline, or both.
@@ -149,6 +168,11 @@ pub struct SurfacePaint {
     pub fill: Option<Color>,
     /// Outline, if this surface is outlined in the active theme.
     pub border: Option<Color>,
+    /// A hairline along one edge, if this surface is separated rather than
+    /// filled or boxed. `None` for every kind except [`Surface::Strip`] under
+    /// [`StripStyle::Separator`] -- which is the cost §835 records for keeping
+    /// that option.
+    pub separator: Option<(Edge, Color)>,
 }
 
 impl SurfacePaint {
@@ -158,6 +182,7 @@ impl SurfacePaint {
         Self {
             fill: None,
             border: None,
+            separator: None,
         }
     }
 }
@@ -175,40 +200,64 @@ impl Palette {
         match (self.surface_style, what) {
             // Borders: nothing is filled, structure is carried by the outline.
             (SurfaceStyle::Borders, Surface::Card | Surface::Sidebar) => SurfacePaint {
+                separator: None,
                 fill: None,
                 border: Some(self.border),
             },
             (SurfaceStyle::Borders, Surface::Selected) => SurfacePaint {
+                separator: None,
                 fill: None,
                 border: Some(self.accent),
             },
             // A panel already has a shadow and an edge; on the page, outlined.
             (SurfaceStyle::Borders, Surface::Panel) => SurfacePaint {
+                separator: None,
                 fill: Some(self.base),
                 border: Some(self.border),
             },
 
             // Cards: the shipped arrangement, kept as an optional theme.
             (SurfaceStyle::Cards, Surface::Card) => SurfacePaint {
+                separator: None,
                 fill: Some(self.surface0),
                 border: None,
             },
             (SurfaceStyle::Cards, Surface::Selected) => SurfacePaint {
+                separator: None,
                 fill: Some(self.surface1),
                 border: None,
             },
             (SurfaceStyle::Cards, Surface::Panel) => SurfacePaint {
+                separator: None,
                 fill: Some(self.mantle),
                 border: Some(self.surface1),
             },
             (SurfaceStyle::Cards, Surface::Sidebar) => SurfacePaint {
+                separator: None,
                 fill: Some(self.crust),
                 border: None,
+            },
+
+            // A strip answers to its own setting, not to the card/border one --
+            // the two are orthogonal (§835), so this arm ignores `surface_style`
+            // exactly as `ControlTrack` does.
+            (_, Surface::Strip(edge)) => match self.strip_style {
+                crate::StripStyle::Filled => SurfacePaint {
+                    separator: None,
+                    fill: Some(self.mantle),
+                    border: None,
+                },
+                crate::StripStyle::Separator => SurfacePaint {
+                    separator: Some((edge, self.border)),
+                    fill: None,
+                    border: None,
+                },
             },
 
             // Identical in both themes. Written as one arm rather than two so
             // that it cannot drift apart later.
             (_, Surface::ControlTrack) => SurfacePaint {
+                separator: None,
                 fill: Some(self.surface2),
                 border: None,
             },
@@ -262,6 +311,25 @@ impl Palette {
                 height,
                 color: fill,
                 corner_radii: radii,
+            });
+        }
+        if let Some((edge, colour)) = paint.separator {
+            // A hairline, not a box. Drawn as a fill rather than a stroke
+            // because a stroke of width 1 is centred on its path and would
+            // straddle the boundary; this sits wholly inside the rectangle, so
+            // a strip still occupies exactly the space it was given.
+            let line = 1.0_f32;
+            let y = match edge {
+                Edge::Top => y,
+                Edge::Bottom => y + (height - line).max(0.0),
+            };
+            out.emit(guitk::render::RenderCommand::FillRect {
+                x,
+                y,
+                width,
+                height: line.min(height),
+                color: colour,
+                corner_radii: CornerRadii::ZERO,
             });
         }
         if let Some(border) = paint.border {
@@ -541,6 +609,104 @@ mod tests {
             outlined * 10.0 < filled,
             "an outline of {outlined} px is not markedly cheaper than {filled} px filled"
         );
+    }
+
+    /// Selection changes colour and nothing else (§834).
+    ///
+    /// The operator took option A and then rejected the thickened outline the
+    /// mock-up drew: a 2px line on a 1px layout costs a pixel, so a row would
+    /// grow when chosen and a list would twitch as the selection travelled down
+    /// it. Colour changes no geometry.
+    #[test]
+    fn a_selected_box_differs_from_an_unselected_one_only_in_colour() {
+        use guitk::render::RenderCommand;
+        let p = styled(SurfaceStyle::Borders);
+        let widths = |what| {
+            let mut tree = RenderTree::new();
+            p.draw_surface(&mut tree, 0.0, 0.0, 100.0, 40.0, 4.0, what);
+            tree.commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::StrokeRect {
+                        line_width,
+                        x,
+                        y,
+                        width,
+                        height,
+                        ..
+                    } => Some((*line_width, *x, *y, *width, *height)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            widths(Surface::Selected),
+            widths(Surface::Card),
+            "a selected box is a different size or weight from an unselected one"
+        );
+        assert_ne!(
+            p.surface_paint(Surface::Selected).border,
+            p.surface_paint(Surface::Card).border,
+            "selection has to differ by colour, since it differs by nothing else"
+        );
+    }
+
+    /// A strip answers to its own setting, not the card/border one (§835).
+    #[test]
+    fn a_strip_follows_the_strip_setting_and_ignores_the_surface_one() {
+        for surface in [SurfaceStyle::Borders, SurfaceStyle::Cards] {
+            let mut filled = Palette::for_mode(true);
+            filled.surface_style = surface;
+            filled.strip_style = crate::StripStyle::Filled;
+            let paint = filled.surface_paint(Surface::Strip(Edge::Bottom));
+            assert_eq!(paint.fill, Some(filled.mantle), "under {surface:?}");
+            assert_eq!(paint.separator, None);
+
+            let mut lined = filled;
+            lined.strip_style = crate::StripStyle::Separator;
+            let paint = lined.surface_paint(Surface::Strip(Edge::Bottom));
+            assert_eq!(paint.fill, None, "a separated strip has no band");
+            assert_eq!(paint.separator, Some((Edge::Bottom, lined.border)));
+        }
+    }
+
+    /// The hairline sits inside the rectangle, on the edge asked for.
+    ///
+    /// Drawn as a fill rather than a stroke: a 1px stroke is centred on its
+    /// path and would straddle the boundary, so a strip would occupy a pixel
+    /// more than it was given and the content below it would shift.
+    #[test]
+    fn a_strips_separator_lands_on_the_edge_it_names() {
+        use guitk::render::RenderCommand;
+        let mut p = Palette::for_mode(true);
+        p.strip_style = crate::StripStyle::Separator;
+        for (edge, want_y) in [(Edge::Top, 20.0_f32), (Edge::Bottom, 20.0 + 40.0 - 1.0)] {
+            let mut tree = RenderTree::new();
+            p.draw_surface(
+                &mut tree,
+                10.0,
+                20.0,
+                100.0,
+                40.0,
+                0.0,
+                Surface::Strip(edge),
+            );
+            let line = tree
+                .commands
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::FillRect {
+                        x,
+                        y,
+                        width,
+                        height,
+                        ..
+                    } => Some((*x, *y, *width, *height)),
+                    _ => None,
+                })
+                .expect("a separated strip draws a line");
+            assert_eq!(line, (10.0, want_y, 100.0, 1.0), "{edge:?} landed wrong");
+        }
     }
 
     /// Borders is what a machine with no configuration gets.

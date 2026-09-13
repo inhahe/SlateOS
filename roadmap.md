@@ -1810,10 +1810,22 @@ Roadmap:
   style settings, all fourteen accents and any custom one. `subtext0`,
   `subtext1` and `link` are floored in the palette (546 sites, none touched);
   the dual-use roles stay as chosen and a text site asks `Palette::ink`.
-  **Still to land:** those 315 text sites (`gui/appearance/ink-text.py` does
-  the transformation) and the 29 shell tests that compare a text colour
-  against a raw role. Until they do, the dual-use roles behave exactly as they
-  do today, so nothing regresses in the meantime.
+  **Landed** across the shell (100 sites, 29 tests rewritten) and the apps
+  (309 sites). `ink-text.py --verify` confirms all 518 `ink()` call sites are
+  inside a `RenderCommand::Text`.
+
+  **Read the app half's green suite carefully, though.** The shell needed 29
+  test rewrites for 100 sites; the apps needed none for 309. That is not
+  because the app conversion was cleaner — it is because **18 of 143 app
+  crates assert a specific palette role at all**, against 25 of ~50 shell
+  modules, and *zero* apps use `appearance::palette_check`. A silent suite
+  over thin coverage is not a verdict. The evidence that the app sweep is
+  right is `--verify` and the diff, not the tests.
+
+  **Still open, and bigger than it looks:**
+  `TD-C-FORTY-NINE-COLOUR-METHODS-ARE-INVISIBLE-TO-THE-INK-SWEEP` — 108
+  methods return a themed `Color` and the sweep cannot see any of them,
+  because they name no role at the draw site.
 
   **One performance note for anyone touching the contrast path.** It runs
   inside the compositor's render loop — `Palette::from_settings` is called per

@@ -1571,15 +1571,23 @@ Roadmap:
   inside), and lets the caret keep the kerning it used to lose at the scroll
   boundary. Still outstanding there: the caret and hit testing, both of which
   want the per-line shaped cache first so there is somewhere to ask for cluster
-  positions. Wiring any of it to a user needs
-  `TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR` closed — the editor has no event loop,
-  which is how two auto-scroll functions came to be written, tested and never
-  called. Chasing that down found the gap is not the editor's: `guiremote`
-  encodes frames in one direction only and has no input events at all, the
-  compositor builds correctly-routed key and mouse events and then drops them
-  into a stub that comments where the IPC send would go, and of 142 app crates
-  138 depend on `guitk` while none depend on `guiremote`. Every app in the tree
-  is an unreachable model-plus-renderer for the same reason the editor is.
+  positions. Wiring any of it to a user needed
+  `TD-NO-APP-CONNECTS-TO-THE-COMPOSITOR`, **closed 2026-09-13** — when this was
+  written the editor had no event loop, which is how two auto-scroll functions
+  came to be written, tested and never called, and the gap turned out not to be
+  the editor's: `guiremote` encoded frames in one direction only and had no
+  input events at all, the compositor built correctly-routed key and mouse
+  events and dropped them into a stub, and of 142 app crates none depended on
+  `guiremote`. Every application in the tree was an unreachable
+  model-plus-renderer.
+
+  That is done. The protocol has both directions, the compositor has a wire
+  front end and a socket, `oswindow`'s strap is written once, and **135 of 143
+  app crates launch from `main`** — the other eight being three libraries with
+  no `main` and three command-line tools that correctly do not open a window.
+  The last two, `match3` and `pinball`, were wired on 2026-09-13. The figure in
+  that entry read "135 to go" until then, having stopped being updated while
+  the apps kept being converted; it is measured now rather than carried.
   The same end-to-end layout was then found
   in three more places — `RichTextView`, `SimpleTextView` and
   `apps/markdowneditor` — and cannot take the same fix, because their spans

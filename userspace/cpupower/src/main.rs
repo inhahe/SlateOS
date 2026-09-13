@@ -485,7 +485,45 @@ fn cmd_monitor(args: &[String]) {
 
 // ── turbostat personality ──────────────────────────────────────────────
 
+/// The first `-`-prefixed argument that is not in `known`, if any.
+///
+/// `known_with_value` names the options that consume the argument after them,
+/// so `-c 2` does not report `2` as an unknown option.
+///
+/// Only `-`-prefixed arguments are judged: these personalities take no
+/// positional arguments today, but refusing a bare word would be a wider
+/// change than the one being made. `--` ends option parsing.
+fn first_unknown_option<'a>(
+    args: &'a [String],
+    known: &[&str],
+    known_with_value: &[&str],
+) -> Option<&'a str> {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--" {
+            return None;
+        }
+        if !a.starts_with('-') || a == "-" {
+            continue;
+        }
+        let name = a.split_once('=').map_or(a.as_str(), |(k, _)| k);
+        if !known.contains(&name) && !known_with_value.contains(&name) {
+            return Some(a);
+        }
+        if known_with_value.contains(&name) && !a.contains('=') {
+            it.next();
+        }
+    }
+    None
+}
+
 fn run_turbostat(args: &[String]) {
+    // Looked only for `-i`, so `turbostat --zzq` printed a full statistics
+    // table and exited 0 -- a report produced without parsing the request.
+    if let Some(bad) = first_unknown_option(args, &["-h", "--help"], &["-i", "--interval"]) {
+        eprintln!("turbostat: unknown option: {bad}");
+        std::process::exit(1);
+    }
     let interval: u32 = args
         .iter()
         .position(|a| a == "-i" || a == "--interval")
@@ -572,6 +610,12 @@ fn run_cpufreq_info(args: Vec<String>) -> i32 {
         println!("Usage: cpufreq-info [-c cpu] [-e]");
         return 0;
     }
+    // `analyzing CPU 0:` and a full frequency report used to follow any
+    // argument at all, understood or not.
+    if let Some(bad) = first_unknown_option(&rest, &["-e", "-h", "--help"], &["-c"]) {
+        eprintln!("cpufreq-info: unknown option: {bad}");
+        return 1;
+    }
     cmd_frequency_info(&rest);
     0
 }
@@ -582,6 +626,16 @@ fn run_cpufreq_set(args: Vec<String>) -> i32 {
         println!("cpufreq-set — Set CPU frequency parameters");
         println!("Usage: cpufreq-set [-c cpu] [-g governor] [-d min] [-u max] [-f freq]");
         return 0;
+    }
+    // Not flagged by the sweep -- `cpufreq-set` needs privileges it does not
+    // have here and fails first -- but it has the same shape, and a setter
+    // that ignores an option it does not know is worse than a reporter that
+    // does.
+    if let Some(bad) =
+        first_unknown_option(&rest, &["-h", "--help"], &["-c", "-g", "-d", "-u", "-f"])
+    {
+        eprintln!("cpufreq-set: unknown option: {bad}");
+        return 1;
     }
     cmd_frequency_set(&rest);
     0
@@ -621,6 +675,38 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A report is not produced for a request that was not parsed.
+    ///
+    /// `cpufreq-info --zzq` printed "analyzing CPU 0:" and a full frequency
+    /// report; `turbostat --zzq` printed a statistics table. Both looked for
+    /// the options they wanted and ignored everything else.
+    #[test]
+    fn an_unknown_option_is_refused_before_the_report() {
+        let a = |v: &[&str]| -> Vec<String> { v.iter().map(|s| (*s).to_string()).collect() };
+
+        assert_eq!(
+            first_unknown_option(&a(&["--zzq"]), &["-e"], &["-c"]),
+            Some("--zzq")
+        );
+        // A value is not judged: without this, `-c 0` reports `0`.
+        assert_eq!(
+            first_unknown_option(&a(&["-c", "0"]), &["-e"], &["-c"]),
+            None
+        );
+        assert_eq!(first_unknown_option(&a(&["-c=0"]), &["-e"], &["-c"]), None);
+        assert_eq!(first_unknown_option(&a(&["-e"]), &["-e"], &["-c"]), None);
+        assert_eq!(
+            first_unknown_option(&a(&["--", "--zzq"]), &["-e"], &["-c"]),
+            None
+        );
+        assert_eq!(first_unknown_option(&a(&["-"]), &["-e"], &["-c"]), None);
+        // The first offender wins, even after a good option and its value.
+        assert_eq!(
+            first_unknown_option(&a(&["-c", "0", "--nope"]), &["-e"], &["-c"]),
+            Some("--nope")
+        );
+    }
 
     #[test]
     fn test_format_freq_khz() {

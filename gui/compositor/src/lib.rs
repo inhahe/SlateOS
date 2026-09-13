@@ -293,6 +293,21 @@ pub enum CompositorError {
     /// never fired would look exactly like a shell with no shortcut mechanism at
     /// all, which is the bug the mechanism exists to end.
     KeyAlreadyGrabbed(Key, Modifiers),
+    /// A modifier-only chord was claimed by one window and asked for by
+    /// another. The key-grab argument above applies unchanged.
+    ///
+    /// Separate from [`Self::KeyAlreadyGrabbed`] rather than reported with a
+    /// placeholder key, because there is no key: a message reading
+    /// "Alt+Shift+Unknown is taken" would send its reader looking for a
+    /// shortcut nobody registered.
+    ModifierChordAlreadyGrabbed(Modifiers),
+    /// A modifier chord was asked for with no modifiers in it.
+    ///
+    /// Refused rather than stored, because the predicate it describes — "fire
+    /// when nothing was held and nothing was pressed" — is one no key event can
+    /// ever satisfy. Stored, it would be a shortcut that silently never fires,
+    /// which is the failure this whole mechanism was built to end.
+    InvalidModifierChord,
 }
 
 impl std::fmt::Display for CompositorError {
@@ -328,20 +343,43 @@ impl std::fmt::Display for CompositorError {
             // reader of a log to guess which of a shell's dozen shortcuts lost.
             Self::KeyAlreadyGrabbed(key, modifiers) => {
                 write!(f, "key combination already grabbed: ")?;
-                for (held, name) in [
-                    (modifiers.ctrl, "Ctrl+"),
-                    (modifiers.alt, "Alt+"),
-                    (modifiers.shift, "Shift+"),
-                    (modifiers.super_key, "Super+"),
-                ] {
-                    if held {
-                        write!(f, "{name}")?;
-                    }
-                }
+                write_modifiers(f, *modifiers)?;
                 write!(f, "{key:?}")
+            }
+            Self::ModifierChordAlreadyGrabbed(modifiers) => {
+                write!(f, "modifier chord already grabbed: ")?;
+                // No trailing key to absorb the final `+`, so the last one is
+                // dropped: "Alt+Shift", not "Alt+Shift+".
+                let text = {
+                    let mut buf = String::new();
+                    write_modifiers(&mut buf, *modifiers)?;
+                    buf
+                };
+                write!(f, "{}", text.trim_end_matches('+'))
+            }
+            Self::InvalidModifierChord => {
+                write!(f, "a modifier chord must name at least one modifier")
             }
         }
     }
+}
+
+/// Write a modifier set as `Ctrl+Alt+Shift+`, in a fixed order.
+///
+/// Fixed so that two clients naming the same chord produce the same log line;
+/// trailing `+` so that a key name can follow directly.
+fn write_modifiers(f: &mut impl std::fmt::Write, modifiers: Modifiers) -> std::fmt::Result {
+    for (held, name) in [
+        (modifiers.ctrl, "Ctrl+"),
+        (modifiers.alt, "Alt+"),
+        (modifiers.shift, "Shift+"),
+        (modifiers.super_key, "Super+"),
+    ] {
+        if held {
+            write!(f, "{name}")?;
+        }
+    }
+    Ok(())
 }
 
 pub type CompositorResult<T> = Result<T, CompositorError>;
@@ -3144,6 +3182,19 @@ pub enum CompositorRequest {
         key: Key,
         modifiers: Modifiers,
     },
+    /// Claim a modifier-only chord. Privileged on the same argument as
+    /// [`GrabKey`](Self::GrabKey), and a separate request from it because it
+    /// is a separate predicate — see
+    /// [`guiremote::control::RequestBody::GrabModifierChord`].
+    GrabModifierChord {
+        window_id: WindowId,
+        modifiers: Modifiers,
+    },
+    /// Release a modifier-chord claim.
+    UngrabModifierChord {
+        window_id: WindowId,
+        modifiers: Modifiers,
+    },
 }
 
 /// Responses from the compositor to clients.
@@ -3238,6 +3289,23 @@ pub enum EventNotification {
         window_id: WindowId,
         group: SettingsGroup,
     },
+    /// A modifier-only chord — Alt+Shift, Ctrl+Shift — was performed, and this
+    /// window claimed it with
+    /// [`grab_modifier_chord`](Compositor::grab_modifier_chord).
+    ///
+    /// It carries no key and no `pressed` flag because there is no keystroke
+    /// to report: the gesture *is* that the modifiers went down and came back
+    /// up with nothing pressed in between. Reporting it as a `KeyEvent` on the
+    /// released modifier was the obvious alternative and is the trap this
+    /// variant exists to avoid — a client reading that could not tell the
+    /// gesture from an ordinary Shift release during Alt+Shift+Tab, which is
+    /// the precise confusion that left the layout switcher unbound.
+    ModifierChord {
+        window_id: WindowId,
+        /// Every modifier that was held. Sides are already collapsed: holding
+        /// the right-hand Alt means the same thing as the left.
+        modifiers: Modifiers,
+    },
 }
 
 impl EventNotification {
@@ -3255,7 +3323,9 @@ impl EventNotification {
             | Self::WindowResized { window_id, .. }
             | Self::FocusGained { window_id }
             | Self::FocusLost { window_id } => *window_id,
-            Self::SettingsChanged { window_id, .. } => *window_id,
+            Self::SettingsChanged { window_id, .. } | Self::ModifierChord { window_id, .. } => {
+                *window_id
+            }
         }
     }
 }
@@ -3324,6 +3394,10 @@ fn wire_event(n: EventNotification) -> guiremote::InputEvent {
         EventNotification::SettingsChanged { window_id, group } => {
             guiremote::InputEvent::new(window_id.0, ClientEvent::SettingsChanged { group })
         }
+        EventNotification::ModifierChord {
+            window_id,
+            modifiers,
+        } => guiremote::InputEvent::new(window_id.0, ClientEvent::ModifierChord { modifiers }),
     }
 }
 
@@ -4923,6 +4997,51 @@ pub struct Compositor {
     /// different Alt chords — a switcher on Alt+Tab and an accessibility tool on
     /// Alt+F7 — and both are waiting for the same physical key to come up.
     grabbed_modifiers: HashMap<u32, Vec<WindowId>>,
+    /// Modifier-only chords — Alt+Shift, Ctrl+Shift — and who claimed them.
+    ///
+    /// A separate table from [`Self::key_grabs`] because it answers a
+    /// different question over a different event. A key grab fires on the
+    /// **press** of a named key while a modifier set is held; this one fires
+    /// on the **release** of the modifiers themselves, and only if nothing was
+    /// pressed in between. Alt+Shift is expressible in the first table —
+    /// `Key::LeftShift` with `alt` — but it means "Shift went down while Alt
+    /// was held", which is the opening half of Alt+Shift+Tab. Binding the
+    /// layout switcher that way would fire it on every reverse Alt-Tab.
+    ///
+    /// Keyed by the modifier set, so Alt+Shift and Ctrl+Shift are distinct
+    /// claims and the side does not matter: the user who holds the right-hand
+    /// Alt means the same thing as the user who holds the left.
+    modifier_chord_grabs: HashMap<Modifiers, WindowId>,
+    /// The stretch of time with at least one modifier held, and whether
+    /// anything has happened during it that rules out a chord.
+    ///
+    /// See [`ModifierEpisode`]. Reset to nothing the moment the last modifier
+    /// comes up, so it can never carry a verdict from one gesture into the
+    /// next.
+    modifier_episode: ModifierEpisode,
+}
+
+/// One stretch of time with at least one modifier key held down.
+///
+/// A modifier-only chord — the Alt+Shift that switches keyboard layout on most
+/// desktops — is not a keystroke; it is the *absence* of one. The predicate is
+/// "these modifiers went down and came back up with nothing pressed in
+/// between", which cannot be evaluated at any single event and so needs this
+/// much state and no more.
+///
+/// `held` is a high-water mark rather than the live modifier set, because the
+/// question is asked on a release, by which time the live set has already lost
+/// the key being released. Alt down, Shift down, Shift up: the live set at that
+/// last event is `{alt}`, and what the user performed is `{alt, shift}`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ModifierEpisode {
+    /// Every modifier held at any point during this episode.
+    held: Modifiers,
+    /// Whether this episode can no longer produce a chord — because an
+    /// ordinary key or a mouse button intervened, or because it already fired
+    /// one. Both are the same fact from the episode's point of view: there is
+    /// nothing more to be got from it until every modifier is released.
+    spent: bool,
 }
 
 impl Compositor {
@@ -4975,6 +5094,8 @@ impl Compositor {
             key_grabs: HashMap::new(),
             grabbed_presses: HashMap::new(),
             grabbed_modifiers: HashMap::new(),
+            modifier_chord_grabs: HashMap::new(),
+            modifier_episode: ModifierEpisode::default(),
         })
     }
 
@@ -6833,6 +6954,12 @@ impl Compositor {
     fn handle_mouse_button(&mut self, button: MouseButton, pressed: bool, x: i32, y: i32) {
         self.cursor_x = x;
         self.cursor_y = y;
+        // A click while modifiers are held rules out a modifier-only chord,
+        // for the same reason a keystroke does: Ctrl+click is the user doing
+        // something with Ctrl, and letting go afterwards must not also switch
+        // the keyboard layout. Shift+click to extend a selection is the common
+        // case and would otherwise fire Alt+Shift's neighbour on every use.
+        self.modifier_episode.spent |= pressed;
 
         // Release ends any active drag.
         if !pressed && button == MouseButton::Left {
@@ -7205,6 +7332,64 @@ impl Compositor {
         self.started_at.elapsed().as_millis() as u64
     }
 
+    /// Advance the modifier-only chord state machine by one key event, and
+    /// deliver a chord if this event completed one.
+    ///
+    /// Called from [`dispatch_key`](Self::dispatch_key) immediately after the
+    /// modifier state is updated, so `self.modifiers` already reflects this
+    /// event.
+    ///
+    /// The chord is delivered **in addition to** the ordinary routing of the
+    /// release, never instead of it. Swallowing it would leave the focused
+    /// window holding a press with no matching release — believing Alt is
+    /// still down for the rest of the session — which is the stuck-modifier
+    /// bug `release_all_modifiers` exists to prevent, and is the same argument
+    /// that governs `grabbed_modifiers`.
+    fn advance_modifier_episode(&mut self, scancode: u32, pressed: bool) {
+        if !keymap::ModifierState::is_held_modifier(scancode) {
+            // An ordinary key — or Caps Lock, which is a latch rather than
+            // something held. Either way the user pressed something, so this
+            // episode is not the "nothing in between" the chord requires.
+            // Releases do not spend it: Alt down, T down, T up, Alt up was
+            // already ruled out by the T going down.
+            self.modifier_episode.spent |= pressed;
+            return;
+        }
+
+        if pressed {
+            let live = self.modifiers.modifiers();
+            let held = &mut self.modifier_episode.held;
+            held.ctrl |= live.ctrl;
+            held.alt |= live.alt;
+            held.shift |= live.shift;
+            held.super_key |= live.super_key;
+            return;
+        }
+
+        if !self.modifier_episode.spent {
+            if let Some(&window_id) = self.modifier_chord_grabs.get(&self.modifier_episode.held) {
+                self.pending_notifications
+                    .push_back(EventNotification::ModifierChord {
+                        window_id,
+                        modifiers: self.modifier_episode.held,
+                    });
+            }
+            // Spent whether or not anybody was listening, and spent on the
+            // *first* modifier to come up. A user lets go of Alt and Shift a
+            // few milliseconds apart; without this the second release would
+            // match the same high-water mark and switch the layout twice.
+            self.modifier_episode.spent = true;
+        }
+
+        if self.modifiers.modifiers() == Modifiers::default() {
+            // The last one is up. Nothing about this gesture may survive into
+            // the next: a verdict of "spent" that outlived its episode would
+            // silently disable the shortcut until the user pressed something
+            // unrelated.
+            self.modifier_episode = ModifierEpisode::default();
+        }
+    }
+
     fn dispatch_key(&mut self, scancode: u32, pressed: bool, character: Option<char>) {
         // Folded *before* the notification is built, so a client told about
         // Shift+A sees `shift: true`. Folding afterwards would report the state
@@ -7213,6 +7398,10 @@ impl Compositor {
         // tracking modifiers from these events would then be permanently one
         // event behind.
         self.modifiers.update(scancode, pressed);
+        // Before anything else looks at the keystroke, because a chord is
+        // decided by what *has not* happened and every path below this point
+        // is something happening.
+        self.advance_modifier_episode(scancode, pressed);
 
         // Sticky keys are consumed *before* the layout is consulted, because a
         // stuck Shift has to reach `Level`: reporting `shift: true` while
@@ -7468,6 +7657,82 @@ impl Compositor {
         }
     }
 
+    /// Claim a modifier-only chord — Alt+Shift, Ctrl+Shift — for a window.
+    ///
+    /// Delivers [`EventNotification::ModifierChord`] when those modifiers are
+    /// held and released with no other key or mouse button pressed in between.
+    /// This is a different predicate from [`grab_key`](Self::grab_key), which
+    /// is why it is a different call rather than a `grab_key` on a modifier:
+    /// `grab_key(LeftShift, alt)` fires on the *press* of Shift while Alt is
+    /// held, which is the first half of Alt+Shift+Tab.
+    ///
+    /// `modifiers` must name at least one modifier. An empty set would mean
+    /// "fire when nothing was held and nothing was pressed", which no key event
+    /// can satisfy — a grab that can never fire is a client bug worth
+    /// reporting rather than a table entry nobody will ever look at again.
+    ///
+    /// Unlike a key grab, the chord is delivered **in addition to** the
+    /// ordinary routing of the keystrokes that formed it. The focused window
+    /// still sees Alt and Shift go down and come up; withholding the releases
+    /// would leave it believing they were still held.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::WindowNotFound`] if the window does not exist.
+    /// [`CompositorError::ModifierChordAlreadyGrabbed`] if somebody else holds
+    /// this chord.
+    /// [`CompositorError::InvalidModifierChord`] if `modifiers` is empty.
+    pub fn grab_modifier_chord(
+        &mut self,
+        window_id: WindowId,
+        modifiers: Modifiers,
+    ) -> CompositorResult<()> {
+        if self.window_index(window_id).is_none() {
+            return Err(CompositorError::WindowNotFound(window_id));
+        }
+        if modifiers == Modifiers::default() {
+            return Err(CompositorError::InvalidModifierChord);
+        }
+        match self.modifier_chord_grabs.entry(modifiers) {
+            Entry::Occupied(held) if *held.get() != window_id => {
+                Err(CompositorError::ModifierChordAlreadyGrabbed(modifiers))
+            }
+            Entry::Occupied(_) => Ok(()),
+            Entry::Vacant(slot) => {
+                slot.insert(window_id);
+                Ok(())
+            }
+        }
+    }
+
+    /// Release a modifier chord claimed by
+    /// [`grab_modifier_chord`](Self::grab_modifier_chord).
+    ///
+    /// Releasing one this window does not hold is not an error, and releasing
+    /// one another window holds is refused — the same two rules
+    /// [`ungrab_key`](Self::ungrab_key) follows, and for the same reasons.
+    ///
+    /// # Errors
+    ///
+    /// [`CompositorError::ModifierChordAlreadyGrabbed`] if another window
+    /// holds it.
+    pub fn ungrab_modifier_chord(
+        &mut self,
+        window_id: WindowId,
+        modifiers: Modifiers,
+    ) -> CompositorResult<()> {
+        match self.modifier_chord_grabs.get(&modifiers) {
+            Some(&holder) if holder != window_id => {
+                Err(CompositorError::ModifierChordAlreadyGrabbed(modifiers))
+            }
+            Some(_) => {
+                self.modifier_chord_grabs.remove(&modifiers);
+                Ok(())
+            }
+            None => Ok(()),
+        }
+    }
+
     /// Release a chord claimed by [`grab_key`](Self::grab_key).
     ///
     /// Releasing one this window does not hold is **not** an error: a client
@@ -7511,6 +7776,8 @@ impl Compositor {
     /// same lifetime argument as a panel's edge reservation.
     pub fn release_grabs_of(&mut self, window_id: WindowId) {
         self.key_grabs.retain(|_, &mut holder| holder != window_id);
+        self.modifier_chord_grabs
+            .retain(|_, &mut holder| holder != window_id);
         // The in-flight presses go too, and here they must: the window that
         // would receive the release no longer exists. Their keys are simply
         // not delivered, which is right — a release is only meaningful to
@@ -8884,6 +9151,24 @@ impl Compositor {
                 key,
                 modifiers,
             } => match self.ungrab_key(window_id, key, modifiers) {
+                Ok(()) => CompositorResponse::Ok,
+                Err(e) => CompositorResponse::Error {
+                    message: e.to_string(),
+                },
+            },
+            CompositorRequest::GrabModifierChord {
+                window_id,
+                modifiers,
+            } => match self.grab_modifier_chord(window_id, modifiers) {
+                Ok(()) => CompositorResponse::Ok,
+                Err(e) => CompositorResponse::Error {
+                    message: e.to_string(),
+                },
+            },
+            CompositorRequest::UngrabModifierChord {
+                window_id,
+                modifiers,
+            } => match self.ungrab_modifier_chord(window_id, modifiers) {
                 Ok(()) => CompositorResponse::Ok,
                 Err(e) => CompositorResponse::Error {
                     message: e.to_string(),
@@ -10512,6 +10797,374 @@ mod tests {
                 .any(|(win, key, _, _)| *win == app && *key == Key::LeftAlt),
             "the modifier's own event should route normally"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Modifier-only chords
+    //
+    // Alt+Shift, the shape that switches keyboard layout on most desktops. It
+    // is the *absence* of a keystroke between the modifiers going down and
+    // coming back up, which is why it cannot be a key grab and why almost
+    // every test below is about something that must NOT fire.
+    // -----------------------------------------------------------------------
+
+    const ALT: u32 = 0x38;
+    const SHIFT: u32 = 0x2A;
+    const CTRL: u32 = 0x1D;
+    const TAB: u32 = 0x0F;
+    const CAPS: u32 = 0x3A;
+    const RIGHT_ALT: u32 = 0xE038;
+
+    /// Every modifier chord now pending, in order.
+    fn chords(comp: &mut Compositor) -> Vec<(WindowId, Modifiers)> {
+        comp.drain_notifications()
+            .into_iter()
+            .filter_map(|n| match n {
+                EventNotification::ModifierChord {
+                    window_id,
+                    modifiers,
+                } => Some((window_id, modifiers)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn alt_shift() -> Modifiers {
+        Modifiers {
+            alt: true,
+            shift: true,
+            ..Modifiers::default()
+        }
+    }
+
+    /// The gesture itself: two modifiers down, two modifiers up, nothing in
+    /// between. This is what the keyboard-layout switcher is bound to, and
+    /// what no amount of `grab_key` could express.
+    #[test]
+    fn alt_shift_pressed_and_released_cleanly_fires_the_chord() {
+        let (mut comp, shell, _app) = shell_and_app();
+        comp.grab_modifier_chord(shell, alt_shift()).unwrap();
+        comp.drain_notifications();
+
+        press(&mut comp, ALT);
+        press(&mut comp, SHIFT);
+        release(&mut comp, SHIFT);
+        release(&mut comp, ALT);
+
+        assert_eq!(
+            chords(&mut comp),
+            vec![(shell, alt_shift())],
+            "the layout switcher was never told the gesture happened"
+        );
+    }
+
+    /// The reason the whole mechanism exists. `grab_key(LeftShift, alt)` is
+    /// expressible and would fire here -- on the press of Shift while Alt is
+    /// held -- which is the opening half of Alt+Shift+Tab. Every reverse
+    /// window-switch would have changed the keyboard layout.
+    #[test]
+    fn alt_shift_tab_does_not_fire_the_chord() {
+        let (mut comp, shell, _app) = shell_and_app();
+        comp.grab_modifier_chord(shell, alt_shift()).unwrap();
+        comp.drain_notifications();
+
+        press(&mut comp, ALT);
+        press(&mut comp, SHIFT);
+        press(&mut comp, TAB);
+        release(&mut comp, TAB);
+        release(&mut comp, SHIFT);
+        release(&mut comp, ALT);
+
+        assert!(
+            chords(&mut comp).is_empty(),
+            "reverse Alt-Tab switched the keyboard layout"
+        );
+    }
+
+    /// A user lets go of Alt and Shift a few milliseconds apart, and both
+    /// releases see the same high-water mark. Firing on each would switch the
+    /// layout twice and land back where it started, which is indistinguishable
+    /// from the shortcut not working at all.
+    #[test]
+    fn a_chord_fires_once_however_many_modifiers_come_up() {
+        let (mut comp, shell, _app) = shell_and_app();
+        comp.grab_modifier_chord(shell, alt_shift()).unwrap();
+        comp.drain_notifications();
+
+        press(&mut comp, ALT);
+        press(&mut comp, SHIFT);
+        release(&mut comp, ALT);
+        release(&mut comp, SHIFT);
+
+        assert_eq!(
+            chords(&mut comp).len(),
+            1,
+            "the gesture fired more than once"
+        );
+    }
+
+    /// Two gestures in a row. The episode's verdict must not survive it: a
+    /// `spent` flag left set would disable the shortcut until the user
+    /// happened to press something unrelated.
+    #[test]
+    fn the_chord_fires_again_on_the_next_gesture() {
+        let (mut comp, shell, _app) = shell_and_app();
+        comp.grab_modifier_chord(shell, alt_shift()).unwrap();
+        comp.drain_notifications();
+
+        for _ in 0..2 {
+            press(&mut comp, ALT);
+            press(&mut comp, SHIFT);
+            release(&mut comp, SHIFT);
+            release(&mut comp, ALT);
+        }
+
+        assert_eq!(
+            chords(&mut comp).len(),
+            2,
+            "the second Alt+Shift did nothing: the first one's verdict leaked"
+        );
+    }
+
+    /// And a spent episode recovers only when the *last* modifier comes up.
+    /// Alt down, Tab, Tab up, Shift down, Shift up, Alt up is one continuous
+    /// hold with a keystroke in it, and is not a chord however it ends.
+    #[test]
+    fn an_episode_stays_spent_until_every_modifier_is_up() {
+        let (mut comp, shell, _app) = shell_and_app();
+        comp.grab_modifier_chord(shell, alt_shift()).unwrap();
+        comp.drain_notifications();
+
+        press(&mut comp, ALT);
+        press(&mut comp, TAB);
+        release(&mut comp, TAB);
+        press(&mut comp, SHIFT);
+        release(&mut comp, SHIFT);
+        release(&mut comp, ALT);
+
+        assert!(
+            chords(&mut comp).is_empty(),
+            "Alt+Tab followed by letting go of Alt+Shift switched the layout"
+        );
+    }
+
+    /// A chord is an observation, not a claim. Withholding the releases would
+    /// leave the focused window believing Alt and Shift were still held for
+    /// the rest of the session -- the stuck-modifier bug that
+    /// `release_all_modifiers` exists to prevent.
+    #[test]
+    fn a_chord_does_not_take_the_keystrokes_away_from_anyone() {
+        let (mut comp, shell, app) = shell_and_app();
+        comp.grab_modifier_chord(shell, alt_shift()).unwrap();
+        comp.drain_notifications();
+
+        press(&mut comp, ALT);
+        press(&mut comp, SHIFT);
+        release(&mut comp, SHIFT);
+        release(&mut comp, ALT);
+
+        let events = key_events(&mut comp);
+        for (key, pressed) in [
+            (Key::LeftAlt, true),
+            (Key::LeftShift, true),
+            (Key::LeftShift, false),
+            (Key::LeftAlt, false),
+        ] {
+            assert!(
+                events
+                    .iter()
+                    .any(|(win, k, p, _)| *win == app && *k == key && *p == pressed),
+                "the focused window never saw {key:?} pressed={pressed}: it now                  believes a modifier is held that is not"
+            );
+        }
+    }
+
+    /// Shift+click to extend a selection, then letting go. A mouse button is
+    /// as much "the user did something with those modifiers" as a keystroke,
+    /// and this is the commonest way to hold Shift on a desktop.
+    #[test]
+    fn a_click_while_the_modifiers_are_held_rules_out_the_chord() {
+        let (mut comp, shell, _app) = shell_and_app();
+        comp.grab_modifier_chord(shell, alt_shift()).unwrap();
+        comp.drain_notifications();
+
+        press(&mut comp, ALT);
+        press(&mut comp, SHIFT);
+        comp.handle_input(InputEvent::MouseButton {
+            button: MouseButton::Left,
+            pressed: true,
+            x: 100,
+            y: 100,
+        });
+        comp.handle_input(InputEvent::MouseButton {
+            button: MouseButton::Left,
+            pressed: false,
+            x: 100,
+            y: 100,
+        });
+        release(&mut comp, SHIFT);
+        release(&mut comp, ALT);
+
+        assert!(
+            chords(&mut comp).is_empty(),
+            "an Alt+Shift+click switched the keyboard layout on release"
+        );
+    }
+
+    /// Caps Lock is a latch, not something held. `is_modifier` counts it and
+    /// `is_held_modifier` does not, which is the whole reason the second one
+    /// exists: counted as held, it would neither spend the episode nor join
+    /// the chord, and Alt+Caps+Shift would switch the layout.
+    #[test]
+    fn caps_lock_between_the_modifiers_rules_out_the_chord() {
+        let (mut comp, shell, _app) = shell_and_app();
+        comp.grab_modifier_chord(shell, alt_shift()).unwrap();
+        comp.drain_notifications();
+
+        press(&mut comp, ALT);
+        press(&mut comp, SHIFT);
+        press(&mut comp, CAPS);
+        release(&mut comp, CAPS);
+        release(&mut comp, SHIFT);
+        release(&mut comp, ALT);
+
+        assert!(
+            chords(&mut comp).is_empty(),
+            "turning Caps Lock on mid-gesture also switched the layout"
+        );
+    }
+
+    /// Sides are collapsed, as they are everywhere else a client sees
+    /// modifiers: the user holding the right-hand Alt means what the user
+    /// holding the left one means.
+    #[test]
+    fn either_hands_alt_performs_the_same_chord() {
+        let (mut comp, shell, _app) = shell_and_app();
+        comp.grab_modifier_chord(shell, alt_shift()).unwrap();
+        comp.drain_notifications();
+
+        press(&mut comp, RIGHT_ALT);
+        press(&mut comp, SHIFT);
+        release(&mut comp, SHIFT);
+        release(&mut comp, RIGHT_ALT);
+
+        assert_eq!(
+            chords(&mut comp),
+            vec![(shell, alt_shift())],
+            "the right-hand Alt did not count"
+        );
+    }
+
+    /// Two different claims, and a gesture matches exactly one. The user who
+    /// chose Ctrl+Shift in Settings must not also get a layout change from
+    /// Alt+Shift, which they may well be using for something else.
+    #[test]
+    fn ctrl_shift_and_alt_shift_are_different_claims() {
+        let (mut comp, shell, _app) = shell_and_app();
+        comp.grab_modifier_chord(
+            shell,
+            Modifiers {
+                ctrl: true,
+                shift: true,
+                ..Modifiers::default()
+            },
+        )
+        .unwrap();
+        comp.drain_notifications();
+
+        press(&mut comp, ALT);
+        press(&mut comp, SHIFT);
+        release(&mut comp, SHIFT);
+        release(&mut comp, ALT);
+        assert!(
+            chords(&mut comp).is_empty(),
+            "Alt+Shift fired a grab that was placed on Ctrl+Shift"
+        );
+
+        press(&mut comp, CTRL);
+        press(&mut comp, SHIFT);
+        release(&mut comp, SHIFT);
+        release(&mut comp, CTRL);
+        assert_eq!(chords(&mut comp).len(), 1, "Ctrl+Shift did not fire");
+    }
+
+    /// Nobody claimed it, so nothing happens -- and in particular the episode
+    /// machinery does not manufacture an event addressed to a window that
+    /// never asked.
+    #[test]
+    fn an_unclaimed_chord_fires_nothing() {
+        let (mut comp, _shell, _app) = shell_and_app();
+        comp.drain_notifications();
+
+        press(&mut comp, ALT);
+        press(&mut comp, SHIFT);
+        release(&mut comp, SHIFT);
+        release(&mut comp, ALT);
+
+        assert!(chords(&mut comp).is_empty());
+    }
+
+    /// A chord of nothing describes a predicate no key event can satisfy.
+    /// Stored, it would be a shortcut that silently never fires, which is
+    /// exactly the failure this mechanism was built to end.
+    #[test]
+    fn a_chord_must_name_at_least_one_modifier() {
+        let (mut comp, shell, _app) = shell_and_app();
+        assert!(matches!(
+            comp.grab_modifier_chord(shell, Modifiers::default()),
+            Err(CompositorError::InvalidModifierChord)
+        ));
+    }
+
+    /// First grabber wins, and the loser is told -- a second shell whose
+    /// layout switcher quietly never fired would look exactly like a shell
+    /// with no shortcut mechanism at all.
+    #[test]
+    fn a_chord_claimed_twice_is_refused_the_second_time() {
+        let (mut comp, shell, app) = shell_and_app();
+        comp.grab_modifier_chord(shell, alt_shift()).unwrap();
+        assert!(
+            comp.grab_modifier_chord(shell, alt_shift()).is_ok(),
+            "re-grabbing your own chord is what a shell does when it re-reads              its configuration"
+        );
+        let err = comp.grab_modifier_chord(app, alt_shift());
+        assert!(matches!(
+            err,
+            Err(CompositorError::ModifierChordAlreadyGrabbed(m)) if m == alt_shift()
+        ));
+    }
+
+    /// The claim's lifetime is the window's, as it is for a key grab: a shell
+    /// that died must not hold Alt+Shift for the rest of the session with
+    /// nothing left on screen able to release it.
+    #[test]
+    fn closing_a_window_releases_the_chords_it_held() {
+        let (mut comp, shell, app) = shell_and_app();
+        comp.grab_modifier_chord(shell, alt_shift()).unwrap();
+        comp.destroy_window(shell).unwrap();
+        assert!(
+            comp.grab_modifier_chord(app, alt_shift()).is_ok(),
+            "the dead shell still holds the layout shortcut"
+        );
+    }
+
+    /// Giving it back makes it available again, and taking one you never held
+    /// is not an error -- a shell tearing down should not have to remember
+    /// precisely what it took.
+    #[test]
+    fn a_released_chord_can_be_claimed_by_somebody_else() {
+        let (mut comp, shell, app) = shell_and_app();
+        assert!(
+            comp.ungrab_modifier_chord(shell, alt_shift()).is_ok(),
+            "releasing a chord nobody holds should be quietly fine"
+        );
+        comp.grab_modifier_chord(shell, alt_shift()).unwrap();
+        assert!(
+            comp.ungrab_modifier_chord(app, alt_shift()).is_err(),
+            "any client could strip the shell of its shortcut"
+        );
+        comp.ungrab_modifier_chord(shell, alt_shift()).unwrap();
+        comp.grab_modifier_chord(app, alt_shift()).unwrap();
     }
 
     /// A grab is on a *chord*. Taking Alt+Tab must not take Tab, or grabbing the

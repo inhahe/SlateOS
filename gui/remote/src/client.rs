@@ -560,6 +560,51 @@ impl<T: Transport> Connection<T> {
         })
     }
 
+    /// Claim a modifier-only chord — Alt+Shift, Ctrl+Shift.
+    ///
+    /// Fires when those modifiers are held and released with **nothing pressed
+    /// in between**, which is what "Alt+Shift switches the keyboard layout"
+    /// means on every desktop that offers it. Delivered as
+    /// [`Event::ModifierChord`](guitk::event::Event::ModifierChord).
+    ///
+    /// Not expressible as [`grab_key`](Self::grab_key), which is why this
+    /// exists: `grab_key(Key::LeftShift, alt)` is accepted and fires on the
+    /// *press* of Shift while Alt is held — the opening half of Alt+Shift+Tab
+    /// — so a layout switcher bound that way would fire on every reverse
+    /// Alt-Tab.
+    ///
+    /// Unlike a key grab, this does **not** take the keystrokes away from
+    /// anyone: the focused window still sees Alt and Shift go down and come up.
+    /// A chord is an observation about a gesture, not a claim on its keys.
+    ///
+    /// # Errors
+    ///
+    /// As [`grab_key`](Self::grab_key), plus a refusal if `modifiers` is empty
+    /// — a chord of nothing could never fire.
+    pub fn grab_modifier_chord(
+        &mut self,
+        window: u64,
+        modifiers: Modifiers,
+    ) -> Result<(), ClientError<T::Error>> {
+        self.confirm(RequestBody::GrabModifierChord { window, modifiers })
+    }
+
+    /// Give a modifier chord back.
+    ///
+    /// Releasing one this window never held is not an error, on
+    /// [`ungrab_key`](Self::ungrab_key)'s reasoning.
+    ///
+    /// # Errors
+    ///
+    /// As [`grab_modifier_chord`](Self::grab_modifier_chord).
+    pub fn ungrab_modifier_chord(
+        &mut self,
+        window: u64,
+        modifiers: Modifiers,
+    ) -> Result<(), ClientError<T::Error>> {
+        self.confirm(RequestBody::UngrabModifierChord { window, modifiers })
+    }
+
     /// Take the oldest queued input event, if any.
     pub fn next_event(&mut self) -> Option<InputEvent> {
         self.events.pop_front()

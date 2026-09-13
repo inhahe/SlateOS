@@ -96,7 +96,13 @@ pub const RESPONSE_MAGIC: [u8; 4] = *b"CRSP";
 /// same reason 3 did, and worse: the new field's own length prefix would be
 /// read by a version-3 decoder as the window's *width*, so the failure is not a
 /// wrong flag but a window several hundred million pixels across.
-pub const CONTROL_VERSION: u8 = 10;
+/// **11** — the request vocabulary gained
+/// [`RequestBody::GrabModifierChord`] and
+/// [`RequestBody::UngrabModifierChord`] (tags `0x1F`/`0x20`), which claim the
+/// Alt+Shift shape that cycles keyboard layouts. Incompatible on exactly the
+/// terms 2 set out: no existing message moves a byte, but an unknown tag stops
+/// the decoder, so a version-10 compositor handed one fails the whole frame.
+pub const CONTROL_VERSION: u8 = 11;
 
 /// Control-frame header: magic + version + flags + message count.
 const CONTROL_HEADER_LEN: usize = 4 + 1 + 1 + 4;
@@ -1228,6 +1234,43 @@ pub enum RequestBody {
         key: Key,
         modifiers: Modifiers,
     },
+    /// Claim a **modifier-only chord**: fire when these modifiers are held and
+    /// released with nothing pressed in between.
+    ///
+    /// This is Alt+Shift and Ctrl+Shift, the shape most desktops use to cycle
+    /// keyboard layouts, and it is a different request from
+    /// [`GrabKey`](Self::GrabKey) rather than a `GrabKey` on a modifier key
+    /// because it is a different predicate. `GrabKey { key: LeftShift,
+    /// modifiers: alt }` is expressible and fires on the *press* of Shift
+    /// while Alt is held — the opening half of Alt+Shift+Tab — so a layout
+    /// switcher bound that way would fire on every reverse Alt-Tab. Keeping
+    /// the two as separate requests is what stops them being confused at the
+    /// call site.
+    ///
+    /// Answered with [`EventTag::ModifierChord`](crate::input) on the wire;
+    /// the client sees `guitk::event::Event::ModifierChord`. Unlike a key
+    /// grab, delivery is **in addition to** the ordinary routing of the
+    /// keystrokes: the focused window still sees Alt and Shift go down and come
+    /// up, because withholding a release leaves it believing the key is held.
+    ///
+    /// `modifiers` must name at least one modifier; an empty set is refused.
+    ///
+    /// **Privileged**, via `ClientLink::require_shell`, on the same argument as
+    /// [`GrabKey`](Self::GrabKey): a chord is a global shortcut.
+    ///
+    /// Answered with [`ResponseBody::Ok`], or an error naming the conflict.
+    GrabModifierChord { window: u64, modifiers: Modifiers },
+    /// Release a claim made by
+    /// [`GrabModifierChord`](Self::GrabModifierChord).
+    ///
+    /// Releasing one this window does not hold is not an error; releasing one
+    /// another window holds is refused. Both rules are
+    /// [`UngrabKey`](Self::UngrabKey)'s, for its reasons.
+    ///
+    /// **Privileged**, via `ClientLink::require_shell`.
+    ///
+    /// Answered with [`ResponseBody::Ok`].
+    UngrabModifierChord { window: u64, modifiers: Modifiers },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1263,6 +1306,8 @@ enum RequestTag {
     ShellSetStackTier = 0x1C,
     ShellSetSizeLimits = 0x1D,
     ShellSetWindowPolicy = 0x1E,
+    GrabModifierChord = 0x1F,
+    UngrabModifierChord = 0x20,
 }
 
 impl RequestTag {
@@ -1298,6 +1343,8 @@ impl RequestTag {
             0x1C => Self::ShellSetStackTier,
             0x1D => Self::ShellSetSizeLimits,
             0x1E => Self::ShellSetWindowPolicy,
+            0x1F => Self::GrabModifierChord,
+            0x20 => Self::UngrabModifierChord,
             _ => return None,
         })
     }
@@ -1646,6 +1693,16 @@ fn encode_request_body(out: &mut Vec<u8>, body: &RequestBody) {
             out.push(RequestTag::GrabKey as u8);
             write_u64(out, *window);
             crate::input::encode_key(out, *key);
+            out.push(crate::input::encode_modifiers(*modifiers));
+        }
+        RequestBody::GrabModifierChord { window, modifiers } => {
+            out.push(RequestTag::GrabModifierChord as u8);
+            write_u64(out, *window);
+            out.push(crate::input::encode_modifiers(*modifiers));
+        }
+        RequestBody::UngrabModifierChord { window, modifiers } => {
+            out.push(RequestTag::UngrabModifierChord as u8);
+            write_u64(out, *window);
             out.push(crate::input::encode_modifiers(*modifiers));
         }
         RequestBody::UngrabKey {
@@ -2025,6 +2082,14 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
                 modifiers,
             }
         }
+        RequestTag::GrabModifierChord => RequestBody::GrabModifierChord {
+            window: r.read_u64()?,
+            modifiers: crate::input::decode_modifiers(r.read_u8()?)?,
+        },
+        RequestTag::UngrabModifierChord => RequestBody::UngrabModifierChord {
+            window: r.read_u64()?,
+            modifiers: crate::input::decode_modifiers(r.read_u8()?)?,
+        },
         RequestTag::UngrabKey => {
             let window = r.read_u64()?;
             let key = crate::input::decode_key(r)?;
@@ -2406,8 +2471,18 @@ mod tests {
         );
         assert_eq!(
             RequestTag::from_byte(0x1F),
+            Some(RequestTag::GrabModifierChord),
+            "0x1F was taken by GrabModifierChord in control version 11"
+        );
+        assert_eq!(
+            RequestTag::from_byte(0x20),
+            Some(RequestTag::UngrabModifierChord),
+            "0x20 was taken by UngrabModifierChord in control version 11"
+        );
+        assert_eq!(
+            RequestTag::from_byte(0x21),
             None,
-            "0x1F is the next free tag"
+            "0x21 is the next free tag"
         );
     }
 

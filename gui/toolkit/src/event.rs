@@ -50,6 +50,19 @@ pub enum Event {
     /// It names the group so that a program which reads one file does not have
     /// to re-read all of them. See [`SettingsGroup`].
     SettingsChanged { group: SettingsGroup },
+    /// A modifier-only chord the program claimed was performed: the listed
+    /// modifiers went down and came back up with nothing pressed in between.
+    ///
+    /// This is Alt+Shift and Ctrl+Shift, the shape most desktops use to cycle
+    /// keyboard layouts. It is *not* a `Key` event and deliberately cannot be
+    /// written as one: `Key::LeftShift` with `alt` held means "Shift went down
+    /// while Alt was held", which is the opening half of Alt+Shift+Tab, and
+    /// binding a layout switcher to that fires it on every reverse Alt-Tab.
+    ///
+    /// Arrives only to a window that asked for this exact chord, and carries no
+    /// `pressed` flag because the gesture is already over by the time it is
+    /// recognised — there is nothing to match a press against.
+    ModifierChord { modifiers: Modifiers },
 }
 
 /// Which settings group a [`Event::SettingsChanged`] is about.

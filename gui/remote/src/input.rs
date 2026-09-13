@@ -67,7 +67,13 @@ pub const INPUT_MAGIC: [u8; 4] = *b"INPT";
 /// `DecodeError::BadEventTag`, which fails the *whole frame*, so a version-2
 /// peer handed one of these would drop the input batch it arrived in rather
 /// than ignore an event it did not know.
-pub const INPUT_VERSION: u8 = 3;
+///
+/// **4** — the event table gained [`Event::ModifierChord`] (tag `0x0B`), the
+/// Alt+Shift shape that cycles keyboard layouts. Incompatible on exactly the
+/// terms 3 set out, and recorded here rather than waved through as "one more
+/// tag": the rule established above is that a vocabulary change *is* a version
+/// change, and the first exception to it would make the version meaningless.
+pub const INPUT_VERSION: u8 = 4;
 
 /// Input-frame header: magic + version + flags + event count.
 const INPUT_HEADER_LEN: usize = 4 + 1 + 1 + 4;
@@ -150,6 +156,7 @@ enum EventTag {
     ScaleChanged = 0x08,
     Moved = 0x09,
     SettingsChanged = 0x0A,
+    ModifierChord = 0x0B,
 }
 
 impl EventTag {
@@ -165,6 +172,7 @@ impl EventTag {
             0x08 => Some(Self::ScaleChanged),
             0x09 => Some(Self::Moved),
             0x0A => Some(Self::SettingsChanged),
+            0x0B => Some(Self::ModifierChord),
             _ => None,
         }
     }
@@ -373,6 +381,10 @@ fn encode_event(out: &mut Vec<u8>, ev: &InputEvent) {
                 SettingsGroup::Appearance => GROUP_APPEARANCE,
                 SettingsGroup::Input => GROUP_INPUT,
             });
+        }
+        Event::ModifierChord { modifiers } => {
+            out.push(EventTag::ModifierChord as u8);
+            out.push(encode_modifiers(*modifiers));
         }
         Event::Moved { x, y } => {
             out.push(EventTag::Moved as u8);
@@ -591,6 +603,12 @@ fn decode_event(r: &mut Reader<'_>) -> Result<InputEvent, DecodeError> {
             };
             (Event::SettingsChanged { group }, None)
         }
+        EventTag::ModifierChord => (
+            Event::ModifierChord {
+                modifiers: decode_modifiers(r.read_u8()?)?,
+            },
+            None,
+        ),
         EventTag::Moved => (
             Event::Moved {
                 x: r.read_u32()?.cast_signed(),
@@ -760,10 +778,42 @@ mod tests {
             Event::SettingsChanged {
                 group: SettingsGroup::Input,
             },
+            Event::ModifierChord {
+                modifiers: Modifiers {
+                    alt: true,
+                    shift: true,
+                    ..Modifiers::default()
+                },
+            },
         ]
         .into_iter()
         .map(|e| InputEvent::new(9, e))
         .collect();
+        assert_eq!(roundtrip(&events), events);
+    }
+
+    /// A chord carries its modifiers and nothing else, so the one thing that
+    /// can go wrong on the wire is those modifiers arriving as a different
+    /// set. Every set, not a sample: the encoding is a bit field, and a bit
+    /// written into the wrong position round-trips perfectly for the one
+    /// combination anybody thought to test.
+    #[test]
+    fn every_modifier_set_survives_a_chord_round_trip() {
+        let events: Vec<_> = (0..16u8)
+            .map(|bits| {
+                InputEvent::new(
+                    1,
+                    Event::ModifierChord {
+                        modifiers: Modifiers {
+                            shift: bits & 1 != 0,
+                            ctrl: bits & 2 != 0,
+                            alt: bits & 4 != 0,
+                            super_key: bits & 8 != 0,
+                        },
+                    },
+                )
+            })
+            .collect();
         assert_eq!(roundtrip(&events), events);
     }
 

@@ -591,6 +591,25 @@ fn to_compositor_request(
                 modifiers,
             }
         }
+        // Same two gates as `GrabKey`, in the same order and for the same
+        // reasons: a modifier chord is a global shortcut, so claiming one is
+        // privileged, and the window named is the sender's own.
+        RequestBody::GrabModifierChord { window, modifiers } => {
+            let window_id = link.resolve(window)?;
+            link.require_shell()?;
+            CompositorRequest::GrabModifierChord {
+                window_id,
+                modifiers,
+            }
+        }
+        RequestBody::UngrabModifierChord { window, modifiers } => {
+            let window_id = link.resolve(window)?;
+            link.require_shell()?;
+            CompositorRequest::UngrabModifierChord {
+                window_id,
+                modifiers,
+            }
+        }
         RequestBody::SetWindowWorkspace { window, workspace } => {
             link.require_shell()?;
             CompositorRequest::SetWindowWorkspace {

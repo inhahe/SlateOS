@@ -549,6 +549,19 @@ impl ModifierState {
     pub const fn is_modifier(scancode: u32) -> bool {
         modifier_of(scancode).is_some() || scancode == 0x3A
     }
+
+    /// Whether this scancode is a modifier the user *holds*.
+    ///
+    /// Narrower than [`Self::is_modifier`] by exactly one key: Caps Lock is a
+    /// latch, not something held down, so it belongs with the ordinary keys
+    /// for any question of the form "was anything pressed while those two were
+    /// down?". A modifier-only chord asks precisely that question, and
+    /// counting Caps Lock as held would make Alt+Caps+Shift fire the layout
+    /// switcher.
+    #[must_use]
+    pub const fn is_held_modifier(scancode: u32) -> bool {
+        modifier_of(scancode).is_some()
+    }
 }
 
 #[cfg(test)]

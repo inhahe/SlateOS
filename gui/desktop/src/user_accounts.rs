@@ -902,7 +902,7 @@ impl AccountSettingsUI {
                 y: tab_y + 6.0,
                 text: tab.display_name().to_string(),
                 font_size: 12.0,
-                color: if is_active { p.accent } else { p.subtext0 },
+                color: if is_active { p.ink(p.accent) } else { p.subtext0 },
                 font_weight: if is_active {
                     FontWeightHint::Bold
                 } else {
@@ -962,7 +962,7 @@ impl AccountSettingsUI {
                 y: y + height - 28.0,
                 text: msg.clone(),
                 font_size: 11.0,
-                color: p.yellow,
+                color: p.ink(p.yellow),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 48.0),
                 overflow: TextOverflow::Ellipsis,

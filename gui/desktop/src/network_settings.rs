@@ -1178,7 +1178,7 @@ impl NetworkSettingsUI {
                 y: tab_y + 8.0,
                 text: label.to_string(),
                 font_size: 13.0,
-                color: if is_active { p.accent } else { p.subtext0 },
+                color: if is_active { p.ink(p.accent) } else { p.subtext0 },
                 font_weight: if is_active {
                     FontWeightHint::Bold
                 } else {
@@ -1536,7 +1536,7 @@ impl NetworkSettingsUI {
                     y: row_y + 8.0,
                     text: net.ssid.clone(),
                     font_size: 13.0,
-                    color: if net.is_connected { p.green } else { p.text },
+                    color: if net.is_connected { p.ink(p.green) } else { p.text },
                     font_weight: if net.is_connected {
                         FontWeightHint::Bold
                     } else {
@@ -1570,7 +1570,7 @@ impl NetworkSettingsUI {
                         y: row_y + 12.0,
                         text: "Connected".to_string(),
                         font_size: 11.0,
-                        color: p.green,
+                        color: p.ink(p.green),
                         font_weight: FontWeightHint::Bold,
                         max_width: None,
                         overflow: TextOverflow::Clip,
@@ -1645,7 +1645,7 @@ impl NetworkSettingsUI {
                 y: row_y + 10.0,
                 text: "Forget".to_string(),
                 font_size: 11.0,
-                color: p.red,
+                color: p.ink(p.red),
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,

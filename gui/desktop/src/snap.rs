@@ -677,7 +677,7 @@ impl SnapManager {
             // Kept as a hue rather than promoted to the accent: the title is
             // decoration on a panel, and an accented title would compete with
             // the accented thumbnail below it that actually means something.
-            color: p.lavender,
+            color: p.ink(p.lavender),
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(PICKER_WIDTH - 2.0 * PICKER_PADDING),

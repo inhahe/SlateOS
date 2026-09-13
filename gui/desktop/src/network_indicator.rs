@@ -666,7 +666,7 @@ impl NetworkIndicator {
                     y: cy + 4.0,
                     text: format!("{}{}{}", net.ssid, connected_marker, saved_marker),
                     font_size: 13.0,
-                    color: if net.connected { p.accent } else { p.text },
+                    color: if net.connected { p.ink(p.accent) } else { p.text },
                     font_weight: if net.connected {
                         FontWeightHint::Bold
                     } else {

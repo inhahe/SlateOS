@@ -662,7 +662,7 @@ impl DateTimeSettingsUI {
             y: cy,
             text: "Taskbar Clock".into(),
             font_size: 15.0,
-            color: p.lavender,
+            color: p.ink(p.lavender),
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -808,7 +808,7 @@ impl DateTimeSettingsUI {
                 y: cy + 4.0,
                 text: format!("{} — {}", tz.city, tz.display_name),
                 font_size: 13.0,
-                color: if is_current { p.accent } else { p.text },
+                color: if is_current { p.ink(p.accent) } else { p.text },
                 font_weight: if is_current {
                     FontWeightHint::Bold
                 } else {
@@ -840,7 +840,7 @@ impl DateTimeSettingsUI {
                     y: cy + 20.0,
                     text: "DST".into(),
                     font_size: 10.0,
-                    color: p.yellow,
+                    color: p.ink(p.yellow),
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(40.0),
                     overflow: TextOverflow::Ellipsis,
@@ -867,7 +867,7 @@ impl DateTimeSettingsUI {
             y: cy,
             text: "Time Synchronization".into(),
             font_size: 15.0,
-            color: p.lavender,
+            color: p.ink(p.lavender),
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -946,7 +946,7 @@ impl DateTimeSettingsUI {
             y: cy,
             text: "NTP Servers".into(),
             font_size: 15.0,
-            color: p.lavender,
+            color: p.ink(p.lavender),
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -984,7 +984,7 @@ impl DateTimeSettingsUI {
             y: cy,
             text: "Additional Clocks".into(),
             font_size: 15.0,
-            color: p.lavender,
+            color: p.ink(p.lavender),
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -2217,7 +2217,7 @@ mod tests {
                      test proves nothing ({what})"
                 );
                 for (i, badge) in badges.iter().enumerate() {
-                    assert_eq!(*badge, p.yellow, "DST badge {i} ({what})");
+                    assert_eq!(*badge, p.ink(p.yellow), "DST badge {i} ({what})");
                 }
             }
         }

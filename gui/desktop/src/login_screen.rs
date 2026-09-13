@@ -1128,7 +1128,7 @@ impl LoginScreen {
                 y: uy + 14.0,
                 text: user.avatar.clone(),
                 font_size: 28.0,
-                color: if selected { p.accent } else { p.subtext0 },
+                color: if selected { p.ink(p.accent) } else { p.subtext0 },
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1177,7 +1177,7 @@ impl LoginScreen {
                     y: cy - 80.0,
                     text: user.avatar.clone(),
                     font_size: 48.0,
-                    color: p.accent,
+                    color: p.ink(p.accent),
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -1301,7 +1301,7 @@ impl LoginScreen {
                         y: btn_y + 48.0,
                         text: msg.clone(),
                         font_size: 12.0,
-                        color: p.red,
+                        color: p.ink(p.red),
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(200.0),
                         overflow: TextOverflow::Ellipsis,
@@ -1322,7 +1322,7 @@ impl LoginScreen {
                             self.config.lockout_seconds
                         ),
                         font_size: 12.0,
-                        color: p.yellow,
+                        color: p.ink(p.yellow),
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(240.0),
                         overflow: TextOverflow::Ellipsis,
@@ -2352,7 +2352,7 @@ mod tests {
             let avatars = texts(&cmds, AVATAR, 28.0);
             assert_eq!(avatars.len(), 2, "{mode}: two avatars");
             assert_eq!(
-                avatars[0].2, p.accent,
+                avatars[0].2, p.ink(p.accent),
                 "{mode}: the accent marks which row you are on"
             );
             assert_eq!(avatars[1].2, p.subtext0, "{mode}: an unselected avatar");
@@ -2382,7 +2382,7 @@ mod tests {
 
             assert_eq!(
                 floating_text(&cmds, AVATAR, 48.0).1,
-                p.accent,
+                p.ink(p.accent),
                 "{mode}: the avatar of the user you are signing in as"
             );
             assert_eq!(
@@ -2419,7 +2419,7 @@ mod tests {
             );
             assert_eq!(
                 fill_of_size(&cmds, 100.0, 32.0),
-                p.accent,
+                p.ink(p.accent),
                 "{mode}: Sign In is the default action"
             );
             assert_eq!(
@@ -2429,12 +2429,12 @@ mod tests {
             );
             assert_eq!(
                 floating_text(&cmds, "Bad password", 12.0).1,
-                p.red,
+                p.ink(p.red),
                 "{mode}: the error message"
             );
             assert_eq!(
                 floating_text(&cmds, "Too many attempts. Try again in 30s.", 12.0).1,
-                p.yellow,
+                p.ink(p.yellow),
                 "{mode}: the lockout notice"
             );
             assert_eq!(

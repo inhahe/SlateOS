@@ -1353,7 +1353,7 @@ pub fn render_battery_icon(
             x: x + 5.0,
             y: y + 2.0,
             text: "\u{26A1}".to_string(), // ⚡
-            color: p.yellow,
+            color: p.ink(p.yellow),
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(batt_w),
@@ -2614,7 +2614,7 @@ mod tests {
             );
             assert_eq!(
                 rgb(text_exact(&charging, "\u{26A1}", 10.0)),
-                rgb(p.yellow),
+                rgb(p.ink(p.yellow)),
                 "{mode}"
             );
 
@@ -2630,7 +2630,7 @@ mod tests {
             let badge = render_power_profile_badge(PowerProfile::Balanced, &p, 0.0, 0.0);
             assert_eq!(
                 rgb(text_exact(&badge, "Balanced", 12.0)),
-                rgb(p.blue),
+                rgb(p.ink(p.blue)),
                 "{mode}"
             );
         }
@@ -2643,7 +2643,7 @@ mod tests {
         let sp = Palette::for_mode(false);
         let mut clock = ScreenSaver::new(ScreenSaverStyle::Clock, 800, 600);
         let cmds = clock.render_frame();
-        assert_eq!(rgb(text_exact(&cmds, "12:00", 72.0)), rgb(sp.lavender));
+        assert_eq!(rgb(text_exact(&cmds, "12:00", 72.0)), rgb(sp.ink(sp.lavender)));
         let mut logo = ScreenSaver::new(ScreenSaverStyle::BouncingLogo, 800, 600);
         let cmds = logo.render_frame();
         assert_eq!(

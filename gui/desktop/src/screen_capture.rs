@@ -906,7 +906,7 @@ pub fn render_recording_controls(
                 // region, encoding — offer no button, so the word replaces
                 // one. Peach because it is the shell's "working on it" hue
                 // and none of red/yellow/green is free to mean it here.
-                color: p.peach,
+                color: p.ink(p.peach),
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,

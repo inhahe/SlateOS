@@ -789,7 +789,7 @@ impl PrintDialog {
             y: dy + 66.0,
             text: printer_name.to_string(),
             font_size: 12.0,
-            color: p.accent,
+            color: p.ink(p.accent),
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -862,7 +862,7 @@ impl PrintDialog {
                 y: cy,
                 text: err.clone(),
                 font_size: 11.0,
-                color: p.red,
+                color: p.ink(p.red),
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1194,7 +1194,7 @@ mod tests {
             // The selected printer's name -- judgement 4, follows the accent.
             assert_eq!(
                 rgb(text_containing(&open, "Office Laser")),
-                rgb(p.accent),
+                rgb(p.ink(p.accent)),
                 "{mode}"
             );
             // Settings-row label (one site, four instances).
@@ -1212,7 +1212,7 @@ mod tests {
             // Validation error -- a reading of what went wrong, so frozen red.
             assert_eq!(
                 rgb(text_containing(&err, "Duplex not supported")),
-                rgb(p.red),
+                rgb(p.ink(p.red)),
                 "{mode}"
             );
             // The Print button's label -- judgement 3, ink DERIVED from the

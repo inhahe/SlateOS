@@ -855,7 +855,7 @@ pub fn render_context_menu(
                     y: cy + 5.0,
                     text: icon_text.to_string(),
                     font_size: 13.0,
-                    color: if hovered { p.accent } else { p.subtext0 },
+                    color: if hovered { p.ink(p.accent) } else { p.subtext0 },
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -1098,7 +1098,7 @@ impl ExtensionSettingsUI {
                         y: cy + 6.0,
                         text: "Slow".to_string(),
                         font_size: 10.0,
-                        color: p.yellow,
+                        color: p.ink(p.yellow),
                         font_weight: FontWeightHint::Bold,
                         max_width: None,
                         overflow: TextOverflow::Clip,
@@ -1884,7 +1884,7 @@ mod tests {
                 let icon = texts_saying(&hovered, EXT_ICON);
                 assert_eq!(icon.len(), 1, "expected one extension icon (light={light})");
                 assert_eq!(
-                    icon[0], p.accent,
+                    icon[0], p.ink(p.accent),
                     "a hovered extension's icon is not the accent (light={light})"
                 );
 

@@ -668,11 +668,7 @@ impl SoundSettingsUI {
                 }
             ),
             font_size: 14.0,
-            color: if self.settings.master_muted {
-                p.red
-            } else {
-                p.text
-            },
+            color: if self.settings.master_muted { p.ink(p.red) } else { p.text },
             font_weight: FontWeightHint::Regular,
             max_width: Some(inner),
             overflow: TextOverflow::Ellipsis,
@@ -707,7 +703,7 @@ impl SoundSettingsUI {
                 y: cy + 8.0,
                 text: (*label).into(),
                 font_size: 12.0,
-                color: if active { p.accent } else { p.subtext0 },
+                color: if active { p.ink(p.accent) } else { p.subtext0 },
                 font_weight: if active {
                     FontWeightHint::Bold
                 } else {
@@ -873,7 +869,7 @@ impl SoundSettingsUI {
             y,
             text: "Microphone Settings".into(),
             font_size: 14.0,
-            color: p.lavender,
+            color: p.ink(p.lavender),
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -957,7 +953,7 @@ impl SoundSettingsUI {
                 y: y + 6.0,
                 text: format!("{}%{}", entry.volume, muted_txt),
                 font_size: 13.0,
-                color: if entry.muted { p.red } else { p.subtext0 },
+                color: if entry.muted { p.ink(p.red) } else { p.subtext0 },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width * 0.4),
                 overflow: TextOverflow::Ellipsis,
@@ -1016,7 +1012,7 @@ impl SoundSettingsUI {
                 y: y + 6.0,
                 text: status.into(),
                 font_size: 12.0,
-                color: if sc.enabled { p.green } else { p.overlay0 },
+                color: if sc.enabled { p.ink(p.green) } else { p.overlay0 },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width * 0.15),
                 overflow: TextOverflow::Ellipsis,
@@ -1049,7 +1045,7 @@ impl SoundSettingsUI {
             y,
             text: "Spatial Audio".into(),
             font_size: 14.0,
-            color: p.lavender,
+            color: p.ink(p.lavender),
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -1072,7 +1068,7 @@ impl SoundSettingsUI {
                 y: y + 8.0,
                 text: format!("{}{}", indicator, mode.label()),
                 font_size: 13.0,
-                color: if active { p.accent } else { p.text },
+                color: if active { p.ink(p.accent) } else { p.text },
                 font_weight: if active {
                     FontWeightHint::Bold
                 } else {
@@ -1895,7 +1891,7 @@ mod tests {
             // render(): the muted master label.
             let m = texts_saying(&draw(&muted_ui(0), &p), "Master Volume: 60% (Muted)", 14.0);
             assert_eq!(m.len(), 1);
-            assert_eq!(rgb(m[0]), rgb(p.red), "a muted master label is not red");
+            assert_eq!(rgb(m[0]), rgb(p.ink(p.red)), "a muted master label is not red");
 
             // render_output_tab.
             let out = draw(&full_ui(0), &p);
@@ -2170,7 +2166,7 @@ mod tests {
                 assert_eq!(tab.len(), 1);
                 assert_eq!(
                     rgb(tab[0]),
-                    rgb(accent),
+                    rgb(p.ink(accent)),
                     "the active tab's label does not follow the accent (light={light})"
                 );
 
@@ -2260,7 +2256,7 @@ mod tests {
                 for c in texts_saying(&sounds, "On", 12.0) {
                     assert_eq!(
                         rgb(c),
-                        rgb(plain.green),
+                        rgb(plain.ink(plain.green)),
                         "an enabled sound's status moved with the accent (light={light})"
                     );
                 }
@@ -2296,7 +2292,7 @@ mod tests {
                     assert_eq!(t.len(), 1);
                     assert_eq!(
                         rgb(t[0]),
-                        rgb(plain.lavender),
+                        rgb(plain.ink(plain.lavender)),
                         "{what} moved with the accent (light={light})"
                     );
                 }

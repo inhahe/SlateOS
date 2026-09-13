@@ -623,7 +623,7 @@ impl DeviceSettingsUI {
                 y: tab_y + 8.0,
                 text: label.to_string(),
                 font_size: 13.0,
-                color: if is_active { p.accent } else { p.subtext0 },
+                color: if is_active { p.ink(p.accent) } else { p.subtext0 },
                 font_weight: if is_active {
                     FontWeightHint::Bold
                 } else {
@@ -1044,7 +1044,7 @@ impl DeviceSettingsUI {
                 y: row_y + 8.0,
                 text: format!("{} device(s) with driver issues", problems.len()),
                 font_size: 13.0,
-                color: p.red,
+                color: p.ink(p.red),
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,

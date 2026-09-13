@@ -554,7 +554,7 @@ impl StorageSettingsUI {
                 y: cy + 6.0,
                 text: "⚠ Low disk space — consider running cleanup".into(),
                 font_size: 12.0,
-                color: p.red,
+                color: p.ink(p.red),
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(inner - 20.0),
                 overflow: TextOverflow::Ellipsis,
@@ -580,7 +580,7 @@ impl StorageSettingsUI {
                 y: cy + 8.0,
                 text: (*label).into(),
                 font_size: 12.0,
-                color: if active { p.accent } else { p.subtext0 },
+                color: if active { p.ink(p.accent) } else { p.subtext0 },
                 font_weight: if active {
                     FontWeightHint::Bold
                 } else {
@@ -646,11 +646,7 @@ impl StorageSettingsUI {
                     drive.used_pct()
                 ),
                 font_size: 12.0,
-                color: if drive.is_low_space() {
-                    p.red
-                } else {
-                    p.subtext0
-                },
+                color: if drive.is_low_space() { p.ink(p.red) } else { p.subtext0 },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width * 0.38),
                 overflow: TextOverflow::Ellipsis,
@@ -714,7 +710,7 @@ impl StorageSettingsUI {
                 y,
                 text: "Breakdown".into(),
                 font_size: 14.0,
-                color: p.lavender,
+                color: p.ink(p.lavender),
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width),
                 overflow: TextOverflow::Ellipsis,
@@ -763,7 +759,7 @@ impl StorageSettingsUI {
                     y,
                     text: format!("Estimated reclaimable: {}", format_bytes(reclaimable)),
                     font_size: 13.0,
-                    color: p.green,
+                    color: p.ink(p.green),
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(width),
                     overflow: TextOverflow::Ellipsis,
@@ -807,7 +803,7 @@ impl StorageSettingsUI {
             y,
             text: "Auto-cleanup rules".into(),
             font_size: 14.0,
-            color: p.lavender,
+            color: p.ink(p.lavender),
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -913,7 +909,7 @@ impl StorageSettingsUI {
                 y: y + 10.0,
                 text: "Change".into(),
                 font_size: 11.0,
-                color: p.accent,
+                color: p.ink(p.accent),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(48.0),
                 overflow: TextOverflow::Ellipsis,

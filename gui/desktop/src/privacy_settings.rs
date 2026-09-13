@@ -151,15 +151,24 @@ impl PermissionState {
         }
     }
 
-    /// The colour this state reports itself in.
+    /// The colour this state reports itself in, as *text*.
     ///
     /// Categorical, not decorative: green *means* allowed and red *means*
     /// denied, so neither follows the accent. See judgement 2 in the module's
     /// colour notes.
+    ///
+    /// Inked here rather than at the call site, and that is not a stylistic
+    /// choice. A colour reaching a `RenderCommand::Text` through a method is
+    /// invisible to `ink-text.py`, which classifies by the role named at the
+    /// site -- so this had to be found by a failing test rather than by the
+    /// sweep. And inking at the call site would be *wrong*: it would raise
+    /// `overlay0` too, and `overlay0` is the muted ink that WCAG 1.4.3 exempts,
+    /// so a "not decided" row would start looking decided. The adjustment
+    /// belongs per arm, which is where the arms are.
     pub fn color(self, p: &Palette) -> Color {
         match self {
-            Self::Allowed => p.green,
-            Self::Denied => p.red,
+            Self::Allowed => p.ink(p.green),
+            Self::Denied => p.ink(p.red),
             Self::NotDecided => p.overlay0,
         }
     }
@@ -523,7 +532,7 @@ impl PrivacySettingsUI {
                 y: cy + 8.0,
                 text: (*label).into(),
                 font_size: 12.0,
-                color: if active { p.accent } else { p.subtext0 },
+                color: if active { p.ink(p.accent) } else { p.subtext0 },
                 font_weight: if active {
                     FontWeightHint::Bold
                 } else {
@@ -567,7 +576,7 @@ impl PrivacySettingsUI {
                 y,
                 text: format!("{} {}", kind.icon(), kind.label()),
                 font_size: 16.0,
-                color: p.lavender,
+                color: p.ink(p.lavender),
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width),
                 overflow: TextOverflow::Ellipsis,
@@ -676,7 +685,7 @@ impl PrivacySettingsUI {
                     y: y + 4.0,
                     text: status,
                     font_size: 12.0,
-                    color: if enabled { p.green } else { p.red },
+                    color: if enabled { p.ink(p.green) } else { p.ink(p.red) },
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width * 0.4),
                     overflow: TextOverflow::Ellipsis,
@@ -773,7 +782,7 @@ impl PrivacySettingsUI {
             y,
             text: "Telemetry".into(),
             font_size: 14.0,
-            color: p.lavender,
+            color: p.ink(p.lavender),
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -796,7 +805,7 @@ impl PrivacySettingsUI {
                 y: y + 6.0,
                 text: format!("{}{}", indicator, level.label()),
                 font_size: 13.0,
-                color: if active { p.accent } else { p.text },
+                color: if active { p.ink(p.accent) } else { p.text },
                 font_weight: if active {
                     FontWeightHint::Bold
                 } else {
@@ -814,7 +823,7 @@ impl PrivacySettingsUI {
             y,
             text: "Other".into(),
             font_size: 14.0,
-            color: p.lavender,
+            color: p.ink(p.lavender),
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -1593,7 +1602,7 @@ mod tests {
             // render_permissions_tab, detail arm
             assert_eq!(
                 rgb(text_containing(&bare, kind0.label())),
-                rgb(p.lavender),
+                rgb(p.ink(p.lavender)),
                 "{mode}"
             );
             assert_eq!(
@@ -1629,12 +1638,12 @@ mod tests {
             // site would give all three rows the same colour.
             assert_eq!(
                 rgb(text_containing(&full, PermissionState::Allowed.label())),
-                rgb(p.green),
+                rgb(p.ink(p.green)),
                 "{mode}"
             );
             assert_eq!(
                 rgb(text_containing(&full, PermissionState::Denied.label())),
-                rgb(p.red),
+                rgb(p.ink(p.red)),
                 "{mode}"
             );
             assert_eq!(
@@ -1667,12 +1676,12 @@ mod tests {
             // render_general_tab
             assert_eq!(
                 rgb(text_containing(&tab2, "Telemetry")),
-                rgb(p.lavender),
+                rgb(p.ink(p.lavender)),
                 "{mode}"
             );
             assert_eq!(
                 rgb(text_containing(&tab2, "Other")),
-                rgb(p.lavender),
+                rgb(p.ink(p.lavender)),
                 "{mode}"
             );
             // render_toggle
@@ -1757,10 +1766,14 @@ mod tests {
             // PermissionState::color -- three arms.
             assert_eq!(
                 rgb(PermissionState::Allowed.color(&p)),
-                rgb(p.green),
+                rgb(p.ink(p.green)),
                 "{mode}"
             );
-            assert_eq!(rgb(PermissionState::Denied.color(&p)), rgb(p.red), "{mode}");
+            assert_eq!(
+                rgb(PermissionState::Denied.color(&p)),
+                rgb(p.ink(p.red)),
+                "{mode}"
+            );
             assert_eq!(
                 rgb(PermissionState::NotDecided.color(&p)),
                 rgb(p.overlay0),
@@ -1782,7 +1795,7 @@ mod tests {
             );
             assert_eq!(
                 rgb(text_exact(&over, "Permissions")),
-                rgb(p.accent),
+                rgb(p.ink(p.accent)),
                 "{mode}"
             );
             assert_eq!(
@@ -1794,17 +1807,17 @@ mod tests {
             // render_permissions_tab: the overview status line, all three ways.
             assert_eq!(
                 rgb(text_containing(&over, "Disabled")),
-                rgb(p.red),
+                rgb(p.ink(p.red)),
                 "{mode}"
             );
             assert_eq!(
                 rgb(text_containing(&over, "apps allowed")),
-                rgb(p.green),
+                rgb(p.ink(p.green)),
                 "{mode}"
             );
             assert_eq!(
                 rgb(text_containing(&over, "No apps")),
-                rgb(p.green),
+                rgb(p.ink(p.green)),
                 "{mode}"
             );
 
@@ -1812,10 +1825,10 @@ mod tests {
             let act = draw("activity: allowed and denied", &p);
             assert_eq!(
                 rgb(text_containing(&act, "\u{2713}")),
-                rgb(p.green),
+                rgb(p.ink(p.green)),
                 "{mode}"
             );
-            assert_eq!(rgb(text_containing(&act, "\u{2715}")), rgb(p.red), "{mode}");
+            assert_eq!(rgb(text_containing(&act, "\u{2715}")), rgb(p.ink(p.red)), "{mode}");
 
             // render_general_tab: the radio row, fill and label, both ways.
             let tab2 = draw("general: level 0, toggles true", &p);
@@ -1832,7 +1845,7 @@ mod tests {
             );
             assert_eq!(
                 rgb(text_containing(&tab2, "\u{25CF} ")),
-                rgb(p.accent),
+                rgb(p.ink(p.accent)),
                 "{mode}"
             );
             assert_eq!(

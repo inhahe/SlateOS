@@ -1201,7 +1201,7 @@ impl DesktopWidgetManager {
                     y: y + 10.0,
                     text: "\u{1F50B}".to_string(),
                     font_size: 28.0,
-                    color: Color::rgba(p.green.r, p.green.g, p.green.b, alpha),
+                    color: Color::rgba(p.ink(p.green).r, p.ink(p.green).g, p.ink(p.green).b, alpha),
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -1307,7 +1307,7 @@ impl DesktopWidgetManager {
                 y: cy + 4.0,
                 text: kind.icon().to_string(),
                 font_size: 16.0,
-                color: p.blue,
+                color: p.ink(p.blue),
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -2231,7 +2231,7 @@ mod tests {
                 assert_eq!(batt.len(), 1);
                 assert_eq!(
                     rgb(batt[0]),
-                    rgb(p.green),
+                    rgb(p.ink(p.green)),
                     "the battery glyph is not green (light={light})"
                 );
                 assert_ne!(
@@ -2495,7 +2495,7 @@ mod tests {
                     assert!(!t.is_empty(), "{what} is not drawn (light={light})");
                     for c in t {
                         assert_eq!(c, role, "{what} is the wrong role (light={light})");
-                        assert_ne!(c, p.accent, "{what} followed the accent (light={light})");
+                        assert_ne!(c, p.ink(p.accent), "{what} followed the accent (light={light})");
                     }
                 }
             }

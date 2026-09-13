@@ -685,7 +685,7 @@ impl LanguageSettingsUI {
                 y: cy + 4.0,
                 text: lang.display_name.clone(),
                 font_size: 13.0,
-                color: if is_current { p.accent } else { p.text },
+                color: if is_current { p.ink(p.accent) } else { p.text },
                 font_weight: if is_current {
                     FontWeightHint::Bold
                 } else {
@@ -760,7 +760,7 @@ impl LanguageSettingsUI {
             y: cy,
             text: "Date Format".into(),
             font_size: 15.0,
-            color: p.lavender,
+            color: p.ink(p.lavender),
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -794,7 +794,7 @@ impl LanguageSettingsUI {
             y: cy,
             text: "Time Format".into(),
             font_size: 15.0,
-            color: p.lavender,
+            color: p.ink(p.lavender),
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -828,7 +828,7 @@ impl LanguageSettingsUI {
             y: cy,
             text: "Calendar".into(),
             font_size: 15.0,
-            color: p.lavender,
+            color: p.ink(p.lavender),
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -852,7 +852,7 @@ impl LanguageSettingsUI {
             y: cy,
             text: "Number Format".into(),
             font_size: 15.0,
-            color: p.lavender,
+            color: p.ink(p.lavender),
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -897,7 +897,7 @@ impl LanguageSettingsUI {
             y: cy,
             text: "Measurement".into(),
             font_size: 15.0,
-            color: p.lavender,
+            color: p.ink(p.lavender),
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -921,7 +921,7 @@ impl LanguageSettingsUI {
             y: cy,
             text: "Temperature".into(),
             font_size: 15.0,
-            color: p.lavender,
+            color: p.ink(p.lavender),
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -945,7 +945,7 @@ impl LanguageSettingsUI {
             y: cy,
             text: "Currency".into(),
             font_size: 15.0,
-            color: p.lavender,
+            color: p.ink(p.lavender),
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),
             overflow: TextOverflow::Ellipsis,
@@ -1000,7 +1000,7 @@ impl LanguageSettingsUI {
                     cur.format_value(1234.56)
                 ),
                 font_size: 12.0,
-                color: if is_current { p.accent } else { p.text },
+                color: if is_current { p.ink(p.accent) } else { p.text },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 20.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1609,7 +1609,7 @@ mod tests {
             // The Region tab: both heading rungs, a label/value pair, and the
             // currency rows, whose current entry is raised the same way.
             let region = &by_tab[2].1;
-            assert_eq!(text_color(region, "Measurement"), p.lavender, "heading");
+            assert_eq!(text_color(region, "Measurement"), p.ink(p.lavender), "heading");
             assert_eq!(
                 text_color(region, "Available Currencies"),
                 p.subtext1,
@@ -1654,10 +1654,17 @@ mod tests {
             assert_eq!(fills_sized(lang, 4.0, 32.0), vec![p.accent], "marker bar");
             assert_eq!(
                 text_color(lang, "English (United States)"),
-                p.accent,
+                p.ink(p.accent),
                 "the current language's name marks which one is in force"
             );
-            let accented_count = all_colors(lang).iter().filter(|c| **c == p.accent).count();
+            // Both forms: the marker bar is an accent *fill* and stays raw,
+            // while the two labels are accent *text* and go through `ink`.
+            // The claim is about how many things are accented, not about
+            // which of the two spellings they use.
+            let accented_count = all_colors(lang)
+                .iter()
+                .filter(|c| **c == p.accent || **c == p.ink(p.accent))
+                .count();
             assert_eq!(
                 accented_count, 3,
                 "the Language tab should accent exactly the active tab, the \
@@ -1682,12 +1689,12 @@ mod tests {
             let region = &by_tab[2].1;
             assert_eq!(
                 text_color(region, "$ USD ($1234.56)"),
-                p.accent,
+                p.ink(p.accent),
                 "the default currency's row marks which one prices are shown in"
             );
             let on_region = all_colors(region)
                 .iter()
-                .filter(|c| **c == p.accent)
+                .filter(|c| **c == p.ink(p.accent))
                 .count();
             assert_eq!(
                 on_region, 2,
@@ -1785,8 +1792,8 @@ mod tests {
                     .collect();
                 assert!(!headings.is_empty(), "{tab:?} has no headings");
                 for h in headings {
-                    assert_eq!(h, p.lavender, "{tab:?} heading left its rung");
-                    assert_ne!(h, p.accent, "a heading is not a selection");
+                    assert_eq!(h, p.ink(p.lavender), "{tab:?} heading left its rung");
+                    assert_ne!(h, p.ink(p.accent), "a heading is not a selection");
                 }
             }
         }

@@ -749,7 +749,7 @@ impl DefaultAppsUI {
                 y: tab_y + 8.0,
                 text: label.to_string(),
                 font_size: 13.0,
-                color: if is_active { p.accent } else { p.subtext0 },
+                color: if is_active { p.ink(p.accent) } else { p.subtext0 },
                 font_weight: if is_active {
                     FontWeightHint::Bold
                 } else {
@@ -837,7 +837,7 @@ impl DefaultAppsUI {
             font_size: 11.0,
             // Peach, not the accent: this is about undoing a departure from
             // the shipped defaults, which is a state rather than a position.
-            color: p.peach,
+            color: p.ink(p.peach),
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -886,11 +886,7 @@ impl DefaultAppsUI {
                 y: row_y + 30.0,
                 text: app_name.to_string(),
                 font_size: 12.0,
-                color: if default_app.is_some() {
-                    p.accent
-                } else {
-                    p.overlay0
-                },
+                color: if default_app.is_some() { p.ink(p.accent) } else { p.overlay0 },
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1062,7 +1058,7 @@ impl DefaultAppsUI {
                     y: row_y + 9.0,
                     text: format!(".{ext}"),
                     font_size: 11.0,
-                    color: p.lavender,
+                    color: p.ink(p.lavender),
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -1074,7 +1070,7 @@ impl DefaultAppsUI {
                     y: row_y + 9.0,
                     text: app.map_or("(none)", |a| a.name.as_str()).to_string(),
                     font_size: 12.0,
-                    color: if is_custom { p.peach } else { p.text },
+                    color: if is_custom { p.ink(p.peach) } else { p.text },
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -1087,7 +1083,7 @@ impl DefaultAppsUI {
                         y: row_y + 10.0,
                         text: "Custom".to_string(),
                         font_size: 10.0,
-                        color: p.peach,
+                        color: p.ink(p.peach),
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
                         overflow: TextOverflow::Clip,
@@ -1876,7 +1872,7 @@ mod tests {
                 vec![marked],
                 "only the active tab is marked"
             );
-            assert_eq!(text_color(cats, "Default apps"), p.accent, "active tab");
+            assert_eq!(text_color(cats, "Default apps"), p.ink(p.accent), "active tab");
             assert_eq!(text_color(cats, "File types"), p.subtext0, "idle tab");
             assert_eq!(
                 text_color(cats, "Installed apps"),
@@ -1885,7 +1881,7 @@ mod tests {
             );
 
             assert_eq!(fills_sized(cats, 100.0, 24.0), vec![carded], "reset button");
-            assert_eq!(text_color(cats, "Reset all"), p.peach, "reset label");
+            assert_eq!(text_color(cats, "Reset all"), p.ink(p.peach), "reset label");
             assert_eq!(
                 text_color(cats, "Choose default apps for each type of content"),
                 p.subtext0,
@@ -1986,7 +1982,7 @@ mod tests {
                 fills_sized(types, 48.0, 20.0).iter().all(|c| *c == carded),
                 "extension pills"
             );
-            assert_eq!(text_color(types, ".flac"), p.lavender, "extension token");
+            assert_eq!(text_color(types, ".flac"), p.ink(p.lavender), "extension token");
             // The search box and the extension rows are both `width` x 32, so
             // geometry cannot tell them apart — but `fills_sized` preserves
             // command order and the box is drawn first, which is enough to
@@ -2044,10 +2040,10 @@ mod tests {
             // Categories: the open tab, the app named under each of the
             // twelve cards, and the current app's chip in the expanded one.
             let cats = &by_tab[0].1;
-            assert_eq!(text_color(cats, "Default apps"), p.accent, "the open tab");
+            assert_eq!(text_color(cats, "Default apps"), p.ink(p.accent), "the open tab");
             assert_eq!(
                 text_color_sized(cats, "Music Player", 12.0),
-                p.accent,
+                p.ink(p.accent),
                 "the app in force for a category is named in the accent"
             );
             let chips = fills_high(cats, 28.0);
@@ -2077,8 +2073,8 @@ mod tests {
             // The other two tabs accent their own tab and nothing else.
             for (i, name) in [(1, "File types"), (2, "Installed apps")] {
                 let cmds = &by_tab[i].1;
-                assert_eq!(text_color(cmds, name), p.accent, "the open tab");
-                let n = all_colors(cmds).iter().filter(|c| **c == p.accent).count();
+                assert_eq!(text_color(cmds, name), p.ink(p.accent), "the open tab");
+                let n = all_colors(cmds).iter().filter(|c| **c == p.ink(p.accent)).count();
                 // Two since §834: the open tab's label and the accent outline
                 // around it. Nothing else on these tabs is accented, which is
                 // the property this was written to check and still checks.
@@ -2154,20 +2150,20 @@ mod tests {
                 let cats = &by_tab[0].1;
                 assert_eq!(
                     text_color(cats, "Reset all"),
-                    p.peach,
+                    p.ink(p.peach),
                     "undoing a customisation stayed peach with accent={role}"
                 );
 
                 let types = &by_tab[1].1;
                 assert_eq!(
                     text_color_sized(types, "Rival Player", 12.0),
-                    p.peach,
+                    p.ink(p.peach),
                     "an app reached through a custom association stayed peach \
                      with accent={role}"
                 );
                 assert_eq!(
                     text_color(types, "Custom"),
-                    p.peach,
+                    p.ink(p.peach),
                     "the Custom badge stayed peach with accent={role}"
                 );
             }

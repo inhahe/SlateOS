@@ -140118,3 +140118,56 @@ twelve application palette conversions warning-clean. The helpers looked like
 ordinary dead code; they are the intended implementation of a path that was
 never wired up.
 
+## BUG-C-THE-KEYBOARD-LAYOUT-TEST-FAILS-ABOUT-ONE-WORKSPACE-RUN-IN-TWO
+
+**In short:** one test in the desktop shell fails now and then, and only when
+the whole project's tests are run at once. It checks that the Super+Space
+shortcut, which switches keyboard layout, writes the new layout to the file
+the compositor reads. Run on its own it passes every time -- eight times in a
+row, plus 2915 of its neighbours. Run as part of `cargo test --workspace` it
+failed once and passed once. Nothing is known to be wrong with the feature;
+what is wrong is that the test cannot be trusted to mean anything, and a test
+that fails at random trains everyone to re-run it rather than read it.
+
+**Where it lives:** `gui/desktop/src/lib.rs`, 
+`run_box_wiring_tests::switching_layout_writes_the_setting_the_compositor_reads`.
+It runs inside `settingsfile::testing::with_scratch_config("shell-layout", ..)`,
+which points `XDG_CONFIG_HOME` at a fresh directory and removes `HOME`, under a
+process-wide lock.
+
+**The failure:** `assert_ne!(before, after)` -- the layout in `input.yaml` was
+the same after the chord as before it. So either the shortcut did not change
+the shell's layout, or the save landed somewhere else, or something reset the
+file between the save and the read.
+
+**What is ruled out.** The lock is shared, not two separate mutexes:
+`inputsettings::config` is a re-export of `settingsfile`, so the two families
+of scratch-config call in this file take the same `ENV_LOCK`. The scratch
+directory is named from the process id and a per-process counter, so two test
+binaries cannot collide on it. And the environment is per-process, so another
+crate's binary cannot see this one's `XDG_CONFIG_HOME`.
+
+**What is not ruled out**, and where to look next:
+
+1. A thread in this binary that reads or writes settings *without* taking the
+   turn -- a watcher, or a shell constructed by another test -- and so writes
+   `input.yaml` inside this test's scratch directory while it is running.
+   `settingsfile` has a file watcher; whether `shell()` starts one is the first
+   thing to check.
+2. A path resolved once and cached. If anything memoises the config directory
+   on first use, the value depends on which test ran first, which changes run
+   to run and changes much more under `--workspace` load.
+3. `persist_input_layout` returns early when the loaded layout already equals
+   the new one. If a previous test left `input.yaml` holding the layout this
+   one switches *to*, the save is skipped and `before == after` -- without any
+   race at all. This is the cheapest to test and the easiest to fix.
+
+**What the proper fix looks like:** whichever of the three it is, the test
+should also assert the shell's own model changed, so a failure says which half
+broke; and the scratch directory should be asserted empty on entry, so
+possibility 3 reports itself instead of looking like a race.
+
+**Evidence:** failed in the workspace run of 2026-09-13 (266 s, one failure in
+579 binaries); passed in the identical run immediately after (358 s, 579 ok);
+passed 8/8 as `-p desktop --lib`.
+

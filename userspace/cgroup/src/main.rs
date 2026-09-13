@@ -184,6 +184,12 @@ fn cmd_cgcreate(args: &[String]) {
             }
             _ => {
                 eprintln!("cgcreate: unknown option: {}", args[i]);
+                // Exit HERE. This used to report the option and keep going, so
+                // `cgcreate --zzq-not-an-option -g cpu:/x` printed the refusal
+                // and then did the work anyway, exiting 0. The command only
+                // appeared to refuse when the bad option was the ONLY argument,
+                // because it then fell through to the missing-operand check.
+                process::exit(1);
             }
         }
         i += 1;
@@ -264,6 +270,12 @@ fn cmd_cgdelete(args: &[String]) {
             }
             _ => {
                 eprintln!("cgdelete: unknown option: {}", args[i]);
+                // Exit HERE. This used to report the option and keep going, so
+                // `cgdelete --zzq-not-an-option -g cpu:/x` printed the refusal
+                // and then did the work anyway, exiting 0. The command only
+                // appeared to refuse when the bad option was the ONLY argument,
+                // because it then fell through to the missing-operand check.
+                process::exit(1);
             }
         }
         i += 1;
@@ -462,6 +474,12 @@ fn cmd_cgset(args: &[String]) {
             }
             _ => {
                 eprintln!("cgset: unknown option: {}", args[i]);
+                // Exit HERE. This used to report the option and keep going, so
+                // `cgset --zzq-not-an-option -g cpu:/x` printed the refusal
+                // and then did the work anyway, exiting 0. The command only
+                // appeared to refuse when the bad option was the ONLY argument,
+                // because it then fell through to the missing-operand check.
+                process::exit(1);
             }
         }
         i += 1;
@@ -544,6 +562,12 @@ fn cmd_cgget(args: &[String]) {
             }
             _ => {
                 eprintln!("cgget: unknown option: {}", args[i]);
+                // Exit HERE. This used to report the option and keep going, so
+                // `cgget --zzq-not-an-option -g cpu:/x` printed the refusal
+                // and then did the work anyway, exiting 0. The command only
+                // appeared to refuse when the bad option was the ONLY argument,
+                // because it then fell through to the missing-operand check.
+                process::exit(1);
             }
         }
         i += 1;
@@ -675,6 +699,12 @@ fn cmd_cgclassify(args: &[String]) {
             }
             _ => {
                 eprintln!("cgclassify: unknown option: {}", args[i]);
+                // Exit HERE. This used to report the option and keep going, so
+                // `cgclassify --zzq-not-an-option -g cpu:/x` printed the refusal
+                // and then did the work anyway, exiting 0. The command only
+                // appeared to refuse when the bad option was the ONLY argument,
+                // because it then fell through to the missing-operand check.
+                process::exit(1);
             }
         }
         i += 1;
@@ -728,7 +758,14 @@ fn cmd_lscgroup(args: &[String]) {
             s if !s.starts_with('-') => {
                 filter_ctrl = Some(s.to_string());
             }
-            _ => {}
+            other => {
+                // `lscgroup` and `lssubsys` were the two personalities that
+                // said nothing at all about an unknown option: the arm was
+                // `_ => {}`, so `lscgroup --zzq-not-an-option` produced output
+                // byte-identical to `lscgroup` and exited 0.
+                eprintln!("lscgroup: unknown option: {other}");
+                process::exit(1);
+            }
         }
     }
 
@@ -807,7 +844,14 @@ fn cmd_lssubsys(args: &[String]) {
             }
             "-m" | "--mount-points" => show_mount = true,
             "-a" | "--all" => show_all = true,
-            _ => {}
+            other => {
+                // See `cmd_lscgroup`. This one hid behind an unrelated
+                // failure: the probe read exit 1 and called it a refusal, but
+                // the 1 came from `/proc/cgroups` being absent on the dev
+                // host, not from the option being rejected.
+                eprintln!("lssubsys: unknown option: {other}");
+                process::exit(1);
+            }
         }
     }
 

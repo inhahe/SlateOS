@@ -937,6 +937,24 @@ impl<T: Transport> EventLoop<T> {
         self.conn.subscribe_tray(on)
     }
 
+    /// Tell the compositor the user clicked a tray icon, so it can tell the
+    /// program that registered it.
+    ///
+    /// For a shell: it owns the strip the icons are drawn in and is the only
+    /// thing that can have done the hit test.
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::confirm`].
+    pub fn click_tray_icon(
+        &mut self,
+        owner: u64,
+        id: u32,
+        button: guitk::event::MouseButton,
+    ) -> Result<(), Error<T>> {
+        self.conn.click_tray_icon(owner, id, button)
+    }
+
     /// The tray's icons, or an empty slice before the first frame arrives.
     #[must_use]
     pub fn tray_icons(&self) -> &[guiremote::tray::TrayIcon] {
@@ -1973,6 +1991,7 @@ pub mod testing {
                 RequestBody::SetTrayIcon { .. } => "SetTrayIcon",
                 RequestBody::RemoveTrayIcon { .. } => "RemoveTrayIcon",
                 RequestBody::SubscribeTrayIcons { .. } => "SubscribeTrayIcons",
+                RequestBody::ClickTrayIcon { .. } => "ClickTrayIcon",
                 RequestBody::ReloadAppearance => "ReloadAppearance",
                 RequestBody::ReloadInput => "ReloadInput",
                 RequestBody::ShellControl { .. } => "ShellControl",

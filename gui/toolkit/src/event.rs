@@ -63,6 +63,22 @@ pub enum Event {
     /// `pressed` flag because the gesture is already over by the time it is
     /// recognised — there is nothing to match a press against.
     ModifierChord { modifiers: Modifiers },
+    /// Somebody clicked this program's system-tray icon.
+    ///
+    /// **Not addressed to a window**, because a program may have none: the
+    /// spec asks for applications that start in the tray
+    /// (`design.txt:716`), and requiring a window to receive the click would
+    /// make that impossible. It arrives on the connection instead, with
+    /// `InputEvent::window` set to zero -- which is not a window id.
+    /// `oswindow` hands it to `App::tray_icon_clicked` *before* its window
+    /// filter, because that filter drops anything not addressed to the
+    /// application's own window and would otherwise swallow every tray
+    /// click silently.
+    ///
+    /// `id` is the program's own icon id, the one it passed to
+    /// `set_tray_icon` -- not a compositor handle. A program with one icon can
+    /// ignore it.
+    TrayIconClicked { id: u32, button: MouseButton },
 }
 
 /// Which settings group a [`Event::SettingsChanged`] is about.

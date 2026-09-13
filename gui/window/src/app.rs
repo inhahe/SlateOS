@@ -365,6 +365,27 @@ pub trait App {
         let _ = settings;
     }
 
+    /// Somebody clicked this program's system-tray icon.
+    ///
+    /// **Not `on_event`**, and the reason is the one thing about this event
+    /// that is unusual: it is addressed to the *connection*, not to a window,
+    /// because a program may have a tray icon and no window at all -- which is
+    /// what `design.txt:716` asks for. `on_event`'s contract is "events for
+    /// your window", and the loop enforces it by dropping anything addressed
+    /// elsewhere; a tray click routed through there would be dropped by that
+    /// filter, and the only symptom would be a program that never answers its
+    /// icon.
+    ///
+    /// `id` is the program's own icon id, as passed to
+    /// `EventLoop::set_tray_icon`. A program with one icon can ignore it.
+    ///
+    /// The default ignores the click and asks for nothing, so a program that
+    /// registers an icon purely to show status needs no code here.
+    fn tray_icon_clicked(&mut self, id: u32, button: guitk::event::MouseButton) -> Response {
+        let _ = (id, button);
+        Response::Idle
+    }
+
     fn theme_changed(&mut self, palette: &Palette) {
         let _ = palette;
     }
@@ -541,6 +562,20 @@ pub fn drive<T: Transport, A: App + ?Sized>(
             window: id,
             ref event,
         } => {
+            // Before the window filter, because this one has no window: it is
+            // addressed to the connection. Filtering it by `id != window` would
+            // drop every tray click, and a program that never answers its own
+            // icon looks like a dead program rather than a lost event.
+            if let guitk::event::Event::TrayIconClicked { id: icon, button } = *event {
+                let response = app.tray_icon_clicked(icon, button);
+                if matches!(response, Response::Redraw) {
+                    dirty = true;
+                }
+                if matches!(response, Response::Exit) {
+                    return EventResponse::Exit;
+                }
+                return EventResponse::Continue;
+            }
             if id != window {
                 return EventResponse::Continue;
             }

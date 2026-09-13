@@ -68,12 +68,18 @@ pub const INPUT_MAGIC: [u8; 4] = *b"INPT";
 /// peer handed one of these would drop the input batch it arrived in rather
 /// than ignore an event it did not know.
 ///
+/// **5** — the event table gained [`Event::TrayIconClicked`] (tag `0x0C`),
+/// which is the first event addressed to a *connection* rather than a window:
+/// a program may have a tray icon and no window at all, which is what
+/// `design.txt:716` asks for. Its `InputEvent::window` is zero, and zero is not
+/// a window id.
+///
 /// **4** — the event table gained [`Event::ModifierChord`] (tag `0x0B`), the
 /// Alt+Shift shape that cycles keyboard layouts. Incompatible on exactly the
 /// terms 3 set out, and recorded here rather than waved through as "one more
 /// tag": the rule established above is that a vocabulary change *is* a version
 /// change, and the first exception to it would make the version meaningless.
-pub const INPUT_VERSION: u8 = 4;
+pub const INPUT_VERSION: u8 = 5;
 
 /// Input-frame header: magic + version + flags + event count.
 const INPUT_HEADER_LEN: usize = 4 + 1 + 1 + 4;
@@ -157,6 +163,7 @@ enum EventTag {
     Moved = 0x09,
     SettingsChanged = 0x0A,
     ModifierChord = 0x0B,
+    TrayIconClicked = 0x0C,
 }
 
 impl EventTag {
@@ -173,6 +180,7 @@ impl EventTag {
             0x09 => Some(Self::Moved),
             0x0A => Some(Self::SettingsChanged),
             0x0B => Some(Self::ModifierChord),
+            0x0C => Some(Self::TrayIconClicked),
             _ => None,
         }
     }
@@ -386,6 +394,11 @@ fn encode_event(out: &mut Vec<u8>, ev: &InputEvent) {
             out.push(EventTag::ModifierChord as u8);
             out.push(encode_modifiers(*modifiers));
         }
+        Event::TrayIconClicked { id, button } => {
+            out.push(EventTag::TrayIconClicked as u8);
+            write_u32(out, *id);
+            out.push(button_code(*button));
+        }
         Event::Moved { x, y } => {
             out.push(EventTag::Moved as u8);
             // Screen coordinates are signed — a window can sit left of or above
@@ -423,7 +436,7 @@ fn encode_mouse_kind(out: &mut Vec<u8>, kind: &MouseEventKind) {
     }
 }
 
-const fn button_code(b: MouseButton) -> u8 {
+pub(crate) const fn button_code(b: MouseButton) -> u8 {
     match b {
         MouseButton::Left => BUTTON_LEFT,
         MouseButton::Right => BUTTON_RIGHT,
@@ -433,7 +446,7 @@ const fn button_code(b: MouseButton) -> u8 {
     }
 }
 
-const fn button_from_code(b: u8) -> Option<MouseButton> {
+pub(crate) const fn button_from_code(b: u8) -> Option<MouseButton> {
     match b {
         BUTTON_LEFT => Some(MouseButton::Left),
         BUTTON_RIGHT => Some(MouseButton::Right),
@@ -606,6 +619,13 @@ fn decode_event(r: &mut Reader<'_>) -> Result<InputEvent, DecodeError> {
         EventTag::ModifierChord => (
             Event::ModifierChord {
                 modifiers: decode_modifiers(r.read_u8()?)?,
+            },
+            None,
+        ),
+        EventTag::TrayIconClicked => (
+            Event::TrayIconClicked {
+                id: r.read_u32()?,
+                button: decode_button(r)?,
             },
             None,
         ),

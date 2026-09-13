@@ -131046,6 +131046,75 @@ crate's own module docs where the next person to need one will read it.
 
 ---
 
+## TD-C-SIXTY-EIGHT-APPS-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE
+
+**Date:** 2026-09-12. **Lane:** C.
+**Where:** `apps/**` — 987 `const NAME: Color` declarations across 68 crates.
+
+**In short:** the desktop shell was cured, in September, of a defect where every
+one of its 49 modules declared its own private copy of the colour scheme —
+which meant a user who chose the light theme got a light taskbar and dark
+everything-else. The applications have the same defect, untouched, and at
+nearly twice the size. On a light desktop, 68 of them will still be dark.
+
+**The measurement.** `const NAME: Color = ...` in production code under
+`apps/`:
+
+| | shell (fixed) | apps (open) |
+|---|---|---|
+| constants | 549 | **987** |
+| crates/modules | 49 | **68** |
+
+And the same giveaway as last time — **the names collide**, which is what
+proves they are copies rather than each app's own considered choices:
+
+| name | declared in |
+|---|---|
+| `BASE` | 40 crates |
+| `SUBTEXT0` | 40 crates |
+| `BLUE`, `GREEN`, `RED` | 37 crates each |
+| `YELLOW`, `LAVENDER` | 38 crates each |
+
+`procexplorer` is the clearest single instance: `COLOR_TOOLBAR_BG`,
+`COLOR_TAB_BG`, `COLOR_TAB_ACTIVE`, `COLOR_CONTENT_BG`, `COLOR_HEADER_BG`,
+`COLOR_ROW_EVEN` — a complete hardcoded dark theme, 45 constants, with no
+reference to the user's setting anywhere.
+
+**Not all 987 are the defect, and the distinction matters.** Three categories,
+and only the first is wrong:
+
+1. **A private copy of the theme.** `BASE`, `SUBTEXT0`, `COLOR_TOOLBAR_BG`.
+   These should read from `Palette`. This is the bulk of the 68 crates.
+2. **A protocol.** `apps/terminal` and `apps/tmux` carry ANSI colour tables.
+   An ANSI palette is defined by the escape-sequence standard, not by the
+   desktop theme, and a terminal traditionally has its own scheme. These stay,
+   but the *chrome* around them (tab bar, status line) does not.
+3. **User data.** `apps/paint`'s swatch row, `apps/imageviewer`'s pixel
+   handling. A drawing program's colours are the document, not the interface.
+   These stay.
+
+**Why it is not visible today.** There is no guard. **47 shell modules use
+`appearance::palette_check`; zero apps do** — and only one app asserts a
+palette colour at all. `palette_check::assert_drawn_from` is the function that
+found the shell's copies, it is already a shared crate, and it takes a
+`derived` list precisely so categories 2 and 3 can be declared rather than
+excused.
+
+**What the proper fix looks like.** Crate by crate, in the order the table
+above suggests: thread the `Palette` the app already receives (or add it),
+replace the category-1 constants with roles, adopt `assert_drawn_from` in the
+crate's existing render test, and declare categories 2 and 3 in `derived`. The
+shell's own conversion is the worked example, including the part that is not
+mechanical: `BASE` was opaque in 26 modules and translucent in 2, and those two
+are panels rather than pages.
+
+**How urgent.** Not a crash, and it does not worsen on its own — but it is
+straightforwardly user-visible the moment anyone selects the light theme, and
+it is the single largest remaining piece of the appearance work. It is also the
+reason the app half of the border conversion looked cheap: those crates were
+converted where they *did* use the palette, and the constants were never in
+scope.
+
 ## TD-C-THIRTEEN-LIGHT-ACCENTS-STILL-FAIL-ON-CARDS -- being fixed 2026-09-12, mechanism landed
 
 **Update, 2026-09-12 (lane C).** Answered, and the entry below was wrong in

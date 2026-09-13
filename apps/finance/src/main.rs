@@ -1521,7 +1521,7 @@ impl FinanceApp {
                 y: ry + 10.0,
                 text: format!("{} {}", tx.category.icon(), tx.category.label()),
                 font_size: 11.0,
-                color: tx.category.color(&self.palette),
+                color: self.palette.ink(tx.category.color(&self.palette)),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(120.0),
                 overflow: TextOverflow::Ellipsis,

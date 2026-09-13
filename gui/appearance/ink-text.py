@@ -133,7 +133,89 @@ def ink_expression(value, allowed=None):
     return inked
 
 
-def convert(path, apply):
+# ---------------------------------------------------------------------------
+# The second shape: a colour that arrives from a method
+# ---------------------------------------------------------------------------
+#
+# `color: tx.category.color(&self.palette)` names no role, so the sweep above
+# is silent about it. That is the blind spot recorded as TD-C-FORTY-NINE, and
+# 37 of the methods behind it cannot be fixed in their own body because the
+# same method also fills a badge -- inking inside would darken the fill.
+#
+# The ink goes at the draw site instead, which is where design decision 837
+# says it belongs: legibility is a property of the ink-and-ground pair, not of
+# the palette field. `p.ink(tx.category.color(&p))` leaves every fill caller
+# of that method exactly as it was.
+#
+# The palette to ask is not guessed: it is the argument the method was just
+# handed. A call with no palette argument is left alone, because there is
+# nothing to ask -- those crates are on the conversion list instead.
+METHOD_CALL = re.compile(
+    r"^(?P<recv>[A-Za-z_][\w.]*)\.(?P<name>[a-z_][\w]*)"
+    r"\(&?(?P<pal>[A-Za-z_][\w.]*)\)$"
+)
+
+
+def ink_a_call(value, allowed, inked_already):
+    """Wrap a colour-method call in `ink`, or return None to leave it.
+
+    Conservative on every axis. One argument only, and that argument must be
+    something this file actually knows to be a `Palette`; no rewriting of a
+    method that already inks its own body, which would be a no-op but a
+    confusing one; and nothing that draws on a ground of its own.
+    """
+    flat = " ".join(part.strip() for part in value.split(NL)).strip()
+    if ".ink(" in flat or GROUNDED.search(flat):
+        return None
+    m = METHOD_CALL.match(flat)
+    if not m:
+        return None
+    if m.group("name") in inked_already:
+        return None
+    pal = m.group("pal")
+    names, fields = allowed
+    if pal not in names and pal.rsplit(".", 1)[-1] not in fields:
+        return None
+    return pal + ".ink(" + flat + ")"
+
+
+def crate_of(path):
+    """`apps/weather/src/main.rs` -> `apps/weather`."""
+    parts = path.as_posix().split("/")
+    for i, part in enumerate(parts):
+        if part in ("apps", "gui") and i + 1 < len(parts):
+            return part + "/" + parts[i + 1]
+    return path.parent.as_posix()
+
+
+def already_inking(paths):
+    """Per crate, the method names whose own body calls `ink`.
+
+    Per crate, because `color` is defined in thirty of them. A tree-wide set
+    of bare names put `color` in it -- `jsonviewer` and `netscan` ink theirs --
+    and every `x.color(&p)` in the tree was then skipped as already handled.
+    One site survived that, which is how it was noticed: a sweep that finds
+    one site where it found many yesterday is reporting a bug in itself.
+    """
+    out = {}
+    for path in paths:
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        end = production_end(lines)
+        name = None
+        seen = out.setdefault(crate_of(path), set())
+        for i, line in enumerate(lines[:end]):
+            m = re.match(r"^\s*(?:pub[\w(): ]*)?fn\s+(\w+)", line)
+            if m:
+                name = m.group(1)
+            elif name and ".ink(" in line:
+                seen.add(name)
+    return out
+
+
+def convert(path, apply, inked_already=frozenset()):
     lines = path.read_text(encoding="utf-8").splitlines()
     allowed = palette_receivers(lines)
     out = []
@@ -150,9 +232,23 @@ def convert(path, apply):
             i += 1
             continue
         end, value = value_span(lines, i, m.group(2))
-        if end is None or ".ink(" in value or ROLE.search(value) is None:
-            out.extend(lines[i : (end if end is not None else i) + 1])
-            i = (end if end is not None else i) + 1
+        if end is None:
+            out.append(lines[i])
+            i += 1
+            continue
+        if ROLE.search(value) is None:
+            call = ink_a_call(value, allowed, inked_already)
+            if call is None:
+                out.extend(lines[i : end + 1])
+                i = end + 1
+                continue
+            out.append(m.group(1) + "color: " + call + ",")
+            n += 1
+            i = end + 1
+            continue
+        if ".ink(" in value:
+            out.extend(lines[i : end + 1])
+            i = end + 1
             continue
         # Every role in it was inside a `readable_on`, so there is nothing here.
         inked = ink_expression(value, allowed)
@@ -273,9 +369,10 @@ if __name__ == "__main__":
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     check = "--check" in sys.argv
     paths = [pathlib.Path(a) for a in args] if args else default_paths()
+    inked_already = already_inking(paths)
     total = 0
     for path in paths:
-        c = convert(path, "--apply" in sys.argv)
+        c = convert(path, "--apply" in sys.argv, inked_already.get(crate_of(path), frozenset()))
         if c:
             print(str(path) + ": " + str(c))
         total += c

@@ -2013,7 +2013,7 @@ impl SoundRecorderApp {
             x: 176.0,
             y: 10.0,
             text: self.state.label().into(),
-            color: self.state.color(&self.palette),
+            color: self.palette.ink(self.state.color(&self.palette)),
             font_size: 14.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,

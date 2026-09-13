@@ -3085,7 +3085,7 @@ fn render_tab_log(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw: f32
             y: row_y + 4.0,
             text: entry.level.label().to_string(),
             font_size: 10.0,
-            color: entry.level.color(&app.palette),
+            color: app.palette.ink(entry.level.color(&app.palette)),
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,

@@ -1153,7 +1153,7 @@ impl AccountSettingsUI {
                 y: row_y + 20.0,
                 text: acct.account_type.display_name().to_string(),
                 font_size: 10.0,
-                color: acct.account_type.badge_color(p),
+                color: p.ink(acct.account_type.badge_color(p)),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(100.0),
                 overflow: TextOverflow::Ellipsis,

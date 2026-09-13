@@ -346,7 +346,20 @@ def main(show_all):
             body = NL.join(world.lines[rel][lo:hi])
             if not DUAL_USE.search(body) or GROUNDED.search(body):
                 continue
-            defs[(crate_of(rel), name)] = {
+            key = (crate_of(rel), name)
+            if key in defs:
+                # Two colour methods of the same name in one crate --
+                # `DeviceCategory::color` and `DeviceStatus::color`. Nothing
+                # here can tell their call sites apart without knowing the
+                # receiver's type, so merging them invents a SPLIT: one's text
+                # callers and the other's fills, reported as a single method
+                # that does both. Marked ambiguous instead, which is the true
+                # statement.
+                defs[key]["ambiguous"] = True
+                defs[key]["where"] += " and " + rel + ":" + str(lo + 1)
+                continue
+            defs[key] = {
+                "ambiguous": False,
                 "where": rel + ":" + str(lo + 1),
                 "exempt": bool(EXEMPT_USE.search(body)),
                 "takes_palette": "Palette" in head,
@@ -372,14 +385,19 @@ def main(show_all):
                     continue
                 for kind in world.classify(rel, i, name):
                     defs[(crate, name)]["kinds"][kind] += 1
-                    defs[(crate, name)]["sites"][kind].append(rel + ":" + str(i + 1))
+                    mark = "" if ".ink(" in statement_at(lines, i) else "  NOT INKED"
+                    defs[(crate, name)]["sites"][kind].append(
+                        rel + ":" + str(i + 1) + mark
+                    )
 
     buckets = collections.defaultdict(list)
     for (_crate, name), d in sorted(defs.items()):
         drawn = dict(d["kinds"])
         unknown = drawn.pop("unresolved", 0)
         text = drawn.pop("Text", 0)
-        if not text and not drawn:
+        if d["ambiguous"]:
+            buckets["AMBIGUOUS -- TWO METHODS SHARE A NAME"].append((name, d))
+        elif not text and not drawn:
             buckets["UNRESOLVED"].append((name, d))
         elif not text:
             buckets["NO TEXT CALLER"].append((name, d))
@@ -398,14 +416,27 @@ def main(show_all):
 
     print(str(len(defs)) + " colour-returning functions name a dual-use role in their body")
     for key in ("INK", "PER-ARM", "INK IF THE REST CHECK OUT", "SPLIT",
-                "NO TEXT CALLER", "UNRESOLVED"):
+                "NO TEXT CALLER", "UNRESOLVED",
+                "AMBIGUOUS -- TWO METHODS SHARE A NAME"):
         rows = buckets.get(key, [])
         if not rows:
             continue
-        todo = [r for r in rows if not r[1]["inked"]]
-        print(NL + "=== " + key + ": " + str(len(rows)) + "  (" + str(len(todo)) + " not yet inked)")
+        if key == "SPLIT":
+            # A SPLIT method must *not* ink its own body -- that is what makes
+            # it SPLIT. Its fix is at the text call sites, so that is what is
+            # counted here; counting bodies reported 35 outstanding after all
+            # 24 call sites had been fixed.
+            todo = [
+                r for r in rows
+                if any("NOT INKED" in x for x in r[1]["sites"].get("Text", []))
+            ]
+            label = " with a text site still not inked)"
+        else:
+            todo = [r for r in rows if not r[1]["inked"]]
+            label = " not yet inked)"
+        print(NL + "=== " + key + ": " + str(len(rows)) + "  (" + str(len(todo)) + label)
         for name, d in rows:
-            if d["inked"] and not show_all:
+            if (name, d) not in todo and not show_all:
                 continue
             counts = ", ".join(k + " x" + str(v) for k, v in d["kinds"].most_common())
             pal = "" if d["takes_palette"] else "  [takes no palette]"

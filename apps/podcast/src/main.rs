@@ -3080,7 +3080,7 @@ impl PodcastApp {
             x: pad + 8.0,
             y: detail_y + 4.0,
             text: status_label.to_string(),
-            color: episode.status.color(&self.palette),
+            color: self.palette.ink(episode.status.color(&self.palette)),
             font_size: 11.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(120.0),

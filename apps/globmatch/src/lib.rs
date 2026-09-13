@@ -34,10 +34,16 @@
 //!
 //! It is **not** the dialect `apps/backup` uses. That one is gitignore-shaped:
 //! it runs on raw path *bytes* (our paths are not required to be UTF-8), `*`
-//! and `?` stop at `/`, `**` spans path segments, and there are no bracket
-//! expressions at all. Unifying the two would silently change the meaning of
-//! every exclude list that contains a `[`, so it is a question for the
-//! operator rather than a refactor — see `open-questions.md` → C-Q9.
+//! and `?` stop at `/`, and `**` spans path segments. Those three differences
+//! are deliberate and stay: an exclude list matches paths, and a search
+//! matches text.
+//!
+//! **Bracket expressions are no longer one of the differences.** They were,
+//! until 2026-09-13, and C-Q9 asked the operator whether to unify. The answer
+//! was yes and the reasoning is in `design-decisions.md` §841: classes are
+//! standard in the exclude-list family too, so `apps/backup` was not speaking
+//! a different language, it was missing a feature of the one it claims. It
+//! now has them, with the same four rules as here.
 //!
 //! # The rules that look like bugs
 //!

@@ -1744,6 +1744,32 @@ Roadmap:
 - `[C]` Container runtime / Docker equivalent (lines ~5253, ~5315)
 - `[C]` System web app framework (line ~5045) — after Chromium
 - `[C]` Port VS Code, Thunderbird (lines ~5046–5047) — after Chromium
+- `[C]` **Twelve applications ignore the user's theme** — the shell's
+  `TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE`, again, in
+  `apps/`. 987 `const NAME: Color` declarations over 68 crates, and the names
+  collide the same way they did last time: `BASE` declared in 40 separate
+  crates, `SUBTEXT0` in 40, `RED`/`GREEN`/`BLUE` in 37 each. Those are copies of
+  one palette, not forty considered choices.
+
+  **Do the twelve applications first** — `procexplorer` (45 constants),
+  `sysinfo` (26), `imageviewer` (25), `pdfviewer` (21), `musicplayer` (18),
+  `speedtest` (17), `explorer` (17), `devicemanager` (17), `pomodoro` (16),
+  `screenshot` (15), `benchmark` (15), `mixer` (14). A file manager and a
+  process explorer that stay dark on a light desktop are the visible failure.
+  Thirteen more crates already have a `Palette` in scope and are nearly free.
+
+  **The ~43 games are C-Q16 and are not part of this.** Their chrome follows
+  the theme either way; whether the *board* should is a question about taste
+  that a sweep must not answer — tetris's seven piece colours and
+  minesweeper's numbered tiles *identify* things, and recolouring them makes
+  the games worse rather than different.
+
+  **Why nothing caught it:** 47 shell modules use `appearance::palette_check`
+  and **zero** apps do. `assert_drawn_from` is the function that found the
+  shell's copies; it already takes a `derived` list so an ANSI table or a
+  paint program's swatches can be declared rather than excused. Adopting it
+  per crate is both the fix and the guard.
+
 - `[C]` Speech input/output; phone camera/mic integration (lines ~5390–5391)
 
 - `[C]` **The bordered theme, applied** (§829-§837) — done. A re-run of the

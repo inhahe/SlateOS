@@ -622,7 +622,13 @@ fn comment_prefix(filetype: &str) -> Option<&'static str> {
     }
 }
 
-/// Highlight a single line, returning a Vec of Highlight per character.
+/// Highlight a single line, returning one `Highlight` per BYTE.
+///
+/// Not per character: the vector is `line.len()` long, and the renderer
+/// indexes it with the same byte offsets it slices the line with. The doc
+/// comment said "per character" until a test measured it, which for any line
+/// containing a multi-byte character would have sent the next reader looking
+/// for an off-by-N that is not there.
 fn highlight_line(line: &str, filetype: Option<&str>) -> Vec<Highlight> {
     let len = line.len();
     let mut hl = vec![Highlight::Normal; len];
@@ -1920,4 +1926,148 @@ fn main() {
     }
 
     editor.run();
+}
+
+// ============================================================================
+// Tests
+//
+// This crate had none. What is pinned here is the part of an editor that can
+// be wrong without anyone noticing: which file gets highlighted as what, the
+// invariant that makes undo/redo safe, and the length contract of the
+// highlight vector.
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_known_extension_selects_its_filetype() {
+        assert_eq!(detect_filetype("main.rs"), Some("rust"));
+        assert_eq!(detect_filetype("setup.py"), Some("python"));
+        assert_eq!(detect_filetype("head.h"), Some("c"));
+        assert_eq!(detect_filetype("Cargo.toml"), Some("toml"));
+        assert_eq!(detect_filetype("conf.yml"), Some("yaml"));
+        assert_eq!(detect_filetype("index.htm"), Some("html"));
+    }
+
+    #[test]
+    fn a_file_with_no_recognised_extension_gets_no_highlighting() {
+        assert_eq!(detect_filetype("Makefile"), None);
+        assert_eq!(detect_filetype("notes.txt"), None);
+        assert_eq!(detect_filetype(""), None);
+    }
+
+    #[test]
+    fn a_dot_in_a_directory_name_does_not_select_a_filetype() {
+        // `/etc/conf.d/hosts` has a dot in a DIRECTORY, and the extension
+        // logic splits on the last dot in the whole string. It must not
+        // decide that `d/hosts` is a filetype.
+        assert_eq!(detect_filetype("/etc/conf.d/hosts"), None);
+        // ...and a real extension after such a directory still works.
+        assert_eq!(detect_filetype("/etc/conf.d/main.rs"), Some("rust"));
+    }
+
+    #[test]
+    fn an_uppercase_extension_is_not_recognised_today() {
+        // Pinned as MEASURED, not endorsed. The match arms are lowercase, so
+        // `MAIN.RS` gets no highlighting. That is cosmetic-only -- an editor
+        // that does not colour a file still edits it correctly -- so it is
+        // recorded here rather than quietly changed. If someone lowercases the
+        // extension, this test is the place that says the behaviour moved on
+        // purpose.
+        assert_eq!(detect_filetype("MAIN.RS"), None);
+    }
+
+    #[test]
+    fn a_new_action_invalidates_the_redo_stack() {
+        // The invariant that makes undo safe. Without it, undoing, typing
+        // something new, and then pressing redo replays an action against
+        // text that no longer exists -- which is how an editor corrupts a
+        // buffer rather than merely annoying its user.
+        let mut st = UndoStack::new();
+        st.push(UndoAction::InsertLine { line: 0 });
+        let undone = st.pop_undo().expect("something to undo");
+        st.push_redo(undone);
+        assert!(st.pop_redo().is_some(), "redo must be available after undo");
+
+        st.push(UndoAction::InsertLine { line: 1 });
+        st.push_redo(UndoAction::InsertLine { line: 9 });
+        st.push(UndoAction::InsertLine { line: 2 });
+        assert!(
+            st.pop_redo().is_none(),
+            "a new action must have cleared the redo stack"
+        );
+    }
+
+    #[test]
+    fn undo_is_last_in_first_out() {
+        let mut st = UndoStack::new();
+        st.push(UndoAction::InsertLine { line: 1 });
+        st.push(UndoAction::InsertLine { line: 2 });
+        match st.pop_undo() {
+            Some(UndoAction::InsertLine { line }) => assert_eq!(line, 2),
+            _ => panic!("expected the most recent action"),
+        }
+        match st.pop_undo() {
+            Some(UndoAction::InsertLine { line }) => assert_eq!(line, 1),
+            _ => panic!("expected the earlier action"),
+        }
+        assert!(st.pop_undo().is_none(), "the stack must now be empty");
+    }
+
+    #[test]
+    fn the_highlight_vector_is_one_entry_per_byte() {
+        // The contract the renderer indexes against. It is BYTES, not
+        // characters: the doc comment said "per character" and the code
+        // allocates `line.len()`. For an ASCII line the two agree, which is
+        // why the difference had never shown up.
+        assert_eq!(highlight_line("abc", None).len(), 3);
+        let combining = "e\u{301}"; // one character, three bytes
+        assert_eq!(combining.chars().count(), 2);
+        assert_eq!(
+            highlight_line(combining, None).len(),
+            combining.len(),
+            "the vector must match the BYTE length the renderer slices with"
+        );
+    }
+
+    #[test]
+    fn without_a_filetype_nothing_is_highlighted() {
+        let hl = highlight_line("fn main() {}", None);
+        assert!(hl.iter().all(|h| *h == Highlight::Normal));
+    }
+
+    #[test]
+    fn a_whole_line_comment_is_marked_as_one() {
+        let line = "# a shell comment";
+        let hl = highlight_line(line, Some("shell"));
+        assert_eq!(hl.len(), line.len());
+        assert!(
+            hl.iter().all(|h| *h == Highlight::Comment),
+            "a line that is entirely a comment must be entirely comment-coloured"
+        );
+    }
+
+    #[test]
+    fn every_highlight_category_has_a_distinct_colour() {
+        // Two categories sharing a colour is indistinguishable from the
+        // highlighter not working, and is the kind of thing a careless edit to
+        // the palette produces.
+        let all = [
+            Highlight::Normal,
+            Highlight::Keyword,
+            Highlight::Type,
+            Highlight::String,
+            Highlight::Comment,
+            Highlight::Number,
+            Highlight::Operator,
+        ];
+        let mut seen = Vec::new();
+        for h in all {
+            let c = h.color();
+            assert!(!seen.contains(&c), "colour {c} is used twice");
+            seen.push(c);
+        }
+    }
 }

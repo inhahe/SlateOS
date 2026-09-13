@@ -129799,6 +129799,56 @@ used *only* in exempt positions, which is the property that actually matters.
 **Also found in the same survey:** `overlay1` and `overlay2` are declared and
 used **zero** times anywhere in `gui` or `apps`. They are dead palette rungs.
 
+## TD-C-THE-COMPOSITOR-FRAME-BUDGET-HAS-NO-INSTRUMENT -- half fixed; the half that was fixed caught a 30x regression on 2026-09-12
+
+**Update, 2026-09-12 (lane C).** Point 2 below -- "the runtime measurement
+exists and is unchecked" -- was fixed on 2026-09-11 by giving
+`the_demo_scene_still_composites` a real ceiling (`FRAME_CEILING_US =
+50_000`) instead of an assertion that the clock runs. **Twenty-four hours
+later it earned its keep.**
+
+A workspace test failed with *a frame of this trivial scene took 67 074 us,
+over the 50 000 us ceiling*. The first instinct was machine load -- the run was
+a parallel workspace test on a busy desktop, and the recorded adjudication rule
+says to suspect load. It was not load. Measured directly:
+
+| | before | after the fix |
+|---|---|---|
+| `contrast_ratio` | 436 ns | 4 ns |
+| `Palette::from_settings`, card theme | 87 395 ns | 3 102 ns |
+
+The cause was the 4.5:1 text floor (§837) making palette resolution call
+`contrast_ratio`, which was three `powf(2.4)` evaluations per colour -- and the
+compositor calls `Palette::from_settings` **inside the render path**, per
+blurred window, per frame. Fixed by tabling the sRGB transfer function: a
+channel is a `u8`, so all 256 inputs are precomputed from the same formula, and
+`guitk::theme::the_table_is_the_formula` asserts the table *is* the formula at
+every one of them.
+
+**What is worth generalising.** The bound was set with a comment explaining
+where its number came from and a rule for adjudicating a failure. Both were
+used within a day -- the number to see that 67 074 was 13x the median rather
+than merely "slow", and the rule to decide whether to investigate. An
+instrument with no threshold is a log line; a threshold whose value a later
+reader cannot explain gets relaxed instead of investigated.
+
+**Point 1 below is still open:** there is still no benchmark series for the
+compositor, and lane A offered two shapes for one (a host-side criterion bench
+in `gui/compositor/benches/`, or a ring-3 rung). This incident is an argument
+for the host-side bench: the regression was in *host* code called from the
+render path, and a criterion series would have shown it as a trend rather than
+as a single ceiling breach that had to be diagnosed from scratch.
+
+**A smaller thing this exposed, not yet fixed:** `Palette::from_settings` is
+called per blurred window per frame rather than resolved once when the
+appearance changes. At 273 ns it no longer matters for the budget, but
+resolving a settings struct inside a render loop is the kind of thing that
+stops being free the next time something is added to it.
+
+---
+
+### The original entry, for the record
+
 ## TD-C-THE-COMPOSITOR-FRAME-BUDGET-HAS-NO-INSTRUMENT
 
 **Date:** 2026-09-11. **Lane:** C. Found by lane A while checking whether the

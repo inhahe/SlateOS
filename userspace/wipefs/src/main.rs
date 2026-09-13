@@ -291,6 +291,12 @@ fn cmd_wipefs(args: &[String]) {
             }
             _ => {
                 eprintln!("wipefs: unknown option: {}", args[i]);
+                // Stop. This used to report the option and keep parsing, so
+                // `wipefs --zzq-not-an-option <device>` printed the refusal
+                // and then operated on the device anyway, exiting 0. For a
+                // tool that destroys data, an argument it did not understand
+                // is precisely when it must not proceed.
+                process::exit(1);
             }
         }
         i += 1;
@@ -508,6 +514,12 @@ fn cmd_blkdiscard(args: &[String]) {
             }
             _ => {
                 eprintln!("blkdiscard: unknown option: {}", args[i]);
+                // Stop. This used to report the option and keep parsing, so
+                // `blkdiscard --zzq-not-an-option <device>` printed the refusal
+                // and then operated on the device anyway, exiting 0. For a
+                // tool that destroys data, an argument it did not understand
+                // is precisely when it must not proceed.
+                process::exit(1);
             }
         }
         i += 1;

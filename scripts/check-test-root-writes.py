@@ -66,14 +66,23 @@ TARGET = "x86_64-pc-windows-gnu"
 
 
 def snapshot():
-    """The POSIX-looking directories at the drive root, right now."""
+    """The POSIX-looking directories at the drive root, right now.
+
+    Matched CASE-SENSITIVELY, which is the whole reason `Boot` is not reported.
+    Windows keeps its boot configuration in `E:\\Boot` with a capital B; a Rust
+    `create_dir("/boot")` creates `boot`, because NTFS is case-insensitive but
+    case-PRESERVING. Lowercasing before the comparison listed Windows' own
+    directory as POSIX litter on every run -- harmless here, since a
+    pre-existing entry can never appear in the before/after difference, but it
+    is exactly the confusion this tool's own self-test forbids.
+    """
     try:
         entries = os.listdir(DRIVE)
     except OSError:
         return set()
     return {
         e for e in entries
-        if e.lower() in POSIX_ROOTS and os.path.isdir(os.path.join(DRIVE, e))
+        if e in POSIX_ROOTS and os.path.isdir(os.path.join(DRIVE, e))
     }
 
 
@@ -194,8 +203,17 @@ def selftest():
     # cannot read.
     snap = snapshot()
     ck(isinstance(snap, set), "snapshot must return a set")
-    ck(all(s.lower() in POSIX_ROOTS for s in snap),
+    ck(all(s in POSIX_ROOTS for s in snap),
        "snapshot returned something that is not a POSIX root: " + repr(snap))
+    # Windows' own `Boot` must not be reported. It is spelled with a capital
+    # B; a `/boot` created from Rust is lowercase, because NTFS preserves the
+    # case it was given. This is the only thing separating the two.
+    ck("Boot" not in POSIX_ROOTS,
+       "POSIX_ROOTS must not contain Windows' capitalised Boot")
+    ck("boot" in POSIX_ROOTS,
+       "a genuine lowercase /boot write must still be caught")
+    ck("Boot" not in snap,
+       "Windows' E:/Boot is being reported as POSIX litter: " + repr(snap))
     # The count must sum every test binary, not report the first. A crate with
     # a lib test and a bin test has two `test result:` lines, and taking one
     # would understate the crate -- plausibly, which is the bad kind of wrong.

@@ -2307,7 +2307,7 @@ fn render_section_title(frame: &mut Frame, pal: &Palette, title: &str, x: f32, y
         x,
         y,
         text: title.to_string(),
-        color: pal.blue,
+        color: pal.ink(pal.blue),
         font_size: SECTION_TEXT,
         font_weight: FontWeightHint::Bold,
         max_width: None,

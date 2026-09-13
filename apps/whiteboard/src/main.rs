@@ -2235,11 +2235,7 @@ impl WhiteboardApp {
             x: 300.0,
             y: 14.0,
             text: grid_label.to_string(),
-            color: if self.show_grid {
-                self.palette.green
-            } else {
-                self.palette.overlay0
-            },
+            color: if self.show_grid { self.palette.ink(self.palette.green) } else { self.palette.overlay0 },
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -2256,11 +2252,7 @@ impl WhiteboardApp {
             x: 380.0,
             y: 14.0,
             text: snap_label.to_string(),
-            color: if self.snap_to_grid {
-                self.palette.blue
-            } else {
-                self.palette.overlay0
-            },
+            color: if self.snap_to_grid { self.palette.ink(self.palette.blue) } else { self.palette.overlay0 },
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -3127,7 +3119,7 @@ impl WhiteboardApp {
                 x: 240.0,
                 y: y + 6.0,
                 text: format!("Selected: {}", sel_count),
-                color: self.palette.blue,
+                color: self.palette.ink(self.palette.blue),
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,

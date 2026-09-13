@@ -1789,11 +1789,7 @@ impl App {
                 y: 15.0,
                 text: label.into(),
                 font_size: NORMAL_TEXT,
-                color: if active {
-                    self.palette.blue
-                } else {
-                    self.palette.subtext0
-                },
+                color: if active { self.palette.ink(self.palette.blue) } else { self.palette.subtext0 },
                 font_weight: tab_weight,
                 max_width: Some(w),
                 overflow: TextOverflow::Ellipsis,
@@ -1887,7 +1883,7 @@ impl App {
                 y: status_y,
                 text: format!("Error: {err}"),
                 font_size: SMALL_TEXT,
-                color: self.palette.red,
+                color: self.palette.ink(self.palette.red),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(self.window_width - 100.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1898,7 +1894,7 @@ impl App {
                 y: status_y,
                 text: self.match_stats(),
                 font_size: SMALL_TEXT,
-                color: self.palette.green,
+                color: self.palette.ink(self.palette.green),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(self.window_width - 100.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2231,11 +2227,7 @@ impl App {
                 y: y + 8.0,
                 text: (*label).into(),
                 font_size: SMALL_TEXT,
-                color: if selected {
-                    self.palette.blue
-                } else {
-                    self.palette.subtext0
-                },
+                color: if selected { self.palette.ink(self.palette.blue) } else { self.palette.subtext0 },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(tw),
                 overflow: TextOverflow::Ellipsis,
@@ -2265,7 +2257,7 @@ impl App {
                     y: content_y + 20.0,
                     text: "No matches found".into(),
                     font_size: NORMAL_TEXT,
-                    color: self.palette.yellow,
+                    color: self.palette.ink(self.palette.yellow),
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - 24.0),
                     overflow: TextOverflow::Ellipsis,
@@ -2357,11 +2349,7 @@ impl App {
                 y: row_y + 2.0,
                 text: format!("#{} [{}-{}]", mi.saturating_add(1), m.start, m.end),
                 font_size: SMALL_TEXT,
-                color: if is_current {
-                    self.palette.blue
-                } else {
-                    self.palette.overlay0
-                },
+                color: if is_current { self.palette.ink(self.palette.blue) } else { self.palette.overlay0 },
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width - 16.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2385,7 +2373,7 @@ impl App {
                 y: row_y + LINE_HEIGHT,
                 text: format!("\"{display}\""),
                 font_size: SMALL_TEXT,
-                color: self.palette.green,
+                color: self.palette.ink(self.palette.green),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 16.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2418,7 +2406,7 @@ impl App {
                         y: row_y + 2.0,
                         text: groups_str,
                         font_size: SMALL_TEXT,
-                        color: self.palette.mauve,
+                        color: self.palette.ink(self.palette.mauve),
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(width - 130.0),
                         overflow: TextOverflow::Ellipsis,
@@ -2466,11 +2454,7 @@ impl App {
                 y: content_y + 5.0,
                 text: label.into(),
                 font_size: SMALL_TEXT,
-                color: if selected {
-                    cat.map_or(self.palette.blue, |c| c.color(&self.palette))
-                } else {
-                    self.palette.subtext0
-                },
+                color: if selected { cat.map_or(self.palette.ink(self.palette.blue), |c| c.color(&self.palette)) } else { self.palette.subtext0 },
                 font_weight: if selected {
                     FontWeightHint::Bold
                 } else {
@@ -2560,7 +2544,7 @@ impl App {
                     FontWeightHint::Regular,
                 ),
                 font_size: SMALL_TEXT,
-                color: self.palette.sky,
+                color: self.palette.ink(self.palette.sky),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(self.window_width - 40.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2613,7 +2597,7 @@ impl App {
             y: content_y + 10.0,
             text: "Syntax Reference".into(),
             font_size: HEADER_TEXT,
-            color: self.palette.blue,
+            color: self.palette.ink(self.palette.blue),
             font_weight: FontWeightHint::Bold,
             max_width: Some(col_width - 24.0),
             overflow: TextOverflow::Ellipsis,
@@ -2658,7 +2642,7 @@ impl App {
                 y: sy,
                 text: (*syntax).into(),
                 font_size: SMALL_TEXT,
-                color: self.palette.green,
+                color: self.palette.ink(self.palette.green),
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(80.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2692,7 +2676,7 @@ impl App {
             y: content_y + 10.0,
             text: "Replacement Reference".into(),
             font_size: HEADER_TEXT,
-            color: self.palette.peach,
+            color: self.palette.ink(self.palette.peach),
             font_weight: FontWeightHint::Bold,
             max_width: Some(col_width - 24.0),
             overflow: TextOverflow::Ellipsis,
@@ -2714,7 +2698,7 @@ impl App {
                 y: ry,
                 text: (*syntax).into(),
                 font_size: SMALL_TEXT,
-                color: self.palette.peach,
+                color: self.palette.ink(self.palette.peach),
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(80.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2738,7 +2722,7 @@ impl App {
             y: tips_y,
             text: "Tips & Tricks".into(),
             font_size: HEADER_TEXT,
-            color: self.palette.teal,
+            color: self.palette.ink(self.palette.teal),
             font_weight: FontWeightHint::Bold,
             max_width: Some(col_width - 24.0),
             overflow: TextOverflow::Ellipsis,

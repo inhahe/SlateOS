@@ -2976,7 +2976,7 @@ impl UndeleteApp {
             x: PADDING,
             y: center_y,
             text: self.engine.progress.phase.display_name().to_string(),
-            color: self.palette.blue,
+            color: self.palette.ink(self.palette.blue),
             font_size: FONT_SIZE_HEADING,
             font_weight: FontWeightHint::Bold,
             max_width: Some(self.width - PADDING * 2.0),
@@ -3120,11 +3120,7 @@ impl UndeleteApp {
             x: PADDING,
             y: all_y + 6.0,
             text: format!("All Files ({})", self.engine.files.len()),
-            color: if all_selected {
-                self.palette.blue
-            } else {
-                self.palette.subtext1
-            },
+            color: if all_selected { self.palette.ink(self.palette.blue) } else { self.palette.subtext1 },
             font_size: FONT_SIZE,
             font_weight: if all_selected {
                 FontWeightHint::Bold
@@ -3167,11 +3163,7 @@ impl UndeleteApp {
                 x: PADDING + 16.0,
                 y: item_y + 6.0,
                 text: format!("{} ({})", cat.display_name(), count),
-                color: if is_selected {
-                    self.palette.blue
-                } else {
-                    self.palette.subtext1
-                },
+                color: if is_selected { self.palette.ink(self.palette.blue) } else { self.palette.subtext1 },
                 font_size: FONT_SIZE,
                 font_weight: if is_selected {
                     FontWeightHint::Bold
@@ -3785,7 +3777,7 @@ impl UndeleteApp {
                 x: inner_x + 6.0,
                 y: cy + 6.0,
                 text: hex_str,
-                color: self.palette.green,
+                color: self.palette.ink(self.palette.green),
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(inner_w - 12.0),
@@ -4104,7 +4096,7 @@ impl UndeleteApp {
                 x: PADDING + row_w * 0.8,
                 y: y + 24.0,
                 text: msg.clone(),
-                color: self.palette.red,
+                color: self.palette.ink(self.palette.red),
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(row_w * 0.18),

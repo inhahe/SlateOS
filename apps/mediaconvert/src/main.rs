@@ -1856,7 +1856,7 @@ impl MediaConvertApp {
             x: 12.0,
             y: 12.0,
             text: "Media Converter".to_owned(),
-            color: self.palette.blue,
+            color: self.palette.ink(self.palette.blue),
             font_size: 15.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(160.0),

@@ -1498,11 +1498,7 @@ impl FileDiffApp {
                 x: *btn_x + 8.0,
                 y: btn_y + 7.0,
                 text: (*label).to_string(),
-                color: if is_active {
-                    self.palette.blue
-                } else {
-                    self.palette.text
-                },
+                color: if is_active { self.palette.ink(self.palette.blue) } else { self.palette.text },
                 font_size: UI_FONT_SIZE,
                 font_weight: if is_active {
                     FontWeightHint::Bold
@@ -1579,11 +1575,7 @@ impl FileDiffApp {
                 x: *btn_x + 8.0,
                 y: btn_y + 7.0,
                 text: (*label).to_string(),
-                color: if *active {
-                    self.palette.teal
-                } else {
-                    self.palette.subtext0
-                },
+                color: if *active { self.palette.ink(self.palette.teal) } else { self.palette.subtext0 },
                 font_size: UI_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -1622,11 +1614,7 @@ impl FileDiffApp {
             x: sync_x + 8.0,
             y: btn_y + 7.0,
             text: sync_label.to_string(),
-            color: if self.sync_scroll {
-                self.palette.green
-            } else {
-                self.palette.overlay0
-            },
+            color: if self.sync_scroll { self.palette.ink(self.palette.green) } else { self.palette.overlay0 },
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -2052,15 +2040,7 @@ impl FileDiffApp {
                 x: text_x + char_offset,
                 y: y + 3.0,
                 text: span_text.to_string(),
-                color: if span.changed {
-                    match row.op {
-                        DiffOp::Insert => self.palette.green,
-                        DiffOp::Delete => self.palette.red,
-                        DiffOp::Equal => self.palette.text,
-                    }
-                } else {
-                    self.palette.text
-                },
+                color: if span.changed { match row.op { DiffOp::Insert => self.palette.ink(self.palette.green), DiffOp::Delete => self.palette.ink(self.palette.red), DiffOp::Equal => self.palette.text, } } else { self.palette.text },
                 font_size: CONTENT_FONT_SIZE,
                 font_weight: weight,
                 max_width: None,
@@ -2247,7 +2227,7 @@ impl FileDiffApp {
             x: text_x,
             y: text_y,
             text: format!("{}", self.view_mode),
-            color: self.palette.blue,
+            color: self.palette.ink(self.palette.blue),
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -2276,7 +2256,7 @@ impl FileDiffApp {
             x: *text_x,
             y: text_y,
             text: change_info,
-            color: self.palette.peach,
+            color: self.palette.ink(self.palette.peach),
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -2329,11 +2309,7 @@ impl FileDiffApp {
                     ),
                     y: text_y,
                     text: merge_text,
-                    color: if decided == total_hunks {
-                        self.palette.green
-                    } else {
-                        self.palette.yellow
-                    },
+                    color: if decided == total_hunks { self.palette.ink(self.palette.green) } else { self.palette.ink(self.palette.yellow) },
                     font_size: UI_FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,

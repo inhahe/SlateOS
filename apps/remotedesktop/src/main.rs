@@ -1838,7 +1838,7 @@ impl RemoteDesktopApp {
                 y: 12.0,
                 text: "Fullscreen".into(),
                 font_size: 11.0,
-                color: self.palette.green,
+                color: self.palette.ink(self.palette.green),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(70.0),
                 overflow: TextOverflow::Ellipsis,
@@ -3085,11 +3085,7 @@ impl RemoteDesktopApp {
             y: y + 7.0,
             text: format!("{active_count} active"),
             font_size: 11.0,
-            color: if active_count > 0 {
-                self.palette.green
-            } else {
-                self.palette.overlay0
-            },
+            color: if active_count > 0 { self.palette.ink(self.palette.green) } else { self.palette.overlay0 },
             font_weight: FontWeightHint::Regular,
             max_width: Some(100.0),
             overflow: TextOverflow::Ellipsis,
@@ -3119,7 +3115,7 @@ impl RemoteDesktopApp {
                 y: y + 7.0,
                 text: format!("{active_transfers} transfers"),
                 font_size: 11.0,
-                color: self.palette.blue,
+                color: self.palette.ink(self.palette.blue),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(100.0),
                 overflow: TextOverflow::Ellipsis,
@@ -3133,7 +3129,7 @@ impl RemoteDesktopApp {
                 y: y + 7.0,
                 text: msg.clone(),
                 font_size: 11.0,
-                color: self.palette.yellow,
+                color: self.palette.ink(self.palette.yellow),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(300.0),
                 overflow: TextOverflow::Ellipsis,
@@ -3210,7 +3206,7 @@ impl RemoteDesktopApp {
             y: oy + 8.0,
             text: "Performance".into(),
             font_size: 12.0,
-            color: self.palette.lavender,
+            color: self.palette.ink(self.palette.lavender),
             font_weight: FontWeightHint::Bold,
             max_width: Some(ow - 20.0),
             overflow: TextOverflow::Ellipsis,

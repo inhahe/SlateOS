@@ -2118,7 +2118,7 @@ impl StartupUI {
                 x: (l.width - PADDING - w).max(PADDING),
                 y: l.header.y + ((l.header.h - FONT_SIZE_SMALL) / 2.0).max(0.0),
                 text: self.status.clone(),
-                color: self.palette.yellow,
+                color: self.palette.ink(self.palette.yellow),
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some((l.width / 2.0).max(0.0)),
@@ -2287,11 +2287,7 @@ impl StartupUI {
                 x: rect.x + 4.0,
                 y: rect.y + ((rect.h - FONT_SIZE_SMALL) / 2.0).max(0.0),
                 text: label,
-                color: if active {
-                    self.palette.blue
-                } else {
-                    self.palette.text
-                },
+                color: if active { self.palette.ink(self.palette.blue) } else { self.palette.text },
                 font_size: FONT_SIZE_SMALL,
                 font_weight: if active {
                     FontWeightHint::Bold
@@ -2673,7 +2669,7 @@ impl StartupUI {
             x: rect.x + PADDING,
             y: rect.bottom() - BUTTON_HEIGHT - PADDING + (BUTTON_HEIGHT - FONT_SIZE_SMALL) / 2.0,
             text: self.status.clone(),
-            color: self.palette.yellow,
+            color: self.palette.ink(self.palette.yellow),
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width),

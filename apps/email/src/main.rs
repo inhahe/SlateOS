@@ -2525,7 +2525,7 @@ impl EmailApp {
             y: 14.0,
             text: "Mail".to_string(),
             font_size: 18.0,
-            color: self.palette.blue,
+            color: self.palette.ink(self.palette.blue),
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2697,11 +2697,7 @@ impl EmailApp {
                 y: my + 7.0,
                 text: format!("{icon} {}", mb.name),
                 font_size: 12.0,
-                color: if is_sel {
-                    self.palette.blue
-                } else {
-                    self.palette.subtext1
-                },
+                color: if is_sel { self.palette.ink(self.palette.blue) } else { self.palette.subtext1 },
                 font_weight: if is_sel {
                     FontWeightHint::Bold
                 } else {
@@ -2717,7 +2713,7 @@ impl EmailApp {
                     y: my + 7.0,
                     text: mb.unread_messages.to_string(),
                     font_size: 11.0,
-                    color: self.palette.blue,
+                    color: self.palette.ink(self.palette.blue),
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -2832,7 +2828,7 @@ impl EmailApp {
                     y: ry + 6.0,
                     text: "★".to_string(),
                     font_size: 14.0,
-                    color: self.palette.yellow,
+                    color: self.palette.ink(self.palette.yellow),
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -2931,7 +2927,7 @@ impl EmailApp {
                     y: ry + 42.0,
                     text: "❗".to_string(),
                     font_size: 12.0,
-                    color: self.palette.red,
+                    color: self.palette.ink(self.palette.red),
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -2952,7 +2948,7 @@ impl EmailApp {
                     y: ry + 55.0,
                     text: label.clone(),
                     font_size: 9.0,
-                    color: self.palette.peach,
+                    color: self.palette.ink(self.palette.peach),
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,

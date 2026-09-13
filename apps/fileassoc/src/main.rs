@@ -2378,11 +2378,7 @@ impl FileAssocUI {
             x: PADDING + 28.0,
             y: r.y + 10.0,
             text: String::from(label),
-            color: if selected {
-                self.palette.blue
-            } else {
-                self.palette.text
-            },
+            color: if selected { self.palette.ink(self.palette.blue) } else { self.palette.text },
             font_size: FONT_SIZE,
             font_weight: if selected {
                 FontWeightHint::Bold
@@ -2505,11 +2501,7 @@ impl FileAssocUI {
                 x: l.columns[0] + 14.0,
                 y: text_y,
                 text: format!(".{}", ft.extension),
-                color: if selected {
-                    self.palette.blue
-                } else {
-                    self.palette.text
-                },
+                color: if selected { self.palette.ink(self.palette.blue) } else { self.palette.text },
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some((l.columns[1] - l.columns[0] - 16.0).max(0.0)),
@@ -2544,11 +2536,7 @@ impl FileAssocUI {
                 x: l.columns[3],
                 y: text_y,
                 text: app_name,
-                color: if ft.default_app_id.is_some() {
-                    self.palette.green
-                } else {
-                    self.palette.overlay0
-                },
+                color: if ft.default_app_id.is_some() { self.palette.ink(self.palette.green) } else { self.palette.overlay0 },
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some((l.table.right() - PADDING - l.columns[3]).max(0.0)),
@@ -2740,11 +2728,7 @@ impl FileAssocUI {
                     x: r.x + 8.0,
                     y: r.y + (r.h - FONT_SIZE_SMALL).max(0.0) / 2.0,
                     text: app.name.clone(),
-                    color: if is_default {
-                        self.palette.green
-                    } else {
-                        self.palette.text
-                    },
+                    color: if is_default { self.palette.ink(self.palette.green) } else { self.palette.text },
                     font_size: FONT_SIZE_SMALL,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some((r.w - 16.0).max(0.0)),

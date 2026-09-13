@@ -2848,7 +2848,7 @@ impl TorrentApp {
             y: 14.0,
             text: "Torrent".to_string(),
             font_size: 18.0,
-            color: self.palette.blue,
+            color: self.palette.ink(self.palette.blue),
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2926,11 +2926,7 @@ impl TorrentApp {
                 y: fy + 7.0,
                 text: format!("{} ({})", filter.label(), count),
                 font_size: 12.0,
-                color: if is_sel {
-                    self.palette.blue
-                } else {
-                    self.palette.subtext1
-                },
+                color: if is_sel { self.palette.ink(self.palette.blue) } else { self.palette.subtext1 },
                 font_weight: if is_sel {
                     FontWeightHint::Bold
                 } else {
@@ -2972,11 +2968,7 @@ impl TorrentApp {
                 y: fy + 5.0,
                 text: label.clone(),
                 font_size: 12.0,
-                color: if is_sel {
-                    self.palette.blue
-                } else {
-                    self.palette.subtext0
-                },
+                color: if is_sel { self.palette.ink(self.palette.blue) } else { self.palette.subtext0 },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(sidebar_w - 24.0),
                 overflow: TextOverflow::Ellipsis,
@@ -3020,11 +3012,7 @@ impl TorrentApp {
                 y: header_h + 12.0,
                 text: tab.label().to_string(),
                 font_size: 12.0,
-                color: if is_active {
-                    self.palette.blue
-                } else {
-                    self.palette.subtext0
-                },
+                color: if is_active { self.palette.ink(self.palette.blue) } else { self.palette.subtext0 },
                 font_weight: if is_active {
                     FontWeightHint::Bold
                 } else {
@@ -3155,7 +3143,7 @@ impl TorrentApp {
                     y: ry + 24.0,
                     text: torrent.label.clone(),
                     font_size: 10.0,
-                    color: self.palette.mauve,
+                    color: self.palette.ink(self.palette.mauve),
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(250.0),
                     overflow: TextOverflow::Ellipsis,
@@ -3245,7 +3233,7 @@ impl TorrentApp {
                 y: ry + 6.0,
                 text: format_speed(torrent.download_speed.speed_bps()),
                 font_size: 12.0,
-                color: self.palette.teal,
+                color: self.palette.ink(self.palette.teal),
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -3258,7 +3246,7 @@ impl TorrentApp {
                 y: ry + 6.0,
                 text: format_speed(torrent.upload_speed.speed_bps()),
                 font_size: 12.0,
-                color: self.palette.peach,
+                color: self.palette.ink(self.palette.peach),
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,

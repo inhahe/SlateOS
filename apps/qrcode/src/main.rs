@@ -1776,7 +1776,7 @@ impl QrApp {
             x: 12.0,
             y: 12.0,
             text: "QR Code Generator".to_owned(),
-            color: self.palette.blue,
+            color: self.palette.ink(self.palette.blue),
             font_size: 15.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
@@ -1806,11 +1806,7 @@ impl QrApp {
                 x: tx + 10.0,
                 y: 14.0,
                 text: ct.label().to_owned(),
-                color: if is_active {
-                    self.palette.blue
-                } else {
-                    self.palette.subtext0
-                },
+                color: if is_active { self.palette.ink(self.palette.blue) } else { self.palette.subtext0 },
                 font_size: 11.0,
                 font_weight: if is_active {
                     FontWeightHint::Bold
@@ -1964,11 +1960,7 @@ impl QrApp {
                 x: mx + 8.0,
                 y: cy + 5.0,
                 text: mode.label().to_owned(),
-                color: if is_active {
-                    self.palette.lavender
-                } else {
-                    self.palette.subtext0
-                },
+                color: if is_active { self.palette.ink(self.palette.lavender) } else { self.palette.subtext0 },
                 font_size: 10.0,
                 font_weight: if is_active {
                     FontWeightHint::Bold
@@ -2488,11 +2480,7 @@ impl QrApp {
                 x: lx + 8.0,
                 y: cy + 5.0,
                 text: ec.label().to_owned(),
-                color: if is_active {
-                    self.palette.green
-                } else {
-                    self.palette.subtext0
-                },
+                color: if is_active { self.palette.ink(self.palette.green) } else { self.palette.subtext0 },
                 font_size: 10.0,
                 font_weight: if is_active {
                     FontWeightHint::Bold
@@ -2538,11 +2526,7 @@ impl QrApp {
                 x: lx + 8.0,
                 y: cy + 5.0,
                 text: ms.label().to_owned(),
-                color: if is_active {
-                    self.palette.yellow
-                } else {
-                    self.palette.subtext0
-                },
+                color: if is_active { self.palette.ink(self.palette.yellow) } else { self.palette.subtext0 },
                 font_size: 10.0,
                 font_weight: if is_active {
                     FontWeightHint::Bold

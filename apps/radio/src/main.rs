@@ -1309,7 +1309,7 @@ impl RadioApp {
             y: y + 10.0,
             text: "Internet Radio".into(),
             font_size: 14.0,
-            color: self.palette.blue,
+            color: self.palette.ink(self.palette.blue),
             font_weight: FontWeightHint::Bold,
             max_width: Some(w - 24.0),
             overflow: TextOverflow::Ellipsis,
@@ -1590,13 +1590,7 @@ impl RadioApp {
                     y: ry + 4.0,
                     text: station.name.clone(),
                     font_size: 13.0,
-                    color: if is_playing {
-                        self.palette.green
-                    } else if is_sel {
-                        self.palette.text
-                    } else {
-                        self.palette.subtext1
-                    },
+                    color: if is_playing { self.palette.ink(self.palette.green) } else if is_sel { self.palette.text } else { self.palette.subtext1 },
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(w - 100.0),
                     overflow: TextOverflow::Ellipsis,
@@ -1701,11 +1695,7 @@ impl RadioApp {
                     y: y + 8.0,
                     text: station.name.clone(),
                     font_size: 14.0,
-                    color: if self.play_state == PlayState::Playing {
-                        self.palette.green
-                    } else {
-                        self.palette.text
-                    },
+                    color: if self.play_state == PlayState::Playing { self.palette.ink(self.palette.green) } else { self.palette.text },
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(250.0),
                     overflow: TextOverflow::Ellipsis,
@@ -1778,11 +1768,7 @@ impl RadioApp {
             y: y + 8.0,
             text: vol_label,
             font_size: 10.0,
-            color: if self.muted {
-                self.palette.red
-            } else {
-                self.palette.subtext1
-            },
+            color: if self.muted { self.palette.ink(self.palette.red) } else { self.palette.subtext1 },
             font_weight: FontWeightHint::Regular,
             max_width: Some(80.0),
             overflow: TextOverflow::Ellipsis,
@@ -1824,7 +1810,7 @@ impl RadioApp {
                 y: y + 48.0,
                 text: format!("Sleep: {}", Self::format_time(remaining)),
                 font_size: 9.0,
-                color: self.palette.yellow,
+                color: self.palette.ink(self.palette.yellow),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(100.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1846,7 +1832,7 @@ impl RadioApp {
                 y: y + 8.0,
                 text: format!("REC {}", Self::format_time(self.record_duration_secs)),
                 font_size: 9.0,
-                color: self.palette.red,
+                color: self.palette.ink(self.palette.red),
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(80.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1901,7 +1887,7 @@ impl RadioApp {
                 y: sy + 28.0,
                 text: format!("{} results — Enter to view", self.search_results.len()),
                 font_size: 10.0,
-                color: self.palette.green,
+                color: self.palette.ink(self.palette.green),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(sw - 24.0),
                 overflow: TextOverflow::Ellipsis,

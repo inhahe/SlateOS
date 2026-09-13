@@ -1321,11 +1321,7 @@ fn render_tab_bar(frame: &mut Frame, state: &AppState, x: f32, y: f32, w: f32, h
             x: rect.x + 16.0,
             y: y + 8.0,
             text: label.to_string(),
-            color: if is_active {
-                state.palette.blue
-            } else {
-                state.palette.subtext0
-            },
+            color: if is_active { state.palette.ink(state.palette.blue) } else { state.palette.subtext0 },
             font_size: 13.0,
             font_weight: if is_active {
                 FontWeightHint::Bold
@@ -1382,11 +1378,7 @@ fn render_tag_strip(frame: &mut Frame, state: &AppState, x: f32, y: f32, w: f32,
         x: all.x + 7.0,
         y: all.y + 4.0,
         text: "All".to_string(),
-        color: if state.tag_filter.is_none() {
-            state.palette.blue
-        } else {
-            state.palette.overlay0
-        },
+        color: if state.tag_filter.is_none() { state.palette.ink(state.palette.blue) } else { state.palette.overlay0 },
         font_size: 10.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
@@ -1416,11 +1408,7 @@ fn render_tag_strip(frame: &mut Frame, state: &AppState, x: f32, y: f32, w: f32,
             x: chip.x + 6.0,
             y: chip.y + 4.0,
             text: tag.clone(),
-            color: if active {
-                state.palette.teal
-            } else {
-                state.palette.overlay0
-            },
+            color: if active { state.palette.ink(state.palette.teal) } else { state.palette.overlay0 },
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1594,7 +1582,7 @@ fn render_entry_row(
             x: bx,
             y: y + 7.0,
             text: "PIN".to_string(),
-            color: pal.yellow,
+            color: pal.ink(pal.yellow),
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -1607,7 +1595,7 @@ fn render_entry_row(
             x: bx,
             y: y + 7.0,
             text: "MARK".to_string(),
-            color: pal.peach,
+            color: pal.ink(pal.peach),
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -1652,7 +1640,7 @@ fn render_entry_row(
             x: x + w - 70.0,
             y: y + 34.0,
             text: format!("{} tags", entry.tags.len()),
-            color: pal.teal,
+            color: pal.ink(pal.teal),
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1689,7 +1677,7 @@ fn render_detail_panel(
         x: x + pad,
         y: cy,
         text: format!("{} #{}", entry.clip_type.label(), entry.id),
-        color: pal.blue,
+        color: pal.ink(pal.blue),
         font_size: 15.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
@@ -1719,7 +1707,7 @@ fn render_detail_panel(
             x: x + pad,
             y: cy,
             text: "Pinned".to_string(),
-            color: pal.yellow,
+            color: pal.ink(pal.yellow),
             font_size: 11.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -1740,7 +1728,7 @@ fn render_detail_panel(
                 x: chip.x + 6.0,
                 y: chip.y + 3.0,
                 text: tag.clone(),
-                color: pal.teal,
+                color: pal.ink(pal.teal),
                 font_size: 10.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -1802,7 +1790,7 @@ fn render_detail_panel(
         x: add.x + 8.0,
         y: add.y + 4.0,
         text: "Tag".to_string(),
-        color: pal.teal,
+        color: pal.ink(pal.teal),
         font_size: 11.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
@@ -1819,7 +1807,7 @@ fn render_detail_panel(
             x: x + pad + 6.0,
             y: cy + 3.0,
             text: format!("lang: {lang}"),
-            color: pal.mauve,
+            color: pal.ink(pal.mauve),
             font_size: 10.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -1888,7 +1876,7 @@ fn render_templates_panel(frame: &mut Frame, state: &AppState, x: f32, y: f32, w
         x: x + pad,
         y: cy,
         text: "Templates".to_string(),
-        color: state.palette.blue,
+        color: state.palette.ink(state.palette.blue),
         font_size: 14.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
@@ -1929,11 +1917,7 @@ fn render_templates_panel(frame: &mut Frame, state: &AppState, x: f32, y: f32, w
                 x: row.x + 8.0,
                 y: row.y + 8.0,
                 text: tmpl.name.clone(),
-                color: if is_sel {
-                    state.palette.blue
-                } else {
-                    state.palette.text
-                },
+                color: if is_sel { state.palette.ink(state.palette.blue) } else { state.palette.text },
                 font_size: 13.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(180.0),
@@ -2021,7 +2005,7 @@ fn render_templates_panel(frame: &mut Frame, state: &AppState, x: f32, y: f32, w
         x: x + pad,
         y: cy,
         text: "New Template".to_string(),
-        color: state.palette.peach,
+        color: state.palette.ink(state.palette.peach),
         font_size: 13.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
@@ -2069,7 +2053,7 @@ fn render_templates_panel(frame: &mut Frame, state: &AppState, x: f32, y: f32, w
         x: save.x + 12.0,
         y: save.y + 6.0,
         text: "Save".to_string(),
-        color: state.palette.blue,
+        color: state.palette.ink(state.palette.blue),
         font_size: 12.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,

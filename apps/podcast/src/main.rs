@@ -2928,7 +2928,7 @@ impl PodcastApp {
                 x: x + width - 40.0,
                 y: y + 8.0,
                 text: "DL".to_string(),
-                color: self.palette.green,
+                color: self.palette.ink(self.palette.green),
                 font_size: 10.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(30.0),
@@ -3039,7 +3039,7 @@ impl PodcastApp {
             x: pad,
             y: detail_y,
             text: format!("From: {}", podcast.title),
-            color: self.palette.blue,
+            color: self.palette.ink(self.palette.blue),
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(text_w),
@@ -3188,7 +3188,7 @@ impl PodcastApp {
                     x: pad + 6.0,
                     y: detail_y + 3.0,
                     text: bm.timestamp_display(),
-                    color: self.palette.blue,
+                    color: self.palette.ink(self.palette.blue),
                     font_size: 11.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(50.0),
@@ -3241,11 +3241,7 @@ impl PodcastApp {
                 "Auto-play: {}",
                 if self.auto_play_next { "On" } else { "Off" }
             ),
-            color: if self.auto_play_next {
-                self.palette.green
-            } else {
-                self.palette.overlay0
-            },
+            color: if self.auto_play_next { self.palette.ink(self.palette.green) } else { self.palette.overlay0 },
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(content_w - 32.0),
@@ -3581,7 +3577,7 @@ impl PodcastApp {
                     x: content_x + content_w - 100.0,
                     y: row_y + 12.0,
                     text: "Completed".to_string(),
-                    color: self.palette.green,
+                    color: self.palette.ink(self.palette.green),
                     font_size: 11.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(80.0),
@@ -4177,7 +4173,7 @@ impl PodcastApp {
             x: speed.x + 6.0,
             y: speed.y + 4.0,
             text: self.playback_speed.label(),
-            color: self.palette.peach,
+            color: self.palette.ink(self.palette.peach),
             font_size: 11.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(38.0),

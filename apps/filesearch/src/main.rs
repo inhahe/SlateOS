@@ -1308,7 +1308,7 @@ impl FileSearchApp {
             y: 8.0,
             text: "File Search".to_string(),
             font_size: 14.0,
-            color: self.palette.blue,
+            color: self.palette.ink(self.palette.blue),
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1362,7 +1362,7 @@ impl FileSearchApp {
             y: 36.0,
             text: self.criteria.mode.to_string(),
             font_size: 11.0,
-            color: self.palette.mauve,
+            color: self.palette.ink(self.palette.mauve),
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1453,11 +1453,7 @@ impl FileSearchApp {
                 y: fy + 4.0,
                 text: format!("{} {cat}", category_icon(*cat)),
                 font_size: 11.0,
-                color: if is_sel {
-                    self.palette.blue
-                } else {
-                    self.palette.subtext1
-                },
+                color: if is_sel { self.palette.ink(self.palette.blue) } else { self.palette.subtext1 },
                 font_weight: if is_sel {
                     FontWeightHint::Bold
                 } else {
@@ -1503,11 +1499,7 @@ impl FileSearchApp {
                 y: fy + 4.0,
                 text: sf.label().to_string(),
                 font_size: 11.0,
-                color: if is_sel {
-                    self.palette.blue
-                } else {
-                    self.palette.subtext1
-                },
+                color: if is_sel { self.palette.ink(self.palette.blue) } else { self.palette.subtext1 },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(w - 24.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1543,11 +1535,7 @@ impl FileSearchApp {
                 y: fy + 4.0,
                 text: df.label().to_string(),
                 font_size: 11.0,
-                color: if is_sel {
-                    self.palette.blue
-                } else {
-                    self.palette.subtext1
-                },
+                color: if is_sel { self.palette.ink(self.palette.blue) } else { self.palette.subtext1 },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(w - 24.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1816,7 +1804,7 @@ impl FileSearchApp {
                 y: py + 5.0,
                 text: action.to_string(),
                 font_size: 11.0,
-                color: self.palette.teal,
+                color: self.palette.ink(self.palette.teal),
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,

@@ -3271,7 +3271,7 @@ impl Multiplexer {
             y: y + 4.0,
             text: self.command_input.clone(),
             font_size: SMALL_TEXT,
-            color: self.palette.yellow,
+            color: self.palette.ink(self.palette.yellow),
             font_weight: FontWeightHint::Regular,
             max_width: Some(self.window_width - PADDING * 2.0),
             overflow: TextOverflow::Ellipsis,

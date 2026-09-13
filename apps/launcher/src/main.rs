@@ -940,7 +940,7 @@ impl LauncherState {
                 x: 10.0,
                 y: error_top + (ERROR_HEIGHT - 4.0) / 2.0 - DESC_FONT_SIZE / 2.0,
                 text: message.clone(),
-                color: self.palette.red,
+                color: self.palette.ink(self.palette.red),
                 font_size: DESC_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 // Elided rather than clipped: a path cut off mid-character

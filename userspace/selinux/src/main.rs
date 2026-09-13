@@ -1096,7 +1096,39 @@ fn find_file_context<'a>(file_contexts: &'a [FileContext], path: &str) -> Option
 // Personality: getenforce
 // ============================================================================
 
-fn cmd_getenforce(_args: &[String]) -> i32 {
+/// The first `-`-prefixed argument that is not in `known`.
+///
+/// Shared by the three personalities that used to answer without parsing.
+/// Only `-`-prefixed arguments are judged: `restorecon` takes paths, and a
+/// path is not this function's business. `--` ends option parsing and a lone
+/// `-` is left alone, as elsewhere in this tree.
+///
+/// The `known` set is what the parser actually reads, not what upstream
+/// accepts. `sestatus -b` is refused here because this implementation has no
+/// booleans section -- which is the honest answer, and better than printing a
+/// status report with the requested part silently missing.
+fn first_unknown_option<'a>(args: &'a [String], known: &[&str]) -> Option<&'a str> {
+    for a in args {
+        if a == "--" {
+            return None;
+        }
+        if a.starts_with('-') && a != "-" && !known.contains(&a.as_str()) {
+            return Some(a);
+        }
+    }
+    None
+}
+
+fn cmd_getenforce(args: &[String]) -> i32 {
+    // The parameter was `_args`, which described what this did with them.
+    // `getenforce --zzq` printed "Disabled" and exited 0: a security reading
+    // -- the answer to "is enforcement on?" -- given by a command that had
+    // not understood the question. A caller checking whether SELinux is
+    // enforcing got a confident no.
+    if let Some(bad) = first_unknown_option(args, &[]) {
+        eprintln!("getenforce: unknown option: {bad}");
+        return 1;
+    }
     let mode = read_enforce_mode();
     println!("{}", mode);
     0
@@ -1131,6 +1163,13 @@ fn cmd_setenforce(args: &[String]) -> i32 {
 // ============================================================================
 
 fn cmd_sestatus(args: &[String]) -> i32 {
+    // Looked for `-v` and ignored everything else, so `sestatus --zzq`
+    // printed "SELinux status: disabled" and exited 0 -- the same reading as
+    // `getenforce`, in a fuller report, equally unparsed.
+    if let Some(bad) = first_unknown_option(args, &["-v"]) {
+        eprintln!("sestatus: unknown option: {bad}");
+        return 1;
+    }
     let verbose = args.iter().any(|a| a == "-v");
     let status = read_sestatus();
 
@@ -1810,6 +1849,17 @@ fn cmd_getsebool(args: &[String]) -> i32 {
 // ============================================================================
 
 fn cmd_restorecon(args: &[String]) -> i32 {
+    // The catch-all below pushes anything unrecognised onto `paths`, so
+    // `restorecon --zzq` did not fail -- it took the option as a *file to
+    // relabel*, found nothing, and exited 0. A relabel that silently
+    // happened to nothing.
+    if let Some(bad) = first_unknown_option(
+        args,
+        &["-R", "-r", "-v", "-n", "-Rv", "-vR", "-Rvn", "-nvR"],
+    ) {
+        eprintln!("restorecon: unknown option: {bad}");
+        return 1;
+    }
     let mut recursive = false;
     let mut verbose = false;
     let mut dry_run = false;
@@ -2515,6 +2565,58 @@ mod tests {
     use super::*;
 
     // ---- SecurityContext tests ----
+
+    /// The three personalities that answered without parsing.
+    ///
+    /// `getenforce --zzq` printed "Disabled" and exited 0 -- a security
+    /// reading, the answer to "is enforcement on?", from a command that had
+    /// not understood the question. `sestatus` gave the same reading in a
+    /// fuller report. `restorecon` took the option as a file to relabel,
+    /// found nothing, and reported success.
+    #[test]
+    fn a_security_reading_is_not_given_without_parsing() {
+        let a = |v: &[&str]| -> Vec<String> { v.iter().map(|s| (*s).to_string()).collect() };
+
+        assert_eq!(cmd_getenforce(&a(&["--zzq"])), 1);
+        assert_eq!(cmd_sestatus(&a(&["--zzq"])), 1);
+        assert_eq!(cmd_restorecon(&a(&["--zzq"])), 1);
+
+        // getenforce takes no options at all, so even a plausible one is
+        // refused rather than quietly ignored.
+        assert_eq!(cmd_getenforce(&a(&["-v"])), 1);
+
+        // What each does take still works.
+        assert_eq!(cmd_getenforce(&a(&[])), 0);
+        assert_eq!(cmd_sestatus(&a(&["-v"])), 0);
+        assert_eq!(cmd_sestatus(&a(&[])), 0);
+
+        // `sestatus -b` is refused rather than ignored: this build has no
+        // booleans section, and printing the report with the requested part
+        // silently absent is how the reading stops meaning anything.
+        assert_eq!(cmd_sestatus(&a(&["-b"])), 1);
+    }
+
+    /// `restorecon` judges options, not paths.
+    ///
+    /// The catch-all that took `--zzq` as a file still has to take every
+    /// real path, including one that starts with a dash after `--`.
+    #[test]
+    fn restorecon_still_takes_its_paths() {
+        let a = |v: &[&str]| -> Vec<String> { v.iter().map(|s| (*s).to_string()).collect() };
+
+        assert_eq!(first_unknown_option(&a(&["-R", "-v"]), &["-R", "-v"]), None);
+        assert_eq!(
+            first_unknown_option(&a(&["/etc/passwd"]), &["-R"]),
+            None,
+            "a path was judged as an option"
+        );
+        assert_eq!(first_unknown_option(&a(&["--", "-oddname"]), &["-R"]), None);
+        assert_eq!(first_unknown_option(&a(&["-"]), &["-R"]), None);
+        assert_eq!(
+            first_unknown_option(&a(&["-R", "--zzq", "/tmp"]), &["-R"]),
+            Some("--zzq")
+        );
+    }
 
     #[test]
     fn test_security_context_parse_full() {

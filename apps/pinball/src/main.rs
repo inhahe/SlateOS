@@ -654,7 +654,7 @@ impl Pinball {
             ball.vel = Vec2::new(0.0, -power);
             ball.active = true;
         }
-        self.balls_used += 1;
+        self.balls_used = self.balls_used.saturating_add(1);
         self.phase = GamePhase::Playing;
         self.launch_power = 0.0;
     }
@@ -685,14 +685,17 @@ impl Pinball {
         }
         self.last_score_ms = Some(self.total_ms);
 
-        let points = base_points * self.combo;
-        self.score += points;
+        let points = base_points.saturating_mul(self.combo);
+        self.score = self.score.saturating_add(points);
 
         // Check for extra ball milestones.
-        let milestone = (self.extra_balls_earned + 1) * EXTRA_BALL_SCORE;
+        let milestone = self
+            .extra_balls_earned
+            .saturating_add(1)
+            .saturating_mul(EXTRA_BALL_SCORE);
         if self.score >= milestone {
-            self.extra_balls_earned += 1;
-            self.balls_remaining += 1;
+            self.extra_balls_earned = self.extra_balls_earned.saturating_add(1);
+            self.balls_remaining = self.balls_remaining.saturating_add(1);
         }
     }
 
@@ -781,21 +784,29 @@ impl Pinball {
 
         let ball_count = self.balls.len();
         for i in 0..ball_count {
-            if !self.balls[i].active {
+            // The integration step belongs to one ball, so it borrows that
+            // ball once rather than subscripting it six times. A ball that is
+            // not there is skipped for the same reason an inactive one is:
+            // `ball_count` was read before the loop and a collision can drain
+            // a ball, so the index is a claim about the past.
+            let Some(ball) = self.balls.get_mut(i) else {
+                continue;
+            };
+            if !ball.active {
                 continue;
             }
 
             // Apply gravity.
-            self.balls[i].vel.y += GRAVITY * dt;
+            ball.vel.y += GRAVITY * dt;
 
             // Apply friction.
-            self.balls[i].vel = self.balls[i].vel.scale(FRICTION);
+            ball.vel = ball.vel.scale(FRICTION);
 
             // Clamp speed.
-            self.balls[i].vel = self.balls[i].vel.clamp_magnitude(MAX_BALL_SPEED);
+            ball.vel = ball.vel.clamp_magnitude(MAX_BALL_SPEED);
 
             // Update position.
-            self.balls[i].pos = self.balls[i].pos.add(self.balls[i].vel.scale(dt));
+            ball.pos = ball.pos.add(ball.vel.scale(dt));
 
             // Collisions.
             self.collide_walls(i);
@@ -809,8 +820,8 @@ impl Pinball {
 
         // Remove drained balls (process in reverse to keep indices valid).
         let mut drained: Vec<usize> = Vec::new();
-        for i in 0..self.balls.len() {
-            if self.balls[i].pos.y > TABLE_HEIGHT + BALL_RADIUS * 2.0 {
+        for (i, ball) in self.balls.iter().enumerate() {
+            if ball.pos.y > TABLE_HEIGHT + BALL_RADIUS * 2.0 {
                 drained.push(i);
             }
         }
@@ -821,7 +832,9 @@ impl Pinball {
 
     /// Collide ball with table walls.
     fn collide_walls(&mut self, idx: usize) {
-        let ball = &mut self.balls[idx];
+        let Some(ball) = self.balls.get_mut(idx) else {
+            return;
+        };
 
         // Left wall.
         if ball.pos.x - BALL_RADIUS < 0.0 {
@@ -865,8 +878,9 @@ impl Pinball {
 
     /// Collide ball with bumpers.
     fn collide_bumpers(&mut self, idx: usize) {
-        let ball_pos = self.balls[idx].pos;
-        let ball_vel = self.balls[idx].vel;
+        let Some((ball_pos, ball_vel)) = self.balls.get(idx).map(|b| (b.pos, b.vel)) else {
+            return;
+        };
 
         for bumper in &mut self.bumpers {
             let diff = ball_pos.sub(bumper.pos);
@@ -876,14 +890,18 @@ impl Pinball {
             if dist < min_dist && dist > 0.01 {
                 // Push ball out of bumper.
                 let normal = diff.normalized();
-                self.balls[idx].pos = bumper.pos.add(normal.scale(min_dist + 0.5));
+                if let Some(ball) = self.balls.get_mut(idx) {
+                    ball.pos = bumper.pos.add(normal.scale(min_dist + 0.5));
+                }
 
                 // Reflect velocity and boost.
                 let reflected = ball_vel.reflect(normal);
-                self.balls[idx].vel = reflected.scale(BUMPER_RESTITUTION);
+                if let Some(ball) = self.balls.get_mut(idx) {
+                    ball.vel = reflected.scale(BUMPER_RESTITUTION);
+                }
 
                 bumper.last_hit_ms = self.total_ms;
-                bumper.hit_count += 1;
+                bumper.hit_count = bumper.hit_count.saturating_add(1);
             }
         }
 
@@ -896,13 +914,15 @@ impl Pinball {
             .count();
         for _ in 0..bumper_hit_count {
             self.award_points(BUMPER_POINTS);
-            self.total_bumper_hits += 1;
+            self.total_bumper_hits = self.total_bumper_hits.saturating_add(1);
         }
     }
 
     /// Collide ball with drop targets.
     fn collide_targets(&mut self, idx: usize) {
-        let ball_pos = self.balls[idx].pos;
+        let Some(ball_pos) = self.balls.get(idx).map(|b| b.pos) else {
+            return;
+        };
 
         let mut hit_any = false;
         for target in &mut self.targets {
@@ -920,18 +940,19 @@ impl Pinball {
                 target.hit_flash_ms = self.total_ms;
                 hit_any = true;
 
-                // Bounce ball away from target.
-                if ball_pos.y < target.pos.y {
-                    self.balls[idx].vel.y = -self.balls[idx].vel.y.abs() * WALL_RESTITUTION;
-                } else {
-                    self.balls[idx].vel.y = self.balls[idx].vel.y.abs() * WALL_RESTITUTION;
+                // Bounce ball away from target. One lookup, with the side
+                // chosen first: the two arms differed only in the sign.
+                let above = ball_pos.y < target.pos.y;
+                if let Some(ball) = self.balls.get_mut(idx) {
+                    let speed = ball.vel.y.abs() * WALL_RESTITUTION;
+                    ball.vel.y = if above { -speed } else { speed };
                 }
             }
         }
 
         if hit_any {
             self.award_points(TARGET_POINTS);
-            self.total_target_hits += 1;
+            self.total_target_hits = self.total_target_hits.saturating_add(1);
 
             // Check for multi-ball activation.
             if self.all_targets_hit() {
@@ -957,7 +978,9 @@ impl Pinball {
             FlipperSide::Right => &self.right_flipper,
         };
 
-        let ball_pos = self.balls[idx].pos;
+        let Some(ball_pos) = self.balls.get(idx).map(|b| b.pos) else {
+            return;
+        };
         let closest = flipper.closest_point(ball_pos);
         let diff = ball_pos.sub(closest);
         let dist = diff.length();
@@ -967,7 +990,9 @@ impl Pinball {
             let normal = diff.normalized();
 
             // Push ball out of flipper.
-            self.balls[idx].pos = closest.add(normal.scale(min_dist + 0.5));
+            if let Some(ball) = self.balls.get_mut(idx) {
+                ball.pos = closest.add(normal.scale(min_dist + 0.5));
+            }
 
             // Calculate deflection angle based on where the ball hits the flipper.
             let pivot = flipper.pivot;
@@ -991,38 +1016,50 @@ impl Pinball {
                     FlipperSide::Right => -(core::f32::consts::PI - 1.2) - t * 0.8,
                 };
                 let speed = FLIPPER_HIT_SPEED * speed_factor;
-                self.balls[idx].vel = Vec2::new(base_angle.cos() * speed, base_angle.sin() * speed);
+                if let Some(ball) = self.balls.get_mut(idx) {
+                    ball.vel = Vec2::new(base_angle.cos() * speed, base_angle.sin() * speed);
+                }
             } else {
                 // Passive flipper: just bounce.
-                let reflected = self.balls[idx].vel.reflect(normal);
-                self.balls[idx].vel = reflected.scale(WALL_RESTITUTION);
+                if let Some(ball) = self.balls.get_mut(idx) {
+                    ball.vel = ball.vel.reflect(normal).scale(WALL_RESTITUTION);
+                }
             }
         }
     }
 
     /// Check if ball enters the ramp.
     fn check_ramp(&mut self, idx: usize) {
-        let ball = &self.balls[idx];
+        let Some(ball) = self.balls.get(idx) else {
+            return;
+        };
         if self.ramp.ball_entering(ball.pos, ball.vel) {
             // Teleport ball to ramp exit with a kick.
-            self.balls[idx].pos = self.ramp.exit;
-            self.balls[idx].vel = Vec2::new(80.0, 50.0);
+            let exit = self.ramp.exit;
+            if let Some(ball) = self.balls.get_mut(idx) {
+                ball.pos = exit;
+                ball.vel = Vec2::new(80.0, 50.0);
+            }
             self.award_points(RAMP_POINTS);
-            self.total_ramp_completions += 1;
+            self.total_ramp_completions = self.total_ramp_completions.saturating_add(1);
         }
     }
 
     /// Check if ball has drained.
     fn check_drain(&mut self, idx: usize) {
         // Drain zone is below the flipper area, between the side gutters.
-        let ball = &self.balls[idx];
+        let Some(ball) = self.balls.get(idx) else {
+            return;
+        };
         // The drain is at the very bottom center of the table.
         if ball.pos.y > TABLE_HEIGHT - 20.0
             && ball.pos.x > 30.0
             && ball.pos.x < TABLE_WIDTH - PLUNGER_LANE_WIDTH - 30.0
         {
             // Mark for drain (will be processed after physics loop).
-            self.balls[idx].pos.y = TABLE_HEIGHT + BALL_RADIUS * 3.0;
+            if let Some(ball) = self.balls.get_mut(idx) {
+                ball.pos.y = TABLE_HEIGHT + BALL_RADIUS * 3.0;
+            }
         }
     }
 
@@ -1091,7 +1128,7 @@ impl Pinball {
     }
 
     fn handle_tick(&mut self, elapsed_ms: u64) {
-        self.total_ms += elapsed_ms;
+        self.total_ms = self.total_ms.saturating_add(elapsed_ms);
 
         match self.phase {
             GamePhase::Launching => {
@@ -1353,7 +1390,7 @@ impl Pinball {
             cmds.push(RenderCommand::Text {
                 x: sx + 10.0,
                 y: hs_y + 20.0 + i as f32 * 18.0,
-                text: format!("{}. {}", i + 1, entry.score),
+                text: format!("{}. {}", i.saturating_add(1), entry.score),
                 color: rank_color,
                 font_size: LABEL_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
@@ -2049,6 +2086,22 @@ fn main() {
 // ═══════════════════════════════════════════════════════════════════════
 #[cfg(test)]
 mod tests {
+
+    // A test that indexes out of range should fail loudly and point at the line
+    // that did it -- that is the diagnosis. The defensive lints exist to keep
+    // panics out of code that runs on a user's data, which this is not.
+    //
+    // The same block `apps/match3` carries, and its absence here is why this
+    // crate's test module was contributing to the tree's clippy total while
+    // every other app's was not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::float_cmp,
+        clippy::arithmetic_side_effects
+    )]
 
     #[test]
     fn an_option_this_program_does_not_have_is_not_silently_accepted() {

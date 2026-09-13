@@ -131603,6 +131603,48 @@ caller does not count as an absent one.** `rate_color` was in the INK bucket
 with eight callers the tool could not follow; two of them fill a stat card.
 Unknowns now block the verdict instead of being dropped from it.
 
+---
+
+**Update 2026-09-13 (later) — closed.** Every text site behind a colour
+method is legible. The tally the tool reports:
+
+| bucket | n | outstanding |
+|---|---|---|
+| INK | 5 | 0 |
+| PER-ARM | 7 | 0 |
+| INK IF THE REST CHECK OUT | 4 | 0 |
+| SPLIT | 15 | 0 |
+| NO TEXT CALLER | 30 | 0 — correctly untouched; inking would darken a fill |
+| UNRESOLVED | 19 | 0 |
+| AMBIGUOUS | 15 | 2 known false positives (see below) |
+
+**SPLIT was not solved the way this entry proposed.** Splitting 37 methods in
+two would have duplicated each mapping and invited the halves to drift. The ink
+went to the *text call site* instead, which needs no split, leaves every fill
+caller untouched, and is where design decision 837 says legibility lives. 24 of
+those sites were mechanical enough for `ink-text.py` to do; the rest were hand
+work, because the colour reached the draw through an argument, a local, or a
+helper that also filled with it.
+
+**The two remaining marks are false positives, verified by reading them:**
+`gui/desktop/src/privacy_settings.rs:641` calls a method that already inks its
+own body, and `resmon.rs:548` binds a colour that only ever fills. Both belong
+to the AMBIGUOUS bucket, where `gui/desktop` defines twenty-three methods named
+`color` and nothing here can tell a call site's receiver apart from another's.
+That bucket's per-site marks are a hint, not a verdict — though following one
+did find real work: `WiFiSecurity::color`, the padlock glyph, was uninked.
+
+**Four more tool corrections, all the same family as the first four:** a
+binding is scoped to its block and not its function; `color: p.text,` contains
+the word `color` and is not a use of a local called `color`; a colour handed to
+a helper that inks it inside is already handled; and `--verify` was scanning
+test code, so it flagged `launcher`'s own fixtures.
+
+**What is left of this entry is nothing.** The residue lives on
+`TD-C-SIXTY-EIGHT-APPS-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE`: a handful of
+colour methods still take no palette at all (`procexplorer`'s two), and threading
+one in is that entry's work, not this one's.
+
 ## TD-C-THIRTEEN-LIGHT-ACCENTS-STILL-FAIL-ON-CARDS -- being fixed 2026-09-12, mechanism landed
 
 **Update, 2026-09-12 (lane C).** Answered, and the entry below was wrong in

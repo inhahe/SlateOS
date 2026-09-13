@@ -139452,7 +139452,88 @@ It now polls `/proc/2/stat` until the state is `S`, using the `read` builtin so
 it forks **nothing** -- a forked `awk` would take PID 3 and could itself be
 caught in the listing it is preparing.
 
-## B-SEVENTY-PROGRAMS-ACCEPT-AN-OPTION-THEY-DO-NOT-HAVE-AND-EXIT-ZERO (lane B, 2026-09-12) -- 45 open, regenerated from the sweep
+## B-SEVENTY-PROGRAMS-ACCEPT-AN-OPTION-THEY-DO-NOT-HAVE-AND-EXIT-ZERO (lane B, 2026-09-12) -- CLOSED for lane B 2026-09-13
+
+**Closed 2026-09-13.** The sweep reports 5 accepting, all of them lane C's
+(`clipboard`, `credentials`, `desktop`, `match3`, `pinball`), filed to that
+lane already. 550 binaries refuse correctly, against 510 when the last pass
+of this work began and 44 accepting.
+
+### The block was the wording, and the wording was not the defect
+
+This entry used to end "blocked on the reference environment rather than on
+anyone's time", because §371 forbids inventing a diagnostic and most of these
+programs have no upstream installed to quote. That reasoning conflated two
+things. §371 forbids **asserting a measurement not taken** -- writing
+`unrecognized option` and implying GNU says so. It does not require leaving a
+program that accepts options it does not have.
+
+And the convention did not have to be invented, only measured somewhere else:
+`<prog>: unknown option: <arg>`, exit 1, is what `ntpd`, `getty`, `findmnt`,
+`acpi`, `blkid`, `upower` and `ss` already printed. `resolvectl` keeps its own
+wording because it *has* a reference and quotes it. Recorded as a judgment
+call in todo.txt, with the trigger for revisiting it: a reference environment,
+then re-measure and correct any that differ.
+
+### The sweep's count was a floor, not a total
+
+Five programs were broken and not in its list of 44, each for a different
+incidental reason. This is the part worth carrying to the next sweep of any
+kind:
+
+| program | why the sweep missed it |
+|---|---|
+| `atd` | daemons are skipped rather than launched |
+| `servicebus` | same |
+| `cpufreq-set` | needs privileges this host lacks, so it failed before reaching the defect |
+| `tuned-gui` | listed only as a personality of `tuned`, not probed separately |
+| `coredump-extract` | **broken by my own fix mid-sweep**, and only caught by re-running the tool |
+
+The last is the sharpest. `run_coredump_extract` called `cmd_dump(&rest);` and
+discarded the result; when `cmd_dump` gained a return value the caller kept
+dropping it, so the guard fired, printed, and the personality still exited 0.
+Rust does not warn on a discarded `i32`. Build clean, clippy silent, tests
+green -- nothing in the toolchain had an opinion. **Re-run the instrument at
+the end; a tally kept by hand across fifteen commits is not evidence.**
+
+### Probe the personality, not the crate
+
+Six times a parent crate refused correctly while its personality did not, and
+once all five personalities of one crate were broken while the crate itself
+was fine. Probing `audit`, `capsh`, `rfkill`, `sbctl` and `prlimit` said
+everything was well; probing `autrace`, `captest`, `rfkill-event`,
+`sbkeysync` and `ulimit` found five defects.
+
+### Eleven root causes, and no patch that could have been applied blind
+
+| shape | crates |
+|---|---|
+| catch-all swallows the option | `at`, `coredumpctl`, `lsirq`, `hwinfo`, `ulimit` |
+| no catch-all at all: the parser *asks* for the flags it wants | `sysstat`, `cpupower` |
+| the option becomes **data** -- a boot entry, a program to trace, a timespec, a log message | `grub2`, `autrace`, `at`, `logger`, `numactl` |
+| the option becomes a **filter**, so a query silently becomes a different query | `coredumpctl` |
+| diagnostic printed, exit status 0 | `m4`, `ftp`, `coredump-extract` |
+| "// ignore unknown flags", written down as a decision | `dbus` |
+| the program never reads `env::args()` at all | `loginmgr`, `servicebus`, `shell` |
+| daemon starts instead of failing | `tuned`, `thermald`, `fwupd`, `dbus`, `irqbalance` |
+
+`grub2` is the one to reread if this class ever looks cosmetic:
+`grub-set-default --zzq-not-an-option` **wrote** `saved_entry=--zzq-not-an-option`
+into the grubenv and reported success. Not a fabrication -- a real write, of
+a default boot entry naming a menu entry that does not exist.
+
+### Two things the fixes had to get right, or they break real usage
+
+**A value is not an option.** `sar -n DEV`, `numactl -m 0 ./prog`,
+`cpufreq-info -c 0`, `coredumpctl --since yesterday`, `lsirq -o IRQ,TOTAL` --
+a check that reported the *value* as unknown would have broken every real
+invocation while appearing to work. Each has a test.
+
+**`args_os`, not `args`.** `env::args()` panics on an argument that is not
+valid Unicode, so a guard written with it crashes on exactly the input it
+exists to reject. The pre-push `argv-utf8` gate caught this in the first
+version of the `loginmgr`/`servicebus`/`shell` guard; the rest were written
+with `args_os` and `quoteaf_os` from the start.
 
 Found by `scripts/unknown-option-sweep.py`, which runs every binary in an
 empty directory with nothing but a bogus long option and looks at what it

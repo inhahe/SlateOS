@@ -22675,11 +22675,47 @@ for them to disagree *at*.
 This is `TD-THREE-INDEPENDENT-APPEARANCE-MODELS` recurring with one more copy
 and, unlike that case, without even one working consumer to be the authority.
 
-**Caveat on this one.** I have verified that the compositor has no cursor size.
-I have *not* traced whether some lower layer (a DRM/KMS hardware cursor plane,
-or the input driver) sizes the pointer independently — if one does, the picture
-changes from "nothing reads it" to "something reads it and the settings cannot
-reach it", which is a different fix. That should be checked before work starts.
+**Caveat on this one -- TRACED 2026-09-13, and the answer is "nothing reads
+it".** The caveat asked whether some lower layer sizes the pointer
+independently. It does not. Across all three presenters, every occurrence of
+the word:
+
+| presenter | cursor code |
+|---|---|
+| `present/host.rs` (the Windows dev host) | one `LoadCursorW(IDC_ARROW)` at window-class registration |
+| `present/evdev.rs` and `evdev/sys.rs` | none — the two hits are the word in prose, about an event ring and a keyboard |
+| `present/drm.rs` | **zero occurrences** |
+
+The kernel does have cursor-plane support (`kernel/src/drm/crtc.rs`,
+`drm/uapi.rs` -- "recommended/maximum hardware cursor plane width"), so the
+hardware path exists; the compositor's DRM presenter never reaches for it. So
+the picture stays "nothing reads it", and wiring `cursor_size` to anything
+today would be theatre in the `icon_size` sense: a setting read by code that
+draws nothing.
+
+**And the same trace turns up a second inert thing, larger than the size.**
+`CursorShape` is computed on every pointer move (`cursor_at`), stored
+(`update_cursor_shape`), and exposed by `Compositor::cursor_shape()` -- which
+is read by **two tests and nothing else**. So the I-beam over a text field, the
+resize arrows on a window edge, the hand over a link: all decided, none drawn.
+On the dev host you get Windows' arrow everywhere, because the host window
+class names one cursor once and never changes it.
+
+**The first piece is now a question, not a task: C-Q18.** Drawing a pointer is
+straightforward until it meets `compose_frame`'s direct-scanout bypass, where a
+fullscreen opaque window's picture is handed to the display uncopied — and a
+pointer cannot be painted onto a frame that is never painted. Software cursor
+always (fullscreen loses the shortcut), software except over fullscreen (the
+pointer vanishes there), or a hardware cursor plane (most work, gives nothing
+up) is an architectural fork with a measured performance feature on one side,
+so it is the operator's. See `open-questions.md` → **C-Q18**.
+
+**Which makes the order of work clear, and it is not this entry.** Four models
+disagreeing about a size matters only once something draws a pointer. The
+first piece is a cursor renderer -- a compositor-drawn pointer on the DRM path,
+or `SetCursor` per shape on the host path -- and *then* the size setting has
+somewhere to land. Reconciling the four models first would be reconciling four
+descriptions of a thing that does not exist.
 
 ### Why this matters more than the count suggests
 
@@ -29623,7 +29659,7 @@ descriptors underneath it. Left as tech debt: changing it to leak instead
 would trade a rare wrong-packet for a permanent queue drain on a flaky device,
 and neither is right without the reset path.
 
-## TD-GUI-ARROW-KEYS-MOVE-IN-LOGICAL-ORDER
+## TD-GUI-ARROW-KEYS-MOVE-IN-LOGICAL-ORDER -- FIXED, and this entry was three weeks stale
 
 **Status: OPEN 2026-08-16, UNBLOCKED 2026-08-21** (lane C).
 
@@ -29640,12 +29676,38 @@ against entries that claim to be waiting on them.
 | | state |
 |---|---|
 | `gui/font/src/shape.rs` -- `ShapedRun::caret_left` / `caret_right`, the primitive | **done**, with tests |
-| `gui/toolkit/src/text.rs` -- `TextCursor` and its wrappers | not started |
-| `guitk::widget::TextInput`, `guitk::modal::InputDialog` -- the arrow-key handling | not started |
+| `gui/toolkit/src/text.rs` -- `TextCursor` (carrying `affinity`) and `caret_left`/`caret_right` | **done** |
+| `guitk::widget::TextInput`, `guitk::modal::InputDialog` -- the arrow-key handling | **done**, both calling the wrappers above |
 | `apps/editor` | **deliberately out of scope**: §541 does not cover it either way, because it draws and scrolls its own caret |
 
-So the primitive exists and nothing calls it. The rest of this entry describes
-the behaviour; §541 is the authority on which behaviour was chosen.
+**So the whole thing is done, and has been for some time.** The evidence is two
+end-to-end tests, both passing:
+
+* `guitk::widget::tests::the_arrows_move_by_the_screen_and_keep_the_side_they_are_on`
+* `guitk::modal::tests::a_plain_input_dialog_moves_its_caret_by_the_screen`
+
+Both walk `ab` + two Hebrew letters + `cd` in each direction and assert the
+exact offset sequence -- `7, 6, 4, 6, 1, 0` leftwards and `1, 2, 4, 2, 7, 8`
+rightwards. The repeated offset is the interesting part and is the regression
+test for §541's measured trap: one byte offset is visited twice per walk,
+because the two gaps where the directions meet sit at opposite ends of the
+Hebrew on screen and each answers to *both* offsets. A widget that kept only
+the byte cannot tell the second 6 from the first and skips the whole word in
+one press -- worse than the logical motion this replaced.
+
+Home and End stay logical, also as §541 says, and `Backspace` still deletes the
+previous character *in the string*: deleting and moving are allowed to
+disagree, because "the previous character" is what a reader of that script
+means regardless of which side of the caret it is drawn on.
+
+**Why this entry is being closed rather than worked.** It said "blocked on
+C-Q2, do not fix this without an answer" for 23 days after the operator
+answered, and the fix had in fact already landed. Two separate staleness
+failures in one entry, and the first hid the second: a reader who believed the
+blocker stopped reading before the code. Found by lane B's
+`scripts/check-stale-blockers.py`, which cross-references answered questions
+against entries claiming to wait on them -- a shape worth having a gate for
+precisely because a question *sounds* like it is still being thought about.
 
 **What.** Left/Right arrow keys move the caret by one position in *logical*
 order -- the order the characters are stored and read -- in every text widget in
@@ -130663,7 +130725,7 @@ English word.
 | `magnifier` | none — `MagnifierConfig` is declared only here |
 | `visual_alerts` | a separate field of the same name in `apps/settings` |
 | `text_scale` | partial: `FontSettings::ui_size` is absolute, not a multiplier |
-| `caret_width` | **none** |
+| `caret_width` | `AppearanceSettings::caret_width_scale`, added 2026-09-13 by 839 and *read* since the `appearance_changed` hook landed -- see below |
 | `focus_indicator` | **none** |
 | `screen_reader` | **none** — the feature does not exist |
 
@@ -130674,6 +130736,40 @@ filter keys, mouse keys existing three times over with no two copies connected �
 and fixed it by moving one definition into `gui/inputsettings`, a crate the
 compositor, the Settings app and the shell can all see. That fix is the
 precedent; what is left in `a11y.rs` is the visual third, not yet done.
+
+**2026-09-13: three of these rows had one cause, and it was a missing hook.**
+`caret_width`, `cursor` and the desktop's `icon_size` were each logged
+separately as a setting with a working control and no reader. The cause is
+shared: `oswindow::app::App` handed an application a **`Palette`** and nothing
+else, and a palette is colours. There was no route by which a program could
+learn a non-colour appearance setting, so each was stored, clamped, persisted,
+round-trip-tested and inert.
+
+`App::appearance_changed(&mut self, &AppearanceSettings)` is that route, called
+immediately before `theme_changed` from the same two places. Its default does
+nothing, for the reason `theme_changed`'s own doc gives: 94 applications
+implement that hook and should adopt this one at their own pace rather than in
+a single commit touching every program in the tree.
+
+`caret_width` is read end to end now. `apps/launcher` takes it in
+`appearance_changed` and draws its caret at that width, with a test that asks
+for 3x and asserts the drawn line is three times wider; the shell's run dialog
+takes it through `DesktopShell::set_appearance`.
+
+**The test written to prove this had the very defect it was written against.**
+`the_caret_width_scale_reaches_a_width_in_pixels` asserted
+`CARET_WIDTH * s.caret_width_scale` -- it performed the multiplication a
+caller would have to perform, so it was a test of `*`, and it would have passed
+with no caller and no helper anywhere in the tree. Its own doc comment says
+the test that matters is *that a caller can get from the settings to a width in
+pixels*. It calls `AppearanceSettings::caret_width()` now.
+
+**One more unreachable module, found on the way.**
+`gui/desktop/src/launcher.rs`'s `LauncherState` is constructed only in its own
+tests -- the shell imports `AppEntry` and `Category` from that module and
+nothing else, and the launcher that runs is `apps/launcher`, which has its own.
+Wiring the caret into the shell's copy was the first thing tried and would have
+been theatre. It belongs on **C-Q17**'s list.
 
 **Why the tests did not catch it.** `text_scale` and `caret_width` each have
 passing tests that round-trip them through the config file and check clamping
@@ -131772,7 +131868,97 @@ and only one of them is a bug fix.
 Converting the colours of a module nobody can see would be the most literal
 possible instance of the thing this file exists to prevent.
 
+## TD-C-TWO-GAMES-CARRIED-THE-WHOLE-TREE-S-DEFENSIVE-LINT-BACKLOG -- FIXED 2026-09-13
+
+**Date:** 2026-09-13. **Lane:** C.
+**Where:** `apps/match3/src/main.rs` (127) and `apps/pinball/src/main.rs` (64).
+
+**In short:** two of this lane's 144 application crates held **every one** of
+the tree's remaining warnings about array indexing that could crash and
+arithmetic that could overflow. The other 142 were at zero. Both are now at
+zero too, and all 240 of their tests still pass.
+
+**How it was found, which is the part worth keeping.** Not by a sweep -- by
+lane A's correction that two different gates share the name `cfg-unix` and
+check different populations. The one the pre-push hook runs compiles only the
+62 crates that *contain* a `#[cfg(unix)]` block; the one in `boot-test.sh`
+lints the whole workspace on a unix target. Everything this lane had verified
+that day was `--target x86_64-pc-windows-gnu`, so running the boot test's
+actual command was the first look at that population, and 196 warnings fell
+out of it.
+
+**What each crate's defect actually was** -- and they were different, which is
+why a mechanical sweep would have been the wrong tool:
+
+* **`match3` already had the right accessors.** `get_gem` and `set_gem` existed
+  with bounds checks, labelled `(for testing)`, sitting beside **forty** direct
+  `self.board[row][col]` subscripts. That arrangement is the defect: a bounds
+  test written next to each subscript is a test somebody forgets. They are the
+  board's only bounds reasoning now, over `.get()`/`.get_mut()`, with a
+  `debug_assert` on writes -- a write off the board is worth failing a test
+  over and worth surviving in a released game.
+* **`pinball`'s test module was simply missing the `#![allow(...)]` block**
+  every other app carries, with the reason attached. That is the whole reason
+  its test code was in the tree's total.
+
+**Six sites got real fixes rather than mechanical ones.** `GEM_COLORS[self.index()]`
+-- an array subscripted by an enum's discriminant -- became a `match`, so
+adding a gem colour now fails to *compile* instead of panicking the first time
+that colour is drawn. `m.positions[m.length / 2]` became `get`, because
+`length` and `positions.len()` are equal only by construction and the
+construction is in another function. The rest of the arithmetic became
+saturating, which in every case wrote down a promise the surrounding guard was
+already making.
+
+**One warning introduced and removed.** Wrapping both arms of a branch in
+`if let Some(ball)` produced a collapsible `else { if .. }`; the two arms
+differed only in a sign, so collapsing them left the code better than it
+started.
+
+**Five are left in the tree and they are not lane C's to fix.**
+`civildate/src/lib.rs` has five in the test oracle its own doc comment
+describes -- a `zeller` implementation kept deliberately separate from the
+code it grades. The fix is the same `#![allow(...)]` block, and `civildate/`
+is outside this lane's globs.
+
+---
 ## TD-C-SIXTY-EIGHT-APPS-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE
+
+**RE-MEASURED 2026-09-13: the applications are done. What is left is the
+games, and they are blocked on C-Q16.**
+
+All twelve applications this entry named as "the real defect" now carry the
+`appearance` dependency and declare **zero** private `Color` constants --
+`procexplorer`, `sysinfo`, `imageviewer`, `pdfviewer`, `musicplayer`,
+`speedtest`, `explorer`, `devicemanager`, `pomodoro`, `screenshot`,
+`benchmark`, `mixer`. The five stragglers in crates that already had a
+palette were finished the same day:
+
+| crate | was | now |
+|---|---|---|
+| `sysmonitor` | `PINK = 0xF5C2E7` | `palette.pink` -- the role exists, it was a duplicate |
+| `partmanager` | `COLOR_FLAMINGO`, dead | deleted; `palette.flamingo` exists |
+| `launcher` | `BASE = rgba(30,30,46,240)` | `with_alpha(palette.base, 240)`. It was a hardcoded Mocha base, so on a light theme this dialog was the one dark rectangle on the screen. |
+| `launcher` | `SHADOW = rgba(0,0,0,100)` | `palette.shadow()` |
+| `lockscreen` | `OVERLAY`, dead | deleted -- kept "so the palette is complete" when the palette had already moved into `guitk` |
+
+`apps/screenshot`'s four stay, and their comments already say why: a
+screenshot's dimming scrim is not the theme's to tint, and an annotation the
+user draws onto the picture is content that must still be red when the file
+is opened on another machine.
+
+**The remaining population is exactly the 43 games** -- 686 constants, none of
+them with an `appearance` dependency -- plus six crates with **no colours at
+all** (`backup`, `diffcore`, `globmatch`, `indexer`, `installer`, `safeio`),
+which have no dependency because they have no interface. Those six were
+inside the original count of 68 and are not a defect.
+
+So this entry is now a duplicate of the games question. **See C-Q16**, which
+asks exactly the thing the section below anticipated: a themed chessboard is
+not obviously better than a chessboard, and the sweep that converts an
+application would recolour the board. Nothing here is actionable until that
+is answered.
+
 
 **Date:** 2026-09-12. **Lane:** C.
 **Where:** `apps/**` — 987 `const NAME: Color` declarations across 68 crates.
@@ -140981,6 +141167,18 @@ which asks whether the games should follow the theme in the first place.
 
 ## TD-C-A-4K-DESKTOP-FRAME-IS-OVER-THE-BUDGET -- and most of this was already known
 
+**STATUS 2026-09-13: the optimisation question is closed; what is left is the
+GPU roadmap item.** The frame is still over the 2 ms target -- 6.88 ms at 4K
+-- but the drawing code is at or below the memory-write floor and no
+rearrangement of it can help. The measurements are at the end of this entry
+under "already below the floor". The remaining work is
+`roadmap.md`'s `[C]` "Wayland-inspired compositor: GPU acceleration, currently
+a software rasterizer", which now carries the figure that motivates it.
+
+This entry stays open as the record of *why* that is the remaining work, and
+because the frame is genuinely over budget. It should not be picked up as an
+optimisation task.
+
 **Date:** 2026-09-13. **Lane:** C.
 
 **Read this first.** This entry was written over an afternoon in which I
@@ -141038,6 +141236,148 @@ the tree, which is the same mistake in a different costume.
 (20.3 ms with, 8.0 ms without, eight windows spread over 4K), and of that
 ~12.1 ms is putting ~9 400 glyph masks on the screen -- roughly 32 ns a
 covered pixel.
+
+**MEASURED 2026-09-13, and the 32 ns figure is not the blit.**
+`bench_glyph_blit_phases` runs `draw_glyph` over a 12x16 mask with 128 covered
+pixels, 20 000 glyphs scattered across the framebuffer, seven alternated rounds
+with the minimum taken per phase:
+
+| ns per covered pixel | 1080p | 4K |
+|---|---|---|
+| shipped (clipped blend) | 5.81 | 5.79 |
+| the same with no clip | 4.61 | 4.63 |
+| the same loop, direct store | 3.26 | 3.39 |
+| **so: the per-pixel clip test** | 1.21 | 1.16 |
+| **and the rest of `blend_pixel`** | 1.34 | 1.24 |
+
+**Three things follow, and the first is the important one.**
+
+1. **The blit costs about 5.8 ns a covered pixel, not 32.** Whatever the 12.1
+   ms is, five sixths of it is not this loop.
+2. **It does not move with the framebuffer size.** 4K and 1080p agree to
+   within 2%, so the glyph loop is not the memory-bandwidth term -- an 8 MB
+   buffer and a 33 MB one cost the same per pixel here.
+3. **The whole per-pixel optimisation is worth at most 2.5 ns of 5.8**, which
+   is 40% of the blit and about 7% of the figure it was meant to attack. The
+   clip is tested twice per pixel (`draw_glyph` and again in
+   `blend_pixel`'s `clip_allows`) and the index is looked up twice
+   (`get` then `get_mut`); both are real and both are small.
+
+**Where to look instead, from the same arithmetic.** 12.1 ms over ~9 400
+glyphs is 1.29 us a glyph. This bench does 0.74 us a glyph while covering
+*three times* as many pixels, and it starts from a mask that already exists.
+So the missing time is **per glyph, not per pixel**.
+
+**The first candidate has been measured and excluded.**
+`osfont::system::tests::bench_warm_glyph_mask_lookup` times the cache hit that
+hands the blit its mask -- 56 distinct glyphs, warmed first so it measures the
+hit and not the rasteriser, seven rounds, minimum taken: **27.1 ns**. Over
+9 400 glyphs that is **0.25 ms**, or 2% of the 12.1.
+
+**So the budget now stands like this**, taking the entry's own figures (the
+32 ns and the 12.1 ms imply ~378 000 covered pixels, ~40 a glyph):
+
+| | measured | of 12.1 ms |
+|---|---|---|
+| the blit itself, 378 000 px at 5.8 ns | 2.2 ms | 18% |
+| the warm mask lookup, 9 400 at 27.1 ns | 0.25 ms | 2% |
+| **unaccounted** | **~9.6 ms** | **80%** |
+
+**And the most likely explanation is the label, not the code.** 12.1 ms was
+almost certainly obtained by differencing a frame with text against one
+without, which includes *everything* text costs -- `font.shape` per command,
+`FontCache::get` per command, `TextSpan::color_at` scanning the span list once
+per glyph, the `RenderCommand::Text` iteration -- and not only "putting glyph
+masks on the screen", which is what the entry calls it. Two measurements now
+say the two things that phrase actually names come to a fifth of it.
+
+**The split now exists and is measured directly, not by differencing.**
+`RenderEngine` accumulates two nanosecond counters under `#[cfg(test)]` --
+time in `font.shape` and time in `blit_run` -- and `bench_compose_frame_4k`
+prints them per frame. At the *run* level, not the glyph level: two
+`Instant::now()` calls cost tens of nanoseconds, which is the same order as
+the glyph-cache hit they would be measuring one level down, and there are a
+few hundred runs a frame against ten thousand glyphs.
+
+**Its scene, three consecutive release runs, and they agree to 1%:**
+
+```
+compose_frame 4K (3840x2160, 16 windows): min=6.88ms
+  phases: background_clear=1.33ms  window_render=5.51ms
+  text:   shape=0.35ms             blit_run=0.29ms
+```
+
+**Read that carefully, because it is a different scene from the one above.**
+The 20.3/8.0 ms figures were eight windows; this is the sixteen-window cascade
+`bench_compose_frame_4k` has always used. The two are not comparable and this
+does not show the earlier measurement was wrong. What it does show:
+
+* **In this scene text is 0.63 ms of 6.88 ms -- about 9%.** Whatever is
+  expensive here, it is not text.
+* **Shaping is more than half of the text cost** (0.35 of 0.63), which is a
+  different shape from "shaping is 1.3% of the frame" and worth keeping in
+  view: the cheap half is the one with a cache.
+* **The frame is 6.88 ms, and the recorded baseline agrees.** I wrote in the
+  first version of this paragraph that `bench/baselines.toml` was "stale by a
+  factor of two" and should be re-taken. **That was wrong, and I had not read
+  the file when I wrote it.** `[compositor_frame_4k]` says
+  `measured_ns = 7041000` -- 7.0 ms, dev host, release, 2026-08-16 -- which
+  matches this measurement to 2%. The stale ~16 ms is in two *comments*: this
+  bench's doc ("~15.8ms/frame release") and its catastrophe-guard note, both
+  of which predate the 2026-08-16 improvement the baseline file recorded.
+  Correcting a stale number by asserting a different file is stale, without
+  opening it, is the same mistake this entry keeps documenting -- and it is
+  left written down here rather than quietly fixed, because the pattern is
+  the point.
+
+**So the 2 ms target is missed by 3.4x, not by 8x**, and the thing to attack
+in this scene is `window_render`'s 5.5 ms, of which text is one eighth.
+
+### And that 5.5 ms is already below the floor, which settles the entry
+
+`bench_fill_floor` fills exactly the bench's window area -- sixteen 1100x720
+rectangles, 12.67 M pixels, 50.7 MB -- through the same `fill_rect` the
+renderer uses. Three runs, minimum taken, agreeing to 1%:
+
+| | time | written |
+|---|---|---|
+| opaque fill of that area | **5.92 ms** | 8.6 GB/s |
+| the same area, alpha 0.5 (read-modify-write) | 25.8 ms | 2.0 GB/s |
+| **`window_render`, same scene** | **5.51 ms** | -- |
+
+**Window rendering is faster than a plain opaque fill of the same area.** It
+has to be: the occlusion cull means it does not write all 12.67 M pixels. So
+the drawing code is at or below the memory-write floor, and *no rearrangement
+of it can help*. This entry has asserted "memory-bandwidth bound on a full
+recomposite" since July on reasoning; it is measured now.
+
+**Which makes the 2 ms target at 4K arithmetically unreachable on a CPU
+compositor at this bandwidth**, and that is a statement about the target, not
+about the code. One full-screen pass is 3840 x 2160 x 4 bytes = 33.2 MB; at
+8.6 GB/s that is **3.9 ms to touch every pixel once**, before reading a single
+source pixel. A 2 ms frame would need 16.5 GB/s of pure writes. The remaining
+levers are therefore only two, and neither is in this code:
+
+1. **Write fewer pixels.** Occlusion culling and damage tracking both already
+   do this, and the damage path is why an idle desktop is cheap -- see
+   `tests/damage_narrows_the_work.rs`. A *full* recomposite is the case where
+   there is nothing left to cull.
+2. **Do not write them with the CPU.** That is the GPU path, and it is a
+   different subsystem rather than an optimisation of this one.
+
+**The blended figure is the other actionable number here.** An alpha fill runs
+at 2.0 GB/s against 8.6 -- four times slower, because every pixel is read as
+well as written. Anything that makes a surface translucent (window opacity,
+shadows, the blur behind a panel) pays that multiple over its area. That is a
+design cost worth knowing before the next transparency feature, and it is
+measured rather than assumed.
+
+**A note on the estimator, because the first version of this bench got it
+wrong.** Run once each in sequence, the three phases reported *"the clip test
+is -0.98 ns"* -- a negative cost, which is a measurement saying the difference
+between two of its numbers is smaller than its own noise. Alternating the
+phases and taking each one's minimum over seven rounds is what made 1080p and
+4K agree to 2%. A single ordered sample measures the order.
 
 **What to do next.** Put a profiler on `draw_glyph`. Four hypotheses about
 this frame have now been wrong -- that shaping was the cost, that the

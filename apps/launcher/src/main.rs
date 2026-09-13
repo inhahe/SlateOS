@@ -26,20 +26,6 @@ use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // ============================================================================
-// Theme — Catppuccin Mocha palette
-// ============================================================================
-
-/// Catppuccin Mocha dark theme colors.
-mod theme {
-    use guitk::color::Color;
-
-    /// Base background (slightly transparent for floating dialog feel).
-    pub const BASE: Color = Color::rgba(30, 30, 46, 240);
-    /// Shadow color for the dialog box.
-    pub const SHADOW: Color = Color::rgba(0, 0, 0, 100);
-}
-
-// ============================================================================
 // Layout constants
 // ============================================================================
 
@@ -343,6 +329,13 @@ struct ScoredEntry {
 
 /// Main state of the launcher dialog.
 pub struct LauncherState {
+    /// How wide to draw the text caret, in pixels.
+    ///
+    /// The user's `caret_width_scale` already applied. Carried rather than
+    /// looked up per frame, and set by `appearance_changed` -- the hook that
+    /// exists because `theme_changed` hands over a `Palette`, and a palette is
+    /// colours. See `design-decisions.md` 839.
+    caret_width: f32,
     /// Current search query text.
     query: String,
     /// Cursor position within the query (byte offset).
@@ -384,6 +377,7 @@ impl LauncherState {
         let apps = builtin_app_database();
         let mut state = Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
+            caret_width: guitk::textedit::CARET_WIDTH,
             query: String::new(),
             cursor: 0,
             results: Vec::new(),
@@ -814,7 +808,7 @@ impl LauncherState {
             offset_y: 4.0,
             blur: 24.0,
             spread: 8.0,
-            color: theme::SHADOW,
+            color: self.palette.shadow(),
             corner_radii: radii,
         });
 
@@ -824,7 +818,11 @@ impl LauncherState {
             y: dialog_y,
             width: DIALOG_WIDTH,
             height: dialog_height,
-            color: theme::BASE,
+            // The user's base, kept slightly transparent for the floating
+            // feel the dialog has always had. It was a hardcoded Mocha base,
+            // so on a light theme this dialog was the one dark rectangle on
+            // the screen.
+            color: guitk::theme::with_alpha(self.palette.base, 240),
             corner_radii: radii,
         });
 
@@ -918,7 +916,7 @@ impl LauncherState {
             x2: cursor_x,
             y2: (INPUT_HEIGHT - PADDING) / 2.0 + INPUT_FONT_SIZE / 2.0 + 2.0,
             color: self.palette.blue,
-            width: 2.0,
+            width: self.caret_width,
         });
 
         // --- Launch failure banner ---
@@ -1354,6 +1352,10 @@ fn spawn_program(path: &str) -> Result<(), String> {
 }
 
 impl oswindow::app::App for LauncherState {
+    fn appearance_changed(&mut self, settings: &appearance::AppearanceSettings) {
+        self.caret_width = settings.caret_width();
+    }
+
     fn theme_changed(&mut self, palette: &Palette) {
         self.palette = *palette;
     }
@@ -1467,6 +1469,48 @@ mod tests {
     /// landed left of the text after wide letters and right of it after narrow
     /// ones. No constant can be right here: a proportional face exists
     /// precisely because its characters do not share a width.
+    /// The accessibility caret-width setting reaches the caret that is drawn.
+    ///
+    /// The half that kept going missing. `caret_width_scale` had a clamping
+    /// test and a round-trip test and no reader, which is what a dead setting
+    /// looks like: green, documented and inert. This asserts the pixels.
+    #[test]
+    fn a_wider_caret_setting_draws_a_wider_caret() {
+        use oswindow::app::App as _;
+
+        let mut app = LauncherState::new(1280.0, 800.0);
+        // Visible, with a query in it: the caret is only drawn when there is
+        // an input to draw it in. The first version of this test asked an
+        // unopened launcher and got "draws no caret at all", which is true and
+        // says nothing about the setting.
+        app.visible = true;
+        app.query = String::from("ab");
+        app.cursor = 2;
+        let width_of = |app: &LauncherState| {
+            app.render()
+                .into_iter()
+                .find_map(|cmd| match cmd {
+                    RenderCommand::Line { x1, x2, width, .. } if (x1 - x2).abs() < f32::EPSILON => {
+                        Some(width)
+                    }
+                    _ => None,
+                })
+                .expect("the launcher draws no caret at all")
+        };
+        let before = width_of(&app);
+
+        let mut settings = appearance::AppearanceSettings::default();
+        settings.caret_width_scale = 3.0;
+        app.appearance_changed(&settings);
+
+        let after = width_of(&app);
+        assert!(
+            after > before,
+            "the caret is still {before} wide after the user asked for 3x"
+        );
+        assert_eq!(after, before * 3.0);
+    }
+
     #[test]
     fn the_caret_sits_where_the_query_text_ends() {
         let pal = Palette::from_settings(&appearance::AppearanceSettings::default());

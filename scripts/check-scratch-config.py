@@ -205,6 +205,25 @@ def selftest():
     finally:
         shutil.rmtree(probe, ignore_errors=True)
 
+    # The three ways the selection can come back empty, which were one branch
+    # until the gate's first real firing refused a push over the one that is a
+    # pass. Both cases below reach a verdict without running cargo, which is
+    # what makes them cheap enough to check on every invocation.
+    for name, args, want in [
+        ("a substring matching no crate is a caller error", ["apps/zzz-not-a-crate"], 2),
+        (
+            "crates that exist but cannot save are nothing to check, not a failure",
+            ["apps/lockscreen", "apps/partmanager"],
+            0,
+        ),
+    ]:
+        got = main(args)
+        ok = got == want
+        print(("ok   " if ok else "FAIL ") + name)
+        if not ok:
+            print("       expected exit " + str(want) + ", got " + str(got))
+            failed += 1
+
     # And that a real crate resolves to a package name -- the path by which
     # every crate could be skipped while the run still printed `ok`.
     pkg = package_of("gui/desktop")
@@ -214,7 +233,7 @@ def selftest():
         print("       package_of('gui/desktop') returned " + repr(pkg))
         failed += 1
 
-    print(NL + str(len(SELF_TESTS) + 2) + " self-test case(s), " + str(failed) + " failed")
+    print(NL + str(len(SELF_TESTS) + 4) + " self-test case(s), " + str(failed) + " failed")
     return 1 if failed else 0
 
 
@@ -245,13 +264,39 @@ def main(argv):
         print("usage: check-scratch-config.py [--self-test] [crate-substring ...]")
         return 2
 
-    crates = [c for c, v in sorted(scan().items()) if v["saves"]]
+    found = scan()
+    crates = [c for c, v in sorted(found.items()) if v["saves"]]
     wanted = [a for a in argv if not a.startswith("-")]
-    if wanted:
+
+    # THREE WAYS THE LIST CAN BE EMPTY, AND ONLY TWO ARE FAILURES. They were
+    # one branch until the gate's first real firing refused a push over the
+    # third, which is a legitimate pass.
+    if not wanted:
+        # Nothing was named, so this is the whole tree. An empty list here
+        # means `SAVES` stopped matching -- the scan rotted -- and reporting
+        # that as "nothing to check" would be the exact failure this file is
+        # built to catch, in the file itself.
+        if not crates:
+            print("no crate in the tree can save settings; the scan has stopped working")
+            return 2
+    else:
+        named = [c for c in sorted(found) if any(w in c for w in wanted)]
+        if not named:
+            # A substring that matches no crate directory at all is a caller
+            # error -- a typo, a renamed crate, a path from another tree --
+            # and a verdict about nothing would be read as covering it.
+            print("no crate matches " + " ".join(wanted) + "; nothing was checked")
+            return 2
         crates = [c for c in crates if any(w in c for w in wanted)]
-    if not crates:
-        print("no save-capable crates selected; refusing to call that a pass")
-        return 2
+        if not crates:
+            # Matched real crates, none of which can save. This is the pre-push
+            # hook's ordinary case: it narrows to the crates a push touched,
+            # and most pushes touch none that write settings. Saying "ok" here
+            # is not a hollow pass, because the sentence says what was looked
+            # at and found harmless.
+            print("ok: " + str(len(named)) + " crate(s) named, none of them able to save "
+                  "settings; nothing to check")
+            return 0
 
     failures = []
     checked = 0

@@ -42,9 +42,6 @@ use std::time::Duration;
 // not the palette it is named after, and the next widget to want one would
 // otherwise re-derive the hex by hand.
 
-#[allow(dead_code, reason = "the palette is kept complete")]
-const COLOR_FLAMINGO: Color = Color::from_hex(0xF2CDCD);
-
 // ============================================================================
 // Layout constants
 // ============================================================================

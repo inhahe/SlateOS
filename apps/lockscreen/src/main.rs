@@ -34,18 +34,6 @@ use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // ============================================================================
-// Theme — Catppuccin Mocha palette
-// ============================================================================
-
-mod theme {
-    use guitk::color::Color;
-
-    /// Overlay — for tinted wallpaper backdrop.
-    #[allow(dead_code, reason = "the palette is kept complete")]
-    pub const OVERLAY: Color = Color::rgba(0, 0, 0, 140);
-}
-
-// ============================================================================
 // Layout constants
 // ============================================================================
 

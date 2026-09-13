@@ -4986,6 +4986,19 @@ pub struct Compositor {
     /// [`route_window_list`](Self::route_window_list), so that a shell polling
     /// an unchanged desktop at 60 Hz allocates nothing.
     window_list_scratch: Vec<u8>,
+    /// Every tray icon a client has registered, oldest first.
+    ///
+    /// Held here rather than in the shell for the reason `guiremote::tray`'s
+    /// module doc gives: a shell that owned this would lose every icon when it
+    /// restarted, and each program would have to notice the shell had come
+    /// back and register again. The compositor already outlives both.
+    ///
+    /// A `Vec` rather than a map, because the order *is* data -- registration
+    /// order is what the shell draws, and a tray whose icons move when an
+    /// unrelated program registers one is a tray where muscle memory is wrong.
+    tray_icons: Vec<guiremote::tray::TrayIcon>,
+    /// The buffer `route_tray_list` encodes into, reused across ticks.
+    tray_list_scratch: Vec<u8>,
     /// Which modifier keys are held, and whether Caps Lock is latched.
     ///
     /// Kept here rather than derived per event because a modifier is a *state*
@@ -5139,6 +5152,32 @@ struct ModifierEpisode {
     spent: bool,
 }
 
+/// Cut a glyph to what the protocol will carry, on a character boundary.
+///
+/// A client sending a paragraph gets the first few characters of it rather than
+/// a refusal: the icon is the client's own, nobody else is harmed, and a tray
+/// that silently dropped the icon would look like a bug in the program that
+/// sent it. `MAX_GLYPH_BYTES` is generous enough that no honest caller meets
+/// it.
+///
+/// Truncating on a *character* boundary matters more than the limit does.
+/// Cutting mid-sequence would put an invalid UTF-8 fragment on the wire, and
+/// the decoder would refuse the whole frame -- so one client's long glyph would
+/// stop the tray updating for every client.
+fn truncate_glyph(glyph: &str) -> String {
+    if glyph.len() <= guiremote::tray::MAX_GLYPH_BYTES {
+        return glyph.to_string();
+    }
+    // `saturating_sub` rather than `-=`: the loop guard already stops at 0,
+    // but the lint is right in general and a subtraction that cannot
+    // underflow is cheaper to read as one that provably cannot.
+    let mut end = guiremote::tray::MAX_GLYPH_BYTES;
+    while end > 0 && !glyph.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    glyph.get(..end).unwrap_or_default().to_string()
+}
+
 impl Compositor {
     /// Create a new compositor with the given display dimensions.
     pub fn new(width: u32, height: u32, refresh_rate: u32) -> CompositorResult<Self> {
@@ -5177,6 +5216,8 @@ impl Compositor {
             layout: keylayout::default_layout(),
             pending_notifications: VecDeque::new(),
             window_list_scratch: Vec::new(),
+            tray_icons: Vec::new(),
+            tray_list_scratch: Vec::new(),
             modifiers: ModifierState::new(),
             dead_keys: deadkey::DeadKeys::new(),
             a11y_keys: a11ykeys::AccessibilityKeys::default(),
@@ -5227,6 +5268,79 @@ impl Compositor {
         self.palette = appearance::Palette::from_settings(&self.appearance);
         self.theme = DecorationTheme::from_settings_with(&self.appearance, &self.palette);
         self.full_recomposite = true;
+    }
+
+    /// Everything currently in the tray.
+    #[must_use]
+    pub fn tray_list(&self) -> guiremote::tray::TrayList {
+        guiremote::tray::TrayList {
+            icons: self.tray_icons.clone(),
+        }
+    }
+
+    /// Register an icon, or replace the one this owner already has under `id`.
+    ///
+    /// Replacing in place rather than removing and appending: an icon that
+    /// changed its tooltip has not changed its position, and a tray that
+    /// reshuffled every time a battery percentage ticked would be unusable.
+    ///
+    /// Answers whether anything changed, so a caller can tell a real update
+    /// from a client re-sending what it already sent. The push does not depend
+    /// on this -- it compares encoded frames -- but a caller that wants to know
+    /// should not have to encode one to find out.
+    pub fn set_tray_icon(&mut self, owner: u64, id: u32, glyph: &str, tooltip: &str) -> bool {
+        let glyph = truncate_glyph(glyph);
+        if let Some(existing) = self
+            .tray_icons
+            .iter_mut()
+            .find(|i| i.owner == owner && i.id == id)
+        {
+            if existing.glyph == glyph && existing.tooltip == tooltip {
+                return false;
+            }
+            existing.glyph = glyph;
+            existing.tooltip = tooltip.to_string();
+            return true;
+        }
+        if u32::try_from(self.tray_icons.len()).unwrap_or(u32::MAX)
+            >= guiremote::tray::MAX_TRAY_ICONS
+        {
+            // Refused rather than grown. The frame's decoder rejects a count
+            // past this, so accepting one more would build a list no client
+            // could read -- the tray would stop updating entirely, for every
+            // program, because one of them registered too many.
+            return false;
+        }
+        self.tray_icons.push(guiremote::tray::TrayIcon {
+            owner,
+            id,
+            glyph,
+            tooltip: tooltip.to_string(),
+        });
+        true
+    }
+
+    /// Take one icon out of the tray.
+    ///
+    /// Removing an id that is not there is not an error and answers `false`: a
+    /// program tidying up on exit should not have to know whether it got as far
+    /// as registering.
+    pub fn remove_tray_icon(&mut self, owner: u64, id: u32) -> bool {
+        let before = self.tray_icons.len();
+        self.tray_icons
+            .retain(|i| !(i.owner == owner && i.id == id));
+        self.tray_icons.len() != before
+    }
+
+    /// Take every icon belonging to a departed client.
+    ///
+    /// Called on reap, exactly as its windows are destroyed. A crash must not
+    /// leave an icon nobody can remove -- the tray equivalent of a window with
+    /// no close button, and worse, because there is no frame to click.
+    pub fn reap_tray_icons(&mut self, owner: u64) -> bool {
+        let before = self.tray_icons.len();
+        self.tray_icons.retain(|i| i.owner != owner);
+        self.tray_icons.len() != before
     }
 
     /// The colour-vision filter the user has asked for, if any.

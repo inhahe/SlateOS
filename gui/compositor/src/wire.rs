@@ -87,6 +87,11 @@ pub struct ClientLink {
     /// mechanism free when nobody wants it: an unsubscribed link never builds a
     /// list at all.
     wants_window_list: bool,
+    /// Whether this link asked to be sent the tray list.
+    wants_tray: bool,
+    /// The last tray frame this link was sent, so an unchanged list is not
+    /// resent. Same device as `window_list_sent` and for the same reason.
+    tray_sent: Vec<u8>,
     /// The exact bytes of the last window-list frame written to this link.
     ///
     /// Compared against a freshly built list to decide whether to send, rather
@@ -209,6 +214,8 @@ impl ClientLink {
             windows: Vec::new(),
             closed: false,
             wants_window_list: false,
+            wants_tray: false,
+            tray_sent: Vec::new(),
             window_list_sent: Vec::new(),
             image_budget: MAX_IMAGE_BYTES_PER_LINK,
         }
@@ -245,6 +252,23 @@ impl ClientLink {
     /// Unsubscribing also forgets it, so that a later re-subscribe cannot be
     /// answered with silence because the list happens not to have changed while
     /// the client was not listening.
+    /// Whether this link asked for the tray list.
+    #[must_use]
+    pub const fn wants_tray(&self) -> bool {
+        self.wants_tray
+    }
+
+    /// Start or stop sending this link the tray list.
+    pub fn set_tray_subscription(&mut self, on: bool) {
+        self.wants_tray = on;
+        if !on {
+            // Dropped on unsubscribe so that re-subscribing sends the list
+            // again rather than comparing against what was sent before the gap
+            // -- during which it may have changed back to exactly this.
+            self.tray_sent.clear();
+        }
+    }
+
     pub fn set_window_list_subscription(&mut self, on: bool) {
         self.wants_window_list = on;
         self.window_list_sent.clear();
@@ -516,6 +540,17 @@ fn to_compositor_request(
                 message: "window-list subscription is a link-level request".to_string(),
             });
         }
+        // The three tray verbs are link-level for the same reason, plus one of
+        // its own: an icon's owner is the connection that registered it, and a
+        // `CompositorRequest` carries no connection. A client that could name
+        // an owner could put an icon in the tray on another program's behalf.
+        RequestBody::SetTrayIcon { .. }
+        | RequestBody::RemoveTrayIcon { .. }
+        | RequestBody::SubscribeTrayIcons { .. } => {
+            return Err(ResponseBody::Error {
+                message: "tray requests are link-level".to_string(),
+            });
+        }
         // The one window request that is deliberately *not* resolved against
         // the sender's own windows: a taskbar button exists to act on somebody
         // else's window, so `resolve` would refuse every legitimate use. What
@@ -753,6 +788,7 @@ impl Compositor {
                 Frame::Render(_) => return Err(WireError::WrongDirection("unaddressed render")),
                 Frame::Input(_) => return Err(WireError::WrongDirection("input")),
                 Frame::WindowList(_) => return Err(WireError::WrongDirection("window list")),
+                Frame::TrayList(_) => return Err(WireError::WrongDirection("tray list")),
             }
         }
 
@@ -774,6 +810,39 @@ impl Compositor {
             // It goes through the same privilege seam as `ShellControl`: the
             // desktop's window list is a shell's to read, and asking in one
             // place is what keeps the eventual capability check to one edit.
+            // The tray verbs, answered here because each needs the
+            // connection: two to know whose icon it is, one because a
+            // subscription is a property of the link.
+            match &req.body {
+                RequestBody::SetTrayIcon { id, glyph, tooltip } => {
+                    let owner = link.client_pid;
+                    self.set_tray_icon(owner, *id, glyph, tooltip);
+                    replies.push(Response::new(req.seq, ResponseBody::Ok));
+                    continue;
+                }
+                RequestBody::RemoveTrayIcon { id } => {
+                    let owner = link.client_pid;
+                    self.remove_tray_icon(owner, *id);
+                    // `Ok` whether or not anything was there: a program tidying
+                    // up should not have to know whether it got as far as
+                    // registering, and an error would invite it to care.
+                    replies.push(Response::new(req.seq, ResponseBody::Ok));
+                    continue;
+                }
+                RequestBody::SubscribeTrayIcons { subscribe } => {
+                    let on = *subscribe;
+                    let body = match link.require_shell() {
+                        Ok(()) => {
+                            link.set_tray_subscription(on);
+                            ResponseBody::Ok
+                        }
+                        Err(refusal) => refusal,
+                    };
+                    replies.push(Response::new(req.seq, body));
+                    continue;
+                }
+                _ => {}
+            }
             if let RequestBody::SubscribeWindowList { subscribe } = req.body {
                 let body = match link.require_shell() {
                     Ok(()) => {
@@ -976,6 +1045,29 @@ impl Compositor {
     /// The cost is building and encoding the list once per tick *per subscribed
     /// link*, and subscribed links are shells — one, on a normal desktop. An
     /// unsubscribed link, which is every application, does no work at all.
+    /// Send this link the tray list, if it wants one and it has changed.
+    ///
+    /// The same shape as [`route_window_list`](Self::route_window_list), and
+    /// for the same reason: the answer is derived from the list rather than
+    /// from a dirty flag, so there is no site that can forget to set one. A
+    /// forgotten flag does not fail -- it leaves a tray quietly showing an icon
+    /// the program removed.
+    pub fn route_tray_list(&mut self, link: &mut ClientLink) -> bool {
+        if !link.wants_tray || link.closed {
+            return false;
+        }
+        self.tray_list_scratch.clear();
+        let list = self.tray_list();
+        guiremote::tray::encode_tray_list_into(&mut self.tray_list_scratch, &list);
+        if link.tray_sent == self.tray_list_scratch {
+            return false;
+        }
+        link.outbox.extend_from_slice(&self.tray_list_scratch);
+        link.tray_sent.clear();
+        link.tray_sent.extend_from_slice(&self.tray_list_scratch);
+        true
+    }
+
     pub fn route_window_list(&mut self, link: &mut ClientLink) -> bool {
         // Checked before anything is built, so an ordinary application pays a
         // single boolean test per tick for a feature it does not use.
@@ -1456,6 +1548,209 @@ mod tests {
             ResponseBody::WindowCreated { window } => window,
             ref other => panic!("expected WindowCreated, got {other:?}"),
         }
+    }
+
+    /// Everything the tray frames a link was sent in this pump.
+    fn pump_trays(comp: &mut Compositor, link: &mut ClientLink) -> Vec<guiremote::tray::TrayList> {
+        comp.route_tray_list(link);
+        let bytes = link.take_outgoing();
+        let mut lists = Vec::new();
+        let mut at = 0usize;
+        while at < bytes.len() {
+            let (frame, used) = guiremote::decode_any(&bytes[at..]).expect("decodes");
+            if let Frame::TrayList(list) = frame {
+                lists.push(list);
+            }
+            at += used;
+        }
+        assert_eq!(at, bytes.len(), "no bytes left over");
+        lists
+    }
+
+    /// The whole point of the protocol: a program puts an icon in the tray and
+    /// a shell that did not create it is told.
+    ///
+    /// Before this, four things in the tree modelled a tray icon and no two of
+    /// them met -- `apps/systray`, the shell's taskbar tray, `tray_dnd.rs` and
+    /// the kernel's persistence. Every part existed and no process boundary was
+    /// crossed anywhere in it.
+    #[test]
+    fn a_shell_is_told_about_an_icon_it_did_not_register() {
+        let (mut comp, mut shell) = wired();
+        let responses = exchange(
+            &mut comp,
+            &mut shell,
+            vec![RequestBody::SubscribeTrayIcons { subscribe: true }],
+        );
+        assert!(matches!(responses[0].body, ResponseBody::Ok));
+        assert!(shell.wants_tray());
+
+        let mut app = ClientLink::new(99);
+        let replies = exchange(
+            &mut comp,
+            &mut app,
+            vec![RequestBody::SetTrayIcon {
+                id: 1,
+                glyph: String::from("B"),
+                tooltip: String::from("Battery: 87%"),
+            }],
+        );
+        assert!(matches!(replies[0].body, ResponseBody::Ok));
+
+        let lists = pump_trays(&mut comp, &mut shell);
+        assert_eq!(lists.len(), 1, "one frame, not one per change");
+        let icons = &lists[0].icons;
+        assert_eq!(icons.len(), 1);
+        assert_eq!(icons[0].glyph, "B");
+        assert_eq!(icons[0].tooltip, "Battery: 87%");
+        assert_eq!(
+            icons[0].owner, 99,
+            "the owner comes from the connection, not from the client"
+        );
+    }
+
+    /// Sending the same id again replaces rather than appends.
+    ///
+    /// The difference between "the battery is now 20%" and a second battery.
+    #[test]
+    fn setting_the_same_id_updates_the_icon_in_place() {
+        let (mut comp, mut shell) = wired();
+        exchange(
+            &mut comp,
+            &mut shell,
+            vec![RequestBody::SubscribeTrayIcons { subscribe: true }],
+        );
+        let mut app = ClientLink::new(99);
+        for tooltip in ["Battery: 87%", "Battery: 20%"] {
+            exchange(
+                &mut comp,
+                &mut app,
+                vec![RequestBody::SetTrayIcon {
+                    id: 1,
+                    glyph: String::from("B"),
+                    tooltip: tooltip.to_string(),
+                }],
+            );
+        }
+        let lists = pump_trays(&mut comp, &mut shell);
+        let last = lists.last().expect("at least one frame");
+        assert_eq!(last.icons.len(), 1, "one battery, not two");
+        assert_eq!(last.icons[0].tooltip, "Battery: 20%");
+    }
+
+    /// Two programs may both call their icon 1.
+    #[test]
+    fn an_id_is_scoped_to_the_program_that_sent_it() {
+        let (mut comp, mut shell) = wired();
+        exchange(
+            &mut comp,
+            &mut shell,
+            vec![RequestBody::SubscribeTrayIcons { subscribe: true }],
+        );
+        for pid in [99u64, 100] {
+            let mut app = ClientLink::new(pid);
+            exchange(
+                &mut comp,
+                &mut app,
+                vec![RequestBody::SetTrayIcon {
+                    id: 1,
+                    glyph: String::from("X"),
+                    tooltip: format!("from {pid}"),
+                }],
+            );
+        }
+        let lists = pump_trays(&mut comp, &mut shell);
+        let last = lists.last().expect("at least one frame");
+        assert_eq!(last.icons.len(), 2, "same id, different programs");
+    }
+
+    /// A program that goes away takes its icon with it.
+    ///
+    /// An icon nobody can remove is the tray equivalent of a window with no
+    /// close button, and worse: there is no frame to click.
+    #[test]
+    fn a_departed_program_leaves_no_icon_behind() {
+        let (mut comp, mut shell) = wired();
+        exchange(
+            &mut comp,
+            &mut shell,
+            vec![RequestBody::SubscribeTrayIcons { subscribe: true }],
+        );
+        let mut app = ClientLink::new(99);
+        exchange(
+            &mut comp,
+            &mut app,
+            vec![RequestBody::SetTrayIcon {
+                id: 1,
+                glyph: String::from("M"),
+                tooltip: String::from("Music"),
+            }],
+        );
+        assert_eq!(
+            pump_trays(&mut comp, &mut shell)
+                .last()
+                .expect("a frame")
+                .icons
+                .len(),
+            1
+        );
+
+        comp.reap_tray_icons(99);
+        let after = pump_trays(&mut comp, &mut shell);
+        assert_eq!(
+            after.last().expect("a frame after reaping").icons.len(),
+            0,
+            "the icon outlived the program that registered it"
+        );
+    }
+
+    /// An ordinary program cannot read the tray list.
+    ///
+    /// The list names every program that has an icon, which is a different fact
+    /// from the one a program is entitled to about itself -- the same
+    /// distinction `SubscribeWindowList` draws, through the same seam, so the
+    /// eventual capability check stays one edit.
+    #[test]
+    fn subscribing_to_the_tray_goes_through_the_shell_seam() {
+        let (mut comp, mut shell) = wired();
+        let responses = exchange(
+            &mut comp,
+            &mut shell,
+            vec![RequestBody::SubscribeTrayIcons { subscribe: true }],
+        );
+        // `require_shell` does not refuse anything yet -- the capability behind
+        // it is the kernel's and does not exist. What this pins is that the
+        // request goes *through* it, so that when it does answer, the tray is
+        // covered without another edit.
+        assert!(matches!(responses[0].body, ResponseBody::Ok));
+        assert!(shell.wants_tray());
+    }
+
+    /// An unchanged tray is not resent.
+    #[test]
+    fn a_tray_that_has_not_changed_sends_nothing() {
+        let (mut comp, mut shell) = wired();
+        exchange(
+            &mut comp,
+            &mut shell,
+            vec![RequestBody::SubscribeTrayIcons { subscribe: true }],
+        );
+        let mut app = ClientLink::new(99);
+        exchange(
+            &mut comp,
+            &mut app,
+            vec![RequestBody::SetTrayIcon {
+                id: 1,
+                glyph: String::from("N"),
+                tooltip: String::from("Network"),
+            }],
+        );
+        assert_eq!(pump_trays(&mut comp, &mut shell).len(), 1);
+        assert_eq!(
+            pump_trays(&mut comp, &mut shell).len(),
+            0,
+            "a second pump with nothing changed sent a frame anyway"
+        );
     }
 
     #[test]

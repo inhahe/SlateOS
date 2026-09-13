@@ -3095,7 +3095,7 @@ impl RssReaderApp {
     fn render_title_bar(&self, cmds: &mut Vec<RenderCommand>, height: f32) {
         // Title bar background
         self.palette
-            .push_surface(cmds, 0.0, 0.0, self.width, height, 0.0, Surface::Card);
+            .push_surface(cmds, 0.0, 0.0, self.width, height, 0.0, Surface::Strip(Edge::Bottom));
 
         // RSS icon (simplified as text)
         cmds.push(RenderCommand::Text {

@@ -1049,7 +1049,17 @@ impl LoginScreen {
             LoginBackground::Theme
             | LoginBackground::SameAsDesktop(_)
             | LoginBackground::CustomImage(_) => {
-                p.push_surface(commands, 0.0, 0.0, self.screen_width, self.screen_height, 0.0, Surface::Card);
+                // The greeter's whole screen, which is the page and not a box on it:
+                // outlined, it draws a border round the display and no background at
+                // all, and the login screen comes up black.
+                commands.push(RenderCommand::FillRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: self.screen_width,
+                    height: self.screen_height,
+                    color: p.crust,
+                    corner_radii: CornerRadii::ZERO,
+                });
             }
         }
     }

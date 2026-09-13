@@ -1970,8 +1970,15 @@ impl RemindersApp {
         let total_h = active.len() as f32 * NOTIFICATION_HEIGHT;
 
         // Background for all notifications
-        self.palette
-            .push_surface(cmds, 0.0, 0.0, self.width, total_h, 0.0, Surface::Panel);
+        // The notification overlay's own background, not a panel within it.
+        cmds.push(RenderCommand::FillRect {
+            x: 0.0,
+            y: 0.0,
+            width: self.width,
+            height: total_h,
+            color: self.palette.crust,
+            corner_radii: CornerRadii::ZERO,
+        });
 
         for (i, notif) in active.iter().enumerate() {
             let y = i as f32 * NOTIFICATION_HEIGHT;

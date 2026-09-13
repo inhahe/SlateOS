@@ -2589,20 +2589,17 @@ mod tests {
 
     fn painted_app_cards(pane: &NotificationPane) -> Vec<f32> {
         let card_width = PANE_WIDTH - 2.0 * PANE_PADDING;
+        // On the logical rectangle, and either shape. A card is an outline
+        // under the bordered theme, and a `FillRect`-only pattern would return
+        // an empty vector -- which is worse than failing, because the two
+        // sweeps that consume this would then pass over nothing at all.
         app_settings_commands(pane)
             .iter()
-            .filter_map(|cmd| match cmd {
-                RenderCommand::FillRect {
-                    x,
-                    y,
-                    width,
-                    height,
-                    ..
-                } if *x == PANE_PADDING && *width == card_width && *height == APP_CARD_HEIGHT => {
-                    Some(*y)
-                }
-                _ => None,
+            .filter_map(appearance::painted_rect)
+            .filter(|(x, _, w, h, _)| {
+                *x == PANE_PADDING && *w == card_width && *h == APP_CARD_HEIGHT
             })
+            .map(|(_, y, _, _, _)| y)
             .collect()
     }
 
@@ -2610,18 +2607,9 @@ mod tests {
     fn painted_app_pills(pane: &NotificationPane) -> Vec<(f32, f32, f32, f32)> {
         app_settings_commands(pane)
             .iter()
-            .filter_map(|cmd| match cmd {
-                RenderCommand::FillRect {
-                    x,
-                    y,
-                    width,
-                    height,
-                    ..
-                } if *width == TOGGLE_WIDTH && *height == TOGGLE_HEIGHT => {
-                    Some((*x, *y, *width, *height))
-                }
-                _ => None,
-            })
+            .filter_map(appearance::painted_rect)
+            .filter(|(_, _, w, h, _)| *w == TOGGLE_WIDTH && *h == TOGGLE_HEIGHT)
+            .map(|(x, y, w, h, _)| (x, y, w, h))
             .collect()
     }
 

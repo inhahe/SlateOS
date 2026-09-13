@@ -27,6 +27,7 @@
 #![allow(clippy::similar_names)]
 
 use appearance::Palette;
+use appearance::Edge;
 use appearance::Surface;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -1292,7 +1293,7 @@ impl FileSearchApp {
 
         // Header with search bar
         self.palette
-            .push_surface(&mut cmds, 0.0, 0.0, width, header_h, 0.0, Surface::Card);
+            .push_surface(&mut cmds, 0.0, 0.0, width, header_h, 0.0, Surface::Strip(Edge::Bottom));
 
         // App title
         cmds.push(RenderCommand::Text {

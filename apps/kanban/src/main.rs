@@ -2866,9 +2866,15 @@ fn render_input_overlay(tree: &mut RenderTree, app: &KanbanApp, width: f32, heig
 fn render_app(app: &KanbanApp, width: f32, height: f32) -> RenderTree {
     let mut tree = RenderTree::new();
 
-    // Full-window background
-    app.palette
-        .push_surface(&mut tree, 0.0, 0.0, width, height, 0.0, Surface::Card);
+    // The window itself. A surface is something drawn *on* the page.
+    tree.push(RenderCommand::FillRect {
+        x: 0.0,
+        y: 0.0,
+        width,
+        height,
+        color: app.palette.crust,
+        corner_radii: CornerRadii::ZERO,
+    });
 
     // Toolbar
     render_toolbar(&mut tree, app, width);

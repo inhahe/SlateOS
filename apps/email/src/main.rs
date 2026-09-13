@@ -2512,7 +2512,7 @@ impl EmailApp {
 
         // Header
         self.palette
-            .push_surface(&mut cmds, 0.0, 0.0, width, header_h, 0.0, Surface::Card);
+            .push_surface(&mut cmds, 0.0, 0.0, width, header_h, 0.0, Surface::Strip(Edge::Bottom));
         cmds.push(RenderCommand::Text {
             x: 16.0,
             y: 14.0,

@@ -60,6 +60,18 @@ enum Compression {
 }
 
 impl Compression {
+    /// The spelling `--compress` accepts for this format, so a diagnostic
+    /// names something the caller can type back verbatim.
+    fn name(&self) -> &'static str {
+        match self {
+            Compression::Gzip => "gzip",
+            Compression::Xz => "xz",
+            Compression::Lz4 => "lz4",
+            Compression::Zstd => "zstd",
+            Compression::None => "none",
+        }
+    }
+
     // Consumed by the future output-naming pass that suffixes the
     // initramfs file with the compression extension.
     #[allow(dead_code)]
@@ -573,16 +585,21 @@ fn _scan_dir_for_module(base: &Path, dir: &Path, name: &str) -> Option<(String, 
 // Compression stub
 // ============================================================================
 
-fn compress_data(data: &[u8], compression: &Compression) -> Vec<u8> {
-    // In a real system, invoke gzip/xz/lz4/zstd.
-    // For now, return uncompressed with a header marker.
+fn compress_data(data: &[u8], compression: &Compression) -> Result<Vec<u8>, String> {
     match compression {
-        Compression::None => data.to_vec(),
-        _ => {
-            // Placeholder: real implementation would call compression library.
-            // Return data as-is since we don't have external deps.
-            data.to_vec()
-        }
+        Compression::None => Ok(data.to_vec()),
+        Compression::Gzip => Ok(deflate::gzip(data)),
+        // Refused, not passed through. This arm used to `return data.to_vec()`
+        // for all three, so `mkinitramfs --compress xz` printed
+        // `compression: Xz`, wrote a plain cpio archive, and exited 0. Whoever
+        // fed that file to a real `xz -d` -- or to a boot loader that trusts
+        // the name -- got a failure with nothing in mkinitramfs's output to
+        // attribute it to. Refusing costs the same archive and names the
+        // reason.
+        Compression::Xz | Compression::Lz4 | Compression::Zstd => Err(format!(
+            "cannot compress with {}: this build implements gzip and none",
+            compression.name()
+        )),
     }
 }
 
@@ -797,7 +814,13 @@ fn mkinitramfs_main(args: &[String]) -> i32 {
     }
 
     let cpio_data = build_cpio(&entries);
-    let compressed = compress_data(&cpio_data, &config.compression);
+    let compressed = match compress_data(&cpio_data, &config.compression) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("mkinitramfs: {e}");
+            return 1;
+        }
+    };
 
     // Write output.
     match fs::write(&config.output, &compressed) {
@@ -907,7 +930,13 @@ fn update_initramfs_main(args: &[String]) -> i32 {
 
                 let entries = build_initramfs_entries(&config);
                 let cpio_data = build_cpio(&entries);
-                let compressed = compress_data(&cpio_data, &config.compression);
+                let compressed = match compress_data(&cpio_data, &config.compression) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        eprintln!("update-initramfs: {e}");
+                        return 1;
+                    }
+                };
 
                 match fs::write(&config.output, &compressed) {
                     Ok(()) => {
@@ -979,6 +1008,44 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The test that would have caught the pass-through: a gzip archive is
+    /// not its own input. `compress_data` returned `data.to_vec()` for every
+    /// format, and no test compared the two, so the only signal was a comment
+    /// admitting it.
+    #[test]
+    fn gzip_actually_compresses() {
+        // Repetitive enough that any real encoder shrinks it; that also makes
+        // "output != input" a weak claim on its own, hence the round-trip.
+        let plain = b"0123456789".repeat(64);
+        let out = compress_data(&plain, &Compression::Gzip).expect("gzip is implemented");
+        assert_ne!(out, plain, "gzip returned its input unchanged");
+        assert_eq!(&out[..2], &[0x1f, 0x8b], "not a gzip member");
+        assert!(out.len() < plain.len(), "gzip grew a repetitive input");
+        assert_eq!(
+            deflate::gunzip(&out).expect("our own gunzip reads our own gzip"),
+            plain
+        );
+    }
+
+    /// Unimplemented formats refuse. Before this they returned the plain
+    /// archive and exited 0, which is the failure mode that matters: the
+    /// caller had no way to tell a compressed archive from an uncompressed
+    /// one with a compressed name.
+    #[test]
+    fn unimplemented_formats_refuse_and_name_themselves() {
+        for (c, want) in [
+            (Compression::Xz, "xz"),
+            (Compression::Lz4, "lz4"),
+            (Compression::Zstd, "zstd"),
+        ] {
+            let err = compress_data(b"payload", &c).expect_err("must refuse");
+            assert!(err.contains(want), "{err:?} does not name {want}");
+            // The spelling in the message must be one `--compress` accepts,
+            // so the advice is actionable rather than merely apologetic.
+            assert_eq!(Compression::from_str(want), Some(c.clone()));
+        }
+    }
 
     #[test]
     fn test_compression_from_str() {
@@ -1139,7 +1206,7 @@ mod tests {
     #[test]
     fn test_compress_data_none() {
         let data = b"test data";
-        let compressed = compress_data(data, &Compression::None);
+        let compressed = compress_data(data, &Compression::None).expect("none never fails");
         assert_eq!(compressed, data);
     }
 

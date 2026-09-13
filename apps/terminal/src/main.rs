@@ -28,6 +28,7 @@
 
 pub mod pty;
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::{Frame, Rect};
@@ -277,6 +278,30 @@ pub struct ColorScheme {
     pub selection_bg: Color,
     /// The 16 ANSI colors (0-7 normal, 8-15 bright).
     pub ansi: [Color; 16],
+}
+
+impl ColorScheme {
+    /// The user's theme for the chrome, and the protocol's colours for the text.
+    ///
+    /// The split is the whole point. `foreground`, `background`, `cursor` and
+    /// `selection_bg` are this window's furniture, and a terminal that stays
+    /// dark when the desktop goes light is the defect 822 is about. The
+    /// sixteen ANSI entries are *not* furniture: colour 1 is red because the
+    /// escape sequence says so, and a program that prints red expects red on
+    /// every terminal ever made. Retinting those would not theme the terminal,
+    /// it would corrupt what programs print -- the same reason
+    /// `guitk::textview::ansi_color` takes no palette.
+    #[must_use]
+    pub fn from_palette(palette: &Palette) -> Self {
+        Self {
+            foreground: palette.text,
+            background: palette.base,
+            cursor: palette.text,
+            // The accent, as every other selection in the desktop uses (839).
+            selection_bg: palette.accent,
+            ..Self::default()
+        }
+    }
 }
 
 impl Default for ColorScheme {
@@ -2895,6 +2920,14 @@ fn scale(whole: usize, fraction: f32) -> usize {
 // ============================================================================
 
 impl App for TerminalState {
+    /// Adopt the user's colours (§822).
+    ///
+    /// Only the chrome moves; `ColorScheme::from_palette` says why the ANSI
+    /// table does not.
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.config.colors = ColorScheme::from_palette(palette);
+    }
+
     fn title(&self) -> String {
         self.title.clone()
     }
@@ -3001,13 +3034,50 @@ mod tests {
         clippy::arithmetic_side_effects
     )]
 
+    use super::ColorScheme;
     use super::{
         BAR_W, BELL_MS, BLINK_MS, Color, CursorStyle, Layout, Rect, RenderCommand, Target,
         TerminalConfig, TerminalState, cells_that_fit, ratio, scale, u32_f32,
     };
+    use appearance::Palette;
     use guitk::event::{Event, Key, MouseButton, MouseEvent, MouseEventKind};
     use guitk::probe::{Probe, press, rect_of_sized, typing};
     use oswindow::app::{App, Response};
+
+    /// The terminal's furniture follows the theme; its ANSI table does not.
+    ///
+    /// Both halves are asserted because both are decisions. A terminal that
+    /// stays dark on a light desktop is the defect; a terminal whose red is
+    /// not red is a worse one, since a program that prints colour 1 expects
+    /// red on every terminal ever made.
+    #[test]
+    fn the_chrome_follows_the_theme_and_the_ansi_table_does_not() {
+        let dark = ColorScheme::from_palette(&Palette::for_mode(false));
+        let light = ColorScheme::from_palette(&Palette::for_mode(true));
+
+        assert_ne!(
+            dark.background, light.background,
+            "the window's own background must change with the theme"
+        );
+        assert_ne!(dark.foreground, light.foreground);
+        assert_eq!(
+            dark.ansi, light.ansi,
+            "the sixteen ANSI colours are the protocol's, not the theme's"
+        );
+        assert_eq!(
+            dark.ansi,
+            ColorScheme::default().ansi,
+            "and they are the same ones a default scheme has"
+        );
+
+        let p = Palette::for_mode(true);
+        assert_eq!(light.background, p.base);
+        assert_eq!(light.foreground, p.text);
+        assert_eq!(
+            light.selection_bg, p.accent,
+            "selection is the accent (839)"
+        );
+    }
 
     /// A terminal with `lines` lines already pushed off the top, so there is
     /// something to scroll back into.

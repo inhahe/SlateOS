@@ -129086,7 +129086,43 @@ it was piped through `head -8`. The answer was in the truncated part.
 
 ---
 
-## TD-C-129-OF-135-APPLICATIONS-IGNORE-THE-THEME-ENTIRELY
+## TD-C-129-OF-135-APPLICATIONS-IGNORE-THE-THEME-ENTIRELY -- 129 is now 42, and all 42 are games
+
+**Re-measured 2026-09-13: 43 of 137, and 42 of those are games.**
+
+The count in the title was taken on 2026-09-08. Counting the same way today
+-- an app crate that draws (`RenderCommand` or `RenderTree` in its source)
+and never mentions a `Palette`:
+
+| | then | now |
+|---|---|---|
+| crates that draw | 135 | 137 |
+| of those, themed | 6 | 94 |
+| unthemed | 129 | 43 |
+
+The 43 are: asteroids, battleship, breakout, checkers, chess, connect4,
+crossword, dots, flood, freecell, game2048, gomoku, hangman, klotski, life,
+lightsout, mahjong, match3, maze, memory, minesweeper, nim, nonogram, pacman,
+pinball, pipes, pong, reversi, rush, simon, sliding, snake, sokoban,
+solitaire, spades, sudoku, terminal, tetris, tictactoe, towers, wordle,
+wordsearch, yahtzee.
+
+**Forty-two are games and wait on C-Q16**, which asks whether a game's board
+should follow the theme at all. The measured reason there is no chrome-only
+slice to take meanwhile is on
+`TD-C-SIXTY-EIGHT-APPS-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE`: the games do not
+separate chrome from board at the constant level, so converting the ramp
+themes the board, which is the very question.
+
+**The forty-third was `terminal`, and it is done.** Its `ColorScheme` splits
+exactly where the toolkit's text view splits: `foreground`, `background`,
+`cursor` and `selection_bg` are the window's own furniture and now come from
+the palette, with the selection taking the accent (839). The sixteen ANSI
+entries do not move, and that is not an omission -- colour 1 is red because
+the escape sequence says so, and a program that prints red expects red on
+every terminal ever made. Retinting those would not theme the terminal, it
+would corrupt what programs print. Both halves are asserted by
+`the_chrome_follows_the_theme_and_the_ansi_table_does_not`.
 
 **Date:** 2026-09-08. **Lane:** C.
 **Where:** `apps/**` (135 crates that draw), and the gap that causes it:

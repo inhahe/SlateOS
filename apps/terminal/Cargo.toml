@@ -5,6 +5,9 @@ edition = "2024"
 description = "SlateOS Terminal Emulator — graphical VT100/xterm terminal"
 
 [dependencies]
+# The user's colours, per design-decisions 822. The terminal's *chrome*
+# follows the theme; its sixteen ANSI colours do not -- see `ColorScheme`.
+appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
 # The window itself. The terminal used to be a simulation: `main` fed a demo
 # string into the parser, rendered one frame into a `RenderTree` and returned,

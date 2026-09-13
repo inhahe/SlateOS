@@ -129,10 +129,15 @@ const REG_NAMES: [&[u8]; REG_COUNT] = [
 // INT3 opcode for software breakpoints
 const INT3_OPCODE: u8 = 0xCC;
 
-// Maximum breakpoints, watchpoints, and threads
+// Maximum breakpoints and watchpoints, both enforced where the list grows.
+//
+// There was a MAX_THREADS here too. It is gone rather than enforced: the one
+// place that pushes a thread calls `threads.clear()` immediately before, so
+// the vector holds exactly one element and the limit could never be reached.
+// A bound that cannot be crossed is not a safeguard, it is a claim that
+// something is being guarded.
 const MAX_BREAKPOINTS: usize = 256;
 const MAX_WATCHPOINTS: usize = 64;
-const MAX_THREADS: usize = 256;
 const MAX_SYMBOLS: usize = 65536;
 const MAX_SECTIONS: usize = 256;
 const MAX_SEGMENTS: usize = 64;
@@ -2293,6 +2298,20 @@ impl Debugger {
 
         match addr {
             Some(a) => {
+                // Before the announcement, not after the push. The
+                // "Breakpoint N at 0x..." line below is written twenty lines
+                // before `breakpoints.push`, so a limit checked at the push
+                // would print that line and then silently not create it.
+                //
+                // `watchpoints` has had this check since it was written;
+                // `breakpoints` never did, so `break` accepted an unbounded
+                // number and MAX_BREAKPOINTS sat unread -- a limit that is
+                // declared, documented and not enforced.
+                if self.breakpoints.len() >= MAX_BREAKPOINTS {
+                    let _ = out.write_all(b"Too many breakpoints.\n");
+                    return;
+                }
+
                 let mut bp = Breakpoint::new(self.next_bp_id, a);
                 // Store the original byte at this address (if we have the ELF)
                 if let Some(ref elf) = self.elf {
@@ -4166,6 +4185,46 @@ mod tests {
     /// It used to evaluate to 0, so `print $rxa` -- one transposed pair
     /// away from `$rax` -- reported that the register held zero, and
     /// nothing distinguished that from a register that really did.
+    /// The breakpoint limit is enforced, and enforced *before* the line
+    /// that announces the breakpoint. `watchpoints` had this check from the
+    /// start; `breakpoints` never did, so MAX_BREAKPOINTS was declared,
+    /// documented and unread while `break` accepted any number.
+    #[test]
+    fn the_breakpoint_limit_refuses_without_announcing() {
+        let mut dbg = Debugger::new();
+        let mut out: Vec<u8> = Vec::new();
+        for i in 0..MAX_BREAKPOINTS {
+            // `format_hex` writes its own "0x" prefix; adding one here
+            // built `*0x0x1000`, which resolve_location rejected, and the
+            // setup assertion caught it.
+            let mut cmd = b"break *".to_vec();
+            let mut buf = [0u8; 20];
+            let n = format_hex(0x1000 + i as u64, &mut buf);
+            cmd.extend_from_slice(&buf[..n]);
+            dbg.process_command(&cmd, &mut out);
+        }
+        assert_eq!(dbg.breakpoints.len(), MAX_BREAKPOINTS, "setup");
+
+        // One more must refuse, and must not print a "Breakpoint N at ..."
+        // line for a breakpoint it did not create -- announcing then
+        // declining is the shape the check is positioned to avoid.
+        out.clear();
+        dbg.process_command(b"break *0x9999", &mut out);
+        assert_eq!(
+            dbg.breakpoints.len(),
+            MAX_BREAKPOINTS,
+            "grew past the limit"
+        );
+        // Byte windows, not `from_utf8_lossy`: CLAUDE.md forbids it outright,
+        // and this file already searches output this way elsewhere.
+        let has = |needle: &[u8]| out.windows(needle.len()).any(|w| w == needle);
+        assert!(has(b"Too many breakpoints"), "did not refuse");
+        assert!(
+            !has(b"Breakpoint "),
+            "announced a breakpoint it refused to create"
+        );
+    }
+
     #[test]
     fn an_unknown_register_is_refused_not_zero() {
         let mut regs = [0u64; REG_COUNT];

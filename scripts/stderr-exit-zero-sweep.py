@@ -87,8 +87,25 @@ EXPECTED_ZERO = {"true", "echo", "printf", "yes", "test", "[", "false"}
 #   quitting without a further error exits 0. Not reasoned from the standard
 #   but measured: `scripts/ed-diff.sh` runs 507 cases against GNU ed 1.20.1
 #   and compares stdout, stderr, the exit status and the bytes on disk.
+# `hwinfo` -- "cannot read /proc/cpuinfo (...); CPU details unavailable" on a
+#   host with no /proc. The inventory is still produced and still honest: the
+#   source argues, correctly, that a machine running hwinfo *has* a processor,
+#   so "details unknown" is a true statement and the line exists to say why.
+#   Exempted by name because the wording rule that would catch it also
+#   suppresses real failures -- see ANNOUNCES_A_FALLBACK.
+# `ftp` -- the probe hands every program a *filename*, and ftp's operand is a
+#   *hostname*. So this measures what ftp does with a host that does not
+#   resolve, which is an ordinary interactive situation: BSD ftp reports it
+#   and drops to the `ftp>` prompt, and with stdin at EOF it exits. Whether
+#   that status is 0 upstream I could not establish -- the reference ftp on
+#   this host hung on the lookup rather than answering -- so this is exempted
+#   as a *probe mismatch*, which is a claim about my instrument and not about
+#   ftp. If someone wants ftp's startup-failure status settled, the probe for
+#   it is a bad host, not a bad path.
 VERIFIED_ZERO = {
     "ed": "507-case differential against GNU ed 1.20.1 (scripts/ed-diff.sh)",
+    "hwinfo": "advisory about one section of an inventory that is still produced",
+    "ftp": "probe mismatch: the operand is a hostname, not a file",
 }
 
 # Daemons and interactive programs: launching them is either useless or
@@ -119,12 +136,47 @@ def probe(argv, cwd):
     return (proc.returncode, proc.stderr.decode("utf-8", "replace"))
 
 
+# A line that says what it is doing *instead* is a warning, not a report of
+# failure, even though it usually contains a failure word. Two real examples
+# from the first run, both correct as written and both flagged by the words
+# alone:
+#
+#   hwinfo:  "cannot read /proc/cpuinfo (...); CPU details unavailable"
+#   selinux: "unknown personality 'selinux', defaulting to getenforce"
+#
+# The first is an advisory about one section of an inventory that is otherwise
+# produced honestly -- the source comment argues, correctly, that a machine
+# running hwinfo *has* a processor, so "details unknown" is a true statement
+# and the line exists to say *why*. The second announces a documented fallback
+# and then does the work.
+#
+# Narrow on purpose, and narrower than my first attempt. That version also
+# matched `unavailable` and `not available`, which made it suppress
+#
+#   credentials: "Failed to set master password: the system random number
+#                 generator is unavailable"
+#
+# -- a real failure report, because those words usually name the *reason* a
+# thing failed rather than a substitute that was used instead. Trading a false
+# positive for a false negative is the worse of the two swaps: a noisy
+# detector is argued with, a quiet one is believed. So the rule requires an
+# explicit substitution, and `hwinfo` is exempted by name below rather than by
+# widening this.
+ANNOUNCES_A_FALLBACK = re.compile(
+    r"\b(defaulting to|falling back|using instead)\b",
+    re.IGNORECASE,
+)
+
+
 def first_failure_line(text):
-    """The first stderr line that reads as a failure, or None."""
+    """The first stderr line that reads as a report of failure, or None."""
     for line in text.splitlines():
         line = line.strip()
-        if line and SOUNDS_LIKE_FAILURE.search(line):
-            return line
+        if not line or not SOUNDS_LIKE_FAILURE.search(line):
+            continue
+        if ANNOUNCES_A_FALLBACK.search(line):
+            continue
+        return line
     return None
 
 
@@ -160,7 +212,13 @@ def selftest():
 
     # And that the failure-word test is about words, not substrings.
     for text, want in (("notice: ok", False), ("cannot open", True),
-                       ("bad input", True), ("embadded", False)):
+                       ("bad input", True), ("embadded", False),
+                       # A fallback announcement is a warning, not a failure.
+                       ("unknown personality 'x', defaulting to getenforce", False),
+                       # ...but continuing is not substituting, and a resource
+                       # that is unavailable is usually why something failed.
+                       ("cannot open x: failed, continuing", True),
+                       ("Failed to set master password: the RNG is unavailable", True)):
         got = first_failure_line(text) is not None
         if got != want:
             print("  selftest FAIL (wording %r): wanted %s got %s" % (text, want, got))

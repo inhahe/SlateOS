@@ -2445,9 +2445,9 @@ _Themes are simpler to vet than apps — they can't execute code. The process is
 - [ ] **Per-axis apply** — apply only colors from one theme, only icons from another, etc.
 
 #### Theme Editor in Settings App
-- [ ] **Live preview panel** showing a miniature desktop with the current theme applied, updating in real time as user makes changes
-- [ ] **Color picker** for each semantic token, with contrast ratio display for text/background combinations
-- [ ] **Built-in WCAG contrast checker** — flags when text/background combinations fail WCAG AA
+- [-] **Live preview panel** showing a miniature desktop with the current theme applied, updating in real time as user makes changes — a first one exists on the Themes page (`apps/settings`, `render_theme_preview`), drawn through `Palette::draw_surface` and the palette's own roles so it cannot show one thing while the desktop does another. It previews the two *style* settings, not yet a full theme under edit.
+- [ ] **Color picker** for each semantic token, with contrast ratio display for text/background combinations — the ratio is `guitk::theme::contrast_ratio`, which is a table lookup rather than a computation (§837's performance note), so a live display costs nothing.
+- [ ] **Built-in WCAG contrast checker** — flags when text/background combinations fail WCAG AA. Note this is a *checker for user-authored themes*; the **system** palette no longer needs one, because since §837 no combination it can produce is below 4.5 — `appearance::legible_on` is the function, and the set of grounds to check a token against is `Palette::text_grounds`, which depends on the style settings and is the thing a hand-written checker would get wrong.
 - [ ] **Import/Export** — import from the theme repository or a local YAML file, export current customizations as a shareable theme YAML
 - [ ] **Derive from existing** — start from any installed theme, tweak individual values, save as a new theme
 - [ ] **Preview multiple contexts** — see how changes look across taskbar, file manager, terminal, dialog, etc.

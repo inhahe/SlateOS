@@ -649,6 +649,67 @@ mod tests {
         assert_eq!(builtin_scale(48.0), 3);
     }
 
+    /// What a glyph costs *before* anything is drawn.
+    ///
+    /// The compositor's 4K frame attributes ~1.29 us to each of ~9 400 glyphs,
+    /// and `compositor::bench_glyph_blit_phases` measured the blit at 5.8 ns a
+    /// covered pixel -- about 0.23 us for a glyph of forty covered pixels. So
+    /// four fifths of a glyph's cost happens somewhere other than the loop
+    /// that puts it on the screen, and this is the first candidate: the cache
+    /// lookup that hands the blit its mask.
+    ///
+    /// Warm on purpose. A cold lookup rasterises, and rasterising once per
+    /// glyph per session is not what 9 400 glyphs a frame are paying for.
+    ///
+    /// ```text
+    /// cargo test -p osfont --target x86_64-pc-windows-gnu --release     ///   -- --ignored --nocapture bench_warm_glyph_mask_lookup
+    /// ```
+    #[test]
+    #[ignore = "measurement benchmark; run explicitly with --release --ignored --nocapture"]
+    fn bench_warm_glyph_mask_lookup() {
+        const REPS: usize = 200_000;
+        const ROUNDS: usize = 7;
+
+        let mut font = SystemFont::builtin(14.0);
+        // A realistic alphabet, shaped once so the keys are the real ones.
+        let run = font.shape("The quick brown fox jumps over the lazy dog, 0123456789.");
+        let keys: Vec<_> = run.draw_order().map(|g| g.key).collect();
+        assert!(!keys.is_empty(), "nothing shaped, so nothing is measured");
+
+        // Warm every entry, so this measures the hit and not the rasteriser.
+        for &k in &keys {
+            let _ = font.glyph_mask(k);
+        }
+
+        let mut best = f64::MAX;
+        for _ in 0..ROUNDS {
+            let t = std::time::Instant::now();
+            let mut covered = 0usize;
+            for i in 0..REPS {
+                let k = keys[i % keys.len()];
+                if let Some(mask) = font.glyph_mask(k) {
+                    // Read one byte so the lookup cannot be optimised away.
+                    covered += mask.coverage.first().map_or(0, |&c| c as usize);
+                }
+            }
+            assert!(covered < usize::MAX, "the loop must not be elided");
+            best = best.min(t.elapsed().as_nanos() as f64 / REPS as f64);
+        }
+
+        println!(
+            "warm glyph_mask lookup: {best:.1} ns ({} distinct glyphs)",
+            keys.len()
+        );
+        println!(
+            "  a 4K frame's ~9 400 glyphs would spend {:.2} ms here",
+            best * 9_400.0 / 1e6
+        );
+        assert!(
+            best > 0.0,
+            "a lookup that takes no measurable time did not happen"
+        );
+    }
+
     #[test]
     fn a_nonsense_size_still_yields_a_usable_font() {
         // A zero-scale font would draw nothing at all, which reads as a

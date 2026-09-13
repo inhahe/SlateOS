@@ -141088,10 +141088,35 @@ with the minimum taken per phase:
 **Where to look instead, from the same arithmetic.** 12.1 ms over ~9 400
 glyphs is 1.29 us a glyph. This bench does 0.74 us a glyph while covering
 *three times* as many pixels, and it starts from a mask that already exists.
-So the missing time is **per glyph, not per pixel** -- the cache lookup, the
-rasterisation, the mask allocation, whatever happens before the loop this
-benchmark begins at. That is the next measurement, and it is a different
-experiment from this one.
+So the missing time is **per glyph, not per pixel**.
+
+**The first candidate has been measured and excluded.**
+`osfont::system::tests::bench_warm_glyph_mask_lookup` times the cache hit that
+hands the blit its mask -- 56 distinct glyphs, warmed first so it measures the
+hit and not the rasteriser, seven rounds, minimum taken: **27.1 ns**. Over
+9 400 glyphs that is **0.25 ms**, or 2% of the 12.1.
+
+**So the budget now stands like this**, taking the entry's own figures (the
+32 ns and the 12.1 ms imply ~378 000 covered pixels, ~40 a glyph):
+
+| | measured | of 12.1 ms |
+|---|---|---|
+| the blit itself, 378 000 px at 5.8 ns | 2.2 ms | 18% |
+| the warm mask lookup, 9 400 at 27.1 ns | 0.25 ms | 2% |
+| **unaccounted** | **~9.6 ms** | **80%** |
+
+**And the most likely explanation is the label, not the code.** 12.1 ms was
+almost certainly obtained by differencing a frame with text against one
+without, which includes *everything* text costs -- `font.shape` per command,
+`FontCache::get` per command, `TextSpan::color_at` scanning the span list once
+per glyph, the `RenderCommand::Text` iteration -- and not only "putting glyph
+masks on the screen", which is what the entry calls it. Two measurements now
+say the two things that phrase actually names come to a fifth of it.
+
+**The next experiment** is therefore to split `draw_text`/`blit_run` itself,
+and the thing to be careful of is the one that has already caught this entry
+twice: a difference between two whole-frame timings attributes everything in
+between to whatever you happened to name it.
 
 **A note on the estimator, because the first version of this bench got it
 wrong.** Run once each in sequence, the three phases reported *"the clip test

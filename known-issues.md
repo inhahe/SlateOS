@@ -3,7 +3,15 @@
 Bugs and technical debt. **Fixed entries move to `known-issues-resolved.md`**
 once the fix has survived a full boot test on `main`, so this file stays a list
 of what is *still* wrong; until then they stay here carrying a
-`**Status: FIXED**` stamp. Nothing is ever deleted — the archive keeps each
+`**Status: FIXED**` stamp.
+
+**Write the stamp in capitals.** On 2026-09-13 five lane-C entries carried a
+lowercase `fixed` or a `DONE` buried in a sentence, and a triage grep for
+`FIXED|RESOLVED|CLOSED` therefore counted them among the open work — 39 where
+34 was the truth. One of them was then picked up as "the best next task" and
+turned out to have been finished three weeks earlier. A marker that is only
+sometimes machine-readable is worse than none, because it is the *readable*
+ones that get filtered out and the rest that get worked. Nothing is ever deleted — the archive keeps each
 entry's full text and commit hashes. **The migration is incremental, so grep
 both files** (as of 2026-08-16 all three lanes' resolved entries are archived,
 bar a handful fixed that same day and still awaiting a boot test on `main`).
@@ -38521,7 +38529,7 @@ same day: `Server::run_with` now polls `Compositor::input_settings` and pushes
 any change through `Present::reload_input` into the device —
 `design-decisions.md` §548.)*
 
-## TD-C-A-POINTER-SPEED-CHANGE-DOES-NOT-REACH-THE-POINTER (lane C, 2026-08-24) — **fixed 2026-08-24**
+## TD-C-A-POINTER-SPEED-CHANGE-DOES-NOT-REACH-THE-POINTER (lane C, 2026-08-24) — FIXED 2026-08-24
 
 **In short:** the Settings → Mouse page can change the pointer speed, the
 acceleration profile, the button mapping and the key-repeat rate, and the file
@@ -55840,7 +55848,7 @@ unreachable (`TD-C-THREE-SETTINGS-PAGES-ARE-BUILT-AND-REACHED-BY-NOTHING`), so
 the design exists and nothing reads it. It is retained for that reason: it is
 the only statement in the tree of what the gate should ask.
 
-## TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE — PART 1 DONE 2026-08-22, PART 2 DONE 2026-08-24
+## TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE — FIXED 2026-08-24 (part 1 2026-08-22, part 2 2026-08-24)
 
 **Status, 2026-08-22.** Part 1 below is **done**: `appearance::Palette` exists,
 carries the light ladder as well as the dark one, and `DecorationColors` and
@@ -83467,7 +83475,7 @@ change, but not one that breaks any current caller: no app in the tree routes
 events through `WidgetTree::handle_event` today — they were all doing their own
 key handling, which is itself a sign that this path was not usable.
 
-## TD-C-NO-MODAL-DIALOG-KNOWS-WHERE-IT-IS-WHEN-IT-IS-CLICKED (lane C, 2026-08-24) — **fixed 2026-08-24**
+## TD-C-NO-MODAL-DIALOG-KNOWS-WHERE-IT-IS-WHEN-IT-IS-CLICKED (lane C, 2026-08-24) — FIXED 2026-08-24
 
 `ModalOverlay` has a `content_rect` — the dialog's own rectangle, which
 `handle_mouse` tests a click against to decide whether it landed outside the
@@ -132338,7 +132346,7 @@ test code, so it flagged `launcher`'s own fixtures.
 colour methods still take no palette at all (`procexplorer`'s two), and threading
 one in is that entry's work, not this one's.
 
-## TD-C-THIRTEEN-LIGHT-ACCENTS-STILL-FAIL-ON-CARDS -- being fixed 2026-09-12, mechanism landed
+## TD-C-THIRTEEN-LIGHT-ACCENTS-STILL-FAIL-ON-CARDS -- FIXED 2026-09-13 (mechanism 2026-09-12, the 315 dual-use sites 2026-09-13)
 
 **Update, 2026-09-12 (lane C).** Answered, and the entry below was wrong in
 three ways worth recording before the correction.

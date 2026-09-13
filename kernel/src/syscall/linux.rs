@@ -4003,6 +4003,40 @@ fn dispatch_socket_write(
     }
 }
 
+/// Back off once while a daemon-backed socket read waits for data.
+///
+/// The blocking wait for a daemon socket has to happen *here*, above the shared
+/// session lock, rather than by asking the daemon to withhold its reply: a
+/// listener and every connection accepted on it share one ring session behind one
+/// mutex, so a reply withheld for a quiet peer stalls every sibling connection
+/// (`D-NETSOCK-SYNC`). Moving the wait out here is what A-Q9 option C required
+/// before the userspace netstack can become the default.
+///
+/// Neither available wait is right on its own, so this is the usual hybrid:
+///
+/// * `yield_now` alone re-polls as fast as the scheduler will let it. That keeps
+///   latency at zero and burns a core whenever the peer is merely quiet, which is
+///   most of the time for an idle connection. It would trade head-of-line
+///   blocking for a busy-wait per blocked reader.
+/// * a timed sleep alone costs its whole slice on *every* read that is not
+///   already satisfied, including the overwhelmingly common case where the data
+///   is a few microseconds behind the call.
+///
+/// So: yield for the first `SPIN_YIELDS` attempts, which covers data already in
+/// flight, then fall to 1 ms interruptible sleeps. `poll`/`select` use 10 ms
+/// slices for the same job; 1 ms here because a read that has already decided to
+/// wait is more latency-sensitive than a poller holding a whole fd set.
+fn socket_read_backoff(spins: &mut u32) {
+    /// Yields before falling back to sleeping.
+    const SPIN_YIELDS: u32 = 16;
+    if *spins < SPIN_YIELDS {
+        *spins = spins.saturating_add(1);
+        crate::sched::yield_now();
+    } else {
+        crate::sched::sleep_ms_interruptible(1);
+    }
+}
+
 /// Socket read — receive up to `cap` bytes from the daemon-backed stream socket
 /// via [`crate::net::socket::recv`] and copy them to the user buffer.  Returns
 /// the number of bytes received (`0` = peer closed / no data).
@@ -4039,9 +4073,25 @@ fn dispatch_socket_read(
     let h = crate::net::socket::SocketHandle::from_raw(entry.raw_handle);
     // Non-blocking if the fd is O_NONBLOCK *or* the caller passed MSG_DONTWAIT.
     let nonblock = force_nonblock || (entry.status_flags & oflags::O_NONBLOCK) != 0;
-    let n = match crate::net::socket::recv(h, &mut kbuf, nonblock, peek) {
-        Ok(v) => v,
-        Err(e) => return linux_err(linux_errno_for(e)),
+    // Blocking-recv policy, mirroring the blocking-accept loop below: ask the
+    // daemon for a NON-blocking receive every time and do the waiting here,
+    // outside the session lock. A blocking (`aux = 0`) recv makes the daemon
+    // withhold its reply until data arrives, and `with_stream_conn` holds the
+    // shared session mutex for that whole time -- so one idle client stalls every
+    // other connection accepted on the same listener. That is D-NETSOCK-SYNC, and
+    // it is what A-Q9 option C required fixing before the default flip.
+    let mut spins = 0u32;
+    let n = loop {
+        match crate::net::socket::recv(h, &mut kbuf, true, peek) {
+            Ok(v) => break v,
+            Err(KernelError::WouldBlock) => {
+                if nonblock {
+                    return linux_err(linux_errno_for(KernelError::WouldBlock));
+                }
+                socket_read_backoff(&mut spins);
+            }
+            Err(e) => return linux_err(linux_errno_for(e)),
+        }
     };
     let n_usize = usize::try_from(n).unwrap_or(0).min(cap_usize);
     if n_usize > 0 {
@@ -4083,13 +4133,20 @@ fn socket_recv_waitall(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
             }
             return linux_err(linux_errno_for(e));
         }
-        let n = match crate::net::socket::recv(h, &mut kbuf[..chunk], false, false) {
-            Ok(v) => v,
-            Err(e) => {
-                if done > 0 {
-                    return SyscallResult::ok(done as i64);
+        // Same reason as the loop above: the wait belongs out here, not inside
+        // the daemon round-trip. Semantics are unchanged -- this still blocks
+        // until data arrives -- but it no longer does so holding the session.
+        let mut spins = 0u32;
+        let n = loop {
+            match crate::net::socket::recv(h, &mut kbuf[..chunk], true, false) {
+                Ok(v) => break v,
+                Err(KernelError::WouldBlock) => socket_read_backoff(&mut spins),
+                Err(e) => {
+                    if done > 0 {
+                        return SyscallResult::ok(done as i64);
+                    }
+                    return linux_err(linux_errno_for(e));
                 }
-                return linux_err(linux_errno_for(e));
             }
         };
         let n_usize = usize::try_from(n).unwrap_or(0).min(chunk);
@@ -39476,9 +39533,21 @@ fn socket_recvmsg(entry: FdEntry, msg_ptr: u64, flags: u32) -> SyscallResult {
     let n = if cap_total == 0 {
         0
     } else {
-        match crate::net::socket::recv(h, &mut kbuf, nonblock, peek) {
-            Ok(v) => v,
-            Err(e) => return linux_err(linux_errno_for(e)),
+        // The wait happens here rather than in the daemon, for the reason given
+        // at the recv in dispatch_socket_read: a blocking round-trip would hold
+        // the shared session for as long as the peer stays quiet.
+        let mut spins = 0u32;
+        loop {
+            match crate::net::socket::recv(h, &mut kbuf, true, peek) {
+                Ok(v) => break v,
+                Err(KernelError::WouldBlock) => {
+                    if nonblock {
+                        return linux_err(linux_errno_for(KernelError::WouldBlock));
+                    }
+                    socket_read_backoff(&mut spins);
+                }
+                Err(e) => return linux_err(linux_errno_for(e)),
+            }
         }
     };
     let n_usize = usize::try_from(n).unwrap_or(0).min(cap_total);

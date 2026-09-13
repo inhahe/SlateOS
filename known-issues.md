@@ -13248,6 +13248,27 @@ needed. What survives is *not* a missing feature but the cost of that
 choice: **the listener and every connection it accepts share one SPSC
 session behind one lock, so a server's accepted connections are served
 strictly one at a time — one slow client holds up the others.** That
+**PLAN (2026-09-12, after A-Q9 resolved C-then-D): the fix is smaller than the
+phrase 'asynchronous rewrite' suggests, because the daemon is already fair.**
+`ring_tcp_recv` routes through `ring_pump` precisely so *concurrent connections
+on the same ring can all receive without starving one another*
+(D-NETSTACK-RX-DEMUX). Nothing daemon-side serialises. The blocking is entirely
+kernel-side, with one cause: `socket.rs::with_stream_conn` takes
+`s.session.lock()` and holds it for the whole closure, and a blocking `recv`
+passes `aux = 0`, so `submit_and_reap` does a round-trip the daemon does not
+answer until data arrives. The session mutex is held across a *network* wait.
+
+**The fix: never ask the daemon to block.** Always submit `RECV_NONBLOCK` at the
+ring level; on `ERR_WOULD_BLOCK` drop the lock and wait above it, then retry.
+The lock is then held only for a round-trip the daemon answers immediately. No
+daemon-ABI change, no change to the one-SQE-per-round model, Q23 Option A's
+shared session intact.
+
+The real work is where the waiting goes (`recv`'s caller, not `recv_on`), how it
+meets the existing poll/epoll readiness path, and not turning a blocking read
+into a spin -- looping on `WOULD_BLOCK` without yielding would remove the
+head-of-line block by burning a core instead.
+
 head-of-line blocking is the last thing standing between here and the 5.7
 default flip, and removing it is an asynchronous rewrite of the session
 layer, not a patch. It is why `open-questions.md` A-Q9 recommends fixing

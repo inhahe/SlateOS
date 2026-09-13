@@ -253,15 +253,17 @@ def selftest():
         src = os.path.join(d, "userspace", "zzq", "src")
         os.makedirs(src)
         with open(os.path.join(d, "userspace", "zzq", "Cargo.toml"),
-                  "w", encoding="utf-8") as fh:
+                  "w", encoding="utf-8", newline="") as fh:
             fh.write('[package]' + NL + 'name = "zzq"' + NL)
-        with open(os.path.join(src, "main.rs"), "w", encoding="utf-8") as fh:
+        with open(os.path.join(src, "main.rs"), "w", encoding="utf-8",
+                  newline="") as fh:
             fh.write("#![allow(dead_code)]")
         # A module file one directory down, to pin that the walker attributes
         # it to the crate rather than to its own directory.
         deep = os.path.join(src, "sub")
         os.makedirs(deep)
-        with open(os.path.join(deep, "mod.rs"), "w", encoding="utf-8") as fh:
+        with open(os.path.join(deep, "mod.rs"), "w", encoding="utf-8",
+                  newline="") as fh:
             fh.write("pub fn f() {}")
         names = sorted({r[0] for r in crate_files(d)})
         if names != ["userspace/zzq"]:

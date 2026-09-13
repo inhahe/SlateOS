@@ -483,8 +483,18 @@ impl NetworkIndicator {
             }
         };
 
-        // Icon background circle
-        p.push_surface(&mut cmds, x, y, 24.0, 24.0, 12.0, Surface::Card);
+        // A disc behind the icon, not a card: the icon's colour is the reading
+        // -- red for down, green for ethernet, lavender for VPN -- and it is
+        // read against this. Outlined, the ground goes and a ring appears
+        // round a 24px taskbar icon, which is the opposite of what it is for.
+        cmds.push(RenderCommand::FillRect {
+            x,
+            y,
+            width: 24.0,
+            height: 24.0,
+            color: p.surface0,
+            corner_radii: CornerRadii::all(12.0),
+        });
 
         // Icon text (emoji or signal bars)
         let label = if self.state.airplane_mode {

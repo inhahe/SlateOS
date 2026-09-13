@@ -1746,6 +1746,37 @@ Roadmap:
 - `[C]` Port VS Code, Thunderbird (lines ~5046–5047) — after Chromium
 - `[C]` Speech input/output; phone camera/mic integration (lines ~5390–5391)
 
+- `[C]` **The bordered theme, applied** (§829-§836) — done for the shell and the
+  apps; ~356 draw sites remain, listed below. Every box that is a *surface* — a
+  card, a selected row, a sidebar, a panel, a control's groove, a full-width
+  strip — now asks `Palette::surface_paint` what to draw instead of naming a
+  shade, so the Outlined/Filled choice and the Shaded/A-line choice are two
+  settings rather than a rewrite. The Themes page carries both, with a preview
+  that draws through the same function the desktop does.
+
+  **What the conversion cost, for whoever converts the remaining 356.** Three
+  defect classes got into the tree, all of them invisible on a passing build
+  and all of them found by *shape* rather than by reading:
+
+  | Sweep | What it looks for | Found |
+  |---|---|---|
+  | too thin | a surface 1px in either direction | 21 separators drawn as degenerate outlines |
+  | at the origin | `(0, 0)`, full width, no radius | 3 window backgrounds, 5 title bars |
+  | doubled | a surface and a `StrokeRect` at the same four coordinates | 19 concentric rings |
+  | circular | `w == h` and `radius == w/2` | 2 discs that were a graphic's ground |
+
+  The common cause is that the converter classifies from the words around a
+  site, and "Header", "Divider" and "Full-window background" are ordinary
+  English no pattern matches. Geometry is what separates them, and geometry is
+  what a sweep after the fact can see. Run all four before believing a batch.
+
+  Two test shapes hid failures rather than reporting them, and both are worth
+  looking for elsewhere: a collector matching `FillRect` only returns an empty
+  vector once its subject becomes an outline (`privacy_settings` passed
+  vacuously through a whole conversion), and `.all()` over that empty vector is
+  true. `appearance::painted_rect` matches either shape on the logical
+  rectangle; assert non-empty before asserting uniform.
+
 Known-issues: no open GUI/app entries today — lane C's backlog is roadmap
 features, and it should also run bug-hunt sweeps over `apps/**` (~200 crates
 that have never had a systematic audit) whenever it is between features.

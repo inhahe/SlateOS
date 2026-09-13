@@ -72,13 +72,21 @@
 #      reads. The count went 180 to 0 this session; this is what keeps it
 #      there, a closed class being exactly the kind whose zero stops being
 #      checked.
+#  35. Refuse a test that writes settings outside a scratch directory. It lands
+#      in the developer's own config dir, and under a parallel run in a
+#      neighbouring test's scratch dir -- which is where an intermittent
+#      failure came from. Narrowed to the crates a push touches, because the
+#      verdict is empirical and costs 105 s over the whole tree.
 #
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented; wrong again the moment gate 13 was written, when the
 # section and the bypass landed in `0ab4b55bc` and this list did not; and
-# wrong again at 19 and at 22. FOUR OUT OF FOUR RECENT ADDITIONS -- lane A
-# counted that and it is worth having, because a note that stops at the second
-# instance reads as though the problem was dealt with.
+# wrong again at 19 and at 22, and at 35. FIVE OUT OF FIVE RECENT ADDITIONS --
+# lane A counted the first four and it is worth having, because a note that
+# stops at the second instance reads as though the problem was dealt with. The
+# fifth was written by someone who had just read this paragraph: gate 35's
+# section and bypass landed, this list did not, and `test-pre-push-gates.py`
+# refused the push. The note is not the mechanism; the test is.
 #
 # Adding a gate is THREE edits: this list, the `# Gate N` section, and the
 # bypass variable. scripts/test-pre-push-gates.py checks all three against each
@@ -4190,7 +4198,13 @@ fi
 [ -n "$py" ] || skip_scratchcfg=1
 [ -f "$scratchcfg" ] || skip_scratchcfg=1
 touches gui/ apps/ scripts/check-scratch-config.py || skip_scratchcfg=1
-[ -n "${pushed_shas# }" ] || skip_scratchcfg=1
+# No `[ -n "${pushed_shas# }" ]` guard, and that is deliberate rather than an
+# omission: that guard exists for gates that loop `for sha in $pushed_shas`,
+# where an empty list would run the checker zero times and report a pass. This
+# gate runs once. With nothing being pushed, `touches` is already false and the
+# crate list below is already empty, so both paths skip it -- and a redundant
+# guard would make `test-pre-push-gates.py`'s guards-match-loops count
+# disagree, which is the count that catches the real omission.
 
 # The crates this push touches, as substrings the checker will match. Empty is
 # not "check everything": it means the push changed no crate directory, and the

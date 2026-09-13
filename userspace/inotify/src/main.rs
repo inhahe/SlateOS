@@ -175,92 +175,196 @@ fn parse_event_list(list: &str) -> u32 {
     mask
 }
 
-// ============================================================================
-// Simulated event generation
-// ============================================================================
+#[cfg(target_vendor = "slateos")]
+unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
+    let ret: i64;
+    // SAFETY: Caller guarantees arguments are valid for the given syscall.
+    // The `syscall` instruction clobbers rcx and r11 per the System V ABI.
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            inlateout("rax") nr as i64 => ret,
+            in("rdi") a1,
+            in("rsi") a2,
+            in("rdx") a3,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
 
-/// Generate simulated inotify events for demonstration.
-/// On a real Slate OS system, this would use the kernel inotify API.
-fn generate_simulated_events(paths: &[String], mask: u32) -> Vec<InotifyEvent> {
-    let mut events = Vec::new();
+// Stub for development hosts (where `cargo test` runs).
+#[cfg(not(target_vendor = "slateos"))]
+unsafe fn syscall3(_nr: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
+    -38 // ENOSYS
+}
 
-    for path in paths {
-        // Simulate common filesystem events.
-        if mask & IN_CREATE != 0 {
-            events.push(InotifyEvent {
-                watch_path: path.clone(),
-                mask: IN_CREATE,
-                name: "newfile.txt".to_string(),
-                _cookie: 0,
-            });
-        }
-        if mask & IN_MODIFY != 0 {
-            events.push(InotifyEvent {
-                watch_path: path.clone(),
-                mask: IN_MODIFY,
-                name: "existing.conf".to_string(),
-                _cookie: 0,
-            });
-        }
-        if mask & IN_DELETE != 0 {
-            events.push(InotifyEvent {
-                watch_path: path.clone(),
-                mask: IN_DELETE,
-                name: "temp.log".to_string(),
-                _cookie: 0,
-            });
-        }
-        if mask & IN_ACCESS != 0 {
-            events.push(InotifyEvent {
-                watch_path: path.clone(),
-                mask: IN_ACCESS,
-                name: "readme.md".to_string(),
-                _cookie: 0,
-            });
-        }
-        if mask & IN_OPEN != 0 {
-            events.push(InotifyEvent {
-                watch_path: path.clone(),
-                mask: IN_OPEN,
-                name: "data.bin".to_string(),
-                _cookie: 0,
-            });
-        }
-        if mask & IN_CLOSE_WRITE != 0 {
-            events.push(InotifyEvent {
-                watch_path: path.clone(),
-                mask: IN_CLOSE_WRITE,
-                name: "output.txt".to_string(),
-                _cookie: 0,
-            });
-        }
-        if mask & IN_ATTRIB != 0 {
-            events.push(InotifyEvent {
-                watch_path: path.clone(),
-                mask: IN_ATTRIB,
-                name: "script.sh".to_string(),
-                _cookie: 0,
-            });
-        }
-        if mask & IN_MOVED_FROM != 0 {
-            events.push(InotifyEvent {
-                watch_path: path.clone(),
-                mask: IN_MOVED_FROM,
-                name: "old_name.txt".to_string(),
-                _cookie: 1,
-            });
-        }
-        if mask & IN_MOVED_TO != 0 {
-            events.push(InotifyEvent {
-                watch_path: path.clone(),
-                mask: IN_MOVED_TO,
-                name: "new_name.txt".to_string(),
-                _cookie: 1,
-            });
+/// Syscall numbers, from `kernel/src/syscall/linux.rs`.
+const SYS_READ: u64 = 0;
+const SYS_CLOSE: u64 = 3;
+const SYS_INOTIFY_INIT1: u64 = 294;
+const SYS_INOTIFY_ADD_WATCH: u64 = 254;
+
+/// Watch `paths` and return the first batch of events the kernel reports.
+///
+/// `None` means this build cannot watch at all -- the syscalls answered
+/// ENOSYS, which is what the development-host stub above returns. The
+/// caller says so rather than inventing events, which is what it used to
+/// do: `generate_simulated_events` reported a `newfile.txt` creation for
+/// every run, so `while inotifywait -e create dir; do rebuild; done` never
+/// stopped rebuilding.
+fn watch_once(paths: &[String], mask: u32) -> Option<(usize, Vec<(usize, RawEvent)>)> {
+    // SAFETY: no pointer arguments; `inotify_init1(0)` takes flags only.
+    let fd = unsafe { syscall3(SYS_INOTIFY_INIT1, 0, 0, 0) };
+    if fd < 0 {
+        return None;
+    }
+    let fd_u = fd as u64;
+    let mut wds: Vec<(i32, usize)> = Vec::new();
+    for (idx, path) in paths.iter().enumerate() {
+        let mut c_path = path.as_bytes().to_vec();
+        c_path.push(0);
+        // SAFETY: `c_path` is NUL-terminated and outlives the call.
+        let wd = unsafe {
+            syscall3(
+                SYS_INOTIFY_ADD_WATCH,
+                fd_u,
+                c_path.as_ptr() as u64,
+                u64::from(mask),
+            )
+        };
+        if wd >= 0 {
+            wds.push((wd as i32, idx));
         }
     }
 
-    events
+    let mut buf = [0u8; 4096];
+    // SAFETY: `buf` is valid for `len` bytes for the duration of the call.
+    let n = unsafe { syscall3(SYS_READ, fd_u, buf.as_mut_ptr() as u64, buf.len() as u64) };
+    // SAFETY: closing a descriptor this function opened.
+    unsafe {
+        syscall3(SYS_CLOSE, fd_u, 0, 0);
+    }
+    if n < 0 {
+        return None;
+    }
+    let read = usize::try_from(n).unwrap_or(0).min(buf.len());
+    let events = parse_event_buffer(buf.get(..read).unwrap_or(&[]));
+    Some((
+        wds.len(),
+        events
+            .into_iter()
+            .map(|e| {
+                let idx = wds
+                    .iter()
+                    .find(|(wd, _)| *wd == e.wd)
+                    .map_or(0, |(_, idx)| *idx);
+                (idx, e)
+            })
+            .collect(),
+    ))
+}
+
+/// The kernel's events, as this program's own type.
+///
+/// `None` propagates "cannot watch" so the caller can say so.
+fn real_events(paths: &[String], mask: u32) -> Option<(usize, Vec<InotifyEvent>)> {
+    let (established, raw) = watch_once(paths, mask)?;
+    Some((
+        established,
+        raw.into_iter()
+            .map(|(idx, e)| InotifyEvent {
+                watch_path: paths.get(idx).cloned().unwrap_or_default(),
+                mask: e.mask,
+                // A name that is not UTF-8 is shown escaped rather than
+                // mangled: `from_utf8_lossy` would report a change to a file
+                // that does not exist.
+                name: String::from_utf8(e.name.clone()).unwrap_or_else(|_| format!("{:?}", e.name)),
+                _cookie: e.cookie,
+            })
+            .collect(),
+    ))
+}
+
+// ============================================================================
+// The kernel's event stream
+// ============================================================================
+
+/// Fixed part of `struct inotify_event`: `wd` (i32), `mask`, `cookie`,
+/// `len` (u32 each).
+const EVENT_HEADER_LEN: usize = 16;
+
+/// One event exactly as the kernel wrote it.
+///
+/// The name is **bytes**. A watched directory can hold a file whose name is
+/// not UTF-8 -- on this OS any byte but `/` and NUL is legal in one -- and a
+/// watcher that mangles the name reports a change to a file that does not
+/// exist.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RawEvent {
+    wd: i32,
+    mask: u32,
+    cookie: u32,
+    name: Vec<u8>,
+}
+
+/// Split a read from an inotify fd into events.
+///
+/// The kernel packs them back to back, each a 16-byte header followed by
+/// `len` bytes of name. `len` is the *padded* length: the name is
+/// NUL-terminated and then padded to an alignment boundary, so the trailing
+/// NULs are not part of it. `len` of 0 means no name at all, which is what
+/// a watch on a file rather than a directory reports.
+///
+/// A trailing partial event is dropped rather than guessed at -- `read` on
+/// an inotify fd never returns one, so seeing it means the buffer is not
+/// what we think it is, and inventing a name from it is exactly the habit
+/// this crate is being cured of.
+fn parse_event_buffer(buf: &[u8]) -> Vec<RawEvent> {
+    let mut out = Vec::new();
+    let mut at = 0usize;
+    while at.saturating_add(EVENT_HEADER_LEN) <= buf.len() {
+        let head = match buf.get(at..at.saturating_add(EVENT_HEADER_LEN)) {
+            Some(h) => h,
+            None => break,
+        };
+        let word = |o: usize| -> u32 {
+            let mut b = [0u8; 4];
+            if let Some(src) = head.get(o..o.saturating_add(4)) {
+                b.copy_from_slice(src);
+            }
+            u32::from_ne_bytes(b)
+        };
+        let wd = word(0) as i32;
+        let mask = word(4);
+        let cookie = word(8);
+        let len = word(12) as usize;
+
+        let name_at = at.saturating_add(EVENT_HEADER_LEN);
+        let name_end = name_at.saturating_add(len);
+        if name_end > buf.len() {
+            break;
+        }
+        let raw_name = buf.get(name_at..name_end).unwrap_or(&[]);
+        // The padding is NULs after the terminator; the name is what
+        // precedes the first one.
+        let name = raw_name
+            .iter()
+            .position(|b| *b == 0)
+            .map_or(raw_name, |z| raw_name.get(..z).unwrap_or(&[]))
+            .to_vec();
+
+        out.push(RawEvent {
+            wd,
+            mask,
+            cookie,
+            name,
+        });
+        at = name_end;
+    }
+    out
 }
 
 // ============================================================================
@@ -508,8 +612,6 @@ fn cmd_inotifywait(args: &[String]) {
         if opts.recursive {
             eprintln!("  Watching recursively.");
         }
-        let watch_count = opts.paths.len();
-        eprintln!("Watches established ({watch_count} total).");
     }
 
     let stdout = io::stdout();
@@ -523,8 +625,17 @@ fn cmd_inotifywait(args: &[String]) {
     let start = Instant::now();
     let timeout_dur = opts.timeout.map(Duration::from_secs);
 
-    // Generate and display events.
-    let events = generate_simulated_events(&opts.paths, opts.events);
+    // The kernel's events, or none at all if this build cannot watch.
+    let Some((established, events)) = real_events(&opts.paths, opts.events) else {
+        eprintln!("inotifywait: this build cannot watch for filesystem events");
+        process::exit(1);
+    };
+    // Said after the attempt, and counting what the kernel actually took.
+    // It used to be printed beforehand from `paths.len()`, so it announced
+    // watches that were never established.
+    if !opts.quiet {
+        eprintln!("Watches established ({established} total).");
+    }
 
     for event in &events {
         // Check timeout.
@@ -650,8 +761,10 @@ fn cmd_inotifywatch(args: &[String]) {
         }
     }
 
-    // Gather statistics from simulated events.
-    let events = generate_simulated_events(&opts.paths, opts.events);
+    let Some((_established, events)) = real_events(&opts.paths, opts.events) else {
+        eprintln!("inotifywatch: this build cannot watch for filesystem events");
+        process::exit(1);
+    };
 
     let mut stats: HashMap<String, EventStats> = HashMap::new();
 
@@ -746,6 +859,77 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── the kernel's event buffer ──
+
+    /// Build one event the way the kernel packs it: 16-byte header then a
+    /// NUL-padded name of `len` bytes.
+    fn packed(wd: i32, mask: u32, cookie: u32, name: &[u8], pad_to: usize) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(&wd.to_ne_bytes());
+        v.extend_from_slice(&mask.to_ne_bytes());
+        v.extend_from_slice(&cookie.to_ne_bytes());
+        v.extend_from_slice(&(pad_to as u32).to_ne_bytes());
+        let mut field = name.to_vec();
+        field.resize(pad_to, 0);
+        v.extend_from_slice(&field);
+        v
+    }
+
+    #[test]
+    fn one_event_round_trips() {
+        let buf = packed(1, IN_CREATE, 0, b"newfile.txt", 16);
+        let got = parse_event_buffer(&buf);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].wd, 1);
+        assert_eq!(got[0].mask, IN_CREATE);
+        assert_eq!(got[0].name, b"newfile.txt".to_vec(), "padding is not name");
+    }
+
+    /// The kernel packs several into one read, and the second must start
+    /// after the *padded* length of the first, not after its text.
+    #[test]
+    fn several_events_in_one_read() {
+        let mut buf = packed(1, IN_CREATE, 0, b"a.txt", 8);
+        buf.extend_from_slice(&packed(2, IN_DELETE, 0, b"bb.txt", 8));
+        let got = parse_event_buffer(&buf);
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert_eq!(got[0].name, b"a.txt".to_vec());
+        assert_eq!(got[1].wd, 2);
+        assert_eq!(got[1].name, b"bb.txt".to_vec());
+    }
+
+    /// A watch on a file rather than a directory reports no name at all.
+    #[test]
+    fn a_nameless_event_is_not_an_error() {
+        let buf = packed(3, IN_MODIFY, 0, b"", 0);
+        let got = parse_event_buffer(&buf);
+        assert_eq!(got.len(), 1);
+        assert!(got[0].name.is_empty());
+    }
+
+    /// A name that is not UTF-8 is carried through as bytes. A watcher that
+    /// mangles it reports a change to a file that does not exist.
+    #[test]
+    fn a_non_utf8_name_survives() {
+        let buf = packed(1, IN_CREATE, 0, b"caf\xe9.txt", 12);
+        let got = parse_event_buffer(&buf);
+        assert_eq!(got[0].name, b"caf\xe9.txt".to_vec());
+    }
+
+    /// A trailing partial event is dropped rather than guessed at.
+    #[test]
+    fn a_truncated_tail_is_ignored() {
+        let mut buf = packed(1, IN_CREATE, 0, b"a", 4);
+        buf.extend_from_slice(&[0u8; 9]); // less than a header
+        assert_eq!(parse_event_buffer(&buf).len(), 1);
+        // A header promising more name than the buffer holds is also dropped.
+        let mut short = packed(1, IN_CREATE, 0, b"", 0);
+        short.truncate(EVENT_HEADER_LEN);
+        let mut lying = short.clone();
+        lying.splice(12..16, 99u32.to_ne_bytes());
+        assert!(parse_event_buffer(&lying).is_empty());
+    }
 
     #[test]
     fn test_event_flag_names_single() {
@@ -848,30 +1032,6 @@ mod tests {
         let include = vec!["important*".to_string()];
         // "test.log" doesn't match include pattern, so excluded.
         assert!(should_exclude("test.log", &exclude, &include));
-    }
-
-    #[test]
-    fn test_generate_simulated_events() {
-        let paths = vec!["/tmp".to_string()];
-        let events = generate_simulated_events(&paths, IN_CREATE | IN_DELETE);
-        assert!(!events.is_empty());
-        for e in &events {
-            assert_eq!(e.watch_path, "/tmp");
-            assert!(e.mask == IN_CREATE || e.mask == IN_DELETE);
-        }
-    }
-
-    #[test]
-    fn test_generate_simulated_events_all() {
-        let paths = vec!["/home".to_string()];
-        let events = generate_simulated_events(&paths, IN_ALL_EVENTS);
-        assert!(events.len() >= 5);
-    }
-
-    #[test]
-    fn test_generate_simulated_events_empty_paths() {
-        let events = generate_simulated_events(&[], IN_ALL_EVENTS);
-        assert!(events.is_empty());
     }
 
     #[test]

@@ -838,6 +838,7 @@ dependencies = [
 name = "fio"
 version = "0.1.0"
 dependencies = [
+ "procinfo",
  "sha2",
 ]
 
@@ -1743,6 +1744,7 @@ dependencies = [
 name = "mkinitramfs"
 version = "0.1.0"
 dependencies = [
+ "deflate",
  "modechange",
  "quoting",
 ]
@@ -2372,6 +2374,9 @@ dependencies = [
 [[package]]
 name = "sanitize"
 version = "0.1.0"
+dependencies = [
+ "usageerror",
+]
 
 [[package]]
 name = "sbctl"

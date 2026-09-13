@@ -57462,3 +57462,27 @@ What it affects: `userspace/route/src/main.rs`, the arm that used to
 `break` on an unknown flag. The divergence is named in a comment there
 so nobody later "fixes" it back toward the reference without reading
 this. Easy to reverse if the operator prefers (a).
+
+### `userspace/sanitize` had no tests and renamed files in place (lane B, 2026-09-12) -- DONE
+
+Found while fixing its option parsing. `cargo test -p sanitize` reports
+`0 passed` — the crate has no test module at all — for a program whose
+entire job is renaming files on disk.
+
+**Update, same day:** the pure functions now have 8 tests, added with the
+fix for a panic they would have caught -- `truncate_chars` splitting a
+UTF-8 character. What is still untested is below.
+
+The part that most wants tests is pure and easy to reach: the
+name-transformation itself (spaces, control characters, `--mode`,
+`--max-len`, `--replace`, `--strip`, `--lowercase`). None of it needs a
+filesystem. A table of input names and expected outputs would cover the
+whole interesting surface, and would have caught at least one question I
+could not answer while reading it: what `--max-len` does to a name whose
+extension is longer than the limit.
+
+**Closed, same day.** The loop is now `parse_args(&[String]) -> Parsed`,
+returning `Run`/`Usage`/`Error` instead of calling `process::exit` from
+seven places, so the destructive case is reachable from a test: there is
+one asserting that `--dry-runn docs` is refused and never becomes a path.
+13 tests where there were none.

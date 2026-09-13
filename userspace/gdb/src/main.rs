@@ -1024,111 +1024,6 @@ enum ExprToken {
     End,
 }
 
-/// Tokenize an expression string.
-fn tokenize_expr(input: &[u8]) -> Vec<ExprToken> {
-    let mut tokens = Vec::new();
-    let mut i = 0;
-    while i < input.len() {
-        match input[i] {
-            b' ' | b'\t' => {
-                i += 1;
-            }
-            b'+' => {
-                tokens.push(ExprToken::Plus);
-                i += 1;
-            }
-            b'-' => {
-                tokens.push(ExprToken::Minus);
-                i += 1;
-            }
-            b'*' => {
-                tokens.push(ExprToken::Star);
-                i += 1;
-            }
-            b'/' => {
-                tokens.push(ExprToken::Slash);
-                i += 1;
-            }
-            b'%' => {
-                tokens.push(ExprToken::Percent);
-                i += 1;
-            }
-            b'&' => {
-                tokens.push(ExprToken::Ampersand);
-                i += 1;
-            }
-            b'|' => {
-                tokens.push(ExprToken::Pipe);
-                i += 1;
-            }
-            b'^' => {
-                tokens.push(ExprToken::Caret);
-                i += 1;
-            }
-            b'~' => {
-                tokens.push(ExprToken::Tilde);
-                i += 1;
-            }
-            b'(' => {
-                tokens.push(ExprToken::LParen);
-                i += 1;
-            }
-            b')' => {
-                tokens.push(ExprToken::RParen);
-                i += 1;
-            }
-            b'<' if i + 1 < input.len() && input[i + 1] == b'<' => {
-                tokens.push(ExprToken::ShiftLeft);
-                i += 2;
-            }
-            b'>' if i + 1 < input.len() && input[i + 1] == b'>' => {
-                tokens.push(ExprToken::ShiftRight);
-                i += 2;
-            }
-            b'0'..=b'9' => {
-                // Parse number (decimal or hex with 0x prefix)
-                let start = i;
-                if input[i] == b'0'
-                    && i + 1 < input.len()
-                    && (input[i + 1] == b'x' || input[i + 1] == b'X')
-                {
-                    i += 2;
-                    while i < input.len() && is_hex_digit(input[i]) {
-                        i += 1;
-                    }
-                } else {
-                    while i < input.len() && input[i] >= b'0' && input[i] <= b'9' {
-                        i += 1;
-                    }
-                }
-                if let Some(val) = parse_number(&input[start..i]) {
-                    tokens.push(ExprToken::Number(val as i64));
-                }
-            }
-            b'$' => {
-                // Register name like $rax
-                i += 1;
-                let start = i;
-                while i < input.len() && (input[i].is_ascii_alphanumeric() || input[i] == b'_') {
-                    i += 1;
-                }
-                let reg_name = &input[start..i];
-                if let Some(idx) = find_register_index(reg_name) {
-                    // Placeholder: register values will be resolved by the caller
-                    tokens.push(ExprToken::Number(idx as i64));
-                } else {
-                    tokens.push(ExprToken::Number(0));
-                }
-            }
-            _ => {
-                i += 1;
-            } // Skip unknown characters
-        }
-    }
-    tokens.push(ExprToken::End);
-    tokens
-}
-
 fn is_hex_digit(ch: u8) -> bool {
     ch.is_ascii_hexdigit()
 }
@@ -1397,7 +1292,12 @@ fn eval_expr(input: &[u8], regs: &[u64; REG_COUNT]) -> Result<i64, &'static [u8]
                 if let Some(idx) = find_register_index(reg_name) {
                     tokens.push(ExprToken::Number(regs[idx] as i64));
                 } else {
-                    tokens.push(ExprToken::Number(0));
+                    // Not zero. `$rxa` is a typo for `$rax`, and answering a
+                    // typo with 0 tells the user that register holds zero --
+                    // in the one tool whose entire product is register and
+                    // memory readings. The signature already returns Result
+                    // and both call sites already print the error.
+                    return Err(b"No such register");
                 }
             }
             _ => {
@@ -4260,6 +4160,27 @@ mod tests {
         regs[REG_RAX] = 100;
         regs[REG_RBX] = 50;
         assert_eq!(eval_expr(b"$rax + $rbx", &regs).unwrap(), 150);
+    }
+
+    /// A register name the debugger does not know is an error, not zero.
+    /// It used to evaluate to 0, so `print $rxa` -- one transposed pair
+    /// away from `$rax` -- reported that the register held zero, and
+    /// nothing distinguished that from a register that really did.
+    #[test]
+    fn an_unknown_register_is_refused_not_zero() {
+        let mut regs = [0u64; REG_COUNT];
+        regs[REG_RAX] = 100;
+        assert_eq!(eval_expr(b"$rxa", &regs), Err(&b"No such register"[..]));
+        // Including when it would be indistinguishable from a real answer:
+        // rbx genuinely holds 0 here, so the two cases returned the same
+        // value before and are now told apart.
+        assert_eq!(eval_expr(b"$rbx", &regs), Ok(0));
+        // And in the middle of an expression, where the wrong answer would
+        // have propagated silently into the arithmetic.
+        assert_eq!(
+            eval_expr(b"$rax + $nosuch", &regs),
+            Err(&b"No such register"[..])
+        );
     }
 
     #[test]

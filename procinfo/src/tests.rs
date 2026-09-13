@@ -1438,3 +1438,47 @@ fn stat_reads_tpgid_between_tty_and_flags() {
     // `+` in BSD STAT means tpgid == pgrp; here it does not.
     assert_ne!(st.tpgid, i64::try_from(st.pgrp).unwrap_or(-1));
 }
+
+/// The fault counters, pinned by index. `/proc/<pid>/stat` is a positional
+/// format, so an off-by-one reports a different number rather than failing
+/// -- which is how this kind of mistake survives review. The neighbours are
+/// asserted too, so a shift in either direction is caught.
+#[test]
+fn a_process_stat_line_yields_its_fault_counters() {
+    // pid comm state ppid pgrp sess tty tpgid flags minflt cminflt majflt
+    // cmajflt utime stime ...
+    // 22 fields after `comm` -- the parser's floor, since rss (field 24) is
+    // the last one anything reads.
+    let line =
+        b"1234 (my proc) S 1 1234 1234 0 -1 4194560 500 7 3 1 12 34 0 0 20 0 1 0 100 123456 42";
+    let st = ProcessStat::parse(line).expect("parses");
+    assert_eq!(st.minflt, 500, "field 10");
+    assert_eq!(st.majflt, 3, "field 12");
+    assert_eq!(st.flags, 4_194_560, "field 9");
+    assert_eq!(st.utime_ticks, 12, "field 14");
+    assert_eq!(st.stime_ticks, 34, "field 15");
+}
+
+/// The two context-switch counters, and the distinction between a kernel
+/// that did not report one and a genuine zero. `fio` prints this column and
+/// was filling it with `ops_done / 10`.
+#[test]
+fn process_status_reads_both_context_switch_counters() {
+    let content = b"Name:	fio
+Uid:	1000	1000	1000	1000
+voluntary_ctxt_switches:	142
+nonvoluntary_ctxt_switches:	7
+";
+    let st = ProcessStatus::parse(content);
+    assert_eq!(st.voluntary_ctxt_switches, Some(142));
+    assert_eq!(st.nonvoluntary_ctxt_switches, Some(7));
+
+    // A status file without them is `None`, not `Some(0)`: "the kernel did
+    // not say" and "it happened zero times" are different claims.
+    let bare = ProcessStatus::parse(
+        b"Name:	fio
+",
+    );
+    assert_eq!(bare.voluntary_ctxt_switches, None);
+    assert_eq!(bare.nonvoluntary_ctxt_switches, None);
+}

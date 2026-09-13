@@ -139072,3 +139072,240 @@ remote's behaviour under concurrent pushes from three lanes, and it fails in the
 safe direction (reports failure, succeeded). Recorded so the next reader does not
 escalate.
 
+
+## B-INOTIFYWAIT-REPORTS-FILESYSTEM-EVENTS-THAT-NEVER-HAPPENED (lane B, 2026-09-12)
+
+`userspace/inotify` provides `inotifywait` and `inotifywatch`. Both call
+`generate_simulated_events`, which invents them:
+
+    fn generate_simulated_events(paths: &[String], mask: u32) -> Vec<InotifyEvent> {
+        // Simulate common filesystem events.
+        if mask & IN_CREATE != 0 {
+            events.push(InotifyEvent { name: "newfile.txt", .. })
+
+It is not a demo mode. It is called from the main path of both
+personalities, at lines 527 and 654, so
+
+    inotifywait -e create /watched
+
+reports that `newfile.txt` was created, immediately, whatever is or is not
+happening in that directory.
+
+**This is the invented-answer class at its worst so far.** `blkzone` and
+`systemd-cgtop` fabricated *readings*, which mislead a reader.
+`prlimit` fabricated an *action*, which misleads a program. This
+fabricates an *event*, which makes a program act. The canonical use is
+
+    while inotifywait -e create /watched; do rebuild; done
+
+and against this implementation that loop never stops rebuilding.
+
+There is also a test, `test_generate_simulated_events`, asserting the
+invented events -- the third test in this tree found pinning a
+fabrication in place, after `systemd-cgls` and `systemd-cgtop`.
+
+### Why this one is implementable rather than deletable
+
+Unlike `blkzone`, which needed ioctls this build does not issue, **the
+kernel already has inotify**. `kernel/src/ipc/inotify.rs` implements it and
+`kernel/src/syscall/linux.rs` registers the calls at the standard numbers:
+
+| call | number |
+|---|---|
+| `inotify_init` | 253 |
+| `inotify_init1` | 294 |
+| `inotify_add_watch` | 254 |
+| `inotify_rm_watch` | 255 |
+
+So §1006's "delete every fabricating command" does not settle it: that rule
+is for commands that cannot work, and this one can. The userspace side was
+simply never wired to the kernel side that exists.
+
+### What the fix is
+
+`init1`, `add_watch` per path, then read the fd and parse the event stream.
+The syscall layer follows the pattern already in `userspace/arp` and
+`userspace/prlimit` -- real `syscall` instruction under
+`target_vendor = "slateos"`, ENOSYS on a development host, and the tool
+saying it cannot watch rather than inventing something. The event buffer
+itself is `struct inotify_event { wd, mask, cookie, len, name[len] }`,
+which is a pure parse over bytes and is where the tests belong: variable
+length names, NUL padding, and a buffer holding several events.
+
+**Not started.** Recorded now because the diagnosis is complete and the
+defect is worse than the ones already fixed today; the implementation is
+more than a single change.
+
+## B-PROGRAMS-THAT-INVENT-THEIR-OUTPUT (lane B, 2026-09-12) -- 10 found, 9 fixed, 1 filed
+
+A class, not a bug. A program prints something shaped like a measurement,
+an action or an event, and the value did not come from the system. It is
+distinct from an unimplemented feature, which announces itself; this looks
+exactly like the working version.
+
+### Found, in ascending order of what it costs
+
+| program | what it invented | fate |
+|---|---|---|
+| `firejail` | `Child process initialized in 0.8ms` -- a literal, before refusing to run anything | line removed |
+| `blkzone` | two hardcoded disk zones, for any device on any machine | deleted (§1006; needs ioctls this build lacks) |
+| `systemd-cgls` | a fixed cgroup tree: `init.scope` pid 1, `dbus.service` pid 100 | walks `/sys/fs/cgroup` |
+| `systemd-cgtop` | five cgroups with invented task counts, CPU and memory | reads `pids.current`/`memory.current` |
+| `fio` | `usr`/`sys`/`ctx`/`minf` computed from the operation count | reads `/proc/self/stat` |
+| `gdb` | `print $rxa` -- any unknown register -- evaluated to `0` | returns `No such register` |
+| `prlimit` | "setting NOFILE for PID N" with no syscall at all | calls `prlimit64` |
+| `mkinitramfs` | `compression: Gzip`, then wrote the cpio uncompressed | calls `deflate::gzip` |
+| `inotifywait` | a `newfile.txt` creation on every run | reads the kernel's event stream |
+| `chattr` | `+i` stored in a `<file>.attrs` sidecar; the file stayed writable | filed to A for `FS_IOC_SETFLAGS` |
+
+**The severity ordering is the useful part.** `blkzone`, `cgtop` and
+`gdb` invented *readings*, which mislead a reader -- and `gdb` is the
+sharpest case, because a debugger's entire product is readings, so there
+is nothing else in its output to cross-check one against. `prlimit`,
+`chattr` and `mkinitramfs` invented *actions*, which mislead a program --
+a caller lowers a limit, sets the immutable bit, or compresses an image,
+and is told it worked. `inotifywait` invented an *event*, which makes a
+program **act**: `while inotifywait -e create dir; do rebuild; done`
+never stops.
+
+`mkinitramfs` extends the ordering past where I first drew it. An
+invented action misleads whoever called it; this one also **wrote a
+file**, so the lie outlived the process and was still there for the next
+program to trust. A refusal that leaves a plausible artifact behind is
+the same bug in a quieter form, which is why it now writes nothing.
+
+The count in this heading read `7 found, 6 fixed` while the table below
+it listed eight, from the last time it was extended without being
+re-totalled -- the same present-tense drift this file keeps recording in
+other people's documents.
+
+### How they were found, since the grep is the weakest part
+
+A grep for `// stub|fake|placeholder|simulated|hardcoded|dummy` gives 45
+hits in lane B and most are honest host-test shims. It is a reading list,
+not a finding list. What actually identified them:
+
+- **Reading a file for an unrelated reason.** `getfacl`'s wrong group
+  lookup, `prlimit`'s missing syscall and `sanitize`'s UTF-8 panic were all
+  found while fixing that file's *option parsing*.
+- **A variable whose only consumer is the output.** After fixing `fio`,
+  clippy reported `ops_done` as assigned and never read: the operation
+  counter existed solely to manufacture four numbers.
+- **A test that asserts a constant.** Five tests in this tree pinned
+  fabrications in place -- `systemd-cgls`, `systemd-cgtop` and three in
+  `inotify`. A test asserting `system.slice` appears in cgroup output is
+  either testing the kernel or testing a literal, and it was the literal.
+- **A success banner before the work.** Twice: `inotifywait` printed
+  "Watches established (1 total)" and `firejail` printed "Child process
+  initialized", both immediately before refusing.
+
+### Negative results, so nobody re-checks them
+
+`capsh` and `chroot` are flagged by the same grep and are both honest.
+`capsh` refuses with "refusing to exec ... with unchanged capabilities" --
+its "Simulated process state" is a section header over state accumulated
+before exec. `chroot` routes every privilege-changing operation through an
+`enosys()` helper returning "not implemented in this kernel". `firejail`'s
+refusal path was right too; only its banner was wrong.
+
+### Still open
+
+`chattr`'s `read_attrs` still consults the sidecar and invents an
+`EXT4_EXTENTS_FL` default when there is none. Left deliberately: whether
+`lsattr` survives depends on A's answer to
+`requests/b-a-chattr-needs-fs-ioc-getflags-or-it-should-be-deleted.md`,
+and there is no honest reading to give it meanwhile.
+
+The 45 stub comments are now triaged, and the impression I recorded here
+first -- "mostly in crates whose whole purpose is host-side development
+support" -- was wrong in the way that mattered. Most are honest, but not
+because of where they live:
+
+| Comment says | Actually | Verdict |
+|---|---|---|
+| `scp` "Stub: send/receive a file" | returns `Err(RemoteNotSupported)` | honest |
+| `last` "we would do reverse DNS" | prints the real IP instead | honest, reduced |
+| `crond` `weekday: 0, // placeholder` | a test input the function ignores | honest |
+| `dbus` "placeholder for length" | write-zero-then-backfill | not a stub at all |
+| `powerctl`, `swapon` "stubbed to `-ENOSYS`" | say so and return it | honest |
+| `mkinitramfs` "would call compression library" | **returned its input unchanged** | fabricating |
+| `gdb` "resolved by the caller" | **no caller; wrong by design** | dead |
+
+Two things this cost me that the grep could not have told me. The
+`mkinitramfs` one was the single most expensive of the eight fabrication
+instances, and it sat in the list the whole time: the comment named the
+missing dependency, and the dependency was a workspace crate four
+directories up. A stub comment that names what it is waiting for is
+worth checking against the tree before believing it.
+
+The `gdb` one is why this class stayed invisible. Its 105 dead lines are
+covered by
+
+    #![allow(clippy::arithmetic_side_effects, clippy::indexing_slicing, dead_code)]
+
+whose eight-line comment justifies the first two lints and never
+mentions the third. That shape -- a defensible suppression with an indefensible one
+appended to it -- is in **22 lane-B crates**. Measured on
+`x86_64-unknown-linux-gnu`, the closest installed target to the
+unix-like one SlateOS userspace actually builds for, it is hiding **180
+findings**, of which **175 are present on every target** (the table
+below sums to the 180):
+
+| Crate | Findings | | Crate | Findings |
+|---|---|---|---|---|
+| `gdb` | 27 | | `upower`, `tcpdump` | 5 each |
+| `wpa` | 25 | | `ntpd`, `ar`, `login` | 4 each |
+| `logind` | 22 | | `getty` | 3 |
+| `systemctl` | 19 | | `resolvectl`, `findmnt`, `ss`, `ldconfig` | 2 each |
+| `objdump` | 13 | | `irqbalance`, `acpi`, `blkid` | 1 each |
+| `jq` | 12 | | `posix`, `libservicebus` | 8, 1 |
+| `finger` | 10 | | `dhcpcd` | 7 |
+
+**A dead-code census is target-specific, and naming the target is part
+of the number.** I first published 208 here, measured on
+`x86_64-pc-windows-gnu` -- which is not unix, so every `#[cfg(unix)]`
+path was compiled out and counted as dead. `logind`'s real `serve` is
+unix-gated, so on that host its entire bus layer -- `handle_message` ->
+`dispatch` -> `authorize`, and the `ERR_*`/`OUTCOME_*` constants -- had
+no caller. I had it written up as a session daemon whose authorization
+function nothing calls. It is live; I caught it only because
+`handle_message` visibly calls `dispatch`, which contradicted the
+compiler and was worth stopping for.
+
+| Target | Findings |
+|---|---|
+| `x86_64-pc-windows-gnu` | 208 |
+| `x86_64-unknown-linux-gnu` | 180 |
+| **real on both** | **175** |
+| windows-only (cfg artifact) | 33, of which 28 are `logind` |
+| linux-only (missed at first) | 5 |
+
+Every crate's count is identical across the two targets except `logind`,
+50 -> 22. Only four of the 22 crates contain `cfg(unix)` at all --
+`oils` 31 occurrences, `getty` 6, `login` 5, `logind` 2 -- which is what
+bounds the artifact.
+
+Method, so it can be repeated: `RUSTFLAGS="--force-warn dead_code" cargo
+check -p <each> --target <triple> --message-format=json`, deduplicated
+by (file, line, message). Two details matter. `--force-warn` overrides a
+crate-level `#![allow]` where `-W` does not, so nothing weaker can see
+past these lines at all. And `check` rather than `build` is what makes
+the second target possible: checking does not link, so a linux target
+can be measured from Windows without a cross-linker.
+
+Not all 175 are bugs. 48 are constants, and a complete ELF or DBus
+constant table with some entries unread is legitimate. The defect is
+that the allow is **crate-wide**, so a real finding like gdb's cannot be
+told from a deliberate table -- and the annotation that would say which
+is which was never required, because the lint never fired. The fix is
+per-item `#[allow(dead_code)]` with a reason, and `dead_code` struck
+from the 22 crate-level lists; then the next `tokenize_expr` announces
+itself. That is 22 crates of work and is not started.
+
+`logind`'s surviving 22 are not a constant table and deserve their own
+look: `SessionType` (`Tty`, `X11`, `Wayland`, `Unspecified`),
+`SessionClass` (`User`, `Greeter`, `LockScreen`) and `SessionState`
+(`Opening`, `Online`) are never **constructed**, their `from_str` never
+called, `CreateSessionParams` never built, and the inhibitor fields
+`who`, `why`, `uid` and `pid` never read. It models sessions in detail
+and never populates the model.

@@ -265,9 +265,24 @@ fn read_attrs(file: &str) -> u32 {
     }
 }
 
-fn write_attrs(file: &str, flags: u32) -> io::Result<()> {
-    let attr_path = attr_file_path(file);
-    fs::write(&attr_path, format!("{flags:08x}\n"))
+/// Setting a file attribute is not something this build can do.
+///
+/// This used to write the flags to a `<file>.attrs` sidecar and report
+/// success, so `chattr +i important.conf` left the file **fully writable**
+/// while telling the caller it was immutable -- and `lsattr` read the same
+/// sidecar back and agreed, so the two tools confirmed each other and
+/// neither consulted the filesystem. It also left a permanent `.attrs`
+/// neighbour beside every file it touched.
+///
+/// The kernel has no `FS_IOC_SETFLAGS`. Its ext4 driver reads the inode's
+/// `i_flags` -- `kernel/src/fs/ext4/driver.rs` -- so the field exists and
+/// only the userspace interface is missing; that is filed as
+/// `requests/b-a-chattr-needs-fs-ioc-getflags-or-it-should-be-deleted.md`.
+/// Until it lands, saying so is the whole of what this can honestly do.
+fn write_attrs(_file: &str, _flags: u32) -> io::Result<()> {
+    Err(io::Error::other(
+        "this build cannot set file attributes: the kernel exposes no interface for them",
+    ))
 }
 
 // ============================================================================
@@ -567,7 +582,12 @@ fn apply_attrs(path: &str, add: u32, remove: u32, set: Option<u32>, opts: &Chatt
     if new_flags != current {
         if let Err(e) = write_attrs(path, new_flags) {
             eprintln!("chattr: cannot set attributes on {path}: {e}");
-            return;
+            // Exit 1, not 0. This printed the failure and returned
+            // successfully, so `chattr +i f || bail` never fired -- the
+            // same "reports success for something it refused" shape found
+            // in `lockfile`, `getopt`, `resolvconf` and `systemd-notify`
+            // today.
+            process::exit(1);
         }
         if opts.verbose {
             let old_str = flags_to_string(current);

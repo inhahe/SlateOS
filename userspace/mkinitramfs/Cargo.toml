@@ -8,6 +8,16 @@ description = "SlateOS mkinitramfs utility"
 # module it packs, so the words come from the command line and from the
 # modules tree on disk.
 quoting = { path = "../quoting" }
+# Real gzip. `compress_data` used to return its input unchanged for every
+# format and say in a comment that a real implementation "would call
+# compression library ... we don't have external deps". Both halves were
+# wrong: `deflate` is a workspace crate, it needs no external deps, and it
+# has had a complete gzip encoder the whole time.
+#
+# Safe under §768 (a Rust rlib must not become a second libc): `deflate`
+# depends only on `crc32`, and its API is pure bytes -- `gzip(&[u8]) ->
+# Vec<u8>` -- so the caller does the I/O.
+deflate = { path = "../../deflate" }
 # One definition of a mode word's file-type field, shared with `cpio`, `chmod`,
 # `stat` and `ls -l`. A newc header stores the same integer they read.
 modechange = { path = "../modechange" }

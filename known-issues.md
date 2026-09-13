@@ -130071,8 +130071,20 @@ used *only* in exempt positions, which is the property that actually matters.
 **Also found in the same survey:** `overlay1` and `overlay2` are declared and
 used **zero** times anywhere in `gui` or `apps`. They are dead palette rungs.
 
-## TD-C-THE-COMPOSITOR-FRAME-BUDGET-HAS-NO-INSTRUMENT -- half fixed; the half that was fixed caught a 30x regression on 2026-09-12
+## TD-C-THE-COMPOSITOR-FRAME-BUDGET-HAS-NO-INSTRUMENT -- FIXED 2026-09-13; the first half caught a 30x regression the day it landed
 
+
+**Both halves are done as of 2026-09-13.** Half one -- no benchmark series --
+is `gui/compositor/tests/frame_budget.rs`: a full 4K desktop, best of five,
+with the debug ceiling set at two and a half times the measurement rather
+than just over it. The first draft of that ceiling was 1.25x the measurement
+and one of the five samples on the very next run exceeded it, which is the
+argument for headroom in one line.
+
+A `tests/` file rather than a criterion benchmark, for the reason the file
+states: no gui crate has criterion, and a benchmark nobody runs measures
+nothing. What it measured immediately is logged as
+`TD-C-A-4K-DESKTOP-FRAME-MEASURES-SEVEN-TIMES-THE-BUDGET`.
 **Update, 2026-09-12 (lane C).** Point 2 below -- "the runtime measurement
 exists and is unchecked" -- was fixed on 2026-09-11 by giving
 `the_demo_scene_still_composites` a real ceiling (`FRAME_CEILING_US =
@@ -140407,3 +140419,51 @@ chess 17). Twelve of those are aliases of other constants in the same file --
 can see at all, because their value is a name. That work belongs to
 `TD-C-SIXTY-EIGHT-APPS-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE` and to C-Q16,
 which asks whether the games should follow the theme in the first place.
+
+## TD-C-A-4K-DESKTOP-FRAME-MEASURES-SEVEN-TIMES-THE-BUDGET
+
+**Date:** 2026-09-13. **Lane:** C.
+**Where:** `gui/compositor`, measured by `tests/frame_budget.rs`.
+
+**In short:** the target says a whole desktop should be drawn in under 2
+milliseconds so a fast display never waits. The first measurement anyone has
+taken says it takes about 14. That is the first time the question has been
+answerable at all -- until today nothing measured it -- so this entry is a
+*measurement*, not yet a diagnosis.
+
+**The numbers.** Eight 960x720 windows on a 3840x2160 surface, each a
+background, a title strip and 29 rows of text; about 480 draw commands. Best
+of five fresh compositors:
+
+| build | best of five |
+|---|---|
+| debug | ~160 000 us |
+| release | ~13 800 us |
+| release, same scene without text | ~5 400 us |
+
+So roughly eight of the fourteen milliseconds are text, and the remaining six
+are everything else including the 8.3-megapixel surface itself.
+
+**Why this is not yet a diagnosis, stated so nobody has to re-derive it:**
+
+1. **It is one scene, and a heavy one.** 29 rows of text per window in eight
+   windows is a busy desktop, not an idle one. The number to compare against
+   2 ms is the one a *typical* desktop produces, and nobody has defined that.
+2. **The obvious next experiment does not work the obvious way.**
+   `FrameStats::should_compose` rate-limits to the refresh interval, so a
+   second `compose_frame` called immediately returns early *without updating*
+   `last_frame_time_us`. An idle-frame comparison written the natural way
+   reports the previous frame's number five times over and looks like a
+   perfectly stable measurement. It is not a measurement at all. Any attempt
+   to find out whether damage tracking is working has to get past that first.
+
+**What to do next.** Find out where the fourteen milliseconds go before
+changing anything: whether the surface is fully repainted every frame or the
+damage region is honoured, and whether text is re-shaped per frame or cached.
+Both are answerable with the instrument that now exists.
+
+**Related:** this entry exists because half one of
+`TD-C-THE-COMPOSITOR-FRAME-BUDGET-HAS-NO-INSTRUMENT` was finally done. Half
+two -- a ceiling on the demo scene -- caught a 30x regression within a day of
+being added, which is the argument for doing this sort of thing at all.
+

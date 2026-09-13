@@ -4,8 +4,8 @@
 //! keyboard navigation (Ctrl+Tab / Ctrl+Shift+Tab), scroll arrows for
 //! overflow, and dark theme styling.
 
-use crate::color::Color;
 use crate::event::{Key, KeyEvent};
+use crate::palette::Palette;
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::style::CornerRadii;
 
@@ -77,26 +77,12 @@ impl Default for TabWidth {
 
 // --- Dark theme colors ---
 
-/// Tab bar background.
-const BAR_BG: Color = Color::from_hex(0x181825);
-/// Active tab background.
-const ACTIVE_BG: Color = Color::from_hex(0x1E1E2E);
-/// Inactive tab background.
-const INACTIVE_BG: Color = Color::from_hex(0x11111B);
-/// Hover tab background.
-const HOVER_BG: Color = Color::from_hex(0x313244);
-/// Active tab text.
-const ACTIVE_TEXT: Color = Color::from_hex(0xCDD6F4);
-/// Inactive tab text.
-const INACTIVE_TEXT: Color = Color::from_hex(0xA6ADC8);
-/// Close button color.
-const CLOSE_COLOR: Color = Color::from_hex(0x6C7086);
-/// Close button hover color.
-const CLOSE_HOVER: Color = Color::from_hex(0xF38BA8);
-/// Dirty indicator color (warm dot).
-const DIRTY_COLOR: Color = Color::from_hex(0xFAB387);
-/// Active tab underline accent.
-const ACCENT_COLOR: Color = Color::from_hex(0x89B4FA);
+// The colours come from the user's palette, threaded in by the caller.
+//
+// Ten Catppuccin Mocha constants used to sit here, so a tab strip was dark on a
+// light desktop. 838 moved `Palette` into this crate so a widget could name
+// one; mapped by value, so a name that said what a colour was *for* becomes
+// the role it always held.
 
 /// Height of the tab bar in pixels.
 const TAB_BAR_HEIGHT: f32 = 36.0;
@@ -283,6 +269,7 @@ impl TabView {
     /// below (or above) the tab bar.
     pub fn render(
         &self,
+        palette: &Palette,
         x: f32,
         y: f32,
         width: f32,
@@ -302,7 +289,7 @@ impl TabView {
             y: bar_y,
             width,
             height: bar_height,
-            color: BAR_BG,
+            color: palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -323,11 +310,11 @@ impl TabView {
 
             // Tab background
             let tab_bg = if is_active {
-                ACTIVE_BG
+                palette.base
             } else if is_hovered {
-                HOVER_BG
+                palette.surface0
             } else {
-                INACTIVE_BG
+                palette.crust
             };
 
             let corner_radii = match self.position {
@@ -365,7 +352,7 @@ impl TabView {
                     y: accent_y,
                     width: tw,
                     height: 2.0,
-                    color: ACCENT_COLOR,
+                    color: palette.blue,
                     corner_radii: CornerRadii::ZERO,
                 });
             }
@@ -378,7 +365,7 @@ impl TabView {
                     y: bar_y + (bar_height - 6.0) / 2.0,
                     width: 6.0,
                     height: 6.0,
-                    color: DIRTY_COLOR,
+                    color: palette.peach,
                     corner_radii: CornerRadii::all(3.0),
                 });
                 label_x += 10.0;
@@ -386,9 +373,9 @@ impl TabView {
 
             // Tab label
             let text_color = if is_active {
-                ACTIVE_TEXT
+                palette.text
             } else {
-                INACTIVE_TEXT
+                palette.subtext0
             };
             let max_label_width = tw
                 - TAB_PADDING_H * 2.0
@@ -419,9 +406,9 @@ impl TabView {
                 let close_x = current_x + tw - TAB_PADDING_H - CLOSE_BUTTON_SIZE;
                 let close_y = bar_y + (bar_height - CLOSE_BUTTON_SIZE) / 2.0;
                 let close_color = if self.hover_close == Some(tab.id) {
-                    CLOSE_HOVER
+                    palette.red
                 } else {
-                    CLOSE_COLOR
+                    palette.overlay0
                 };
                 // Render X as text
                 commands.push(RenderCommand::Text {
@@ -450,7 +437,7 @@ impl TabView {
                     x: x + 2.0,
                     y: bar_y + (bar_height - 12.0) / 2.0,
                     text: "\u{25C0}".to_string(),
-                    color: INACTIVE_TEXT,
+                    color: palette.subtext0,
                     font_size: 12.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
@@ -463,7 +450,7 @@ impl TabView {
                     x: x + width - 14.0,
                     y: bar_y + (bar_height - 12.0) / 2.0,
                     text: "\u{25B6}".to_string(),
-                    color: INACTIVE_TEXT,
+                    color: palette.subtext0,
                     font_size: 12.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
@@ -932,11 +919,12 @@ mod tests {
 
     #[test]
     fn test_render_produces_commands() {
+        let palette = Palette::for_mode(false);
         let mut tv = TabView::new(TabPosition::Top);
         tv.add_tab(Tab::new(1, "Tab A"));
         tv.add_tab(Tab::new(2, "Tab B"));
 
-        let (commands, content_y, content_height) = tv.render(0.0, 0.0, 400.0, 300.0);
+        let (commands, content_y, content_height) = tv.render(&palette, 0.0, 0.0, 400.0, 300.0);
         assert!(!commands.is_empty());
         // Content should start below the tab bar
         assert!((content_y - TAB_BAR_HEIGHT).abs() < f32::EPSILON);
@@ -945,10 +933,11 @@ mod tests {
 
     #[test]
     fn test_render_bottom_position() {
+        let palette = Palette::for_mode(false);
         let mut tv = TabView::new(TabPosition::Bottom);
         tv.add_tab(Tab::new(1, "Tab"));
 
-        let (_, content_y, content_height) = tv.render(0.0, 0.0, 400.0, 300.0);
+        let (_, content_y, content_height) = tv.render(&palette, 0.0, 0.0, 400.0, 300.0);
         // Content should start at y=0 with bottom tabs
         assert!(content_y.abs() < f32::EPSILON);
         assert!((content_height - (300.0 - TAB_BAR_HEIGHT)).abs() < f32::EPSILON);

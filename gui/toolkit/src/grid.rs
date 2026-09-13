@@ -24,6 +24,7 @@ use crate::color::Color;
 use crate::event::{
     Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
 };
+use crate::palette::Palette;
 use crate::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use crate::style::CornerRadii;
 use crate::wheel;
@@ -76,37 +77,6 @@ pub fn columns_across(avail: f32, cell: f32, gap: f32) -> NonZeroUsize {
     // negative or NaN `avail` gives 0 here and not a huge column count.
     let fitting = ((avail + gap) / pitch) as usize;
     NonZeroUsize::new(fitting).unwrap_or(NonZeroUsize::MIN)
-}
-
-// --- Catppuccin Mocha palette ---
-// Used for selection highlights, hover, and chrome.
-mod catppuccin {
-    use crate::color::Color;
-
-    /// Surface0 - subtle background layer.
-    pub const SURFACE0: Color = Color::from_hex(0x313244);
-    /// Surface1 - elevated surface.
-    pub const SURFACE1: Color = Color::from_hex(0x45475a);
-    /// Surface2 - highest elevation surface.
-    pub const SURFACE2: Color = Color::from_hex(0x585b70);
-    /// Base - primary background.
-    pub const BASE: Color = Color::from_hex(0x1e1e2e);
-    /// Mantle - slightly darker background.
-    pub const MANTLE: Color = Color::from_hex(0x181825);
-    /// Crust - darkest background.
-    pub const CRUST: Color = Color::from_hex(0x11111b);
-    /// Text - primary text color.
-    pub const TEXT: Color = Color::from_hex(0xcdd6f4);
-    /// Subtext0 - dimmer text.
-    pub const SUBTEXT0: Color = Color::from_hex(0xa6adc8);
-    /// Blue - primary accent.
-    pub const BLUE: Color = Color::from_hex(0x89b4fa);
-    /// Lavender - secondary accent.
-    pub const LAVENDER: Color = Color::from_hex(0xb4befe);
-    /// Sapphire - alternate accent.
-    pub const SAPPHIRE: Color = Color::from_hex(0x74c7ec);
-    /// Overlay0 - selection/rubber-band outline.
-    pub const OVERLAY0: Color = Color::from_hex(0x6c7086);
 }
 
 // =============================================================================
@@ -1344,7 +1314,7 @@ impl GridView {
     // -------------------------------------------------------------------------
 
     /// Render the grid view into a render tree.
-    pub fn render(&mut self, tree: &mut RenderTree) {
+    pub fn render(&mut self, palette: &Palette, tree: &mut RenderTree) {
         self.ensure_layout();
         let layout = self.layout();
 
@@ -1354,7 +1324,7 @@ impl GridView {
             0.0,
             self.container_width,
             self.container_height,
-            catppuccin::BASE,
+            palette.base,
         );
 
         // Clip to container.
@@ -1380,7 +1350,7 @@ impl GridView {
             .take(last_item)
             .skip(first_item)
         {
-            self.render_cell(tree, &layout, index, item);
+            self.render_cell(palette, tree, &layout, index, item);
         }
 
         // Render rubber-band overlay.
@@ -1392,12 +1362,7 @@ impl GridView {
                 y: ry,
                 width: rw,
                 height: rh,
-                color: Color::rgba(
-                    catppuccin::BLUE.r,
-                    catppuccin::BLUE.g,
-                    catppuccin::BLUE.b,
-                    40,
-                ),
+                color: Color::rgba(palette.blue.r, palette.blue.g, palette.blue.b, 40),
                 corner_radii: CornerRadii::ZERO,
             });
             // Border.
@@ -1406,7 +1371,7 @@ impl GridView {
                 y: ry,
                 width: rw,
                 height: rh,
-                color: catppuccin::BLUE,
+                color: palette.blue,
                 line_width: 1.0,
                 corner_radii: CornerRadii::ZERO,
             });
@@ -1420,6 +1385,7 @@ impl GridView {
     /// Render a single grid cell.
     fn render_cell(
         &self,
+        palette: &Palette,
         tree: &mut RenderTree,
         layout: &LayoutCache,
         index: usize,
@@ -1444,7 +1410,7 @@ impl GridView {
                 y: cy,
                 width: cw,
                 height: ch,
-                color: catppuccin::SURFACE1,
+                color: palette.surface1,
                 corner_radii: CornerRadii::all(6.0),
             });
             // Focused item gets a border to distinguish it.
@@ -1454,7 +1420,7 @@ impl GridView {
                     y: cy,
                     width: cw,
                     height: ch,
-                    color: catppuccin::LAVENDER,
+                    color: palette.lavender,
                     line_width: 1.5,
                     corner_radii: CornerRadii::all(6.0),
                 });
@@ -1466,7 +1432,7 @@ impl GridView {
                 y: cy,
                 width: cw,
                 height: ch,
-                color: catppuccin::OVERLAY0,
+                color: palette.overlay0,
                 line_width: 1.0,
                 corner_radii: CornerRadii::all(6.0),
             });
@@ -1496,7 +1462,7 @@ impl GridView {
                 y: icon_y,
                 width: icon_area_size,
                 height: icon_area_size,
-                color: catppuccin::SURFACE0,
+                color: palette.surface0,
                 corner_radii: CornerRadii::all(4.0),
             });
         }
@@ -1525,9 +1491,9 @@ impl GridView {
         // Text label (truncated with max_width).
         let label_y = cy + icon_height + 4.0;
         let label_color = if is_selected {
-            catppuccin::TEXT
+            palette.text
         } else {
-            catppuccin::SUBTEXT0
+            palette.subtext0
         };
 
         tree.push(RenderCommand::Text {

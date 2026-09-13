@@ -20,11 +20,37 @@ SENTINEL = chr(0)
 
 DUAL = ("accent", "red", "green", "yellow", "peach", "blue", "lavender", "mauve",
         "sapphire", "teal", "sky")
-ROLE = re.compile(r"\b([A-Za-z_][\w.]*)\.(" + "|".join(DUAL) + r")\b")
+# The trailing negative lookahead is load-bearing: `cat.accent(&self.palette)`
+# is a *method* that happens to be named like a role, and rewriting it gives
+# `cat.ink(cat.accent)(&self.palette)`, which is not anything.
+ROLE = re.compile(r"\b([A-Za-z_][\w.]*)\.(" + "|".join(DUAL) + r")\b(?!\s*\()")
 COLOR = re.compile(r"^(\s*)color:\s*(.*)$")
 # `readable_on(x)` picks an ink for text drawn *on* `x`. Its ground is `x`,
 # not one of the theme's surfaces, so it must not be re-inked.
 READABLE_ON = re.compile(r"readable_on\([^()]*\)")
+
+
+def palette_receivers(lines):
+    """Which expressions in this file are actually a `Palette`.
+
+    `apps/ebook` has its own `ThemeColors` with an `accent` field, and
+    `tc.accent` matches the role pattern exactly. Rewriting it asks a type
+    that has no `ink` for one -- which at least fails to compile, but the
+    same shape on a type that *did* have a similarly named method would not,
+    so the receiver is checked rather than assumed.
+
+    Deliberately conservative: an expression not recognised here is left
+    alone. A missed site is a site someone looks at; a wrongly rewritten one
+    is a colour nobody notices is wrong.
+    """
+    text = NL.join(lines)
+    named = set(re.findall(r"\b([a-z_][\w]*)\s*:\s*&?\s*Palette\b", text))
+    named |= set(
+        re.findall(r"\blet\s+(?:mut\s+)?([a-z_][\w]*)\s*=\s*Palette::", text)
+    )
+    # A field declared `Palette`, reached as `self.<field>` or `x.<field>`.
+    fields = set(re.findall(r"\b([a-z_][\w]*)\s*:\s*Palette\b", text))
+    return named, fields
 
 
 def enclosing_kind(lines, i):
@@ -68,7 +94,7 @@ def value_span(lines, i, first_rest):
     return None, None
 
 
-def ink_expression(value):
+def ink_expression(value, allowed=None):
     """Wrap each dual-use role *occurrence*, not the expression around them.
 
     A conditional colour usually has one branch that is a dual-use role and
@@ -90,8 +116,15 @@ def ink_expression(value):
         return SENTINEL + str(len(masked) - 1) + SENTINEL
 
     guarded = READABLE_ON.sub(mask, flat)
-    inked = ROLE.sub(lambda mo: mo.group(1) + ".ink(" + mo.group(1) + "." + mo.group(2) + ")",
-                     guarded)
+    def one(mo):
+        recv = mo.group(1)
+        if allowed is not None:
+            names, fields = allowed
+            if recv not in names and recv.rsplit(".", 1)[-1] not in fields:
+                return mo.group(0)
+        return recv + ".ink(" + recv + "." + mo.group(2) + ")"
+
+    inked = ROLE.sub(one, guarded)
     for idx, original in enumerate(masked):
         inked = inked.replace(SENTINEL + str(idx) + SENTINEL, original)
     return inked
@@ -99,6 +132,7 @@ def ink_expression(value):
 
 def convert(path, apply):
     lines = path.read_text(encoding="utf-8").splitlines()
+    allowed = palette_receivers(lines)
     out = []
     i = 0
     n = 0
@@ -117,7 +151,7 @@ def convert(path, apply):
             i = (end if end is not None else i) + 1
             continue
         # Every role in it was inside a `readable_on`, so there is nothing here.
-        inked = ink_expression(value)
+        inked = ink_expression(value, allowed)
         if ".ink(" not in inked:
             out.extend(lines[i : end + 1])
             i = end + 1
@@ -224,3 +258,60 @@ if __name__ == "__main__":
         print("ok: every text site in " + str(len(paths)) + " files goes through ink()")
         sys.exit(0)
     print(str(total) + " text sites routed through ink()")
+
+
+# ---------------------------------------------------------------------------
+# The blind spots
+# ---------------------------------------------------------------------------
+#
+# `--check` counts text sites that *name a dual-use role*. A colour can reach a
+# `RenderCommand::Text` without naming one, and four ways were found during the
+# shell conversion -- every one by a failing test, none by this script:
+#
+#     a method in the color: field    color: app.state.color(p)
+#     a helper's return value         let (glyph, c) = icon_info(p, icon)
+#     an argument to a draw helper    self.render_icon_text(.., p.red, ..)
+#     a local used by field shorthand let color = ..; Text { .., color, .. }
+#
+# Two of those have a syntactic signature this script can look for: a `color:`
+# whose value is a call, and a `color,` shorthand. The other two are properties
+# of a function's body rather than of the draw site, and finding them needs
+# something that understands Rust rather than lines.
+#
+# So this is a *report*, not a gate. It exists because "`--check` says zero"
+# reads as "the conversion is complete" when it means "complete among the sites
+# I can classify", and that gap is exactly the shape of every other near-miss
+# in this conversion: a check answering confidently about a narrower population
+# than its name implies.
+
+CALL_VALUE = re.compile(r"^\s*color:\s*.*\w\s*\(")
+SHORTHAND = re.compile(r"^\s*color,\s*$")
+# Text drawn *on* a colour rather than on a surface: its ground is that colour,
+# so it is already right and is not a blind spot. `on_accent` is literally
+# `readable_on(self.accent)`; `on_wallpaper` answers for a photograph the shell
+# did not choose.
+GROUNDED = re.compile(r"readable_on|on_accent|on_wallpaper|contrast_text")
+
+
+def blind_spots(path):
+    """Text sites whose colour this script cannot classify."""
+    lines = path.read_text(encoding="utf-8").splitlines()
+    out = []
+    in_test = False
+    for i, line in enumerate(lines):
+        if lines[i].strip().startswith("#[cfg(test)]"):
+            in_test = True
+        if in_test:
+            continue
+        if enclosing_kind(lines, i) != "Text":
+            continue
+        # A few lines of the value, since a conditional colour runs over
+        # several and the exclusion may be on any of them.
+        value = " ".join(l.strip() for l in lines[i : i + 5])
+        if GROUNDED.search(value) or ".ink(" in value:
+            continue
+        if SHORTHAND.match(line):
+            out.append((i + 1, "shorthand", line.strip()))
+        elif CALL_VALUE.match(line) and not ROLE.search(value):
+            out.append((i + 1, "a call", line.strip()))
+    return out

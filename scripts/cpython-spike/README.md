@@ -359,13 +359,30 @@ of the zip.
 (`-E` is *not* used for these probes and would be counterproductive: it discards
 `PYTHONHOME`, which is the only thing telling the interpreter where the zip is.)
 
-## What this spike is still *not*
+## What this spike was not — and is no longer (corrected 2026-09-13)
 
-`python-slateos.elf` has never executed on SlateOS. Everything above was
-measured on the host, either by the linker or by a control interpreter built
-from the same objects. The remaining unknowns are ours, not CPython's: whether
-our ext4 driver, `mmap`, tty and `getrandom` behave the way `zipimport` and
-`init_fs_encoding` assume.
+**This section used to say `python-slateos.elf` has never executed on SlateOS.
+That stopped being true on 2026-08-21 and the sentence stayed.** It is the
+shape this project keeps finding: a statement that was correct when written,
+in a document read as present tense.
 
-Closing that needs a Path-Z self-test in `kernel/src/proc/spawn.rs`, which is
-lane A's tree — filed as `requests/b-a-cpython-path-z-self-test.md`.
+What is true now:
+
+* `scripts/create-ext4-rootfs.sh` stages the interpreter as `/bin/python3` and
+  the standard library as `/usr/local/lib/python312.zip`.
+* Lane A built the rung. `self_test_cpython_on_slateos_libc()` is in
+  `kernel/src/proc/spawn.rs` with a call site in `kernel/src/main.rs`, and it
+  runs the interpreter in ring 3 **every boot**, asserting exit 0 and exact
+  output: the version, `zipimport` working, a bytes literal, a dict, a tuple
+  and a final `SLATE_PYTHON_OK` marker.
+* `requests/b-a-cpython-path-z-self-test.md` is marked DONE, and has been since
+  the day it was answered.
+
+So the unknowns this section listed — whether our ext4 driver, `mmap`, tty and
+`getrandom` behave the way `zipimport` and `init_fs_encoding` assume — are
+answered, on target, on every boot, and a regression in any of them now fails
+the boot rather than waiting to be discovered.
+
+What the spike still does **not** cover: no third-party C extension has been
+built against this interpreter, and fastpy bootstrapping is untouched. That is
+why `roadmap.md`'s entry is `[-]` and not `[x]`.

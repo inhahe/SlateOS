@@ -130,12 +130,44 @@ def convert(path, apply):
     return n
 
 
+def default_paths():
+    """Every production Rust file in the two trees this lane owns.
+
+    So that `--check` cannot pass by being pointed at nothing -- which is the
+    same failure as a test collecting an empty vector, and has happened four
+    separate ways in this conversion. The directories are asserted to exist.
+    """
+    root = pathlib.Path(__file__).resolve().parents[2]
+    found = []
+    for sub in ("gui", "apps"):
+        here = root / sub
+        if not here.is_dir():
+            raise SystemExit("no " + sub + "/ under " + str(root) + "; this script has moved")
+        found.extend(sorted(here.glob("**/*.rs")))
+    if not found:
+        raise SystemExit("no .rs files found; refusing to report success over nothing")
+    return found
+
+
 if __name__ == "__main__":
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    check = "--check" in sys.argv
+    paths = [pathlib.Path(a) for a in args] if args else default_paths()
     total = 0
-    for a in args:
-        c = convert(pathlib.Path(a), "--apply" in sys.argv)
+    for path in paths:
+        c = convert(path, "--apply" in sys.argv)
         if c:
-            print(a + ": " + str(c))
+            print(str(path) + ": " + str(c))
         total += c
+    if check:
+        # A gate, not a report. A site that draws text in a dual-use role
+        # without asking `ink` renders perfectly and cannot be read on a card,
+        # which is exactly the kind of defect nobody notices until someone
+        # switches themes. See design decision 837.
+        if total:
+            print(str(total) + " text site(s) still name a dual-use role directly.")
+            print("Run:  python gui/appearance/ink-text.py --apply  (then check the diff)")
+            sys.exit(1)
+        print("ok: every text site in " + str(len(paths)) + " files goes through ink()")
+        sys.exit(0)
     print(str(total) + " text sites routed through ink()")

@@ -150,21 +150,6 @@ PINNED: dict[str, str] = {
     # stop them rotting while they waited -- went with them: a self-test run
     # beside a real check that is now also run is duplicated work, and lane C's
     # version runs the fixture immediately before the check it guards.
-    "check-test-root-writes.py":
-        "lane B, unwired FOR NOW and on purpose. It is the attribution half of "
-        "lane C's check-drive-root-litter.py: that one reports that a "
-        "POSIX-looking directory exists at the drive root, this one runs a "
-        "crate's tests and names the crate that created it. It is behavioural "
-        "because the static version cannot work -- a grep for an absolute "
-        "literal inside #[cfg(test)] finds three hits in 2,695 files, all of "
-        "them strings that are never used as paths, and misses the one real "
-        "instance, where udevd's test named the production constant DEV_DIR "
-        "and the write happened three calls deeper. The cost is a full "
-        "`cargo test -p` per crate, so wiring it needs the narrowing lane C's "
-        "check-scratch-config.py uses (touched crates only) plus a measured "
-        "per-crate time, and neither exists yet. Two writers are still "
-        "unattributed -- /var/run and /etc -- and this is the tool that will "
-        "name them; it gets wired once it has.",
     "check-drive-root-litter.py":
         "lane C, and DELIBERATELY unwired: it is a diagnostic about the "
         "MACHINE, not about the tree. It reports POSIX-looking directories at "

@@ -328,12 +328,16 @@ impl WiFiSecurity {
     }
 
     /// Color based on security strength.
+    /// The colour the padlock is drawn in.
+    ///
+    /// Inked here: the glyph is text and this has exactly one caller, which
+    /// draws it as such. 837; `gui/appearance/colour-methods.py`.
     pub fn color(self, p: &Palette) -> Color {
         match self.strength() {
-            0 => p.red,
-            1 => p.peach,
-            2 => p.yellow,
-            _ => p.green,
+            0 => p.ink(p.red),
+            1 => p.ink(p.peach),
+            2 => p.ink(p.yellow),
+            _ => p.ink(p.green),
         }
     }
 }

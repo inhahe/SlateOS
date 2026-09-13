@@ -1056,7 +1056,7 @@ impl LauncherState {
                 x: badge_x + 6.0,
                 y: badge_y + 4.0,
                 text: badge_text.to_string(),
-                color: entry.category.color(&self.palette),
+                color: self.palette.ink(entry.category.color(&self.palette)),
                 font_size: DESC_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,

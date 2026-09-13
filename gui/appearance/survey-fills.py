@@ -7,6 +7,10 @@ filled in both themes.
 """
 import re
 import pathlib
+import sys as _sys
+
+_sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from rustslice import production_end  # noqa: E402
 import collections
 import sys
 
@@ -55,10 +59,9 @@ def main() -> int:
             lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
         except OSError:
             continue
-        in_test = False
+        prod_end = production_end(lines)
         for i, line in enumerate(lines):
-            if line.strip().startswith("#[cfg(test)]"):
-                in_test = True
+            in_test = i >= prod_end
             stripped = line.strip()
             # Comments are not draw sites. Without this the survey reported a
             # doc comment in palette_check.rs as a control track, which is how

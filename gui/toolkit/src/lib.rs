@@ -45,10 +45,12 @@ pub mod listview;
 pub mod menu;
 pub mod menubar;
 pub mod modal;
+pub mod palette;
 pub mod pathbar;
 pub mod probe;
 pub mod ratio;
 pub mod render;
+pub mod surface;
 /// Random numbers — see [`randrange`] for the whole story.
 ///
 /// This was a module here, written to end the hand-rolled generators the

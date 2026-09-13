@@ -4,11 +4,17 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS Music Player — audio playback with playlist management"
 [dependencies]
+# The user's colours, per design-decisions 822.
+appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
 
 # The app-facing compositor client. An app names `oswindow` and never
 # `guiremote`, for the reason a Unix program does not name the socket layer.
 oswindow = { path = "../../gui/window" }
+
+[dev-dependencies]
+# `appearance::palette_check`.
+appearance = { path = "../../gui/appearance", features = ["testing"] }
 
 [lints]
 workspace = true

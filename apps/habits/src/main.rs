@@ -1226,7 +1226,7 @@ impl HabitTrackerApp {
             y: 10.0,
             text: progress_text,
             font_size: 16.0,
-            color: self.palette.green,
+            color: self.palette.ink(self.palette.green),
             font_weight: FontWeightHint::Bold,
             max_width: Some(180.0),
             overflow: TextOverflow::Ellipsis,
@@ -1576,7 +1576,10 @@ impl HabitTrackerApp {
 
             // 7-day rate
             let rate_7 = habit.completion_rate(self.today, 7);
-            let rate_7_color = rate_color(rate_7, &self.palette);
+            // Inked at the binding: this local is used once, and it is a
+            // label. `rate_color` also fills the stat cards, so it cannot be
+            // inked in its own body. 837.
+            let rate_7_color = self.palette.ink(rate_color(rate_7, &self.palette));
             cmds.push(RenderCommand::Text {
                 x: stats_x + 50.0,
                 y: ry + 16.0,
@@ -1590,7 +1593,7 @@ impl HabitTrackerApp {
 
             // 30-day rate
             let rate_30 = habit.completion_rate(self.today, 30);
-            let rate_30_color = rate_color(rate_30, &self.palette);
+            let rate_30_color = self.palette.ink(rate_color(rate_30, &self.palette));
             cmds.push(RenderCommand::Text {
                 x: stats_x + 86.0,
                 y: ry + 16.0,
@@ -1905,7 +1908,7 @@ impl HabitTrackerApp {
                     y: ry + 14.0,
                     text: String::from("Enter to restore"),
                     font_size: 11.0,
-                    color: self.palette.blue,
+                    color: self.palette.ink(self.palette.blue),
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(140.0),
                     overflow: TextOverflow::Ellipsis,

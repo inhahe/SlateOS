@@ -34,11 +34,13 @@ use crate::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow, Tex
 use crate::style::CornerRadii;
 use crate::text::TextCursor;
 
-/// What a text field's selection is painted in, and what selected text is
-/// drawn in over it. The same accent the checkbox tick already uses.
-pub const SELECTION_BACKGROUND: Color = Color::from_hex(0x0078D7);
-/// The colour selected text is drawn in, over [`SELECTION_BACKGROUND`].
-pub const SELECTION_FOREGROUND: Color = Color::WHITE;
+// The selection's two colours are fields of [`SingleLine`] now, not
+// constants here. They were `#0078D7` and white -- Windows' selection blue,
+// the one colour in this whole toolkit that was never part of the Catppuccin
+// table and so never showed up in a sweep looking for one. A selection
+// highlight is exactly what a user's accent is for (838), and `SingleLine`
+// already carried the text's own `color`, so the pair belongs beside it
+// rather than behind a palette parameter on a free function.
 
 /// How close to the right edge of the field the caret is allowed to sit before
 /// the text starts scrolling under it. One pixel is the caret's own width; two
@@ -221,6 +223,13 @@ pub struct SingleLine<'a> {
     pub weight: FontWeightHint,
     /// Colour of unselected text, and of the caret.
     pub color: Color,
+    /// What the selection is painted in -- the user's accent.
+    ///
+    /// A field for the same reason `color` and `caret_width` are: the caller
+    /// has the palette and this crate cannot reach one for itself.
+    pub selection_bg: Color,
+    /// What selected text is drawn in, over `selection_bg`.
+    pub selection_fg: Color,
     /// How wide to draw the caret, in pixels.
     ///
     /// A field rather than a constant because it is a user preference: the
@@ -262,7 +271,7 @@ pub fn draw(tree: &mut RenderTree, f: &SingleLine<'_>) {
                 y: f.y,
                 width,
                 height: f.line_height,
-                color: SELECTION_BACKGROUND,
+                color: f.selection_bg,
                 corner_radii: CornerRadii::ZERO,
             });
         }
@@ -284,7 +293,7 @@ pub fn draw(tree: &mut RenderTree, f: &SingleLine<'_>) {
         }
         spans.push(TextSpan {
             end: u32::try_from(to).unwrap_or(u32::MAX),
-            color: SELECTION_FOREGROUND,
+            color: f.selection_fg,
         });
         spans
     });

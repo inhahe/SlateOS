@@ -2413,7 +2413,7 @@ impl MediaConvertApp {
                 x: x + width - 80.0,
                 y: cy + 6.0,
                 text: job.status.label().to_owned(),
-                color: job.status.color(&self.palette),
+                color: self.palette.ink(job.status.color(&self.palette)),
                 font_size: 10.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(70.0),

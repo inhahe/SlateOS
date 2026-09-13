@@ -153,6 +153,7 @@ dependencies = [
 name = "benchmark"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -563,6 +564,7 @@ dependencies = [
 name = "devicemanager"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -764,6 +766,7 @@ dependencies = [
 name = "explorer"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "byteread",
  "guitk",
  "imagecodec",
@@ -1151,6 +1154,7 @@ dependencies = [
 name = "imageviewer"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "byteread",
  "guitk",
  "imagecodec",
@@ -1728,6 +1732,7 @@ dependencies = [
 name = "mixer"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -1782,6 +1787,7 @@ dependencies = [
 name = "musicplayer"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -2040,6 +2046,7 @@ dependencies = [
 name = "pdfviewer"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
  "printjob",
@@ -2135,6 +2142,7 @@ dependencies = [
 name = "pomodoro"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -2186,6 +2194,7 @@ dependencies = [
 name = "procexplorer"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -2419,6 +2428,7 @@ dependencies = [
 name = "screenshot"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
  "safeio",
@@ -2601,6 +2611,7 @@ dependencies = [
 name = "speedtest"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]
@@ -2794,6 +2805,7 @@ dependencies = [
 name = "sysinfo-app"
 version = "0.1.0"
 dependencies = [
+ "appearance",
  "guitk",
  "oswindow",
 ]

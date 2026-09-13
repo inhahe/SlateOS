@@ -2605,7 +2605,7 @@ fn render_status_bar(tree: &mut RenderTree, app: &PartitionManagerApp) {
 fn render_confirm_dialog(tree: &mut RenderTree, app: &mut PartitionManagerApp) {
     let (width, height) = (app.width, app.height);
     if let ActiveDialog::Confirm { dialog, .. } = &mut app.dialog {
-        dialog.render(width, height, tree);
+        dialog.render(&app.palette, width, height, tree);
     }
 }
 

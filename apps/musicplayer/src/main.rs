@@ -14,6 +14,8 @@
 //! Uses the guitk library for UI rendering.
 
 #[allow(unused_imports)]
+use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -41,24 +43,11 @@ const FALLBACK_SEED: u64 = 0x4D55_5349_4350_4C52;
 // Catppuccin Mocha Theme Colors
 // ============================================================================
 
-const BASE: Color = Color::rgb(30, 30, 46);
-const MANTLE: Color = Color::rgb(24, 24, 37);
-const CRUST: Color = Color::rgb(17, 17, 27);
-const SURFACE0: Color = Color::rgb(49, 50, 68);
-const SURFACE1: Color = Color::rgb(69, 71, 90);
-const SURFACE2: Color = Color::rgb(88, 91, 112);
-const TEXT_COLOR: Color = Color::rgb(205, 214, 244);
-const SUBTEXT0: Color = Color::rgb(166, 173, 200);
-const SUBTEXT1: Color = Color::rgb(186, 194, 222);
-const LAVENDER: Color = Color::rgb(180, 190, 254);
-const BLUE: Color = Color::rgb(137, 180, 250);
-const SAPPHIRE: Color = Color::rgb(116, 199, 236);
-const GREEN: Color = Color::rgb(166, 227, 161);
-const PEACH: Color = Color::rgb(250, 179, 135);
-const RED: Color = Color::rgb(243, 139, 168);
-const MAUVE: Color = Color::rgb(203, 166, 247);
-const PINK: Color = Color::rgb(245, 194, 231);
-const YELLOW: Color = Color::rgb(249, 226, 175);
+// The colours live in the user's palette, not here.
+//
+// 18 constants used to sit here -- Catppuccin Mocha -- so a light desktop got
+// a dark music player. design-decisions 822; one of the 55 crates never
+// converted. Names and values agreed, so the mapping is by name.
 
 // ============================================================================
 // Layout Constants
@@ -662,6 +651,8 @@ const VISUALIZER_TAU_SECS: f32 = 0.0646;
 const PLAYING_TICK_MS: u64 = 33;
 
 pub struct PlayerState {
+    /// The user's colours, handed over by the framework (§822).
+    pub palette: Palette,
     // Playback
     pub current_track_index: Option<usize>,
     pub position_secs: f32,
@@ -735,6 +726,7 @@ impl PlayerState {
 
     fn with_rng(rng: SeededRng) -> Self {
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             shuffle_played: Vec::new(),
             visualizer_bars: vec![0.0; VISUALIZATION_BARS],
             rng,
@@ -1250,7 +1242,7 @@ pub fn render(state: &PlayerState) -> RenderTree {
     let mut tree = RenderTree::new();
 
     // Background
-    tree.fill_rect(0.0, 0.0, state.width, state.height, BASE);
+    tree.fill_rect(0.0, 0.0, state.width, state.height, state.palette.base);
 
     // Tab bar at top
     render_tab_bar(state, &mut tree);
@@ -1278,7 +1270,7 @@ pub fn render(state: &PlayerState) -> RenderTree {
 
 /// Render tab bar.
 fn render_tab_bar(state: &PlayerState, tree: &mut RenderTree) {
-    tree.fill_rect(0.0, 0.0, state.width, TAB_BAR_HEIGHT, MANTLE);
+    tree.fill_rect(0.0, 0.0, state.width, TAB_BAR_HEIGHT, state.palette.mantle);
 
     let tabs = [
         (Tab::NowPlaying, "Now Playing"),
@@ -1291,8 +1283,16 @@ fn render_tab_bar(state: &PlayerState, tree: &mut RenderTree) {
 
     for (tab, label) in &tabs {
         let active = state.active_tab == *tab;
-        let bg = if active { SURFACE0 } else { MANTLE };
-        let fg = if active { TEXT_COLOR } else { SUBTEXT0 };
+        let bg = if active {
+            state.palette.surface0
+        } else {
+            state.palette.mantle
+        };
+        let fg = if active {
+            state.palette.text
+        } else {
+            state.palette.subtext0
+        };
 
         tree.push(RenderCommand::FillRect {
             x,
@@ -1325,7 +1325,7 @@ fn render_tab_bar(state: &PlayerState, tree: &mut RenderTree) {
                 TAB_BAR_HEIGHT - 3.0,
                 tab_width - 20.0,
                 3.0,
-                LAVENDER,
+                state.palette.lavender,
             );
         }
 
@@ -1339,7 +1339,7 @@ fn render_tab_bar(state: &PlayerState, tree: &mut RenderTree) {
             x: state.width - 250.0,
             y: 16.0,
             text: search_text,
-            color: YELLOW,
+            color: state.palette.ink(state.palette.yellow),
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(240.0),
@@ -1357,7 +1357,7 @@ fn render_now_playing(state: &PlayerState, tree: &mut RenderTree, content_height
         let art_size = content_height.min(300.0);
         let art_x = center_x - art_size / 2.0;
         let art_y = 30.0;
-        let art_color = album_color(&track.album);
+        let art_color = album_color(&track.album, &state.palette);
 
         tree.push(RenderCommand::FillRect {
             x: art_x,
@@ -1386,7 +1386,7 @@ fn render_now_playing(state: &PlayerState, tree: &mut RenderTree, content_height
             x: center_x - 200.0,
             y: text_y,
             text: track.title.clone(),
-            color: TEXT_COLOR,
+            color: state.palette.text,
             font_size: 22.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(400.0),
@@ -1398,7 +1398,7 @@ fn render_now_playing(state: &PlayerState, tree: &mut RenderTree, content_height
             x: center_x - 200.0,
             y: text_y + 32.0,
             text: track.artist.clone(),
-            color: SUBTEXT1,
+            color: state.palette.subtext1,
             font_size: 16.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(400.0),
@@ -1410,7 +1410,7 @@ fn render_now_playing(state: &PlayerState, tree: &mut RenderTree, content_height
             x: center_x - 200.0,
             y: text_y + 56.0,
             text: track.album.clone(),
-            color: SUBTEXT0,
+            color: state.palette.subtext0,
             font_size: 14.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(400.0),
@@ -1443,7 +1443,7 @@ fn render_now_playing(state: &PlayerState, tree: &mut RenderTree, content_height
                 y: bar_y,
                 width: bar_width - 2.0,
                 height: bar_h,
-                color: LAVENDER,
+                color: state.palette.lavender,
                 corner_radii: CornerRadii::all(1.0),
             });
         }
@@ -1453,7 +1453,7 @@ fn render_now_playing(state: &PlayerState, tree: &mut RenderTree, content_height
             x: center_x - 100.0,
             y: content_height / 2.0 - 20.0,
             text: String::from("No Track Playing"),
-            color: SUBTEXT0,
+            color: state.palette.subtext0,
             font_size: 20.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1463,7 +1463,7 @@ fn render_now_playing(state: &PlayerState, tree: &mut RenderTree, content_height
             x: center_x - 140.0,
             y: content_height / 2.0 + 10.0,
             text: String::from("Add music to your library to get started"),
-            color: SURFACE2,
+            color: state.palette.surface2,
             font_size: 14.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1490,7 +1490,13 @@ fn first_visible_row(scroll_offset: f32) -> usize {
 fn render_library(state: &PlayerState, tree: &mut RenderTree) {
     // Column headers
     let header_y = 0.0;
-    tree.fill_rect(0.0, header_y, state.width, TRACK_ROW_HEIGHT, MANTLE);
+    tree.fill_rect(
+        0.0,
+        header_y,
+        state.width,
+        TRACK_ROW_HEIGHT,
+        state.palette.mantle,
+    );
 
     let col_title_x = 16.0;
     let col_artist_x = state.width * 0.35;
@@ -1502,7 +1508,7 @@ fn render_library(state: &PlayerState, tree: &mut RenderTree) {
         x: col_title_x,
         y: header_text_y,
         text: String::from("Title"),
-        color: SUBTEXT0,
+        color: state.palette.subtext0,
         font_size: 12.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
@@ -1512,7 +1518,7 @@ fn render_library(state: &PlayerState, tree: &mut RenderTree) {
         x: col_artist_x,
         y: header_text_y,
         text: String::from("Artist"),
-        color: SUBTEXT0,
+        color: state.palette.subtext0,
         font_size: 12.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
@@ -1522,7 +1528,7 @@ fn render_library(state: &PlayerState, tree: &mut RenderTree) {
         x: col_album_x,
         y: header_text_y,
         text: String::from("Album"),
-        color: SUBTEXT0,
+        color: state.palette.subtext0,
         font_size: 12.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
@@ -1532,7 +1538,7 @@ fn render_library(state: &PlayerState, tree: &mut RenderTree) {
         x: col_duration_x,
         y: header_text_y,
         text: String::from("Duration"),
-        color: SUBTEXT0,
+        color: state.palette.subtext0,
         font_size: 12.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
@@ -1572,18 +1578,22 @@ fn render_library(state: &PlayerState, tree: &mut RenderTree) {
         // to the rows, so they no longer invert every time the list scrolls
         // past a row boundary.
         let row_bg = if is_playing {
-            SURFACE0
+            state.palette.surface0
         } else if is_selected {
-            SURFACE1
+            state.palette.surface1
         } else if track_idx % 2 == 0 {
-            BASE
+            state.palette.base
         } else {
             Color::rgba(49, 50, 68, 80)
         };
 
         tree.fill_rect(0.0, row_y, state.width, TRACK_ROW_HEIGHT, row_bg);
 
-        let text_color = if is_playing { LAVENDER } else { TEXT_COLOR };
+        let text_color = if is_playing {
+            state.palette.lavender
+        } else {
+            state.palette.text
+        };
         let text_y = row_y + 10.0;
 
         // Playing indicator
@@ -1592,7 +1602,7 @@ fn render_library(state: &PlayerState, tree: &mut RenderTree) {
                 x: 4.0,
                 y: text_y,
                 text: String::from("▶"),
-                color: GREEN,
+                color: state.palette.ink(state.palette.green),
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -1615,7 +1625,7 @@ fn render_library(state: &PlayerState, tree: &mut RenderTree) {
             x: col_artist_x,
             y: text_y,
             text: track.artist.clone(),
-            color: SUBTEXT1,
+            color: state.palette.subtext1,
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(col_album_x - col_artist_x - 16.0),
@@ -1626,7 +1636,7 @@ fn render_library(state: &PlayerState, tree: &mut RenderTree) {
             x: col_album_x,
             y: text_y,
             text: track.album.clone(),
-            color: SUBTEXT0,
+            color: state.palette.subtext0,
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(col_duration_x - col_album_x - 16.0),
@@ -1637,7 +1647,7 @@ fn render_library(state: &PlayerState, tree: &mut RenderTree) {
             x: col_duration_x,
             y: text_y,
             text: track.duration_display(),
-            color: SUBTEXT0,
+            color: state.palette.subtext0,
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1658,7 +1668,7 @@ fn render_library(state: &PlayerState, tree: &mut RenderTree) {
         x: state.width - 120.0,
         y: header_text_y,
         text: sort_label.to_string(),
-        color: SURFACE2,
+        color: state.palette.surface2,
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
@@ -1669,12 +1679,18 @@ fn render_library(state: &PlayerState, tree: &mut RenderTree) {
 /// Render Playlists view.
 fn render_playlist_view(state: &PlayerState, tree: &mut RenderTree, content_height: f32) {
     // Header
-    tree.fill_rect(0.0, 0.0, state.width, TRACK_ROW_HEIGHT, MANTLE);
+    tree.fill_rect(
+        0.0,
+        0.0,
+        state.width,
+        TRACK_ROW_HEIGHT,
+        state.palette.mantle,
+    );
     tree.push(RenderCommand::Text {
         x: 16.0,
         y: 11.0,
         text: format!("Playlist — {} tracks", state.playlist.len()),
-        color: TEXT_COLOR,
+        color: state.palette.text,
         font_size: 14.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
@@ -1687,7 +1703,7 @@ fn render_playlist_view(state: &PlayerState, tree: &mut RenderTree, content_heig
         x: state.width - 150.0,
         y: 11.0,
         text: format!("Total: {}", format_time(total_secs)),
-        color: SUBTEXT0,
+        color: state.palette.subtext0,
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
@@ -1717,11 +1733,11 @@ fn render_playlist_view(state: &PlayerState, tree: &mut RenderTree, content_heig
         let is_selected = state.selected_index == Some(track_idx);
 
         let row_bg = if is_current {
-            SURFACE0
+            state.palette.surface0
         } else if is_selected {
-            SURFACE1
+            state.palette.surface1
         } else if track_idx % 2 == 0 {
-            BASE
+            state.palette.base
         } else {
             Color::rgba(49, 50, 68, 80)
         };
@@ -1734,7 +1750,7 @@ fn render_playlist_view(state: &PlayerState, tree: &mut RenderTree, content_heig
             x: 16.0,
             y: text_y,
             text: format!("{}.", track_idx.saturating_add(1)),
-            color: SURFACE2,
+            color: state.palette.surface2,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1742,13 +1758,17 @@ fn render_playlist_view(state: &PlayerState, tree: &mut RenderTree, content_heig
         });
 
         // Playing indicator
-        let title_color = if is_current { LAVENDER } else { TEXT_COLOR };
+        let title_color = if is_current {
+            state.palette.lavender
+        } else {
+            state.palette.text
+        };
         if is_current && state.playing {
             tree.push(RenderCommand::Text {
                 x: 40.0,
                 y: text_y,
                 text: String::from("▶"),
-                color: GREEN,
+                color: state.palette.ink(state.palette.green),
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -1772,7 +1792,7 @@ fn render_playlist_view(state: &PlayerState, tree: &mut RenderTree, content_heig
             x: state.width * 0.5,
             y: text_y,
             text: track.artist.clone(),
-            color: SUBTEXT0,
+            color: state.palette.subtext0,
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(state.width * 0.25),
@@ -1784,7 +1804,7 @@ fn render_playlist_view(state: &PlayerState, tree: &mut RenderTree, content_heig
             x: state.width - 70.0,
             y: text_y,
             text: track.duration_display(),
-            color: SUBTEXT0,
+            color: state.palette.subtext0,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1792,19 +1812,20 @@ fn render_playlist_view(state: &PlayerState, tree: &mut RenderTree, content_heig
         });
 
         // Format badge
-        tree.push(RenderCommand::FillRect {
-            x: state.width - 120.0,
-            y: row_y + 8.0,
-            width: 36.0,
-            height: 18.0,
-            color: SURFACE1,
-            corner_radii: CornerRadii::all(3.0),
-        });
+        state.palette.push_surface(
+            tree,
+            state.width - 120.0,
+            row_y + 8.0,
+            36.0,
+            18.0,
+            3.0,
+            Surface::Card,
+        );
         tree.push(RenderCommand::Text {
             x: state.width - 116.0,
             y: text_y,
             text: track.format.name().to_string(),
-            color: SUBTEXT0,
+            color: state.palette.subtext0,
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1820,7 +1841,7 @@ fn render_playlist_view(state: &PlayerState, tree: &mut RenderTree, content_heig
             x: state.width / 2.0 - 80.0,
             y: content_height / 2.0,
             text: String::from("Playlist is empty"),
-            color: SUBTEXT0,
+            color: state.palette.subtext0,
             font_size: 16.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1834,10 +1855,16 @@ fn render_controls(state: &PlayerState, tree: &mut RenderTree) {
     let controls_y = state.height - CONTROLS_HEIGHT;
 
     // Background
-    tree.fill_rect(0.0, controls_y, state.width, CONTROLS_HEIGHT, CRUST);
+    tree.fill_rect(
+        0.0,
+        controls_y,
+        state.width,
+        CONTROLS_HEIGHT,
+        state.palette.crust,
+    );
 
     // Separator line
-    tree.fill_rect(0.0, controls_y, state.width, 1.0, SURFACE0);
+    tree.fill_rect(0.0, controls_y, state.width, 1.0, state.palette.surface0);
 
     // Progress bar
     let progress_y = controls_y + 8.0;
@@ -1851,14 +1878,15 @@ fn render_controls(state: &PlayerState, tree: &mut RenderTree) {
     };
 
     // Progress track (background)
-    tree.push(RenderCommand::FillRect {
-        x: progress_x,
-        y: progress_y,
-        width: progress_width,
-        height: PROGRESS_BAR_HEIGHT,
-        color: SURFACE1,
-        corner_radii: CornerRadii::all(3.0),
-    });
+    state.palette.push_surface(
+        tree,
+        progress_x,
+        progress_y,
+        progress_width,
+        PROGRESS_BAR_HEIGHT,
+        3.0,
+        Surface::ControlTrack,
+    );
 
     // Progress fill
     let fill_width = progress_width * progress_fraction;
@@ -1868,7 +1896,7 @@ fn render_controls(state: &PlayerState, tree: &mut RenderTree) {
             y: progress_y,
             width: fill_width,
             height: PROGRESS_BAR_HEIGHT,
-            color: LAVENDER,
+            color: state.palette.lavender,
             corner_radii: CornerRadii::all(3.0),
         });
     }
@@ -1880,7 +1908,7 @@ fn render_controls(state: &PlayerState, tree: &mut RenderTree) {
         y: progress_y - 2.0,
         width: 8.0,
         height: PROGRESS_BAR_HEIGHT + 4.0,
-        color: TEXT_COLOR,
+        color: state.palette.text,
         corner_radii: CornerRadii::all(4.0),
     });
 
@@ -1890,7 +1918,7 @@ fn render_controls(state: &PlayerState, tree: &mut RenderTree) {
         x: progress_x,
         y: time_y,
         text: format_time(state.position_secs),
-        color: SUBTEXT0,
+        color: state.palette.subtext0,
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
@@ -1900,7 +1928,7 @@ fn render_controls(state: &PlayerState, tree: &mut RenderTree) {
         x: progress_x + progress_width - 40.0,
         y: time_y,
         text: format_time(duration),
-        color: SUBTEXT0,
+        color: state.palette.subtext0,
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
@@ -1918,8 +1946,8 @@ fn render_controls(state: &PlayerState, tree: &mut RenderTree) {
         btn_y,
         BUTTON_SIZE,
         "⏮",
-        SURFACE0,
-        TEXT_COLOR,
+        state.palette.surface0,
+        state.palette.text,
     );
 
     // Play/Pause button (larger)
@@ -1930,14 +1958,14 @@ fn render_controls(state: &PlayerState, tree: &mut RenderTree) {
         y: btn_y - 4.0,
         width: play_size,
         height: play_size,
-        color: LAVENDER,
+        color: state.palette.lavender,
         corner_radii: CornerRadii::all(play_size / 2.0),
     });
     tree.push(RenderCommand::Text {
         x: btn_center_x - 8.0,
         y: btn_y + 6.0,
         text: play_icon.to_string(),
-        color: CRUST,
+        color: state.palette.crust,
         font_size: 16.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
@@ -1951,8 +1979,8 @@ fn render_controls(state: &PlayerState, tree: &mut RenderTree) {
         btn_y,
         BUTTON_SIZE,
         "⏭",
-        SURFACE0,
-        TEXT_COLOR,
+        state.palette.surface0,
+        state.palette.text,
     );
 
     // Stop button
@@ -1962,15 +1990,15 @@ fn render_controls(state: &PlayerState, tree: &mut RenderTree) {
         btn_y,
         BUTTON_SIZE,
         "⏹",
-        SURFACE0,
-        TEXT_COLOR,
+        state.palette.surface0,
+        state.palette.text,
     );
 
     // Repeat mode button
     let repeat_color = match state.repeat_mode {
-        RepeatMode::Off => SURFACE2,
-        RepeatMode::One => PEACH,
-        RepeatMode::All => GREEN,
+        RepeatMode::Off => state.palette.surface2,
+        RepeatMode::One => state.palette.peach,
+        RepeatMode::All => state.palette.green,
     };
     let repeat_label = match state.repeat_mode {
         RepeatMode::Off => "R",
@@ -1983,19 +2011,23 @@ fn render_controls(state: &PlayerState, tree: &mut RenderTree) {
         btn_y,
         BUTTON_SIZE,
         repeat_label,
-        SURFACE0,
+        state.palette.surface0,
         repeat_color,
     );
 
     // Shuffle button
-    let shuffle_color = if state.shuffle { GREEN } else { SURFACE2 };
+    let shuffle_color = if state.shuffle {
+        state.palette.green
+    } else {
+        state.palette.surface2
+    };
     render_button(
         tree,
         btn_center_x + 140.0,
         btn_y,
         BUTTON_SIZE,
         "⇄",
-        SURFACE0,
+        state.palette.surface0,
         shuffle_color,
     );
 
@@ -2015,7 +2047,11 @@ fn render_controls(state: &PlayerState, tree: &mut RenderTree) {
         x: vol_x - 24.0,
         y: vol_y,
         text: vol_icon.to_string(),
-        color: if state.muted { RED } else { TEXT_COLOR },
+        color: if state.muted {
+            state.palette.ink(state.palette.red)
+        } else {
+            state.palette.text
+        },
         font_size: 14.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
@@ -2028,7 +2064,7 @@ fn render_controls(state: &PlayerState, tree: &mut RenderTree) {
         y: vol_y + 4.0,
         width: VOLUME_BAR_WIDTH,
         height: 4.0,
-        color: SURFACE1,
+        color: state.palette.surface1,
         corner_radii: CornerRadii::all(2.0),
     });
 
@@ -2041,7 +2077,7 @@ fn render_controls(state: &PlayerState, tree: &mut RenderTree) {
             y: vol_y + 4.0,
             width: vol_fill_width,
             height: 4.0,
-            color: SAPPHIRE,
+            color: state.palette.sapphire,
             corner_radii: CornerRadii::all(2.0),
         });
     }
@@ -2051,7 +2087,7 @@ fn render_controls(state: &PlayerState, tree: &mut RenderTree) {
         x: vol_x + VOLUME_BAR_WIDTH + 8.0,
         y: vol_y,
         text: format!("{}%", (effective_volume * 100.0) as u32),
-        color: SUBTEXT0,
+        color: state.palette.subtext0,
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
@@ -2064,7 +2100,7 @@ fn render_controls(state: &PlayerState, tree: &mut RenderTree) {
         let info_y = btn_y;
 
         // Mini album art
-        let mini_art_color = album_color(&track.album);
+        let mini_art_color = album_color(&track.album, &state.palette);
         tree.push(RenderCommand::FillRect {
             x: info_x,
             y: info_y - 4.0,
@@ -2078,7 +2114,7 @@ fn render_controls(state: &PlayerState, tree: &mut RenderTree) {
             x: info_x + 44.0,
             y: info_y,
             text: track.title.clone(),
-            color: TEXT_COLOR,
+            color: state.palette.text,
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
@@ -2089,7 +2125,7 @@ fn render_controls(state: &PlayerState, tree: &mut RenderTree) {
             x: info_x + 44.0,
             y: info_y + 16.0,
             text: track.artist.clone(),
-            color: SUBTEXT0,
+            color: state.palette.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(200.0),
@@ -2566,7 +2602,7 @@ fn format_time(secs: f32) -> String {
 }
 
 /// Generate a deterministic color from an album name (for album art placeholder).
-fn album_color(album: &str) -> Color {
+fn album_color(album: &str, p: &Palette) -> Color {
     let mut hash: u32 = 5381;
     for byte in album.bytes() {
         hash = hash.wrapping_mul(33).wrapping_add(byte as u32);
@@ -2574,7 +2610,12 @@ fn album_color(album: &str) -> Color {
 
     // Use hash to pick from a set of pleasing colors
     let palette = [
-        MAUVE, BLUE, SAPPHIRE, GREEN, PEACH, PINK, LAVENDER, YELLOW, RED,
+        // Nine distinct hues, so nine albums in a row rarely repeat. The
+        // palette has no `pink` rung -- the constant this replaced was
+        // Catppuccin's, which the shared palette never adopted -- so `teal`
+        // takes that slot: unused by the others here, and far enough from
+        // the three blues already in the list to stay distinguishable.
+        p.mauve, p.blue, p.sapphire, p.green, p.peach, p.teal, p.lavender, p.yellow, p.red,
     ];
     // The table is a non-empty literal three lines up, so neither the modulo
     // nor the lookup can fail — but that is an argument about the code above
@@ -2583,7 +2624,7 @@ fn album_color(album: &str) -> Color {
     // instead of asserting the argument.
     #[allow(clippy::cast_possible_truncation)]
     let idx = (hash as usize).checked_rem(palette.len()).unwrap_or(0);
-    let base_color = palette.get(idx).copied().unwrap_or(BLUE);
+    let base_color = palette.get(idx).copied().unwrap_or(p.blue);
 
     // Darken slightly for album art background
     Color::rgba(
@@ -2599,6 +2640,11 @@ fn album_color(album: &str) -> Color {
 // ============================================================================
 
 impl App for PlayerState {
+    /// Adopt the user's colours (§822).
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         "Music Player".to_string()
     }
@@ -2774,6 +2820,32 @@ mod tests {
     )]
 
     use super::*;
+
+    /// Every colour the music player draws comes from the user's palette.
+    #[test]
+    fn every_colour_the_music_player_draws_comes_from_its_palette() {
+        for light in [false, true] {
+            let mut app = PlayerState::new();
+            app.palette = Palette::for_mode(light);
+            let tree = render(&app);
+            assert!(
+                tree.commands.len() > 20,
+                "the sweep examined {} commands, which is not a render",
+                tree.commands.len()
+            );
+            appearance::palette_check::assert_drawn_from(
+                &app.palette,
+                &tree.commands,
+                // The album-art placeholder is a hashed hue darkened to 180/255
+                // so the art reads as art rather than as a panel. It is derived
+                // from a role rather than being one.
+                &(0..9)
+                    .map(|i| album_color(&format!("a{i}"), &app.palette))
+                    .collect::<Vec<_>>(),
+                &format!("musicplayer (light={light})"),
+            );
+        }
+    }
 
     // -- Wheel scrolling --
 
@@ -3696,13 +3768,16 @@ mod tests {
 
     #[test]
     fn test_album_color_deterministic() {
-        let c1 = album_color("Test Album");
-        let c2 = album_color("Test Album");
+        let c1 = album_color("Test Album", &Palette::for_mode(false));
+        let c2 = album_color("Test Album", &Palette::for_mode(false));
         assert_eq!(c1, c2);
 
-        let c3 = album_color("Different Album");
+        let c3 = album_color("Different Album", &Palette::for_mode(false));
         // Different albums should (usually) get different colors
-        assert_ne!(album_color("A"), album_color("B"));
+        assert_ne!(
+            album_color("A", &Palette::for_mode(false)),
+            album_color("B", &Palette::for_mode(false))
+        );
         let _ = c3; // used
     }
 

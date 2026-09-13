@@ -10,6 +10,7 @@
 
 use crate::color::Color;
 use crate::event::{EventResult, Key, KeyEvent, MouseEvent, MouseEventKind};
+use crate::palette::Palette;
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::step;
 use crate::style::CornerRadii;
@@ -19,24 +20,13 @@ use crate::text::TextCursor;
 // Catppuccin Mocha palette
 // ---------------------------------------------------------------------------
 
-/// Base background (dark).
-const COLOR_BASE: Color = Color::from_hex(0x1E1E2E);
-/// Slightly lighter surface for segments/inputs.
-const COLOR_SURFACE0: Color = Color::from_hex(0x313244);
-/// Overlay for dropdowns.
-const COLOR_SURFACE1: Color = Color::from_hex(0x45475A);
-/// Highlighted item in dropdown.
-const COLOR_SURFACE2: Color = Color::from_hex(0x585B70);
-/// Primary text.
-const COLOR_TEXT: Color = Color::from_hex(0xCDD6F4);
-/// Subdued/dim text.
-const COLOR_SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-/// Accent (lavender) for cursor, selection.
-const COLOR_LAVENDER: Color = Color::from_hex(0xB4BEFE);
-/// Error/invalid (red).
-const COLOR_RED: Color = Color::from_hex(0xF38BA8);
-/// Directory icon hint (blue).
-const COLOR_BLUE: Color = Color::from_hex(0x89B4FA);
+// The colours come from the user's palette, threaded in by the caller.
+//
+// Nine Catppuccin Mocha constants used to sit here, so a breadcrumb bar was dark on a
+// light desktop. 838 moved `Palette` into this crate so a widget could name
+// one; mapped by value, so a name that said what a colour was *for* becomes
+// the role it always held.
+
 /// Shadow color.
 const COLOR_SHADOW: Color = Color::rgba(0, 0, 0, 100);
 
@@ -243,7 +233,7 @@ impl PathBar {
     }
 
     /// Render the path bar into a list of render commands.
-    pub fn render(&mut self, width: u32, height: u32) -> Vec<RenderCommand> {
+    pub fn render(&mut self, palette: &Palette, width: u32, height: u32) -> Vec<RenderCommand> {
         let w = width as f32;
         let h = height as f32;
         let mut cmds = Vec::new();
@@ -254,15 +244,15 @@ impl PathBar {
             y: 0.0,
             width: w,
             height: h,
-            color: COLOR_BASE,
+            color: palette.base,
             corner_radii: CornerRadii::all(SEGMENT_RADIUS),
         });
 
         // Border (red if invalid in edit mode).
         let border_color = if self.mode == Mode::Edit && self.path_invalid {
-            COLOR_RED
+            palette.red
         } else {
-            COLOR_SURFACE1
+            palette.surface1
         };
         cmds.push(RenderCommand::StrokeRect {
             x: 0.0,
@@ -275,8 +265,8 @@ impl PathBar {
         });
 
         match self.mode {
-            Mode::Breadcrumb => self.render_breadcrumb(&mut cmds, w, h),
-            Mode::Edit => self.render_edit(&mut cmds, w, h),
+            Mode::Breadcrumb => self.render_breadcrumb(palette, &mut cmds, w, h),
+            Mode::Edit => self.render_edit(palette, &mut cmds, w, h),
         }
 
         cmds
@@ -704,7 +694,13 @@ impl PathBar {
     // Rendering — Breadcrumb mode
     // -----------------------------------------------------------------------
 
-    fn render_breadcrumb(&mut self, cmds: &mut Vec<RenderCommand>, width: f32, height: f32) {
+    fn render_breadcrumb(
+        &mut self,
+        palette: &Palette,
+        cmds: &mut Vec<RenderCommand>,
+        width: f32,
+        height: f32,
+    ) {
         self.segment_rects.clear();
         let y_center = height / 2.0;
 
@@ -749,17 +745,18 @@ impl PathBar {
         let mut preceded = false;
 
         if overflow && first_visible > 0 {
-            let (_, _, ellipsis_w, _) = push_pill(cmds, x, y_center, ELLIPSIS, COLOR_SUBTEXT0);
+            let (_, _, ellipsis_w, _) =
+                push_pill(palette, cmds, x, y_center, ELLIPSIS, palette.subtext0);
             x += ellipsis_w + SEGMENT_GAP;
             preceded = true;
         }
 
         for seg in self.segments.get(first_visible..).unwrap_or_default() {
             if preceded {
-                push_separator(cmds, x, y_center);
+                push_separator(palette, cmds, x, y_center);
                 x += SEPARATOR_WIDTH;
             }
-            let (rx, ry, rw, rh) = push_pill(cmds, x, y_center, seg, COLOR_TEXT);
+            let (rx, ry, rw, rh) = push_pill(palette, cmds, x, y_center, seg, palette.text);
             self.segment_rects.push((rx, ry, rw, rh));
             x += rw + SEGMENT_GAP;
             preceded = true;
@@ -770,7 +767,13 @@ impl PathBar {
     // Rendering — Edit mode
     // -----------------------------------------------------------------------
 
-    fn render_edit(&self, cmds: &mut Vec<RenderCommand>, width: f32, height: f32) {
+    fn render_edit(
+        &self,
+        palette: &Palette,
+        cmds: &mut Vec<RenderCommand>,
+        width: f32,
+        height: f32,
+    ) {
         let y_center = height / 2.0;
         let text_y = y_center - FONT_SIZE / 2.0;
         let text_x = BAR_PADDING + 4.0;
@@ -781,7 +784,7 @@ impl PathBar {
             y: 2.0,
             width: width - 4.0,
             height: height - 4.0,
-            color: COLOR_SURFACE0,
+            color: palette.surface0,
             corner_radii: CornerRadii::all(SEGMENT_RADIUS - 1.0),
         });
 
@@ -807,7 +810,12 @@ impl PathBar {
                     y: text_y - 2.0,
                     width: sel_w,
                     height: FONT_SIZE + 4.0,
-                    color: Color::rgba(COLOR_LAVENDER.r, COLOR_LAVENDER.g, COLOR_LAVENDER.b, 60),
+                    color: Color::rgba(
+                        palette.lavender.r,
+                        palette.lavender.g,
+                        palette.lavender.b,
+                        60,
+                    ),
                     corner_radii: CornerRadii::all(2.0),
                 });
             }
@@ -818,7 +826,7 @@ impl PathBar {
             x: text_x,
             y: text_y,
             text: self.edit_text.clone(),
-            color: COLOR_TEXT,
+            color: palette.text,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - BAR_PADDING * 2.0 - 8.0),
@@ -846,18 +854,24 @@ impl PathBar {
             cursor_x,
             text_y - 2.0,
             FONT_SIZE + 4.0,
-            COLOR_LAVENDER,
+            palette.lavender,
             crate::textedit::CARET_WIDTH,
         );
         cmds.extend(caret.commands);
 
         // Autocomplete dropdown.
         if self.dropdown_visible && !self.completions.is_empty() {
-            self.render_dropdown(cmds, width, height);
+            self.render_dropdown(palette, cmds, width, height);
         }
     }
 
-    fn render_dropdown(&self, cmds: &mut Vec<RenderCommand>, width: f32, bar_height: f32) {
+    fn render_dropdown(
+        &self,
+        palette: &Palette,
+        cmds: &mut Vec<RenderCommand>,
+        width: f32,
+        bar_height: f32,
+    ) {
         let visible_count = self.completions.len().min(DROPDOWN_MAX_VISIBLE);
         let dropdown_h = visible_count as f32 * DROPDOWN_ITEM_HEIGHT + DROPDOWN_PADDING * 2.0;
         let dropdown_y = bar_height + 2.0;
@@ -883,7 +897,7 @@ impl PathBar {
             y: dropdown_y,
             width: dropdown_w,
             height: dropdown_h,
-            color: COLOR_SURFACE1,
+            color: palette.surface1,
             corner_radii: CornerRadii::all(SEGMENT_RADIUS),
         });
 
@@ -913,16 +927,16 @@ impl PathBar {
                     y: item_y,
                     width: dropdown_w - DROPDOWN_PADDING * 2.0,
                     height: DROPDOWN_ITEM_HEIGHT,
-                    color: COLOR_SURFACE2,
+                    color: palette.surface2,
                     corner_radii: CornerRadii::all(3.0),
                 });
             }
 
             // Directory indicator.
             let icon_color = if item.is_directory {
-                COLOR_BLUE
+                palette.blue
             } else {
-                COLOR_SUBTEXT0
+                palette.subtext0
             };
             let icon_text = if item.is_directory { "/" } else { " " };
             cmds.push(RenderCommand::Text {
@@ -941,7 +955,7 @@ impl PathBar {
                 x: DROPDOWN_PADDING + 16.0,
                 y: item_y + (DROPDOWN_ITEM_HEIGHT - FONT_SIZE) / 2.0,
                 text: item.name.clone(),
-                color: COLOR_TEXT,
+                color: palette.text,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(dropdown_w - DROPDOWN_PADDING * 2.0 - 20.0),
@@ -974,6 +988,7 @@ fn pill_width(label: &str) -> f32 {
 /// Draw one pill — `label` in a rounded box, centred vertically on `y_center`
 /// — and return the rectangle it occupies, for hit testing.
 fn push_pill(
+    palette: &Palette,
     cmds: &mut Vec<RenderCommand>,
     x: f32,
     y_center: f32,
@@ -987,7 +1002,7 @@ fn push_pill(
         y,
         width,
         height: SEGMENT_HEIGHT,
-        color: COLOR_SURFACE0,
+        color: palette.surface0,
         corner_radii: CornerRadii::all(SEGMENT_RADIUS),
     });
     cmds.push(RenderCommand::Text {
@@ -1004,12 +1019,12 @@ fn push_pill(
 }
 
 /// Draw the ">" that stands between two pills.
-fn push_separator(cmds: &mut Vec<RenderCommand>, x: f32, y_center: f32) {
+fn push_separator(palette: &Palette, cmds: &mut Vec<RenderCommand>, x: f32, y_center: f32) {
     cmds.push(RenderCommand::Text {
         x,
         y: y_center - FONT_SIZE / 2.0,
         text: ">".to_string(),
-        color: COLOR_SUBTEXT0,
+        color: palette.subtext0,
         font_size: FONT_SIZE,
         font_weight: FontWeightHint::Regular,
         max_width: None,
@@ -1251,8 +1266,9 @@ mod tests {
 
     #[test]
     fn test_render_breadcrumb_segment_count() {
+        let palette = Palette::for_mode(false);
         let mut bar = PathBar::new("/home/user/Documents");
-        let cmds = bar.render(800, 32);
+        let cmds = bar.render(&palette, 800, 32);
 
         // Count Text commands that are segment names (not separators).
         let text_cmds: Vec<&str> = cmds
@@ -1278,8 +1294,9 @@ mod tests {
 
     #[test]
     fn test_render_breadcrumb_root_only() {
+        let palette = Palette::for_mode(false);
         let mut bar = PathBar::new("/");
-        let cmds = bar.render(800, 32);
+        let cmds = bar.render(&palette, 800, 32);
 
         let text_cmds: Vec<&str> = cmds
             .iter()
@@ -1584,9 +1601,10 @@ mod tests {
 
     #[test]
     fn test_navigate_via_segment_click() {
+        let palette = Palette::for_mode(false);
         let mut bar = PathBar::new("/home/user/Documents");
         // Render to populate segment_rects.
-        bar.render(800, 32);
+        bar.render(&palette, 800, 32);
 
         // We need to find the rect for "home" (index 1).
         // The segment_rects are populated after render.
@@ -1609,8 +1627,9 @@ mod tests {
 
     #[test]
     fn test_navigate_to_root_segment() {
+        let palette = Palette::for_mode(false);
         let mut bar = PathBar::new("/home/user");
-        bar.render(800, 32);
+        bar.render(&palette, 800, 32);
 
         // Click on "/" (index 0).
         let (sx, sy, sw, sh) = bar.segment_rects[0];
@@ -1630,9 +1649,10 @@ mod tests {
 
     #[test]
     fn test_overflow_rendering() {
+        let palette = Palette::for_mode(false);
         let mut bar = PathBar::new("/very/long/path/with/many/segments/that/will/overflow");
         // Render at a narrow width to trigger overflow.
-        let cmds = bar.render(150, 32);
+        let cmds = bar.render(&palette, 150, 32);
 
         let text_cmds: Vec<&str> = cmds
             .iter()
@@ -1704,8 +1724,9 @@ mod tests {
 
     #[test]
     fn test_click_empty_area_enters_edit() {
+        let palette = Palette::for_mode(false);
         let mut bar = PathBar::new("/home");
-        bar.render(800, 32);
+        bar.render(&palette, 800, 32);
 
         // Click far to the right where no segment is.
         let click = MouseEvent {
@@ -1726,8 +1747,9 @@ mod tests {
     /// together, and nothing said so.
     #[test]
     fn every_segment_is_clickable_exactly_where_it_was_drawn() {
+        let palette = Palette::for_mode(false);
         let mut bar = PathBar::new("/home/user/Documents");
-        let cmds = bar.render(800, 32);
+        let cmds = bar.render(&palette, 800, 32);
 
         // The bar's own background is a fill too; the pills are the ones one
         // line of text tall.
@@ -1755,8 +1777,9 @@ mod tests {
     /// the last, and the two must lay out identically.
     #[test]
     fn neighbouring_segments_are_a_gap_and_a_separator_apart() {
+        let palette = Palette::for_mode(false);
         let mut bar = PathBar::new("/home/user/Documents");
-        bar.render(800, 32);
+        bar.render(&palette, 800, 32);
 
         for pair in bar.segment_rects.windows(2) {
             let (left, right) = (pair[0], pair[1]);
@@ -1773,9 +1796,10 @@ mod tests {
     /// nothing overflows, the last pill ends within the bar's padding.
     #[test]
     fn a_trail_that_fits_stays_inside_the_bar() {
+        let palette = Palette::for_mode(false);
         let mut bar = PathBar::new("/home/user/Documents");
         let width = 800.0;
-        bar.render(800, 32);
+        bar.render(&palette, 800, 32);
 
         let last = *bar.segment_rects.last().expect("four segments were drawn");
         assert!(last.0 + last.2 <= width - BAR_PADDING);
@@ -1791,8 +1815,9 @@ mod tests {
     /// side of it.
     #[test]
     fn an_overflowing_trail_draws_one_separator_per_join() {
+        let palette = Palette::for_mode(false);
         let mut bar = PathBar::new("/very/long/path/with/many/segments/that/will/overflow");
-        let cmds = bar.render(150, 32);
+        let cmds = bar.render(&palette, 150, 32);
 
         let texts: Vec<&str> = cmds
             .iter()

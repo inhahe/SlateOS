@@ -867,9 +867,13 @@ impl FinanceApp {
 
     fn format_currency_colored(cents: i64, pal: &Palette) -> (String, Color) {
         let text = Self::format_currency(cents);
+        // Inked here: an amount is always written, never filled, and all
+        // four callers draw it as text. `text` is floored in the palette
+        // already and `ink` leaves it alone. 837;
+        // `gui/appearance/colour-methods.py`.
         let color = match cents.cmp(&0) {
-            std::cmp::Ordering::Greater => pal.green,
-            std::cmp::Ordering::Less => pal.red,
+            std::cmp::Ordering::Greater => pal.ink(pal.green),
+            std::cmp::Ordering::Less => pal.ink(pal.red),
             std::cmp::Ordering::Equal => pal.text,
         };
         (text, color)
@@ -1517,7 +1521,7 @@ impl FinanceApp {
                 y: ry + 10.0,
                 text: format!("{} {}", tx.category.icon(), tx.category.label()),
                 font_size: 11.0,
-                color: tx.category.color(&self.palette),
+                color: self.palette.ink(tx.category.color(&self.palette)),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(120.0),
                 overflow: TextOverflow::Ellipsis,

@@ -1002,14 +1002,22 @@ enum ValueType {
 }
 
 impl ValueType {
+    /// The colour a JSON value's type is written in.
+    ///
+    /// Inked per arm rather than around the `match`: `overlay0` is the
+    /// faintest legible mark and is deliberately below the text floor, so
+    /// raising it would erase the distinction it exists to make. Every other
+    /// arm is a dual-use hue drawn as text and asks for the legible version.
+    /// 837, and `gui/appearance/colour-methods.py` for why this method may be
+    /// inked inside at all: every one of its callers draws text.
     fn color(self, pal: &Palette) -> Color {
         match self {
             Self::Null => pal.overlay0,
-            Self::Bool => pal.blue,
-            Self::Number => pal.peach,
-            Self::Str => pal.green,
-            Self::Array => pal.lavender,
-            Self::Object => pal.mauve,
+            Self::Bool => pal.ink(pal.blue),
+            Self::Number => pal.ink(pal.peach),
+            Self::Str => pal.ink(pal.green),
+            Self::Array => pal.ink(pal.lavender),
+            Self::Object => pal.ink(pal.mauve),
         }
     }
 }

@@ -21,6 +21,7 @@
 //! development.
 
 #[allow(unused_imports)]
+use appearance::{Edge, Palette, Surface};
 use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEventKind};
@@ -76,40 +77,17 @@ const TOOLBAR_BTN_HEIGHT: f32 = 26.0;
 // Color palette -- Catppuccin Mocha
 // ============================================================================
 
-/// Base background (Crust).
-const COLOR_BASE: Color = Color::rgb(17, 17, 27);
-/// Slightly lighter surface (Mantle).
-const COLOR_MANTLE: Color = Color::rgb(24, 24, 37);
-/// Surface for panels (Surface0).
-const COLOR_SURFACE0: Color = Color::rgb(30, 30, 46);
-/// Lighter surface for selected items (Surface1).
-const COLOR_SURFACE1: Color = Color::rgb(49, 50, 68);
-/// Overlay surface (Surface2).
-const COLOR_SURFACE2: Color = Color::rgb(69, 71, 90);
-/// Primary text (Text).
-const COLOR_TEXT: Color = Color::rgb(205, 214, 244);
-/// Secondary/dimmed text (Subtext0).
-const COLOR_SUBTEXT: Color = Color::rgb(166, 173, 200);
-/// Overlay text (Overlay1).
-const COLOR_OVERLAY: Color = Color::rgb(147, 153, 178);
-/// Blue accent.
-const COLOR_BLUE: Color = Color::rgb(137, 180, 250);
-/// Lavender accent.
-const COLOR_LAVENDER: Color = Color::rgb(180, 190, 254);
-/// Green (success/working).
-const COLOR_GREEN: Color = Color::rgb(166, 227, 161);
-/// Yellow (warning).
-const COLOR_YELLOW: Color = Color::rgb(249, 226, 175);
-/// Red (error/danger).
-const COLOR_RED: Color = Color::rgb(243, 139, 168);
-/// Peach.
-const COLOR_PEACH: Color = Color::rgb(250, 179, 135);
-/// Mauve.
-const COLOR_MAUVE: Color = Color::rgb(203, 166, 247);
-/// Teal.
-const COLOR_TEAL: Color = Color::rgb(148, 226, 213);
-/// Sapphire.
-const COLOR_SAPPHIRE: Color = Color::rgb(116, 199, 236);
+// The colours live in the user's palette, not here.
+//
+// 17 constants used to sit here -- Catppuccin Mocha, copied verbatim -- so a
+// light desktop got a dark device manager. design-decisions 822 added
+// `App::theme_changed`; this is one of the 55 crates never converted.
+//
+// Mapped **by value, not by name**: `state.palette.base` held rgb(30, 30, 46),
+// which is the palette's `base`, and `state.palette.crust`, `state.palette.surface0` and
+// `state.palette.surface1` were shifted the same way. Only this crate and `sysinfo`
+// carry that shift -- checked across all of apps/ rather than assumed, since
+// hitting a trap twice in a row is not evidence it is everywhere.
 
 // ============================================================================
 // Device categories
@@ -158,16 +136,16 @@ impl DeviceCategory {
     }
 
     /// Color accent for this category.
-    pub fn color(self) -> Color {
+    pub fn color(self, p: &Palette) -> Color {
         match self {
-            Self::Display => COLOR_BLUE,
-            Self::Audio => COLOR_MAUVE,
-            Self::Network => COLOR_TEAL,
-            Self::Storage => COLOR_PEACH,
-            Self::Usb => COLOR_SAPPHIRE,
-            Self::Input => COLOR_LAVENDER,
-            Self::System => COLOR_GREEN,
-            Self::Other => COLOR_OVERLAY,
+            Self::Display => p.ink(p.blue),
+            Self::Audio => p.ink(p.mauve),
+            Self::Network => p.ink(p.teal),
+            Self::Storage => p.ink(p.peach),
+            Self::Usb => p.ink(p.sapphire),
+            Self::Input => p.ink(p.lavender),
+            Self::System => p.ink(p.green),
+            Self::Other => p.overlay0,
         }
     }
 
@@ -218,13 +196,13 @@ impl DeviceStatus {
     }
 
     /// Color for this status indicator.
-    pub fn color(self) -> Color {
+    pub fn color(self, p: &Palette) -> Color {
         match self {
-            Self::Working => COLOR_GREEN,
-            Self::Warning => COLOR_YELLOW,
-            Self::Error => COLOR_RED,
-            Self::Disabled => COLOR_OVERLAY,
-            Self::Unknown => COLOR_SUBTEXT,
+            Self::Working => p.ink(p.green),
+            Self::Warning => p.ink(p.yellow),
+            Self::Error => p.ink(p.red),
+            Self::Disabled => p.overlay0,
+            Self::Unknown => p.subtext0,
         }
     }
 
@@ -278,12 +256,12 @@ impl DeviceEventKind {
     }
 
     /// Color for this event kind.
-    pub fn color(self) -> Color {
+    pub fn color(self, p: &Palette) -> Color {
         match self {
-            Self::Connected | Self::DriverLoaded | Self::Enabled => COLOR_GREEN,
-            Self::Disconnected | Self::DriverUnloaded | Self::Disabled => COLOR_OVERLAY,
-            Self::Error => COLOR_RED,
-            Self::Reset => COLOR_YELLOW,
+            Self::Connected | Self::DriverLoaded | Self::Enabled => p.ink(p.green),
+            Self::Disconnected | Self::DriverUnloaded | Self::Disabled => p.overlay0,
+            Self::Error => p.ink(p.red),
+            Self::Reset => p.ink(p.yellow),
         }
     }
 }
@@ -571,13 +549,13 @@ impl UpdateCheckStatus {
     }
 
     /// Display color.
-    pub fn color(self) -> Color {
+    pub fn color(self, p: &Palette) -> Color {
         match self {
-            Self::NotChecked => COLOR_SUBTEXT,
-            Self::Checking => COLOR_BLUE,
-            Self::UpToDate => COLOR_GREEN,
-            Self::UpdateAvailable => COLOR_YELLOW,
-            Self::Failed => COLOR_RED,
+            Self::NotChecked => p.subtext0,
+            Self::Checking => p.ink(p.blue),
+            Self::UpToDate => p.ink(p.green),
+            Self::UpdateAvailable => p.ink(p.yellow),
+            Self::Failed => p.ink(p.red),
         }
     }
 }
@@ -758,6 +736,8 @@ impl ToolbarAction {
 
 /// Top-level state for the device manager application.
 pub struct DeviceManagerState {
+    /// The user's colours, handed over by the framework (§822).
+    pub palette: Palette,
     /// Window width.
     pub width: f32,
     /// Window height.
@@ -826,6 +806,7 @@ impl DeviceManagerState {
         }
 
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             width: DEFAULT_WIDTH,
             height: DEFAULT_HEIGHT,
             devices,
@@ -1641,7 +1622,7 @@ pub fn render(state: &DeviceManagerState) -> Vec<RenderCommand> {
         y: 0.0,
         width: state.width,
         height: state.height,
-        color: COLOR_BASE,
+        color: state.palette.crust,
         corner_radii: CornerRadii::ZERO,
     });
 
@@ -1662,7 +1643,7 @@ fn render_title_bar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) {
         y: 0.0,
         width: state.width,
         height: TITLE_BAR_HEIGHT,
-        color: COLOR_MANTLE,
+        color: state.palette.mantle,
         corner_radii: CornerRadii::ZERO,
     });
 
@@ -1671,7 +1652,7 @@ fn render_title_bar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) {
         y: 10.0,
         text: "Device Manager".to_string(),
         font_size: 15.0,
-        color: COLOR_TEXT,
+        color: state.palette.text,
         font_weight: FontWeightHint::Bold,
         max_width: None,
         overflow: TextOverflow::Clip,
@@ -1687,7 +1668,7 @@ fn render_title_bar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) {
             y: 8.0,
             width: 100.0,
             height: 20.0,
-            color: COLOR_RED,
+            color: state.palette.red,
             corner_radii: CornerRadii::all(4.0),
         });
         cmds.push(RenderCommand::Text {
@@ -1695,7 +1676,7 @@ fn render_title_bar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) {
             y: 11.0,
             text: badge_text,
             font_size: 11.0,
-            color: COLOR_BASE,
+            color: state.palette.crust,
             font_weight: FontWeightHint::Bold,
             max_width: Some(84.0),
             overflow: TextOverflow::Ellipsis,
@@ -1708,7 +1689,7 @@ fn render_title_bar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) {
         y1: TITLE_BAR_HEIGHT,
         x2: state.width,
         y2: TITLE_BAR_HEIGHT,
-        color: COLOR_SURFACE1,
+        color: state.palette.surface0,
         width: 1.0,
     });
 }
@@ -1722,7 +1703,7 @@ fn render_toolbar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) {
         y,
         width: state.width,
         height: TOOLBAR_HEIGHT,
-        color: COLOR_SURFACE0,
+        color: state.palette.base,
         corner_radii: CornerRadii::ZERO,
     });
 
@@ -1733,9 +1714,9 @@ fn render_toolbar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) {
 
         let is_hovered = state.hovered_toolbar_action == Some(i);
         let bg = if is_hovered {
-            COLOR_SURFACE2
+            state.palette.surface1
         } else {
-            COLOR_SURFACE1
+            state.palette.surface0
         };
 
         cmds.push(RenderCommand::FillRect {
@@ -1752,7 +1733,7 @@ fn render_toolbar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) {
             y: btn_y + 6.0,
             text: action.label().to_string(),
             font_size: 12.0,
-            color: COLOR_TEXT,
+            color: state.palette.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(TOOLBAR_BTN_WIDTH - 16.0),
             overflow: TextOverflow::Ellipsis,
@@ -1765,7 +1746,7 @@ fn render_toolbar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) {
         y1: y + TOOLBAR_HEIGHT,
         x2: state.width,
         y2: y + TOOLBAR_HEIGHT,
-        color: COLOR_SURFACE1,
+        color: state.palette.surface0,
         width: 1.0,
     });
 }
@@ -1779,7 +1760,7 @@ fn render_search_bar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) 
         y,
         width: SIDEBAR_WIDTH,
         height: SEARCH_BAR_HEIGHT,
-        color: COLOR_MANTLE,
+        color: state.palette.mantle,
         corner_radii: CornerRadii::ZERO,
     });
 
@@ -1790,9 +1771,9 @@ fn render_search_bar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) 
     let input_h = SEARCH_BAR_HEIGHT - 8.0;
 
     let border_color = if state.search_focused {
-        COLOR_BLUE
+        state.palette.blue
     } else {
-        COLOR_SURFACE2
+        state.palette.surface1
     };
 
     cmds.push(RenderCommand::FillRect {
@@ -1800,7 +1781,7 @@ fn render_search_bar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) 
         y: input_y,
         width: input_w,
         height: input_h,
-        color: COLOR_SURFACE0,
+        color: state.palette.base,
         corner_radii: CornerRadii::all(3.0),
     });
     cmds.push(RenderCommand::StrokeRect {
@@ -1819,9 +1800,9 @@ fn render_search_bar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) 
         state.search_query.clone()
     };
     let text_color = if state.search_query.is_empty() {
-        COLOR_OVERLAY
+        state.palette.overlay0
     } else {
-        COLOR_TEXT
+        state.palette.text
     };
 
     cmds.push(RenderCommand::Text {
@@ -1859,7 +1840,7 @@ fn render_sidebar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) {
         y: top,
         width: SIDEBAR_WIDTH,
         height: sidebar_height,
-        color: COLOR_MANTLE,
+        color: state.palette.mantle,
         corner_radii: CornerRadii::ZERO,
     });
 
@@ -1885,9 +1866,9 @@ fn render_sidebar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) {
 
         // Row background
         let row_bg = if is_selected {
-            COLOR_SURFACE1
+            state.palette.surface0
         } else if is_hovered {
-            COLOR_SURFACE0
+            state.palette.base
         } else {
             Color::TRANSPARENT
         };
@@ -1910,7 +1891,7 @@ fn render_sidebar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) {
                 y: y_offset,
                 width: 3.0,
                 height: TREE_ROW_HEIGHT,
-                color: COLOR_BLUE,
+                color: state.palette.blue,
                 corner_radii: CornerRadii::ZERO,
             });
         }
@@ -1925,7 +1906,7 @@ fn render_sidebar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) {
                 y: y_offset + 5.0,
                 text: arrow.to_string(),
                 font_size: 11.0,
-                color: COLOR_OVERLAY,
+                color: state.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1936,7 +1917,7 @@ fn render_sidebar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) {
                 y: y_offset + 5.0,
                 text: cat.icon().to_string(),
                 font_size: 11.0,
-                color: cat.color(),
+                color: cat.color(&state.palette),
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -1947,7 +1928,7 @@ fn render_sidebar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) {
                 y: y_offset + 5.0,
                 text: node.label.clone(),
                 font_size: 12.0,
-                color: COLOR_TEXT,
+                color: state.palette.text,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(SIDEBAR_WIDTH - indent - 48.0),
                 overflow: TextOverflow::Ellipsis,
@@ -1962,7 +1943,7 @@ fn render_sidebar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) {
                     y: y_offset + 5.0,
                     text: dev.status.icon().to_string(),
                     font_size: 11.0,
-                    color: dev.status.color(),
+                    color: dev.status.color(&state.palette),
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -1970,11 +1951,11 @@ fn render_sidebar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) {
 
                 // Device name
                 let name_color = if dev.has_problem() {
-                    dev.status.color()
+                    dev.status.color(&state.palette)
                 } else if !dev.enabled {
-                    COLOR_OVERLAY
+                    state.palette.overlay0
                 } else {
-                    COLOR_SUBTEXT
+                    state.palette.subtext0
                 };
 
                 cmds.push(RenderCommand::Text {
@@ -1995,7 +1976,7 @@ fn render_sidebar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) {
                         y: y_offset + 8.0,
                         width: 8.0,
                         height: 8.0,
-                        color: COLOR_YELLOW,
+                        color: state.palette.yellow,
                         corner_radii: CornerRadii::all(4.0),
                     });
                 }
@@ -2011,7 +1992,7 @@ fn render_sidebar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) {
         y1: top,
         x2: SIDEBAR_WIDTH,
         y2: bottom,
-        color: COLOR_SURFACE1,
+        color: state.palette.surface0,
         width: 1.0,
     });
 }
@@ -2024,14 +2005,15 @@ fn render_properties_panel(state: &DeviceManagerState, cmds: &mut Vec<RenderComm
     let panel_height = state.panel_bottom() - top;
 
     // Panel background
-    cmds.push(RenderCommand::FillRect {
-        x: panel_x,
-        y: top,
-        width: panel_width,
-        height: panel_height,
-        color: COLOR_BASE,
-        corner_radii: CornerRadii::ZERO,
-    });
+    state.palette.push_surface(
+        cmds,
+        panel_x,
+        top,
+        panel_width,
+        panel_height,
+        0.0,
+        Surface::Card,
+    );
 
     if state.shows_tab_bar() {
         render_tab_bar(state, cmds, panel_x, top, panel_width);
@@ -2095,7 +2077,7 @@ fn render_properties_body(
             y: y + body_height / 2.0 - 10.0,
             text: "Select a device to view its properties".to_string(),
             font_size: 14.0,
-            color: COLOR_OVERLAY,
+            color: state.palette.overlay0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(panel_width - 40.0),
             overflow: TextOverflow::Ellipsis,
@@ -2106,7 +2088,9 @@ fn render_properties_body(
     match state.active_tab {
         PropertiesTab::General => render_general_tab(state, dev, cmds, panel_x, y, panel_width),
         PropertiesTab::Driver => render_driver_tab(state, dev, cmds, panel_x, y, panel_width),
-        PropertiesTab::Resources => render_resources_tab(dev, cmds, panel_x, y, panel_width),
+        PropertiesTab::Resources => {
+            render_resources_tab(dev, cmds, panel_x, y, panel_width, &state.palette);
+        }
         PropertiesTab::Events => render_events_tab(state, dev, cmds, panel_x, y, panel_width),
     }
 }
@@ -2143,14 +2127,15 @@ fn render_tab_bar(
     y: f32,
     width: f32,
 ) {
-    cmds.push(RenderCommand::FillRect {
+    state.palette.push_surface(
+        cmds,
         x,
         y,
         width,
-        height: TAB_BAR_HEIGHT,
-        color: COLOR_MANTLE,
-        corner_radii: CornerRadii::ZERO,
-    });
+        TAB_BAR_HEIGHT,
+        0.0,
+        Surface::Strip(Edge::Bottom),
+    );
 
     let tabs = PropertiesTab::all();
     let tab_width = width / tabs.len() as f32;
@@ -2166,7 +2151,7 @@ fn render_tab_bar(
                 y: y + TAB_BAR_HEIGHT - 2.0,
                 width: tab_width,
                 height: 2.0,
-                color: COLOR_BLUE,
+                color: state.palette.blue,
                 corner_radii: CornerRadii::ZERO,
             });
         } else if is_hovered {
@@ -2175,12 +2160,16 @@ fn render_tab_bar(
                 y,
                 width: tab_width,
                 height: TAB_BAR_HEIGHT,
-                color: COLOR_SURFACE0,
+                color: state.palette.base,
                 corner_radii: CornerRadii::ZERO,
             });
         }
 
-        let text_color = if is_active { COLOR_BLUE } else { COLOR_SUBTEXT };
+        let text_color = if is_active {
+            state.palette.blue
+        } else {
+            state.palette.subtext0
+        };
 
         cmds.push(RenderCommand::Text {
             x: tab_x + tab_width / 2.0 - 20.0,
@@ -2201,7 +2190,7 @@ fn render_tab_bar(
 
 /// Render the General properties tab for a device.
 fn render_general_tab(
-    _state: &DeviceManagerState,
+    state: &DeviceManagerState,
     dev: &DeviceInfo,
     cmds: &mut Vec<RenderCommand>,
     x: f32,
@@ -2219,7 +2208,7 @@ fn render_general_tab(
         y: row_y,
         text: dev.name.clone(),
         font_size: 15.0,
-        color: COLOR_TEXT,
+        color: state.palette.text,
         font_weight: FontWeightHint::Bold,
         max_width: Some(width - 32.0),
         overflow: TextOverflow::Ellipsis,
@@ -2227,7 +2216,7 @@ fn render_general_tab(
     row_y += 24.0;
 
     // Status indicator
-    let status_color = dev.status.color();
+    let status_color = dev.status.color(&state.palette);
     cmds.push(RenderCommand::FillRect {
         x: label_x,
         y: row_y + 2.0,
@@ -2254,7 +2243,7 @@ fn render_general_tab(
             y: row_y,
             text: dev.status_detail.clone(),
             font_size: 11.0,
-            color: COLOR_SUBTEXT,
+            color: state.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 48.0),
             overflow: TextOverflow::Ellipsis,
@@ -2270,7 +2259,7 @@ fn render_general_tab(
         y1: row_y,
         x2: x + width - 16.0,
         y2: row_y,
-        color: COLOR_SURFACE1,
+        color: state.palette.surface0,
         width: 1.0,
     });
     row_y += 12.0;
@@ -2305,7 +2294,7 @@ fn render_general_tab(
             y: row_y,
             text: (*label).to_string(),
             font_size: 11.0,
-            color: COLOR_OVERLAY,
+            color: state.palette.overlay0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(120.0),
             overflow: TextOverflow::Ellipsis,
@@ -2315,7 +2304,7 @@ fn render_general_tab(
             y: row_y,
             text: value.clone(),
             font_size: 11.0,
-            color: COLOR_TEXT,
+            color: state.palette.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(max_val_w),
             overflow: TextOverflow::Ellipsis,
@@ -2344,7 +2333,7 @@ fn render_driver_tab(
         y: row_y,
         text: "Driver Information".to_string(),
         font_size: 13.0,
-        color: COLOR_LAVENDER,
+        color: state.palette.ink(state.palette.lavender),
         font_weight: FontWeightHint::Bold,
         max_width: Some(width - 32.0),
         overflow: TextOverflow::Ellipsis,
@@ -2366,7 +2355,7 @@ fn render_driver_tab(
                     y: row_y,
                     text: (*label).to_string(),
                     font_size: 11.0,
-                    color: COLOR_OVERLAY,
+                    color: state.palette.overlay0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(120.0),
                     overflow: TextOverflow::Ellipsis,
@@ -2376,7 +2365,7 @@ fn render_driver_tab(
                     y: row_y,
                     text: (*value).to_string(),
                     font_size: 11.0,
-                    color: COLOR_TEXT,
+                    color: state.palette.text,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(max_val_w),
                     overflow: TextOverflow::Ellipsis,
@@ -2391,7 +2380,7 @@ fn render_driver_tab(
                 y1: row_y,
                 x2: x + width - 16.0,
                 y2: row_y,
-                color: COLOR_SURFACE1,
+                color: state.palette.surface0,
                 width: 1.0,
             });
             row_y += 12.0;
@@ -2401,7 +2390,7 @@ fn render_driver_tab(
                 y: row_y,
                 text: "Update Status".to_string(),
                 font_size: 13.0,
-                color: COLOR_LAVENDER,
+                color: state.palette.ink(state.palette.lavender),
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width - 32.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2414,7 +2403,7 @@ fn render_driver_tab(
                     y: row_y,
                     text: "Status".to_string(),
                     font_size: 11.0,
-                    color: COLOR_OVERLAY,
+                    color: state.palette.overlay0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(120.0),
                     overflow: TextOverflow::Ellipsis,
@@ -2424,7 +2413,7 @@ fn render_driver_tab(
                     y: row_y,
                     text: check.status.label().to_string(),
                     font_size: 11.0,
-                    color: check.status.color(),
+                    color: check.status.color(&state.palette),
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(max_val_w),
                     overflow: TextOverflow::Ellipsis,
@@ -2437,7 +2426,7 @@ fn render_driver_tab(
                         y: row_y,
                         text: "Available".to_string(),
                         font_size: 11.0,
-                        color: COLOR_OVERLAY,
+                        color: state.palette.overlay0,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(120.0),
                         overflow: TextOverflow::Ellipsis,
@@ -2447,7 +2436,7 @@ fn render_driver_tab(
                         y: row_y,
                         text: ver.clone(),
                         font_size: 11.0,
-                        color: COLOR_YELLOW,
+                        color: state.palette.ink(state.palette.yellow),
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(max_val_w),
                         overflow: TextOverflow::Ellipsis,
@@ -2461,7 +2450,7 @@ fn render_driver_tab(
                         y: row_y,
                         text: "Last Check".to_string(),
                         font_size: 11.0,
-                        color: COLOR_OVERLAY,
+                        color: state.palette.overlay0,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(120.0),
                         overflow: TextOverflow::Ellipsis,
@@ -2471,7 +2460,7 @@ fn render_driver_tab(
                         y: row_y,
                         text: ts.clone(),
                         font_size: 11.0,
-                        color: COLOR_TEXT,
+                        color: state.palette.text,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(max_val_w),
                         overflow: TextOverflow::Ellipsis,
@@ -2486,7 +2475,7 @@ fn render_driver_tab(
                     y: row_y,
                     width: 140.0,
                     height: 24.0,
-                    color: COLOR_YELLOW,
+                    color: state.palette.yellow,
                     corner_radii: CornerRadii::all(4.0),
                 });
                 cmds.push(RenderCommand::Text {
@@ -2494,7 +2483,7 @@ fn render_driver_tab(
                     y: row_y + 5.0,
                     text: "Update Available".to_string(),
                     font_size: 11.0,
-                    color: COLOR_BASE,
+                    color: state.palette.crust,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(120.0),
                     overflow: TextOverflow::Ellipsis,
@@ -2507,7 +2496,7 @@ fn render_driver_tab(
                 y: row_y,
                 text: "No driver installed".to_string(),
                 font_size: 12.0,
-                color: COLOR_OVERLAY,
+                color: state.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 32.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2523,6 +2512,7 @@ fn render_resources_tab(
     x: f32,
     y: f32,
     width: f32,
+    p: &Palette,
 ) {
     let mut row_y = y + 8.0;
     let label_x = x + 16.0;
@@ -2535,7 +2525,7 @@ fn render_resources_tab(
         y: row_y,
         text: "Interrupt Request (IRQ)".to_string(),
         font_size: 13.0,
-        color: COLOR_LAVENDER,
+        color: p.ink(p.lavender),
         font_weight: FontWeightHint::Bold,
         max_width: Some(width - 32.0),
         overflow: TextOverflow::Ellipsis,
@@ -2547,7 +2537,7 @@ fn render_resources_tab(
         y: row_y,
         text: "IRQ".to_string(),
         font_size: 11.0,
-        color: COLOR_OVERLAY,
+        color: p.overlay0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(120.0),
         overflow: TextOverflow::Ellipsis,
@@ -2557,7 +2547,7 @@ fn render_resources_tab(
         y: row_y,
         text: dev.format_irq(),
         font_size: 11.0,
-        color: COLOR_TEXT,
+        color: p.text,
         font_weight: FontWeightHint::Regular,
         max_width: Some(max_val_w),
         overflow: TextOverflow::Ellipsis,
@@ -2570,7 +2560,7 @@ fn render_resources_tab(
         y1: row_y,
         x2: x + width - 16.0,
         y2: row_y,
-        color: COLOR_SURFACE1,
+        color: p.surface0,
         width: 1.0,
     });
     row_y += 12.0;
@@ -2580,7 +2570,7 @@ fn render_resources_tab(
         y: row_y,
         text: "Memory-Mapped I/O (MMIO)".to_string(),
         font_size: 13.0,
-        color: COLOR_LAVENDER,
+        color: p.ink(p.lavender),
         font_weight: FontWeightHint::Bold,
         max_width: Some(width - 32.0),
         overflow: TextOverflow::Ellipsis,
@@ -2592,7 +2582,7 @@ fn render_resources_tab(
         y: row_y,
         text: "Range".to_string(),
         font_size: 11.0,
-        color: COLOR_OVERLAY,
+        color: p.overlay0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(120.0),
         overflow: TextOverflow::Ellipsis,
@@ -2602,7 +2592,7 @@ fn render_resources_tab(
         y: row_y,
         text: dev.format_mmio(),
         font_size: 11.0,
-        color: COLOR_TEXT,
+        color: p.text,
         font_weight: FontWeightHint::Regular,
         max_width: Some(max_val_w),
         overflow: TextOverflow::Ellipsis,
@@ -2623,7 +2613,7 @@ fn render_resources_tab(
             y: row_y,
             text: "Size".to_string(),
             font_size: 11.0,
-            color: COLOR_OVERLAY,
+            color: p.overlay0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(120.0),
             overflow: TextOverflow::Ellipsis,
@@ -2633,7 +2623,7 @@ fn render_resources_tab(
             y: row_y,
             text: size_str,
             font_size: 11.0,
-            color: COLOR_TEXT,
+            color: p.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(max_val_w),
             overflow: TextOverflow::Ellipsis,
@@ -2649,7 +2639,7 @@ fn render_resources_tab(
         y1: row_y,
         x2: x + width - 16.0,
         y2: row_y,
-        color: COLOR_SURFACE1,
+        color: p.surface0,
         width: 1.0,
     });
     row_y += 12.0;
@@ -2659,7 +2649,7 @@ fn render_resources_tab(
         y: row_y,
         text: "DMA Channel".to_string(),
         font_size: 13.0,
-        color: COLOR_LAVENDER,
+        color: p.ink(p.lavender),
         font_weight: FontWeightHint::Bold,
         max_width: Some(width - 32.0),
         overflow: TextOverflow::Ellipsis,
@@ -2671,7 +2661,7 @@ fn render_resources_tab(
         y: row_y,
         text: "Channel".to_string(),
         font_size: 11.0,
-        color: COLOR_OVERLAY,
+        color: p.overlay0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(120.0),
         overflow: TextOverflow::Ellipsis,
@@ -2683,7 +2673,7 @@ fn render_resources_tab(
             .dma_channel
             .map_or("N/A".to_string(), |c| format!("{c}")),
         font_size: 11.0,
-        color: COLOR_TEXT,
+        color: p.text,
         font_weight: FontWeightHint::Regular,
         max_width: Some(max_val_w),
         overflow: TextOverflow::Ellipsis,
@@ -2707,7 +2697,7 @@ fn render_events_tab(
         y: row_y,
         text: "Event History".to_string(),
         font_size: 13.0,
-        color: COLOR_LAVENDER,
+        color: state.palette.ink(state.palette.lavender),
         font_weight: FontWeightHint::Bold,
         max_width: Some(width - 32.0),
         overflow: TextOverflow::Ellipsis,
@@ -2721,7 +2711,7 @@ fn render_events_tab(
             y: row_y,
             text: "No events recorded".to_string(),
             font_size: 11.0,
-            color: COLOR_OVERLAY,
+            color: state.palette.overlay0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 32.0),
             overflow: TextOverflow::Ellipsis,
@@ -2735,7 +2725,7 @@ fn render_events_tab(
         y: row_y,
         width: width - 16.0,
         height: EVENT_ROW_HEIGHT,
-        color: COLOR_SURFACE0,
+        color: state.palette.base,
         corner_radii: CornerRadii::ZERO,
     });
     cmds.push(RenderCommand::Text {
@@ -2743,7 +2733,7 @@ fn render_events_tab(
         y: row_y + 3.0,
         text: "Time".to_string(),
         font_size: 10.0,
-        color: COLOR_OVERLAY,
+        color: state.palette.overlay0,
         font_weight: FontWeightHint::Bold,
         max_width: Some(140.0),
         overflow: TextOverflow::Ellipsis,
@@ -2753,7 +2743,7 @@ fn render_events_tab(
         y: row_y + 3.0,
         text: "Event".to_string(),
         font_size: 10.0,
-        color: COLOR_OVERLAY,
+        color: state.palette.overlay0,
         font_weight: FontWeightHint::Bold,
         max_width: Some(100.0),
         overflow: TextOverflow::Ellipsis,
@@ -2763,7 +2753,7 @@ fn render_events_tab(
         y: row_y + 3.0,
         text: "Detail".to_string(),
         font_size: 10.0,
-        color: COLOR_OVERLAY,
+        color: state.palette.overlay0,
         font_weight: FontWeightHint::Bold,
         max_width: Some(width - 296.0),
         overflow: TextOverflow::Ellipsis,
@@ -2774,7 +2764,7 @@ fn render_events_tab(
         let bg = if i % 2 == 0 {
             Color::TRANSPARENT
         } else {
-            COLOR_MANTLE
+            state.palette.mantle
         };
 
         if bg != Color::TRANSPARENT {
@@ -2793,7 +2783,7 @@ fn render_events_tab(
             y: row_y + 3.0,
             text: event.timestamp.clone(),
             font_size: 10.0,
-            color: COLOR_SUBTEXT,
+            color: state.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(140.0),
             overflow: TextOverflow::Ellipsis,
@@ -2803,7 +2793,7 @@ fn render_events_tab(
             y: row_y + 3.0,
             text: event.kind.label().to_string(),
             font_size: 10.0,
-            color: event.kind.color(),
+            color: event.kind.color(&state.palette),
             font_weight: FontWeightHint::Regular,
             max_width: Some(100.0),
             overflow: TextOverflow::Ellipsis,
@@ -2813,7 +2803,7 @@ fn render_events_tab(
             y: row_y + 3.0,
             text: event.detail.clone(),
             font_size: 10.0,
-            color: COLOR_TEXT,
+            color: state.palette.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 296.0),
             overflow: TextOverflow::Ellipsis,
@@ -2840,7 +2830,7 @@ fn render_resource_view(
         y: row_y,
         text: "System Resource Overview".to_string(),
         font_size: 15.0,
-        color: COLOR_TEXT,
+        color: state.palette.text,
         font_weight: FontWeightHint::Bold,
         max_width: Some(width - 32.0),
         overflow: TextOverflow::Ellipsis,
@@ -2853,7 +2843,7 @@ fn render_resource_view(
         y: row_y,
         text: format!("IRQ Assignments ({})", state.resource_view.irqs.len()),
         font_size: 13.0,
-        color: COLOR_LAVENDER,
+        color: state.palette.ink(state.palette.lavender),
         font_weight: FontWeightHint::Bold,
         max_width: Some(width - 32.0),
         overflow: TextOverflow::Ellipsis,
@@ -2867,7 +2857,7 @@ fn render_resource_view(
             y: row_y,
             text: format!("IRQ {:>3}", irq.irq),
             font_size: 11.0,
-            color: COLOR_TEAL,
+            color: state.palette.ink(state.palette.teal),
             font_weight: FontWeightHint::Regular,
             max_width: Some(80.0),
             overflow: TextOverflow::Ellipsis,
@@ -2877,7 +2867,7 @@ fn render_resource_view(
             y: row_y,
             text: format!("{}{shared_tag}", irq.device_name),
             font_size: 11.0,
-            color: COLOR_TEXT,
+            color: state.palette.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 126.0),
             overflow: TextOverflow::Ellipsis,
@@ -2891,7 +2881,7 @@ fn render_resource_view(
         y1: row_y,
         x2: x + width - 16.0,
         y2: row_y,
-        color: COLOR_SURFACE1,
+        color: state.palette.surface0,
         width: 1.0,
     });
     row_y += 12.0;
@@ -2902,7 +2892,7 @@ fn render_resource_view(
         y: row_y,
         text: format!("MMIO Ranges ({})", state.resource_view.mmio_ranges.len()),
         font_size: 13.0,
-        color: COLOR_LAVENDER,
+        color: state.palette.ink(state.palette.lavender),
         font_weight: FontWeightHint::Bold,
         max_width: Some(width - 32.0),
         overflow: TextOverflow::Ellipsis,
@@ -2915,7 +2905,7 @@ fn render_resource_view(
             y: row_y,
             text: mmio.format_range(),
             font_size: 11.0,
-            color: COLOR_PEACH,
+            color: state.palette.ink(state.palette.peach),
             font_weight: FontWeightHint::Regular,
             max_width: Some(220.0),
             overflow: TextOverflow::Ellipsis,
@@ -2925,7 +2915,7 @@ fn render_resource_view(
             y: row_y,
             text: mmio.device_name.clone(),
             font_size: 11.0,
-            color: COLOR_TEXT,
+            color: state.palette.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 266.0),
             overflow: TextOverflow::Ellipsis,
@@ -2939,7 +2929,7 @@ fn render_resource_view(
         y1: row_y,
         x2: x + width - 16.0,
         y2: row_y,
-        color: COLOR_SURFACE1,
+        color: state.palette.surface0,
         width: 1.0,
     });
     row_y += 12.0;
@@ -2950,7 +2940,7 @@ fn render_resource_view(
         y: row_y,
         text: format!("DMA Channels ({})", state.resource_view.dma_channels.len()),
         font_size: 13.0,
-        color: COLOR_LAVENDER,
+        color: state.palette.ink(state.palette.lavender),
         font_weight: FontWeightHint::Bold,
         max_width: Some(width - 32.0),
         overflow: TextOverflow::Ellipsis,
@@ -2963,7 +2953,7 @@ fn render_resource_view(
             y: row_y,
             text: format!("Ch {:>2}", dma.channel),
             font_size: 11.0,
-            color: COLOR_SAPPHIRE,
+            color: state.palette.ink(state.palette.sapphire),
             font_weight: FontWeightHint::Regular,
             max_width: Some(60.0),
             overflow: TextOverflow::Ellipsis,
@@ -2973,7 +2963,7 @@ fn render_resource_view(
             y: row_y,
             text: dma.device_name.clone(),
             font_size: 11.0,
-            color: COLOR_TEXT,
+            color: state.palette.text,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 106.0),
             overflow: TextOverflow::Ellipsis,
@@ -2986,21 +2976,22 @@ fn render_resource_view(
 fn render_status_bar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) {
     let y = state.height - STATUS_BAR_HEIGHT;
 
-    cmds.push(RenderCommand::FillRect {
-        x: 0.0,
+    state.palette.push_surface(
+        cmds,
+        0.0,
         y,
-        width: state.width,
-        height: STATUS_BAR_HEIGHT,
-        color: COLOR_MANTLE,
-        corner_radii: CornerRadii::ZERO,
-    });
+        state.width,
+        STATUS_BAR_HEIGHT,
+        0.0,
+        Surface::Strip(Edge::Top),
+    );
 
     cmds.push(RenderCommand::Line {
         x1: 0.0,
         y1: y,
         x2: state.width,
         y2: y,
-        color: COLOR_SURFACE1,
+        color: state.palette.surface0,
         width: 1.0,
     });
 
@@ -3020,7 +3011,7 @@ fn render_status_bar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) 
         y: y + 5.0,
         text: status_text,
         font_size: 11.0,
-        color: COLOR_SUBTEXT,
+        color: state.palette.subtext0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(state.width - 24.0),
         overflow: TextOverflow::Ellipsis,
@@ -3469,6 +3460,26 @@ mod tests {
 
     // -- DeviceCategory tests ------------------------------------------------
 
+    /// Every colour the device manager draws comes from the user's palette.
+    #[test]
+    fn every_colour_the_device_manager_draws_comes_from_its_palette() {
+        for light in [false, true] {
+            let mut state = DeviceManagerState::new();
+            state.palette = Palette::for_mode(light);
+            let cmds = render(&state);
+            assert!(
+                cmds.len() > 20,
+                "the sweep examined {} commands, which is not a render",
+                cmds.len()
+            );
+            appearance::palette_check::assert_drawn_from(
+                &state.palette,
+                &cmds,
+                &[],
+                &format!("devicemanager (light={light})"),
+            );
+        }
+    }
     #[test]
     fn test_category_label() {
         assert_eq!(DeviceCategory::Display.label(), "Display Adapters");
@@ -3499,8 +3510,8 @@ mod tests {
         for i in 0..cats.len() {
             for j in (i + 1)..cats.len() {
                 assert_ne!(
-                    cats[i].color(),
-                    cats[j].color(),
+                    cats[i].color(&Palette::for_mode(false)),
+                    cats[j].color(&Palette::for_mode(false)),
                     "Categories {:?} and {:?} share a color",
                     cats[i],
                     cats[j]
@@ -3550,7 +3561,7 @@ mod tests {
             DeviceStatus::Disabled,
             DeviceStatus::Unknown,
         ] {
-            assert_eq!(status.color().a, 255);
+            assert_eq!(status.color(&Palette::for_mode(false)).a, 255);
         }
     }
 
@@ -3577,7 +3588,7 @@ mod tests {
             DeviceEventKind::Reset,
         ];
         for k in &kinds {
-            assert_eq!(k.color().a, 255);
+            assert_eq!(k.color(&Palette::for_mode(false)).a, 255);
         }
     }
 
@@ -3884,7 +3895,7 @@ mod tests {
             UpdateCheckStatus::UpdateAvailable,
             UpdateCheckStatus::Failed,
         ] {
-            assert_eq!(s.color().a, 255);
+            assert_eq!(s.color(&Palette::for_mode(false)).a, 255);
         }
     }
 
@@ -4755,23 +4766,23 @@ mod tests {
     #[test]
     fn test_color_constants_opaque() {
         let colors = [
-            COLOR_BASE,
-            COLOR_MANTLE,
-            COLOR_SURFACE0,
-            COLOR_SURFACE1,
-            COLOR_SURFACE2,
-            COLOR_TEXT,
-            COLOR_SUBTEXT,
-            COLOR_OVERLAY,
-            COLOR_BLUE,
-            COLOR_LAVENDER,
-            COLOR_GREEN,
-            COLOR_YELLOW,
-            COLOR_RED,
-            COLOR_PEACH,
-            COLOR_MAUVE,
-            COLOR_TEAL,
-            COLOR_SAPPHIRE,
+            Palette::for_mode(false).crust,
+            Palette::for_mode(false).mantle,
+            Palette::for_mode(false).base,
+            Palette::for_mode(false).surface0,
+            Palette::for_mode(false).surface1,
+            Palette::for_mode(false).text,
+            Palette::for_mode(false).subtext0,
+            Palette::for_mode(false).overlay0,
+            Palette::for_mode(false).blue,
+            Palette::for_mode(false).lavender,
+            Palette::for_mode(false).green,
+            Palette::for_mode(false).yellow,
+            Palette::for_mode(false).red,
+            Palette::for_mode(false).peach,
+            Palette::for_mode(false).mauve,
+            Palette::for_mode(false).teal,
+            Palette::for_mode(false).sapphire,
         ];
         for c in &colors {
             assert_eq!(c.a, 255, "Color constant has non-opaque alpha");

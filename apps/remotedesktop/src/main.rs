@@ -1942,7 +1942,7 @@ impl RemoteDesktopApp {
             y: y + 10.0,
             text: preset.label().into(),
             font_size: 12.0,
-            color: preset.color(&self.palette),
+            color: self.palette.ink(preset.color(&self.palette)),
             font_weight: FontWeightHint::Bold,
             max_width: Some(104.0),
             overflow: TextOverflow::Ellipsis,
@@ -2631,7 +2631,7 @@ impl RemoteDesktopApp {
                     y: cy + 26.0,
                     text: session.state.label().into(),
                     font_size: 11.0,
-                    color: session.state.color(&self.palette),
+                    color: self.palette.ink(session.state.color(&self.palette)),
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(SIDEBAR_WIDTH - 60.0),
                     overflow: TextOverflow::Ellipsis,
@@ -2858,7 +2858,7 @@ impl RemoteDesktopApp {
                 transfer.state.label()
             ),
             font_size: 11.0,
-            color: transfer.state.color(&self.palette),
+            color: self.palette.ink(transfer.state.color(&self.palette)),
             font_weight: FontWeightHint::Regular,
             max_width: Some(pw - 200.0),
             overflow: TextOverflow::Ellipsis,
@@ -3364,23 +3364,29 @@ fn protocol_badge_bg(proto: Protocol, pal: &Palette) -> Color {
 
 /// Color for latency value (green = good, yellow = ok, red = bad).
 fn latency_color(ms: f32, pal: &Palette) -> Color {
+    // Inked here. Both callers draw a reading as text -- the overlay's
+    // number, and the third element of the metrics table, whose loop pushes
+    // it as a `Text`. Checked by hand: `colour-methods.py` cannot follow a
+    // colour into a tuple in a vector and reports that caller as unresolved
+    // rather than guessing, which is the behaviour that matters. 837.
     if ms < 30.0 {
-        pal.green
+        pal.ink(pal.green)
     } else if ms < 100.0 {
-        pal.yellow
+        pal.ink(pal.yellow)
     } else {
-        pal.red
+        pal.ink(pal.red)
     }
 }
 
 /// Color for frame rate value (green = good, yellow = ok, red = bad).
 fn fps_color(fps: f32, pal: &Palette) -> Color {
+    // Text-only, exactly as `latency_color` above.
     if fps >= 50.0 {
-        pal.green
+        pal.ink(pal.green)
     } else if fps >= 25.0 {
-        pal.yellow
+        pal.ink(pal.yellow)
     } else {
-        pal.red
+        pal.ink(pal.red)
     }
 }
 
@@ -4790,37 +4796,37 @@ mod tests {
     #[test]
     fn test_latency_color_good() {
         let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
-        assert_eq!(latency_color(10.0, &pal), pal.green);
+        assert_eq!(latency_color(10.0, &pal), pal.ink(pal.green));
     }
 
     #[test]
     fn test_latency_color_medium() {
         let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
-        assert_eq!(latency_color(50.0, &pal), pal.yellow);
+        assert_eq!(latency_color(50.0, &pal), pal.ink(pal.yellow));
     }
 
     #[test]
     fn test_latency_color_bad() {
         let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
-        assert_eq!(latency_color(150.0, &pal), pal.red);
+        assert_eq!(latency_color(150.0, &pal), pal.ink(pal.red));
     }
 
     #[test]
     fn test_fps_color_good() {
         let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
-        assert_eq!(fps_color(60.0, &pal), pal.green);
+        assert_eq!(fps_color(60.0, &pal), pal.ink(pal.green));
     }
 
     #[test]
     fn test_fps_color_medium() {
         let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
-        assert_eq!(fps_color(30.0, &pal), pal.yellow);
+        assert_eq!(fps_color(30.0, &pal), pal.ink(pal.yellow));
     }
 
     #[test]
     fn test_fps_color_bad() {
         let pal = Palette::from_settings(&appearance::AppearanceSettings::default());
-        assert_eq!(fps_color(10.0, &pal), pal.red);
+        assert_eq!(fps_color(10.0, &pal), pal.ink(pal.red));
     }
 
     #[test]

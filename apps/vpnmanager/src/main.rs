@@ -1700,7 +1700,10 @@ pub fn render_frame(app: &VpnManager, width: f32, height: f32) -> Frame {
     // dropped for the reason above.
     if let Some(picker) = app.picker.as_ref() {
         frame.discard_hits();
-        for cmd in picker.dialog.render(frame.width, frame.height) {
+        for cmd in picker
+            .dialog
+            .render(&app.palette, frame.width, frame.height)
+        {
             frame.push(cmd);
         }
     }
@@ -2101,7 +2104,9 @@ fn render_sidebar_item(
         y: y + 40.0,
         text: status_text,
         font_size: 10.0,
-        color: status_color,
+        // The same colour fills the pill above; only the label needs to be
+        // legible on the page, so the ink goes here and not at the binding.
+        color: pal.ink(status_color),
         font_weight: FontWeightHint::Light,
         max_width: Some(SIDEBAR_WIDTH - 50.0),
         overflow: TextOverflow::Ellipsis,
@@ -2503,7 +2508,9 @@ fn render_tab_connection(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, 
             y,
             text: format!("Status: {status_label}"),
             font_size: 13.0,
-            color: status_color,
+            // The 8px dot above is this colour too, so the ink goes on the
+            // label alone rather than on the method. 837.
+            color: app.palette.ink(status_color),
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -3085,7 +3092,7 @@ fn render_tab_log(frame: &mut Frame, app: &VpnManager, px: f32, py: f32, pw: f32
             y: row_y + 4.0,
             text: entry.level.label().to_string(),
             font_size: 10.0,
-            color: entry.level.color(&app.palette),
+            color: app.palette.ink(entry.level.color(&app.palette)),
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -7636,7 +7643,7 @@ mod tests {
             .as_ref()
             .expect("a chooser is up")
             .dialog
-            .frame(w, h)
+            .frame(&Palette::for_mode(false), w, h)
             .rect_of(|t| *t == target)
             .unwrap_or_else(|| panic!("{target:?} should have been drawn"))
             .centre();
@@ -7833,7 +7840,7 @@ mod tests {
             .as_ref()
             .expect("a chooser is up")
             .dialog
-            .frame(w, h)
+            .frame(&Palette::for_mode(false), w, h)
             .rect_of(|t| *t == guitk::dialog::DialogTarget::Cancel)
             .expect("the chooser draws a Cancel button")
             .centre();

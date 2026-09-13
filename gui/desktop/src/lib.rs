@@ -5287,7 +5287,10 @@ impl DesktopShell {
             return None;
         }
         let mut tree = RenderTree::new();
-        tree.commands.extend(self.desktop_menu.render());
+        tree.commands.extend(
+            self.desktop_menu
+                .render(&Palette::from_settings(&self.appearance)),
+        );
         Some(tree)
     }
 
@@ -5509,7 +5512,11 @@ impl DesktopShell {
         let (x, y, width, height) = self.run_browser_rect();
         let mut tree = RenderTree::new();
         tree.translate(x, y);
-        tree.commands.extend(dialog.render(width, height));
+        tree.commands.extend(dialog.render(
+            &Palette::from_settings(&self.appearance),
+            width,
+            height,
+        ));
         tree.untranslate();
         Some(tree)
     }
@@ -10353,35 +10360,48 @@ mod run_box_wiring_tests {
     /// nothing constructed.
     #[test]
     fn super_space_switches_to_the_next_keyboard_layout() {
-        let mut shell = shell();
-        let first = shell
-            .input_methods
-            .active_layout_id()
-            .expect("a machine with no layouts cannot type at all")
-            .to_string();
+        // Inside a scratch config even though this test never reads a file.
+        // The chord *writes* one: `persist_input_layout` saves the new layout
+        // to `input.yaml`. Without this the write landed in the developer's
+        // real configuration directory, and -- because the scratch helper also
+        // swaps the process-wide `XDG_CONFIG_HOME` -- landed in the neighbouring
+        // test's scratch directory whenever the two ran at the same moment.
+        // That is the flake logged as
+        // BUG-C-THE-KEYBOARD-LAYOUT-TEST-FAILS-ABOUT-ONE-WORKSPACE-RUN-IN-TWO:
+        // this test wrote `de` first, so the other one read `de` as its
+        // "before", found the file already correct, skipped its own save and
+        // saw nothing change.
+        settingsfile::testing::with_scratch_config("shell-layout-switch", |_root| {
+            let mut shell = shell();
+            let first = shell
+                .input_methods
+                .active_layout_id()
+                .expect("a machine with no layouts cannot type at all")
+                .to_string();
 
-        // Built inline rather than through a `press` helper: this module has
-        // one that takes a *mouse* position, and the key-event one lives in a
-        // different test module.
-        let outcome = shell.handle_hotkey(&KeyEvent {
-            key: Key::Space,
-            pressed: true,
-            modifiers: Modifiers {
-                super_key: true,
-                ..Modifiers::NONE
-            },
-            text: String::new(),
+            // Built inline rather than through a `press` helper: this module
+            // has one that takes a *mouse* position, and the key-event one
+            // lives in a different test module.
+            let outcome = shell.handle_hotkey(&KeyEvent {
+                key: Key::Space,
+                pressed: true,
+                modifiers: Modifiers {
+                    super_key: true,
+                    ..Modifiers::NONE
+                },
+                text: String::new(),
+            });
+            assert!(outcome.consumed, "Super+Space was not claimed by the shell");
+
+            let second = shell
+                .input_methods
+                .active_layout_id()
+                .expect("switching lost the layout list");
+            assert_ne!(
+                first, second,
+                "Super+Space was consumed but the active layout did not move"
+            );
         });
-        assert!(outcome.consumed, "Super+Space was not claimed by the shell");
-
-        let second = shell
-            .input_methods
-            .active_layout_id()
-            .expect("switching lost the layout list");
-        assert_ne!(
-            first, second,
-            "Super+Space was consumed but the active layout did not move"
-        );
     }
 
     /// The chord is *grabbed*, which is the half a consumed-and-ignored test

@@ -24,10 +24,12 @@
 //! fact that *every* item in the file was unused; the module now has a caller
 //! for each one, and the absence of the blanket is what keeps that true.
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::theme::with_alpha;
 
 use std::path::{Path, PathBuf};
 
@@ -597,21 +599,38 @@ fn detect_conflicts(sources: &[PathBuf], target_dir: &Path) -> Vec<PathBuf> {
 // ============================================================================
 
 /// Colours used for drop zone feedback.
-struct FeedbackColors;
+struct FeedbackColors {
+    highlight: Color,
+    underline: Color,
+    invalid: Color,
+    invalid_underline: Color,
+    label_bg: Color,
+    label_fg: Color,
+}
 
 impl FeedbackColors {
-    /// Translucent blue overlay for valid drop zones.
-    const HIGHLIGHT: Color = Color::rgba(50, 120, 220, 40);
-    /// Stronger blue for the underline on a hovered folder row.
-    const UNDERLINE: Color = Color::rgba(50, 120, 220, 180);
-    /// Red overlay for invalid drop targets.
-    const INVALID: Color = Color::rgba(220, 50, 50, 50);
-    /// Red underline for invalid targets.
-    const INVALID_UNDERLINE: Color = Color::rgba(220, 50, 50, 180);
-    /// Semi-transparent background for the operation label.
-    const LABEL_BG: Color = Color::rgba(30, 30, 30, 200);
-    /// White text for the operation label.
-    const LABEL_FG: Color = Color::WHITE;
+    fn new(p: &Palette) -> Self {
+        Self {
+            // The accent at two weights: a wash over the zone, a firm line
+            // under the row. The fixed blue they used to be was the old
+            // accent, frozen.
+            highlight: with_alpha(p.accent, 40),
+            underline: with_alpha(p.accent, 180),
+            // Refusal is `red` for the reason every categorical colour is a
+            // role: it has to read as refusal under any accent, including a
+            // red one.
+            invalid: with_alpha(p.red, 50),
+            invalid_underline: with_alpha(p.red, 180),
+            // Deliberately NOT a palette surface. This chip is drawn over
+            // whatever is being dragged across -- icons, thumbnails, someone's
+            // photographs -- so its ground is unknown, and a themed surface
+            // would be pale-on-pale half the time. A near-black scrim with
+            // white on it is the answer subtitles reach, and `palette_check`
+            // already exempts black at any alpha for this class.
+            label_bg: Color::rgba(0, 0, 0, 200),
+            label_fg: Color::WHITE,
+        }
+    }
 }
 
 /// Build a human-readable label like "Copy to Documents" or "Move to ~/Projects".
@@ -659,13 +678,15 @@ pub fn render_drop_feedback(
     drag_y: f32,
     list_area: Option<Rect>,
     valid: bool,
+    p: &Palette,
 ) -> Vec<RenderCommand> {
     let mut cmds: Vec<RenderCommand> = Vec::new();
+    let c = FeedbackColors::new(p);
 
     let (highlight, underline) = if valid {
-        (FeedbackColors::HIGHLIGHT, FeedbackColors::UNDERLINE)
+        (c.highlight, c.underline)
     } else {
-        (FeedbackColors::INVALID, FeedbackColors::INVALID_UNDERLINE)
+        (c.invalid, c.invalid_underline)
     };
 
     match zone {
@@ -741,7 +762,7 @@ pub fn render_drop_feedback(
             y: label_y,
             width: pill_width,
             height: label_height,
-            color: FeedbackColors::LABEL_BG,
+            color: c.label_bg,
             corner_radii: CornerRadii::all(4.0),
         });
 
@@ -750,7 +771,7 @@ pub fn render_drop_feedback(
             x: label_x + 8.0,
             y: label_y + 4.0,
             text: label,
-            color: FeedbackColors::LABEL_FG,
+            color: c.label_fg,
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1200,6 +1221,7 @@ mod tests {
             200.0,
             list_area,
             true,
+            &Palette::for_mode(false),
         );
         // Should have: list area overlay + label background + label text.
         assert_eq!(cmds.len(), 3);
@@ -1227,6 +1249,7 @@ mod tests {
             90.0,
             None,
             true,
+            &Palette::for_mode(false),
         );
         // Should have: overlay + underline + label bg + label text.
         assert_eq!(cmds.len(), 4);
@@ -1245,12 +1268,18 @@ mod tests {
             90.0,
             None,
             false,
+            &Palette::for_mode(false),
         );
-        // The overlay should use the invalid (red) colour.
+        // The overlay reports refusal, so it is the palette's `red` -- checked
+        // as the role rather than as an RGB triple, which is the difference
+        // between "this means refusal" and "this is the colour someone typed
+        // in 2026". A literal here is what made this test fail when the
+        // hardcoded red became a role, and it would have gone on passing if
+        // the arm had been swapped for a green one of the same value.
+        let p = Palette::for_mode(false);
         if let RenderCommand::FillRect { color, .. } = &cmds[0] {
-            assert_eq!(color.r, 220);
-            assert_eq!(color.g, 50);
-            assert_eq!(color.b, 50);
+            assert_eq!((color.r, color.g, color.b), (p.red.r, p.red.g, p.red.b));
+            assert_eq!(color.a, 50, "the overlay is a wash, not a fill");
         } else {
             panic!("expected FillRect as first command");
         }
@@ -1258,7 +1287,15 @@ mod tests {
 
     #[test]
     fn render_feedback_none_zone_empty() {
-        let cmds = render_drop_feedback(&DropZone::None, DropOperation::None, 0.0, 0.0, None, true);
+        let cmds = render_drop_feedback(
+            &DropZone::None,
+            DropOperation::None,
+            0.0,
+            0.0,
+            None,
+            true,
+            &Palette::for_mode(false),
+        );
         assert!(cmds.is_empty());
     }
 
@@ -1275,6 +1312,7 @@ mod tests {
             130.0,
             None,
             true,
+            &Palette::for_mode(false),
         );
         // overlay + underline + label bg + label text.
         assert_eq!(cmds.len(), 4);

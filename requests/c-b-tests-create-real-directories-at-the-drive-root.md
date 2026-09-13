@@ -130,3 +130,52 @@ Logged on my side as
 `TD-C-A-TEST-THAT-WRITES-TO-AN-ABSOLUTE-POSIX-PATH-WRITES-TO-THE-DEV-DRIVE-ROOT`
 in `known-issues.md`, marked as lane B's to fix so it is not lost if this file
 is missed.
+
+---
+
+## Second instance, confirmed the same afternoon — `init/loginmgr`, six tests
+
+This is no longer one test's ambient assumption. The same mechanism broke a
+second, unrelated crate two hours later, and the three workspace runs done here
+today gave three different answers about the same tree:
+
+| run | result | what was on the drive root afterwards |
+|---|---|---|
+| 12:5x | 25 484 passed, **2 failed** (`systemctl`, cgroups) | `E:\sys\fs\cgroup` |
+| 13:4x | 60 638 passed, **0 failed** | — (`E:\sys` had been deleted) |
+| 14:2x | 60 533 passed, **6 failed** (`init/loginmgr`) | `E:\etc\passwd`, `E:\etc\shadow`, `E:\etc\users.yaml` |
+
+The six failures all read:
+
+```
+panicked at init/loginmgr/src/main.rs:354:5:
+save_user_database writes the whole database, not a subset
+```
+
+Adjudicated the same way as the first: with `E:\etc` deleted,
+`cargo test -p loginmgr` is **46 passed, 0 failed**, and running it alone does
+not recreate the directory. So `loginmgr` has no bug either; some third crate
+writes `/etc/passwd`, `/etc/shadow` and `/etc/users.yaml`, which on this host
+means the root of the operator's data drive, and `loginmgr`'s tests then read a
+user database somebody else wrote.
+
+The files are self-describing, which is how they were identified at a glance:
+
+```
+# Generated from `/etc/users.yaml' -- do not edit.
+# Every change to an account rewrites this file from that one, so an edit
+# made here survives only until the next one and is then silently undone.
+```
+
+**What this changes about the priority.** The first instance could be read as
+one brittle test. Two instances in different subsystems, with the *same* tree
+producing 0, 2 and 6 failures on three consecutive runs, means **no workspace
+test result on this machine is currently trustworthy** — including the ones
+lane C runs before every push, and including any run used to decide whether a
+merge to `main` is green. That is the cost worth acting on, rather than the
+directories themselves.
+
+**Lane C has still not touched `userspace/**` or `init/**`.** `E:\etc` and
+`E:\sys` were deleted from the machine, since both were actively failing tests
+and neither is tracked by any repository. `E:\run`, `E:\var` and `E:\dev`
+are still there, untouched, in case something depends on them.

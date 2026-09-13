@@ -22664,6 +22664,27 @@ claim on its own:
   `guitk::scaling`'s own `icon_size()` method in that module's tests — a
   scaling-context accessor with the same name, unrelated to this preference.
 
+**Correction, 2026-09-13: `icon_size` is not missing a reader, and that
+matters for what to do about it.** `gui/desktop/src/icons.rs` is a complete
+desktop icon layer -- 1974 lines, a grid, drag and selection, a `render`, and
+its own tests. It is exactly the thing that would read this setting. Nothing
+in the tree ever constructs it: `grep` for `DesktopIconLayer` across every
+`.rs` file finds the type, its own module, and nothing else, and `lib.rs`'s
+`pub mod icons;` is the only reference to the module at all.
+
+So the honest state of this row is **blocked on C-Q17**, not "waiting for
+someone to write the consumer". Wiring `icon_size` into that layer today would
+connect a dead setting to a dead renderer and change nothing a user can see,
+while looking in the git log exactly like a fix. It is listed in
+`TD-C-FOUR-SHELL-FEATURES-ARE-BUILT-AND-NEVER-CONSTRUCTED` for the same
+reason, and C-Q17 is the question of whether those get wired up or deleted.
+
+The same is true, for a different reason, of `cursor_scheme` and `cursor_size`:
+nothing draws a pointer at all, which is C-Q18. **All three remaining rows of
+this entry are therefore waiting on an operator decision rather than on work,**
+which was not clear from the table above and is the sort of thing that gets a
+reader to spend an afternoon before noticing.
+
 ### The cursor-size tangle
 
 One user-facing setting, four independent models, no reader:
@@ -131221,6 +131242,20 @@ so the two tests point at a scratch path they own -- the sibling test
 `/` inside `#[cfg(test)]` would catch the whole family; **lane C has
 deliberately not added one**, because it would refuse lane B's pushes and that
 is their decision to make, not ours.
+
+**Second instance the same afternoon, and it is the reason this matters.**
+`init/loginmgr` failed six tests in the 14:2x workspace run, all with
+*save_user_database writes the whole database, not a subset*, because something
+had written `E:\etc\passwd`, `E:\etc\shadow` and `E:\etc\users.yaml`. With
+`E:\etc` deleted, `cargo test -p loginmgr` is 46 passed, 0 failed, and running
+it alone does not recreate the directory.
+
+Three workspace runs of the same tree today returned **2 failed, then 0 failed,
+then 6 failed**, in two unrelated subsystems, purely on what happened to be left
+at the drive root. So the real cost is not the litter: it is that **no workspace
+test result on this machine is currently trustworthy**, including the one lane C
+runs before every push and any run used to judge a merge to `main` green.
+`E:\etc` was deleted for the same reason `E:\sys` was.
 
 **Done on the machine, not in any tree:** `E:\sys` was deleted, since it was
 failing two tests and is tracked by no repository. `E:\run`, `E:\var` and

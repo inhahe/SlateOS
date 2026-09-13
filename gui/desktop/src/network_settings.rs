@@ -3440,6 +3440,20 @@ mod tests {
     /// the same pattern is subtracted in [`colors_apart_from_the_controls`],
     /// so a pill wrongly counted as a segment is a colour silently removed
     /// from the frozen union.
+    /// The active tab's own pill -- the 32-tall box *above* the content well.
+    ///
+    /// The exact complement of [`segment_fills`]'s position bound, so between
+    /// them the two account for every 32-tall box in the module. Matched on
+    /// the logical rectangle and either shape: since 834 the pill is an accent
+    /// outline rather than an accent fill.
+    fn tab_pill(cmds: &[RenderCommand]) -> Vec<Color> {
+        cmds.iter()
+            .filter_map(appearance::painted_rect)
+            .filter(|(_, y, _, h, _)| (*h - 32.0).abs() < 0.01 && *y <= 100.0)
+            .map(|t| t.4)
+            .collect()
+    }
+
     fn segment_fills(cmds: &[RenderCommand]) -> Vec<Color> {
         cmds.iter()
             .filter_map(|c| match c {
@@ -3525,7 +3539,8 @@ mod tests {
                     c,
                     RenderCommand::Text { text, .. }
                         if text == "+ Add rule" || is_picker_label(text)
-                )
+                ) && !appearance::painted_rect(c)
+                    .is_some_and(|(_, y, _, h, _)| (h - 32.0).abs() < 0.01 && y <= 100.0)
             })
             .filter_map(|c| match c {
                 RenderCommand::FillRect { color, .. }
@@ -3569,6 +3584,16 @@ mod tests {
                 tab_labels(&x),
                 tab_labels(&y),
                 "the {tab:?} tab's label did not move with the accent"
+            );
+
+            // The pill behind that label. Excluded from the frozen union
+            // below, so it gets its own negative half here -- an exclusion
+            // with no assertion behind it is how a site stops being checked.
+            assert_eq!(tab_pill(&x).len(), 1, "one tab is marked as active");
+            assert_ne!(
+                tab_pill(&x),
+                tab_pill(&y),
+                "the {tab:?} tab's pill did not move with the accent"
             );
 
             match tab {

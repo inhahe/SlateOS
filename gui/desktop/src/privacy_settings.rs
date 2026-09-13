@@ -1697,38 +1697,47 @@ mod tests {
             let act = draw("activity: allowed and denied", &p);
             let tab2 = draw("general: level 0, toggles true", &p);
 
+            // Non-empty *and* uniform. Written as `.all()` alone this whole
+            // test passed while drawing nothing: once these rows became
+            // outlines the old `FillRect`-only collector returned an empty
+            // vector, and `[].all(..)` is true. Four assertions went quiet
+            // together and the suite stayed green.
+            let every = |got: &[Color], want: Color, what: &str| {
+                assert!(!got.is_empty(), "{mode}: no {what} was drawn at all");
+                assert!(
+                    got.iter().all(|c| rgb(*c) == rgb(want)),
+                    "{mode}: a {what} is in the wrong role: {got:?}"
+                );
+            };
+
             // render: the panel background.
             assert_eq!(rgb(fills(&over, 500.0, 900.0)[0]), rgb(p.base), "{mode}");
             // render_permissions_tab: an app row.
-            assert!(
-                fills(&full, 468.0, 32.0)
-                    .iter()
-                    .all(|c| rgb(*c) == rgb(p.mantle)),
-                "{mode}"
+            every(
+                &fills(&full, 468.0, 32.0),
+                p.painted(appearance::Surface::Card),
+                "app row",
             );
             // render_permissions_tab: an overview row.
-            assert!(
-                fills(&over, 468.0, 40.0)
-                    .iter()
-                    .all(|c| rgb(*c) == rgb(p.mantle)),
-                "{mode}"
+            every(
+                &fills(&over, 468.0, 40.0),
+                p.painted(appearance::Surface::Card),
+                "overview row",
             );
             // render_activity_tab: a log row.
-            assert!(
-                fills(&act, 468.0, 28.0)
-                    .iter()
-                    .all(|c| rgb(*c) == rgb(p.mantle)),
-                "{mode}"
+            every(
+                &fills(&act, 468.0, 28.0),
+                p.painted(appearance::Surface::Card),
+                "log row",
             );
             // render_toggle: the knob, which is `readable_on` its own pill
             // rather than a role. This fixture has every toggle *on*, so every
             // knob here rides `green`; the off ink is a different value and is
             // pinned by the switch module's own tests.
-            assert!(
-                fills(&tab2, 16.0, 16.0)
-                    .iter()
-                    .all(|c| rgb(*c) == rgb(appearance::readable_on(p.green))),
-                "{mode}"
+            every(
+                &fills(&tab2, 16.0, 16.0),
+                appearance::readable_on(p.green),
+                "toggle knob",
             );
         }
     }

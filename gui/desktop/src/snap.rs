@@ -1256,7 +1256,7 @@ mod tests {
                 if i == hovered {
                     want.push(p.panel_hover());
                 }
-                want.push(p.surface0);
+                want.push(p.painted(appearance::Surface::ControlTrack));
                 want.extend(std::iter::repeat_n(
                     if active { p.accent } else { p.overlay0 },
                     mini_zone_count(preset),

@@ -2011,10 +2011,15 @@ mod tests {
             let p = accented(light);
             let cmds = five_categories().render(&p);
             let n = all_colors(&cmds).iter().filter(|c| **c == p.accent).count();
+            // Three since §834: the caret, the selected row's bar, and the
+            // outline the bordered theme draws round the selected row. All
+            // three say where you are, which is the claim this test makes --
+            // the number is the *population* of that claim, not a budget, so
+            // it moves when the theme gives the idea another expression.
             assert_eq!(
-                n, 2,
-                "the caret and the selected row's bar are the only two things \
-                 that say where you are — found {n}"
+                n, 3,
+                "the caret, the selected row's bar and its outline are the \
+                 only three things that say where you are — found {n}"
             );
 
             // The caret is one of the two, and it is the module's only Line.

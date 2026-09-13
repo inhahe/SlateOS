@@ -2554,7 +2554,11 @@ mod tests {
                 assert_eq!(*pill, p.surface0, "unselected section pill {i} ({ctx})");
             }
             for (i, well) in choice_wells(&cmds).iter().enumerate() {
-                assert_eq!(*well, p.surface0, "choice well {i} ({ctx})");
+                assert_eq!(
+                    *well,
+                    p.painted(appearance::Surface::Card),
+                    "choice well {i} ({ctx})"
+                );
             }
             for (i, track) in toggle_tracks(&draw(
                 &on(TouchpadSettingsSection::Taps),

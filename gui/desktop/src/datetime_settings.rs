@@ -2043,14 +2043,22 @@ mod tests {
                 "one row per configured server ({what})"
             );
             for (i, row) in servers.iter().enumerate() {
-                assert_eq!(*row, p.surface0, "server row {i} ({what})");
+                assert_eq!(
+                    *row,
+                    p.painted(appearance::Surface::Card),
+                    "server row {i} ({what})"
+                );
             }
 
             let clocks = render(&wound(DateTimeTab::Clocks), &p);
             let cards = fills_h(&clocks, 60.0);
             assert_eq!(cards.len(), 4, "four world-clock cards ({what})");
             for (i, card) in cards.iter().enumerate() {
-                assert_eq!(*card, p.surface0, "world-clock card {i} ({what})");
+                assert_eq!(
+                    *card,
+                    p.painted(appearance::Surface::Card),
+                    "world-clock card {i} ({what})"
+                );
             }
         }
     }

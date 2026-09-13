@@ -1205,7 +1205,14 @@ mod tests {
                 want.push(if chosen { p.text } else { p.subtext0 });
                 want.push(p.overlay0);
             }
-            want.extend([p.text, p.surface0, p.text, p.overlay0]);
+            // The rule row is the one surface this page draws through the
+            // theme; the four mode rows above are still plain fills.
+            want.extend([
+                p.text,
+                p.painted(appearance::Surface::Card),
+                p.text,
+                p.overlay0,
+            ]);
             assert_eq!(
                 colors(&mgr.render_settings(&p, 0.0, 0.0, 400.0)),
                 want,

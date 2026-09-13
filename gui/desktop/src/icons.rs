@@ -933,7 +933,7 @@ impl DesktopIconLayer {
                         y: glyph_y,
                         text: icon.icon_type.glyph().to_string(),
                         color: {
-                            let c = icon.icon_type.color(p);
+                            let c = p.ink(icon.icon_type.color(p));
                             Color::rgba(c.r, c.g, c.b, 120)
                         },
                         font_size: ICON_GLYPH_SIZE,
@@ -1033,7 +1033,7 @@ impl DesktopIconLayer {
             x: glyph_x,
             y: glyph_y,
             text: icon.icon_type.glyph().to_string(),
-            color: icon.icon_type.color(p),
+            color: p.ink(icon.icon_type.color(p)),
             font_size: ICON_GLYPH_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,

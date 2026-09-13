@@ -49,6 +49,35 @@ DEF = re.compile(r"^\s*(?:pub(?:\([\w:]+\))?\s+)?(?:const\s+)?fn\s+(\w+)\s*[(<]"
 FN_LINE = re.compile(r"^\s*(?:pub(?:\([\w:]+\))?\s+)?(?:const\s+)?fn" + WORD_END)
 RETURNS_COLOR = re.compile(r"->[^{;]*[^\w]Color[^\w]")
 GROUNDED = re.compile(r"readable_on|on_accent|on_wallpaper|contrast_text")
+def block_end(lines, i, hi):
+    """The line where the block containing the binding on line `i` closes.
+
+    A binding is scoped to its block, not to its function. Scanning to the end
+    of the function let a *later* `for (si, (text, color))` loop, a hundred
+    lines below and in a different scope, count as a use of a local called
+    `color` -- and that loop's text is coloured by something else entirely.
+    """
+    depth = 0
+    for j in range(i, hi):
+        depth += lines[j].count("{") - lines[j].count("}")
+        if depth < 0:
+            return j
+    return hi
+
+
+def mentions(line, name):
+    """Does `line` use the value `name`, as opposed to naming a field?
+
+    `color: self.palette.text,` contains the word `color` and has nothing to
+    do with a local called `color`. Reading it as one made speedtest's gauge
+    -- whose local only ever colours a `Line` -- report an uninked text site
+    three commands further down that belongs to a different colour entirely.
+    The field shorthand `color,` is a real use and survives, because the
+    character after it is a comma rather than a colon.
+    """
+    return bool(re.search(r"[^\w.]" + re.escape(name) + r"[^\w:]", " " + line + " "))
+
+
 LET = re.compile(r"^\s*let\s+(?:mut\s+)?(?:\(\s*[\w, ]*?(\w+)\s*\)|(\w+))\s*(?::[^=]+)?=")
 SHORTHAND = re.compile(r"^\s*color,\s*$")
 CALL = re.compile(r"(\w+)\s*\(")
@@ -234,6 +263,28 @@ def statement_at(lines, i):
     return lines[i]
 
 
+def split_args(line, callee):
+    """The argument expressions of `callee(...)` on `line`, in order."""
+    m = re.search(r"[^\w]" + re.escape(callee) + r"\s*\(", " " + line)
+    if not m:
+        return []
+    out, depth, cur = [], 0, ""
+    for ch in (" " + line)[m.end():]:
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            if depth == 0:
+                break
+            depth -= 1
+        if ch == "," and depth == 0:
+            out.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    out.append(cur)
+    return out
+
+
 class World:
     """Every function in gui/ and apps/, and what its parameters colour."""
 
@@ -251,11 +302,21 @@ class World:
                 m = DEF.match(line)
                 if m:
                     lo, hi = item_span(lines, i, end)
-                    self.fns.setdefault(m.group(1), []).append(
+                    # Keyed by crate as well as name. `draw_button` exists
+                    # in a dozen crates; a global key unioned all their
+                    # parameter uses, so fileassoc's `bg` argument inherited
+                    # some other crate's text parameter and the site was
+                    # reported as text. It fills a button.
+                    self.fns.setdefault((crate_of(rel), m.group(1)), []).append(
                         (rel, lo, hi, params_of(lines, i))
                     )
         self.param_kind = {}
+        self.param_text_inked = {}
         self._solve_params()
+
+    def known(self, rel, callee):
+        """Is `callee` a function of this file's own crate?"""
+        return (crate_of(rel), callee) in self.fns
 
     def _uses(self, rel, lo, hi, name):
         """Kinds and onward dependencies for `name` inside one function body."""
@@ -263,7 +324,7 @@ class World:
         lines, field = self.lines[rel], self.field[rel]
         for j in range(lo, min(hi, len(lines))):
             line = lines[j]
-            if not re.search(r"[^\w.]" + re.escape(name) + r"[^\w]", " " + line + " "):
+            if not mentions(line, name):
                 continue
             if j in field:
                 kinds.add(field[j])
@@ -273,12 +334,25 @@ class World:
                 continue
             stmt = statement_at(lines, j)
             for callee in set(CALL.findall(stmt)):
-                if callee == name or callee not in self.fns:
+                if callee == name or not self.known(rel, callee):
                     continue
                 k = arg_index(stmt, callee, name)
                 if k is not None:
-                    deps.add((callee, k + method_offset(stmt, callee)))
+                    deps.add((crate_of(rel), callee, k + method_offset(stmt, callee)))
         return kinds, deps
+
+    def _param_inked(self, rel, lo, hi, name):
+        """Is every text use of this parameter inked or grounded?"""
+        lines, field = self.lines[rel], self.field[rel]
+        saw = False
+        for j in range(lo, min(hi, len(lines))):
+            if field.get(j) != "Text" or not mentions(lines[j], name):
+                continue
+            saw = True
+            stmt = statement_at(lines, j)
+            if ".ink(" not in stmt and not GROUNDED.search(stmt):
+                return False
+        return saw
 
     def _solve_params(self):
         """`param_kind[(fn, index)]` -> the commands that parameter colours.
@@ -287,14 +361,17 @@ class World:
         levels -- `render_row` takes it and gives it to `render_badge`.
         """
         direct, deps = {}, {}
-        for name, defs in self.fns.items():
+        for (crate, name), defs in self.fns.items():
             for rel, lo, hi, params in defs:
                 for k, p in enumerate(params):
                     if not p:
                         continue
                     kinds, dep = self._uses(rel, lo, hi, p)
-                    direct.setdefault((name, k), set()).update(kinds)
-                    deps.setdefault((name, k), set()).update(dep)
+                    direct.setdefault((crate, name, k), set()).update(kinds)
+                    deps.setdefault((crate, name, k), set()).update(dep)
+                    self.param_text_inked[(crate, name, k)] = self._param_inked(
+                        rel, lo, hi, p
+                    )
         self.param_kind = {key: set(v) for key, v in direct.items()}
         for _ in range(8):
             changed = False
@@ -307,6 +384,56 @@ class World:
             if not changed:
                 break
 
+    def text_is_handled(self, rel, i, produced_by=""):
+        """Is the colour produced on line `i` already legible where it is drawn?
+
+        Two ways it can be, and neither is visible on the producing line:
+
+          * the *use* is inked, not the binding -- `color: p.ink(c)` fifty
+            lines below `let c = gauge_color_at(..)`;
+          * the use is grounded -- `readable_on(badge_color)`, text drawn on
+            that very colour, which must not be re-inked.
+
+        Without this, `notif_pane` and `user_accounts` were reported as
+        needing work they had already done correctly, and speedtest's gauge --
+        whose local only ever colours a `Line` -- was reported as text.
+        """
+        lines, field = self.lines[rel], self.field[rel]
+        if ".ink(" in statement_at(lines, i) or GROUNDED.search(lines[i]):
+            return True
+        # The colour may be handed straight to a helper that inks it inside.
+        # `startupmanager` does exactly that: `draw_button` takes one colour,
+        # washes the button with it, outlines with it, and writes the label in
+        # `pal.ink(color)` -- so the call site is right and looks wrong.
+        stmt = statement_at(lines, i)
+        for callee in set(CALL.findall(stmt)):
+            if not self.known(rel, callee):
+                continue
+            for idx, arg in enumerate(split_args(stmt, callee)):
+                if produced_by not in arg:
+                    continue
+                key = (crate_of(rel), callee, idx + method_offset(stmt, callee))
+                if self.param_text_inked.get(key):
+                    return True
+        m = LET.match(lines[i])
+        if not m:
+            return False
+        name = m.group(1) or m.group(2)
+        lo = enclosing_fn(lines, i)
+        _, fn_hi = item_span(lines, lo, len(lines))
+        hi = block_end(lines, i, fn_hi)
+        found_text = False
+        for j in range(i + 1, hi):
+            if field.get(j) != "Text":
+                continue
+            if not mentions(lines[j], name):
+                continue
+            found_text = True
+            stmt = statement_at(lines, j)
+            if ".ink(" not in stmt and not GROUNDED.search(stmt):
+                return False
+        return found_text or True
+
     def classify(self, rel, i, produced_by):
         """What the colour produced on line `i` of `rel` ends up colouring."""
         lines, field = self.lines[rel], self.field[rel]
@@ -315,12 +442,12 @@ class World:
         kinds = set()
         stmt = statement_at(lines, i)
         for callee in set(CALL.findall(stmt)):
-            if callee == produced_by or callee not in self.fns:
+            if callee == produced_by or not self.known(rel, callee):
                 continue
             k = arg_index(stmt, callee, produced_by, needle_may_be_a_method=True)
             if k is not None:
                 kinds |= self.param_kind.get(
-                    (callee, k + method_offset(stmt, callee)), set()
+                    (crate_of(rel), callee, k + method_offset(stmt, callee)), set()
                 )
         m = LET.match(lines[i])
         if m:
@@ -337,7 +464,7 @@ class World:
 def main(show_all):
     world = World()
     defs = {}
-    for name, places in world.fns.items():
+    for (_c, name), places in world.fns.items():
         for rel, lo, hi, _params in places:
             head = NL.join(world.lines[rel][lo : lo + 6])
             head = head[: head.find("{")] if "{" in head else head
@@ -385,7 +512,10 @@ def main(show_all):
                     continue
                 for kind in world.classify(rel, i, name):
                     defs[(crate, name)]["kinds"][kind] += 1
-                    mark = "" if ".ink(" in statement_at(lines, i) else "  NOT INKED"
+                    handled = defs[(crate, name)]["inked"] or world.text_is_handled(
+                        rel, i, name
+                    )
+                    mark = "" if handled else "  NOT INKED"
                     defs[(crate, name)]["sites"][kind].append(
                         rel + ":" + str(i + 1) + mark
                     )
@@ -421,19 +551,22 @@ def main(show_all):
         rows = buckets.get(key, [])
         if not rows:
             continue
-        if key == "SPLIT":
-            # A SPLIT method must *not* ink its own body -- that is what makes
-            # it SPLIT. Its fix is at the text call sites, so that is what is
-            # counted here; counting bodies reported 35 outstanding after all
-            # 24 call sites had been fixed.
-            todo = [
-                r for r in rows
-                if any("NOT INKED" in x for x in r[1]["sites"].get("Text", []))
-            ]
-            label = " with a text site still not inked)"
-        else:
-            todo = [r for r in rows if not r[1]["inked"]]
-            label = " not yet inked)"
+        # One rule for every bucket: a method is done when its text is
+        # legible, whether that was arranged in its body or at its call
+        # sites. Counting bodies alone reported 35 SPLIT methods outstanding
+        # after all 24 of their call sites had been fixed -- and a SPLIT
+        # method must *not* ink its body, so that count could never reach
+        # zero. Counting sites alone would miss a method whose body inks and
+        # whose callers this tool cannot follow.
+        # A method with no text caller needs nothing: it is a fill's colour
+        # and inking it would darken the fill. So the only outstanding work
+        # is a *text site* that is neither inked at the site nor inked by the
+        # method that produced it.
+        todo = [
+            r for r in rows
+            if any("NOT INKED" in x for x in r[1]["sites"].get("Text", []))
+        ]
+        label = " with text that is not legible yet)"
         print(NL + "=== " + key + ": " + str(len(rows)) + "  (" + str(len(todo)) + label)
         for name, d in rows:
             if (name, d) not in todo and not show_all:
@@ -441,7 +574,13 @@ def main(show_all):
             counts = ", ".join(k + " x" + str(v) for k, v in d["kinds"].most_common())
             pal = "" if d["takes_palette"] else "  [takes no palette]"
             print("  " + name.ljust(24) + " " + d["where"].ljust(44) + " " + counts + pal)
-            for site in d["sites"].get("Text", [])[:2]:
+            # Outstanding sites first. Printing the first two in file order
+            # hid the only one that needed work behind two that did not, so
+            # the summary said "1 outstanding" and the listing showed nothing.
+            sites = sorted(
+                d["sites"].get("Text", []), key=lambda x: "NOT INKED" not in x
+            )
+            for site in sites[:3]:
                 print("        text at " + site)
     return 0
 

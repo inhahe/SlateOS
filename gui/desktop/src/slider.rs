@@ -344,7 +344,7 @@ mod tests {
             // is the defect: the touchpad thumb was `p.accent` on a `p.accent`
             // fill, so it vanished for the whole left half of its travel.
             for accent in AccentColor::presets() {
-                let fill = p.hue(*accent);
+                let fill = accent.in_mode(p.light);
                 let mut cmds = Vec::new();
                 Slider {
                     x: 0.0,
@@ -391,7 +391,7 @@ mod tests {
         for light in [false, true] {
             let p = Palette::for_mode(light);
             for accent in AccentColor::presets() {
-                let fill = p.hue(*accent);
+                let fill = accent.in_mode(p.light);
                 let derived = readable_on(fill);
                 let (mine, theirs) = (contrast(p.base, p.text), contrast(p.base, derived));
                 assert!(

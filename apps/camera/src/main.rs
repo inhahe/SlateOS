@@ -368,12 +368,17 @@ impl CameraStatus {
         }
     }
 
+    /// The colour the camera's status line is written in.
+    ///
+    /// Inked per arm; `overlay0` is left as the faintest legible mark, which
+    /// is what a disconnected camera should look like. Its one caller draws
+    /// the status as text (837; `gui/appearance/colour-methods.py`).
     pub fn color(self, pal: &Palette) -> Color {
         match self {
-            Self::Connected => pal.green,
+            Self::Connected => pal.ink(pal.green),
             Self::Disconnected => pal.overlay0,
-            Self::Recording => pal.red,
-            Self::Error => pal.yellow,
+            Self::Recording => pal.ink(pal.red),
+            Self::Error => pal.ink(pal.yellow),
         }
     }
 

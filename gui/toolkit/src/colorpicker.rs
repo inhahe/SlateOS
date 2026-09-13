@@ -17,6 +17,7 @@ use core::num::NonZeroUsize;
 
 use crate::color::Color;
 use crate::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use crate::palette::Palette;
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::style::CornerRadii;
 
@@ -24,26 +25,12 @@ use crate::style::CornerRadii;
 // Catppuccin Mocha palette (UI chrome)
 // ============================================================================
 
-/// Base background.
-const COLOR_BASE: Color = Color::from_hex(0x1E1E2E);
-/// Raised surface.
-const COLOR_SURFACE0: Color = Color::from_hex(0x313244);
-/// Higher surface (input fields, selected areas).
-const COLOR_SURFACE1: Color = Color::from_hex(0x45475A);
-/// Overlay / hover highlight.
-const COLOR_SURFACE2: Color = Color::from_hex(0x585B70);
-/// Primary text.
-const COLOR_TEXT: Color = Color::from_hex(0xCDD6F4);
-/// Subdued text.
-const COLOR_SUBTEXT: Color = Color::from_hex(0xA6ADC8);
-/// Accent color.
-const COLOR_BLUE: Color = Color::from_hex(0x89B4FA);
-/// Muted / disabled.
-const COLOR_OVERLAY: Color = Color::from_hex(0x6C7086);
-/// Error / cancel.
-const COLOR_RED: Color = Color::from_hex(0xF38BA8);
-/// Teal accent (used for eyedropper highlight).
-const COLOR_TEAL: Color = Color::from_hex(0x94E2D5);
+// The colours come from the user's palette, threaded in by the caller.
+//
+// Ten Catppuccin Mocha constants used to sit here, so the colour picker was dark on a
+// light desktop. 838 moved `Palette` into this crate so a widget could name
+// one; mapped by value, so a name that said what a colour was *for* becomes
+// the role it always held.
 
 // ============================================================================
 // Layout constants
@@ -612,7 +599,7 @@ impl ColorPicker {
     }
 
     /// Render the compact picker at the given origin. Returns render commands.
-    pub fn render(&self, x: f32, y: f32) -> Vec<RenderCommand> {
+    pub fn render(&self, palette: &Palette, x: f32, y: f32) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
         let sv_size = self.sv_size;
 
@@ -624,7 +611,7 @@ impl ColorPicker {
             y,
             width: total_width + PADDING * 2.0,
             height: total_height + PADDING * 2.0,
-            color: COLOR_BASE,
+            color: palette.base,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
 
@@ -632,22 +619,29 @@ impl ColorPicker {
         let cy = y + PADDING;
 
         // Saturation/Value square
-        self.render_sv_square(&mut cmds, cx, cy, sv_size);
+        self.render_sv_square(palette, &mut cmds, cx, cy, sv_size);
 
         // Hue bar (vertical, to the right of SV square)
         let hue_x = cx + sv_size + PADDING;
-        self.render_hue_bar(&mut cmds, hue_x, cy, HUE_BAR_WIDTH, sv_size);
+        self.render_hue_bar(palette, &mut cmds, hue_x, cy, HUE_BAR_WIDTH, sv_size);
 
         // Preview swatch (to the right of hue bar)
         let preview_x = hue_x + HUE_BAR_WIDTH + PADDING;
-        self.render_preview(&mut cmds, preview_x, cy);
+        self.render_preview(palette, &mut cmds, preview_x, cy);
 
         cmds
     }
 
     // --- Private rendering sub-methods ---
 
-    fn render_sv_square(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, size: f32) {
+    fn render_sv_square(
+        &self,
+        palette: &Palette,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        size: f32,
+    ) {
         // The SV square is a gradient: left-to-right = saturation (0→1),
         // top-to-bottom = value (1→0). The base color is the current hue at
         // full saturation and value.
@@ -678,7 +672,7 @@ impl ColorPicker {
             y,
             width: size,
             height: size,
-            color: COLOR_SURFACE2,
+            color: palette.surface2,
             line_width: 1.0,
             corner_radii: CornerRadii::all(2.0),
         });
@@ -712,6 +706,7 @@ impl ColorPicker {
 
     fn render_hue_bar(
         &self,
+        palette: &Palette,
         cmds: &mut Vec<RenderCommand>,
         x: f32,
         y: f32,
@@ -741,7 +736,7 @@ impl ColorPicker {
             y,
             width,
             height,
-            color: COLOR_SURFACE2,
+            color: palette.surface2,
             line_width: 1.0,
             corner_radii: CornerRadii::all(2.0),
         });
@@ -766,7 +761,7 @@ impl ColorPicker {
         });
     }
 
-    fn render_preview(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32) {
+    fn render_preview(&self, palette: &Palette, cmds: &mut Vec<RenderCommand>, x: f32, y: f32) {
         let current = self.current_color();
 
         // Label
@@ -774,7 +769,7 @@ impl ColorPicker {
             x,
             y: y - 2.0,
             text: String::from("New"),
-            color: COLOR_SUBTEXT,
+            color: palette.subtext0,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -804,7 +799,7 @@ impl ColorPicker {
             x,
             y: orig_y + PREVIEW_SIZE / 2.0 + 4.0,
             text: String::from("Prev"),
-            color: COLOR_SUBTEXT,
+            color: palette.subtext0,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -831,7 +826,7 @@ impl ColorPicker {
             y: swatch_y,
             width: PREVIEW_SIZE,
             height: PREVIEW_SIZE,
-            color: COLOR_SURFACE2,
+            color: palette.surface2,
             line_width: 1.0,
             corner_radii: CornerRadii::all(3.0),
         });
@@ -1109,7 +1104,7 @@ impl ColorPickerDialog {
     }
 
     /// Render the full dialog at the given dimensions.
-    pub fn render(&self, width: f32, height: f32) -> Vec<RenderCommand> {
+    pub fn render(&self, palette: &Palette, width: f32, height: f32) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
         let layout = self.layout(width, height);
 
@@ -1119,7 +1114,7 @@ impl ColorPickerDialog {
             y: 0.0,
             width,
             height,
-            color: COLOR_BASE,
+            color: palette.base,
             corner_radii: CornerRadii::all(CORNER_RADIUS + 2.0),
         });
 
@@ -1129,7 +1124,7 @@ impl ColorPickerDialog {
             y: 0.0,
             width,
             height: TITLE_BAR_HEIGHT,
-            color: COLOR_SURFACE0,
+            color: palette.surface0,
             corner_radii: CornerRadii {
                 top_left: CORNER_RADIUS + 2.0,
                 top_right: CORNER_RADIUS + 2.0,
@@ -1141,7 +1136,7 @@ impl ColorPickerDialog {
             x: PADDING,
             y: 9.0,
             text: String::from("Color Picker"),
-            color: COLOR_TEXT,
+            color: palette.text,
             font_size: 13.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -1150,37 +1145,57 @@ impl ColorPickerDialog {
 
         // --- Left column: SV square + Hue bar ---
         self.picker
-            .render_sv_square(&mut cmds, layout.sv_x, layout.sv_y, layout.sv_size);
+            .render_sv_square(palette, &mut cmds, layout.sv_x, layout.sv_y, layout.sv_size);
         self.picker.render_hue_bar(
+            palette,
             &mut cmds,
             layout.hue_x,
             layout.sv_y,
             HUE_BAR_WIDTH,
             layout.sv_size,
         );
-        self.render_alpha_bar(&mut cmds, layout.sv_x, layout.alpha_y, layout.sv_size);
+        self.render_alpha_bar(
+            palette,
+            &mut cmds,
+            layout.sv_x,
+            layout.alpha_y,
+            layout.sv_size,
+        );
 
         // --- Right column: Preview, hex, eyedropper ---
         self.picker
-            .render_preview(&mut cmds, layout.right_x, layout.sv_y);
-        self.render_hex_input(&mut cmds, layout.right_x, layout.hex_y, layout.right_width);
-        self.render_eyedropper_button(&mut cmds, layout.right_x, layout.eye_y);
+            .render_preview(palette, &mut cmds, layout.right_x, layout.sv_y);
+        self.render_hex_input(
+            palette,
+            &mut cmds,
+            layout.right_x,
+            layout.hex_y,
+            layout.right_width,
+        );
+        self.render_eyedropper_button(palette, &mut cmds, layout.right_x, layout.eye_y);
 
         // --- Slider section ---
-        self.render_slider_tabs(&mut cmds, layout.slider_y);
-        self.render_sliders(&mut cmds, &layout);
+        self.render_slider_tabs(palette, &mut cmds, layout.slider_y);
+        self.render_sliders(palette, &mut cmds, &layout);
 
         // --- Preset palette, recent colours, buttons ---
-        self.render_preset_palette(&mut cmds, &layout);
-        self.render_recent_colors(&mut cmds, &layout);
-        self.render_bottom_buttons(&mut cmds, layout.button_y, layout.width);
+        self.render_preset_palette(palette, &mut cmds, &layout);
+        self.render_recent_colors(palette, &mut cmds, &layout);
+        self.render_bottom_buttons(palette, &mut cmds, layout.button_y, layout.width);
 
         cmds
     }
 
     // --- Private dialog-specific rendering ---
 
-    fn render_alpha_bar(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32) {
+    fn render_alpha_bar(
+        &self,
+        palette: &Palette,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+    ) {
         // Checkerboard background to show transparency
         render_checkerboard(cmds, x, y, width, ALPHA_BAR_HEIGHT);
 
@@ -1207,7 +1222,7 @@ impl ColorPickerDialog {
             y,
             width,
             height: ALPHA_BAR_HEIGHT,
-            color: COLOR_SURFACE2,
+            color: palette.surface2,
             line_width: 1.0,
             corner_radii: CornerRadii::all(2.0),
         });
@@ -1237,7 +1252,7 @@ impl ColorPickerDialog {
             x: x + width + 6.0,
             y: y + 2.0,
             text: format!("A: {}", self.picker.alpha),
-            color: COLOR_SUBTEXT,
+            color: palette.subtext0,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1245,13 +1260,20 @@ impl ColorPickerDialog {
         });
     }
 
-    fn render_hex_input(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32) {
+    fn render_hex_input(
+        &self,
+        palette: &Palette,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+    ) {
         // Label
         cmds.push(RenderCommand::Text {
             x,
             y,
             text: String::from("Hex:"),
-            color: COLOR_SUBTEXT,
+            color: palette.subtext0,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1262,9 +1284,9 @@ impl ColorPickerDialog {
         let input_x = x + 32.0;
         let input_width = width - 32.0;
         let border_color = if self.picker.hex_focused {
-            COLOR_BLUE
+            palette.blue
         } else {
-            COLOR_SURFACE2
+            palette.surface2
         };
 
         cmds.push(RenderCommand::FillRect {
@@ -1272,7 +1294,7 @@ impl ColorPickerDialog {
             y: y - 2.0,
             width: input_width,
             height: 22.0,
-            color: COLOR_SURFACE1,
+            color: palette.surface1,
             corner_radii: CornerRadii::all(3.0),
         });
         cmds.push(RenderCommand::StrokeRect {
@@ -1290,7 +1312,7 @@ impl ColorPickerDialog {
             x: input_x + 4.0,
             y: y + 2.0,
             text: String::from("#"),
-            color: COLOR_OVERLAY,
+            color: palette.overlay0,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1301,7 +1323,7 @@ impl ColorPickerDialog {
             x: input_x + 14.0,
             y: y + 2.0,
             text: self.picker.hex_input.clone(),
-            color: COLOR_TEXT,
+            color: palette.text,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(input_width - 20.0),
@@ -1309,14 +1331,24 @@ impl ColorPickerDialog {
         });
     }
 
-    fn render_eyedropper_button(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32) {
+    fn render_eyedropper_button(
+        &self,
+        palette: &Palette,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+    ) {
         let is_active = self.picker.mode == PickerMode::Eyedropper;
         let bg = if is_active {
-            COLOR_TEAL
+            palette.teal
         } else {
-            COLOR_SURFACE1
+            palette.surface1
         };
-        let text_color = if is_active { COLOR_BASE } else { COLOR_TEXT };
+        let text_color = if is_active {
+            palette.base
+        } else {
+            palette.text
+        };
 
         cmds.push(RenderCommand::FillRect {
             x,
@@ -1343,7 +1375,7 @@ impl ColorPickerDialog {
     /// This was the two tabs written out one after the other, with the second
     /// one's x offset — the 46 that `DialogLayout::slider_tab_x` now owns —
     /// spelled as a literal here and again in the hit-test.
-    fn render_slider_tabs(&self, cmds: &mut Vec<RenderCommand>, y: f32) {
+    fn render_slider_tabs(&self, palette: &Palette, cmds: &mut Vec<RenderCommand>, y: f32) {
         let (tab_w, tab_h) = SLIDER_TAB_SIZE;
         for (tab, label) in [(SliderTab::Rgb, "RGB"), (SliderTab::Hsv, "HSV")] {
             let active = self.slider_tab == tab;
@@ -1353,14 +1385,18 @@ impl ColorPickerDialog {
                 y,
                 width: tab_w,
                 height: tab_h,
-                color: if active { COLOR_BLUE } else { COLOR_SURFACE1 },
+                color: if active {
+                    palette.blue
+                } else {
+                    palette.surface1
+                },
                 corner_radii: CornerRadii::all(3.0),
             });
             cmds.push(RenderCommand::Text {
                 x: x + 8.0,
                 y: y + 5.0,
                 text: String::from(label),
-                color: if active { COLOR_BASE } else { COLOR_TEXT },
+                color: if active { palette.base } else { palette.text },
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
@@ -1374,7 +1410,12 @@ impl ColorPickerDialog {
     /// This was six calls written out one under the other, each repeating the
     /// row offset for its position. The row offsets now come from the layout,
     /// which is where the hit-test gets them too.
-    fn render_sliders(&self, cmds: &mut Vec<RenderCommand>, layout: &DialogLayout) {
+    fn render_sliders(
+        &self,
+        palette: &Palette,
+        cmds: &mut Vec<RenderCommand>,
+        layout: &DialogLayout,
+    ) {
         let hsv = self.picker.hsv;
         match self.slider_tab {
             SliderTab::Rgb => {
@@ -1386,6 +1427,7 @@ impl ColorPickerDialog {
                 ] {
                     let fraction = f32::from(value) / 255.0;
                     self.render_channel_slider(
+                        palette,
                         cmds,
                         layout,
                         row,
@@ -1399,12 +1441,15 @@ impl ColorPickerDialog {
             SliderTab::Hsv => {
                 // Hue gets a rainbow track rather than a single-colour fill,
                 // and its readout runs to 360 rather than 255.
-                self.render_hue_slider(cmds, layout, hsv.h / 360.0, hsv.h as u16);
-                for (row, label, color, fraction) in
-                    [(1u8, "S", COLOR_BLUE, hsv.s), (2, "V", Color::WHITE, hsv.v)]
-                {
+                self.render_hue_slider(palette, cmds, layout, hsv.h / 360.0, hsv.h as u16);
+                for (row, label, color, fraction) in [
+                    (1u8, "S", palette.blue, hsv.s),
+                    (2, "V", Color::WHITE, hsv.v),
+                ] {
                     let display = (fraction * 100.0 + 0.5) as u16;
-                    self.render_channel_slider(cmds, layout, row, label, fraction, color, display);
+                    self.render_channel_slider(
+                        palette, cmds, layout, row, label, fraction, color, display,
+                    );
                 }
             }
         }
@@ -1418,6 +1463,7 @@ impl ColorPickerDialog {
     /// exactly what was drawn.
     fn render_channel_slider(
         &self,
+        palette: &Palette,
         cmds: &mut Vec<RenderCommand>,
         layout: &DialogLayout,
         row: u8,
@@ -1434,7 +1480,7 @@ impl ColorPickerDialog {
             x: PADDING,
             y: y + 2.0,
             text: label.to_string(),
-            color: COLOR_SUBTEXT,
+            color: palette.subtext0,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -1448,7 +1494,7 @@ impl ColorPickerDialog {
             y: track_y,
             width: track_width,
             height: SLIDER_TRACK_HEIGHT,
-            color: COLOR_SURFACE1,
+            color: palette.surface1,
             corner_radii: CornerRadii::all(SLIDER_TRACK_HEIGHT / 2.0),
         });
 
@@ -1479,7 +1525,7 @@ impl ColorPickerDialog {
             y: y + 1.0,
             width: thumb_size,
             height: thumb_size,
-            color: COLOR_SURFACE2,
+            color: palette.surface2,
             line_width: 1.0,
             corner_radii: CornerRadii::all(thumb_size / 2.0),
         });
@@ -1489,7 +1535,7 @@ impl ColorPickerDialog {
             x: track_x + track_width + 4.0,
             y: y + 2.0,
             text: format!("{value_display}"),
-            color: COLOR_TEXT,
+            color: palette.text,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1502,6 +1548,7 @@ impl ColorPickerDialog {
     /// Hue always occupies the first row of the HSV tab.
     fn render_hue_slider(
         &self,
+        palette: &Palette,
         cmds: &mut Vec<RenderCommand>,
         layout: &DialogLayout,
         fraction: f32,
@@ -1515,7 +1562,7 @@ impl ColorPickerDialog {
             x: PADDING,
             y: y + 2.0,
             text: String::from("H"),
-            color: COLOR_SUBTEXT,
+            color: palette.subtext0,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -1571,7 +1618,7 @@ impl ColorPickerDialog {
             y: y + 1.0,
             width: thumb_size,
             height: thumb_size,
-            color: COLOR_SURFACE2,
+            color: palette.surface2,
             line_width: 1.0,
             corner_radii: CornerRadii::all(thumb_size / 2.0),
         });
@@ -1581,7 +1628,7 @@ impl ColorPickerDialog {
             x: track_x + track_width + 4.0,
             y: y + 2.0,
             text: format!("{value_display}"),
-            color: COLOR_TEXT,
+            color: palette.text,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1589,13 +1636,18 @@ impl ColorPickerDialog {
         });
     }
 
-    fn render_preset_palette(&self, cmds: &mut Vec<RenderCommand>, layout: &DialogLayout) {
+    fn render_preset_palette(
+        &self,
+        palette: &Palette,
+        cmds: &mut Vec<RenderCommand>,
+        layout: &DialogLayout,
+    ) {
         // Section label
         cmds.push(RenderCommand::Text {
             x: PADDING,
             y: layout.preset_y,
             text: String::from("Presets"),
-            color: COLOR_SUBTEXT,
+            color: palette.subtext0,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -1630,7 +1682,12 @@ impl ColorPickerDialog {
         }
     }
 
-    fn render_recent_colors(&self, cmds: &mut Vec<RenderCommand>, layout: &DialogLayout) {
+    fn render_recent_colors(
+        &self,
+        palette: &Palette,
+        cmds: &mut Vec<RenderCommand>,
+        layout: &DialogLayout,
+    ) {
         if self.picker.recent_colors.is_empty() {
             return;
         }
@@ -1640,7 +1697,7 @@ impl ColorPickerDialog {
             x: PADDING,
             y: layout.recent_y,
             text: String::from("Recent"),
-            color: COLOR_SUBTEXT,
+            color: palette.subtext0,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -1660,7 +1717,13 @@ impl ColorPickerDialog {
         }
     }
 
-    fn render_bottom_buttons(&self, cmds: &mut Vec<RenderCommand>, y: f32, width: f32) {
+    fn render_bottom_buttons(
+        &self,
+        palette: &Palette,
+        cmds: &mut Vec<RenderCommand>,
+        y: f32,
+        width: f32,
+    ) {
         let btn_width = 70.0;
         let btn_height = 28.0;
 
@@ -1671,14 +1734,14 @@ impl ColorPickerDialog {
             y,
             width: btn_width,
             height: btn_height,
-            color: COLOR_BLUE,
+            color: palette.blue,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
         cmds.push(RenderCommand::Text {
             x: ok_x + (btn_width - 16.0) / 2.0,
             y: y + 8.0,
             text: String::from("OK"),
-            color: COLOR_BASE,
+            color: palette.base,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -1692,14 +1755,14 @@ impl ColorPickerDialog {
             y,
             width: btn_width,
             height: btn_height,
-            color: COLOR_SURFACE1,
+            color: palette.surface1,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
         cmds.push(RenderCommand::Text {
             x: cancel_x + (btn_width - 42.0) / 2.0,
             y: y + 8.0,
             text: String::from("Cancel"),
-            color: COLOR_RED,
+            color: palette.ink(palette.red),
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -2057,6 +2120,7 @@ mod tests {
     /// return a different colour at any other.
     #[test]
     fn every_preset_swatch_is_clickable_where_it_was_drawn() {
+        let palette = Palette::for_mode(false);
         for width in [320.0, 400.0, 640.0] {
             let mut dialog = ColorPickerDialog::new(Color::rgb(1, 2, 3));
             let layout = dialog.layout(width, 600.0);
@@ -2065,7 +2129,7 @@ mod tests {
                 .collect();
 
             // The renderer really did fill a square at each of those points.
-            let cmds = dialog.render(width, 600.0);
+            let cmds = dialog.render(&palette, width, 600.0);
             for (i, &(sx, sy)) in drawn.iter().enumerate() {
                 assert!(
                     cmds.iter().any(|c| matches!(c, RenderCommand::FillRect {
@@ -2461,8 +2525,9 @@ mod tests {
 
     #[test]
     fn test_dialog_render_produces_commands() {
+        let palette = Palette::for_mode(false);
         let dialog = ColorPickerDialog::new(Color::rgb(128, 64, 200));
-        let cmds = dialog.render(400.0, 600.0);
+        let cmds = dialog.render(&palette, 400.0, 600.0);
         assert!(!cmds.is_empty());
         // Should have at least background + title + SV square cells
         assert!(cmds.len() > 50);
@@ -2470,8 +2535,9 @@ mod tests {
 
     #[test]
     fn test_compact_picker_render() {
+        let palette = Palette::for_mode(false);
         let picker = ColorPicker::compact(Color::rgb(200, 100, 50));
-        let cmds = picker.render(10.0, 10.0);
+        let cmds = picker.render(&palette, 10.0, 10.0);
         assert!(!cmds.is_empty());
     }
 

@@ -7,6 +7,7 @@
 
 use crate::color::Color;
 use crate::event::{Key, KeyEvent};
+use crate::palette::Palette;
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::row_strip::RowStrip;
 use crate::scrollbar;
@@ -15,22 +16,23 @@ use crate::style::CornerRadii;
 
 // ─── Catppuccin Mocha palette ───────────────────────────────────────────────
 
-/// Dark background for menus and tooltips.
-const BG_COLOR: Color = Color::from_hex(0x1E1E2E);
-/// Slightly lighter surface for hover highlights.
-const HOVER_COLOR: Color = Color::from_hex(0x313244);
-/// Primary text color (light).
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-/// Dimmed text for disabled items and secondary info.
-const DIM_TEXT_COLOR: Color = Color::from_hex(0x6C7086);
-/// Accent color for checkmarks and active indicators.
-const ACCENT_COLOR: Color = Color::from_hex(0x89B4FA);
-/// Separator line color.
-const SEPARATOR_COLOR: Color = Color::from_hex(0x45475A);
+// The colours come from the user's palette, threaded in by the caller.
+//
+// Twelve Catppuccin Mocha constants used to sit here, so a context menu or a tooltip
+// was dark on a light desktop. 838 moved `Palette` into this crate so a
+// widget could name one.
+//
+// Mapped by *value*, which is why two purpose-names can land on one role:
+// they were one colour all along. `palette.surface1` is `surface1` and
+// deliberately not the palette's `border` role -- that role is `text`, a
+// far heavier line than the pale grey a menu outlines itself with today,
+// and mapping to it would be a redesign wearing the clothes of a
+// conversion.
+//
+// The shadows stay: black at an alpha is what casts one.
+
 /// Shadow color (semi-transparent black).
 const SHADOW_COLOR: Color = Color::rgba(0, 0, 0, 160);
-/// Border color for menu outline.
-const BORDER_COLOR: Color = Color::from_hex(0x45475A);
 
 // ─── Layout constants ───────────────────────────────────────────────────────
 
@@ -56,10 +58,6 @@ const SCROLLBAR_INSET: f32 = 2.0;
 /// otherwise draw a thumb under a pixel tall, which is the same as drawing
 /// nothing — and the point of the indicator is to say "there is more here".
 const SCROLLBAR_MIN_THUMB: f32 = 16.0;
-/// Track behind the scroll thumb.
-const SCROLLBAR_TRACK_COLOR: Color = Color::from_hex(0x313244);
-/// The thumb itself.
-const SCROLLBAR_THUMB_COLOR: Color = Color::from_hex(0x585B70);
 
 // ─── Viewport bounds (used for edge-flip logic) ─────────────────────────────
 
@@ -442,7 +440,7 @@ impl ContextMenu {
     }
 
     /// Produce render commands for this menu and any open submenus.
-    pub fn render(&self) -> Vec<RenderCommand> {
+    pub fn render(&self, palette: &Palette) -> Vec<RenderCommand> {
         if !self.visible {
             return Vec::new();
         }
@@ -471,7 +469,7 @@ impl ContextMenu {
             y: self.y,
             width: self.width,
             height: panel_height,
-            color: BG_COLOR,
+            color: palette.base,
             corner_radii: radii,
         });
 
@@ -481,7 +479,7 @@ impl ContextMenu {
             y: self.y,
             width: self.width,
             height: panel_height,
-            color: BORDER_COLOR,
+            color: palette.surface1,
             line_width: 1.0,
             corner_radii: radii,
         });
@@ -519,7 +517,7 @@ impl ContextMenu {
                         y1: line_y,
                         x2: self.x + self.width - HORIZONTAL_PADDING,
                         y2: line_y,
-                        color: SEPARATOR_COLOR,
+                        color: palette.surface1,
                         width: 1.0,
                     });
                 }
@@ -537,12 +535,16 @@ impl ContextMenu {
                             y: current_y,
                             width: self.width - 8.0,
                             height: ITEM_HEIGHT,
-                            color: HOVER_COLOR,
+                            color: palette.surface0,
                             corner_radii: CornerRadii::all(4.0),
                         });
                     }
 
-                    let text_color = if *enabled { TEXT_COLOR } else { DIM_TEXT_COLOR };
+                    let text_color = if *enabled {
+                        palette.text
+                    } else {
+                        palette.overlay0
+                    };
                     let text_y = current_y + (ITEM_HEIGHT - FONT_SIZE) / 2.0;
 
                     // Check mark.
@@ -551,7 +553,7 @@ impl ContextMenu {
                             x: self.x + HORIZONTAL_PADDING + 4.0,
                             y: text_y,
                             text: "\u{2713}".to_string(), // checkmark
-                            color: ACCENT_COLOR,
+                            color: palette.ink(palette.blue),
                             font_size: FONT_SIZE,
                             font_weight: FontWeightHint::Bold,
                             max_width: None,
@@ -579,7 +581,7 @@ impl ContextMenu {
                                 - Self::estimate_text_width(shortcut_text, FONT_SIZE),
                             y: text_y,
                             text: shortcut_text.clone(),
-                            color: DIM_TEXT_COLOR,
+                            color: palette.overlay0,
                             font_size: FONT_SIZE,
                             font_weight: FontWeightHint::Regular,
                             max_width: None,
@@ -595,12 +597,16 @@ impl ContextMenu {
                             y: current_y,
                             width: self.width - 8.0,
                             height: ITEM_HEIGHT,
-                            color: HOVER_COLOR,
+                            color: palette.surface0,
                             corner_radii: CornerRadii::all(4.0),
                         });
                     }
 
-                    let text_color = if *enabled { TEXT_COLOR } else { DIM_TEXT_COLOR };
+                    let text_color = if *enabled {
+                        palette.text
+                    } else {
+                        palette.overlay0
+                    };
                     let text_y = current_y + (ITEM_HEIGHT - FONT_SIZE) / 2.0;
 
                     // Label.
@@ -643,7 +649,7 @@ impl ContextMenu {
                 y: view_top,
                 width: SCROLLBAR_WIDTH,
                 height: track_height,
-                color: SCROLLBAR_TRACK_COLOR,
+                color: palette.surface0,
                 corner_radii: CornerRadii::all(SCROLLBAR_WIDTH / 2.0),
             });
             // The thumb is as tall a fraction of the track as the panel is of
@@ -673,14 +679,14 @@ impl ContextMenu {
                 y: thumb.y,
                 width: thumb.w,
                 height: thumb.h,
-                color: SCROLLBAR_THUMB_COLOR,
+                color: palette.surface2,
                 corner_radii: CornerRadii::all(SCROLLBAR_WIDTH / 2.0),
             });
         }
 
         // Render open submenu on top.
         if let Some((_, ref submenu)) = self.open_submenu {
-            cmds.extend(submenu.render());
+            cmds.extend(submenu.render(palette));
         }
 
         cmds
@@ -917,9 +923,6 @@ impl ContextMenu {
 
 // ─── Tooltip ────────────────────────────────────────────────────────────────
 
-const TOOLTIP_BG: Color = Color::from_hex(0x1E1E2E);
-const TOOLTIP_TEXT: Color = Color::from_hex(0xCDD6F4);
-const TOOLTIP_BORDER: Color = Color::from_hex(0x45475A);
 const TOOLTIP_SHADOW: Color = Color::rgba(0, 0, 0, 120);
 const TOOLTIP_FONT_SIZE: f32 = 12.0;
 const TOOLTIP_PADDING: f32 = 6.0;
@@ -1016,7 +1019,7 @@ impl Tooltip {
     }
 
     /// Produce render commands for the tooltip.
-    pub fn render(&self) -> Vec<RenderCommand> {
+    pub fn render(&self, palette: &Palette) -> Vec<RenderCommand> {
         if !self.visible {
             return Vec::new();
         }
@@ -1046,7 +1049,7 @@ impl Tooltip {
             y: self.y,
             width,
             height,
-            color: TOOLTIP_BG,
+            color: palette.base,
             corner_radii: radii,
         });
 
@@ -1056,7 +1059,7 @@ impl Tooltip {
             y: self.y,
             width,
             height,
-            color: TOOLTIP_BORDER,
+            color: palette.surface1,
             line_width: 1.0,
             corner_radii: radii,
         });
@@ -1069,7 +1072,7 @@ impl Tooltip {
                 x: self.x + TOOLTIP_PADDING,
                 y: text_y,
                 text: line.clone(),
-                color: TOOLTIP_TEXT,
+                color: palette.text,
                 font_size: TOOLTIP_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(self.max_width),
@@ -1244,8 +1247,9 @@ mod tests {
     /// The `(top, height)` of whatever hover highlight the menu is currently
     /// painting, if any.
     fn hover_highlight(menu: &ContextMenu) -> Option<(f32, f32)> {
+        let palette = Palette::for_mode(false);
         let (x, w) = (menu.x + 4.0, menu.width - 8.0);
-        menu.render().into_iter().find_map(|cmd| match cmd {
+        menu.render(&palette).into_iter().find_map(|cmd| match cmd {
             // Exact equality on purpose: these are the very floats the
             // renderer pushed, not a measurement of them.
             RenderCommand::FillRect {
@@ -1255,7 +1259,7 @@ mod tests {
                 height,
                 color,
                 ..
-            } if rx == x && width == w && color == HOVER_COLOR => Some((y, height)),
+            } if rx == x && width == w && color == palette.surface0 => Some((y, height)),
             _ => None,
         })
     }
@@ -1264,7 +1268,8 @@ mod tests {
     /// is the render tree's own statement of where the rows are, which is what
     /// the hit test then has to agree with.
     fn painted_clip(menu: &ContextMenu) -> (f32, f32) {
-        menu.render()
+        let palette = Palette::for_mode(false);
+        menu.render(&palette)
             .into_iter()
             .find_map(|cmd| match cmd {
                 RenderCommand::PushClip { y, height, .. } => Some((y, y + height)),
@@ -1277,16 +1282,17 @@ mod tests {
     /// `None` when the menu paints none — which is what a menu that fits does.
     #[allow(clippy::type_complexity)]
     fn scrollbar_rects(menu: &ContextMenu) -> Option<((f32, f32), (f32, f32))> {
+        let palette = Palette::for_mode(false);
         let mut track = None;
         let mut thumb = None;
-        for cmd in menu.render() {
+        for cmd in menu.render(&palette) {
             if let RenderCommand::FillRect {
                 y, height, color, ..
             } = cmd
             {
-                if color == SCROLLBAR_TRACK_COLOR {
+                if color == palette.surface0 {
                     track = Some((y, height));
-                } else if color == SCROLLBAR_THUMB_COLOR {
+                } else if color == palette.surface2 {
                     thumb = Some((y, height));
                 }
             }
@@ -1313,10 +1319,11 @@ mod tests {
 
     /// The y of every separator line the menu paints, in order.
     fn painted_separator_lines(menu: &ContextMenu) -> Vec<f32> {
-        menu.render()
+        let palette = Palette::for_mode(false);
+        menu.render(&palette)
             .into_iter()
             .filter_map(|cmd| match cmd {
-                RenderCommand::Line { y1, color, .. } if color == SEPARATOR_COLOR => Some(y1),
+                RenderCommand::Line { y1, color, .. } if color == palette.surface1 => Some(y1),
                 _ => None,
             })
             .collect()
@@ -2089,19 +2096,21 @@ mod tests {
 
     #[test]
     fn tooltip_render_empty_when_hidden() {
+        let palette = Palette::for_mode(false);
         let tooltip = Tooltip::new("Hidden tooltip");
-        let cmds = tooltip.render();
+        let cmds = tooltip.render(&palette);
         assert!(cmds.is_empty());
     }
 
     #[test]
     fn tooltip_render_produces_commands_when_visible() {
+        let palette = Palette::for_mode(false);
         let mut tooltip = Tooltip::new("Visible tooltip");
         tooltip.start_hover(50.0, 50.0, 0);
         tooltip.tick(600);
         assert!(tooltip.is_visible());
 
-        let cmds = tooltip.render();
+        let cmds = tooltip.render(&palette);
         // Should have shadow, background, border, and at least one text command.
         assert!(cmds.len() >= 4);
     }

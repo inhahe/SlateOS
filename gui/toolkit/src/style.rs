@@ -204,6 +204,18 @@ pub struct Style {
     // Foreground (text color)
     pub foreground: Color,
 
+    /// What a selection inside this widget is painted in, and what selected
+    /// text is drawn in over it.
+    ///
+    /// Defaults here for the same reason `foreground` defaults to black: a
+    /// `Style` is a complete description and a caller that has the user's
+    /// palette overwrites it. The defaults are the Windows selection blue
+    /// this toolkit shipped before 838, kept so a caller that sets neither
+    /// looks exactly as it did.
+    pub selection_bg: Color,
+    /// See [`selection_bg`](Self::selection_bg).
+    pub selection_fg: Color,
+
     // Padding (inside border)
     pub padding: Edges,
 
@@ -241,6 +253,8 @@ impl Default for Style {
         Self {
             background: Color::TRANSPARENT,
             foreground: Color::BLACK,
+            selection_bg: Color::from_hex(0x0078D7),
+            selection_fg: Color::WHITE,
             padding: Edges::ZERO,
             margin: Edges::ZERO,
             border: Borders::default(),

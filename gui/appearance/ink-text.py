@@ -280,7 +280,11 @@ def stray_inks(path):
     lines = path.read_text(encoding="utf-8").splitlines()
     out = []
     seen = 0
-    for i, line in enumerate(lines):
+    # Production code only. A test may legitimately ask for an ink while
+    # asserting about something that is not a `Text` -- `launcher`'s badge
+    # tests compare a wash against the inked hue it is derived from -- and
+    # reporting those made the gate cry wolf on its own fixtures.
+    for i, line in enumerate(lines[: production_end(lines)]):
         if ".ink(" not in line or line.lstrip().startswith("//"):
             continue
         seen += 1

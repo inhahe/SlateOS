@@ -2372,7 +2372,7 @@ impl Dictionary {
                 r.y + r.h * 0.5 - text::line_height(l.small, FontWeightHint::Regular),
                 short.short(),
                 l.small,
-                short.color(&self.palette),
+                self.palette.ink(short.color(&self.palette)),
                 FontWeightHint::Regular,
                 Some(w),
             );

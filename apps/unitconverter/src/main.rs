@@ -1230,7 +1230,9 @@ impl UnitConverterApp {
             x: main_left + 24.0,
             y: 20.0,
             text: String::from(self.selected_category.name()),
-            color: accent,
+            // `accent` fills elsewhere in this app, so the ink goes on the
+            // one use that is text rather than on the method. 837.
+            color: self.palette.ink(accent),
             font_size: 20.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(main_width - 80.0),

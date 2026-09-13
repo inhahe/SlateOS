@@ -9,6 +9,7 @@
 
 use crate::color::Color;
 use crate::event::{EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use crate::palette::Palette;
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::row_strip::RowStrip;
 use crate::scrollbar;
@@ -21,17 +22,22 @@ pub use crate::menu::MenuItemId;
 
 // ─── Catppuccin Mocha palette ──────────────────────────────────────────────
 
-const BAR_BG: Color = Color::from_hex(0x1E1E2E);
-const BAR_ACTIVE_BG: Color = Color::from_hex(0x313244);
-const DROPDOWN_BG: Color = Color::from_hex(0x1E1E2E);
-const HOVER_COLOR: Color = Color::from_hex(0x313244);
-const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-const DIM_TEXT_COLOR: Color = Color::from_hex(0x6C7086);
-const ACCENT_COLOR: Color = Color::from_hex(0x89B4FA);
-const SEPARATOR_COLOR: Color = Color::from_hex(0x45475A);
-const BORDER_COLOR: Color = Color::from_hex(0x45475A);
+// The colours come from the user's palette, threaded in by the caller.
+//
+// Twelve Catppuccin Mocha constants used to sit here, so a menu bar or its dropdown
+// was dark on a light desktop. 838 moved `Palette` into this crate so a
+// widget could name one.
+//
+// Mapped by *value*, which is why two purpose-names can land on one role:
+// they were one colour all along. `palette.surface1` is `surface1` and
+// deliberately not the palette's `border` role -- that role is `text`, a
+// far heavier line than the pale grey a menu outlines itself with today,
+// and mapping to it would be a redesign wearing the clothes of a
+// conversion.
+//
+// The shadows stay: black at an alpha is what casts one.
+
 const SHADOW_COLOR: Color = Color::rgba(0, 0, 0, 160);
-const MNEMONIC_UNDERLINE: Color = Color::from_hex(0xCDD6F4);
 
 // ─── Layout constants ──────────────────────────────────────────────────────
 
@@ -79,10 +85,6 @@ const SCROLLBAR_WIDTH: f32 = 4.0;
 const SCROLLBAR_INSET: f32 = 2.0;
 /// Shortest the thumb may get, so a two-hundred-row menu still shows one.
 const SCROLLBAR_MIN_THUMB: f32 = 16.0;
-/// Track behind the scroll thumb.
-const SCROLLBAR_TRACK_COLOR: Color = Color::from_hex(0x313244);
-/// The thumb itself.
-const SCROLLBAR_THUMB_COLOR: Color = Color::from_hex(0x585B70);
 
 /// Underline thickness drawn beneath mnemonic characters.
 const MNEMONIC_UNDERLINE_THICKNESS: f32 = 1.0;
@@ -869,7 +871,7 @@ impl MenuBar {
     ///
     /// `bar_width` is the full width of the window (the bar stretches edge to
     /// edge).
-    pub fn render(&self, bar_width: u32) -> Vec<RenderCommand> {
+    pub fn render(&self, palette: &Palette, bar_width: u32) -> Vec<RenderCommand> {
         let bar_w = bar_width as f32;
         let mut cmds = Vec::new();
 
@@ -879,7 +881,7 @@ impl MenuBar {
             y: 0.0,
             width: bar_w,
             height: BAR_HEIGHT,
-            color: BAR_BG,
+            color: palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -889,7 +891,7 @@ impl MenuBar {
             y1: BAR_HEIGHT,
             x2: bar_w,
             y2: BAR_HEIGHT,
-            color: BORDER_COLOR,
+            color: palette.surface1,
             width: 1.0,
         });
 
@@ -903,7 +905,7 @@ impl MenuBar {
                     y: 0.0,
                     width: *w,
                     height: BAR_HEIGHT,
-                    color: BAR_ACTIVE_BG,
+                    color: palette.surface0,
                     corner_radii: CornerRadii::ZERO,
                 });
             }
@@ -915,7 +917,7 @@ impl MenuBar {
                 x: text_x,
                 y: text_y,
                 text: parsed.text.clone(),
-                color: TEXT_COLOR,
+                color: palette.text,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -944,7 +946,7 @@ impl MenuBar {
                     y1: ul_y,
                     x2: text_x + prefix_w + char_w,
                     y2: ul_y,
-                    color: MNEMONIC_UNDERLINE,
+                    color: palette.text,
                     width: MNEMONIC_UNDERLINE_THICKNESS,
                 });
             }
@@ -952,7 +954,7 @@ impl MenuBar {
 
         // --- Open dropdown ---
         if let Some(top_idx) = self.open_index {
-            self.render_dropdown(&mut cmds, top_idx);
+            self.render_dropdown(palette, &mut cmds, top_idx);
         }
 
         cmds
@@ -960,16 +962,16 @@ impl MenuBar {
 
     // ─── Private: dropdown rendering ───────────────────────────────────
 
-    fn render_dropdown(&self, cmds: &mut Vec<RenderCommand>, top_idx: usize) {
+    fn render_dropdown(&self, palette: &Palette, cmds: &mut Vec<RenderCommand>, top_idx: usize) {
         let panel = self.dropdown_panel(top_idx);
         let children = children_of(&self.items, top_idx);
 
-        render_panel(cmds, &panel);
-        render_entries(cmds, children, &panel, self.dropdown_hover);
+        render_panel(palette, cmds, &panel);
+        render_entries(palette, cmds, children, &panel, self.dropdown_hover);
 
         // Submenu chain.
         if let Some(ref sub) = self.open_submenu {
-            render_submenu_chain(cmds, children, sub);
+            render_submenu_chain(palette, cmds, children, sub);
         }
     }
 
@@ -1335,6 +1337,7 @@ fn scroll_in_submenu_chain(
 /// each node against the root's children again. `parent_entries` means what it
 /// does in [`click_in_submenu_chain`].
 fn render_submenu_chain(
+    palette: &Palette,
     cmds: &mut Vec<RenderCommand>,
     parent_entries: &[MenuBarEntry],
     sub: &OpenSubmenu,
@@ -1342,11 +1345,11 @@ fn render_submenu_chain(
     let entries = resolve_submenu_entries(parent_entries, sub);
     let panel = submenu_panel(&entries, sub);
 
-    render_panel(cmds, &panel);
-    render_entries(cmds, &entries, &panel, sub.hover_index);
+    render_panel(palette, cmds, &panel);
+    render_entries(palette, cmds, &entries, &panel, sub.hover_index);
 
     if let Some(ref child) = sub.child {
-        render_submenu_chain(cmds, &entries, child);
+        render_submenu_chain(palette, cmds, &entries, child);
     }
 }
 
@@ -1555,7 +1558,7 @@ fn jump_to_letter(entries: &[MenuBarEntry], ch: char) -> Option<usize> {
 }
 
 /// Render the shadow + background + border for a dropdown panel.
-fn render_panel(cmds: &mut Vec<RenderCommand>, panel: &DropdownPanel) {
+fn render_panel(palette: &Palette, cmds: &mut Vec<RenderCommand>, panel: &DropdownPanel) {
     let (x, y, w, h) = (panel.x, panel.y, panel.width, panel.panel_height);
     let radii = CornerRadii::all(CORNER_RADIUS);
 
@@ -1577,7 +1580,7 @@ fn render_panel(cmds: &mut Vec<RenderCommand>, panel: &DropdownPanel) {
         y,
         width: w,
         height: h,
-        color: DROPDOWN_BG,
+        color: palette.base,
         corner_radii: radii,
     });
 
@@ -1586,7 +1589,7 @@ fn render_panel(cmds: &mut Vec<RenderCommand>, panel: &DropdownPanel) {
         y,
         width: w,
         height: h,
-        color: BORDER_COLOR,
+        color: palette.surface1,
         line_width: 1.0,
         corner_radii: radii,
     });
@@ -1594,6 +1597,7 @@ fn render_panel(cmds: &mut Vec<RenderCommand>, panel: &DropdownPanel) {
 
 /// Render the item rows inside a dropdown or submenu panel.
 fn render_entries(
+    palette: &Palette,
     cmds: &mut Vec<RenderCommand>,
     entries: &[MenuBarEntry],
     panel: &DropdownPanel,
@@ -1633,7 +1637,7 @@ fn render_entries(
                     y1: line_y,
                     x2: panel_x + panel_w - DROPDOWN_HPAD,
                     y2: line_y,
-                    color: SEPARATOR_COLOR,
+                    color: palette.surface1,
                     width: 1.0,
                 });
             }
@@ -1650,12 +1654,16 @@ fn render_entries(
                         y: cur_y,
                         width: panel_w - 8.0,
                         height: ITEM_HEIGHT,
-                        color: HOVER_COLOR,
+                        color: palette.surface0,
                         corner_radii: CornerRadii::all(ITEM_HOVER_RADIUS),
                     });
                 }
 
-                let tc = if *enabled { TEXT_COLOR } else { DIM_TEXT_COLOR };
+                let tc = if *enabled {
+                    palette.text
+                } else {
+                    palette.overlay0
+                };
                 let text_y = cur_y + (ITEM_HEIGHT - FONT_SIZE) / 2.0;
 
                 cmds.push(RenderCommand::Text {
@@ -1674,7 +1682,7 @@ fn render_entries(
                         x: panel_x + panel_w - DROPDOWN_HPAD - estimate_text_width(sc, FONT_SIZE),
                         y: text_y,
                         text: sc.clone(),
-                        color: DIM_TEXT_COLOR,
+                        color: palette.overlay0,
                         font_size: FONT_SIZE,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
@@ -1690,7 +1698,7 @@ fn render_entries(
                         y: cur_y,
                         width: panel_w - 8.0,
                         height: ITEM_HEIGHT,
-                        color: HOVER_COLOR,
+                        color: palette.surface0,
                         corner_radii: CornerRadii::all(ITEM_HOVER_RADIUS),
                     });
                 }
@@ -1702,7 +1710,7 @@ fn render_entries(
                         x: panel_x + DROPDOWN_HPAD + 4.0,
                         y: text_y,
                         text: "\u{2713}".to_string(),
-                        color: ACCENT_COLOR,
+                        color: palette.ink(palette.blue),
                         font_size: FONT_SIZE,
                         font_weight: FontWeightHint::Bold,
                         max_width: None,
@@ -1714,7 +1722,7 @@ fn render_entries(
                     x: panel_x + DROPDOWN_HPAD + ICON_COL_WIDTH,
                     y: text_y,
                     text: label.clone(),
-                    color: TEXT_COLOR,
+                    color: palette.text,
                     font_size: FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
@@ -1729,7 +1737,7 @@ fn render_entries(
                         y: cur_y,
                         width: panel_w - 8.0,
                         height: ITEM_HEIGHT,
-                        color: HOVER_COLOR,
+                        color: palette.surface0,
                         corner_radii: CornerRadii::all(ITEM_HOVER_RADIUS),
                     });
                 }
@@ -1740,7 +1748,7 @@ fn render_entries(
                     x: panel_x + DROPDOWN_HPAD + ICON_COL_WIDTH,
                     y: text_y,
                     text: label.clone(),
-                    color: TEXT_COLOR,
+                    color: palette.text,
                     font_size: FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
@@ -1752,7 +1760,7 @@ fn render_entries(
                     x: panel_x + panel_w - DROPDOWN_HPAD - SUBMENU_ARROW_WIDTH,
                     y: text_y,
                     text: "\u{25B8}".to_string(),
-                    color: TEXT_COLOR,
+                    color: palette.text,
                     font_size: FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
@@ -1762,13 +1770,13 @@ fn render_entries(
         }
     }
     cmds.push(RenderCommand::PopClip);
-    render_scrollbar(cmds, panel);
+    render_scrollbar(palette, cmds, panel);
 }
 
 /// The scroll indicator down a panel's right edge, drawn only when the panel is
 /// showing less than it holds. Without it a capped panel looks exactly like a
 /// panel that happens to end there.
-fn render_scrollbar(cmds: &mut Vec<RenderCommand>, panel: &DropdownPanel) {
+fn render_scrollbar(palette: &Palette, cmds: &mut Vec<RenderCommand>, panel: &DropdownPanel) {
     let max_scroll = panel.max_scroll();
     let track_height = panel.viewport_height();
     if max_scroll <= 0.0 || track_height <= 0.0 {
@@ -1781,7 +1789,7 @@ fn render_scrollbar(cmds: &mut Vec<RenderCommand>, panel: &DropdownPanel) {
         y: panel.viewport_top(),
         width: SCROLLBAR_WIDTH,
         height: track_height,
-        color: SCROLLBAR_TRACK_COLOR,
+        color: palette.surface0,
         corner_radii: radii,
     });
     // The thumb is as tall a fraction of the track as the panel is of the
@@ -1808,7 +1816,7 @@ fn render_scrollbar(cmds: &mut Vec<RenderCommand>, panel: &DropdownPanel) {
         y: thumb.y,
         width: thumb.w,
         height: thumb.h,
-        color: SCROLLBAR_THUMB_COLOR,
+        color: palette.surface2,
         corner_radii: radii,
     });
 }
@@ -1998,22 +2006,25 @@ mod tests {
     /// The `(top, height)` of the hover highlight painted with the pointer at
     /// `py` — moved there through the real pointer path.
     fn highlight_after_pointer_at(bar: &mut MenuBar, py: f32) -> Option<(f32, f32)> {
+        let palette = Palette::for_mode(false);
         let panel = bar.dropdown_panel(0);
         bar.handle_mouse_event(&mouse_move(panel.x + 10.0, py));
         let (x, w) = (panel.x + 4.0, panel.width - 8.0);
-        bar.render(800).into_iter().find_map(|cmd| match cmd {
-            // Exact equality on purpose: these are the very floats the
-            // renderer pushed, not a measurement of them.
-            RenderCommand::FillRect {
-                x: rx,
-                y,
-                width,
-                height,
-                color,
-                ..
-            } if rx == x && width == w && color == HOVER_COLOR => Some((y, height)),
-            _ => None,
-        })
+        bar.render(&palette, 800)
+            .into_iter()
+            .find_map(|cmd| match cmd {
+                // Exact equality on purpose: these are the very floats the
+                // renderer pushed, not a measurement of them.
+                RenderCommand::FillRect {
+                    x: rx,
+                    y,
+                    width,
+                    height,
+                    color,
+                    ..
+                } if rx == x && width == w && color == palette.surface0 => Some((y, height)),
+                _ => None,
+            })
     }
 
     /// The `(top, height)` of the hover highlight painted when the pointer is
@@ -2060,6 +2071,7 @@ mod tests {
 
     #[test]
     fn a_dropdown_separator_is_drawn_inside_the_run_it_reserves_space_in() {
+        let palette = Palette::for_mode(false);
         let mut bar = geometry_bar();
         let panel = open_first_dropdown(&mut bar);
         let children = children_of(&bar.items, 0).to_vec();
@@ -2068,11 +2080,11 @@ mod tests {
         // renderer actually pushed for a dropdown separator and nothing else.
         let sep_x = panel.x + DROPDOWN_HPAD;
         let lines: Vec<f32> = bar
-            .render(800)
+            .render(&palette, 800)
             .into_iter()
             .filter_map(|cmd| match cmd {
                 RenderCommand::Line { x1, y1, color, .. }
-                    if color == SEPARATOR_COLOR && x1 == sep_x =>
+                    if color == palette.surface1 && x1 == sep_x =>
                 {
                     Some(y1)
                 }
@@ -2194,7 +2206,8 @@ mod tests {
     /// The `(y, height)` of the clip the renderer pushed for the dropdown —
     /// the region it claims the rows are painted in.
     fn painted_clip(bar: &MenuBar) -> (f32, f32) {
-        bar.render(800)
+        let palette = Palette::for_mode(false);
+        bar.render(&palette, 800)
             .into_iter()
             .find_map(|cmd| match cmd {
                 RenderCommand::PushClip { y, height, .. } => Some((y, height)),
@@ -2206,16 +2219,17 @@ mod tests {
     /// The `((track_y, track_h), (thumb_y, thumb_h))` of the scroll indicator,
     /// or `None` when the panel drew none.
     fn scrollbar_rects(bar: &MenuBar) -> Option<((f32, f32), (f32, f32))> {
+        let palette = Palette::for_mode(false);
         let mut track = None;
         let mut thumb = None;
-        for cmd in bar.render(800) {
+        for cmd in bar.render(&palette, 800) {
             if let RenderCommand::FillRect {
                 y, height, color, ..
             } = cmd
             {
-                if color == SCROLLBAR_TRACK_COLOR {
+                if color == palette.surface0 {
                     track = Some((y, height));
-                } else if color == SCROLLBAR_THUMB_COLOR {
+                } else if color == palette.surface2 {
                     thumb = Some((y, height));
                 }
             }
@@ -2728,11 +2742,12 @@ mod tests {
 
     #[test]
     fn a_third_level_submenu_shows_its_own_entries_and_not_the_roots() {
+        let palette = Palette::for_mode(false);
         let mut bar = nested_decoy_bar();
         let _ = open_depth_two(&mut bar);
 
         let labels: Vec<String> = bar
-            .render(800)
+            .render(&palette, 800)
             .into_iter()
             .filter_map(|cmd| match cmd {
                 RenderCommand::Text { text, .. } => Some(text),
@@ -3169,8 +3184,9 @@ mod tests {
 
     #[test]
     fn render_closed_produces_bar_only() {
+        let palette = Palette::for_mode(false);
         let bar = make_bar();
-        let cmds = bar.render(800);
+        let cmds = bar.render(&palette, 800);
         assert!(!cmds.is_empty());
         // No BoxShadow when closed (that only appears for dropdowns).
         assert!(
@@ -3182,9 +3198,10 @@ mod tests {
 
     #[test]
     fn render_open_produces_dropdown() {
+        let palette = Palette::for_mode(false);
         let mut bar = make_bar();
         bar.handle_key_event(&alt_press(Key::F));
-        let cmds = bar.render(800);
+        let cmds = bar.render(&palette, 800);
         assert!(
             cmds.iter()
                 .any(|c| matches!(c, RenderCommand::BoxShadow { .. }))
@@ -3227,8 +3244,9 @@ mod tests {
 
     #[test]
     fn empty_bar_renders() {
+        let palette = Palette::for_mode(false);
         let bar = MenuBar::new(vec![]);
-        let cmds = bar.render(400);
+        let cmds = bar.render(&palette, 400);
         // Bar background + bottom border line.
         assert_eq!(cmds.len(), 2);
     }
@@ -3306,11 +3324,12 @@ mod tests {
     /// than panicking — nineteen sites used to index straight into `items`.
     #[test]
     fn a_top_level_index_with_no_menu_behind_it_is_inert() {
+        let palette = Palette::for_mode(false);
         let mut bar = make_bar();
         bar.open_index = Some(99);
         bar.dropdown_hover = Some(3);
 
-        let _ = bar.render(800);
+        let _ = bar.render(&palette, 800);
         bar.activate_entry(99, 3);
 
         assert!(children_of(&bar.items, 99).is_empty());

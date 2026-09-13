@@ -20,6 +20,7 @@
 //! ```
 
 use crate::color::Color;
+use crate::palette::Palette;
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::style::CornerRadii;
 use crate::widget::WidgetId;
@@ -104,12 +105,12 @@ pub const DISABLED_OPACITY: f32 = 0.5;
 /// Tooltip delay before showing reason (milliseconds).
 const TOOLTIP_DELAY_MS: u64 = 500;
 
-/// Tooltip background color (Catppuccin Mocha surface0).
-const TOOLTIP_BG: Color = Color::rgb(49, 50, 68);
-/// Tooltip text color (Catppuccin Mocha text).
-const TOOLTIP_FG: Color = Color::rgb(205, 214, 244);
-/// Tooltip border color (Catppuccin Mocha overlay0).
-const TOOLTIP_BORDER: Color = Color::rgb(108, 112, 134);
+// The tooltip's three colours come from the user's palette now (838). They
+// were written as decimal `rgb(49, 50, 68)` rather than hex, which is the
+// only reason they outlasted the other hundred-odd: every survey of this
+// toolkit looked for `from_hex`, and a colour spelled a different way is a
+// colour a sweep cannot see. Their own comments named the roles correctly --
+// surface0, text, overlay0 -- which is how they were found in the end.
 
 /// Tooltip padding in pixels.
 const TOOLTIP_PADDING: f32 = 6.0;
@@ -302,7 +303,13 @@ fn reduce_alpha(color: Color, factor: f32) -> Color {
 ///
 /// The tooltip is positioned above the control by default. If `above` is false,
 /// it is positioned below.
-pub fn render_reason_tooltip(reason: &str, x: f32, y: f32, above: bool) -> Vec<RenderCommand> {
+pub fn render_reason_tooltip(
+    palette: &Palette,
+    reason: &str,
+    x: f32,
+    y: f32,
+    above: bool,
+) -> Vec<RenderCommand> {
     // Measured rather than estimated: the tooltip's background is sized from
     // this, so a wrong answer here is a visible box that does not fit its text.
     let text_width = crate::text::width(reason, TOOLTIP_FONT_SIZE);
@@ -337,7 +344,7 @@ pub fn render_reason_tooltip(reason: &str, x: f32, y: f32, above: bool) -> Vec<R
             y: box_y,
             width: box_width,
             height: box_height,
-            color: TOOLTIP_BG,
+            color: palette.surface0,
             corner_radii: radii,
         },
         // Border
@@ -346,7 +353,7 @@ pub fn render_reason_tooltip(reason: &str, x: f32, y: f32, above: bool) -> Vec<R
             y: box_y,
             width: box_width,
             height: box_height,
-            color: TOOLTIP_BORDER,
+            color: palette.overlay0,
             line_width: 1.0,
             corner_radii: radii,
         },
@@ -355,7 +362,7 @@ pub fn render_reason_tooltip(reason: &str, x: f32, y: f32, above: bool) -> Vec<R
             x: x + TOOLTIP_PADDING,
             y: box_y + TOOLTIP_PADDING,
             text: reason.to_string(),
-            color: TOOLTIP_FG,
+            color: palette.text,
             font_size: TOOLTIP_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(text_width),
@@ -1413,7 +1420,8 @@ mod tests {
 
     #[test]
     fn tooltip_renders_four_commands() {
-        let commands = render_reason_tooltip("Not available yet", 50.0, 100.0, true);
+        let palette = Palette::for_mode(false);
+        let commands = render_reason_tooltip(&palette, "Not available yet", 50.0, 100.0, true);
         // Shadow, fill, stroke, text = 4 commands.
         assert_eq!(commands.len(), 4);
         assert!(matches!(commands[0], RenderCommand::BoxShadow { .. }));
@@ -1424,8 +1432,9 @@ mod tests {
 
     #[test]
     fn tooltip_above_positions_correctly() {
+        let palette = Palette::for_mode(false);
         let y = 100.0;
-        let commands = render_reason_tooltip("Reason", 0.0, y, true);
+        let commands = render_reason_tooltip(&palette, "Reason", 0.0, y, true);
         if let RenderCommand::FillRect { y: box_y, .. } = &commands[1] {
             assert!(*box_y < y, "Tooltip above should have y < control y");
         } else {
@@ -1435,8 +1444,9 @@ mod tests {
 
     #[test]
     fn tooltip_below_positions_correctly() {
+        let palette = Palette::for_mode(false);
         let y = 100.0;
-        let commands = render_reason_tooltip("Reason", 0.0, y, false);
+        let commands = render_reason_tooltip(&palette, "Reason", 0.0, y, false);
         if let RenderCommand::FillRect { y: box_y, .. } = &commands[1] {
             assert!(*box_y > y, "Tooltip below should have y > control y");
         } else {

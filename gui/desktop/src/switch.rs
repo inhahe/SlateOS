@@ -275,7 +275,7 @@ mod tests {
                 ("surface2", p.surface2),
             ];
             for accent in AccentColor::presets() {
-                tracks.push((accent.label(), p.hue(*accent)));
+                tracks.push((accent.label(), accent.in_mode(p.light)));
             }
             for (name, track) in tracks {
                 let c = contrast(track, readable_on(track));

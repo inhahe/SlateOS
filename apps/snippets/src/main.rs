@@ -3124,7 +3124,7 @@ impl App {
                 text: &lang,
                 size: l.small,
                 weight: FontWeightHint::Bold,
-                color: s.language.color(&self.palette),
+                color: self.palette.ink(s.language.color(&self.palette)),
             },
             lang_rect,
         );

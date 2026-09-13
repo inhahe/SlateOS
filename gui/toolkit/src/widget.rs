@@ -903,6 +903,8 @@ impl Widget {
                 font_size: self.style.font_size,
                 weight: FontWeightHint::Regular,
                 color: self.style.foreground,
+                selection_bg: self.style.selection_bg,
+                selection_fg: self.style.selection_fg,
                 caret_width: crate::textedit::CARET_WIDTH,
             },
         );
@@ -2002,13 +2004,13 @@ mod tests {
 
         let tree = drawn(&w);
         let highlighted = tree.commands.iter().any(|c| {
-            matches!(c, RenderCommand::FillRect { color, .. } if *color == crate::textedit::SELECTION_BACKGROUND)
+            matches!(c, RenderCommand::FillRect { color, .. } if *color == crate::style::Style::default().selection_bg)
         });
         assert!(highlighted, "the selected range must be painted");
 
         let recoloured = tree.commands.iter().any(|c| {
             matches!(c, RenderCommand::RichText { spans, .. }
-                if spans.iter().any(|s| s.color == crate::textedit::SELECTION_FOREGROUND))
+                if spans.iter().any(|s| s.color == crate::style::Style::default().selection_fg))
         });
         assert!(
             recoloured,

@@ -1271,7 +1271,9 @@ impl WeatherApp {
                     alert.description,
                 ),
                 font_size: 13.0,
-                color: bg_color,
+                // Fills the banner above at alpha 40, so the headline is on
+                // the page rather than on a solid ground: inked, not grounded.
+                color: self.palette.ink(bg_color),
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(self.width - 24.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2363,7 +2365,9 @@ impl WeatherApp {
                     alert.title,
                 ),
                 font_size: 15.0,
-                color: severity_color,
+                // The card behind it is this colour too, at a lower alpha,
+                // so the headline is effectively on the page. 837.
+                color: self.palette.ink(severity_color),
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(self.width - padding * 2.0 - 40.0),
                 overflow: TextOverflow::Ellipsis,

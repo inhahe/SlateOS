@@ -3630,7 +3630,7 @@ fn render_sidebar(frame: &mut Frame, state: &AppState, layout: &Layout) {
             y + 8.0,
             &item.label(&state.vault),
             if selected {
-                item.accent(&state.palette)
+                state.palette.ink(item.accent(&state.palette))
             } else {
                 state.palette.text
             },
@@ -4060,7 +4060,7 @@ fn render_entry_detail(frame: &mut Frame, state: &AppState, width: f32, height: 
                 field_value_x + 170.0,
                 y - 2.0,
                 &strength_text,
-                strength.color(&state.palette),
+                state.palette.ink(strength.color(&state.palette)),
                 SMALL_FONT_SIZE,
                 FontWeightHint::Regular,
                 None,
@@ -4927,7 +4927,7 @@ fn render_generator_panel(frame: &mut Frame, state: &AppState, width: f32, heigh
             x_start + pad,
             y,
             &label,
-            strength.color(&state.palette),
+            state.palette.ink(strength.color(&state.palette)),
             SMALL_FONT_SIZE,
             FontWeightHint::Regular,
             None,

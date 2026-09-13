@@ -793,6 +793,14 @@ impl LauncherState {
             let badge_x = input_width - badge_width - 8.0;
             let badge_y = row_y + (ROW_HEIGHT - 20.0) / 2.0;
 
+            // One hue for both halves of the badge, inked once. The label is
+            // drawn on a wash of its own colour over the page, so it has to
+            // clear the text floor (837) -- and the wash is derived from the
+            // *inked* hue rather than the raw one, so the two still match
+            // exactly, which is what `a_badge_wash_is_its_own_hue_at_a_lower_
+            // alpha` is there to hold.
+            let badge_hue = p.ink(entry.category.color(p));
+
             cmds.push(RenderCommand::FillRect {
                 x: badge_x,
                 y: badge_y,
@@ -801,7 +809,7 @@ impl LauncherState {
                 // Derived from the badge's own hue, never named beside it:
                 // a category gets a colour by being added to the enum, and a
                 // hand-written wash is free to disagree with it.
-                color: with_alpha(entry.category.color(p), BADGE_WASH_ALPHA),
+                color: with_alpha(badge_hue, BADGE_WASH_ALPHA),
                 corner_radii: CornerRadii::all(4.0),
             });
 
@@ -809,7 +817,7 @@ impl LauncherState {
                 x: badge_x + 6.0,
                 y: badge_y + 4.0,
                 text: badge_text.to_string(),
-                color: entry.category.color(p),
+                color: badge_hue,
                 font_size: DESC_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -1972,7 +1980,11 @@ mod tests {
                 assert_eq!(category.color(&p), expected, "{label} names the wrong role");
                 assert_eq!(
                     text_color(&cmds, label),
-                    expected,
+                    // `ink`, because a badge is *text*: 837 floors a dual-use
+                    // hue where it is written and leaves it alone where it
+                    // fills. The pairing this test exists for -- category to
+                    // role -- is untouched; only the last unit of red moves.
+                    p.ink(expected),
                     "the {label} badge is not drawn in the role its category names"
                 );
             }
@@ -2049,7 +2061,7 @@ mod tests {
                 for (category, _, badge) in FIVE {
                     assert_eq!(
                         text_color(&cmds, badge),
-                        category.color(&swept),
+                        swept.ink(category.color(&swept)),
                         "the {badge} badge followed the accent when it was set \
                          to {role}"
                     );
@@ -2075,7 +2087,7 @@ mod tests {
                 let drawn = text_color(&cmds, badge);
                 assert_eq!(
                     drawn,
-                    category.color(&p),
+                    p.ink(category.color(&p)),
                     "the {badge} badge is not drawn in its own category's hue"
                 );
                 assert!(

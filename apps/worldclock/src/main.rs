@@ -1140,7 +1140,7 @@ impl WorldClockApp {
                     y + 60.0,
                     Self::day_night_icon(h),
                     20.0,
-                    Self::day_night_color(h, &self.palette),
+                    self.palette.ink(Self::day_night_color(h, &self.palette)),
                     FontWeightHint::Regular,
                     Some(30.0),
                 );
@@ -1176,7 +1176,7 @@ impl WorldClockApp {
             y + CARD_H - 14.0,
             if is_day { "Daytime" } else { "Nighttime" },
             10.0,
-            Self::day_night_color(h, &self.palette),
+            self.palette.ink(Self::day_night_color(h, &self.palette)),
             FontWeightHint::Regular,
             Some(80.0),
         );
@@ -1435,7 +1435,7 @@ impl WorldClockApp {
                 ry + 16.0,
                 format!("{dn_icon} {dn_label}"),
                 13.0,
-                Self::day_night_color(h, &self.palette),
+                self.palette.ink(Self::day_night_color(h, &self.palette)),
                 FontWeightHint::Regular,
                 Some((cols[5] - cols[4] - 10.0).max(30.0)),
             );

@@ -15,6 +15,7 @@
 //!   region types.
 #![allow(dead_code)]
 
+use appearance::{Palette, Surface};
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
@@ -25,29 +26,18 @@ use std::collections::{HashMap, HashSet};
 // Catppuccin Mocha palette
 // ============================================================================
 
-const MOCHA_BASE: Color = Color::rgb(30, 30, 46);
-const MOCHA_MANTLE: Color = Color::rgb(24, 24, 37);
-const MOCHA_CRUST: Color = Color::rgb(17, 17, 27);
-const MOCHA_SURFACE0: Color = Color::rgb(49, 50, 68);
-const MOCHA_SURFACE1: Color = Color::rgb(69, 71, 90);
-const MOCHA_SURFACE2: Color = Color::rgb(88, 91, 112);
-const MOCHA_OVERLAY0: Color = Color::rgb(108, 112, 134);
-const MOCHA_TEXT: Color = Color::rgb(205, 214, 244);
-const MOCHA_SUBTEXT0: Color = Color::rgb(166, 173, 200);
-const MOCHA_SUBTEXT1: Color = Color::rgb(186, 194, 222);
-const MOCHA_RED: Color = Color::rgb(243, 139, 168);
-const MOCHA_MAROON: Color = Color::rgb(235, 160, 172);
-const MOCHA_PEACH: Color = Color::rgb(250, 179, 135);
-const MOCHA_YELLOW: Color = Color::rgb(249, 226, 175);
-const MOCHA_GREEN: Color = Color::rgb(166, 227, 161);
-const MOCHA_TEAL: Color = Color::rgb(148, 226, 213);
-const MOCHA_BLUE: Color = Color::rgb(137, 180, 250);
-const MOCHA_LAVENDER: Color = Color::rgb(180, 190, 254);
-const MOCHA_MAUVE: Color = Color::rgb(203, 166, 247);
-const MOCHA_SKY: Color = Color::rgb(137, 220, 235);
-const MOCHA_SAPPHIRE: Color = Color::rgb(116, 199, 236);
-const MOCHA_FLAMINGO: Color = Color::rgb(242, 205, 205);
-const MOCHA_ROSEWATER: Color = Color::rgb(245, 224, 220);
+// The colours live in the user's palette, not here.
+//
+// Twenty-three Catppuccin Mocha constants used to sit here -- a *second*
+// private copy inside a crate whose main.rs was converted a week ago
+// (design-decisions 822). The conversion looked at the file it was pointed
+// at and reported success, which is this lane's recurring mistake in yet
+// another costume.
+//
+// Names and values agreed exactly, so the mapping is by name. MAROON,
+// FLAMINGO and ROSEWATER have no rung in the shared palette and were used
+// for a warning, a hover tint and a header: they are now peach, surface2
+// and subtext1, which is what they were standing in for.
 
 /// Standard row height used across feature panels.
 const FEATURE_ROW_HEIGHT: f32 = 22.0;
@@ -158,7 +148,7 @@ impl WindowPicker {
     ///
     /// When active, shows a semi-transparent overlay with instructions.
     /// When a result is available, shows the identified process info.
-    pub fn render(&self, x: f32, y: f32, width: f32) -> Vec<RenderCommand> {
+    pub fn render(&self, palette: &Palette, x: f32, y: f32, width: f32) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
 
         if self.active {
@@ -168,14 +158,14 @@ impl WindowPicker {
                 y,
                 width,
                 height: FEATURE_ROW_HEIGHT * 2.0,
-                color: Color::rgba(MOCHA_CRUST.r, MOCHA_CRUST.g, MOCHA_CRUST.b, 220),
+                color: Color::rgba(palette.crust.r, palette.crust.g, palette.crust.b, 220),
                 corner_radii: CornerRadii::all(4.0),
             });
             cmds.push(RenderCommand::Text {
                 x: x + FEATURE_TEXT_PAD,
                 y: y + 6.0,
                 text: "Crosshair mode active".to_string(),
-                color: MOCHA_YELLOW,
+                color: palette.ink(palette.yellow),
                 font_size: FEATURE_HEADER_FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width - FEATURE_TEXT_PAD * 2.0),
@@ -185,7 +175,7 @@ impl WindowPicker {
                 x: x + FEATURE_TEXT_PAD,
                 y: y + 26.0,
                 text: "Click a window to identify its process. Press Esc to cancel.".to_string(),
-                color: MOCHA_SUBTEXT0,
+                color: palette.subtext0,
                 font_size: FEATURE_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - FEATURE_TEXT_PAD * 2.0),
@@ -194,20 +184,13 @@ impl WindowPicker {
         } else if let Some(ref res) = self.result {
             // Result panel
             let panel_h = FEATURE_ROW_HEIGHT * 5.0;
-            cmds.push(RenderCommand::FillRect {
-                x,
-                y,
-                width,
-                height: panel_h,
-                color: MOCHA_MANTLE,
-                corner_radii: CornerRadii::all(4.0),
-            });
+            palette.push_surface(&mut cmds, x, y, width, panel_h, 4.0, Surface::Card);
             cmds.push(RenderCommand::StrokeRect {
                 x,
                 y,
                 width,
                 height: panel_h,
-                color: MOCHA_SURFACE1,
+                color: palette.surface1,
                 line_width: 1.0,
                 corner_radii: CornerRadii::all(4.0),
             });
@@ -215,7 +198,7 @@ impl WindowPicker {
                 x: x + FEATURE_TEXT_PAD,
                 y: y + 4.0,
                 text: "Identified Window".to_string(),
-                color: MOCHA_BLUE,
+                color: palette.ink(palette.blue),
                 font_size: FEATURE_HEADER_FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width - FEATURE_TEXT_PAD * 2.0),
@@ -234,7 +217,7 @@ impl WindowPicker {
                     x: x + FEATURE_TEXT_PAD,
                     y: row_y + 3.0,
                     text: format!("{label}:"),
-                    color: MOCHA_SUBTEXT0,
+                    color: palette.subtext0,
                     font_size: FEATURE_FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(80.0),
@@ -244,7 +227,7 @@ impl WindowPicker {
                     x: x + 90.0,
                     y: row_y + 3.0,
                     text: value.clone(),
-                    color: MOCHA_TEXT,
+                    color: palette.text,
                     font_size: FEATURE_FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - 98.0),
@@ -304,15 +287,15 @@ impl WaitReason {
     }
 
     /// Color for rendering this wait reason.
-    pub fn color(&self) -> Color {
+    pub fn color(&self, palette: &Palette) -> Color {
         match self {
-            Self::Mutex(_) | Self::Futex(_) => MOCHA_RED,
-            Self::Semaphore(_) => MOCHA_MAROON,
-            Self::IO(_) => MOCHA_PEACH,
-            Self::Sleep(_) => MOCHA_LAVENDER,
-            Self::Network(_) => MOCHA_BLUE,
-            Self::Channel(_) => MOCHA_TEAL,
-            Self::None => MOCHA_GREEN,
+            Self::Mutex(_) | Self::Futex(_) => palette.red,
+            Self::Semaphore(_) => palette.peach,
+            Self::IO(_) => palette.peach,
+            Self::Sleep(_) => palette.lavender,
+            Self::Network(_) => palette.blue,
+            Self::Channel(_) => palette.teal,
+            Self::None => palette.green,
         }
     }
 }
@@ -534,25 +517,33 @@ impl BlockingAnalyzer {
     }
 
     /// Render the blocking analysis for a process.
-    pub fn render(&self, pid: u32, x: f32, y: f32, width: f32) -> Vec<RenderCommand> {
+    pub fn render(
+        &self,
+        palette: &Palette,
+        pid: u32,
+        x: f32,
+        y: f32,
+        width: f32,
+    ) -> Vec<RenderCommand> {
         let info = self.analyze_blocking(pid);
         let mut cmds = Vec::new();
         let mut cy = y;
 
         // Section header.
-        cmds.push(RenderCommand::FillRect {
+        palette.push_surface(
+            &mut cmds,
             x,
-            y: cy,
+            cy,
             width,
-            height: FEATURE_ROW_HEIGHT,
-            color: MOCHA_MANTLE,
-            corner_radii: CornerRadii::all(4.0),
-        });
+            FEATURE_ROW_HEIGHT,
+            4.0,
+            Surface::Card,
+        );
         cmds.push(RenderCommand::Text {
             x: x + FEATURE_TEXT_PAD,
             y: cy + 4.0,
             text: format!("Blocking Analysis  PID {pid}"),
-            color: MOCHA_BLUE,
+            color: palette.ink(palette.blue),
             font_size: FEATURE_HEADER_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - FEATURE_TEXT_PAD * 2.0),
@@ -584,7 +575,7 @@ impl BlockingAnalyzer {
                 x: x + FEATURE_TEXT_PAD,
                 y: cy + 4.0,
                 text: format!("DEADLOCK: {}", cycle_str.join(" -> ")),
-                color: MOCHA_RED,
+                color: palette.ink(palette.red),
                 font_size: FEATURE_FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(width - FEATURE_TEXT_PAD * 2.0),
@@ -599,7 +590,7 @@ impl BlockingAnalyzer {
                 x: x + FEATURE_TEXT_PAD,
                 y: cy + 4.0,
                 text: "Process is not blocked.".to_string(),
-                color: MOCHA_GREEN,
+                color: palette.ink(palette.green),
                 font_size: FEATURE_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - FEATURE_TEXT_PAD * 2.0),
@@ -608,7 +599,11 @@ impl BlockingAnalyzer {
         } else {
             for (i, link) in info.chain.iter().enumerate() {
                 let indent = (i as f32) * 20.0;
-                let bg = if i % 2 == 0 { MOCHA_BASE } else { MOCHA_MANTLE };
+                let bg = if i % 2 == 0 {
+                    palette.base
+                } else {
+                    palette.mantle
+                };
                 cmds.push(RenderCommand::FillRect {
                     x,
                     y: cy,
@@ -624,7 +619,7 @@ impl BlockingAnalyzer {
                         x: x + FEATURE_TEXT_PAD + indent - 16.0,
                         y: cy + 4.0,
                         text: "->".to_string(),
-                        color: MOCHA_OVERLAY0,
+                        color: palette.overlay0,
                         font_size: FEATURE_FONT_SIZE,
                         font_weight: FontWeightHint::Regular,
                         max_width: None,
@@ -643,7 +638,7 @@ impl BlockingAnalyzer {
                     x: x + FEATURE_TEXT_PAD + indent,
                     y: cy + 4.0,
                     text,
-                    color: link.reason.color(),
+                    color: palette.ink(link.reason.color(palette)),
                     font_size: FEATURE_FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - indent - FEATURE_TEXT_PAD * 2.0),
@@ -656,7 +651,7 @@ impl BlockingAnalyzer {
                         x: x + width - 180.0,
                         y: cy + 4.0,
                         text: format!("held by {hname}"),
-                        color: MOCHA_SUBTEXT0,
+                        color: palette.subtext0,
                         font_size: FEATURE_FONT_SIZE,
                         font_weight: FontWeightHint::Regular,
                         max_width: Some(170.0),
@@ -818,19 +813,27 @@ impl AffinityMask {
     /// Render the affinity editor UI.
     ///
     /// Shows a grid of CPU toggles with preset buttons.
-    pub fn render(&self, pid: u32, x: f32, y: f32, width: f32) -> Vec<RenderCommand> {
+    pub fn render(
+        &self,
+        palette: &Palette,
+        pid: u32,
+        x: f32,
+        y: f32,
+        width: f32,
+    ) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
         let mut cy = y;
 
         // Header.
-        cmds.push(RenderCommand::FillRect {
+        palette.push_surface(
+            &mut cmds,
             x,
-            y: cy,
+            cy,
             width,
-            height: FEATURE_ROW_HEIGHT,
-            color: MOCHA_MANTLE,
-            corner_radii: CornerRadii::all(4.0),
-        });
+            FEATURE_ROW_HEIGHT,
+            4.0,
+            Surface::Card,
+        );
         cmds.push(RenderCommand::Text {
             x: x + FEATURE_TEXT_PAD,
             y: cy + 4.0,
@@ -839,7 +842,7 @@ impl AffinityMask {
                 self.enabled_count(),
                 self.cpu_count
             ),
-            color: MOCHA_BLUE,
+            color: palette.ink(palette.blue),
             font_size: FEATURE_HEADER_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - FEATURE_TEXT_PAD * 2.0),
@@ -854,19 +857,12 @@ impl AffinityMask {
         let btn_gap = 8.0f32;
         for (i, label) in presets.iter().enumerate() {
             let bx = x + FEATURE_TEXT_PAD + (i as f32 * (btn_w + btn_gap));
-            cmds.push(RenderCommand::FillRect {
-                x: bx,
-                y: cy,
-                width: btn_w,
-                height: btn_h,
-                color: MOCHA_SURFACE0,
-                corner_radii: CornerRadii::all(3.0),
-            });
+            palette.push_surface(&mut cmds, bx, cy, btn_w, btn_h, 3.0, Surface::Card);
             cmds.push(RenderCommand::Text {
                 x: bx + 8.0,
                 y: cy + 3.0,
                 text: label.to_string(),
-                color: MOCHA_TEXT,
+                color: palette.text,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(btn_w - 16.0),
@@ -890,9 +886,9 @@ impl AffinityMask {
             let cell_y = cy + (row as f32 * (cell_size + cell_gap));
 
             let (bg, fg) = if self.is_cpu_enabled(cpu) {
-                (MOCHA_GREEN, MOCHA_CRUST)
+                (palette.green, palette.crust)
             } else {
-                (MOCHA_SURFACE0, MOCHA_OVERLAY0)
+                (palette.surface0, palette.overlay0)
             };
 
             cmds.push(RenderCommand::FillRect {
@@ -970,14 +966,14 @@ impl PriorityLevel {
     }
 
     /// Color for rendering.
-    pub fn color(self) -> Color {
+    pub fn color(self, palette: &Palette) -> Color {
         match self {
-            Self::Idle => MOCHA_OVERLAY0,
-            Self::BelowNormal => MOCHA_SUBTEXT0,
-            Self::Normal => MOCHA_TEXT,
-            Self::AboveNormal => MOCHA_YELLOW,
-            Self::High => MOCHA_PEACH,
-            Self::Realtime => MOCHA_RED,
+            Self::Idle => palette.overlay0,
+            Self::BelowNormal => palette.subtext0,
+            Self::Normal => palette.text,
+            Self::AboveNormal => palette.yellow,
+            Self::High => palette.peach,
+            Self::Realtime => palette.red,
         }
     }
 
@@ -1057,24 +1053,25 @@ impl PrioritySelector {
     }
 
     /// Render the priority selector.
-    pub fn render(&self, x: f32, y: f32, width: f32) -> Vec<RenderCommand> {
+    pub fn render(&self, palette: &Palette, x: f32, y: f32, width: f32) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
         let mut cy = y;
 
         // Header.
-        cmds.push(RenderCommand::FillRect {
+        palette.push_surface(
+            &mut cmds,
             x,
-            y: cy,
+            cy,
             width,
-            height: FEATURE_ROW_HEIGHT,
-            color: MOCHA_MANTLE,
-            corner_radii: CornerRadii::all(4.0),
-        });
+            FEATURE_ROW_HEIGHT,
+            4.0,
+            Surface::Card,
+        );
         cmds.push(RenderCommand::Text {
             x: x + FEATURE_TEXT_PAD,
             y: cy + 4.0,
             text: format!("Priority  PID {}", self.pid),
-            color: MOCHA_BLUE,
+            color: palette.ink(palette.blue),
             font_size: FEATURE_HEADER_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - FEATURE_TEXT_PAD * 2.0),
@@ -1083,19 +1080,20 @@ impl PrioritySelector {
         cy += FEATURE_ROW_HEIGHT;
 
         // Current value button.
-        cmds.push(RenderCommand::FillRect {
-            x: x + FEATURE_TEXT_PAD,
-            y: cy,
-            width: width - FEATURE_TEXT_PAD * 2.0,
-            height: FEATURE_ROW_HEIGHT,
-            color: MOCHA_SURFACE0,
-            corner_radii: CornerRadii::all(3.0),
-        });
+        palette.push_surface(
+            &mut cmds,
+            x + FEATURE_TEXT_PAD,
+            cy,
+            width - FEATURE_TEXT_PAD * 2.0,
+            FEATURE_ROW_HEIGHT,
+            3.0,
+            Surface::Card,
+        );
         cmds.push(RenderCommand::Text {
             x: x + FEATURE_TEXT_PAD + 8.0,
             y: cy + 4.0,
             text: self.current.label().to_string(),
-            color: self.current.color(),
+            color: palette.ink(self.current.color(palette)),
             font_size: FEATURE_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - FEATURE_TEXT_PAD * 2.0 - 30.0),
@@ -1107,7 +1105,7 @@ impl PrioritySelector {
             x: x + width - FEATURE_TEXT_PAD - 20.0,
             y: cy + 4.0,
             text: arrow.to_string(),
-            color: MOCHA_SUBTEXT0,
+            color: palette.subtext0,
             font_size: FEATURE_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1120,11 +1118,11 @@ impl PrioritySelector {
             for (i, level) in PriorityLevel::ALL.iter().enumerate() {
                 let hovered = self.hover_index == Some(i);
                 let bg = if *level == self.current {
-                    MOCHA_SURFACE1
+                    palette.surface1
                 } else if hovered {
-                    MOCHA_SURFACE0
+                    palette.surface0
                 } else {
-                    MOCHA_MANTLE
+                    palette.mantle
                 };
                 cmds.push(RenderCommand::FillRect {
                     x: x + FEATURE_TEXT_PAD,
@@ -1138,7 +1136,7 @@ impl PrioritySelector {
                     x: x + FEATURE_TEXT_PAD + 8.0,
                     y: cy + 4.0,
                     text: level.label().to_string(),
-                    color: level.color(),
+                    color: palette.ink(level.color(palette)),
                     font_size: FEATURE_FONT_SIZE,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(width - FEATURE_TEXT_PAD * 2.0 - 16.0),
@@ -1173,7 +1171,7 @@ impl PrioritySelector {
                 y: dlg_y,
                 width: dlg_w,
                 height: dlg_h,
-                color: MOCHA_CRUST,
+                color: palette.crust,
                 corner_radii: CornerRadii::all(6.0),
             });
             cmds.push(RenderCommand::StrokeRect {
@@ -1181,7 +1179,7 @@ impl PrioritySelector {
                 y: dlg_y,
                 width: dlg_w,
                 height: dlg_h,
-                color: MOCHA_RED,
+                color: palette.red,
                 line_width: 1.0,
                 corner_radii: CornerRadii::all(6.0),
             });
@@ -1189,7 +1187,7 @@ impl PrioritySelector {
                 x: dlg_x + 12.0,
                 y: dlg_y + 12.0,
                 text: "Warning".to_string(),
-                color: MOCHA_RED,
+                color: palette.ink(palette.red),
                 font_size: FEATURE_HEADER_FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(dlg_w - 24.0),
@@ -1199,7 +1197,7 @@ impl PrioritySelector {
                 x: dlg_x + 12.0,
                 y: dlg_y + 34.0,
                 text: "Realtime priority can make the system".to_string(),
-                color: MOCHA_TEXT,
+                color: palette.text,
                 font_size: FEATURE_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(dlg_w - 24.0),
@@ -1209,7 +1207,7 @@ impl PrioritySelector {
                 x: dlg_x + 12.0,
                 y: dlg_y + 50.0,
                 text: "unresponsive. Continue?".to_string(),
-                color: MOCHA_TEXT,
+                color: palette.text,
                 font_size: FEATURE_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(dlg_w - 24.0),
@@ -1223,33 +1221,34 @@ impl PrioritySelector {
                 y: btn_y,
                 width: 60.0,
                 height: 22.0,
-                color: MOCHA_RED,
+                color: palette.red,
                 corner_radii: CornerRadii::all(3.0),
             });
             cmds.push(RenderCommand::Text {
                 x: dlg_x + dlg_w - 142.0,
                 y: btn_y + 4.0,
                 text: "Yes".to_string(),
-                color: MOCHA_CRUST,
+                color: palette.crust,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
             });
             // Cancel button.
-            cmds.push(RenderCommand::FillRect {
-                x: dlg_x + dlg_w - 80.0,
-                y: btn_y,
-                width: 60.0,
-                height: 22.0,
-                color: MOCHA_SURFACE1,
-                corner_radii: CornerRadii::all(3.0),
-            });
+            palette.push_surface(
+                &mut cmds,
+                dlg_x + dlg_w - 80.0,
+                btn_y,
+                60.0,
+                22.0,
+                3.0,
+                Surface::Card,
+            );
             cmds.push(RenderCommand::Text {
                 x: dlg_x + dlg_w - 72.0,
                 y: btn_y + 4.0,
                 text: "Cancel".to_string(),
-                color: MOCHA_TEXT,
+                color: palette.text,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
@@ -1439,25 +1438,33 @@ impl EnvViewer {
     }
 
     /// Render the environment viewer.
-    pub fn render(&self, x: f32, y: f32, width: f32, max_rows: usize) -> Vec<RenderCommand> {
+    pub fn render(
+        &self,
+        palette: &Palette,
+        x: f32,
+        y: f32,
+        width: f32,
+        max_rows: usize,
+    ) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
         let mut cy = y;
         let name_col_w = width * 0.35;
 
         // Header.
-        cmds.push(RenderCommand::FillRect {
+        palette.push_surface(
+            &mut cmds,
             x,
-            y: cy,
+            cy,
             width,
-            height: FEATURE_ROW_HEIGHT,
-            color: MOCHA_MANTLE,
-            corner_radii: CornerRadii::all(4.0),
-        });
+            FEATURE_ROW_HEIGHT,
+            4.0,
+            Surface::Card,
+        );
         cmds.push(RenderCommand::Text {
             x: x + FEATURE_TEXT_PAD,
             y: cy + 4.0,
             text: format!("Environment  PID {}", self.pid),
-            color: MOCHA_BLUE,
+            color: palette.ink(palette.blue),
             font_size: FEATURE_HEADER_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - FEATURE_TEXT_PAD * 2.0),
@@ -1466,23 +1473,24 @@ impl EnvViewer {
         cy += FEATURE_ROW_HEIGHT;
 
         // Filter bar.
-        cmds.push(RenderCommand::FillRect {
-            x: x + FEATURE_TEXT_PAD,
-            y: cy,
-            width: width - FEATURE_TEXT_PAD * 2.0,
-            height: FEATURE_ROW_HEIGHT,
-            color: MOCHA_SURFACE0,
-            corner_radii: CornerRadii::all(3.0),
-        });
+        palette.push_surface(
+            &mut cmds,
+            x + FEATURE_TEXT_PAD,
+            cy,
+            width - FEATURE_TEXT_PAD * 2.0,
+            FEATURE_ROW_HEIGHT,
+            3.0,
+            Surface::Card,
+        );
         let filter_text = if self.filter.is_empty() {
             "Search...".to_string()
         } else {
             self.filter.clone()
         };
         let filter_color = if self.filter.is_empty() {
-            MOCHA_OVERLAY0
+            palette.overlay0
         } else {
-            MOCHA_TEXT
+            palette.text
         };
         cmds.push(RenderCommand::Text {
             x: x + FEATURE_TEXT_PAD + 8.0,
@@ -1497,14 +1505,15 @@ impl EnvViewer {
         cy += FEATURE_ROW_HEIGHT + 2.0;
 
         // Column headers.
-        cmds.push(RenderCommand::FillRect {
+        palette.push_surface(
+            &mut cmds,
             x,
-            y: cy,
+            cy,
             width,
-            height: FEATURE_ROW_HEIGHT,
-            color: MOCHA_SURFACE0,
-            corner_radii: CornerRadii::ZERO,
-        });
+            FEATURE_ROW_HEIGHT,
+            0.0,
+            Surface::Card,
+        );
         let name_arrow = if self.sort_column == EnvSortColumn::Name {
             if self.sort_ascending { " ^" } else { " v" }
         } else {
@@ -1519,7 +1528,7 @@ impl EnvViewer {
             x: x + FEATURE_TEXT_PAD,
             y: cy + 4.0,
             text: format!("Name{name_arrow}"),
-            color: MOCHA_SUBTEXT1,
+            color: palette.subtext1,
             font_size: FEATURE_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(name_col_w - FEATURE_TEXT_PAD),
@@ -1529,7 +1538,7 @@ impl EnvViewer {
             x: x + name_col_w,
             y: cy + 4.0,
             text: format!("Value{value_arrow}"),
-            color: MOCHA_SUBTEXT1,
+            color: palette.subtext1,
             font_size: FEATURE_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - name_col_w - FEATURE_TEXT_PAD),
@@ -1549,11 +1558,11 @@ impl EnvViewer {
 
             let selected = self.selected_index == Some(entry_idx);
             let bg = if selected {
-                MOCHA_SURFACE1
+                palette.surface1
             } else if i % 2 == 0 {
-                MOCHA_BASE
+                palette.base
             } else {
-                MOCHA_MANTLE
+                palette.mantle
             };
 
             cmds.push(RenderCommand::FillRect {
@@ -1568,7 +1577,7 @@ impl EnvViewer {
                 x: x + FEATURE_TEXT_PAD,
                 y: cy + 4.0,
                 text: entry.name.clone(),
-                color: MOCHA_GREEN,
+                color: palette.ink(palette.green),
                 font_size: FEATURE_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(name_col_w - FEATURE_TEXT_PAD * 2.0),
@@ -1578,7 +1587,7 @@ impl EnvViewer {
                 x: x + name_col_w,
                 y: cy + 4.0,
                 text: entry.value.clone(),
-                color: MOCHA_TEXT,
+                color: palette.text,
                 font_size: FEATURE_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - name_col_w - FEATURE_TEXT_PAD),
@@ -1602,7 +1611,7 @@ impl EnvViewer {
                     format!(" (filtered from {})", self.entries.len())
                 }
             ),
-            color: MOCHA_OVERLAY0,
+            color: palette.overlay0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - FEATURE_TEXT_PAD * 2.0),
@@ -1648,14 +1657,14 @@ impl RegionType {
     }
 
     /// Color for rendering this region type.
-    pub fn color(self) -> Color {
+    pub fn color(self, palette: &Palette) -> Color {
         match self {
-            Self::Code => MOCHA_BLUE,
-            Self::Data => MOCHA_GREEN,
-            Self::Stack => MOCHA_MAUVE,
-            Self::Heap => MOCHA_PEACH,
-            Self::MappedFile => MOCHA_TEAL,
-            Self::Shared => MOCHA_YELLOW,
+            Self::Code => palette.blue,
+            Self::Data => palette.green,
+            Self::Stack => palette.mauve,
+            Self::Heap => palette.peach,
+            Self::MappedFile => palette.teal,
+            Self::Shared => palette.yellow,
         }
     }
 }
@@ -1832,24 +1841,25 @@ impl MemoryMap {
     }
 
     /// Render the memory map viewer.
-    pub fn render(&self, x: f32, y: f32, width: f32) -> Vec<RenderCommand> {
+    pub fn render(&self, palette: &Palette, x: f32, y: f32, width: f32) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
         let mut cy = y;
 
         // Header.
-        cmds.push(RenderCommand::FillRect {
+        palette.push_surface(
+            &mut cmds,
             x,
-            y: cy,
+            cy,
             width,
-            height: FEATURE_ROW_HEIGHT,
-            color: MOCHA_MANTLE,
-            corner_radii: CornerRadii::all(4.0),
-        });
+            FEATURE_ROW_HEIGHT,
+            4.0,
+            Surface::Card,
+        );
         cmds.push(RenderCommand::Text {
             x: x + FEATURE_TEXT_PAD,
             y: cy + 4.0,
             text: format!("Memory Map  PID {}", self.pid),
-            color: MOCHA_BLUE,
+            color: palette.ink(palette.blue),
             font_size: FEATURE_HEADER_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - FEATURE_TEXT_PAD * 2.0),
@@ -1858,14 +1868,15 @@ impl MemoryMap {
         cy += FEATURE_ROW_HEIGHT;
 
         // Summary bar: committed vs reserved.
-        cmds.push(RenderCommand::FillRect {
-            x: x + FEATURE_TEXT_PAD,
-            y: cy,
-            width: width - FEATURE_TEXT_PAD * 2.0,
-            height: FEATURE_ROW_HEIGHT,
-            color: MOCHA_SURFACE0,
-            corner_radii: CornerRadii::all(3.0),
-        });
+        palette.push_surface(
+            &mut cmds,
+            x + FEATURE_TEXT_PAD,
+            cy,
+            width - FEATURE_TEXT_PAD * 2.0,
+            FEATURE_ROW_HEIGHT,
+            3.0,
+            Surface::Card,
+        );
         cmds.push(RenderCommand::Text {
             x: x + FEATURE_TEXT_PAD + 8.0,
             y: cy + 4.0,
@@ -1874,7 +1885,7 @@ impl MemoryMap {
                 format_size(self.total_committed),
                 format_size(self.total_reserved),
             ),
-            color: MOCHA_TEXT,
+            color: palette.text,
             font_size: FEATURE_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - FEATURE_TEXT_PAD * 2.0 - 16.0),
@@ -1890,7 +1901,7 @@ impl MemoryMap {
             y: cy,
             width: bar_width,
             height: bar_height,
-            color: MOCHA_SURFACE0,
+            color: palette.surface0,
             corner_radii: CornerRadii::all(3.0),
         });
 
@@ -1905,7 +1916,7 @@ impl MemoryMap {
                         y: cy,
                         width: seg_w,
                         height: bar_height,
-                        color: region.region_type.color(),
+                        color: region.region_type.color(palette),
                         corner_radii: CornerRadii::ZERO,
                     });
                 }
@@ -1931,14 +1942,14 @@ impl MemoryMap {
                 y: cy + 2.0,
                 width: 10.0,
                 height: 10.0,
-                color: rt.color(),
+                color: rt.color(palette),
                 corner_radii: CornerRadii::all(2.0),
             });
             cmds.push(RenderCommand::Text {
                 x: lx + 14.0,
                 y: cy + 1.0,
                 text: rt.label().to_string(),
-                color: MOCHA_SUBTEXT0,
+                color: palette.subtext0,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(legend_item_w - 18.0),
@@ -1948,14 +1959,15 @@ impl MemoryMap {
         cy += FEATURE_ROW_HEIGHT;
 
         // Column headers.
-        cmds.push(RenderCommand::FillRect {
+        palette.push_surface(
+            &mut cmds,
             x,
-            y: cy,
+            cy,
             width,
-            height: FEATURE_ROW_HEIGHT,
-            color: MOCHA_SURFACE0,
-            corner_radii: CornerRadii::ZERO,
-        });
+            FEATURE_ROW_HEIGHT,
+            0.0,
+            Surface::Card,
+        );
         let col_headers = ["Address Range", "Size", "Prot", "Type", "Backing"];
         let col_widths = [
             width * 0.30,
@@ -1970,7 +1982,7 @@ impl MemoryMap {
                 x: hx,
                 y: cy + 4.0,
                 text: header.to_string(),
-                color: MOCHA_SUBTEXT1,
+                color: palette.subtext1,
                 font_size: FEATURE_FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(cw - 4.0),
@@ -1982,7 +1994,11 @@ impl MemoryMap {
 
         // Region rows.
         for (i, region) in self.regions.iter().enumerate() {
-            let bg = if i % 2 == 0 { MOCHA_BASE } else { MOCHA_MANTLE };
+            let bg = if i % 2 == 0 {
+                palette.base
+            } else {
+                palette.mantle
+            };
             cmds.push(RenderCommand::FillRect {
                 x,
                 y: cy,
@@ -1998,7 +2014,7 @@ impl MemoryMap {
                 y: cy,
                 width: 3.0,
                 height: FEATURE_ROW_HEIGHT,
-                color: region.region_type.color(),
+                color: region.region_type.color(palette),
                 corner_radii: CornerRadii::ZERO,
             });
 
@@ -2009,7 +2025,7 @@ impl MemoryMap {
                 x: rx,
                 y: cy + 4.0,
                 text: format!("{:#014X}-{:#014X}", region.start_addr, region.end_addr),
-                color: MOCHA_TEXT,
+                color: palette.text,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(col_widths[0] - 4.0),
@@ -2022,7 +2038,7 @@ impl MemoryMap {
                 x: rx,
                 y: cy + 4.0,
                 text: format_size(region.size()),
-                color: MOCHA_TEXT,
+                color: palette.text,
                 font_size: FEATURE_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(col_widths[1] - 4.0),
@@ -2035,7 +2051,7 @@ impl MemoryMap {
                 x: rx,
                 y: cy + 4.0,
                 text: region.protection.to_rwx(),
-                color: MOCHA_SUBTEXT0,
+                color: palette.subtext0,
                 font_size: FEATURE_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(col_widths[2] - 4.0),
@@ -2048,7 +2064,7 @@ impl MemoryMap {
                 x: rx,
                 y: cy + 4.0,
                 text: region.region_type.label().to_string(),
-                color: region.region_type.color(),
+                color: palette.ink(region.region_type.color(palette)),
                 font_size: FEATURE_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(col_widths[3] - 4.0),
@@ -2061,7 +2077,7 @@ impl MemoryMap {
                 x: rx,
                 y: cy + 4.0,
                 text: region.backing.clone(),
-                color: MOCHA_SUBTEXT0,
+                color: palette.subtext0,
                 font_size: FEATURE_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(col_widths[4] - 4.0),
@@ -2498,42 +2514,111 @@ mod tests {
     fn window_picker_render_active() {
         let mut picker = WindowPicker::new();
         picker.activate();
-        let cmds = picker.render(0.0, 0.0, 400.0);
+        let cmds = picker.render(&Palette::for_mode(false), 0.0, 0.0, 400.0);
         assert!(!cmds.is_empty());
     }
 
     #[test]
     fn blocking_render_produces_output() {
         let analyzer = BlockingAnalyzer::with_demo_data();
-        let cmds = analyzer.render(203, 0.0, 0.0, 600.0);
+        let cmds = analyzer.render(&Palette::for_mode(false), 203, 0.0, 0.0, 600.0);
         assert!(!cmds.is_empty());
     }
 
     #[test]
     fn affinity_render_produces_output() {
         let mask = AffinityMask::all(8);
-        let cmds = mask.render(100, 0.0, 0.0, 400.0);
+        let cmds = mask.render(&Palette::for_mode(false), 100, 0.0, 0.0, 400.0);
         assert!(!cmds.is_empty());
     }
 
     #[test]
     fn priority_render_produces_output() {
         let sel = PrioritySelector::new(100, PriorityLevel::Normal);
-        let cmds = sel.render(0.0, 0.0, 300.0);
+        let cmds = sel.render(&Palette::for_mode(false), 0.0, 0.0, 300.0);
         assert!(!cmds.is_empty());
     }
 
     #[test]
     fn env_viewer_render_produces_output() {
         let viewer = EnvViewer::with_demo_data(100);
-        let cmds = viewer.render(0.0, 0.0, 500.0, 10);
+        let cmds = viewer.render(&Palette::for_mode(false), 0.0, 0.0, 500.0, 10);
         assert!(!cmds.is_empty());
     }
 
     #[test]
     fn memory_map_render_produces_output() {
         let map = MemoryMap::with_demo_data(100);
-        let cmds = map.render(0.0, 0.0, 800.0);
+        let cmds = map.render(&Palette::for_mode(false), 0.0, 0.0, 800.0);
         assert!(!cmds.is_empty());
+    }
+
+    /// Every colour these six panels draw comes from the user's palette.
+    ///
+    /// One test over all six rather than six, because the thing being checked
+    /// is a property of the module: it used to hold twenty-three Catppuccin
+    /// constants of its own, in a crate whose `main.rs` was converted a week
+    /// earlier. A per-panel test would have been six chances to add a seventh
+    /// panel without one.
+    ///
+    /// What it does *not* cover, stated because a guard whose reach is
+    /// unstated gets trusted further than it earns: each panel is rendered in
+    /// one state, so a branch those states do not take is unchecked. Putting
+    /// a stray colour in the picker's inactive branch does not fail this;
+    /// putting one in the memory map does.
+    #[test]
+    fn every_colour_these_panels_draw_comes_from_the_palette() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+            let mut picker = WindowPicker::new();
+            picker.activate();
+            let panels: Vec<(&str, Vec<RenderCommand>)> = vec![
+                ("window picker", picker.render(&p, 0.0, 0.0, 400.0)),
+                (
+                    "blocking",
+                    BlockingAnalyzer::with_demo_data().render(&p, 203, 0.0, 0.0, 600.0),
+                ),
+                (
+                    "affinity",
+                    AffinityMask::all(8).render(&p, 100, 0.0, 0.0, 400.0),
+                ),
+                (
+                    "priority",
+                    PrioritySelector::new(100, PriorityLevel::Normal).render(&p, 0.0, 0.0, 300.0),
+                ),
+                (
+                    "environment",
+                    EnvViewer::with_demo_data(100).render(&p, 0.0, 0.0, 500.0, 10),
+                ),
+                (
+                    "memory map",
+                    MemoryMap::with_demo_data(100).render(&p, 0.0, 0.0, 800.0),
+                ),
+            ];
+            for (what, cmds) in panels {
+                // Commands that carry a colour, not commands. `assert_drawn_from`
+                // walks colours, so a panel of three clip-and-translate
+                // commands would satisfy it without being looked at -- the
+                // vacuous pass this lane has now met six times.
+                let coloured = cmds
+                    .iter()
+                    .filter(|c| {
+                        appearance::painted_rect(c).is_some()
+                            || matches!(c, RenderCommand::Text { .. })
+                    })
+                    .count();
+                assert!(
+                    coloured > 0,
+                    "the {what} panel drew {} commands and none of them had a colour",
+                    cmds.len()
+                );
+                appearance::palette_check::assert_drawn_from(
+                    &p,
+                    &cmds,
+                    &[],
+                    &format!("procexplorer {what} (light={light})"),
+                );
+            }
+        }
     }
 }

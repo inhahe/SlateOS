@@ -731,7 +731,9 @@ impl ClipboardViewer {
                     x: x + 16.0,
                     y: ey + 9.0,
                     text: entry.format.icon().to_string(),
-                    color: badge_color,
+                    // The badge behind it is this colour at alpha 60, so the
+                    // glyph is effectively on the page. 837.
+                    color: p.ink(badge_color),
                     font_size: 11.0,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(16.0),

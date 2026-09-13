@@ -2151,6 +2151,7 @@ impl StartupUI {
         for (rect, action) in l.buttons.iter().zip(ToolbarAction::all()) {
             Self::draw_button(
                 frame,
+                &self.palette,
                 Target::Toolbar(*action),
                 *rect,
                 action.label(),
@@ -2161,7 +2162,21 @@ impl StartupUI {
 
     /// Draw a button and record it. An empty rectangle draws and records
     /// nothing — a window too small for the control simply does not have it.
-    fn draw_button(frame: &mut Frame, target: Target, rect: Rect, label: &str, color: Color) {
+    /// A toolbar button: a wash of its colour, an outline of it, and its
+    /// label written in it.
+    ///
+    /// Takes the palette only to ink the label. The same colour cannot be
+    /// inked at the call site, because two of its three uses here are a fill
+    /// and a stroke -- raising those would change the button's appearance
+    /// rather than its legibility. 837.
+    fn draw_button(
+        frame: &mut Frame,
+        pal: &Palette,
+        target: Target,
+        rect: Rect,
+        label: &str,
+        color: Color,
+    ) {
         if rect.is_empty() {
             return;
         }
@@ -2191,7 +2206,7 @@ impl StartupUI {
             ),
             y: rect.y + ((rect.h - FONT_SIZE) / 2.0).max(0.0),
             text: label.to_string(),
-            color,
+            color: pal.ink(color),
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: Some((rect.w - 8.0).max(0.0)),
@@ -2740,12 +2755,20 @@ impl StartupUI {
         let (cancel, save) = l.dialog_buttons();
         Self::draw_button(
             frame,
+            &self.palette,
             Target::DialogCancel,
             cancel,
             "Cancel",
             self.palette.overlay0,
         );
-        Self::draw_button(frame, Target::DialogSave, save, "Save", self.palette.green);
+        Self::draw_button(
+            frame,
+            &self.palette,
+            Target::DialogSave,
+            save,
+            "Save",
+            self.palette.green,
+        );
     }
 
     /// A labelled text input. `label_y` is where the caption goes; `input` is
@@ -2884,6 +2907,7 @@ impl StartupUI {
         let (cancel, delete) = l.confirm_buttons();
         Self::draw_button(
             frame,
+            &self.palette,
             Target::DeleteCancel,
             cancel,
             "Cancel",
@@ -2891,6 +2915,7 @@ impl StartupUI {
         );
         Self::draw_button(
             frame,
+            &self.palette,
             Target::DeleteConfirm,
             delete,
             "Delete",

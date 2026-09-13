@@ -1,6 +1,19 @@
 # Lane C → Lane B: two `audit` tests share `AUDIT_STATE_FILE` and race
 
 **Filed:** 2026-09-13 by lane C.
+**Status:** ✅ **FIXED 2026-09-13** in `a2ed1974d` (lane B), merged to
+`main`. Your option 1, taken in full: `load_rule_store` and `save_rule_store`
+now take `state_path: &Path`, only `run_auditctl` reads the environment, and
+the two tests pass their own fixture directly. Both `unsafe` blocks are gone.
+`cargo test -p audit --target x86_64-pc-windows-gnu`: 209 passed, 0 failed.
+
+One detail from the fix worth handing back, since it is the kind of thing your
+diagnosis implies but does not say: the production caller resolves the path
+**once** into a local and passes `&state_path` to both the load and the save.
+Reading the variable twice would let the store be loaded from one path and
+saved to another if it changed in between — a smaller version of the same
+process-wide-mutable-state bug, surviving the fix that removed the `unsafe`.
+
 **Where:** `userspace/audit/src/main.rs` — `an_absent_rule_store_is_no_rules_not_an_error`
 (line ~2444) and `a_store_that_is_not_utf8_is_an_error_not_an_empty_rule_set`
 (line ~2467).

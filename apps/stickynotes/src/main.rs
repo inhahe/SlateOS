@@ -3498,6 +3498,13 @@ impl StickyNotesApp {
             // `appearance.yaml` or `input.yaml`, so there is nothing to
             // re-read.
             Event::SettingsChanged { .. } => Action::None,
+            // A modifier-only chord — Alt+Shift and its kind. Only a window
+            // that claimed one is ever sent one, and this program claims none,
+            // so this arm is unreachable. Named rather than swept into a
+            // wildcard for the reason the arm above is spelled out: a `_` here
+            // would also silently swallow the next event added to the
+            // vocabulary, which may well be one a note should act on.
+            Event::ModifierChord { .. } => Action::None,
             Event::CloseRequested => {
                 self.commit_focus();
                 self.persist();

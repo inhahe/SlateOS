@@ -7158,6 +7158,13 @@ impl Compositor {
             && let Some(action) = a11ykeys::MouseKeyAction::from_keypad_scancode(scancode)
         {
             self.apply_mouse_key(action, pressed);
+            // Spent for the reason a real mouse button spends it: this is the
+            // user clicking or moving the pointer, and letting go of the
+            // modifiers afterwards must not also switch the keyboard layout.
+            // Said here as well as in `handle_mouse_button`, because a
+            // mouse-key press returns from this function and reaches neither of
+            // the paths that already say it.
+            self.modifier_episode.spent |= pressed;
             return true;
         }
 
@@ -7831,6 +7838,13 @@ impl Compositor {
         self.dead_keys.cancel();
         self.grabbed_presses.clear();
         self.grabbed_modifiers.clear();
+        // And the modifier episode, which is the sharpest instance of the same
+        // reason: its `held` set is a high-water mark, so an episode surviving
+        // here would still believe Alt and Shift were down. The next release of
+        // *either* of them -- arriving from the keyboard the user comes back to
+        // -- would then look like a clean Alt+Shift and switch the layout, for
+        // a gesture nobody performed.
+        self.modifier_episode = ModifierEpisode::default();
     }
 
     /// The modifier keys currently held.
@@ -10038,8 +10052,70 @@ mod tests {
 
     /// What `main` used to do, kept because it is a compact tour of the API:
     /// a window, a picture in it, and a composited frame.
+    ///
+    /// Correctness only. The frame-time ceiling that used to live here is now
+    /// `the_demo_scene_composites_inside_the_frame_ceiling`, and is
+    /// `#[ignore]`d -- see there for the measurement that forced the split.
     #[test]
     fn the_demo_scene_still_composites() {
+        let mut compositor = Compositor::new(1920, 1080, 60).expect("compositor");
+        let window_id = compositor.create_window("Welcome to Slate OS".to_string(), 640, 480, 1);
+
+        let mut tree = RenderTree::new();
+        tree.fill_rect(10.0, 10.0, 200.0, 40.0, Color::BLUE);
+        tree.text(
+            20.0,
+            20.0,
+            "Hello from Slate OS Compositor!",
+            Color::WHITE,
+            14.0,
+        );
+        tree.fill_rect(10.0, 60.0, 620.0, 1.0, Color::LIGHT_GRAY);
+        compositor
+            .submit_render(window_id, tree.commands)
+            .expect("submit");
+
+        assert!(compositor.compose_frame(), "nothing was drawn");
+        assert_eq!(compositor.window_count(), 1);
+        assert!(
+            compositor.frame_stats().last_frame_time_us > 0,
+            "the frame took no measurable time, so it did no work"
+        );
+    }
+
+    /// The frame-time ceiling for that scene, kept out of the default run.
+    ///
+    /// **Why it is `#[ignore]`d, which is the whole point of this comment.**
+    /// This assertion lived in the test above and fired three times in two
+    /// days, each time during a parallel `cargo test`. Two of those firings
+    /// were the machine and one was real, and here are the three figures:
+    ///
+    ///     67_074 us  a real regression -- the 4.5:1 text floor made palette
+    ///                resolution call `contrast_ratio`, three `powf(2.4)` per
+    ///                colour, once per blurred window per frame. Fixed by
+    ///                tabling the sRGB curve: 436 ns -> 4 ns.
+    ///     54_434 us  contention. The same test, alone, took ~5_000 us.
+    ///     53_363 us  contention, likewise.
+    ///
+    /// **The real regression and the noise overlap.** There is no ceiling that
+    /// separates 67_074 from 53_363, so no amount of tuning rescues a
+    /// wall-clock bound here: under a saturated machine the instrument cannot
+    /// tell the thing it is watching for from the conditions it is watching
+    /// under. Best-of-five was the previous attempt and does not help, because
+    /// five consecutive samples during a workspace run are five contended
+    /// samples.
+    ///
+    /// So it moves to where `bench_compose_frame_4k` already is, for the
+    /// reason that one gives: a measurement that hard-fails a correctness run
+    /// on the machine's mood teaches everyone to disregard it, and a gate
+    /// people disregard is worse than no gate.
+    ///
+    /// ```text
+    /// cargo test -p compositor --target x86_64-pc-windows-gnu     ///   -- --ignored --nocapture the_demo_scene_composites_inside
+    /// ```
+    #[test]
+    #[ignore = "wall-clock measurement; run explicitly on a quiet machine"]
+    fn the_demo_scene_composites_inside_the_frame_ceiling() {
         // One first frame, on a fresh compositor -- which is how every figure
         // in the comment below was gathered. `compose_frame` rate-limits to the
         // target interval and early-outs when nothing is damaged, so composing
@@ -10974,7 +11050,7 @@ mod tests {
                 events
                     .iter()
                     .any(|(win, k, p, _)| *win == app && *k == key && *p == pressed),
-                "the focused window never saw {key:?} pressed={pressed}: it now                  believes a modifier is held that is not"
+                "the focused window never saw {key:?} pressed={pressed}: it now believes a modifier is held that is not"
             );
         }
     }
@@ -11125,7 +11201,7 @@ mod tests {
         comp.grab_modifier_chord(shell, alt_shift()).unwrap();
         assert!(
             comp.grab_modifier_chord(shell, alt_shift()).is_ok(),
-            "re-grabbing your own chord is what a shell does when it re-reads              its configuration"
+            "re-grabbing your own chord is what a shell does when it re-reads its configuration"
         );
         let err = comp.grab_modifier_chord(app, alt_shift());
         assert!(matches!(
@@ -11165,6 +11241,61 @@ mod tests {
         );
         comp.ungrab_modifier_chord(shell, alt_shift()).unwrap();
         comp.grab_modifier_chord(app, alt_shift()).unwrap();
+    }
+
+    /// The keyboard went away mid-gesture -- a VT switch, a focus loss, an
+    /// unplugged keyboard. The episode has to go with the modifier state it
+    /// describes: its `held` set is a high-water mark, so one that survived
+    /// would still believe Alt and Shift were down, and the next release of
+    /// either would look like a clean Alt+Shift.
+    #[test]
+    fn losing_the_keyboard_mid_gesture_cannot_fire_a_chord_afterwards() {
+        let (mut comp, shell, _app) = shell_and_app();
+        comp.grab_modifier_chord(shell, alt_shift()).unwrap();
+        comp.drain_notifications();
+
+        press(&mut comp, ALT);
+        press(&mut comp, SHIFT);
+        comp.release_all_modifiers();
+        // The physical releases arrive from the keyboard the user came back to.
+        release(&mut comp, SHIFT);
+        release(&mut comp, ALT);
+
+        assert!(
+            chords(&mut comp).is_empty(),
+            "coming back from a VT switch switched the keyboard layout"
+        );
+    }
+
+    /// Mouse keys -- the accessibility feature that drives the pointer from the
+    /// keypad -- never reach `dispatch_key` at all, so nothing on that path can
+    /// spend the episode for them.
+    ///
+    /// A keypad *click* was already covered by accident: it goes on to
+    /// `handle_mouse_button`, which spends it. **Movement** does not, and it is
+    /// the case this tests, because it is the one that discriminates. Steering
+    /// the pointer with Alt and Shift held is a deliberate gesture with
+    /// keystrokes in it, whatever those keystrokes are aimed at, and letting go
+    /// afterwards must not also switch the keyboard layout.
+    #[test]
+    fn steering_the_pointer_from_the_keypad_rules_out_the_chord() {
+        let (mut comp, shell, _app) = shell_and_app();
+        comp.grab_modifier_chord(shell, alt_shift()).unwrap();
+        comp.set_accessibility_keys(mouse_keys_config());
+        comp.drain_notifications();
+
+        press(&mut comp, ALT);
+        press(&mut comp, SHIFT);
+        // Keypad 4 -- move left, while mouse keys own the keypad.
+        press(&mut comp, 0x4B);
+        release(&mut comp, 0x4B);
+        release(&mut comp, SHIFT);
+        release(&mut comp, ALT);
+
+        assert!(
+            chords(&mut comp).is_empty(),
+            "steering the pointer with the keypad switched the keyboard layout when the modifiers came up"
+        );
     }
 
     /// A grab is on a *chord*. Taking Alt+Tab must not take Tab, or grabbing the
@@ -16141,7 +16272,7 @@ mod tests {
         assert_eq!(
             comp.focused_window,
             Some(app),
-            "the application should still have taken focus; only the stacking              is confined, not the focus"
+            "the application should still have taken focus; only the stacking is confined, not the focus"
         );
     }
 
@@ -16171,7 +16302,7 @@ mod tests {
         assert_eq!(
             comp.z_stack,
             vec![b, c, a],
-            "confining a raise to its band must not change what a raise does              inside the band"
+            "confining a raise to its band must not change what a raise does inside the band"
         );
     }
 
@@ -16200,7 +16331,7 @@ mod tests {
                 let layers: Vec<Layer> = comp.z_stack.iter().map(|&i| comp.layer_of(i)).collect();
                 assert!(
                     layers.windows(2).all(|w| w[0] <= w[1]),
-                    "round {round}: raising {id:?} left the stack unsorted by                      band: {layers:?}"
+                    "round {round}: raising {id:?} left the stack unsorted by band: {layers:?}"
                 );
                 assert_eq!(
                     comp.z_stack.len(),
@@ -16223,7 +16354,7 @@ mod tests {
         assert_eq!(
             comp.focused_window,
             Some(behind),
-            "closing a window focused the topmost surface outright, which is              always the shell"
+            "closing a window focused the topmost surface outright, which is always the shell"
         );
         assert!(comp.window_ref(panel).is_some(), "the panel was destroyed");
     }

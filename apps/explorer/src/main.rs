@@ -2530,11 +2530,18 @@ impl ExplorerState {
             // palette and takes no preference from disk. If that ever stops
             // being true, this arm is where the re-read belongs, and moving it
             // out of this group is part of the change.
+            //
+            // `ModifierChord` is here for a third reason again: this program
+            // never asks for one, so the compositor never sends it. Named
+            // rather than swept up in a `_ =>` because a wildcard here would
+            // also swallow the *next* event added to the vocabulary, which may
+            // well be one this window should act on.
             Event::CloseRequested
             | Event::Moved { .. }
             | Event::FocusIn
             | Event::FocusOut
             | Event::ScaleChanged { .. }
+            | Event::ModifierChord { .. }
             | Event::SettingsChanged { .. } => false,
         }
     }

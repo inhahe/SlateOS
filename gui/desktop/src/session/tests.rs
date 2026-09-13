@@ -1009,7 +1009,7 @@ fn the_shell_claims_the_layout_switching_chord_it_is_configured_for() {
                     window: panel,
                     modifiers
                 }),
-            "{modifiers:?} is the configured layout shortcut and was never              claimed, so it is dead in every window but the shell's own"
+            "{modifiers:?} is the configured layout shortcut and was never claimed, so it is dead in every window but the shell's own"
         );
     }
 }
@@ -1097,7 +1097,7 @@ fn changing_the_layout_shortcut_moves_the_grab() {
                 window: panel,
                 modifiers: old
             }),
-        "and the old one released, or Alt+Shift goes on switching layouts          after the user chose Ctrl+Shift"
+        "and the old one released, or Alt+Shift goes on switching layouts after the user chose Ctrl+Shift"
     );
 }
 
@@ -1970,7 +1970,7 @@ fn a_desktop_with_a_clock_widget_asks_to_be_woken() {
         run_frames(&mut first, &desktop, 1_000);
         assert!(
             first.events_mut().next_wakeup().is_some(),
-            "a desktop with a clock widget registered no wake-up, so the              clock would show the minute it was created for ever"
+            "a desktop with a clock widget registered no wake-up, so the clock would show the minute it was created for ever"
         );
 
         // And the counterpart, in the same test so the two cannot drift: with

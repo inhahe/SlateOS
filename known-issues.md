@@ -130868,6 +130868,90 @@ also what Windows does, and what this shortcut is modelled on.
 
 ---
 
+## TD-C-THE-COMPOSE-PATH-HAS-NO-TIMING-GUARD-IN-THE-DEFAULT-RUN
+
+**Date:** 2026-09-13. **Lane:** C.
+**Where:** `gui/compositor/src/lib.rs` —
+`the_demo_scene_composites_inside_the_frame_ceiling`, now `#[ignore]`d.
+
+**In short:** there used to be a test that failed if drawing one frame got ten
+times slower, and it ran every time anyone ran the tests. It has been switched
+off by default, because it was also failing when the computer was merely busy,
+and it had no way to tell the two apart. Nothing is broken today; what is gone
+is an alarm that would have gone off the next time somebody made drawing slow.
+
+**Why it had to go.** Three firings in two days, with these figures:
+
+| frame | what it was |
+|---|---|
+| 67_074 us | a real regression — `contrast_ratio` doing three `powf(2.4)` per colour, once per blurred window per frame |
+| 54_434 us | contention; the same test alone took ~5_000 us |
+| 53_363 us | contention |
+
+The real one and the noise **overlap**, so no ceiling separates them. Under a
+saturated machine a wall-clock bound cannot tell the thing it watches for from
+the conditions it watches under. Best-of-five was the previous attempt at this
+and does not help: five consecutive samples during a workspace run are five
+contended samples.
+
+**What the default run still has:** that the scene composites, that the window
+count is right, and that the frame took a non-zero time — i.e. that it did
+work at all.
+
+**The proper fix is to count work rather than measure time.** A guard immune
+to load asserts an *operation count*: how many times the palette is resolved
+per frame, how many pixels the compose path writes for a given damage set.
+`tests/damage_narrows_the_work.rs` already does the ratio form of this and
+does not flake. The regression that was caught above would have been caught by
+"the palette is resolved at most once per frame", which is a design property,
+exactly checkable, and free.
+
+**Second-best fix:** run the `#[ignore]`d benchmarks on a quiet machine as a
+scheduled step rather than as part of the correctness run, and diff against
+`bench/baselines.toml` the way `scripts/bench-history.py` does for the kernel.
+
+---
+
+## TD-C-ASSERTION-MESSAGES-CARRY-COLLAPSED-LINE-CONTINUATIONS
+
+**Date:** 2026-09-13. **Lane:** C.
+**Where:** about 60 string literals across ~30 files under `gui/**` and
+`apps/**`; ten were repaired in `gui/compositor/src/lib.rs` and
+`gui/desktop/src/session/tests.rs` on the day this was filed.
+
+**In short:** when a test fails, the message it prints sometimes has a long
+gap in the middle of a sentence — *"the stacking&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+is confined"*. Cosmetic, but it lands at the exact moment somebody is trying
+to read quickly.
+
+**The cause.** A message written across two source lines with a trailing `\`
+relies on Rust stripping the newline *and* the following indentation. When
+`rustfmt` later joins the two lines, the indentation is left in the literal
+and the backslash goes. Nothing warns, because the result is a perfectly valid
+string.
+
+**Do not fix this with a blanket regex.** It was tried on the day this was
+filed and reverted, having found two classes of false positive on the first
+pass:
+
+* **Deliberate column alignment.** `apps/screenshot`'s shortcut list is
+  `"Alt+PrintScreen      Active window"` — the run of spaces *is* the layout.
+* **Embedded indentation.** JSON and table fixtures —
+  `"      \"type\": \"{}\",
+"` — where the spaces are the output's own
+  formatting. Excluding runs that follow `
+` is not enough, because a regex
+  for four-or-more spaces also matches starting one space into a six-space run.
+
+**The proper fix** is to decide by *position*, not by shape: only rewrite a
+literal that is an argument to `assert!`, `assert_eq!`, `panic!` or `expect`.
+That is parseable — walk back from the literal to the opening of the enclosing
+macro call — and it excludes every false positive above by construction, since
+none of them are assertion messages. A `scripts/check-*.py` gate on the same
+rule would stop it recurring; two of the ten repaired were introduced the same
+day by the same hand that filed this.
+
+---
 ## TD-C-TWENTY-FOUR-THOUSAND-LINES-BEHIND-ALLOW-DEAD-CODE
 
 **Date:** 2026-09-08. **Lane:** C.

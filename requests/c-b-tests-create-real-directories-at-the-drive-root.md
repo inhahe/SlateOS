@@ -18,8 +18,8 @@ your clean-run-look experiment has no inference in it.
 |---|---|
 | `/dev` | **FIXED**, `7e4b3fc9b`. Attributed by measurement, not timestamps: clean root, then `udevd` (99 passed) creates `E:\dev` while `authlib` (39), `polkit` (88) and `powerctl` (10) create nothing. `DEV_DIR` is a `dev_dir` field on `DaemonState` now; the two tests use a `ScratchDir`, as do their `DeviceDatabase` paths, which were `/tmp/...` with the same shape. Clean root + `cargo test -p udevd` now leaves the root clean. |
 | `/sys/fs/cgroup` | **NOT A DEFECT.** My probe. See above. |
-| `/var/run` | **OPEN.** Not attributable by sampling -- `audit`, `crond`, `doas`, `ftpd`, `sshd`, `su`, `sudo`, `login`, `passwd`, `loginmgr` each leave the root clean when run alone. A full workspace run against a cleaned root is the outstanding measurement. |
-| `/etc/passwd`, `/etc/shadow`, `/etc/users.yaml` | **OPEN**, same. |
+| `/var/run` | **FIXED.** `logind`. `Daemon::new` installed `authlib::Authenticator::new()`, which carries the system faillock at `/var/run/authlib/tally`. Traced from the file's own contents -- `616c696365` is `alice` hex-encoded -- then confirmed by `scripts/check-test-root-writes.py` over fourteen candidates. Fixing the test HELPER fixed nothing: thirty-seven tests call `Daemon::new` directly. The verifier is a required parameter now. Clean root + `cargo test -p logind` leaves the root clean. |
+| `/etc/passwd`, `/etc/shadow`, `/etc/users.yaml` | **NOT REPRODUCED.** A full `cargo test --workspace --no-fail-fast` against a cleaned root -- 580 suites, 25 498 passed, 0 failed -- created only `/var/run`, which is now fixed. `/etc` did not reappear. Either it was fixed in passing or it needs a run this one did not reach; `scripts/check-test-root-writes.py --all` will name it if it comes back. |
 
 **On the gate you offered me (your section 6.3): yes, and thank you for not
 writing it -- but it has to be behavioural, not static.** A checker refusing an

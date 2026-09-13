@@ -74763,6 +74763,28 @@ the disc's own brightness, and `p.lavender` is only ever drawn on the card. The
 defensible and each visible to the user, so this is a design choice, not an
 oversight to patch.
 
+**2026-09-13: now in the operator's queue as `open-questions.md` → C-Q19, and
+the reason it moved is that one option got cheap.** `appearance::legible_on`
+landed on 2026-09-12: it moves a colour the smallest distance that clears
+4.5:1, does nothing when it already does, and preserves hue. So "nudge the
+brightness" is no longer a rule somebody has to invent, it is one call.
+
+**I started implementing it and stopped at the call site's own comment**,
+which says *"An event the user coloured keeps that colour everywhere, even on
+today's disc: it is their data and the calendar does not get to overrule it."*
+That is the same principle that left `apps/whiteboard`'s strokes and
+`apps/screenshot`'s annotations unfloored earlier the same day, and overruling
+it here on the strength of a mechanism the decision predates would have been
+inconsistency dressed as progress. The comment is the reason this is a
+question rather than a commit.
+
+**One thing the aborted attempt did leave behind, and it is worth having.** The
+test written for it passed *without* the fix, because the fixture's event never
+landed on the rendered cell and no dot was drawn at all. A negative control --
+assert that a dot exists before asserting anything about its colour -- turned a
+vacuous pass into a loud failure. Whatever is decided here, the test for it
+needs that control first.
+
 | Option | *What changes:* |
 |---|---|
 | Honour it always (today) | Nothing. A colour matching the accent is invisible on today's cell, and the user arguably asked for that. |

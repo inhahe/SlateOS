@@ -61,7 +61,6 @@ BASELINE = {
     "userspace/ldconfig",
     "userspace/login",
     "userspace/ntpd",
-    "userspace/objdump",
     "userspace/oils",
     "userspace/resolvectl",
     "userspace/ss",

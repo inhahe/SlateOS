@@ -463,6 +463,29 @@ fn main() {
                 print_usage();
                 process::exit(0);
             }
+            // Everything after `--` is a path, however it is spelled. This
+            // program exists to rename files with awkward names, so a file
+            // called `-n` is squarely within its remit and it needs a way to
+            // be handed one.
+            "--" => {
+                i += 1;
+                while i < args.len() {
+                    paths.push(args[i].clone());
+                    i += 1;
+                }
+            }
+            // An unrecognised option used to become a *path to rename*.
+            //
+            // That is not merely untidy here. `sanitize --dry-runn DIR`
+            // would fail to set dry-run, add the typo as a path that does
+            // not exist, and then **rename every file under DIR** -- the
+            // user asked for a preview and got the real thing. A renaming
+            // tool cannot treat a mistyped flag as an operand.
+            other if other.starts_with('-') && other.len() > 1 => {
+                eprintln!("sanitize: {}", usageerror::unknown_option(other.as_bytes()));
+                eprintln!("Run 'sanitize --help' for usage.");
+                process::exit(1);
+            }
             other => {
                 paths.push(other.to_string());
                 i += 1;

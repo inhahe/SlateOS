@@ -77,6 +77,11 @@
 #      neighbouring test's scratch dir -- which is where an intermittent
 #      failure came from. Narrowed to the crates a push touches, because the
 #      verdict is empirical and costs 105 s over the whole tree.
+#  36. Refuse a program that names an option it does not understand and then
+#      acts on the command line anyway. `cgcreate --zzq -g cpu:/x` printed
+#      the refusal AFTER creating the cgroup and exited 0. Static, because
+#      the behavioural probe runs the bad option alone and cannot tell a
+#      rejection from a missing-operand failure -- eleven read as green.
 #
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented; wrong again the moment gate 13 was written, when the
@@ -4271,7 +4276,8 @@ if [ "$skip" -eq 0 ] && [ -f "$repo_root/scripts/check-lane-signals.py" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Gate: an unknown-option diagnostic that does not stop the command.
+# Gate 36 -- option-stops.  An unknown-option diagnostic that does not stop the
+# command.
 #
 # A program that prints "unknown option: X" and then carries on has told the
 # caller it did not understand the command line and acted on it anyway.

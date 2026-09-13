@@ -1920,7 +1920,7 @@ impl EditorState {
                 x + tab_w - input::TAB_CLOSE_WIDTH + 4.0,
                 9.0,
                 "x",
-                self.palette.overlay0,
+                self.palette.subtext0,
                 11.0,
             );
 
@@ -2326,14 +2326,14 @@ impl EditorState {
             doc.cursor_line.saturating_add(1),
             doc.cursor_col.saturating_add(1)
         );
-        tree.text(8.0, bar_y + 5.0, &pos_text, self.palette.overlay0, 11.0);
+        tree.text(8.0, bar_y + 5.0, &pos_text, self.palette.subtext0, 11.0);
 
         // Language
         tree.text(
             200.0,
             bar_y + 5.0,
             doc.language.name(),
-            self.palette.overlay0,
+            self.palette.subtext0,
             11.0,
         );
 
@@ -2342,13 +2342,13 @@ impl EditorState {
             350.0,
             bar_y + 5.0,
             doc.line_ending.as_str(),
-            self.palette.overlay0,
+            self.palette.subtext0,
             11.0,
         );
 
         // Line count
         let lc = format!("{} lines", doc.line_count());
-        tree.text(w - 100.0, bar_y + 5.0, &lc, self.palette.overlay0, 11.0);
+        tree.text(w - 100.0, bar_y + 5.0, &lc, self.palette.subtext0, 11.0);
     }
 
     fn render_find_panel(&self, tree: &mut RenderTree) {
@@ -2419,7 +2419,7 @@ impl EditorState {
             panel_x + 8.0,
             panel_y + 64.0,
             &match_info,
-            self.palette.overlay0,
+            self.palette.subtext0,
             10.0,
         );
     }
@@ -2543,7 +2543,7 @@ impl EditorState {
             }
 
             let label = format!("#{}", i.saturating_add(1));
-            tree.text(dx + 2.0, y, &label, self.palette.overlay0, 9.0);
+            tree.text(dx + 2.0, y, &label, self.palette.subtext0, 9.0);
 
             for (li, line) in ours.iter().enumerate() {
                 tree.text(

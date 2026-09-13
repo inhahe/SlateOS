@@ -697,7 +697,7 @@ impl StorageSettingsUI {
                     if drive.removable { " (removable)" } else { "" }
                 ),
                 font_size: 10.0,
-                color: p.overlay0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 24.0),
                 overflow: TextOverflow::Ellipsis,

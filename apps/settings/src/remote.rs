@@ -823,7 +823,7 @@ fn render_dropdown_row(
         dd_x + FIELD_INPUT_WIDTH - 24.0,
         y + 10.0,
         "\u{25BC}",
-        pal.overlay0,
+        pal.subtext0,
         11.0,
     );
 

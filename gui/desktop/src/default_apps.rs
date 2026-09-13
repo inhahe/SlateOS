@@ -906,7 +906,7 @@ impl DefaultAppsUI {
                 y: row_y + 16.0,
                 text: if is_expanded { "\u{25B2}" } else { "\u{25BC}" }.to_string(),
                 font_size: 12.0,
-                color: p.overlay0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,

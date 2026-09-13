@@ -655,7 +655,7 @@ impl BluetoothSettingsUI {
                 y: y + 60.0,
                 text: "Bluetooth is turned off".to_string(),
                 font_size: 14.0,
-                color: p.overlay0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,

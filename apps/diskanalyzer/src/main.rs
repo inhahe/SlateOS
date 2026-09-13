@@ -1741,7 +1741,7 @@ impl DiskAnalyzerUI {
                     x: bx,
                     y: y + 8.0,
                     text: " / ".to_string(),
-                    color: self.palette.overlay0,
+                    color: self.palette.subtext0,
                     font_size: FONT_SIZE_SMALL,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,

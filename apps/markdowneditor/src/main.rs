@@ -5260,7 +5260,7 @@ impl App {
                 y,
                 text: format!("#{}", i.saturating_add(1)),
                 font_size: 9.0,
-                color: self.palette.overlay0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(10.0),
                 overflow: TextOverflow::Ellipsis,

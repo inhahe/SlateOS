@@ -2986,7 +2986,7 @@ impl EmailApp {
                 y: y + _h / 2.0 - 10.0,
                 text: "Select a message to read".to_string(),
                 font_size: 13.0,
-                color: self.palette.overlay0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,

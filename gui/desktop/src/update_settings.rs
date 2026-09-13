@@ -469,7 +469,7 @@ impl UpdateSettingsUI {
                 self.settings.os_version, self.settings.os_build
             ),
             font_size: 12.0,
-            color: p.overlay0,
+            color: p.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(inner),
             overflow: TextOverflow::Ellipsis,

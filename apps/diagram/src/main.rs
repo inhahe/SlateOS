@@ -3190,7 +3190,7 @@ impl DiagramApp {
                 x: px + 12.0,
                 y: row_y,
                 text: String::from("No selection"),
-                color: self.palette.overlay0,
+                color: self.palette.subtext0,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(PROPERTIES_WIDTH - 24.0),

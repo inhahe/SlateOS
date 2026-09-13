@@ -1568,7 +1568,7 @@ fn render_disabled_button(tree: &mut RenderTree, pal: &Palette, x: f32, y: f32, 
         pal.surface0,
         6.0,
     );
-    tree.text(x + 12.0, y + 8.0, label, pal.overlay0, 13.0);
+    tree.text(x + 12.0, y + 8.0, label, pal.subtext0, 13.0);
 }
 
 /// Draw a read-only text field showing `value`, inset within a row at `y`.
@@ -3642,7 +3642,7 @@ impl SettingsState {
                 };
                 tree.text(x + 220.0, y + 4.0, sym, col, 13.0);
             } else {
-                tree.text(x + 220.0, y + 4.0, "-", pal.overlay0, 13.0);
+                tree.text(x + 220.0, y + 4.0, "-", pal.subtext0, 13.0);
             }
             // Camera
             if let Some(p) = cam {
@@ -3653,7 +3653,7 @@ impl SettingsState {
                 };
                 tree.text(x + 310.0, y + 4.0, sym, col, 13.0);
             } else {
-                tree.text(x + 310.0, y + 4.0, "-", pal.overlay0, 13.0);
+                tree.text(x + 310.0, y + 4.0, "-", pal.subtext0, 13.0);
             }
             // Mic
             if let Some(p) = mic {
@@ -3664,7 +3664,7 @@ impl SettingsState {
                 };
                 tree.text(x + 385.0, y + 4.0, sym, col, 13.0);
             } else {
-                tree.text(x + 385.0, y + 4.0, "-", pal.overlay0, 13.0);
+                tree.text(x + 385.0, y + 4.0, "-", pal.subtext0, 13.0);
             }
             // Background
             if let Some(p) = bg {
@@ -3675,7 +3675,7 @@ impl SettingsState {
                 };
                 tree.text(x + 465.0, y + 4.0, sym, col, 13.0);
             } else {
-                tree.text(x + 465.0, y + 4.0, "-", pal.overlay0, 13.0);
+                tree.text(x + 465.0, y + 4.0, "-", pal.subtext0, 13.0);
             }
 
             y += 28.0;
@@ -4538,7 +4538,7 @@ impl SettingsState {
                 dropdown_x + 12.0,
                 layout.row_top(window.count) + 10.0,
                 &format!("{hidden} more"),
-                pal.overlay0,
+                pal.subtext0,
                 11.0,
             );
         }

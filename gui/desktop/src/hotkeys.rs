@@ -1711,7 +1711,7 @@ pub fn render_settings_panel(
                 text: detail.to_string(),
                 // Dimmer than either label branch: the app name is an
                 // argument to the action beside it, not a second action.
-                color: p.overlay0,
+                color: p.subtext0,
                 font_size: KEY_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(content_width * 0.25),

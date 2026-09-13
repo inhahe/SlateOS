@@ -1156,7 +1156,7 @@ impl LoginScreen {
                 y: uy + 36.0,
                 text: user.account_type.clone(),
                 font_size: 11.0,
-                color: p.overlay0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,

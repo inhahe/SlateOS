@@ -6010,6 +6010,31 @@ check_lane_c_gui_gates() {
         return 1
     fi
 
+    # Same shape again, over a different property: which *ink* text is drawn
+    # in. `overlay0` is the palette's disabled grey and fails 4.5:1 on every
+    # surface by design, which is correct for a switched-off control and wrong
+    # for a section heading. No rendering test can see the difference -- a
+    # heading in the disabled grey composites perfectly -- so the draw site is
+    # the only place the question can be asked.
+    if ! run_checker check-overlay0-ink-selftest "$py" "$PROJECT_ROOT/scripts/check-overlay0-ink.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The overlay0-ink gate no longer agrees" >&2
+        echo "with its own fixtures, so it can no longer be trusted to find" >&2
+        echo "live text drawn in the disabled grey." >&2
+        return 1
+    fi
+
+    echo "=== Checking that only disabled text is drawn in the disabled grey ==="
+    if ! run_checker check-overlay0-ink "$py" "$PROJECT_ROOT/scripts/check-overlay0-ink.py"; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  Each draw above inks live text in" >&2
+        echo "\`overlay0\`, which is 2.30:1 against the page where 4.5 is the" >&2
+        echo "floor -- unreadable, and it will render and test perfectly." >&2
+        echo "WCAG exempts *disabled* controls so that off can look off; it does" >&2
+        echo "not exempt a heading.  Live text belongs in \`subtext0\` (9.58:1)." >&2
+        return 1
+    fi
+
     # A gate that has stopped scanning reports zero findings exactly as a
     # clean tree does, so the key-release gate is checked against its own
     # fixture before its verdict on the tree is believed.

@@ -2626,7 +2626,7 @@ impl FileAssocUI {
                 x,
                 y,
                 text: String::from("Select a file type to see details"),
-                color: self.palette.overlay0,
+                color: self.palette.subtext0,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(content_w),

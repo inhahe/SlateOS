@@ -1675,7 +1675,7 @@ impl NotificationPane {
             x: x + card_width - 60.0,
             y: y + 8.0,
             text: time_str,
-            color: p.overlay0,
+            color: p.subtext0,
             font_size: 10.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(55.0),

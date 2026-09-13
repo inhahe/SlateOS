@@ -1328,7 +1328,7 @@ impl DesktopWidgetManager {
                 y: cy + 8.0,
                 text: format!("{}x{}", sz.cols, sz.rows),
                 font_size: 10.0,
-                color: p.overlay0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Light,
                 max_width: None,
                 overflow: TextOverflow::Clip,

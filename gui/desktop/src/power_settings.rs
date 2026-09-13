@@ -797,7 +797,7 @@ impl PowerSettingsUI {
                 y,
                 text: "No battery detected — running on AC power.".into(),
                 font_size: 13.0,
-                color: p.overlay0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width),
                 overflow: TextOverflow::Ellipsis,

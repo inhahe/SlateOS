@@ -2314,7 +2314,7 @@ impl HabitTrackerApp {
             y: y + 7.0,
             text: String::from("N:New  A:Archive  C:Filter  Space:Check  +/-:Date"),
             font_size: 10.0,
-            color: self.palette.overlay0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(310.0),
             overflow: TextOverflow::Ellipsis,

@@ -2358,7 +2358,7 @@ impl SlidesApp {
                     x: lx,
                     y,
                     text: String::from("No element selected"),
-                    color: self.palette.overlay0,
+                    color: self.palette.subtext0,
                     font_size: 11.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(val_w),

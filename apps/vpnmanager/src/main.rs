@@ -2247,7 +2247,7 @@ fn render_no_selection(frame: &mut Frame, pal: &Palette, px: f32, py: f32, pw: f
         y: py + ph / 2.0 - 10.0,
         text: String::from("Select a VPN profile"),
         font_size: 16.0,
-        color: pal.overlay0,
+        color: pal.subtext0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
         overflow: TextOverflow::Clip,

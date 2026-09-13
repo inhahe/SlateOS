@@ -2259,7 +2259,7 @@ impl NetworkSettingsUI {
                 y: row_y + 8.0,
                 text: "No proxy configured. Direct connection to the internet.".to_string(),
                 font_size: 13.0,
-                color: p.overlay0,
+                color: p.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(width - 32.0),
                 overflow: TextOverflow::Ellipsis,

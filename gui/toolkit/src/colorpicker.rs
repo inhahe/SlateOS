@@ -1312,7 +1312,7 @@ impl ColorPickerDialog {
             x: input_x + 4.0,
             y: y + 2.0,
             text: String::from("#"),
-            color: palette.overlay0,
+            color: palette.subtext0,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,

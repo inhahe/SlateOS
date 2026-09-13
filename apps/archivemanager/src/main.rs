@@ -1919,7 +1919,7 @@ pub fn render_sidebar(state: &AppState, frame: &mut Frame, y_offset: f32, height
                 x: indent,
                 y: ry + 4.0,
                 text: arrow.to_string(),
-                color: state.palette.overlay0,
+                color: state.palette.subtext0,
                 font_size: 11.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,

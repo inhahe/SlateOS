@@ -129557,6 +129557,53 @@ entry names a *count* in its title, and a count in a title is a claim that goes
 out of date silently -- nothing fails when three of four are fixed, and the
 heading still says four.
 
+**And the one that is left is not "unconstructed" — it is the fourth model of a
+feature that exists four times and connects nowhere.** `tray_dnd.rs` drags,
+drops, pins and reorders **tray icons**. Four things in this tree model a tray
+icon, and no two of them meet:
+
+| | what | state |
+|---|---|---|
+| `apps/systray` (3 809 lines) | a running application that draws a tray: volume, network, battery, clock, notifications, power | **wired** -- `launch("systray", ...)`, one of the 135 |
+| `gui/desktop`'s taskbar tray | clock, notification bell, desktop indicator, keyboard-layout indicator, laid out right-to-left from the display edge | **wired**, and these are shell items, not application icons |
+| `gui/desktop/src/tray_dnd.rs` (1 184 lines) | `TrayIconSlot`, `TrayIconArrangement`, drag/drop/pin/reorder | nothing constructs it |
+| `kernel/src/fs/systray.rs` (607 lines) | the persistence model -- badges, click actions, per-app overrides, visibility | lane A's tree |
+
+**The join that is missing is the one that makes it a system tray at all: an
+application cannot put an icon in any of them.** `apps/systray::register_icon`
+is public and takes exactly what a third-party app would need -- app name, icon
+character, tooltip -- and **all nine of its callers are its own tests**. There
+is no control verb, in `gui/remote` or anywhere else, by which one process asks
+another to show an icon on its behalf. The icons `apps/systray` draws are
+built-in ones it constructs itself.
+
+So the spec's `design.txt:714-717` -- "a system tray like on Windows", "can drag
+and drop icons into and out of the system tray", apps that start in or minimise
+to it, a per-app override -- has an implementation of every *part* and no
+process boundary crossed anywhere in it. This is the shape
+`TD-THREE-INDEPENDENT-APPEARANCE-MODELS` and this file's accessibility entry
+both describe, at four copies rather than three.
+
+**What the work is, when someone takes it:** a registration verb and a
+per-client registry with reaping, then a subscription frame so a tray learns
+the list. `gui/remote/src/window_list.rs` is the model to copy and says why in
+its own first paragraph -- "a taskbar has to list the windows it did not open,
+and had no way to ask" is the same sentence with "icons" in it. Deciding
+*which* of the four is the real tray is the first question, and it is a real
+one: `apps/systray` is a separate window, the shell's tray is part of the
+taskbar, and they cannot both be where icons go.
+
+**Not started here, deliberately**, and the reason is this entry's own subject:
+layers that exist without their consumers are what produced four models in the
+first place.
+
+**A correction to how this was found, because it is the error this file keeps
+recording.** The first pass concluded "there are no tray icons anywhere" from a
+grep across `gui/remote`, `gui/compositor`, `gui/window` and `gui/desktop` --
+four crates chosen because they are where a protocol would live. `apps/` and
+`kernel/` were not in it, and that is where three of the four models are. A
+population picked for where the answer *should* be is not a population.
+
 **These are not the settings panels, and must not be treated the same way.**
 Three unreachable `*_settings.rs` panels were deleted the same day under
 `design-decisions.md` §815 — but §815 draws its line precisely here: *"The

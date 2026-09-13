@@ -141666,7 +141666,7 @@ defect is worse than the ones already fixed today; the implementation is
 more than a single change.
 
 
-## B-TWELVE-CRATES-HAVE-NO-TESTS-AT-ALL-AND-REPORT-ZERO-PASSED (lane B, 2026-09-13) -- 12 -> 8, four defects found
+## B-TWELVE-CRATES-HAVE-NO-TESTS-AT-ALL-AND-REPORT-ZERO-PASSED (lane B, 2026-09-13) -- CLOSED for workspace members: 12 -> 7, two defects found
 
 ### Progress, and what writing the tests actually turned up
 
@@ -141684,11 +141684,34 @@ that looks like a right one. A backup that silently records the wrong size
 still backs up. A search that returns four files instead of one still returns
 files. Neither would be reported by anything.
 
-Remaining: 8 crates, 9,975 lines. Six are `services/*`, which are NOT
-workspace members -- `cargo test -p netstack` answers "did not match any
-packages" -- so testing those is a different job and the baseline says so per
-line. The two workspace members left are `userspace/nano` (1,923 lines) and
-`userspace/indexer`'s neighbours.
+### Closed for workspace members
+
+`userspace/nano` took the count to 7, and **every remaining crate is one that
+`cargo test -p` cannot reach or that has nothing to reach.** Each carries its
+reason in the baseline:
+
+* Six `services/*` crates -- `hello`, `httpget`, `init`, `netstack`, `ticker`,
+  `udpget` -- are not workspace members. They target `x86_64-unknown-none` and
+  `cargo test -p netstack` answers "did not match any packages". Their bodies
+  are raw syscall wrappers and the boot/poll sequences that call them.
+* `userspace/shell` is not a shell: it is the toolchain validation program,
+  and its whole behaviour is printing a fixed sequence from `main()`.
+
+**`netstack` is the one worth stating separately**, because 4,329 untested
+lines reads alarming and is not: the protocol logic it would be tested FOR
+lives in the shared crates it delegates to, and those are tested --
+`netproto` 79 tests, `netipc` 41, `netring` 9. What remains in `netstack`
+itself is syscall wrappers and frame dispatch.
+
+A measurement note, since it nearly became a wrong accusation: my first count
+of those three said `netring` had **zero** tests, and I was one command away
+from telling lane C that a crate the kernel links had none. The count was
+wrong -- `grep -c` on a SINGLE file prints just the number, with no `file:`
+prefix, so the `awk -F: '{s+=$2}'` summing field two got nothing. It worked
+for the two multi-file crates and failed for the one-file one. Recounted
+recursively before saying anything.
+
+### What the original twelve were
 
 ### The original measurement
 

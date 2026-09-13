@@ -8,10 +8,10 @@
 #
 # Anything after " -- " in a line's comment is a human explanation and is preserved
 #   when this file is regenerated.
-services/hello  # 70 lines, separate
-services/httpget  # 303 lines, separate
-services/init  # 2454 lines, separate
-services/netstack  # 4329 lines, separate
-services/ticker  # 167 lines, separate
-services/udpget  # 525 lines, separate
+services/hello  # 70 lines, separate -- NOT a workspace member: it targets x86_64-unknown-none and `cargo test -p` answers "did not match any packages". a 70-line smoke service whose whole body is print-and-exit through raw syscalls.
+services/httpget  # 303 lines, separate -- NOT a workspace member: it targets x86_64-unknown-none and `cargo test -p` answers "did not match any packages". raw-syscall client for the SlateOS target; its HTTP/TCP logic is thin glue over the shared net crates.
+services/init  # 2454 lines, separate -- NOT a workspace member: it targets x86_64-unknown-none and `cargo test -p` answers "did not match any packages". the first userspace process. Every function is a raw syscall wrapper or the boot sequence that calls them; there is no host-runnable unit.
+services/netstack  # 4329 lines, separate -- NOT a workspace member: it targets x86_64-unknown-none and `cargo test -p` answers "did not match any packages". the protocol logic IS tested, in the shared crates it delegates to -- netproto 79 tests, netipc 41, netring 9. What is left here is syscall wrappers and frame dispatch.
+services/ticker  # 167 lines, separate -- NOT a workspace member: it targets x86_64-unknown-none and `cargo test -p` answers "did not match any packages". a 167-line timer smoke service; body is sleep-and-print through raw syscalls.
+services/udpget  # 525 lines, separate -- NOT a workspace member: it targets x86_64-unknown-none and `cargo test -p` answers "did not match any packages". raw-syscall client for the SlateOS target, like httpget.
 userspace/shell  # 204 lines, ws -- not a shell. It is the toolchain validation program (its own module doc says so), and its whole behaviour is printing a fixed sequence of checks from main(). There is no unit to test; the real shell is /bin/dash, staged by scripts/create-ext4-rootfs.sh.

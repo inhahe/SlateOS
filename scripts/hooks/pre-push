@@ -100,6 +100,11 @@
 #      twelve that are like that today are baselined, and the list may only
 #      shrink -- a crate that gains its first test must leave it.
 #
+#  40. Compile the six crates under `services/` that nothing else compiles.
+#      They are not workspace members, so every workspace build and every
+#      other gate here skips them -- yet they link crates that ARE members
+#      and do change. 0.6 s warm.
+#
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented; wrong again the moment gate 13 was written, when the
 # section and the bypass landed in `0ab4b55bc` and this list did not; and
@@ -4599,6 +4604,80 @@ If a crate gained its first test, tighten the list:
 
 To push anyway:
     ALLOW_UNTESTED_CRATES=1 git push origin ...
+EOF
+    exit 1
+fi
+
+
+# ---------------------------------------------------------------------------
+# Gate 40 -- services-build.  The six crates under services/ that nothing else
+# compiles.
+#
+# hello, httpget, init, netstack, ticker and udpget are NOT workspace members.
+# Each carries its own .cargo/config.toml pinning x86_64-unknown-none, which is
+# what lets them build and what keeps them out of everything that runs here:
+# \`cargo test --workspace\` skips them, \`cargo test -p netstack\` answers "did
+# not match any packages", and grepping this hook and boot-test.sh for their
+# names returned 0 before this gate.
+#
+# They depend on crates that ARE in the workspace and do change -- netstack
+# pulls in netproto, netipc and netring -- so an edit over there can break the
+# daemon while every check here stays green, and the breakage waits for a
+# rootfs rebuild or a boot. services/init is the sharper case: a kernel that
+# boots to a broken init has nothing to report the breakage with.
+#
+# 0.6 s for all six warm, 1.9 s after a dependency changes. Compiles, does not
+# test: those crates have no host-runnable tests and the baseline says why per
+# line. The floor is what was missing.
+# ---------------------------------------------------------------------------
+svcbuild="${repo_root:-.}/scripts/check-services-build.py"
+skip_svcbuild=0
+# Bypass: ALLOW_SERVICES_BUILD=1 git push origin <branch>
+if [ "${ALLOW_SERVICES_BUILD:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_SERVICES_BUILD=1 set -- skipping the services-build gate." >&2
+    skip_svcbuild=1
+fi
+[ -n "$py" ] || skip_svcbuild=1
+[ -f "$svcbuild" ] || skip_svcbuild=1
+# Their own trees, and the workspace crates they link. netproto/netipc/netring
+# are the whole reason this gate exists, so a push touching those must run it.
+touches services/ netproto/ netipc/ netring/         scripts/check-services-build.py || skip_svcbuild=1
+note_gate services-build "$skip_svcbuild"
+
+svcbuild_failed=0
+if [ "$skip_svcbuild" != "1" ]; then
+    # The checker before its verdict. Its silent failure is discovery
+    # returning nothing: it would then compile zero crates and print a clean
+    # verdict. That is a self-test case, along with both halves of the
+    # two-marker rule.
+    if ! run_checker services-build-selftest "$py" "$svcbuild" --selftest; then
+        echo "pre-push: check-services-build.py FAILED ITS OWN SELF-TEST -- its verdict is not trustworthy." >&2
+        svcbuild_failed=1
+    else
+        if ! run_checker services-build "$py" "$svcbuild"; then
+            svcbuild_failed=1
+        fi
+    fi
+fi
+
+if [ "$svcbuild_failed" != "0" ]; then
+    cat >&2 <<EOF
+
+pre-push: REFUSING to push -- a crate under services/ does not compile.
+
+Nothing else in this repository would have told you. Those six are not
+workspace members, so every workspace build and every other gate here skips
+them, and they depend on crates that are in the workspace: netstack pulls in
+netproto, netipc and netring.
+
+If services/init is the one failing, fix it first -- it is the first userspace
+process, and a kernel that boots to a broken init has nothing left to report
+the breakage with.
+
+    cd services/<name> && cargo check
+
+To push anyway:
+    ALLOW_SERVICES_BUILD=1 git push origin ...
 EOF
     exit 1
 fi

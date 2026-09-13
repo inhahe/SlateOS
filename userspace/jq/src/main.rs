@@ -886,7 +886,26 @@ fn tokenize_filter(input: &str) -> Result<Vec<Token>, String> {
                     .map_err(|e: std::num::ParseFloatError| e.to_string())?;
                 tokens.push(Token::Num(n));
             }
-            b'a'..=b'z' | b'A'..=b'Z' | b'_' | b'$' => {
+            b'$' => {
+                // `$name`, consumed and refused. There is no variable token
+                // in this program and no binding form, so there is nothing
+                // to evaluate -- but the refusal has to CONSUME the `$`.
+                //
+                // This used to fall into the identifier arm below, whose
+                // inner loop advances only over alphanumerics and `_`. On a
+                // `$` the body never ran, `i` never moved, and the outer
+                // `while i < bytes.len()` spun forever: `jq -n '$x'` hung
+                // until it was killed. Any filter containing a variable did,
+                // which includes the ordinary `--arg name value` idiom.
+                let start = i;
+                i += 1;
+                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                    i += 1;
+                }
+                let name = std::str::from_utf8(&bytes[start..i]).map_err(|e| e.to_string())?;
+                return Err(format!("variables are not supported: {name}"));
+            }
+            b'a'..=b'z' | b'A'..=b'Z' | b'_' => {
                 let start = i;
                 while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
                     i += 1;
@@ -3245,6 +3264,33 @@ mod tests {
             parse_json(r#""\u0041""#).unwrap(),
             Value::String("A".into())
         );
+    }
+
+    /// The tokenizer terminates on every byte it accepts.
+    ///
+    /// `$` used to enter the identifier arm, whose inner loop advances only
+    /// over alphanumerics and `_`, so it consumed nothing and the outer loop
+    /// spun forever. `jq -n '$x'` hung until killed. This asserts the
+    /// specific case and then the general property, because the next
+    /// non-advancing arm will not be `$`.
+    #[test]
+    fn the_tokenizer_always_advances() {
+        assert!(
+            tokenize_filter("$o").is_err(),
+            "$o must be refused, not hang"
+        );
+        assert!(tokenize_filter("label $o | 1").is_err());
+
+        // Every byte that can start a token, alone and in context. A
+        // non-advancing arm hangs the suite rather than failing it, which is
+        // the point: a test that hangs is still a test that caught it.
+        for b in 0x20u8..0x7f {
+            let c = b as char;
+            for probe in [c.to_string(), format!(".a {c} 1"), format!("{c}x")] {
+                // Only that it returns at all. Err is a fine answer here.
+                let _ = tokenize_filter(&probe);
+            }
+        }
     }
 
     /// An unimplemented filter is an error, and an error is not exit 0.

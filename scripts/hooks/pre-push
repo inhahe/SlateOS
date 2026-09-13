@@ -4338,7 +4338,7 @@ it did not understand; going on to do the work makes the message a lie rather
 than a warning. Two of the thirteen found this way destroy data -- wipefs and
 blkdiscard both printed the refusal and then operated on the device.
 
-The fix is one line: a `process::exit(1)` or `return 1` in the arm.
+The fix is one line: a \`process::exit(1)\` or \`return 1\` in the arm.
 
 If the arm is a deliberate end-of-options marker -- as in \`cgexec\`, where
 everything after the options is the command to run, so \`cgexec -g cpu:/x ls

@@ -2087,7 +2087,10 @@ fn main() {
 // that the code under test must never call, so reaching one IS the test
 // failing and the message names which invariant broke. CLAUDE.md allows panic
 // in test modules for this.
-#[allow(clippy::panic)]
+// `expect` joins it for the same reason: a parse that must succeed is an
+// assertion about the parser, and a test that fires one is a test reporting
+// a failure rather than a program crashing on a user's data.
+#[allow(clippy::panic, clippy::expect_used)]
 mod tests {
     use super::*;
 

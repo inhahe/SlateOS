@@ -1550,7 +1550,7 @@ impl Face {
         self.kerning.is_some()
     }
 
-    /// Whether this face's kerning lives somewhere [`position`](Self::position)
+    /// Whether this face's kerning lives somewhere `position`
     /// cannot reach — that is, in the legacy `kern` table.
     ///
     /// A shaper that runs the positioning pass must ask before also walking
@@ -1666,7 +1666,7 @@ impl Face {
     /// its script asks for a complex one, because this face files its `GSUB`
     /// features under `DFLT` or `latn`.
     ///
-    /// The face's half of [`fallback::shaped_as_default`](crate::fallback::shaped_as_default),
+    /// The face's half of `fallback::shaped_as_default`,
     /// which is where the reasoning is. Three callers, and they have to agree:
     /// whether the Indic shaper runs at all, whether the run's marks may be
     /// placed by measurement, and whether their advances are zeroed are three
@@ -2117,7 +2117,7 @@ impl Face {
     ///
     /// As [`outline`](Self::outline). A `gvar` that is unreadable for this
     /// particular glyph is *not* an error: it yields the default outline, on
-    /// the same reasoning as [`Gvar::parse`](crate::gvar::Gvar) returning
+    /// the same reasoning as `Gvar::parse` returning
     /// `None` — a face that fails to vary still draws.
     pub fn outline_at(&self, gid: u16, coords: &var::Coords) -> Result<Outline, SfntError> {
         let Some(gvar) = self.gvar.as_ref() else {

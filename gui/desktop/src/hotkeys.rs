@@ -201,7 +201,7 @@ pub(crate) const ALL_MODIFIER_SETS: [Modifiers; 16] = {
 /// with Ctrl held as well: the virtual-desktop shortcuts were unreachable and
 /// had never once fired. A map keyed on the exact set cannot reproduce that.
 ///
-/// The two exceptions are in [`normalized`](Self::normalized), which is applied
+/// The two exceptions are in `normalized`, which is applied
 /// on the way *in* as well as on the way out, so they are properties of the
 /// stored binding rather than of the lookup.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -316,7 +316,7 @@ impl Hotkey {
 
     /// Test whether a key event matches this hotkey.
     ///
-    /// Both sides go through [`normalized`](Self::normalized), so this answers
+    /// Both sides go through `normalized`, so this answers
     /// the same question the registry does. Comparing the raw fields instead
     /// would let `matches` disagree with [`HotkeyRegistry::lookup`] about the
     /// two keys that have a rule — which is a difference nobody would look for.
@@ -1525,7 +1525,7 @@ fn panel_layout(registry: &HotkeyRegistry, max_height: f32) -> PanelLayout {
 /// card of another the moment a user added a binding. [`render_settings_panel`]
 /// asks this same function.
 ///
-/// `max_height` is the room the caller has; see [`panel_layout`] for what
+/// `max_height` is the room the caller has; see `panel_layout` for what
 /// happens when the bindings need more than that. Pass the caller the *same*
 /// number here and to [`render_settings_panel`], or the two will disagree about
 /// how many columns there are.
@@ -1547,7 +1547,7 @@ pub fn settings_panel_size(registry: &HotkeyRegistry, max_height: f32) -> (f32, 
 ///
 /// `max_height` is how tall the caller can let the card be; past that it grows
 /// into a second column rather than off the bottom of the screen. See
-/// [`panel_layout`]. Whatever is passed here must also be passed to
+/// `panel_layout`. Whatever is passed here must also be passed to
 /// [`settings_panel_size`], or the placement and the drawing will disagree.
 ///
 /// `p` supplies every colour drawn; see this module's `# Colour` section for

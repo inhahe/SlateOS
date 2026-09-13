@@ -15,7 +15,7 @@
 //! # Colour: roles, and the two things that are exceptions on purpose
 //!
 //! Everything this module paints reads its colour from the live
-//! [`Palette`](appearance::Palette), for the reason in `known-issues.md`
+//! [`appearance::Palette`], for the reason in `known-issues.md`
 //! → `TD-C-FORTY-NINE-SHELL-MODULES-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE`.
 //! Two things here do not, and both are exceptions with a reason rather than
 //! leftovers:

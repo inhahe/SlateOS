@@ -13,7 +13,7 @@
 //!
 //! * [`ScriptTags::of`] maps one character to the OpenType script tag(s) a font would
 //!   file its features under.
-//! * [`runs`] splits a piece list into maximal stretches of one script *and
+//! * `runs` splits a piece list into maximal stretches of one script *and
 //!   one direction*, which is the unit substitution has to be applied over.
 //!   Splitting matters because the alternative — one script for the whole
 //!   string, which is what HarfBuzz's `guess_segment_properties` does —
@@ -51,7 +51,7 @@
 //! Unicode records this as `Script_Extensions`, the set of scripts a character
 //! is *used by*, as against the one it belongs to.
 //!
-//! [`runs`] resolves through those sets, which is UAX #24's rule rather than
+//! `runs` resolves through those sets, which is UAX #24's rule rather than
 //! the simplified one this module started with. Each run carries the
 //! intersection of the sets of the characters in it, and a character narrows
 //! the open run whenever the intersection is non-empty. So an Arabic-Indic

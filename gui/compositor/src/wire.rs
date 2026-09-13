@@ -223,7 +223,7 @@ impl ClientLink {
     /// Set this connection's image budget.
     ///
     /// Lowering it below what the link already holds does not evict anything —
-    /// see [`MAX_IMAGE_BYTES_PER_LINK`] for why nothing here evicts — it only
+    /// see `MAX_IMAGE_BYTES_PER_LINK` for why nothing here evicts — it only
     /// means the next upload is refused until the client frees enough itself.
     pub const fn set_image_budget(&mut self, bytes: u64) {
         self.image_budget = bytes;

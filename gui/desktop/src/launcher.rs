@@ -30,7 +30,7 @@
 //!
 //! # Colour
 //!
-//! Every colour here is a role of the [`Palette`] handed to [`render`], and
+//! Every colour here is a role of the [`Palette`] handed to `render`, and
 //! four judgements decide which role each site takes. Each is stated so it can
 //! be refuted by a test rather than merely believed.
 //!

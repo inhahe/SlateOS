@@ -30,7 +30,7 @@
 //! ## Scancodes, keycodes, and which one the compositor wants
 //!
 //! These are two different numbering schemes and the compositor uses the older
-//! one. [`keymap`](crate::keymap) is a **scan code set 1** table — `0x1E` is
+//! one. `keymap` is a **scan code set 1** table — `0x1E` is
 //! `A`, and an extended key carries its `0xE0` prefix in the high byte so that
 //! `0xE04B` (Left arrow) stays distinct from `0x4B` (keypad 4). evdev speaks
 //! **Linux keycodes** instead, in which those two keys are 105 and 75.
@@ -202,11 +202,11 @@ impl Record {
 // ---------------------------------------------------------------------------
 
 /// Translate a Linux keycode to the scan-code-set-1 code
-/// [`keymap`](crate::keymap) expects, or `None` if there is no such key.
+/// `keymap` expects, or `None` if there is no such key.
 ///
 /// This is the exact inverse of the kernel's `evdev::set1_to_keycode` and
 /// `set1_extended_to_keycode` (`kernel/src/evdev.rs`), and is kept an inverse
-/// by [`tests::the_table_is_the_kernels_table_backwards`].
+/// by `tests::the_table_is_the_kernels_table_backwards`.
 ///
 /// Two things make it more than a lookup:
 ///

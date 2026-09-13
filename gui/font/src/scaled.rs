@@ -1,6 +1,6 @@
 //! A font face pinned to one pixel size, with a glyph cache.
 //!
-//! [`sfnt::Face`] answers questions in *font units* and [`raster`] turns one
+//! `sfnt::Face` answers questions in *font units* and `raster` turns one
 //! outline into one mask. Neither is what a caller wants: a toolkit wants to
 //! say "draw this string at 13 px" and have it happen, without re-flattening
 //! the same 'e' for every word on the screen. [`ScaledFont`] is that layer.
@@ -21,7 +21,7 @@
 //! Everything here is in pixels with y increasing downward, matching the
 //! framebuffer. A glyph's `top` is relative to the baseline, so it is
 //! negative for the part of a glyph above the baseline — the usual
-//! convention, and the one [`raster::GlyphMask`] already uses.
+//! convention, and the one `raster::GlyphMask` already uses.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;

@@ -10,7 +10,7 @@
 //!
 //! Because the answer is already here, and having it twice is the failure
 //! mode. Composing `e` and an acute accent into `é` is exactly the question
-//! [`crate::norm`] answers on every string it shapes — UAX #15 canonical
+//! `crate::norm` answers on every string it shapes — UAX #15 canonical
 //! composition, from generated tables covering some 1050 pairs. A keyboard
 //! module that wrote its own `match ('e', '´') => 'é'` table would be a second
 //! answer to that question: shorter, hand-maintained, and therefore the one

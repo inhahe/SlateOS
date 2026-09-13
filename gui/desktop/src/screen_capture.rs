@@ -33,9 +33,9 @@
 //!    one.** Record, Pause and Resume were lettered with the near-black
 //!    `MOCHA_BASE`, which is legible on Mocha's pale red, yellow and green —
 //!    and illegible on the light theme's, where all three fills are *dark*
-//!    enough that [`readable_on`](appearance::readable_on) answers with the
+//!    enough that [`appearance::readable_on`] answers with the
 //!    pale endpoint instead. Naming the ink beside the fill is what allowed the
-//!    two to disagree; [`readable_on`](appearance::readable_on) of the fill
+//!    two to disagree; [`appearance::readable_on`] of the fill
 //!    cannot. The tests pin the endpoint each mode must produce, computed by
 //!    hand rather than by calling the same function the renderer calls.
 //! 3. **The transport colours are a code, not decoration, so nothing here is

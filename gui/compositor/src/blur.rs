@@ -11,7 +11,7 @@
 //!                       (3-pass box blur)
 //! ```
 //!
-//! The [`BlurManager`] coordinates all active [`BlurRegion`]s, caches results
+//! The [`crate::blur::BlurManager`] coordinates all active [`crate::blur::BlurRegion`]s, caches results
 //! to avoid redundant work, and exposes a single `update_all()` call per frame.
 //!
 //! # Usage
@@ -189,7 +189,7 @@ impl BlurEffect {
     /// Fully opaque, no blur — the accessibility and performance fallback.
     ///
     /// The tint is opaque `base` at every transparency setting, and deliberately
-    /// does not go through [`scaled_tint`]: this preset means "draw no blur at
+    /// does not go through `scaled_tint`: this preset means "draw no blur at
     /// all", so a user who reached for it because motion or translucency is a
     /// problem for them must not have translucency handed back by the
     /// transparency slider. It is the one preset whose alpha is a fact rather
@@ -382,7 +382,7 @@ const OPAQUE_BLACK: u32 = 0xFF00_0000;
 /// separate nested loops, each with its own bounds handling, and each correct
 /// only because of a clamp performed in some *other* function. That is how
 /// this module came to blur with a kernel one sample short (see
-/// [`box_blur_line`]) and to write a row's overhang onto the start of the next
+/// `box_blur_line`) and to write a row's overhang onto the start of the next
 /// scanline whenever a region reached the right-hand edge.
 ///
 /// A buffer that carries its own dimensions moves that index arithmetic into

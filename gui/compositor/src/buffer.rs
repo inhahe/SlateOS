@@ -308,7 +308,7 @@ impl SharedBuffer {
 /// # Why this is not a [`SharedBuffer`]
 ///
 /// The two hold the same thing — validated, normalised ARGB8888 pixels from an
-/// untrusted client — and share [`normalize`] for exactly that reason. What
+/// untrusted client — and share `normalize` for exactly that reason. What
 /// differs is the *contract around* the pixels, and it differs in every respect:
 ///
 /// | | [`SharedBuffer`] | `ImageAsset` |

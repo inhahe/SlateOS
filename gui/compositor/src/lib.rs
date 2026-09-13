@@ -969,7 +969,7 @@ pub struct Window {
     /// left on screen to release it from.
     ///
     /// Counted only while the window is visible and not minimized — see
-    /// [`Compositor::reserved_on`].
+    /// `Compositor::reserved_on`.
     pub reserved_edge: Option<(PanelEdge, u32)>,
     /// What this window is snapped to, if anything.
     ///
@@ -999,8 +999,8 @@ pub struct Window {
     pub transparent: bool,
     /// Whether the pointer passes straight through this window.
     ///
-    /// When set, [`window_at`](Compositor::window_at) and
-    /// [`window_at_with_decorations`](Compositor::window_at_with_decorations)
+    /// When set, `window_at` and
+    /// `window_at_with_decorations`
     /// behave as though the window were not there, so clicks, hovers, drags and
     /// scrolls all land on whatever is behind it. The window is consequently
     /// unfocusable by pointer and receives no pointer events at all.
@@ -1727,7 +1727,7 @@ impl Framebuffer {
     ///
     /// OPT (BENCH-COMPOSITOR-SLOW): a full 4K clear writes ~33 MB, enough that a
     /// single core does not saturate DRAM write bandwidth. Above
-    /// [`PARALLEL_FILL_THRESHOLD_PX`] the fill is split into disjoint row-bands
+    /// `PARALLEL_FILL_THRESHOLD_PX` the fill is split into disjoint row-bands
     /// filled on scoped worker threads (`split_at_mut` guarantees each thread
     /// owns a non-overlapping `&mut [u32]`, so this is safe with no `unsafe`).
     /// Below the threshold, or when the platform reports no usable parallelism
@@ -3164,7 +3164,7 @@ pub enum CompositorResponse {
     },
     /// A remote stream session was started.
     StreamStarted { stream_id: u64 },
-    /// An encoded draw-command stream frame (see [`stream`] wire format).
+    /// An encoded draw-command stream frame (see `stream` wire format).
     StreamFrame { data: Vec<u8> },
     /// The usable rectangle left on a monitor after every reservation on it,
     /// in whole pixels and in virtual-desktop coordinates. Answer to
@@ -3197,7 +3197,7 @@ pub enum EventNotification {
         /// The text this keystroke produced — see [`ClientKeyEvent::text`],
         /// whose shape this is and into which it is copied unchanged.
         ///
-        /// A `String` rather than the [`CompositorInput::KeyDown`] side's
+        /// A `String` rather than the `CompositorInput::KeyDown` side's
         /// `Option<char>` because the two ends of this translation are not
         /// symmetric: a keystroke *arrives* carrying at most one character —
         /// that is all a scancode plus a level can name — but *leaves*
@@ -5094,7 +5094,7 @@ impl Compositor {
     /// something has integrated it, and the thing integrating it is the input
     /// source. So the whole file is kept in [`Self::input_settings`], from
     /// which [`Server::run_with`](crate::Server::run_with) pushes it into the
-    /// source via [`Present::reload_input`](present::Present::reload_input).
+    /// source via [`present::Present::reload_input`].
     ///
     /// That carrying is the whole point of the method. Before it existed this
     /// read the file and threw away everything but the double-click window, so
@@ -5146,7 +5146,7 @@ impl Compositor {
     /// The keyboard layout in force.
     ///
     /// US QWERTY until `input.yaml` has been read and names another — see
-    /// [`Self::layout`] for why this one has no "not read yet" state.
+    /// `Self::layout` for why this one has no "not read yet" state.
     #[must_use]
     pub const fn keyboard_layout(&self) -> &'static keylayout::Layout {
         self.layout
@@ -5158,11 +5158,11 @@ impl Compositor {
     /// Polled once per tick by [`Server::run_with`](crate::Server::run_with),
     /// which forwards any *change* to the input source. Deliberately polled
     /// rather than pushed, matching
-    /// [`Present::monitors`](present::Present::monitors) in the same spirit: a
+    /// [`present::Present::monitors`] in the same spirit: a
     /// push needs a queue, and a queue is a thing that can get out of step with
     /// what it describes.
     ///
-    /// See [`Self::input`] for why the `None` is not spelled as the defaults.
+    /// See `Self::input` for why the `None` is not spelled as the defaults.
     #[must_use]
     pub const fn input_settings(&self) -> Option<&InputSettings> {
         self.input.as_ref()
@@ -5682,7 +5682,7 @@ impl Compositor {
     ///
     /// Windows already tiled on the affected monitor are re-placed, because a
     /// tiled window holds a rectangle rather than a rule — see
-    /// [`retile_for_work_area_change`](Self::retile_for_work_area_change).
+    /// `retile_for_work_area_change`.
     ///
     /// # Errors
     ///
@@ -5920,7 +5920,7 @@ impl Compositor {
     /// framebuffer, which on a multi-head desktop is the union of every monitor
     /// and belongs to no one screen. This is the same question
     /// [`maximize_window`](Self::maximize_window) asks, answered by the same
-    /// [`work_bounds_for`](Self::work_bounds_for), and the two differ only in
+    /// `work_bounds_for`, and the two differ only in
     /// that maximising yields the panels their reserved strips and fullscreen
     /// covers them.
     ///
@@ -8934,7 +8934,7 @@ impl Compositor {
     /// Everything on the desktop that was placed *by a rule* is re-derived
     /// against the new size, because a window stores the rectangle its rule
     /// produced and not the rule itself — the same fact that makes
-    /// [`retile_for_work_area_change`](Self::retile_for_work_area_change)
+    /// `retile_for_work_area_change`
     /// necessary when a taskbar changes height. A mode switch is that problem
     /// at its largest, and this used to do none of it: a maximised window kept
     /// its 1920-wide rectangle on a 1280-wide screen, with its right-hand third
@@ -8950,7 +8950,7 @@ impl Compositor {
     ///
     /// It is the **primary** display that is resized, and the scanout surface
     /// then follows the whole virtual desktop rather than that one screen —
-    /// see [`resize_scanout_surface`](Self::resize_scanout_surface). On a
+    /// see `resize_scanout_surface`. On a
     /// one-monitor desktop those are the same rectangle, which is why this
     /// took a bare width and height for as long as there was only ever one.
     ///
@@ -9021,7 +9021,7 @@ impl Compositor {
     /// A compositor is built at a size before anything has told it *which*
     /// screen that size belongs to, so [`DisplayManager::new`] invents the id
     /// `0` for it. The scanout keys everything on the connector id — that is
-    /// what [`Present::monitors`](present::Present::monitors) reports and what
+    /// what [`present::Present::monitors`] reports and what
     /// `Server::reconcile_monitors` matches the two sets on — so a desktop whose
     /// first screen is still called `0` has one monitor the reconciliation
     /// cannot recognise: it sees a connector it does not know (and attaches a
@@ -9076,7 +9076,7 @@ impl Compositor {
     /// no title bar edge left on any surviving monitor to drag it back by.
     ///
     /// Everything that re-places those windows is
-    /// [`relayout_for_desktop_change`](Self::relayout_for_desktop_change),
+    /// `relayout_for_desktop_change`,
     /// unchanged: with the display gone, `display_for` answers *primary* for any
     /// window that no longer overlaps a real monitor, so a maximised or snapped
     /// one is re-tiled onto the primary by the first pass, a fullscreen one is
@@ -9463,7 +9463,7 @@ impl Compositor {
 
     /// Move a window into a stacking tier and restack it.
     ///
-    /// Restacking through [`raise_within_layer`](Self::raise_within_layer)
+    /// Restacking through `raise_within_layer`
     /// rather than by editing `z_stack` here: a window that changed tier
     /// without moving would be sorted into a band it is no longer in, and the
     /// next raise would appear to teleport it.
@@ -9497,7 +9497,7 @@ impl Compositor {
     /// Constrain a window's size, and bring it inside the new bounds now.
     ///
     /// `None` in either pair means "leave that limit as it is", not "clear
-    /// it" -- see [`RequestBody::ShellSetSizeLimits`] for why the distinction
+    /// it" -- see `RequestBody::ShellSetSizeLimits` for why the distinction
     /// matters.
     ///
     /// Applying the clamp immediately rather than waiting for the next resize

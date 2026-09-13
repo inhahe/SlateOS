@@ -91,7 +91,7 @@ const MAX_BRACKET_PAIRS: usize = 63;
 
 /// A character's `Bidi_Class`.
 ///
-/// The variant order is the one [`bidi_tables`](crate::bidi_tables) is
+/// The variant order is the one `bidi_tables` is
 /// generated against, so the two must change together.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Class {

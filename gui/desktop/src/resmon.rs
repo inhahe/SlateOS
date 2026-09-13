@@ -317,7 +317,7 @@ pub struct ResourceMonitor {
 impl ResourceMonitor {
     /// Create a new resource monitor widget with the given dimensions.
     ///
-    /// Starts in compact mode. Call [`toggle_mode`] to switch.
+    /// Starts in compact mode. Call `toggle_mode` to switch.
     pub fn new(width: f32, height: f32) -> Self {
         Self {
             width,

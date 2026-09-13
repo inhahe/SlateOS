@@ -82,10 +82,10 @@
 //!
 //! So each glyph carries a mask of the features it is eligible for, and each
 //! lookup carries the mask of the features that reached it (see
-//! [`otl`](crate::otl)). A lookup is offered a position only when the two
+//! `otl`). A lookup is offered a position only when the two
 //! intersect. The unconditional features set their bit on every glyph, so they
 //! behave exactly as before; the positional four set theirs on the one glyph
-//! [`joining`](crate::joining) says takes that form.
+//! `joining` says takes that form.
 //!
 //! The mask is checked at the position a lookup is *applied* to, and not on
 //! the glyphs a ligature or a context goes on to match. HarfBuzz checks both.
@@ -113,7 +113,7 @@
 //!   is a shaper this crate does not have yet. See
 //!   `TD-FONT-HAS-NO-JOINING-OR-REORDERING-SHAPER`.
 //! * **Syriac's `fin2`, `fin3` and `med2`**, the alaph forms, and Arabic's
-//!   `mset` and `stch`. See [`joining`](crate::joining).
+//!   `mset` and `stch`. See `joining`.
 
 use alloc::vec::Vec;
 

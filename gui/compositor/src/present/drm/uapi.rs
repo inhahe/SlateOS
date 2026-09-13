@@ -29,7 +29,7 @@
 //! A field at the wrong offset is the defect this module exists to prevent, so
 //! it is checked from three directions that fail for different reasons:
 //!
-//! 1. **The round trip.** [`tests`] encodes every payload with a distinct
+//! 1. **The round trip.** `tests` encodes every payload with a distinct
 //!    value in every field and decodes it back. A field written to the wrong
 //!    offset lands on top of another and one of the two comes back wrong.
 //! 2. **The declared size.** Each payload's `SIZE` is asserted against the

@@ -572,7 +572,7 @@ impl SnapManager {
     /// ask [`is_picker_visible`](Self::is_picker_visible) first.
     ///
     /// Shared by [`render_picker`](Self::render_picker) and by the shell's hit
-    /// test, for the reason [`thumb_origin`](Self::thumb_origin) gives: a panel
+    /// test, for the reason `thumb_origin` gives: a panel
     /// drawn from one height and clicked against another is a panel whose lower
     /// rows either swallow clicks aimed past them or leak clicks aimed at them,
     /// and nothing about either failure says which of the two copies is wrong.
@@ -590,7 +590,7 @@ impl SnapManager {
     /// Where the picker draws `preset`'s thumbnail, as `(x, y, size)`, or
     /// `None` if `preset` is not one the picker offers.
     ///
-    /// Derived from [`thumb_origin`](Self::thumb_origin) — the same grid
+    /// Derived from `thumb_origin` — the same grid
     /// [`render_picker`](Self::render_picker) and `update_picker_hover` walk —
     /// so a caller aiming at a thumbnail cannot aim at a rectangle the picker
     /// never drew.

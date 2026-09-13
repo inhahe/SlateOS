@@ -583,7 +583,7 @@ impl EventStore {
         out
     }
 
-    /// Import events from the text format produced by [`export_text`].
+    /// Import events from the text format produced by `export_text`.
     /// Returns the number of events successfully imported.
     pub fn import_text(&mut self, text: &str) -> usize {
         // Counting what the store actually gained, rather than incrementing

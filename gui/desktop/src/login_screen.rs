@@ -399,7 +399,7 @@ const POWER_MENU_LABELS: [(&str, &str); 4] = [
     ("\u{1F4BE}", "Hibernate"),
 ];
 
-/// What each row of [`POWER_MENU_LABELS`] does, in the same order.
+/// What each row of `POWER_MENU_LABELS` does, in the same order.
 pub const POWER_MENU_ACTIONS: [LoginPowerAction; POWER_MENU_LABELS.len()] = [
     LoginPowerAction::Shutdown,
     LoginPowerAction::Reboot,

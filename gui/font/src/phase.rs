@@ -51,7 +51,7 @@ use crate::phase::sealed::Repr;
 pub enum Phase {
     /// Bidi levels, one per byte of the text.
     ByteLevels,
-    /// Normalization: [`norm::pieces`](crate::norm::pieces).
+    /// Normalization: `norm::pieces`.
     Norm,
     /// Korean preprocessing, variation sequences, per-piece levels and
     /// mirroring, the script/direction run split, and the legacy-Thai pass.

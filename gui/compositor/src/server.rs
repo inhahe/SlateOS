@@ -173,7 +173,7 @@ pub enum Disconnect {
     /// resynchronised, because the length that would say how far to skip is
     /// itself part of what is not trusted.
     Protocol(String),
-    /// The client's incomplete frame passed [`MAX_PENDING_INPUT`].
+    /// The client's incomplete frame passed `MAX_PENDING_INPUT`.
     Backlog(usize),
 }
 
@@ -317,7 +317,7 @@ impl Server {
     /// that a connection accepted during it counts as work -- scoring it
     /// before would let a new client's very first tick be called idle.
     ///
-    /// See [`IdleBackoff`] for why the condition is "no clients" rather than
+    /// See `IdleBackoff` for why the condition is "no clients" rather than
     /// "nothing composed".
     pub fn settle(&mut self, composed: bool, had_input: bool, frame: Duration) -> Duration {
         let busy = composed || had_input || self.client_count() > 0;

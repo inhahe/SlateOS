@@ -1,6 +1,6 @@
 //! Scanout on SlateOS: putting the composited frame on a real screen.
 //!
-//! This is the [`Present`](super::Present) implementation the rest of this
+//! This is the [`super::Present`] implementation the rest of this
 //! crate was built for. Everything else that implements the trait is either a
 //! deliberate no-op ([`Headless`](super::Headless)), a test recorder, or a
 //! development harness on the machine the tree happens to be compiled on
@@ -523,7 +523,7 @@ impl<S: KmsSys> DrmScanout<S> {
     /// How long [`Present::monitors`] waits between re-probing the card's
     /// connectors.
     ///
-    /// Defaults to [`PROBE_INTERVAL`]. Worth lowering on a machine where the
+    /// Defaults to `PROBE_INTERVAL`. Worth lowering on a machine where the
     /// cable moves often — a laptop that lives on a dock — and worth raising on
     /// one where it never does, because the probe costs DDC traffic to every
     /// monitor. Zero means "probe on every call", which is what a test wants and

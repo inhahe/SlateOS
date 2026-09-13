@@ -32,7 +32,7 @@
 //! # The geometry is not a new opinion
 //!
 //! Every one of the seventeen hand-written switches obeyed the same rule
-//! without ever writing it down: the knob is a circle inset [`INSET`] from
+//! without ever writing it down: the knob is a circle inset [`crate::switch::INSET`] from
 //! every edge of the track, so its diameter is `height - 2 * INSET` and the
 //! track's corner radius is `height / 2`. That held at 40x20, 40x22, 36x20 and
 //! 36x18 alike. This module states the rule and takes the track's size as

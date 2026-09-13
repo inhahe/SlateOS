@@ -510,7 +510,7 @@ enum Locals {
 /// of its stored offsets are relative to that slice's byte zero. That removes
 /// a whole class of "which base is this relative to" mistake, at the cost of
 /// the caller having to re-slice on each call — which is what
-/// [`table`](Self::table) is for.
+/// `table` is for.
 #[derive(Clone, Debug)]
 pub struct Cff {
     /// Where the `CFF ` table sits in the font file.

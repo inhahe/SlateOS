@@ -148,7 +148,7 @@ impl GridPos {
 ///
 /// The predicates below are *exact for every input*, because none of them
 /// computes an edge. Each compares a distance against a length instead — see
-/// [`span_starts_within`] — so there is no value they can produce that is
+/// `span_starts_within` — so there is no value they can produce that is
 /// wrong rather than merely `false`. [`Self::right`] and [`Self::bottom`] do
 /// still exist, because rendering and callers want the edge as a number, and
 /// those two saturate; they are reporting, not deciding.

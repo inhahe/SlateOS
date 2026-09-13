@@ -894,7 +894,7 @@ fn button_for(code: u16, mapping: ButtonMapping) -> Option<MouseButton> {
 ///
 /// See the module docs for what it does and does not do. The type is generic
 /// over the syscall layer so that all of the above is driven by a fake in
-/// tests; [`EvdevInput::open`] is the constructor that uses the real one.
+/// tests; `EvdevInput::open` is the constructor that uses the real one.
 #[derive(Debug)]
 pub struct EvdevInput<S> {
     /// One entry per device that opened.

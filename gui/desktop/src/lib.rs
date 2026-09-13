@@ -444,7 +444,7 @@ pub struct ManagedWindow {
     /// authority on what a window says about itself. Empty means the window
     /// named no program.
     ///
-    /// This is what [`window_rules`](crate::window_rules) matches on, and the
+    /// This is what [`crate::window_rules`] matches on, and the
     /// reason it can match anything useful: a rule keyed on
     /// [`title`](Self::title) would stop applying the moment the user saved the
     /// document under a new name.
@@ -1051,7 +1051,7 @@ pub struct DesktopShell {
     /// the taskbar clock reads the zone *and* the three `show_*` flags, whose
     /// doc comments in [`datetime_settings::DateTimeSettings`] each say "in
     /// the taskbar clock" — and until this field existed, none of them reached
-    /// one. See [`current_clock_string`](Self::current_clock_string).
+    /// one. See `current_clock_string`.
     pub datetime: datetime_settings::DateTimeSettings,
     /// The calendar popup the tray clock opens.
     ///
@@ -1082,7 +1082,7 @@ pub struct DesktopShell {
     /// The single truth for Do Not Disturb. The pane's two quick-setting
     /// switches are *views* of this: pressing one is reported to the shell,
     /// applied here, and pushed back onto both switches by
-    /// [`sync_quick_settings`](Self::sync_quick_settings), so the pair can
+    /// `sync_quick_settings`, so the pair can
     /// never disagree with what is actually happening to arriving
     /// notifications.
     ///
@@ -1123,7 +1123,7 @@ pub struct DesktopShell {
     /// are all public fields that anything may assign, and `work_area()`
     /// derives from all three, so an "update on change" scheme would be one
     /// forgotten call site away from tiling a screen size that no longer
-    /// exists. [`sync_snap_area`](Self::sync_snap_area) re-seeds it at the top
+    /// exists. `sync_snap_area` re-seeds it at the top
     /// of every gesture that reads it instead.
     pub snap: snap::SnapManager,
     /// The heads-up overlays: what the volume keys put on screen.
@@ -1141,7 +1141,7 @@ pub struct DesktopShell {
     /// [`ShellSession::anything_moving`](session::ShellSession) or its fade
     /// stops halfway and the overlay stays on screen for ever.
     ///
-    /// Timed off [`osd_clock_ms`](Self::osd_clock_ms) rather than off the wall
+    /// Timed off `osd_clock_ms` rather than off the wall
     /// clock; see that field for why the difference does not matter here.
     pub osd: osd::OsdManager,
     /// Milliseconds of animation time the shell has been told about, and the
@@ -1262,7 +1262,7 @@ pub struct DesktopShell {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DesktopTheme {
     /// The taskbar panel itself. Alpha may be below 255 — see
-    /// [`taskbar_alpha`].
+    /// `taskbar_alpha`.
     pub taskbar_bg: Color,
     /// Text and icons on the taskbar.
     pub taskbar_fg: Color,
@@ -1313,7 +1313,7 @@ impl DesktopTheme {
     /// only by a doc comment.
     ///
     /// The border and desktop fields are not this crate's to choose — see
-    /// [`from_palette`](Self::from_palette).
+    /// `from_palette`.
     #[must_use]
     pub fn for_mode(light: bool) -> Self {
         Self::from_palette(&Palette::for_mode(light), DecorationColors::for_mode(light))
@@ -1774,7 +1774,7 @@ impl DesktopShell {
     /// `row` counts from the top of the visible list, so it is the index of the
     /// entry at `start_menu_scroll + row` — the renderer and the hit test agree
     /// about that offset because both go through
-    /// [`start_menu_entry_at`](Self::start_menu_entry_at).
+    /// `start_menu_entry_at`.
     #[must_use]
     pub fn start_menu_row_rect(&self, row: usize) -> Rect {
         let menu = self.start_menu_rect();
@@ -1789,7 +1789,7 @@ impl DesktopShell {
 
     /// The power button in the start menu's footer, which opens the power menu.
     ///
-    /// The footer is the last [`START_MENU_FOOTER`] of the menu, or the whole
+    /// The footer is the last `START_MENU_FOOTER` of the menu, or the whole
     /// menu if the menu has been clamped shorter than that — a button drawn
     /// above the menu's own top edge would be as unreachable as a row drawn off
     /// the screen.
@@ -3621,7 +3621,7 @@ impl DesktopShell {
     /// change size under a shell that is already running
     /// ([`ShellSession::resize_display`](session::ShellSession)), and a position
     /// computed at startup would put the box off the edge of the new screen. The
-    /// same pull-on-use reasoning as [`sync_osd_screen`](Self::sync_osd_screen),
+    /// same pull-on-use reasoning as `sync_osd_screen`,
     /// for the same reason: `screen_width` and `screen_height` are public fields
     /// that anything may assign.
     pub fn toggle_run_dialog(&mut self) {
@@ -3736,7 +3736,7 @@ impl DesktopShell {
     /// for, if there is one.
     ///
     /// The read half of the split described on
-    /// [`run_browser_listed`](Self::run_browser_listed): a host that draws this
+    /// `run_browser_listed`: a host that draws this
     /// shell should call this before each paint and answer any `Some` with
     /// [`set_run_browser_entries`](Self::set_run_browser_entries), the way it
     /// already answers [`WallpaperManager::current_image_path`] with pixels.
@@ -4336,7 +4336,7 @@ impl DesktopShell {
     ///
     /// It exists rather than letting each such caller write `utc_secs % 86_400`
     /// because that expression is the exact bug
-    /// [`current_clock_string`](Self::current_clock_string) documents: it is
+    /// `current_clock_string` documents: it is
     /// UTC, so on the shipped default zone the desktop would turn to its
     /// evening colours five hours early while the clock beside it read the
     /// correct local time. One zone answer, asked in one place.
@@ -5425,7 +5425,7 @@ impl DesktopShell {
     /// Put a heads-up overlay on screen, or refresh the one already there.
     ///
     /// Takes no clock: it is stamped from
-    /// [`osd_clock_ms`](Self::osd_clock_ms), which is why the volume keys can
+    /// `osd_clock_ms`, which is why the volume keys can
     /// be handled by [`handle_hotkey`](Self::handle_hotkey) — a keystroke
     /// handler that had to be told the time would have to be told it by all
     /// forty of its callers.
@@ -5497,7 +5497,7 @@ impl DesktopShell {
     /// Separate from [`render_run_dialog`](Self::render_run_dialog) rather than
     /// appended to it, so that the host's paint order says out loud that the
     /// chooser is over the box — the same thing the input routing in
-    /// [`handle_mouse_inner`](Self::handle_mouse_inner) says. A chooser folded
+    /// `handle_mouse_inner` says. A chooser folded
     /// into the box's tree would be over it by accident of ordering inside one
     /// `Vec`, which is a fact nothing outside this file could see.
     ///

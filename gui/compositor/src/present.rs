@@ -17,7 +17,7 @@
 //! whatever input has arrived, and say whether the display still exists. That
 //! is the whole of what a compositor needs from a screen, and keeping it to
 //! three methods is what lets a SlateOS framebuffer, a host window and a
-//! deliberate no-op all be the same thing to [`Server::run_with`].
+//! deliberate no-op all be the same thing to `Server::run_with`.
 //!
 //! ## What implements it
 //!
@@ -26,7 +26,7 @@
 //!   elsewhere, and any platform this crate has not been taught to draw on.
 //! * [`host::Window`] on Windows — a real window, drawn with `StretchDIBits`,
 //!   with its keyboard and mouse messages translated into
-//!   [`InputEvent`](crate::InputEvent)s. This is a **development harness**, and
+//!   [`crate::InputEvent`]s. This is a **development harness**, and
 //!   is described as one in that module: it is how a person can look at the
 //!   desktop this compositor draws, on the machine the tree is developed on.
 //! * [`drm::DrmScanout`] on SlateOS — the real target. It opens the first
@@ -35,7 +35,7 @@
 //!   already running, each with its own pair of dumb buffers and its own page
 //!   flip. The frame it is handed is the size of the whole desktop and every
 //!   monitor copies out its own rectangle of it, so a second screen costs this
-//!   trait nothing: [`Self::show`] still takes one buffer. This is what closed
+//!   trait nothing: `Self::show` still takes one buffer. This is what closed
 //!   `known-issues.md` → `TD-COMPOSITOR-HAS-NO-SCANOUT` and
 //!   `TD-COMPOSITOR-DRIVES-ONE-HEAD`, and neither needed a change to
 //!   [`Server::run_with`](crate::Server::run_with) — which is the claim this

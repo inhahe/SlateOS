@@ -3,7 +3,7 @@
 //! Four system calls — `open`, `ioctl`, `mmap`, `close` — and the rule for
 //! turning a kernel return value into an error. Everything else about talking
 //! to a DRM device is protocol, lives in [`super`], and is exercised on the
-//! build machine against [`super::tests::FakeCard`].
+//! build machine against `super::tests::FakeCard`.
 //!
 //! ## Why the trait exists, and why it is shaped like this
 //!
@@ -83,7 +83,7 @@ pub trait Mapped {
     /// How many bytes are mapped.
     ///
     /// Separate from `bytes().len()` because the caller that needs to check the
-    /// size — [`super::make_buffer`], verifying that the driver gave it what it
+    /// size — `super::make_buffer`, verifying that the driver gave it what it
     /// asked for — holds the mapping behind a `Box` it has not yet stored, and
     /// asking for the length should not require a mutable borrow.
     fn bytes_len(&self) -> usize;

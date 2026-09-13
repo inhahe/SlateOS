@@ -11,7 +11,7 @@
 //!
 //! This module is the lookup that turns what the caller knows — a BCP 47 tag
 //! like `tr`, `sr-Cyrl`, `ro-MD` — into the four-byte tag the font filed those
-//! rules under. [`otl::select`](crate::otl) does the rest.
+//! rules under. `otl::select` does the rest.
 //!
 //! # The mapping is a registry
 //!
@@ -19,7 +19,7 @@
 //! It is a table of about eleven hundred entries maintained by Microsoft, and
 //! the only defensible way to have it is to take it from the same place the
 //! shaper this crate measures itself against takes it. So
-//! [`lang_tables`](crate::lang_tables) is generated from HarfBuzz's
+//! `lang_tables` is generated from HarfBuzz's
 //! `hb-ot-tag-table.hh` by `tools/gen_lang_tables.py`, and the resolution order
 //! below is HarfBuzz's `hb_ot_tags_from_language` step for step.
 //!
@@ -29,7 +29,7 @@
 //! script fallback chain along. A face that registers `latn` and no `TRK `
 //! under it shapes Turkish with `latn`'s default rules — it has said its Latin
 //! text does not vary by language, and that is an answer. See
-//! [`otl`](crate::otl)'s "Language selection".
+//! `otl`'s "Language selection".
 //!
 //! Nor is it a hint about the text's content: the shaper does not read it to
 //! decide word boundaries, casing or anything else. Its entire effect is which
@@ -67,7 +67,7 @@ const MAX_TAGS: usize = 3;
 ///
 /// Constructed from a BCP 47 language tag with [`Lang::new`], which is the only
 /// way in from outside this crate — the point of the type is that a tag that
-/// reached [`otl`](crate::otl) came through the registry rather than from a
+/// reached `otl` came through the registry rather than from a
 /// caller inventing one.
 ///
 /// Unused slots hold the same filler in every value, so the derived equality is

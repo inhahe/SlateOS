@@ -131155,6 +131155,64 @@ reason the app half of the border conversion looked cheap: those crates were
 converted where they *did* use the palette, and the constants were never in
 scope.
 
+## TD-C-FORTY-NINE-COLOUR-METHODS-ARE-INVISIBLE-TO-THE-INK-SWEEP
+
+**Date:** 2026-09-12. **Lane:** C.
+**Where:** 49 sites across 22 crates; `gui/appearance/ink-text.py --blind`
+reports them.
+
+**In short:** §837 makes a site that draws *text* in an accent or a status
+colour ask the palette for a readable version of it. The script that converted
+1,200 such sites finds them by the role named at the draw site — and 49 sites
+name no role, because the colour arrives from a method: `dev.state.color(p)`,
+`task.priority.color(&self.palette)`, `alert.severity.color(&self.palette)`.
+The script reported zero for those files and was right about the question it
+asks, which is not the question anyone reading the number thinks it is.
+
+**How they were found:** by failing tests, one at a time, during the shell
+conversion — never by the sweep. Four distinct ways a colour can reach a
+`RenderCommand::Text` without naming a role there:
+
+| | example |
+|---|---|
+| a method in the `color:` field | `app.state.color(p)` |
+| a helper's return value | `osd::icon_info -> (glyph, Color)` |
+| an argument to a draw helper | `render_icon_text_osd(.., p.red, ..)` |
+| a local passed by field shorthand | `let color = ..; Text { .., color, .. }` |
+
+The first has a syntactic signature, so it is now reported. The middle two are
+properties of a *function body* rather than of the draw site and need something
+that parses Rust. The fourth is reported as well, at 88 candidates, most of
+which are benign.
+
+**The 49 split in two, and only one half is this entry's problem:**
+
+- **39 take a palette** (`color(&self.palette)`). These are the ink gap and are
+  fixable today. Concentrations: `desktop` (8), `remotedesktop` (5),
+  `reminders` (4), `sysmonitor` (3), `weather` (3).
+- **10 take nothing** (`cat.color()`, `dev.status.color()`). Those crates have
+  no `Palette` at all — they are
+  `TD-C-SIXTY-EIGHT-APPS-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE`, and the colour
+  they return is hardcoded. Inking is not the fix; threading a palette is.
+  `devicemanager` (4) and `procexplorer` (4) are both on that entry's list of
+  twelve.
+
+**What the fix looks like, per method.** Not "ink the call site" — that was
+tried and is wrong. `PermissionState::color` has three arms and one returns
+`overlay0`, the muted ink WCAG 1.4.3 exempts; raising it makes a *not decided*
+row look decided. The rule that came out of the shell: **ink at the point where
+every path through it is text.** For `osd::render_icon_text_osd` that is the
+body, because its colour parameter has exactly one use. For a method with arms
+it is the arms, individually, skipping any exempt one.
+
+**How urgent.** Low and non-worsening. These sites draw exactly what they drew
+before §837, so nothing regressed; they are simply not yet *improved*, and the
+text they draw can fall below 4.5:1 on a card under the optional filled theme.
+The guard `every_ink_clears_the_floor_on_every_ground_it_lands_on` does not
+catch them, because it tests the palette's arithmetic rather than which call
+sites use it — which is the same gap in a different place, and worth
+remembering when reading it.
+
 ## TD-C-THIRTEEN-LIGHT-ACCENTS-STILL-FAIL-ON-CARDS -- being fixed 2026-09-12, mechanism landed
 
 **Update, 2026-09-12 (lane C).** Answered, and the entry below was wrong in

@@ -5,6 +5,16 @@
 
 #![allow(dead_code)]
 
+/// Status for a runtime error, as distinct from the 2 this program already
+/// uses for a usage or I/O failure.
+///
+/// **Unverified against a reference jq**, which is not installed here: jq's
+/// manual documents 2 for usage/system problems and 3 for a compile error,
+/// and 5 is its runtime-error status. Recorded as a judgment call in
+/// todo.txt. What is certain, and was the actual defect, is that it must not
+/// be 0.
+const RUNTIME_ERROR_EXIT: i32 = 5;
+
 use quoting::{quoteaf, quoteaf_os};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -2472,12 +2482,17 @@ fn main() {
     let indent = if opts.tab { 1 } else { opts.indent };
     let mut any_output = false;
     let mut last_was_falsy = false;
+    // A runtime error used to be written to stderr and then forgotten, so
+    // `jq 'explode'` printed "filter not implemented" and exited 0. Any
+    // script guarding with `|| fallback` never took the fallback.
+    let mut had_error = false;
 
     let process_value = |val: &Value,
                          filter: &Filter,
                          opts: &Options,
                          any: &mut bool,
-                         falsy: &mut bool| {
+                         falsy: &mut bool,
+                         failed: &mut bool| {
         match eval(filter, val) {
             Ok(results) => {
                 for result in &results {
@@ -2497,13 +2512,21 @@ fn main() {
             }
             Err(e) => {
                 write_stderr(&format!("jq: error: {}\n", e));
+                *failed = true;
             }
         }
     };
 
     if opts.null_input {
         let input = Value::Null;
-        process_value(&input, &filter, &opts, &mut any_output, &mut last_was_falsy);
+        process_value(
+            &input,
+            &filter,
+            &opts,
+            &mut any_output,
+            &mut last_was_falsy,
+            &mut had_error,
+        );
     } else if opts.files.is_empty() {
         // Read from stdin
         let mut input_str = String::new();
@@ -2519,10 +2542,24 @@ fn main() {
                 .collect();
             if opts.slurp {
                 let arr = Value::Array(lines);
-                process_value(&arr, &filter, &opts, &mut any_output, &mut last_was_falsy);
+                process_value(
+                    &arr,
+                    &filter,
+                    &opts,
+                    &mut any_output,
+                    &mut last_was_falsy,
+                    &mut had_error,
+                );
             } else {
                 for line in &lines {
-                    process_value(line, &filter, &opts, &mut any_output, &mut last_was_falsy);
+                    process_value(
+                        line,
+                        &filter,
+                        &opts,
+                        &mut any_output,
+                        &mut last_was_falsy,
+                        &mut had_error,
+                    );
                 }
             }
         } else if opts.slurp {
@@ -2546,7 +2583,14 @@ fn main() {
                 }
             }
             let arr = Value::Array(values);
-            process_value(&arr, &filter, &opts, &mut any_output, &mut last_was_falsy);
+            process_value(
+                &arr,
+                &filter,
+                &opts,
+                &mut any_output,
+                &mut last_was_falsy,
+                &mut had_error,
+            );
         } else {
             // Parse potentially multiple JSON values from stdin
             let trimmed = input_str.trim();
@@ -2558,9 +2602,14 @@ fn main() {
                         break;
                     }
                     match parser.parse_value() {
-                        Ok(v) => {
-                            process_value(&v, &filter, &opts, &mut any_output, &mut last_was_falsy)
-                        }
+                        Ok(v) => process_value(
+                            &v,
+                            &filter,
+                            &opts,
+                            &mut any_output,
+                            &mut last_was_falsy,
+                            &mut had_error,
+                        ),
                         Err(e) => {
                             write_stderr(&format!("jq: parse error: {}\n", e));
                             std::process::exit(2);
@@ -2587,9 +2636,14 @@ fn main() {
                         break;
                     }
                     match parser.parse_value() {
-                        Ok(v) => {
-                            process_value(&v, &filter, &opts, &mut any_output, &mut last_was_falsy)
-                        }
+                        Ok(v) => process_value(
+                            &v,
+                            &filter,
+                            &opts,
+                            &mut any_output,
+                            &mut last_was_falsy,
+                            &mut had_error,
+                        ),
                         Err(e) => {
                             write_stderr(&format!("jq: {}: parse error: {}\n", file, e));
                             break;
@@ -2598,6 +2652,12 @@ fn main() {
                 }
             }
         }
+    }
+
+    // A runtime error outranks --exit-status: `-e` reports on the last
+    // output value, and an error means there was no such value to report on.
+    if had_error {
+        std::process::exit(RUNTIME_ERROR_EXIT);
     }
 
     if opts.exit_status && last_was_falsy {
@@ -3185,6 +3245,30 @@ mod tests {
             parse_json(r#""\u0041""#).unwrap(),
             Value::String("A".into())
         );
+    }
+
+    /// An unimplemented filter is an error, and an error is not exit 0.
+    ///
+    /// `eval` already returned `Err` for these -- the message was right and
+    /// the status was 0, so `jq 'explode' || fallback` never took the
+    /// fallback. This asserts the error half at the unit level; the status
+    /// half is asserted on the built binary, since `process::exit` cannot be
+    /// observed from inside a test.
+    #[test]
+    fn unimplemented_filters_return_err() {
+        let input = parse_json("[1,2]").expect("valid json");
+        for f in ["explode", "paths", "any", "implode"] {
+            let filter = parse_filter(f).expect("parses");
+            assert!(
+                eval(&filter, &input).is_err(),
+                "{f} silently succeeded instead of reporting it is unimplemented"
+            );
+        }
+        // And the ones that do work still do.
+        for f in ["length", "tojson", "@base64"] {
+            let filter = parse_filter(f).expect("parses");
+            assert!(eval(&filter, &input).is_ok(), "{f} regressed");
+        }
     }
 
     #[test]

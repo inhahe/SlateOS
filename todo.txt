@@ -4527,6 +4527,25 @@
 
 ## Judgment Calls
 
+### jq's runtime-error exit status is 5, and that is unverified (2026-09-12, Claude autonomous)
+
+**What was decided.** `jq` printed `jq: error: ...` to stderr and exited **0**,
+so `jq 'explode' || fallback` never took the fallback. It now exits non-zero.
+The value chosen is **5**, as `RUNTIME_ERROR_EXIT` in `userspace/jq/src/main.rs`.
+
+**Why it is a judgment call.** No reference `jq` is installed on this host, so
+the number is not measured -- and this project's rule is to measure the
+reference rather than recall it. From jq's documentation: 2 is a usage or
+system problem, 3 is a program compile error, and 5 is a runtime error. This
+program already uses 2 for usage and I/O failures, which is consistent.
+
+**What is certain** is the part that was actually broken: the status must not
+be 0. If 5 turns out to be wrong the fix is a one-line constant change, and
+the tests assert the error, not the number.
+
+**Trigger to resolve:** the first time a real `jq` is available, run
+`echo '[1]' | jq 'explode'; echo $?` and set the constant to what it prints.
+
 Judgment call (lane A, 2026-09-12): lane A writes the harness gates.
 
   `which-lane.py` lists lane A's `owns` as kernel/**, bench/**, the toolchain

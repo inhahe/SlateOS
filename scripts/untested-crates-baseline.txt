@@ -1,0 +1,14 @@
+# Crates with no #[test] anywhere. Written by check-untested-crates.py --write-baseline.
+# This list may only SHRINK. A crate that gains its first test must be removed from it.
+services/hello  # 70 lines
+services/httpget  # 303 lines
+services/init  # 2454 lines
+services/netstack  # 4329 lines
+services/ticker  # 167 lines
+services/udpget  # 525 lines
+userspace/file  # 1212 lines
+userspace/indexer  # 1319 lines
+userspace/man  # 1198 lines
+userspace/nano  # 1923 lines
+userspace/shell  # 204 lines
+userspace/sysctl  # 597 lines

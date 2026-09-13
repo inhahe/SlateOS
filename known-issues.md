@@ -141578,6 +141578,63 @@ length names, NUL padding, and a buffer holding several events.
 defect is worse than the ones already fixed today; the implementation is
 more than a single change.
 
+
+## B-TWELVE-CRATES-HAVE-NO-TESTS-AT-ALL-AND-REPORT-ZERO-PASSED (lane B, 2026-09-13)
+
+A crate with no `#[test]` anywhere reports
+
+    test result: ok. 0 passed; 0 failed; 0 ignored
+
+which is not a green suite. It is an empty one, and the two are
+indistinguishable in the line anybody actually reads.
+
+Measured 2026-09-13 across lane B's trees: **219 crates, 12 with no tests at
+all, 14,301 lines between them.**
+
+| lines | crate |
+|---|---|
+| 4,329 | `services/netstack` |
+| 2,454 | `services/init` |
+| 1,923 | `userspace/nano` |
+| 1,319 | `userspace/indexer` |
+| 1,212 | `userspace/file` |
+| 1,198 | `userspace/man` |
+| 597 | `userspace/sysctl` |
+| 525 | `services/udpget` |
+| 303 | `services/httpget` |
+| 204 | `userspace/shell` |
+| 167 | `services/ticker` |
+| 70 | `services/hello` |
+
+### How it was found, which is the argument for fixing it
+
+`userspace/backup` was the thirteenth. It had 1,336 lines of backup and
+restore and no tests, and I only noticed because I ran `cargo test -p backup`
+after changing its exit status and read `0 passed` instead of skimming it.
+
+Writing its first nine tests took under an hour and found a defect in the
+first: `Manifest::parse` had `parts[2].parse().unwrap_or(0)` for a file's SIZE
+and the same for its mtime, so a corrupted manifest line silently became a
+zero-byte file dated the epoch. Every other malformed line in that parser is
+an error; those two were the exception. An incremental backup decides what to
+copy by comparing size and mtime against that manifest.
+
+That is one defect per crate-hour on the first crate tried, in the one part of
+a backup tool whose failure is invisible until a restore.
+
+### Ratcheted, not swept
+
+`scripts/check-untested-crates.py`, gate 39, with the twelve baselined. A
+crate that is not on the list and has no tests fails the push; a crate that
+gains its first test makes the baseline stale and also fails, because a
+ratchet that does not tighten when the work is done is a standing permission
+to regress.
+
+**What the gate deliberately does not claim.** Counting `#[test]` says nothing
+about whether the tests are good, and one trivial assertion satisfies it. The
+gap it closes is the one between "no tests" and "one test" -- the gap where a
+whole crate is invisible to every suite that runs.
+
 ## B-PROGRAMS-THAT-INVENT-THEIR-OUTPUT (lane B, 2026-09-12) -- 15 found, 14 fixed, 1 filed
 
 ### `sbctl`, found 2026-09-13 -- the whole write half of a security tool

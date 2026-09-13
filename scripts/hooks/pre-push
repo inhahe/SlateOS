@@ -95,6 +95,11 @@
 #      later run of an unrelated crate sees. Narrowed to the crates a push
 #      touches, because it runs their tests: ~1-2.5 s each.
 #
+#  39. Refuse a crate that ships with no tests at all. Its suite reports
+#      `0 passed`, which reads exactly like a passing one. A ratchet: the
+#      twelve that are like that today are baselined, and the list may only
+#      shrink -- a crate that gains its first test must leave it.
+#
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented; wrong again the moment gate 13 was written, when the
 # section and the bypass landed in `0ab4b55bc` and this list did not; and
@@ -4523,6 +4528,77 @@ See requests/c-b-tests-create-real-directories-at-the-drive-root.md.
 
 To push anyway:
     ALLOW_TEST_ROOT_WRITES=1 git push origin ...
+EOF
+    exit 1
+fi
+
+
+# ---------------------------------------------------------------------------
+# Gate 39 -- untested-crates.  A crate that ships with no tests at all.
+#
+# A crate with no #[test] anywhere reports "test result: ok. 0 passed", which
+# is not a green suite but an empty one, and the two read the same in the
+# summary line anybody skims.  userspace/backup sat like that for its whole
+# life -- 1,336 lines of backup and restore -- and writing its first nine
+# tests found a manifest parser that turned a corrupted file size into zero,
+# which an incremental backup then compares against.
+#
+# A RATCHET.  Twelve crates are in this state today, 14,301 lines, listed in
+# scripts/untested-crates-baseline.txt and not failures.  What fails is a
+# crate that is NOT on the list and has no tests.  The baseline tightens both
+# ways: a crate that gains its first test must leave it, because a ratchet
+# that does not shrink when the work is done is a standing permission to
+# regress.
+#
+# Pure file scan, no cargo: 0.4 s over 219 crates.
+# ---------------------------------------------------------------------------
+untested="${repo_root:-.}/scripts/check-untested-crates.py"
+skip_untested=0
+# Bypass: ALLOW_UNTESTED_CRATES=1 git push origin <branch>
+if [ "${ALLOW_UNTESTED_CRATES:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_UNTESTED_CRATES=1 set -- skipping the untested-crates gate." >&2
+    skip_untested=1
+fi
+[ -n "$py" ] || skip_untested=1
+[ -f "$untested" ] || skip_untested=1
+touches userspace/ services/ init/ posix/         scripts/check-untested-crates.py scripts/untested-crates-baseline.txt         || skip_untested=1
+note_gate untested-crates "$skip_untested"
+
+untested_failed=0
+if [ "$skip_untested" != "1" ]; then
+    # The checker before its verdict. Its silent failure is a pattern that
+    # stops matching: every crate would then read as untested, or -- worse --
+    # a pattern that matches too much would make every crate read as tested
+    # and the gate would pass over anything. Both are self-test cases, along
+    # with the corpus size, because a scan that found no crates would report a
+    # clean tree however broken it was.
+    if ! run_checker untested-crates-selftest "$py" "$untested" --selftest; then
+        echo "pre-push: check-untested-crates.py FAILED ITS OWN SELF-TEST -- its verdict is not trustworthy." >&2
+        untested_failed=1
+    else
+        if ! run_checker untested-crates "$py" "$untested"; then
+            untested_failed=1
+        fi
+    fi
+fi
+
+if [ "$untested_failed" != "0" ]; then
+    cat >&2 <<EOF
+
+pre-push: REFUSING to push -- a crate above has no tests at all, or one on the
+baseline has gained some and the baseline was not tightened.
+
+A crate with no tests reports "0 passed", which reads exactly like a passing
+suite. userspace/backup was in that state for its whole life: 1,336 lines of
+backup and restore, and the first nine tests written for it found a manifest
+parser that silently turned a corrupted file size into zero -- the number an
+incremental backup compares against to decide what to copy.
+
+If a crate gained its first test, tighten the list:
+    python scripts/check-untested-crates.py --write-baseline
+
+To push anyway:
+    ALLOW_UNTESTED_CRATES=1 git push origin ...
 EOF
     exit 1
 fi

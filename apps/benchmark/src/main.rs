@@ -21,6 +21,7 @@
 use std::collections::VecDeque;
 use std::process::ExitCode;
 
+use appearance::Palette;
 use guitk::color::Color;
 use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::fold;
@@ -35,22 +36,11 @@ use oswindow::app::{self, App, Response};
 // Catppuccin Mocha Theme Colors
 // ============================================================================
 
-const BASE: Color = Color::rgb(30, 30, 46);
-const MANTLE: Color = Color::rgb(24, 24, 37);
-const CRUST: Color = Color::rgb(17, 17, 27);
-const SURFACE0: Color = Color::rgb(49, 50, 68);
-const SURFACE1: Color = Color::rgb(69, 71, 90);
-#[allow(dead_code)]
-const SURFACE2: Color = Color::rgb(88, 91, 112);
-const TEXT_COLOR: Color = Color::rgb(205, 214, 244);
-const SUBTEXT0: Color = Color::rgb(166, 173, 200);
-const BLUE: Color = Color::rgb(137, 180, 250);
-const GREEN: Color = Color::rgb(166, 227, 161);
-const RED: Color = Color::rgb(243, 139, 168);
-const YELLOW: Color = Color::rgb(249, 226, 175);
-const PEACH: Color = Color::rgb(250, 179, 135);
-const LAVENDER: Color = Color::rgb(180, 190, 254);
-const OVERLAY0: Color = Color::rgb(108, 112, 134);
+// The colours live in the user's palette, not here.
+//
+// 15 constants used to sit here -- Catppuccin Mocha -- so a light desktop got
+// a dark benchmark window. design-decisions 822; one of the 55 crates never
+// converted. Names and values agreed here, so the mapping is by name.
 
 // ============================================================================
 // Layout Constants
@@ -633,14 +623,14 @@ impl BenchPhase {
     }
 
     /// Color associated with this phase.
-    pub fn color(self) -> Color {
+    pub fn color(self, p: &Palette) -> Color {
         match self {
-            Self::Idle => SUBTEXT0,
-            Self::RunningCpu => BLUE,
-            Self::RunningMemory => GREEN,
-            Self::RunningDisk => PEACH,
-            Self::RunningGraphics => LAVENDER,
-            Self::Complete => GREEN,
+            Self::Idle => p.subtext0,
+            Self::RunningCpu => p.ink(p.blue),
+            Self::RunningMemory => p.ink(p.green),
+            Self::RunningDisk => p.ink(p.peach),
+            Self::RunningGraphics => p.ink(p.lavender),
+            Self::Complete => p.ink(p.green),
         }
     }
 
@@ -1362,6 +1352,8 @@ fn history_rows_top(content_top: f32, scroll: f32) -> f32 {
 
 /// The benchmark application UI state.
 pub struct BenchmarkApp {
+    /// The user's colours, handed over by the framework (§822).
+    pub palette: Palette,
     /// Current tab.
     pub active_tab: Tab,
     /// Window dimensions.
@@ -1402,6 +1394,7 @@ pub struct BenchmarkApp {
 impl BenchmarkApp {
     pub fn new() -> Self {
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             active_tab: Tab::Overview,
             width: WINDOW_WIDTH,
             height: WINDOW_HEIGHT,
@@ -1863,7 +1856,7 @@ impl BenchmarkApp {
             y: 0.0,
             width: frame.width,
             height: frame.height,
-            color: CRUST,
+            color: self.palette.crust,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1887,7 +1880,7 @@ impl BenchmarkApp {
             y: bar.y,
             width: bar.w,
             height: bar.h,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
         frame.push(RenderCommand::Text {
@@ -1895,7 +1888,7 @@ impl BenchmarkApp {
             y: bar.y + 12.0,
             text: "Slate OS System Benchmark".into(),
             font_size: 16.0,
-            color: TEXT_COLOR,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -1910,7 +1903,7 @@ impl BenchmarkApp {
             y: bar.y + 14.0,
             text: hw_summary,
             font_size: 11.0,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(380.0),
             overflow: TextOverflow::Ellipsis,
@@ -1924,7 +1917,7 @@ impl BenchmarkApp {
             y: bar.y,
             width: bar.w,
             height: bar.h,
-            color: BASE,
+            color: self.palette.base,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1938,7 +1931,7 @@ impl BenchmarkApp {
                     y: slot.y,
                     width: slot.w,
                     height: slot.h,
-                    color: SURFACE0,
+                    color: self.palette.surface0,
                     corner_radii: CornerRadii::ZERO,
                 });
                 // Active indicator line.
@@ -1947,7 +1940,7 @@ impl BenchmarkApp {
                     y: slot.bottom() - 2.0,
                     width: slot.w,
                     height: 2.0f32.min(slot.h),
-                    color: BLUE,
+                    color: self.palette.blue,
                     corner_radii: CornerRadii::ZERO,
                 });
             }
@@ -1957,7 +1950,7 @@ impl BenchmarkApp {
                 y: slot.y + 10.0,
                 text: tab.label().into(),
                 font_size: 13.0,
-                color: if is_active { TEXT_COLOR } else { SUBTEXT0 },
+                color: if is_active { self.palette.text } else { self.palette.subtext0 },
                 font_weight: if is_active {
                     FontWeightHint::Bold
                 } else {
@@ -1976,7 +1969,7 @@ impl BenchmarkApp {
             y1: bar.bottom(),
             x2: bar.right(),
             y2: bar.bottom(),
-            color: SURFACE0,
+            color: self.palette.surface0,
             width: 1.0,
         });
     }
@@ -2010,7 +2003,7 @@ impl BenchmarkApp {
                 y,
                 text: "Overall Score".into(),
                 font_size: 14.0,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -2022,7 +2015,7 @@ impl BenchmarkApp {
                 y,
                 text: format!("{:.0}", result.overall_score),
                 font_size: 28.0,
-                color: score_color(result.overall_score),
+                color: score_color(result.overall_score, &self.palette),
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -2031,7 +2024,7 @@ impl BenchmarkApp {
             // Comparison delta.
             if let Some(ref comp) = self.comparison {
                 let delta_text = format_delta(comp.overall_change_pct);
-                let delta_color = delta_color(comp.overall_change_pct);
+                let delta_color = delta_color(comp.overall_change_pct, &self.palette);
                 frame.push(RenderCommand::Text {
                     x: x + 160.0,
                     y: y + 6.0,
@@ -2049,10 +2042,10 @@ impl BenchmarkApp {
             let card_width = (content.w - 3.0 * CONTENT_PADDING) / 2.0;
             let card_height = 90.0;
             let categories: [(&str, f64, Color); 4] = [
-                ("CPU", result.cpu.composite_score, BLUE),
-                ("Memory", result.memory.composite_score, GREEN),
-                ("Disk", result.disk.composite_score, PEACH),
-                ("Graphics", result.graphics.composite_score, LAVENDER),
+                ("CPU", result.cpu.composite_score, self.palette.blue),
+                ("Memory", result.memory.composite_score, self.palette.green),
+                ("Disk", result.disk.composite_score, self.palette.peach),
+                ("Graphics", result.graphics.composite_score, self.palette.lavender),
             ];
 
             for (i, (name, score, color)) in categories.iter().enumerate() {
@@ -2067,7 +2060,7 @@ impl BenchmarkApp {
                     y: cy,
                     width: card_width,
                     height: card_height,
-                    color: SURFACE0,
+                    color: self.palette.surface0,
                     corner_radii: CornerRadii::all(6.0),
                 });
 
@@ -2077,7 +2070,7 @@ impl BenchmarkApp {
                     y: cy + 10.0,
                     text: (*name).into(),
                     font_size: 12.0,
-                    color: SUBTEXT0,
+                    color: self.palette.subtext0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -2105,7 +2098,7 @@ impl BenchmarkApp {
                     y: bar_y,
                     width: bar_max_w,
                     height: BAR_CHART_HEIGHT,
-                    color: SURFACE1,
+                    color: self.palette.surface1,
                     corner_radii: CornerRadii::all(3.0),
                 });
                 if bar_frac > 0.0 {
@@ -2134,7 +2127,7 @@ impl BenchmarkApp {
                         y: cy + 12.0,
                         text: delta_text,
                         font_size: 11.0,
-                        color: delta_color(pct),
+                        color: delta_color(pct, &self.palette),
                         font_weight: FontWeightHint::Bold,
                         max_width: Some(70.0),
                         overflow: TextOverflow::Ellipsis,
@@ -2150,7 +2143,7 @@ impl BenchmarkApp {
                 y,
                 text: "Hardware Info".into(),
                 font_size: 14.0,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -2159,7 +2152,7 @@ impl BenchmarkApp {
 
             for (i, (label, value)) in self.hardware.summary_lines().iter().enumerate() {
                 let row_y = y + i as f32 * ROW_HEIGHT;
-                let bg_color = if i % 2 == 0 { BASE } else { SURFACE0 };
+                let bg_color = if i % 2 == 0 { self.palette.base } else { self.palette.surface0 };
                 frame.push(RenderCommand::FillRect {
                     x,
                     y: row_y,
@@ -2173,7 +2166,7 @@ impl BenchmarkApp {
                     y: row_y + 4.0,
                     text: label.clone(),
                     font_size: 12.0,
-                    color: SUBTEXT0,
+                    color: self.palette.subtext0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(150.0),
                     overflow: TextOverflow::Ellipsis,
@@ -2183,7 +2176,7 @@ impl BenchmarkApp {
                     y: row_y + 4.0,
                     text: value.clone(),
                     font_size: 12.0,
-                    color: TEXT_COLOR,
+                    color: self.palette.text,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(content.w - 200.0),
                     overflow: TextOverflow::Ellipsis,
@@ -2196,7 +2189,7 @@ impl BenchmarkApp {
                 y: content.y + 100.0,
                 text: "No benchmark results yet".into(),
                 font_size: 16.0,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -2206,7 +2199,7 @@ impl BenchmarkApp {
                 y: content.y + 130.0,
                 text: "Press F5 or click Run to start benchmarking".into(),
                 font_size: 13.0,
-                color: OVERLAY0,
+                color: self.palette.overlay0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -2223,7 +2216,7 @@ impl BenchmarkApp {
             y,
             width: bar_width,
             height: PROGRESS_BAR_HEIGHT,
-            color: SURFACE1,
+            color: self.palette.surface1,
             corner_radii: CornerRadii::all(4.0),
         });
 
@@ -2235,7 +2228,7 @@ impl BenchmarkApp {
                 y,
                 width: fill_width,
                 height: PROGRESS_BAR_HEIGHT,
-                color: self.progress.phase.color(),
+                color: self.progress.phase.color(&self.palette),
                 corner_radii: CornerRadii::all(4.0),
             });
         }
@@ -2246,7 +2239,7 @@ impl BenchmarkApp {
             y: y + 3.0,
             text: format!("{} - {:.0}%", self.progress.phase.label(), overall * 100.0),
             font_size: 12.0,
-            color: TEXT_COLOR,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: Some(bar_width - 100.0),
             overflow: TextOverflow::Ellipsis,
@@ -2258,7 +2251,7 @@ impl BenchmarkApp {
             y: y + 3.0,
             text: self.progress.elapsed_display(),
             font_size: 12.0,
-            color: TEXT_COLOR,
+            color: self.palette.text,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2281,7 +2274,7 @@ impl BenchmarkApp {
             y,
             text: format!("{} Benchmark Results", title),
             font_size: 16.0,
-            color: TEXT_COLOR,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2295,7 +2288,7 @@ impl BenchmarkApp {
                 y,
                 text: format!("Composite Score: {:.0}", cat.composite_score),
                 font_size: 14.0,
-                color: score_color(cat.composite_score),
+                color: score_color(cat.composite_score, &self.palette),
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -2308,7 +2301,7 @@ impl BenchmarkApp {
                 y,
                 width: content.w - 2.0 * CONTENT_PADDING,
                 height: ROW_HEIGHT,
-                color: SURFACE0,
+                color: self.palette.surface0,
                 corner_radii: CornerRadii::ZERO,
             });
             frame.push(RenderCommand::Text {
@@ -2316,7 +2309,7 @@ impl BenchmarkApp {
                 y: y + 4.0,
                 text: "Test".into(),
                 font_size: 12.0,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(200.0),
                 overflow: TextOverflow::Ellipsis,
@@ -2326,7 +2319,7 @@ impl BenchmarkApp {
                 y: y + 4.0,
                 text: "Score".into(),
                 font_size: 12.0,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -2336,7 +2329,7 @@ impl BenchmarkApp {
                 y: y + 4.0,
                 text: "Bar".into(),
                 font_size: 12.0,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -2354,7 +2347,7 @@ impl BenchmarkApp {
 
             for (i, sub) in cat.sub_tests.iter().enumerate() {
                 let row_y = y + i as f32 * (ROW_HEIGHT + 4.0);
-                let bg_color = if i % 2 == 0 { BASE } else { SURFACE0 };
+                let bg_color = if i % 2 == 0 { self.palette.base } else { self.palette.surface0 };
 
                 frame.push(RenderCommand::FillRect {
                     x,
@@ -2371,7 +2364,7 @@ impl BenchmarkApp {
                     y: row_y + 4.0,
                     text: sub.name.clone(),
                     font_size: 12.0,
-                    color: TEXT_COLOR,
+                    color: self.palette.text,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(230.0),
                     overflow: TextOverflow::Ellipsis,
@@ -2384,7 +2377,7 @@ impl BenchmarkApp {
                     y: row_y + 4.0,
                     text: format!("{}{}", sub.formatted_score(), direction_indicator),
                     font_size: 12.0,
-                    color: TEXT_COLOR,
+                    color: self.palette.text,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(160.0),
                     overflow: TextOverflow::Ellipsis,
@@ -2405,11 +2398,11 @@ impl BenchmarkApp {
                     y: row_y + 4.0,
                     width: bar_w,
                     height: BAR_CHART_HEIGHT,
-                    color: SURFACE1,
+                    color: self.palette.surface1,
                     corner_radii: CornerRadii::all(2.0),
                 });
                 if bar_frac > 0.0 {
-                    let bar_color = category_color(title);
+                    let bar_color = category_color(title, &self.palette);
                     frame.push(RenderCommand::FillRect {
                         x: bar_x,
                         y: row_y + 4.0,
@@ -2430,7 +2423,7 @@ impl BenchmarkApp {
                     y: footnote_y,
                     text: "* lower is better".into(),
                     font_size: 10.0,
-                    color: OVERLAY0,
+                    color: self.palette.overlay0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -2442,7 +2435,7 @@ impl BenchmarkApp {
                 y,
                 text: format!("No {} benchmark results yet. Press F5 to run.", title),
                 font_size: 13.0,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -2459,7 +2452,7 @@ impl BenchmarkApp {
             y,
             text: "Benchmark History".into(),
             font_size: 16.0,
-            color: TEXT_COLOR,
+            color: self.palette.text,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2472,7 +2465,7 @@ impl BenchmarkApp {
                 y,
                 text: "No benchmark runs recorded.".into(),
                 font_size: 13.0,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -2487,7 +2480,7 @@ impl BenchmarkApp {
                 y,
                 text: format!("Best: {:.0}  |  ", best),
                 font_size: 12.0,
-                color: GREEN,
+                color: self.palette.green,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -2499,7 +2492,7 @@ impl BenchmarkApp {
                 y,
                 text: format!("Avg: {:.0}  |  ", avg),
                 font_size: 12.0,
-                color: BLUE,
+                color: self.palette.blue,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -2511,7 +2504,7 @@ impl BenchmarkApp {
                 y,
                 text: format!("Worst: {:.0}", worst),
                 font_size: 12.0,
-                color: RED,
+                color: self.palette.red,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -2526,7 +2519,7 @@ impl BenchmarkApp {
             y,
             width: row_width,
             height: ROW_HEIGHT,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::ZERO,
         });
         let headers = ["#", "Overall", "CPU", "Memory", "Disk", "Graphics", "Time"];
@@ -2538,7 +2531,7 @@ impl BenchmarkApp {
                 y: y + 4.0,
                 text: (*header).into(),
                 font_size: 11.0,
-                color: SUBTEXT0,
+                color: self.palette.subtext0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -2555,11 +2548,11 @@ impl BenchmarkApp {
             let row_y = y + i as f32 * ROW_HEIGHT;
             let is_selected = self.selected_history_idx == Some(i);
             let bg_color = if is_selected {
-                SURFACE1
+                self.palette.surface1
             } else if i % 2 == 0 {
-                BASE
+                self.palette.base
             } else {
-                SURFACE0
+                self.palette.surface0
             };
 
             let row = Rect::new(x, row_y, row_width, ROW_HEIGHT);
@@ -2590,12 +2583,12 @@ impl BenchmarkApp {
             for (j, val) in values.iter().enumerate() {
                 let col_x = col_positions.get(j).copied().unwrap_or(0.0);
                 let col_color = match j {
-                    1 => score_color(run.overall_score),
-                    2 => BLUE,
-                    3 => GREEN,
-                    4 => PEACH,
-                    5 => LAVENDER,
-                    _ => TEXT_COLOR,
+                    1 => score_color(run.overall_score, &self.palette),
+                    2 => self.palette.blue,
+                    3 => self.palette.green,
+                    4 => self.palette.peach,
+                    5 => self.palette.lavender,
+                    _ => self.palette.text,
                 };
                 frame.push(RenderCommand::Text {
                     x: x + col_x,
@@ -2630,7 +2623,7 @@ impl BenchmarkApp {
             y,
             text: "Score Trend".into(),
             font_size: 12.0,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2643,7 +2636,7 @@ impl BenchmarkApp {
             y: chart_y,
             width: chart_width,
             height: chart_height,
-            color: SURFACE0,
+            color: self.palette.surface0,
             corner_radii: CornerRadii::all(4.0),
         });
 
@@ -2690,7 +2683,7 @@ impl BenchmarkApp {
                 y1,
                 x2,
                 y2,
-                color: BLUE,
+                color: self.palette.blue,
                 width: 2.0,
             });
         }
@@ -2706,7 +2699,7 @@ impl BenchmarkApp {
                 y: py - 3.0,
                 width: 6.0,
                 height: 6.0,
-                color: LAVENDER,
+                color: self.palette.lavender,
                 corner_radii: CornerRadii::all(3.0),
             });
         }
@@ -2720,7 +2713,7 @@ impl BenchmarkApp {
             y,
             width: bar.w,
             height: bar.h,
-            color: MANTLE,
+            color: self.palette.mantle,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -2742,7 +2735,7 @@ impl BenchmarkApp {
             y: y + 7.0,
             text: status,
             font_size: 11.0,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: Some((layout.width - 200.0).max(0.0)),
             overflow: TextOverflow::Ellipsis,
@@ -2754,7 +2747,7 @@ impl BenchmarkApp {
             y: y + 7.0,
             text: format!("Runs: {}/{}", self.history.len(), MAX_HISTORY),
             font_size: 11.0,
-            color: SUBTEXT0,
+            color: self.palette.subtext0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
             overflow: TextOverflow::Clip,
@@ -2765,17 +2758,17 @@ impl BenchmarkApp {
         // Run button.
         let run = layout.run_button();
         let run_color = if self.progress.phase.is_running() {
-            SURFACE1
+            self.palette.surface1
         } else if self.run_button_hover {
-            BLUE
+            self.palette.blue
         } else {
-            SURFACE0
+            self.palette.surface0
         };
         render_button(
             frame,
             run,
             run_color,
-            BLUE,
+            self.palette.blue,
             // A running benchmark cannot be started again, and the missing
             // outline is the only thing that says so — so it is drawn from the
             // same condition the click handler refuses on.
@@ -2787,6 +2780,7 @@ impl BenchmarkApp {
                 "Run (F5)"
             },
             FontWeightHint::Bold,
+            appearance::readable_on(run_color),
         );
         // Recorded even while running: the click handler ignores the press, but
         // a button that stops being *there* would let the click fall through to
@@ -2796,19 +2790,20 @@ impl BenchmarkApp {
         // Export button.
         let export = layout.export_button();
         let export_color = if self.export_button_hover {
-            GREEN
+            self.palette.green
         } else {
-            SURFACE0
+            self.palette.surface0
         };
         render_button(
             frame,
             export,
             export_color,
-            GREEN,
+            self.palette.green,
             true,
             28.0,
             "Export (Ctrl+E)",
             FontWeightHint::Regular,
+            appearance::readable_on(export_color),
         );
         frame.hit(Target::Export, export);
 
@@ -2816,20 +2811,21 @@ impl BenchmarkApp {
         if self.active_tab == Tab::History {
             let clear = layout.clear_button();
             let clear_color = if self.clear_button_hover {
-                RED
+                self.palette.red
             } else {
-                SURFACE0
+                self.palette.surface0
             };
             render_button(
-                frame,
+            frame,
                 clear,
                 clear_color,
-                RED,
+                self.palette.red,
                 true,
                 35.0,
                 "Clear History",
                 FontWeightHint::Regular,
-            );
+                appearance::readable_on(clear_color),
+        );
             frame.hit(Target::ClearHistory, clear);
         }
     }
@@ -2869,6 +2865,7 @@ fn render_button(
     label_inset: f32,
     label: &str,
     weight: FontWeightHint,
+    text_color: Color,
 ) {
     if rect.is_empty() {
         return;
@@ -2897,7 +2894,7 @@ fn render_button(
         y: rect.y + 10.0,
         text: label.into(),
         font_size: 12.0,
-        color: TEXT_COLOR,
+        color: text_color,
         font_weight: weight,
         max_width: None,
         overflow: TextOverflow::Clip,
@@ -2905,26 +2902,26 @@ fn render_button(
 }
 
 /// Color for a score value (0-10000 scale). Green for high, yellow for mid, red for low.
-fn score_color(score: f64) -> Color {
+fn score_color(score: f64, p: &Palette) -> Color {
     if score >= 7500.0 {
-        GREEN
+        p.ink(p.green)
     } else if score >= 5000.0 {
-        BLUE
+        p.ink(p.blue)
     } else if score >= 2500.0 {
-        YELLOW
+        p.ink(p.yellow)
     } else {
-        RED
+        p.ink(p.red)
     }
 }
 
 /// Color for a percentage delta. Green for positive, red for negative.
-fn delta_color(pct: f64) -> Color {
+fn delta_color(pct: f64, p: &Palette) -> Color {
     if pct > 0.5 {
-        GREEN
+        p.ink(p.green)
     } else if pct < -0.5 {
-        RED
+        p.ink(p.red)
     } else {
-        SUBTEXT0
+        p.subtext0
     }
 }
 
@@ -2940,13 +2937,13 @@ fn format_delta(pct: f64) -> String {
 }
 
 /// Color for a benchmark category name.
-fn category_color(name: &str) -> Color {
+fn category_color(name: &str, p: &Palette) -> Color {
     match name {
-        "CPU" => BLUE,
-        "Memory" => GREEN,
-        "Disk" => PEACH,
-        "Graphics" => LAVENDER,
-        _ => TEXT_COLOR,
+        "CPU" => p.blue,
+        "Memory" => p.green,
+        "Disk" => p.peach,
+        "Graphics" => p.lavender,
+        _ => p.text,
     }
 }
 
@@ -2955,6 +2952,11 @@ fn category_color(name: &str) -> Color {
 // ============================================================================
 
 impl App for BenchmarkApp {
+    /// Adopt the user's colours (§822).
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     fn title(&self) -> String {
         "Benchmark".into()
     }
@@ -3885,39 +3887,39 @@ mod tests {
 
     #[test]
     fn score_color_high_is_green() {
-        assert_eq!(score_color(8000.0), GREEN);
+        assert_eq!(score_color(8000.0, &Palette::for_mode(false)), Palette::for_mode(false).green);
     }
 
     #[test]
     fn score_color_mid_is_blue() {
-        assert_eq!(score_color(6000.0), BLUE);
+        assert_eq!(score_color(6000.0, &Palette::for_mode(false)), Palette::for_mode(false).blue);
     }
 
     #[test]
     fn score_color_low_mid_is_yellow() {
-        assert_eq!(score_color(3000.0), YELLOW);
+        assert_eq!(score_color(3000.0, &Palette::for_mode(false)), Palette::for_mode(false).yellow);
     }
 
     #[test]
     fn score_color_very_low_is_red() {
-        assert_eq!(score_color(1000.0), RED);
+        assert_eq!(score_color(1000.0, &Palette::for_mode(false)), Palette::for_mode(false).red);
     }
 
     // --- delta_color tests ---
 
     #[test]
     fn delta_color_positive_is_green() {
-        assert_eq!(delta_color(5.0), GREEN);
+        assert_eq!(delta_color(5.0, &Palette::for_mode(false)), Palette::for_mode(false).green);
     }
 
     #[test]
     fn delta_color_negative_is_red() {
-        assert_eq!(delta_color(-5.0), RED);
+        assert_eq!(delta_color(-5.0, &Palette::for_mode(false)), Palette::for_mode(false).red);
     }
 
     #[test]
     fn delta_color_zero_is_neutral() {
-        assert_eq!(delta_color(0.0), SUBTEXT0);
+        assert_eq!(delta_color(0.0, &Palette::for_mode(false)), Palette::for_mode(false).subtext0);
     }
 
     // --- format_delta tests ---
@@ -3946,15 +3948,15 @@ mod tests {
 
     #[test]
     fn category_color_known() {
-        assert_eq!(category_color("CPU"), BLUE);
-        assert_eq!(category_color("Memory"), GREEN);
-        assert_eq!(category_color("Disk"), PEACH);
-        assert_eq!(category_color("Graphics"), LAVENDER);
+        assert_eq!(category_color("CPU", &Palette::for_mode(false)), Palette::for_mode(false).blue);
+        assert_eq!(category_color("Memory", &Palette::for_mode(false)), Palette::for_mode(false).green);
+        assert_eq!(category_color("Disk", &Palette::for_mode(false)), Palette::for_mode(false).peach);
+        assert_eq!(category_color("Graphics", &Palette::for_mode(false)), Palette::for_mode(false).lavender);
     }
 
     #[test]
     fn category_color_unknown() {
-        assert_eq!(category_color("Unknown"), TEXT_COLOR);
+        assert_eq!(category_color("Unknown", &Palette::for_mode(false)), Palette::for_mode(false).text);
     }
 
     // --- Tab tests ---
@@ -4092,7 +4094,7 @@ mod tests {
     /// The `y` of every run-number cell the History tab actually draws.
     ///
     /// Rows are found by their run-number cell, not by their background fill.
-    /// The column header is a `SURFACE0` rectangle exactly one `ROW_HEIGHT`
+    /// The column header is a `Palette::for_mode(false).surface0` rectangle exactly one `ROW_HEIGHT`
     /// high -- which is also what an odd-numbered row's background is -- so a
     /// fill-based filter reports one row more than the table drew and then
     /// blames the hit test for an off-by-one it invented itself. sysinfo's
@@ -4112,7 +4114,7 @@ mod tests {
             .filter_map(|cmd| match cmd {
                 RenderCommand::Text {
                     x, y, text, color, ..
-                } if *color == TEXT_COLOR
+                } if *color == Palette::for_mode(false).text
                     && (*x - CONTENT_X).abs() < EPS
                     && text.parse::<usize>().is_ok() =>
                 {
@@ -4713,3 +4715,4 @@ mod tests {
         }
     }
 }
+

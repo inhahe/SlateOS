@@ -5809,6 +5809,54 @@ if ! check_ran_if; then
     exit 1
 fi
 
+# Wired here because the gate's author could not do it: scripts/ gates are
+# written by whichever lane needs them, but boot-test.sh is lane A's file, so a
+# new checker sits unrun until lane A picks it up. check-gates-are-wired.py is
+# what makes that visible instead of silent -- it refused this build naming
+# check-help-vs-parser.py, which had arrived from main unwired.
+#
+# Verified before wiring rather than after: a gate that fails on first contact
+# reds the tree for three lanes, and the checker's own warning says as much
+# (running a gate can fail on the owning lane's tree). It reports 122 files with
+# help text, 0 advertising anything unparsed, 0 options never read.
+check_help_vs_parser() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== help-vs-parser check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Checking the help-vs-parser gate against its fixture ==="
+    if ! run_checker check-help-vs-parser-selftest "$py" "$PROJECT_ROOT/scripts/check-help-vs-parser.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  The help-vs-parser gate no longer" >&2
+        echo "agrees with its own fixture, so its verdict means nothing." >&2
+        return 1
+    fi
+
+    echo "=== Checking that advertised options are actually parsed ==="
+    if run_checker check-help-vs-parser "$py" "$PROJECT_ROOT/scripts/check-help-vs-parser.py"; then
+        return 0
+    fi
+
+    echo "" >&2
+    echo "ERROR: refusing to build.  A program advertises an option in its" >&2
+    echo "--help that its parser never reads, or reads one it never" >&2
+    echo "advertises.  Help text that promises a flag which does nothing is" >&2
+    echo "worse than no help at all: it is a documented feature that silently" >&2
+    echo "is not there." >&2
+    echo "" >&2
+    return 1
+}
+
+if ! check_help_vs_parser; then
+    exit 1
+fi
+
 # An app that keeps time but never receives the clock.
 #
 # A GUI app's clock is one event, `Event::Tick { elapsed_ms }`.  An app that

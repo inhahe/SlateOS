@@ -131046,6 +131046,49 @@ crate's own module docs where the next person to need one will read it.
 
 ---
 
+## TD-C-PROCEXPLORER-FEATURES-IS-A-MODULE-NOBODY-CAN-REACH
+
+**Date:** 2026-09-13. **Lane:** C.
+**Where:** `apps/procexplorer/src/features.rs` — 85 KB, 55 public items, 17
+public types, **37 passing tests**.
+
+**In short:** the process explorer has a second module of features — a window
+picker that identifies a process by clicking its window, a blocking analyser
+that traces what a process is waiting on and detects deadlocks, CPU affinity
+control, priority control, a memory-map viewer and an environment browser. It
+is compiled, it is tested, and **no part of the application calls any of it**.
+A user cannot reach a single one of those features.
+
+**How sure.** `mod features;` is declared in `main.rs` and nothing else
+references it. Of the module's seventeen public types — `WindowPicker`,
+`BlockingAnalyzer`, `AffinityMask`, `PrioritySelector`, `EnvViewer`,
+`MemoryMap` and the rest — **not one is named anywhere in `main.rs`**. The only
+names in common are `new`, `render`, `all`, `color`, `label`, `select`, `size`
+and `hover`, which are methods on unrelated types.
+
+**Why nothing noticed.** It has 37 tests and they all pass, because they test
+the module directly. This is `known-issues.md` lesson 47 at module scale, and
+the irony is sharp: `procexplorer`'s own `tick_interval` doc cites that lesson
+by name — *"a system monitor that monitors nothing, with every one of its
+tests still passing"* — while this module sat beside it unreachable.
+
+**How it was found.** Not by reading, and not by the tests. A colour-literal
+count came back at 27 for the crate when `main.rs` had 1; the other 26 were in
+a file I had never opened, and opening it to convert its colours is what
+exposed that nothing calls it.
+
+**What the fix is.** A decision first, then work: either wire the features into
+the UI (they appear to be complete — the analyser has a deadlock detector and
+the affinity control has a mask editor), or delete the module. Both are
+defensible; shipping 85 KB of tested, unreachable features is not. This is
+worth the operator's input, because "delete a working deadlock detector" and
+"add six features to the process explorer" are very different amounts of work
+and only one of them is a bug fix.
+
+**Its 26 colour literals are deliberately left alone** until that is settled.
+Converting the colours of a module nobody can see would be the most literal
+possible instance of the thing this file exists to prevent.
+
 ## TD-C-SIXTY-EIGHT-APPS-CARRY-THEIR-OWN-COPY-OF-THE-PALETTE
 
 **Date:** 2026-09-12. **Lane:** C.

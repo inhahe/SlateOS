@@ -14,10 +14,10 @@
 //! The lasting reason is that "selected" now means the same thing everywhere,
 //! which no arrangement of shades could deliver.
 
-use crate::{Palette, SurfaceStyle};
-use guitk::color::Color;
-use guitk::render::RenderTree;
-use guitk::style::CornerRadii;
+use crate::color::Color;
+use crate::palette::{Palette, SurfaceStyle};
+use crate::render::RenderTree;
+use crate::style::CornerRadii;
 
 /// Somewhere render commands can be sent.
 ///
@@ -29,17 +29,17 @@ use guitk::style::CornerRadii;
 /// when there are 991 of them.
 pub trait CommandSink {
     /// Emit one command.
-    fn emit(&mut self, cmd: guitk::render::RenderCommand);
+    fn emit(&mut self, cmd: crate::render::RenderCommand);
 }
 
-impl CommandSink for Vec<guitk::render::RenderCommand> {
-    fn emit(&mut self, cmd: guitk::render::RenderCommand) {
+impl CommandSink for Vec<crate::render::RenderCommand> {
+    fn emit(&mut self, cmd: crate::render::RenderCommand) {
         self.push(cmd);
     }
 }
 
 impl CommandSink for RenderTree {
-    fn emit(&mut self, cmd: guitk::render::RenderCommand) {
+    fn emit(&mut self, cmd: crate::render::RenderCommand) {
         self.push(cmd);
     }
 }
@@ -49,13 +49,13 @@ impl CommandSink for RenderTree {
 /// sites would have to know which they were looking at, and they cannot -- the
 /// two are spelled identically at the point of use.
 impl<S: CommandSink + ?Sized> CommandSink for &mut S {
-    fn emit(&mut self, cmd: guitk::render::RenderCommand) {
+    fn emit(&mut self, cmd: crate::render::RenderCommand) {
         (**self).emit(cmd);
     }
 }
 
-impl<T> CommandSink for guitk::frame::Frame<T> {
-    fn emit(&mut self, cmd: guitk::render::RenderCommand) {
+impl<T> CommandSink for crate::frame::Frame<T> {
+    fn emit(&mut self, cmd: crate::render::RenderCommand) {
         // Through `push`, never into the buffer behind it: this one maintains
         // the clip stack as it goes.
         self.push(cmd);
@@ -77,16 +77,16 @@ impl<T> CommandSink for guitk::frame::Frame<T> {
 ///
 /// Returns `None` for commands that are not rectangles.
 #[must_use]
-pub fn logical_rect(cmd: &guitk::render::RenderCommand) -> Option<(f32, f32, f32, f32)> {
+pub fn logical_rect(cmd: &crate::render::RenderCommand) -> Option<(f32, f32, f32, f32)> {
     match *cmd {
-        guitk::render::RenderCommand::FillRect {
+        crate::render::RenderCommand::FillRect {
             x,
             y,
             width,
             height,
             ..
         } => Some((x, y, width, height)),
-        guitk::render::RenderCommand::StrokeRect {
+        crate::render::RenderCommand::StrokeRect {
             x,
             y,
             width,
@@ -120,10 +120,10 @@ pub fn logical_rect(cmd: &guitk::render::RenderCommand) -> Option<(f32, f32, f32
 /// is not hypothetical: `privacy_settings` passed vacuously for exactly this
 /// reason. Written through this function the same test matches either shape.
 #[must_use]
-pub fn painted_rect(cmd: &guitk::render::RenderCommand) -> Option<(f32, f32, f32, f32, Color)> {
+pub fn painted_rect(cmd: &crate::render::RenderCommand) -> Option<(f32, f32, f32, f32, Color)> {
     let color = match *cmd {
-        guitk::render::RenderCommand::FillRect { color, .. }
-        | guitk::render::RenderCommand::StrokeRect { color, .. } => color,
+        crate::render::RenderCommand::FillRect { color, .. }
+        | crate::render::RenderCommand::StrokeRect { color, .. } => color,
         _ => return None,
     };
     let (x, y, w, h) = logical_rect(cmd)?;
@@ -147,7 +147,7 @@ pub fn painted_rect(cmd: &guitk::render::RenderCommand) -> Option<(f32, f32, f32
 /// asked for and does not have to know about the half-pixel stroke inset.
 #[must_use]
 pub fn paint_at(
-    cmds: &[guitk::render::RenderCommand],
+    cmds: &[crate::render::RenderCommand],
     x: f32,
     y: f32,
     width: f32,
@@ -166,8 +166,8 @@ pub fn paint_at(
             continue;
         }
         match *cmd {
-            guitk::render::RenderCommand::FillRect { color, .. } => found.fill = Some(color),
-            guitk::render::RenderCommand::StrokeRect { color, .. } => found.border = Some(color),
+            crate::render::RenderCommand::FillRect { color, .. } => found.fill = Some(color),
+            crate::render::RenderCommand::StrokeRect { color, .. } => found.border = Some(color),
             _ => {}
         }
     }
@@ -268,7 +268,7 @@ impl Palette {
     /// control, and the fill *is* the thing. See [`Surface::ControlTrack`].
     #[must_use]
     pub fn surface_paint(&self, what: Surface) -> SurfacePaint {
-        match (self.surface_style, what) {
+        match (self.surface_style(), what) {
             // Borders: nothing is filled, structure is carried by the outline.
             (SurfaceStyle::Borders, Surface::Card | Surface::Sidebar) => SurfacePaint {
                 separator: None,
@@ -312,13 +312,13 @@ impl Palette {
             // A strip answers to its own setting, not to the card/border one --
             // the two are orthogonal (§835), so this arm ignores `surface_style`
             // exactly as `ControlTrack` does.
-            (_, Surface::Strip(edge)) => match self.strip_style {
-                crate::StripStyle::Filled => SurfacePaint {
+            (_, Surface::Strip(edge)) => match self.strip_style() {
+                crate::palette::StripStyle::Filled => SurfacePaint {
                     separator: None,
                     fill: Some(self.mantle),
                     border: None,
                 },
-                crate::StripStyle::Separator => SurfacePaint {
+                crate::palette::StripStyle::Separator => SurfacePaint {
                     separator: Some((edge, self.border)),
                     fill: None,
                     border: None,
@@ -404,7 +404,7 @@ impl Palette {
         paint: SurfacePaint,
     ) {
         if let Some(fill) = paint.fill {
-            out.emit(guitk::render::RenderCommand::FillRect {
+            out.emit(crate::render::RenderCommand::FillRect {
                 x,
                 y,
                 width,
@@ -423,7 +423,7 @@ impl Palette {
                 Edge::Top => y,
                 Edge::Bottom => y + (height - line).max(0.0),
             };
-            out.emit(guitk::render::RenderCommand::FillRect {
+            out.emit(crate::render::RenderCommand::FillRect {
                 x,
                 y,
                 width,
@@ -437,7 +437,7 @@ impl Palette {
             // the caller asked for. Without this a bordered row is a pixel
             // taller than the filled row it replaces, and a column of them
             // drifts -- invisible in one row, obvious down a page.
-            out.emit(guitk::render::RenderCommand::StrokeRect {
+            out.emit(crate::render::RenderCommand::StrokeRect {
                 x: x + 0.5,
                 y: y + 0.5,
                 width: (width - 1.0).max(0.0),
@@ -507,7 +507,7 @@ impl Palette {
 )]
 mod tests {
     use super::*;
-    use guitk::render::RenderCommand;
+    use crate::render::RenderCommand;
 
     fn light() -> Palette {
         Palette::for_mode(true)
@@ -700,7 +700,7 @@ mod tests {
     /// change could plausibly have moved.
     #[test]
     fn neither_theme_asks_the_compositor_for_more_work_than_the_other() {
-        use guitk::render::RenderTree;
+        use crate::render::RenderTree;
 
         for what in [
             Surface::Card,
@@ -747,7 +747,7 @@ mod tests {
     /// it. Colour changes no geometry.
     #[test]
     fn a_selected_box_differs_from_an_unselected_one_only_in_colour() {
-        use guitk::render::RenderCommand;
+        use crate::render::RenderCommand;
         let p = styled(SurfaceStyle::Borders);
         let widths = |what| {
             let mut tree = RenderTree::new();
@@ -785,13 +785,13 @@ mod tests {
         for surface in [SurfaceStyle::Borders, SurfaceStyle::Cards] {
             let mut filled = Palette::for_mode(true);
             filled.set_surface_style(surface);
-            filled.set_strip_style(crate::StripStyle::Filled);
+            filled.set_strip_style(crate::palette::StripStyle::Filled);
             let paint = filled.surface_paint(Surface::Strip(Edge::Bottom));
             assert_eq!(paint.fill, Some(filled.mantle), "under {surface:?}");
             assert_eq!(paint.separator, None);
 
             let mut lined = filled;
-            lined.set_strip_style(crate::StripStyle::Separator);
+            lined.set_strip_style(crate::palette::StripStyle::Separator);
             let paint = lined.surface_paint(Surface::Strip(Edge::Bottom));
             assert_eq!(paint.fill, None, "a separated strip has no band");
             assert_eq!(paint.separator, Some((Edge::Bottom, lined.border)));
@@ -805,9 +805,9 @@ mod tests {
     /// more than it was given and the content below it would shift.
     #[test]
     fn a_strips_separator_lands_on_the_edge_it_names() {
-        use guitk::render::RenderCommand;
+        use crate::render::RenderCommand;
         let mut p = Palette::for_mode(true);
-        p.set_strip_style(crate::StripStyle::Separator);
+        p.set_strip_style(crate::palette::StripStyle::Separator);
         for (edge, want_y) in [(Edge::Top, 20.0_f32), (Edge::Bottom, 20.0 + 40.0 - 1.0)] {
             let mut tree = RenderTree::new();
             p.draw_surface(

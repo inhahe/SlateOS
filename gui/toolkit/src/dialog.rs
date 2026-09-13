@@ -52,10 +52,10 @@
 //! outside this module is the one thing not to do: it is a second copy of the
 //! layout, and the bug then lives in whichever copy you are not reading.
 
-use crate::color::Color;
 use crate::date::Date;
 use crate::event::{Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use crate::frame::{Frame, Rect};
+use crate::palette::Palette;
 use crate::render::{FontWeightHint, RenderCommand, TextOverflow};
 use crate::scroll_window;
 use crate::scrollbar;
@@ -68,26 +68,12 @@ pub use tzrules::Tz;
 
 // --- Catppuccin Mocha palette ---
 
-/// Base background (dialog body).
-const COLOR_BASE: Color = Color::from_hex(0x1E1E2E);
-/// Slightly raised surface (sidebar, toolbar).
-const COLOR_SURFACE0: Color = Color::from_hex(0x313244);
-/// Higher surface (selected items, input fields).
-const COLOR_SURFACE1: Color = Color::from_hex(0x45475A);
-/// Overlay / hover highlights.
-const COLOR_SURFACE2: Color = Color::from_hex(0x585B70);
-/// Primary text.
-const COLOR_TEXT: Color = Color::from_hex(0xCDD6F4);
-/// Subdued text (secondary labels, sizes, dates).
-const COLOR_SUBTEXT: Color = Color::from_hex(0xA6ADC8);
-/// Accent color (selection highlight, primary buttons).
-const COLOR_BLUE: Color = Color::from_hex(0x89B4FA);
-/// Accent for folders.
-const COLOR_YELLOW: Color = Color::from_hex(0xF9E2AF);
-/// Disabled / muted elements.
-const COLOR_OVERLAY: Color = Color::from_hex(0x6C7086);
-/// Error / cancel accent.
-const COLOR_RED: Color = Color::from_hex(0xF38BA8);
+// The colours come from the user's palette, threaded in by the caller.
+//
+// Ten Catppuccin Mocha constants used to sit here. The toolkit could not
+// name a `Palette` until 838 moved the type down into this crate -- until
+// then a file dialog was dark whatever theme the user had chosen, which is
+// what that decision was for.
 
 // --- Layout constants ---
 
@@ -668,8 +654,8 @@ impl FileDialog {
     ///
     /// A thin wrapper over [`frame`](Self::frame), which is the same walk with
     /// the click targets kept. Callers that only paint can keep using this.
-    pub fn render(&self, width: f32, height: f32) -> Vec<RenderCommand> {
-        self.frame(width, height).into_tree().commands
+    pub fn render(&self, palette: &Palette, width: f32, height: f32) -> Vec<RenderCommand> {
+        self.frame(palette, width, height).into_tree().commands
     }
 
     /// Draw the dialog at the given dimensions, recording what each part of it
@@ -680,7 +666,7 @@ impl FileDialog {
     /// also what [`handle_mouse`](Self::handle_mouse) tests a click against, so
     /// there is no second copy of the layout to keep in step with this one.
     #[must_use]
-    pub fn frame(&self, width: f32, height: f32) -> Frame<DialogTarget> {
+    pub fn frame(&self, palette: &Palette, width: f32, height: f32) -> Frame<DialogTarget> {
         let mut frame = Frame::new(width, height);
 
         // Dialog background. Recorded as a target so that a host drawing the
@@ -691,13 +677,13 @@ impl FileDialog {
             y: 0.0,
             width,
             height,
-            color: COLOR_BASE,
+            color: palette.base,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
         frame.hit(DialogTarget::Chrome, Rect::new(0.0, 0.0, width, height));
 
         // Toolbar
-        self.draw_toolbar(&mut frame, width);
+        self.draw_toolbar(palette, &mut frame, width);
 
         // Sidebar. Clamped at zero because a dialog shorter than its own
         // furniture would otherwise hand a negative height to the clip stack,
@@ -705,12 +691,13 @@ impl FileDialog {
         // bottom edge is above its top.
         let content_top = TOOLBAR_HEIGHT;
         let content_height = (height - TOOLBAR_HEIGHT - BOTTOM_BAR_HEIGHT).max(0.0);
-        self.draw_sidebar(&mut frame, content_top, content_height);
+        self.draw_sidebar(palette, &mut frame, content_top, content_height);
 
         // File list
         let list_x = SIDEBAR_WIDTH;
         let list_width = (width - SIDEBAR_WIDTH).max(0.0);
         self.draw_file_list(
+            palette,
             &mut frame,
             list_x,
             content_top,
@@ -721,7 +708,7 @@ impl FileDialog {
 
         // Bottom bar (filename input for save, buttons)
         let bottom_y = height - BOTTOM_BAR_HEIGHT;
-        self.draw_bottom_bar(&mut frame, bottom_y, width);
+        self.draw_bottom_bar(palette, &mut frame, bottom_y, width);
 
         frame
     }
@@ -739,7 +726,14 @@ impl FileDialog {
     /// presses: a drag of the scrollbar is a press, a run of moves and a
     /// release, and a dialog that only sees the press cannot follow the thumb.
     pub fn handle_mouse(&mut self, event: &MouseEvent, width: f32, height: f32) -> DialogAction {
-        let frame = self.frame(width, height);
+        // Walked for its hit boxes, not its ink. `frame` produces both in
+        // one pass -- which is what stops a control being drawn in one place
+        // and clicked in another -- and the hit boxes do not depend on the
+        // palette: a colour decides what a command *is*, never where. Any
+        // palette gives the same answer here, so this asks for the plain dark
+        // one rather than obliging every caller to thread colours through an
+        // event handler.
+        let frame = self.frame(&Palette::for_mode(false), width, height);
         let target = frame.hit_test(event.x, event.y);
 
         match event.kind {
@@ -1178,14 +1172,14 @@ impl FileDialog {
 
     // --- Render sub-methods ---
 
-    fn draw_toolbar(&self, frame: &mut Frame<DialogTarget>, width: f32) {
+    fn draw_toolbar(&self, palette: &Palette, frame: &mut Frame<DialogTarget>, width: f32) {
         // Toolbar background
         frame.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
             width,
             height: TOOLBAR_HEIGHT,
-            color: COLOR_SURFACE0,
+            color: palette.surface0,
             corner_radii: CornerRadii {
                 top_left: CORNER_RADIUS,
                 top_right: CORNER_RADIUS,
@@ -1209,9 +1203,9 @@ impl FileDialog {
         // the target instead would let the click fall through to the toolbar,
         // which is not different here but would be if anything were behind it.
         let back_color = if self.history_back.is_empty() {
-            COLOR_OVERLAY
+            palette.overlay0
         } else {
-            COLOR_TEXT
+            palette.text
         };
         frame.push(RenderCommand::Text {
             x,
@@ -1228,9 +1222,9 @@ impl FileDialog {
 
         // Forward button
         let fwd_color = if self.history_forward.is_empty() {
-            COLOR_OVERLAY
+            palette.overlay0
         } else {
-            COLOR_TEXT
+            palette.text
         };
         frame.push(RenderCommand::Text {
             x,
@@ -1253,7 +1247,7 @@ impl FileDialog {
             x,
             y: btn_y + 4.0,
             text: String::from("^"),
-            color: COLOR_TEXT,
+            color: palette.text,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -1269,7 +1263,7 @@ impl FileDialog {
             y: btn_y,
             width: addr_width,
             height: 24.0,
-            color: COLOR_SURFACE1,
+            color: palette.surface1,
             corner_radii: CornerRadii::all(3.0),
         });
         frame.push(RenderCommand::Text {
@@ -1279,7 +1273,7 @@ impl FileDialog {
             // glyphs rather than a key to look anything up with, so lossy is
             // correct here. See `DirEntry::name`.
             text: self.current_path.to_string_lossy().into_owned(),
-            color: COLOR_TEXT,
+            color: palette.text,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(addr_width - 12.0),
@@ -1291,14 +1285,20 @@ impl FileDialog {
         );
     }
 
-    fn draw_sidebar(&self, frame: &mut Frame<DialogTarget>, top: f32, height: f32) {
+    fn draw_sidebar(
+        &self,
+        palette: &Palette,
+        frame: &mut Frame<DialogTarget>,
+        top: f32,
+        height: f32,
+    ) {
         // Sidebar background
         frame.push(RenderCommand::FillRect {
             x: 0.0,
             y: top,
             width: SIDEBAR_WIDTH,
             height,
-            color: COLOR_SURFACE0,
+            color: palette.surface0,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1313,7 +1313,7 @@ impl FileDialog {
                 x: PADDING + 4.0,
                 y,
                 text: qa.label.clone(),
-                color: COLOR_SUBTEXT,
+                color: palette.subtext0,
                 font_size: FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(SIDEBAR_WIDTH - PADDING * 2.0 - 4.0),
@@ -1332,6 +1332,7 @@ impl FileDialog {
 
     fn draw_file_list(
         &self,
+        palette: &Palette,
         frame: &mut Frame<DialogTarget>,
         x: f32,
         top: f32,
@@ -1353,7 +1354,7 @@ impl FileDialog {
             y: header_y,
             width,
             height: ROW_HEIGHT,
-            color: COLOR_SURFACE1,
+            color: palette.surface1,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1382,7 +1383,7 @@ impl FileDialog {
             x: name_col_x,
             y: header_y + 6.0,
             text: String::from("Name"),
-            color: COLOR_TEXT,
+            color: palette.text,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -1392,7 +1393,7 @@ impl FileDialog {
             x: size_col_x,
             y: header_y + 6.0,
             text: String::from("Size"),
-            color: COLOR_TEXT,
+            color: palette.text,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -1402,7 +1403,7 @@ impl FileDialog {
             x: date_col_x,
             y: header_y + 6.0,
             text: String::from("Modified"),
-            color: COLOR_TEXT,
+            color: palette.text,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -1420,7 +1421,7 @@ impl FileDialog {
             x: indicator_x,
             y: header_y + 6.0,
             text: String::from(indicator),
-            color: COLOR_OVERLAY,
+            color: palette.overlay0,
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1452,7 +1453,7 @@ impl FileDialog {
                     y: row_y,
                     width,
                     height: ROW_HEIGHT,
-                    color: COLOR_SURFACE2,
+                    color: palette.surface2,
                     corner_radii: CornerRadii::ZERO,
                 });
             }
@@ -1460,9 +1461,9 @@ impl FileDialog {
             // Icon placeholder (folder vs file indicator)
             let icon_char = if entry.is_dir { "D" } else { "F" };
             let icon_color = if entry.is_dir {
-                COLOR_YELLOW
+                palette.yellow
             } else {
-                COLOR_SUBTEXT
+                palette.subtext0
             };
             frame.push(RenderCommand::Text {
                 x: x + PADDING,
@@ -1477,9 +1478,9 @@ impl FileDialog {
 
             // Name
             let name_color = if entry.is_dir {
-                COLOR_YELLOW
+                palette.yellow
             } else {
-                COLOR_TEXT
+                palette.text
             };
             let max_name_width = size_col_x - name_col_x - PADDING;
             frame.push(RenderCommand::Text {
@@ -1504,7 +1505,7 @@ impl FileDialog {
                     x: size_col_x,
                     y: row_y + 6.0,
                     text: format_size(entry.size),
-                    color: COLOR_SUBTEXT,
+                    color: palette.subtext0,
                     font_size: FONT_SIZE_SMALL,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
@@ -1517,7 +1518,7 @@ impl FileDialog {
                 x: date_col_x,
                 y: row_y + 6.0,
                 text: format_timestamp(entry.modified_timestamp, &self.timezone),
-                color: COLOR_SUBTEXT,
+                color: palette.subtext0,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -1533,7 +1534,7 @@ impl FileDialog {
             );
         }
 
-        self.draw_scrollbar(frame, x, entries_top, width, height, dialog_height);
+        self.draw_scrollbar(palette, frame, x, entries_top, width, height, dialog_height);
 
         frame.unclip();
     }
@@ -1546,6 +1547,7 @@ impl FileDialog {
     /// not.
     fn draw_scrollbar(
         &self,
+        palette: &Palette,
         frame: &mut Frame<DialogTarget>,
         x: f32,
         entries_top: f32,
@@ -1570,7 +1572,7 @@ impl FileDialog {
             y: track.y,
             width: track.w,
             height: track.h,
-            color: COLOR_SURFACE0,
+            color: palette.surface0,
             corner_radii: CornerRadii::ZERO,
         });
         frame.hit(DialogTarget::ScrollTrack, track);
@@ -1586,7 +1588,7 @@ impl FileDialog {
             y: thumb.y,
             width: thumb.w,
             height: thumb.h,
-            color: COLOR_SURFACE2,
+            color: palette.surface2,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
         // Recorded after the track, so a press on the overlap reaches the thumb
@@ -1594,14 +1596,20 @@ impl FileDialog {
         frame.hit(DialogTarget::ScrollThumb, thumb);
     }
 
-    fn draw_bottom_bar(&self, frame: &mut Frame<DialogTarget>, y: f32, width: f32) {
+    fn draw_bottom_bar(
+        &self,
+        palette: &Palette,
+        frame: &mut Frame<DialogTarget>,
+        y: f32,
+        width: f32,
+    ) {
         // Bottom bar background
         frame.push(RenderCommand::FillRect {
             x: 0.0,
             y,
             width,
             height: BOTTOM_BAR_HEIGHT,
-            color: COLOR_SURFACE0,
+            color: palette.surface0,
             corner_radii: CornerRadii {
                 top_left: 0.0,
                 top_right: 0.0,
@@ -1620,7 +1628,7 @@ impl FileDialog {
                 y: input_y,
                 width: input_width,
                 height: 28.0,
-                color: COLOR_SURFACE1,
+                color: palette.surface1,
                 corner_radii: CornerRadii::all(3.0),
             });
             frame.hit(
@@ -1632,7 +1640,7 @@ impl FileDialog {
                 y: input_y,
                 width: input_width,
                 height: 28.0,
-                color: COLOR_BLUE,
+                color: palette.blue,
                 line_width: 1.0,
                 corner_radii: CornerRadii::all(3.0),
             });
@@ -1643,9 +1651,9 @@ impl FileDialog {
                 self.filename_input.clone()
             };
             let text_color = if self.filename_input.is_empty() {
-                COLOR_OVERLAY
+                palette.overlay0
             } else {
-                COLOR_TEXT
+                palette.text
             };
             frame.push(RenderCommand::Text {
                 x: PADDING + 6.0,
@@ -1666,9 +1674,9 @@ impl FileDialog {
         // Confirm button
         let confirm_enabled = self.confirm().is_some();
         let confirm_bg = if confirm_enabled {
-            COLOR_BLUE
+            palette.blue
         } else {
-            COLOR_SURFACE2
+            palette.surface2
         };
         let confirm_label = match self.mode {
             DialogMode::Open => "Open",
@@ -1697,9 +1705,9 @@ impl FileDialog {
             y: input_y + 8.0,
             text: String::from(confirm_label),
             color: if confirm_enabled {
-                COLOR_BASE
+                palette.base
             } else {
-                COLOR_OVERLAY
+                palette.overlay0
             },
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Bold,
@@ -1713,7 +1721,7 @@ impl FileDialog {
             y: input_y,
             width: BUTTON_WIDTH,
             height: BUTTON_HEIGHT,
-            color: COLOR_SURFACE1,
+            color: palette.surface1,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
         frame.hit(
@@ -1724,7 +1732,7 @@ impl FileDialog {
             x: cancel_x + (BUTTON_WIDTH - 42.0) / 2.0,
             y: input_y + 8.0,
             text: String::from("Cancel"),
-            color: COLOR_RED,
+            color: palette.red,
             font_size: FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -2191,7 +2199,7 @@ mod tests {
     /// boxes during the draw is that no second copy of the geometry exists to
     /// disagree with the first.
     fn centre_of(dialog: &FileDialog, target: DialogTarget) -> (f32, f32) {
-        let frame = dialog.frame(W, H);
+        let frame = dialog.frame(&Palette::for_mode(false), W, H);
         let rect = frame
             .rect_of(|t| *t == target)
             .unwrap_or_else(|| panic!("{target:?} should have been drawn"));
@@ -2561,7 +2569,7 @@ mod tests {
     #[test]
     fn test_render_produces_commands() {
         let dialog = FileDialog::open().with_initial_path("/test");
-        let cmds = dialog.render(600.0, 400.0);
+        let cmds = dialog.render(&Palette::for_mode(false), 600.0, 400.0);
         // Should produce at least the background, toolbar, sidebar, bottom bar.
         assert!(!cmds.is_empty());
     }
@@ -2656,7 +2664,7 @@ mod tests {
             }
             dialog.set_entries(vec![entry.clone()]);
             dialog
-                .render(800.0, 600.0)
+                .render(&Palette::for_mode(false), 800.0, 600.0)
                 .into_iter()
                 .filter_map(|cmd| match cmd {
                     RenderCommand::Text { text, .. } => Some(text),
@@ -3053,7 +3061,7 @@ mod tests {
     fn everything_that_fits_gets_no_scrollbar() {
         let mut dialog = FileDialog::open();
         dialog.set_entries(vec![file("a.txt"), file("b.txt")]);
-        let frame = dialog.frame(W, H);
+        let frame = dialog.frame(&Palette::for_mode(false), W, H);
 
         assert!(
             frame.rect_of(|t| *t == DialogTarget::ScrollTrack).is_none(),
@@ -3066,7 +3074,7 @@ mod tests {
         let mut dialog = FileDialog::open().with_initial_path("/docs");
         dialog.set_entries(long_listing());
 
-        let before = dialog.frame(W, H);
+        let before = dialog.frame(&Palette::for_mode(false), W, H);
         assert!(
             before.rect_of(|t| *t == DialogTarget::Entry(29)).is_none(),
             "the last row starts out below the fold, or this test proves nothing"
@@ -3084,7 +3092,7 @@ mod tests {
             );
         }
 
-        let after = dialog.frame(W, H);
+        let after = dialog.frame(&Palette::for_mode(false), W, H);
         assert!(
             after.rect_of(|t| *t == DialogTarget::Entry(29)).is_some(),
             "scrolling to the end has to bring the last row on screen"
@@ -3146,7 +3154,7 @@ mod tests {
         // Aim at the topmost drawn row by its pixels, and check the dialog
         // agrees about which entry lives there.
         let rect = dialog
-            .frame(W, H)
+            .frame(&Palette::for_mode(false), W, H)
             .rect_of(|t| *t == DialogTarget::Entry(first))
             .expect("the first visible row is drawn");
         let (x, y) = rect.centre();
@@ -3234,7 +3242,7 @@ mod tests {
         let capacity = FileDialog::row_capacity(H);
 
         let track = dialog
-            .frame(W, H)
+            .frame(&Palette::for_mode(false), W, H)
             .rect_of(|t| *t == DialogTarget::ScrollTrack)
             .expect("a long listing has a scrollbar");
         // Below the thumb, which sits at the top.
@@ -3259,7 +3267,7 @@ mod tests {
             );
         }
 
-        let frame = dialog.frame(W, H);
+        let frame = dialog.frame(&Palette::for_mode(false), W, H);
         let track = frame
             .rect_of(|t| *t == DialogTarget::ScrollTrack)
             .expect("track");
@@ -3387,7 +3395,7 @@ mod tests {
         // cannot press. `Frame` drops those, so asking the frame is the check.
         let mut dialog = FileDialog::save().with_initial_path("/docs");
         dialog.set_entries(long_listing());
-        let frame = dialog.frame(W, H);
+        let frame = dialog.frame(&Palette::for_mode(false), W, H);
 
         for target in [
             DialogTarget::Back,

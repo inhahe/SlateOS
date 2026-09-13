@@ -2774,7 +2774,7 @@ impl DiskImagerApp {
         // itself out from its own origin and there is no translate command to
         // move a finished list of absolute coordinates somewhere else.
         if let Some(dialog) = self.open_dialog.as_ref() {
-            for cmd in dialog.render(self.window_width, self.window_height) {
+            for cmd in dialog.render(&self.palette, self.window_width, self.window_height) {
                 rt.push(cmd);
             }
         }
@@ -5237,7 +5237,7 @@ mod tests {
                 .open_dialog
                 .as_ref()
                 .expect("a dialog is up")
-                .frame(w, h)
+                .frame(&Palette::for_mode(false), w, h)
                 .rect_of(|t| *t == target)
                 .unwrap_or_else(|| panic!("{target:?} should have been drawn"))
                 .centre();

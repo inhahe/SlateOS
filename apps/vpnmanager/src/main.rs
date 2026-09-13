@@ -1700,7 +1700,10 @@ pub fn render_frame(app: &VpnManager, width: f32, height: f32) -> Frame {
     // dropped for the reason above.
     if let Some(picker) = app.picker.as_ref() {
         frame.discard_hits();
-        for cmd in picker.dialog.render(frame.width, frame.height) {
+        for cmd in picker
+            .dialog
+            .render(&app.palette, frame.width, frame.height)
+        {
             frame.push(cmd);
         }
     }
@@ -7640,7 +7643,7 @@ mod tests {
             .as_ref()
             .expect("a chooser is up")
             .dialog
-            .frame(w, h)
+            .frame(&Palette::for_mode(false), w, h)
             .rect_of(|t| *t == target)
             .unwrap_or_else(|| panic!("{target:?} should have been drawn"))
             .centre();
@@ -7837,7 +7840,7 @@ mod tests {
             .as_ref()
             .expect("a chooser is up")
             .dialog
-            .frame(w, h)
+            .frame(&Palette::for_mode(false), w, h)
             .rect_of(|t| *t == guitk::dialog::DialogTarget::Cancel)
             .expect("the chooser draws a Cancel button")
             .centre();

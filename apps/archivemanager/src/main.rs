@@ -3650,7 +3650,7 @@ impl App for AppState {
         // put this window's targets and the dialog's in one namespace for no
         // gain, and the dialog's are not this window's to interpret.
         if let Some(choice) = self.choosing.as_ref() {
-            for cmd in choice.dialog.render(width, height) {
+            for cmd in choice.dialog.render(&self.palette, width, height) {
                 tree.push(cmd);
             }
         }
@@ -5581,7 +5581,7 @@ mod tests {
             },
         ]);
         let (x, y) = dialog
-            .frame(SIZE.0, SIZE.1)
+            .frame(&Palette::for_mode(false), SIZE.0, SIZE.1)
             .rect_of(|t| *t == guitk::dialog::DialogTarget::Entry(1))
             .expect("the second row is drawn")
             .centre();

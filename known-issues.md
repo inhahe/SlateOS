@@ -131240,6 +131240,23 @@ have been through it.** For each crate:
 
    Cargo unifies it with the ordinary dependency when building tests.
 
+**A correction to every count in this entry, and to how to take one.** The
+figures here were produced by treating everything before the first
+`#[cfg(test)]` as production code. That is wrong: a `#[cfg(test)] use
+guitk::probe;` at the top of a file cuts the slice at line 42, and
+`apps/pdfviewer` was therefore measured over **0.9%** of itself and reported
+as having no colour literals at all. It has thirty.
+
+Slicing at the first `#[cfg(test)]` *followed by* `mod` instead raises the
+tree-wide count from 1,313 to **1,535** — 17% of the population was invisible.
+Take the correction as the method rather than the number: a "production code
+only" filter needs to name what it is excluding, because one that silently
+excludes 99% of a file reports zero and looks like good news.
+
+(`Color::TRANSPARENT` is counted by that pattern and should not be. It is used
+as a sentinel — `if row_bg != Color::TRANSPARENT` — meaning "no background was
+set", not as a colour anyone chose.)
+
 **Two things a survey of `const` cannot tell you, found while converting:**
 
 * **Some constants are function-local.** A pattern anchored at `^const` misses

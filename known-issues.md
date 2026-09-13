@@ -138617,7 +138617,7 @@ It now polls `/proc/2/stat` until the state is `S`, using the `read` builtin so
 it forks **nothing** -- a forked `awk` would take PID 3 and could itself be
 caught in the listing it is preparing.
 
-## B-SEVENTY-PROGRAMS-ACCEPT-AN-OPTION-THEY-DO-NOT-HAVE-AND-EXIT-ZERO (lane B, 2026-09-12) -- 20 of 70 FIXED
+## B-SEVENTY-PROGRAMS-ACCEPT-AN-OPTION-THEY-DO-NOT-HAVE-AND-EXIT-ZERO (lane B, 2026-09-12) -- 45 open, regenerated from the sweep
 
 Found by `scripts/unknown-option-sweep.py`, which runs every binary in an
 empty directory with nothing but a bogus long option and looks at what it
@@ -138732,7 +138732,37 @@ On a machine where `/dev/sda` exists it would have exited 0. It was found
 only because `blkzone`, its argv[0] sibling, was flagged and the crate was
 opened anyway. So the count of 70 is a floor, not a total.
 
-### Still open (50)
+### Still open (45), regenerated 2026-09-12 from the sweep itself
+
+Not hand-maintained. The previous list here had drifted: it still named
+`route`, `dnsdomainname`, `lshw` and `objdump` as open hours after they
+were fixed, because the count was being edited by hand while the sweep
+was the real source of truth. Regenerate with
+
+    python scripts/unknown-option-sweep.py
+
+and paste. Lane A's argument for a `--pin` mode applies to prose lists
+too: a count that can be regenerated beats one that has to be trusted.
+
+**The inputs were checked before the count was believed.** The sweep
+reads binaries, and 85 of 191 were older than their source -- three of
+them fixed the same day, because `cargo test` and `cargo clippy` had
+been run on those crates and `cargo build` had not. The sweep now
+refuses to report in that state. Worth recording honestly: the count
+over stale binaries was 44 and over current ones is 45, so the error
+here was one, not a catastrophe. That the difference turned out small is
+not a reason the check was unnecessary -- its size was unknowable in
+advance -- but the reason it was small is worth knowing. Of the three
+stale-and-fixed crates, none had been fixed for *unknown options*:
+`xattr` was an encoding value, `acl` gained `-a`/`-d`/`-n`, `irqbalance`
+gained `--banmod`. Their staleness could not move this particular count.
+
+One binary, `irqbalance`, is still stale and could not be rebuilt: the
+file is locked by this host's continuous backup scanners, the same
+condition lane A recorded as
+`A-TEST-RECLAIM-SPACE-RACES-THIS-HOST-BACKUP-SCANNERS`. It appears below
+either way -- its fix added an option and no refusal -- so its staleness
+does not change its verdict.
 
 - `clipboard`
 - `coredumpctl`
@@ -138743,16 +138773,13 @@ opened anyway. So the count of 70 is a floor, not a total.
 - `fwupd`
 - `gdb`
 - `hwinfo`
-- `ifconfig`
+- `logger`
 - `loginmgr`
 - `lsirq`
 - `m4`
 - `match3`
 - `numactl`
-- `objdump`
 - `pinball`
-- `prlimit`
-- `route`
 - `sanitize`
 - `selinux`
 - `servicebus`
@@ -138766,11 +138793,9 @@ opened anyway. So the count of 70 is a floor, not a total.
 - `captest (via capsh)`
 - `cifsiostat (via sysstat)`
 - `cpufreq-info (via cpupower)`
-- `dnsdomainname (via hostnamectl)`
 - `getenforce (via selinux)`
 - `grub-reboot (via grub2)`
 - `grub-set-default (via grub2)`
-- `lshw (via hwinfo)`
 - `mpstat (via sysstat)`
 - `numademo (via numactl)`
 - `numastat (via numactl)`

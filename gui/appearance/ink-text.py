@@ -15,6 +15,9 @@ import re
 import sys
 import pathlib
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from rustslice import production_end  # noqa: E402
+
 NL = chr(10)
 SENTINEL = chr(0)
 
@@ -136,12 +139,13 @@ def convert(path, apply):
     out = []
     i = 0
     n = 0
-    in_test = False
+    # Not `end`: the loop below rebinds that to the *site's* last line, and a
+    # bound named twice is a bound that silently shrinks -- after the first
+    # site, `i >= end` was true for the whole rest of the file.
+    prod_end = production_end(lines)
     while i < len(lines):
-        if lines[i].strip().startswith("#[cfg(test)]"):
-            in_test = True
         m = COLOR.match(lines[i])
-        if in_test or not m or enclosing_kind(lines, i) != "Text":
+        if i >= prod_end or not m or enclosing_kind(lines, i) != "Text":
             out.append(lines[i])
             i += 1
             continue
@@ -297,12 +301,8 @@ def blind_spots(path):
     """Text sites whose colour this script cannot classify."""
     lines = path.read_text(encoding="utf-8").splitlines()
     out = []
-    in_test = False
-    for i, line in enumerate(lines):
-        if lines[i].strip().startswith("#[cfg(test)]"):
-            in_test = True
-        if in_test:
-            continue
+    end = production_end(lines)
+    for i, line in enumerate(lines[:end]):
         if enclosing_kind(lines, i) != "Text":
             continue
         # A few lines of the value, since a conditional colour runs over

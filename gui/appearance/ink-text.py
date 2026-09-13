@@ -130,6 +130,35 @@ def convert(path, apply):
     return n
 
 
+def stray_inks(path):
+    """Lines calling `ink` from something that is not a `RenderCommand::Text`.
+
+    The complement of the count `--check` reports, and it catches the opposite
+    mistake. `--check` finds a text site that forgot to ask; this finds a site
+    that asked when it should not have -- a fill, a stroke, a line. Both
+    render, so neither is visible without looking.
+
+    It exists because the converter's `enclosing_kind` is a twenty-line
+    lookback rather than a parser, and a lookback can be wrong. Running this
+    over the first 106 conversions found none, which is the only reason to
+    believe the other 309.
+    """
+    lines = path.read_text(encoding="utf-8").splitlines()
+    out = []
+    seen = 0
+    for i, line in enumerate(lines):
+        if ".ink(" not in line or line.lstrip().startswith("//"):
+            continue
+        seen += 1
+        kind = enclosing_kind(lines, i)
+        # `None` means no `RenderCommand::` within the lookback at all, which
+        # is an ordinary expression rather than a draw site -- a `let` binding,
+        # a helper's argument. Those are the caller's business.
+        if kind is not None and kind != "Text":
+            out.append((i + 1, kind, line.strip()))
+    return seen, out
+
+
 def default_paths():
     """Every production Rust file in the two trees this lane owns.
 
@@ -159,6 +188,30 @@ if __name__ == "__main__":
         if c:
             print(str(path) + ": " + str(c))
         total += c
+    if "--verify" in sys.argv:
+        examined = 0
+        stray = []
+        for path in paths:
+            seen, found = stray_inks(path)
+            examined += seen
+            stray.extend((path, ln, kind, text) for ln, kind, text in found)
+        for path, ln, kind, text in stray:
+            print(str(path) + ":" + str(ln) + "  ink() inside a " + kind + ": " + text[:70])
+        if stray:
+            print(str(len(stray)) + " site(s) ask for a text ink and do not draw text.")
+            sys.exit(1)
+        if examined == 0:
+            # Not a pass. Five separate times in this conversion a check has
+            # reported success over an empty population: a collector matching
+            # only `FillRect` after its subject became an outline, the
+            # `.all()` over the empty vector it returned, two geometry helpers
+            # in `notif_pane`, and a harness regex that dropped one character
+            # and compared 0 > 0. Every one of them was green.
+            print("no ink() call sites found at all; refusing to call that a pass")
+            sys.exit(2)
+        print("ok: all " + str(examined) + " ink() call sites are inside a Text command")
+        sys.exit(0)
+
     if check:
         # A gate, not a report. A site that draws text in a dual-use role
         # without asking `ink` renders perfectly and cannot be read on a card,

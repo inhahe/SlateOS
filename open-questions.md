@@ -1011,6 +1011,59 @@ muddy, B is still available and nothing about C forecloses it.
 readable in every combination today. The only cost is the mild surprise
 described above, and only for people who switch to the optional theme.
 
+## C-Q16 — [C] Should the games follow the desktop theme, or keep their own colours? — Status: OPEN
+
+**In short:** about forty small games ship with the system — chess, solitaire,
+minesweeper, tetris and so on — and each one has its colours written into it
+rather than taking them from your theme. Twelve *applications* have the same
+problem and that is plainly a bug: a file manager should be light when you
+choose the light theme. For the games I am not sure it is a bug, and I would
+rather ask than decide it with a script. A chess board's light and dark squares
+are the game's own look, the way a photograph in an image viewer is not
+something the theme should tint.
+
+**What is definitely being fixed either way:** every game's *chrome* — its
+menus, score panels, dialogs, and the window background behind the board. Those
+are interface and they should follow your theme. The question is only about the
+playing surface itself: the board, the pieces, the tiles, the cards.
+
+**The options**
+
+**A. The board keeps its own colours; only the chrome follows the theme.**
+*What changes:* a chess board looks the same in light and dark mode; the menu
+bar and score panel around it change.
+For: a game's board is artwork, and forty games designed around their own
+palettes will not all survive being recoloured. Solitaire's card backs,
+minesweeper's numbered tiles and tetris's seven piece colours are conventions
+people recognise. Against: a dark-theme user gets forty bright rectangles.
+
+**B. Everything follows the theme, boards included.**
+*What changes:* a chess board is drawn in two shades from your palette; tetris
+pieces take palette hues.
+For: complete consistency, and dark mode is genuinely dark.
+Against: tetris's pieces are *identified* by colour (the standard seven), and
+minesweeper's numbers 1–8 have fixed colours that players read at a glance.
+Recolouring those makes the games worse, not just different.
+
+**C. Per-game, decided by whether the colour carries meaning.**
+*What changes:* minesweeper and tetris keep their colours (they mean
+something); chess, checkers and solitaire's felt take the theme (they are
+decoration).
+For: the only option that respects both arguments.
+Against: forty individual judgements, and someone has to make them.
+
+**My recommendation: A**, with C available later for the handful where the
+board is obviously just decoration. A gets dark-mode chrome everywhere for a
+modest, mechanical change, and it cannot make any game worse — which B
+demonstrably can. The cost of deferring C is nothing: it is the same work,
+game by game, whenever anyone cares.
+
+**If it is never answered:** I do the chrome (which A and C agree on) and leave
+the boards alone. Nothing breaks; the games simply keep their current
+appearance, which is what they have today. This question is genuinely safe to
+leave — it is here because forty crates is too many to change on my own guess
+about taste, not because anything is blocked.
+
 ## B-Q9 — [B] We wrote our own copy of a shell because we could not build the original. We can now. Keep the copy, or switch to the original? — Status: OPEN
 
 **In short:** the *shell* is the program that runs the commands you type. SlateOS

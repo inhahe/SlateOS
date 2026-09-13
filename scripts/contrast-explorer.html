@@ -108,8 +108,9 @@
       <button data-p="brd" class="on">Borders (the default)</button>
     </div>
     <p class="note" style="margin-top:6px">Borders are the decision; the shaded cards stay as an
-       optional theme, which is why both columns are still drawn below. In this preset the panes are
-       deliberately all one colour &mdash; nothing is shaded, so the ladder has nothing to say.</p>
+       optional theme, which is why both columns are still drawn below. The pane values below are the
+       shipped ladder, because the cards column needs them &mdash; under borders nothing is filled, so
+       they affect only the comparison.</p>
 
     <h2>Colours</h2>
     <div class="row"><label>Main text</label><input type="color" id="c_main"><input type="text" id="t_main"></div>
@@ -228,21 +229,23 @@
     </div>
 
     <div class="panel" style="margin-top:18px">
-      <h2>C&#8209;Q13 &mdash; what does &ldquo;selected&rdquo; look like?</h2>
+      <h2>C&#8209;Q13 &mdash; what does &ldquo;selected&rdquo; look like? &mdash; <b>ANSWERED</b></h2>
       <p class="note" style="margin-top:0">Three places a thing can be selected, drawn together because the
          question is whether they should agree: a <b>tab</b>, a <b>sidebar entry</b> and a <b>row in a list</b>.
-         Each window below is identical except for the rule being applied. <b>This is the one that is not safe to
-         leave</b> &mdash; every application already follows the new theme, and the shell around them cannot be
-         converted until this is answered, so it keeps its filled boxes meanwhile.</p>
+         Each window below is identical except for the rule being applied. <b>Answered 2026-09-12: A, at the
+         same thickness.</b> Selection is a change of colour and nothing else &mdash; the line stays one pixel,
+         so a row does not grow or shift when it is chosen. The rejected alternatives are kept beside it for
+         comparison.</p>
       <div class="q3" id="q13"></div>
     </div>
 
     <div class="panel" style="margin-top:18px">
-      <h2>C&#8209;Q14 &mdash; what happens to a toolbar or a status bar?</h2>
+      <h2>C&#8209;Q14 &mdash; what happens to a toolbar or a status bar? &mdash; <b>ANSWERED</b></h2>
       <p class="note" style="margin-top:0">A strip that runs the full width of a window has no obvious bordered
          form: a box around it looks like a box, and nothing at all loses the separation. 211 draw sites are
-         waiting on this, and they are currently left <em>filled</em> &mdash; so <b>doing nothing chooses B</b>,
-         and today&rsquo;s appearance is what you keep.</p>
+         waiting on this. <b>Answered 2026-09-12: B is the default and A becomes a theme option.</b> Strips keep
+         today&rsquo;s fill unless someone asks for the lighter separator treatment, which is offered as a setting
+         beside the outlined/filled choice.</p>
       <div class="q3" id="q14"></div>
     </div>
 
@@ -258,7 +261,7 @@
     </div>
 
     <div class="panel" style="margin-top:18px">
-      <h2>What the shades are actually used for &mdash; and the same thing with borders instead</h2>
+      <h2>What each shade is used for &mdash; bordered, and the same thing with cards</h2>
       <p class="note" style="margin-top:0">Taken from the code, not invented. Grepping every use of the three
          shades in <code>gui/desktop</code> and <code>apps/settings</code> shows they are <b>not</b> three depths
          of card:</p>
@@ -384,7 +387,15 @@ const PRESETS = {
   // #00688B is the most saturated cerulean that still clears the floor with real margin.
   brd: { main:'#000000', sec:'#00688B', sec1:'#00688B', acc:'#00688B', link:'#0036A3', ovl:'#9CA0B0',
          page:'#EFF1F5', card:'#EFF1F5',
-         ladder: { mantle:'#EFF1F5', crust:'#EFF1F5', s0:'#EFF1F5', s1:'#EFF1F5', s2:'#CCD0DA' },
+         // The REAL ladder, not a flat one. An earlier version set every rung to
+         // the page colour, reasoning that borders fill nothing so the ladder had
+         // nothing to say. That is true of the bordered column and false of the
+         // one beside it: the cards column is the comparison, and with a flat
+         // ladder it drew every box in the page colour and came out blank --
+         // which reads as "the optional theme is nothing" rather than as a bug.
+         // The pane-vs-pane table had the same fault, reporting six rungs as one
+         // colour for the theme we had just chosen.
+         ladder: { mantle:'#E6E9EF', crust:'#DCE0E8', s0:'#CCD0DA', s1:'#BCC0CC', s2:'#ACB0BE' },
          borders: true },
 
   // ---- the operator's palette, 2026-09-09 (answers C-Q10) -------------------------------------
@@ -539,19 +550,21 @@ function renderOptions() {
   };
 
   const Q13 = [
-    ['A &mdash; everything selected takes the accent',
+    ['A &mdash; CHOSEN: the accent, at the same thickness',
+     () => `border:1px solid ${acc};`,
+     '<b>Decided 2026-09-12.</b> Selection is a change of <em>colour</em> only &mdash; the line stays ' +
+     '1px, exactly as an unselected border. Colour alone carries it, so nothing moves when a row is ' +
+     'chosen and a list does not shift by a pixel as the selection travels down it. This is also what ' +
+     'the code already did: <code>push_surface</code> has always stroked at one pixel, and only this ' +
+     'page was drawing selection thicker.'],
+    ['A&prime; &mdash; the accent, thickened (rejected)',
      () => `border:2px solid ${acc};`,
-     'Selection looks the same wherever it is. This is the property that made borders ' +
-     'worth choosing: under fills it was impossible, because selected was a shade relative ' +
-     'to whatever sat underneath.'],
-    ['B &mdash; accent only for &ldquo;where you are&rdquo;',
-     what => what === 'tab' ? `border:2px solid ${acc};` : `border:2px solid ${ink};`,
-     'The shell&rsquo;s existing rule, kept. The tab you are on is accented; a selected row is ' +
-     'a heavier black outline. Two weights of black now have to be told apart.'],
-    ['C &mdash; lists take the accent, chrome does not',
-     what => what === 'row' ? `border:2px solid ${acc};` : `border:2px solid ${ink};`,
-     'A middle course, and the one closest to today. But it is the relative rule again: ' +
-     'you must know which kind of container you are in to know what selected looks like.'],
+     'What this page showed before, and what the operator rejected on sight: colour <em>and</em> weight ' +
+     'is two signals for one fact. It also costs a pixel of layout, so a row grows when selected.'],
+    ['B &mdash; accent only for &ldquo;where you are&rdquo; (rejected)',
+     what => what === 'tab' ? `border:1px solid ${acc};` : `border:2px solid ${ink};`,
+     'Rejected with A chosen. The tab you are on is accented; a selected row is a heavier black ' +
+     'outline. Two weights of black have to be told apart, and selection stops meaning one thing.'],
   ];
 
   // --- C-Q14: what happens to a full-width strip? ------------------------------------
@@ -570,15 +583,17 @@ function renderOptions() {
     </div>`;
 
   const Q14 = [
-    ['A &mdash; a line along one edge',
+    ['A &mdash; a line along one edge (an option)',
      edge => `background:${page};border-${edge === 'top' ? 'bottom' : 'top'}:1px solid ${bord}`,
-     'What most desktops do, and the least heavy. Costs a third way of drawing a surface: ' +
-     '<code>Surface</code> grows a member and the decision point grows an arm.'],
-    ['B &mdash; leave them filled',
+     '<b>Decided 2026-09-12: available as a theme option, not the default.</b> What most desktops do, ' +
+     'and the least heavy. It costs a third way of drawing a surface &mdash; <code>Surface</code> grows ' +
+     'a strip member and a setting chooses between this and the fill.'],
+    ['B &mdash; CHOSEN as the default: leave them filled',
      () => `background:${L.mantle}`,
-     'Today&rsquo;s appearance, made permanent. Free, and defensible &mdash; window chrome is ' +
-     'arguably a different material from content. Chosen by default if nothing is decided.'],
-    ['C &mdash; outline them like everything else',
+     '<b>Decided 2026-09-12.</b> Today&rsquo;s appearance, kept. Window chrome is a different material ' +
+     'from content, and a strip that spans the window reads as a band rather than as a box. A is ' +
+     'offered beside it for anyone who wants the lighter treatment.'],
+    ['C &mdash; outline them like everything else (rejected)',
      () => `background:${page};border:1px solid ${bord}`,
      'Consistent, no new concept. But a box around a full-width strip reads as a box that ' +
      'failed to fit, which is why almost nothing does it.'],
@@ -839,14 +854,18 @@ function renderUseCases() {
 
   let html = '';
   for (const ex of examples) {
-    html += `<div><h3>${ex.name} &mdash; shaded (today)</h3>` +
-            `<div class="frame" style="background:${cur.page}">${ex.shaded}</div></div>` +
-            `<div><h3>&hellip; the same, with borders</h3>` +
-            `<div class="frame" style="background:${cur.page}">${ex.bordered}</div></div>`;
+    // Borders first, matching the whole-window panel. Both sections used to
+    // lead with the shaded column, which was the old default and is not any
+    // more -- two panels disagreeing about which side is the default is the
+    // kind of thing that makes a reader distrust both.
+    html += `<div><h3>${ex.name} &mdash; borders (the default)</h3>` +
+            `<div class="frame" style="background:${cur.page}">${ex.bordered}</div></div>` +
+            `<div><h3>&hellip; the same, cards (optional theme)</h3>` +
+            `<div class="frame" style="background:${cur.page}">${ex.shaded}</div></div>`;
   }
   $('uc').innerHTML = html;
   $('uc_note').innerHTML =
-    'Borders on the right use <code>surface2</code> for the quiet outline and the accent for the selected ' +
+    'Borders on the <b>left</b> use <code>surface2</code> for the quiet outline and the accent for the selected ' +
     'row. Note what that buys: <b>a border needs no contrast against the ink</b>, because no text sits on ' +
     'it &mdash; so the whole problem C&#8209;Q10 is about disappears for any element drawn that way. It is ' +
     'the fills that constrain the palette, and there are fewer of them than the shade count suggests.';

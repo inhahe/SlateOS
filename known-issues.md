@@ -141059,6 +141059,47 @@ the tree, which is the same mistake in a different costume.
 ~12.1 ms is putting ~9 400 glyph masks on the screen -- roughly 32 ns a
 covered pixel.
 
+**MEASURED 2026-09-13, and the 32 ns figure is not the blit.**
+`bench_glyph_blit_phases` runs `draw_glyph` over a 12x16 mask with 128 covered
+pixels, 20 000 glyphs scattered across the framebuffer, seven alternated rounds
+with the minimum taken per phase:
+
+| ns per covered pixel | 1080p | 4K |
+|---|---|---|
+| shipped (clipped blend) | 5.81 | 5.79 |
+| the same with no clip | 4.61 | 4.63 |
+| the same loop, direct store | 3.26 | 3.39 |
+| **so: the per-pixel clip test** | 1.21 | 1.16 |
+| **and the rest of `blend_pixel`** | 1.34 | 1.24 |
+
+**Three things follow, and the first is the important one.**
+
+1. **The blit costs about 5.8 ns a covered pixel, not 32.** Whatever the 12.1
+   ms is, five sixths of it is not this loop.
+2. **It does not move with the framebuffer size.** 4K and 1080p agree to
+   within 2%, so the glyph loop is not the memory-bandwidth term -- an 8 MB
+   buffer and a 33 MB one cost the same per pixel here.
+3. **The whole per-pixel optimisation is worth at most 2.5 ns of 5.8**, which
+   is 40% of the blit and about 7% of the figure it was meant to attack. The
+   clip is tested twice per pixel (`draw_glyph` and again in
+   `blend_pixel`'s `clip_allows`) and the index is looked up twice
+   (`get` then `get_mut`); both are real and both are small.
+
+**Where to look instead, from the same arithmetic.** 12.1 ms over ~9 400
+glyphs is 1.29 us a glyph. This bench does 0.74 us a glyph while covering
+*three times* as many pixels, and it starts from a mask that already exists.
+So the missing time is **per glyph, not per pixel** -- the cache lookup, the
+rasterisation, the mask allocation, whatever happens before the loop this
+benchmark begins at. That is the next measurement, and it is a different
+experiment from this one.
+
+**A note on the estimator, because the first version of this bench got it
+wrong.** Run once each in sequence, the three phases reported *"the clip test
+is -0.98 ns"* -- a negative cost, which is a measurement saying the difference
+between two of its numbers is smaller than its own noise. Alternating the
+phases and taking each one's minimum over seven rounds is what made 1080p and
+4K agree to 2%. A single ordered sample measures the order.
+
 **What to do next.** Put a profiler on `draw_glyph`. Four hypotheses about
 this frame have now been wrong -- that shaping was the cost, that the
 compositor was 7x over budget (it was my scene, with every window stacked at

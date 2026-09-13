@@ -12,6 +12,7 @@
 //! Uses the guitk library for UI rendering.
 
 #[allow(unused_imports)]
+use appearance::Palette;
 use guitk::color::Color;
 #[allow(unused_imports)]
 use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
@@ -19,6 +20,7 @@ use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, Mou
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
+use guitk::theme::with_alpha;
 use guitk::wheel;
 
 mod video;
@@ -39,16 +41,18 @@ const MIN_ZOOM: f32 = 0.25;
 const MAX_ZOOM: f32 = 4.0;
 const ZOOM_STEP: f32 = 0.25;
 
-const BG_COLOR: Color = Color::rgb(30, 30, 30);
-const TOOLBAR_BG: Color = Color::rgb(48, 48, 48);
-const STATUS_BG: Color = Color::rgb(38, 38, 38);
-const INFO_PANEL_BG: Color = Color::rgb(42, 42, 42);
-const BUTTON_BG: Color = Color::rgb(60, 60, 60);
-const BUTTON_HOVER_BG: Color = Color::rgb(80, 80, 80);
-const TEXT_PRIMARY: Color = Color::rgb(230, 230, 230);
-const TEXT_SECONDARY: Color = Color::rgb(160, 160, 160);
-const ACCENT_COLOR: Color = Color::rgb(70, 140, 220);
-const BORDER_COLOR: Color = Color::rgb(70, 70, 70);
+// The colours live in the user's palette, not here.
+//
+// Ten constants used to sit here: a private grey ladder, so a light desktop
+// got a dark image viewer (design-decisions 822). Mapped by the palette's own
+// documented meanings rather than by nearest grey, which is why the info
+// panel is `mantle` -- 'a sidebar beside a content pane' -- even though that
+// is a step *down* from `base` where the old constant was a step up.
+//
+// One collapse: the toolbar and the status bar were 48 and 38, a contrast
+// ratio of 1.1 apart, and both are now `surface0`. They are never adjacent
+// except across the thumbnail strip, where a `border` hairline separates
+// them and does the work the 10/255 never did.
 
 /// Supported image file extensions for directory browsing.
 const IMAGE_EXTENSIONS: &[&str] = &[
@@ -469,6 +473,8 @@ pub enum ViewerAction {
 
 /// Complete state for the image viewer application.
 pub struct ViewerState {
+    /// The user's colours, handed over by the framework (§822).
+    pub palette: Palette,
     // Window dimensions
     pub window_width: f32,
     pub window_height: f32,
@@ -534,6 +540,7 @@ impl ViewerState {
     /// Create a new viewer state with default settings.
     pub fn new(width: f32, height: f32) -> Self {
         Self {
+            palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             window_width: width,
             window_height: height,
             fullscreen: false,
@@ -1136,7 +1143,13 @@ pub fn render(state: &ViewerState) -> RenderTree {
     let mut tree = RenderTree::new();
 
     // Background
-    tree.fill_rect(0.0, 0.0, state.window_width, state.window_height, BG_COLOR);
+    tree.fill_rect(
+        0.0,
+        0.0,
+        state.window_width,
+        state.window_height,
+        state.palette.base,
+    );
 
     let mut content_y = 0.0;
 
@@ -1203,14 +1216,20 @@ pub fn render(state: &ViewerState) -> RenderTree {
 /// Render the toolbar with action buttons.
 fn render_toolbar(state: &ViewerState, tree: &mut RenderTree, y: f32) {
     // Toolbar background
-    tree.fill_rect(0.0, y, state.window_width, TOOLBAR_HEIGHT, TOOLBAR_BG);
+    tree.fill_rect(
+        0.0,
+        y,
+        state.window_width,
+        TOOLBAR_HEIGHT,
+        state.palette.surface0,
+    );
     // Bottom border
     tree.fill_rect(
         0.0,
         y + TOOLBAR_HEIGHT - 1.0,
         state.window_width,
         1.0,
-        BORDER_COLOR,
+        state.palette.border,
     );
 
     let buttons = toolbar_buttons();
@@ -1219,9 +1238,9 @@ fn render_toolbar(state: &ViewerState, tree: &mut RenderTree, y: f32) {
 
     for (idx, btn) in buttons.iter().enumerate() {
         let bg = if state.hovered_button == Some(idx) {
-            BUTTON_HOVER_BG
+            state.palette.surface2
         } else {
-            BUTTON_BG
+            state.palette.surface1
         };
 
         tree.push(RenderCommand::FillRect {
@@ -1243,7 +1262,7 @@ fn render_toolbar(state: &ViewerState, tree: &mut RenderTree, y: f32) {
             x: btn.x + 4.0,
             y: button_y + 7.0,
             text: btn.label.to_string(),
-            color: TEXT_PRIMARY,
+            color: state.palette.text,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(btn.width - 8.0),
@@ -1277,7 +1296,7 @@ fn render_image(
             x: area_x + area_w / 2.0 - 80.0,
             y: area_y + area_h / 2.0 - 8.0,
             text: headline,
-            color: TEXT_SECONDARY,
+            color: state.palette.subtext0,
             font_size: 14.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1287,7 +1306,7 @@ fn render_image(
             x: area_x + area_w / 2.0 - 100.0,
             y: area_y + area_h / 2.0 + 12.0,
             text: detail,
-            color: TEXT_SECONDARY,
+            color: state.palette.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             // The reason is the whole point of this state; it is worth the
@@ -1328,9 +1347,9 @@ fn render_image(
             "SLIDESHOW"
         };
         let indicator_color = if state.slideshow.paused {
-            Color::rgba(220, 180, 50, 200)
+            with_alpha(state.palette.yellow, 200)
         } else {
-            Color::rgba(70, 180, 70, 200)
+            with_alpha(state.palette.green, 200)
         };
 
         // Small badge in top-right of image area
@@ -1363,9 +1382,9 @@ fn render_image(
 /// Render the image information panel on the right side.
 fn render_info_panel(state: &ViewerState, tree: &mut RenderTree, x: f32, y: f32, height: f32) {
     // Panel background
-    tree.fill_rect(x, y, INFO_PANEL_WIDTH, height, INFO_PANEL_BG);
+    tree.fill_rect(x, y, INFO_PANEL_WIDTH, height, state.palette.mantle);
     // Left border
-    tree.fill_rect(x, y, 1.0, height, BORDER_COLOR);
+    tree.fill_rect(x, y, 1.0, height, state.palette.border);
 
     let pad = 12.0;
     let mut text_y = y + pad;
@@ -1378,7 +1397,7 @@ fn render_info_panel(state: &ViewerState, tree: &mut RenderTree, x: f32, y: f32,
         x: label_x,
         y: text_y,
         text: String::from("Image Information"),
-        color: TEXT_PRIMARY,
+        color: state.palette.text,
         font_size: 13.0,
         font_weight: FontWeightHint::Bold,
         max_width: Some(INFO_PANEL_WIDTH - pad * 2.0),
@@ -1392,7 +1411,7 @@ fn render_info_panel(state: &ViewerState, tree: &mut RenderTree, x: f32, y: f32,
         text_y,
         INFO_PANEL_WIDTH - pad * 2.0,
         1.0,
-        BORDER_COLOR,
+        state.palette.border,
     );
     text_y += 8.0;
 
@@ -1434,7 +1453,7 @@ fn render_info_panel(state: &ViewerState, tree: &mut RenderTree, x: f32, y: f32,
             x: label_x,
             y: text_y,
             text: String::from(*label),
-            color: TEXT_SECONDARY,
+            color: state.palette.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1444,7 +1463,7 @@ fn render_info_panel(state: &ViewerState, tree: &mut RenderTree, x: f32, y: f32,
             x: value_x,
             y: text_y,
             text: value.clone(),
-            color: TEXT_PRIMARY,
+            color: state.palette.text,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(INFO_PANEL_WIDTH - 80.0 - pad * 2.0),
@@ -1468,7 +1487,7 @@ fn render_info_panel(state: &ViewerState, tree: &mut RenderTree, x: f32, y: f32,
             text_y,
             INFO_PANEL_WIDTH - pad * 2.0,
             1.0,
-            BORDER_COLOR,
+            state.palette.border,
         );
         text_y += 8.0;
 
@@ -1476,7 +1495,7 @@ fn render_info_panel(state: &ViewerState, tree: &mut RenderTree, x: f32, y: f32,
             x: label_x,
             y: text_y,
             text: String::from("EXIF Data"),
-            color: TEXT_PRIMARY,
+            color: state.palette.text,
             font_size: 12.0,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -1499,7 +1518,7 @@ fn render_info_panel(state: &ViewerState, tree: &mut RenderTree, x: f32, y: f32,
                     x: label_x,
                     y: text_y,
                     text: String::from(*label),
-                    color: TEXT_SECONDARY,
+                    color: state.palette.subtext0,
                     font_size: 11.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: None,
@@ -1509,7 +1528,7 @@ fn render_info_panel(state: &ViewerState, tree: &mut RenderTree, x: f32, y: f32,
                     x: value_x,
                     y: text_y,
                     text: value.clone(),
-                    color: TEXT_PRIMARY,
+                    color: state.palette.text,
                     font_size: 11.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(INFO_PANEL_WIDTH - 80.0 - pad * 2.0),
@@ -1527,7 +1546,7 @@ fn render_info_panel(state: &ViewerState, tree: &mut RenderTree, x: f32, y: f32,
         text_y,
         INFO_PANEL_WIDTH - pad * 2.0,
         1.0,
-        BORDER_COLOR,
+        state.palette.border,
     );
     text_y += 8.0;
 
@@ -1535,7 +1554,7 @@ fn render_info_panel(state: &ViewerState, tree: &mut RenderTree, x: f32, y: f32,
         x: label_x,
         y: text_y,
         text: String::from("View"),
-        color: TEXT_PRIMARY,
+        color: state.palette.text,
         font_size: 12.0,
         font_weight: FontWeightHint::Bold,
         max_width: None,
@@ -1566,7 +1585,7 @@ fn render_info_panel(state: &ViewerState, tree: &mut RenderTree, x: f32, y: f32,
             x: label_x,
             y: text_y,
             text: String::from(*label),
-            color: TEXT_SECONDARY,
+            color: state.palette.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1576,7 +1595,7 @@ fn render_info_panel(state: &ViewerState, tree: &mut RenderTree, x: f32, y: f32,
             x: value_x,
             y: text_y,
             text: value.clone(),
-            color: TEXT_PRIMARY,
+            color: state.palette.text,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(INFO_PANEL_WIDTH - 80.0 - pad * 2.0),
@@ -1594,10 +1613,10 @@ fn render_thumbnail_strip(state: &ViewerState, tree: &mut RenderTree, y: f32) {
         y,
         state.window_width,
         THUMBNAIL_STRIP_HEIGHT,
-        TOOLBAR_BG,
+        state.palette.surface0,
     );
     // Top border
-    tree.fill_rect(0.0, y, state.window_width, 1.0, BORDER_COLOR);
+    tree.fill_rect(0.0, y, state.window_width, 1.0, state.palette.border);
 
     if state.entries.is_empty() {
         return;
@@ -1620,9 +1639,9 @@ fn render_thumbnail_strip(state: &ViewerState, tree: &mut RenderTree, y: f32) {
 
         // Thumbnail border (highlight current)
         let border_color = if is_current {
-            ACCENT_COLOR
+            state.palette.accent
         } else {
-            BORDER_COLOR
+            state.palette.border
         };
         tree.push(RenderCommand::StrokeRect {
             x: thumb_x,
@@ -1640,7 +1659,7 @@ fn render_thumbnail_strip(state: &ViewerState, tree: &mut RenderTree, y: f32) {
             y: thumb_y + 1.0,
             width: thumb_size - 2.0,
             height: thumb_size - 2.0,
-            color: Color::rgb(50, 50, 50),
+            color: state.palette.surface1,
             corner_radii: CornerRadii::ZERO,
         });
 
@@ -1657,9 +1676,9 @@ fn render_thumbnail_strip(state: &ViewerState, tree: &mut RenderTree, y: f32) {
                 y: thumb_y + thumb_size - 12.0,
                 text: display_name,
                 color: if is_current {
-                    TEXT_PRIMARY
+                    state.palette.text
                 } else {
-                    TEXT_SECONDARY
+                    state.palette.subtext0
                 },
                 font_size: 9.0,
                 font_weight: FontWeightHint::Regular,
@@ -1673,9 +1692,15 @@ fn render_thumbnail_strip(state: &ViewerState, tree: &mut RenderTree, y: f32) {
 /// Render the status bar at the bottom.
 fn render_status_bar(state: &ViewerState, tree: &mut RenderTree, y: f32) {
     // Background
-    tree.fill_rect(0.0, y, state.window_width, STATUS_BAR_HEIGHT, STATUS_BG);
+    tree.fill_rect(
+        0.0,
+        y,
+        state.window_width,
+        STATUS_BAR_HEIGHT,
+        state.palette.surface0,
+    );
     // Top border
-    tree.fill_rect(0.0, y, state.window_width, 1.0, BORDER_COLOR);
+    tree.fill_rect(0.0, y, state.window_width, 1.0, state.palette.border);
 
     let text_y = y + 8.0;
     let pad = 10.0;
@@ -1685,7 +1710,7 @@ fn render_status_bar(state: &ViewerState, tree: &mut RenderTree, y: f32) {
         x: pad,
         y: text_y,
         text: state.image_info.filename.clone(),
-        color: TEXT_PRIMARY,
+        color: state.palette.text,
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: Some(state.window_width * 0.4),
@@ -1698,7 +1723,7 @@ fn render_status_bar(state: &ViewerState, tree: &mut RenderTree, y: f32) {
         x: state.window_width * 0.4,
         y: text_y,
         text: dims,
-        color: TEXT_SECONDARY,
+        color: state.palette.subtext0,
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
@@ -1712,7 +1737,7 @@ fn render_status_bar(state: &ViewerState, tree: &mut RenderTree, y: f32) {
         x: state.window_width - 160.0,
         y: text_y,
         text: zoom_text,
-        color: TEXT_SECONDARY,
+        color: state.palette.subtext0,
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
@@ -1726,7 +1751,7 @@ fn render_status_bar(state: &ViewerState, tree: &mut RenderTree, y: f32) {
             x: state.window_width - 80.0,
             y: text_y,
             text: pos_text,
-            color: TEXT_SECONDARY,
+            color: state.palette.subtext0,
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1830,6 +1855,11 @@ pub fn is_image_extension(ext: &str) -> bool {
 // ============================================================================
 
 impl oswindow::app::App for ViewerState {
+    /// Adopt the user's colours (§822).
+    fn theme_changed(&mut self, palette: &Palette) {
+        self.palette = *palette;
+    }
+
     /// The file's name first, then the application's.
     ///
     /// That order is what a task bar full of windows needs: the strip of
@@ -1970,6 +2000,36 @@ mod tests {
     )]
 
     use super::*;
+
+    /// Every colour the viewer's chrome draws comes from the user's palette.
+    ///
+    /// Nothing is declared derived here, which is the point: an image viewer
+    /// has no content colour of its own. The picture is the content, and it
+    /// arrives as pixels, not as a `RenderCommand`. The scrim over the
+    /// slideshow badge is black at an alpha, which the check exempts.
+    #[test]
+    fn every_colour_the_viewer_draws_comes_from_its_palette() {
+        for light in [false, true] {
+            let mut state = ViewerState::new(1100.0, 800.0);
+            state.palette = Palette::for_mode(light);
+            state.show_info_panel = true;
+            state.show_thumbnails = true;
+            state.slideshow.active = true;
+            let tree = render(&state);
+            assert!(
+                tree.commands.len() > 10,
+                "the sweep examined {} commands, which is not a render",
+                tree.commands.len()
+            );
+            appearance::palette_check::assert_drawn_from(
+                &state.palette,
+                &tree.commands,
+                &[],
+                &format!("imageviewer (light={light})"),
+            );
+        }
+    }
+
     use scratchdir::ScratchDir;
 
     /// One detent is one zoom step, and the direction is the one every other

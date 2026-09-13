@@ -8,30 +8,27 @@
 
 #![allow(dead_code)]
 
+use appearance::Palette;
+use appearance::Surface;
 use guitk::color::Color;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use guitk::theme::with_alpha;
 
 // ============================================================================
 // Catppuccin Mocha palette
 // ============================================================================
 
-const MOCHA_BASE: Color = Color::rgb(30, 30, 46);
-const MOCHA_MANTLE: Color = Color::rgb(24, 24, 37);
-const MOCHA_CRUST: Color = Color::rgb(17, 17, 27);
-const MOCHA_SURFACE0: Color = Color::rgb(49, 50, 68);
-const MOCHA_SURFACE1: Color = Color::rgb(69, 71, 90);
-const MOCHA_SURFACE2: Color = Color::rgb(88, 91, 112);
-const MOCHA_OVERLAY0: Color = Color::rgb(108, 112, 134);
-const MOCHA_TEXT: Color = Color::rgb(205, 214, 244);
-const MOCHA_SUBTEXT0: Color = Color::rgb(166, 173, 200);
-const MOCHA_BLUE: Color = Color::rgb(137, 180, 250);
-const MOCHA_GREEN: Color = Color::rgb(166, 227, 161);
-const MOCHA_RED: Color = Color::rgb(243, 139, 168);
-const MOCHA_YELLOW: Color = Color::rgb(249, 226, 175);
-const MOCHA_MAUVE: Color = Color::rgb(203, 166, 247);
-const MOCHA_PEACH: Color = Color::rgb(250, 179, 135);
+// The colours live in the user's palette, not here.
+//
+// Fifteen Catppuccin Mocha constants used to sit here -- the second private
+// copy in this one crate (design-decisions 822). Names and values agreed
+// exactly, so the mapping is by name.
+//
+// The letterbox is the exception and is now plain black. It is the absence of
+// a picture, not a surface of the interface: under a light theme `crust`
+// would have put white bars around a video, which no player anywhere does.
 
 // ============================================================================
 // Layout constants
@@ -1212,6 +1209,7 @@ pub fn format_time(ms: u64) -> String {
 /// the total area available and the player state.
 pub fn render_controls(
     player: &VideoPlayer,
+    palette: &Palette,
     tree: &mut RenderTree,
     area_x: f32,
     area_y: f32,
@@ -1224,7 +1222,8 @@ pub fn render_controls(
         y: area_y,
         width: area_w,
         height: area_h,
-        color: MOCHA_CRUST,
+        // The letterbox is the absence of a picture, not a surface.
+        color: Color::rgb(0, 0, 0),
         corner_radii: CornerRadii::ZERO,
     });
 
@@ -1260,12 +1259,12 @@ pub fn render_controls(
         y: bar_y,
         width: area_w,
         height: CONTROL_BAR_HEIGHT,
-        color: Color::rgba(24, 24, 37, 220),
+        color: with_alpha(palette.mantle, 220),
         corner_radii: CornerRadii::ZERO,
     });
 
     // -- Seek bar --
-    render_seek_bar(player, tree, area_x, bar_y, area_w);
+    render_seek_bar(player, palette, tree, area_x, bar_y, area_w);
 
     // -- Time display --
     let time_y = bar_y + SEEK_BAR_HIT_HEIGHT + 8.0;
@@ -1277,7 +1276,7 @@ pub fn render_controls(
         x: area_x + 8.0,
         y: time_y,
         text: time_text,
-        color: MOCHA_SUBTEXT0,
+        color: palette.subtext0,
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
@@ -1288,10 +1287,17 @@ pub fn render_controls(
     let button_y = bar_y + SEEK_BAR_HIT_HEIGHT + 4.0;
     let center_x = area_x + area_w / 2.0;
 
-    render_playback_buttons(player, tree, center_x, button_y);
+    render_playback_buttons(player, palette, tree, center_x, button_y);
 
     // -- Volume (right side) --
-    render_volume(player, tree, area_x + area_w - 160.0, button_y, 120.0);
+    render_volume(
+        player,
+        palette,
+        tree,
+        area_x + area_w - 160.0,
+        button_y,
+        120.0,
+    );
 
     // -- Speed indicator --
     let speed_text = format!("{:.2}x", player.playback_speed);
@@ -1300,9 +1306,9 @@ pub fn render_controls(
         y: time_y,
         text: speed_text,
         color: if (player.playback_speed - 1.0).abs() < 0.01 {
-            MOCHA_SUBTEXT0
+            palette.subtext0
         } else {
-            MOCHA_PEACH
+            palette.ink(palette.peach)
         },
         font_size: 11.0,
         font_weight: FontWeightHint::Regular,
@@ -1320,17 +1326,17 @@ pub fn render_controls(
         // Advance by the width the badge actually drew. The caller used to
         // recompute it with different padding, so the gap after the loop badge
         // was 8 px only by coincidence and moved whenever the badge did.
-        ix += render_badge(tree, ix, indicator_y, label, MOCHA_MAUVE) + BADGE_GAP;
+        ix += render_badge(tree, ix, indicator_y, label, palette.mauve) + BADGE_GAP;
     }
 
     // Subtitle indicator
     if player.subtitles_enabled {
-        ix += render_badge(tree, ix, indicator_y, "CC", MOCHA_GREEN) + BADGE_GAP;
+        ix += render_badge(tree, ix, indicator_y, "CC", palette.green) + BADGE_GAP;
     }
 
     // Muted indicator
     if player.muted {
-        render_badge(tree, ix, indicator_y, "MUTED", MOCHA_RED);
+        render_badge(tree, ix, indicator_y, "MUTED", palette.red);
     }
 
     // -- State overlay (buffering / error) --
@@ -1341,7 +1347,7 @@ pub fn render_controls(
                 x: text::center_x(msg, area_x + area_w / 2.0, 14.0, FontWeightHint::Bold),
                 y: area_y + area_h / 2.0 - 8.0,
                 text: String::from(msg),
-                color: MOCHA_YELLOW,
+                color: palette.ink(palette.yellow),
                 font_size: 14.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
@@ -1359,7 +1365,7 @@ pub fn render_controls(
                 x: area_x + 20.0,
                 y: area_y + area_h / 2.0 - 8.0,
                 text: display,
-                color: MOCHA_RED,
+                color: palette.ink(palette.red),
                 font_size: 13.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(area_w - 40.0),
@@ -1371,34 +1377,43 @@ pub fn render_controls(
 }
 
 /// Render the seek bar with progress and buffered region.
-fn render_seek_bar(player: &VideoPlayer, tree: &mut RenderTree, x: f32, bar_y: f32, width: f32) {
+fn render_seek_bar(
+    player: &VideoPlayer,
+    palette: &Palette,
+    tree: &mut RenderTree,
+    x: f32,
+    bar_y: f32,
+    width: f32,
+) {
     let seek_x = x + 8.0;
     let seek_w = width - 16.0;
     let seek_y = bar_y + (SEEK_BAR_HIT_HEIGHT - SEEK_BAR_HEIGHT) / 2.0;
 
     // Background track
-    tree.push(RenderCommand::FillRect {
-        x: seek_x,
-        y: seek_y,
-        width: seek_w,
-        height: SEEK_BAR_HEIGHT,
-        color: MOCHA_SURFACE0,
-        corner_radii: CornerRadii::all(3.0),
-    });
+    palette.push_surface(
+        tree,
+        seek_x,
+        seek_y,
+        seek_w,
+        SEEK_BAR_HEIGHT,
+        3.0,
+        Surface::ControlTrack,
+    );
 
     if player.duration_ms > 0 {
         // Buffered region (slightly lighter)
         let buffered_frac =
             (player.buffered_ms as f64 / player.duration_ms as f64).clamp(0.0, 1.0) as f32;
         if buffered_frac > 0.0 {
-            tree.push(RenderCommand::FillRect {
-                x: seek_x,
-                y: seek_y,
-                width: seek_w * buffered_frac,
-                height: SEEK_BAR_HEIGHT,
-                color: MOCHA_SURFACE1,
-                corner_radii: CornerRadii::all(3.0),
-            });
+            palette.push_surface(
+                tree,
+                seek_x,
+                seek_y,
+                seek_w * buffered_frac,
+                SEEK_BAR_HEIGHT,
+                3.0,
+                Surface::Card,
+            );
         }
 
         // Progress bar (accent color)
@@ -1410,7 +1425,7 @@ fn render_seek_bar(player: &VideoPlayer, tree: &mut RenderTree, x: f32, bar_y: f
                 y: seek_y,
                 width: seek_w * progress_frac,
                 height: SEEK_BAR_HEIGHT,
-                color: MOCHA_BLUE,
+                color: palette.blue,
                 corner_radii: CornerRadii::all(3.0),
             });
         }
@@ -1423,23 +1438,29 @@ fn render_seek_bar(player: &VideoPlayer, tree: &mut RenderTree, x: f32, bar_y: f
             y: handle_y,
             width: 10.0,
             height: 10.0,
-            color: MOCHA_TEXT,
+            color: palette.text,
             corner_radii: CornerRadii::all(5.0),
         });
     }
 }
 
 /// Render the central playback buttons (prev, play/pause, stop, next).
-fn render_playback_buttons(player: &VideoPlayer, tree: &mut RenderTree, center_x: f32, y: f32) {
+fn render_playback_buttons(
+    player: &VideoPlayer,
+    palette: &Palette,
+    tree: &mut RenderTree,
+    center_x: f32,
+    y: f32,
+) {
     let btn_gap = 8.0;
     let total_width = CONTROL_BUTTON_SIZE * 5.0 + btn_gap * 4.0;
     let start_x = center_x - total_width / 2.0;
 
     let buttons: &[(&str, Color)] = &[
         // Previous
-        ("\u{23EE}", MOCHA_TEXT), // |<<
+        ("\u{23EE}", palette.text), // |<<
         // Stop
-        ("\u{23F9}", MOCHA_TEXT), // Stop
+        ("\u{23F9}", palette.text), // Stop
         // Play/Pause
         (
             if player.state == PlayerState::Playing {
@@ -1448,9 +1469,9 @@ fn render_playback_buttons(player: &VideoPlayer, tree: &mut RenderTree, center_x
                 "\u{25B6}"
             },
             if player.state == PlayerState::Playing {
-                MOCHA_BLUE
+                palette.blue
             } else {
-                MOCHA_GREEN
+                palette.green
             },
         ),
         // stop (second is actually not needed, but we have a nice layout)
@@ -1458,27 +1479,28 @@ fn render_playback_buttons(player: &VideoPlayer, tree: &mut RenderTree, center_x
         (
             if player.subtitles_enabled { "CC" } else { "cc" },
             if player.subtitles_enabled {
-                MOCHA_GREEN
+                palette.green
             } else {
-                MOCHA_OVERLAY0
+                palette.overlay0
             },
         ),
         // Next
-        ("\u{23ED}", MOCHA_TEXT), // >>|
+        ("\u{23ED}", palette.text), // >>|
     ];
 
     for (i, (label, color)) in buttons.iter().enumerate() {
         let bx = start_x + (CONTROL_BUTTON_SIZE + btn_gap) * i as f32;
 
         // Button background
-        tree.push(RenderCommand::FillRect {
-            x: bx,
+        palette.push_surface(
+            tree,
+            bx,
             y,
-            width: CONTROL_BUTTON_SIZE,
-            height: CONTROL_BUTTON_SIZE,
-            color: MOCHA_SURFACE0,
-            corner_radii: CornerRadii::all(4.0),
-        });
+            CONTROL_BUTTON_SIZE,
+            CONTROL_BUTTON_SIZE,
+            4.0,
+            Surface::Card,
+        );
 
         // Button label
         tree.push(RenderCommand::Text {
@@ -1495,7 +1517,14 @@ fn render_playback_buttons(player: &VideoPlayer, tree: &mut RenderTree, center_x
 }
 
 /// Render the volume slider.
-fn render_volume(player: &VideoPlayer, tree: &mut RenderTree, x: f32, y: f32, width: f32) {
+fn render_volume(
+    player: &VideoPlayer,
+    palette: &Palette,
+    tree: &mut RenderTree,
+    x: f32,
+    y: f32,
+    width: f32,
+) {
     // Volume icon
     let icon = if player.muted || player.volume < 0.01 {
         "\u{1F507}" // muted speaker
@@ -1509,7 +1538,11 @@ fn render_volume(player: &VideoPlayer, tree: &mut RenderTree, x: f32, y: f32, wi
         x,
         y: y + 8.0,
         text: String::from(icon),
-        color: if player.muted { MOCHA_RED } else { MOCHA_TEXT },
+        color: if player.muted {
+            palette.ink(palette.red)
+        } else {
+            palette.text
+        },
         font_size: 12.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
@@ -1522,14 +1555,15 @@ fn render_volume(player: &VideoPlayer, tree: &mut RenderTree, x: f32, y: f32, wi
     let slider_w = width - 24.0;
     let slider_h = 4.0;
 
-    tree.push(RenderCommand::FillRect {
-        x: slider_x,
-        y: slider_y,
-        width: slider_w,
-        height: slider_h,
-        color: MOCHA_SURFACE0,
-        corner_radii: CornerRadii::all(2.0),
-    });
+    palette.push_surface(
+        tree,
+        slider_x,
+        slider_y,
+        slider_w,
+        slider_h,
+        2.0,
+        Surface::ControlTrack,
+    );
 
     // Filled portion
     let eff = player.effective_volume();
@@ -1539,7 +1573,11 @@ fn render_volume(player: &VideoPlayer, tree: &mut RenderTree, x: f32, y: f32, wi
             y: slider_y,
             width: slider_w * eff,
             height: slider_h,
-            color: if player.muted { MOCHA_RED } else { MOCHA_BLUE },
+            color: if player.muted {
+                palette.red
+            } else {
+                palette.blue
+            },
             corner_radii: CornerRadii::all(2.0),
         });
     }
@@ -1550,7 +1588,7 @@ fn render_volume(player: &VideoPlayer, tree: &mut RenderTree, x: f32, y: f32, wi
         x: slider_x + slider_w + 4.0,
         y: y + 8.0,
         text: format!("{pct}%"),
-        color: MOCHA_SUBTEXT0,
+        color: palette.subtext0,
         font_size: 10.0,
         font_weight: FontWeightHint::Regular,
         max_width: None,
@@ -1738,7 +1776,7 @@ mod tests {
     fn a_badge_reports_the_width_it_drew() {
         let mut tree = RenderTree::new();
         for label in ["CC", "MUTED", "Playlist", "Wiederholen"] {
-            let w = render_badge(&mut tree, 0.0, 0.0, label, MOCHA_MAUVE);
+            let w = render_badge(&mut tree, 0.0, 0.0, label, Palette::for_mode(false).mauve);
             assert!(
                 w >= text::measure(label, 10.0, FontWeightHint::Bold) + 8.0,
                 "{label} overflows its badge"
@@ -1756,7 +1794,15 @@ mod tests {
         p.subtitles_enabled = true;
         p.muted = true;
         let mut tree = RenderTree::new();
-        render_controls(&p, &mut tree, 0.0, 0.0, 800.0, 400.0);
+        render_controls(
+            &p,
+            &Palette::for_mode(false),
+            &mut tree,
+            0.0,
+            0.0,
+            800.0,
+            400.0,
+        );
 
         let badges: Vec<(f32, f32)> = tree
             .commands
@@ -1786,7 +1832,15 @@ mod tests {
         let mut p = VideoPlayer::new();
         p.state = PlayerState::Buffering;
         let mut tree = RenderTree::new();
-        render_controls(&p, &mut tree, 0.0, 0.0, 800.0, 400.0);
+        render_controls(
+            &p,
+            &Palette::for_mode(false),
+            &mut tree,
+            0.0,
+            0.0,
+            800.0,
+            400.0,
+        );
         let (x, msg) = tree
             .commands
             .iter()
@@ -2295,7 +2349,15 @@ mod tests {
     fn test_render_controls_produces_commands() {
         let p = VideoPlayer::new();
         let mut tree = RenderTree::new();
-        render_controls(&p, &mut tree, 0.0, 0.0, 800.0, 600.0);
+        render_controls(
+            &p,
+            &Palette::for_mode(false),
+            &mut tree,
+            0.0,
+            0.0,
+            800.0,
+            600.0,
+        );
         assert!(!tree.is_empty());
     }
 
@@ -2309,7 +2371,15 @@ mod tests {
         p.play();
 
         let mut tree = RenderTree::new();
-        render_controls(&p, &mut tree, 0.0, 0.0, 800.0, 600.0);
+        render_controls(
+            &p,
+            &Palette::for_mode(false),
+            &mut tree,
+            0.0,
+            0.0,
+            800.0,
+            600.0,
+        );
 
         // Should include an Image command for the video frame.
         let has_image = tree

@@ -251,11 +251,20 @@ class World:
                 m = DEF.match(line)
                 if m:
                     lo, hi = item_span(lines, i, end)
-                    self.fns.setdefault(m.group(1), []).append(
+                    # Keyed by crate as well as name. `draw_button` exists
+                    # in a dozen crates; a global key unioned all their
+                    # parameter uses, so fileassoc's `bg` argument inherited
+                    # some other crate's text parameter and the site was
+                    # reported as text. It fills a button.
+                    self.fns.setdefault((crate_of(rel), m.group(1)), []).append(
                         (rel, lo, hi, params_of(lines, i))
                     )
         self.param_kind = {}
         self._solve_params()
+
+    def known(self, rel, callee):
+        """Is `callee` a function of this file's own crate?"""
+        return (crate_of(rel), callee) in self.fns
 
     def _uses(self, rel, lo, hi, name):
         """Kinds and onward dependencies for `name` inside one function body."""
@@ -273,11 +282,11 @@ class World:
                 continue
             stmt = statement_at(lines, j)
             for callee in set(CALL.findall(stmt)):
-                if callee == name or callee not in self.fns:
+                if callee == name or not self.known(rel, callee):
                     continue
                 k = arg_index(stmt, callee, name)
                 if k is not None:
-                    deps.add((callee, k + method_offset(stmt, callee)))
+                    deps.add((crate_of(rel), callee, k + method_offset(stmt, callee)))
         return kinds, deps
 
     def _solve_params(self):
@@ -287,14 +296,14 @@ class World:
         levels -- `render_row` takes it and gives it to `render_badge`.
         """
         direct, deps = {}, {}
-        for name, defs in self.fns.items():
+        for (crate, name), defs in self.fns.items():
             for rel, lo, hi, params in defs:
                 for k, p in enumerate(params):
                     if not p:
                         continue
                     kinds, dep = self._uses(rel, lo, hi, p)
-                    direct.setdefault((name, k), set()).update(kinds)
-                    deps.setdefault((name, k), set()).update(dep)
+                    direct.setdefault((crate, name, k), set()).update(kinds)
+                    deps.setdefault((crate, name, k), set()).update(dep)
         self.param_kind = {key: set(v) for key, v in direct.items()}
         for _ in range(8):
             changed = False
@@ -315,12 +324,12 @@ class World:
         kinds = set()
         stmt = statement_at(lines, i)
         for callee in set(CALL.findall(stmt)):
-            if callee == produced_by or callee not in self.fns:
+            if callee == produced_by or not self.known(rel, callee):
                 continue
             k = arg_index(stmt, callee, produced_by, needle_may_be_a_method=True)
             if k is not None:
                 kinds |= self.param_kind.get(
-                    (callee, k + method_offset(stmt, callee)), set()
+                    (crate_of(rel), callee, k + method_offset(stmt, callee)), set()
                 )
         m = LET.match(lines[i])
         if m:
@@ -337,7 +346,7 @@ class World:
 def main(show_all):
     world = World()
     defs = {}
-    for name, places in world.fns.items():
+    for (_c, name), places in world.fns.items():
         for rel, lo, hi, _params in places:
             head = NL.join(world.lines[rel][lo : lo + 6])
             head = head[: head.find("{")] if "{" in head else head

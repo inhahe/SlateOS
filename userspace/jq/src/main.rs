@@ -652,6 +652,10 @@ struct FilterParser<'a> {
 #[derive(Clone, Debug)]
 enum Token {
     Dot,
+    /// A string containing at least one interpolation. Each part is
+    /// `(is_expr, text)`: literal text, or the raw source between the
+    /// parentheses, parsed as a filter when the token is consumed.
+    StrInterp(Vec<(bool, String)>),
     Pipe,
     Comma,
     LParen,
@@ -844,31 +848,85 @@ fn tokenize_filter(input: &str) -> Result<Vec<Token>, String> {
             }
             b'"' => {
                 i += 1;
-                let mut s = String::new();
+                // Parts of a possibly-interpolated string. `lit` accumulates
+                // literal text; on an interpolation the parenthesised source
+                // is captured whole and parsed later, so nesting is handled
+                // by counting here rather than by the escape table below --
+                // which used to swallow it: its catch-all pushed the
+                // backslash and the character straight through, so an
+                // interpolation lexed as ordinary literal text and jq echoed
+                // it back with the backslash JSON-escaped, exit 0. A wrong
+                // answer rather than a refusal, which is the worse kind.
+                let mut parts: Vec<(bool, String)> = Vec::new();
+                let mut lit = String::new();
                 while i < bytes.len() && bytes[i] != b'"' {
+                    if bytes[i] == b'\\' && i + 1 < bytes.len() && bytes[i + 1] == b'(' {
+                        i += 2;
+                        let src_start = i;
+                        let mut depth = 1usize;
+                        let mut in_str = false;
+                        while i < bytes.len() {
+                            let c = bytes[i];
+                            if in_str {
+                                if c == b'\\' {
+                                    i += 1;
+                                } else if c == b'"' {
+                                    in_str = false;
+                                }
+                            } else if c == b'"' {
+                                in_str = true;
+                            } else if c == b'(' {
+                                depth += 1;
+                            } else if c == b')' {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                            }
+                            i += 1;
+                        }
+                        if depth != 0 || i >= bytes.len() {
+                            return Err("unterminated interpolation in string".to_string());
+                        }
+                        let src =
+                            std::str::from_utf8(&bytes[src_start..i]).map_err(|e| e.to_string())?;
+                        if !lit.is_empty() {
+                            parts.push((false, std::mem::take(&mut lit)));
+                        }
+                        parts.push((true, src.to_string()));
+                        i += 1;
+                        continue;
+                    }
                     if bytes[i] == b'\\' && i + 1 < bytes.len() {
                         i += 1;
                         match bytes[i] {
-                            b'n' => s.push('\n'),
-                            b't' => s.push('\t'),
-                            b'\\' => s.push('\\'),
-                            b'"' => s.push('"'),
-                            b'/' => s.push('/'),
-                            b'r' => s.push('\r'),
+                            b'n' => lit.push('\n'),
+                            b't' => lit.push('\t'),
+                            b'\\' => lit.push('\\'),
+                            b'"' => lit.push('"'),
+                            b'/' => lit.push('/'),
+                            b'r' => lit.push('\r'),
                             other => {
-                                s.push('\\');
-                                s.push(other as char);
+                                lit.push('\\');
+                                lit.push(other as char);
                             }
                         }
                     } else {
-                        s.push(bytes[i] as char);
+                        lit.push(bytes[i] as char);
                     }
                     i += 1;
                 }
                 if i < bytes.len() {
                     i += 1;
                 } // skip closing "
-                tokens.push(Token::Str(s));
+                if parts.is_empty() {
+                    tokens.push(Token::Str(lit));
+                } else {
+                    if !lit.is_empty() {
+                        parts.push((false, lit));
+                    }
+                    tokens.push(Token::StrInterp(parts));
+                }
             }
             b'0'..=b'9' => {
                 let start = i;
@@ -1184,6 +1242,22 @@ impl<'a> FilterParser<'a> {
             Some(Token::Str(s)) => {
                 self.advance();
                 Ok(Filter::Literal(Value::String(s)))
+            }
+            Some(Token::StrInterp(raw)) => {
+                self.advance();
+                // Each interpolated piece is parsed as a full filter here,
+                // which is why the lexer captured its source rather than
+                // trying to tokenise it inline: an interpolation may contain
+                // anything a filter may, parentheses and strings included.
+                let mut parts = Vec::with_capacity(raw.len());
+                for (is_expr, text) in raw {
+                    if is_expr {
+                        parts.push(StringPart::Expr(parse_filter(&text)?));
+                    } else {
+                        parts.push(StringPart::Lit(text));
+                    }
+                }
+                Ok(Filter::StringInterp(parts))
             }
             Some(Token::True) => {
                 self.advance();
@@ -1618,6 +1692,27 @@ fn eval(filter: &Filter, input: &Value) -> Result<Vec<Value>, String> {
     match filter {
         Filter::Identity => Ok(vec![input.clone()]),
         Filter::Literal(v) => Ok(vec![v.clone()]),
+        Filter::StringInterp(parts) => {
+            let mut out = String::new();
+            for part in parts {
+                match part {
+                    StringPart::Lit(t) => out.push_str(t),
+                    StringPart::Expr(f) => {
+                        for v in eval(f, input)? {
+                            // A string interpolates as its own text, not as
+                            // its JSON form: jq gives "a" for "\(.x)" with
+                            // x="a", not "\"a\"". Everything else takes its
+                            // compact JSON rendering.
+                            match v {
+                                Value::String(sv) => out.push_str(&sv),
+                                other => out.push_str(&format_json(&other, true, 0)),
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(vec![Value::String(out)])
+        }
         Filter::Field(name) => match input {
             Value::Object(map) => Ok(vec![map.get(name).cloned().unwrap_or(Value::Null)]),
             Value::Null => Ok(vec![Value::Null]),
@@ -3264,6 +3359,35 @@ mod tests {
             parse_json(r#""\u0041""#).unwrap(),
             Value::String("A".into())
         );
+    }
+
+    /// String interpolation, which used to be echoed back as literal text.
+    ///
+    /// The escape table's catch-all pushed the backslash and the character
+    /// through unchanged, so an interpolation lexed as ordinary text and the
+    /// program printed it with the backslash JSON-escaped and exited 0 --
+    /// a wrong answer rather than a refusal. The AST types for this
+    /// (`StringInterp`, `StringPart`) already existed and had never been
+    /// constructed, which is what pointed here.
+    #[test]
+    fn strings_interpolate() {
+        let input = parse_json(r#"{"a":1,"s":"hi","arr":[1,2]}"#).expect("valid json");
+        let go = |src: &str| -> String {
+            let f = parse_filter(src).expect("parses");
+            match eval(&f, &input).expect("evaluates").remove(0) {
+                Value::String(s) => s,
+                other => panic!("not a string: {other:?}"),
+            }
+        };
+        assert_eq!(go(r#""x\(.a)y""#), "x1y");
+        // A string interpolates as its own text, not as its JSON form.
+        assert_eq!(go(r#""\(.s)""#), "hi");
+        // Anything else takes its compact JSON rendering.
+        assert_eq!(go(r#""\(.arr)""#), "[1,2]");
+        // More than one, and literal text on both sides of each.
+        assert_eq!(go(r#""a\(.a)b\(.a)c""#), "a1b1c");
+        // A plain string still lexes as a plain string.
+        assert_eq!(go(r#""plain""#), "plain");
     }
 
     /// The tokenizer terminates on every byte it accepts.

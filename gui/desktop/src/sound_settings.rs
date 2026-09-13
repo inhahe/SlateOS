@@ -2005,7 +2005,7 @@ mod tests {
                     "the global toggle's label",
                 ),
                 ("Notification", 12.0, p.text, 1, "a system sound's label"),
-                ("On", 12.0, p.green, 11, "an enabled sound's status"),
+                ("On", 12.0, p.ink(p.green), 11, "an enabled sound's status"),
                 ("Off", 12.0, p.overlay0, 1, "a disabled sound's status"),
                 ("chime.wav", 12.0, p.subtext0, 1, "a custom sound's name"),
                 ("Default", 12.0, p.subtext0, 11, "an unset sound's name"),

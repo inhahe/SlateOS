@@ -2024,7 +2024,15 @@ fn refuse_arguments() {
         }
         ArgVerdict::Refuse => {
             let bad = first.unwrap_or_default();
-            eprintln!("pinball: unrecognized option: {bad:?}");
+            // The raw bytes, escaped -- not `Display` and not `to_string_lossy`.
+            // An option name can hold any byte, and a lossy conversion prints
+            // U+FFFD where the undecodable ones were: a string nobody passed.
+            // `escape_ascii` renders those as \xNN, so the message names
+            // exactly what arrived and stays printable.
+            eprintln!(
+                "pinball: unrecognized option: '{}'",
+                bad.as_encoded_bytes().escape_ascii()
+            );
             eprintln!("usage: pinball");
             std::process::exit(2);
         }

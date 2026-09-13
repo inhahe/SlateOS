@@ -1205,7 +1205,13 @@ mod tests {
             let mut want = vec![p.text, p.blue, p.overlay0];
             for chosen in [false, false, true, false] {
                 want.push(if chosen { p.surface0 } else { p.mantle });
-                want.push(if chosen { p.accent } else { p.subtext0 });
+                // The chosen row's icon is accent *text*, so it is inked;
+                // the row's fill above it is not. Same accent, two values.
+                want.push(if chosen {
+                    p.ink(p.accent)
+                } else {
+                    p.subtext0
+                });
                 want.push(if chosen { p.text } else { p.subtext0 });
                 want.push(p.overlay0);
             }
@@ -1237,7 +1243,13 @@ mod tests {
             let mut want = vec![p.text, p.subtext0];
             for chosen in [true, false, false, false] {
                 want.push(if chosen { p.surface0 } else { p.mantle });
-                want.push(if chosen { p.accent } else { p.subtext0 });
+                // The chosen row's icon is accent *text*, so it is inked;
+                // the row's fill above it is not. Same accent, two values.
+                want.push(if chosen {
+                    p.ink(p.accent)
+                } else {
+                    p.subtext0
+                });
                 want.push(if chosen { p.text } else { p.subtext0 });
                 want.push(p.overlay0);
             }

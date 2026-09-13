@@ -2248,8 +2248,11 @@ mod tests {
     /// pixel values: the raw one on fills and the inked one on text. A count
     /// of "how many things carry the accent" means both, and counting only one
     /// would report half the answer while looking exactly as authoritative.
-    fn count_of(cmds: &[RenderCommand], c: Color) -> usize {
-        let inked = Palette::for_mode(false).ink(c);
+    fn count_of(p: &Palette, cmds: &[RenderCommand], c: Color) -> usize {
+        // Against the palette in use, not a fixed one: the inked form of a
+        // colour depends on the theme's grounds, so asking a dark palette
+        // what the light one would draw gives a value nothing on screen has.
+        let inked = p.ink(c);
         every_color(cmds)
             .into_iter()
             .filter(|x| *x == c || *x == inked)
@@ -2699,7 +2702,7 @@ mod tests {
         for (mode, p) in table_palettes() {
             let cmds = everything().render(&p);
             assert_eq!(
-                count_of(&cmds, OFF_PALETTE),
+                count_of(&p, &cmds, OFF_PALETTE),
                 2,
                 "{mode}: the avatar of the chosen user and the Sign In fill, \
                  and nothing else. A third would mean the accent had leaked \
@@ -2710,7 +2713,7 @@ mod tests {
             let mut s = base();
             s.power_menu_open = true;
             assert_eq!(
-                count_of(&s.render(&p), OFF_PALETTE),
+                count_of(&p, &s.render(&p), OFF_PALETTE),
                 1,
                 "{mode}: in the user list only the selected avatar is accented"
             );
@@ -2732,19 +2735,19 @@ mod tests {
         for (mode, p) in table_palettes() {
             let cmds = everything().render(&p);
             assert_eq!(
-                count_of(&cmds, SHADOW),
+                count_of(&p, &cmds, SHADOW),
                 7,
                 "{mode}: the clock, the date, the avatar, the name, the error, \
                  the lockout notice and the back arrow — every text this render \
                  puts on a surface the shell did not choose, and no others"
             );
             assert_eq!(
-                count_of(&cmds, p.on_wallpaper()),
+                count_of(&p, &cmds, p.on_wallpaper()),
                 2,
                 "{mode}: the clock and the name"
             );
             assert_eq!(
-                count_of(&cmds, p.on_wallpaper_dim()),
+                count_of(&p, &cmds, p.on_wallpaper_dim()),
                 2,
                 "{mode}: the date and the back arrow"
             );

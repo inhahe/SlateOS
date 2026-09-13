@@ -1257,7 +1257,7 @@ mod tests {
                 Color::rgba(0, 0, 0, 100),
                 p.panel_bg(),
                 p.surface0,
-                p.lavender,
+                p.ink(p.lavender),
             ];
             for (i, &preset) in SnapLayoutPreset::all().iter().enumerate() {
                 let active = mgr.active_preset == preset;

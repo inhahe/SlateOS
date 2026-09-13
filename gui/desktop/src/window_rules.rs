@@ -2675,7 +2675,7 @@ mod tests {
         let buttons = |cmds: &[RenderCommand]| -> Vec<Color> {
             cmds.iter()
                 .filter_map(appearance::painted_rect)
-                .filter(|(_, _, w, h, _)| *w == 80.0 && *h == 28.0)
+                .filter(|(_, _, w, h, _)| (*w - 80.0).abs() < 0.01 && (*h - 28.0).abs() < 0.01)
                 .map(|t| t.4)
                 .collect()
         };

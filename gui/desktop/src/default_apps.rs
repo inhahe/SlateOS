@@ -2058,7 +2058,12 @@ mod tests {
                 chips[1], p.surface1,
                 "a rival app's chip is merely raised, not accented"
             );
-            let on_cats = all_colors(cats).iter().filter(|c| **c == p.accent).count();
+            // Both forms: the tab's outline is an accent *fill* and stays
+            // raw, the labels are accent *text* and go through `ink`.
+            let on_cats = all_colors(cats)
+                .iter()
+                .filter(|c| **c == p.accent || **c == p.ink(p.accent))
+                .count();
             // Thirteen since §834, not twelve: the active tab now carries an
             // accent OUTLINE as well as an accent label, so the tab contributes
             // two accent-coloured commands instead of one. That is the decision
@@ -2074,7 +2079,10 @@ mod tests {
             for (i, name) in [(1, "File types"), (2, "Installed apps")] {
                 let cmds = &by_tab[i].1;
                 assert_eq!(text_color(cmds, name), p.ink(p.accent), "the open tab");
-                let n = all_colors(cmds).iter().filter(|c| **c == p.ink(p.accent)).count();
+                let n = all_colors(cmds)
+                    .iter()
+                    .filter(|c| **c == p.accent || **c == p.ink(p.accent))
+                    .count();
                 // Two since §834: the open tab's label and the accent outline
                 // around it. Nothing else on these tabs is accented, which is
                 // the property this was written to check and still checks.

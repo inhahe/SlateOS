@@ -894,10 +894,18 @@ fn cmd_restore(backup_path: &Path, dest: &Path, files_filter: &[String]) {
 
                 let dst = dest.join(path);
                 if let Some(parent) = dst.parent() {
+                    // Discarded deliberately: the symlink below is checked and
+                    // counted, and a parent that could not be created makes it
+                    // fail with the same cause against the path in the
+                    // manifest, which is the name the caller recognises.
                     let _ = fs::create_dir_all(parent);
                 }
 
-                // Remove existing file/link before creating symlink
+                // Remove any existing file or link first. Discarded for the
+                // same reason and one more: NotFound is the ordinary case --
+                // restoring into an empty directory -- so this failing is not
+                // evidence of anything on its own. If it fails for a reason
+                // that matters, `symlink` cannot create the link and says so.
                 let _ = fs::remove_file(&dst);
 
                 #[cfg(unix)]
@@ -926,6 +934,12 @@ fn cmd_restore(backup_path: &Path, dest: &Path, files_filter: &[String]) {
     );
     if errors > 0 {
         eprintln!("  {errors} error(s) during restore");
+        // Exit non-zero. This counted the errors, printed them, and returned
+        // -- so `backup restore` could fail on every single file and still
+        // exit 0. A restore is the one operation whose caller is most likely
+        // to be a script reacting to the status: the human running it is
+        // usually recovering from something that already went wrong.
+        process::exit(1);
     }
 }
 

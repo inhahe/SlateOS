@@ -1569,6 +1569,33 @@ impl DesktopShell {
         self.set_appearance(settings);
     }
 
+    /// Read the user's saved *input* settings and adopt the parts the shell
+    /// owns.
+    ///
+    /// Today that is one field: which shortcut cycles the keyboard layout.
+    /// It lives in `input.yaml` beside the layout itself, because the two are
+    /// the same subject and because
+    /// [`persist_input_layout`](Self::persist_input_layout) already writes
+    /// that file — a second configuration format for one neighbouring value
+    /// would be a second thing to keep in step.
+    ///
+    /// Returns whether anything changed, so a caller reacting to an
+    /// announcement can skip the work when a different field moved.
+    ///
+    /// Reads the file rather than a watch, on `persist_input_layout`'s
+    /// reasoning: an input-settings announcement happens when a person clicks
+    /// Apply, and a file read then costs nothing anybody can perceive.
+    pub fn load_input_settings(&mut self) -> bool {
+        let file = inputsettings::InputFile::load();
+        let wanted =
+            crate::input_method::SwitchShortcut::from_id(&file.settings.keyboard.layout_switch);
+        if self.input_methods.switch_shortcut == wanted {
+            return false;
+        }
+        self.input_methods.switch_shortcut = wanted;
+        true
+    }
+
     /// Look once for an appearance change made by another process, and apply
     /// it. Returns whether anything changed.
     ///
@@ -10470,6 +10497,69 @@ mod run_box_wiring_tests {
     /// The switch reaches `input.yaml`, which is what makes it reach the keys.
     ///
     /// The compositor decides what a scancode means and reads that from this
+    /// The layout-switching shortcut is a choice, and a choice that does not
+    /// survive a restart is not one.
+    ///
+    /// `SwitchShortcut` had a serializer and a parser from the day it was
+    /// written, in a private config format that nothing ever called: the
+    /// setting was stored, displayed by nothing and read by nothing, and it
+    /// reset to Alt+Shift every session. It lives in `input.yaml` now, beside
+    /// the layout it switches.
+    #[test]
+    fn the_layout_switching_shortcut_is_read_back_from_the_file() {
+        inputsettings::config::testing::with_scratch_config("shell-switch", |_root| {
+            let mut shell = shell();
+            assert_eq!(
+                shell.input_methods.switch_shortcut,
+                crate::input_method::SwitchShortcut::AltShift,
+                "the default is Alt+Shift"
+            );
+
+            let mut file = inputsettings::InputFile::load();
+            file.settings.keyboard.layout_switch = "ctrl-shift".to_string();
+            file.save().expect("save");
+
+            assert!(shell.load_input_settings(), "the change was not noticed");
+            assert_eq!(
+                shell.input_methods.switch_shortcut,
+                crate::input_method::SwitchShortcut::CtrlShift
+            );
+            assert!(
+                !shell.load_input_settings(),
+                "a second read of an unchanged file reported a change, which                  would repaint the desktop on every announcement"
+            );
+        });
+    }
+
+    /// An id this build does not know falls back rather than being taken
+    /// literally, and — the half that matters — the file is **not** rewritten
+    /// to the fallback. A newer build's shortcut name must survive a session
+    /// under an older one.
+    #[test]
+    fn an_unknown_switch_shortcut_falls_back_without_destroying_the_setting() {
+        inputsettings::config::testing::with_scratch_config("shell-switch-unknown", |_root| {
+            let mut shell = shell();
+            let mut file = inputsettings::InputFile::load();
+            file.settings.keyboard.layout_switch = "triple-tap-escape".to_string();
+            file.save().expect("save");
+
+            let _ = shell.load_input_settings();
+            assert_eq!(
+                shell.input_methods.switch_shortcut,
+                crate::input_method::SwitchShortcut::AltShift,
+                "an unknown id should fall back to the default"
+            );
+            assert_eq!(
+                inputsettings::InputFile::load()
+                    .settings
+                    .keyboard
+                    .layout_switch,
+                "triple-tap-escape",
+                "reading the file rewrote it, so the newer build's setting is gone"
+            );
+        });
+    }
+
     /// file. A test that only checked the shell's own field would pass on a
     /// build where the user pressed the chord, saw the indicator change, and
     /// went on typing in the old layout.

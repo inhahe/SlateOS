@@ -211,6 +211,21 @@ pub struct KeyboardConfig {
     /// reader's job, and [`keylayout::by_id`] returning `None` is where it
     /// happens.
     pub layout: String,
+    /// Which shortcut cycles between the installed layouts —
+    /// `"alt-shift"`, `"ctrl-shift"`, `"super-space"`.
+    ///
+    /// Stored as written and resolved by the reader, for the reason
+    /// [`Self::layout`] is: the set of shortcuts is closed today and a newer
+    /// build may open it, and rewriting an unrecognised value on the next save
+    /// would destroy the setting rather than fall back from it. The desktop's
+    /// `SwitchShortcut::from_id` is the reader, and an id it does not know
+    /// falls back to the default.
+    ///
+    /// Two of the three are **modifier-only chords** — held and released with
+    /// nothing pressed in between — which is a different gesture from an
+    /// ordinary shortcut and needs the compositor's `grab_modifier_chord` to
+    /// notice it at all.
+    pub layout_switch: String,
     /// Delay before repeat starts, in milliseconds (150–2000).
     pub repeat_delay_ms: u32,
     /// Interval between repeated keystrokes, in milliseconds (10–500).
@@ -223,6 +238,9 @@ impl Default for KeyboardConfig {
     fn default() -> Self {
         Self {
             layout: keylayout::DEFAULT_ID.to_string(),
+            // Alt+Shift, which is what the desktop's own default was before
+            // this field existed, and what most desktops ship.
+            layout_switch: "alt-shift".to_string(),
             repeat_delay_ms: 500,
             repeat_interval_ms: 30,
             enabled: true,
@@ -727,6 +745,14 @@ impl InputSettings {
                 .filter(|v| !v.trim().is_empty())
                 .map(|v| v.trim().to_string())
         );
+        read_into!(
+            s.keyboard.layout_switch,
+            doc.get_str(&["keyboard", "layout_switch"])
+                // Empty means "present but says nothing", exactly as it does
+                // for `layout` above.
+                .filter(|v| !v.trim().is_empty())
+                .map(|v| v.trim().to_string())
+        );
         read_into!(s.keyboard.enabled, doc.get_bool(&["keyboard", "repeat"]));
         read_into!(
             s.keyboard.repeat_delay_ms,
@@ -857,6 +883,7 @@ impl InputSettings {
         );
 
         doc.set_str(&["keyboard", "layout"], &self.keyboard.layout);
+        doc.set_str(&["keyboard", "layout_switch"], &self.keyboard.layout_switch);
         doc.set_bool(&["keyboard", "repeat"], self.keyboard.enabled);
         doc.set_i64(
             &["keyboard", "delay_ms"],

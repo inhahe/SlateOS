@@ -1318,6 +1318,13 @@ impl<T: Transport> ShellSession<T> {
         // remember is a door somebody forgets, which is exactly how the
         // animation speed stayed inert.
         self.shell.load_widgets();
+        // And the input settings, for that same reason: the keyboard-layout
+        // shortcut is one the user chose and expects to find still chosen.
+        // The grab that makes it work is reconciled on the next pump.
+        // The answer is "did anything change", which on this path is nothing
+        // to act on: the caller is adopting the saved state wholesale and is
+        // about to repaint regardless.
+        let _ = self.shell.load_input_settings();
     }
 
     /// Persist the widget layout, reporting a failure rather than hiding it.
@@ -1551,6 +1558,18 @@ impl<T: Transport> ShellSession<T> {
                 // does not start the program either, it only records that one
                 // was asked for.
                 self.launches.extend(outcome.launches);
+            }
+            // Somebody rewrote `input.yaml`. The one field the shell owns
+            // there is which shortcut cycles the keyboard layout, and picking
+            // a different one has to move the grab -- which the next
+            // `reconcile_modifier_chords` does, because the wanted set is
+            // derived from the setting rather than remembered separately.
+            Event::SettingsChanged {
+                group: SettingsGroup::Input,
+            } => {
+                if self.shell.load_input_settings() {
+                    self.dirty = true;
+                }
             }
             // A modifier-only gesture the shell claimed: Alt+Shift or
             // Ctrl+Shift, held and let go with nothing pressed in between.

@@ -2190,6 +2190,12 @@ mod tests {
     /// Separate from [`fill_of_size`] rather than replacing it: the power menu
     /// is a fill *and* a border at one rectangle, so a helper that collected
     /// both could not tell its two assertions apart.
+    ///
+    /// Currently unused -- the power menu's two assertions ended up using the
+    /// narrower helpers. Kept because the next site with one shape under one
+    /// theme and the other under the other will want exactly this, and
+    /// rewriting it from scratch is how the two drift apart.
+    #[allow(dead_code)]
     fn box_of_size(cmds: &[RenderCommand], w: f32, h: f32) -> Color {
         let hits: Vec<Color> = cmds
             .iter()

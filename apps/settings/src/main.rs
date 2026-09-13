@@ -3253,8 +3253,8 @@ impl SettingsState {
         // argument made possible, and which the page-level test was written
         // to catch.
         let mut preview_pal = *pal;
-        preview_pal.surface_style = style;
-        preview_pal.strip_style = strip;
+        preview_pal.set_surface_style(style);
+        preview_pal.set_strip_style(strip);
         s.draw(move |tree, x, y| {
             render_theme_preview(tree, &preview_pal, x, y, PREVIEW_WIDTH);
         });
@@ -9112,7 +9112,7 @@ mod against_the_real_compositor {
 
         let band = |style| {
             let mut pal = crate::Palette::for_mode(true);
-            pal.strip_style = style;
+            pal.set_strip_style(style);
             let mut tree = RenderTree::new();
             crate::render_theme_preview(&mut tree, &pal, 0.0, 0.0, crate::PREVIEW_WIDTH);
             // Full width, at the origin, and shorter than the preview itself.
@@ -9166,7 +9166,7 @@ mod against_the_real_compositor {
 
         let count = |style| {
             let mut pal = crate::Palette::for_mode(true);
-            pal.surface_style = style;
+            pal.set_surface_style(style);
             let mut tree = RenderTree::new();
             crate::render_theme_preview(&mut tree, &pal, 0.0, 0.0, crate::PREVIEW_WIDTH);
             let strokes = tree

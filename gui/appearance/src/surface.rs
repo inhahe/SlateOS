@@ -518,7 +518,7 @@ mod tests {
     /// have to ask the question.
     fn styled(style: SurfaceStyle) -> Palette {
         let mut p = Palette::for_mode(true);
-        p.surface_style = style;
+        p.set_surface_style(style);
         p
     }
 
@@ -784,14 +784,14 @@ mod tests {
     fn a_strip_follows_the_strip_setting_and_ignores_the_surface_one() {
         for surface in [SurfaceStyle::Borders, SurfaceStyle::Cards] {
             let mut filled = Palette::for_mode(true);
-            filled.surface_style = surface;
-            filled.strip_style = crate::StripStyle::Filled;
+            filled.set_surface_style(surface);
+            filled.set_strip_style(crate::StripStyle::Filled);
             let paint = filled.surface_paint(Surface::Strip(Edge::Bottom));
             assert_eq!(paint.fill, Some(filled.mantle), "under {surface:?}");
             assert_eq!(paint.separator, None);
 
             let mut lined = filled;
-            lined.strip_style = crate::StripStyle::Separator;
+            lined.set_strip_style(crate::StripStyle::Separator);
             let paint = lined.surface_paint(Surface::Strip(Edge::Bottom));
             assert_eq!(paint.fill, None, "a separated strip has no band");
             assert_eq!(paint.separator, Some((Edge::Bottom, lined.border)));
@@ -807,7 +807,7 @@ mod tests {
     fn a_strips_separator_lands_on_the_edge_it_names() {
         use guitk::render::RenderCommand;
         let mut p = Palette::for_mode(true);
-        p.strip_style = crate::StripStyle::Separator;
+        p.set_strip_style(crate::StripStyle::Separator);
         for (edge, want_y) in [(Edge::Top, 20.0_f32), (Edge::Bottom, 20.0 + 40.0 - 1.0)] {
             let mut tree = RenderTree::new();
             p.draw_surface(

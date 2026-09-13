@@ -131080,6 +131080,31 @@ proves they are copies rather than each app's own considered choices:
 `COLOR_ROW_EVEN` — a complete hardcoded dark theme, 45 constants, with no
 reference to the user's setting anywhere.
 
+**Twelve crates are the real defect; the rest is a weaker question.** Splitting
+the 68 by whether the crate has a `Palette` in scope at all turns out to split
+it almost exactly along "is this an application or a game":
+
+| | crates | constants | what to do |
+|---|---|---|---|
+| **applications with no palette** | **12** | **~246** | the defect. Thread a `Palette` and convert |
+| games with no palette | ~43 | ~741 | see below — a weaker case |
+| already have a palette | 13 | 57 | cheap: the roles are already reachable |
+
+The twelve are `procexplorer` (45), `sysinfo` (26), `imageviewer` (25),
+`pdfviewer` (21), `musicplayer` (18), `speedtest` (17), `explorer` (17),
+`devicemanager` (17), `pomodoro` (16), `screenshot` (15), `benchmark` (15),
+`mixer` (14). A **file manager** and a **process explorer** that ignore the
+user's theme are the visible failure; start there.
+
+**The games are a different question and should not be swept with them.** A
+chess board's light and dark squares are the game's own art, in the same sense
+that `paint`'s swatch row is the document — a themed chessboard is not
+obviously better than a chessboard. What *should* follow the theme in a game is
+its **chrome**: the menu, the score panel, the dialogs, the window background
+behind the board. So the games want a narrower conversion, and doing it with
+the same sweep as the applications would recolour the boards, which nobody
+asked for. This is the part worth putting to the operator before starting.
+
 **Not all 987 are the defect, and the distinction matters.** Three categories,
 and only the first is wrong:
 

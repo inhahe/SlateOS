@@ -213,12 +213,17 @@ pub struct Connection<T: Transport> {
     /// "not told yet" and "told, and the desktop is empty" are different, and a
     /// shell that conflated them would blank its taskbar during startup.
     window_list: Option<WindowList>,
+    /// The last tray list the compositor sent, or `None` before the first.
+    tray_list: Option<crate::tray::TrayList>,
     /// Increments on every window-list frame received.
     ///
     /// Lets a shell repaint on change without diffing the list against its own
     /// copy — and, unlike a dirty flag, cannot be lost by two consumers, since
     /// each remembers the number it last acted on.
     window_list_revision: u64,
+    /// Bumped on every tray frame, so a shell can tell "sent again" from
+    /// "changed" without comparing lists itself.
+    tray_revision: u64,
 }
 
 impl<T: Transport> Connection<T> {
@@ -237,6 +242,8 @@ impl<T: Transport> Connection<T> {
             misdirected: 0,
             window_list: None,
             window_list_revision: 0,
+            tray_list: None,
+            tray_revision: 0,
         }
     }
 
@@ -370,6 +377,13 @@ impl<T: Transport> Connection<T> {
                 self.window_list = Some(list);
                 self.window_list_revision = self.window_list_revision.saturating_add(1);
             }
+            // Kept unconditionally, for the same reason the window list is: an
+            // unsubscribe that crosses a frame in flight is an ordinary race,
+            // not a protocol error.
+            Frame::TrayList(list) => {
+                self.tray_list = Some(list);
+                self.tray_revision = self.tray_revision.saturating_add(1);
+            }
             // Everything else travels the other way. A compositor that sends
             // one is misrouting; that is worth being able to see and is not
             // worth killing an application over.
@@ -400,6 +414,27 @@ impl<T: Transport> Connection<T> {
     #[must_use]
     pub const fn desktop(&self) -> Option<&WindowList> {
         self.window_list.as_ref()
+    }
+
+    /// The tray's icons, or an empty slice before the first frame arrives.
+    ///
+    /// Empty and "not yet told" are deliberately the same answer here, as they
+    /// are for the window list: a shell drawing an empty tray before the first
+    /// frame draws exactly what it should, and a `None` would make every caller
+    /// write the same match to reach the same conclusion.
+    #[must_use]
+    pub fn tray_icons(&self) -> &[crate::tray::TrayIcon] {
+        self.tray_list.as_ref().map_or(&[], |l| &l.icons)
+    }
+
+    /// How many tray frames have arrived.
+    ///
+    /// For a shell that repaints on change: the compositor only sends a frame
+    /// when the list it would send differs, so a bump is a real change and
+    /// comparing lists locally would be doing that work twice.
+    #[must_use]
+    pub const fn tray_revision(&self) -> u64 {
+        self.tray_revision
     }
 
     /// The virtual desktop the compositor says is on screen, as of the last

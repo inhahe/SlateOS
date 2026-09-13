@@ -112,6 +112,7 @@ pub use submit::{
     try_decode_submit,
 };
 
+pub mod tray;
 pub mod window_list;
 pub use window_list::{
     MAX_WINDOWS_PER_LIST, WINDOW_LIST_MAGIC, WINDOW_LIST_VERSION, WindowInfo, WindowList,
@@ -413,6 +414,9 @@ pub enum DecodeError {
     BadUtf8,
     /// A scene frame's window or removed-id count exceeds [`scene::MAX_WINDOWS_PER_FRAME`].
     TooManyWindows(u32),
+
+    /// A `TRAY` frame claimed more icons than `tray::MAX_TRAY_ICONS`.
+    TooManyTrayIcons(u32),
     /// An input frame's event count exceeds [`input::MAX_EVENTS_PER_FRAME`].
     TooManyEvents(u32),
     /// A [`Key`](guitk::event::Key) code byte is not in this decoder's table.
@@ -486,6 +490,14 @@ impl core::fmt::Display for DecodeError {
                     f,
                     "scene window/removed count {n} exceeds limit {}",
                     scene::MAX_WINDOWS_PER_FRAME
+                )
+            }
+
+            Self::TooManyTrayIcons(n) => {
+                write!(
+                    f,
+                    "tray icon count {n} exceeds limit {}",
+                    tray::MAX_TRAY_ICONS
                 )
             }
             Self::TooManyEvents(n) => {

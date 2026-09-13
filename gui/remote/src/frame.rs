@@ -49,6 +49,8 @@ pub enum Frame {
     Responses(Vec<Response>),
     /// The desktop's window set, for a subscribed shell (`WLST`).
     WindowList(WindowList),
+    /// The system tray's icons, for a subscribed shell (`TRAY`).
+    TrayList(crate::tray::TrayList),
 }
 
 impl Frame {
@@ -63,6 +65,7 @@ impl Frame {
             Self::Requests(_) => "control request",
             Self::Responses(_) => "control response",
             Self::WindowList(_) => "window list",
+            Self::TrayList(_) => "tray list",
         }
     }
 }
@@ -111,6 +114,10 @@ pub fn decode_any(input: &[u8]) -> Result<(Frame, usize), DecodeError> {
         WINDOW_LIST_MAGIC => {
             let (list, used) = decode_window_list(input)?;
             Ok((Frame::WindowList(list), used))
+        }
+        crate::tray::TRAY_MAGIC => {
+            let (list, used) = crate::tray::decode_tray_list(input)?;
+            Ok((Frame::TrayList(list), used))
         }
         _ => Err(DecodeError::BadMagic),
     }

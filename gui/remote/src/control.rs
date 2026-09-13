@@ -102,7 +102,7 @@ pub const RESPONSE_MAGIC: [u8; 4] = *b"CRSP";
 /// Alt+Shift shape that cycles keyboard layouts. Incompatible on exactly the
 /// terms 2 set out: no existing message moves a byte, but an unknown tag stops
 /// the decoder, so a version-10 compositor handed one fails the whole frame.
-pub const CONTROL_VERSION: u8 = 11;
+pub const CONTROL_VERSION: u8 = 12;
 
 /// Control-frame header: magic + version + flags + message count.
 const CONTROL_HEADER_LEN: usize = 4 + 1 + 1 + 4;
@@ -970,6 +970,35 @@ pub enum RequestBody {
     /// does re-send the list, which is the useful reading of a repeated
     /// subscribe — "I may have lost track, tell me again".
     SubscribeWindowList { subscribe: bool },
+    /// Put an icon in the system tray, or replace this client's existing one.
+    ///
+    /// `id` is the client's own name for the icon and is scoped to the client,
+    /// so two programs may both use 1. Sending the same id again *replaces*,
+    /// which is what makes "the battery is now 20%" an update rather than a
+    /// second battery.
+    ///
+    /// The owner is not a field: the compositor fills it in from the
+    /// connection. A client that could name an owner could put an icon in the
+    /// tray on another program's behalf, and clicking it would deliver to a
+    /// process that never asked.
+    SetTrayIcon {
+        id: u32,
+        glyph: String,
+        tooltip: String,
+    },
+    /// Take this client's icon out of the tray.
+    ///
+    /// Removing an id that is not there is not an error. A program tidying up
+    /// on exit should not have to know whether it got as far as registering,
+    /// and answering "no such icon" would invite it to care.
+    RemoveTrayIcon { id: u32 },
+    /// Ask to be sent the tray list whenever it changes.
+    ///
+    /// A shell request, gated by `require_shell` exactly as
+    /// [`SubscribeWindowList`](Self::SubscribeWindowList) is: the list names
+    /// every program that has an icon, which is a different fact from the one
+    /// a program is entitled to about itself.
+    SubscribeTrayIcons { subscribe: bool },
     /// Tell the compositor its copy of the user's appearance settings is out
     /// of date, so that it re-reads `appearance.yaml` and redraws.
     ///
@@ -1290,6 +1319,9 @@ enum RequestTag {
     SetFullscreen = 0x0C,
     SetOpacity = 0x0D,
     SubscribeWindowList = 0x0E,
+    SetTrayIcon = 0x21,
+    RemoveTrayIcon = 0x22,
+    SubscribeTrayIcons = 0x23,
     ReloadAppearance = 0x0F,
     ShellControl = 0x10,
     ReserveEdge = 0x11,
@@ -1327,6 +1359,9 @@ impl RequestTag {
             0x0C => Self::SetFullscreen,
             0x0D => Self::SetOpacity,
             0x0E => Self::SubscribeWindowList,
+            0x21 => Self::SetTrayIcon,
+            0x22 => Self::RemoveTrayIcon,
+            0x23 => Self::SubscribeTrayIcons,
             0x0F => Self::ReloadAppearance,
             0x10 => Self::ShellControl,
             0x11 => Self::ReserveEdge,
@@ -1633,6 +1668,20 @@ fn encode_request_body(out: &mut Vec<u8>, body: &RequestBody) {
             out.push(RequestTag::SubscribeWindowList as u8);
             out.push(u8::from(*subscribe));
         }
+        RequestBody::SetTrayIcon { id, glyph, tooltip } => {
+            out.push(RequestTag::SetTrayIcon as u8);
+            write_u32(out, *id);
+            write_string(out, glyph);
+            write_string(out, tooltip);
+        }
+        RequestBody::RemoveTrayIcon { id } => {
+            out.push(RequestTag::RemoveTrayIcon as u8);
+            write_u32(out, *id);
+        }
+        RequestBody::SubscribeTrayIcons { subscribe } => {
+            out.push(RequestTag::SubscribeTrayIcons as u8);
+            out.push(u8::from(*subscribe));
+        }
         RequestBody::ReloadAppearance => out.push(RequestTag::ReloadAppearance as u8),
         RequestBody::ReloadInput => out.push(RequestTag::ReloadInput as u8),
         RequestBody::ShellControl { window, action } => {
@@ -1887,6 +1936,15 @@ fn decode_request_body(r: &mut Reader<'_>) -> Result<RequestBody, DecodeError> {
         }
         RequestTag::DestroyWindow => RequestBody::DestroyWindow {
             window: r.read_u64()?,
+        },
+        RequestTag::SetTrayIcon => RequestBody::SetTrayIcon {
+            id: r.read_u32()?,
+            glyph: r.read_string()?,
+            tooltip: r.read_string()?,
+        },
+        RequestTag::RemoveTrayIcon => RequestBody::RemoveTrayIcon { id: r.read_u32()? },
+        RequestTag::SubscribeTrayIcons => RequestBody::SubscribeTrayIcons {
+            subscribe: r.read_u8()? != 0,
         },
         RequestTag::SetTitle => {
             let window = r.read_u64()?;
@@ -2481,8 +2539,23 @@ mod tests {
         );
         assert_eq!(
             RequestTag::from_byte(0x21),
+            Some(RequestTag::SetTrayIcon),
+            "0x21 was taken by SetTrayIcon in control version 12"
+        );
+        assert_eq!(
+            RequestTag::from_byte(0x22),
+            Some(RequestTag::RemoveTrayIcon),
+            "0x22 was taken by RemoveTrayIcon in control version 12"
+        );
+        assert_eq!(
+            RequestTag::from_byte(0x23),
+            Some(RequestTag::SubscribeTrayIcons),
+            "0x23 was taken by SubscribeTrayIcons in control version 12"
+        );
+        assert_eq!(
+            RequestTag::from_byte(0x24),
             None,
-            "0x21 is the next free tag"
+            "0x24 is the next free tag"
         );
     }
 

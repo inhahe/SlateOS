@@ -130157,6 +130157,31 @@ the 829 uses are that: `if self.enabled { pal.text } else { pal.overlay0 }` in
 `apps/alarmclock`, the same shape in `apps/dictionary`. Those are correct and
 should stay.
 
+**RE-MEASURED 2026-09-13: it is about two hundred, not about ten.** The first
+pass was a grep for `overlay0` on the same line as a `tree.text(` call, and the
+dominant shape in this tree is the *struct* form --
+
+```rust
+cmds.push(RenderCommand::Text { x, y, text, font_size, color: pal.overlay0, .. });
+```
+
+-- where the ink is five lines below the call. Counting both forms, by
+*position* (the colour argument of a text draw, not the word `overlay0`
+anywhere nearby), production code has **419** text draws inked `overlay0`:
+
+| | count | what it is |
+|---|---|---|
+| **live** | **208** | no disabled/enabled word anywhere in the enclosing function. These are the bug. |
+| ambiguous | 117 | such a word is in the function but not beside the draw; each needs reading. |
+| exempt | 94 | the draw is right beside its own `if enabled { .. } else { .. }`. Correct as they are. |
+
+Spread over about forty crates, the worst being `gui/desktop` (14),
+`apps/screenrecorder` (13) and `apps/netscan` (12) -- so there is no single
+place to fix it. Samples from the live set, to show they are not disabled
+states: `apps/benchmark`'s "Press F5 or click Run to start benchmarking",
+`apps/finance`'s "Total Balance" label, `apps/weather`'s chart axis
+temperatures.
+
 **The bug is the sites where nothing is disabled.** `apps/editor`'s status bar
 is the clearest: `tree.text(8.0, bar_y + 5.0, &pos_text, …overlay0, 11.0)` draws
 "Ln 12, Col 4" — live, always-current information — at 2.30 : 1 and 11 px. A

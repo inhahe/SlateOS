@@ -2551,7 +2551,7 @@ impl SysInfoState {
             x: left + 16.0,
             y: heading_y,
             text: self.selected_category.label().to_string(),
-            color: self.palette.lavender,
+            color: self.palette.ink(self.palette.lavender),
             font_size: 15.0,
             font_weight: FontWeightHint::Bold,
             max_width: Some(width - 32.0),

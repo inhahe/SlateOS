@@ -3405,7 +3405,7 @@ impl VideoPlayerApp {
             text: self.volume.icon().to_string(),
             font_size: 13.0,
             color: if self.volume.is_muted() {
-                self.palette.red
+                self.palette.ink(self.palette.red)
             } else {
                 self.palette.text
             },
@@ -3464,7 +3464,7 @@ impl VideoPlayerApp {
             text: self.speed.label(),
             font_size: 11.0,
             color: if self.speed != PlaybackSpeed::NORMAL {
-                self.palette.peach
+                self.palette.ink(self.palette.peach)
             } else {
                 self.palette.subtext0
             },
@@ -3479,7 +3479,7 @@ impl VideoPlayerApp {
             text: self.repeat.icon().to_string(),
             font_size: 11.0,
             color: if self.repeat != RepeatMode::Off {
-                self.palette.blue
+                self.palette.ink(self.palette.blue)
             } else {
                 self.palette.subtext0
             },
@@ -3499,7 +3499,7 @@ impl VideoPlayerApp {
             .to_string(),
             font_size: 11.0,
             color: if self.playlist.is_shuffle() {
-                self.palette.green
+                self.palette.ink(self.palette.green)
             } else {
                 self.palette.subtext0
             },
@@ -3526,7 +3526,7 @@ impl VideoPlayerApp {
                 y: btn_y + 6.0,
                 text: "CC".to_string(),
                 font_size: 11.0,
-                color: self.palette.yellow,
+                color: self.palette.ink(self.palette.yellow),
                 font_weight: FontWeightHint::Bold,
                 max_width: None,
                 overflow: TextOverflow::Clip,
@@ -3695,7 +3695,7 @@ impl VideoPlayerApp {
                 text: format!("{}", i.saturating_add(1)),
                 font_size: 11.0,
                 color: if is_current {
-                    self.palette.blue
+                    self.palette.ink(self.palette.blue)
                 } else {
                     self.palette.overlay0
                 },
@@ -3711,7 +3711,7 @@ impl VideoPlayerApp {
                     y: ey + 8.0,
                     text: ">".to_string(),
                     font_size: 12.0,
-                    color: self.palette.green,
+                    color: self.palette.ink(self.palette.green),
                     font_weight: FontWeightHint::Bold,
                     max_width: None,
                     overflow: TextOverflow::Clip,
@@ -3793,7 +3793,7 @@ impl VideoPlayerApp {
                     y: *y,
                     text: title.to_string(),
                     font_size: 14.0,
-                    color: self.palette.blue,
+                    color: self.palette.ink(self.palette.blue),
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(300.0),
                     overflow: TextOverflow::Ellipsis,
@@ -4463,7 +4463,7 @@ impl VideoPlayerApp {
             y: extra_y,
             text: "Seek Steps".to_string(),
             font_size: 14.0,
-            color: self.palette.blue,
+            color: self.palette.ink(self.palette.blue),
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
             overflow: TextOverflow::Ellipsis,
@@ -4489,7 +4489,7 @@ impl VideoPlayerApp {
             y: extra_y + 52.0,
             text: "Preferred Languages".to_string(),
             font_size: 14.0,
-            color: self.palette.blue,
+            color: self.palette.ink(self.palette.blue),
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
             overflow: TextOverflow::Ellipsis,
@@ -4515,7 +4515,7 @@ impl VideoPlayerApp {
             y: extra_y + 104.0,
             text: "Screenshots".to_string(),
             font_size: 14.0,
-            color: self.palette.blue,
+            color: self.palette.ink(self.palette.blue),
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
             overflow: TextOverflow::Ellipsis,
@@ -4590,7 +4590,7 @@ impl VideoPlayerApp {
                 y: sy + 2.0,
                 text: shortcut.keys.to_string(),
                 font_size: 11.0,
-                color: self.palette.mauve,
+                color: self.palette.ink(self.palette.mauve),
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(74.0),
                 overflow: TextOverflow::Ellipsis,

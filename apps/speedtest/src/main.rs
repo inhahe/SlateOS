@@ -1827,7 +1827,7 @@ impl SpeedTestUI {
                 y: iy + 6.0,
                 text: format!("{} ({})", server.name, server.location),
                 color: if i == self.selected_server {
-                    self.palette.blue
+                    self.palette.ink(self.palette.blue)
                 } else {
                     self.palette.text
                 },
@@ -2102,7 +2102,7 @@ impl SpeedTestUI {
             x: r.x + (r.w - label_w).max(0.0) / 2.0,
             y: r.y + (r.h - 14.0) / 2.0,
             text: label.into(),
-            color: if bg == self.palette.sapphire {
+            color: if bg == self.palette.ink(self.palette.sapphire) {
                 self.palette.crust
             } else {
                 self.palette.text
@@ -2125,7 +2125,7 @@ impl SpeedTestUI {
                     x: r.x + (r.w - w).max(0.0) / 2.0,
                     y: r.y + 8.0,
                     text,
-                    color: self.palette.red,
+                    color: self.palette.ink(self.palette.red),
                     font_size: 12.0,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(r.w),

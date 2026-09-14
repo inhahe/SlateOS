@@ -118692,6 +118692,27 @@ still worth having.
 
 ## B-A-VERDICT-ABOUT-DEAD-CODE-DEPENDS-ON-A-CONFIGURATION-THE-COMMAND-DID-NOT-NAME (lane B, 2026-09-13)
 
+**One mistake in FOUR costumes, made four times in one day while actively
+watching for it** — the fourth arriving hours after this entry was written, by
+its own author, who had just finished describing the shape.
+
+**Fourth costume (added later the same day): a lint that is denied only on a
+target I never build.** The `RWF_` change to `file.rs` left a doc comment
+orphaned from its function. `cargo test -p posix --target x86_64-pc-windows-gnu`
+passed, `cargo clippy` on that same target passed, `cargo fmt --check` passed.
+The pre-push hook then refused with `error: empty line after doc comment`,
+because `scripts/check-cfg-unix.py` builds for `x86_64-unknown-linux-gnu`, where
+`cfg(unix)` is true and that lint is denied. **Every check I ran was green and
+the code did not compile.** The axis is the same one the third row names, seen
+from the other side: there I had unused-import findings that existed only on one
+target; here I had an error that existed only on the target I do not run.
+
+The practical consequence, and the reason this is worth the fourth entry:
+`cargo clippy --target x86_64-pc-windows-gnu` is **not** a sufficient pre-push
+check for this tree, and treating it as one costs a full pre-push gate run
+(~10 minutes) to find out. `python scripts/check-cfg-unix.py` takes 19 seconds
+and answers the question directly.
+
 **One mistake in three costumes, made three times in one day while actively
 watching for it.** Recorded together because separately each looks like a
 detail of the tool that found it, and together the shape is obvious: a

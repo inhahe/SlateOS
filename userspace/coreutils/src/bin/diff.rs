@@ -69,7 +69,7 @@
 use quoting::{quoteaf_os, quotef_os};
 use std::env;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process;
 
@@ -239,7 +239,11 @@ fn parse_args(args: &[String]) -> ParseResult {
     while i < args.len() {
         let arg = &args[i];
 
-        if end_of_opts || !arg.starts_with('-') {
+        // A bare `-` is stdin, and so an OPERAND. It was falling into the
+        // option branch on `starts_with('-')`, never reaching `positional`,
+        // and `diff base.txt -` answered `missing operand after '-'` --
+        // which is the most ordinary way anyone writes a diff in a pipeline.
+        if end_of_opts || !arg.starts_with('-') || arg == "-" {
             positional.push(arg.clone());
             positional_at.push(i);
             i += 1;
@@ -607,6 +611,17 @@ enum FileContent {
 /// Read a file into lines. Returns `Err` on I/O errors, `Ok(Binary)` if the
 /// file contains NUL bytes, or `Ok(Text(lines))` for normal text files.
 fn read_file(path: &Path) -> Result<FileContent, String> {
+    // `-` is stdin, which has no metadata to size-check and no mtime. It also
+    // cannot be read twice, so `diff - -` reads it once and compares the result
+    // with an empty second side -- the same thing GNU does with a pipe.
+    if is_stdin(path) {
+        let mut data = Vec::new();
+        io::stdin()
+            .read_to_end(&mut data)
+            .map_err(|e| format!("-: {e}"))?;
+        return Ok(classify(data));
+    }
+
     let metadata = fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
 
     if metadata.len() > MAX_FILE_SIZE {
@@ -619,11 +634,30 @@ fn read_file(path: &Path) -> Result<FileContent, String> {
     }
 
     let data = fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(classify(data))
+}
 
-    // Check for binary content in the first BINARY_DETECT_LEN bytes.
+/// Whether this operand names standard input.
+///
+/// A bare `-` only; `./-` is a file called `-`, which is what GNU does and is
+/// the reason this is a function rather than a `== "-"` at each site.
+fn is_stdin(path: &Path) -> bool {
+    path.as_os_str() == "-"
+}
+
+/// A file's bytes, as either binary or a list of lines.
+///
+/// Shared by the path that reads a file and the one that reads stdin, so that
+/// `diff base.txt -` classifies its two sides by the same rule. Before stdin
+/// was supported this was read_file's tail and there was only one caller.
+fn classify(data: Vec<u8>) -> FileContent {
+    // Binary is decided on the first BINARY_DETECT_LEN bytes.
     let check_len = data.len().min(BINARY_DETECT_LEN);
-    if data[..check_len].contains(&0u8) {
-        return Ok(FileContent::Binary);
+    if data
+        .get(..check_len)
+        .is_some_and(|head| head.contains(&0u8))
+    {
+        return FileContent::Binary;
     }
 
     // NO DECODE. The comment that used to stand here said the lossy
@@ -645,7 +679,7 @@ fn read_file(path: &Path) -> Result<FileContent, String> {
         FinalNewline::Missing
     };
 
-    Ok(FileContent::Text(lines, final_newline))
+    FileContent::Text(lines, final_newline)
 }
 
 // ============================================================================
@@ -1774,8 +1808,12 @@ fn diff_files(path1_str: &str, path2_str: &str, config: &Config, in_dir_walk: bo
     let p1 = Path::new(path1_str);
     let p2 = Path::new(path2_str);
 
-    let e1 = p1.exists();
-    let e2 = p2.exists();
+    // `-` is stdin, which exists without being a path -- `Path::new("-")
+    // .exists()` is false, so the two guards below turned every
+    // `cmd | diff file -` into `No such file or directory` before `read_file`
+    // was ever reached.
+    let e1 = is_stdin(p1) || p1.exists();
+    let e2 = is_stdin(p2) || p2.exists();
 
     // Handle absent files with --new-file.
     if !e1 && !config.new_file {
@@ -2342,6 +2380,35 @@ mod tests {
     }
 
     // ---------------- parse_args ----------------
+    /// A bare `-` is an OPERAND, not an option.
+    ///
+    /// It was falling into the option branch on `starts_with('-')`, so
+    /// `cmd | diff base.txt -` answered `missing operand after '-'` -- the
+    /// most ordinary way anyone writes a diff in a pipeline.
+    #[test]
+    fn a_bare_dash_is_an_operand() {
+        let c = run(&["diff", "base.txt", "-"]);
+        assert_eq!(c.path1, "base.txt");
+        assert_eq!(c.path2, "-");
+        assert!(c.option_words.is_empty(), "{:?}", c.option_words);
+        // ...on either side.
+        let c = run(&["diff", "-", "base.txt"]);
+        assert_eq!(c.path1, "-");
+        // A real option is still an option, and `--` still ends them.
+        let c = run(&["diff", "-u", "a", "b"]);
+        assert_eq!(c.option_words, vec!["-u"]);
+    }
+
+    /// Only a BARE `-` is stdin. `./-` names a file called `-`.
+    #[test]
+    fn only_a_bare_dash_names_stdin() {
+        assert!(is_stdin(Path::new("-")));
+        assert!(!is_stdin(Path::new("./-")));
+        assert!(!is_stdin(Path::new("-x")));
+        assert!(!is_stdin(Path::new("a-")));
+        assert!(!is_stdin(Path::new("")));
+    }
+
     /// The `diff -r a/x b/x` header echoes the options AS TYPED, and an
     /// operand that looks like an option's value is still an operand.
     ///

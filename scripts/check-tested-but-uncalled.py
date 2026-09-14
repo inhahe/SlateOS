@@ -32,6 +32,10 @@ WHAT IT DOES NOT REPORT, and these are omissions rather than oversights:
     textual reference cannot be attributed between them. That is the same
     conservatism `scan-orphan-modules.py` learned the hard way -- see
     `TD-C-THE-ORPHAN-SCAN-CLEARS-A-MODULE-ON-A-NAME-AN-APP-HAPPENS-TO-SHARE`.
+  * a counterpart in a *different crate*. A save/load pair is two halves of one
+    program keeping one thing; halves in two programs are not a pair, they are
+    two functions with a suffix in common. See `crate_of` below for what this
+    cost before it was enforced.
 
 A false positive here costs a reader a minute. A false negative is the defect
 this is for, so the bias is deliberate.
@@ -61,6 +65,96 @@ TEST_ATTR = re.compile(r"^\s*#\[(?:cfg\(test\)|test|tokio::test)\]")
 IDENT = re.compile(r"\b([a-z_][a-z0-9_]*)\b")
 
 SKIP = {"main", "new", "default", "fmt", "drop", "clone", "from", "eq", "cmp", "hash"}
+
+
+def strip_comments(line, in_block):
+    """The code on a line, with comments removed. Returns (code, still_in_block).
+
+    WHY THIS IS NOT FUSSINESS. Without it this script counted *every mention*
+    of a name as a call, including mentions in comments -- and the comments
+    that name a function are overwhelmingly the ones explaining a bug it was
+    involved in. `DesktopShell::load_pinned` is the case that proved it. On
+    2026-09-14 it was found with no caller and wired up, and three sentences
+    were written about the find: two in `session/tests.rs`, one in
+    `session.rs`. Those three, plus its own definition, came to four
+    "production references".
+
+    So when the call was removed again as a positive control, this gate stayed
+    silent: the record of the last time the door went missing was enough to
+    hide the next. A check switched off by documenting its own successes is
+    worse than no check -- it reads green for the exact reason it should read
+    red, and it gets quieter the more diligent its owner is.
+
+    String literals are deliberately *not* stripped. Comments were observed
+    masking a real defect three times over; strings have not been observed
+    doing it once, and changing two things at a time would leave neither
+    proven.
+    """
+    out = []
+    i = 0
+    n = len(line)
+    in_str = False
+    while i < n:
+        ch = line[i]
+        nxt = line[i + 1] if i + 1 < n else ""
+        if in_block:
+            if ch == "*" and nxt == "/":
+                in_block = False
+                i += 2
+                continue
+            i += 1
+        elif in_str:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == '"':
+                in_str = False
+            out.append(ch)
+            i += 1
+        elif ch == '"':
+            in_str = True
+            out.append(ch)
+            i += 1
+        elif ch == "/" and nxt == "/":
+            break
+        elif ch == "/" and nxt == "*":
+            in_block = True
+            i += 2
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out), in_block
+
+
+EXT_TEST_MOD = re.compile(r"^\s*mod\s+([a-z_][a-z0-9_]*)\s*;")
+
+
+def external_test_files():
+    """Files that are wholly test code because their *parent* declared them so.
+
+    `#[cfg(test)] mod tests;` puts the whole of `tests.rs` under that
+    attribute, but the attribute is in the parent file. `test_spans` looks for
+    it inside the file it is reading, finds nothing, and concludes the file is
+    production code -- so every test in `gui/desktop/src/session/tests.rs`
+    counted as a production caller. That is exactly backwards: those are the
+    callers this script exists to see past.
+    """
+    found = set()
+    for path in rust_files():
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        block = False
+        for n, raw in enumerate(lines):
+            code, block = strip_comments(raw, block)
+            if not TEST_ATTR.match(code):
+                continue
+            nxt = lines[n + 1] if n + 1 < len(lines) else ""
+            m = EXT_TEST_MOD.match(nxt)
+            if not m:
+                continue
+            stem = path.parent / m.group(1)
+            found.add(stem.with_suffix(".rs"))
+            found.add(stem / "mod.rs")
+    return found
 
 
 def rust_files():
@@ -109,11 +203,28 @@ def scan():
     defs = collections.defaultdict(list)      # name -> [(path, line)]
     prod_refs = collections.Counter()
     test_refs = collections.Counter()
+    # (crate, name) -> count. The global counters answer "does anything call
+    # this?", which is a whole-tree question and must stay whole-tree: a
+    # toolkit function called only from `apps/` is wired, not dead. This one
+    # answers "does *this program* call it?", which is the only question a
+    # pair-of-halves claim can be built on.
+    crate_prod_refs = collections.Counter()
+    whole_file_tests = external_test_files()
 
     for path in rust_files():
         text = path.read_text(encoding="utf-8", errors="replace")
         lines = text.split("\n")
+        # Comments first: `test_spans` should not be fooled by a doc comment
+        # that quotes `#[cfg(test)]` either.
+        stripped = []
+        block = False
+        for raw in lines:
+            code, block = strip_comments(raw, block)
+            stripped.append(code)
+        lines = stripped
         inside = test_spans(lines)
+        if path in whole_file_tests:
+            inside = [True] * len(lines)
         in_trait_impl_until = -1
         depth = 0
 
@@ -131,10 +242,13 @@ def scan():
                     defs[name].append((path.relative_to(ROOT).as_posix(), n + 1))
 
             bucket = test_refs if inside[n] else prod_refs
+            crate = crate_of(path.relative_to(ROOT).as_posix())
             for ident in IDENT.findall(line):
                 bucket[ident] += 1
+                if not inside[n]:
+                    crate_prod_refs[(crate, ident)] += 1
 
-    return defs, prod_refs, test_refs
+    return defs, prod_refs, test_refs, crate_prod_refs
 
 
 # The two halves of keeping something. A file written and never read back is a
@@ -142,6 +256,28 @@ def scan():
 # separates them.
 READERS = ("load", "read", "import", "restore", "reload")
 WRITERS = ("save", "write", "export", "store", "persist")
+
+
+def crate_of(rel_path):
+    """Which program a file belongs to: `apps/passwordgen/src/main.rs` -> `apps/passwordgen`.
+
+    WHY THE PAIRING NEEDS THIS, in one case that this script got wrong for a
+    day. `apps/passwordgen` has `export_history` (it returns the password list
+    as a String). `gui/desktop/src/run_dialog.rs` has `load_history` (it takes
+    the Run box's previous commands). Different programs, different data, no
+    relationship whatever -- but `defs` was keyed by bare function name across
+    the whole tree, so the two matched and the gate reported a missing door
+    between two buildings.
+
+    It was the only thing the gate reported, so its false-positive rate was
+    100% while reading as a clean, specific finding. Worse, the "fix" for it
+    was obvious and wrong: wire passwordgen's export to a file dialog, watch
+    the gate go green, and conclude the instrument worked.
+    """
+    parts = rel_path.split("/src/")
+    if len(parts) > 1:
+        return parts[0]
+    return rel_path.rsplit("/", 1)[0]
 
 
 def counterpart(name):
@@ -162,7 +298,7 @@ def counterpart(name):
 def main(argv):
     listing = "--list" in argv
     every = "--all" in argv
-    defs, prod_refs, test_refs = scan()
+    defs, prod_refs, test_refs, crate_prod_refs = scan()
 
     uncalled = []
     for name, sites in sorted(defs.items()):
@@ -187,18 +323,36 @@ def main(argv):
     # three times in lane C on 2026-09-14.
     pairs = []
     for path, line, name, uses in uncalled:
+        crate = crate_of(path)
         for other in counterpart(name):
-            if other in defs and prod_refs[other] > 1:
+            # Both tests are needed and neither implies the other. The first
+            # says this program *has* the other half; the second says this
+            # program *uses* it outside its tests. A half defined here and
+            # called only from another crate's production code would pass the
+            # second on the global counter and mean nothing.
+            here = [d for d in defs.get(other, []) if crate_of(d[0]) == crate]
+            if here and crate_prod_refs[(crate, other)] > 1:
                 pairs.append((path, line, name, other, uses))
                 break
 
     for path, line, name, other, uses in pairs:
-        # States what was measured and stops. The first version of this line
-        # added "Something is written and never read back", which was true of
+        # States what was measured and stops. A gate that diagnoses past its
+        # evidence teaches its readers to discount it.
+        #
+        # This line has now been wrong twice about the same pair, and the
+        # second time is the instructive one. The first version asserted
+        # "Something is written and never read back", which was true of
         # `load_pinned`/`save_pinned` and false of
-        # `export_history`/`load_history` -- `export_history` returns a String
-        # and writes nothing. A gate that diagnoses past its evidence teaches
-        # its readers to discount it.
+        # `export_history`/`load_history`; the repair was to weaken the
+        # sentence until it was true of both.
+        #
+        # That repair treated a false *finding* as a wording problem. The
+        # evidence was right there -- the two functions were in different
+        # programs -- and softening the claim made the output survive the
+        # contradiction instead of the contradiction killing the claim. The
+        # question that would have caught it is not "is this sentence true?"
+        # but "why did these two get paired at all?", and it went unasked for
+        # a day because the sentence, once softened, read fine.
         print(
             f"{path}:{line}: `{name}` is called {uses}x, all from tests, "
             f"while its counterpart `{other}` is called in production."

@@ -571,6 +571,34 @@ unsafe fn retrieve_initial_args() -> (i32, *const *const u8, *const *const u8) {
     unsafe { retrieve_initial_args_from(&mut src) }
 }
 
+/// Pick storage for one NUL-terminated pointer array.
+///
+/// The statics hold `MAX_INIT_PTRS` entries plus the terminator, which is
+/// plenty for ordinary commands and nothing like enough for `grep pat *.c` in
+/// a large directory. Past that we take memory from the same source the packed
+/// data came from, for the same reason: silently returning the first 512 of
+/// someone's 600 arguments is a wrong answer delivered with confidence, and
+/// the program has no way to notice. Falling back to the static on allocation
+/// failure keeps the old behaviour as the floor rather than the default.
+fn slots_for<S: InitArgSource>(
+    src: &mut S,
+    n: usize,
+    fallback: *mut *const u8,
+) -> (*mut *const u8, usize) {
+    if n <= MAX_INIT_PTRS {
+        return (fallback, MAX_INIT_PTRS);
+    }
+    let bytes = n
+        .saturating_add(1)
+        .saturating_mul(core::mem::size_of::<*const u8>());
+    let p = src.grow(bytes);
+    if p.is_null() {
+        (fallback, MAX_INIT_PTRS)
+    } else {
+        (p.cast::<*const u8>(), n)
+    }
+}
+
 /// The body of [`retrieve_initial_args`], with the kernel behind a seam.
 ///
 /// # Safety
@@ -659,16 +687,17 @@ pub(crate) unsafe fn retrieve_initial_args_from<S: InitArgSource>(
     // Build argv pointer array.
     // SAFETY: data_start is within our buffer bounds (validated above).
     let data_start = unsafe { data.add(header_size) };
-    let argv_ptrs = addr_of_mut!(INIT_ARGV);
+    let (argv_ptrs, argv_cap) =
+        slots_for(src, argc, addr_of_mut!(INIT_ARGV).cast::<*const u8>());
 
     let mut pos = 0usize;
     let mut arg_idx = 0usize;
-    while arg_idx < argc && arg_idx < MAX_INIT_PTRS && pos < argv_data_len {
-        // SAFETY: pos < argv_data_len, which is within buffer bounds.
+    while arg_idx < argc && arg_idx < argv_cap && pos < argv_data_len {
+        // SAFETY: arg_idx < argv_cap, and the array behind `argv_ptrs` holds
+        // argv_cap entries plus the terminator; pos < argv_data_len, which is
+        // within the buffer bounds validated above.
         unsafe {
-            if let Some(slot) = (*argv_ptrs).get_mut(arg_idx) {
-                *slot = data_start.add(pos);
-            }
+            *argv_ptrs.add(arg_idx) = data_start.add(pos);
         }
 
         // Advance past this string's null terminator.
@@ -684,24 +713,24 @@ pub(crate) unsafe fn retrieve_initial_args_from<S: InitArgSource>(
     }
 
     // Null-terminate the argv array.
+    // SAFETY: the loop above stopped at arg_idx <= argv_cap, and the array has
+    // room for argv_cap entries plus this terminator.
     unsafe {
-        if let Some(slot) = (*argv_ptrs).get_mut(arg_idx) {
-            *slot = core::ptr::null();
-        }
+        *argv_ptrs.add(arg_idx) = core::ptr::null();
     }
 
     // Build envp pointer array.
     // SAFETY: envp_start is at data_start + argv_data_len, within bounds.
     let envp_start = unsafe { data_start.add(argv_data_len) };
-    let envp_ptrs = addr_of_mut!(INIT_ENVP);
+    let (envp_ptrs, envp_cap) =
+        slots_for(src, envc, addr_of_mut!(INIT_ENVP).cast::<*const u8>());
 
     let mut pos = 0usize;
     let mut env_idx = 0usize;
-    while env_idx < envc && env_idx < MAX_INIT_PTRS && pos < envp_data_len {
+    while env_idx < envc && env_idx < envp_cap && pos < envp_data_len {
+        // SAFETY: as for argv above.
         unsafe {
-            if let Some(slot) = (*envp_ptrs).get_mut(env_idx) {
-                *slot = envp_start.add(pos);
-            }
+            *envp_ptrs.add(env_idx) = envp_start.add(pos);
         }
 
         while pos < envp_data_len {
@@ -715,10 +744,9 @@ pub(crate) unsafe fn retrieve_initial_args_from<S: InitArgSource>(
     }
 
     // Null-terminate the envp array.
+    // SAFETY: as for argv above.
     unsafe {
-        if let Some(slot) = (*envp_ptrs).get_mut(env_idx) {
-            *slot = core::ptr::null();
-        }
+        *envp_ptrs.add(env_idx) = core::ptr::null();
     }
 
     // Load environment variables into the environ store so that
@@ -731,7 +759,7 @@ pub(crate) unsafe fn retrieve_initial_args_from<S: InitArgSource>(
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let final_argc = arg_idx as i32;
-    let final_argv = unsafe { (*argv_ptrs).as_ptr() };
+    let final_argv: *const *const u8 = argv_ptrs.cast_const();
 
     (final_argc, final_argv, core::ptr::null())
 }
@@ -2613,6 +2641,32 @@ mod initial_args_tests {
         f.lie_on_retry = Some(i64::try_from(INIT_ARGS_BUF_SIZE * 64).unwrap());
         let (argc, _, _) = unsafe { retrieve_initial_args_from(&mut f) };
         assert_eq!(argc, 0, "an answer we cannot trust must not be parsed");
+    }
+
+    #[test]
+    fn more_than_512_arguments_are_not_silently_dropped() {
+        // MAX_INIT_PTRS is 512. Short args on purpose: 600 x ~8 bytes stays
+        // well under the 64 KiB buffer, so this exercises the POINTER cap on
+        // its own rather than the retry path fixed alongside it.
+        let _g = guard();
+        let owned: Vec<String> = (0..600).map(|i| format!("a{i}")).collect();
+        let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
+        let packed = pack(&refs, &[]);
+        assert!(
+            packed.len() < INIT_ARGS_BUF_SIZE,
+            "fixture must not also trip the size retry, got {}",
+            packed.len()
+        );
+        let mut f = Fake::new(packed);
+        let (argc, argv, _) = unsafe { retrieve_initial_args_from(&mut f) };
+        assert_eq!(argc, 600, "arguments past 512 must survive, not vanish");
+        assert!(!argv.is_null());
+        // The last one must really be there and really be the last one.
+        let last = unsafe { *argv.add(599) };
+        assert!(!last.is_null(), "argv[599] should be a real pointer");
+        let bytes = unsafe { core::slice::from_raw_parts(last, 4) };
+        assert_eq!(&bytes[..4], b"a599");
+        assert!(unsafe { *argv.add(600) }.is_null(), "argv must stay NULL-terminated");
     }
 
     #[test]

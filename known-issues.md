@@ -143269,12 +143269,25 @@ process-wide statics, and a panic while holding it makes every later
 the extra ones pointing at innocent code. The guard now ignores poisoning, and
 the same mutation fails exactly one test.
 
-### What is still open
+### The same defect at a second limit — also fixed
 
-`MAX_INIT_PTRS` is 512. A program invoked with more than 512 arguments still
-has the excess **silently dropped** — `argc` comes back as 512 and the program
-has no way to know more were sent. That is the same defect class as this entry,
-at a different limit, and it is not fixed here.
+`MAX_INIT_PTRS` is 512, and the pointer-array loop stopped there. A program
+invoked with 600 arguments got `argc == 512`: the wrong answer, delivered with
+confidence, with no way for the program to notice. `grep pat *.c` in a large
+directory reaches this easily, and 512 is low enough that it is a normal
+command rather than an adversarial one.
+
+Fixed the same way, and the test was written first so it could be watched to
+fail — it reported `left: 512, right: 600` before the fix. The pointer arrays
+now come from the same source as the packed data when they do not fit, falling
+back to the static array if that allocation fails, so the old behaviour is the
+floor rather than the default. The test checks more than the count: that
+`argv[599]` is really `a599` and that `argv[600]` is NULL, because an array
+that is the right length but not NULL-terminated is a worse bug than the one
+being fixed.
+
+Writing the failing test first also confirmed the poisoning fix above: this
+time exactly one test failed, where the earlier mutation had failed two.
 
 ### The near-miss, which is the part worth keeping
 

@@ -143073,3 +143073,15 @@ present on the image", and no more than that. This is the same distinction the
 pkgconf entry had to learn: cross-compiling, linking, being staged and being
 *run* are four separate claims, and passing three of them is not passing the
 fourth.
+
+**And the image will not hold all 278.** A static Rust binary here averages
+886 KiB, so the 86 that `coreutils` produces are 74 MiB — about a fifth of the
+fixed 384M image, which after CPython had roughly 150 MiB free. Building the
+remaining 193 `userspace/*` binary crates would add on the order of 167 MiB and
+would not fit. That is not a reason to stage none of them, but it does mean
+"put all 278 on the image" is not the finish line: the block now reports its own
+MiB and warns past a quarter of `IMG_SIZE`, because nothing else in
+`create-ext4-rootfs.sh` accounts for free space at all and the script's own
+header records what running out looks like — `mke2fs -d` gives up partway and
+the abort trap leaves a broken image behind. Deciding *which* utilities earn
+their bytes is a real question, and it is not answered here.

@@ -2004,6 +2004,7 @@ SLATE_BIN_DIR="$ROOT_DIR/target/x86_64-slateos/release"
 SLATE_COUNT=0
 SLATE_SKIPPED=0
 SLATE_STALE=0
+SLATE_BYTES=0
 if [ -d "$SLATE_BIN_DIR" ]; then
     for f in "$SLATE_BIN_DIR"/*; do
         [ -f "$f" ] || continue
@@ -2027,13 +2028,32 @@ if [ -d "$SLATE_BIN_DIR" ]; then
         fi
         cp -L "$f" "$STAGE/bin/$name"
         SLATE_COUNT=$((SLATE_COUNT + 1))
+        SLATE_BYTES=$((SLATE_BYTES + $(wc -c < "$f")))
         if [ -e "$SYSROOT_LIBC" ] && [ "$SYSROOT_LIBC" -nt "$f" ]; then
             SLATE_STALE=$((SLATE_STALE + 1))
         fi
     done
 fi
 if [ "$SLATE_COUNT" -gt 0 ]; then
-    echo "[rootfs] staged $SLATE_COUNT SlateOS-native utilities from userspace/ into /bin"
+    SLATE_MIB=$((SLATE_BYTES / 1048576))
+    echo "[rootfs] staged $SLATE_COUNT SlateOS-native utilities from userspace/ into /bin ($SLATE_MIB MiB)"
+    # A SIZE TRIPWIRE, because this block is now the largest single consumer of
+    # image bytes and nothing else in this script accounts for free space at
+    # all.  The image is a fixed $IMG_SIZE and running it close to full is a
+    # failure this script has already had: the header at the top records that
+    # at 256M "mke2fs -d gives up partway and this script's abort trap then
+    # leaves" a broken image behind.  A static Rust binary here averages ~886
+    # KiB, so this total grows fast -- the 86 binaries the coreutils crate
+    # produces are 74 MiB, and building all 193 of the remaining userspace
+    # crates would add roughly 167 MiB more and not fit.  Staging a subset is a
+    # legitimate answer; silently overflowing is not.
+    SLATE_BUDGET=$(( $(echo "$IMG_SIZE" | sed 's/[Mm]$//') / 4 ))
+    if [ "$SLATE_MIB" -gt "$SLATE_BUDGET" ]; then
+        echo "[rootfs] WARNING: that is more than a quarter of the $IMG_SIZE image ($SLATE_BUDGET MiB)."
+        echo "[rootfs]          Nothing here checks total free space, and mke2fs -d fails PARTWAY"
+        echo "[rootfs]          through when it runs out, leaving a broken image. Either raise"
+        echo "[rootfs]          IMG_SIZE or stage fewer binaries."
+    fi
     if [ "$SLATE_SKIPPED" -gt 0 ]; then
         echo "[rootfs]          ($SLATE_SKIPPED skipped, already present -- see the NOTEs above)"
     fi

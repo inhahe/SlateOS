@@ -103,6 +103,11 @@ slate_env() {
     mkdir -p "$ROOT_DIR/target/x86_64-slateos/release" "$STAGE/bin" \
              "$ROOT_DIR/toolchain/sysroot/lib"
     export SYSROOT_LIBC="$ROOT_DIR/toolchain/sysroot/lib/libc.a"
+    # The block reports its share of the image and warns past a quarter of
+    # it, so it reads IMG_SIZE. Under `set -u` an unset one is a crash, not
+    # a skipped warning -- which is why this is exported rather than left
+    # to the real script to define.
+    export IMG_SIZE="384M"
     : > "$SYSROOT_LIBC"
 }
 
@@ -174,6 +179,42 @@ rc=$?
 case "$msg" in
     *"cargo +nightly build --release"*) ok ;;
     *) bad "the NOTE must name the command that fixes it, got: $msg" ;;
+esac
+rm -rf "$T"
+
+# 10. THE SIZE TRIPWIRE FIRES. Nothing else in create-ext4-rootfs.sh accounts
+# for free space, and this block is the largest single consumer of image bytes,
+# so an overflow would surface as mke2fs failing partway with a broken image.
+# IMG_SIZE is shrunk rather than the fixture grown: a quarter of 4M is 1 MiB,
+# so a 2 MiB binary crosses it without writing 96 MiB to disk.
+slate_env
+export IMG_SIZE="4M"
+mk_elf "$ROOT_DIR/target/x86_64-slateos/release/fat"
+head -c 2097152 /dev/zero >> "$ROOT_DIR/target/x86_64-slateos/release/fat"
+msg="$(eval "$SLATE_BLOCK" 2>&1)"
+case "$msg" in
+    *"more than a quarter of the 4M image"*) ok ;;
+    *) bad "an oversized staging set must warn, got: $msg" ;;
+esac
+case "$msg" in
+    *"mke2fs -d fails PARTWAY"*) ok ;;
+    *) bad "the warning must name the failure it prevents, got: $msg" ;;
+esac
+rm -rf "$T"
+
+# 11. ...AND STAYS QUIET UNDER BUDGET. A tripwire that always fires is not a
+# tripwire; this is the half that makes case 10 mean something.
+slate_env
+export IMG_SIZE="384M"
+mk_elf "$ROOT_DIR/target/x86_64-slateos/release/small"
+msg="$(eval "$SLATE_BLOCK" 2>&1)"
+case "$msg" in
+    *"more than a quarter"*) bad "a 4-byte binary must not trip the budget, got: $msg" ;;
+    *) ok ;;
+esac
+case "$msg" in
+    *"(0 MiB)"*) ok ;;
+    *) bad "the staged size should be reported either way, got: $msg" ;;
 esac
 rm -rf "$T"
 

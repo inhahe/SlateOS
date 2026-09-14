@@ -546,7 +546,9 @@ impl MouseKeysConfig {
 /// one definition has to serve all three. Before this they existed three times
 /// over -- as state machines in `desktop::a11y`, as differently named fields on
 /// `desktop::a11y::AccessibilityConfig`, and again as config structs in
-/// `desktop::accessibility_settings` -- and no two of the three were connected
+/// `desktop::accessibility_settings`. (`desktop::a11y` has since been deleted
+/// outright, so two of those three are now only history; this crate is what
+/// replaced them.) -- and no two of the three were connected
 /// to each other or to the keyboard. See `known-issues.md`
 /// `TD-C-STICKY-FILTER-AND-MOUSE-KEYS-ARE-BUILT-TESTED-AND-CONNECTED-TO-NOTHING`.
 ///

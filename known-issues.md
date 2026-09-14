@@ -142967,13 +142967,18 @@ Every one was cheap to disprove by measuring and expensive to act on. Reading
 the inner loop has been wrong every time.
 
 
-## B-THE-USERSPACE-THIS-PROJECT-WRITES-HAS-NEVER-BEEN-ON-THE-IMAGE (lane B, 2026-09-13) — **fixed**
+## B-THE-RUST-HALF-OF-OUR-USERLAND-HAD-NEVER-BEEN-ON-THE-IMAGE (lane B, 2026-09-13) — **fixed**
 
-**In short:** SlateOS boots an image that contains a shell, a C compiler, GNU
-make, CMake and Python — all of them ported from other people's source — and
-not one of the 278 command-line programs this project wrote itself. `ls`,
-`cat`, `cp`, `chmod`, `awk` and 273 others were written, tested, marked done in
-`roadmap.md`, and then copied nowhere. They were being tested on the developer's
+> **Renamed and corrected 2026-09-13, hours after filing.** It was first filed as
+> `B-THE-USERSPACE-THIS-PROJECT-WRITES-HAS-NEVER-BEEN-ON-THE-IMAGE`, and that
+> title was wrong: 14 utilities this project writes *were* already on the image.
+> See **Correction** below — the mistake is more instructive than the finding.
+
+**In short:** SlateOS boots an image carrying five upstream ports and 14
+small utilities compiled from our Python. It carried **none** of the 278
+command-line programs written in Rust under `userspace/` — `cp`, `awk`, `sed`,
+`tar`, `find` and 273 others were written, tested, marked done in `roadmap.md`,
+and then copied nowhere. They were being tested on the developer's
 *Windows* machine, against Windows' own filesystem, and never once compiled for
 SlateOS, let alone run on it. The cause was not a missing toolchain — the
 toolchain worked the first time it was asked — it was that no script ever
@@ -142991,8 +142996,9 @@ locally-written software each one puts on it is:
 | `scripts/build-usb-image.py` | nothing |
 
 The kernel embeds three programs directly (`init`, `hello`, `ticker`, all from
-`services/`, via `include_bytes!` in `kernel/src/main.rs`). Those three were the
-entire set of software written here that had ever executed under SlateOS.
+`services/`, via `include_bytes!` in `kernel/src/main.rs`), and the fastpy block
+promotes 14 compiled-Python utilities into `/bin`. Those 17 were the entire set
+of software written here that had ever reached a running SlateOS.
 
 Everything `create-ext4-rootfs.sh` does stage is either a host Linux binary
 used as a fallback, or one of the five upstream ports (bash, pkgconf, make,
@@ -143028,7 +143034,7 @@ the delay, and it is worth being precise that it was never true:
 - Asked to build for the real target for the first time, `logrotate` produced a **795 KB statically linked SlateOS ELF in 58 seconds**, and the whole `coreutils` crate produced **86 SlateOS ELF executables in 50 seconds**. Zero errors, zero changes to any crate.
 
 So the distance between "278 utilities that have never touched the OS" and
-"86 of them on the image" was one `cargo build` and one `cp` loop. It had been
+"71 of them on the image" was one `cargo build` and one `cp` loop. It had been
 that distance the whole time.
 
 ### The fix
@@ -143052,6 +143058,61 @@ block *verbatim* from the shipped script and runs it against fake artifacts.
 Both guards were mutation-tested: deleting the ELF-magic check and disabling
 the collision guard each take the harness from 14/14 to 12/14 and exit 1.
 
+### Correction — and how the mistake was made
+
+The first version of this entry claimed that **nothing** this project writes had
+ever been on the image. That was wrong, and it was wrong in a way worth keeping.
+
+14 utilities were already there, promoted into `/bin` by the fastpy block:
+`cat`, `chmod`, `chown`, `grep`, `head`, `ls`, `mkdir`, `mv`, `rm`, `rmdir`,
+`sort`, `tail`, `uniq`, `wc`. They are compiled from our own Python, which is
+the path `CLAUDE.md` actually prefers for userspace tools, so they are very much
+software this project writes. `/bin/ls` on the image was ours all along — just
+not the Rust one.
+
+**How the error was made: I grepped for a verb.** To inventory the script I ran
+
+    grep -oE '\[rootfs\] staged [^"]{0,70}' scripts/create-ext4-rootfs.sh
+
+and read the result as the complete list of what reaches the image. The fastpy
+promotion does not use that word. It prints
+
+    [rootfs] promoted fastpy binary: /bin/ls  (fastpy-ls)
+
+so the one block that disproved the thesis was invisible to the search that
+built it. Every line I *did* find was accurate; the set was not complete, and a
+grep over one phrasing cannot tell those two apart.
+
+**What caught it:** running the script. The correction did not come from
+re-reading the source, which I did several times, but from my own collision
+guard printing `NOTE: /bin/ls is already staged by an earlier block` — a guard
+written for a different purpose (protecting lane A's `/bin/make`) and which
+turned out to be the only thing in the change capable of contradicting its own
+author. It is worth noticing that an inventory taken by reading was wrong for
+half a day and an inventory taken by executing was right immediately.
+
+### Verified end to end
+
+The image was built with the block in place (`ALLOW_STALE_FIXTURES=1`, needed
+for a pre-existing stale cmake fixture unrelated to this change):
+
+    [rootfs] staged 71 SlateOS-native utilities from userspace/ into /bin (60 MiB)
+    [rootfs]          (15 skipped, already present -- see the NOTEs above)
+    [rootfs] DONE.
+
+384 MiB image written. The 15 skips are the 14 fastpy commands above plus `sh`,
+which dash owns. 60 MiB is under the 96 MiB budget, so the tripwire correctly
+stayed silent. `/bin` went from 36 entries to 107.
+
+**One caveat on what those 71 are linked against.** `toolchain/sysroot/lib/libc.a`
+is dated 2026-09-12 08:11 and four `posix/src/*.rs` files are newer than it, so
+these binaries link a libc that is behind its own sources. The tree already
+detects this — it is why the default image build refuses and why
+`ALLOW_STALE_FIXTURES=1` was needed. The staleness check inside this block
+compares each binary against `libc.a` and correctly stays quiet, because the
+binaries are newer than the archive; it is the archive that is behind. The two
+checks compose, but neither states the transitive claim on its own.
+
 ### Why absence is a NOTE and not an error, for now
 
 The neighbouring fastpy block exits 1 on an empty scan. This one does not, and
@@ -143068,7 +143129,7 @@ in the same change that adds the first boot test asserting one of these runs.
 establish that a single one of these binaries *executes* under SlateOS. That
 needs a boot test, which is lane A's tree — filed as
 `requests/b-a-our-own-utilities-are-on-the-image-now-can-a-boot-test-run-one.md`.
-Until that rung is green, the honest claim is "86 SlateOS-native utilities are
+Until that rung is green, the honest claim is "71 SlateOS-native utilities are
 present on the image", and no more than that. This is the same distinction the
 pkgconf entry had to learn: cross-compiling, linking, being staged and being
 *run* are four separate claims, and passing three of them is not passing the

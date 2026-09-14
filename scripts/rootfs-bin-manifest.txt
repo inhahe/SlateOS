@@ -1,0 +1,113 @@
+# rootfs-bin-manifest.txt -- which SlateOS-native binaries go into /bin.
+#
+# Read by scripts/create-ext4-rootfs.sh. One binary name per line; blank lines
+# and #-comments ignored. A name here that has not been built is reported, not
+# silently skipped. A binary that is built but NOT named here does not ship.
+#
+# WHY A MANIFEST AND NOT A SCAN OF target/x86_64-slateos/release/.
+# The first version of the staging block did scan that directory, and the
+# coupling it created is a defect: `cargo build` inside a crate directory
+# changed what the operating system image contains. That is not hypothetical.
+# On 2026-09-13 a measurement build of all 193 userspace crates -- run purely to
+# find out whether they cross-compile, which all 276 binaries do -- turned the
+# next image build into
+#
+#     [rootfs] staged 260 SlateOS-native utilities from userspace/ into /bin (204 MiB)
+#     mke2fs: Could not allocate block in ext2 filesystem while populating file system
+#     *** rootfs.ext4 was NOT written ***
+#
+# A developer debugging one crate must not be able to change, or break, the
+# image that way. What ships is now a deliberate, reviewable list.
+#
+# ON SIZE. These binaries are static and average ~813 KiB, so the list is a real
+# budget and not a formality. All 276 come to 204 MiB staged, which does not fit
+# a 384M image; the 84 below come to ~60 MiB, which is measured to fit with the
+# tripwire silent. Adding names is fine -- adding 100 is not, until IMG_SIZE
+# goes up with it.
+#
+# ON THE 13 NAMES THAT ARE NOT HERE. cat, chmod, chown, grep, head, ls, mkdir,
+# mv, rm, rmdir, tail, uniq and wc are all built by the coreutils crate and are
+# all deliberately absent, because /bin/<those> already belong to the promoted
+# fastpy commands. design-decisions.md §108 part 1 is explicit that fastpy stays
+# "additive only... No Rust coreutil is touched, shadowed or retired" and that
+# "a silent swap is a user-visible policy change and is not Claude's to make."
+# Listing them here would be exactly that swap. Which implementation a stock
+# install should prefer is deferred-questions.md D-Q1, whose trigger -- a fastpy
+# utility with a parity suite and a performance bar -- has not been met.
+# The staging block also refuses to overwrite a name already staged, so this
+# list and that guard have to BOTH be wrong before a swap can happen silently.
+#
+# ON sh. The coreutils crate builds one, and it is left out for the same kind of
+# reason: /bin/sh is dash, staged far earlier, and lane A's boot test asserts on
+# it by name. Replacing the system shell from a block at the bottom of the
+# script is not a staging decision.
+logrotate
+basename
+bc
+cal
+cmp
+comm
+cp
+csplit
+cut
+date
+dd
+df
+diff
+dirname
+du
+echo
+ed
+env
+expand
+expr
+false
+fetch
+find
+fold
+free
+hostname
+id
+join
+kill
+ln
+logger
+logname
+md5sum
+mkfifo
+more
+nice
+nl
+nohup
+od
+paste
+patch
+printf
+ps
+pwd
+readlink
+realpath
+renice
+sed
+seq
+sha256sum
+sleep
+split
+stat
+strings
+tar
+tee
+test
+time_cmd
+touch
+tr
+true
+tsort
+tty
+uname
+unexpand
+uptime
+which
+whoami
+xargs
+yes

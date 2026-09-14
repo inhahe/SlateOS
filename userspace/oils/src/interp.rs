@@ -102636,23 +102636,44 @@ st=1
         // Forcing the poll makes the race a certainty rather than a 1-in-100.
         let mut sh = new_shell();
         sh.run_source("( exit 7 ) &".as_bytes());
-        // Land INSIDE the window: the body must be finished, the grace must
-        // not have passed. 5 ms against a 20 ms grace, and the first attempt
-        // at this test used no sleep at all -- it passed, because the thread
-        // had not finished yet and the poll did nothing.
+        // Land INSIDE the window -- body finished, grace not yet passed --
+        // WITHOUT depending on how fast this machine is.
         //
-        // Both halves are then ASSERTED rather than assumed, because a test
-        // that silently missed the window would pass for the wrong reason and
-        // go on passing after the bug came back.
-        std::thread::sleep(std::time::Duration::from_millis(5));
+        // The first version slept 5 ms against the 20 ms grace and asserted it
+        // had landed. `sleep` is a FLOOR, not a duration: under a full
+        // `cargo test --workspace`, with a couple of dozen test binaries
+        // competing, this thread can be off the CPU for far longer than the
+        // 15 ms of slack that left. The grace then HAS passed, the assertion
+        // below fires, and the suite goes red for a scheduling accident rather
+        // than a product defect. Lane C measured it at roughly every other
+        // workspace run and ~6 minutes of re-run per merge.
+        //
+        // So neither half is timed now. The wait is on the CONDITION -- the
+        // body reporting itself finished -- and then `born_at` is pinned to
+        // this instant, which makes "the grace has not elapsed" true by
+        // construction however long the wait took. A slow machine cannot
+        // perturb either.
+        loop {
+            let all_done = sh
+                .jobs
+                .iter_mut()
+                .all(|j| j.child.as_mut().is_none_or(JobBody::is_finished));
+            if all_done {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        for j in &mut sh.jobs {
+            j.born_at = std::time::Instant::now();
+        }
         sh.poll_jobs();
         assert!(
             sh.jobs.iter().all(|j| j.status.is_some()),
-            "the poll must have reaped the body, or the window was missed"
+            "the poll must have reaped the body"
         );
         assert!(
             !sh.jobs.iter().any(|j| j.exit_seen),
-            "the grace must NOT have passed yet, or the window was missed"
+            "the grace must NOT have passed yet"
         );
         settle_jobs(&mut sh);
         assert_eq!(sh.run_source("wait".as_bytes()), 0);

@@ -82,6 +82,8 @@ pub const TAB_CLOSE_WIDTH: f32 = 24.0;
 /// inventing one would be a menu written for this enum's benefit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
+    /// Start an empty document in a new tab.
+    New,
     /// Read a file chosen from a dialog into a new tab.
     Open,
     /// Write the active document back to its file.
@@ -117,7 +119,8 @@ impl Command {
     /// undispatchable -- consistently missing rather than silently running
     /// something else, which is why [`Command::id`] is the discriminant rather
     /// than a position in this list.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
+        Self::New,
         Self::Open,
         Self::Save,
         Self::SaveAs,
@@ -149,6 +152,7 @@ impl Command {
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
+            Self::New => "New",
             Self::Open => "Open...",
             Self::Save => "Save",
             Self::SaveAs => "Save As...",
@@ -176,6 +180,7 @@ impl Command {
     #[must_use]
     pub fn shortcut(self) -> &'static str {
         match self {
+            Self::New => "Ctrl+N",
             Self::Open => "Ctrl+O",
             Self::Save => "Ctrl+S",
             Self::SaveAs => "Ctrl+Shift+S",
@@ -494,7 +499,8 @@ impl EditorState {
             Command::Redo => !doc.redo_stack.is_empty(),
             Command::Cut | Command::Copy => doc.has_selection(),
             Command::Paste => !self.clipboard.is_empty(),
-            Command::Open
+            Command::New
+            | Command::Open
             | Command::Save
             | Command::SaveAs
             | Command::CloseTab
@@ -517,6 +523,16 @@ impl EditorState {
             return Response::Idle;
         }
         match command {
+            Command::New => {
+                // An empty document, which needs no dialog: the question a
+                // picker answers is "which file", and a new one has no name
+                // until it is saved. This was filed alongside Open and Save As
+                // as "one gap wearing three faces"; only two of the faces
+                // needed a picker.
+                self.tabs.open(Document::new());
+                self.after_cursor_move();
+                Response::Redraw
+            }
             Command::Open => {
                 self.open_dialog(crate::DialogPurpose::Open);
                 Response::Redraw
@@ -735,6 +751,7 @@ impl EditorState {
             MenuBarItem {
                 label: "&File".to_string(),
                 children: vec![
+                    row(Command::New),
                     row(Command::Open),
                     MenuBarEntry::Separator,
                     row(Command::Save),
@@ -828,6 +845,7 @@ impl EditorState {
     fn control_key(&mut self, key: &KeyEvent) -> Response {
         let shift = key.modifiers.shift;
         match key.key {
+            Key::N => self.run(Command::New),
             Key::O => self.run(Command::Open),
             Key::S => self.run(if shift {
                 Command::SaveAs
@@ -1289,6 +1307,7 @@ mod tests {
             "D" => Key::D,
             "F" => Key::F,
             "H" => Key::H,
+            "N" => Key::N,
             "O" => Key::O,
             "S" => Key::S,
             "V" => Key::V,
@@ -1318,6 +1337,17 @@ mod tests {
         for command in Command::ALL {
             let event = keystroke(command.shortcut());
             match command {
+                Command::New => {
+                    let mut editor = editor_with("ab");
+                    let before = editor.tabs.count();
+                    editor.handle_event(&event);
+                    assert_eq!(editor.tabs.count(), before + 1, "Ctrl+N did not open a tab");
+                    assert!(
+                        editor.active_document().lines.iter().all(String::is_empty),
+                        "the new tab is not empty"
+                    );
+                    assert!(editor.dialog.is_none(), "New should ask nothing");
+                }
                 Command::Open => {
                     let mut editor = editor_with("ab");
                     assert!(editor.dialog.is_none());

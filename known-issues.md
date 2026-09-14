@@ -144395,7 +144395,22 @@ that, and "we were lucky" is not a property a gate is supposed to rely on. The
 `store` spelling is now one of the self-test's ten cases, so the pattern cannot
 quietly narrow again.
 
-## TD-C-THE-TEXT-EDITOR-CANNOT-OPEN-OR-CREATE-A-FILE-FROM-INSIDE-ITSELF
+## TD-C-THE-TEXT-EDITOR-CANNOT-OPEN-OR-CREATE-A-FILE-FROM-INSIDE-ITSELF -- FIXED 2026-09-14
+
+**Status: FIXED.** Ctrl+N, Ctrl+O and Ctrl+Shift+S, with File gaining New,
+Open... and Save As.... Ctrl+S on a document with no path now asks where to put
+it instead of refusing. Four tests drive the dialog through `handle_event`, and
+the reintroduction proof fails as it should.
+
+**The fix was to call something that already existed**, which is the part worth
+keeping: `guitk::dialog::FileDialog`, already driven by `apps/archivemanager`,
+`apps/diskimager`, `apps/vpnmanager` and the desktop shell. This entry asserted
+the opposite as fact and three programs were parked behind it. See the
+correction below.
+
+One of the three faces never needed a picker at all: **New** is an empty tab and
+has no name to ask about. "One gap wearing three faces" was two faces and a
+misreading.
 
 **Date:** 2026-09-14. **Lane:** C.
 
@@ -144452,14 +144467,16 @@ editor's File menu grows three rows that are already written. Until then the
 editor is a file *editor* and not a file *creator*, which is a fair description
 of what ships but not of what a text editor is.
 
-**A second program has the same gap, found 2026-09-14 by
-`scripts/check-tested-but-uncalled.py`.** `apps/passwordgen`'s `export_history`
-renders the generated passwords as text and is called by nothing but its own
-test. There is no clipboard in that program and no way to name a file, so the
-string it builds has nowhere to go. It is not a save/load asymmetry -- nothing
-is lost -- but it is the same root cause: a finished feature whose only missing
-part is the ability to ask the user where to put something. Wiring it is one key
-binding *after* a picker exists, and guesswork before.
+**A second program still has the gap and is no longer blocked**, found
+2026-09-14 by `scripts/check-tested-but-uncalled.py`. `apps/passwordgen`'s
+`export_history` renders the generated passwords as text and is called by
+nothing but its own test: the program has no clipboard and no way to name a
+file, so the string it builds has nowhere to go.
+
+The original text here said wiring it was "guesswork before a picker exists".
+There is a picker, so it is not guesswork -- it is a `FileDialog::save()`, a
+field on the app, routing in `handle_event`, and somewhere to report the result,
+which that program currently has no status line for. Small, and open.
 
 **Not urgent, and worth saying why:** the editor opens files perfectly well
 when something else chooses them -- the file explorer's double-click, a command

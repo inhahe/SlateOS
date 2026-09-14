@@ -145312,7 +145312,20 @@ and the two-way probe, not a confident-sounding commit.
 
 ## B-DATE-IGNORES-EVERY-STRFTIME-FLAG-AND-WIDTH (lane B, 2026-09-14)
 
-**Status:** OPEN — specification measured in full, implementation not started
+**Status:** flags and widths **FIXED 2026-09-14**; the `-d` grammar remains open
+
+`localtime::strftime` now reads flags and a width before the conversion, so
+all seven flag/width cases pass: `scripts/date-diff.sh` went **80 passed / 41
+differed to 87 / 34**. The remaining 34 are the second cluster below — `-d`
+accepting anything but `@SECONDS` — which is GNU's whole date grammar and a
+separate job.
+
+**One rule needed a third measurement.** `%#a` was implemented as a
+per-character case swap, the obvious reading of "opposite case", which gives
+`sUN`. Measuring six fields showed `#` flips the FIELD, with the direction
+taken from its text — `%#a` `SUN`, `%#p` `am`, `%#B` `SEPTEMBER`, `%#Z` `utc`
+— and that `%P` is exempt, because `%P` is already the flipped spelling of
+`%p`. Six tests pin the measured rules, including `%1d` and last-flag-wins.
 
 `date +%-d` prints the literal text `%-d`. So does `%_d`, `%0e`, `%^a`, `%#a`,
 `%5S` and every other flagged or width-qualified conversion:

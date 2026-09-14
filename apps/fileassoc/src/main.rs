@@ -13,8 +13,8 @@ use std::collections::BTreeMap;
 use std::process::ExitCode;
 
 use guitk::color::Color;
-use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::dialog::{DialogAction, FileDialog};
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use guitk::frame::Rect;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
@@ -1822,10 +1822,9 @@ impl FileAssocUI {
                         // what could not be. Naming the first is what makes the
                         // message actionable -- "3 problems" sends the user
                         // looking through the file themselves.
-                        Some(first) => format!(
-                            "Imported with {} problem(s), first: {first}",
-                            errors.len()
-                        ),
+                        Some(first) => {
+                            format!("Imported with {} problem(s), first: {first}", errors.len())
+                        }
                         None => format!(
                             "Imported {} association(s) from {}",
                             self.registry.association_count(),

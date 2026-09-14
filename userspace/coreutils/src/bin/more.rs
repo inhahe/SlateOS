@@ -431,7 +431,6 @@ fn say(text: &[u8]) -> ExitCode {
 fn run(opts: Options) -> ExitCode {
     // Set when a named file could not be opened; carried to the end so one
     // bad name does not stop the rest being paged.
-    let mut unreadable = false;
     let stdin_is_tty = io::stdin().is_terminal();
     let banners = wants_banners(opts.files.len(), stdin_is_tty);
 
@@ -517,11 +516,29 @@ fn run(opts: Options) -> ExitCode {
                 }
                 Err(e) => {
                     diag!("more: cannot open {}: {}", quotef(&name), strerror(&e));
-                    // The `continue` stays: `more a missing b` must still
-                    // page `a` and `b`. What was missing is that the failure
-                    // never reached the status, so `more /nonexistent`
-                    // reported it and exited 0.
-                    unreadable = true;
+                    // AND THE STATUS STAYS ZERO. The comment that stood here
+                    // called that a bug -- "the failure never reached the
+                    // status, so `more /nonexistent` reported it and exited
+                    // 0" -- and setting it cost 13 divergences in
+                    // `scripts/more-diff.sh`, every one of them an unopenable
+                    // operand.
+                    //
+                    // Measured against util-linux 2.39.3 with a working
+                    // control in the same run:
+                    //
+                    //     more nosuch.txt        rc ZERO
+                    //     more plain nosuch      rc ZERO
+                    //     false                  rc NONZERO   (the control)
+                    //
+                    // and the message is byte-identical on both sides, so the
+                    // status was the whole of the difference. Exiting non-zero
+                    // is the more defensible behaviour and it is not the one
+                    // `more` has; the harness's own note beside those cases
+                    // says so too -- "util-linux's own choice and not an
+                    // oversight of ours".
+                    //
+                    // The `continue` stays: `more a missing b` must still page
+                    // `a` and `b`.
                     continue;
                 }
             }
@@ -576,11 +593,7 @@ fn run(opts: Options) -> ExitCode {
     }
 
     let _ = out.flush(); // see write_ignoring_errors
-    if unreadable {
-        ExitCode::from(1)
-    } else {
-        ExitCode::SUCCESS
-    }
+    ExitCode::SUCCESS
 }
 
 /// The parts of the command line that describe the screen rather than the

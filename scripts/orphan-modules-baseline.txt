@@ -109,7 +109,6 @@ gui/desktop/src/window_peek.rs
 gui/remote/src/reader.rs
 gui/toolkit/src/context_ext.rs
 gui/toolkit/src/menubar.rs
-gui/toolkit/src/pathbar.rs
 gui/toolkit/src/signal.rs
 gui/toolkit/src/svg.rs
 netproto/src/arp.rs

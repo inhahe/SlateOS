@@ -79,7 +79,7 @@ pub const INPUT_MAGIC: [u8; 4] = *b"INPT";
 /// terms 3 set out, and recorded here rather than waved through as "one more
 /// tag": the rule established above is that a vocabulary change *is* a version
 /// change, and the first exception to it would make the version meaningless.
-pub const INPUT_VERSION: u8 = 5;
+pub const INPUT_VERSION: u8 = 6;
 
 /// Input-frame header: magic + version + flags + event count.
 const INPUT_HEADER_LEN: usize = 4 + 1 + 1 + 4;
@@ -193,6 +193,7 @@ impl EventTag {
 /// the same reason the key table below is a table.
 const GROUP_APPEARANCE: u8 = 0x01;
 const GROUP_INPUT: u8 = 0x02;
+const GROUP_NOTIFICATIONS: u8 = 0x03;
 
 const MOUSE_PRESS: u8 = 0x01;
 const MOUSE_RELEASE: u8 = 0x02;
@@ -388,6 +389,7 @@ fn encode_event(out: &mut Vec<u8>, ev: &InputEvent) {
             out.push(match group {
                 SettingsGroup::Appearance => GROUP_APPEARANCE,
                 SettingsGroup::Input => GROUP_INPUT,
+                SettingsGroup::Notifications => GROUP_NOTIFICATIONS,
             });
         }
         Event::ModifierChord { modifiers } => {
@@ -612,6 +614,7 @@ fn decode_event(r: &mut Reader<'_>) -> Result<InputEvent, DecodeError> {
             let group = match byte {
                 GROUP_APPEARANCE => SettingsGroup::Appearance,
                 GROUP_INPUT => SettingsGroup::Input,
+                GROUP_NOTIFICATIONS => SettingsGroup::Notifications,
                 other => return Err(DecodeError::BadSettingsGroup(other)),
             };
             (Event::SettingsChanged { group }, None)

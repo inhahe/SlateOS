@@ -332,3 +332,18 @@ enforces the last part, since the matches are exhaustive over `SysPath`.
 Units are **kB**, not MB, because `cache/size` and the rest of the tree already
 use kB and one tree with two units is the same defect this whole choice was
 about. Flagged to lane C for overrule.
+
+**Units settled: kB.** Lane C took `total_kb`/`available_kb` and noted their
+`total_mb` came only from a struct field name and a `total_mb: 32768` fixture
+literal in `apps/sysinfo/src/main.rs` -- not a reason to bend a kernel
+interface. The conversion lands in the reader they are rewriting anyway.
+
+**Build the flat form, and know which way it grows.** Lane C's note, kept here
+because it is the kind of thing that is expensive to rediscover: `speed_mhz`
+under `memory/` is a DIMM property and `slots_total` is a board property, so if
+per-slot detail is ever wanted the natural shape is
+`memory/slotN/{speed_mhz,size_kb}` with `slots_total` staying at the top. Not
+built now -- nothing consumes it and the enumeration would be guesswork -- but
+the flat form is the one that has to change if it happens.
+
+Recorded by lane C as `design-decisions.md` **§850**.

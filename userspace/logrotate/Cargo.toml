@@ -4,6 +4,12 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS log rotation"
 
+[build-dependencies]
+# Tells cargo that the hand-built sysroot libc.a is an input, so a
+# libc rebuild relinks these binaries instead of silently leaving them
+# stale. See userspace/sysroot-dep.
+sysroot-dep = { path = "../sysroot-dep" }
+
 [dependencies]
 # Diagnostics name log paths, and a path may hold spaces or newlines;
 # scripts/quote-names.py enforces that they are quoted.

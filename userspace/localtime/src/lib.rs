@@ -330,57 +330,155 @@ pub const MON_FULL: [&[u8]; 12] = [
 )]
 pub fn strftime(fmt: &[u8], tm: &Tm) -> Vec<u8> {
     let mut out = Vec::with_capacity(fmt.len().saturating_add(16));
-    let mut it = fmt.iter().copied();
+    let mut it = fmt.iter().copied().peekable();
     while let Some(b) = it.next() {
         if b != b'%' {
             out.push(b);
             continue;
         }
+        // Flags and width first, then the conversion. A `%` followed only
+        // by flags is a trailing `%`, same as a bare one.
+        let fs = read_spec(&mut it);
         let Some(spec) = it.next() else {
-            // A trailing `%` is a literal `%`.
             out.push(b'%');
             break;
         };
+        // Rendered aside so the case flags and the string width can be applied
+        // to the whole conversion rather than to whatever `out` already held.
+        let mut piece: Vec<u8> = Vec::new();
+        // `%P` is already the flipped spelling of `%p`, so glibc treats `#`
+        // on it as a no-op -- measured, `%#P` is `am` and not `AM`. Every
+        // other string field flips.
+        let fs = if spec == b'P' {
+            Spec { swap: false, ..fs }
+        } else {
+            fs
+        };
         match spec {
-            b'%' => out.push(b'%'),
-            b'n' => out.push(b'\n'),
-            b't' => out.push(b'\t'),
-            b'a' => out.extend_from_slice(pick(&WDAY_ABBR, tm.wday as usize)),
-            b'A' => out.extend_from_slice(pick(&WDAY_FULL, tm.wday as usize)),
-            b'b' | b'h' => out.extend_from_slice(pick(&MON_ABBR, month_index(tm))),
-            b'B' => out.extend_from_slice(pick(&MON_FULL, month_index(tm))),
-            b'c' => out.extend_from_slice(&strftime(b"%a %b %e %H:%M:%S %Y", tm)),
-            b'x' => out.extend_from_slice(&strftime(b"%m/%d/%y", tm)),
-            b'X' | b'T' => out.extend_from_slice(&strftime(b"%H:%M:%S", tm)),
-            b'r' => out.extend_from_slice(&strftime(b"%I:%M:%S %p", tm)),
-            b'R' => out.extend_from_slice(&strftime(b"%H:%M", tm)),
-            b'D' => out.extend_from_slice(&strftime(b"%m/%d/%y", tm)),
-            b'F' => out.extend_from_slice(&strftime(b"%Y-%m-%d", tm)),
-            b'C' => pad_zero(&mut out, tm.year.div_euclid(100), 2),
-            b'd' => pad_zero(&mut out, i64::from(tm.day), 2),
-            b'e' => pad_space(&mut out, i64::from(tm.day), 2),
-            b'H' => pad_zero(&mut out, i64::from(tm.hour), 2),
-            b'k' => pad_space(&mut out, i64::from(tm.hour), 2),
-            b'I' => pad_zero(&mut out, i64::from(hour12(tm)), 2),
-            b'l' => pad_space(&mut out, i64::from(hour12(tm)), 2),
-            b'j' => pad_zero(&mut out, i64::from(tm.yday).saturating_add(1), 3),
-            b'm' => pad_zero(&mut out, i64::from(tm.month), 2),
-            b'M' => pad_zero(&mut out, i64::from(tm.minute), 2),
-            b'S' => pad_zero(&mut out, i64::from(tm.second), 2),
-            b'N' => pad_zero(&mut out, i64::from(tm.nanos), 9),
-            b'p' => out.extend_from_slice(if tm.hour < 12 { b"AM" } else { b"PM" }),
-            b'P' => out.extend_from_slice(if tm.hour < 12 { b"am" } else { b"pm" }),
-            b's' => push_int(&mut out, tm.epoch),
-            b'u' => push_int(&mut out, i64::from(iso_wday(tm))),
-            b'w' => push_int(&mut out, i64::from(tm.wday)),
-            b'U' => pad_zero(&mut out, i64::from(week_of_year(tm, 0)), 2),
-            b'W' => pad_zero(&mut out, i64::from(week_of_year(tm, 1)), 2),
-            b'V' => pad_zero(&mut out, i64::from(iso_week(tm).1), 2),
-            b'G' => push_int(&mut out, iso_week(tm).0),
-            b'g' => pad_zero(&mut out, iso_week(tm).0.rem_euclid(100), 2),
-            b'y' => pad_zero(&mut out, tm.year.rem_euclid(100), 2),
-            b'Y' => push_int(&mut out, tm.year),
-            b'z' => push_offset(&mut out, tm.gmtoff, 0),
+            b'%' => piece.push(b'%'),
+            b'n' => piece.push(b'\n'),
+            b't' => piece.push(b'\t'),
+            b'a' => piece.extend_from_slice(pick(&WDAY_ABBR, tm.wday as usize)),
+            b'A' => piece.extend_from_slice(pick(&WDAY_FULL, tm.wday as usize)),
+            b'b' | b'h' => piece.extend_from_slice(pick(&MON_ABBR, month_index(tm))),
+            b'B' => piece.extend_from_slice(pick(&MON_FULL, month_index(tm))),
+            b'c' => piece.extend_from_slice(&strftime(b"%a %b %e %H:%M:%S %Y", tm)),
+            b'x' => piece.extend_from_slice(&strftime(b"%m/%d/%y", tm)),
+            b'X' | b'T' => piece.extend_from_slice(&strftime(b"%H:%M:%S", tm)),
+            b'r' => piece.extend_from_slice(&strftime(b"%I:%M:%S %p", tm)),
+            b'R' => piece.extend_from_slice(&strftime(b"%H:%M", tm)),
+            b'D' => piece.extend_from_slice(&strftime(b"%m/%d/%y", tm)),
+            b'F' => piece.extend_from_slice(&strftime(b"%Y-%m-%d", tm)),
+            b'C' => pad_with(
+                &mut piece,
+                tm.year.div_euclid(100),
+                fs.num_width(2),
+                fs.num_pad(b'0'),
+            ),
+            b'd' => pad_with(
+                &mut piece,
+                i64::from(tm.day),
+                fs.num_width(2),
+                fs.num_pad(b'0'),
+            ),
+            b'e' => pad_with(
+                &mut piece,
+                i64::from(tm.day),
+                fs.num_width(2),
+                fs.num_pad(b' '),
+            ),
+            b'H' => pad_with(
+                &mut piece,
+                i64::from(tm.hour),
+                fs.num_width(2),
+                fs.num_pad(b'0'),
+            ),
+            b'k' => pad_with(
+                &mut piece,
+                i64::from(tm.hour),
+                fs.num_width(2),
+                fs.num_pad(b' '),
+            ),
+            b'I' => pad_with(
+                &mut piece,
+                i64::from(hour12(tm)),
+                fs.num_width(2),
+                fs.num_pad(b'0'),
+            ),
+            b'l' => pad_with(
+                &mut piece,
+                i64::from(hour12(tm)),
+                fs.num_width(2),
+                fs.num_pad(b' '),
+            ),
+            b'j' => pad_with(
+                &mut piece,
+                i64::from(tm.yday).saturating_add(1),
+                fs.num_width(3),
+                fs.num_pad(b'0'),
+            ),
+            b'm' => pad_with(
+                &mut piece,
+                i64::from(tm.month),
+                fs.num_width(2),
+                fs.num_pad(b'0'),
+            ),
+            b'M' => pad_with(
+                &mut piece,
+                i64::from(tm.minute),
+                fs.num_width(2),
+                fs.num_pad(b'0'),
+            ),
+            b'S' => pad_with(
+                &mut piece,
+                i64::from(tm.second),
+                fs.num_width(2),
+                fs.num_pad(b'0'),
+            ),
+            b'N' => pad_with(
+                &mut piece,
+                i64::from(tm.nanos),
+                fs.num_width(9),
+                fs.num_pad(b'0'),
+            ),
+            b'p' => piece.extend_from_slice(if tm.hour < 12 { b"AM" } else { b"PM" }),
+            b'P' => piece.extend_from_slice(if tm.hour < 12 { b"am" } else { b"pm" }),
+            b's' => push_int(&mut piece, tm.epoch),
+            b'u' => push_int(&mut piece, i64::from(iso_wday(tm))),
+            b'w' => push_int(&mut piece, i64::from(tm.wday)),
+            b'U' => pad_with(
+                &mut piece,
+                i64::from(week_of_year(tm, 0)),
+                fs.num_width(2),
+                fs.num_pad(b'0'),
+            ),
+            b'W' => pad_with(
+                &mut piece,
+                i64::from(week_of_year(tm, 1)),
+                fs.num_width(2),
+                fs.num_pad(b'0'),
+            ),
+            b'V' => pad_with(
+                &mut piece,
+                i64::from(iso_week(tm).1),
+                fs.num_width(2),
+                fs.num_pad(b'0'),
+            ),
+            b'G' => push_int(&mut piece, iso_week(tm).0),
+            b'g' => pad_with(
+                &mut piece,
+                iso_week(tm).0.rem_euclid(100),
+                fs.num_width(2),
+                fs.num_pad(b'0'),
+            ),
+            b'y' => pad_with(
+                &mut piece,
+                tm.year.rem_euclid(100),
+                fs.num_width(2),
+                fs.num_pad(b'0'),
+            ),
+            b'Y' => push_int(&mut piece, tm.year),
+            b'z' => push_offset(&mut piece, tm.gmtoff, 0),
             // `%:z`, `%::z` and `%:::z` -- GNU's colon forms, which are a
             // MODIFIER on `z` rather than specifiers of their own, so they are
             // read here rather than in the match arm above.
@@ -398,23 +496,25 @@ pub fn strftime(fmt: &[u8], tm: &Tm) -> Vec<u8> {
                     next = it.next();
                 }
                 if next == Some(b'z') {
-                    push_offset(&mut out, tm.gmtoff, colons);
+                    push_offset(&mut piece, tm.gmtoff, colons);
                 } else {
                     // Not a zone directive after all. Emit what was consumed,
                     // unchanged, the way an unknown specifier is emitted.
-                    out.push(b'%');
+                    piece.push(b'%');
                     out.extend(std::iter::repeat_n(b':', usize::from(colons)));
                     if let Some(c) = next {
-                        out.push(c);
+                        piece.push(c);
                     }
                 }
             }
-            b'Z' => out.extend_from_slice(tm.abbr.as_bytes()),
+            b'Z' => piece.extend_from_slice(tm.abbr.as_bytes()),
             other => {
-                out.push(b'%');
-                out.push(other);
+                piece.push(b'%');
+                piece.push(other);
             }
         }
+        finish_piece(&mut piece, fs);
+        out.extend_from_slice(&piece);
     }
     out
 }
@@ -511,12 +611,130 @@ fn pad_with(out: &mut Vec<u8>, value: i64, width: usize, fill: u8) {
     out.extend_from_slice(text.as_bytes());
 }
 
+/// Zero-padded, for the offset fields that always are.
 fn pad_zero(out: &mut Vec<u8>, value: i64, width: usize) {
     pad_with(out, value, width, b'0');
 }
 
-fn pad_space(out: &mut Vec<u8>, value: i64, width: usize) {
-    pad_with(out, value, width, b' ');
+/// The flags and field width GNU allows between `%` and the conversion.
+///
+/// Measured against coreutils 9.4 with `date -d @1000000000 +'[%X]'`, because
+/// two of these rules are not what an implementation would naturally do:
+///
+/// | directive | output | rule |
+/// |---|---|---|
+/// | `%d` `%-d` `%_d` `%0d` | `09` `9` ` 9` `09` | `-` none, `_` space, `0` zero |
+/// | `%e` `%0e` | ` 9` `09` | `0` overrides a space-padded field |
+/// | `%a` `%^a` `%#a` | `Sun` `SUN` `SUN` | `^` upper, `#` swap case |
+/// | `%S` `%5S` `%-5S` `%_5S` | `40` `00040` `40` `   40` | `-` discards the width too |
+/// | `%5a` `%10B` | `  Sun` ` September` | a STRING field pads with space |
+/// | `%0a` `%_a` | `Sun` `Sun` | a pad flag does nothing to a string |
+///
+/// **`%1d` is `9`, not `09`.** The width REPLACES the field's default width;
+/// it is not a minimum applied to the default rendering. Rendering `%d` as
+/// `09` and then padding to 1 returns `09`, which is why the width has to
+/// reach the number formatter rather than being applied afterwards.
+///
+/// **The last flag wins**: `%-0d` is `09` and `%0-d` is `9`.
+#[derive(Clone, Copy, Default)]
+struct Spec {
+    /// `Some(b'0')` or `Some(b' ')` from an explicit flag.
+    pad: Option<u8>,
+    /// `-`: no padding at all, and the width is discarded with it.
+    nopad: bool,
+    width: Option<usize>,
+    upper: bool,
+    swap: bool,
+}
+
+impl Spec {
+    /// The width a numeric conversion should render at, given its default.
+    fn num_width(self, default: usize) -> usize {
+        if self.nopad {
+            0
+        } else {
+            self.width.unwrap_or(default)
+        }
+    }
+
+    /// The character a numeric conversion should pad with, given its default.
+    fn num_pad(self, default: u8) -> u8 {
+        self.pad.unwrap_or(default)
+    }
+}
+
+/// Read the flags and width after a `%`, leaving the iterator on the
+/// conversion character.
+fn read_spec<I: Iterator<Item = u8>>(it: &mut core::iter::Peekable<I>) -> Spec {
+    let mut spec = Spec::default();
+    while let Some(&c) = it.peek() {
+        match c {
+            // Last of a kind wins, which is why each simply overwrites.
+            b'-' => {
+                spec.nopad = true;
+                spec.pad = None;
+            }
+            b'_' => {
+                spec.pad = Some(b' ');
+                spec.nopad = false;
+            }
+            b'0' => {
+                spec.pad = Some(b'0');
+                spec.nopad = false;
+            }
+            b'^' => spec.upper = true,
+            b'#' => spec.swap = true,
+            _ => break,
+        }
+        it.next();
+    }
+    // `0` is a flag before it is a digit, so the width is whatever digits
+    // remain -- `%05S` is flag `0` and width `5`, not width `05`.
+    let mut width: Option<usize> = None;
+    while let Some(&c) = it.peek() {
+        if !c.is_ascii_digit() {
+            break;
+        }
+        let d = usize::from(c.wrapping_sub(b'0'));
+        width = Some(width.unwrap_or(0).saturating_mul(10).saturating_add(d));
+        it.next();
+    }
+    spec.width = width;
+    spec
+}
+
+/// Apply `^`/`#` and pad a STRING conversion out to the requested width.
+///
+/// Numeric conversions have already been rendered at their width, so the pad
+/// below is a no-op for them -- which is why one function can serve both.
+fn finish_piece(piece: &mut Vec<u8>, spec: Spec) {
+    if spec.upper {
+        piece.make_ascii_uppercase();
+    } else if spec.swap {
+        // `#` flips the case of the FIELD, not of each character, and the
+        // direction comes from the text. Measured:
+        //
+        //     %a Sun -> %#a SUN          %p AM -> %#p am
+        //     %B September -> SEPTEMBER  %Z UTC -> %#Z utc
+        //
+        // A per-character swap gives `sUN` for the first, which is what the
+        // obvious reading of "opposite case" produces and is wrong.
+        if piece.iter().any(u8::is_ascii_lowercase) {
+            piece.make_ascii_uppercase();
+        } else {
+            piece.make_ascii_lowercase();
+        }
+    }
+    if spec.nopad {
+        return;
+    }
+    if let Some(w) = spec.width {
+        if piece.len() < w {
+            let mut padded = vec![b' '; w.saturating_sub(piece.len())];
+            padded.extend_from_slice(piece);
+            *piece = padded;
+        }
+    }
 }
 
 /// `%z`: `+hhmm`, with the sign taken from the offset and the magnitude from
@@ -592,6 +810,104 @@ mod tests {
 
     fn fmt(f: &str, tm: &Tm) -> String {
         String::from_utf8(strftime(f.as_bytes(), tm)).unwrap()
+    }
+
+    /// The flags and widths GNU allows between `%` and the conversion.
+    ///
+    /// Every expectation here was run against coreutils 9.4 as
+    /// `date -d @1000000000 +'[%X]'` with TZ=UTC, not recalled. Before this,
+    /// `strftime` read exactly one byte after the `%`, so every one of these
+    /// came out as the literal text of the directive.
+    #[test]
+    fn strftime_honours_the_pad_flags() {
+        let tm = utc_tm(1_000_000_000);
+        assert_eq!(fmt("%d", &tm), "09");
+        assert_eq!(fmt("%-d", &tm), "9", "`-` means no padding");
+        assert_eq!(fmt("%_d", &tm), " 9", "`_` means space padding");
+        assert_eq!(fmt("%0d", &tm), "09", "`0` means zero padding");
+        // `0` overrides a field whose default pad is a space, and `_` a field
+        // whose default is a zero -- the flag wins either way round.
+        assert_eq!(fmt("%e", &tm), " 9");
+        assert_eq!(fmt("%0e", &tm), "09");
+        assert_eq!(fmt("%S", &tm), "40");
+        assert_eq!(fmt("%_5S", &tm), "   40");
+    }
+
+    /// A width REPLACES the field's default width; it is not a minimum.
+    ///
+    /// This is the rule an implementation gets wrong by building the obvious
+    /// way: render `%d` as `09` and then pad to the requested width, and `%1d`
+    /// comes back `09`. GNU says `9`.
+    #[test]
+    fn strftime_width_replaces_the_default_width() {
+        let tm = utc_tm(1_000_000_000);
+        assert_eq!(
+            fmt("%1d", &tm),
+            "9",
+            "a width of 1 is narrower than %d's default"
+        );
+        assert_eq!(fmt("%2d", &tm), "09");
+        assert_eq!(fmt("%5S", &tm), "00040");
+        assert_eq!(fmt("%3H", &tm), "001");
+        assert_eq!(fmt("%12N", &tm), "000000000000");
+        // `-` discards the width along with the padding.
+        assert_eq!(fmt("%-5S", &tm), "40");
+    }
+
+    /// The LAST flag wins, so the two orderings differ.
+    #[test]
+    fn strftime_takes_the_last_flag() {
+        let tm = utc_tm(1_000_000_000);
+        assert_eq!(fmt("%-0d", &tm), "09");
+        assert_eq!(fmt("%0-d", &tm), "9");
+    }
+
+    /// A string field pads with SPACE whatever the pad flag says, and `^`/`#`
+    /// change its case.
+    #[test]
+    fn strftime_cases_and_pads_a_string_field() {
+        let tm = utc_tm(1_000_000_000);
+        assert_eq!(fmt("%a", &tm), "Sun");
+        assert_eq!(fmt("%5a", &tm), "  Sun", "strings pad with space, not zero");
+        assert_eq!(fmt("%10B", &tm), " September");
+        assert_eq!(
+            fmt("%0a", &tm),
+            "Sun",
+            "a pad flag does nothing to a string"
+        );
+        assert_eq!(fmt("%^a", &tm), "SUN");
+        assert_eq!(fmt("%^B", &tm), "SEPTEMBER");
+    }
+
+    /// `#` flips the case of the FIELD, with the direction taken from the text.
+    ///
+    /// A per-character swap -- the obvious reading of "opposite case" -- gives
+    /// `sUN` for the first of these, and is wrong. `%P` is exempt because it is
+    /// already the flipped spelling of `%p`.
+    #[test]
+    fn strftime_hash_flips_the_whole_field() {
+        let tm = utc_tm(1_000_000_000);
+        assert_eq!(fmt("%#a", &tm), "SUN", "not sUN");
+        assert_eq!(fmt("%#B", &tm), "SEPTEMBER");
+        assert_eq!(fmt("%#p", &tm), "am", "an upper-case field goes down");
+        assert_eq!(fmt("%#Z", &tm), "utc");
+        assert_eq!(fmt("%#P", &tm), "am", "%P is already the flipped spelling");
+        assert_eq!(fmt("%^p", &tm), "AM");
+    }
+
+    /// An unrecognised specifier still comes back verbatim, flags and all --
+    /// the behaviour the flag parsing must not have broken.
+    #[test]
+    fn strftime_still_passes_an_unknown_directive_through() {
+        let tm = utc_tm(1_000_000_000);
+        assert_eq!(fmt("%q", &tm), "%q");
+        assert_eq!(fmt("%%", &tm), "%");
+        assert_eq!(fmt("100%", &tm), "100%");
+        assert_eq!(
+            fmt("%Y-%m-%d", &tm),
+            "2001-09-09",
+            "plain formats unchanged"
+        );
     }
 
     #[test]

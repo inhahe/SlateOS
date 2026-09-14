@@ -422,6 +422,19 @@ run_case -o nosuchcolumn
 run_case -p notanumber
 run_case -p 999999
 
+# AN ARGUMENT THAT IS NOT VALID UNICODE. On this OS that is a legal thing
+# to type, and `env::args()` unwraps -- so until 2026-09-14 this ABORTED
+# `ps` rather than refusing it. Measured: procps answers
+# `error: garbage option` for a bad option byte.
+#
+# Only this form is pinned. procps picks its sentence by POSITION --
+# `-u<0xE9>` gives `user name does not exist`, `-o<0xE9>` gives `unknown
+# user-defined format specifier`, `--sort <0xE9>` gives `unknown sort
+# specifier` -- and this build answers `garbage option` for all of them.
+# Those three are a wording difference on an input nobody types, recorded
+# in known-issues rather than pinned red here.
+run_case "-$(printf '\351')"
+
 # `-X` and `-h` are NOT unknown options, and putting them in the list above was
 # my error rather than a finding. Both are real procps options this build does
 # not implement: `-X` is the register format and prints its own header before

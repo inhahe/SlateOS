@@ -143891,6 +143891,81 @@ were older than `libc.a` and every one would have been reported.
 
 ### The proper fix, not done here
 
+**FIXED 2026-09-14, and it was three crates rather than ~200.** The estimate
+below counted every crate under `userspace/`; what actually ships is the
+`scripts/rootfs-bin-manifest.txt` list, and **70 of its 72 binaries live in one
+crate** (`coreutils`). The other two are `ar` and `logrotate`. Measuring the
+scope before starting turned a change nobody wanted to make into one that took
+a tick.
+
+`userspace/sysroot-dep` holds the logic; each of the three crates has a
+three-line `build.rs` calling `sysroot_dep::emit()`. It is a
+**build-dependency**, not a normal one, and that is the whole design: a shared
+*library* crate would not work, because cargo would re-run ITS build script,
+find the output unchanged and leave the dependents alone. The
+`cargo:rerun-if-changed` has to be emitted by the build script of the crate
+whose rebuild it governs.
+
+`rerun-if-changed` alone is also not enough — it only re-runs the script. The
+script therefore emits `cargo:rustc-env=SYSROOT_LIBC_FINGERPRINT=<mtime>.<len>`
+so the crate's own compilation input changes when the archive does. Without
+that second half the fix is a no-op that looks correct.
+
+**Verified three ways**, because one direction would not have been enough:
+
+| | result |
+|---|---|
+| touch `libc.a`, rebuild | `cp` **relinks** (was: unchanged) |
+| rebuild again, touching nothing | `cp` unchanged, 0.75 s — it has not made every build rebuild the world |
+| touch `libc.a`, build for the **host** target | `cp.exe` unchanged — the host links its own libc and must not depend on this archive |
+
+**And verified at scale, which the three above do not cover.** The three
+checks are all about one binary. After the `libc.a` touches those measurements
+required, the whole image manifest was left genuinely stale, and a single
+ordinary rebuild of the three crates cleared it:
+
+| | |
+|---|---|
+| before | **70 of 72** manifest binaries older than `libc.a` |
+| `cargo +nightly build --release` in the three crates | 37 s, 3 s, 2 s |
+| after | **0 of 72** |
+
+Before today that same rebuild left all 70 stale and reported `Finished`. This
+also confirms the precondition for making the staging gate fatal: the refusal
+is satisfiable by the command the gate prints, for every binary on the image,
+in about forty seconds.
+
+### What is deliberately NOT covered, and why
+
+The three crates fixed are the ones holding the image's binaries. Measured, the
+rest of the tree is larger than that:
+
+| | count |
+|---|---|
+| `userspace/` crates producing binaries | **194** |
+| of those, already having a `build.rs` | **9** |
+
+**The image is protected without touching the other 191**, and that is the
+whole argument: `create-ext4-rootfs.sh` now refuses to build an image from a
+binary older than `libc.a`, and the boot test runs the image. A stale binary
+that is not on the image is a developer-build annoyance, not something that can
+ship or be tested against.
+
+So extending this is optional, and it is not free. The nine crates that already
+have a `build.rs` would need their scripts **merged**, not replaced — and that
+is not a hypothetical hazard. It is exactly how this fix broke `coreutils`:
+`cat > build.rs` in a loop over three crates destroyed the one that already had
+a script, which emitted the bare-metal linker script every binary in that crate
+is laid out by. Two commits and 70 rebuilt binaries passed before the baseline
+comment on an unrelated gate led back to it.
+
+If the other 191 are ever done, the merge cases are the whole of the risk and
+should be done by hand and read individually, not by the loop that does the 185
+safe ones.
+
+The original proper-fix note follows; the part about ~200 crates is what was
+wrong with it.
+
 A `build.rs` in the crates that link the sysroot, emitting
 
     cargo:rerun-if-changed=<path to sysroot>/lib/libc.a
@@ -143945,6 +144020,57 @@ regression — with the `ARG_MAX` mismatch left as its own question.
 silent loss: the spawn does fail, and the caller does get an error. That is
 strictly better than the 64 KiB case in the entry above, which is why that one
 was fixed on the spot and this one is written down.
+
+---
+
+## FIXED 2026-09-14 — and the paragraph directly above is WRONG
+
+**It was a silent loss.** The table at the top of this entry followed the value
+from the kernel backwards and stopped at `posix/src/spawn.rs` without reading
+what that file does before it calls. It packs first:
+
+```rust
+if pos + needed > buf.len() {
+    break; // Truncate silently if buffer is full.
+}
+```
+
+`buf` is `EXEC_PACKED_MAX`, **128 KiB** — half the kernel's 256 KiB. So an
+argument list over 128 KiB never reached the kernel check at all. It was packed
+short, and `count_cstring_array` counts the whole list regardless of any
+buffer, so the child was handed **a truncated buffer and the full `argc`**. A
+program started with fewer arguments than its parent passed, and nothing
+anywhere reported it.
+
+Proved before fixing, with four strings and room for two:
+
+    count_cstring_array -> 4
+    pack_cstring_array  -> 22 bytes (two strings), no error
+
+**The dilemma above dissolves, because its premise was false.** Option 1 was
+rejected on the grounds that enforcing `ARG_MAX` "would start refusing spawns
+between 128 KiB and 256 KiB that succeed today". Those spawns do not succeed
+today — they truncate. Enforcing 128 KiB refuses nothing that works; it reports
+something that was already broken. So the choice that looked like a
+user-visible policy call was not one, and did not need the operator.
+
+**Fixed:** `pack_cstring_array` returns `Option<usize>` and refuses rather than
+truncating; `posix_spawn` and `execve` answer `E2BIG`, which is what POSIX
+spells for exec with too long an argument list. That fixes the errno this entry
+was originally about as a side effect.
+
+**One thing worth noticing about the tests.** A test named
+`test_pack_and_count_consistency` already existed and exercised only a case
+where the buffer was ample — it asserted the invariant in the one situation
+where it cannot fail. And `slateos_spawn_caps_rejects_an_oversized_list` passes
+with the truncation reinstated, so it was not covering this either. Two tests
+whose names describe the defect, neither of which could see it.
+
+**Still open, and genuinely a question:** `sysconf(_SC_ARG_MAX)` advertises
+128 KiB and the kernel enforces 256 KiB. They now agree in effect, because libc
+refuses at 128 KiB first — but the kernel's limit is still twice what anyone is
+told, which is worth reconciling on the kernel side rather than leaving as two
+numbers that happen not to collide.
 
 
 ## B-AIO-TOOK-AN-EVENTFD-TO-NOTIFY-AND-NEVER-NOTIFIED-IT (lane B, 2026-09-13) — **fixed**, and so is its sibling
@@ -144359,6 +144485,24 @@ smaller. Written down because the pattern is in *how I look*, not in any one
 subject, and because twice the correct answer was already sitting in a tool
 this repo ships.
 
+**The same failure runs the other way, and that direction is worse.** Later the
+same day I overwrote `userspace/coreutils/build.rs` — it held the bare-metal
+linker-script emission and I replaced it with nine lines — and then wrote an
+audit over all 75 of that day's commits to find any other file I had clobbered.
+It reported **none**. It was wrong: the one case I already knew about counted
+its previous size as `stdout.count("
+") + 1`, which over-counts a file ending
+in a newline, so the ratio came out 21/25 = 0.84 against a 0.85 cutoff and the
+known clobbering fell just under it.
+
+An over-report wastes time. **An under-report ends the investigation**, and it
+ends it with a number that reads like reassurance. The fix is the one habit
+that catches both: give the instrument a case whose answer you already know,
+and refuse to believe a clean result until it has found that one. Re-run with
+the count fixed and a control asserting the known case was found, the audit
+reported exactly one file — which was the truth, and is why the blast radius is
+now known to be one rather than assumed to be.
+
 | question | my ad-hoc answer | the real answer | what got it right |
 |---|---|---|---|
 | how many flags do we accept and ignore? | **9** (grep the `## Limitations` lists) | **1** | reading the code behind each row |
@@ -144537,12 +144681,37 @@ permutation out of 20,745!.
 
 ## B-FOUR-STAGED-UTILITIES-STILL-DIE-ON-A-LEGAL-FILENAME (lane B, 2026-09-14)
 
-**Three of the four are done as of 2026-09-14.** `patch` and `diff` were
-converted (and both turned out to have a larger content-side fault behind
-the argv one), and `logger` is done here. **`ps` is the one left**, and it
-is the mildest of the four: its options are numeric and format selectors,
-so a non-Unicode argument is unlikely rather than routine — but it still
-aborts rather than refusing.
+**FIXED 2026-09-14 — all four.** `patch` and `diff` were converted first,
+and both turned out to have a larger content-side fault sitting behind the
+argv one: `patch` refused every file that was not valid UTF-8, and `diff`
+reported two different files as identical. `logger` had the same shape —
+`BufRead::lines()` failed the whole read on one undecodable byte, so
+`cat something-binary | logger` logged nothing. **`ps` was the mildest and
+is now done too.**
+
+**That is the pattern worth keeping from all four: the argv detector found
+the door, and in three cases out of four the bigger hole was inside.** A
+checker that looks at one narrow thing will report that narrow thing; what
+it is actually telling you is *where to read*.
+
+### One deliberate divergence, in `ps`
+
+procps picks its refusal sentence by WHERE the bad byte appeared, measured:
+
+| input | procps says |
+|---|---|
+| `ps -<0xE9>` | `error: garbage option` |
+| `ps -u<0xE9>` | `error: user name does not exist` |
+| `ps -o<0xE9>` | `error: unknown user-defined format specifier "..."` |
+| `ps --sort <0xE9>` | `error: unknown sort specifier` |
+
+This build answers `garbage option` for all four. The first matches exactly
+and is pinned in `scripts/ps-diff.sh`; the other three differ in wording,
+not in outcome — all refuse, all exit 1. Reaching the three sentences would
+mean reparsing the argument as bytes throughout a file already at **60
+passed / 0 differed** against procps, to change what a program says about
+an input nobody types. Recorded here rather than pinned red, so it is a
+decision on the record instead of an omission.
 
 `logger` had the argv panic AND a second fault the argv detector cannot
 see: `BufRead::lines()` on stdin yields `Result<String>` and fails the
@@ -145145,3 +145314,120 @@ neighbours (`-u`, `-c`, `-q` of the same pair) — it has had the fixtures all
 along, like the byte cases did. Today's work took that harness from **43 passed
 / 64 differed to 68 / 39**; this is the largest single wrong-answer left in the
 remainder.
+
+## TD-B-CP-DIFF-CANNOT-SEE-A-DIFFERENCE-MADE-OF-NUL-BYTES (lane B, 2026-09-14)
+
+**Status:** OPEN — diagnosed and the fix written, but **reverted unverified**
+
+`scripts/cp-diff.sh` compares the copied tree's file contents by capturing them
+in a command substitution:
+
+```sh
+o_body=$(contents "$o_dir" | scrub "$o_dir"); g_body=$(contents "$g_dir" | ...)
+```
+
+A command substitution **drops NUL bytes**, and bash says so, once per file:
+
+    cp-diff.sh: line 419: warning: command substitution: ignored null byte in input
+
+Both sides lose them identically, so two files differing **only** in NUL bytes
+compare EQUAL and the harness reports the copy as faithful. That is the same
+shape as the `diff` bug fixed earlier today: comparing a lossy projection of
+the thing rather than the thing.
+
+`contents()` is what feeds it, and it `cat`s each file raw — so every fixture
+holding a NUL reaches the capture. The warnings have presumably been printed on
+every run for as long as those fixtures have existed.
+
+### The fix, written and then backed out
+
+Add a per-file checksum inside `contents()`, above the body:
+
+```sh
+printf '== %s\n' "$f"
+printf 'sha %s\n' "$(sha256sum <"$f" 2>/dev/null | cut -d' ' -f1)"
+cat -- "$f"
+```
+
+The sum is over the raw bytes and is plain hex, so it survives the capture; the
+readable body stays beneath it so a failure is still diagnosable rather than a
+wall of differing hashes. Both sides get it, so no expected output changes —
+what changes is that a NUL-only difference stops being invisible.
+
+**Backed out because I could not verify it.** `all-diff.sh` was running, the
+machine was saturated, and three attempts at an isolated probe either mangled
+in the shell layers or timed out. A harness change that has not been shown to
+(a) catch the case it is for and (b) still call identical trees identical is
+exactly the kind that turns green into noise for the other two lanes. The
+diagnosis is solid and the patch is above; applying it wants a quiet machine
+and the two-way probe, not a confident-sounding commit.
+
+## B-DATE-IGNORES-EVERY-STRFTIME-FLAG-AND-WIDTH (lane B, 2026-09-14)
+
+**Status:** flags and widths **FIXED 2026-09-14**; the `-d` grammar remains open
+
+`localtime::strftime` now reads flags and a width before the conversion, so
+all seven flag/width cases pass: `scripts/date-diff.sh` went **80 passed / 41
+differed to 87 / 34**. The remaining 34 are the second cluster below — `-d`
+accepting anything but `@SECONDS` — which is GNU's whole date grammar and a
+separate job.
+
+**One rule needed a third measurement.** `%#a` was implemented as a
+per-character case swap, the obvious reading of "opposite case", which gives
+`sUN`. Measuring six fields showed `#` flips the FIELD, with the direction
+taken from its text — `%#a` `SUN`, `%#p` `am`, `%#B` `SEPTEMBER`, `%#Z` `utc`
+— and that `%P` is exempt, because `%P` is already the flipped spelling of
+`%p`. Six tests pin the measured rules, including `%1d` and last-flag-wins.
+
+`date +%-d` prints the literal text `%-d`. So does `%_d`, `%0e`, `%^a`, `%#a`,
+`%5S` and every other flagged or width-qualified conversion:
+`localtime::strftime` reads exactly one byte after the `%`, so a flag is an
+unrecognised specifier and comes out verbatim.
+
+Found by running `date` over `scripts/date-diff.sh`'s own 77 cases against GNU
+directly: **45 differ**, in two clusters.
+
+| cluster | cases | size |
+|---|---|---|
+| flags and widths (`%-d`, `%_d`, `%0e`, `%^a`, `%#a`, `%5S`, `%-5S`) | ~7 | bounded, specified below |
+| `-d` accepting anything but `@SECONDS` (`-d '2021-03-04 05:06:07'`) | ~30 | GNU's whole date grammar; a separate job |
+
+### The measured specification
+
+Every line below was run, not recalled. `date -d @1000000000 +'[%X]'`, TZ=UTC:
+
+| format | output | what it shows |
+|---|---|---|
+| `%d` `%-d` `%_d` `%0d` | `09` `9` `⎵9` `09` | `-` no pad, `_` space pad, `0` zero pad |
+| `%e` `%0e` `%_e` | `⎵9` `09` `⎵9` | `0` overrides a space-padded field |
+| `%a` `%^a` `%#a` | `Sun` `SUN` `SUN` | `^` upper, `#` swap case |
+| `%S` `%5S` `%-5S` `%_5S` `%05S` | `40` `00040` `40` `⎵⎵⎵40` `00040` | width; `-` discards the width too |
+| `%5e` `%5a` `%10B` `%5Z` | `⎵⎵⎵⎵9` `⎵⎵Sun` `⎵September` | **string fields pad with SPACE** |
+| `%0a` `%_a` | `Sun` `Sun` | a pad flag on a string field does nothing |
+| `%3H` `%3j` `%12N` | `001` `252` `000000000000` | width applies to any numeric field |
+
+**Two rules that a reasonable implementation would get wrong:**
+
+1. **`%1d` is `9`, not `09`.** The width *replaces* the field's default width;
+   it is not a minimum applied to the default rendering. An implementation that
+   renders `%d` as `09` and then pads to the requested width returns `09` here
+   and is wrong. The value must be formatted *with* the requested width.
+2. **The last flag wins.** `%-0d` is `09` and `%0-d` is `9`.
+
+### Why this was measured twice
+
+The first sweep captured both sides with `.strip()`, which showed `%_d` as `9`.
+Implementing from that reading would have produced no space padding at all and
+looked right against the stripped comparison. Re-measuring with `[` `]`
+delimiters is what turned it into ` 9`. **A comparison that normalises
+whitespace cannot be used to specify something whose whole content is
+whitespace.**
+
+### What the fix needs
+
+`strftime` currently formats each field inline, so there is no single place a
+width or pad can be applied. The numeric arms need to go through one helper
+taking `(value, default_width, default_pad)` with the flags and width
+overriding both — which is a real change to a ~40-arm function shared by
+`date`, `ls` and `diff`'s header, and wants doing with attention rather than at
+the end of a tick.

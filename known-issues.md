@@ -143819,6 +143819,43 @@ the broken behaviour: no program benefits from losing its arguments. That is
 what made them safe to fix on sight, and it is the property to check before
 fixing each of the nine.
 
+### The sweep that did work, and its numbers
+
+After the constant-based idea failed at 93% noise, a narrower one succeeded. The
+signature is not *a constant nobody reads* — a libc exports those by the
+thousand — but **a parameter we were handed and chose not to look at, in a
+function that then reports success**:
+
+| filter | count |
+|---|---|
+| exported `pub extern "C"` functions in `posix/src` | 1203 |
+| …ignoring at least one `_`-prefixed parameter | 168 |
+| …where that parameter is flag/mode-like | 17 |
+| …**and the function returns success** | **13** |
+
+That last row is what makes it usable. `mkfifo`, `mkfifoat`, `dbm_open` and
+`open_by_handle_at` all ignore a mode or flag and are *correct* to: they return
+`ENOSYS` after validating, so nothing was created and nothing was promised.
+
+Of the 13 survivors, exactly **one** was a defect: `siginterrupt`, fixed. The
+other twelve, each checked against code:
+
+- `dlopen` returns null — nothing is loaded, so `RTLD_*` has nothing to affect.
+- `mq_open`, `shmat` — single-process implementations, where a permission or
+  attach flag cannot mean anything (the same reasoning that withdrew
+  `SHM_RDONLY` and `SEM_UNDO`).
+- `openlog`'s facility — `do_syslog` writes to stderr; there is no daemon to
+  route to.
+- the seven `__*_chk` fortify wrappers — the ignored parameter is the fortify
+  *level*, and they always apply `maxlen.min(slen)`, the stricter of the two
+  bounds. Ignoring a level while taking the strict path is safe by
+  construction.
+
+**One real defect from 13 candidates**, against nine claimed and one real from
+the documentation sweep. The difference is entirely that this reads what the
+code does with its arguments, and a doc comment reads what someone believed at
+the time they wrote it.
+
 ### Why there is no gate for this, measured
 
 The obvious follow-up is a standing check: **a flag constant that production

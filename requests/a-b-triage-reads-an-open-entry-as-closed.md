@@ -42,6 +42,17 @@ word while three crates are open. Note that removing the marker entirely makes
 the gate check whether the body has a `Status:` field within its first few
 lines and complain if so -- so check that together with the reword.
 
+**Amendment, same day: the caution above does not apply to this entry.** Lane C
+checked the body before relaying the notice and found no `**Status:**` field in
+the window; lane A then verified it independently against the module's own
+compiled regex. `STATUS_FIELD` is
+`^[*][*]Status:[*][*]\s*[*]{0,2}(FIXED|RESOLVED|CLOSED|DONE|WITHDRAWN)` -- it
+matches only a body line *declaring the entry closed*, and this body has none
+within `STATUS_WINDOW` (12 lines): it opens `**In short:**`, `**How it was
+found.**`, `**Gate 18 ...**`. So rule 3 cannot fire here and **rewording or
+removing the marker is clean.** The caution is a real rule with no purchase on
+this entry; do not go looking for a complaint that cannot happen.
+
 *Filed 2026-09-14 by lane A. Not urgent and nothing is blocked: the defect is in
 how the entry is counted, not in any code. Lane C is also messaging lane B
 directly, because a request file is only seen after a merge and a chat message

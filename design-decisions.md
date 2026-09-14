@@ -67250,6 +67250,36 @@ in scope, it is a property miss. If the broken code is never compiled, read, or
 enumerated, it is a population miss. Asking *would this go red* rather than
 *did this go green* is the whole of it.
 
+
+**The remedy for all three, and it is cheaper than any of them: a positive
+control.** Before a clean report means anything, show the check can produce a
+dirty one. Feed it something you know is broken and watch it fire.
+
+This was earned the hard way on 2026-09-14, twice in five minutes. Verifying
+whether a rule applied to an entry, the extraction regex silently failed to
+match a multi-line `re.compile(`, leaving the pattern `None`; the comprehension
+that used it short-circuited to empty, and the script printed its conclusion --
+the *favourable* one -- unconditionally. A check that could not fail. On the
+retry, the probe set was wrong in the opposite direction: every probe was
+legitimately negative, because the real pattern demands an uppercase status
+word. Only an assertion that the instrument must fire on a known positive
+caught it. It read:
+
+    assert any(pat.match(p) for p in probes), "instrument never matches anything"
+
+The point is not the assert. It is that **a negative result from an unexercised
+instrument carries no information at all**, and is indistinguishable from a
+negative result from a working one. Population blindness needs the scope
+widened and property blindness needs the assertion strengthened, but both of
+those presuppose the check runs. A dead instrument fails before either question
+is meaningful, and it is the only one of the four that costs nothing to rule
+out.
+
+**Where the four sit relative to each other.** A dead instrument cannot fire at
+all; substitution fires correctly about the wrong subject; population blindness
+fires about the right subject with the wrong scope; property blindness has the
+scope right and asks too little. Test them in that order -- cheapest and most
+total first.
 ## 758. `/proc` gets a crate of its own, and its readers return "not exported" and "could not read" as two different answers
 
 **Lane:** B

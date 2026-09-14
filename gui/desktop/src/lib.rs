@@ -1719,6 +1719,8 @@ impl DesktopShell {
         if let Some(doc) = self.notif_watch.poll() {
             self.notif = notifsettings::NotifFile::from_document(doc);
             self.focus.app_overrides = self.notif.settings.apps.clone();
+            self.notifications
+                .adopt_app_rules(&self.notif.settings.apps);
         }
     }
 
@@ -1740,6 +1742,10 @@ impl DesktopShell {
         let changed = file.settings.apps != self.focus.app_overrides;
         if changed {
             self.focus.app_overrides = file.settings.apps.clone();
+            // The pane draws a card per program; without this a rule changed
+            // in the Settings application would show as its old value here,
+            // and a toggle made against that stale card would write it back.
+            self.notifications.adopt_app_rules(&file.settings.apps);
         }
         // Adopted either way: the document is what a later save splices into,
         // so keeping the old one would write back a file stripped of whatever
@@ -1814,7 +1820,8 @@ impl DesktopShell {
             _ => return,
         }
         self.notif.settings.set_rule(rule.clone());
-        self.focus.set_app_override(rule);
+        self.focus.set_app_override(rule.clone());
+        self.notifications.adopt_app_rules(&[rule]);
         if let Err(err) = self.notif.save() {
             eprintln!("desktop: could not save notifications.yaml: {err}");
         }
@@ -10478,6 +10485,43 @@ mod overview_wiring_tests {
                 s.notif.settings.rule_for("Chat").importance,
                 notifsettings::Importance::Silent,
                 "a priority change overwrote the rule the user had set"
+            );
+        });
+    }
+
+    /// A rule changed elsewhere shows as changed in the notification pane.
+    ///
+    /// The pane draws a card per program, and it used to draw them from a
+    /// record of its own. So a program silenced in the Settings application
+    /// still showed as enabled here -- and because the pane's switch reports
+    /// the value it *thinks* it is flipping from, toggling that stale card
+    /// wrote "enabled" back over the user's choice. A duplicate model that is
+    /// merely stale is a display bug; one the user can act on is a data loss.
+    #[test]
+    fn a_rule_changed_elsewhere_is_shown_in_the_pane() {
+        appearance::config::testing::with_scratch_config("shell-pane-adopt", |_root| {
+            let mut s = shell();
+            // The pane learns about Chat the way it always does.
+            let _ = s.notify(notif(1, "Chat"));
+            assert_eq!(
+                s.notifications.app_settings()[0].importance,
+                notifsettings::Importance::Normal
+            );
+
+            // Somebody else silences it: the Settings application writing the
+            // file, arriving as a reload.
+            let mut file = notifsettings::NotifFile::load();
+            file.settings.set_rule(
+                notifsettings::AppRule::new("Chat")
+                    .with_importance(notifsettings::Importance::Silent),
+            );
+            file.save().expect("save");
+            assert!(s.poll_notification_rules(), "the change was not picked up");
+
+            assert_eq!(
+                s.notifications.app_settings()[0].importance,
+                notifsettings::Importance::Silent,
+                "the pane still shows the value it had before"
             );
         });
     }

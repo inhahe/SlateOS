@@ -60,6 +60,7 @@ use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 use guitk::wheel;
+use notifsettings::Importance;
 
 // ============================================================================
 // Colour
@@ -259,15 +260,6 @@ pub enum NotifPriority {
 }
 
 impl NotifPriority {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Low => "Low",
-            Self::Normal => "Normal",
-            Self::High => "High",
-            Self::Urgent => "Urgent",
-        }
-    }
-
     fn accent_color(self, p: &Palette) -> Color {
         match self {
             Self::Low => p.overlay0,
@@ -367,24 +359,30 @@ enum QsHit {
 }
 
 /// Per-app notification settings.
-#[derive(Clone, Debug)]
-pub struct AppNotifSettings {
-    pub app_name: String,
-    pub enabled: bool,
-    pub priority: NotifPriority,
-    pub sound: bool,
-    pub banner: bool,
-}
+///
+/// **The same rule the desktop obeys**, not a copy of it. This was a local
+/// struct with its own `enabled` and its own priority scale, and the cards
+/// drawn from it could disagree with what `notifications.yaml` said -- so a
+/// program silenced in the Settings application still showed as enabled here,
+/// and toggling it would write "enabled" back over the user's choice.
+///
+/// `enabled` is gone with the struct: a program is switched off by being
+/// `Silent`, which is the one value `focus_assist::should_show_notification`
+/// reads.
+pub use notifsettings::AppRule as AppNotifSettings;
 
-impl AppNotifSettings {
-    fn new(app_name: String) -> Self {
-        Self {
-            app_name,
-            enabled: true,
-            priority: NotifPriority::Normal,
-            sound: true,
-            banner: true,
-        }
+/// The colour a program's importance is badged with.
+///
+/// A free function rather than a method, because [`Importance`] belongs to
+/// `notifsettings` and that crate must not learn what a palette is -- it is
+/// read by a settings application that draws none of this. The same reason
+/// `inputsettings` does not depend on `appearance`.
+fn importance_accent(importance: Importance, p: &Palette) -> Color {
+    match importance {
+        Importance::Silent => p.overlay0,
+        Importance::Normal => p.blue,
+        Importance::Priority => p.peach,
+        Importance::Critical => p.red,
     }
 }
 
@@ -717,7 +715,7 @@ impl NotificationPane {
             .any(|s| s.app_name == notif.app_name)
         {
             self.app_settings
-                .push(AppNotifSettings::new(notif.app_name.clone()));
+                .push(AppNotifSettings::new(&notif.app_name));
         }
 
         // Insert at front (newest first).
@@ -932,6 +930,29 @@ impl NotificationPane {
     /// Get per-app settings (read-only).
     pub fn app_settings(&self) -> &[AppNotifSettings] {
         &self.app_settings
+    }
+
+    /// Adopt the rules the desktop is obeying.
+    ///
+    /// Called by the shell whenever they change, so that a program silenced in
+    /// the Settings application shows as silenced here. Without it the pane's
+    /// cards were a separate record that drifted, and a toggle made against a
+    /// stale card wrote the stale value back over the user's choice.
+    ///
+    /// Programs the pane has seen but the rules do not mention keep their
+    /// card: a rule is created the first time the user expresses one, and
+    /// dropping the card until then would remove the only way to express it.
+    pub fn adopt_app_rules(&mut self, rules: &[AppNotifSettings]) {
+        for rule in rules {
+            match self
+                .app_settings
+                .iter_mut()
+                .find(|a| a.app_name == rule.app_name)
+            {
+                Some(existing) => existing.clone_from(rule),
+                None => self.app_settings.push(rule.clone()),
+            }
+        }
     }
 
     /// Get quick settings state for a specific toggle.
@@ -1801,7 +1822,7 @@ impl NotificationPane {
             });
 
             // Priority badge.
-            let prio_color = app.priority.accent_color(p);
+            let prio_color = importance_accent(app.importance, p);
             cmds.push(RenderCommand::FillRect {
                 x: PANE_PADDING + 12.0,
                 y: y + 32.0,
@@ -1813,7 +1834,7 @@ impl NotificationPane {
             cmds.push(RenderCommand::Text {
                 x: PANE_PADDING + 16.0,
                 y: y + 34.0,
-                text: app.priority.label().to_string(),
+                text: app.importance.label().to_string(),
                 color: readable_on(prio_color),
                 font_size: 10.0,
                 font_weight: FontWeightHint::Bold,
@@ -1823,7 +1844,8 @@ impl NotificationPane {
 
             // Enabled toggle.
             let (pill_x, pill_y, pill_w, pill_h) = Self::app_toggle_rect(y);
-            let pill_bg = if app.enabled { p.green } else { p.surface2 };
+            let enabled = app.importance != Importance::Silent;
+            let pill_bg = if enabled { p.green } else { p.surface2 };
             cmds.push(RenderCommand::FillRect {
                 x: pill_x,
                 y: pill_y,
@@ -1841,7 +1863,7 @@ impl NotificationPane {
             if app.banner {
                 status_parts.push("Banner");
             }
-            if !app.enabled {
+            if !enabled {
                 status_parts.push("Disabled");
             }
             cmds.push(RenderCommand::Text {
@@ -1998,11 +2020,20 @@ impl NotificationPane {
         let Some(app) = self.app_settings.get_mut(idx) else {
             return;
         };
-        app.enabled = !app.enabled;
+        // Switched off is `Silent`; switched on returns to `Normal`. The
+        // pane's switch carries no memory of a level the user chose elsewhere,
+        // and inventing one here would be a third place storing it -- the
+        // shell's applier makes the same choice for the same reason.
+        let enabled = app.importance == Importance::Silent;
+        app.importance = if enabled {
+            Importance::Normal
+        } else {
+            Importance::Silent
+        };
         self.events.push(NotifPaneEvent::SettingChanged {
             app: app.app_name.clone(),
             setting: AppSettingKind::Enabled,
-            value: SettingValue::Bool(app.enabled),
+            value: SettingValue::Bool(enabled),
         });
     }
 
@@ -2809,7 +2840,9 @@ mod tests {
             );
         }
         assert!(
-            pane.app_settings.iter().all(|a| a.enabled),
+            pane.app_settings
+                .iter()
+                .all(|a| a.importance != Importance::Silent),
             "no app should have been toggled"
         );
     }
@@ -3129,10 +3162,13 @@ mod tests {
         pane.push_notification(make_notif("MyApp", "Hello", 100));
         assert_eq!(pane.app_settings.len(), 1);
         assert_eq!(pane.app_settings[0].app_name, "MyApp");
-        assert!(pane.app_settings[0].enabled);
+        assert_eq!(
+            pane.app_settings[0].importance,
+            Importance::Normal,
+            "a program the user has said nothing about is neither silenced nor promoted"
+        );
         assert!(pane.app_settings[0].sound);
         assert!(pane.app_settings[0].banner);
-        assert_eq!(pane.app_settings[0].priority, NotifPriority::Normal);
     }
 
     #[test]
@@ -3594,8 +3630,15 @@ mod tests {
             notif.read = read;
             pane.push_notification(notif);
             for app in &mut pane.app_settings {
-                app.priority = priority;
-                app.enabled = enabled;
+                // The card's badge is the *program's* importance, not the
+                // message's urgency the fixture varies above. Silent when the
+                // fixture asks for a disabled app, Normal otherwise, which is
+                // the same pair the pane's own switch writes.
+                app.importance = if enabled {
+                    Importance::Normal
+                } else {
+                    Importance::Silent
+                };
             }
             if hovered {
                 pane.hovered_notif = Some(0);

@@ -20,6 +20,7 @@
 
 use quoting::quoteaf_os;
 use std::env;
+use std::ffi::OsString;
 use std::io;
 use std::process::{self, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -136,14 +137,14 @@ fn parse_duration(s: &str) -> Option<Duration> {
 
 // ── timeout ──────────────────────────────────────────────────────
 
-fn run_timeout(args: &[String]) -> i32 {
+fn run_timeout(args: &[OsString]) -> i32 {
     let mut signal = SIGTERM;
     let mut kill_after: Option<Duration> = None;
     let mut _foreground = false;
     let mut preserve_status = false;
     let mut verbose = false;
-    let mut duration_str: Option<String> = None;
-    let mut cmd_args: Vec<String> = Vec::new();
+    let mut duration_str: Option<OsString> = None;
+    let mut cmd_args: Vec<OsString> = Vec::new();
 
     let mut i = 0;
     let mut past_options = false;
@@ -157,7 +158,12 @@ fn run_timeout(args: &[String]) -> i32 {
             continue;
         }
 
-        match arg.as_str() {
+        // `""` for a word that is not valid Unicode. Every option name here
+        // is ASCII, so such a word matches none of them and falls to the
+        // operand arm -- which is where a COMMAND or one of its arguments
+        // belongs, and where its bytes are kept intact.
+        let decoded: &str = arg.to_str().unwrap_or("");
+        match decoded {
             "--help" => {
                 println!("Usage: timeout [OPTION] DURATION COMMAND [ARG]...");
                 println!("Start COMMAND, and kill it if still running after DURATION.");
@@ -182,7 +188,7 @@ fn run_timeout(args: &[String]) -> i32 {
             "-s" | "--signal" => {
                 i += 1;
                 if i < args.len() {
-                    match parse_signal(&args[i]) {
+                    match args[i].to_str().and_then(parse_signal) {
                         Some(s) => signal = s,
                         None => {
                             eprintln!("timeout: invalid signal {}", quoteaf_os(&args[i]));
@@ -194,7 +200,7 @@ fn run_timeout(args: &[String]) -> i32 {
             "-k" | "--kill-after" => {
                 i += 1;
                 if i < args.len() {
-                    match parse_duration(&args[i]) {
+                    match args[i].to_str().and_then(parse_duration) {
                         Some(d) => kill_after = Some(d),
                         None => {
                             eprintln!("timeout: invalid duration {}", quoteaf_os(&args[i]));
@@ -209,8 +215,8 @@ fn run_timeout(args: &[String]) -> i32 {
             "--" => {
                 past_options = true;
             }
-            _ if arg.starts_with("--signal=") => {
-                let val = arg.strip_prefix("--signal=").unwrap_or("");
+            _ if decoded.starts_with("--signal=") => {
+                let val = decoded.strip_prefix("--signal=").unwrap_or("");
                 match parse_signal(val) {
                     Some(s) => signal = s,
                     None => {
@@ -219,8 +225,8 @@ fn run_timeout(args: &[String]) -> i32 {
                     }
                 }
             }
-            _ if arg.starts_with("--kill-after=") => {
-                let val = arg.strip_prefix("--kill-after=").unwrap_or("");
+            _ if decoded.starts_with("--kill-after=") => {
+                let val = decoded.strip_prefix("--kill-after=").unwrap_or("");
                 match parse_duration(val) {
                     Some(d) => kill_after = Some(d),
                     None => {
@@ -229,9 +235,11 @@ fn run_timeout(args: &[String]) -> i32 {
                     }
                 }
             }
-            _ if arg.starts_with('-') && arg.len() == 2 => {
-                // -N where N is a signal number
-                if let Ok(n) = arg[1..].parse::<u32>() {
+            _ if decoded.starts_with('-') && decoded.len() == 2 => {
+                // -N where N is a signal number. On the decoded view: a signal
+                // number is ASCII, so a two-BYTE word that is not Unicode
+                // cannot be one and falls through to the operand arm.
+                if let Ok(n) = decoded.get(1..).unwrap_or("").parse::<u32>() {
                     if n <= 31 {
                         signal = n;
                     }
@@ -253,7 +261,11 @@ fn run_timeout(args: &[String]) -> i32 {
     }
 
     let duration = match duration_str {
-        Some(ref ds) => match parse_duration(ds) {
+        // A duration is a number and a unit letter, so a word that is not
+        // Unicode is simply not one. Decoding to `None` here sends it down the
+        // invalid-duration path, where the ORIGINAL bytes are what the
+        // diagnostic names.
+        Some(ref ds) => match ds.to_str().and_then(parse_duration) {
             Some(d) => d,
             None => {
                 eprintln!("timeout: invalid duration {}", quoteaf_os(ds));
@@ -393,8 +405,13 @@ fn run_timeout(args: &[String]) -> i32 {
 // ── main ─────────────────────────────────────────────────────────
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
-    let rest: Vec<String> = args.into_iter().skip(1).collect();
+    // `args_os`, not `args`: the latter's iterator unwraps. `timeout` passes
+    // its operands straight to another program, so reading them as `String`
+    // meant `timeout 5 prog <file with a byte that is not UTF-8>` died before
+    // the command it was asked to run had started -- and it is a wrapper, so
+    // every one of its operands is somebody else's argument.
+    let args: Vec<OsString> = env::args_os().collect();
+    let rest: Vec<OsString> = args.into_iter().skip(1).collect();
     process::exit(run_timeout(&rest));
 }
 

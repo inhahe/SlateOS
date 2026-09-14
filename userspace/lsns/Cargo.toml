@@ -9,3 +9,8 @@ description = "SlateOS lsns utility"
 # landing on the same placeholder as a process that had exited. Zero
 # dependencies of its own, so it is safe under 768.
 procinfo = { path = "../../procinfo" }
+
+# An option value that is not valid Unicode still has to appear in the
+# diagnostic that refuses it, as the bytes the user typed. Pure formatting,
+# no I/O of its own, so 768-exempt for the same reason `procinfo` is.
+quoting = { path = "../quoting" }

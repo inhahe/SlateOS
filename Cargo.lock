@@ -1591,6 +1591,7 @@ name = "lsns"
 version = "0.1.0"
 dependencies = [
  "procinfo",
+ "quoting",
 ]
 
 [[package]]

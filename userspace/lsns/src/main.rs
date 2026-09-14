@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 use std::env;
+use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Write};
 use std::process;
@@ -291,7 +292,15 @@ fn print_raw(out: &mut io::StdoutLock<'_>, entries: &[NsInfo], opts: &Options) {
 // ============================================================================
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
+    // `args_os`, not `args`: the latter's iterator unwraps, so ANY argument
+    // holding a byte that is not valid Unicode aborted the process with a
+    // Rust panic message before `lsns` looked at it.
+    //
+    // Nothing `lsns` takes is a path -- its values are a namespace type, a
+    // PID and a list of column names, all of them legitimately text. So the
+    // defect here was only ever the panic, and a word that does not decode
+    // still reaches the unknown-option refusal it always deserved.
+    let args: Vec<OsString> = env::args_os().collect();
     let mut opts = Options {
         type_filter: None,
         pid_filter: None,
@@ -304,7 +313,7 @@ fn main() {
 
     let mut i = 1;
     while i < args.len() {
-        match args[i].as_str() {
+        match args[i].to_str().unwrap_or("") {
             "-h" | "--help" => {
                 println!("Usage: lsns [options]");
                 println!();
@@ -330,16 +339,30 @@ fn main() {
             "-t" | "--type" => {
                 i += 1;
                 if i < args.len() {
-                    opts.type_filter = Some(args[i].clone());
+                    // A namespace type is one of eight ASCII words, so a
+                    // value that does not decode is simply not one and the
+                    // filter matches nothing.
+                    opts.type_filter = Some(args[i].to_str().unwrap_or("").to_string());
                 }
             }
             "-p" | "--task" => {
                 i += 1;
                 if i < args.len() {
-                    opts.pid_filter = Some(args[i].parse().unwrap_or_else(|_| {
-                        eprintln!("lsns: invalid PID: {}", args[i]);
-                        process::exit(1);
-                    }));
+                    // A PID is digits, so a value that does not decode is
+                    // not one and takes the same refusal an alphabetic word
+                    // takes. The diagnostic names the ORIGINAL bytes.
+                    opts.pid_filter = Some(
+                        args[i]
+                            .to_str()
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or_else(|| {
+                                let mut line: Vec<u8> = b"lsns: invalid PID: ".to_vec();
+                                line.extend_from_slice(&quoting::os_bytes(&args[i]));
+                                line.push(b'\n');
+                                let _ = io::stderr().write_all(&line);
+                                process::exit(1);
+                            }),
+                    );
                 }
             }
             "-J" | "--json" => opts.json = true,
@@ -348,14 +371,25 @@ fn main() {
             "-o" | "--output" => {
                 i += 1;
                 if i < args.len() {
+                    // Column names are ASCII identifiers; a list that does
+                    // not decode names no column and leaves the set empty,
+                    // which falls back to the defaults.
                     opts.columns = args[i]
+                        .to_str()
+                        .unwrap_or("")
                         .split(',')
                         .map(|s| s.trim().to_uppercase())
                         .collect();
                 }
             }
-            other => {
-                eprintln!("lsns: unknown option: {other}");
+            _ => {
+                // The ORIGINAL bytes, not the decoded view: a word that did
+                // not decode shows as empty there, and a diagnostic that
+                // names nothing is worse than the panic this replaced.
+                let mut line: Vec<u8> = b"lsns: unknown option: ".to_vec();
+                line.extend_from_slice(&quoting::os_bytes(&args[i]));
+                line.push(b'\n');
+                let _ = io::stderr().write_all(&line);
                 process::exit(1);
             }
         }

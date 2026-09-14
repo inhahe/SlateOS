@@ -2542,6 +2542,12 @@ impl ExplorerState {
             | Event::FocusOut
             | Event::ScaleChanged { .. }
             | Event::ModifierChord { .. }
+            // Cannot arrive here: a tray click is addressed to the connection
+            // and `oswindow` hands it to `App::tray_icon_clicked` before the
+            // window dispatch. Listed because this match is exhaustive on
+            // purpose -- a wildcard would swallow the next event added, which
+            // may well be one this program should act on.
+            | Event::TrayIconClicked { .. }
             | Event::SettingsChanged { .. } => false,
         }
     }

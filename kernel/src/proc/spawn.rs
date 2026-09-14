@@ -4861,6 +4861,32 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
         ),
     }
 
+    // The head-of-line witness for D-NETSOCK-SYNC. The tests above prove the
+    // daemon path works; none of them proves that two connections accepted on
+    // ONE listener progress independently, which is the property the 2026-09-12
+    // fix exists for. A boot with that fix reverted passed every check here.
+    //
+    // Propagates rather than warning, unlike its neighbours. A warning is right
+    // for a parity check that can be defeated by the environment (no lease, no
+    // IPv6 peer); this one asserts a property of our own locking, under a
+    // deadline, and a regression in it must red the boot rather than print a
+    // line nobody greps for.
+    match crate::net::socket::self_test_no_head_of_line() {
+        // The check prints its own OK line, including the byte count.
+        Ok(Some(())) => {}
+        Ok(None) => {
+            serial_println!("[spawn]   net::socket head-of-line: no IPv4 lease — check skipped")
+        }
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: net::socket head-of-line witness ({:?}) — a listener's \
+                 accepted connections are serialising again",
+                e
+            );
+            return Err(e);
+        }
+    }
+
     // IPv6 connect parity (D-NETSOCK-SYNC, final gap): OP_CONNECT6 over the daemon.
     // Slirp offers no IPv6 peer or router, so this too drives the in-process
     // loopback — a non-blocking connect to the daemon's own link-local (me.ip6,

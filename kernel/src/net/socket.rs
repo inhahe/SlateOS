@@ -574,6 +574,161 @@ pub fn recv(handle: SocketHandle, buf: &mut [u8], nonblock: bool, peek: bool) ->
     guard.with_stream_conn(|c, cid| c.recv_on(cid, buf, nonblock, peek))
 }
 
+/// Set by the spawned reader immediately before it blocks, so the main task can
+/// wait for it to be *inside* `recv` rather than merely spawned.
+static HOL_READER_IN_RECV: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// A blocking `recv` on an idle accepted connection.
+///
+/// Before `D-NETSOCK-SYNC` was fixed this held the listener's shared session
+/// mutex for its whole duration, so every sibling connection waited behind it.
+extern "C" fn hol_idle_reader(handle_raw: u64) {
+    let handle = SocketHandle::from_raw(handle_raw);
+    let mut buf = [0u8; 8];
+    HOL_READER_IN_RECV.store(true, core::sync::atomic::Ordering::SeqCst);
+    // Blocking (nonblock = false). Released by the main task sending on the peer
+    // socket; until then this task is parked inside the recv path.
+    let _ = recv(handle, &mut buf, false, false);
+}
+
+/// Two connections accepted on one listener make progress independently.
+///
+/// The witness `known-issues.md` recorded as missing for `D-NETSOCK-SYNC`. The
+/// fix's own boot proved the daemon still works end to end; nothing proved the
+/// property the fix exists for, and a boot with the fix reverted would have been
+/// exactly as green.
+///
+/// Q23 Option A gives a listener and every connection accepted on it **one** ring
+/// session behind **one** mutex. The old code let a blocking `recv` hold that
+/// mutex while the daemon withheld its reply, so one quiet peer stalled every
+/// sibling. The fix moved the wait above the lock.
+///
+/// Step 3 is what makes this a test rather than a ritual: without waiting for the
+/// reader to be *in* `recv`, the main task can reach its own read first, nothing
+/// is contended, and the test passes whether or not the fix is present.
+///
+/// The deadline matters for the same reason. Under the old code the second read
+/// never returns, and a self-test that hangs turns a clear regression into a
+/// 2400-second timeout with no diagnosis.
+///
+/// Returns `Ok(None)` when the interface has no IPv4 address yet: the loopback
+/// divert keys on a non-zero local IP, so there is nothing to assert.
+///
+/// # Errors
+///
+/// `Err` when the sibling connection cannot complete its read inside the
+/// deadline -- the regression this exists to catch -- or when the
+/// listen/connect/accept setup fails.
+pub fn self_test_no_head_of_line() -> KernelResult<Option<()>> {
+    /// Loopback port, unused by the other self-tests.
+    const PORT: u16 = 9107;
+    /// Payload for the connection that must stay responsive.
+    const MSG: &[u8] = b"hol-ok";
+    /// Milliseconds the responsive read is allowed. A ready socket answers in
+    /// microseconds, so missing this means blocked rather than slow.
+    const DEADLINE_MS: u64 = 2_000;
+    /// Yields allowed after the reader reports it is in `recv`, to let it settle.
+    const SETTLE_YIELDS: u32 = 8;
+    /// Yields waited for the reader to reach `recv` before calling it a setup
+    /// failure rather than a property failure.
+    const START_YIELDS: u32 = 10_000;
+
+    let me_ip = crate::net::interface::ip().0;
+    if me_ip == [0, 0, 0, 0] {
+        return Ok(None);
+    }
+
+    HOL_READER_IN_RECV.store(false, core::sync::atomic::Ordering::SeqCst);
+
+    let srv = create(2)?;
+    bind_stream(srv, PORT)?;
+    listen(srv, 2)?;
+
+    // Two clients, two accepts: both accepted fds land on the listener's session.
+    let c1 = create(2)?;
+    connect(c1, &me_ip, PORT, true)?;
+    let (a1, _) = accept(srv)?;
+    let c2 = create(2)?;
+    connect(c2, &me_ip, PORT, true)?;
+    let (a2, _) = accept(srv)?;
+
+    crate::sched::spawn(b"hol-idle-reader", 16, hol_idle_reader, a1.raw(), 0)?;
+
+    let mut spins = 0u32;
+    while !HOL_READER_IN_RECV.load(core::sync::atomic::Ordering::SeqCst) {
+        crate::sched::yield_now();
+        spins = spins.saturating_add(1);
+        if spins > START_YIELDS {
+            close(a1);
+            close(a2);
+            close(c1);
+            close(c2);
+            close(srv);
+            crate::serial_println!(
+                "[netsock]   FAIL: the idle reader never reached recv, so nothing was contended"
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    for _ in 0..SETTLE_YIELDS {
+        crate::sched::yield_now();
+    }
+
+    send(c2, MSG, false)?;
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_MS.saturating_mul(1_000_000));
+    let mut buf = [0u8; 16];
+    let mut got = 0i32;
+    while crate::hrtimer::now_ns() < deadline {
+        match recv(a2, &mut buf, true, false) {
+            Ok(n) if n > 0 => {
+                got = n;
+                break;
+            }
+            Ok(_) | Err(KernelError::WouldBlock) => crate::sched::yield_now(),
+            Err(e) => {
+                // Release the parked reader before surfacing the error, or it
+                // stays blocked for the rest of the boot.
+                let _ = send(c1, MSG, false);
+                close(a1);
+                close(a2);
+                close(c1);
+                close(c2);
+                close(srv);
+                return Err(e);
+            }
+        }
+    }
+
+    // Release the parked reader unconditionally, before judging.
+    let _ = send(c1, MSG, false);
+    for _ in 0..SETTLE_YIELDS {
+        crate::sched::yield_now();
+    }
+    close(a1);
+    close(a2);
+    close(c1);
+    close(c2);
+    close(srv);
+
+    let want = i32::try_from(MSG.len()).unwrap_or(0);
+    if got != want {
+        crate::serial_println!(
+            "[netsock]   FAIL: a sibling connection read {} of {} byte(s) within {} ms while another accepted connection sat in a blocking recv -- the listener session is serialising again (D-NETSOCK-SYNC)",
+            got,
+            want,
+            DEADLINE_MS,
+        );
+        return Err(KernelError::InternalError);
+    }
+
+    crate::serial_println!(
+        "[netsock]   head-of-line: a sibling read {} byte(s) while another accepted connection was parked in a blocking recv: OK",
+        got,
+    );
+    Ok(Some(()))
+}
+
 /// Non-destructively probe a stream socket's readiness for the poll/epoll engine.
 ///
 /// Returns `(readable, writable, error)`:

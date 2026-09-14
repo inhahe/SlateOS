@@ -563,15 +563,30 @@ impl Server {
         let pixels = compositor.present_pixels();
         let filter = compositor.color_filter();
 
-        if matches!(filter, ColorFilter::None) {
+        let warmth = compositor.night_light_gains();
+
+        if matches!(filter, ColorFilter::None) && warmth.is_none() {
             present.show(pixels, width, height);
             return;
         }
 
         self.filtered.clear();
         self.filtered.reserve(pixels.len());
-        self.filtered
-            .extend(pixels.iter().map(|p| filter.apply_argb(*p)));
+        // The accessibility filter first, then the warmth. The order is a
+        // claim about what each one is: a colour-vision filter transforms the
+        // *content*, so it should see the colours the application chose, while
+        // night light is a property of the *display* -- the software stand-in
+        // for a warm panel or a sheet of amber over the glass. Reversing them
+        // would have a protanopia filter correcting for a tint the user added
+        // on purpose, and hand back a screen that is neither warm nor
+        // corrected.
+        self.filtered.extend(pixels.iter().map(|p| {
+            let shown = filter.apply_argb(*p);
+            match warmth {
+                Some(gains) => appearance::warm_argb(shown, gains),
+                None => shown,
+            }
+        }));
         present.show(&self.filtered, width, height);
     }
 
@@ -1764,6 +1779,90 @@ mod tests {
             shown,
             compositor.present_pixels(),
             "with no filter the display must receive the composed frame itself"
+        );
+    }
+
+    /// Compose one frame with night light on, and return what the display got.
+    fn warmed_frame(strength: f32) -> Vec<u32> {
+        let (mut server, mut compositor, _addr) = server();
+        compositor.set_appearance(AppearanceSettings {
+            night_light: true,
+            night_light_strength: strength,
+            ..AppearanceSettings::default()
+        });
+
+        let mut display = Recording::new();
+        server.compose(&mut compositor);
+        server.show(&compositor, &mut display);
+
+        let (_, _, pixels) = display.last_frame().expect("a frame must be shown");
+        pixels.to_vec()
+    }
+
+    /// Night light reaches the display, and in the direction it claims.
+    ///
+    /// Asserted channel by channel rather than as "the frame changed": a tint
+    /// that reduced red, or that brightened blue, would also change the frame
+    /// and would be the opposite of warming it.
+    #[test]
+    fn night_light_takes_blue_out_of_the_frame_and_leaves_red() {
+        let plain = shown_frame(ColorFilter::None);
+        let warm = warmed_frame(1.0);
+        assert_eq!(plain.len(), warm.len(), "same frame, same size");
+        assert_ne!(plain, warm, "night light must change the frame");
+
+        for (before, after) in plain.iter().zip(warm.iter()) {
+            let (r0, g0, b0) = ((before >> 16) & 0xFF, (before >> 8) & 0xFF, before & 0xFF);
+            let (r1, g1, b1) = ((after >> 16) & 0xFF, (after >> 8) & 0xFF, after & 0xFF);
+            assert_eq!(r1, r0, "red was changed");
+            assert!(g1 <= g0, "green went up: {g0} -> {g1}");
+            assert!(b1 <= b0, "blue went up: {b0} -> {b1}");
+            if b0 > 0 {
+                assert!(
+                    b1 <= g1 || g0 == 0,
+                    "blue was not cut at least as hard as green"
+                );
+            }
+        }
+    }
+
+    /// Off is off: the frame is handed over untouched and nothing is copied.
+    #[test]
+    fn night_light_switched_off_changes_no_pixel() {
+        let (mut server, mut compositor, _addr) = server();
+        compositor.set_appearance(AppearanceSettings {
+            night_light: false,
+            // A strength that would be very visible if it were read.
+            night_light_strength: 1.0,
+            ..AppearanceSettings::default()
+        });
+
+        let mut display = Recording::new();
+        server.compose(&mut compositor);
+        server.show(&compositor, &mut display);
+
+        let (_, _, shown) = display.last_frame().expect("a frame");
+        assert_eq!(
+            shown,
+            compositor.present_pixels(),
+            "night light switched off must not touch the frame"
+        );
+    }
+
+    /// A stronger setting is a warmer screen.
+    ///
+    /// The strength is a slider, so "it applies" is not enough: a version that
+    /// ignored the number and always used full warmth would pass the test
+    /// above.
+    #[test]
+    fn a_stronger_night_light_is_warmer() {
+        let gentle = warmed_frame(0.25);
+        let full = warmed_frame(1.0);
+
+        let blue = |f: &[u32]| -> u32 { f.iter().map(|p| p & 0xFF).sum() };
+        assert!(
+            blue(&full) < blue(&gentle),
+            "full warmth left as much blue as a quarter of it"
         );
     }
 

@@ -1302,6 +1302,16 @@ impl<T: Transport> ShellSession<T> {
             self.save_widgets();
         }
 
+        // The shell writes `appearance.yaml` itself for the quick toggles --
+        // night light is one -- and the compositor reads that file rather than
+        // being handed a value. Only this session holds the connection, so
+        // saying "go and read it again" is its job. Drained here beside the
+        // widget save rather than at the toggle, so one pump that flipped a
+        // switch twice sends one notification rather than two.
+        if self.shell.take_appearance_change() {
+            self.events.appearance_changed()?;
+        }
+
         if self.dirty {
             self.dirty = false;
             self.paint_chrome()?;

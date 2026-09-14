@@ -1110,6 +1110,9 @@ pub struct DesktopShell {
     /// and corner radius all live here, and each is read by a different part
     /// of the shell.
     pub appearance: AppearanceSettings,
+    /// Set when the shell itself has written `appearance.yaml` and the
+    /// compositor has not been told.
+    appearance_dirty: bool,
     /// The menu that opens on a right-click over bare desktop.
     ///
     /// Built once and reused rather than rebuilt per click: its item list is
@@ -1580,6 +1583,7 @@ impl DesktopShell {
             overview: overview::OverviewState::new(),
             overview_config: overview::OverviewConfig::default(),
             appearance: AppearanceSettings::default(),
+            appearance_dirty: false,
             desktop_menu: ContextMenu::new(Self::desktop_menu_items()),
             widgets: DesktopWidgetManager::new(),
             menu_widget: None,
@@ -3900,6 +3904,44 @@ impl DesktopShell {
     /// model and the indicator will show it, so a read-only configuration
     /// directory costs the user persistence, not the feature. Refusing the
     /// keystroke because a file could not be written would be worse.
+    /// Flip night light, and leave the file and the compositor agreeing.
+    ///
+    /// Load, modify, save -- the shape
+    /// [`persist_input_layout`](Self::persist_input_layout) uses, and for the
+    /// same reason: the file is the authority and this process holds no
+    /// unsaved edits of it, so re-reading first means a setting the Settings
+    /// application changed a moment ago is not overwritten by a stale copy.
+    ///
+    /// Writing a settings file from here is safe because a person clicked a
+    /// switch. The rule and the counter-example are in
+    /// `TD-C-THE-NOTIFICATIONS-PAGE-HAS-NO-PROGRAMS-TO-LIST`.
+    ///
+    /// A failed write is reported and the session still gets the new state:
+    /// refusing to warm the screen because a disk is full helps nobody, and
+    /// the switch can be flipped again.
+    fn toggle_night_light(&mut self) {
+        let mut file = appearance::AppearanceFile::load();
+        file.settings.night_light = !file.settings.night_light;
+        self.appearance.night_light = file.settings.night_light;
+        if let Err(err) = file.save() {
+            eprintln!("desktop: could not save appearance.yaml: {err}");
+        }
+        // The compositor warms the frame, and it reads the file rather than
+        // being handed a value. Saying "go and read it again" is the session's
+        // job because only it holds the connection.
+        self.appearance_dirty = true;
+    }
+
+    /// Whether the shell has rewritten `appearance.yaml` since this was last
+    /// asked, clearing the flag.
+    ///
+    /// The session calls this after handling events and, if it is true, tells
+    /// the compositor to re-read -- which is what makes a quick toggle warm
+    /// the screen now rather than at the next login.
+    pub fn take_appearance_change(&mut self) -> bool {
+        core::mem::take(&mut self.appearance_dirty)
+    }
+
     fn persist_input_layout(&mut self) {
         let Some(id) = self.input_methods.active_layout_id() else {
             return;
@@ -5853,16 +5895,21 @@ impl DesktopShell {
                     QuickSetting::DoNotDisturb | QuickSetting::FocusMode => {
                         self.apply_focus_toggle(qs);
                     }
-                    // Wi-Fi, Bluetooth and Night Light have no service in this
-                    // process to talk to: the first two are the network and
-                    // bluetooth daemons' state and the third is the
-                    // compositor's gamma ramp, all of which are reached over
-                    // IPC the shell does not hold yet. The switches move and
-                    // are remembered by the pane, and that is all they do —
-                    // recorded in known-issues.md rather than left to be
-                    // rediscovered by someone wondering why the radio stayed
-                    // on.
-                    QuickSetting::WiFi | QuickSetting::Bluetooth | QuickSetting::NightLight => {}
+                    QuickSetting::NightLight => self.toggle_night_light(),
+                    // Wi-Fi and Bluetooth have no service in this process to
+                    // talk to: they are the network and bluetooth daemons'
+                    // state, reached over IPC the shell does not hold yet. The
+                    // switches move and are remembered by the pane, and that
+                    // is all they do — recorded in known-issues.md rather than
+                    // left to be rediscovered by someone wondering why the
+                    // radio stayed on.
+                    //
+                    // Night Light used to be in this list, described as "the
+                    // compositor's gamma ramp". It is an appearance setting
+                    // now, which the compositor reads from the same file
+                    // everything else does, so the switch above is the whole
+                    // of the work.
+                    QuickSetting::WiFi | QuickSetting::Bluetooth => {}
                 },
                 // The pane marks the card read before reporting the click, so
                 // the only thing left is the part it cannot do: start the
@@ -10526,6 +10573,43 @@ mod overview_wiring_tests {
         });
     }
 
+    /// The pane's Night Light switch warms the screen.
+    ///
+    /// It used to be one of three switches the shell explicitly did nothing
+    /// with, described in the code as "the compositor's gamma ramp, reached
+    /// over IPC the shell does not hold yet". Night light is an appearance
+    /// setting now, so the switch writes the file the compositor already
+    /// reads, and the honest comment that documented a gap became a comment
+    /// documenting a gap that had closed.
+    ///
+    /// Exercises the shell's half. The pane emits the event from a click whose
+    /// coordinates need its private layout constants, and its own tests cover
+    /// that; the routing between them is a match on the quick-setting enum
+    /// with no wildcard, so a variant that stopped being handled is a compile
+    /// error.
+    #[test]
+    fn the_panes_night_light_switch_reaches_the_file_the_compositor_reads() {
+        appearance::config::testing::with_scratch_config("shell-quick-night", |_root| {
+            let mut s = shell();
+            assert!(!appearance::AppearanceFile::load().settings.night_light);
+
+            s.toggle_night_light();
+
+            assert!(
+                appearance::AppearanceFile::load().settings.night_light,
+                "the switch did not reach appearance.yaml"
+            );
+            assert!(
+                s.take_appearance_change(),
+                "the compositor was never told to re-read"
+            );
+            assert!(
+                !s.take_appearance_change(),
+                "the flag must clear, or every later pump re-notifies"
+            );
+        });
+    }
+
     /// The glyphs the tray is drawing, left to right.
     fn tray_row(s: &DesktopShell) -> Vec<String> {
         s.ordered_tray_icons()
@@ -11264,16 +11348,25 @@ mod overview_wiring_tests {
         // claim: a `hide()` called behind the shell's back would report a
         // `Closed` the shell never had the chance to drain, and the test would
         // be about the pane rather than about the wiring.
-        let mut s = shell();
-        for _ in 0..5 {
-            let _ = toggle_quick_setting(&mut s, "Night Light");
-            let (bx, by) = bell_centre(&s);
-            let _ = press(&mut s, bx, by);
-        }
-        assert!(
-            s.notifications.drain_events().is_empty(),
-            "the shell left events in the pane"
-        );
+        //
+        // Scratch-wrapped since the Night Light switch became real: flipping
+        // it writes `appearance.yaml`, so a test that presses it five times
+        // now edits the developer's own settings. The switch it drives was
+        // inert when this test was written, which is the general shape --
+        // wiring a dead control makes tests that had been pressing it start
+        // having effects.
+        appearance::config::testing::with_scratch_config("shell-pane-buffer", |_root| {
+            let mut s = shell();
+            for _ in 0..5 {
+                let _ = toggle_quick_setting(&mut s, "Night Light");
+                let (bx, by) = bell_centre(&s);
+                let _ = press(&mut s, bx, by);
+            }
+            assert!(
+                s.notifications.drain_events().is_empty(),
+                "the shell left events in the pane"
+            );
+        });
     }
 
     #[test]

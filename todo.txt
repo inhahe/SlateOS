@@ -4527,6 +4527,35 @@
 
 ## Judgment Calls
 
+A-Q10 implementation notes (lane A, 2026-09-13): where the code actually is.
+
+  Investigated but NOT started, because it cannot be validated while main is red
+  (apps/launcher blocks check-cfg-unix; lane C notified).
+
+  The mechanism is NOT `fs::fileversion`, despite that module's own doc saying
+  `capture_version(path, data) before overwrite`. Nothing in production calls
+  `capture_version` -- its only callers are its own self-tests. The live path is:
+
+    vfs.rs::write_file -> fs::history::try_auto_record(path)
+      -> is_auto_version_enabled()   global master switch, Config default true
+      -> should_auto_version(path)   excludes /proc /dev /sys /tmp, _TRASH, _JOURNAL
+
+  So 936's 'on only where it is asked for' is a change to `should_auto_version`
+  plus an opt-in registry, NOT to the master switch: flipping `auto_version` to
+  false makes `try_auto_record` return before the per-directory list is ever
+  consulted, so the opt-in would never fire.
+
+  **The self-test has to change with it, and that is the part to not miss.**
+  history.rs Test 8 asserts `should_auto_version("/home/user/document.txt")` is
+  TRUE, commented 'Normal paths included'. Under opt-in that becomes false. The
+  test is right today and will be wrong the moment the semantics invert, so it
+  needs updating in the same commit or the boot goes red for a correct change.
+
+  936's second half -- do the work after the save returns -- is separate and
+  larger: try_auto_record currently runs inline before the VFS lock, and moving
+  it off the caller's path needs somewhere to run it and a story for the crash
+  window the decision already accepts.
+
 ### Refusing an unknown option without an upstream to quote (2026-09-13, Claude autonomous)
 
 **The block.** 39 lane-B programs accept `--zzq-not-an-option` and exit 0, so

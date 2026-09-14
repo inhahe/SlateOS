@@ -143613,6 +143613,36 @@ two SQLite connections both believe they have the write lock and interleave
 writes into one file. It needs a kernel-side lock table keyed by inode, so it is
 filed as `requests/b-a-advisory-record-locking-is-a-stub-that-always-succeeds.md`.
 
+### Second pass — the list is much shorter than it looked
+
+Having withdrawn two rows, I went back and read the code behind the rest rather
+than the bullet describing it. The honest triage:
+
+| item | verdict |
+|---|---|
+| `F_SETLK`/`F_GETLK` | **Real and severe.** Verified in code. Filed to lane A; not fixable here |
+| `SEM_UNDO` | **Real.** A promise the caller can express and we silently do not keep: a process that dies holding a semaphore should have it released. Needs a process-exit hook, which is why it is not a one-liner |
+| `MSG_COPY` | **Was real. Fixed** (see Progress) |
+| `SHM_RDONLY` | Real gap, but **documented with its reason** — "we have no per-mapping permission machinery" — and **not enforceable in this design at all**: one static pool address serves every attacher, so a read-only and a read-write attacher cannot be told apart. Refusing the flag would punish correct callers, who pass it and never write |
+| `SHM_RND`, `SHM_REMAP`, `shmaddr` | **Low.** Documented; `shmat` returns the address it used, and a correct caller uses the return value rather than assuming its hint was taken |
+| `SHM_LOCK` / `SHM_UNLOCK` | **Not a defect.** "Accepted as no-ops; our memory is never swapped" — the guarantee is vacuously satisfied, which is the right answer, not a missing one |
+| `openlog` facility | **Weak.** `do_syslog` writes to **stderr**; there is no daemon, so a facility has nowhere to be routed to. Nothing is lost that could have been delivered |
+| `FTS_COMFOLLOW` | **Not a defect.** Read at `fts.rs:952`; a documented partial, not an ignored flag |
+
+So the honest count is **two** open defects, not nine: one severe and out of my
+lane, one moderate and awaiting a process-exit hook. Plus one fixed today.
+
+**Why the first pass read as nine.** "Accepted but ignored" covers two very
+different things, and the phrase does not distinguish them: a promise the
+implementation *could* keep and does not, versus a request the design *cannot*
+express an answer to, documented as such. Only the first is a defect. The three
+bugs that started this sweep — argv, argv again, `aio_resfd` — were all the
+first kind, and I generalised from them to every bullet that sounded similar.
+
+**The method that would have worked** is the one used on the second pass and on
+`F_SETLK` in the first: read the code, not the bullet. It is slower and it is
+the only part of either pass that produced a claim worth acting on.
+
 ### Correction — the survey caught its own disease
 
 **Two of the nine rows were wrong, and both for the reason the survey exists.**

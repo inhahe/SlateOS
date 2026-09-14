@@ -245,27 +245,22 @@ impl QuietHours {
     /// saying so.
     #[must_use]
     pub fn active_at(&self, hour: u8, minute: u8, weekday: u8) -> bool {
-        let Some(now) = TimeOfDay::new(hour, minute) else {
-            // Not a time of day. Refusing to be quiet is the safe answer: a
-            // notification shown when it need not have been is a nuisance, and
-            // one held back for ever is a message the user never sees.
-            return false;
-        };
-        if !self.enabled || !self.window.contains_hm(hour, minute) {
+        if !self.enabled {
             return false;
         }
-        // Normalised before anything is added to it, which is what makes the
-        // step back to yesterday safe: after this, `weekday` is at most 6.
-        let weekday = weekday % 7;
-        let overnight = self.window.start() > self.window.end();
-        let day = if overnight && now < self.window.start() {
-            // Before the start on an overnight rule: this is yesterday's
-            // window, still running.
-            weekday.saturating_add(6) % 7
-        } else {
-            weekday
-        };
-        self.days.get(usize::from(day)).copied().unwrap_or(false)
+        // `started_on` answers with the day the window *opened* on, which for
+        // an overnight rule at two in the morning is yesterday. Asked rather
+        // than re-derived here: this file used to carry its own copy of that
+        // step, and so did `focus_assist`, and a rule read out of one and
+        // applied by the other is the way they drift apart. A time that is not
+        // a time, and a time outside the window, both come back `None` -- and
+        // `None` means notifications are shown, which is the safe answer: one
+        // shown needlessly is a nuisance, one held back for ever is a message
+        // the user never sees.
+        self.window
+            .started_on(hour, minute, weekday)
+            .and_then(|day| self.days.get(usize::from(day)).copied())
+            .unwrap_or(false)
     }
 }
 

@@ -217,15 +217,21 @@ impl AutoRule {
     }
 
     /// Check if a schedule rule is currently active.
+    ///
+    /// The day the rule is checked against is the day the window *opened* on,
+    /// not the day it is now -- see [`DailyWindow::started_on`]. This used to
+    /// compare the day list against the current day, which meant a
+    /// Friday-night 22:00-07:00 rule switched itself off at midnight and gave
+    /// the user two hours of the nine they asked for. It did that silently.
     pub fn is_schedule_active(&self, hour: u8, minute: u8, day_of_week: u8) -> bool {
         let Self::Schedule { window, days, .. } = self else {
             return false;
         };
-        // An empty day list means every day.
-        if !days.is_empty() && !days.contains(&day_of_week) {
+        let Some(began) = window.started_on(hour, minute, day_of_week) else {
             return false;
-        }
-        window.contains_hm(hour, minute)
+        };
+        // An empty day list means every day.
+        days.is_empty() || days.contains(&began)
     }
 }
 
@@ -997,6 +1003,30 @@ mod tests {
         };
         assert!(rule.is_schedule_active(10, 0, 1)); // Monday
         assert!(!rule.is_schedule_active(10, 0, 0)); // Sunday
+    }
+
+    /// **The bug this used to have.** An overnight rule with a day list has
+    /// to survive midnight, because that is most of what the user selected.
+    #[test]
+    fn an_overnight_rule_does_not_stop_at_midnight() {
+        let rule = AutoRule::Schedule {
+            window: DailyWindow::from_hm(22, 0, 7, 0).unwrap(),
+            days: vec![5], // Friday only
+            mode: FocusMode::PriorityOnly,
+        };
+        assert!(rule.is_schedule_active(23, 0, 5), "Friday at eleven");
+        assert!(
+            rule.is_schedule_active(1, 0, 6),
+            "one o'clock on Saturday morning is still Friday night"
+        );
+        assert!(
+            !rule.is_schedule_active(23, 0, 6),
+            "Saturday night was not selected"
+        );
+        assert!(
+            !rule.is_schedule_active(1, 0, 0),
+            "Sunday morning would be Saturday's window"
+        );
     }
 
     #[test]

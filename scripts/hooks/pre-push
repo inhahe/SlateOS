@@ -706,6 +706,11 @@ fi
 # Scoped to posix/ for the same reason raced-globals is scoped: that is where
 # the process-global state lives, and a lane that did not touch it cannot have
 # changed the answer. This costs a lane-A or lane-C push nothing.
+# Initialised before first use: this hook runs under `set -u`, where a bare
+# `skip_toi=1` in a conditional leaves it unbound on the path that does not
+# take the branch. That is how the first version of this block failed -- the
+# push aborted with "skip_toi: unbound variable" before the gate ever ran.
+skip_toi=0
 toi="${repo_root:-.}/scripts/check-test-order-independence.py"
 [ -f "$toi" ] || skip_toi=1
 touches posix/ scripts/check-test-order-independence.py || skip_toi=1

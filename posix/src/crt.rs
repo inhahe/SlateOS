@@ -555,10 +555,22 @@ impl InitArgSource for KernelArgs {
         // that almost never runs, so nothing is lost by being blunt.
         const PROT_READ_WRITE: u64 = 0x1 | 0x2;
         const MAP_PRIVATE_ANON: u64 = 0x02 | 0x20;
-        let r = syscall6(SYS_MMAP, 0, len as u64, PROT_READ_WRITE, MAP_PRIVATE_ANON, u64::MAX, 0);
+        let r = syscall6(
+            SYS_MMAP,
+            0,
+            len as u64,
+            PROT_READ_WRITE,
+            MAP_PRIVATE_ANON,
+            u64::MAX,
+            0,
+        );
         // mmap reports failure as a small negative value (an errno), which must
         // not be cast into a plausible-looking pointer.
-        if r <= 0 { core::ptr::null_mut() } else { r as *mut u8 }
+        if r <= 0 {
+            core::ptr::null_mut()
+        } else {
+            r as *mut u8
+        }
     }
 }
 
@@ -687,8 +699,7 @@ pub(crate) unsafe fn retrieve_initial_args_from<S: InitArgSource>(
     // Build argv pointer array.
     // SAFETY: data_start is within our buffer bounds (validated above).
     let data_start = unsafe { data.add(header_size) };
-    let (argv_ptrs, argv_cap) =
-        slots_for(src, argc, addr_of_mut!(INIT_ARGV).cast::<*const u8>());
+    let (argv_ptrs, argv_cap) = slots_for(src, argc, addr_of_mut!(INIT_ARGV).cast::<*const u8>());
 
     let mut pos = 0usize;
     let mut arg_idx = 0usize;
@@ -722,8 +733,7 @@ pub(crate) unsafe fn retrieve_initial_args_from<S: InitArgSource>(
     // Build envp pointer array.
     // SAFETY: envp_start is at data_start + argv_data_len, within bounds.
     let envp_start = unsafe { data_start.add(argv_data_len) };
-    let (envp_ptrs, envp_cap) =
-        slots_for(src, envc, addr_of_mut!(INIT_ENVP).cast::<*const u8>());
+    let (envp_ptrs, envp_cap) = slots_for(src, envc, addr_of_mut!(INIT_ENVP).cast::<*const u8>());
 
     let mut pos = 0usize;
     let mut env_idx = 0usize;
@@ -2481,7 +2491,6 @@ mod tests {
     }
 }
 
-
 #[cfg(test)]
 mod initial_args_tests {
     use super::{INIT_ARGS_BUF_SIZE, InitArgSource, retrieve_initial_args_from};
@@ -2501,7 +2510,8 @@ mod initial_args_tests {
     /// failures and hides which one actually caught it. Observed: breaking the
     /// retry failed the retry test AND the unrelated small-args test.
     fn guard() -> std::sync::MutexGuard<'static, ()> {
-        LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        LOCK.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Build the packed layout the kernel sends: a 4x u32 header, then the
@@ -2539,7 +2549,13 @@ mod initial_args_tests {
 
     impl Fake {
         fn new(data: Vec<u8>) -> Self {
-            Self { data, fetches: 0, grows: 0, grow_fails: false, lie_on_retry: None }
+            Self {
+                data,
+                fetches: 0,
+                grows: 0,
+                grow_fails: false,
+                lie_on_retry: None,
+            }
         }
     }
 
@@ -2666,7 +2682,10 @@ mod initial_args_tests {
         assert!(!last.is_null(), "argv[599] should be a real pointer");
         let bytes = unsafe { core::slice::from_raw_parts(last, 4) };
         assert_eq!(&bytes[..4], b"a599");
-        assert!(unsafe { *argv.add(600) }.is_null(), "argv must stay NULL-terminated");
+        assert!(
+            unsafe { *argv.add(600) }.is_null(),
+            "argv must stay NULL-terminated"
+        );
     }
 
     #[test]

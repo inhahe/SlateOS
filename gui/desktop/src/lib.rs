@@ -475,6 +475,21 @@ pub struct WindowId(pub u64);
 /// compositor already answers — and was, until the fields were deleted. What
 /// the shell draws about a window is a taskbar button and a switcher row,
 /// neither of which is anywhere near the window itself.
+/// What a pin menu was opened on.
+///
+/// The two places pinning can be reached from name the same program in
+/// different ways, and neither can be converted to the other: the start menu
+/// knows a row of its own list, the taskbar knows a slot of the pinned list,
+/// and the pinned list is a filtered, reordered thing. Carrying *which kind*
+/// is what stops a row index being read as a pin index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PinTarget {
+    /// A row of the start menu, which may or may not already be pinned.
+    StartMenuRow(usize),
+    /// An application already pinned, by index into the pinned list.
+    Pinned(usize),
+}
+
 /// What one taskbar button stands for.
 ///
 /// The taskbar used to show one button per window and nothing else, so an
@@ -1100,7 +1115,7 @@ pub struct DesktopShell {
     /// The row is remembered rather than the executable path, for the reason
     /// [`Hit::TaskbarPinned`] carries an index: the list is the authority, and
     /// a copy of a path here would be a second one to keep in step.
-    pin_menu: Option<(guitk::menu::ContextMenu, usize)>,
+    pin_menu: Option<(guitk::menu::ContextMenu, PinTarget)>,
     /// A press that landed on a tray icon and has not been released.
     ///
     /// Held from press to release because until the release the shell does
@@ -3085,11 +3100,24 @@ impl DesktopShell {
         // a window carries only the `app_id` its program declares, and nothing
         // in the tree maps one to the other -- so the taskbar itself cannot
         // say "pin this", however much that is where the button ends up.
-        if button == MouseButton::Right
-            && let Hit::StartMenuEntry(index) = hit
-        {
-            self.open_pin_menu(index, x, y);
-            return ShellAction::Consumed;
+        if button == MouseButton::Right {
+            match hit {
+                Hit::StartMenuEntry(index) => {
+                    self.open_pin_menu(PinTarget::StartMenuRow(index), x, y);
+                    return ShellAction::Consumed;
+                }
+                // And off it again from the button itself, which is where a
+                // user looks for it. Only *unpinning* is offered here: a
+                // taskbar button for a window cannot be pinned, because
+                // pinning needs an executable path and a window does not
+                // carry one. See
+                // `TD-C-NOTHING-CONNECTS-A-LAUNCHER-ENTRY-TO-THE-WINDOWS-IT-OPENS`.
+                Hit::TaskbarPinned(index) => {
+                    self.open_pin_menu(PinTarget::Pinned(index), x, y);
+                    return ShellAction::Consumed;
+                }
+                _ => {}
+            }
         }
 
         // Only the primary button acts. The rest still cannot fall through to a
@@ -4001,12 +4029,12 @@ impl DesktopShell {
             let chosen = self.pin_menu.as_mut().map(|(menu, _)| menu.handle_key(key));
             match chosen {
                 Some(Some(MenuAction::Selected(id))) => {
-                    let index = self.pin_menu.as_ref().map(|(_, index)| *index);
+                    let target = self.pin_menu.as_ref().map(|(_, target)| *target);
                     self.pin_menu = None;
                     if id == Self::MENU_PIN_TOGGLE
-                        && let Some(index) = index
+                        && let Some(target) = target
                     {
-                        self.toggle_pin(index);
+                        self.toggle_pin(target);
                     }
                 }
                 Some(Some(MenuAction::Closed)) => self.pin_menu = None,
@@ -5516,14 +5544,8 @@ impl DesktopShell {
     /// menu that said "Pinned" with a tick would be a second way of saying
     /// what the taskbar already shows, and would leave the user to work out
     /// that clicking it reverses the thing.
-    fn open_pin_menu(&mut self, index: usize, x: f32, y: f32) {
-        // Cloned out of the borrow: `start_menu_entries` builds its list on
-        // demand, so the entry does not outlive the call that produced it.
-        let Some(exec) = self
-            .start_menu_entries()
-            .get(index)
-            .map(|entry| entry.executable_path.clone())
-        else {
+    fn open_pin_menu(&mut self, target: PinTarget, x: f32, y: f32) {
+        let Some(exec) = self.exec_of(target) else {
             return;
         };
         let label = if self.is_pinned(&exec) {
@@ -5544,15 +5566,15 @@ impl DesktopShell {
         // the overflow list passes it: this opens from wherever the start menu
         // is, which is near the bottom edge.
         menu.show(x, y, self.viewport());
-        self.pin_menu = Some((menu, index));
+        self.pin_menu = Some((menu, target));
     }
 
     /// A press while the pin menu is open.
     fn click_pin_menu(&mut self, x: f32, y: f32) -> ShellAction {
-        let Some((menu, index)) = self.pin_menu.as_mut() else {
+        let Some((menu, target)) = self.pin_menu.as_mut() else {
             return ShellAction::Consumed;
         };
-        let index = *index;
+        let target = *target;
         // A press that named no row -- on the panel's padding, or outside it.
         // Either way the menu closes, as the desktop menu does.
         let Some(id) = menu.handle_click(x, y) else {
@@ -5561,25 +5583,55 @@ impl DesktopShell {
         };
         self.pin_menu = None;
         if id == Self::MENU_PIN_TOGGLE {
-            self.toggle_pin(index);
+            self.toggle_pin(target);
         }
         ShellAction::Consumed
     }
 
-    /// Pin the start-menu row at `index`, or unpin it if it is already pinned.
-    fn toggle_pin(&mut self, index: usize) {
-        let Some((exec, name)) = self
-            .start_menu_entries()
-            .get(index)
-            .map(|entry| (entry.executable_path.clone(), entry.name.clone()))
-        else {
+    /// The executable a pin menu target names, if it still names one.
+    ///
+    /// Cloned out of the borrow in both arms: `start_menu_entries` builds its
+    /// list on demand, so an entry does not outlive the call that produced it,
+    /// and the pinned list is behind `&self` for the same reason.
+    fn exec_of(&self, target: PinTarget) -> Option<String> {
+        match target {
+            PinTarget::StartMenuRow(index) => self
+                .start_menu_entries()
+                .get(index)
+                .map(|entry| entry.executable_path.clone()),
+            PinTarget::Pinned(index) => self
+                .taskbar
+                .pinned_apps()
+                .get(index)
+                .map(|app| app.exec_path.clone()),
+        }
+    }
+
+    /// Pin what `target` names, or unpin it if it is already pinned.
+    ///
+    /// A target that no longer names anything does nothing. The lists are
+    /// rebuilt between the menu opening and the row being taken -- a program
+    /// can be unpinned from elsewhere in between -- and acting on a stale
+    /// index would unpin whichever program had moved into that slot.
+    fn toggle_pin(&mut self, target: PinTarget) {
+        let Some(exec) = self.exec_of(target) else {
             return;
         };
         if self.is_pinned(&exec) {
             self.unpin_app(&exec);
-        } else {
-            self.pin_app(&exec, &name);
+            return;
         }
+        let name = match target {
+            PinTarget::StartMenuRow(index) => self
+                .start_menu_entries()
+                .get(index)
+                .map(|entry| entry.name.clone()),
+            // Already pinned by construction, so this arm is unreachable in
+            // practice; the name it would use is the launcher's.
+            PinTarget::Pinned(_) => None,
+        }
+        .unwrap_or_else(|| self.app_name_for(&exec));
+        self.pin_app(&exec, &name);
     }
 
     /// The pin menu's draw commands, empty when it is closed.
@@ -13716,6 +13768,58 @@ mod taskbar_pin_tests {
             shell.handle_press(cx, cy, MouseButton::Right);
             let drawn = format!("{:?}", shell.render_pin_menu().expect("no menu opened"));
             assert!(drawn.contains("Unpin from taskbar"), "wrong offer: {drawn}");
+        });
+    }
+
+    /// **And off it again from the button itself**, which is where a user
+    /// looks for it.
+    #[test]
+    fn a_pinned_button_can_be_unpinned_from_the_taskbar() {
+        with_scratch_config("shell-unpin-taskbar", |_root| {
+            let mut shell = shell();
+            let (exec, name) = first_app(&shell);
+            shell.pin_app(&exec, &name);
+
+            let button = shell.taskbar_button_rect(0);
+            let (cx, cy) = (button.x + button.w / 2.0, button.y + button.h / 2.0);
+            shell.handle_press(cx, cy, MouseButton::Right);
+
+            let drawn = format!("{:?}", shell.render_pin_menu().expect("no menu opened"));
+            assert!(
+                drawn.contains("Unpin from taskbar"),
+                "the button offered no way off the bar: {drawn}"
+            );
+
+            drop(shell.handle_hotkey(&press(Key::Down)));
+            drop(shell.handle_hotkey(&press(Key::Enter)));
+
+            assert!(!shell.is_pinned(&exec), "it is still pinned");
+            assert!(
+                shell.taskbar_slots().is_empty(),
+                "the button outlived the pin"
+            );
+        });
+    }
+
+    /// A right-click on a *window's* button offers nothing, because pinning
+    /// one is not possible: a window carries no executable path.
+    #[test]
+    fn a_window_button_offers_no_pin_menu() {
+        with_scratch_config("shell-unpin-window", |_root| {
+            let mut shell = shell();
+            shell.apply_window_list(&WindowList::new(
+                0,
+                vec![WindowInfo::new(1, 1, "A window".to_string())],
+            ));
+            let button = shell.taskbar_button_rect(0);
+            let (cx, cy) = (button.x + button.w / 2.0, button.y + button.h / 2.0);
+
+            shell.handle_press(cx, cy, MouseButton::Right);
+
+            assert!(
+                shell.render_pin_menu().is_none(),
+                "a window's button offered to pin something"
+            );
         });
     }
 

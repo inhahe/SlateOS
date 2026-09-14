@@ -143621,7 +143621,7 @@ than the bullet describing it. The honest triage:
 | item | verdict |
 |---|---|
 | `F_SETLK`/`F_GETLK` | **Real and severe.** Verified in code. Filed to lane A; not fixable here |
-| `SEM_UNDO` | **Real.** A promise the caller can express and we silently do not keep: a process that dies holding a semaphore should have it released. Needs a process-exit hook, which is why it is not a one-liner |
+| ~~`SEM_UNDO`~~ | **WITHDRAWN on a third look.** `sysv_sem` makes **zero syscalls** — the whole set lives in this process's static memory, as its own doc says ("Single-process only"). `SEM_UNDO` exists to stop a dead process wedging a semaphore *other processes* are waiting on, and there are no other processes sharing this pool. Ignoring it cannot cost anything |
 | `MSG_COPY` | **Was real. Fixed** (see Progress) |
 | `SHM_RDONLY` | Real gap, but **documented with its reason** — "we have no per-mapping permission machinery" — and **not enforceable in this design at all**: one static pool address serves every attacher, so a read-only and a read-write attacher cannot be told apart. Refusing the flag would punish correct callers, who pass it and never write |
 | `SHM_RND`, `SHM_REMAP`, `shmaddr` | **Low.** Documented; `shmat` returns the address it used, and a correct caller uses the return value rather than assuming its hint was taken |
@@ -143629,8 +143629,20 @@ than the bullet describing it. The honest triage:
 | `openlog` facility | **Weak.** `do_syslog` writes to **stderr**; there is no daemon, so a facility has nowhere to be routed to. Nothing is lost that could have been delivered |
 | `FTS_COMFOLLOW` | **Not a defect.** Read at `fts.rs:952`; a documented partial, not an ignored flag |
 
-So the honest count is **two** open defects, not nine: one severe and out of my
-lane, one moderate and awaiting a process-exit hook. Plus one fixed today.
+So the honest count is **one** open defect, not nine: `F_SETLK`, severe, out of
+my lane and filed. Plus one fixed today.
+
+**A third look removed the second one too.** `SEM_UNDO` fell to the same test
+that saved me from "fixing" `SHM_RDONLY`: all three SysV IPC modules
+(`sysv_sem`, `sysv_shm`, `sysv_msg`) make **zero syscalls** — against 54 in
+`ioctl.rs` — so every one of them is process-local static memory, and each says
+"Single-process only" in its own header. A flag whose purpose is to protect
+*other processes* cannot be a defect where there are none.
+
+And the limitation bites nothing today: the only match for SysV IPC across all
+of `userspace/` and `services/` is `time_cmd.rs`, where `msgsnd`/`msgrcv` are
+**`struct rusage` fields** — message counts reported by `getrusage` — not calls.
+Nothing we ship uses SysV IPC at all.
 
 **Why the first pass read as nine.** "Accepted but ignored" covers two very
 different things, and the phrase does not distinguish them: a promise the

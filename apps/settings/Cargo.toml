@@ -13,6 +13,10 @@ appearance = { path = "../../gui/appearance" }
 # whether two clicks are one double click, so the value has to travel through a
 # file both processes read rather than living in this application.
 inputsettings = { path = "../../gui/inputsettings" }
+
+# Which programs may interrupt the user. The desktop shell reads what
+# this page writes; see gui/notifsettings.
+notifsettings = { path = "../../gui/notifsettings" }
 # The window and the event loop. Settings names `oswindow`, never `guiremote` —
 # an application should no more name the display protocol than a Unix program
 # names the socket layer.

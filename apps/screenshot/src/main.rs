@@ -54,6 +54,18 @@ const ANNOTATION_RED: Color = Color::rgb(220, 50, 50);
 #[allow(dead_code)]
 const ANNOTATION_BLUE: Color = Color::rgb(50, 100, 220);
 
+// The crosshair that follows the pointer while a region is being chosen. Also
+// not the theme's: it is drawn over the *user's screen*, whatever happens to be
+// on it, so it has to stay visible against a white document and a black
+// terminal alike. White at 150 over the scrim above does that; a palette role
+// would be legible against this desktop's chrome and nothing else.
+//
+// It was a bare `Color::rgba(255, 255, 255, 150)` inline until 2026-09-14,
+// which is indistinguishable from an oversight -- and stayed that way because
+// the theme sweep never rendered this view. Naming it is what makes the
+// decision reviewable.
+const CROSSHAIR_COLOR: Color = Color::rgba(255, 255, 255, 150);
+
 /// Default save directory path.
 const DEFAULT_SAVE_DIR: &str = "~/Pictures/Screenshots/";
 
@@ -674,7 +686,7 @@ impl RegionSelector {
         }
 
         // Crosshair at current mouse position.
-        let ch_color = Color::rgba(255, 255, 255, 150);
+        let ch_color = CROSSHAIR_COLOR;
         tree.push(RenderCommand::Line {
             x1: self.current_x,
             y1: 0.0,
@@ -1628,13 +1640,21 @@ impl ScreenshotApp {
         }
 
         // Annotation toolbar.
+        //
+        // `mantle` rather than the `surface0` of the toolbar above it, so the
+        // two bars still read as two; and rather than the `Color::rgb(55, 55,
+        // 55)` that was here until 2026-09-14, which is a dark grey drawn
+        // whatever theme is in force -- a black band across a light desktop,
+        // with `palette.text` labels on it and `palette.surface1` buttons.
+        // It survived because the theme sweep rendered only this program's
+        // opening menu and never reached the Preview.
         let ann_y = TOOLBAR_HEIGHT;
         tree.fill_rect(
             0.0,
             ann_y,
             self.window_width,
             ANNOTATION_TOOLBAR_HEIGHT,
-            Color::rgb(55, 55, 55),
+            self.palette.mantle,
         );
 
         for (i, tool) in PREVIEW_TOOLS.iter().enumerate() {
@@ -1658,13 +1678,17 @@ impl ScreenshotApp {
         let content_h = self.window_height - content_y - STATUS_BAR_HEIGHT;
 
         if let Some(ref capture) = self.current_capture {
-            // Show image placeholder (the compositor would blit the actual pixels).
+            // Show image placeholder (the compositor would blit the actual
+            // pixels). `crust` -- the palette's darkest role -- rather than the
+            // fixed `Color::rgb(40, 40, 40)` that was here: a matte behind a
+            // picture should be the deepest thing this theme has, which on a
+            // light desktop is not a near-black.
             tree.fill_rect(
                 0.0,
                 content_y,
                 self.window_width,
                 content_h,
-                Color::rgb(40, 40, 40),
+                self.palette.crust,
             );
 
             // Image info overlay.
@@ -1726,15 +1750,33 @@ impl ScreenshotApp {
         let nx = self.window_width - nw - 20.0;
         let ny = 20.0;
 
+        // The palette's own green at two alphas, rather than two hand-mixed
+        // greens. "Saved" is a semantic colour and this theme has a role for
+        // it; the pair that used to be here -- rgba(30,100,50,230) over
+        // rgba(50,160,80,200) -- were a dark green box with a lighter green
+        // edge whatever the user had chosen, including on a light desktop.
         tree.fill_rounded_rect(
             nx,
             ny,
             nw,
             nh,
-            Color::rgba(30, 100, 50, 230),
+            Color {
+                a: 230,
+                ..self.palette.green
+            },
             CornerRadii::all(6.0),
         );
-        tree.stroke_rect(nx, ny, nw, nh, Color::rgba(50, 160, 80, 200), 1.0);
+        tree.stroke_rect(
+            nx,
+            ny,
+            nw,
+            nh,
+            Color {
+                a: 200,
+                ..self.palette.green
+            },
+            1.0,
+        );
         tree.text(nx + 12.0, ny + 8.0, &notif.message, self.palette.text, 12.0);
 
         if let Some(ref path) = notif.file_path {
@@ -2258,21 +2300,68 @@ mod tests {
     /// with it, so they are content, not theme.
     #[test]
     fn every_colour_the_screenshot_chrome_draws_comes_from_its_palette() {
+        // All four views, with a capture in hand so Preview has something to
+        // annotate. Until 2026-09-14 this rendered the Menu and nothing else --
+        // three of the four views unswept, including the annotation surface
+        // where this program's only legitimate non-palette colours live. See
+        // `known-issues.md`
+        // `TD-C-EIGHT-THEME-GUARDS-CHECK-A-PROGRAM'S-OPENING-FRAME`.
         for light in [false, true] {
-            let mut app = ScreenshotApp::new(1280.0, 800.0);
-            app.palette = Palette::for_mode(light);
-            let tree = App::render(&mut app, 1280.0, 800.0);
-            assert!(
-                tree.commands.len() > 10,
-                "the sweep examined {} commands, which is not a render",
-                tree.commands.len()
-            );
-            appearance::palette_check::assert_drawn_from(
-                &app.palette,
-                &tree.commands,
-                &[HIGHLIGHT_COLOR, ANNOTATION_RED],
-                &format!("screenshot (light={light})"),
-            );
+            // Each view with its own floor on "this drew something", and the
+            // numbers are what these views actually draw rather than what a
+            // round number would suggest they draw: the countdown is a scrim
+            // and a number, the region overlay a scrim, a hole, a border and a
+            // crosshair. One floor for all four would have to clear the
+            // smallest -- three -- and would then be no floor at all for the
+            // Preview. The floor's job is to catch an *empty* frame, which is
+            // how this sweep would otherwise pass over a view that renders
+            // nothing: `RegionSelect` drew exactly zero commands until this
+            // test learned to activate the selector.
+            for (view, floor) in [
+                (AppView::Menu, 10),
+                (AppView::RegionSelect, 5),
+                (AppView::Countdown, 3),
+                (AppView::Preview, 10),
+            ] {
+                let mut app = ScreenshotApp::new(1280.0, 800.0);
+                app.palette = Palette::for_mode(light);
+                app.view = view;
+                app.current_capture = Some(Capture::new(4, 4, vec![0xFF20_2020; 16]));
+                app.countdown_remaining = 3;
+                // The region overlay draws nothing at all unless the selector
+                // is active -- `RegionSelector::render` returns early -- so a
+                // sweep that only set the view would have found an empty frame
+                // and, without the `> 10` floor below, called it swept.
+                app.region_selector.active = true;
+                app.region_selector.dragging = true;
+                app.region_selector.start_x = 100.0;
+                app.region_selector.start_y = 100.0;
+                app.region_selector.current_x = 400.0;
+                app.region_selector.current_y = 300.0;
+                let tree = App::render(&mut app, 1280.0, 800.0);
+                assert!(
+                    tree.commands.len() >= floor,
+                    "{view:?} drew {} commands, below its floor of {floor}, so this sweep looked at an empty frame",
+                    tree.commands.len()
+                );
+                appearance::palette_check::assert_drawn_from(
+                    &app.palette,
+                    &tree.commands,
+                    // Colours this program owns rather than borrows: an
+                    // annotation pen the user picked, the scrim, and the
+                    // crosshair. Three of these five were unreachable from the
+                    // single view this test used to render, which is how a
+                    // bare white literal sat in the overlay unnoticed.
+                    &[
+                        HIGHLIGHT_COLOR,
+                        ANNOTATION_RED,
+                        ANNOTATION_BLUE,
+                        CROSSHAIR_COLOR,
+                        OVERLAY_COLOR,
+                    ],
+                    &format!("screenshot {view:?} (light={light})"),
+                );
+            }
         }
     }
 

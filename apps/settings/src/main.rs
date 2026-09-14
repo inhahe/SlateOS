@@ -849,17 +849,22 @@ pub enum DropdownId {
 }
 
 impl DropdownId {
-    /// Every dropdown in the application.
+    /// Every dropdown with a fixed identity.
     ///
-    /// Exists so a test can walk the whole set and check each one is reachable.
+    /// Exists so a test can walk the set and check each one is reachable.
     /// Three of these were drawn with nothing that could open them, and the
-    /// only cheap way to keep the next one from joining them is to iterate the
-    /// enum rather than trust that whoever adds it also wires it.
+    /// only cheap way to keep the next one from joining them is to iterate
+    /// rather than trust that whoever adds one also wires it.
     ///
-    /// `NotifImportance` is absent because it is one dropdown per program in a
-    /// list that may be empty; there is no fixed value to walk. Everything with
-    /// a fixed identity belongs here.
-    pub const ALL: [Self; 13] = [
+    /// **Named `FIXED` and not `ALL`, because it is deliberately a subset.**
+    /// `NotifImportance` is absent: it is one dropdown *per program*, in a list
+    /// that may be empty, so there is no fixed value to walk. That reason was
+    /// already written here while the constant was still called `ALL` -- which
+    /// is the shape `scripts/check-variant-lists.py` exists to refuse, and did:
+    /// a list that names itself exhaustive and is not will be read as
+    /// exhaustive by the next person, reason or no reason. The gate's own
+    /// wording: "A subset named ALL is the same defect wearing the other hat."
+    pub const FIXED: [Self; 13] = [
         Self::QuietStart,
         Self::QuietEnd,
         Self::Resolution,
@@ -2244,7 +2249,7 @@ impl SliderId {
     /// The per-application volumes are left out because how many of them there
     /// are is state, not a constant; a test that wants those enumerates
     /// `app_volumes` instead. Exists so a test can walk the rest and check each
-    /// one is draggable, the way [`DropdownId::ALL`] does for dropdowns.
+    /// one is draggable, the way [`DropdownId::FIXED`] does for dropdowns.
     #[cfg(test)]
     const FIXED: [Self; 8] = [
         Self::NightLightTemperature,
@@ -7114,7 +7119,7 @@ mod tests {
         // Three of the ten were drawn with no opener at all: the page's click
         // handler stopped short of them. Walking the enum rather than a list
         // written by hand is what makes this catch the eleventh as well.
-        for id in DropdownId::ALL {
+        for id in DropdownId::FIXED {
             let mut state = state_showing(RowHit::Dropdown(id))
                 .unwrap_or_else(|| panic!("no page draws a row for {id:?}"));
             let (cx, cy) = center_of(&state, RowHit::Dropdown(id)).expect("just found it");
@@ -7133,7 +7138,7 @@ mod tests {
     fn test_an_open_dropdown_appears_under_its_own_button() {
         // The popup used to carry a hand-written anchor per dropdown, so it
         // could open several rows away from the button that was pressed.
-        for id in DropdownId::ALL {
+        for id in DropdownId::FIXED {
             let mut state = state_showing(RowHit::Dropdown(id))
                 .unwrap_or_else(|| panic!("no page draws a row for {id:?}"));
             let (cx, cy) = center_of(&state, RowHit::Dropdown(id)).expect("just found it");

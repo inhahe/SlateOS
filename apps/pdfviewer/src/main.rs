@@ -4257,25 +4257,42 @@ mod tests {
     /// reading -- neither is the desktop theme's decision.
     #[test]
     fn every_colour_the_pdf_chrome_draws_comes_from_its_palette() {
+        // The sidebar, the print dialog and the search box are three surfaces
+        // this test never drew until 2026-09-14: it rendered the opening
+        // window, sidebar hidden, no dialog, nothing focused. A dialog is an
+        // overlay over everything else, which makes it the *last* place a
+        // theme-ignoring colour would be noticed by eye. See `known-issues.md`
+        // `TD-C-EIGHT-THEME-GUARDS-CHECK-A-PROGRAM'S-OPENING-FRAME`.
         for light in [false, true] {
-            let mut app = PdfViewerApp::new(1100.0, 800.0);
-            app.palette = Palette::for_mode(light);
-            let tree = App::render(&mut app, 1100.0, 800.0);
-            assert!(
-                tree.commands.len() > 10,
-                "the sweep examined {} commands, which is not a render",
-                tree.commands.len()
-            );
-            appearance::palette_check::assert_drawn_from(
-                &app.palette,
-                &tree.commands,
-                &[
-                    Color::rgb(255, 255, 255),
-                    Color::rgb(40, 42, 54),
-                    Color::rgb(30, 30, 30),
-                ],
-                &format!("pdfviewer (light={light})"),
-            );
+            for sidebar in [false, true] {
+                for dialog in [false, true] {
+                    for searching in [false, true] {
+                        let mut app = PdfViewerApp::new(1100.0, 800.0);
+                        app.palette = Palette::for_mode(light);
+                        app.tabs[app.active_tab].sidebar_visible = sidebar;
+                        app.print_dialog.open = dialog;
+                        app.search_focused = searching;
+                        let tree = App::render(&mut app, 1100.0, 800.0);
+                        assert!(
+                            tree.commands.len() > 10,
+                            "the sweep examined {} commands, which is not a render",
+                            tree.commands.len()
+                        );
+                        appearance::palette_check::assert_drawn_from(
+                            &app.palette,
+                            &tree.commands,
+                            &[
+                                Color::rgb(255, 255, 255),
+                                Color::rgb(40, 42, 54),
+                                Color::rgb(30, 30, 30),
+                            ],
+                            &format!(
+                                "pdfviewer sidebar={sidebar} dialog={dialog} searching={searching} (light={light})"
+                            ),
+                        );
+                    }
+                }
+            }
         }
     }
 

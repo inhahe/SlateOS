@@ -4883,6 +4883,22 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
                  accepted connections are serialising again",
                 e
             );
+            // The descriptive line above cannot fail a boot on its own:
+            // `scripts/boot-test.sh` fails a run by grepping the serial log for
+            // `self-test failed`, and deliberately NOT for raw `FAIL:`, which has
+            // legitimate occurrences in intentional negative tests. This dispatch
+            // is what actually reds the run -- without it the witness reports a
+            // regression into a channel nothing reads, which is worse than having
+            // no witness, because `known-issues` would record one as landed.
+            //
+            // Diagnostic rather than Integrity: it must fail the run, but
+            // `halt_loop()` would stop every later self-test and cost a whole
+            // boot's worth of information for each regression.
+            crate::selftest::dispatch_debug(
+                "net::socket head-of-line",
+                crate::selftest::Severity::Diagnostic,
+                Err::<(), _>(e),
+            );
             return Err(e);
         }
     }

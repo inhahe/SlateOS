@@ -22,23 +22,34 @@
 //! │   │   ├── BB:DD.F      PCI device info per BDF address
 //! │   │   └── ...
 //! │   └── system/
-//! │       └── cpu/
-//! │           ├── online    Online CPU range, e.g. "0-7" (read-only)
-//! │           ├── present   Present (populated) CPU range (read-only)
-//! │           ├── possible  Possible CPU range (read-only)
-//! │           ├── kernel_max Highest addressable CPU index (read-only)
-//! │           └── cpuN/                 One per present CPU
-//! │               ├── online            Online toggle, cpu1+ (read-only)
-//! │               ├── topology/
-//! │               │   ├── physical_package_id   Socket id (read-only)
-//! │               │   ├── core_id               Core id within socket
-//! │               │   ├── core_siblings[_list]  Threads in same socket
-//! │               │   └── thread_siblings[_list] Threads in same core
-//! │               └── cache/indexI/     One per detected cache level/type
-//! │                   ├── level / type / size   CPUID-derived geometry
-//! │                   ├── coherency_line_size
-//! │                   ├── ways_of_associativity / number_of_sets
-//! │                   └── shared_cpu_map[_list]  CPUs sharing this cache
+//! │       ├── cpu/
+//! │       │   ├── online    Online CPU range, e.g. "0-7" (read-only)
+//! │       │   ├── present   Present (populated) CPU range (read-only)
+//! │       │   ├── possible  Possible CPU range (read-only)
+//! │       │   ├── kernel_max Highest addressable CPU index (read-only)
+//! │       │   ├── cpuid/                CPUID leaf 1 identity (read-only)
+//! │       │   │   ├── family            Extended family folded in
+//! │       │   │   ├── model             Extended model folded in
+//! │       │   │   └── stepping
+//! │       │   └── cpuN/                 One per present CPU
+//! │       │       ├── online            Online toggle, cpu1+ (read-only)
+//! │       │       ├── topology/
+//! │       │       │   ├── physical_package_id   Socket id (read-only)
+//! │       │       │   ├── core_id               Core id within socket
+//! │       │       │   ├── core_siblings[_list]  Threads in same socket
+//! │       │       │   └── thread_siblings[_list] Threads in same core
+//! │       │       └── cache/indexI/     One per detected cache level/type
+//! │       │           ├── level / type / size   CPUID-derived geometry
+//! │       │           ├── coherency_line_size
+//! │       │           ├── ways_of_associativity / number_of_sets
+//! │       │           └── shared_cpu_map[_list]  CPUs sharing this cache
+//! │       └── memory/
+//! │           ├── total_kb       MemTotal, from mm::memory_info (read-only)
+//! │           └── available_kb   Free memory, same source (read-only)
+//! │
+//! │  No cpufreq/: this kernel has no CPU frequency source, and a file
+//! │  reading 0 cannot be told from a real 0 MHz. Absent is the honest
+//! │  answer until a CPUID leaf-16h reader exists.
 //! └── fs/
 //!     ├── cache_sectors    Buffer cache capacity (read-only)
 //!     ├── cache_stats      Buffer cache hit/miss stats (read-only)
@@ -136,6 +147,10 @@ enum SysPath<'a> {
     CpuCacheIndexDir(usize, usize),
     /// A per-CPU cache file: /sys/devices/system/cpu/cpuN/cache/indexI/size etc.
     CpuCacheFile(usize, usize, &'a str),
+    CpuidDir,
+    CpuidFile(&'a str),
+    MemoryDir,
+    MemoryFile(&'a str),
     /// File in fs/ subdir: /sys/fs/cache_sectors etc.
     FsFile(&'a str),
     /// Not found.
@@ -163,6 +178,16 @@ const FS_FILES: &[&str] = &["cache_sectors", "cache_stats", "mount_count"];
 /// nproc, hwloc, and OpenMP/TBB runtimes consult to size thread pools — they
 /// try this authoritative sysfs path *before* falling back to /proc/cpuinfo.
 const CPU_FILES: &[&str] = &["online", "present", "possible", "kernel_max"];
+
+/// CPUID identity files in `/sys/devices/system/cpu/cpuid/`.
+const CPUID_FILES: &[&str] = &["family", "model", "stepping"];
+
+/// System memory files in `/sys/devices/system/memory/`.
+///
+/// `slots_total` and `speed_mhz` are DIMM/board facts needing SMBIOS, which
+/// has no producer here, so they are absent rather than zero. Units are kB,
+/// matching `cache/size` and the rest of this tree.
+const MEMORY_FILES: &[&str] = &["total_kb", "available_kb"];
 
 /// Per-CPU topology files in /sys/devices/system/cpu/cpuN/topology/.
 ///
@@ -239,6 +264,17 @@ fn classify_cpu_tail(tail: &str) -> SysPath<'_> {
         return SysPath::CpuFile(head);
     }
     // A per-CPU directory cpuN — must index a present CPU.
+    // CPUID identity. A directory beside cpuN rather than a flat file, so it
+    // is matched here and not through CPU_FILES.
+    if head == "cpuid" {
+        if rest.is_empty() {
+            return SysPath::CpuidDir;
+        }
+        if !rest.contains('/') && CPUID_FILES.contains(&rest) {
+            return SysPath::CpuidFile(rest);
+        }
+        return SysPath::NotFound;
+    }
     if let Some(idx) = parse_cpu_dir(head) {
         if idx >= crate::acpi::processor_count() {
             return SysPath::NotFound;
@@ -362,6 +398,14 @@ fn classify_path(rel: &str) -> SysPath<'_> {
                         };
                         if third == "cpu" {
                             classify_cpu_tail(rest2)
+                        } else if third == "memory" {
+                            if rest2.is_empty() {
+                                SysPath::MemoryDir
+                            } else if !rest2.contains('/') && MEMORY_FILES.contains(&rest2) {
+                                SysPath::MemoryFile(rest2)
+                            } else {
+                                SysPath::NotFound
+                            }
                         } else {
                             SysPath::NotFound
                         }
@@ -526,6 +570,49 @@ fn fmt_cpu_mask(cpus: &[u32]) -> String {
 /// entry we fall back to a single-thread core in package 0 (the same honest
 /// "we don't know better" layout `cputopo::init_defaults` itself uses), never
 /// fabricated data.
+/// CPUID identity: `/sys/devices/system/cpu/cpuid/<name>`.
+///
+/// Leaf 1 EAX, with extended family/model already folded in by
+/// `cpu_family_model_stepping`. These are facts about the running CPU and
+/// always exist, so nothing here is omitted.
+fn gen_cpuid_file(name: &str) -> KernelResult<Vec<u8>> {
+    let (family, model, stepping) = crate::cpu::cpu_family_model_stepping();
+    let v = match name {
+        "family" => family,
+        "model" => model,
+        "stepping" => stepping,
+        _ => return Err(KernelError::NotFound),
+    };
+    Ok(format!(
+        "{v}
+"
+    )
+    .into_bytes())
+}
+
+/// System memory: `/sys/devices/system/memory/<name>`.
+///
+/// Sourced from `mm::memory_info()`, the same call `/proc/meminfo` uses for
+/// `MemTotal`. Deliberately NOT from `frame::stats().total_frames`, which
+/// counts non-usable holes -- that would publish a second, different answer
+/// to 'how much memory is there' in a second tree, which is the duplication
+/// this whole tree was chosen to avoid.
+///
+/// kB, matching `cache/size` and the rest of `/sys/devices`.
+fn gen_memory_file(name: &str) -> KernelResult<Vec<u8>> {
+    let info = crate::mm::memory_info();
+    let v = match name {
+        "total_kb" => info.total_bytes / 1024,
+        "available_kb" => info.free_bytes / 1024,
+        _ => return Err(KernelError::NotFound),
+    };
+    Ok(format!(
+        "{v}
+"
+    )
+    .into_bytes())
+}
+
 fn gen_cpu_topo_file(cpu_idx: usize, name: &str) -> KernelResult<Vec<u8>> {
     // Idempotent: populates the snapshot from cpu_topology on first call.
     crate::fs::cputopo::init_defaults();
@@ -797,13 +884,21 @@ impl FileSystem for SysFs {
                 ])
             }
             SysPath::SystemDir => {
-                // Just "cpu/" for now (memory/node trees can follow).
-                Ok(vec![DirEntry {
-                    ino: 0,
-                    name: PathBuf::from("cpu"),
-                    entry_type: EntryType::Directory,
-                    size: 0,
-                }])
+                // cpu/ and memory/. A node/ tree can follow.
+                Ok(vec![
+                    DirEntry {
+                        ino: 0,
+                        name: PathBuf::from("cpu"),
+                        entry_type: EntryType::Directory,
+                        size: 0,
+                    },
+                    DirEntry {
+                        ino: 0,
+                        name: PathBuf::from("memory"),
+                        entry_type: EntryType::Directory,
+                        size: 0,
+                    },
+                ])
             }
             SysPath::SystemCpuDir => {
                 let mut entries: Vec<DirEntry> = CPU_FILES
@@ -827,6 +922,14 @@ impl FileSystem for SysFs {
                         size: 0,
                     });
                 }
+                // CPUID identity, a directory rather than a flat file because
+                // family/model/stepping are three scalars, one per file.
+                entries.push(DirEntry {
+                    ino: 0,
+                    name: PathBuf::from("cpuid"),
+                    entry_type: EntryType::Directory,
+                    size: 0,
+                });
                 Ok(entries)
             }
             SysPath::CpuN(idx) => {
@@ -884,6 +987,38 @@ impl FileSystem for SysFs {
                     .collect();
                 Ok(entries)
             }
+            SysPath::CpuidDir => {
+                let entries = CPUID_FILES
+                    .iter()
+                    .map(|name| {
+                        let size = gen_cpuid_file(name).map_or(0, |d| d.len() as u64);
+                        DirEntry {
+                            ino: 0,
+                            name: PathBuf::from(*name),
+                            entry_type: EntryType::File,
+                            size,
+                        }
+                    })
+                    .collect();
+                Ok(entries)
+            }
+            SysPath::MemoryDir => {
+                // Only the files that resolve. `gen_memory_file` returns
+                // NotFound for anything the kernel cannot answer, and a name
+                // listed here but absent on read is a worse lie than omission.
+                let entries = MEMORY_FILES
+                    .iter()
+                    .filter_map(|name| {
+                        gen_memory_file(name).ok().map(|d| DirEntry {
+                            ino: 0,
+                            name: PathBuf::from(*name),
+                            entry_type: EntryType::File,
+                            size: d.len() as u64,
+                        })
+                    })
+                    .collect();
+                Ok(entries)
+            }
             SysPath::CpuNTopologyDir(idx) => {
                 let entries = CPU_TOPOLOGY_FILES
                     .iter()
@@ -936,7 +1071,9 @@ impl FileSystem for SysFs {
             | SysPath::CpuN(_)
             | SysPath::CpuNTopologyDir(_)
             | SysPath::CpuCacheDir(_)
-            | SysPath::CpuCacheIndexDir(_, _) => Err(KernelError::IsADirectory),
+            | SysPath::CpuCacheIndexDir(_, _)
+            | SysPath::CpuidDir
+            | SysPath::MemoryDir => Err(KernelError::IsADirectory),
 
             SysPath::KernelFile(name) => gen_kernel_file(name),
             SysPath::ParamFile(name) => gen_param_file(name),
@@ -946,6 +1083,8 @@ impl FileSystem for SysFs {
             SysPath::CpuNOnline(idx) => Ok(gen_cpu_online_file(idx)),
             SysPath::CpuTopoFile(idx, name) => gen_cpu_topo_file(idx, name),
             SysPath::CpuCacheFile(idx, ci, name) => gen_cpu_cache_file(idx, ci, name),
+            SysPath::CpuidFile(name) => gen_cpuid_file(name),
+            SysPath::MemoryFile(name) => gen_memory_file(name),
             SysPath::NotFound => Err(KernelError::NotFound),
         }
     }
@@ -1053,6 +1192,36 @@ impl FileSystem for SysFs {
                 entry_type: EntryType::Directory,
                 size: 0,
             }),
+            SysPath::CpuidDir => Ok(DirEntry {
+                ino: 0,
+                name: PathBuf::from("cpuid"),
+                entry_type: EntryType::Directory,
+                size: 0,
+            }),
+            SysPath::MemoryDir => Ok(DirEntry {
+                ino: 0,
+                name: PathBuf::from("memory"),
+                entry_type: EntryType::Directory,
+                size: 0,
+            }),
+            SysPath::CpuidFile(name) => {
+                let size = gen_cpuid_file(name).map_or(0, |d| d.len() as u64);
+                Ok(DirEntry {
+                    ino: 0,
+                    name: PathBuf::from(name),
+                    entry_type: EntryType::File,
+                    size,
+                })
+            }
+            SysPath::MemoryFile(name) => {
+                let size = gen_memory_file(name).map_or(0, |d| d.len() as u64);
+                Ok(DirEntry {
+                    ino: 0,
+                    name: PathBuf::from(name),
+                    entry_type: EntryType::File,
+                    size,
+                })
+            }
             SysPath::CpuTopoFile(idx, name) => {
                 let size = gen_cpu_topo_file(idx, name).map_or(0, |d| d.len() as u64);
                 Ok(DirEntry {
@@ -1117,7 +1286,9 @@ impl FileSystem for SysFs {
             | SysPath::CpuFile(_)
             | SysPath::CpuNOnline(_)
             | SysPath::CpuTopoFile(_, _)
-            | SysPath::CpuCacheFile(_, _, _) => {
+            | SysPath::CpuCacheFile(_, _, _)
+            | SysPath::CpuidFile(_)
+            | SysPath::MemoryFile(_) => {
                 // Read-only files (we do not model runtime CPU hot-plug).
                 Err(KernelError::NotSupported)
             }
@@ -1130,7 +1301,9 @@ impl FileSystem for SysFs {
             | SysPath::CpuN(_)
             | SysPath::CpuNTopologyDir(_)
             | SysPath::CpuCacheDir(_)
-            | SysPath::CpuCacheIndexDir(_, _) => Err(KernelError::IsADirectory),
+            | SysPath::CpuCacheIndexDir(_, _)
+            | SysPath::CpuidDir
+            | SysPath::MemoryDir => Err(KernelError::IsADirectory),
             SysPath::NotFound => Err(KernelError::NotFound),
         }
     }

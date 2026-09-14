@@ -195,7 +195,9 @@ def selftest():
     probe = pathlib.Path(tempfile.mkdtemp(prefix="slateos-xdg-selftest-"))
     try:
         (probe / "slateos").mkdir()
-        (probe / "slateos" / "input.yaml").write_text("keyboard: {}" + NL, encoding="utf-8")
+        (probe / "slateos" / "input.yaml").write_text(
+            "keyboard: {}" + NL, encoding="utf-8", newline=""
+        )
         left = sorted(p for p in probe.rglob("*") if p.is_file())
         ok = [p.relative_to(probe).as_posix() for p in left] == ["slateos/input.yaml"]
         print(("ok   " if ok else "FAIL ") + "a file written into the probe is seen")

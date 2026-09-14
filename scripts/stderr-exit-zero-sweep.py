@@ -226,7 +226,7 @@ def selftest():
     try:
         for name, body, _want_code, want_flag in cases:
             script = os.path.join(work, name + ".py")
-            with open(script, "w", encoding="utf-8") as fh:
+            with open(script, "w", encoding="utf-8", newline="") as fh:
                 fh.write(body + "\n")
             code, err = probe([py, script, MISSING_PATH], work)
             flagged = code == 0 and first_failure_line(err) is not None

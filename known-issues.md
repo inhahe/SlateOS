@@ -878,6 +878,34 @@ exactly this reason: a helper the whole userland needs, extracted into its own
 crate rather than copied. `getopt` is the same shape and has not had the same
 treatment.
 
+**WHICH of them ship, measured 2026-09-14 — and it reorders the work.**
+
+Intersecting the baseline with `scripts/rootfs-bin-manifest.txt`, which is what
+`create-ext4-rootfs.sh` actually installs into `/bin`:
+
+| | count |
+|---|---|
+| binaries on the argv baseline | 169 |
+| binaries on the image | 75 |
+| **on both** | **3** — `ar`, `kill`, `logger` |
+
+The coreutils binaries dominate the image and are already clean, because they
+share the byte-based `getopt`. So of 169 programs that die on a legal filename,
+**three can be run by a user of the current image.** The other 166 are real
+defects in binaries that are built and not installed.
+
+That is a correction to how this sweep was being run, not a footnote. The first
+seven conversions were chosen by FILE SIZE — smallest first, fastest to
+convert — and of those only `diff` is on the image. `blockdev`, `look`,
+`nologin`, `timeout`, `lsns`, `eject` and `ldconfig` are all shipped nowhere.
+The defects were real and the fixes stand; the ORDER was wrong, and picking by
+"cheapest to convert" is what produced it.
+
+**Take the three that ship first.** After them the baseline is a backlog of
+things nobody can currently run, and its priority should be read that way —
+against, say, the lossy-decode column, which `scripts/lossy-decode.py` reports
+as VALUE 0 for the image's binaries and 182 for everything else.
+
 **The route, revised after the measurement above:**
 
 1. **Fix bins now; the extraction is not a gate.** Each bin needs a real pass

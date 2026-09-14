@@ -387,5 +387,15 @@ frames-to-kB conversion is `* 16` -- but per the above, none is needed.
 - `cpufreq` is a per-CPU subdirectory, beside the existing `online`,
   `topology` and `cache` handling.
 
-`read_file`, `stat` and `list_dir` all match exhaustively on `SysPath`, so the
-compiler enforces that every new variant is handled in all three.
+**Correction:** there is no `list_dir`. The trait method is **`readdir`**, and
+**five** methods dispatch through `classify_path`, not three -- `readdir`
+(718), `read_file` (926), `stat` (953), `write_file` (1090) and `metadata`
+(1138). Each new variant has to be handled in all five. The original sentence
+here named a function that does not exist and undercounted the rest, which is
+the sort of plan that reads as complete and produces a patch matching nothing.
+Verified by listing the `impl`'s methods rather than by assuming the usual VFS
+names.
+
+The module's `//!` doc carries a `## Layout` ASCII tree of the served paths;
+it has to grow with the new files or it becomes a second, wrong description of
+the same tree.

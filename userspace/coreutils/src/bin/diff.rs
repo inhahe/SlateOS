@@ -123,6 +123,15 @@ struct Config {
     color: bool,
     recursive: bool,
     new_file: bool,
+    /// The option words exactly as the user typed them, for the `diff -r
+    /// da/x.txt db/x.txt` line GNU prints ahead of each file in a directory
+    /// walk.
+    ///
+    /// Kept verbatim rather than reconstructed from the parsed flags,
+    /// because GNU echoes the spelling: measured, `-ru` comes back as `-ru`
+    /// and `-r -u` as `-r -u`. Rebuilding the line from `Config` would
+    /// print one canonical form for both.
+    option_words: Vec<String>,
 }
 
 /// Result of argument parsing.
@@ -219,6 +228,10 @@ fn parse_args(args: &[String]) -> ParseResult {
     let mut recursive = false;
     let mut new_file = false;
     let mut positional: Vec<String> = Vec::new();
+    // Tracked by INDEX, not by value: an operand can be spelled the same as
+    // an option's value -- `diff -U 5 5 other` names a file called `5` -- and
+    // subtracting one list from the other by content would drop the wrong word.
+    let mut positional_at: Vec<usize> = Vec::new();
 
     let mut end_of_opts = false;
     let mut i = 1;
@@ -228,6 +241,7 @@ fn parse_args(args: &[String]) -> ParseResult {
 
         if end_of_opts || !arg.starts_with('-') {
             positional.push(arg.clone());
+            positional_at.push(i);
             i += 1;
             continue;
         }
@@ -463,6 +477,16 @@ fn parse_args(args: &[String]) -> ParseResult {
     let use_color = color.unwrap_or(false);
     let ctx = context_lines.unwrap_or(3);
 
+    // Everything that was not an operand, in the order it was typed. `args[0]`
+    // is the program name and is not one of them.
+    let option_words: Vec<String> = args
+        .iter()
+        .enumerate()
+        .skip(1)
+        .filter(|(at, _)| !positional_at.contains(at))
+        .map(|(_, w)| w.clone())
+        .collect();
+
     ParseResult::Run(Config {
         path1: positional[0].clone(),
         path2: positional[1].clone(),
@@ -478,6 +502,7 @@ fn parse_args(args: &[String]) -> ParseResult {
         color: use_color,
         recursive,
         new_file,
+        option_words,
     })
 }
 
@@ -1705,7 +1730,7 @@ fn diff_dirs(path1: &Path, path2: &Path, config: &Config) -> i32 {
                 worst_exit = 1;
             }
         } else {
-            let code = diff_files(&p1.to_string_lossy(), &p2.to_string_lossy(), config);
+            let code = diff_files(&p1.to_string_lossy(), &p2.to_string_lossy(), config, true);
             if code > worst_exit {
                 worst_exit = code;
             }
@@ -1734,7 +1759,7 @@ fn list_dir(path: &Path) -> Result<Vec<String>, String> {
 // ============================================================================
 
 /// Compare two files and print the diff. Returns exit code (0/1/2).
-fn diff_files(path1_str: &str, path2_str: &str, config: &Config) -> i32 {
+fn diff_files(path1_str: &str, path2_str: &str, config: &Config, in_dir_walk: bool) -> i32 {
     let p1 = Path::new(path1_str);
     let p2 = Path::new(path2_str);
 
@@ -1829,6 +1854,26 @@ fn diff_files(path1_str: &str, path2_str: &str, config: &Config) -> i32 {
     if config.brief {
         println!("Files {path1_str} and {path2_str} differ");
         return 1;
+    }
+
+    // THE `diff -r da/x.txt db/x.txt` LINE, printed here rather than by the
+    // directory walk, because the conditions for it are only known now.
+    // Measured, three ways round:
+    //
+    //   * it appears only for a file that DIFFERS -- an identical pair in the
+    //     same walk gets no line, and under `-s` its `are identical` line has
+    //     no header either, which is why this sits below the `!has_diff`
+    //     return rather than above it;
+    //   * `--brief` prints none at all, which is why it sits below that return
+    //     too;
+    //   * the options are echoed as TYPED.
+    if in_dir_walk {
+        let mut line = String::from("diff");
+        for word in &config.option_words {
+            line.push(' ');
+            line.push_str(word);
+        }
+        println!("{line} {path1_str} {path2_str}");
     }
 
     // Format the output.
@@ -1942,16 +1987,16 @@ fn main() {
                     let f_str = file.to_string_lossy();
 
                     if is_dir1 {
-                        diff_files(&t_str, &f_str, &config)
+                        diff_files(&t_str, &f_str, &config, false)
                     } else {
-                        diff_files(&f_str, &t_str, &config)
+                        diff_files(&f_str, &t_str, &config, false)
                     }
                 } else {
                     eprintln!("diff: cannot determine filename from path");
                     2
                 }
             } else {
-                diff_files(&config.path1, &config.path2, &config)
+                diff_files(&config.path1, &config.path2, &config, false)
             };
 
             process::exit(exit_code);
@@ -2275,6 +2320,7 @@ mod tests {
             color: false,
             recursive: false,
             new_file: false,
+            option_words: Vec::new(),
         }
     }
 
@@ -2286,6 +2332,30 @@ mod tests {
     }
 
     // ---------------- parse_args ----------------
+    /// The `diff -r a/x b/x` header echoes the options AS TYPED, and an
+    /// operand that looks like an option's value is still an operand.
+    ///
+    /// The words are collected by INDEX rather than by subtracting the operand
+    /// list from argv by content. `diff -U 5 5 other` names a file called `5`,
+    /// and a content-based subtraction would remove the wrong `5` -- leaving
+    /// the header reading `diff -U` and the file list intact, which is the
+    /// kind of wrong that looks right.
+    #[test]
+    fn the_option_words_are_kept_as_typed() {
+        let c = run(&["diff", "-r", "-u", "a", "b"]);
+        assert_eq!(c.option_words, vec!["-r", "-u"]);
+        // Measured: GNU echoes `-ru` as `-ru`, not as `-r -u`.
+        let c = run(&["diff", "-ru", "a", "b"]);
+        assert_eq!(c.option_words, vec!["-ru"]);
+        // An option's value is not an operand.
+        let c = run(&["diff", "-U", "5", "a", "b"]);
+        assert_eq!(c.option_words, vec!["-U", "5"]);
+        // ...and an operand spelled like one is still an operand.
+        let c = run(&["diff", "-U", "5", "5", "other"]);
+        assert_eq!(c.option_words, vec!["-U", "5"]);
+        assert_eq!(c.path1, "5");
+        assert_eq!(c.path2, "other");
+    }
 
     #[test]
     fn parse_files_only() {

@@ -114,6 +114,12 @@ set -u
 DIFF_PROG='cp'
 # Not `/usr/bin/cp`; see "The reference is built, not found" above.
 DIFF_GNU_SOURCE=9.4
+# `contents` hashes every file body -- see the comment on it for why. Declared
+# so a machine without `sha256sum` SKIPS this harness instead of running it
+# with an empty hash on every line, which would compare equal for every pair
+# and report a clean run. A silent downgrade to "everything matches" is the
+# worst failure a differential harness has.
+DIFF_NEED=sha256sum
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 
@@ -271,11 +277,42 @@ xattrs() {
 # sides, so both bodies come out empty and the comparison says nothing about
 # that one file rather than saying something false about it. Same bargain as
 # `snapshot`'s discarded `find` errors, for the same reason.
+# EVERY BODY IS HASHED AS WELL AS PRINTED, and the hash is the part that makes
+# the comparison correct.
+#
+# This function's output is consumed as `o_body=$(contents ... )`, and **bash
+# command substitution discards NUL bytes** -- it even says so, on stderr:
+# "warning: command substitution: ignored null byte in input". So `cat` of a
+# file containing NULs yields a captured string with them removed, and two
+# files differing only in NUL placement compared EQUAL. A `cp` that dropped or
+# invented NUL bytes would have been reported as correct.
+#
+# Measured both ways by `scripts/probe-cp-diff-nul.sh`, which runs this body
+# and the previous one over the same fixtures: a file holding `a\0b` against
+# one holding `ab` is SAME under the old body and DIFFERs under this one, while
+# a control pair differing in an ordinary byte DIFFERs under both -- so the
+# change fixes the blindness without making everything look different.
+#
+# `cat` is kept rather than replaced: the hash decides equality, the body makes
+# a failure legible. A harness that reports only "sha 3a7f... != sha 9c21..."
+# tells you that something is wrong and nothing about what.
 contents() {
   ( cd "$1" 2>/dev/null || return 0
     find . -type f -printf '%P\0' 2>/dev/null | LC_ALL=C sort -z \
       | while IFS= read -r -d '' f; do
       printf '== %s\n' "$f"
+      # Hex, so it survives the command substitution that ate the NULs.
+      # Redirected rather than passed as an operand so the output is the bare
+      # hash with no filename to strip.
+      #
+      # The redirect is inside `{ ...; } 2>/dev/null` because a plain
+      # `sha256sum <"$f" 2>/dev/null` does NOT silence an unreadable file: the
+      # shell opens the redirect before the command runs, so "Permission
+      # denied" comes from the shell and misses the command's own stderr
+      # redirection. The unreadable cases (19 and its relatives) are symmetric
+      # -- both sides fail identically and the hash is empty on both -- so this
+      # suppresses noise without suppressing a difference.
+      printf 'sha %s\n' "$( { sha256sum <"$f"; } 2>/dev/null | cut -d' ' -f1 )"
       cat -- "$f"
       printf '\n'
     done )
@@ -656,6 +693,34 @@ run_case file.txt new.txt
 run_case file.txt dir
 run_case file.txt dir/
 run_case file.txt dir/new.txt
+
+# A body containing NUL bytes, and one that is nothing but NULs.
+#
+# These exist to exercise `contents`' hash rather than to catch a plausible
+# `cp` bug: until 2026-09-14 this harness could not see a NUL difference at
+# all, because its comparison runs through a command substitution and bash
+# discards NUL bytes there. Two files differing only in NUL placement compared
+# EQUAL, so a `cp` that dropped or invented them would have been called
+# correct. `scripts/probe-cp-diff-nul.sh` demonstrates that blindness against
+# the old body and its absence against the new one.
+#
+# Without a case that actually carries such a file through, the fix would be a
+# guard nothing ever runs -- and `find -printf '%P\0' | sort -z | read -d ''`
+# is exactly the sort of pipeline that could mishandle one.
+TREE="mktree; printf 'a\\000b\\000c' > nul.bin"
+run_case nul.bin dst
+TREE="mktree; printf '\\000\\000\\000' > allnul.bin"
+run_case allnul.bin dst
+# Recursively, so a NUL body is carried through the directory walk too.
+#
+# `tree`, NOT `.`: the first attempt here was `cp -r . dst`, which the harness
+# reported as UNSTABLE rather than passing. It was right to -- the destination
+# is created inside the directory being walked, so what the walk finds depends
+# on when it reaches `dst`, and the two sides need not agree. That is a broken
+# fixture, not a `cp` difference, and the instability check is what stopped it
+# being committed as a passing case that would flap later.
+TREE="mktree; printf 'x\\000y' > tree/deep.bin"
+run_case -r tree dst
 run_case file.txt tree/a.txt
 run_case file.txt ./new.txt
 run_case file.txt dir/../new.txt

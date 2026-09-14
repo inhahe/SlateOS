@@ -70,6 +70,7 @@
 
 use quoting::{quoteaf_os, quotef_os};
 use std::env;
+use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -111,8 +112,8 @@ enum Format {
 
 /// Fully parsed command-line configuration.
 struct Config {
-    path1: String,
-    path2: String,
+    path1: OsString,
+    path2: OsString,
     format: Format,
     context_lines: usize,
     width: usize,
@@ -141,7 +142,7 @@ struct Config {
     /// because GNU echoes the spelling: measured, `-ru` comes back as `-ru`
     /// and `-r -u` as `-r -u`. Rebuilding the line from `Config` would
     /// print one canonical form for both.
-    option_words: Vec<String>,
+    option_words: Vec<OsString>,
 }
 
 /// Result of argument parsing.
@@ -224,7 +225,20 @@ struct Hunk {
 // Argument parsing
 // ============================================================================
 
-fn parse_args(args: &[String]) -> ParseResult {
+/// Parse `diff`'s command line.
+///
+/// Words arrive as `OsString`, not `String`, because on this OS a filename may
+/// hold any byte but `/` and NUL — and `env::args()`'s iterator is a literal
+/// `unwrap`, so `diff <name holding 0x80> other` died with a Rust panic
+/// message before `diff` ran a line of its own.
+///
+/// Option NAMES are matched through a decoded `&str`, which is safe because
+/// every option `diff` has is ASCII and **every option VALUE it takes is
+/// numeric** — there is no `--from-file=PATH` here for a path to hide in. A
+/// word that is not valid Unicode decodes to `""`, which starts with no `-`
+/// and so falls through to the operand arm, where the original `OsString` is
+/// kept intact.
+fn parse_args(args: &[OsString]) -> ParseResult {
     let mut format = Format::Normal;
     let mut context_lines: Option<usize> = None;
     let mut width: usize = 130;
@@ -239,7 +253,7 @@ fn parse_args(args: &[String]) -> ParseResult {
     let mut new_file = false;
     let mut ignore_trailing_space = false;
     let mut text_mode = false;
-    let mut positional: Vec<String> = Vec::new();
+    let mut positional: Vec<OsString> = Vec::new();
     // Tracked by INDEX, not by value: an operand can be spelled the same as
     // an option's value -- `diff -U 5 5 other` names a file called `5` -- and
     // subtracting one list from the other by content would drop the wrong word.
@@ -250,29 +264,33 @@ fn parse_args(args: &[String]) -> ParseResult {
 
     while i < args.len() {
         let arg = &args[i];
+        // `""` for a word that is not Unicode: it matches no option and is
+        // taken as an operand, which is what it must be. Decoding is for
+        // MATCHING only -- the operand arm below keeps `arg` itself.
+        let a: &str = arg.to_str().unwrap_or("");
 
         // A bare `-` is stdin, and so an OPERAND. It was falling into the
         // option branch on `starts_with('-')`, never reaching `positional`,
         // and `diff base.txt -` answered `missing operand after '-'` --
         // which is the most ordinary way anyone writes a diff in a pipeline.
-        if end_of_opts || !arg.starts_with('-') || arg == "-" {
+        if end_of_opts || !a.starts_with('-') || a == "-" {
             positional.push(arg.clone());
             positional_at.push(i);
             i += 1;
             continue;
         }
 
-        if arg == "--" {
+        if a == "--" {
             end_of_opts = true;
             i += 1;
             continue;
         }
 
         // Long options.
-        if arg.starts_with("--") {
-            if arg == "--unified" {
+        if a.starts_with("--") {
+            if a == "--unified" {
                 format = Format::Unified;
-            } else if let Some(n_str) = arg.strip_prefix("--unified=") {
+            } else if let Some(n_str) = a.strip_prefix("--unified=") {
                 format = Format::Unified;
                 match n_str.parse::<usize>() {
                     Ok(n) => context_lines = Some(n),
@@ -281,9 +299,9 @@ fn parse_args(args: &[String]) -> ParseResult {
                         process::exit(2);
                     }
                 }
-            } else if arg == "--context" {
+            } else if a == "--context" {
                 format = Format::Context;
-            } else if let Some(n_str) = arg.strip_prefix("--context=") {
+            } else if let Some(n_str) = a.strip_prefix("--context=") {
                 format = Format::Context;
                 match n_str.parse::<usize>() {
                     Ok(n) => context_lines = Some(n),
@@ -292,22 +310,22 @@ fn parse_args(args: &[String]) -> ParseResult {
                         process::exit(2);
                     }
                 }
-            } else if arg == "--side-by-side" {
+            } else if a == "--side-by-side" {
                 format = Format::SideBySide;
-            } else if arg == "--width" {
+            } else if a == "--width" {
                 i += 1;
                 if i >= args.len() {
                     eprintln!("diff: option '--width' requires an argument");
                     process::exit(2);
                 }
-                match args[i].parse::<usize>() {
+                match args[i].to_str().unwrap_or("").parse::<usize>() {
                     Ok(w) => width = w,
                     Err(_) => {
                         eprintln!("diff: invalid width {}", quoteaf_os(&args[i]));
                         process::exit(2);
                     }
                 }
-            } else if let Some(w_str) = arg.strip_prefix("--width=") {
+            } else if let Some(w_str) = a.strip_prefix("--width=") {
                 match w_str.parse::<usize>() {
                     Ok(w) => width = w,
                     Err(_) => {
@@ -315,33 +333,33 @@ fn parse_args(args: &[String]) -> ParseResult {
                         process::exit(2);
                     }
                 }
-            } else if arg == "--brief" {
+            } else if a == "--brief" {
                 brief = true;
-            } else if arg == "--report-identical-files" {
+            } else if a == "--report-identical-files" {
                 report_identical = true;
-            } else if arg == "--ignore-case" {
+            } else if a == "--ignore-case" {
                 ignore_case = true;
-            } else if arg == "--ignore-space-change" {
+            } else if a == "--ignore-space-change" {
                 ignore_space_change = true;
-            } else if arg == "--ignore-trailing-space" {
+            } else if a == "--ignore-trailing-space" {
                 ignore_trailing_space = true;
-            } else if arg == "--text" {
+            } else if a == "--text" {
                 text_mode = true;
-            } else if arg == "--ignore-all-space" {
+            } else if a == "--ignore-all-space" {
                 ignore_all_space = true;
-            } else if arg == "--ignore-blank-lines" {
+            } else if a == "--ignore-blank-lines" {
                 ignore_blank_lines = true;
-            } else if arg == "--color" {
+            } else if a == "--color" {
                 color = Some(true);
-            } else if arg == "--no-color" {
+            } else if a == "--no-color" {
                 color = Some(false);
-            } else if arg == "--recursive" {
+            } else if a == "--recursive" {
                 recursive = true;
-            } else if arg == "--new-file" {
+            } else if a == "--new-file" {
                 new_file = true;
-            } else if arg == "--help" {
+            } else if a == "--help" {
                 return ParseResult::Help;
-            } else if arg == "--version" {
+            } else if a == "--version" {
                 return ParseResult::Version;
             } else {
                 eprintln!("diff: unrecognized option {}", quoteaf_os(arg));
@@ -354,7 +372,9 @@ fn parse_args(args: &[String]) -> ParseResult {
         }
 
         // Short options. Some accept an optional or required value.
-        let chars: Vec<char> = arg[1..].chars().collect();
+        // `a`, not `arg`: a non-Unicode word decoded to `""` above and was
+        // taken as an operand, so anything reaching here is ASCII.
+        let chars: Vec<char> = a.get(1..).unwrap_or("").chars().collect();
         let mut j = 0;
         while j < chars.len() {
             match chars[j] {
@@ -402,7 +422,10 @@ fn parse_args(args: &[String]) -> ParseResult {
                             eprintln!("diff: Try 'diff --help' for more information.");
                             process::exit(2);
                         }
-                        args[i].clone()
+                        // Decoded: this value is a COUNT, so a word that is
+                        // not Unicode is simply not a number, and the
+                        // diagnostic below echoes the original bytes anyway.
+                        args[i].to_str().unwrap_or("").to_string()
                     } else {
                         rest
                     };
@@ -439,7 +462,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                             eprintln!("diff: option '-W' requires an argument");
                             process::exit(2);
                         }
-                        match args[i].parse::<usize>() {
+                        match args[i].to_str().unwrap_or("").parse::<usize>() {
                             Ok(w) => width = w,
                             Err(_) => {
                                 eprintln!("diff: invalid width {}", quoteaf_os(&args[i]));
@@ -488,7 +511,10 @@ fn parse_args(args: &[String]) -> ParseResult {
         if let Some(extra) = positional.get(2) {
             eprintln!("diff: extra operand {}", quoteaf_os(extra));
         } else {
-            let last = args.last().map_or("diff", String::as_str);
+            // The last WORD as typed, byte-exact: it is usually a path, and
+            // this diagnostic is the one place a bad one is echoed back.
+            let fallback = OsString::from("diff");
+            let last = args.last().unwrap_or(&fallback);
             eprintln!("diff: missing operand after {}", quoteaf_os(last));
         }
         eprintln!("diff: Try 'diff --help' for more information.");
@@ -501,7 +527,7 @@ fn parse_args(args: &[String]) -> ParseResult {
 
     // Everything that was not an operand, in the order it was typed. `args[0]`
     // is the program name and is not one of them.
-    let option_words: Vec<String> = args
+    let option_words: Vec<OsString> = args
         .iter()
         .enumerate()
         .skip(1)
@@ -1324,10 +1350,29 @@ fn print_normal(hunks: &[Hunk], config: &Config) {
 ///
 /// A file whose mtime cannot be read -- stdin, above all -- takes the current
 /// time, which is also measured: GNU stamps `diff -u - y.txt` with now.
+/// A path as `diff` writes it in a HEADER, C-quoted when it needs to be.
+///
+/// GNU runs the names in `--- `/`+++ ` and in the `diff -r A B` label through
+/// `quotearg` in the C style, so a name holding a byte like `0xE9` comes out
+/// as `"da/oddéname.txt"` -- double-quoted, with the byte escaped in
+/// octal. Measured (`scripts/probe-diff-name-quoting.sh`), along with three
+/// rules that are not guessable from "it quotes odd names":
+///
+/// * a space or a tab is enough to force the quotes: `"with space1"`,
+///   `"tab\tone"`;
+/// * a single quote is **not** -- `apo'st1` stays bare -- though a double
+///   quote is, as `"quo\"te1"`;
+/// * and `Only in DIR: NAME` does **not** go through this at all. It prints
+///   the raw bytes. Two lines of the same program, two rules, and assuming
+///   they agreed would have been wrong in whichever direction I guessed.
+fn qname(p: &Path) -> Vec<u8> {
+    quoting::quote_c_maybe(&pb(p)).into_bytes()
+}
+
 fn header_field(path: &Path) -> Vec<u8> {
     let (secs, nanos) = mtime_parts(path);
     let tm = localtime::Zone::from_env().local(secs, nanos);
-    let mut out = pb(path);
+    let mut out = qname(path);
     out.push(b'\t');
     out.extend_from_slice(&localtime::strftime(b"%Y-%m-%d %H:%M:%S.%N %z", &tm));
     out
@@ -1733,7 +1778,7 @@ fn diff_dirs(path1: &Path, path2: &Path, config: &Config) -> i32 {
     entries2.sort();
 
     // Merge the two sorted lists.
-    let mut all_names: Vec<String> = Vec::new();
+    let mut all_names: Vec<OsString> = Vec::new();
     let mut i = 0;
     let mut j = 0;
     while i < entries1.len() && j < entries2.len() {
@@ -1776,14 +1821,18 @@ fn diff_dirs(path1: &Path, path2: &Path, config: &Config) -> i32 {
             // puts them on stdout. They are a RESULT -- part of the answer to
             // "how do these trees differ" -- not a diagnostic, and on stderr
             // they were lost by every caller that redirected the diff.
-            println!("Only in {}: {name}", path2.display());
+            // Bytes, not `Display`: `name` is a directory entry and may
+            // hold any byte. `println!` would not compile against an
+            // `OsString`, and the `to_str()` that used to make it
+            // compile is what silently dropped such entries upstream.
+            print_path_line(&[b"Only in ", &pb(path2), b": ", &pb(Path::new(name))]);
             if worst_exit < 1 {
                 worst_exit = 1;
             }
             continue;
         }
         if !e2 && !config.new_file {
-            println!("Only in {}: {name}", path1.display());
+            print_path_line(&[b"Only in ", &pb(path1), b": ", &pb(Path::new(name))]);
             if worst_exit < 1 {
                 worst_exit = 1;
             }
@@ -1830,15 +1879,23 @@ fn diff_dirs(path1: &Path, path2: &Path, config: &Config) -> i32 {
 }
 
 /// List entries in a directory, returning just the file/dir names.
-fn list_dir(path: &Path) -> Result<Vec<String>, String> {
+fn list_dir(path: &Path) -> Result<Vec<OsString>, String> {
     let entries = fs::read_dir(path).map_err(|e| format!("{}: {e}", path.display()))?;
 
     let mut names = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|e| format!("{}: {e}", path.display()))?;
-        if let Some(name) = entry.file_name().to_str() {
-            names.push(name.to_string());
-        }
+        // The name is taken as it is. This used to read
+        //
+        //     if let Some(name) = entry.file_name().to_str() { names.push(...) }
+        //
+        // which **silently dropped every entry whose name is not valid
+        // Unicode** -- a legal filename on this OS. The effect was worse than
+        // the panic it avoided: `diff -r a b` reported no difference for files
+        // it had never looked at, and said nothing about having skipped them.
+        // A comparison tool answering "these are the same" about a file it
+        // declined to read is the one failure it must never have.
+        names.push(entry.file_name());
     }
     Ok(names)
 }
@@ -1993,12 +2050,15 @@ fn diff_files(p1: &Path, p2: &Path, config: &Config, in_dir_walk: bool) -> i32 {
     //     too;
     //   * the options are echoed as TYPED.
     if in_dir_walk {
-        let mut line = String::from("diff");
+        // Bytes: an option word is echoed exactly as typed, and `diff`
+        // accepts words it does not recognise as operands rather than
+        // rejecting them, so this must not assume Unicode.
+        let mut line: Vec<u8> = b"diff".to_vec();
         for word in &config.option_words {
-            line.push(' ');
-            line.push_str(word);
+            line.push(b' ');
+            line.extend_from_slice(&quoting::os_bytes(word));
         }
-        print_path_line(&[line.as_bytes(), b" ", &pb(p1), b" ", &pb(p2)]);
+        print_path_line(&[&line, b" ", &qname(p1), b" ", &qname(p2)]);
     }
 
     // Format the output.
@@ -2075,7 +2135,9 @@ fn print_help() {
 // ============================================================================
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
+    // `args_os`, not `args`: the latter's iterator unwraps, so a filename
+    // holding a byte that is not valid Unicode killed the process here.
+    let args: Vec<OsString> = env::args_os().collect();
 
     match parse_args(&args) {
         ParseResult::Help => {
@@ -2466,15 +2528,15 @@ mod tests {
     /// take a filename that is not Unicode. That is the smaller of the two
     /// faults -- it fails loudly -- and it is deliberately not mixed into the
     /// change that fixes the one returning a wrong answer.
-    fn argv(items: &[&str]) -> Vec<String> {
-        items.iter().map(|x| (*x).to_string()).collect()
+    fn argv(items: &[&str]) -> Vec<OsString> {
+        items.iter().map(OsString::from).collect()
     }
 
     /// A Config with every knob off, so a test names only what it changes.
     fn cfg() -> Config {
         Config {
-            path1: String::new(),
-            path2: String::new(),
+            path1: OsString::new(),
+            path2: OsString::new(),
             format: Format::Normal,
             context_lines: 3,
             width: 130,

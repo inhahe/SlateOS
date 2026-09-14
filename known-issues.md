@@ -833,6 +833,52 @@ reading `/etc/hosts` from `posix` would need the file to exist in the image and
 would still leave in-kernel resolution wrong, and it would duplicate a table
 the kernel already has.
 
+## B-USERSPACE-176-BINS-CANNOT-REACH-THE-BYTE-SAFE-GETOPT (lane B, 2026-09-14) — OPEN
+
+`scripts/argv-utf8-baseline.txt` holds **178 findings, 176 of them the same
+one**: `let argv: Vec<String> = env::args().collect()`. Every one is a program
+that **dies on a legal filename** — `env::args()`'s iterator is a literal
+`unwrap`, and on this OS a filename may hold every byte but `/` and NUL.
+
+**Why they are all spelled the same, and why that matters.** The coreutils
+bins are clean because they share `userspace/coreutils/src/getopt.rs`, which is
+byte-based. **No crate outside `userspace/coreutils` can use it** — checked:
+not one `userspace/*/Cargo.toml` depends on `coreutils`. So all 176 standalone
+bins hand-roll their argv walk, in `String`, because the byte-safe reader is
+behind a wall.
+
+That makes this one structural fact rather than 176 defects, and it changes
+what the fix is.
+
+**The precedent is already in the tree.** `userspace/quoting` exists for
+exactly this reason: a helper the whole userland needs, extracted into its own
+crate rather than copied. `getopt` is the same shape and has not had the same
+treatment.
+
+**The route, in order:**
+
+1. Extract `getopt.rs` into `userspace/getopt-rs` (the name `userspace/getopt`
+   is taken — it is the `getopt(1)` *binary*, and it is itself on the baseline).
+   `coreutils` then depends on it, unchanged in behaviour.
+2. Migrate the standalone bins to it. Each migration closes a baseline line
+   **and** fixes option handling the hand-rolled readers get wrong — long-option
+   abbreviation and ambiguity, which is what `uname` and `env` each cost a
+   separate entry in this file.
+
+**Why not just convert each bin's argv to `OsString` in place.** That closes
+the crash and leaves the parsing wrong, so each bin would be visited twice. It
+also leaves 176 hand-rolled readers to drift, which is the accumulation this
+file already records for `touch` at a smaller scale.
+
+**Scale, measured rather than guessed:** two bins have been converted by hand
+so far — `patch` and `diff` — and each took a single focused pass, with `diff`
+also turning up a silent-skip bug worse than the panic it was filed for. The
+work is real but it is not research.
+
+**Not yet started.** Recorded now because the finding is the structural one,
+and because a reader looking at a 176-line baseline needs to know it is one
+wall and not 176 separate jobs.
+
 ## B-COREUTILS-UNAME-PARSES-ITS-OWN-OPTIONS (lane B, 2026-09-11)
 
 `userspace/coreutils/src/bin/uname.rs` parses `argv` by hand rather than through

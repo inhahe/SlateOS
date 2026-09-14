@@ -41407,6 +41407,40 @@ impl Shell {
                     job.exit_seen = true;
                 }
             }
+            // A job REAPED BY AN EARLIER POLL, whose grace had not passed at
+            // the time. Outside the branch above on purpose, and this is a bug
+            // fix rather than tidying.
+            //
+            // That branch is guarded on `child` still being `Some`, and its own
+            // first act is to take it. So a poll landing in the window between
+            // the body finishing and the grace elapsing reaped the job with
+            // `exit_seen` left false — and **no later poll could ever set it**,
+            // because the guard it needs can never be true again. `exit_seen`
+            // became a property of *which poll happened to observe the exit*
+            // instead of a property of the job.
+            //
+            // The consequence was not a stale flag. `drain_jobs` reads it as
+            // "did the shell already know?", so a job with it false counts as
+            // one this `wait` waited FOR, and is marked notified — before
+            // `builtin_wait`'s pass that spares `$!`, which only ever sets
+            // `notified = true` and so cannot rescue it. The next `jobs` swept
+            // the job and printed nothing. Reported twice by lane C as a
+            // workspace-only flake in `wait_n_ignores_a_job_whose_status_was_
+            // already_reported`; it never reproduced alone (0 in 250 runs, 0 in
+            // three shuffled orders) because it needs a poll inside a 20 ms
+            // window. `a_poll_before_the_grace_does_not_lose_the_exit_forever`
+            // forces that poll and fails 100% of the time without this.
+            //
+            // `signal.is_none()` keeps `kill` out, and that exclusion is the
+            // contract on [`Job::exit_seen`]: `kill` writes a status down
+            // itself and is *not* a reaping point. It is the only thing that
+            // sets `signal`, so it is the marker that tells the two apart.
+            if job.status.is_some()
+                && job.signal.is_none()
+                && job.born_at.elapsed() >= JOB_EXIT_NOTICE_GRACE
+            {
+                job.exit_seen = true;
+            }
         }
         self.dispose_reaped_coproc();
     }
@@ -102578,6 +102612,55 @@ st=1
             }
             std::thread::yield_now();
         }
+    }
+
+    #[test]
+    fn a_poll_before_the_grace_does_not_lose_the_exit_forever() {
+        // The deterministic form of a flake lane C reported twice from a full
+        // `cargo test --workspace`, and which never reproduced alone -- 0 in
+        // 250 runs in isolation, 0 in three shuffled orders.
+        //
+        // `poll_jobs` reaps a finished body and, in the SAME branch, sets
+        // `exit_seen` only once JOB_EXIT_NOTICE_GRACE has passed. The reap
+        // takes `child`, so a poll landing in the window between the body
+        // finishing and the grace elapsing leaves the job reaped with
+        // `exit_seen` false -- and no later poll can ever set it, because the
+        // branch that would is guarded on a `child` that is now None.
+        //
+        // `drain_jobs` then sees a job it has no record of having heard about,
+        // counts it as one this `wait` waited FOR, and marks it notified. That
+        // happens BEFORE `builtin_wait`'s pass that spares `$!`, and that pass
+        // only ever sets `notified = true` -- so sparing cannot rescue it. The
+        // next `jobs` sweeps it and prints nothing.
+        //
+        // Forcing the poll makes the race a certainty rather than a 1-in-100.
+        let mut sh = new_shell();
+        sh.run_source("( exit 7 ) &".as_bytes());
+        // Land INSIDE the window: the body must be finished, the grace must
+        // not have passed. 5 ms against a 20 ms grace, and the first attempt
+        // at this test used no sleep at all -- it passed, because the thread
+        // had not finished yet and the poll did nothing.
+        //
+        // Both halves are then ASSERTED rather than assumed, because a test
+        // that silently missed the window would pass for the wrong reason and
+        // go on passing after the bug came back.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        sh.poll_jobs();
+        assert!(
+            sh.jobs.iter().all(|j| j.status.is_some()),
+            "the poll must have reaped the body, or the window was missed"
+        );
+        assert!(
+            !sh.jobs.iter().any(|j| j.exit_seen),
+            "the grace must NOT have passed yet, or the window was missed"
+        );
+        settle_jobs(&mut sh);
+        assert_eq!(sh.run_source("wait".as_bytes()), 0);
+        assert_eq!(
+            listing(&mut sh, "jobs").lines().count(),
+            1,
+            "the job holding $! must survive an operand-less wait"
+        );
     }
 
     #[test]

@@ -58,7 +58,7 @@ DIFF_PROG='nohup'
 # with Debian rather than with GNU. See `diff-wsl.sh`'s "Why a built reference"
 # and `design-decisions.md` 726.
 DIFF_GNU_SOURCE=9.4
-DIFF_NEED=script
+DIFF_NEED='script sha256sum'
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 
@@ -85,6 +85,15 @@ contents() {
   ( cd "$1" 2>/dev/null || return 0
     find . -type f -printf '%P\n' 2>/dev/null | LC_ALL=C sort | while read -r f; do
       printf '== %s\n' "$f"
+      # sha256, because this function's output is captured as
+      # `o_body=$(contents ...)` and bash command substitution DISCARDS
+      # NUL bytes -- it warns "ignored null byte in input" and carries
+      # on. Without the hash, two files differing only in NUL placement
+      # compare EQUAL. Hex survives; `cat` stays so a failure is still
+      # legible. Demonstrated both ways in
+      # scripts/probe-cp-diff-nul.sh.
+      printf 'sha %s
+' "$( { sha256sum <"$f"; } 2>/dev/null | cut -d' ' -f1 )"
       cat -- "$f"
       printf '\n'
     done )

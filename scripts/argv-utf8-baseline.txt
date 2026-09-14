@@ -37,7 +37,6 @@ userspace/chattr/src/main.rs:argv-as-string
 userspace/chroot/src/main.rs:argv-as-string
 userspace/column/src/main.rs:argv-as-string
 userspace/coredumpctl/src/main.rs:argv-as-string
-userspace/coreutils/src/bin/diff.rs:argv-as-string
 userspace/cpio/src/main.rs:argv-as-string
 userspace/cpupower/src/main.rs:argv-as-string
 userspace/crond/src/main.rs:argv-as-string
@@ -70,7 +69,6 @@ userspace/getent/src/main.rs:argv-as-string
 userspace/getopt/src/main.rs:argv-as-string
 userspace/getopt/src/main.rs:env-as-string
 userspace/grub2/src/main.rs:argv-as-string
-userspace/grub2/src/main.rs:to_str-unwrap
 userspace/gzip/src/main.rs:argv-as-string
 userspace/hardlink/src/main.rs:argv-as-string
 userspace/hexdump/src/main.rs:argv-as-string
@@ -84,7 +82,6 @@ userspace/indexer/src/main.rs:argv-as-string
 userspace/inetd/src/main.rs:argv-as-string
 userspace/inotify/src/main.rs:argv-as-string
 userspace/install/src/main.rs:argv-as-string
-userspace/install/src/main.rs:to_str-unwrap
 userspace/iostat/src/main.rs:argv-as-string
 userspace/ip/src/main.rs:argv-as-string
 userspace/ipcalc/src/main.rs:argv-as-string
@@ -142,7 +139,6 @@ userspace/pgrep/src/main.rs:argv-as-string
 userspace/ping/src/main.rs:argv-as-string
 userspace/pkg/src/main.rs:argv-as-string
 userspace/plymouth/src/main.rs:argv-as-string
-userspace/plymouth/src/main.rs:to_str-unwrap
 userspace/polkit/src/main.rs:argv-as-string
 userspace/powerctl/src/main.rs:argv-as-string
 userspace/prlimit/src/main.rs:argv-as-string
@@ -164,7 +160,6 @@ userspace/shuf/src/main.rs:argv-as-string
 userspace/ss/src/main.rs:argv-as-string
 userspace/ssh-keygen/src/lib.rs:argv-as-string
 userspace/ssh/src/lib.rs:argv-as-string
-userspace/ssh/src/lib.rs:to_str-unwrap
 userspace/strace/src/main.rs:argv-as-string
 userspace/stty/src/main.rs:argv-as-string
 userspace/swapon/src/main.rs:argv-as-string
@@ -190,7 +185,6 @@ userspace/updatedb/src/main.rs:argv-as-string
 userspace/upower/src/main.rs:argv-as-string
 userspace/useradm/src/main.rs:argv-as-string
 userspace/vi/src/main.rs:argv-as-string
-userspace/vi/src/main.rs:to_str-unwrap
 userspace/vmstat/src/main.rs:argv-as-string
 userspace/wall/src/main.rs:argv-as-string
 userspace/watch/src/main.rs:argv-as-string

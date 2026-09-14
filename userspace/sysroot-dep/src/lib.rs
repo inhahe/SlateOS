@@ -123,12 +123,125 @@ fn fingerprint(archive: &Path) -> String {
 /// relative path that is right for one is silently wrong for the other — it
 /// would resolve to nothing, take the `absent` branch, and report success.
 fn repo_root() -> Option<PathBuf> {
-    let start = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").ok()?);
-    let mut dir = start.as_path();
+    repo_root_from(Path::new(&std::env::var("CARGO_MANIFEST_DIR").ok()?))
+}
+
+/// [`repo_root`] with the starting directory passed in rather than read from
+/// the environment.
+///
+/// Split out so the walk can be tested without `set_var`. A test that mutates
+/// a process-global is shared state between every other test in the same
+/// binary, which is what `scripts/raced-globals.py` exists to find; removing
+/// the sharing is better than serialising around it.
+fn repo_root_from(start: &Path) -> Option<PathBuf> {
+    let mut dir = start;
     loop {
         if dir.join(LIBC_A).exists() {
             return Some(dir.to_path_buf());
         }
         dir = dir.parent()?;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // The workspace's defensive lints are for production code; a test that
+    // cannot create its own scratch directory should stop loudly rather than
+    // carry on and report something about nothing. Same form as
+    // userspace/randdist.
+    #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
+    use super::{LIBC_A, fingerprint, repo_root_from};
+    use std::io::Write as _;
+    use std::path::PathBuf;
+
+    /// A scratch directory that removes itself, so a failing test does not
+    /// leave the temp tree dirtier than it found it.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            let mut p = std::env::temp_dir();
+            p.push(format!("sysroot-dep-test-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&p);
+            std::fs::create_dir_all(&p).expect("scratch dir");
+            Self(p)
+        }
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// An ABSENT archive is a distinct, STABLE answer.
+    ///
+    /// Stable matters as much as distinct: a value that varied for a missing
+    /// file would rebuild every dependent on every build until someone built
+    /// the sysroot, which is a worse failure than the one this crate fixes.
+    #[test]
+    fn a_missing_archive_fingerprints_as_absent_and_stays_put() {
+        let s = Scratch::new("absent");
+        let missing = s.path().join("nosuch.a");
+        assert_eq!(fingerprint(&missing), "absent");
+        assert_eq!(fingerprint(&missing), "absent", "and does not vary");
+    }
+
+    /// The fingerprint changes when the archive does, which is the half that
+    /// makes the crate rebuild rather than merely re-running its script.
+    #[test]
+    fn the_fingerprint_tracks_the_archive() {
+        let s = Scratch::new("track");
+        let a = s.path().join("libc.a");
+        std::fs::write(&a, b"one").expect("write");
+        let first = fingerprint(&a);
+        assert_ne!(first, "absent");
+
+        // Same file, untouched: the same answer. Without this the fix would
+        // "work" by rebuilding unconditionally, which is the other failure.
+        assert_eq!(fingerprint(&a), first, "an untouched archive must not move");
+
+        // Different LENGTH is caught even if the clock has not ticked, which
+        // is exactly why the length is in there beside the mtime.
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&a)
+            .expect("append");
+        f.write_all(b"-longer").expect("append");
+        drop(f);
+        assert_ne!(fingerprint(&a), first, "a changed archive must move");
+    }
+
+    /// `repo_root` walks UP, so it works from any depth.
+    ///
+    /// Hard-coding `../../` would be right for `userspace/coreutils` and
+    /// silently wrong for anything at another depth: it would resolve to
+    /// nothing, take the `absent` branch, and report success.
+    #[test]
+    fn the_root_is_found_by_walking_up_not_by_a_fixed_depth() {
+        let s = Scratch::new("walk");
+        let root = s.path();
+        std::fs::create_dir_all(root.join(LIBC_A).parent().expect("parent")).expect("dirs");
+        std::fs::write(root.join(LIBC_A), b"x").expect("archive");
+
+        // Deep enough that any fixed number of `..` would be wrong.
+        let deep = root.join("userspace").join("a").join("b").join("c");
+        std::fs::create_dir_all(&deep).expect("deep");
+        let found = repo_root_from(&deep).expect("the root is above us");
+        assert_eq!(
+            std::fs::canonicalize(found).expect("canon"),
+            std::fs::canonicalize(root).expect("canon"),
+        );
+
+        // ...and a tree with no archive yields None rather than a wrong guess.
+        let bare = Scratch::new("bare");
+        assert!(
+            repo_root_from(bare.path()).is_none(),
+            "no archive above means no root"
+        );
     }
 }

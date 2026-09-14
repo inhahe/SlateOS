@@ -5731,6 +5731,27 @@ check_variant_lists() {
         return 1
     fi
 
+    # A gate whose scan root is an absolute path to another lane's worktree
+    # checks the wrong tree for everyone. check-collapsed-messages.py had ROOT
+    # hardcoded to os-lane-c until 2026-09-14, so every lane's boot scanned
+    # lane C -- their uncommitted edits could refuse your build, and every
+    # green it gave described their tree rather than yours.
+    echo "=== Checking for a hardcoded lane-worktree path in a script ==="
+    if ! run_checker foreign-worktree-selftest "$py" "$PROJECT_ROOT/scripts/check-foreign-worktree-paths.py" --self-test; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  check-foreign-worktree-paths.py no" >&2
+        echo "longer agrees with its own cases, so its verdict on the tree" >&2
+        echo "means nothing." >&2
+        return 1
+    fi
+    if ! run_checker foreign-worktree "$py" "$PROJECT_ROOT/scripts/check-foreign-worktree-paths.py"; then
+        echo "" >&2
+        echo "ERROR: refusing to build.  A script hardcodes an absolute path" >&2
+        echo "to a lane worktree, so it reads a tree other than the one being" >&2
+        echo "built.  Derive the root from __file__ instead." >&2
+        return 1
+    fi
+
     echo "=== Checking that every ALL list still names every variant ==="
     if run_checker check-variant-lists "$py" "$PROJECT_ROOT/scripts/check-variant-lists.py"; then
         return 0

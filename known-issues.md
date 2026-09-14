@@ -147125,3 +147125,55 @@ comments and docstrings counts documentation as defect.
 **Still live in lane C's tree:** the collapsed message the gate originally found
 is real and is theirs to repair with
 `python scripts/check-collapsed-messages.py --apply`. It was never lane A's.
+
+## TD-A-THE-HEAD-OF-LINE-WITNESS-MAY-BE-TESTING-A-DEAD-DATAPATH (lane A, 2026-09-14)
+
+**In short:** the witness written for `D-NETSOCK-SYNC` fails at its first
+`accept`, 64 retries, `InternalError` every time. That is not a race and the
+retry added for one was the wrong fix. The likely cause is that
+`net::socket`'s datapath does not work at all in the default configuration,
+which would make it the wrong layer to build this witness on.
+
+**What the diagnostics bought.** The first failure was a bare `InternalError`
+with no indication which of six setup calls produced it -- six bare `?`s. With
+per-step reporting it reads:
+
+    [netsock]   FAIL: first accept never became ready in 64 spins: InternalError
+
+`InternalError`, not `WouldBlock`. A connection that is merely not ready yet
+returns `WouldBlock`; this fails for a reason, persistently. The retry fix
+addressed a race that was not happening.
+
+**Why the layer is suspect.**
+
+* `net.userspace` now defaults **on** (lane A flipped it), so the persistent
+  userspace netstack daemon claims the NIC -- confirmed this boot:
+  `[spawn] persistent netstack daemon registered net.stack (pid 459)`.
+* `net::socket`'s own self-tests are a stream-socket state-machine check and a
+  server-socket test covering `bind`/`listen`/**empty-backlog** `accept`, port
+  reporting, and `connect`-on-a-listener rejection. **None of them completes a
+  real connect-and-accept carrying data.**
+
+So there is no evidence that a real handshake through `net::socket` has ever
+worked under the daemon-owned-NIC default, and this witness is the first thing
+to ask for one.
+
+**The tension this creates, which is the part to decide rather than patch.**
+932 wants a second witness for the head-of-line fix. The scoping note for that
+fix says the lock in question is `socket.rs`'s `with_stream_conn` over
+`SessionRef::Shared`, reachable only through the fd layer -- so a witness built
+on `NetstackConn` would bypass the mutex it exists to exercise and pass either
+way. But if the fd layer has no datapath under the default config, a witness
+there cannot run at all.
+
+Both cannot be true and useful at once. Either the fd layer does work and
+something narrower is wrong with this test, or it does not, and the property
+needs proving somewhere the code actually runs -- which may mean proving it
+about `with_stream_conn` directly rather than end-to-end through sockets.
+
+**Do not "fix" this by moving the witness to `NetstackConn`** without settling
+that: it would produce a green line about a lock the test never takes, which is
+937 substitution and strictly worse than the current honest red.
+
+**`D-NETSOCK-SYNC` still has ONE witness.** Three boots have now failed on this
+test and none of them said anything about the property.

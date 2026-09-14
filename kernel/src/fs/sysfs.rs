@@ -1985,7 +1985,13 @@ pub fn self_test() -> KernelResult<()> {
         //    `_ => NotADirectory` wildcard, so a directory can classify and
         //    stat correctly yet never appear in its parent -- which is what
         //    this catches and the compiler cannot.
-        let sys_entries = fs.readdir(Path::new("/devices/system"))?;
+        let sys_entries = match fs.readdir(Path::new("/devices/system")) {
+            Ok(v) => v,
+            Err(e) => {
+                serial_println!("[sysfs]   FAIL: readdir /devices/system failed: {e:?}");
+                return Err(e);
+            }
+        };
         for want in ["cpu", "memory"] {
             if !sys_entries
                 .iter()
@@ -1995,7 +2001,13 @@ pub fn self_test() -> KernelResult<()> {
                 return Err(KernelError::IoError);
             }
         }
-        let cpu_entries = fs.readdir(Path::new("/devices/system/cpu"))?;
+        let cpu_entries = match fs.readdir(Path::new("/devices/system/cpu")) {
+            Ok(v) => v,
+            Err(e) => {
+                serial_println!("[sysfs]   FAIL: readdir /devices/system/cpu failed: {e:?}");
+                return Err(e);
+            }
+        };
         if !cpu_entries
             .iter()
             .any(|e| e.name.as_path().as_bytes() == b"cpuid")
@@ -2005,7 +2017,13 @@ pub fn self_test() -> KernelResult<()> {
         }
 
         // 2. CPUID identity reads as a number.
-        let fam = fs.read_file(Path::new("/devices/system/cpu/cpuid/family"))?;
+        let fam = match fs.read_file(Path::new("/devices/system/cpu/cpuid/family")) {
+            Ok(v) => v,
+            Err(e) => {
+                serial_println!("[sysfs]   FAIL: read cpuid/family failed: {e:?}");
+                return Err(e);
+            }
+        };
         let fam_s = core::str::from_utf8(&fam).unwrap_or("").trim();
         if fam_s.is_empty() || fam_s.parse::<u32>().is_err() {
             serial_println!("[sysfs]   FAIL: cpuid/family is not a number: {fam_s:?}");
@@ -2021,9 +2039,25 @@ pub fn self_test() -> KernelResult<()> {
         //    If someone later 'simplifies' gen_memory_file to use it, this
         //    goes red -- which is the only reason the guarantee survives the
         //    next person to read that function.
-        let ours = fs.read_file(Path::new("/devices/system/memory/total_kb"))?;
+        let ours = match fs.read_file(Path::new("/devices/system/memory/total_kb")) {
+            Ok(v) => v,
+            Err(e) => {
+                serial_println!("[sysfs]   FAIL: read memory/total_kb failed: {e:?}");
+                return Err(e);
+            }
+        };
         let ours_s = core::str::from_utf8(&ours).unwrap_or("").trim();
-        let meminfo = procfs.read_file(Path::new("/proc/meminfo"))?;
+        // Relative to the procfs mount root, matching the established usage
+        // above -- `/sys/kernel/hostname` here is `/proc/sys/kernel/hostname`
+        // to a user. Written `/proc/meminfo` first, which resolves as
+        // `/proc/proc/meminfo` and correctly is not found.
+        let meminfo = match procfs.read_file(Path::new("/meminfo")) {
+            Ok(v) => v,
+            Err(e) => {
+                serial_println!("[sysfs]   FAIL: /proc/meminfo unreadable: {e:?}");
+                return Err(e);
+            }
+        };
         let meminfo_s = core::str::from_utf8(&meminfo).unwrap_or("");
         let memtotal = meminfo_s
             .lines()

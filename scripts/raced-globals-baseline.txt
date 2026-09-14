@@ -14,7 +14,6 @@ posix/src/crt.rs:EXCEPTION_BUF
 posix/src/crt.rs:INIT_FDS_BUF
 posix/src/crt.rs:ON_EXIT_COUNT
 posix/src/crt.rs:ON_EXIT_FUNCS
-posix/src/pthread.rs:THREAD_NAMES
 posix/src/random.rs:GENERATION
 posix/src/socket.rs:GAI_ADDR
 posix/src/socket.rs:GAI_ADDR2

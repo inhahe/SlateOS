@@ -147213,5 +147213,41 @@ fix is about. It would be a green line about the one layer known to be fine.
 came from reasoning about a subsystem I had not read the first page of. The
 module doc that settles it is sixteen lines long and was three minutes away.
 
+**Narrowed by reading, 2026-09-14 (third pass, and the first two were wrong).**
+
+`net::socket::accept` maps the daemon's reply directly:
+
+    if res == ERR_WOULD_BLOCK { return Err(WouldBlock); }   // empty backlog
+    if res != 0 { return Err(InternalError); }              // -1 unknown listener / id install failed
+
+So `InternalError` is the daemon answering **"unknown listener"** -- a permanent
+condition, which is exactly why 64 retries failed identically and why the retry
+fix could never have helped.
+
+Four facts, each checked rather than inferred:
+
+1. `accept` does take the locks this witness exists to exercise -- `inner.lock()`
+   and then `arc.lock()` on the shared session, held across the daemon call. The
+   layer is right; only my two explanations were wrong.
+2. `listen` **succeeded**. The witness's per-step macro names any failing setup
+   call, and it printed nothing for `listen` -- which is the first thing those
+   diagnostics have actually settled.
+3. `listen` issues `OP_LISTEN` with a **constant**, `LISTENER_ID`, not a
+   per-socket id (`socket.rs` line ~1327).
+4. `netstack_client`'s own loopback test also uses `LISTENER_ID`, on its own
+   session, and runs **earlier in the same boot** -- its success line appears
+   about ten lines above this witness's failure.
+
+**Hypothesis, explicitly untested:** the daemon keys listeners by id, the id is a
+constant shared by every session, and a listener registered by the earlier test
+collides with or supersedes this one -- so `listen` returns success while
+`accept` finds no listener under that id on this session.
+
+**Deliberately not acted on tonight.** Two diagnoses have already been published
+and withdrawn this evening, both formed from symptoms plus a plausible mechanism
+rather than from reading. The next step is to read the daemon's listener table
+and confirm or kill the hypothesis before changing anything -- not to try a third
+fix and see whether the boot goes green.
+
 **`D-NETSOCK-SYNC` still has ONE witness.** Three boots have now failed on this
 test and none of them said anything about the property.

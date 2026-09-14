@@ -1434,15 +1434,6 @@ pub const RWF_SYNC: i32 = 0x04;
 /// Do not wait for I/O completion.
 pub const RWF_NOWAIT: i32 = 0x08;
 
-/// Read data from a file at an offset into multiple buffers, with flags.
-///
-/// Like `preadv`, but with an additional `flags` parameter. `flags == 0`
-/// is identical to `preadv`.
-///
-/// If `offset == -1`, the current file position is used and updated
-/// (like `readv`).
-///
-
 // ---------------------------------------------------------------------------
 // RWF_* policy — shared by preadv2/pwritev2 and kernel AIO
 // ---------------------------------------------------------------------------
@@ -1513,6 +1504,14 @@ pub(crate) fn plan_rw_flags(flags: i32, is_write: bool) -> Result<PostWriteSync,
     Ok(PostWriteSync::None)
 }
 
+/// Read data from a file at an offset into multiple buffers, with flags.
+///
+/// Like `preadv`, but with an additional `flags` parameter. `flags == 0`
+/// is identical to `preadv`.
+///
+/// If `offset == -1`, the current file position is used and updated
+/// (like `readv`).
+///
 /// `flags` is honoured or refused, never ignored — see [`plan_rw_flags`].
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn preadv2(

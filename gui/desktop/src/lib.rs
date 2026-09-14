@@ -194,6 +194,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 // Geometry
 // ============================================================================
 
+/// The file the pinned applications live in.
+const TASKBAR_CONFIG_NAME: &str = "taskbar";
+
 /// An axis-aligned rectangle in screen pixels.
 ///
 /// Every clickable part of the shell is described by exactly one `*_rect`
@@ -472,6 +475,22 @@ pub struct WindowId(pub u64);
 /// compositor already answers — and was, until the fields were deleted. What
 /// the shell draws about a window is a taskbar button and a switcher row,
 /// neither of which is anywhere near the window itself.
+/// What one taskbar button stands for.
+///
+/// The taskbar used to show one button per window and nothing else, so an
+/// index into it was an index into [`taskbar_windows`](DesktopShell::taskbar_windows).
+/// Pinned applications share the same run of buttons, so the index is now into
+/// *this* -- and it is a named enum rather than a bare `usize` for the reason
+/// `Hit` is: a number that means "the third button" is read as "the third
+/// window" by whoever forgets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TaskbarSlot {
+    /// An open window.
+    Window(WindowId),
+    /// An application pinned to the taskbar, by index into the pinned list.
+    Pinned(usize),
+}
+
 #[derive(Clone, Debug)]
 pub struct ManagedWindow {
     pub id: WindowId,
@@ -601,6 +620,12 @@ pub enum Hit {
     /// something — "the button drawn third belongs to the third window" rather
     /// than "the third button is the third button".
     TaskbarButton(WindowId),
+    /// A pinned application's button, by index into the pinned list.
+    ///
+    /// An index and not an executable path, because the path is the pinned
+    /// list's business and a `Hit` that carried one would be a second place
+    /// holding it.
+    TaskbarPinned(usize),
     /// The taskbar panel, but not one of its controls.
     TaskbarPanel,
     /// The tray clock, which opens the calendar popup.
@@ -1069,6 +1094,13 @@ pub struct DesktopShell {
     /// exit, and re-deriving the list would hand row 3 to whoever moved up
     /// into position 3.
     tray_overflow_menu: Option<(guitk::menu::ContextMenu, Vec<tray_dnd::TrayIconKey>)>,
+    /// The pin menu a right-click on a start-menu row opens, and which row it
+    /// was opened on.
+    ///
+    /// The row is remembered rather than the executable path, for the reason
+    /// [`Hit::TaskbarPinned`] carries an index: the list is the authority, and
+    /// a copy of a path here would be a second one to keep in step.
+    pin_menu: Option<(guitk::menu::ContextMenu, usize)>,
     /// A press that landed on a tray icon and has not been released.
     ///
     /// Held from press to release because until the release the shell does
@@ -1159,6 +1191,13 @@ pub struct DesktopShell {
     /// process, so "has it changed" is a question the shell has to be able to
     /// ask again, not something it learns once at login.
     notif_watch: config::Watcher,
+    /// The applications pinned to the taskbar.
+    ///
+    /// `taskbar::Taskbar` is used for its *model* only -- `add_pinned`,
+    /// `remove_pinned`, `pinned_apps` -- and never for its renderer, which is
+    /// design-decisions 849. That module had no caller at all until this; see
+    /// `TD-C-THE-SHELL-DRAWS-FOUR-OF-ITS-FIFTY-SEVEN-MODULES`.
+    taskbar: taskbar::TaskbarState,
     /// When an automatic schedule may take effect again, if the user has just
     /// switched it off from inside one.
     ///
@@ -1585,6 +1624,7 @@ impl DesktopShell {
             tray_arrangement: tray_dnd::TrayIconArrangement::new(),
             tray_drag: None,
             tray_overflow_menu: None,
+            pin_menu: None,
             tray_tooltip: None,
             alt_tab_active: false,
             alt_tab_index: 0,
@@ -1599,6 +1639,7 @@ impl DesktopShell {
             widgets_dirty: false,
             appearance_watch: config::Watcher::new(appearance::CONFIG_NAME),
             notif_watch: config::Watcher::new(notifsettings::CONFIG_NAME),
+            taskbar: taskbar::TaskbarState::new(taskbar::TaskbarConfig::default()),
             schedule_snooze: None,
             notif: notifsettings::NotifFile::new(),
             theme: DesktopTheme::default(),
@@ -2094,7 +2135,7 @@ impl DesktopShell {
             - self.tray_width()
             - self.scale(TRAY_RESERVE_GAP))
         .max(0.0);
-        let count = self.taskbar_windows().len().max(1) as f32;
+        let count = self.taskbar_slots().len().max(1) as f32;
         self.scale(TASKBAR_BUTTON_MAX_WIDTH).min(available / count)
     }
 
@@ -2109,6 +2150,143 @@ impl DesktopShell {
             + self.scale(TASKBAR_BUTTON_START_GAP)
             + index as f32 * (w + self.scale(TASKBAR_BUTTON_GAP));
         Rect::new(x, bar.y + inset, w, bar.h - inset * 2.0)
+    }
+
+    /// Every button the taskbar shows, pinned applications first.
+    ///
+    /// Pinned first and always shown, rather than merged with a window of the
+    /// same program. Merging needs a name both ends agree on, and there is
+    /// none: a window carries the `app_id` its program declares, while a
+    /// pinned entry carries the executable path the launcher knows it by, and
+    /// nothing in the tree maps one to the other. Showing both is honest --
+    /// the pinned button is a *launcher*, and it keeps meaning that while the
+    /// program runs -- and it is what a quick-launch strip has always done.
+    /// Merging is a refinement for the day an application identity exists.
+    #[must_use]
+    pub fn taskbar_slots(&self) -> Vec<TaskbarSlot> {
+        let mut slots: Vec<TaskbarSlot> = (0..self.taskbar.pinned_apps().len())
+            .map(TaskbarSlot::Pinned)
+            .collect();
+        slots.extend(
+            self.taskbar_windows()
+                .iter()
+                .map(|window| TaskbarSlot::Window(window.id)),
+        );
+        slots
+    }
+
+    /// The applications pinned to the taskbar, in the order they are shown.
+    #[must_use]
+    pub fn pinned_apps(&self) -> &[taskbar::PinnedApp] {
+        self.taskbar.pinned_apps()
+    }
+
+    /// Whether `exec` is already pinned.
+    #[must_use]
+    pub fn is_pinned(&self, exec: &str) -> bool {
+        self.taskbar
+            .pinned_apps()
+            .iter()
+            .any(|a| a.exec_path == exec)
+    }
+
+    /// Pin an application to the taskbar, and remember it.
+    ///
+    /// Keyed on the executable path, which is what the launcher knows an
+    /// application by and what a click has to hand to
+    /// [`ShellAction::Launch`]. `app_id` is set to the same string so that
+    /// `Taskbar::add_pinned`'s duplicate check -- which is on `app_id` -- means
+    /// "already pinned" rather than "has the same empty name".
+    pub fn pin_app(&mut self, exec: &str, name: &str) {
+        if exec.is_empty() || self.is_pinned(exec) {
+            return;
+        }
+        let position = u32::try_from(self.taskbar.pinned_apps().len()).unwrap_or(u32::MAX);
+        self.taskbar.add_pinned(taskbar::PinnedApp {
+            app_id: exec.to_string(),
+            display_name: name.to_string(),
+            icon_type: taskbar::IconType::Generic,
+            exec_path: exec.to_string(),
+            position,
+        });
+        self.save_pinned();
+    }
+
+    /// Unpin an application, and forget it.
+    pub fn unpin_app(&mut self, exec: &str) {
+        if !self.is_pinned(exec) {
+            return;
+        }
+        self.taskbar.remove_pinned(exec);
+        self.save_pinned();
+    }
+
+    /// Read the pinned applications back from `taskbar.yaml`.
+    ///
+    /// Names are *not* stored: a pin is an executable path, and the name shown
+    /// on it comes from the launcher's entry for that path at the moment it is
+    /// drawn. Storing the name too would be a second copy of it, stale the
+    /// first time an application is renamed.
+    pub fn load_pinned(&mut self) {
+        let doc = config::load(TASKBAR_CONFIG_NAME);
+        let Some(execs) = doc.get_seq(&["pinned"]) else {
+            return;
+        };
+        for exec in execs {
+            let name = self.app_name_for(&exec);
+            self.pin_app_without_saving(&exec, &name);
+        }
+    }
+
+    /// The launcher's name for an executable, or its file name.
+    ///
+    /// The fallback is the file name rather than the whole path: a button is
+    /// narrow, and a pinned program the launcher has never heard of is still
+    /// better labelled "editor" than "/usr/local/bin/editor".
+    fn app_name_for(&self, exec: &str) -> String {
+        if let Some(entry) = self.apps.iter().find(|a| a.executable_path == exec) {
+            return entry.name.clone();
+        }
+        Path::new(exec)
+            .file_name()
+            .map_or_else(|| exec.to_string(), |n| n.to_string_lossy().into_owned())
+    }
+
+    /// `pin_app` without the write, for the load path.
+    ///
+    /// Loading is not a change the user made, and writing the file back while
+    /// reading it is how a partial read becomes a truncated file.
+    fn pin_app_without_saving(&mut self, exec: &str, name: &str) {
+        if exec.is_empty() || self.is_pinned(exec) {
+            return;
+        }
+        let position = u32::try_from(self.taskbar.pinned_apps().len()).unwrap_or(u32::MAX);
+        self.taskbar.add_pinned(taskbar::PinnedApp {
+            app_id: exec.to_string(),
+            display_name: name.to_string(),
+            icon_type: taskbar::IconType::Generic,
+            exec_path: exec.to_string(),
+            position,
+        });
+    }
+
+    /// Write the pinned applications to `taskbar.yaml`.
+    ///
+    /// A failed write is reported and the pin still applies to this session:
+    /// refusing to pin because a disk is full helps nobody, and the user can
+    /// see whether the button is there.
+    fn save_pinned(&mut self) {
+        let mut doc = config::load(TASKBAR_CONFIG_NAME);
+        let execs: Vec<&str> = self
+            .taskbar
+            .pinned_apps()
+            .iter()
+            .map(|a| a.exec_path.as_str())
+            .collect();
+        doc.set_seq(&["pinned"], &execs);
+        if let Err(err) = config::store(TASKBAR_CONFIG_NAME, &doc) {
+            eprintln!("desktop: could not save taskbar.yaml: {err}");
+        }
     }
 
     /// The start menu panel, anchored to the start button's corner.
@@ -2446,9 +2624,12 @@ impl DesktopShell {
             // The slot is resolved to a window *here*, while the list that
             // produced the rectangle is still in hand — see
             // [`Hit::TaskbarButton`].
-            for (index, window) in self.taskbar_windows().iter().enumerate() {
+            for (index, slot) in self.taskbar_slots().iter().enumerate() {
                 if self.taskbar_button_rect(index).contains(x, y) {
-                    return Hit::TaskbarButton(window.id);
+                    return match *slot {
+                        TaskbarSlot::Window(id) => Hit::TaskbarButton(id),
+                        TaskbarSlot::Pinned(pin) => Hit::TaskbarPinned(pin),
+                    };
                 }
             }
             return Hit::TaskbarPanel;
@@ -2539,6 +2720,21 @@ impl DesktopShell {
                     self.widgets_dirty = true;
                     return ShellAction::Consumed;
                 }
+                _ => return ShellAction::Consumed,
+            }
+        }
+        // The pin menu, for the same reason as the overflow list below it: it
+        // is drawn over everything, so a press either landed on it or
+        // dismissed it, and nothing underneath should see the same press.
+        if self.pin_menu.is_some() {
+            match event.kind {
+                MouseEventKind::Move => {
+                    if let Some((menu, _)) = self.pin_menu.as_mut() {
+                        menu.handle_mouse_move(event.x, event.y);
+                    }
+                    return ShellAction::Consumed;
+                }
+                MouseEventKind::Press(_) => return self.click_pin_menu(event.x, event.y),
                 _ => return ShellAction::Consumed,
             }
         }
@@ -2884,6 +3080,18 @@ impl DesktopShell {
             return ShellAction::Consumed;
         }
 
+        // A right-click on a start-menu row offers to pin it. This is the one
+        // place pinning can be offered from: pinning needs an executable path,
+        // a window carries only the `app_id` its program declares, and nothing
+        // in the tree maps one to the other -- so the taskbar itself cannot
+        // say "pin this", however much that is where the button ends up.
+        if button == MouseButton::Right
+            && let Hit::StartMenuEntry(index) = hit
+        {
+            self.open_pin_menu(index, x, y);
+            return ShellAction::Consumed;
+        }
+
         // Only the primary button acts. The rest still cannot fall through to a
         // client when they land on the shell's own surfaces.
         if button != MouseButton::Left {
@@ -2904,6 +3112,17 @@ impl DesktopShell {
             // UTF-8, so nothing is lost turning it back into a path here. It is
             // the *browsed* paths — see `RunDialog` — that cannot survive a
             // round trip through `String`, and those never pass through here.
+            Hit::TaskbarPinned(index) => {
+                let path = self
+                    .taskbar
+                    .pinned_apps()
+                    .get(index)
+                    .map(|app| PathBuf::from(&app.exec_path));
+                // A pin whose index no longer exists is a list that changed
+                // under the press. Doing nothing is right: there is no
+                // second-best program to start.
+                path.map_or(ShellAction::Consumed, ShellAction::Launch)
+            }
             Hit::StartMenuEntry(index) => {
                 let path = self
                     .start_menu_entries()
@@ -3774,6 +3993,30 @@ impl DesktopShell {
             return outcome;
         }
 
+        // The pin menu, on the same terms as the two below it: a popup that
+        // owns the keyboard while it is up. Without this it could be opened
+        // and then only used with the mouse, and Escape would do whatever the
+        // global table says rather than closing the thing in front of you.
+        if self.pin_menu.is_some() {
+            let chosen = self.pin_menu.as_mut().map(|(menu, _)| menu.handle_key(key));
+            match chosen {
+                Some(Some(MenuAction::Selected(id))) => {
+                    let index = self.pin_menu.as_ref().map(|(_, index)| *index);
+                    self.pin_menu = None;
+                    if id == Self::MENU_PIN_TOGGLE
+                        && let Some(index) = index
+                    {
+                        self.toggle_pin(index);
+                    }
+                }
+                Some(Some(MenuAction::Closed)) => self.pin_menu = None,
+                // It moved its highlight, or ignored the key. Either way it
+                // stays open and the press goes no further.
+                _ => {}
+            }
+            return HotkeyOutcome::consumed();
+        }
+
         // The overflow list, on the same terms as the desktop menu below and
         // ahead of it only because the two cannot both be open. Without this
         // the list could be opened and then only used with the mouse, which
@@ -4560,13 +4803,33 @@ impl DesktopShell {
         // Window buttons. Rounded like the windows they stand for — the corner
         // style is a property of the desktop, not of one surface in it.
         let radii = self.corner_radii();
-        for (index, window) in self.taskbar_windows().iter().enumerate() {
+        // Over *slots*, not windows: a pinned application has a button whether
+        // or not it is running, and it stands to the left of the windows.
+        let windows = self.taskbar_windows();
+        for (index, slot) in self.taskbar_slots().iter().enumerate() {
             let button = self.taskbar_button_rect(index);
 
-            let bg = if Some(window.id) == self.focused_window {
-                self.theme.taskbar_active_bg
-            } else {
-                self.theme.taskbar_bg
+            let (label, bg) = match *slot {
+                TaskbarSlot::Pinned(pin) => {
+                    let Some(app) = self.taskbar.pinned_apps().get(pin) else {
+                        continue;
+                    };
+                    // Never the focused colour: a pinned button is a way to
+                    // *start* the program, so drawing it as though it were the
+                    // window in front would say something untrue about it.
+                    (app.display_name.as_str(), self.theme.taskbar_bg)
+                }
+                TaskbarSlot::Window(id) => {
+                    let Some(window) = windows.iter().find(|w| w.id == id) else {
+                        continue;
+                    };
+                    let bg = if Some(id) == self.focused_window {
+                        self.theme.taskbar_active_bg
+                    } else {
+                        self.theme.taskbar_bg
+                    };
+                    (window.title.as_str(), bg)
+                }
             };
 
             fill_round(&mut tree, button, bg, radii);
@@ -4592,7 +4855,7 @@ impl DesktopShell {
                 button.x + inset,
                 button.y + inset,
                 (button.w - inset - inset).max(0.0),
-                &window.title,
+                label,
                 self.theme.taskbar_fg,
                 title_size,
             );
@@ -5244,6 +5507,89 @@ impl DesktopShell {
         // viewport puts the rows off the display.
         menu.show(rect.x, rect.y, self.viewport());
         self.tray_overflow_menu = Some((menu, keys));
+    }
+
+    /// Offer to pin or unpin the start-menu row at `index`.
+    ///
+    /// One item, and its label is the *action*, not the state: "Pin to
+    /// taskbar" when it is not pinned and "Unpin from taskbar" when it is. A
+    /// menu that said "Pinned" with a tick would be a second way of saying
+    /// what the taskbar already shows, and would leave the user to work out
+    /// that clicking it reverses the thing.
+    fn open_pin_menu(&mut self, index: usize, x: f32, y: f32) {
+        // Cloned out of the borrow: `start_menu_entries` builds its list on
+        // demand, so the entry does not outlive the call that produced it.
+        let Some(exec) = self
+            .start_menu_entries()
+            .get(index)
+            .map(|entry| entry.executable_path.clone())
+        else {
+            return;
+        };
+        let label = if self.is_pinned(&exec) {
+            "Unpin from taskbar"
+        } else {
+            "Pin to taskbar"
+        };
+        let items = vec![guitk::menu::MenuItem::Action {
+            id: Self::MENU_PIN_TOGGLE,
+            label: label.to_string(),
+            shortcut: None,
+            icon: None,
+            enabled: true,
+            checked: None,
+        }];
+        let mut menu = guitk::menu::ContextMenu::new(items);
+        // The real screen, not the toolkit's assumed one -- the same reason
+        // the overflow list passes it: this opens from wherever the start menu
+        // is, which is near the bottom edge.
+        menu.show(x, y, self.viewport());
+        self.pin_menu = Some((menu, index));
+    }
+
+    /// A press while the pin menu is open.
+    fn click_pin_menu(&mut self, x: f32, y: f32) -> ShellAction {
+        let Some((menu, index)) = self.pin_menu.as_mut() else {
+            return ShellAction::Consumed;
+        };
+        let index = *index;
+        // A press that named no row -- on the panel's padding, or outside it.
+        // Either way the menu closes, as the desktop menu does.
+        let Some(id) = menu.handle_click(x, y) else {
+            self.pin_menu = None;
+            return ShellAction::Consumed;
+        };
+        self.pin_menu = None;
+        if id == Self::MENU_PIN_TOGGLE {
+            self.toggle_pin(index);
+        }
+        ShellAction::Consumed
+    }
+
+    /// Pin the start-menu row at `index`, or unpin it if it is already pinned.
+    fn toggle_pin(&mut self, index: usize) {
+        let Some((exec, name)) = self
+            .start_menu_entries()
+            .get(index)
+            .map(|entry| (entry.executable_path.clone(), entry.name.clone()))
+        else {
+            return;
+        };
+        if self.is_pinned(&exec) {
+            self.unpin_app(&exec);
+        } else {
+            self.pin_app(&exec, &name);
+        }
+    }
+
+    /// The pin menu's draw commands, empty when it is closed.
+    #[must_use]
+    pub fn render_pin_menu(&self) -> Option<RenderTree> {
+        let (menu, _) = self.pin_menu.as_ref()?;
+        let mut tree = RenderTree::new();
+        tree.commands
+            .extend(menu.render(&Palette::from_settings(&self.appearance)));
+        Some(tree)
     }
 
     /// A press while the overflow list is open.
@@ -6130,6 +6476,10 @@ impl DesktopShell {
 
     /// Menu item ids. Stable numbers rather than positions, so inserting an
     /// item cannot silently reassign what the ones below it do.
+    /// The pin menu's only row. Numbered well clear of the desktop menu's
+    /// ids, which are a different menu with a different handler.
+    const MENU_PIN_TOGGLE: u64 = 900;
+
     const MENU_ADD_CLOCK: u64 = 1;
     const MENU_ADD_CALENDAR: u64 = 2;
     const MENU_ADD_SYSTEM_MONITOR: u64 = 3;
@@ -13191,5 +13541,204 @@ mod quiet_hours_wiring_tests {
             "the mode did not change at the boundary"
         );
         assert_eq!(shell.focus.effective_mode(), FocusMode::PriorityOnly);
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
+mod taskbar_pin_tests {
+    //! Pinning an application to the taskbar.
+    //!
+    //! Every test that pins runs inside `with_scratch_config`: pinning writes
+    //! `taskbar.yaml`, and a test that wrote the developer's own is what
+    //! `scripts/check-scratch-config.py` exists to refuse.
+
+    use super::{
+        DesktopShell, Hit, Key, KeyEvent, Modifiers, MouseButton, ShellAction, TaskbarSlot,
+        WindowInfo, WindowList,
+    };
+
+    /// A plain key press, as the compositor delivers one.
+    fn press(key: Key) -> KeyEvent {
+        KeyEvent {
+            key,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        }
+    }
+    use appearance::config::testing::with_scratch_config;
+
+    fn shell() -> DesktopShell {
+        DesktopShell::new(1920, 1080)
+    }
+
+    /// The executable path of the first program the start menu offers.
+    fn first_app(shell: &DesktopShell) -> (String, String) {
+        let entry = shell
+            .start_menu_entries()
+            .first()
+            .copied()
+            .expect("the shipped app database is empty");
+        (entry.executable_path.clone(), entry.name.clone())
+    }
+
+    /// **A pinned application has a button, and it is a launcher.**
+    #[test]
+    fn a_pinned_application_gets_a_taskbar_button() {
+        with_scratch_config("shell-pin-button", |_root| {
+            let mut shell = shell();
+            assert!(
+                shell.taskbar_slots().is_empty(),
+                "nothing is open or pinned"
+            );
+
+            let (exec, name) = first_app(&shell);
+            shell.pin_app(&exec, &name);
+
+            assert_eq!(shell.taskbar_slots(), vec![TaskbarSlot::Pinned(0)]);
+            assert!(shell.is_pinned(&exec));
+            let button = shell.taskbar_button_rect(0);
+            assert!(button.w > 0.0 && button.h > 0.0, "the button has no area");
+        });
+    }
+
+    /// Pressing it starts the program.
+    #[test]
+    fn pressing_a_pinned_button_launches_the_program() {
+        with_scratch_config("shell-pin-launch", |_root| {
+            let mut shell = shell();
+            let (exec, name) = first_app(&shell);
+            shell.pin_app(&exec, &name);
+
+            let button = shell.taskbar_button_rect(0);
+            let (cx, cy) = (button.x + button.w / 2.0, button.y + button.h / 2.0);
+            assert_eq!(shell.hit_test(cx, cy), Hit::TaskbarPinned(0));
+
+            match shell.handle_press(cx, cy, MouseButton::Left) {
+                ShellAction::Launch(path) => {
+                    assert_eq!(path.to_string_lossy(), exec, "it started the wrong program");
+                }
+                other => panic!("a pinned button did not launch anything: {other:?}"),
+            }
+        });
+    }
+
+    /// Pinning the same program twice leaves one button.
+    #[test]
+    fn pinning_the_same_program_twice_leaves_one_button() {
+        with_scratch_config("shell-pin-twice", |_root| {
+            let mut shell = shell();
+            let (exec, name) = first_app(&shell);
+            shell.pin_app(&exec, &name);
+            shell.pin_app(&exec, &name);
+
+            assert_eq!(shell.pinned_apps().len(), 1);
+            assert_eq!(shell.taskbar_slots().len(), 1);
+        });
+    }
+
+    /// Unpinning takes the button away again.
+    #[test]
+    fn unpinning_takes_the_button_away() {
+        with_scratch_config("shell-unpin", |_root| {
+            let mut shell = shell();
+            let (exec, name) = first_app(&shell);
+            shell.pin_app(&exec, &name);
+            assert_eq!(shell.taskbar_slots().len(), 1);
+
+            shell.unpin_app(&exec);
+
+            assert!(
+                shell.taskbar_slots().is_empty(),
+                "the button outlived the pin"
+            );
+            assert!(!shell.is_pinned(&exec));
+        });
+    }
+
+    /// **The pins survive a restart**, which is the whole point of pinning.
+    #[test]
+    fn pinned_applications_come_back_after_a_restart() {
+        with_scratch_config("shell-pin-restart", |_root| {
+            let (exec, name) = {
+                let mut shell = shell();
+                let (exec, name) = first_app(&shell);
+                shell.pin_app(&exec, &name);
+                (exec, name)
+            };
+
+            // A fresh shell, as a new login gets.
+            let mut restarted = shell();
+            assert!(!restarted.is_pinned(&exec), "it has not read the file yet");
+            restarted.load_pinned();
+
+            assert!(restarted.is_pinned(&exec), "the pin did not survive");
+            assert_eq!(restarted.taskbar_slots(), vec![TaskbarSlot::Pinned(0)]);
+            // The name comes from the launcher, not from the file: storing it
+            // would be a second copy, stale the first time a program is
+            // renamed.
+            assert_eq!(restarted.pinned_apps()[0].display_name, name);
+        });
+    }
+
+    /// A right-click on a start-menu row offers to pin it, and the label says
+    /// what the click will *do* rather than what is already true.
+    #[test]
+    fn right_clicking_a_start_menu_row_offers_to_pin_and_then_to_unpin() {
+        with_scratch_config("shell-pin-menu", |_root| {
+            let mut shell = shell();
+            shell.toggle_start_menu();
+            let row = shell.start_menu_row_rect(0);
+            let (cx, cy) = (row.x + row.w / 2.0, row.y + row.h / 2.0);
+            assert_eq!(shell.hit_test(cx, cy), Hit::StartMenuEntry(0));
+
+            shell.handle_press(cx, cy, MouseButton::Right);
+            let drawn = format!("{:?}", shell.render_pin_menu().expect("no menu opened"));
+            assert!(drawn.contains("Pin to taskbar"), "wrong offer: {drawn}");
+
+            // Taken with the keyboard, which is the other half of the claim:
+            // a menu that can only be used with the mouse is half a menu, and
+            // it is also the only way a test can name a row without guessing
+            // at where the panel drew it.
+            drop(shell.handle_hotkey(&press(Key::Down)));
+            drop(shell.handle_hotkey(&press(Key::Enter)));
+            let (exec, _) = first_app(&shell);
+            assert!(shell.is_pinned(&exec), "the menu did not pin it");
+
+            // Ask again, and the offer is the reverse.
+            shell.handle_press(cx, cy, MouseButton::Right);
+            let drawn = format!("{:?}", shell.render_pin_menu().expect("no menu opened"));
+            assert!(drawn.contains("Unpin from taskbar"), "wrong offer: {drawn}");
+        });
+    }
+
+    /// Pinned buttons stand to the left of the windows.
+    #[test]
+    fn pinned_buttons_come_before_window_buttons() {
+        with_scratch_config("shell-pin-order", |_root| {
+            let mut shell = shell();
+            let (exec, name) = first_app(&shell);
+            shell.pin_app(&exec, &name);
+            shell.apply_window_list(&WindowList::new(
+                0,
+                vec![WindowInfo::new(1, 1, "A window".to_string())],
+            ));
+
+            let slots = shell.taskbar_slots();
+            assert_eq!(slots.len(), 2, "one pin and one window: {slots:?}");
+            assert_eq!(slots[0], TaskbarSlot::Pinned(0));
+            assert!(matches!(slots[1], TaskbarSlot::Window(_)));
+            assert!(
+                shell.taskbar_button_rect(0).x < shell.taskbar_button_rect(1).x,
+                "the pinned button is not to the left of the window's"
+            );
+        });
     }
 }

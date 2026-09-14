@@ -144793,6 +144793,54 @@ everything else, and ranking candidates by subject-matter intuition is worse
 than not ranking them at all, because it moves the genuinely broken one down
 the list.
 
+### RESOLVED 2026-09-14 — the instrument exists, and the answer is one defect
+
+`scripts/lossy-decode.py` now does what the section below asked for. Against
+the 72 binaries on the image:
+
+| | count |
+|---|---|
+| raw occurrences of the two names | **131** |
+| inside `#[cfg(test)]` (assertion messages) | 85 |
+| `#[cfg(not(unix))]` host-only halves | 18 |
+| rendered into a diagnostic | 12 |
+| **VALUE — could corrupt something** | **6** |
+
+All six were then read, and **all six are benign**: two are
+`String::from_utf8_lossy` of an ASCII *constant* (`stat`'s `TERSE_FILE` /
+`TERSE_FS`), one sits behind `looks_like_integer` which admits only ASCII
+digits and a sign (`expr`), one decodes solely to match an ASCII long-option
+name (`od`), and two are bindings used only in messages that the checker's
+binding-following rule does not quite reach (`split`, `strings`). `split`'s is
+worth naming because it is the shape that looks worst and is right: the
+decoded name goes to `println!` while the child's `FILE=` environment variable
+gets `os_from_bytes(name)` beside it.
+
+**So the entire image held exactly one real defect of this kind, and it was in
+`diff`** — fixed the same day. Not `sed`, not `realpath`, the two this entry
+originally named.
+
+The checker's four exclusions were each added because a real site needed it,
+and two were added after it produced a false positive on the very file whose
+shape most resembled the bug:
+
+* `test.rs` writes `path_of` as a `#[cfg(unix)]` block beside a
+  `#[cfg(not(unix))]` block INSIDE one function — the first draft only looked
+  at attributes on the function itself and called the second block a defect;
+* five of the nine it then reported were `let x = lossy(...)` used in a
+  `format!` two statements later, which no fixed window can see.
+
+Both directions are pinned in its 15-case self-test, including that a cfg
+block which has already *closed* does not excuse a later call, and that a
+binding which reaches real work is still a VALUE even if it is also printed.
+
+**Still to do:** a baseline file so the six audited sites are recorded as
+accepted and the checker can be wired into `scripts/hooks/pre-push` as a
+ratchet, the way `argv-utf8` and `raced-globals` are. Until then it is a tool
+to run, not a gate. Note also that `--all` reports **VALUE 183** across the
+whole of `userspace/`, which is a much larger surface than the image and has
+not been audited at all.
+
 ### The instrument this actually wants
 
 A checker that classifies each `from_utf8_lossy` / `to_string_lossy` by what

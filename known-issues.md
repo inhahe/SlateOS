@@ -144348,7 +144348,31 @@ identified and the one non-obvious case called out.
 
 ## B-PATCH-REFUSES-EVERY-FILE-THAT-IS-NOT-VALID-UTF-8 (lane B, 2026-09-14)
 
-**Status:** OPEN — fix in progress · `userspace/coreutils/src/bin/patch.rs`
+**Status:** FIXED 2026-09-14 · `userspace/coreutils/src/bin/patch.rs`
+
+**How it was closed.** `patch` carries lines as `Vec<u8>` end to end now:
+`HunkLine`, `FilePatch`'s two paths and its header lines, and the ~14 `&str`
+signatures between them. The three `fs::read_to_string` calls became
+`fs::read`, `env::args()` became `args_os()`, and the ASCII structure a patch
+is made of (`@@`, `---`, `+++`, the column-one marker) is matched on byte
+literals. A private `mod bytes` supplies the six `str` operations that have no
+slice counterpart; `coreutils::quote`'s `os_bytes`/`os_from_bytes` do the
+syscall boundary, so the conversion added no `unsafe`.
+
+**Measured, not asserted.** `scripts/patch-diff.sh` runs 68 cases against real
+GNU patch 2.7.6 and compares the resulting *tree* — every file's mode, size
+and checksum — not just the three streams: **68 passed, 0 differed**. Three of
+those cases are new and are the bug itself, and the harness was probed in both
+directions: restoring the UTF-8 requirement on the patch file turns exactly
+those three red and nothing else. Six unit cases cover the same ground at the
+function level, and reintroducing a decode inside `bytes::lines` turns three of
+them red.
+
+**One regression the harness caught that nothing else would have.** Routing
+the strip-count error through `quote_glibc` printed `**** strip count 'abc' is
+not a number`; GNU prints it unquoted. GNU quotes an option *name*
+(`invalid option -- 'Q'`) and not this value, which is not a rule anyone would
+guess — §371 again, and the reason the reference is run rather than recalled.
 
 Measured, both sides, on the same two files:
 

@@ -129951,9 +129951,13 @@ quarter of the bar, with a chevron for the rest — see
 
 **What is left:**
 
-- **`apps/systray` is still the copy**, and 842 says its unique parts — quick
-  settings, the volume and network popups — move into the shell rather than
-  to Settings. Nothing has moved yet.
+- ~~**`apps/systray` is still the copy**~~ — **done 2026-09-14.** The operator
+  answered C-Q12 with option A (§845): the tray is the shell's and that program
+  stops existing. Deleted, 3 809 lines. The five things it offered that have
+  no home yet — a volume popup with per-application volumes, a network popup,
+  airplane mode, battery saver, a brightness slider — are recorded in
+  `TD-C-FIVE-TRAY-FEATURES-EXISTED-ONLY-IN-A-PROGRAM-NOTHING-LAUNCHED`, each
+  needing a service that does not exist rather than a place to be drawn.
 - **Hiding and pinning have no way in.** `TrayIconSlot` carries `visible`
   and `pinned`, the arrangement honours both, and nothing can set either:
   right-click belongs to the program that owns the icon, so the shell's own

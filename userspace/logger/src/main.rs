@@ -4,8 +4,10 @@
 //! the system log via /dev/log socket or direct file append.
 
 use std::env;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, Write};
+use std::path::PathBuf;
 use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -296,11 +298,11 @@ fn json_escape(s: &str) -> String {
 struct Options {
     tag: Option<String>,
     priority: (Facility, Severity),
-    log_file: String,
+    log_file: PathBuf,
     stderr: bool,
     id: bool,
     pid_override: Option<u32>,
-    socket: Option<String>,
+    socket: Option<PathBuf>,
     rfc3339: bool,
     json: bool,
     size_limit: Option<usize>,
@@ -340,11 +342,41 @@ fn print_help() {
     println!("Severities: emerg, alert, crit, err, warning, notice, info, debug");
 }
 
-fn parse_args(args: &[String]) -> Options {
+/// One word of the message, as text.
+///
+/// **A message that is not valid UTF-8 is REFUSED, not decoded.** `logger`
+/// writes into the system log, and both output shapes here are text: the
+/// syslog line and the JSON object. `to_string_lossy` would put U+FFFD where
+/// the caller's bytes were, so the log would record something nobody wrote --
+/// in the one file that exists to be evidence of what happened. Refusing is
+/// loud, and the caller still has its bytes; a corrupted entry is silent and
+/// permanent.
+///
+/// Before 2026-09-14 this could not arise, because `env::args()` unwrapped and
+/// the process died first. Refusing is strictly the better of the two.
+///
+/// Logging the bytes verbatim would be better still on the syslog path, and is
+/// not done here only because the JSON path cannot represent them without an
+/// escaping decision this change is not the place to make. Recorded in
+/// known-issues.md.
+fn decode_message_part(arg: &OsStr) -> String {
+    match arg.to_str() {
+        Some(s) => s.to_string(),
+        None => {
+            eprintln!(
+                "logger: message is not valid UTF-8: {}",
+                quoting::quoteaf_os(arg)
+            );
+            process::exit(1);
+        }
+    }
+}
+
+fn parse_args(args: &[OsString]) -> Options {
     let mut opts = Options {
         tag: None,
         priority: (Facility::User, Severity::Notice),
-        log_file: "/var/log/syslog".to_string(),
+        log_file: PathBuf::from("/var/log/syslog"),
         stderr: false,
         id: false,
         pid_override: None,
@@ -357,18 +389,25 @@ fn parse_args(args: &[String]) -> Options {
     };
 
     let mut i = 0;
-    let mut file_to_log: Option<String> = None;
+    let mut file_to_log: Option<PathBuf> = None;
 
     while i < args.len() {
         let arg = &args[i];
-        match arg.as_str() {
+        // `""` for a word that is not valid Unicode. Option names are ASCII,
+        // so such a word matches none of them and reaches the message arm --
+        // where `decode_message_part` decides what to do about it.
+        let s: &str = arg.to_str().unwrap_or("");
+        match s {
             "-p" | "--priority" => {
                 i += 1;
                 if i < args.len() {
-                    match parse_priority(&args[i]) {
+                    match parse_priority(args[i].to_str().unwrap_or("")) {
                         Some(p) => opts.priority = p,
                         None => {
-                            eprintln!("logger: unknown priority: {}", args[i]);
+                            eprintln!(
+                                "logger: unknown priority: {}",
+                                quoting::quoteaf_os(&args[i])
+                            );
                             process::exit(1);
                         }
                     }
@@ -377,7 +416,10 @@ fn parse_args(args: &[String]) -> Options {
             "-t" | "--tag" => {
                 i += 1;
                 if i < args.len() {
-                    opts.tag = Some(args[i].clone());
+                    // A syslog tag is an ASCII identifier; one that does
+                    // not decode is not a tag, and an empty one falls back to
+                    // the user name exactly as an absent `-t` does.
+                    opts.tag = Some(args[i].to_str().unwrap_or("").to_string());
                 }
             }
             "-i" | "--id" => {
@@ -386,7 +428,8 @@ fn parse_args(args: &[String]) -> Options {
             "-f" | "--file" => {
                 i += 1;
                 if i < args.len() {
-                    file_to_log = Some(args[i].clone());
+                    // A path, so it stays bytes.
+                    file_to_log = Some(PathBuf::from(args[i].to_str().unwrap_or("")));
                 }
             }
             "-s" | "--stderr" => {
@@ -395,7 +438,8 @@ fn parse_args(args: &[String]) -> Options {
             "-u" | "--socket" => {
                 i += 1;
                 if i < args.len() {
-                    opts.socket = Some(args[i].clone());
+                    // A socket PATH, so it stays bytes.
+                    opts.socket = Some(PathBuf::from(&args[i]));
                 }
             }
             "-n" | "--server" | "-P" | "--port" => {
@@ -411,7 +455,7 @@ fn parse_args(args: &[String]) -> Options {
             "--size" => {
                 i += 1;
                 if i < args.len()
-                    && let Ok(n) = args[i].parse::<usize>()
+                    && let Ok(n) = args[i].to_str().unwrap_or("").parse::<usize>()
                 {
                     opts.size_limit = Some(n);
                 }
@@ -419,7 +463,7 @@ fn parse_args(args: &[String]) -> Options {
             "--pid" => {
                 i += 1;
                 if i < args.len()
-                    && let Ok(pid) = args[i].parse::<u32>()
+                    && let Ok(pid) = args[i].to_str().unwrap_or("").parse::<u32>()
                 {
                     opts.pid_override = Some(pid);
                 }
@@ -432,8 +476,8 @@ fn parse_args(args: &[String]) -> Options {
                 println!("logger (Slate OS) 0.1.0");
                 process::exit(0);
             }
-            _ if arg.starts_with("--priority=") => {
-                let val = arg.strip_prefix("--priority=").unwrap_or("");
+            _ if s.starts_with("--priority=") => {
+                let val = s.strip_prefix("--priority=").unwrap_or("");
                 match parse_priority(val) {
                     Some(p) => opts.priority = p,
                     None => {
@@ -442,27 +486,30 @@ fn parse_args(args: &[String]) -> Options {
                     }
                 }
             }
-            _ if arg.starts_with("--tag=") => {
-                opts.tag = Some(arg.strip_prefix("--tag=").unwrap_or("").to_string());
+            _ if s.starts_with("--tag=") => {
+                opts.tag = Some(s.strip_prefix("--tag=").unwrap_or("").to_string());
             }
-            _ if arg.starts_with("--socket=") => {
-                opts.socket = Some(arg.strip_prefix("--socket=").unwrap_or("").to_string());
+            _ if s.starts_with("--socket=") => {
+                opts.socket = Some(PathBuf::from(s.strip_prefix("--socket=").unwrap_or("")));
             }
-            _ if arg.starts_with("--size=") => {
-                let val = arg.strip_prefix("--size=").unwrap_or("");
+            _ if s.starts_with("--size=") => {
+                let val = s.strip_prefix("--size=").unwrap_or("");
                 if let Ok(n) = val.parse::<usize>() {
                     opts.size_limit = Some(n);
                 }
             }
-            _ if arg.starts_with("--pid=") => {
-                let val = arg.strip_prefix("--pid=").unwrap_or("");
+            _ if s.starts_with("--pid=") => {
+                let val = s.strip_prefix("--pid=").unwrap_or("");
                 if let Ok(pid) = val.parse::<u32>() {
                     opts.pid_override = Some(pid);
                 }
             }
-            _ if arg.starts_with('-') && arg.len() > 1 && !arg.starts_with("--") => {
+            // On the decoded view: a short cluster is ASCII flags, so a
+            // word that does not decode is not one and falls to the
+            // message arm below.
+            _ if s.starts_with('-') && s.len() > 1 && !s.starts_with("--") => {
                 // Handle combined short flags
-                let chars: Vec<char> = arg[1..].chars().collect();
+                let chars: Vec<char> = s.get(1..).unwrap_or("").chars().collect();
                 let mut j = 0;
                 while j < chars.len() {
                     match chars[j] {
@@ -471,10 +518,13 @@ fn parse_args(args: &[String]) -> Options {
                         'p' => {
                             i += 1;
                             if i < args.len() {
-                                match parse_priority(&args[i]) {
+                                match parse_priority(args[i].to_str().unwrap_or("")) {
                                     Some(p) => opts.priority = p,
                                     None => {
-                                        eprintln!("logger: unknown priority: {}", args[i]);
+                                        eprintln!(
+                                            "logger: unknown priority: {}",
+                                            quoting::quoteaf_os(&args[i])
+                                        );
                                         process::exit(1);
                                     }
                                 }
@@ -483,19 +533,19 @@ fn parse_args(args: &[String]) -> Options {
                         't' => {
                             i += 1;
                             if i < args.len() {
-                                opts.tag = Some(args[i].clone());
+                                opts.tag = Some(args[i].to_str().unwrap_or("").to_string());
                             }
                         }
                         'f' => {
                             i += 1;
                             if i < args.len() {
-                                file_to_log = Some(args[i].clone());
+                                file_to_log = Some(PathBuf::from(&args[i]));
                             }
                         }
                         'u' => {
                             i += 1;
                             if i < args.len() {
-                                opts.socket = Some(args[i].clone());
+                                opts.socket = Some(PathBuf::from(&args[i]));
                             }
                         }
                         'h' => {
@@ -514,7 +564,7 @@ fn parse_args(args: &[String]) -> Options {
             // message that begins with a dash.
             "--" => {
                 for rest in &args[i + 1..] {
-                    opts.message_parts.push(rest.clone());
+                    opts.message_parts.push(decode_message_part(rest));
                 }
                 break;
             }
@@ -524,12 +574,12 @@ fn parse_args(args: &[String]) -> Options {
             // wrote "--zzq" to the system log and exited 0. The log then
             // holds a line nobody meant to write, attributed to the user who
             // mistyped.
-            _ if arg.starts_with("--") => {
-                eprintln!("logger: unknown option: {arg}");
+            _ if s.starts_with("--") => {
+                eprintln!("logger: unknown option: {}", quoting::quoteaf_os(arg));
                 process::exit(1);
             }
             _ => {
-                opts.message_parts.push(arg.clone());
+                opts.message_parts.push(decode_message_part(arg));
             }
         }
         i += 1;
@@ -546,7 +596,8 @@ fn parse_args(args: &[String]) -> Options {
                 }
             }
             Err(e) => {
-                eprintln!("logger: {}: {}", file_path, e);
+                // The path as the caller gave it, escaped only for display.
+                eprintln!("logger: {}: {}", quoting::quoteaf_os(&file_path), e);
                 process::exit(1);
             }
         }
@@ -720,7 +771,11 @@ fn log_message(opts: &Options, message: &str, hostname: &str, tag: &str, pid: u3
 // ── main ─────────────────────────────────────────────────────────
 
 fn main() {
-    let args: Vec<String> = env::args().skip(1).collect();
+    // `args_os`, not `args`: the latter's iterator unwraps, so `logger` died
+    // with a Rust panic on a message or a `-f` path holding a byte that is not
+    // valid Unicode -- and it is one of only three binaries on the image that
+    // had this defect.
+    let args: Vec<OsString> = env::args_os().skip(1).collect();
     let opts = parse_args(&args);
 
     let hostname = get_hostname();
@@ -936,7 +991,7 @@ mod tests {
         let opts = Options {
             tag: None,
             priority: (Facility::User, Severity::Notice),
-            log_file: "/var/log/syslog".to_string(),
+            log_file: PathBuf::from("/var/log/syslog"),
             stderr: false,
             id: false,
             pid_override: None,
@@ -960,7 +1015,7 @@ mod tests {
         let opts = Options {
             tag: None,
             priority: (Facility::Daemon, Severity::Err),
-            log_file: "/var/log/syslog".to_string(),
+            log_file: PathBuf::from("/var/log/syslog"),
             stderr: false,
             id: true,
             pid_override: None,
@@ -982,7 +1037,7 @@ mod tests {
         let opts = Options {
             tag: None,
             priority: (Facility::User, Severity::Info),
-            log_file: "/var/log/syslog".to_string(),
+            log_file: PathBuf::from("/var/log/syslog"),
             stderr: false,
             id: true,
             pid_override: Some(9999),
@@ -1003,7 +1058,7 @@ mod tests {
         let opts = Options {
             tag: None,
             priority: (Facility::User, Severity::Info),
-            log_file: "/var/log/syslog".to_string(),
+            log_file: PathBuf::from("/var/log/syslog"),
             stderr: false,
             id: false,
             pid_override: None,
@@ -1025,7 +1080,7 @@ mod tests {
         let opts = Options {
             tag: None,
             priority: (Facility::User, Severity::Info),
-            log_file: "/var/log/syslog".to_string(),
+            log_file: PathBuf::from("/var/log/syslog"),
             stderr: false,
             id: false,
             pid_override: None,
@@ -1053,7 +1108,7 @@ mod tests {
         let opts = Options {
             tag: None,
             priority: (Facility::User, Severity::Info),
-            log_file: "/var/log/syslog".to_string(),
+            log_file: PathBuf::from("/var/log/syslog"),
             stderr: false,
             id: true,
             pid_override: None,
@@ -1083,11 +1138,7 @@ mod tests {
 
     #[test]
     fn test_parse_args_priority() {
-        let args = vec![
-            "-p".to_string(),
-            "daemon.err".to_string(),
-            "msg".to_string(),
-        ];
+        let args = vec!["-p".into(), "daemon.err".into(), "msg".into()];
         let opts = parse_args(&args);
         assert_eq!(opts.priority, (Facility::Daemon, Severity::Err));
         assert_eq!(opts.message_parts, vec!["msg"]);
@@ -1095,14 +1146,14 @@ mod tests {
 
     #[test]
     fn test_parse_args_tag() {
-        let args = vec!["-t".to_string(), "myapp".to_string(), "hello".to_string()];
+        let args = vec!["-t".into(), "myapp".into(), "hello".into()];
         let opts = parse_args(&args);
         assert_eq!(opts.tag, Some("myapp".to_string()));
     }
 
     #[test]
     fn test_parse_args_flags() {
-        let args = vec!["-is".to_string(), "test".to_string()];
+        let args = vec!["-is".into(), "test".into()];
         let opts = parse_args(&args);
         assert!(opts.id);
         assert!(opts.stderr);
@@ -1110,21 +1161,21 @@ mod tests {
 
     #[test]
     fn test_parse_args_rfc3339() {
-        let args = vec!["--rfc3339".to_string(), "test".to_string()];
+        let args = vec!["--rfc3339".into(), "test".into()];
         let opts = parse_args(&args);
         assert!(opts.rfc3339);
     }
 
     #[test]
     fn test_parse_args_json() {
-        let args = vec!["--json".to_string(), "test".to_string()];
+        let args = vec!["--json".into(), "test".into()];
         let opts = parse_args(&args);
         assert!(opts.json);
     }
 
     #[test]
     fn test_parse_args_message() {
-        let args = vec!["hello".to_string(), "world".to_string()];
+        let args = vec!["hello".into(), "world".into()];
         let opts = parse_args(&args);
         assert_eq!(opts.message_parts, vec!["hello", "world"]);
         assert!(!opts.read_stdin);

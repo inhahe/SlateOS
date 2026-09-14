@@ -2897,16 +2897,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "systray"
-version = "0.1.0"
-dependencies = [
- "appearance",
- "guitk",
- "oswindow",
- "tzrules",
-]
-
-[[package]]
 name = "tac"
 version = "0.1.0"
 dependencies = [

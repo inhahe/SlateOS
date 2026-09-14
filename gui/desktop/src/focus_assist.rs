@@ -378,12 +378,24 @@ impl FocusAssistManager {
     }
 
     /// Should a notification from this app be shown right now?
+    ///
+    /// The four modes are rungs on one ladder: each admits everything at or
+    /// above a level, and the level a program sits at is its
+    /// [`NotifPriority`].
+    ///
+    /// **`Off` is not "show everything".** It used to be, and that made
+    /// `Silent` mean "silent only while the user is focusing" -- so a program
+    /// the user had switched off went on interrupting them for as long as no
+    /// focus mode was on, which is nearly always. The word on the switch is
+    /// the promise: a program set to `Silent` is silent. `Off` is the bottom
+    /// rung, admitting everything *above* `Silent`, and the ladder now reads
+    /// the same way at every rung.
     pub fn should_show_notification(&self, app_id: &str) -> bool {
         let mode = self.effective_mode();
         let priority = self.app_priority(app_id);
 
         match mode {
-            FocusMode::Off => true,
+            FocusMode::Off => priority > NotifPriority::Silent,
             FocusMode::PriorityOnly => priority >= NotifPriority::Priority,
             FocusMode::AlarmsOnly => priority >= NotifPriority::Critical,
             FocusMode::TotalSilence => false,
@@ -907,6 +919,34 @@ mod tests {
     /// the shell does. Nothing in production wrote a rule, so it never bit --
     /// a settings page would have been the first thing to meet it, and the
     /// symptom would have been a preference that saved and did nothing.
+    /// A silenced program is silent with no focus mode on.
+    ///
+    /// `Off` used to be `=> true`, which made `Silent` mean "silent only while
+    /// the user is focusing" -- so a program they had switched off went on
+    /// interrupting them for as long as no focus mode was on, which is nearly
+    /// always. Found by the shell test for the notification pane's switch,
+    /// which asserted the thing the switch promises and got the opposite.
+    #[test]
+    fn a_silenced_program_is_silent_even_with_no_focus_mode_on() {
+        let mut mgr = make_mgr();
+        assert_eq!(mgr.effective_mode(), FocusMode::Off, "precondition");
+        assert!(
+            mgr.should_show_notification("Chat"),
+            "an unconfigured program notifies with no focus mode on"
+        );
+
+        mgr.set_app_override(AppNotifOverride::new("Chat").with_importance(NotifPriority::Silent));
+
+        assert!(
+            !mgr.should_show_notification("Chat"),
+            "a program set to Silent notified anyway"
+        );
+        assert!(
+            mgr.should_show_notification("Mail"),
+            "silencing Chat silenced everything"
+        );
+    }
+
     #[test]
     fn a_rule_is_found_by_the_name_a_notification_carries() {
         let mut mgr = make_mgr();

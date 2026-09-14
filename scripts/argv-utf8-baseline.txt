@@ -29,7 +29,6 @@ userspace/audit/src/main.rs:argv-as-string
 userspace/backup/src/main.rs:argv-as-string
 userspace/base64/src/main.rs:argv-as-string
 userspace/blkid/src/main.rs:argv-as-string
-userspace/blockdev/src/main.rs:argv-as-string
 userspace/bootctl/src/main.rs:argv-as-string
 userspace/capsh/src/main.rs:argv-as-string
 userspace/cgroup/src/main.rs:argv-as-string

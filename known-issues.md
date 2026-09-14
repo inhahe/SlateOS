@@ -842,33 +842,66 @@ that **dies on a legal filename** — `env::args()`'s iterator is a literal
 
 **Why they are all spelled the same, and why that matters.** The coreutils
 bins are clean because they share `userspace/coreutils/src/getopt.rs`, which is
-byte-based. **No crate outside `userspace/coreutils` can use it** — checked:
-not one `userspace/*/Cargo.toml` depends on `coreutils`. So all 176 standalone
-bins hand-roll their argv walk, in `String`, because the byte-safe reader is
-behind a wall.
+byte-based. Not one `userspace/*/Cargo.toml` depends on `coreutils`, so all 176
+standalone bins hand-roll their argv walk in `String`.
 
-That makes this one structural fact rather than 176 defects, and it changes
-what the fix is.
+> **CORRECTED 2026-09-14, same day, before anything was built on it.** This
+> paragraph first said "**No crate outside `userspace/coreutils` can use it**",
+> and that is **false**. I had checked that none *does* depend on `coreutils`
+> and wrote it up as a wall. Tested instead of asserted: adding
+> `coreutils = { path = "../coreutils" }` to `blockdev` and calling
+> `coreutils::getopt::Program` **compiles and works today**. There is no wall.
+>
+> What there is, is **weight**, and that is measured rather than guessed.
+> `blockdev`, debug, `x86_64-pc-windows-gnu`:
+>
+> | | bytes |
+> |---|---|
+> | as it is | 2,858,660 |
+> | with the `coreutils` dependency, using `getopt` | 6,502,583 |
+> | | **2.27×** |
+>
+> because `coreutils`' lib pulls `bignum`, `charwidth`, `ere`, `bstr`,
+> `memchr` and `localtime` behind it. A 3.6 MB payload on a small utility to
+> reach a 1,838-line parser.
+>
+> **This changes the priority, not just the wording.** The 176 bins are *not
+> blocked* on an extraction — each could be fixed today, either by taking the
+> dependency or by converting its argv to `OsString` in place. Extracting
+> `getopt` into a small crate is an optimisation with a measured
+> justification (the 2.27×), not a prerequisite. Recorded because the original
+> phrasing would have had the next reader treat a multi-crate refactor as
+> something they had to finish before touching a single bin.
 
 **The precedent is already in the tree.** `userspace/quoting` exists for
 exactly this reason: a helper the whole userland needs, extracted into its own
 crate rather than copied. `getopt` is the same shape and has not had the same
 treatment.
 
-**The route, in order:**
+**The route, revised after the measurement above:**
 
-1. Extract `getopt.rs` into `userspace/getopt-rs` (the name `userspace/getopt`
-   is taken — it is the `getopt(1)` *binary*, and it is itself on the baseline).
-   `coreutils` then depends on it, unchanged in behaviour.
-2. Migrate the standalone bins to it. Each migration closes a baseline line
-   **and** fixes option handling the hand-rolled readers get wrong — long-option
-   abbreviation and ambiguity, which is what `uname` and `env` each cost a
-   separate entry in this file.
+1. **Fix bins now; the extraction is not a gate.** Each bin needs a real pass
+   anyway — `patch` and `diff` each took one, and `diff`'s turned up a silent
+   `to_str()` skip in its directory walk that was worse than the panic it was
+   filed for. That work does not wait on any crate reshuffle.
+2. **Extract `getopt.rs` into a small crate when the weight is the reason**,
+   not before. The name `userspace/getopt` is taken — it is the `getopt(1)`
+   *binary*, and it is itself on the baseline — so a new name is needed.
 
-**Why not just convert each bin's argv to `OsString` in place.** That closes
-the crash and leaves the parsing wrong, so each bin would be visited twice. It
-also leaves 176 hand-rolled readers to drift, which is the accumulation this
-file already records for `touch` at a smaller scale.
+**The one thing the extraction genuinely blocks on**, found while scoping it
+and worth writing down so it is not rediscovered: `Program::report` cannot move
+to an I/O-free crate. It goes through `stdfd::diag_line`, which **flushes
+stdout first** — glibc's `error()` behaviour, and without it a block-buffered
+`cat big missing >out 2>&1` puts the complaint ahead of output written before
+it. So an extracted parser either drags `stdfd` (1,357 lines) and `errmsg`
+(299) with it, or gives up `report` and changes its 44 call sites. `quoting`
+set the standard that a move should cost callers nothing, and this one cannot
+meet it for free.
+
+**Taking the `coreutils` dependency is a third option** and is the cheapest
+per bin — it compiles and works — but it is the 2.27× above, so it suits a bin
+that already wants several of those helpers rather than one that wants only the
+parser.
 
 **Scale, measured rather than guessed:** two bins have been converted by hand
 so far — `patch` and `diff` — and each took a single focused pass, with `diff`

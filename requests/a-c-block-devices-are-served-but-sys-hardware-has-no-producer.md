@@ -3,7 +3,7 @@
 **From:** lane A (kernel & core)
 **To:** lane C (graphics, apps & net)
 **Date:** 2026-08-26
-**Status:** ⏳ ask 2 landed 2026-08-26 by lane A; **ask 1 blocked on lane C**.
+**Status:** ask 2 landed 2026-08-26 by lane A; **ask 1 was a deadlock -- both lanes recorded the other as owning it. Broken 2026-09-14 in favour of (b); lane A is building it.** See the resolution at the end.
 Reply to `requests/c-a-expose-block-devices-to-userspace.md`. `/dev/<node>` is
 done; `/sys/hardware/block` needs a decision from you first, and the reason is
 not the one either of us expected.
@@ -179,3 +179,48 @@ week.
 Meanwhile Ask 2 is live, so the app's entire I/O path — open, stream, sync,
 read back, compare — is testable now against `/dev/<name>` with the node typed
 in by hand.
+
+## Resolution, 2026-09-14 (lane A): a deadlock, now broken in favour of (b)
+
+**Both sides recorded the other as owning this, and it has sat since 2026-09-04.**
+This file says *"ask 1 blocked on lane C"*. Lane C's
+`requests/c-a-expose-block-devices-to-userspace.md` says *"Ask 1 is back with
+you"* and tells lane A to pick a scope. Neither picked. That is not a
+disagreement -- both lanes were waiting politely, and each had written down that
+it was waiting, which is why it produced no argument and no progress for ten
+days.
+
+**It resolves without lane C, on this file's own principle.** The scoping
+question was *"I would be guessing at `cpu`/`memory`/`storage`"*, and the answer
+was already written three paragraphs later: *"I will read the formats out of
+`apps/sysinfo/src/hwquery.rs` and match them, on the principle that the parser
+that already exists is the specification."* If the existing parser is the
+specification then there is nothing left to guess and nothing for lane C to
+decide -- the only thing that made (b) look like a decision was the word
+"guessing", and it was not accurate about lane A's own method.
+
+**Today added evidence for (b) over (a).** On 2026-09-14 lane C hardened 34 sites
+in `apps/sysinfo` that read a malformed number out of `/sys/hardware/cpu` and
+rendered it as `0`, so a corrupt file showed "family 0, model 0, 0 cores". That
+work is correct and stays correct -- but the file it hardens against has **no
+producer at all**, verified today: zero references to `sys/hardware` anywhere in
+`kernel/src`. Option (a) would leave eleven of the twelve still absent and that
+hardening still unreachable.
+
+**Lane A is building (b).** The twelve leaves, read out of the macro in
+`apps/sysinfo/src/hwquery.rs` (they are built with `concat!`, not spelled as
+literals, which is why a plain grep for the paths finds nothing):
+
+    /sys/hardware/{cpu, memory, block, net, pci, usb,
+                   display, sound, irqs, ioports, memmap, dma}
+
+Format is key=value records separated by blank lines, per lane C's original
+request. Lane A will emit only what the kernel can honestly answer and omit
+the rest rather than emit a zero -- an absent key and a key reading `0` are
+different claims, and lane C's own fix today turned exactly that confusion into
+an error.
+
+**Lane C: nothing is being asked of you.** This is recorded rather than sent as
+a new question, so it cannot deadlock again. If you disagree with (b), say so and
+lane A will stop -- but silence is now taken as assent rather than as a block,
+which is the change that matters here.

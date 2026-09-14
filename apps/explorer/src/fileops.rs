@@ -756,6 +756,17 @@ pub struct OperationExecutor {
     events: Vec<FileOpEvent>,
     skipped: u32,
     started: Option<Instant>,
+    /// The journal, held across steps. `None` before `begin` and after
+    /// `finish`.
+    journal: Option<OperationJournal>,
+    /// The plan's actions, cloned once by `begin`.
+    actions: Vec<PlannedAction>,
+    /// The next action to carry out.
+    next: usize,
+    /// Set when an action ended the operation early -- cancelled, or failed
+    /// under `ErrorPolicy::StopOnFirst`. Distinct from `next == len`, which is
+    /// the ordinary end, because the two mean different things to a resume.
+    stopped: bool,
 }
 
 impl OperationExecutor {
@@ -769,31 +780,56 @@ impl OperationExecutor {
             events: Vec::new(),
             skipped: 0,
             started: None,
+            journal: None,
+            actions: Vec::new(),
+            next: 0,
+            stopped: false,
         }
     }
 
-    /// Run the full operation synchronously, collecting events.
+    /// Run the full operation without returning until it is finished.
+    ///
+    /// Now a loop over [`step`](Self::step), kept because some callers
+    /// genuinely want to block: the tests, and the undo path, which is a short
+    /// operation with no window to keep alive. A caller that *does* have a
+    /// window should drive `begin`/`step`/`finish` itself -- see `step`.
     ///
     /// Returns the events emitted during execution.
     pub fn execute(&mut self) -> Vec<FileOpEvent> {
-        self.started = Some(Instant::now());
-        self.progress.state = OperationState::Running;
+        if !self.begin() {
+            return std::mem::take(&mut self.events);
+        }
+        while !self.is_done() {
+            self.step();
+        }
+        self.finish();
+        std::mem::take(&mut self.events)
+    }
 
-        let dest_dir = self.journal_dir();
-        let plan_id = self.plan.id();
-        let journal = match OperationJournal::open(&dest_dir, plan_id) {
-            Ok(j) => j,
-            Err(e) => {
-                self.progress.state = OperationState::Failed;
-                self.events.push(FileOpEvent::Error {
-                    path: dest_dir,
-                    error: format!("failed to open journal: {e}"),
-                });
-                return std::mem::take(&mut self.events);
-            }
-        };
+    /// Ask the operation to stop after the action now in progress.
+    ///
+    /// Only reachable now that the operation is stepped: the check this sets
+    /// has been at the top of the action loop since the loop was written, and
+    /// with a synchronous `execute` there was no moment at which anyone could
+    /// have set it.
+    ///
+    /// **What a cancelled Move leaves behind is deliberate.** `finish` still
+    /// runs, and its source deletion is guarded by `journal.transferred`, so
+    /// the files that reached the destination have their sources removed and
+    /// the files that did not keep theirs. The operation is half done because
+    /// it was stopped half way; every individual file is wholly moved or
+    /// wholly not. The journal is kept -- it is only removed on `Completed` --
+    /// so the operation can be resumed instead.
+    pub fn cancel(&mut self) {
+        self.progress.state = OperationState::Cancelled;
+    }
 
-        self.run_actions(journal);
+    /// Take the events emitted since this was last called.
+    ///
+    /// For a caller stepping the operation: `execute` hands back everything at
+    /// the end, which is no use to a progress bar that wants to move while the
+    /// copy is running.
+    pub fn take_events(&mut self) -> Vec<FileOpEvent> {
         std::mem::take(&mut self.events)
     }
 
@@ -824,134 +860,218 @@ impl OperationExecutor {
             .unwrap_or_else(|| PathBuf::from("."))
     }
 
-    fn run_actions(&mut self, mut journal: OperationJournal) {
-        // Clone values we need to iterate over since we cannot borrow self
-        // immutably (via plan.actions) and mutably (via self.handle_*) at
-        // the same time.
-        let actions: Vec<PlannedAction> = self.plan.actions.clone();
+    /// Open the journal and mark the operation running.
+    ///
+    /// Split from [`execute`](Self::execute) so a caller with an event loop can
+    /// own the pacing. Answers whether the operation can proceed: a journal
+    /// that will not open is reported and the operation is `Failed` before a
+    /// single file is touched.
+    fn begin(&mut self) -> bool {
+        self.started = Some(Instant::now());
+        self.progress.state = OperationState::Running;
+        // Cloned once, for the reason the loop used to clone it every call:
+        // `self.plan.actions` cannot be borrowed while `self.execute_*_action`
+        // borrows `self` mutably.
+        self.actions = self.plan.actions.clone();
+        self.next = 0;
+        self.stopped = false;
+
+        let dest_dir = self.journal_dir();
+        let plan_id = self.plan.id();
+        match OperationJournal::open(&dest_dir, plan_id) {
+            Ok(journal) => {
+                self.journal = Some(journal);
+                true
+            }
+            Err(e) => {
+                self.progress.state = OperationState::Failed;
+                self.events.push(FileOpEvent::Error {
+                    path: dest_dir,
+                    error: format!("failed to open journal: {e}"),
+                });
+                false
+            }
+        }
+    }
+
+    /// Whether there is no more work to do.
+    ///
+    /// True before [`begin`](Self::begin) as well, which is deliberate: a
+    /// caller that loops on this without having begun does nothing rather than
+    /// spinning on an executor with no journal.
+    #[must_use]
+    pub fn is_done(&self) -> bool {
+        self.stopped || self.next >= self.actions.len()
+    }
+
+    /// Carry out one planned action.
+    ///
+    /// **This is what lets the window stay alive during a copy.** The engine
+    /// used to run every action in one call, inside an event handler, so for
+    /// the length of the operation the explorer did not repaint, did not
+    /// answer a click, and could not move the progress bar it was already
+    /// computing -- every `FileOpEvent::Progress` it pushed arrived after the
+    /// last byte was copied. One action is the unit because it is the unit the
+    /// journal already records, so it is also the unit an interrupted
+    /// operation resumes from.
+    ///
+    /// No-op once [`is_done`](Self::is_done) answers true.
+    pub fn step(&mut self) {
+        // Taken and put back rather than borrowed: the body below calls
+        // `self.execute_*_action`, which borrows `self` mutably, so a live
+        // `&mut self.journal` across it would not compile. Restoring it is the
+        // caller's job here precisely so that the many early returns inside
+        // `step_action` cannot lose it.
+        let Some(mut journal) = self.journal.take() else {
+            return;
+        };
+        self.step_action(&mut journal);
+        self.journal = Some(journal);
+    }
+
+    /// One action, with the journal already in hand.
+    fn step_action(&mut self, journal: &mut OperationJournal) {
+        let Some(action) = self.actions.get(self.next).cloned() else {
+            return;
+        };
+        // Advanced before the work, not after: every exit below is an early
+        // return, and an action that returned without advancing would be
+        // retried for ever.
+        self.next = self.next.saturating_add(1);
+        let action = &action;
         let operation = self.plan.operation.clone();
         let conflict_policy = self.plan.conflict_policy;
         let error_policy = self.plan.error_policy;
 
-        for action in &actions {
-            if self.progress.state == OperationState::Cancelled {
-                break;
-            }
+        if self.progress.state == OperationState::Cancelled {
+            self.stopped = true;
+            return;
+        }
 
-            // Skip actions already completed in a previous (interrupted) run.
-            if journal.is_complete(action.index) {
+        // Skip actions already completed in a previous (interrupted) run.
+        if journal.is_complete(action.index) {
+            if !action.is_dir {
+                self.progress.completed_files = self.progress.completed_files.saturating_add(1);
+                self.progress.copied_bytes = self.progress.copied_bytes.saturating_add(action.size);
+            }
+            return;
+        }
+
+        self.progress.current_file = action.src.to_string_lossy().to_string();
+
+        let result = match operation {
+            FileOperation::Copy | FileOperation::Move => {
+                self.execute_copy_action(action, conflict_policy)
+            }
+            FileOperation::Delete => self.execute_delete_action(action),
+            FileOperation::Recycle => self.execute_recycle_action(action),
+            FileOperation::Restore => self.execute_restore_action(action),
+            FileOperation::Link => self.execute_link_action(action, conflict_policy),
+        };
+
+        match result {
+            Ok(ActionOutcome::Done) => {
+                // A journal write that fails only costs redone work on a
+                // resume, which is why it does not abort the operation.
+                let _ = journal.mark_complete(action.index);
                 if !action.is_dir {
                     self.progress.completed_files = self.progress.completed_files.saturating_add(1);
                     self.progress.copied_bytes =
                         self.progress.copied_bytes.saturating_add(action.size);
                 }
-                continue;
             }
-
-            self.progress.current_file = action.src.to_string_lossy().to_string();
-
-            let result = match operation {
-                FileOperation::Copy | FileOperation::Move => {
-                    self.execute_copy_action(action, conflict_policy)
+            Ok(ActionOutcome::Skipped) => {
+                // Recorded as a *skip*: nothing was copied, so a Move must
+                // not delete this source. See `OperationJournal`.
+                let _ = journal.mark_skipped(action.index);
+                self.skipped = self.skipped.saturating_add(1);
+                if !action.is_dir {
+                    self.progress.completed_files = self.progress.completed_files.saturating_add(1);
+                    // Count skipped bytes in progress so ETA stays accurate.
+                    self.progress.copied_bytes =
+                        self.progress.copied_bytes.saturating_add(action.size);
                 }
-                FileOperation::Delete => self.execute_delete_action(action),
-                FileOperation::Recycle => self.execute_recycle_action(action),
-                FileOperation::Restore => self.execute_restore_action(action),
-                FileOperation::Link => self.execute_link_action(action, conflict_policy),
-            };
+            }
+            Err(e) => {
+                let err = FileOpError {
+                    path: action.src.clone(),
+                    message: e.to_string(),
+                };
+                self.events.push(FileOpEvent::Error {
+                    path: action.src.clone(),
+                    error: e.to_string(),
+                });
+                self.errors.push(err);
 
-            match result {
-                Ok(ActionOutcome::Done) => {
-                    // A journal write that fails only costs redone work on a
-                    // resume, which is why it does not abort the operation.
-                    let _ = journal.mark_complete(action.index);
-                    if !action.is_dir {
-                        self.progress.completed_files =
-                            self.progress.completed_files.saturating_add(1);
-                        self.progress.copied_bytes =
-                            self.progress.copied_bytes.saturating_add(action.size);
+                match error_policy {
+                    ErrorPolicy::StopOnFirst => {
+                        self.progress.state = OperationState::Failed;
+                        self.stopped = true;
+                        return;
                     }
-                }
-                Ok(ActionOutcome::Skipped) => {
-                    // Recorded as a *skip*: nothing was copied, so a Move must
-                    // not delete this source. See `OperationJournal`.
-                    let _ = journal.mark_skipped(action.index);
-                    self.skipped = self.skipped.saturating_add(1);
-                    if !action.is_dir {
-                        self.progress.completed_files =
-                            self.progress.completed_files.saturating_add(1);
-                        // Count skipped bytes in progress so ETA stays accurate.
-                        self.progress.copied_bytes =
-                            self.progress.copied_bytes.saturating_add(action.size);
+                    ErrorPolicy::SkipAndContinue => {
+                        self.skipped = self.skipped.saturating_add(1);
+                        return;
                     }
-                }
-                Err(e) => {
-                    let err = FileOpError {
-                        path: action.src.clone(),
-                        message: e.to_string(),
-                    };
-                    self.events.push(FileOpEvent::Error {
-                        path: action.src.clone(),
-                        error: e.to_string(),
-                    });
-                    self.errors.push(err);
-
-                    match error_policy {
-                        ErrorPolicy::StopOnFirst => {
-                            self.progress.state = OperationState::Failed;
-                            break;
-                        }
-                        ErrorPolicy::SkipAndContinue => {
-                            self.skipped = self.skipped.saturating_add(1);
-                            continue;
-                        }
-                        ErrorPolicy::RetryN(max) => {
-                            let mut retried = false;
-                            for _ in 0..max {
-                                let retry = match operation {
-                                    FileOperation::Copy | FileOperation::Move => {
-                                        self.execute_copy_action(action, conflict_policy)
-                                    }
-                                    FileOperation::Delete => self.execute_delete_action(action),
-                                    FileOperation::Recycle => self.execute_recycle_action(action),
-                                    FileOperation::Restore => self.execute_restore_action(action),
-                                    FileOperation::Link => {
-                                        self.execute_link_action(action, conflict_policy)
-                                    }
-                                };
-                                if let Ok(outcome) = retry {
-                                    if matches!(outcome, ActionOutcome::Skipped) {
-                                        let _ = journal.mark_skipped(action.index);
-                                        self.skipped = self.skipped.saturating_add(1);
-                                    } else {
-                                        let _ = journal.mark_complete(action.index);
-                                    }
-                                    if !action.is_dir {
-                                        self.progress.completed_files =
-                                            self.progress.completed_files.saturating_add(1);
-                                        self.progress.copied_bytes =
-                                            self.progress.copied_bytes.saturating_add(action.size);
-                                    }
-                                    retried = true;
-                                    break;
+                    ErrorPolicy::RetryN(max) => {
+                        let mut retried = false;
+                        for _ in 0..max {
+                            let retry = match operation {
+                                FileOperation::Copy | FileOperation::Move => {
+                                    self.execute_copy_action(action, conflict_policy)
                                 }
+                                FileOperation::Delete => self.execute_delete_action(action),
+                                FileOperation::Recycle => self.execute_recycle_action(action),
+                                FileOperation::Restore => self.execute_restore_action(action),
+                                FileOperation::Link => {
+                                    self.execute_link_action(action, conflict_policy)
+                                }
+                            };
+                            if let Ok(outcome) = retry {
+                                if matches!(outcome, ActionOutcome::Skipped) {
+                                    let _ = journal.mark_skipped(action.index);
+                                    self.skipped = self.skipped.saturating_add(1);
+                                } else {
+                                    let _ = journal.mark_complete(action.index);
+                                }
+                                if !action.is_dir {
+                                    self.progress.completed_files =
+                                        self.progress.completed_files.saturating_add(1);
+                                    self.progress.copied_bytes =
+                                        self.progress.copied_bytes.saturating_add(action.size);
+                                }
+                                retried = true;
+                                break;
                             }
-                            if !retried {
-                                self.skipped = self.skipped.saturating_add(1);
-                            }
+                        }
+                        if !retried {
+                            self.skipped = self.skipped.saturating_add(1);
                         }
                     }
                 }
             }
-
-            // Emit progress periodically.
-            if let Some(start) = self.started {
-                self.progress.update_rates(start.elapsed());
-            }
-            self.events
-                .push(FileOpEvent::Progress(self.progress.clone()));
         }
 
+        // Emit progress periodically.
+        if let Some(start) = self.started {
+            self.progress.update_rates(start.elapsed());
+        }
+        self.events
+            .push(FileOpEvent::Progress(self.progress.clone()));
+    }
+
+    /// Everything that happens after the last action.
+    ///
+    /// A Move's source deletion lives here and nowhere else, which is the
+    /// reason this is a separate phase rather than a tail on the last step: it
+    /// must run once, after every action has had its turn, and it must see the
+    /// finished journal.
+    pub fn finish(&mut self) {
+        let Some(journal) = self.journal.take() else {
+            return;
+        };
+        let actions: Vec<PlannedAction> = self.actions.clone();
+        let operation = self.plan.operation.clone();
         // For Move: delete the sources whose data actually reached the
         // destination.
         //
@@ -3264,6 +3384,242 @@ mod tests {
         let summary = complete.unwrap();
         assert_eq!(summary.succeeded, 1);
         assert_eq!(summary.failed, 0);
+    }
+
+    // ---- stepping ---------------------------------------------------
+    //
+    // What these are for: the engine used to run every action in one call, so
+    // the explorer froze for the length of a copy and the progress bar it was
+    // already computing could never move. The tests below are about the thing
+    // that fixed it -- that the work comes in pieces a caller can interleave
+    // with drawing -- and each one of them fails against a single-call engine.
+
+    /// Three files, three steps, and the caller is in charge of every one.
+    #[test]
+    fn a_plan_is_carried_out_one_action_at_a_time() {
+        let src_scratch = temp_dir("step_count_src");
+        let src_dir = src_scratch.dir().to_path_buf();
+        let dst_scratch = temp_dir("step_count_dst");
+        let dst_dir = dst_scratch.dir().to_path_buf();
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            write_file(&src_dir.join(name), name);
+        }
+
+        let plan = OperationPlan::plan_copy(
+            &[
+                src_dir.join("a.txt"),
+                src_dir.join("b.txt"),
+                src_dir.join("c.txt"),
+            ],
+            &dst_dir,
+            ConflictPolicy::Skip,
+            ErrorPolicy::StopOnFirst,
+        )
+        .unwrap();
+        let total = plan.actions.len();
+        assert_eq!(total, 3, "three files should plan three actions");
+
+        let mut executor = OperationExecutor::new(plan);
+        assert!(
+            executor.is_done(),
+            "an executor that has not begun has nothing to step"
+        );
+        assert!(executor.begin(), "the journal did not open");
+
+        let mut steps = 0;
+        while !executor.is_done() {
+            executor.step();
+            steps += 1;
+            assert!(steps <= total, "stepping did not terminate");
+        }
+        executor.finish();
+
+        assert_eq!(steps, total, "one step per planned action");
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            assert!(dst_dir.join(name).exists(), "{name} was not copied");
+        }
+    }
+
+    /// **The point of the whole change: progress moves while the copy runs.**
+    ///
+    /// Asserted between steps rather than at the end. The old engine computed
+    /// exactly these numbers and handed them over only once the last byte was
+    /// copied, which is the difference between a progress bar and a picture of
+    /// one.
+    #[test]
+    fn progress_advances_between_steps_rather_than_at_the_end() {
+        let src_scratch = temp_dir("step_progress_src");
+        let src_dir = src_scratch.dir().to_path_buf();
+        let dst_scratch = temp_dir("step_progress_dst");
+        let dst_dir = dst_scratch.dir().to_path_buf();
+        let names = ["one.txt", "two.txt", "three.txt", "four.txt"];
+        for name in names {
+            write_file(&src_dir.join(name), "0123456789");
+        }
+
+        let sources: Vec<PathBuf> = names.iter().map(|n| src_dir.join(n)).collect();
+        let plan = OperationPlan::plan_copy(
+            &sources,
+            &dst_dir,
+            ConflictPolicy::Skip,
+            ErrorPolicy::StopOnFirst,
+        )
+        .unwrap();
+
+        let mut executor = OperationExecutor::new(plan);
+        assert!(executor.begin());
+        assert_eq!(executor.progress().completed_files, 0);
+
+        let mut seen = Vec::new();
+        while !executor.is_done() {
+            executor.step();
+            seen.push(executor.progress().completed_files);
+            // And the events are available *now*, not at the end.
+            let events = executor.take_events();
+            assert!(
+                events.iter().any(|e| matches!(e, FileOpEvent::Progress(_))),
+                "a step emitted no progress the caller could draw"
+            );
+        }
+        executor.finish();
+
+        assert_eq!(
+            seen,
+            vec![1, 2, 3, 4],
+            "progress did not climb with the steps"
+        );
+    }
+
+    /// Cancelling stops the operation where it stands.
+    #[test]
+    fn cancelling_stops_the_operation_and_leaves_the_rest_alone() {
+        let src_scratch = temp_dir("step_cancel_src");
+        let src_dir = src_scratch.dir().to_path_buf();
+        let dst_scratch = temp_dir("step_cancel_dst");
+        let dst_dir = dst_scratch.dir().to_path_buf();
+        let names = ["a.txt", "b.txt", "c.txt", "d.txt"];
+        for name in names {
+            write_file(&src_dir.join(name), name);
+        }
+
+        let sources: Vec<PathBuf> = names.iter().map(|n| src_dir.join(n)).collect();
+        let plan = OperationPlan::plan_copy(
+            &sources,
+            &dst_dir,
+            ConflictPolicy::Skip,
+            ErrorPolicy::StopOnFirst,
+        )
+        .unwrap();
+
+        let mut executor = OperationExecutor::new(plan);
+        assert!(executor.begin());
+        executor.step();
+        executor.cancel();
+        // The next step is the one that notices, and it must not copy.
+        executor.step();
+        assert!(executor.is_done(), "a cancelled operation kept going");
+        executor.finish();
+
+        assert_eq!(executor.progress().state, OperationState::Cancelled);
+        assert!(dst_dir.join("a.txt").exists(), "the first file was undone");
+        let copied = names.iter().filter(|n| dst_dir.join(n).exists()).count();
+        assert!(copied < names.len(), "cancelling copied everything anyway");
+    }
+
+    /// A cancelled operation keeps its journal, so it can be resumed.
+    ///
+    /// The journal is removed only on `Completed`. That is what makes cancel
+    /// different from failure and from finishing: the record of which actions
+    /// are done outlives the run that stopped.
+    #[test]
+    fn a_cancelled_operation_keeps_the_record_of_what_it_did() {
+        let src_scratch = temp_dir("step_resume_src");
+        let src_dir = src_scratch.dir().to_path_buf();
+        let dst_scratch = temp_dir("step_resume_dst");
+        let dst_dir = dst_scratch.dir().to_path_buf();
+        let names = ["a.txt", "b.txt", "c.txt"];
+        for name in names {
+            write_file(&src_dir.join(name), name);
+        }
+        let sources: Vec<PathBuf> = names.iter().map(|n| src_dir.join(n)).collect();
+        let make = || {
+            OperationPlan::plan_copy(
+                &sources,
+                &dst_dir,
+                ConflictPolicy::Skip,
+                ErrorPolicy::StopOnFirst,
+            )
+            .unwrap()
+        };
+
+        let mut executor = OperationExecutor::new(make());
+        assert!(executor.begin());
+        executor.step();
+        executor.cancel();
+        executor.step();
+        executor.finish();
+
+        // Resuming the same plan finishes the job.
+        let mut resumed = OperationExecutor::new(make());
+        let events = resumed.execute();
+        for name in names {
+            assert!(
+                dst_dir.join(name).exists(),
+                "{name} is missing after resume"
+            );
+        }
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, FileOpEvent::Complete { .. })),
+            "the resumed operation never completed"
+        );
+    }
+
+    /// **A cancelled Move is half a move, not half a file.**
+    ///
+    /// `finish` still runs, and its source deletion is guarded by what the
+    /// journal says actually transferred -- so a file that reached the
+    /// destination has its source removed and a file that did not keeps it.
+    /// Nothing is left half-written and nothing is lost, which is the property
+    /// that matters when the user presses Cancel on a move.
+    #[test]
+    fn a_cancelled_move_leaves_every_file_wholly_moved_or_wholly_not() {
+        let src_scratch = temp_dir("step_cancel_move_src");
+        let src_dir = src_scratch.dir().to_path_buf();
+        let dst_scratch = temp_dir("step_cancel_move_dst");
+        let dst_dir = dst_scratch.dir().to_path_buf();
+        let names = ["a.txt", "b.txt", "c.txt", "d.txt"];
+        for name in names {
+            write_file(&src_dir.join(name), name);
+        }
+        let sources: Vec<PathBuf> = names.iter().map(|n| src_dir.join(n)).collect();
+        let plan = OperationPlan::plan_move(
+            &sources,
+            &dst_dir,
+            ConflictPolicy::Skip,
+            ErrorPolicy::StopOnFirst,
+        )
+        .unwrap();
+
+        let mut executor = OperationExecutor::new(plan);
+        assert!(executor.begin());
+        executor.step();
+        executor.cancel();
+        executor.step();
+        executor.finish();
+
+        for name in names {
+            let at_source = src_dir.join(name).exists();
+            let at_dest = dst_dir.join(name).exists();
+            assert!(
+                at_source != at_dest,
+                "{name} is in both places or in neither: source {at_source}, dest {at_dest}"
+            );
+            if at_dest {
+                assert_eq!(read_file(&dst_dir.join(name)), name, "{name} is truncated");
+            }
+        }
     }
 
     #[test]

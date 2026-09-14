@@ -4,7 +4,7 @@
 # public items which no other file in the repository names.  57 of them, 113k
 # lines, were found the day this file was created; the list is a debt ledger,
 # not an allow-list, and the only edit it should ever receive is a deletion.
-# 40 remain.  Paid off so far: apps/explorer's columns.rs, thumbs.rs and
+# 39 remain.  Paid off so far: apps/explorer's columns.rs, thumbs.rs and
 # dropzone.rs — 5,611 lines between them — wired into the app that declared
 # them; then the desktop shell's focus_assist.rs, hotkeys.rs, osd.rs,
 # run_dialog.rs and window_rules.rs together with gui/toolkit's modal.rs; and
@@ -37,6 +37,17 @@
 #
 # THIRD BATCH, 2026-09-13, pruned by lane C: a11y.rs, deleted outright as a dead
 # parallel copy, and tray_dnd.rs, wired into the shell's tray.
+#
+# FOURTH BATCH, 2026-09-14, lane C, five in one day and all the same move -- find
+# the application that should already have been using the module, and use it:
+# gui/toolkit's pathbar.rs (the file explorer's address bar), disabled.rs (why a
+# greyed toolbar button is grey), svg.rs (a thumbnail of the drawing instead of a
+# coloured rectangle) and menubar.rs (the text editor's File/Edit/Search bar),
+# plus the desktop shell's taskbar.rs.  Worth noting what the wirings kept turning
+# up, since it was not the feature: menubar.rs found that `set_items` silently
+# closes an open dropdown, and the editor's TAB_BAR_HEIGHT doing duty as two
+# different facts.  An island is not only unreached code -- it is code whose
+# assumptions nobody has had to satisfy yet.
 #
 # The two paragraphs above were written straight into the generated file and were
 # one `--pin` away from deletion; this run is the one that would have done it.  They
@@ -113,7 +124,6 @@ gui/desktop/src/user_accounts.rs
 gui/desktop/src/window_peek.rs
 gui/remote/src/reader.rs
 gui/toolkit/src/context_ext.rs
-gui/toolkit/src/menubar.rs
 gui/toolkit/src/signal.rs
 gui/toolkit/src/textview.rs
 netproto/src/arp.rs

@@ -8,6 +8,7 @@
 //! - Undo/redo (unlimited history)
 //! - Word wrap or horizontal scroll
 //! - Status bar (line, column, encoding, line ending)
+//! - Menu bar (File / Edit / Search) reaching the same commands with a pointer
 //! - Keyboard shortcuts (Ctrl+S save, Ctrl+Z undo, Ctrl+F find, etc.)
 //! - Auto-indent
 //! - Configurable tab width
@@ -23,6 +24,7 @@ mod syntree;
 use appearance::Palette;
 use guitk::color::Color;
 use guitk::event::Event;
+use guitk::menubar;
 use guitk::render::{FontWeightHint, RenderTree, TextSpan};
 use guitk::tabs::Tabs;
 use guitk::text;
@@ -1536,6 +1538,22 @@ pub const TAB_BAR_HEIGHT: f32 = 32.0;
 /// [`TAB_BAR_HEIGHT`].
 pub const STATUS_BAR_HEIGHT: f32 = 24.0;
 
+/// The y at which the tab strip starts: directly below the menu bar.
+///
+/// The menu bar's height is [`guitk::menubar::BAR_HEIGHT`] and is read from
+/// there rather than repeated here, because the bar draws itself from that
+/// number and a second copy of it would be a silent overlap the day it moved.
+pub const TAB_BAR_TOP: f32 = guitk::menubar::BAR_HEIGHT;
+
+/// The y at which the text area starts: below the menu bar and the tab strip.
+///
+/// The vertical sibling of [`EditorState::text_x`], and for the reason that one
+/// exists: the renderer, the hit test and the scroll arithmetic agree to the
+/// pixel only if they read the same number. [`TAB_BAR_HEIGHT`] used to be that
+/// number *and* the strip's own height -- two facts that are equal only while
+/// nothing sits above the strip, which stopped being true here.
+pub const TEXT_TOP: f32 = TAB_BAR_TOP + TAB_BAR_HEIGHT;
+
 /// Complete editor application state.
 pub struct EditorState {
     /// Open documents (tabs), and which is in front.
@@ -1597,6 +1615,13 @@ pub struct EditorState {
     /// calls `App::theme_changed` before the first frame, so nothing is drawn
     /// with this initial value in a real window.
     palette: Palette,
+    /// The File / Edit / Search bar along the top.
+    ///
+    /// Holds only *which* menu is open and where the pointer is inside it. The
+    /// rows are rebuilt from the editor's state before the bar is shown any
+    /// event, so a greyed Undo is greyed because there is nothing to undo now
+    /// and not because there was nothing to undo a minute ago.
+    pub menu_bar: menubar::MenuBar,
 }
 
 /// A pending prompt shown when the active document's file changed on disk.
@@ -1635,7 +1660,7 @@ impl Default for EditorState {
 impl EditorState {
     pub fn new() -> Self {
         let font_size = 14.0;
-        Self {
+        let mut state = Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             tabs: Tabs::new(),
             find: FindState::new(),
@@ -1651,7 +1676,13 @@ impl EditorState {
             modifiers: oswindow::Modifiers::NONE,
             clipboard: String::new(),
             find_field: FindField::Query,
-        }
+            menu_bar: menubar::MenuBar::new(Vec::new()),
+        };
+        // The opening frame is drawn before any event arrives, so the bar's
+        // top-level labels have to be in place already or the first thing the
+        // user sees is an empty strip.
+        state.refresh_menu_items();
+        state
     }
 
     pub fn active_document(&self) -> &Document {
@@ -1699,8 +1730,19 @@ impl EditorState {
     /// background, and `ensure_cursor_visible` scrolled two lines early. Two
     /// numbers that must agree are now one.
     pub fn visible_lines(&self) -> usize {
-        let editor_height = self.window_height as f32 - TAB_BAR_HEIGHT - STATUS_BAR_HEIGHT;
-        (editor_height / self.line_height).max(0.0) as usize
+        (self.editor_height() / self.line_height).max(0.0) as usize
+    }
+
+    /// The height of the text area: what is left between the bars.
+    ///
+    /// One expression rather than the same subtraction written out at each
+    /// site. It *was* written out at two, and the comment above records what
+    /// happened the first time two copies of this number disagreed. Clamped at
+    /// zero so a window shorter than its own chrome asks for an empty text area
+    /// rather than a negative one.
+    #[must_use]
+    pub fn editor_height(&self) -> f32 {
+        (self.window_height as f32 - TEXT_TOP - STATUS_BAR_HEIGHT).max(0.0)
     }
 
     // ======================================================================
@@ -1875,6 +1917,12 @@ impl EditorState {
             self.render_find_panel(&mut tree);
         }
 
+        // Menu bar, over the panels its dropdowns fall across and under the
+        // modal prompt, which outranks everything: a file that changed on disk
+        // is a question that has to be answered before a menu is worth opening.
+        tree.commands
+            .extend(self.menu_bar.render(&self.palette, self.window_width));
+
         // External-change prompt / merge review (modal overlay)
         if let Some(prompt) = self.external_prompt.as_ref() {
             self.render_external_prompt(&mut tree, prompt);
@@ -1885,9 +1933,10 @@ impl EditorState {
 
     fn render_tabs(&self, tree: &mut RenderTree) {
         let tab_h = TAB_BAR_HEIGHT;
+        let top = TAB_BAR_TOP;
         tree.fill_rect(
             0.0,
-            0.0,
+            top,
             self.window_width as f32,
             tab_h,
             self.palette.mantle,
@@ -1904,7 +1953,7 @@ impl EditorState {
                 self.palette.crust
             };
 
-            tree.fill_rect(x, 0.0, tab_w, tab_h, bg);
+            tree.fill_rect(x, top, tab_w, tab_h, bg);
 
             // Tab title
             let title = if doc.modified {
@@ -1912,13 +1961,13 @@ impl EditorState {
             } else {
                 doc.name.clone()
             };
-            tree.text(x + 12.0, 9.0, &title, self.palette.text, 12.0);
+            tree.text(x + 12.0, top + 9.0, &title, self.palette.text, 12.0);
 
             // Close button, drawn inside the box `tab_at` reports as the close
             // box so that the glyph and the clickable area coincide.
             tree.text(
                 x + tab_w - input::TAB_CLOSE_WIDTH + 4.0,
-                9.0,
+                top + 9.0,
                 "x",
                 self.palette.subtext0,
                 11.0,
@@ -2035,8 +2084,8 @@ impl EditorState {
 
     fn render_editor(&self, tree: &mut RenderTree) {
         let doc = self.active_document();
-        let editor_y = TAB_BAR_HEIGHT;
-        let editor_h = self.window_height as f32 - TAB_BAR_HEIGHT - STATUS_BAR_HEIGHT;
+        let editor_y = TEXT_TOP;
+        let editor_h = self.editor_height();
         let w = self.window_width as f32;
 
         // Gutter (line numbers)
@@ -2241,11 +2290,11 @@ impl EditorState {
     #[must_use]
     pub fn caret_cursor_at(&self, x: f32, y: f32) -> Option<(usize, text::TextCursor)> {
         let bottom = self.window_height as f32 - STATUS_BAR_HEIGHT;
-        if y < TAB_BAR_HEIGHT || y >= bottom || x < self.text_x() {
+        if y < TEXT_TOP || y >= bottom || x < self.text_x() {
             return None;
         }
         let doc = self.active_document();
-        let row = ((y - TAB_BAR_HEIGHT) / self.line_height) as usize;
+        let row = ((y - TEXT_TOP) / self.line_height) as usize;
         let line = doc
             .scroll_line
             .saturating_add(row)
@@ -2352,7 +2401,7 @@ impl EditorState {
     }
 
     fn render_find_panel(&self, tree: &mut RenderTree) {
-        let panel_y = TAB_BAR_HEIGHT;
+        let panel_y = TEXT_TOP;
         let panel_w = 350.0;
         let panel_h = 80.0;
         let panel_x = self.window_width as f32 - panel_w - 16.0;
@@ -3567,7 +3616,7 @@ mod caret_tests {
         let base = editor_with(MIXED, 0);
         let text_left = base.gutter_width + 8.0;
         let width = text::measure(MIXED, base.font_size, FontWeightHint::Regular);
-        let y = TAB_BAR_HEIGHT + 2.0;
+        let y = TEXT_TOP + 2.0;
 
         // Across the whole run, including inside the right-to-left stretch.
         let mut checked = 0;

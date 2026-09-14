@@ -43,7 +43,12 @@ const SHADOW_COLOR: Color = Color::rgba(0, 0, 0, 160);
 // ─── Layout constants ──────────────────────────────────────────────────────
 
 /// Height of the top menu bar.
-const BAR_HEIGHT: f32 = 28.0;
+///
+/// Public because a window that puts a bar at its top has to reserve exactly
+/// this much room above its own content, and a caller that cannot read the
+/// number has to repeat it -- at which point the bar's height is recorded in
+/// two places and a change to one of them is a silent overlap or a silent gap.
+pub const BAR_HEIGHT: f32 = 28.0;
 /// Horizontal padding inside each top-level label.
 const LABEL_HPAD: f32 = 12.0;
 /// Height of a single dropdown item row.
@@ -564,6 +569,13 @@ impl MenuBar {
     }
 
     /// Replace the entire menu structure.
+    ///
+    /// **This closes any open dropdown**, which is not obvious from the name
+    /// and is the only safe thing to do: the open index and the hovered row are
+    /// positions *into the old rows*, and keeping them would point them at
+    /// whatever now happens to sit at those offsets. A caller that rebuilds its
+    /// rows to keep them current must therefore do it while the bar is shut, or
+    /// the menu closes under the pointer on the first keystroke after it opens.
     pub fn set_items(&mut self, items: Vec<MenuBarItem>) {
         self.label_metrics = Self::compute_label_metrics(&items);
         self.dropdown_widths = Self::compute_dropdown_widths(&items);

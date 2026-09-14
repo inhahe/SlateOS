@@ -143949,9 +143949,11 @@ deciding which needs the question "who would use this?" asked per module:
   which is better than the bare `bool` the explorer's toolbar was given on
   2026-09-14; that bool was written without checking here first, which is the
   habit this entry is really about.
-* `menubar`, `context_ext` -- these want an application with a menu bar. The
-  shell has its own menus; whether a second implementation should exist at all
-  is a design question, not a wiring one.
+* `menubar` -- **wired 2026-09-14**, into `apps/editor`. See the correction
+  below: the sentence this bullet used to carry was wrong.
+* `context_ext` -- wants an application with a menu bar. The shell has its own
+  menus; whether a second implementation should exist at all is a design
+  question, not a wiring one.
 * `svg` -- a renderer with no caller. `apps/imageviewer` and the icon paths are
   the candidates; 3 391 lines is worth an hour's look before either wiring or
   deleting.
@@ -143993,6 +143995,86 @@ fourth model in `apps/fileassoc`, all beside an unread registry with MIME types
 and magic-byte signatures, for three days after the gate said the registry was
 fine. Filed as
 `TD-C-THE-ORPHAN-SCAN-CLEARS-A-MODULE-ON-A-NAME-AN-APP-HAPPENS-TO-SHARE`.
+
+**Correction, 2026-09-14: `menubar` was never a design question, and saying it
+was is what kept it unwired for a day longer.** The plan above deferred it as
+*"the shell has its own menus; whether a second implementation should exist at
+all is a design question"*. That reasoning only holds if the shell is the
+consumer -- and the consumer is `apps/editor`, a text editor with five thousand
+lines, eleven commands, and no menus of any kind. There is no second
+implementation and no conflict: the shell's menus are the compositor's, an
+application's menu bar is the application's, and the two never meet. The
+question I should have asked was the one this entry's own heading asks --
+*who would use this?* -- and I answered it for the shell without asking it of
+the applications.
+
+That is the second time in this entry I deferred something on reasoning I had
+not checked; the first is the paragraph above about the gate. The pattern is the
+same both times: a confident sentence about the state of the tree, written
+without reading the tree.
+
+**What `menubar` wiring actually turned up**, which is the part that makes it
+worth more than one feature:
+
+* `MenuBar::set_items` **closes any open dropdown**, and its doc said only
+  *"Replace the entire menu structure"*. The editor rebuilds its rows so a
+  greyed-out Undo is greyed for a live reason, and doing that on every event
+  shut the menu on the user's first arrow key. Caught by a test, not by
+  reading. Its doc now says what it does.
+* The editor's `TAB_BAR_HEIGHT` was doing duty as both *the strip's height* and
+  *the y where the text starts* -- equal only while nothing sat above the
+  strip. `visible_lines` already carried a comment about the last time two
+  copies of that number disagreed (a hardcoded 64 for a 32-pixel strip, which
+  under-reported the viewport by two lines). Five tests were hardcoding `y =
+  10.0` to mean "inside the tab strip" and broke the moment it moved, which is
+  the same defect in the tests.
+
+## TD-C-THE-TEXT-EDITOR-CANNOT-OPEN-OR-CREATE-A-FILE-FROM-INSIDE-ITSELF
+
+**Date:** 2026-09-14. **Lane:** C.
+
+**In short:** the text editor can only ever edit the files that were named on
+the command line that started it. There is no New, no Open and no Save As --
+not on the menu bar added today, not on the keyboard, nowhere. Start it with no
+arguments and you get an empty page you can type into and then cannot keep. The
+editor already says so itself: pressing Ctrl+S on that page answers *"No file
+name -- Save As needs a file dialog"*.
+
+**It is one gap wearing three faces.** New, Open and Save As all need the same
+missing thing: a way to ask the user for a path. There is no file picker
+anywhere in `gui/` -- no dialog crate, no chooser, no prompt -- so all three are
+blocked on the same absent part rather than on three separate oversights. That
+is why the menu bar ships with File holding only Save and Close Tab: a greyed
+`Open...` that can never ungrey is a dead control, and this tree has been
+removing those all week, not adding them.
+
+**Where it lives.** `apps/editor/src/input.rs` -- `save_active` is the function
+that prints the message above. `EditorState::open_file` exists,
+`Document::save_as` exists, and both are reachable only from tests and from
+`open_all` at startup. `apps/editor/src/main.rs` has no `Key::O` or `Key::N`
+binding at all.
+
+**The proper fix, and it does not belong in the editor.** A file picker is
+wanted by every application that opens a document, so building one inside the
+text editor would be the first of several. It belongs in `gui/toolkit`, and
+most of it already exists there:
+
+* `guitk::pathbar` -- path editing with completion, wired into the file
+  explorer on 2026-09-14, so it is known to work against a real directory.
+* `guitk::filetypes` -- categories and icons for the listing.
+* `guitk::modal` -- the overlay and the focus trap.
+* `apps/explorer`'s own listing and sorting are the model for the file list,
+  though the picker must not depend on the explorer binary.
+
+So the shape is a `guitk` module that composes three existing ones, and the
+editor's File menu grows three rows that are already written. Until then the
+editor is a file *editor* and not a file *creator*, which is a fair description
+of what ships but not of what a text editor is.
+
+**Not urgent, and worth saying why:** the editor opens files perfectly well
+when something else chooses them -- the file explorer's double-click, a command
+line, a future "Open with". The missing piece is only the case where the editor
+itself has to ask.
 
 ## TD-C-A-SINGLE-HUGE-FILE-STILL-BLOCKS-THE-EXPLORER-FOR-ITS-WHOLE-COPY -- FIXED 2026-09-14
 

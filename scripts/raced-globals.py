@@ -233,6 +233,18 @@ IGNORE: dict[str, str] = {
     # `#[test]` body always runs with live TLS, so no test can reach it -- and a
     # thread that does is, as the comment there notes, the last one alive.
     "posix/src/perthread.rs:HOST_FALLBACK": "only reachable after thread-local teardown, which no #[test] body is",
+    # `__cxa_allocate_exception` returns `addr_of_mut!(EXCEPTION_BUF)` and does
+    # nothing else -- no write, not even a length check. All three tests that
+    # reach it assert only `!ptr.is_null()`; none dereferences the pointer, let
+    # alone stores through it. Three readers of a constant address cannot
+    # disagree. Audited by hand 2026-09-13.
+    "posix/src/crt.rs:EXCEPTION_BUF": "the allocator only returns its address; all three tests assert non-null and never write",
+    # Both tests are read-only: one asserts `.len() == MAX_INIT_FDS`, the other
+    # walks the entries asserting every field is still zero. Nothing in the test
+    # suite writes this buffer -- it is filled by `__libc_start_main` on the real
+    # target, which no `#[test]` runs -- so the two cannot observe each other.
+    # Audited by hand 2026-09-13.
+    "posix/src/crt.rs:INIT_FDS_BUF": "both tests only read; the buffer is written by startup, which no test runs",
     # Write-once under a three-state latch. `ensure_at_random_initialized()`
     # admits exactly one writer via compare_exchange(UNINIT -> FILLING); every
     # other caller spins until READY rather than writing, and the Release/Acquire

@@ -10,10 +10,6 @@
 # A genuine false positive belongs in the IGNORE table in the script, which
 # records *why*, not here, which records only *that*.
 
-posix/src/crt.rs:EXCEPTION_BUF
-posix/src/crt.rs:INIT_FDS_BUF
-posix/src/crt.rs:ON_EXIT_COUNT
-posix/src/crt.rs:ON_EXIT_FUNCS
 posix/src/random.rs:GENERATION
 posix/src/socket.rs:GAI_ADDR
 posix/src/socket.rs:GAI_ADDR2

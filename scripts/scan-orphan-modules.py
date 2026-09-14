@@ -347,6 +347,33 @@ BASELINE_HEADER = """\
 # wrong.  It just quietly stops describing the tree, and the count in this
 # header — the number anyone actually quotes — drifts away from the truth.
 #
+# SECOND BATCH, 2026-09-11, and the second time the stale direction went unacted on:
+# apps/settings' associations.rs, the desktop shell's blur.rs, display_settings.rs,
+# input_method.rs, login_screen.rs and mouse_settings.rs, and gui/toolkit's
+# filetypes.rs -- 6,655 lines between them, all reached by lane C's own later work.
+# `--check` had been naming all seven on every run. Pruned by lane A, which owns
+# neither the modules nor the debt: the deletion only tightens a ratchet, the file's
+# header says deletion is the only edit it should ever receive, and the gate itself
+# prints the line to delete. Nothing here is a judgement about lane C's code.
+#
+# Worth saying plainly, since the note above already said it once and it happened
+# again anyway: every stale line is a place a genuinely new island can hide, because
+# a reader who sees seven known-wrong entries stops trusting the other thirty-eight.
+#
+# THIRD BATCH, 2026-09-13, pruned by lane C: a11y.rs, deleted outright as a dead
+# parallel copy, and tray_dnd.rs, wired into the shell's tray.
+#
+# The two paragraphs above were written straight into the generated file and were
+# one `--pin` away from deletion; this run is the one that would have done it.  They
+# are moved here verbatim, which is where the header four paragraphs down says all
+# prose has to live.  That instruction has now been given twice and disobeyed twice,
+# by two different lanes, which is worth more than another warning: a file that is
+# regenerated cannot hold hand-written text safely, and the only reason the loss is
+# survivable is that every version of it is in git.  If it happens a third time the
+# answer is not a sterner comment -- it is `--pin` preserving blocks it did not
+# write, or `--check` refusing a baseline that differs from what `--pin` would
+# produce.
+#
 # `--check` fails on a module that is an island and is NOT listed here.  That
 # is the whole point: the count may fall, never rise.  A new module lands
 # wired up or it does not land.  When you connect one, delete its line

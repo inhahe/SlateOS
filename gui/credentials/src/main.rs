@@ -38,6 +38,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // SHA-256 and the constant-time digest comparison used to be written out in
@@ -1954,17 +1955,30 @@ fn refuse_arguments() {
     }
 }
 
-fn main() {
-    refuse_arguments();
+/// The self-test `main` runs, and its outcome.
+///
+/// Split out so that a failure has somewhere to go. It used to be inline,
+/// where the only thing available to an error was `return` -- which printed a
+/// correct diagnostic and exited **0**. Lane B's `stderr-exit-zero-sweep.py`
+/// found it and put the cost plainly: *"A human reading the terminal is told
+/// the truth. A script reading `$?` is told the run succeeded. Only the one
+/// nobody watches is believed."*
+///
+/// For this program it matters more than for most. "Could not draw an
+/// unpredictable value" is exactly the failure a caller must not proceed past,
+/// and anything treating exit 0 as "the master password is set" would go on to
+/// use a store that has none.
+///
+/// # Errors
+///
+/// Whatever [`CredentialStore::set_master_password`] reports -- on a host with
+/// no entropy source, that one cannot be drawn.
+fn self_test() -> Result<(), CredentialError> {
     // The credential manager runs as a system service, receiving IPC requests.
     // For now, perform a self-test to validate core functionality.
     let mut store = CredentialStore::new(1000);
 
-    // Set master password
-    if let Err(e) = store.set_master_password(None, "initial_master_password") {
-        eprintln!("Failed to set master password: {e}");
-        return;
-    }
+    store.set_master_password(None, "initial_master_password")?;
 
     println!("Slate OS Credential Manager v0.1.0");
     println!("Store initialized for uid={}", store.uid);
@@ -1979,6 +1993,20 @@ fn main() {
         }
     );
     println!("\nCredential Manager service ready. Awaiting IPC requests...");
+    Ok(())
+}
+
+fn main() -> ExitCode {
+    refuse_arguments();
+    match self_test() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("Failed to set master password: {e}");
+            // The message was never the problem: it names what failed,
+            // why, and the consequence. What was missing is this line.
+            ExitCode::FAILURE
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

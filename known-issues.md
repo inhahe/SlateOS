@@ -131756,11 +131756,47 @@ where four of those four go. A page that exists in a menu and a page that
 exists are different things, which is the same mistake as counting a grep's
 hits and calling them callers.
 
-**Order to do them in.** Power first: it is the smallest, `SettingsPage::Power`
-already exists, and nothing in the shell consumes power settings, so the
-panel has no second consumer to keep in step. Notifications last of the five:
-the shell's notification *pane* reads per-app settings, so that one is a
-move with a live reader on the other end.
+**~~Order to do them in. Power first~~ — corrected within the hour, and the
+reasoning was backwards.** The paragraph here said to start with Power
+because *"nothing in the shell consumes power settings, so the panel has no
+second consumer to keep in step"*. That is not a reason to start; it is a
+reason not to. **No second consumer turned out to mean no consumer at all.**
+
+Checked, per this file's own standing rule that you look at what a module
+talks to before wiring it:
+
+| page | who reads the setting | verdict |
+|---|---|---|
+| Power | **nobody.** And there are *two* dead models: `power_settings.rs` has a `PowerConfig`, and so does `power.rs` | building it produces controls that change nothing |
+| Default apps | **nobody.** The only mention of associations outside the panel is a line in `apps/explorer`'s module doc | same |
+| Startup apps | **nobody** in the session's launch path | same |
+| WiFi / Ethernet / VPN | not checked yet | unknown |
+| Notifications | the shell's pane holds `app_settings` in memory — a real reader, but not a persisted one | the closest to ready, and still a three-part job |
+
+**So the blocker is not the port.** It is that these settings have nowhere
+to be read from. The pattern this tree already uses for exactly that is a
+third crate both halves depend on: `gui/appearance` with `ReloadAppearance`,
+and `gui/inputsettings` with `ReloadInput` (control verb `0x14`). There is a
+`gui/notifications`, but it is a **binary**, not a shared model.
+
+So each of these is a three-part change and not a move: a settings crate,
+a page that edits it, and a consumer that re-reads on a verb. Doing only the
+middle part is how a panel full of live-looking controls that change nothing
+gets built — which is strictly worse than the roadworks sign it replaces,
+because the sign is honest.
+
+**`power.rs` is worth its own line, because it also shows a blind spot in
+the orphan scanner.** It is 2 880 lines and is *not* on the baseline — but
+only three of its public items are reached (`PowerMenuRow`, `PowerMenuStyle`,
+`render_power_menu`, the Start menu's power rows). The scanner asks whether a
+*module* has any named item, so one reached item hides the rest of the file.
+A second dead `PowerConfig` sat there in plain sight.
+
+**Revised order.** Notifications first, because it is the only one with a
+reader today, and because doing it builds the settings-crate-plus-reload-verb
+chain that the other four will each need. The rest wait on that chain, or on
+a consumer existing at all — and for Power that means a power manager, which
+is not lane C's.
 ## TD-C-A-SWEEP-FOR-CODE-THAT-ASSUMES-THE-SCREEN-IS-1920-BY-1080 -- DONE 2026-09-13
 
 **Date:** 2026-09-13. **Lane:** C.

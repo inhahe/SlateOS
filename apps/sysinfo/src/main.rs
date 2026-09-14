@@ -3185,26 +3185,26 @@ mod tests {
         // `TD-C-EIGHT-THEME-GUARDS-CHECK-A-PROGRAM'S-OPENING-FRAME`.
         for light in [false, true] {
             for category in SysInfoCategory::ALL {
-            let mut app = SysInfoState::new();
-            app.palette = Palette::for_mode(light);
-            app.selected_category = category;
-            let tree = app.render_tree();
-            // Not a formality: a guard that sweeps an empty command list passes
-            // for the wrong reason, and this file's own `drawn_property_rows`
-            // exists because a helper filtered on the wrong property once
-            // already. A default `SysInfoState` draws its chrome, its sidebar
-            // and its detail pane, so the floor is generous and still real.
-            assert!(
-                tree.commands.len() > 50,
-                "the sweep examined only {} commands, which is not a render",
-                tree.commands.len()
-            );
-            appearance::palette_check::assert_drawn_from(
-                &app.palette,
-                &tree.commands,
-                &[],
-                &format!("sysinfo {category:?} (light={light})"),
-            );
+                let mut app = SysInfoState::new();
+                app.palette = Palette::for_mode(light);
+                app.selected_category = category;
+                let tree = app.render_tree();
+                // Not a formality: a guard that sweeps an empty command list passes
+                // for the wrong reason, and this file's own `drawn_property_rows`
+                // exists because a helper filtered on the wrong property once
+                // already. A default `SysInfoState` draws its chrome, its sidebar
+                // and its detail pane, so the floor is generous and still real.
+                assert!(
+                    tree.commands.len() > 50,
+                    "the sweep examined only {} commands, which is not a render",
+                    tree.commands.len()
+                );
+                appearance::palette_check::assert_drawn_from(
+                    &app.palette,
+                    &tree.commands,
+                    &[],
+                    &format!("sysinfo {category:?} (light={light})"),
+                );
             }
         }
     }

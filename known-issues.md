@@ -143598,7 +143598,7 @@ caller asked for something, was told it got it, and did not.
 |---|---|---|
 | `fcntl_ops.rs` | `F_SETLK`/`F_SETLKW`/`F_GETLK` — advisory record locking | **two processes both hold the same exclusive lock.** Verified in the code, not just its comment: `F_GETLK` unconditionally writes `l_type = F_UNLCK` ("no conflicting lock") and `F_SETLK` returns success without taking one |
 | `sysv_shm.rs` | `SHM_RDONLY` — accepted but unenforced | a read-only shared mapping is writable; a process that attached read-only can corrupt the segment |
-| `sysv_msg.rs` | `MSG_COPY` — "treated as a normal receive" | the caller wanted to *peek*; the message is **dequeued** and nobody else will see it |
+| ~~`sysv_msg.rs`~~ | ~~`MSG_COPY` — "treated as a normal receive"~~ | **FIXED 2026-09-13.** `MSG_COPY` is now a real peek: `msgtyp` is a 0-based queue index in `seq` order, `IPC_NOWAIT` is required and `MSG_EXCEPT` refused (it selects by type, so one call cannot mean both), and the message stays queued for whoever it was sent to |
 | `sysv_sem.rs` | `SEM_UNDO` — accepted but ignored | a process that dies holding a semaphore never releases it; everyone waiting deadlocks |
 | `pthread.rs` | `pthread_cancel` — "accepted but never actually cancels" | the caller believes a thread is stopping; it runs on |
 | `sysv_shm.rs` | `SHM_REMAP`, `SHM_RND`, caller-supplied `shmaddr` | the segment lands somewhere other than where it was asked to |
@@ -143612,6 +143612,17 @@ cross-process correctness mechanism. On a libc where `F_SETLK` always succeeds,
 two SQLite connections both believe they have the write lock and interleave
 writes into one file. It needs a kernel-side lock table keyed by inode, so it is
 filed as `requests/b-a-advisory-record-locking-is-a-stub-that-always-succeeds.md`.
+
+### Progress
+
+`MSG_COPY` was taken first because it is the clearest case of the property that
+makes one of these safe to fix on sight: **nothing can be relying on the broken
+behaviour.** No caller benefits from a peek that destroys what it looked at, and
+the flag's own name says so. The queue already carried a per-message `seq`, so
+"the message at index *n*" was well-defined without inventing an ordering.
+
+The rest still need that question asked one at a time. `F_SETLK` notably fails
+it — programs run today *because* the lie lets them through.
 
 ### Why this is a survey and not nine fixes
 

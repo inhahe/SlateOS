@@ -51,7 +51,7 @@ use guitk::text;
 use guitk::textfind;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
-use printjob::PrintJob;
+use printjob::{ColorMode, PageRange, PrintJob, ScaleMode};
 
 use std::path::{Path, PathBuf};
 
@@ -152,6 +152,22 @@ pub enum Target {
     BookmarkArrow(usize),
     /// A recent-file entry on the welcome screen.
     RecentFile(usize),
+    /// The print dialog's controls. `PrintRangeField` is the box a custom
+    /// page range is typed into; the rest cycle or step a value.
+    PrintRangeMode,
+    PrintRangeField,
+    PrintCopiesDown,
+    PrintCopiesUp,
+    PrintColor,
+    PrintDuplex,
+    PrintScale,
+    PrintConfirm,
+    PrintCancel,
+    /// The dialog's own panel, which swallows a click that hit no control.
+    /// Recorded *first* of the dialog's boxes so every control wins over it,
+    /// and it exists so that a miss inside the dialog does not fall through to
+    /// the page behind and turn a mis-aimed click into a page change.
+    PrintPanel,
     /// The search field, previous-match and next-match buttons.
     SearchField,
     SearchPrev,
@@ -159,6 +175,156 @@ pub enum Target {
     /// The document viewport. Not a button -- it exists so a click or a wheel
     /// notch over the pages can be told apart from one over the sidebar.
     Document,
+}
+
+/// Which pages the print dialog is set to send.
+///
+/// Three choices rather than a free-text box alone, because
+/// [`PageRange::CurrentPage`] has **no spelling** a user could type:
+/// `PageRange::parse("")` is `All`, and there is no input that produces
+/// `CurrentPage`. `printjob`'s own doc says the variant exists *"so that a
+/// dialog can offer 'Current page' as a choice and read it back"* -- this is
+/// that choice, and without it a field of the message format would be
+/// unreachable from the only program that sends one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RangeChoice {
+    #[default]
+    All,
+    CurrentPage,
+    /// Whatever is in the range box: `1-3, 5, 7-9`.
+    Custom,
+}
+
+impl RangeChoice {
+    /// The label on the cycling button.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::All => "All pages",
+            Self::CurrentPage => "Current page",
+            Self::Custom => "Pages...",
+        }
+    }
+
+    /// The next choice, wrapping.
+    #[must_use]
+    pub fn next(self) -> Self {
+        match self {
+            Self::All => Self::CurrentPage,
+            Self::CurrentPage => Self::Custom,
+            Self::Custom => Self::All,
+        }
+    }
+}
+
+/// The print dialog's staged settings.
+///
+/// **A draft, not a second copy of the job.** Everything here is written into
+/// [`PdfViewer::print_job`] when the user presses Print and discarded when
+/// they press Cancel, which is what makes Cancel mean anything. That is a
+/// different thing from holding two records of one fact: until Print is
+/// pressed there *is* no fact, only what the user has typed so far.
+pub struct PrintDialog {
+    pub open: bool,
+    pub choice: RangeChoice,
+    /// What the user typed, kept as their words rather than as a rendering of
+    /// the parsed range.
+    ///
+    /// [`PageRange`] has no `Display` and should not grow one for this:
+    /// `parse("1-3,5")` is `Custom([(0, 2), (4, 4)])`, and writing that back
+    /// out is a second conversion that can disagree with the first --
+    /// re-rendering `7-7` as `7` would quietly edit what the user typed. The
+    /// text is the input and the range is derived from it, once, on Print.
+    pub range_text: String,
+    pub copies: u32,
+    pub color: ColorMode,
+    pub duplex: bool,
+    pub scale: ScaleMode,
+}
+
+impl Default for PrintDialog {
+    fn default() -> Self {
+        Self {
+            open: false,
+            choice: RangeChoice::All,
+            range_text: String::new(),
+            copies: 1,
+            color: ColorMode::Color,
+            duplex: false,
+            scale: ScaleMode::FitToPage,
+        }
+    }
+}
+
+/// The most copies the dialog will dial up to.
+///
+/// Ninety-nine because it is the largest number that fits the field without
+/// re-laying it out, and because a print dialog is not the place to discover
+/// you asked for a thousand. `PrintJob::validate` refuses zero; this refuses
+/// the other end.
+const MAX_COPIES: u32 = 99;
+
+/// The percentages the scale button cycles through, after fit-to-page.
+///
+/// `ScaleMode::Percent` accepts anything up to `MAX_PERCENT` because a
+/// *message format* must carry whatever a driver was asked for. A dialog is
+/// not a message format: these are the stops a person picks from, and a free
+/// number entry here would be a spinner nobody uses guarding a range no
+/// printer in this tree can yet honour.
+const SCALE_STOPS: [u32; 6] = [50, 75, 100, 125, 150, 200];
+
+impl PrintDialog {
+    /// The label on the colour button.
+    #[must_use]
+    fn color_label(&self) -> &'static str {
+        match self.color {
+            ColorMode::Color => "Colour",
+            ColorMode::Grayscale => "Greyscale",
+            ColorMode::Monochrome => "Black and white",
+        }
+    }
+
+    /// The label on the scale button.
+    #[must_use]
+    fn scale_label(&self) -> String {
+        match self.scale {
+            ScaleMode::FitToPage => "Fit to page".to_string(),
+            ScaleMode::Percent(pct) => format!("{pct}%"),
+        }
+    }
+
+    /// Advance the colour mode, wrapping.
+    fn cycle_color(&mut self) {
+        self.color = match self.color {
+            ColorMode::Color => ColorMode::Grayscale,
+            ColorMode::Grayscale => ColorMode::Monochrome,
+            ColorMode::Monochrome => ColorMode::Color,
+        };
+    }
+
+    /// Advance the scale, wrapping through fit-to-page and the stops.
+    fn cycle_scale(&mut self) {
+        self.scale = match self.scale {
+            ScaleMode::FitToPage => ScaleMode::Percent(SCALE_STOPS[0]),
+            ScaleMode::Percent(pct) => SCALE_STOPS
+                .iter()
+                .find(|stop| **stop > pct)
+                .map_or(ScaleMode::FitToPage, |stop| ScaleMode::Percent(*stop)),
+        };
+    }
+
+    /// The range the dialog currently names.
+    ///
+    /// Parsed here rather than stored, so the box and the range cannot drift:
+    /// there is one conversion and it runs on the text that is on screen.
+    #[must_use]
+    pub fn range(&self) -> PageRange {
+        match self.choice {
+            RangeChoice::All => PageRange::All,
+            RangeChoice::CurrentPage => PageRange::CurrentPage,
+            RangeChoice::Custom => PageRange::parse(&self.range_text),
+        }
+    }
 }
 
 /// The four page-navigation buttons.
@@ -1188,6 +1354,8 @@ pub struct PdfViewerApp {
     /// click on the page leaves the bar up (so the match count stays readable)
     /// but takes the caret away, exactly as a browser's find bar does.
     pub search_focused: bool,
+    /// The print dialog, open or not.
+    pub print_dialog: PrintDialog,
     pub recent_files: RecentFilesList,
     /// The job the print dialog is filling in, in the format the printing
     /// service will receive.
@@ -1229,6 +1397,7 @@ impl std::fmt::Debug for PdfViewerApp {
             .field("active_tab", &self.active_tab)
             .field("search", &self.search)
             .field("search_focused", &self.search_focused)
+            .field("print_dialog_open", &self.print_dialog.open)
             .field("recent_files", &self.recent_files)
             .field("print_job", &self.print_job)
             .field("dark_mode", &self.dark_mode)
@@ -1254,6 +1423,7 @@ impl PdfViewerApp {
             active_tab: 0,
             search: SearchState::new(),
             search_focused: false,
+            print_dialog: PrintDialog::default(),
             recent_files: RecentFilesList::default(),
             print_job: PrintJob::default(),
             dark_mode: true,
@@ -1482,6 +1652,14 @@ impl PdfViewerApp {
 
         if self.search.active {
             self.render_search_bar(&mut frame, &layout);
+        }
+
+        // Last, and over the search bar: it is the only *modal* surface here,
+        // so nothing it covers should answer a click, and recording its boxes
+        // after everything else is what `Frame::hit`'s last-wins rule turns
+        // into that.
+        if self.print_dialog.open {
+            self.render_print_dialog(&mut frame, &layout);
         }
 
         frame
@@ -2769,6 +2947,244 @@ impl PdfViewerApp {
         }
     }
 
+    /// Render the print dialog.
+    ///
+    /// Centred on the window and modal: [`Target::PrintPanel`] is recorded
+    /// first so that every control wins over it, and it catches the clicks
+    /// that hit no control. Without it a press on the dialog's own padding
+    /// would fall through to the page behind and turn a mis-aimed click into
+    /// a page change -- which is the difference between a dialog and an
+    /// overlay, and the search bar above is deliberately the other one.
+    #[allow(clippy::too_many_lines)]
+    fn render_print_dialog(&self, frame: &mut Frame, layout: &Layout) {
+        let dlg_w: f32 = 340.0_f32.min(layout.window.w);
+        let row_h: f32 = 32.0;
+        let rows: f32 = 6.0;
+        let dlg_h: f32 = 52.0 + rows * row_h + 48.0;
+        let dlg_x = ((layout.window.w - dlg_w) / 2.0).max(0.0);
+        let dlg_y = ((layout.window.h - dlg_h) / 2.0).max(0.0);
+
+        frame.push(RenderCommand::BoxShadow {
+            x: dlg_x,
+            y: dlg_y,
+            width: dlg_w,
+            height: dlg_h,
+            offset_x: 0.0,
+            offset_y: 4.0,
+            blur: 16.0,
+            spread: 0.0,
+            color: Color::rgba(0, 0, 0, 120),
+            corner_radii: CornerRadii::all(10.0),
+        });
+        frame.push(RenderCommand::FillRect {
+            x: dlg_x,
+            y: dlg_y,
+            width: dlg_w,
+            height: dlg_h,
+            color: self.palette.surface0,
+            corner_radii: CornerRadii::all(10.0),
+        });
+        frame.push(RenderCommand::StrokeRect {
+            x: dlg_x,
+            y: dlg_y,
+            width: dlg_w,
+            height: dlg_h,
+            color: self.palette.surface1,
+            line_width: 1.0,
+            corner_radii: CornerRadii::all(10.0),
+        });
+        // First, so every control below wins the overlap.
+        frame.hit(Target::PrintPanel, Rect::new(dlg_x, dlg_y, dlg_w, dlg_h));
+
+        frame.push(RenderCommand::Text {
+            x: dlg_x + 16.0,
+            y: dlg_y + 16.0,
+            text: "Print".to_string(),
+            color: self.palette.text,
+            font_size: 15.0,
+            font_weight: FontWeightHint::Bold,
+            max_width: None,
+            overflow: TextOverflow::Clip,
+        });
+
+        let label_x = dlg_x + 16.0;
+        let value_x = dlg_x + 116.0;
+        let value_w = (dlg_w - 132.0).max(0.0);
+        let mut y = dlg_y + 52.0;
+
+        let label = |frame: &mut Frame, y: f32, text: &str| {
+            frame.push(RenderCommand::Text {
+                x: label_x,
+                y: y + 8.0,
+                text: text.to_string(),
+                color: self.palette.subtext0,
+                font_size: 13.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(96.0),
+                overflow: TextOverflow::Ellipsis,
+            });
+        };
+
+        // Pages
+        label(frame, y, "Pages");
+        self.dialog_button(
+            frame,
+            Target::PrintRangeMode,
+            Rect::new(value_x, y, value_w, row_h - 4.0),
+            self.print_dialog.choice.label(),
+        );
+        y += row_h;
+
+        // The custom range box, always drawn so the dialog does not change
+        // height, and lit only when it is the choice in force.
+        let custom = self.print_dialog.choice == RangeChoice::Custom;
+        let box_rect = Rect::new(value_x, y, value_w, row_h - 4.0);
+        frame.push(RenderCommand::FillRect {
+            x: box_rect.x,
+            y: box_rect.y,
+            width: box_rect.w,
+            height: box_rect.h,
+            color: self.palette.base,
+            corner_radii: CornerRadii::all(6.0),
+        });
+        frame.push(RenderCommand::StrokeRect {
+            x: box_rect.x,
+            y: box_rect.y,
+            width: box_rect.w,
+            height: box_rect.h,
+            color: if custom {
+                self.palette.blue
+            } else {
+                self.palette.surface1
+            },
+            line_width: if custom { 2.0 } else { 1.0 },
+            corner_radii: CornerRadii::all(6.0),
+        });
+        let (range_text, range_color) = if self.print_dialog.range_text.is_empty() {
+            ("e.g. 1-3, 5, 7-9".to_string(), self.palette.overlay0)
+        } else {
+            (
+                self.print_dialog.range_text.clone(),
+                if custom {
+                    self.palette.text
+                } else {
+                    self.palette.overlay0
+                },
+            )
+        };
+        frame.push(RenderCommand::Text {
+            x: box_rect.x + 8.0,
+            y: box_rect.y + 7.0,
+            text: range_text,
+            color: range_color,
+            font_size: 13.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some((value_w - 16.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+        frame.hit(Target::PrintRangeField, box_rect);
+        y += row_h;
+
+        // Copies, as a stepper.
+        label(frame, y, "Copies");
+        let step_w: f32 = 28.0;
+        self.dialog_button(
+            frame,
+            Target::PrintCopiesDown,
+            Rect::new(value_x, y, step_w, row_h - 4.0),
+            "-",
+        );
+        frame.push(RenderCommand::Text {
+            x: value_x + step_w + 14.0,
+            y: y + 8.0,
+            text: self.print_dialog.copies.to_string(),
+            color: self.palette.text,
+            font_size: 13.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(40.0),
+            overflow: TextOverflow::Clip,
+        });
+        self.dialog_button(
+            frame,
+            Target::PrintCopiesUp,
+            Rect::new(value_x + step_w + 48.0, y, step_w, row_h - 4.0),
+            "+",
+        );
+        y += row_h;
+
+        label(frame, y, "Colour");
+        self.dialog_button(
+            frame,
+            Target::PrintColor,
+            Rect::new(value_x, y, value_w, row_h - 4.0),
+            self.print_dialog.color_label(),
+        );
+        y += row_h;
+
+        label(frame, y, "Sides");
+        self.dialog_button(
+            frame,
+            Target::PrintDuplex,
+            Rect::new(value_x, y, value_w, row_h - 4.0),
+            if self.print_dialog.duplex {
+                "Both sides"
+            } else {
+                "One side"
+            },
+        );
+        y += row_h;
+
+        label(frame, y, "Scale");
+        self.dialog_button(
+            frame,
+            Target::PrintScale,
+            Rect::new(value_x, y, value_w, row_h - 4.0),
+            &self.print_dialog.scale_label(),
+        );
+        y += row_h + 8.0;
+
+        // Cancel left of Print, which is the order every dialog in this tree
+        // uses: the destructive-to-a-draft action is never under the pointer
+        // on the way to the one that commits.
+        let btn_w: f32 = 84.0;
+        self.dialog_button(
+            frame,
+            Target::PrintCancel,
+            Rect::new(dlg_x + dlg_w - 16.0 - btn_w * 2.0 - 8.0, y, btn_w, row_h),
+            "Cancel",
+        );
+        self.dialog_button(
+            frame,
+            Target::PrintConfirm,
+            Rect::new(dlg_x + dlg_w - 16.0 - btn_w, y, btn_w, row_h),
+            "Print",
+        );
+    }
+
+    /// One of the dialog's buttons: a rounded plate, a centred-ish label and a
+    /// hit box, which is the whole vocabulary this dialog needs.
+    fn dialog_button(&self, frame: &mut Frame, target: Target, rect: Rect, label: &str) {
+        frame.push(RenderCommand::FillRect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.w,
+            height: rect.h,
+            color: self.palette.surface1,
+            corner_radii: CornerRadii::all(6.0),
+        });
+        frame.push(RenderCommand::Text {
+            x: rect.x + 8.0,
+            y: rect.y + 7.0,
+            text: label.to_string(),
+            color: self.palette.text,
+            font_size: 13.0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some((rect.w - 12.0).max(0.0)),
+            overflow: TextOverflow::Ellipsis,
+        });
+        frame.hit(target, rect);
+    }
+
     /// Render the search bar overlay.
     ///
     /// This floats over the document rather than displacing it, and it is drawn
@@ -3080,6 +3496,39 @@ impl PdfViewerApp {
         true
     }
 
+    /// Take what the dialog says, put it in the job, and spool it.
+    ///
+    /// **The whole of the dialog's effect on the world is here**, which is
+    /// what makes Cancel free: nothing the user touched has left
+    /// `print_dialog` until this runs.
+    ///
+    /// The three fields the service needs but the user does not choose --
+    /// name, current page and page count -- are read off the active tab at
+    /// this moment rather than kept in step as the user reads. A job describes
+    /// the document as it was when Print was pressed.
+    fn commit_print(&mut self) -> bool {
+        let Some((name, page_count, current_page)) = self.active_tab().and_then(|tab| {
+            tab.document
+                .as_ref()
+                .map(|doc| (tab.title(), doc.page_count(), tab.current_page))
+        }) else {
+            // Nothing open. The dialog closes rather than sitting there with a
+            // Print button that silently does nothing.
+            self.print_dialog.open = false;
+            return true;
+        };
+        self.print_job.document_name = name;
+        self.print_job.page_count = page_count;
+        self.print_job.current_page = current_page;
+        self.print_job.range = self.print_dialog.range();
+        self.print_job.copies = self.print_dialog.copies;
+        self.print_job.color = self.print_dialog.color;
+        self.print_job.duplex = self.print_dialog.duplex;
+        self.print_job.scale = self.print_dialog.scale;
+        self.print_dialog.open = false;
+        self.print_active()
+    }
+
     /// Spool the pages the print settings name, answering whether it took.
     pub fn print_active(&mut self) -> bool {
         let Some(print) = self.print else {
@@ -3248,7 +3697,54 @@ impl PdfViewerApp {
                 }
                 true
             }
-            Target::Print => self.print_active(),
+            // Opens the dialog rather than printing. Printing the whole
+            // document on one press was the defect: a 400-page manual read for
+            // one page printed 400 pages, and there was nowhere to say
+            // otherwise short of editing the source.
+            Target::Print => {
+                self.print_dialog.open = true;
+                true
+            }
+            Target::PrintPanel => true,
+            Target::PrintRangeMode => {
+                self.print_dialog.choice = self.print_dialog.choice.next();
+                true
+            }
+            // The box takes the caret; typing is routed to it in `handle_key`.
+            // Choosing it also selects the custom choice, because a user who
+            // clicks into the page box has said which pages they want more
+            // plainly than the button above it has.
+            Target::PrintRangeField => {
+                self.print_dialog.choice = RangeChoice::Custom;
+                true
+            }
+            Target::PrintCopiesDown => {
+                let was = self.print_dialog.copies;
+                self.print_dialog.copies = was.saturating_sub(1).max(1);
+                self.print_dialog.copies != was
+            }
+            Target::PrintCopiesUp => {
+                let was = self.print_dialog.copies;
+                self.print_dialog.copies = was.saturating_add(1).min(MAX_COPIES);
+                self.print_dialog.copies != was
+            }
+            Target::PrintColor => {
+                self.print_dialog.cycle_color();
+                true
+            }
+            Target::PrintDuplex => {
+                self.print_dialog.duplex = !self.print_dialog.duplex;
+                true
+            }
+            Target::PrintScale => {
+                self.print_dialog.cycle_scale();
+                true
+            }
+            Target::PrintConfirm => self.commit_print(),
+            Target::PrintCancel => {
+                self.print_dialog.open = false;
+                true
+            }
             Target::Tab(i) => {
                 self.switch_tab(i);
                 true
@@ -3406,6 +3902,13 @@ impl PdfViewerApp {
             return false;
         }
 
+        // The dialog is modal, so it takes every key before anything else --
+        // including the page keys, which would otherwise walk the document
+        // behind a dialog the user is typing a page range into.
+        if self.print_dialog.open {
+            return self.handle_print_key(event);
+        }
+
         // Escape closes the search bar from anywhere, focused or not, because
         // the whole point of Escape on an overlay is that you do not have to
         // find it first.
@@ -3458,6 +3961,40 @@ impl PdfViewerApp {
     }
 
     /// Handle a keystroke while the search field holds the caret.
+    /// A keystroke while the print dialog is up.
+    ///
+    /// Typing goes to the range box and *selects* the custom choice, because
+    /// someone typing `2-4` has said which pages they want more plainly than
+    /// the button above the box has. Without that, a user could type a range,
+    /// press Print, and get every page -- the exact failure this dialog was
+    /// built to remove, reintroduced one control along.
+    fn handle_print_key(&mut self, event: &KeyEvent) -> bool {
+        match event.key {
+            Key::Escape => {
+                self.print_dialog.open = false;
+                true
+            }
+            Key::Enter => self.commit_print(),
+            Key::Backspace => {
+                // `pop` removes a `char`, not a byte, as the search box does.
+                if self.print_dialog.range_text.pop().is_none() {
+                    return false;
+                }
+                self.print_dialog.choice = RangeChoice::Custom;
+                true
+            }
+            _ => {
+                let typed: String = event.typed().collect();
+                if typed.is_empty() {
+                    return false;
+                }
+                self.print_dialog.range_text.push_str(&typed);
+                self.print_dialog.choice = RangeChoice::Custom;
+                true
+            }
+        }
+    }
+
     fn handle_search_key(&mut self, event: &KeyEvent) -> bool {
         match event.key {
             Key::Enter => {
@@ -4213,6 +4750,290 @@ mod tests {
             "a range naming no page of the document was spooled anyway"
         );
         assert!(PRINTED.lock().unwrap().is_empty());
+    }
+
+    // -- The print dialog -----------------------------------------------------
+
+    /// A viewer with a ten-page document open and a printer that records.
+    fn viewer_with_recorder(
+        printer: fn(&PdfDocument, &[usize]) -> bool,
+        pages: usize,
+    ) -> PdfViewerApp {
+        let mut app = PdfViewerApp::new(800.0, 600.0);
+        app.set_printer(printer);
+        app.load_document(PdfDocument::create_sample(PathBuf::from("a.pdf"), pages));
+        app
+    }
+
+    /// Type `text` into whatever has the keyboard.
+    ///
+    /// One event per character rather than one for the whole string, because
+    /// that is what a keyboard produces and because the per-character path is
+    /// the one that has to keep selecting the custom range choice.
+    ///
+    /// `probe::typing` deliberately puts an arbitrary key code on the event,
+    /// so a handler that reacted to the code rather than to the text would
+    /// fail here.
+    fn typed(app: &mut PdfViewerApp, text: &str) {
+        for ch in text.chars() {
+            app.handle_key(&probe::typing(&ch.to_string()));
+        }
+    }
+
+    /// Pressing Print opens the dialog instead of printing the document.
+    ///
+    /// This is the defect the dialog exists for: the button used to spool
+    /// everything on one press, so reading one page of a 400-page manual cost
+    /// 400 pages and there was nowhere to say otherwise.
+    #[test]
+    fn the_print_button_opens_a_dialog_rather_than_printing_everything() {
+        static PRINTED: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+        fn record(_doc: &PdfDocument, pages: &[usize]) -> bool {
+            *PRINTED.lock().unwrap() = pages.to_vec();
+            true
+        }
+        PRINTED.lock().unwrap().clear();
+
+        let mut app = viewer_with_recorder(record, 10);
+        assert!(!app.print_dialog.open);
+
+        probe::click(&mut app, Target::Print);
+
+        assert!(app.print_dialog.open, "Print did not open the dialog");
+        assert!(
+            PRINTED.lock().unwrap().is_empty(),
+            "Print spooled the document without asking"
+        );
+    }
+
+    /// A range typed into the box is the range that is spooled.
+    ///
+    /// The whole road, through the controls a user actually touches rather
+    /// than by assigning to `print_job`: open, type, confirm.
+    #[test]
+    fn a_range_typed_in_the_dialog_is_the_range_that_prints() {
+        static PRINTED: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+        fn record(_doc: &PdfDocument, pages: &[usize]) -> bool {
+            *PRINTED.lock().unwrap() = pages.to_vec();
+            true
+        }
+        PRINTED.lock().unwrap().clear();
+
+        let mut app = viewer_with_recorder(record, 10);
+        probe::click(&mut app, Target::Print);
+        typed(&mut app, "2-4");
+        probe::click(&mut app, Target::PrintConfirm);
+
+        assert_eq!(
+            *PRINTED.lock().unwrap(),
+            vec![1, 2, 3],
+            "the dialog printed something other than pages 2-4"
+        );
+        assert!(!app.print_dialog.open, "the dialog stayed open after Print");
+    }
+
+    /// Typing a range selects the custom choice, so Print honours it.
+    ///
+    /// Without this a user could type `2-4`, press Print, and get every page
+    /// -- the very failure the dialog removes, reintroduced one control along,
+    /// and invisible because both the typed text and the printed output would
+    /// look deliberate.
+    #[test]
+    fn typing_a_range_selects_it_without_touching_the_pages_button() {
+        let mut app = viewer_with_recorder(|_, _| true, 10);
+        probe::click(&mut app, Target::Print);
+        assert_eq!(app.print_dialog.choice, RangeChoice::All);
+
+        typed(&mut app, "3");
+
+        assert_eq!(app.print_dialog.choice, RangeChoice::Custom);
+        assert_eq!(app.print_dialog.range(), PageRange::parse("3"));
+    }
+
+    /// Cancel leaves the job exactly as it was.
+    ///
+    /// The point of staging the settings in the dialog rather than editing the
+    /// job in place: a user who opens Print, changes their mind about four
+    /// things and cancels has changed nothing.
+    #[test]
+    fn cancel_discards_every_change_the_dialog_made() {
+        let mut app = viewer_with_recorder(|_, _| true, 10);
+        let before = format!("{:?}", app.print_job);
+
+        probe::click(&mut app, Target::Print);
+        typed(&mut app, "2-4");
+        probe::click(&mut app, Target::PrintCopiesUp);
+        probe::click(&mut app, Target::PrintColor);
+        probe::click(&mut app, Target::PrintDuplex);
+        probe::click(&mut app, Target::PrintScale);
+        probe::click(&mut app, Target::PrintCancel);
+
+        assert!(!app.print_dialog.open);
+        assert_eq!(
+            format!("{:?}", app.print_job),
+            before,
+            "Cancel left a change behind in the job"
+        );
+    }
+
+    /// Every control the dialog draws reaches the job when Print is pressed.
+    ///
+    /// `copies`, `color`, `duplex` and `scale` had **no writer at all** before
+    /// this dialog -- they were fields of a message nothing could fill in. A
+    /// test per control would pass with three of the four never assigned, so
+    /// this moves all four and reads all four back.
+    #[test]
+    fn every_control_reaches_the_job() {
+        let mut app = viewer_with_recorder(|_, _| true, 10);
+        probe::click(&mut app, Target::Print);
+
+        probe::click(&mut app, Target::PrintCopiesUp);
+        probe::click(&mut app, Target::PrintCopiesUp);
+        probe::click(&mut app, Target::PrintColor);
+        probe::click(&mut app, Target::PrintDuplex);
+        probe::click(&mut app, Target::PrintScale);
+        probe::click(&mut app, Target::PrintConfirm);
+
+        assert_eq!(app.print_job.copies, 3, "copies");
+        assert_eq!(app.print_job.color, ColorMode::Grayscale, "colour");
+        assert!(app.print_job.duplex, "duplex");
+        assert_eq!(app.print_job.scale, ScaleMode::Percent(50), "scale");
+    }
+
+    /// The job carries what the service needs and the user never chose.
+    ///
+    /// `document_name`, `page_count` and `current_page` are read off the open
+    /// tab at the moment Print is pressed. `current_page` in particular is
+    /// what makes "Current page" resolvable by a service that cannot see the
+    /// document.
+    #[test]
+    fn the_job_describes_the_document_as_it_was_when_print_was_pressed() {
+        let mut app = viewer_with_recorder(|_, _| true, 10);
+        app.go_to_page(6);
+        probe::click(&mut app, Target::Print);
+        probe::click(&mut app, Target::PrintConfirm);
+
+        assert_eq!(app.print_job.page_count, 10);
+        assert_eq!(app.print_job.current_page, 6);
+        assert!(
+            !app.print_job.document_name.is_empty(),
+            "the job did not name the document"
+        );
+    }
+
+    /// "Current page" prints the page on screen, and is reachable only as a
+    /// choice.
+    ///
+    /// `PageRange::CurrentPage` has no spelling: `parse("")` is `All` and no
+    /// input produces it. Without the cycling button it would be a variant of
+    /// the message format that the only program sending one could not name.
+    #[test]
+    fn current_page_prints_the_page_on_screen() {
+        static PRINTED: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+        fn record(_doc: &PdfDocument, pages: &[usize]) -> bool {
+            *PRINTED.lock().unwrap() = pages.to_vec();
+            true
+        }
+        PRINTED.lock().unwrap().clear();
+
+        let mut app = viewer_with_recorder(record, 10);
+        app.go_to_page(4);
+        probe::click(&mut app, Target::Print);
+        // All -> Current page.
+        probe::click(&mut app, Target::PrintRangeMode);
+        assert_eq!(app.print_dialog.choice, RangeChoice::CurrentPage);
+        probe::click(&mut app, Target::PrintConfirm);
+
+        assert_eq!(*PRINTED.lock().unwrap(), vec![4]);
+    }
+
+    /// The copies stepper stops at both ends rather than wrapping or wedging.
+    #[test]
+    fn the_copies_stepper_has_both_ends() {
+        let mut app = viewer_with_recorder(|_, _| true, 10);
+        probe::click(&mut app, Target::Print);
+
+        // One is the floor: zero copies is not a print job, and PrintJob
+        //::validate refuses it, so the dialog must not be able to name it.
+        probe::click(&mut app, Target::PrintCopiesDown);
+        probe::click(&mut app, Target::PrintCopiesDown);
+        assert_eq!(app.print_dialog.copies, 1);
+
+        for _ in 0..MAX_COPIES + 5 {
+            probe::click(&mut app, Target::PrintCopiesUp);
+        }
+        assert_eq!(app.print_dialog.copies, MAX_COPIES);
+    }
+
+    /// Escape closes the dialog without printing.
+    #[test]
+    fn escape_closes_the_print_dialog_without_printing() {
+        static PRINTED: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+        fn record(_doc: &PdfDocument, pages: &[usize]) -> bool {
+            *PRINTED.lock().unwrap() = pages.to_vec();
+            true
+        }
+        PRINTED.lock().unwrap().clear();
+
+        let mut app = viewer_with_recorder(record, 10);
+        probe::click(&mut app, Target::Print);
+        app.handle_key(&probe::press(Key::Escape));
+
+        assert!(!app.print_dialog.open);
+        assert!(PRINTED.lock().unwrap().is_empty());
+    }
+
+    /// A key that pages the document does not do so through the dialog.
+    ///
+    /// The dialog is modal. A Right arrow while it is up is a keystroke aimed
+    /// at the dialog, and letting it walk the document behind would move the
+    /// page the "Current page" choice refers to while the user is choosing it.
+    #[test]
+    fn the_dialog_swallows_the_page_keys() {
+        let mut app = viewer_with_recorder(|_, _| true, 10);
+        app.go_to_page(3);
+        probe::click(&mut app, Target::Print);
+
+        app.handle_key(&probe::press(Key::Right));
+
+        assert_eq!(
+            app.active_tab().map(|t| t.current_page),
+            Some(3),
+            "a page key reached the document behind a modal dialog"
+        );
+    }
+
+    /// A click on the dialog's own padding does not reach the page behind it.
+    ///
+    /// **Not written with `probe::click`**, which clicks the *centre* of the
+    /// box it finds -- and the centre of the panel is the Copies stepper. The
+    /// first version of this test did exactly that: it pressed "+" and then
+    /// asserted the page had not changed, which was true and proved nothing.
+    /// A test of a miss has to aim at somewhere there is nothing, so this
+    /// aims at the title band and checks the hit test agrees before clicking.
+    #[test]
+    fn a_miss_inside_the_dialog_does_not_page_the_document() {
+        let mut app = viewer_with_recorder(|_, _| true, 10);
+        app.go_to_page(3);
+        probe::click(&mut app, Target::Print);
+
+        let panel = probe::rect_of(&app, Target::PrintPanel).expect("the dialog is up");
+        // Beside the title: inside the dialog, on no control.
+        let (x, y) = (panel.x + panel.w - 24.0, panel.y + 18.0);
+        assert_eq!(
+            app.target_at(x, y),
+            Some(Target::PrintPanel),
+            "the point this test aims at is not empty dialog"
+        );
+
+        app.handle_event(&Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Press(MouseButton::Left),
+            x,
+            y,
+        }));
+
+        assert_eq!(app.active_tab().map(|t| t.current_page), Some(3));
+        assert!(app.print_dialog.open, "a miss closed the dialog");
     }
 
     /// A viewer that has printed nothing yet prints every page.

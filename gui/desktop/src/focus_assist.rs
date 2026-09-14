@@ -60,8 +60,8 @@
 //! shell, and a page that spelled it differently would be the odd one out.
 
 use appearance::{Palette, Surface, readable_on};
+use daywindow::DailyWindow;
 use guitk::color::Color;
-use guitk::daywindow::DailyWindow;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 

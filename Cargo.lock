@@ -504,6 +504,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "daywindow"
+version = "0.1.0"
+
+[[package]]
 name = "dbus"
 version = "0.1.0"
 dependencies = [
@@ -548,6 +552,7 @@ version = "0.1.0"
 dependencies = [
  "appearance",
  "authlib",
+ "daywindow",
  "guiremote",
  "guitk",
  "imagecodec",
@@ -1939,6 +1944,7 @@ dependencies = [
 name = "notifsettings"
 version = "0.1.0"
 dependencies = [
+ "daywindow",
  "settingsfile",
  "yamldoc",
 ]

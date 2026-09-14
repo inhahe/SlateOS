@@ -50,6 +50,7 @@
 
 #![deny(clippy::all, clippy::pedantic)]
 
+use daywindow::{DailyWindow, TimeOfDay};
 use settingsfile::yaml_enum;
 use yamldoc::Document;
 
@@ -184,12 +185,99 @@ impl AppRule {
 }
 
 // ============================================================================
+// Quiet hours
+// ============================================================================
+
+/// Hours in which nothing ordinary may interrupt, whoever sent it.
+///
+/// The per-program rules above answer "may *this* program interrupt me". This
+/// answers "may anything, *now*", and the two are independent: a program you
+/// marked `Critical` still gets through, which is the point of having marked
+/// it.
+///
+/// **The window is a [`DailyWindow`] rather than four numbers**, because that
+/// type exists for this: its own documentation lists do-not-disturb quiet
+/// hours as one of three features that each grew four unvalidated `u8`s, and
+/// one of the three shipped a start of `25:00` that compared as an overnight
+/// window and then never opened. A schedule that silently stops happening is
+/// the worst failure this feature has.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QuietHours {
+    /// Whether the schedule is in force at all.
+    ///
+    /// Separate from the window for the reason `night_light` is separate from
+    /// its strength: a switch that forgets the hours you set is a switch
+    /// nobody sets twice.
+    pub enabled: bool,
+    /// When it runs, which may wrap past midnight -- and usually does.
+    pub window: DailyWindow,
+    /// Which days it runs on, Sunday first.
+    ///
+    /// An array rather than a list of day numbers, so "is today one of them"
+    /// is an index rather than a search, and so a file naming Tuesday twice
+    /// cannot mean anything different from naming it once.
+    pub days: [bool; 7],
+}
+
+impl Default for QuietHours {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            // Ten at night until seven in the morning, every day: the hours
+            // this feature is named after, so that switching it on without
+            // touching anything else does the thing people mean by it.
+            window: DailyWindow::from_hm(22, 0, 7, 0).unwrap_or_default(),
+            days: [true; 7],
+        }
+    }
+}
+
+impl QuietHours {
+    /// Whether quiet hours are in force at this local time.
+    ///
+    /// `weekday` is 0 for Sunday, matching [`days`](Self::days).
+    ///
+    /// **The day is the one the window *starts* on.** An overnight window
+    /// asked about at one in the morning is the previous evening's window
+    /// still running, so a Friday-night rule has to still be quiet at 1 a.m.
+    /// on Saturday even if Saturday is not selected. Getting this the obvious
+    /// way round would make every overnight schedule end at midnight without
+    /// saying so.
+    #[must_use]
+    pub fn active_at(&self, hour: u8, minute: u8, weekday: u8) -> bool {
+        let Some(now) = TimeOfDay::new(hour, minute) else {
+            // Not a time of day. Refusing to be quiet is the safe answer: a
+            // notification shown when it need not have been is a nuisance, and
+            // one held back for ever is a message the user never sees.
+            return false;
+        };
+        if !self.enabled || !self.window.contains_hm(hour, minute) {
+            return false;
+        }
+        // Normalised before anything is added to it, which is what makes the
+        // step back to yesterday safe: after this, `weekday` is at most 6.
+        let weekday = weekday % 7;
+        let overnight = self.window.start() > self.window.end();
+        let day = if overnight && now < self.window.start() {
+            // Before the start on an overnight rule: this is yesterday's
+            // window, still running.
+            weekday.saturating_add(6) % 7
+        } else {
+            weekday
+        };
+        self.days.get(usize::from(day)).copied().unwrap_or(false)
+    }
+}
+
+// ============================================================================
 // The settings
 // ============================================================================
 
 /// Every program-specific rule the user has set.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NotifSettings {
+    /// Hours in which nothing ordinary interrupts, whoever sent it.
+    pub quiet_hours: QuietHours,
     /// One rule per program the user has an opinion about, in file order.
     ///
     /// A `Vec` rather than a map because the order is the user's: this list is
@@ -233,6 +321,43 @@ impl NotifSettings {
     /// field degrades on its own rather than failing the file.
     #[must_use]
     pub fn read_from(doc: &Document) -> Self {
+        let mut quiet_hours = QuietHours::default();
+        if let Some(v) = doc.get_bool(&["quiet_hours", "enabled"]) {
+            quiet_hours.enabled = v;
+        }
+        // Both ends or neither. A file giving a start and no end would
+        // otherwise pair a chosen time with a default one and produce a window
+        // the user never asked for -- and an overnight one at that, since the
+        // default end is 07:00.
+        if let (Some(start), Some(end)) = (
+            doc.get_str(&["quiet_hours", "start"])
+                .and_then(|v| parse_hm(&v)),
+            doc.get_str(&["quiet_hours", "end"])
+                .and_then(|v| parse_hm(&v)),
+        ) {
+            quiet_hours.window = DailyWindow::new(start, end);
+        }
+        // Block style only: `yamldoc::get_seq` does not read a flow list
+        // (`days: [mon, tue]`), which someone editing by hand might well
+        // write and would then find silently ignored. That is the shared
+        // YAML layer's limit, and every settings list in the tree has it.
+        if let Some(days) = doc.get_seq(&["quiet_hours", "days"]) {
+            let mut on = [false; 7];
+            for name in &days {
+                if let Some(i) = weekday_index(name)
+                    && let Some(slot) = on.get_mut(i)
+                {
+                    *slot = true;
+                }
+            }
+            // An empty or wholly unreadable list is a schedule that runs on no
+            // day, which is a switch that is on and does nothing. Read as "the
+            // user did not say", which is what the default already means.
+            if on.iter().any(|d| *d) {
+                quiet_hours.days = on;
+            }
+        }
+
         let mut apps = Vec::new();
         for name in doc.keys(&["apps"]) {
             let mut rule = AppRule::new(&name);
@@ -250,7 +375,7 @@ impl NotifSettings {
             }
             apps.push(rule);
         }
-        Self { apps }
+        Self { quiet_hours, apps }
     }
 
     /// Fold the settings back into the document they came from.
@@ -259,6 +384,22 @@ impl NotifSettings {
     /// taken out of the list leaves the file rather than lingering as a key
     /// that nothing reads and the next reader restores.
     pub fn write_into(&self, doc: &mut Document) {
+        doc.set_bool(&["quiet_hours", "enabled"], self.quiet_hours.enabled);
+        doc.set_str(
+            &["quiet_hours", "start"],
+            &format_hm(self.quiet_hours.window.start()),
+        );
+        doc.set_str(
+            &["quiet_hours", "end"],
+            &format_hm(self.quiet_hours.window.end()),
+        );
+        let days: Vec<&str> = WEEKDAYS
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| self.quiet_hours.days.get(*i).copied().unwrap_or(false))
+            .map(|(_, name)| *name)
+            .collect();
+        doc.set_seq(&["quiet_hours", "days"], &days);
         let kept: Vec<&str> = self.apps.iter().map(|r| r.app_name.as_str()).collect();
         for name in doc.keys(&["apps"]) {
             if !kept.contains(&name.as_str()) {
@@ -272,6 +413,30 @@ impl NotifSettings {
             doc.set_bool(&["apps", name, "banner"], rule.banner);
         }
     }
+}
+
+/// The days, Sunday first, as they are spelled in the file.
+const WEEKDAYS: [&str; 7] = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+
+/// The index of a day's spelling, or `None`.
+///
+/// Case-insensitive and prefix-based, so `Mon`, `monday` and `MONDAY` all
+/// work: this is a file people edit by hand, and refusing `Monday` because the
+/// writer spells it `mon` would be a rule with no purpose behind it.
+fn weekday_index(name: &str) -> Option<usize> {
+    let lower = name.trim().to_ascii_lowercase();
+    WEEKDAYS.iter().position(|d| lower.starts_with(d))
+}
+
+/// `HH:MM` to a time of day, or `None` for anything else.
+fn parse_hm(text: &str) -> Option<TimeOfDay> {
+    let (h, m) = text.trim().split_once(':')?;
+    TimeOfDay::new(h.trim().parse().ok()?, m.trim().parse().ok()?)
+}
+
+/// A time of day as `HH:MM`, zero-padded.
+fn format_hm(t: TimeOfDay) -> String {
+    format!("{:02}:{:02}", t.hour(), t.minute())
 }
 
 // ============================================================================
@@ -375,6 +540,138 @@ mod tests {
     )]
 
     use super::*;
+
+    /// Off by default, so adding this feature changes nobody's desktop.
+    #[test]
+    fn quiet_hours_are_off_until_asked_for() {
+        let q = QuietHours::default();
+        assert!(!q.enabled);
+        // At three in the morning, which is inside the default window.
+        assert!(!q.active_at(3, 0, 3), "a switch that is off was in force");
+    }
+
+    /// The ordinary case: ten at night to seven, every day.
+    #[test]
+    fn quiet_hours_hold_between_their_ends() {
+        let q = QuietHours {
+            enabled: true,
+            ..QuietHours::default()
+        };
+        assert!(
+            q.active_at(23, 0, 3),
+            "eleven at night is inside 22:00-07:00"
+        );
+        assert!(q.active_at(3, 0, 4), "three in the morning is inside it");
+        assert!(!q.active_at(12, 0, 3), "midday is not");
+        assert!(!q.active_at(21, 59, 3), "a minute before the start is not");
+        assert!(q.active_at(22, 0, 3), "the start itself is");
+    }
+
+    /// **The case that goes wrong silently.** An overnight window asked about
+    /// after midnight belongs to the day it *started* on.
+    ///
+    /// A Friday-night rule has to still be quiet at one o'clock on Saturday
+    /// morning. Attributing that hour to Saturday -- the obvious reading --
+    /// would make every overnight schedule stop at midnight, and it would stop
+    /// without saying anything: the user set 22:00 to 07:00 on Friday and gets
+    /// two hours of it.
+    #[test]
+    fn an_overnight_window_belongs_to_the_day_it_started_on() {
+        let mut q = QuietHours {
+            enabled: true,
+            ..QuietHours::default()
+        };
+        // Friday only. 0 = Sunday, so Friday is 5 and Saturday is 6.
+        q.days = [false, false, false, false, false, true, false];
+
+        assert!(q.active_at(23, 0, 5), "Friday night is in force");
+        assert!(
+            q.active_at(1, 0, 6),
+            "one o'clock on Saturday morning is still Friday's window"
+        );
+        assert!(
+            !q.active_at(23, 0, 6),
+            "Saturday night is not, because Saturday was not selected"
+        );
+        assert!(
+            !q.active_at(1, 0, 0),
+            "one o'clock on Sunday morning would be Saturday's window"
+        );
+    }
+
+    /// A window that does not cross midnight is attributed to today.
+    #[test]
+    fn a_daytime_window_belongs_to_today() {
+        let mut q = QuietHours {
+            enabled: true,
+            ..QuietHours::default()
+        };
+        q.window = DailyWindow::from_hm(9, 0, 17, 0).expect("a real window");
+        q.days = [false, true, false, false, false, false, false]; // Monday
+
+        assert!(q.active_at(12, 0, 1), "Monday lunchtime is in force");
+        assert!(!q.active_at(12, 0, 2), "Tuesday lunchtime is not");
+        assert!(
+            !q.active_at(3, 0, 1),
+            "Monday at three in the morning is not"
+        );
+    }
+
+    #[test]
+    fn quiet_hours_survive_a_round_trip_through_the_file() {
+        let mut before = NotifSettings::default();
+        before.quiet_hours.enabled = true;
+        before.quiet_hours.window = DailyWindow::from_hm(21, 30, 6, 45).expect("real");
+        before.quiet_hours.days = [true, false, true, false, true, false, false];
+
+        let mut doc = Document::new();
+        before.write_into(&mut doc);
+        let after = NotifSettings::read_from(&Document::parse(&doc.to_text()));
+
+        assert_eq!(after.quiet_hours, before.quiet_hours);
+    }
+
+    /// The spellings a person would actually type are accepted.
+    #[test]
+    fn a_hand_written_day_list_is_read_generously() {
+        // Block style, which is what `yamldoc` reads and what `set_seq`
+        // writes. A flow list -- `days: [mon, tue]` -- is ignored by
+        // `get_seq`; that is the shared YAML layer's limit rather than
+        // this crate's, and it is noted where the days are read.
+        let doc = Document::parse(
+            "quiet_hours:\n  enabled: true\n  days:\n    - Monday\n    - TUE\n    - fri\n",
+        );
+        let q = NotifSettings::read_from(&doc).quiet_hours;
+        assert_eq!(q.days, [false, true, true, false, false, true, false]);
+    }
+
+    /// Half a window is no window.
+    ///
+    /// A file with a start and no end would otherwise pair the user's time
+    /// with the default 07:00 and produce an overnight schedule they never
+    /// asked for.
+    #[test]
+    fn a_start_without_an_end_leaves_the_window_alone() {
+        let doc = Document::parse("quiet_hours:\n  enabled: true\n  start: \"01:00\"\n");
+        let q = NotifSettings::read_from(&doc).quiet_hours;
+        assert_eq!(q.window, QuietHours::default().window);
+    }
+
+    /// An unreadable time is not a window either.
+    #[test]
+    fn a_nonsense_time_leaves_the_window_alone() {
+        for text in ["25:00", "noon", "7", "07:61", ""] {
+            let doc = Document::parse(&format!(
+                "quiet_hours:\n  start: \"{text}\"\n  end: \"08:00\"\n"
+            ));
+            let q = NotifSettings::read_from(&doc).quiet_hours;
+            assert_eq!(
+                q.window,
+                QuietHours::default().window,
+                "{text} was read as a time of day"
+            );
+        }
+    }
 
     /// A program the user has never configured behaves as it did before this
     /// file existed.

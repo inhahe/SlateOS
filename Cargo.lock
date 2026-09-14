@@ -552,6 +552,7 @@ dependencies = [
  "inputsettings",
  "keylayout",
  "loginusers",
+ "notifsettings",
  "oswindow",
  "posix",
  "scratchdir",

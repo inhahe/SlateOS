@@ -1716,9 +1716,20 @@ fn diff_dirs(path1: &Path, path2: &Path, config: &Config) -> i32 {
         let is_dir2 = e2 && p2.is_dir();
 
         if is_dir1 && is_dir2 {
-            let code = diff_dirs(&p1, &p2, config);
-            if code > worst_exit {
-                worst_exit = code;
+            if config.recursive {
+                let code = diff_dirs(&p1, &p2, config);
+                if code > worst_exit {
+                    worst_exit = code;
+                }
+            } else {
+                // Measured: this is informational and goes to STDOUT with the
+                // rest of the answer, in the same sorted pass as the file
+                // comparisons rather than collected at the end.
+                println!(
+                    "Common subdirectories: {} and {}",
+                    p1.display(),
+                    p2.display()
+                );
             }
         } else if is_dir1 || is_dir2 {
             eprintln!(
@@ -1966,16 +1977,15 @@ fn main() {
             let is_dir1 = p1.is_dir();
             let is_dir2 = p2.is_dir();
 
+            // TWO DIRECTORIES ARE COMPARED WITH OR WITHOUT `-r`. This build
+            // refused without it -- `diff: da and db are directories (use -r to
+            // compare recursively)`, exit 2 -- where GNU compares the files
+            // they hold and reports `Common subdirectories:` for the ones it
+            // will not descend into. `-r` chooses whether to DESCEND, not
+            // whether to compare at all, and the refusal made the common
+            // `diff olddir newdir` fail outright.
             let exit_code = if is_dir1 && is_dir2 {
-                if config.recursive {
-                    diff_dirs(&p1, &p2, &config)
-                } else {
-                    eprintln!(
-                        "diff: {} and {} are directories (use -r to compare recursively)",
-                        config.path1, config.path2,
-                    );
-                    2
-                }
+                diff_dirs(&p1, &p2, &config)
             } else if is_dir1 || is_dir2 {
                 // One is a directory, one is a file -- diff the file against
                 // the same-named file in the directory.

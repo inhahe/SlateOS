@@ -159,18 +159,36 @@ enum Precision {
     Ns,
 }
 
-impl Precision {
-    /// The spelling GNU accepts, or `None`.
-    fn parse(spec: &[u8], allow_hm: bool) -> Option<Self> {
-        match spec {
-            b"date" => Some(Self::Date),
-            b"hours" if allow_hm => Some(Self::Hours),
-            b"minutes" if allow_hm => Some(Self::Minutes),
-            b"seconds" => Some(Self::Seconds),
-            b"ns" => Some(Self::Ns),
-            _ => None,
-        }
-    }
+/// `-I`'s argument table, **in GNU's order**, which is the order the
+/// "Valid arguments are:" list prints in — `hours` and `minutes` first, which
+/// is gnulib's table order and not alphabetical or logical.
+///
+/// Measured: `date -Ibogus` lists hours, minutes, date, seconds, ns.
+const ISO_PRECISIONS: &[(&str, Precision)] = &[
+    ("hours", Precision::Hours),
+    ("minutes", Precision::Minutes),
+    ("date", Precision::Date),
+    ("seconds", Precision::Seconds),
+    ("ns", Precision::Ns),
+];
+
+/// `--rfc-3339`'s argument table. It does **not** accept `hours` or `minutes`;
+/// `-I` does. Measured: `date --rfc-3339=bogus` lists only date, seconds, ns.
+const RFC3339_PRECISIONS: &[(&str, Precision)] = &[
+    ("date", Precision::Date),
+    ("seconds", Precision::Seconds),
+    ("ns", Precision::Ns),
+];
+
+/// Which option named the instant to print.
+///
+/// Tracked so a *second, different* one can be refused. Repeats of the same
+/// option are fine and the last wins — measured, `date -d @0 -d @1` prints the
+/// second — so this is about the kind, not the count.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DateSource {
+    Date,
+    Reference,
 }
 
 /// Build the format string for `-I`/`--rfc-3339`.
@@ -235,6 +253,7 @@ fn parse_args(args: &[OsString]) -> Result<Config, String> {
         utc: false,
     };
     let mut seen_format = false;
+    let mut source: Option<DateSource> = None;
 
     for item in DATE.parse_aliased(args, SHORT_OPTIONS, LONG_OPTIONS, ALIASES) {
         match item.map_err(|e| e.message())? {
@@ -243,35 +262,29 @@ fn parse_args(args: &[OsString]) -> Result<Config, String> {
                 cfg.shape = Shape::RfcEmail;
             }
             Opt::Long("date", v) | Opt::Short(b'd', v) => {
+                claim_source(&mut source, DateSource::Date)?;
                 cfg.when = parse_when(v.unwrap_or_default())?;
             }
             Opt::Long("reference", v) | Opt::Short(b'r', v) => {
+                claim_source(&mut source, DateSource::Reference)?;
                 cfg.when = When::File(v.unwrap_or_default());
             }
             Opt::Long("iso-8601", v) | Opt::Short(b'I', v) => {
                 let spec = v.unwrap_or_else(|| OsString::from("date"));
-                let bytes = os_bytes(&spec);
-                let p = Precision::parse(&bytes, true).ok_or_else(|| {
-                    DATE.usage_referring(format!(
-                        "invalid argument {} for '--iso-8601'",
-                        quote_os(&spec)
-                    ))
-                    .message()
-                })?;
+                // `argmatch` rather than an exact match: GNU accepts any
+                // unambiguous prefix here, so `-Isec` works, and it renders
+                // the "Valid arguments are:" list from this same table. The
+                // hand-rolled version did neither.
+                let p = DATE
+                    .argmatch(&os_bytes(&spec), "--iso-8601", ISO_PRECISIONS)
+                    .map_err(|e| e.message())?;
                 cfg.shape = Shape::Iso(p, b'T');
             }
             Opt::Long("rfc-3339", v) => {
                 let spec = v.unwrap_or_default();
-                let bytes = os_bytes(&spec);
-                // GNU's `--rfc-3339` does NOT accept `hours` or `minutes`;
-                // `-I` does. Measured, not assumed.
-                let p = Precision::parse(&bytes, false).ok_or_else(|| {
-                    DATE.usage_referring(format!(
-                        "invalid argument {} for '--rfc-3339'",
-                        quote_os(&spec)
-                    ))
-                    .message()
-                })?;
+                let p = DATE
+                    .argmatch(&os_bytes(&spec), "--rfc-3339", RFC3339_PRECISIONS)
+                    .map_err(|e| e.message())?;
                 cfg.shape = Shape::Iso(p, b' ');
             }
             // Refused rather than approximated -- see the module docs.
@@ -296,8 +309,36 @@ fn parse_args(args: &[OsString]) -> Result<Config, String> {
             Opt::Operand(arg) => {
                 let bytes = os_bytes(arg);
                 let Some(fmt) = bytes.strip_prefix(b"+") else {
+                    // Three different messages, measured, and the difference
+                    // is which of them the caller has already supplied:
+                    //
+                    //   date extra           -> invalid date ‘extra’
+                    //   date +%F extra       -> extra operand ‘extra’
+                    //   date -d @0 extra     -> the argument … lacks a leading '+'
+                    //
+                    // The middle one is "you have given me a format already";
+                    // the last is "you have told me WHICH date, so a bare word
+                    // cannot be one". With neither, a bare word is GNU's
+                    // obsolete set-the-clock form and fails as a bad date.
+                    if seen_format {
+                        return Err(DATE
+                            .usage_referring(format!("extra operand {}", quote_os(arg)))
+                            .message());
+                    }
+                    if source.is_some() {
+                        return Err(DATE
+                            .usage_referring(format!(
+                                "the argument {} lacks a leading '+';\n\
+                                 when using an option to specify date(s), any non-option\n\
+                                 argument must be a format string beginning with '+'",
+                                quote_os(arg)
+                            ))
+                            .message());
+                    }
+                    // `usage`, not `usage_referring`: measured, this one
+                    // carries no `Try 'date --help'` line.
                     return Err(DATE
-                        .usage_referring(format!("extra operand {}", quote_os(arg)))
+                        .usage(format!("invalid date {}", quote_os(arg)))
                         .message());
                 };
                 if seen_format {
@@ -311,6 +352,33 @@ fn parse_args(args: &[OsString]) -> Result<Config, String> {
         }
     }
     Ok(cfg)
+}
+
+/// Record which option named the instant, refusing a second *different* one.
+///
+/// `date -d @0 -r file` used to print the reference file's time and say
+/// nothing, silently discarding one of two contradictory instructions — the
+/// same "accepted and not honoured" shape as the flags surveyed in
+/// `B-A-SURVEY-OF-FLAGS-WE-ACCEPT-AND-DO-NOT-HONOUR`. GNU refuses.
+///
+/// Repeats of the *same* option are not a conflict and the last wins,
+/// measured: `date -d @0 -d @1` prints the second.
+///
+/// # Errors
+///
+/// A second date-source option of a different kind from the first.
+fn claim_source(seen: &mut Option<DateSource>, now: DateSource) -> Result<(), String> {
+    match seen {
+        Some(prev) if *prev != now => Err(DATE
+            .usage_referring(
+                "the options to specify dates for printing are mutually exclusive".to_string(),
+            )
+            .message()),
+        _ => {
+            *seen = Some(now);
+            Ok(())
+        }
+    }
 }
 
 /// `--help` and `--version` travel back through the error channel because they
@@ -486,13 +554,64 @@ mod tests {
     #[test]
     fn rfc_3339_refuses_hours_and_minutes_but_iso_accepts_them() {
         // Not symmetric, and not guessable: GNU's --rfc-3339 takes only date,
-        // seconds and ns.
-        assert!(Precision::parse(b"hours", true).is_some());
-        assert!(Precision::parse(b"hours", false).is_none());
-        assert!(Precision::parse(b"minutes", false).is_none());
-        assert!(Precision::parse(b"seconds", false).is_some());
-        assert!(Precision::parse(b"ns", false).is_some());
-        assert!(Precision::parse(b"nosuch", true).is_none());
+        // seconds and ns. Asserted against the tables `argmatch` is driven by,
+        // so the rule and the thing enforcing it cannot drift apart.
+        let iso: Vec<&str> = ISO_PRECISIONS.iter().map(|&(n, _)| n).collect();
+        let rfc: Vec<&str> = RFC3339_PRECISIONS.iter().map(|&(n, _)| n).collect();
+        // The ORDER is not cosmetic: it is the order GNU prints in its
+        // "Valid arguments are:" list, measured from `date -Ibogus`, and it is
+        // neither alphabetical nor logical.
+        assert_eq!(iso, ["hours", "minutes", "date", "seconds", "ns"]);
+        assert_eq!(rfc, ["date", "seconds", "ns"]);
+
+        assert!(parse_args(&[os("-Ihours")]).is_ok());
+        assert!(parse_args(&[os("--rfc-3339=hours")]).is_err());
+        assert!(parse_args(&[os("--rfc-3339=seconds")]).is_ok());
+    }
+
+    #[test]
+    fn precision_arguments_accept_an_unambiguous_prefix() {
+        // GNU's argmatch does prefix matching: `date -Isec` works. The
+        // hand-rolled exact match this replaced refused it.
+        assert!(parse_args(&[os("-Isec")]).is_ok());
+        assert!(parse_args(&[os("--rfc-3339=sec")]).is_ok());
+        // `s` is ambiguous between `seconds` and nothing else in the 3339
+        // table, but in the ISO table it is unambiguous too; `n` vs `ns`
+        // likewise. The interesting refusal is a word matching nothing.
+        assert!(parse_args(&[os("-Ibogus")]).is_err());
+    }
+
+    #[test]
+    fn date_sources_are_mutually_exclusive_but_repeats_are_not() {
+        // Measured: `date -d @0 -r file` refuses, while `date -d @0 -d @1`
+        // takes the second. Before this, the first case silently printed the
+        // reference file's time and discarded the -d.
+        let e = parse_args(&[os("-d"), os("@0"), os("-r"), os("f")]).unwrap_err();
+        assert!(e.contains("mutually exclusive"), "{e}");
+        let e = parse_args(&[os("-r"), os("f"), os("-d"), os("@0")]).unwrap_err();
+        assert!(e.contains("mutually exclusive"), "{e}");
+
+        let cfg = parse_args(&[os("-d"), os("@0"), os("-d"), os("@1")]).unwrap();
+        assert_eq!(cfg.when, When::Epoch(1));
+    }
+
+    #[test]
+    fn a_bare_operand_gets_one_of_three_measured_messages() {
+        // Which one depends on what the caller has already supplied.
+        let e = parse_args(&[os("extra")]).unwrap_err();
+        assert!(e.contains("invalid date"), "{e}");
+        // ...and that one carries no `Try …` referral.
+        assert!(!e.contains("--help"), "{e}");
+
+        let e = parse_args(&[os("+%F"), os("extra")]).unwrap_err();
+        assert!(e.contains("extra operand"), "{e}");
+
+        let e = parse_args(&[os("-d"), os("@0"), os("extra")]).unwrap_err();
+        assert!(e.contains("lacks a leading '+'"), "{e}");
+        assert!(
+            e.contains("must be a format string beginning with '+'"),
+            "{e}"
+        );
     }
 
     #[test]

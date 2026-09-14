@@ -3160,6 +3160,7 @@ mod tests {
 
     #[test]
     fn test_stream_to_file_sentinel_stdin() {
+        let _g = lock_std_streams_for_test();
         let file = stream_to_file(STDIN_SENTINEL as *mut u8);
         assert!(!file.is_null());
         let f = unsafe { &*file };
@@ -3168,6 +3169,7 @@ mod tests {
 
     #[test]
     fn test_stream_to_file_sentinel_stdout() {
+        let _g = lock_std_streams_for_test();
         let file = stream_to_file(STDOUT_SENTINEL as *mut u8);
         assert!(!file.is_null());
         let f = unsafe { &*file };
@@ -3176,6 +3178,7 @@ mod tests {
 
     #[test]
     fn test_stream_to_file_sentinel_stderr() {
+        let _g = lock_std_streams_for_test();
         let file = stream_to_file(STDERR_SENTINEL as *mut u8);
         assert!(!file.is_null());
         let f = unsafe { &*file };
@@ -3437,6 +3440,7 @@ mod tests {
 
     #[test]
     fn test_feof_initially_zero() {
+        let _g = lock_std_streams_for_test();
         // stdout starts with no EOF flag.
         // Reset flag state first to avoid interference from prior tests.
         let file = stream_to_file(STDOUT_SENTINEL as *mut u8);
@@ -3448,6 +3452,7 @@ mod tests {
 
     #[test]
     fn test_ferror_initially_zero() {
+        let _g = lock_std_streams_for_test();
         let file = stream_to_file(STDOUT_SENTINEL as *mut u8);
         unsafe {
             (*file).flags &= !FLAG_ERR;
@@ -3457,6 +3462,7 @@ mod tests {
 
     #[test]
     fn test_feof_after_setting_flag() {
+        let _g = lock_std_streams_for_test();
         let file = stream_to_file(STDERR_SENTINEL as *mut u8);
         let old_flags = unsafe { (*file).flags };
         unsafe {
@@ -3471,6 +3477,7 @@ mod tests {
 
     #[test]
     fn test_ferror_after_setting_flag() {
+        let _g = lock_std_streams_for_test();
         let file = stream_to_file(STDERR_SENTINEL as *mut u8);
         let old_flags = unsafe { (*file).flags };
         unsafe {
@@ -3485,6 +3492,7 @@ mod tests {
 
     #[test]
     fn test_clearerr_clears_both_flags() {
+        let _g = lock_std_streams_for_test();
         let file = stream_to_file(STDERR_SENTINEL as *mut u8);
         let old_flags = unsafe { (*file).flags };
         unsafe {
@@ -3505,6 +3513,7 @@ mod tests {
 
     #[test]
     fn test_ungetc_stores_byte() {
+        let _g = lock_std_streams_for_test();
         let file = stream_to_file(STDIN_SENTINEL as *mut u8);
         let old_byte = unsafe { (*file).ungetc_byte };
         let old_flags = unsafe { (*file).flags };
@@ -3528,6 +3537,7 @@ mod tests {
 
     #[test]
     fn test_ungetc_clears_eof_flag() {
+        let _g = lock_std_streams_for_test();
         let file = stream_to_file(STDIN_SENTINEL as *mut u8);
         let old_flags = unsafe { (*file).flags };
         let old_byte = unsafe { (*file).ungetc_byte };
@@ -3549,6 +3559,7 @@ mod tests {
 
     #[test]
     fn test_ungetc_masks_to_byte() {
+        let _g = lock_std_streams_for_test();
         let file = stream_to_file(STDIN_SENTINEL as *mut u8);
         let old_byte = unsafe { (*file).ungetc_byte };
 
@@ -3641,6 +3652,7 @@ mod tests {
 
     #[test]
     fn test_setvbuf_valid_modes() {
+        let _g = lock_std_streams_for_test();
         // Each valid mode (0=_IOFBF, 1=_IOLBF, 2=_IONBF) should succeed.
         // Test on stderr (unbuffered) since we can restore its mode.
         let file = stream_to_file(STDERR_SENTINEL as *mut u8);
@@ -3800,12 +3812,14 @@ mod tests {
 
     #[test]
     fn test_fgets_null_buf() {
+        let _g = lock_std_streams_for_test();
         let ret = fgets(core::ptr::null_mut(), 100, STDIN_SENTINEL as *mut u8);
         assert!(ret.is_null());
     }
 
     #[test]
     fn test_fgets_zero_size() {
+        let _g = lock_std_streams_for_test();
         let mut buf = [0u8; 10];
         let ret = fgets(buf.as_mut_ptr(), 0, STDIN_SENTINEL as *mut u8);
         assert!(ret.is_null());
@@ -3813,6 +3827,7 @@ mod tests {
 
     #[test]
     fn test_fgets_negative_size() {
+        let _g = lock_std_streams_for_test();
         let mut buf = [0u8; 10];
         let ret = fgets(buf.as_mut_ptr(), -1, STDIN_SENTINEL as *mut u8);
         assert!(ret.is_null());
@@ -3820,6 +3835,7 @@ mod tests {
 
     #[test]
     fn test_fgets_size_one() {
+        let _g = lock_std_streams_for_test();
         // POSIX: size=1 writes NUL and returns buf (empty string, no read).
         let mut buf = [0xFFu8; 10];
         let ret = fgets(buf.as_mut_ptr(), 1, STDIN_SENTINEL as *mut u8);
@@ -3998,6 +4014,7 @@ mod tests {
 
     #[test]
     fn test_setbuf_null_makes_unbuffered() {
+        let _g = lock_std_streams_for_test();
         let file = stream_to_file(STDERR_SENTINEL as *mut u8);
         let old_mode = unsafe { (*file).buf_mode };
         setbuf(STDERR_SENTINEL as *mut u8, core::ptr::null_mut());
@@ -4009,6 +4026,7 @@ mod tests {
 
     #[test]
     fn test_setbuf_nonnull_makes_fully_buffered() {
+        let _g = lock_std_streams_for_test();
         let file = stream_to_file(STDERR_SENTINEL as *mut u8);
         let old_mode = unsafe { (*file).buf_mode };
         let mut dummy = [0u8; 1];
@@ -4025,6 +4043,7 @@ mod tests {
 
     #[test]
     fn test_setlinebuf_makes_line_buffered() {
+        let _g = lock_std_streams_for_test();
         let file = stream_to_file(STDERR_SENTINEL as *mut u8);
         let old_mode = unsafe { (*file).buf_mode };
         setlinebuf(STDERR_SENTINEL as *mut u8);
@@ -4040,6 +4059,7 @@ mod tests {
 
     #[test]
     fn test_setbuffer_null_makes_unbuffered() {
+        let _g = lock_std_streams_for_test();
         let file = stream_to_file(STDERR_SENTINEL as *mut u8);
         let old_mode = unsafe { (*file).buf_mode };
         setbuffer(STDERR_SENTINEL as *mut u8, core::ptr::null_mut(), 0);
@@ -4051,6 +4071,7 @@ mod tests {
 
     #[test]
     fn test_setbuffer_nonnull_makes_fully_buffered() {
+        let _g = lock_std_streams_for_test();
         let file = stream_to_file(STDERR_SENTINEL as *mut u8);
         let old_mode = unsafe { (*file).buf_mode };
         let mut dummy = [0u8; 1];
@@ -4067,6 +4088,7 @@ mod tests {
 
     #[test]
     fn test_setvbuf_full_to_line() {
+        let _g = lock_std_streams_for_test();
         let file = stream_to_file(STDERR_SENTINEL as *mut u8);
         let old_mode = unsafe { (*file).buf_mode };
 
@@ -4085,6 +4107,7 @@ mod tests {
 
     #[test]
     fn test_setvbuf_line_to_none() {
+        let _g = lock_std_streams_for_test();
         let file = stream_to_file(STDERR_SENTINEL as *mut u8);
         let old_mode = unsafe { (*file).buf_mode };
 
@@ -4101,6 +4124,7 @@ mod tests {
 
     #[test]
     fn test_setvbuf_clears_read_buffer_on_mode_change() {
+        let _g = lock_std_streams_for_test();
         let file = stream_to_file(STDERR_SENTINEL as *mut u8);
         let old_dir = unsafe { (*file).buf_dir };
         let old_pos = unsafe { (*file).buf_pos };
@@ -4239,6 +4263,7 @@ mod tests {
 
     #[test]
     fn test_fflush_idle_stream_returns_zero() {
+        let _g = lock_std_streams_for_test();
         let file = stream_to_file(STDERR_SENTINEL as *mut u8);
         let old_dir = unsafe { (*file).buf_dir };
         let old_pos = unsafe { (*file).buf_pos };
@@ -4263,6 +4288,7 @@ mod tests {
 
     #[test]
     fn test_rewind_clears_error() {
+        let _g = lock_std_streams_for_test();
         let file = stream_to_file(STDERR_SENTINEL as *mut u8);
         let old_flags = unsafe { (*file).flags };
 
@@ -4405,6 +4431,7 @@ mod tests {
 
     #[test]
     fn test_ungetc_overwrites_previous() {
+        let _g = lock_std_streams_for_test();
         let file = stream_to_file(STDIN_SENTINEL as *mut u8);
         let old_byte = unsafe { (*file).ungetc_byte };
         let old_flags = unsafe { (*file).flags };
@@ -4489,6 +4516,7 @@ mod tests {
 
     #[test]
     fn test_fgetc_stdin_no_crash() {
+        let _g = lock_std_streams_for_test();
         // fgetc reads from a stream. On the test host the stdin fd may
         // return EOF immediately (not a tty), but must not crash.
         let _ret = fgetc(STDIN_SENTINEL as *mut u8);
@@ -4497,6 +4525,7 @@ mod tests {
 
     #[test]
     fn test_fgetc_returns_ungetc_byte() {
+        let _g = lock_std_streams_for_test();
         // Push back a byte, then read it with fgetc.
         let file = stream_to_file(STDIN_SENTINEL as *mut u8);
         let old_byte = unsafe { (*file).ungetc_byte };

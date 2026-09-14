@@ -1771,6 +1771,25 @@ pub extern "C" fn gnu_dev_makedev(major: u32, minor: u32) -> u64 {
 #[cfg(test)]
 mod tests {
 
+    /// Serialises the tests that register `atexit`/`on_exit` handlers.
+    ///
+    /// `ON_EXIT_FUNCS` and `ON_EXIT_COUNT` are a fixed 32-entry table and a
+    /// count, and `on_exit` appends to them without a lock -- correct for a
+    /// libc, where registration happens on one thread during startup. Two
+    /// `#[test]`s calling it concurrently are not that: they can interleave
+    /// read-modify-write on the count and lose a registration or overrun the
+    /// table. Unlike the other crt.rs entries the detector reports, this pair
+    /// genuinely writes.
+    static ON_EXIT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Poison-tolerant, so one failing test does not make its sibling panic in
+    /// `.unwrap()` and report two failures for one defect.
+    fn on_exit_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        ON_EXIT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     // -- the standard-descriptor fallback table --
 
     /// Descriptor 0 read-only, 1 and 2 write-only.
@@ -2530,12 +2549,14 @@ mod tests {
 
     #[test]
     fn test_on_exit_registers() {
+        let _g = on_exit_test_guard();
         let ret = on_exit(dummy_on_exit, core::ptr::null_mut());
         assert_eq!(ret, 0, "on_exit should succeed");
     }
 
     #[test]
     fn test_on_exit_with_arg() {
+        let _g = on_exit_test_guard();
         let mut data: i32 = 42;
         let ret = on_exit(dummy_on_exit, (&raw mut data) as *mut u8);
         assert_eq!(ret, 0);

@@ -3494,6 +3494,31 @@ pub extern "C" fn pthread_setschedparam(
 
 #[cfg(test)]
 mod tests {
+
+    /// Serialises the fourteen tests that drive `THREAD_NAMES`.
+    ///
+    /// The production `THREAD_NAME_LOCK` spinlock beside that table keeps the
+    /// data consistent, so this is not about corruption -- it is about
+    /// interference. These tests address threads by number, and the numbers
+    /// overlap: six of them write thread 0, and ids 1, 2, 3, 4 and 9 are each
+    /// driven by two. `test_pthread_setname_getname_roundtrip` names threads 3
+    /// and 4 and reads them back, while `..._short_len_rejected` writes 3 and
+    /// `..._buffer_too_small` writes 4. Cargo runs these on several threads, so
+    /// the roundtrip can read a name another test set and fail in a way that
+    /// reproduces rarely and looks like a bug in `pthread_getname_np`.
+    ///
+    /// Named `..._TEST_LOCK` because `THREAD_NAME_LOCK` is already taken by the
+    /// real spinlock this file ships; the two guard different things.
+    static THREAD_NAME_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Take the lock, ignoring poisoning: a panicking test would otherwise make
+    /// the other thirteen panic on `.unwrap()`, reporting one real failure as
+    /// fourteen and burying the one that matters.
+    fn thread_name_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        THREAD_NAME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
     use super::*;
 
     #[test]
@@ -5576,12 +5601,14 @@ mod tests {
 
     #[test]
     fn test_pthread_setname_np_null() {
+        let _g = thread_name_test_guard();
         let ret = unsafe { pthread_setname_np(0, core::ptr::null()) };
         assert_eq!(ret, crate::errno::EFAULT);
     }
 
     #[test]
     fn test_pthread_setname_np_too_long() {
+        let _g = thread_name_test_guard();
         // PTHREAD_NAME_MAX is 16, so a 16-char name (excluding null) is too long.
         let name = b"0123456789abcdef\0";
         let ret = unsafe { pthread_setname_np(0, name.as_ptr()) };
@@ -5590,6 +5617,7 @@ mod tests {
 
     #[test]
     fn test_pthread_setname_np_max_valid() {
+        let _g = thread_name_test_guard();
         // 15 chars + null = exactly PTHREAD_NAME_MAX.
         let name = b"0123456789abcde\0";
         let ret = unsafe { pthread_setname_np(1, name.as_ptr()) };
@@ -5598,6 +5626,7 @@ mod tests {
 
     #[test]
     fn test_pthread_setname_np_short() {
+        let _g = thread_name_test_guard();
         let name = b"main\0";
         let ret = unsafe { pthread_setname_np(2, name.as_ptr()) };
         assert_eq!(ret, 0);
@@ -5605,6 +5634,7 @@ mod tests {
 
     #[test]
     fn test_pthread_getname_np_null() {
+        let _g = thread_name_test_guard();
         let ret = unsafe { pthread_getname_np(0, core::ptr::null_mut(), 16) };
         assert_eq!(ret, crate::errno::EFAULT);
     }
@@ -5615,6 +5645,7 @@ mod tests {
     /// value that fails it.  See `design-decisions.md` §303.
     #[test]
     fn test_pthread_getname_np_zero_len() {
+        let _g = thread_name_test_guard();
         let mut buf = [0u8; 16];
         let ret = unsafe { pthread_getname_np(0, buf.as_mut_ptr(), 0) };
         assert_eq!(ret, crate::errno::ERANGE);
@@ -5624,6 +5655,7 @@ mod tests {
     /// outranks a null one.  See `design-decisions.md` §303.
     #[test]
     fn test_pthread_getname_np_short_len_outranks_a_null_buffer() {
+        let _g = thread_name_test_guard();
         let ret = unsafe { pthread_getname_np(0, core::ptr::null_mut(), 4) };
         assert_eq!(ret, crate::errno::ERANGE);
     }
@@ -5634,6 +5666,7 @@ mod tests {
     /// used to accept.  See `design-decisions.md` §303.
     #[test]
     fn test_pthread_getname_np_short_len_rejected_even_when_the_name_would_fit() {
+        let _g = thread_name_test_guard();
         let name = b"ab\0";
         assert_eq!(unsafe { pthread_setname_np(9, name.as_ptr()) }, 0);
 
@@ -5644,6 +5677,7 @@ mod tests {
 
     #[test]
     fn test_pthread_setname_getname_roundtrip() {
+        let _g = thread_name_test_guard();
         let name = b"worker\0";
         let ret = unsafe { pthread_setname_np(3, name.as_ptr()) };
         assert_eq!(ret, 0);
@@ -5656,6 +5690,7 @@ mod tests {
 
     #[test]
     fn test_pthread_getname_np_buffer_too_small() {
+        let _g = thread_name_test_guard();
         let name = b"longthreadname\0"; // 14 chars
         let _ = unsafe { pthread_setname_np(4, name.as_ptr()) };
 
@@ -5669,6 +5704,7 @@ mod tests {
 
     #[test]
     fn test_pthread_setname_empty() {
+        let _g = thread_name_test_guard();
         let name = b"\0";
         let ret = unsafe { pthread_setname_np(5, name.as_ptr()) };
         assert_eq!(ret, 0);
@@ -5680,6 +5716,7 @@ mod tests {
 
     #[test]
     fn test_pthread_name_no_modulo_collision() {
+        let _g = thread_name_test_guard();
         // Two task IDs that alias under the old `tid % MAX_NAMED_THREADS`
         // hash (100 and 100 + MAX_NAMED_THREADS ≡ same slot) must now keep
         // independent names.
@@ -5704,6 +5741,7 @@ mod tests {
 
     #[test]
     fn test_pthread_name_release_clears_slot() {
+        let _g = thread_name_test_guard();
         let t: PthreadT = 200;
         let n = b"worker\0";
         assert_eq!(unsafe { pthread_setname_np(t, n.as_ptr()) }, 0);
@@ -5720,6 +5758,7 @@ mod tests {
 
     #[test]
     fn test_pthread_getname_unset_thread_is_empty() {
+        let _g = thread_name_test_guard();
         // A thread ID that was never named yields the empty string (not an
         // error), regardless of any stale data at the old modulo slot.
         let mut buf = [0xFFu8; 16];

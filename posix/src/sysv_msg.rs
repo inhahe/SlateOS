@@ -789,9 +789,28 @@ mod tests {
 
     static TEST_LOCK: Mutex<()> = Mutex::new(());
 
-    fn with_clean<F: FnOnce()>(f: F) {
-        let _g = TEST_LOCK.lock().unwrap();
+    /// Take `TEST_LOCK` and reset the queue pool, returning the guard.
+    ///
+    /// The pool is `MAX_QUEUES` = 8 slots of shared state and these tests
+    /// depend on its *contents*, not merely touch it:
+    /// `test_msgget_pool_exhaustion_enospc` fills it deliberately and asserts
+    /// the next `msgget` fails. A test that allocates outside this guard both
+    /// changes that answer and risks getting `ENOSPC` itself.
+    ///
+    /// Poison-tolerant, unlike the `.unwrap()` this replaces. That unwrap made
+    /// one genuine failure cascade: when the pool-exhaustion test panicked, the
+    /// next seventeen tests panicked in `.unwrap()` and the run reported
+    /// eighteen failures for one defect.
+    fn clean_pool_guard() -> std::sync::MutexGuard<'static, ()> {
+        let g = TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         test_reset_all();
+        g
+    }
+
+    fn with_clean<F: FnOnce()>(f: F) {
+        let _g = clean_pool_guard();
         f();
     }
 
@@ -849,6 +868,7 @@ mod tests {
 
     #[test]
     fn msg_copy_returns_a_message_without_dequeuing_it() {
+        let _pool = clean_pool_guard();
         // THE REGRESSION PIN. MSG_COPY used to fall through to a normal
         // receive, so a caller that asked to look at a message destroyed it
         // and the recipient it was queued for never saw it.
@@ -885,6 +905,7 @@ mod tests {
 
     #[test]
     fn msg_copy_indexes_by_position_not_by_type() {
+        let _pool = clean_pool_guard();
         let qid = msgget(IPC_PRIVATE, 0o600 | IPC_CREAT);
         assert!(qid >= 0);
         for (n, body) in [b"aaaaaaaa", b"bbbbbbbb"].iter().enumerate() {
@@ -908,6 +929,7 @@ mod tests {
 
     #[test]
     fn msg_copy_past_the_end_is_enomsg() {
+        let _pool = clean_pool_guard();
         let qid = msgget(IPC_PRIVATE, 0o600 | IPC_CREAT);
         assert!(qid >= 0);
         let mut out = [0u8; 64];
@@ -919,6 +941,7 @@ mod tests {
 
     #[test]
     fn msg_copy_without_nowait_is_einval() {
+        let _pool = clean_pool_guard();
         // A peek that blocks waiting for an index has nothing to wait for.
         let qid = msgget(IPC_PRIVATE, 0o600 | IPC_CREAT);
         assert!(qid >= 0);
@@ -930,6 +953,7 @@ mod tests {
 
     #[test]
     fn msg_copy_with_msg_except_is_einval() {
+        let _pool = clean_pool_guard();
         // MSG_EXCEPT selects by type, MSG_COPY by position; one call cannot
         // mean both.
         let qid = msgget(IPC_PRIVATE, 0o600 | IPC_CREAT);

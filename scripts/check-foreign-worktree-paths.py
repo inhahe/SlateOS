@@ -34,6 +34,23 @@ A grep that counts documentation as defect would have filed a systemic bug that
 does not exist -- so this parses instead. Comments never reach the AST at all,
 and docstrings are identified and skipped explicitly.
 
+## Scope, and what it does not cover
+
+`scripts/**/*.py` only. Shell scripts are **not** scanned, because the
+technique here is an AST walk and there is no equally reliable way to tell
+code from a comment in shell without writing a parser for it.
+
+Checked once, on 2026-09-14: `scripts/*.sh` and `scripts/hooks/*` contain
+**zero** lane-worktree paths, so the gap is empty today rather than merely
+unexamined. `build/*.json` run records do contain them, correctly -- they are
+records of runs that happened in a particular tree, not code that addresses
+one.
+
+That measurement expires. A `.sh` that hardcodes a lane path would pass this
+gate silently, and `boot-test.sh` -- the file that runs every other gate -- is
+shell. If that becomes a live risk the honest fix is a second, cruder check for
+shell rather than pretending this one covers it.
+
 ## The rule
 
 A string constant in code, naming `os-lane-*` under the projects directory, is

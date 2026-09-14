@@ -162,6 +162,25 @@ impl AppRule {
             banner: true,
         }
     }
+
+    /// This rule with a different importance.
+    ///
+    /// Builders rather than field assignment for the two settings a caller
+    /// usually changes one of, because a rule is most often written as a
+    /// single expression in a table of defaults.
+    #[must_use]
+    pub fn with_importance(mut self, importance: Importance) -> Self {
+        self.importance = importance;
+        self
+    }
+
+    /// This rule with sound and banner set.
+    #[must_use]
+    pub fn with_alerts(mut self, sound: bool, banner: bool) -> Self {
+        self.sound = sound;
+        self.banner = banner;
+        self
+    }
 }
 
 // ============================================================================

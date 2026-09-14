@@ -150,6 +150,34 @@ mkdir -p da/sub db/sub
 printf 'nested\n'                                > da/sub/deep.txt
 printf 'NESTED\n'                                > db/sub/deep.txt
 
+# Names holding a byte that is not valid UTF-8, which on this OS is a legal
+# filename -- every byte but `/` and NUL is.
+#
+# These exist because `diff` handled them in the worst possible way until
+# 2026-09-14: `list_dir` read each entry with `.to_str()` and SKIPPED the ones
+# that did not decode, so `diff -r` compared trees while silently omitting
+# files, and reported no difference for a file it had never opened. A
+# comparison tool answering "the same" about something it declined to read is
+# the one failure it must not have. Separately, `main` used `env::args()`,
+# whose iterator unwraps, so naming such a file on the command line killed the
+# process before `diff` ran at all.
+#
+# `\351` is the Latin-1 encoding of `é` and is not valid UTF-8 on its own,
+# which is exactly the property being tested.
+# Both names go through `$(printf ...)`. Writing `"da/only\351.txt"` directly
+# does NOT work and is the trap here: bash does not process `\351` inside
+# double quotes, so that creates a file whose name contains a literal
+# backslash, three digits and a dot -- valid ASCII throughout, and therefore
+# testing nothing. The first version of this block did exactly that, and it
+# looked right because both sides agreed about it.
+nonutf8=$(printf 'odd\351name.txt')
+onlyodd=$(printf 'only\351.txt')
+printf 'alpha\n'                                 > "da/$nonutf8"
+printf 'ALPHA\n'                                 > "db/$nonutf8"
+printf 'lonely\n'                                > "da/$onlyodd"
+printf 'top level\n'                             > "$nonutf8"
+stamp "da/$nonutf8" "db/$nonutf8" "da/$onlyodd" "$nonutf8"
+
 # Everything gets the same mtime, including the directories, so no header and no
 # `-r` listing can differ for a reason that is not the program's.
 stamp ./*.txt da/*.txt db/*.txt da/sub/*.txt db/sub/*.txt da/sub db/sub da db .
@@ -356,6 +384,12 @@ run_stdin '' - empty.txt
 run_case da db
 run_case -r da db
 run_case --recursive da db
+
+# A non-UTF-8 filename named on the command line, and one reached by the
+# directory walk. See the fixture block for what these caught.
+run_case "$nonutf8" base.txt
+run_case base.txt "$nonutf8"
+run_case -u "da/$nonutf8" "db/$nonutf8"
 run_case -q -r da db
 run_case -N da db
 run_case --new-file da db

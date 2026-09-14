@@ -269,7 +269,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                 return ParseResult::Version;
             } else {
                 eprintln!("diff: unrecognized option {}", quoteaf_os(arg));
-                eprintln!("Try 'diff --help' for more information.");
+                eprintln!("diff: Try 'diff --help' for more information.");
                 process::exit(2);
             }
 
@@ -305,6 +305,45 @@ fn parse_args(args: &[String]) -> ParseResult {
                         j = chars.len();
                         continue;
                     }
+                }
+                // `-U N` -- unified with N lines of context, the argument in a
+                // SEPARATE word, unlike `-u3` which glues it on. GNU accepts
+                // both spellings and this build accepted only the glued one,
+                // so `diff -U 5` was refused outright as an unknown option.
+                //
+                // The argument is taken unconditionally rather than only when
+                // it does not look like an option, which is measured: GNU
+                // answers `diff -U -1` with `invalid context length '-1'`, so
+                // it consumed the `-1` as the value rather than treating it as
+                // a flag.
+                'U' => {
+                    format = Format::Unified;
+                    let rest: String = chars[j + 1..].iter().collect();
+                    let value = if rest.is_empty() {
+                        i += 1;
+                        if i >= args.len() {
+                            eprintln!("diff: option '-U' requires an argument");
+                            eprintln!("diff: Try 'diff --help' for more information.");
+                            process::exit(2);
+                        }
+                        args[i].clone()
+                    } else {
+                        rest
+                    };
+                    match value.parse::<usize>() {
+                        Ok(n) => context_lines = Some(n),
+                        Err(_) => {
+                            // GNU's wording, measured: `diff: invalid context
+                            // length 'notanumber'`. Not "invalid width", which
+                            // is what the neighbouring `-W` says, and not the
+                            // generic unknown-option line this used to give.
+                            eprintln!("diff: invalid context length {}", quoteaf_os(&value));
+                            eprintln!("diff: Try 'diff --help' for more information.");
+                            process::exit(2);
+                        }
+                    }
+                    j = chars.len();
+                    continue;
                 }
                 'y' => format = Format::SideBySide,
                 'W' => {
@@ -345,7 +384,7 @@ fn parse_args(args: &[String]) -> ParseResult {
                 'N' => new_file = true,
                 other => {
                     eprintln!("diff: invalid option -- {}", quoteaf_os(other.to_string()));
-                    eprintln!("Try 'diff --help' for more information.");
+                    eprintln!("diff: Try 'diff --help' for more information.");
                     process::exit(2);
                 }
             }
@@ -357,7 +396,7 @@ fn parse_args(args: &[String]) -> ParseResult {
 
     if positional.len() != 2 {
         eprintln!("diff: requires exactly two file arguments");
-        eprintln!("Try 'diff --help' for more information.");
+        eprintln!("diff: Try 'diff --help' for more information.");
         process::exit(2);
     }
 
@@ -1107,6 +1146,24 @@ fn epoch_parts(t: std::time::SystemTime) -> (i64, u32) {
     }
 }
 
+/// One side of a `@@ -a,b +c,d @@` header.
+///
+/// A count of exactly ONE is written as the bare line number, with no comma
+/// and no count: GNU answers `diff -U0` with `@@ -20 +20 @@`, not
+/// `@@ -20,1 +20,1 @@`. That is the unified format's own rule rather than a
+/// preference, and it shows up the moment a hunk has no context -- which is
+/// why `-U0` was the case that exposed it here.
+///
+/// A count of ZERO keeps its `,0` and takes the line number GNU uses for an
+/// insertion point, which the caller has already worked out.
+fn range_field(start: usize, count: usize) -> String {
+    if count == 1 {
+        format!("{start}")
+    } else {
+        format!("{start},{count}")
+    }
+}
+
 fn print_unified(hunks: &[Hunk], path1: &str, path2: &str, config: &Config) {
     let out = io::stdout();
     let mut w = out.lock();
@@ -1132,11 +1189,9 @@ fn print_unified(hunks: &[Hunk], path1: &str, path2: &str, config: &Config) {
         let h1_start = hunk.start1 + 1;
         let h2_start = hunk.start2 + 1;
         let header = format!(
-            "@@ -{},{} +{},{} @@",
-            if hunk.count1 == 0 { 0 } else { h1_start },
-            hunk.count1,
-            if hunk.count2 == 0 { 0 } else { h2_start },
-            hunk.count2,
+            "@@ -{} +{} @@",
+            range_field(if hunk.count1 == 0 { 0 } else { h1_start }, hunk.count1),
+            range_field(if hunk.count2 == 0 { 0 } else { h2_start }, hunk.count2),
         );
         let _ = writeln!(w, "{}", color_cyan(&header, config.color));
 
@@ -1691,6 +1746,22 @@ fn main() {
 #[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 mod tests {
     use super::*;
+
+    /// A hunk of exactly one line drops the `,1` from its `@@` header.
+    ///
+    /// Measured: `diff -U0` on a one-line change gives `@@ -20 +20 @@`, and
+    /// this build wrote `@@ -20,1 +20,1 @@`. `patch` reads both -- its
+    /// `parse_range` already treats a bare number as a count of one -- so
+    /// nothing downstream complained, which is exactly why the harness is the
+    /// thing that found it.
+    #[test]
+    fn a_one_line_range_is_written_without_its_count() {
+        assert_eq!(range_field(20, 1), "20");
+        // Every other count keeps the comma, including the two that bracket 1.
+        assert_eq!(range_field(20, 0), "20,0");
+        assert_eq!(range_field(20, 2), "20,2");
+        assert_eq!(range_field(1, 4), "1,4");
+    }
 
     // ---------------- the header timestamp ----------------
 

@@ -10,7 +10,3 @@
 # A genuine false positive belongs in the IGNORE table in the script, which
 # records *why*, not here, which records only *that*.
 
-posix/src/stdio.rs:COUNTER
-posix/src/stdio.rs:STATIC_BUF
-userspace/authlib/src/lib.rs:FAKE_NOW_PAIR
-userspace/ping/src/main.rs:RUNNING

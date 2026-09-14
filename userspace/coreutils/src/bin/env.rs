@@ -60,7 +60,7 @@ use std::process::{Command, ExitStatus};
 
 use coreutils::errmsg::strerror;
 use coreutils::getopt::Program;
-use coreutils::quote::{os_bytes, quote_os, quotef_os};
+use coreutils::quote::{os_bytes, quote_os, quoteaf_os};
 
 /// `env`'s own failures exit 125, not 1 — GNU reserves 126 and 127 for "found
 /// the command but could not run it" and "could not find it", so a third
@@ -435,19 +435,44 @@ fn run_main() -> ExitCode {
         }
     };
 
+    // A NAME THAT CANNOT NAME A VARIABLE IS REFUSED, not quietly ignored, and
+    // before anything else happens. Measured:
+    //
+    //     env -u ''          env: cannot unset ‘’: Invalid argument       rc 125
+    //     env -u 'WITH=EQ'   env: cannot unset ‘WITH=EQ’: Invalid argument rc 125
+    //
+    // This accepted both and exited 0 having unset nothing -- so a script that
+    // built the name from a variable and got it empty was told the unset had
+    // happened. Curly marks here, unlike `--chdir`'s ASCII ones below; both
+    // spellings were measured rather than made uniform.
+    for name in &cfg.unset {
+        let bytes = os_bytes(name);
+        if bytes.is_empty() || bytes.contains(&b'=') {
+            diag!(
+                "env: cannot unset {}: {}",
+                quote_os(name),
+                strerror(&io::Error::from_raw_os_error(22))
+            );
+            return status(EXIT_CANCELED);
+        }
+    }
+
     let vars = effective_env(&cfg, env::vars_os().collect());
 
     let Some(program) = cfg.command.first() else {
-        // No command: `-C` still has to happen, because `env -C /tmp` with no
-        // command is how a caller asks what the environment looks like there.
-        if let Some(dir) = &cfg.chdir
-            && let Err(e) = env::set_current_dir(dir)
-        {
-            diag!(
-                "env: cannot change directory to {}: {}",
-                quote_os(dir),
-                strerror(&e)
-            );
+        // `-C` WITHOUT A COMMAND IS AN ERROR, measured:
+        //
+        //     $ env -C /tmp
+        //     env: must specify command with --chdir (-C)      rc 125
+        //
+        // The comment that stood here said the opposite -- that `env -C /tmp`
+        // with no command "is how a caller asks what the environment looks
+        // like there" -- and this printed the environment, exit 0. It is a
+        // reasonable-sounding thing for the option to mean and it is not what
+        // it means.
+        if cfg.chdir.is_some() {
+            diag!("env: must specify command with --chdir (-C)");
+            diag!("Try 'env --help' for more information.");
             return status(EXIT_CANCELED);
         }
         return status(write_out(&render(&vars, &cfg.sep)));
@@ -458,13 +483,40 @@ fn run_main() -> ExitCode {
     cmd.env_clear();
     cmd.envs(vars);
     if let Some(dir) = &cfg.chdir {
+        // CHECKED HERE, not left to the spawn. `Command::current_dir` defers
+        // the chdir, so a directory that does not exist surfaced as a failure
+        // to run the PROGRAM -- `env: ‘/bin/pwd’: No such file or directory`,
+        // naming a file that is perfectly present. GNU names the directory:
+        //
+        //     env: cannot change directory to '/nosuch': No such file...
+        //
+        // `quoteaf_os`, with ASCII apostrophes, because that is what GNU uses
+        // HERE -- unlike `cannot unset ‘’` and ‘program’ above, which are curly.
+        // Measured all three rather than assumed from one; coreutils is not
+        // uniform about this and picking one spelling for the file would be
+        // wrong twice.
+        if let Err(e) = std::fs::metadata(dir) {
+            diag!(
+                "env: cannot change directory to {}: {}",
+                quoteaf_os(dir),
+                strerror(&e)
+            );
+            return status(EXIT_CANCELED);
+        }
         cmd.current_dir(dir);
     }
 
     match cmd.status() {
         Ok(finished) => status(exit_status_code(&finished)),
         Err(e) => {
-            diag!("env: {}: {}", quotef_os(program), strerror(&e));
+            // `quote_os`, not `quotef_os`: GNU quotes the name ALWAYS here,
+            // in the curly marks its own `quote()` produces --
+            // `env: ‘novalue’: No such file or directory`. `quotef_os` quotes
+            // only a name that needs it, so a plain one came out bare and one
+            // holding `=` came out in ASCII apostrophes; both differ from GNU,
+            // in opposite directions, which is why one spelling could not be
+            // right for both.
+            diag!("env: {}: {}", quote_os(program), strerror(&e));
             status(spawn_failure_status(e.kind()))
         }
     }

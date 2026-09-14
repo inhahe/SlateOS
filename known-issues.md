@@ -657,6 +657,106 @@ does — rather than reading `/etc/resolv.conf`'s `search` line. The distinction
 matters beyond this program: the resolver's search list is for *completing
 queries*, not for naming this host.
 
+### BLOCKED, 2026-09-14 — our own libc does not implement `AI_CANONNAME`
+
+The fix above names a mechanism this project does not have.
+`posix/src/socket.rs:4589` says so outright, in the `getaddrinfo` result
+constructor:
+
+```rust
+// Always NULL: we do not implement AI_CANONNAME.  If it is ever
+// added, the name must live inside this same block (glibc does the
+// same) — `freeaddrinfo` frees the node and nothing else.
+ai_canonname: core::ptr::null_mut(),
+```
+
+So `getaddrinfo(…, AI_CANONNAME, …)` returned a node whose canonical name was
+`NULL`, and `hostname` would have had nothing to read. **The prerequisite is in
+this lane** — `posix/**` is lane B's — so this was not a request to file, it
+was two pieces of work in order:
+
+1. ~~implement `AI_CANONNAME` in `posix`~~ — **DONE 2026-09-14**, see below;
+2. then change `hostname` to use it — **still open, and step 1 did not unblock
+   it.** Read the next subsection before starting it.
+
+### STEP 1 DONE, 2026-09-14 — and it does not fix `hostname -f`
+
+`gai_alloc` now takes a `canon: Option<&[u8]>` and copies the name into the
+same block, after the `SockaddrIn`, honouring the constraint the old comment
+stated; `getaddrinfo` attaches it to the head node only, and only when
+`AI_CANONNAME` is set and `nodename` is non-null. Four tests cover it,
+including a control (no flag ⇒ still `NULL`) and an assertion that the
+`SockaddrIn` survives — writing the name at the wrong offset inside the shared
+block reads `sin_family` back as `14641`, the ASCII `"19"` of the test's
+`"192.168.1.1"`, which is how that assertion was confirmed to fail when it
+ought to.
+
+**What that fixed is a NULL dereference, not the FQDN.** A program that sets
+`AI_CANONNAME` and does `printf("%s", res->ai_canonname)` — which is normal,
+since glibc guarantees the field is non-NULL there — was dereferencing NULL
+against our libc. That is now correct, and it is worth having on its own.
+
+**What it cannot fix, and why step 2 is still blocked.** The canonical name we
+return is *the queried name itself*, because there is nothing else to return:
+
+* `gethostbyname` fills `h_name` from its own `name` argument
+  (`HostentBuf::fill(…, name, name_len, resolved)`), not from the answer;
+* the answer has no room for a name — `SYS_DNS_RESOLVE` takes
+  `(hostname_ptr, hostname_len, output_ptr)` and writes **four address bytes**.
+
+So the resolver cannot report a CNAME, and `AI_CANONNAME` echoes its input: a
+short hostname in, a short hostname out. That is precisely what glibc does for
+a host with no CNAME, and precisely what `hostname -f` must *not* do.
+**Step 2 as written would replace an invented FQDN with a short name — it
+would not produce a correct one.** Whether that trade is an improvement (a
+confidently wrong answer versus an admittedly incomplete one) is a real
+question, and not one to settle silently while implementing it.
+
+Closing this properly needs the FQDN to exist somewhere a libc call can reach:
+either `SYS_DNS_RESOLVE` grows a canonical-name output, or the kernel's hosts
+table in `kernel/src/fs/nameservice.rs` becomes readable by name. Both are
+lane A's, so both are requests rather than work.
+
+**Scale, so the next reader knows what they are picking up:**
+`scripts/hostname-diff.sh` is **7 passed / 50 differed** — by ratio the worst
+harness in the tree, and the largest single family of those is this one cause.
+Doing (1) without (2) fixes nothing visible — and, as the subsection above
+records, (1) is now done and (2) turns out to need a third thing that is not
+in this lane, so the ratio is unchanged and will stay that way until the
+resolver can carry a name.
+
+Written down because the entry as it stood sends someone to `getaddrinfo` with
+a plausible plan and no warning that the call cannot answer.
+
+**And one thing that is NOT wrong, checked on the way.** Reading the above, the
+next step looked alarming: nothing in `posix` reads `/etc/hosts` — the path is
+defined in `paths.rs` and referenced by nothing else, and `getaddrinfo`
+resolves by numeric parse, then the DNS syscall. That reads like "`localhost`
+does not resolve", which would be far worse than an FQDN.
+
+It is not the case. `kernel/src/fs/nameservice.rs` holds the hosts table,
+`localhost` and `ip6-localhost` included, and the DNS syscall `getaddrinfo`
+calls goes there. The resolution that other systems do in libc against a file
+is done kernel-side here, so libc not reading `/etc/hosts` is the design rather
+than a gap.
+
+Recorded because the wrong version of that paragraph was one step away from
+being written, and "the C library never reads /etc/hosts" is exactly the sort
+of claim that is technically true, sounds severe, and misleads.
+
+**Corrected 2026-09-14: the paragraph above said "there is no
+`gethostbyname`". That was false** — it is `posix/src/socket.rs:3892`, and
+`getaddrinfo` calls it for every non-numeric name. The grep behind the claim
+was `pub extern "C" fn gethostbyname`, which misses the actual signature
+`pub unsafe extern "C" fn`. The conclusion the paragraph reaches survives
+(resolution is kernel-side, `localhost` does resolve), but it reached it
+through a false premise, in a paragraph whose entire purpose was to stop a
+misleading claim being recorded. Noted rather than quietly edited because the
+false version was committed and pushed, and because the failure is a reusable
+one: **an absence proved by grepping for a signature is only as good as the
+modifiers in the pattern.** `unsafe`, `pub(crate)`, `async`, `const` and a
+line break after `fn` all defeat it. Grep for the bare name first, then narrow.
+
 ## B-COREUTILS-UNAME-PARSES-ITS-OWN-OPTIONS (lane B, 2026-09-11)
 
 `userspace/coreutils/src/bin/uname.rs` parses `argv` by hand rather than through

@@ -62,10 +62,27 @@ const SCROLLBAR_MIN_THUMB: f32 = 16.0;
 
 // ─── Viewport bounds (used for edge-flip logic) ─────────────────────────────
 
-/// Default viewport width used for edge detection when flipping menu position.
-const DEFAULT_VIEWPORT_WIDTH: f32 = 1920.0;
-/// Default viewport height used for edge detection when flipping menu position.
-const DEFAULT_VIEWPORT_HEIGHT: f32 = 1080.0;
+/// The screen a menu assumes it is on **before it has been shown**.
+///
+/// Nothing is positioned against this in practice: [`ContextMenu::show`] and
+/// [`Tooltip::start_hover`] both take the real viewport and store it, and
+/// those are the only two functions that place anything. This is the value a
+/// menu holds between `new` and `show`, when it is not on screen at all.
+///
+/// **It used to be what every menu was positioned against, and the bug that
+/// caused is worth keeping in front of whoever reads this next.** The
+/// edge-flip and the height cap both compared against a hard 1920x1080, so on
+/// any other display the flip fired at the wrong place or not at all. Measured
+/// on a 1024x768 screen with the shell's tray overflow menu: the panel was
+/// capped to 1080 -- a height the screen does not have -- placed at y=0, and
+/// drawn to **y=1080, 312 pixels past the bottom of the display**. Every row
+/// below 768 was unreachable.
+///
+/// That is the *same* defect this type's own documentation describes having
+/// fixed ("the rows down there were drawn off-screen, could not be seen, and
+/// could not be clicked"). The fix was real; it was written against a constant
+/// rather than the screen, so it worked at exactly one resolution.
+const FALLBACK_VIEWPORT: (f32, f32) = (1920.0, 1080.0);
 
 // ─── Menu types ─────────────────────────────────────────────────────────────
 
@@ -151,6 +168,13 @@ pub struct ContextMenu {
     /// `0..=max_scroll()`, and zero for every menu short enough to fit — which
     /// is nearly all of them, so the common case is unchanged.
     scroll: f32,
+    /// The screen this menu was last shown on.
+    ///
+    /// Stored rather than passed to each of the placement functions, because
+    /// `render` and `hit_test` run long after `show` and must agree with it
+    /// about where the bottom of the screen is. Set only by
+    /// [`show`](Self::show), which is the only thing that positions a menu.
+    viewport: (f32, f32),
 }
 
 impl ContextMenu {
@@ -166,6 +190,7 @@ impl ContextMenu {
             open_submenu: None,
             width,
             scroll: 0.0,
+            viewport: FALLBACK_VIEWPORT,
         }
     }
 
@@ -175,7 +200,11 @@ impl ContextMenu {
     /// the bottom edge. A menu taller than the whole viewport fits in neither
     /// direction, so it is given the full height of the screen and its rows
     /// scroll — see the type's docs for why the old flip could not express that.
-    pub fn show(&mut self, x: f32, y: f32) {
+    pub fn show(&mut self, x: f32, y: f32, viewport: (f32, f32)) {
+        // Before anything is measured: `panel_height` caps against the screen,
+        // so a stale viewport here would cap the panel to the last display the
+        // menu was opened on.
+        self.viewport = viewport;
         // Opening the menu shows the top of it. Reset before measuring: the
         // panel height does not depend on the offset, but leaving a stale
         // offset behind would open the menu part-way down its own list.
@@ -183,7 +212,7 @@ impl ContextMenu {
         let panel_height = self.panel_height();
 
         // Flip horizontally if menu would overflow right edge.
-        self.x = if x + self.width > DEFAULT_VIEWPORT_WIDTH {
+        self.x = if x + self.width > self.viewport.0 {
             (x - self.width).max(0.0)
         } else {
             x
@@ -192,7 +221,7 @@ impl ContextMenu {
         // Flip vertically if the menu would overflow the bottom edge. When the
         // panel is the full viewport height both branches give 0.0, which is
         // the only place it can go.
-        self.y = if y + panel_height > DEFAULT_VIEWPORT_HEIGHT {
+        self.y = if y + panel_height > self.viewport.1 {
             (y - panel_height).max(0.0)
         } else {
             y
@@ -287,7 +316,7 @@ impl ContextMenu {
                 let mut sub = ContextMenu::new(children.clone());
                 let sub_x = self.x + self.width;
                 let sub_y = self.y + self.y_offset_for_index(idx);
-                sub.show(sub_x, sub_y);
+                sub.show(sub_x, sub_y, self.viewport);
                 self.open_submenu = Some((idx, Box::new(sub)));
                 None
             }
@@ -339,7 +368,7 @@ impl ContextMenu {
                         let mut sub = ContextMenu::new(children.clone());
                         let sub_x = self.x + self.width;
                         let sub_y = self.y + self.y_offset_for_index(idx);
-                        sub.show(sub_x, sub_y);
+                        sub.show(sub_x, sub_y, self.viewport);
                         self.open_submenu = Some((idx, Box::new(sub)));
                     }
                 }
@@ -405,7 +434,7 @@ impl ContextMenu {
                             let mut sub = ContextMenu::new(children.clone());
                             let sub_x = self.x + self.width;
                             let sub_y = self.y + self.y_offset_for_index(idx);
-                            sub.show(sub_x, sub_y);
+                            sub.show(sub_x, sub_y, self.viewport);
                             self.open_submenu = Some((idx, Box::new(sub)));
                             Some(MenuAction::None)
                         }
@@ -427,7 +456,7 @@ impl ContextMenu {
                     let mut sub = ContextMenu::new(children.clone());
                     let sub_x = self.x + self.width;
                     let sub_y = self.y + self.y_offset_for_index(idx);
-                    sub.show(sub_x, sub_y);
+                    sub.show(sub_x, sub_y, self.viewport);
                     self.open_submenu = Some((idx, Box::new(sub)));
                 }
                 Some(MenuAction::None)
@@ -795,7 +824,7 @@ impl ContextMenu {
     /// [`Self::content_height`] for anything that fits, and the viewport
     /// otherwise.
     fn panel_height(&self) -> f32 {
-        self.content_height().min(DEFAULT_VIEWPORT_HEIGHT)
+        self.content_height().min(self.viewport.1)
     }
 
     /// Top of the region the rows are drawn in and hit-tested against.
@@ -954,6 +983,9 @@ pub struct Tooltip {
     delay_ms: u32,
     /// Timestamp (ms) when hover began; `None` if not hovering.
     hover_start: Option<u64>,
+    /// The screen this tooltip was last placed on, for the same reason
+    /// [`ContextMenu`] stores one: `render` runs after `start_hover`.
+    viewport: (f32, f32),
     /// Maximum width before text wraps to a new line.
     max_width: f32,
 }
@@ -969,6 +1001,7 @@ impl Tooltip {
             delay_ms: DEFAULT_TOOLTIP_DELAY_MS,
             hover_start: None,
             max_width: DEFAULT_TOOLTIP_MAX_WIDTH,
+            viewport: FALLBACK_VIEWPORT,
         }
     }
 
@@ -985,9 +1018,10 @@ impl Tooltip {
     }
 
     /// Call when the mouse enters the tooltip trigger area.
-    pub fn start_hover(&mut self, x: f32, y: f32, timestamp_ms: u64) {
+    pub fn start_hover(&mut self, x: f32, y: f32, timestamp_ms: u64, viewport: (f32, f32)) {
         if self.hover_start.is_none() {
             self.hover_start = Some(timestamp_ms);
+            self.viewport = viewport;
 
             // Position with offset, flipping if near viewport edges.
             let tip_width = self.compute_width();
@@ -996,10 +1030,10 @@ impl Tooltip {
             let mut tip_x = x + TOOLTIP_OFFSET_X;
             let mut tip_y = y + TOOLTIP_OFFSET_Y;
 
-            if tip_x + tip_width > DEFAULT_VIEWPORT_WIDTH {
+            if tip_x + tip_width > self.viewport.0 {
                 tip_x = (x - tip_width - TOOLTIP_OFFSET_X).max(0.0);
             }
-            if tip_y + tip_height > DEFAULT_VIEWPORT_HEIGHT {
+            if tip_y + tip_height > self.viewport.1 {
                 tip_y = (y - tip_height - TOOLTIP_OFFSET_Y).max(0.0);
             }
 
@@ -1132,6 +1166,7 @@ impl Tooltip {
 
 #[cfg(test)]
 mod tests {
+
     // A test module's job is to fail loudly the instant the code under test is
     // wrong, so the defensive lints that forbid exactly that in production code
     // are off here — as `CLAUDE.md` prescribes.
@@ -1146,6 +1181,14 @@ mod tests {
 
     use super::*;
     use crate::event::Modifiers;
+
+    /// The display these tests place menus on.
+    ///
+    /// Named rather than implied. Every one of these tests used to run against
+    /// a hardcoded 1920x1080 *inside the menu*, which is why they all passed
+    /// while the placement was wrong on every other screen -- the assertions
+    /// and the code under test were reading the same constant.
+    const SCREEN: (f32, f32) = (1920.0, 1080.0);
 
     fn sample_items() -> Vec<MenuItem> {
         vec![
@@ -1368,7 +1411,7 @@ mod tests {
     #[test]
     fn every_item_is_selectable_exactly_where_it_was_painted() {
         let mut menu = ContextMenu::new(geometry_items());
-        menu.show(300.0, 120.0);
+        menu.show(300.0, 120.0, SCREEN);
         for idx in 0..menu.items.len() {
             if matches!(menu.items[idx], MenuItem::Separator) {
                 continue;
@@ -1397,7 +1440,7 @@ mod tests {
     #[test]
     fn a_separator_is_drawn_inside_the_run_it_reserves_space_in() {
         let mut menu = ContextMenu::new(geometry_items());
-        menu.show(300.0, 120.0);
+        menu.show(300.0, 120.0, SCREEN);
         let lines = painted_separator_lines(&menu);
         let sep_indices: Vec<usize> = menu
             .items
@@ -1431,7 +1474,7 @@ mod tests {
         // renderer the submenu appears beside a different row than the one
         // the user is pointing at.
         let mut menu = ContextMenu::new(geometry_items());
-        menu.show(300.0, 120.0);
+        menu.show(300.0, 120.0, SCREEN);
         for idx in 0..menu.items.len() {
             if matches!(menu.items[idx], MenuItem::Separator) {
                 continue;
@@ -1453,7 +1496,7 @@ mod tests {
     #[test]
     fn the_menu_is_exactly_as_tall_as_the_rows_it_holds() {
         let mut menu = ContextMenu::new(geometry_items());
-        menu.show(300.0, 120.0);
+        menu.show(300.0, 120.0, SCREEN);
         let last = menu.items.len() - 1;
         let (top, height) = painted_row(&mut menu, last).unwrap();
         assert_eq!(
@@ -1469,7 +1512,7 @@ mod tests {
     #[test]
     fn nothing_outside_the_run_selects_an_item() {
         let mut menu = ContextMenu::new(geometry_items());
-        menu.show(300.0, 120.0);
+        menu.show(300.0, 120.0, SCREEN);
         // The top padding is the popup's border, not row zero.
         assert_eq!(menu.index_at_y(menu.y), None);
         assert_eq!(menu.index_at_y(menu.y + VERTICAL_PADDING - 0.001), None);
@@ -1483,7 +1526,7 @@ mod tests {
     #[test]
     fn an_empty_menu_is_just_its_padding() {
         let mut menu = ContextMenu::new(Vec::new());
-        menu.show(300.0, 120.0);
+        menu.show(300.0, 120.0, SCREEN);
         assert_eq!(menu.content_height(), VERTICAL_PADDING * 2.0);
         assert_eq!(menu.index_at_y(120.0), None);
         assert_eq!(menu.index_at_y(124.0), None);
@@ -1499,7 +1542,7 @@ mod tests {
         // The scrolling machinery must be invisible to the case that was
         // already right, which is nearly every menu in the tree.
         let mut menu = ContextMenu::new(geometry_items());
-        menu.show(300.0, 120.0);
+        menu.show(300.0, 120.0, SCREEN);
         assert_eq!(menu.panel_height(), menu.content_height());
         assert_eq!(menu.max_scroll(), 0.0);
         assert_eq!(menu.scroll, 0.0);
@@ -1509,31 +1552,72 @@ mod tests {
         // And it still flips upwards when it would overrun the bottom edge.
         let height = ContextMenu::new(geometry_items()).content_height();
         let mut flipped = ContextMenu::new(geometry_items());
-        flipped.show(300.0, DEFAULT_VIEWPORT_HEIGHT - 5.0);
-        assert_eq!(flipped.y, DEFAULT_VIEWPORT_HEIGHT - 5.0 - height);
+        flipped.show(300.0, SCREEN.1 - 5.0, SCREEN);
+        assert_eq!(flipped.y, SCREEN.1 - 5.0 - height);
+    }
+
+    /// A smaller display is a display, and the menu has to fit it too.
+    ///
+    /// **The test that did not exist, which is why the bug did not either.**
+    /// Every other test here places a menu on `SCREEN`, and until this commit
+    /// the menu placed itself against a constant of the same value -- so the
+    /// assertions and the code under test read the same number and agreed
+    /// with each other on the one display neither had been told about.
+    ///
+    /// Measured on the shell's tray overflow menu at 1024x768 before the fix:
+    /// the panel was capped to 1080, a height that screen does not have,
+    /// placed at y=0, and drawn to y=1080 -- 312 pixels past the bottom.
+    #[test]
+    fn a_menu_fits_a_screen_that_is_not_the_one_the_tests_use() {
+        const SMALL: (f32, f32) = (1024.0, 768.0);
+
+        let mut menu = tall_menu(120);
+        menu.show(200.0, 700.0, SMALL);
+        assert!(
+            menu.panel_height() <= SMALL.1,
+            "panel is {} tall on a {}px screen",
+            menu.panel_height(),
+            SMALL.1
+        );
+        assert!(
+            menu.viewport_bottom() <= SMALL.1,
+            "rows run to {} on a {}px screen",
+            menu.viewport_bottom(),
+            SMALL.1
+        );
+
+        // And the horizontal flip fires at the small screen's edge, not at
+        // 1920 -- which on this display is off the side entirely.
+        let mut near_edge = ContextMenu::new(sample_items());
+        near_edge.show(SMALL.0 - 10.0, 100.0, SMALL);
+        assert!(
+            near_edge.x < SMALL.0 - 10.0,
+            "menu opened rightwards off a {}px screen",
+            SMALL.0
+        );
     }
 
     #[test]
     fn a_menu_taller_than_the_screen_is_capped_rather_than_run_off_the_bottom() {
         let mut menu = tall_menu(120);
         assert!(
-            menu.content_height() > DEFAULT_VIEWPORT_HEIGHT,
+            menu.content_height() > SCREEN.1,
             "precondition: this menu has to be taller than the viewport"
         );
-        menu.show(200.0, 500.0);
+        menu.show(200.0, 500.0, SCREEN);
 
         // The old rule was a single flip: `(y - content_height).max(0.0)`. With
         // a menu 3368 px tall that clamped to zero and left the panel its full
         // height, so 2288 px of rows were drawn below the bottom of the screen
         // where they could be neither seen nor clicked.
         assert_eq!(menu.y, 0.0);
-        assert_eq!(menu.panel_height(), DEFAULT_VIEWPORT_HEIGHT);
-        assert!(menu.viewport_bottom() <= DEFAULT_VIEWPORT_HEIGHT);
+        assert_eq!(menu.panel_height(), SCREEN.1);
+        assert!(menu.viewport_bottom() <= SCREEN.1);
         assert!(menu.max_scroll() > 0.0);
 
         // Sweep well past the bottom edge: no row may answer down there.
         for step in 0..200 {
-            let probe = DEFAULT_VIEWPORT_HEIGHT + (step as f32) * 20.0;
+            let probe = SCREEN.1 + (step as f32) * 20.0;
             assert_eq!(
                 menu.index_at_y(probe),
                 None,
@@ -1546,7 +1630,7 @@ mod tests {
     fn every_row_of_a_tall_menu_can_be_reached_by_scrolling() {
         // The property the whole change exists for: no row is unreachable.
         let mut menu = tall_menu(200);
-        menu.show(200.0, 500.0);
+        menu.show(200.0, 500.0, SCREEN);
         for idx in 0..menu.items.len() {
             menu.scroll_index_into_view(idx);
             let (clip_top, clip_bottom) = painted_clip(&menu);
@@ -1572,7 +1656,7 @@ mod tests {
     #[test]
     fn every_visible_row_of_a_scrolled_menu_answers_exactly_where_it_was_painted() {
         let mut menu = tall_menu(120);
-        menu.show(200.0, 40.0);
+        menu.show(200.0, 40.0, SCREEN);
         let max = menu.max_scroll();
         assert!(
             max > 0.0,
@@ -1635,7 +1719,7 @@ mod tests {
         // scrolled it genuinely extends past both ends of the panel, so the
         // strip names a row for a pointer sitting in the menu's own border.
         let mut menu = tall_menu(120);
-        menu.show(200.0, 40.0);
+        menu.show(200.0, 40.0, SCREEN);
         menu.set_scroll(menu.max_scroll() / 2.0);
 
         for probe in [
@@ -1668,7 +1752,7 @@ mod tests {
     fn the_clip_a_menu_emits_is_the_region_the_pointer_lands_in() {
         for count in [3_usize, 120] {
             let mut menu = tall_menu(count);
-            menu.show(200.0, 40.0);
+            menu.show(200.0, 40.0, SCREEN);
             menu.set_scroll(menu.max_scroll() / 3.0);
             let (clip_top, clip_bottom) = painted_clip(&menu);
             assert_eq!(clip_top, menu.viewport_top());
@@ -1676,7 +1760,7 @@ mod tests {
             // 400 probes down the whole screen: outside the painted region,
             // nothing answers.
             for step in 0..400 {
-                let probe = (step as f32) * DEFAULT_VIEWPORT_HEIGHT / 400.0;
+                let probe = (step as f32) * SCREEN.1 / 400.0;
                 if probe < clip_top || probe >= clip_bottom {
                     assert_eq!(
                         menu.index_at_y(probe),
@@ -1692,7 +1776,7 @@ mod tests {
     #[test]
     fn the_wheel_scrolls_to_each_end_and_stops_there() {
         let mut menu = tall_menu(120);
-        menu.show(200.0, 40.0);
+        menu.show(200.0, 40.0, SCREEN);
         let (px, py) = (menu.x + 10.0, menu.y + 10.0);
         let last = menu.items.len() - 1;
 
@@ -1721,7 +1805,7 @@ mod tests {
         // Otherwise the wheel falls through the menu to whatever it covers,
         // and the document scrolls out from under an open context menu.
         let mut menu = ContextMenu::new(geometry_items());
-        menu.show(300.0, 120.0);
+        menu.show(300.0, 120.0, SCREEN);
         assert_eq!(menu.max_scroll(), 0.0);
         let (px, py) = (menu.x + 10.0, menu.y + 10.0);
         assert!(menu.handle_scroll(px, py, -1.0));
@@ -1740,7 +1824,7 @@ mod tests {
         // would let it through to the strip's origin and poison every row's
         // position at once — a menu that answers for no pointer at all.
         let mut menu = tall_menu(120);
-        menu.show(200.0, 40.0);
+        menu.show(200.0, 40.0, SCREEN);
         menu.set_scroll(100.0);
         for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
             menu.set_scroll(bad);
@@ -1757,7 +1841,7 @@ mod tests {
         // Without this the highlight walks off the bottom of a panel that has
         // no way to follow it, and Enter acts on a row nobody can see.
         let mut menu = tall_menu(120);
-        menu.show(200.0, 500.0);
+        menu.show(200.0, 500.0, SCREEN);
         for expected in 0..menu.items.len() {
             menu.handle_key(&make_key(Key::Down));
             assert_eq!(menu.hover_index, Some(expected));
@@ -1781,7 +1865,7 @@ mod tests {
     #[test]
     fn the_scroll_thumb_stays_in_its_track_and_reaches_both_ends() {
         let mut menu = tall_menu(120);
-        menu.show(200.0, 40.0);
+        menu.show(200.0, 40.0, SCREEN);
         let (track, thumb_top) = scrollbar_rects(&menu).expect("a capped menu shows an indicator");
         assert_eq!(track.0, menu.viewport_top());
         assert_eq!(track.1, menu.viewport_height());
@@ -1807,9 +1891,9 @@ mod tests {
     #[test]
     fn showing_a_scrolled_menu_again_shows_its_top() {
         let mut menu = tall_menu(120);
-        menu.show(200.0, 40.0);
+        menu.show(200.0, 40.0, SCREEN);
         menu.set_scroll(menu.max_scroll());
-        menu.show(200.0, 40.0);
+        menu.show(200.0, 40.0, SCREEN);
         assert_eq!(menu.scroll, 0.0);
         assert_eq!(menu.index_at_y(menu.viewport_top()), Some(0));
     }
@@ -1823,7 +1907,7 @@ mod tests {
     #[test]
     fn menu_show_and_hide() {
         let mut menu = ContextMenu::new(sample_items());
-        menu.show(100.0, 200.0);
+        menu.show(100.0, 200.0, SCREEN);
         assert!(menu.is_visible());
         menu.hide();
         assert!(!menu.is_visible());
@@ -1832,7 +1916,7 @@ mod tests {
     #[test]
     fn menu_click_selects_item() {
         let mut menu = ContextMenu::new(sample_items());
-        menu.show(0.0, 0.0);
+        menu.show(0.0, 0.0, SCREEN);
 
         // Click within the first item area (after padding).
         let click_y = VERTICAL_PADDING + ITEM_HEIGHT / 2.0;
@@ -1844,7 +1928,7 @@ mod tests {
     #[test]
     fn menu_click_disabled_item_does_nothing() {
         let mut menu = ContextMenu::new(sample_items());
-        menu.show(0.0, 0.0);
+        menu.show(0.0, 0.0, SCREEN);
 
         // Item 3 ("Paste") is disabled, it's at index 3 (after separator).
         // Offset: items 0,1 = 2*ITEM_HEIGHT, separator = SEPARATOR_HEIGHT, then half of item 3.
@@ -1857,7 +1941,7 @@ mod tests {
     #[test]
     fn menu_click_outside_closes() {
         let mut menu = ContextMenu::new(sample_items());
-        menu.show(100.0, 100.0);
+        menu.show(100.0, 100.0, SCREEN);
 
         let result = menu.handle_click(0.0, 0.0);
         assert_eq!(result, None);
@@ -1867,7 +1951,7 @@ mod tests {
     #[test]
     fn keyboard_down_moves_hover() {
         let mut menu = ContextMenu::new(sample_items());
-        menu.show(0.0, 0.0);
+        menu.show(0.0, 0.0, SCREEN);
 
         // Press Down — should select first selectable item (index 0).
         menu.handle_key(&make_key(Key::Down));
@@ -1885,7 +1969,7 @@ mod tests {
     #[test]
     fn keyboard_up_wraps_around() {
         let mut menu = ContextMenu::new(sample_items());
-        menu.show(0.0, 0.0);
+        menu.show(0.0, 0.0, SCREEN);
 
         // Press Up from no selection — should wrap to last selectable item (index 4).
         menu.handle_key(&make_key(Key::Up));
@@ -1910,7 +1994,7 @@ mod tests {
     #[test]
     fn the_hover_wraps_past_separators_and_disabled_rows_in_both_directions() {
         let mut menu = ContextMenu::new(sample_items());
-        menu.show(0.0, 0.0);
+        menu.show(0.0, 0.0, SCREEN);
 
         menu.hover_index = Some(4);
         menu.handle_key(&make_key(Key::Down));
@@ -1938,7 +2022,7 @@ mod tests {
     fn arrowing_all_the_way_round_visits_exactly_the_selectable_rows() {
         for (key, mut expected) in [(Key::Down, vec![0, 1, 4]), (Key::Up, vec![4, 1, 0])] {
             let mut menu = ContextMenu::new(sample_items());
-            menu.show(0.0, 0.0);
+            menu.show(0.0, 0.0, SCREEN);
             let mut seen = Vec::new();
             // One more press than there are rows, to catch a walk that stalls
             // or that lands somewhere twice before coming round.
@@ -1963,7 +2047,7 @@ mod tests {
             MenuItem::Separator,
         ];
         let mut menu = ContextMenu::new(items);
-        menu.show(0.0, 0.0);
+        menu.show(0.0, 0.0, SCREEN);
 
         for press in 0..4 {
             menu.handle_key(&make_key(Key::Down));
@@ -1982,7 +2066,7 @@ mod tests {
     fn a_menu_with_no_selectable_row_highlights_nothing() {
         let items = vec![MenuItem::Separator, action(1, false), MenuItem::Separator];
         let mut menu = ContextMenu::new(items);
-        menu.show(0.0, 0.0);
+        menu.show(0.0, 0.0, SCREEN);
 
         menu.handle_key(&make_key(Key::Down));
         assert_eq!(menu.hover_index, None);
@@ -2000,7 +2084,7 @@ mod tests {
     #[test]
     fn an_empty_menu_can_be_arrowed_through_without_panicking() {
         let mut menu = ContextMenu::new(Vec::new());
-        menu.show(0.0, 0.0);
+        menu.show(0.0, 0.0, SCREEN);
         menu.handle_key(&make_key(Key::Down));
         menu.handle_key(&make_key(Key::Up));
         assert_eq!(menu.hover_index, None);
@@ -2009,7 +2093,7 @@ mod tests {
     #[test]
     fn keyboard_enter_selects_hovered() {
         let mut menu = ContextMenu::new(sample_items());
-        menu.show(0.0, 0.0);
+        menu.show(0.0, 0.0, SCREEN);
 
         menu.handle_key(&make_key(Key::Down)); // hover index 0
         let result = menu.handle_key(&make_key(Key::Enter));
@@ -2020,7 +2104,7 @@ mod tests {
     #[test]
     fn keyboard_escape_closes_menu() {
         let mut menu = ContextMenu::new(sample_items());
-        menu.show(0.0, 0.0);
+        menu.show(0.0, 0.0, SCREEN);
 
         let result = menu.handle_key(&make_key(Key::Escape));
         assert_eq!(result, Some(MenuAction::Closed));
@@ -2045,7 +2129,7 @@ mod tests {
         }];
 
         let mut menu = ContextMenu::new(items);
-        menu.show(0.0, 0.0);
+        menu.show(0.0, 0.0, SCREEN);
 
         // Move mouse over the submenu item.
         let hover_y = VERTICAL_PADDING + ITEM_HEIGHT / 2.0;
@@ -2075,7 +2159,7 @@ mod tests {
         }];
 
         let mut menu = ContextMenu::new(items);
-        menu.show(0.0, 0.0);
+        menu.show(0.0, 0.0, SCREEN);
 
         menu.handle_key(&make_key(Key::Down)); // hover on submenu item
         menu.handle_key(&make_key(Key::Right)); // open submenu
@@ -2087,16 +2171,16 @@ mod tests {
     fn menu_edge_flip_horizontal() {
         let mut menu = ContextMenu::new(sample_items());
         // Show near right edge — should flip to left.
-        menu.show(DEFAULT_VIEWPORT_WIDTH - 10.0, 100.0);
-        assert!(menu.x < DEFAULT_VIEWPORT_WIDTH - 10.0);
+        menu.show(SCREEN.0 - 10.0, 100.0, SCREEN);
+        assert!(menu.x < SCREEN.0 - 10.0);
     }
 
     #[test]
     fn menu_edge_flip_vertical() {
         let mut menu = ContextMenu::new(sample_items());
         // Show near bottom edge — should flip upward.
-        menu.show(100.0, DEFAULT_VIEWPORT_HEIGHT - 10.0);
-        assert!(menu.y < DEFAULT_VIEWPORT_HEIGHT - 10.0);
+        menu.show(100.0, SCREEN.1 - 10.0, SCREEN);
+        assert!(menu.y < SCREEN.1 - 10.0);
     }
 
     // ─── Tooltip tests ──────────────────────────────────────────────────────
@@ -2111,7 +2195,7 @@ mod tests {
     fn tooltip_appears_after_delay() {
         let mut tooltip = Tooltip::new("Tooltip text").with_delay(200);
 
-        tooltip.start_hover(100.0, 100.0, 1000);
+        tooltip.start_hover(100.0, 100.0, 1000, SCREEN);
         tooltip.tick(1100); // 100ms elapsed — not enough
         assert!(!tooltip.is_visible());
 
@@ -2122,7 +2206,7 @@ mod tests {
     #[test]
     fn tooltip_disappears_on_leave() {
         let mut tooltip = Tooltip::new("Tip");
-        tooltip.start_hover(50.0, 50.0, 0);
+        tooltip.start_hover(50.0, 50.0, 0, SCREEN);
         tooltip.tick(600); // Past default delay
         assert!(tooltip.is_visible());
 
@@ -2142,7 +2226,7 @@ mod tests {
     fn tooltip_render_produces_commands_when_visible() {
         let palette = Palette::for_mode(false);
         let mut tooltip = Tooltip::new("Visible tooltip");
-        tooltip.start_hover(50.0, 50.0, 0);
+        tooltip.start_hover(50.0, 50.0, 0, SCREEN);
         tooltip.tick(600);
         assert!(tooltip.is_visible());
 
@@ -2155,13 +2239,9 @@ mod tests {
     fn tooltip_edge_flip() {
         let mut tooltip = Tooltip::new("Near edge");
         // Start hover near bottom-right — should flip position.
-        tooltip.start_hover(
-            DEFAULT_VIEWPORT_WIDTH - 5.0,
-            DEFAULT_VIEWPORT_HEIGHT - 5.0,
-            0,
-        );
-        assert!(tooltip.x < DEFAULT_VIEWPORT_WIDTH - 5.0);
-        assert!(tooltip.y < DEFAULT_VIEWPORT_HEIGHT - 5.0);
+        tooltip.start_hover(SCREEN.0 - 5.0, SCREEN.1 - 5.0, 0, SCREEN);
+        assert!(tooltip.x < SCREEN.0 - 5.0);
+        assert!(tooltip.y < SCREEN.1 - 5.0);
     }
 
     #[test]

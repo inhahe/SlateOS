@@ -21,7 +21,22 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import selftestflag  # noqa: E402
 
-ROOT = pathlib.Path(r"E:/visual studio projects/os-lane-c")
+# Derived from `__file__`, never hardcoded. This read
+#
+#     ROOT = pathlib.Path(r"E:/visual studio projects/os-lane-c")
+#
+# until 2026-09-14, so every lane's boot scanned lane C's worktree instead of
+# its own. Two consequences, and the second is worse: lane C's *uncommitted*
+# edits could refuse another lane's build -- which is how this was found, when
+# a message in `gui/desktop/src/session/tests.rs` that does not exist in lane
+# A's tree at all failed lane A's boot at gate 60 -- and this gate's verdict
+# never described the tree actually being built, so a lane could not have been
+# cleared by it either.
+#
+# `check-eol.py` already carries the rule in a comment: ROOT derived from
+# `__file__` means `os-lane-a/scripts/...` checks `os-lane-a` and nothing can
+# redirect it. Same derivation here.
+ROOT = pathlib.Path(__file__).resolve().parent.parent
 NL = chr(10)
 BS = chr(92)
 SP = chr(32)

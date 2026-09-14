@@ -146,6 +146,48 @@ enum Op {
 }
 
 /// A contiguous group of changes with surrounding context.
+/// Whether a file's last line is terminated.
+///
+/// A `bool` would read as `true`/`false` at four call sites that each have to
+/// remember which way round it is. The bug this exists for was two files, 26
+/// bytes and 25, reported IDENTICAL -- so the cost of getting the polarity
+/// backwards is another silent wrong answer, not a compile error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FinalNewline {
+    Present,
+    Missing,
+}
+
+/// One line of the edit script, and whether GNU's no-newline marker follows it.
+///
+/// A tuple until 2026-09-14, when it grew the third field. `diff` reported a
+/// file ending in a newline and one that does not as IDENTICAL -- exit 0 on
+/// two files of 26 and 25 bytes -- because splitting into lines throws the
+/// terminator away and both sides then yield the same four lines.
+///
+/// The flag rides on the emitted line rather than being recomputed by each
+/// renderer because that is where the answer is needed: measured, GNU puts
+/// `\ No newline at end of file` immediately after the line it belongs to, on
+/// whichever side lacks the newline, and after BOTH when both lack it.
+#[derive(Clone, PartialEq, Eq)]
+#[cfg_attr(test, derive(Debug))]
+struct Edit {
+    op: Op,
+    text: Vec<u8>,
+    /// This is the final line of a file with no terminating newline.
+    no_final_newline: bool,
+}
+
+impl Edit {
+    fn new(op: Op, text: Vec<u8>) -> Self {
+        Self {
+            op,
+            text,
+            no_final_newline: false,
+        }
+    }
+}
+
 struct Hunk {
     /// Starting line in file 1 (0-based).
     start1: usize,
@@ -156,7 +198,7 @@ struct Hunk {
     /// Number of lines from file 2 in this hunk.
     count2: usize,
     /// Operations and their associated line text.
-    lines: Vec<(Op, Vec<u8>)>,
+    lines: Vec<Edit>,
 }
 
 // ============================================================================
@@ -532,7 +574,7 @@ fn split_lines(data: &[u8]) -> Vec<Vec<u8>> {
 /// Result of reading a file for diffing.
 enum FileContent {
     /// Text file, split into lines.
-    Text(Vec<Vec<u8>>),
+    Text(Vec<Vec<u8>>, FinalNewline),
     /// Binary file detected (contains NUL bytes).
     Binary,
 }
@@ -570,8 +612,15 @@ fn read_file(path: &Path) -> Result<FileContent, String> {
     // A line is bytes. See known-issues.md ->
     // B-DIFF-SAYS-TWO-DIFFERENT-FILES-ARE-IDENTICAL.
     let lines: Vec<Vec<u8>> = split_lines(&data);
+    // An EMPTY file is treated as ending with a newline: it has no last line
+    // to mark, and GNU prints no marker for it.
+    let final_newline = if data.is_empty() || data.last() == Some(&b'\n') {
+        FinalNewline::Present
+    } else {
+        FinalNewline::Missing
+    };
 
-    Ok(FileContent::Text(lines))
+    Ok(FileContent::Text(lines, final_newline))
 }
 
 // ============================================================================
@@ -583,13 +632,82 @@ fn read_file(path: &Path) -> Result<FileContent, String> {
 ///
 /// Returns a vector of `(Op, line_text)` pairs describing the full edit
 /// sequence from `a` to `b`.
-fn compute_diff(a: &[Vec<u8>], b: &[Vec<u8>], config: &Config) -> Vec<(Op, Vec<u8>)> {
+/// Flag the emitted lines that GNU follows with `\\ No newline at end of file`.
+///
+/// Measured, in all three output formats: the marker goes immediately after
+/// the line it belongs to, on whichever side lacks the newline, and after BOTH
+/// lines when both files lack one.
+///
+/// The last line of file A is simply the last edit that came from A -- a
+/// `Delete` or an `Equal` -- and the last line of B is the last `Insert` or
+/// `Equal`. An `Equal` is the last line of both at once, which is the
+/// single-file case and needs no special handling: the flag is set twice on
+/// the same edit and the marker prints once.
+fn mark_missing_newlines(ops: &mut [Edit], nl_a: FinalNewline, nl_b: FinalNewline) {
+    if nl_a == FinalNewline::Missing
+        && let Some(e) = ops
+            .iter_mut()
+            .rev()
+            .find(|e| matches!(e.op, Op::Delete | Op::Equal))
+    {
+        e.no_final_newline = true;
+    }
+    if nl_b == FinalNewline::Missing
+        && let Some(e) = ops
+            .iter_mut()
+            .rev()
+            .find(|e| matches!(e.op, Op::Insert | Op::Equal))
+    {
+        e.no_final_newline = true;
+    }
+}
+
+/// GNU's no-newline marker, written after the line it belongs to.
+///
+/// It carries NO diff prefix -- not `<`, not `-`, not two spaces -- which is
+/// why it is written here rather than through `write_body_line`.
+fn write_no_newline_marker(w: &mut impl Write) {
+    let _ = w.write_all(b"\\ No newline at end of file\n");
+}
+
+fn compute_diff(
+    a: &[Vec<u8>],
+    b: &[Vec<u8>],
+    nl_a: FinalNewline,
+    nl_b: FinalNewline,
+    config: &Config,
+) -> Vec<Edit> {
     let n = a.len();
     let m = b.len();
 
     // Build normalized comparison keys.
-    let norm_a: Vec<Vec<u8>> = a.iter().map(|l| normalize_line(l, config)).collect();
-    let norm_b: Vec<Vec<u8>> = b.iter().map(|l| normalize_line(l, config)).collect();
+    let mut norm_a: Vec<Vec<u8>> = a.iter().map(|l| normalize_line(l, config)).collect();
+    let mut norm_b: Vec<Vec<u8>> = b.iter().map(|l| normalize_line(l, config)).collect();
+
+    // A LAST LINE WITH NO NEWLINE IS NOT THE SAME LINE as the same text
+    // terminated, and this is the only place that can be said: splitting a
+    // file into lines throws the terminator away, so `delta` and `delta\n`
+    // arrive here identical and two files of 26 and 25 bytes compared EQUAL.
+    //
+    // The marker is a newline, which is not a choice of sentinel but the
+    // absence of one: a line produced by `split_lines` cannot contain a
+    // newline by construction, so no real content can collide with it. It
+    // goes on the NORMALISED key only -- `orig_a`/`orig_b` are what gets
+    // emitted, so nothing printed is affected.
+    //
+    // When NEITHER file ends with a newline, both last lines are marked and
+    // still compare equal, which is right.
+    if nl_a == FinalNewline::Missing
+        && let Some(last) = norm_a.last_mut()
+    {
+        last.push(b'\n');
+    }
+    if nl_b == FinalNewline::Missing
+        && let Some(last) = norm_b.last_mut()
+    {
+        last.push(b'\n');
+    }
+    let (norm_a, norm_b) = (norm_a, norm_b);
 
     // For very large inputs, fall back to a simpler LCS DP when both files are
     // small enough that the O(NM) table fits in memory (< ~10K lines each).
@@ -609,7 +727,7 @@ fn lcs_diff(
     norm_b: &[Vec<u8>],
     orig_a: &[Vec<u8>],
     orig_b: &[Vec<u8>],
-) -> Vec<(Op, Vec<u8>)> {
+) -> Vec<Edit> {
     let n = norm_a.len();
     let m = norm_b.len();
 
@@ -630,20 +748,20 @@ fn lcs_diff(
     }
 
     // Trace back to build edit script.
-    let mut ops: Vec<(Op, Vec<u8>)> = Vec::new();
+    let mut ops: Vec<Edit> = Vec::new();
     let mut i = n;
     let mut j = m;
 
     while i > 0 || j > 0 {
         if i > 0 && j > 0 && norm_a[i - 1] == norm_b[j - 1] {
-            ops.push((Op::Equal, orig_a[i - 1].clone()));
+            ops.push(Edit::new(Op::Equal, orig_a[i - 1].clone()));
             i -= 1;
             j -= 1;
         } else if j > 0 && (i == 0 || dp[i][j - 1] >= dp[i - 1][j]) {
-            ops.push((Op::Insert, orig_b[j - 1].clone()));
+            ops.push(Edit::new(Op::Insert, orig_b[j - 1].clone()));
             j -= 1;
         } else {
-            ops.push((Op::Delete, orig_a[i - 1].clone()));
+            ops.push(Edit::new(Op::Delete, orig_a[i - 1].clone()));
             i -= 1;
         }
     }
@@ -658,7 +776,7 @@ fn myers_diff(
     norm_b: &[Vec<u8>],
     orig_a: &[Vec<u8>],
     orig_b: &[Vec<u8>],
-) -> Vec<(Op, Vec<u8>)> {
+) -> Vec<Edit> {
     let n = norm_a.len();
     let m = norm_b.len();
 
@@ -666,10 +784,16 @@ fn myers_diff(
         return Vec::new();
     }
     if n == 0 {
-        return orig_b.iter().map(|l| (Op::Insert, l.clone())).collect();
+        return orig_b
+            .iter()
+            .map(|l| Edit::new(Op::Insert, l.clone()))
+            .collect();
     }
     if m == 0 {
-        return orig_a.iter().map(|l| (Op::Delete, l.clone())).collect();
+        return orig_a
+            .iter()
+            .map(|l| Edit::new(Op::Delete, l.clone()))
+            .collect();
     }
 
     // Myers shortest edit script. We store the V array for each iteration of d
@@ -780,33 +904,33 @@ fn myers_diff(
     path.reverse();
 
     // Convert path into edit operations.
-    let mut ops: Vec<(Op, Vec<u8>)> = Vec::new();
+    let mut ops: Vec<Edit> = Vec::new();
     let mut ai: usize = 0;
     let mut bi: usize = 0;
 
     for &(px, py) in &path {
         // If we need to skip to (px, py), emit deletes/inserts.
         while ai < px && bi < py {
-            ops.push((Op::Equal, orig_a[ai].clone()));
+            ops.push(Edit::new(Op::Equal, orig_a[ai].clone()));
             ai += 1;
             bi += 1;
         }
         while ai < px {
-            ops.push((Op::Delete, orig_a[ai].clone()));
+            ops.push(Edit::new(Op::Delete, orig_a[ai].clone()));
             ai += 1;
         }
         while bi < py {
-            ops.push((Op::Insert, orig_b[bi].clone()));
+            ops.push(Edit::new(Op::Insert, orig_b[bi].clone()));
             bi += 1;
         }
         // The point itself.
         if ai == px && bi == py && ai < n && bi < m {
             if norm_a[ai] == norm_b[bi] {
-                ops.push((Op::Equal, orig_a[ai].clone()));
+                ops.push(Edit::new(Op::Equal, orig_a[ai].clone()));
                 ai += 1;
                 bi += 1;
             } else if ai < n {
-                ops.push((Op::Delete, orig_a[ai].clone()));
+                ops.push(Edit::new(Op::Delete, orig_a[ai].clone()));
                 ai += 1;
             }
         }
@@ -814,11 +938,11 @@ fn myers_diff(
 
     // Flush remaining.
     while ai < n {
-        ops.push((Op::Delete, orig_a[ai].clone()));
+        ops.push(Edit::new(Op::Delete, orig_a[ai].clone()));
         ai += 1;
     }
     while bi < m {
-        ops.push((Op::Insert, orig_b[bi].clone()));
+        ops.push(Edit::new(Op::Insert, orig_b[bi].clone()));
         bi += 1;
     }
 
@@ -831,10 +955,10 @@ fn myers_diff(
 
 /// If `--ignore-blank-lines` is set, reclassify insertions and deletions of
 /// blank lines as equal (keeping the line from whichever side is available).
-fn filter_blank_lines(ops: &mut [(Op, Vec<u8>)]) {
+fn filter_blank_lines(ops: &mut [Edit]) {
     for entry in ops.iter_mut() {
-        if entry.0 != Op::Equal && is_blank(&entry.1) {
-            entry.0 = Op::Equal;
+        if entry.op != Op::Equal && is_blank(&entry.text) {
+            entry.op = Op::Equal;
         }
     }
 }
@@ -844,7 +968,7 @@ fn filter_blank_lines(ops: &mut [(Op, Vec<u8>)]) {
 // ============================================================================
 
 /// Group edit operations into hunks with the given number of context lines.
-fn build_hunks(ops: &[(Op, Vec<u8>)], context: usize) -> Vec<Hunk> {
+fn build_hunks(ops: &[Edit], context: usize) -> Vec<Hunk> {
     if ops.is_empty() {
         return Vec::new();
     }
@@ -853,7 +977,7 @@ fn build_hunks(ops: &[(Op, Vec<u8>)], context: usize) -> Vec<Hunk> {
     let change_indices: Vec<usize> = ops
         .iter()
         .enumerate()
-        .filter(|(_, (op, _))| *op != Op::Equal)
+        .filter(|(_, e)| e.op != Op::Equal)
         .map(|(i, _)| i)
         .collect();
 
@@ -870,7 +994,7 @@ fn build_hunks(ops: &[(Op, Vec<u8>)], context: usize) -> Vec<Hunk> {
         // Count equal lines between group_end and ci.
         let gap = ops[group_end + 1..ci]
             .iter()
-            .filter(|(op, _)| *op == Op::Equal)
+            .filter(|e| e.op == Op::Equal)
             .count();
 
         if gap <= 2 * context {
@@ -898,7 +1022,7 @@ fn build_hunks(ops: &[(Op, Vec<u8>)], context: usize) -> Vec<Hunk> {
         let mut line2: usize = 0;
 
         // Count lines before hunk_start to determine the starting line numbers.
-        for (op, _) in &ops[..hunk_start] {
+        for Edit { op, .. } in &ops[..hunk_start] {
             match op {
                 Op::Equal => {
                     line1 += 1;
@@ -914,10 +1038,10 @@ fn build_hunks(ops: &[(Op, Vec<u8>)], context: usize) -> Vec<Hunk> {
 
         let mut count1 = 0usize;
         let mut count2 = 0usize;
-        let mut lines: Vec<(Op, Vec<u8>)> = Vec::new();
+        let mut lines: Vec<Edit> = Vec::new();
 
-        for (op, text) in hunk_ops {
-            match op {
+        for e in hunk_ops {
+            match e.op {
                 Op::Equal => {
                     count1 += 1;
                     count2 += 1;
@@ -925,7 +1049,7 @@ fn build_hunks(ops: &[(Op, Vec<u8>)], context: usize) -> Vec<Hunk> {
                 Op::Delete => count1 += 1,
                 Op::Insert => count2 += 1,
             }
-            lines.push((*op, text.clone()));
+            lines.push(e.clone());
         }
 
         hunks.push(Hunk {
@@ -1007,19 +1131,11 @@ fn print_normal(hunks: &[Hunk], config: &Config) {
     for hunk in hunks {
         // Determine the operation type for this hunk: all deletes, all inserts,
         // or a change (mix).
-        let has_del = hunk.lines.iter().any(|(op, _)| *op == Op::Delete);
-        let has_ins = hunk.lines.iter().any(|(op, _)| *op == Op::Insert);
+        let has_del = hunk.lines.iter().any(|e| e.op == Op::Delete);
+        let has_ins = hunk.lines.iter().any(|e| e.op == Op::Insert);
 
-        let del_count = hunk
-            .lines
-            .iter()
-            .filter(|(op, _)| *op == Op::Delete)
-            .count();
-        let ins_count = hunk
-            .lines
-            .iter()
-            .filter(|(op, _)| *op == Op::Insert)
-            .count();
+        let del_count = hunk.lines.iter().filter(|e| e.op == Op::Delete).count();
+        let ins_count = hunk.lines.iter().filter(|e| e.op == Op::Insert).count();
 
         // Compute file-1 and file-2 ranges for the changed lines only (not context).
         // We need start positions relative to the hunk's changes.
@@ -1027,7 +1143,7 @@ fn print_normal(hunks: &[Hunk], config: &Config) {
         let mut line2_pos = hunk.start2;
 
         // Skip leading context to find where changes begin.
-        for (op, _) in &hunk.lines {
+        for Edit { op, .. } in &hunk.lines {
             if *op == Op::Equal {
                 line1_pos += 1;
                 line2_pos += 1;
@@ -1057,9 +1173,17 @@ fn print_normal(hunks: &[Hunk], config: &Config) {
         let _ = writeln!(w, "{}", color_cyan(&header, config.color));
 
         // Print deleted lines.
-        for (op, text) in &hunk.lines {
+        for Edit {
+            op,
+            text,
+            no_final_newline,
+        } in &hunk.lines
+        {
             if *op == Op::Delete {
                 write_body_line(&mut w, b"< ", text, when(config.color, RED));
+                if *no_final_newline {
+                    write_no_newline_marker(&mut w);
+                }
             }
         }
 
@@ -1069,9 +1193,17 @@ fn print_normal(hunks: &[Hunk], config: &Config) {
         }
 
         // Print inserted lines.
-        for (op, text) in &hunk.lines {
+        for Edit {
+            op,
+            text,
+            no_final_newline,
+        } in &hunk.lines
+        {
             if *op == Op::Insert {
                 write_body_line(&mut w, b"> ", text, when(config.color, GREEN));
+                if *no_final_newline {
+                    write_no_newline_marker(&mut w);
+                }
             }
         }
     }
@@ -1212,14 +1344,25 @@ fn print_unified(hunks: &[Hunk], path1: &str, path2: &str, config: &Config) {
         );
         let _ = writeln!(w, "{}", color_cyan(&header, config.color));
 
-        for (op, text) in &hunk.lines {
+        for Edit {
+            op,
+            text,
+            no_final_newline,
+        } in &hunk.lines
+        {
             match op {
                 Op::Equal => write_body_line(&mut w, b" ", text, None),
                 Op::Delete => {
                     write_body_line(&mut w, b"-", text, when(config.color, RED));
+                    if *no_final_newline {
+                        write_no_newline_marker(&mut w);
+                    }
                 }
                 Op::Insert => {
                     write_body_line(&mut w, b"+", text, when(config.color, GREEN));
+                    if *no_final_newline {
+                        write_no_newline_marker(&mut w);
+                    }
                 }
             }
         }
@@ -1266,13 +1409,24 @@ fn print_context(hunks: &[Hunk], path1: &str, path2: &str, config: &Config) {
             )
         );
 
-        for (op, text) in &hunk.lines {
+        for Edit {
+            op,
+            text,
+            no_final_newline,
+        } in &hunk.lines
+        {
             match op {
                 Op::Equal => {
                     write_body_line(&mut w, b"  ", text, None);
+                    if *no_final_newline {
+                        write_no_newline_marker(&mut w);
+                    }
                 }
                 Op::Delete => {
                     write_body_line(&mut w, b"- ", text, when(config.color, RED));
+                    if *no_final_newline {
+                        write_no_newline_marker(&mut w);
+                    }
                 }
                 Op::Insert => {
                     // Inserts are not shown in the file-1 section.
@@ -1296,13 +1450,24 @@ fn print_context(hunks: &[Hunk], path1: &str, path2: &str, config: &Config) {
             )
         );
 
-        for (op, text) in &hunk.lines {
+        for Edit {
+            op,
+            text,
+            no_final_newline,
+        } in &hunk.lines
+        {
             match op {
                 Op::Equal => {
                     write_body_line(&mut w, b"  ", text, None);
+                    if *no_final_newline {
+                        write_no_newline_marker(&mut w);
+                    }
                 }
                 Op::Insert => {
                     write_body_line(&mut w, b"+ ", text, when(config.color, GREEN));
+                    if *no_final_newline {
+                        write_no_newline_marker(&mut w);
+                    }
                 }
                 Op::Delete => {
                     // Deletes are not shown in the file-2 section.
@@ -1316,7 +1481,7 @@ fn print_context(hunks: &[Hunk], path1: &str, path2: &str, config: &Config) {
 // Side-by-side output
 // ============================================================================
 
-fn print_side_by_side(ops: &[(Op, Vec<u8>)], config: &Config) {
+fn print_side_by_side(ops: &[Edit], config: &Config) {
     let out = io::stdout();
     let mut w = out.lock();
 
@@ -1327,7 +1492,16 @@ fn print_side_by_side(ops: &[(Op, Vec<u8>)], config: &Config) {
         30
     };
 
-    for (op, text) in ops {
+    for Edit {
+        op,
+        text,
+        // NOT bound: side-by-side prints no no-newline marker.
+        // Measured -- GNU's `-y` on a file lacking its final
+        // newline shows the line and nothing else, and simply
+        // omits the newline from its own last line of output.
+        ..
+    } in ops
+    {
         match op {
             Op::Equal => {
                 let left = truncate_or_pad(text, col_width);
@@ -1533,7 +1707,7 @@ fn diff_files(path1_str: &str, path2_str: &str, config: &Config) -> i32 {
             }
         }
     } else {
-        FileContent::Text(Vec::new())
+        FileContent::Text(Vec::new(), FinalNewline::Present)
     };
 
     let content2 = if e2 {
@@ -1545,7 +1719,7 @@ fn diff_files(path1_str: &str, path2_str: &str, config: &Config) -> i32 {
             }
         }
     } else {
-        FileContent::Text(Vec::new())
+        FileContent::Text(Vec::new(), FinalNewline::Present)
     };
 
     // Handle binary files.
@@ -1560,17 +1734,18 @@ fn diff_files(path1_str: &str, path2_str: &str, config: &Config) -> i32 {
         _ => {}
     }
 
-    let lines1 = match &content1 {
-        FileContent::Text(l) => l,
+    let (lines1, nl1) = match &content1 {
+        FileContent::Text(l, nl) => (l, *nl),
         FileContent::Binary => return 2, // unreachable due to match above
     };
-    let lines2 = match &content2 {
-        FileContent::Text(l) => l,
+    let (lines2, nl2) = match &content2 {
+        FileContent::Text(l, nl) => (l, *nl),
         FileContent::Binary => return 2,
     };
 
     // Compute the diff.
-    let mut ops = compute_diff(lines1, lines2, config);
+    let mut ops = compute_diff(lines1, lines2, nl1, nl2, config);
+    mark_missing_newlines(&mut ops, nl1, nl2);
 
     // Apply blank-line filtering if requested.
     if config.ignore_blank_lines {
@@ -1578,7 +1753,7 @@ fn diff_files(path1_str: &str, path2_str: &str, config: &Config) -> i32 {
     }
 
     // Check if there are any differences.
-    let has_diff = ops.iter().any(|(op, _)| *op != Op::Equal);
+    let has_diff = ops.iter().any(|e| e.op != Op::Equal);
 
     if !has_diff {
         if config.report_identical {
@@ -1837,6 +2012,89 @@ mod tests {
         assert_eq!(last.len(), 5, "a +ZZZZ offset, got {last:?}");
     }
 
+    // ---------------- the missing final newline ----------------
+
+    /// The same four lines, one file terminated and one not, are DIFFERENT.
+    ///
+    /// This build called them identical and exited 0 on files of 26 and 25
+    /// bytes, because splitting into lines throws the terminator away and both
+    /// sides then yield the same four lines. GNU prints `4c4`.
+    ///
+    /// See known-issues.md -> B-DIFF-CANNOT-SEE-A-MISSING-FINAL-NEWLINE.
+    #[test]
+    fn a_missing_final_newline_is_a_difference() {
+        let a = s(&["alpha", "bravo", "charlie", "delta"]);
+        let script = compute_diff(&a, &a.clone(), NL, FinalNewline::Missing, &cfg());
+        assert!(
+            script.iter().any(|e| e.op != Op::Equal),
+            "the terminator is part of the file, got {script:?}"
+        );
+    }
+
+    /// The control: when NEITHER file ends with a newline they are equal.
+    ///
+    /// Without this, an implementation that simply called the last lines
+    /// different whenever it was asked would pass the case above.
+    #[test]
+    fn two_files_that_both_lack_a_final_newline_are_equal() {
+        let a = s(&["alpha", "bravo", "charlie", "delta"]);
+        let script = compute_diff(
+            &a,
+            &a.clone(),
+            FinalNewline::Missing,
+            FinalNewline::Missing,
+            &cfg(),
+        );
+        assert!(
+            script.iter().all(|e| e.op == Op::Equal),
+            "both unterminated is still the same file, got {script:?}"
+        );
+    }
+
+    /// The second control: two terminated files are equal, as always.
+    #[test]
+    fn two_terminated_files_are_equal() {
+        let a = s(&["alpha", "delta"]);
+        let script = compute_diff(&a, &a.clone(), NL, NL, &cfg());
+        assert!(script.iter().all(|e| e.op == Op::Equal), "{script:?}");
+    }
+
+    /// The marker lands on the last line of the side that lacks the newline,
+    /// and on that side only.
+    ///
+    /// Measured, both directions:
+    ///   `diff withnl nonl`  -> marker after the `>` line
+    ///   `diff nonl withnl`  -> marker after the `<` line
+    #[test]
+    fn the_marker_goes_on_the_side_that_lacks_the_newline() {
+        let mut edits = vec![
+            Edit::new(Op::Equal, b"alpha".to_vec()),
+            Edit::new(Op::Delete, b"delta".to_vec()),
+            Edit::new(Op::Insert, b"delta".to_vec()),
+        ];
+        mark_missing_newlines(&mut edits, NL, FinalNewline::Missing);
+        assert!(!edits[1].no_final_newline, "the old side is terminated");
+        assert!(edits[2].no_final_newline, "the new side is not");
+
+        let mut edits = vec![
+            Edit::new(Op::Equal, b"alpha".to_vec()),
+            Edit::new(Op::Delete, b"delta".to_vec()),
+            Edit::new(Op::Insert, b"delta".to_vec()),
+        ];
+        mark_missing_newlines(&mut edits, FinalNewline::Missing, NL);
+        assert!(edits[1].no_final_newline, "the old side is not terminated");
+        assert!(!edits[2].no_final_newline, "the new side is");
+    }
+
+    /// An `Equal` line is the last line of BOTH files at once, which is the
+    /// single-hunk-at-the-end case and must be marked from either side.
+    #[test]
+    fn an_equal_line_can_be_the_last_line_of_both_files() {
+        let mut edits = vec![Edit::new(Op::Equal, b"delta".to_vec())];
+        mark_missing_newlines(&mut edits, FinalNewline::Missing, FinalNewline::Missing);
+        assert!(edits[0].no_final_newline);
+    }
+
     // ---------------- bytes, not UTF-8 ----------------
 
     /// Two lines that differ, in bytes that are not valid UTF-8, must differ.
@@ -1853,9 +2111,9 @@ mod tests {
     fn two_distinct_bytes_that_are_not_utf8_are_not_the_same_line() {
         let a = vec![b"caf\xe9".to_vec()];
         let b = vec![b"caf\xff".to_vec()];
-        let script = compute_diff(&a, &b, &cfg());
+        let script = compute_diff(&a, &b, NL, NL, &cfg());
         assert!(
-            script.iter().any(|(op, _)| *op != Op::Equal),
+            script.iter().any(|e| e.op != Op::Equal),
             "a difference must be reported, got {script:?}"
         );
     }
@@ -1867,9 +2125,9 @@ mod tests {
     #[test]
     fn the_same_byte_that_is_not_utf8_is_still_equal() {
         let a = vec![b"caf\xe9".to_vec()];
-        let script = compute_diff(&a, &a.clone(), &cfg());
+        let script = compute_diff(&a, &a.clone(), NL, NL, &cfg());
         assert!(
-            script.iter().all(|(op, _)| *op == Op::Equal),
+            script.iter().all(|e| e.op == Op::Equal),
             "identical input must produce no edits, got {script:?}"
         );
     }
@@ -1901,6 +2159,9 @@ mod tests {
         // A trailing newline does not invent a final empty line.
         assert_eq!(split_lines(b"x\n").len(), 1);
     }
+
+    /// The common case: both files end with a newline.
+    const NL: FinalNewline = FinalNewline::Present;
 
     /// File content as the differ now takes it: a line is bytes.
     fn s(items: &[&str]) -> Vec<Vec<u8>> {
@@ -2050,9 +2311,9 @@ mod tests {
     /// were here before the conversion rather than restatements of it. The
     /// cases that exercise bytes call `compute_diff` directly.
     fn ops(a: &[&str], b: &[&str]) -> Vec<(Op, String)> {
-        compute_diff(&s(a), &s(b), &cfg())
+        compute_diff(&s(a), &s(b), NL, NL, &cfg())
             .into_iter()
-            .map(|(op, line)| (op, String::from_utf8(line).expect("ASCII fixture")))
+            .map(|e| (e.op, String::from_utf8(e.text).expect("ASCII fixture")))
             .collect()
     }
 

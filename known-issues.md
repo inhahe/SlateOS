@@ -144820,7 +144820,38 @@ exercises both halves through their real entry points and its assertion is
 
 ## B-DIFF-CANNOT-SEE-A-MISSING-FINAL-NEWLINE (lane B, 2026-09-14)
 
-**Status:** OPEN · `userspace/coreutils/src/bin/diff.rs` · **`diff` is on the image**
+**Status:** FIXED 2026-09-14 · `userspace/coreutils/src/bin/diff.rs`
+
+**How it was closed**, following the design below almost exactly. The
+comparison marker is a newline pushed onto the normalised last line of
+whichever side lacks one — collision-free by construction — and the emitted
+lines are untouched, so it cost nothing in output. The output half rides on
+the line itself: `(Op, Vec<u8>)` became an `Edit` struct with a
+`no_final_newline` flag, set by one pass over the edit script that finds the
+last `Delete`-or-`Equal` for file A and the last `Insert`-or-`Equal` for B.
+
+**One thing the design did not anticipate, and it needed measuring.**
+Side-by-side prints **no** marker: GNU's `-y` on an unterminated file shows
+the line and nothing else, and simply omits the newline from its own last
+line of output. So that renderer deliberately does not bind the flag, with
+the measurement recorded where the `..` is.
+
+`FinalNewline` is an enum rather than a `bool` because the polarity has four
+call sites and getting it backwards produces another silent wrong answer
+rather than a compile error — which is exactly what the bug was. The first
+draft of `read_file` did name the variable backwards, so the concern was not
+hypothetical.
+
+**Measured:** `scripts/diff-diff.sh` 71 passed/36 differed → **75/32**, four
+cases fixed and `comm` confirming none newly differ. Five unit cases, three
+of them controls — both-unterminated is equal, both-terminated is equal, and
+an `Equal` line can be the last line of both files at once. Removing the
+comparison marker turns the bug's case red and leaves all three controls
+green.
+
+---
+
+Original report follows.
 
 `diff` reports two files as identical, **exit 0**, when one ends with a newline
 and the other does not:

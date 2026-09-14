@@ -129783,7 +129783,7 @@ so that destination became a running program rather than a library.
 | 1. a control verb to register, update and remove | **done** — `SetTrayIcon` 0x21, `RemoveTrayIcon` 0x22, `CONTROL_VERSION` 12 |
 | 2. a registry in the compositor, reaped per client | **done** — `Compositor::set_tray_icon` / `remove_tray_icon` / `reap_tray_icons` |
 | 3. a `TRAY` frame and a subscription | **done** — `guiremote::tray`, `SubscribeTrayIcons` 0x23, `route_tray_list` |
-| 4. drag, drop, pin, reorder (`tray_dnd.rs`) | still unconstructed, but no longer built on nothing |
+| 4. drag, drop, pin, reorder (`tray_dnd.rs`) | **reorder done** — drag the row; pin and hide have no door yet |
 | 5. a click reaching the program that owns the icon | **done** — `ClickTrayIcon` 0x24, `Event::TrayIconClicked` 0x0C, `App::tray_icon_clicked` |
 
 Plus the two ends: `oswindow::EventLoop` has `watch_tray`, `set_tray_icon`,
@@ -129827,13 +129827,43 @@ with a build error rather than a test failure. That is
 `TD-C-A-TEST-BINARY-CAN-BE-BROKEN-WITHOUT-ANYONE-NOTICING` happening to the
 person who had read it the same afternoon.
 
-**What is left, and it is now a short list:**
+**Update, later still again: the row is the user's, and it can no longer
+take the taskbar away from them.**
+
+Two things landed after the click. First the order became the shell's:
+`TrayIconArrangement` folds each list from the compositor in, so a program
+swapping its glyph no longer drags every icon back to registration order,
+and a drag moves one. The identity had to be fixed to do it — the module
+keyed an icon on a single number, and the wire keys one on `(owner, id)`,
+which `guiremote::tray` states outright and the compositor has a test for.
+Keyed on `id` alone, hiding one program's icon would have hidden another's.
+
+**Second, and this one is a defect rather than a feature.** Measured on a
+1920-wide bar with eighty icons, before the cap: `tray_width` came to 2167,
+so `tray_x` clamped to zero, the icon run covered the whole bar including
+the clock at x=1805, and `taskbar_button_rect(0).w` was *zero* — no window
+buttons at all, on a shell whose only window switcher that is. Nothing
+rationed the strip: `MAX_TRAY_ICONS` is 4096 and a program picks its own
+ids, so any process that could reach the compositor could make the desktop
+unusable, and nothing about it would look like a crash. The run now gets a
+quarter of the bar, with a chevron for the rest — see
+`design-decisions.md` §844 for why a share and not a count.
+
+**What is left:**
 
 - **`apps/systray` is still the copy**, and 842 says its unique parts — quick
   settings, the volume and network popups — move into the shell rather than
   to Settings. Nothing has moved yet.
-- **`tray_dnd.rs` is still constructed by nothing**, but it now has real
-  icons to reorder, so wiring it is a task rather than a prerequisite.
+- **Hiding and pinning have no way in.** `TrayIconSlot` carries `visible`
+  and `pinned`, the arrangement honours both, and nothing can set either:
+  right-click belongs to the program that owns the icon, so the shell's own
+  per-icon menu needs a different door. Until it has one those two fields
+  are exercised only by tests.
+- **The order does not survive a reboot**, and cannot yet: keys are
+  `(pid, id)` pairs, so an order written to disk would restore onto
+  processes that no longer exist. It needs the compositor to report a
+  *stable* name for the program behind a connection, and `ClientLink`
+  carries `client_pid` and nothing else.
 
 **A correction to how this was found, because it is the error this file keeps
 recording.** The first pass concluded "there are no tray icons anywhere" from a

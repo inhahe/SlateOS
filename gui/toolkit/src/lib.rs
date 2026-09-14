@@ -29,7 +29,6 @@ pub mod colorpicker;
 pub mod context_ext;
 pub mod date;
 pub mod datetime;
-pub mod daywindow;
 pub mod dialog;
 pub mod disabled;
 pub mod dnd;

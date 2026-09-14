@@ -61,7 +61,7 @@
 
 use appearance::{Palette, Surface, readable_on};
 use guitk::color::Color;
-use guitk::daywindow::DailyWindow;
+use daywindow::DailyWindow;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 

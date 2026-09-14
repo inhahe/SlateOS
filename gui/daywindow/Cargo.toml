@@ -1,0 +1,16 @@
+[package]
+name = "daywindow"
+version = "0.1.0"
+edition = "2024"
+description = "A recurring window of the day, which may wrap past midnight"
+
+# Deliberately none. This crate is one value type and its arithmetic, and the
+# reason it is a crate rather than a module of the toolkit is that the two
+# halves that need it -- the desktop shell, which *applies* a schedule, and the
+# settings model, which *stores* one -- must not have to agree on a widget
+# library to agree on what an hour is. `notifsettings` already declines to
+# depend on `appearance` for the same reason.
+[dependencies]
+
+[lints]
+workspace = true

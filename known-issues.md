@@ -144029,6 +144029,110 @@ worth more than one feature:
   10.0` to mean "inside the tab strip" and broke the moment it moved, which is
   the same defect in the tests.
 
+## TD-C-FILE-ASSOCIATIONS-WERE-NEVER-WRITTEN-DOWN -- FIXED 2026-09-14
+
+**Date:** 2026-09-14. **Lane:** C. **Fixed the same day.**
+
+**In short:** the File Associations program let you choose which application
+opens each kind of file, and then threw the answer away when you closed the
+window. It never read or wrote a file of any kind -- 4,826 lines, no
+`std::fs`, no `PathBuf`, nothing. Every setting reverted to the built-in
+default at the next start.
+
+**What made it hard to see.** The program had a complete save format sitting
+right there: `export_config` and `import_config`, a matching pair with eight
+tests including a round-trip over deliberately hostile extension names. All of
+it worked. None of it went anywhere -- `export_config` was reachable only as
+text in a panel the user could read, and `import_config` had **no caller at
+all** outside its own tests. So every signal a reader would use said the
+feature was present: a format, tests, a round-trip, even a hardened escaping
+scheme with a comment about a bug it had already fixed. The one thing missing
+was the call that touches a disk.
+
+That is the same shape as `apps/automator`'s mutation table and `guitk::svg`:
+the work was done, carefully and with tests, on a component whose output
+nobody collected.
+
+**What was done.**
+
+* Associations are a YAML document now, under `settingsfile`, like every other
+  settings surface here -- `design.txt` says configuration is YAML "processed
+  with a library that preserves comments and formatting", and this program had
+  a hand-rolled `ext=app` grammar instead. The document is kept and *edited*
+  rather than rebuilt, so a hand-written comment survives being saved over.
+* `read_from` / `write_into` on the registry, and `FileAssocUI::load` /
+  `from_document` / `persist` on the UI. The `load`/`from_document` split is
+  the one `inputsettings` already has, and it exists for a concrete reason:
+  48 tests build a `FileAssocUI`, and a constructor that read the config
+  directory would make all 48 of them read the developer's own.
+* Saved after every change rather than behind a Save button. There is no Save
+  button and there should not be one: this program is a list of choices, and a
+  choice that has to be confirmed elsewhere is a choice a user can lose.
+* The old `ext=app` codec, its `CONFIG_META`, and the `AssocError::ParseError`
+  variant are gone with it. `ParseError` carried the line number of a bad line;
+  `yamldoc` repairs what it can and reports no line, and inventing one to keep
+  the variant alive is exactly what the comment beside it warned against.
+
+**Two things the tests caught that reading had not.**
+
+1. **A cleared association came back.** `load` started from the built-in
+   defaults and applied the file on top, so an association the user had
+   *cleared* -- an absence from the file -- was indistinguishable from one
+   never set, and the default under it won. Once a file exists it is now the
+   whole truth about associations: the defaults are cleared before it is
+   applied. The catalogue of file types and applications is untouched, because
+   that is not a choice the user made.
+2. **A cleared entry has to be removed from the document**, not merely omitted
+   from what is written. Writing only what is present leaves the old key in the
+   file, and it reads back as though the clear never happened.
+
+**Verified by reintroduction**: with the `store` call disabled, and again with
+the defaults left to override the file, `an_association_survives_a_restart`
+fails and nothing else does.
+
+## TD-C-THE-SCRATCH-CONFIG-GATE-COULD-NOT-SEE-A-STORE -- FIXED 2026-09-14
+
+**Date:** 2026-09-14. **Lane:** C. **Fixed the same day.**
+
+**In short:** `scripts/check-scratch-config.py` is the gate that stops a test
+writing settings into the developer's own home directory instead of a
+throwaway one. It found the crates to watch by searching for two spellings --
+a method called `save`, or `settingsfile::...write...`. The actual function
+that writes the file is `settingsfile::store`. Any crate whose saving method
+was called something else was therefore invisible to it, and the gate reported
+success over the crates it could see while saying nothing about the rest.
+
+**How it surfaced.** `apps/fileassoc` gained persistence through a method named
+`persist`. Four of its tests immediately started writing
+`~/.config/slateos/fileassoc.yaml` for real. The gate ran and answered:
+
+> ok: 12 save-capable crates wrote nothing to the real config
+
+-- true of the twelve, and silent about the thirteenth. Adding `store` to the
+pattern turned that into `fileassoc wrote slateos/fileassoc.yaml` on the very
+next run, and the count went from 12 to **14**: `notifsettings` had been
+unwatched as well, and had simply happened not to be writing.
+
+**Why it belongs in this file even though it is fixed.** This is the third
+instance this week of one defect: *a check that reports success over a
+population it cannot enumerate.* The others were `check-scratch-config.py`
+itself running tests in parallel, so a stray write landed in a neighbouring
+scratch directory and was attributed to nobody; and `scan-orphan-modules.py`
+clearing a module because a name it owned was also declared in a file the scan
+skipped. In all three the gate was **green and wrong**, which is worse than
+red, because a green gate ends the investigation.
+
+The general shape to look for: a checker that discovers its own subjects by
+pattern. Its blind spot is never in what it reports -- it is in what it never
+looked at, and no output will mention that.
+
+**A second lesson, about finding the writers.** Wrapping the offending tests
+took three rounds of reading call paths and guessing wrong, because two of the
+eight were sweeps that click *every* control without naming any of them. A
+temporary panic inside `persist` listed all eight in one run. Enumerating a
+population beats reasoning about it -- which is the same sentence as the
+paragraph above, pointed at my own method.
+
 ## TD-C-THE-TEXT-EDITOR-CANNOT-OPEN-OR-CREATE-A-FILE-FROM-INSIDE-ITSELF
 
 **Date:** 2026-09-14. **Lane:** C.

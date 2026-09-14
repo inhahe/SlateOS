@@ -74,7 +74,20 @@ from rustslice import production_end  # noqa: E402
 
 # The call that actually touches the disk. `InputFile`, `AppearanceFile` and
 # the rest all reach it through `settingsfile`.
-SAVES = re.compile(r"[.]save" + BS + "s*" + BS + "(|settingsfile::[" + BS + "w:]*write")
+#
+# `store` is here because it was missing, and the miss is the exact shape this
+# whole script is about. `settingsfile::store` is *the* way a settings surface
+# writes its file -- `InputFile::save` is a one-line wrapper over it -- and the
+# pattern matched `write` only. A crate was therefore save-capable and invisible
+# the moment its saving method was called anything other than `save`:
+# `apps/fileassoc` gained persistence on 2026-09-14 through a method named
+# `persist`, its four mutation tests started writing, and this gate answered
+# "ok: 12 save-capable crates wrote nothing to the real config" -- true of the
+# twelve it could see, and silent about the thirteenth. A check that reports
+# success over a population it cannot enumerate is the defect it exists to find.
+SAVES = re.compile(
+    r"[.]save" + BS + "s*" + BS + "(|settingsfile::[" + BS + "w:]*(write|store)"
+)
 GUARD = re.compile(r"with_scratch_config|with_env" + BS + "b|ScratchDir::new")
 FN = re.compile(r"^(\s*)(?:pub(?:\([\w:]+\))?\s+)?(?:async\s+)?(?:const\s+)?fn\s+(\w+)")
 TEST_ATTR = re.compile(r"^\s*#\[(test|tokio::test)\]")

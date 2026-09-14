@@ -144437,9 +144437,139 @@ GNU exits 0 and leaves `THIRD LINE` with the 0xE9 untouched. Keep this as the
 acceptance case: it fails on the *patch* file, so it also covers chokepoint 1's
 sibling — a patch whose own `---` path is not UTF-8.
 
-### One separate thing the probe turned up, not yet chased
+### WITHDRAWN: the "GNU patch -Q exits 0" note that was here
 
-GNU `patch -Q` prints `patch: invalid option -- 'Q'` and **exits 0**; ours
-exits 2. Measured once, in passing, while probing something else, so it wants
-re-measuring deliberately before anything is changed — a one-sample exit code
-is exactly the kind of thing this file has been wrong about before.
+An earlier revision of this entry recorded that GNU `patch -Q` prints
+`patch: invalid option -- 'Q'` and **exits 0** where ours exits 2, flagged as
+wanting deliberate re-measurement. It has now been re-measured and **there is
+no such divergence** — GNU exits non-zero, same as us, and
+`scripts/patch-diff.sh` case `u.patch -p1 -Q` passes on both sides
+independently.
+
+The note was an artifact of the instrument, not an observation. See
+`TD-B-EVERY-EXIT-CODE-I-MEASURED-THROUGH-WSL-WAS-THE-SAME-ZERO`. Left in
+place rather than deleted because a withdrawn finding is worth more than a
+missing one: whoever reads this next would otherwise re-measure it.
+
+## TD-B-EVERY-EXIT-CODE-I-MEASURED-THROUGH-WSL-WAS-THE-SAME-ZERO (lane B, 2026-09-14)
+
+**Status:** instrument defect, understood; no code change needed
+
+Every exit status read with `$?` inside a `wsl -d Ubuntu -- bash -c '…'`
+payload comes back **0**, whatever actually happened. The control that
+settles it is one line:
+
+    $ wsl -d Ubuntu -- bash -c '... false; echo "false_rc=$?" ...'
+    false_rc=0          # `false` exits 1, by definition
+
+It is not the heredoc, and not a quoting slip in one probe: a script written
+inside WSL with a quoted delimiter and run as `bash /tmp/rc.sh` gives the same
+`false_rc=0`. Something in the layering between the Bash tool and WSL resolves
+`$?` before the inner shell ever sees it.
+
+### What it cost
+
+One false entry in this file — "GNU `patch -Q` exits 0" — now withdrawn above.
+It was recorded *with* a caveat that a one-sample exit code wants
+re-measuring, which is the only reason it did no damage. A GNU-abbreviation
+probe from the previous tick (`patch --dry-run --inp=…`, "exit 0") rests on
+the same broken reading and should not be relied on either.
+
+### The workaround, which is also the better habit
+
+Ask the shell the question directly instead of reading a variable:
+
+    if patch -Q </dev/null >/dev/null 2>&1; then echo zero; else echo NONZERO; fi
+
+`if` consumes the status where it is produced, so nothing can rewrite it in
+between. Run `false` and `true` alongside as controls in the same script —
+that is what caught this, and it costs two lines.
+
+### What was NOT affected, and why it is worth saying
+
+* **`scripts/patch-diff.sh` is sound.** It runs as a real script from Git Bash
+  and prints genuine non-zero codes (`ours (rc=2)`, `gnu (rc=2)`), so all 68
+  of its verdicts stand. The bug is specific to my ad-hoc one-liners.
+* **Every conclusion I drew from stdout stands**, because none of the ones
+  that mattered rested on the exit code: GNU applying the Latin-1 patch was
+  read off `patching file orig.txt` plus the resulting bytes, and GNU seeing
+  the `diff` difference was read off `2c2`.
+
+This is the same shape as `TD-B-MY-AD-HOC-SEARCHES-OVER-REPORT-BY-AN-ORDER-OF-MAGNITUDE`,
+one layer down: there the ad-hoc instrument over-reported, here it under-read.
+Both say the purpose-built harness is the thing to trust, and both were caught
+by running a control rather than by reasoning about the tool.
+
+## B-DIFF-SAYS-TWO-DIFFERENT-FILES-ARE-IDENTICAL (lane B, 2026-09-14)
+
+**Status:** OPEN · `userspace/coreutils/src/bin/diff.rs:467` · **`diff` is on the image**
+
+`diff` reports **no difference** between two files that differ, and exits 0.
+Measured, with `cmp` as the control:
+
+    $ cmp x.txt y.txt
+    x.txt y.txt differ: char 10, line 2
+
+    $ diff x.txt y.txt          # ours
+    $                           # nothing at all, exit 0
+
+    $ diff x.txt y.txt          # GNU diffutils
+    2c2
+    < cafM-i
+    ---
+    > cafM-^?
+
+The two files are `alpha/caf\351/gamma` and `alpha/caf\377/gamma`. Byte
+`0351` and byte `0377` are different bytes; neither is valid UTF-8 on its
+own.
+
+### Cause
+
+```rust
+// Convert to string. We use lossy conversion here only for the purpose of
+// displaying diff output; the comparison is byte-accurate via the line
+// strings.
+let text = String::from_utf8(data)
+    .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
+let lines: Vec<String> = text.lines().map(String::from).collect();
+```
+
+**The comment is wrong, and it is wrong in the specific way that hides the
+bug.** There is no byte-accurate path: `lines` *is* the lossy text, and the
+comparison runs on it. Every byte that is not valid UTF-8 becomes U+FFFD, so
+any two distinct bad bytes become the same character and compare equal.
+
+`from_utf8_lossy` is named in CLAUDE.md's self-review list — *"No
+`from_utf8_lossy` — that's silent data corruption"* — and this is exactly the
+failure it is named for. The comment reads as though someone had already
+thought about it, which is what makes it worse than no comment.
+
+### Why this is sharper than the `patch` bug fixed today
+
+`patch` **refused**: exit 2, a message, nothing written. Loud and safe.
+`diff` **answers wrongly and confidently**. Two consequences:
+
+* `diff expected actual && echo OK` — the idiom every test harness and build
+  script uses — passes when it should fail.
+* `diff -u` output is fed to `patch`. A diff of a file holding one Latin-1
+  byte emits a patch with U+FFFD in the context lines, which then fails to
+  match, or matches and writes the corruption in. Today's `patch` fix makes
+  `patch` byte-exact, so `diff` is now the weaker half of that pair.
+
+### The fix
+
+The same one `patch` just had: keep lines as `Vec<u8>`. `diff` already reads
+with `fs::read`, so the bytes are in hand and thrown away one line later —
+there is no I/O change needed, only the type. `FileContent::Text(Vec<String>)`
+becomes `Vec<Vec<u8>>`, and the hunk renderer writes the line rather than
+formatting it.
+
+One thing to settle first, noted while converting `patch`: GNU writes the
+operand **raw** into the `--- path` / `+++ path` header, so that header must
+be emitted as bytes. Quoting it would invent a format, and `patch` reads it
+back.
+
+`scripts/patch-diff.sh` gained a Latin-1 fixture today; `scripts/diff-*`
+should get the same pair of files, and the case above — two files differing
+only in a high byte — belongs in it as the regression, because it is the one
+that returns the wrong answer rather than an error.

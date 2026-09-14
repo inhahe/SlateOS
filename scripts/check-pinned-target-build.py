@@ -64,6 +64,12 @@ NL = chr(10)
 # one any workspace command builds".
 SEARCH_ROOTS = ("posix", "toolchain", "services", "userspace", "init")
 
+# Zones whose crates inherit a build target from a config ABOVE them rather
+# than carrying one of their own. Scanned by `inherited_target_crates`, which
+# reports them; they are NOT compiled here. See that function for why the two
+# are separate.
+INHERIT_ROOTS = ("gui", "apps")
+
 BUILD_TARGET = re.compile(r"^\s*target\s*=\s*\"([^\"]+)\"", re.M)
 
 
@@ -99,6 +105,92 @@ def pinned_target_crates(roots=SEARCH_ROOTS, base=None):
                 continue
             out.append(os.path.relpath(dirpath, top).replace(os.sep, "/"))
     return sorted(out)
+
+
+def zone_configs(roots, base=None):
+    """`{directory: target}` for every `.cargo/config.toml` that pins a target.
+
+    Keyed by the directory that CONTAINS `.cargo`, which is the directory
+    cargo's upward search would find it from.
+    """
+    top = base if base is not None else ROOT
+    out = {}
+    for root in roots:
+        start = os.path.join(top, root)
+        if not os.path.isdir(start):
+            continue
+        for dirpath, dirnames, filenames in os.walk(start):
+            dirnames[:] = [d for d in dirnames if d not in ("target", ".git")]
+            if os.path.basename(dirpath) != ".cargo" or "config.toml" not in filenames:
+                continue
+            try:
+                with open(os.path.join(dirpath, "config.toml"),
+                          encoding="utf-8", errors="replace") as fh:
+                    text = fh.read()
+            except OSError:
+                continue
+            found = BUILD_TARGET.search(text)
+            if found:
+                out[os.path.dirname(dirpath)] = found.group(1)
+    return out
+
+
+def inherited_target_crates(roots=INHERIT_ROOTS, base=None):
+    """Crates whose build target comes from a config ABOVE their directory.
+
+    **This exists because the per-crate predicate reported a confident zero.**
+    [`pinned_target_crates`] keys on a directory holding both a `Cargo.toml`
+    and its own `.cargo/config.toml`, which is how `posix/` and `services/*`
+    are laid out. `gui/` and `apps/` put ONE config at the zone root and let
+    cargo's upward search give it to all 161 crates beneath. So the predicate
+    matched nothing there, and widening `--roots` alone would still have
+    matched nothing -- the roots were not the narrowing, the predicate was.
+    Reported by lane C on 2026-09-14; the zero was reproduced here before
+    this was written.
+
+    The docstring on [`pinned_target_crates`] already named the class -- "a
+    hardcoded list is how a gate comes to cover five of six" -- and this is the
+    same failure one level down: the list was fine and the *rule* encoded one
+    layout.
+
+    **Why these are reported and not compiled.** `check_one` runs `cargo
+    check` per crate, and the two zone configs also set
+    `build-std = ["core", "alloc", "std", "panic_abort"]`, so a cold run
+    compiles the standard library from source before it compiles anything
+    else. Adding 161 of those to a gate that runs on every push is a cost
+    nobody has measured yet -- so this function makes the coverage gap
+    VISIBLE without paying for it, and the measurement is the next step
+    rather than a guess baked into the push path.
+    """
+    top = base if base is not None else ROOT
+    configs = zone_configs(roots, base=top)
+    out = []
+    for root in roots:
+        start = os.path.join(top, root)
+        if not os.path.isdir(start):
+            continue
+        for dirpath, dirnames, filenames in os.walk(start):
+            dirnames[:] = [d for d in dirnames if d not in ("target", ".git")]
+            if "Cargo.toml" not in filenames:
+                continue
+            if os.path.isfile(os.path.join(dirpath, ".cargo", "config.toml")):
+                # Its own config; `pinned_target_crates` already has it.
+                continue
+            # Cargo searches upward. The NEAREST config wins, so walk up from
+            # the crate rather than assuming the zone root.
+            probe = dirpath
+            while True:
+                if probe in configs:
+                    out.append((
+                        os.path.relpath(dirpath, top).replace(os.sep, "/"),
+                        os.path.relpath(probe, top).replace(os.sep, "/"),
+                    ))
+                    break
+                parent = os.path.dirname(probe)
+                if parent == probe or len(probe) <= len(top):
+                    break
+                probe = parent
+    return out
 
 
 def check_one(rel, timeout):
@@ -153,6 +245,18 @@ def selftest():
     # the libc every userspace binary links stops being compiled for the
     # target it ships to and nothing says so.
     ck("posix" in found, "posix must never silently leave this gate")
+
+    # The inherited scan must find the zones the per-crate predicate cannot.
+    # A floor, not an equality: the number grows as lane C adds crates, and a
+    # gate that fails on growth teaches people to edit the gate.
+    inherited = inherited_target_crates()
+    ck(len(inherited) >= 100,
+       "expected the gui/apps zones to contribute a large inherited set, "
+       "found " + str(len(inherited)))
+    # ...and it must not double-count anything the per-crate predicate has.
+    own = set(pinned_target_crates())
+    ck(not (own & {c for c, _ in inherited}),
+       "a crate with its own config must not also appear as inheriting one")
 
     # The marker must be BOTH files. A directory with a Cargo.toml alone is a
     # workspace member and is already covered; one with only a cargo config is
@@ -234,6 +338,25 @@ def main():
 
     print(str(len(crates)) + " crate(s) checked in "
           + format(total, ".1f") + "s; " + str(len(failed)) + " failed.")
+
+    # DISCOVERED BUT NOT COMPILED, and the distinction is deliberate.
+    #
+    # These crates inherit a pinned target from a config above them rather than
+    # carrying one of their own, so the per-crate predicate above never saw
+    # them and this gate reported a confident zero about 161 crates. They are
+    # counted here so the gap is visible; they are not compiled here because
+    # those zone configs also set `build-std`, which means a cold run builds
+    # the standard library from source before anything else. Paying that on
+    # every push is a decision that needs a measurement, not a default.
+    inherited = inherited_target_crates()
+    if inherited:
+        zones = sorted({cfg for _, cfg in inherited})
+        print("")
+        print(str(len(inherited)) + " further crate(s) pin a target by "
+              "INHERITING one from " + ", ".join(zones)
+              + " -- discovered, not compiled here. See "
+              "`inherited_target_crates` for why, and "
+              "requests/ for the open question about what should compile them.")
 
     if failed:
         print("", file=sys.stderr)

@@ -1149,6 +1149,13 @@ pub struct DesktopShell {
     /// between "read once at startup" and "start watching" for a save to fall
     /// into. See [`poll_appearance`](Self::poll_appearance).
     appearance_watch: config::Watcher,
+    /// `notifications.yaml`, which says which programs may interrupt.
+    ///
+    /// A watcher rather than a one-off read, for the reason the appearance
+    /// one is: the Settings application writes this file from another
+    /// process, so "has it changed" is a question the shell has to be able to
+    /// ask again, not something it learns once at login.
+    notif_watch: config::Watcher,
     /// Theme configuration, derived from [`appearance`](Self::appearance).
     ///
     /// Never assign to this directly: it would disagree with `appearance` at
@@ -1572,6 +1579,7 @@ impl DesktopShell {
             widget_drag: None,
             widgets_dirty: false,
             appearance_watch: config::Watcher::new(appearance::CONFIG_NAME),
+            notif_watch: config::Watcher::new(notifsettings::CONFIG_NAME),
             theme: DesktopTheme::default(),
             datetime: datetime_settings::DateTimeSettings::default(),
             calendar: calendar::CalendarView::new(calendar::CalendarConfig::default()),
@@ -1690,6 +1698,41 @@ impl DesktopShell {
             None => self.appearance.clone(),
         };
         self.set_appearance(settings);
+    }
+
+    /// Read the user's saved notification rules and adopt them.
+    ///
+    /// The rules go to [`focus_assist`](focus_assist::FocusAssistManager),
+    /// which is what already reads them: `should_show_notification` asks an
+    /// app's importance on every notification the shell is handed. Until this
+    /// existed that list was only ever empty, so every program got the
+    /// default and a rule was something no user could set.
+    pub fn load_notification_rules(&mut self) {
+        if let Some(doc) = self.notif_watch.poll() {
+            self.focus.app_overrides = notifsettings::NotifSettings::read_from(&doc).apps;
+        }
+    }
+
+    /// Re-read the rules if the file changed, and say whether they differ.
+    ///
+    /// Answers on the *settings*, not on the file, for the reason
+    /// [`poll_appearance`](Self::poll_appearance) does: a comment added to the
+    /// file, or a key written by a newer desktop, changes the document and
+    /// changes nothing a caller should act on.
+    ///
+    /// Like `poll_appearance` it does not merge. The file is the authority,
+    /// and the shell has no notification-rules editor of its own whose unsaved
+    /// work could be lost — the Settings application owns that page.
+    pub fn poll_notification_rules(&mut self) -> bool {
+        let Some(doc) = self.notif_watch.poll() else {
+            return false;
+        };
+        let rules = notifsettings::NotifSettings::read_from(&doc).apps;
+        if rules == self.focus.app_overrides {
+            return false;
+        }
+        self.focus.app_overrides = rules;
+        true
     }
 
     /// Read the user's saved *input* settings and adopt the parts the shell
@@ -10163,6 +10206,105 @@ mod overview_wiring_tests {
             drawn(&s, "Notice 0"),
             "the keyboard could not reach the last notification"
         );
+    }
+
+    /// A rule saved on disk reaches the decision that suppresses a
+    /// notification.
+    ///
+    /// The whole chain in one test, because every link of it was built
+    /// separately and each looked finished on its own: `notifications.yaml`
+    /// holds the rule, `poll_notification_rules` adopts it,
+    /// `focus_assist::app_priority` finds it by the name the notification
+    /// carries, and `notify` acts on the answer. Before this, `app_overrides`
+    /// was only ever the empty vector, so the last three links were exercised
+    /// exclusively by tests that filled it in by hand.
+    ///
+    /// Asserted through `notify` rather than through `app_priority`, because
+    /// the thing that was broken is the *chain*, and testing the far end
+    /// against a hand-placed rule is how it came to be broken in the first
+    /// place.
+    #[test]
+    fn a_rule_written_to_the_config_file_lets_that_program_through() {
+        appearance::config::testing::with_scratch_config("shell-notif-rules", |_root| {
+            // Written through the settings crate's own save path, so the test
+            // exercises the format both ends will actually use rather than a
+            // hand-typed approximation of it.
+            let mut file = notifsettings::NotifFile::load();
+            file.settings.set_rule(
+                notifsettings::AppRule::new("Chat")
+                    .with_importance(notifsettings::Importance::Critical),
+            );
+            file.save().expect("save the rule");
+
+            let mut s = shell();
+            s.focus.set_mode(focus_assist::FocusMode::PriorityOnly);
+            assert!(
+                s.poll_notification_rules(),
+                "the saved rule was not picked up"
+            );
+
+            // Chat is Critical by the file, so it survives a focus mode that
+            // holds back everything ordinary.
+            let _ = s.notify(notif(1, "Chat"));
+            assert_eq!(
+                s.focus.suppressed_count, 0,
+                "the rule the user saved did not let Chat through"
+            );
+
+            // Alarms has no rule, so it is Normal and PriorityOnly holds it
+            // back. Without this the test would pass on a shell that
+            // suppressed nothing at all.
+            let _ = s.notify(notif(2, "Alarms"));
+            assert_eq!(
+                s.focus.suppressed_count, 1,
+                "an unconfigured program was not held back, so Chat getting \
+                 through proves nothing"
+            );
+        });
+    }
+
+    /// The same file, read by a shell that never polls, changes nothing.
+    ///
+    /// The negative control for the one above: it is the *adoption* that makes
+    /// a saved rule take effect, and a chain that worked by accident — because
+    /// `focus_assist` defaulted the way the rule happened to say — would pass
+    /// the first test and fail this one.
+    #[test]
+    fn a_rule_no_one_read_has_no_effect() {
+        appearance::config::testing::with_scratch_config("shell-notif-unread", |_root| {
+            let mut file = notifsettings::NotifFile::load();
+            file.settings.set_rule(
+                notifsettings::AppRule::new("Chat")
+                    .with_importance(notifsettings::Importance::Critical),
+            );
+            file.save().expect("save the rule");
+
+            let mut s = shell();
+            s.focus.set_mode(focus_assist::FocusMode::PriorityOnly);
+            // Deliberately no `poll_notification_rules`.
+            let _ = s.notify(notif(1, "Chat"));
+
+            assert_eq!(
+                s.focus.suppressed_count, 1,
+                "Chat got through without the rule being read, so the first \
+                 test is not testing the file"
+            );
+        });
+    }
+
+    /// A notification from `app`, with nothing else interesting about it.
+    fn notif(id: u64, app: &str) -> notif_pane::Notification {
+        notif_pane::Notification {
+            id,
+            app_name: app.to_owned(),
+            title: "hello".to_owned(),
+            body: String::new(),
+            timestamp: 0,
+            priority: notif_pane::NotifPriority::Normal,
+            read: false,
+            action: None,
+            silent: false,
+        }
     }
 
     /// The glyphs the tray is drawing, left to right.

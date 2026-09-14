@@ -75,7 +75,62 @@ subsystem".)
 
 **The body of this file holds OPEN questions only.** When the operator answers
 one: write it up in `design-decisions.md` as a `Decided by: Operator` entry,
-**delete the entry from here**, and add one line to the `# Resolved` index at
+**delete the entry from here**, and add one line to the `
+
+## A-Q14: When we keep a previous copy of a file, should it be the content from *before* that save, or *after* it?
+
+**In short:** the system can keep old copies of a file so you can go back to one.
+You have already told us (A-Q10) to stop doing that work *while* a save is
+happening and do it just after, so saving feels fast. Doing it afterwards has a
+consequence we want you to confirm rather than decide for you: once the save has
+finished, the previous content is already gone, so the copy we keep would be the
+**new** content instead of the old one. You can still go back either way -- the
+question is what each stored copy contains.
+
+**Why there is a choice at all.** Today the copy is taken before the save
+overwrites anything, which is why it holds the old content. Moving the work after
+the save means the old content is no longer there to read. We can either accept
+that and store the new content, or hold the old content in memory across the save
+so we can still store it.
+
+**The options:**
+
+* **A. Store the content as it stands after each save.**
+  *What changes:* after three saves you can recover the file as it was at save 1
+  and save 2; save 3 is the file itself. "Undo my last save" still works. A crash
+  in the moment right after a save loses the newest entry only. Nothing is held in
+  memory.
+* **B. Copy the old content into memory during the save, and do the slow part (the
+  checksum) afterwards.**
+  *What changes:* exactly what you can recover today, unchanged. The save gets
+  most of the speed-up, because the checksum is the slow part, not the copy. The
+  cost is that while a large file is being saved we briefly hold a second copy of
+  it in memory -- for a very large file that is a real amount of memory, and it is
+  memory the kernel cannot decline to find.
+
+**Recommendation: A.** It is what your A-Q10 answer literally says ("the read-back
+and checksum happen after the write has returned"), it holds nothing extra in
+memory, and the thing you actually want -- going back to an earlier state -- works
+under both. B's advantage is only that the stored copies line up with what the
+feature stored before, which matters to nobody who has not read the code.
+
+**One honest flag against my own recommendation.** A exists in the codebase as a
+test that asserts the opposite: after writing v2, the history must contain v1.
+Under A that test's meaning changes. All session I have treated "a test whose
+assertion flips" as a sign that an invariant was quietly redefined, so I am not
+going to flip it on my own judgement, which is why this is here rather than
+decided in passing.
+
+**If this is never answered:** nothing breaks and nothing is at risk. A-Q10's
+first half is already in -- the history is off unless a directory is enrolled, so
+almost nothing pays for it. What stays unfinished is only the "do it after the
+save" half, so any directory that *is* enrolled keeps paying the old cost during
+its saves. It does not get worse with time.
+
+*Filed 2026-09-14 by lane A. Bites at `kernel/src/fs/history.rs` --
+`try_auto_record`, and the Test 7 block in that file's `self_test`.*
+
+# Resolved` index at
 the bottom under your own lane's subheading. An answered question left in the
 body is pure clutter, and because it is older it sorts *first* — directly in
 front of the questions that still need an answer, which is the one thing this
@@ -2588,56 +2643,3 @@ These numbers are not to be extended; new questions use `A-Q<n>` / `B-Q<n>` /
   option C** (Claude recommended C): keep `nft`/`iptables` as an explicit
   parser/pretty-printer only, fix the docs, steer users to `fw`; defer full/minimal
   kernel wiring (§62).
-
-## A-Q14: When we keep a previous copy of a file, should it be the content from *before* that save, or *after* it?
-
-**In short:** the system can keep old copies of a file so you can go back to one.
-You have already told us (A-Q10) to stop doing that work *while* a save is
-happening and do it just after, so saving feels fast. Doing it afterwards has a
-consequence we want you to confirm rather than decide for you: once the save has
-finished, the previous content is already gone, so the copy we keep would be the
-**new** content instead of the old one. You can still go back either way -- the
-question is what each stored copy contains.
-
-**Why there is a choice at all.** Today the copy is taken before the save
-overwrites anything, which is why it holds the old content. Moving the work after
-the save means the old content is no longer there to read. We can either accept
-that and store the new content, or hold the old content in memory across the save
-so we can still store it.
-
-**The options:**
-
-* **A. Store the content as it stands after each save.**
-  *What changes:* after three saves you can recover the file as it was at save 1
-  and save 2; save 3 is the file itself. "Undo my last save" still works. A crash
-  in the moment right after a save loses the newest entry only. Nothing is held in
-  memory.
-* **B. Copy the old content into memory during the save, and do the slow part (the
-  checksum) afterwards.**
-  *What changes:* exactly what you can recover today, unchanged. The save gets
-  most of the speed-up, because the checksum is the slow part, not the copy. The
-  cost is that while a large file is being saved we briefly hold a second copy of
-  it in memory -- for a very large file that is a real amount of memory, and it is
-  memory the kernel cannot decline to find.
-
-**Recommendation: A.** It is what your A-Q10 answer literally says ("the read-back
-and checksum happen after the write has returned"), it holds nothing extra in
-memory, and the thing you actually want -- going back to an earlier state -- works
-under both. B's advantage is only that the stored copies line up with what the
-feature stored before, which matters to nobody who has not read the code.
-
-**One honest flag against my own recommendation.** A exists in the codebase as a
-test that asserts the opposite: after writing v2, the history must contain v1.
-Under A that test's meaning changes. All session I have treated "a test whose
-assertion flips" as a sign that an invariant was quietly redefined, so I am not
-going to flip it on my own judgement, which is why this is here rather than
-decided in passing.
-
-**If this is never answered:** nothing breaks and nothing is at risk. A-Q10's
-first half is already in -- the history is off unless a directory is enrolled, so
-almost nothing pays for it. What stays unfinished is only the "do it after the
-save" half, so any directory that *is* enrolled keeps paying the old cost during
-its saves. It does not get worse with time.
-
-*Filed 2026-09-14 by lane A. Bites at `kernel/src/fs/history.rs` --
-`try_auto_record`, and the Test 7 block in that file's `self_test`.*

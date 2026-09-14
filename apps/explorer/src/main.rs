@@ -255,6 +255,19 @@ pub enum SortDir {
 /// in the same colour, and both vanished at the next click. A destructive
 /// operation that half-failed is precisely the thing a user must not miss,
 /// and the status bar is where things go to be missed.
+/// A file operation that has not started, because another is running.
+///
+/// It holds the *plan*, which is the point: the scan, the conflict policy and
+/// the error policy are all settled at the moment the user asked, so a queued
+/// operation cannot quietly acquire different answers by the time its turn
+/// comes. What it does not hold is a journal -- nothing has been written, and
+/// nothing will be until it starts.
+struct PendingOperation {
+    plan: OperationPlan,
+    verb: &'static str,
+    keep_undo: bool,
+}
+
 /// A bulk file operation the explorer is carrying out a slice at a time.
 ///
 /// Deliberately not `Clone` or `PartialEq`: it owns a journal file handle and
@@ -458,10 +471,14 @@ pub struct ExplorerState {
     /// Empty means "nothing to report"; the status bar then shows the summary.
     pub status_message: String,
     /// The bulk file operation in progress, if any.
-    ///
-    /// One at a time. A second is *refused with a message* rather than
-    /// silently dropped or silently run alongside -- see `start_operation`.
     operation: Option<RunningOperation>,
+    /// Operations waiting for the one in front of them to finish.
+    ///
+    /// A queue rather than a refusal: a user who starts a second copy meant to
+    /// start it, and telling them "no, try again later" makes them sit and
+    /// watch for a moment that nothing announces. Nothing has been written for
+    /// a waiting operation, so cancelling one is free.
+    pending: VecDeque<PendingOperation>,
     /// Derived one-line description of the current directory's contents.
     pub dir_summary: String,
     /// Tree sidebar expanded paths.
@@ -559,6 +576,7 @@ impl ExplorerState {
             address_editing: false,
             status_message: String::new(),
             operation: None,
+            pending: VecDeque::new(),
             dir_summary: String::new(),
             tree_expanded: vec![PathBuf::from("/")],
             window_width: 900,
@@ -947,28 +965,47 @@ impl ExplorerState {
     /// froze for its duration and the progress this reports could not be
     /// drawn until it was already over.
     ///
-    /// **A second operation is refused, out loud.** Only one can be in flight,
-    /// because the engine's undo entries and journal belong to one executor;
-    /// saying so is the point, since a copy that quietly did nothing would be
-    /// started again by a user who saw no sign of the first. The refusal is
-    /// also the seam the roadmap's per-drive queue replaces: that item turns
-    /// "no" into "queued behind the one on this drive", which needs somewhere
-    /// to say what it is waiting for.
+    /// **A second operation waits rather than being refused.** Only one runs
+    /// at a time -- the journal and the undo entries belong to one executor --
+    /// but "no" is the wrong answer to a user who meant to start it: it makes
+    /// them watch for a moment nothing announces, and a copy that quietly did
+    /// nothing would simply be started again. So it is queued, and the status
+    /// line says what it is waiting for. Cancelling it before it starts costs
+    /// nothing, because nothing has been written.
+    ///
+    /// **Not yet keyed on the drive**, which is what `roadmap.md` 4.1 asks
+    /// for: an operation on one drive should start immediately while two queue
+    /// on another. That needs operations that genuinely overlap, and these do
+    /// not -- `fs::copy` blocks, the explorer has one thread, so two
+    /// "concurrent" operations would interleave their steps and finish no
+    /// sooner than one after the other. Keying the queue on drives before the
+    /// parallelism exists would be a rule with no effect. See
+    /// `TD-C-THE-FILE-OPERATION-QUEUE-CANNOT-BE-PER-DRIVE-UNTIL-COPIES-CAN-OVERLAP`.
     fn start_operation(
         &mut self,
         plan: OperationPlan,
         verb: &'static str,
         keep_undo: bool,
     ) -> bool {
-        if let Some(running) = &self.operation {
-            self.status_message = format!(
-                "Busy: {} {} of {} — start this again when it finishes",
-                running.verb,
-                running.executor.progress().completed_files,
-                running.total_files,
-            );
-            return false;
+        if self.operation.is_some() {
+            self.pending.push_back(PendingOperation {
+                plan,
+                verb,
+                keep_undo,
+            });
+            self.update_operation_status();
+            return true;
         }
+        self.begin_operation(plan, verb, keep_undo)
+    }
+
+    /// Put an operation into flight. Answers whether it started.
+    fn begin_operation(
+        &mut self,
+        plan: OperationPlan,
+        verb: &'static str,
+        keep_undo: bool,
+    ) -> bool {
         let total_files = plan.total_files;
         let mut executor = OperationExecutor::new(plan);
         if !executor.begin() {
@@ -984,6 +1021,25 @@ impl ExplorerState {
         });
         self.update_operation_status();
         true
+    }
+
+    /// How many operations are waiting to start.
+    #[must_use]
+    pub fn queued_count(&self) -> usize {
+        self.pending.len()
+    }
+
+    /// Drop a waiting operation. Free: it has written nothing.
+    ///
+    /// Answers whether there was one at that position, so a caller cannot
+    /// quietly cancel nothing -- the failure mode the whole status line is
+    /// written against.
+    pub fn cancel_queued(&mut self, index: usize) -> bool {
+        let removed = self.pending.remove(index).is_some();
+        if removed {
+            self.update_operation_status();
+        }
+        removed
     }
 
     /// Work at the operation for a slice of a frame. Answers whether anything
@@ -1036,6 +1092,17 @@ impl ExplorerState {
             }
         }
         self.load_directory();
+
+        // And the next one takes its turn. A loop, not an `if`: an operation
+        // whose journal will not open reports itself and is gone, and the one
+        // behind it is still entitled to start. Without the loop a single
+        // unopenable journal would strand the whole queue with nothing to
+        // restart it.
+        while let Some(next) = self.pending.pop_front() {
+            if self.begin_operation(next.plan, next.verb, next.keep_undo) {
+                break;
+            }
+        }
     }
 
     /// Ask the operation in progress to stop.
@@ -1060,6 +1127,10 @@ impl ExplorerState {
     }
 
     /// Put the operation's progress where the status bar will find it.
+    ///
+    /// The waiting count is part of it and not a second line, because there is
+    /// only one status bar: an operation the user started and cannot see is
+    /// one they will start again.
     fn update_operation_status(&mut self) {
         let Some(running) = &self.operation else {
             return;
@@ -1069,17 +1140,26 @@ impl ExplorerState {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        self.status_message = if current.is_empty() {
-            format!(
-                "{} {} of {}",
-                running.verb, progress.completed_files, running.total_files
-            )
-        } else {
-            format!(
-                "{} {} of {} — {current}",
-                running.verb, progress.completed_files, running.total_files
-            )
-        };
+        let mut line = format!(
+            "{} {} of {}",
+            running.verb, progress.completed_files, running.total_files
+        );
+        if !current.is_empty() {
+            line.push_str(" — ");
+            line.push_str(&current);
+        }
+        match self.pending.len() {
+            0 => {}
+            1 => line.push_str(" (1 waiting)"),
+            n => {
+                use std::fmt::Write as _;
+                // The result is deliberately discarded: writing into a
+                // `String` cannot fail, and `?` here would mean this function
+                // returns a `Result` nobody has anything to do with.
+                let _ = write!(line, " ({n} waiting)");
+            }
+        }
+        self.status_message = line;
     }
 
     /// The text the status bar should display.
@@ -3769,34 +3849,107 @@ mod tests {
         );
     }
 
-    /// **Starting a second operation must not silently do nothing.**
+    /// **A second operation waits its turn, and says that it is waiting.**
     ///
-    /// Only one can be in flight. A paste that quietly did nothing would be
-    /// started again by a user who saw no sign of the first, and the roadmap
-    /// item that turns this refusal into a per-drive queue says the same
-    /// thing: a copy that is queued rather than started has to say so.
+    /// It used to be refused. "No, try again later" makes the user watch for a
+    /// moment nothing announces, and a paste that quietly did nothing would
+    /// simply be started again -- which is what `roadmap.md` 4.1 means by a
+    /// copy that is queued rather than started having to say so.
     #[test]
-    fn a_second_operation_is_refused_out_loud() {
-        let scratch = temp_dir("live_busy");
+    fn a_second_operation_waits_its_turn_and_says_so() {
+        let scratch = temp_dir("queue_second");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_of(&root, 6);
+        state.paste();
+        assert_eq!(
+            state.queued_count(),
+            0,
+            "the first one runs, it does not wait"
+        );
+
+        fs::create_dir(root.join("other")).expect("other");
+        write(&root.join("other/extra.txt"), "extra");
+        state.clipboard = Some(ClipboardOp::Copy(vec![root.join("other/extra.txt")]));
+        state.paste();
+
+        assert_eq!(state.queued_count(), 1, "the second one was not queued");
+        let message = state.status_bar_text().to_string();
+        assert!(
+            message.contains("(1 waiting)"),
+            "the status bar does not say anything is waiting: {message:?}"
+        );
+
+        settle(&mut state);
+
+        // Both finished, and in order.
+        assert_eq!(state.queued_count(), 0, "something is still waiting");
+        for n in 0..6 {
+            assert!(
+                root.join(format!("dst/f{n}.txt")).exists(),
+                "f{n} is missing"
+            );
+        }
+        assert!(
+            root.join("dst/extra.txt").exists(),
+            "the queued operation never ran"
+        );
+    }
+
+    /// Three deep, and the count is right at every depth.
+    #[test]
+    fn the_waiting_count_is_what_is_waiting() {
+        let scratch = temp_dir("queue_depth");
         let root = scratch.dir().to_path_buf();
         let mut state = paste_of(&root, 6);
         state.paste();
 
-        let other = root.join("src/f0.txt");
-        state.clipboard = Some(ClipboardOp::Copy(vec![other]));
+        for n in 0..3 {
+            let name = format!("extra{n}.txt");
+            write(&root.join(&name), "x");
+            state.clipboard = Some(ClipboardOp::Copy(vec![root.join(&name)]));
+            state.paste();
+            assert_eq!(state.queued_count(), n + 1);
+        }
+        assert!(state.status_bar_text().contains("(3 waiting)"));
+
+        settle(&mut state);
+        assert_eq!(state.queued_count(), 0);
+        for n in 0..3 {
+            assert!(
+                root.join(format!("dst/extra{n}.txt")).exists(),
+                "queued operation {n} never ran"
+            );
+        }
+    }
+
+    /// Cancelling something that has not started is free, and says whether it
+    /// cancelled anything.
+    #[test]
+    fn a_waiting_operation_can_be_dropped_before_it_writes_anything() {
+        let scratch = temp_dir("queue_cancel");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_of(&root, 6);
         state.paste();
 
-        let message = state.status_bar_text().to_string();
+        write(&root.join("never.txt"), "x");
+        state.clipboard = Some(ClipboardOp::Copy(vec![root.join("never.txt")]));
+        state.paste();
+        assert_eq!(state.queued_count(), 1);
+
+        assert!(state.cancel_queued(0), "there was one to cancel");
+        assert!(!state.cancel_queued(0), "and now there is not");
+        assert_eq!(state.queued_count(), 0);
         assert!(
-            message.starts_with("Busy:"),
-            "the second paste said nothing: {message:?}"
-        );
-        assert!(
-            state.clipboard.is_some(),
-            "a refused paste must leave the clipboard alone"
+            !state.status_bar_text().contains("waiting"),
+            "the status bar still claims something is waiting: {:?}",
+            state.status_bar_text()
         );
 
         settle(&mut state);
+        assert!(
+            !root.join("dst/never.txt").exists(),
+            "a cancelled operation copied something anyway"
+        );
     }
 
     /// Cancelling stops it, which is only possible because it is stepped.

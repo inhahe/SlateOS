@@ -143465,6 +143465,57 @@ resolved from the path -- not on the mount path, and not on the path prefix"*,
 so this wants one resolver in one place before anything else keys a queue on
 it. Two editors of one model is fine; two models of one fact is the defect.
 
+## TD-C-THE-FILE-OPERATION-QUEUE-CANNOT-BE-PER-DRIVE-UNTIL-COPIES-CAN-OVERLAP
+
+**Date:** 2026-09-14. **Lane:** C.
+
+**In short:** start a second copy in the file explorer while one is running and
+it now waits its turn instead of being refused. What `roadmap.md` 4.1 actually
+asks for is finer: a copy on *a different drive* should start **immediately**,
+and only one that would touch a drive already in use should wait. That part is
+not built, and building it now would change nothing a user could measure --
+because the explorer can only carry out one copy at a time anyway, so "start
+immediately" and "wait" reach the same finish line.
+
+**Why the drive check would be inert.** `fs::copy` blocks until the file is
+written, and the explorer runs its operations on the one thread that also draws
+the window. Two operations admitted at once would therefore *interleave* their
+steps rather than run in parallel: a slice of one, a slice of the other. Two
+copies on two different disks finish no sooner that way than one after the
+other -- and slightly later, since they alternate. The rule would be real code
+with a real test and no effect on the machine, which is the shape this file has
+several entries warning about.
+
+**What it needs first: an operation that runs off the drawing thread.** Not
+threads in general -- one worker per in-flight operation, with:
+
+* `OperationExecutor` made `Send`, which means auditing what it holds: the
+  journal's file handle, the plan, the collected events and errors. Nothing in
+  it is obviously thread-hostile, but "obviously" is not an audit;
+* progress and events crossing back over a channel instead of being read
+  directly, so `ExplorerState::step_operation` becomes a drain rather than a
+  stepper;
+* cancellation crossing the other way -- an `AtomicBool` the executor checks
+  where `is_done` checks `stopped` today;
+* a cap on how many run at once that is about *drives*, not a number: the whole
+  point of 4.1 is that two operations on one disk are slower than the same work
+  done in turn.
+
+**The parts that are already done, so this is smaller than it looks.**
+`apps/explorer/src/drives.rs` resolves a path to its backing device properly
+(and `same_drive` already answers `Option<bool>` with the "don't know" case
+split, which the queue reads as "assume it collides"). The engine is stepped,
+so an operation is already a sequence of interruptible units rather than one
+blocking call. What is missing is only that the units run somewhere other than
+the drawing thread.
+
+**Until then.** The queue is a plain FIFO, and that is honest: a second
+operation is accepted, visible in the status bar as "(N waiting)", and can be
+cancelled for free before it starts. The user-visible loss against 4.1 is that
+a copy to a USB stick waits behind a copy to the internal disk when it did not
+have to. The user-visible *gain* over what was there before is that it is
+accepted at all.
+
 ## TD-C-A-SINGLE-HUGE-FILE-STILL-BLOCKS-THE-EXPLORER-FOR-ITS-WHOLE-COPY
 
 **Date:** 2026-09-14. **Lane:** C.

@@ -600,6 +600,39 @@ So `--workspace` is roughly **2,900 members**, not 160. Scoped checks 158
 things and whole checks about 2,900; the subset being cheaper is not a
 surprise once the number is in front of you. It was in front of neither of us.
 
+### A hazard in the scoped form itself, found 2026-09-14
+
+Before that 8 s is used as a point in the scoped form's favour, somebody has to
+answer a question neither measurement asked: **how was the list of 158 `-p`
+flags built?**
+
+`-p` takes a *package* name, and nine directories under `apps/` and `gui/` are
+not named after their package. Three of those nine resolve to a **different
+crate that really exists**:
+
+| typed | reaches | rather than |
+|---|---|---|
+| `-p backup` | `userspace/backup` | `apps/backup` (`backup-app`) |
+| `-p indexer` | `userspace/indexer` | `apps/indexer` (`indexer-app`) |
+| `-p sysinfo` | `userspace/sysinfo` | `apps/sysinfo` (`sysinfo-app`) |
+
+The other six (`tmux`, `font`, `remote`, `toolkit`, `vulkan`, `window`) error,
+which is the honest failure and would have made a directory-built list fail
+loudly. So if the 158 came from `cargo metadata` the number stands; if it came
+from directory names the run could not have completed, *unless* the six were
+special-cased and the three were not -- in which case the 8 s covers three of
+the wrong crates and skips three of the right ones.
+
+This is not hypothetical. Lane C hit it today: `cargo test -p sysinfo` on a
+crate in `apps/` ran `userspace/sysinfo`'s tests and printed "26 passed". That
+is not a silence anyone could notice -- it is a **true statement about tests
+that really ran**, just not the ones asked for. Every other blind spot found
+this week produced an absence; this one produces a green line.
+
+Which matters for the decision and not only for the measurement: a gate built
+out of `-p` flags carries this failure permanently, and a `--workspace` gate
+cannot. That is a point on the coverage axis, not the cost one.
+
 ### What that means: cost is not the axis, coverage is
 
 At 8 s against 15 s, **both under contention**, cost cannot decide this. Seven

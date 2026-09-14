@@ -144029,6 +144029,89 @@ worth more than one feature:
   10.0` to mean "inside the tab strip" and broke the moment it moved, which is
   the same defect in the tests.
 
+## TD-C-SYSTEM-INFORMATION-REPORTS-CORRUPT-HARDWARE-DATA-AS-ZEROS
+
+**Date:** 2026-09-14. **Lane:** C.
+
+**In short:** the System Information program reads the kernel's hardware files
+and, when a number in one of them is malformed, quietly shows **0** instead of
+saying anything. A CPU whose `family` field is garbage is displayed as "family
+0, model 0, 0 cores" -- which looks exactly like real data and is the one thing
+a system-information tool must never do. There are 34 places this happens.
+
+**The fix is already written and has never been called.** `SyscallProvider` has
+three helpers -- `parse_u64`, `parse_u32`, `parse_f32` -- that do the parse and
+return `HwQueryError::ParseError` with the offending text. They have four tests.
+Their only callers are those tests. Meanwhile the live code, three lines below
+them, reads:
+
+```rust
+family: kv.get("family").and_then(|v| v.parse().ok()).unwrap_or(0),
+```
+
+and all **nine** enclosing functions already return
+`Result<_, HwQueryError>`. The error path exists, is typed, is tested, and is
+unreachable. This is the `apps/automator` mutation-table shape again, and the
+`apps/fileassoc` export/import shape from earlier today: work done carefully,
+with tests, on something nothing calls.
+
+**What the fix has to preserve**, and the reason it is not a blind
+search-and-replace: *absent* and *malformed* are different. A field the kernel
+did not report is ordinary and should keep defaulting; a field that is present
+and will not parse means the file is corrupt. So each site becomes "no key ->
+the default; a key that will not parse -> `?`", which is what the three helpers
+already express.
+
+| enclosing function | sites |
+|---|---|
+| `query_cpu_from_cpuid` | 11 |
+| `query_memory` | 6 |
+| `query_storage` | 4 |
+| `query_processes`, `query_pci`, `query_network` | 3 each |
+| `query_display` | 2 |
+| `query_irqs`, `query_dma` | 1 each |
+
+**A second, smaller thing in the same file.** `SYSFS_BASE` is
+`"/sys/hardware"` and is unused, while the twelve constants under it each spell
+`/sys/hardware/...` out in full. The base is declared once and then written
+again twelve times, which is why the declaration could fall out of use without
+anyone noticing. `concat!` takes literals rather than constants, so the fix is a
+small macro holding the one literal.
+
+**How this was found, which is the part worth keeping.** Not by reading the
+file. `cargo clippy -p sysinfo-app` reported the dead helpers -- and nobody had
+run that, because the habit is `-p sysinfo`, which is a **different crate**
+(`userspace/sysinfo`, lane B's). The directory is `apps/sysinfo` and the package
+is `sysinfo-app`. Every `-p sysinfo` anyone has typed has silently linted and
+tested somebody else's code and reported success.
+
+So this crate has been outside a check everyone assumed covered it, and the
+dead code sat there because the only thing that would have mentioned it was
+being aimed at the wrong target. Same defect as
+`TD-C-THE-SCRATCH-CONFIG-GATE-COULD-NOT-SEE-A-STORE` and the eight theme guards
+below: a check reporting success over a population it was not looking at. The
+new instance is that the *invocation* can be wrong, not just the check.
+
+Nine directories under `apps/` and `gui/` have a package name that differs from
+the directory: `backup-app`, `indexer-app`, `sysinfo-app`, `tmux-app`,
+`osfont`, `guiremote`, `guitk`, `vkloader`, `oswindow`.
+
+**Three of those nine silently resolve to a different crate**, not one --
+corrected the same day, after I wrote "only `sysinfo`" without checking the
+other eight:
+
+| typed | reaches | rather than |
+|---|---|---|
+| `-p backup` | `userspace/backup` | `apps/backup` (`backup-app`) |
+| `-p indexer` | `userspace/indexer` | `apps/indexer` (`indexer-app`) |
+| `-p sysinfo` | `userspace/sysinfo` | `apps/sysinfo` (`sysinfo-app`) |
+
+The remaining six -- `tmux`, `font`, `remote`, `toolkit`, `vulkan`, `window` --
+error, which is the honest failure. Writing "only sysinfo" was the same move as
+the defect being described: a claim about a population, made from one sample.
+Checked with `cargo pkgid -p <name>` for all nine, which is the way to settle
+it in one command.
+
 ## TD-C-EIGHT-THEME-GUARDS-CHECK-A-PROGRAM'S-OPENING-FRAME
 
 **Date:** 2026-09-14. **Lane:** C.

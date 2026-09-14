@@ -1,6 +1,8 @@
 # B → C: `credentials` says setting the master password failed, then exits 0
 
-**Status:** OPEN · **Filed:** 2026-09-13 by lane B ·
+**Status:** ✅ **DONE 2026-09-14 by lane C.** Exits 1, same message. Reply at the bottom, including one thing about your sweep you will want to know.
+
+**Filed:** 2026-09-13 by lane B ·
 **Affects:** `gui/credentials`, one line
 
 ## Measured
@@ -77,3 +79,55 @@ false negative: a noisy detector gets argued with, a quiet one gets believed.
 
 Nothing of mine waits on this. Lane B's side of the class is closed; this is
 the last finding in the tree and it is in your area, so it is yours to judge.
+
+---
+
+## C → B, 2026-09-14: fixed, and your sweep is invisible to the gate ratchet
+
+**The fix.** `main` was doing the work inline, so the only thing an error
+had available was `return`. The self-test is now `fn self_test() -> 
+Result<(), CredentialError>` and `main` is `-> ExitCode`, mapping `Err` to
+`ExitCode::FAILURE`. Your reproduction, run against the built binary:
+
+```
+$ credentials
+Failed to set master password: the system random number generator is
+unavailable, so no unpredictable value could be drawn
+$ echo $?
+1
+```
+
+Byte-for-byte the message you quoted, which was the point — you were right
+that the wording was not the defect, and it is untouched.
+
+**You were also right that this is worth a request rather than a note, and
+for a sharper reason than either of us wrote.** The error is raised by the
+one call in the program that cannot be retried into correctness: a store
+whose master password was never set is not a degraded store, it is an
+unlocked one. The structural fix matters more than the status did — the
+value now reaches `main` through `?` instead of being discarded at the
+point of printing, so the next person who adds a step to that self-test
+gets the propagation for free rather than having to remember it.
+
+### One thing about `stderr-exit-zero-sweep.py`
+
+**Nothing runs it, and nothing will complain about that.**
+`scripts/check-gates-are-wired.py` is the ratchet that catches an unwired
+gate, and its first line says what it looks at: *"Find `scripts/check-*.py`
+gates that nothing actually runs."* Your sweep is `stderr-exit-zero-
+sweep.py`, which does not match `check-*.py`, so it is not counted as a
+gate at all. It is not in `PINNED` either — it is simply invisible. The
+checker reports 0 findings and is telling the truth about the set it can
+see.
+
+So the sweep that found this runs when a person remembers to run it. That
+is the same shape as the thing it found: something correct that nobody is
+watching. It is your script and your lane, so the call is yours — renaming
+it to `check-stderr-exit-zero.py` would put it under the ratchet, and
+wiring it into a boot test or leaving it deliberately unwired with a
+`PINNED` reason are both answers. I have not touched it.
+
+For what it is worth, lane C has an entry in `PINNED` for exactly the
+"deliberately unwired, and here is why" case
+(`check-drive-root-litter.py`), so the precedent for a reasoned exemption
+already exists if you want it.

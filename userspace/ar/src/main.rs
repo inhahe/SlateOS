@@ -36,6 +36,7 @@
 
 use quoting::quoteaf_os;
 use std::env;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
@@ -1161,6 +1162,28 @@ impl ArOptions {
 }
 
 /// Parse ar command-line flags and return (options, archive_path, member_files).
+/// One operand as text, or a refusal naming the bytes.
+///
+/// **This is a real limit of this build, stated rather than hidden.** The `ar`
+/// format stores a member name in a 16-byte header field (or the `//` long-name
+/// table), and those are BYTES -- a name need not be valid UTF-8. This
+/// implementation carries member names as `String` from the header structs
+/// outward, so a name it cannot decode is one it cannot represent at all.
+///
+/// Until 2026-09-14 the question never arose: `env::args()`'s iterator is a
+/// literal `unwrap`, so such an operand killed the process before `ar` ran.
+/// Refusing with the bytes in the message is strictly better than that, and it
+/// is honest about which layer is the obstacle -- see known-issues.md
+/// `B-AR-MEMBER-NAMES-ARE-STRINGS-IN-THE-FORMAT-LAYER`.
+fn decode_operand(arg: &OsStr) -> Result<String, String> {
+    arg.to_str().map(str::to_string).ok_or_else(|| {
+        format!(
+            "this build cannot represent a member or archive name that is not              valid UTF-8: {}",
+            quoteaf_os(arg)
+        )
+    })
+}
+
 fn parse_ar_args(args: &[String]) -> Result<(ArOptions, String, Vec<String>), String> {
     if args.is_empty() {
         return Err("no operation specified".into());
@@ -1259,7 +1282,14 @@ fn parse_ar_args(args: &[String]) -> Result<(ArOptions, String, Vec<String>), St
 }
 
 /// Execute the ar operation.
-fn run_ar(args: &[String]) -> Result<(), String> {
+fn run_ar(args: &[OsString]) -> Result<(), String> {
+    // Decoded at the boundary; see `decode_operand` for why this
+    // build cannot carry the bytes further in.
+    let args: Vec<String> = args
+        .iter()
+        .map(|a| decode_operand(a))
+        .collect::<Result<_, _>>()?;
+    let args: &[String] = &args;
     let (opts, archive_path, member_files) = parse_ar_args(args)?;
 
     match opts.operation {
@@ -1549,7 +1579,14 @@ fn format_timestamp(ts: u64) -> String {
 // ============================================================================
 
 /// Parse ranlib arguments and run.
-fn run_ranlib(args: &[String]) -> Result<(), String> {
+fn run_ranlib(args: &[OsString]) -> Result<(), String> {
+    // Decoded at the boundary; see `decode_operand` for why this
+    // build cannot carry the bytes further in.
+    let args: Vec<String> = args
+        .iter()
+        .map(|a| decode_operand(a))
+        .collect::<Result<_, _>>()?;
+    let args: &[String] = &args;
     let mut archive_path = None;
     let mut _deterministic = false;
 
@@ -1636,7 +1673,14 @@ fn parse_strip_args(args: &[String]) -> Result<(StripOptions, Vec<String>), Stri
 }
 
 /// Run strip on the given files.
-fn run_strip(args: &[String]) -> Result<(), String> {
+fn run_strip(args: &[OsString]) -> Result<(), String> {
+    // Decoded at the boundary; see `decode_operand` for why this
+    // build cannot carry the bytes further in.
+    let args: Vec<String> = args
+        .iter()
+        .map(|a| decode_operand(a))
+        .collect::<Result<_, _>>()?;
+    let args: &[String] = &args;
     let (opts, files) = parse_strip_args(args)?;
 
     for file_path in &files {
@@ -1720,11 +1764,17 @@ fn print_strip_usage() {
 }
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
-    let argv0 = args.first().map(String::as_str).unwrap_or("ar");
+    // `args_os`, not `args`: the latter's iterator unwraps, so naming an
+    // archive or a member whose path holds a byte that is not valid Unicode
+    // killed the process before `ar` looked at it. `ar` is one of only three
+    // binaries on the image that had this defect.
+    let args: Vec<OsString> = env::args_os().collect();
+    // A program name that is not Unicode is none of the personalities this
+    // binary answers to, so it takes the `ar` default.
+    let argv0 = args.first().and_then(|a| a.to_str()).unwrap_or("ar");
     let personality = detect_personality(argv0);
 
-    let tool_args: Vec<String> = args[1..].to_vec();
+    let tool_args: Vec<OsString> = args.get(1..).unwrap_or(&[]).to_vec();
 
     let result = match personality {
         "ranlib" => {
@@ -1769,6 +1819,37 @@ fn main() {
     clippy::indexing_slicing
 )]
 mod tests {
+    /// An operand that is not valid UTF-8 is REFUSED, with its bytes named.
+    ///
+    /// Before 2026-09-14 this input killed the process: `env::args()`'s
+    /// iterator unwraps. Refusing is not the end state -- the `ar` format
+    /// stores member names as bytes and this build carries them as `String`
+    /// -- but a refusal that says which layer is the obstacle is strictly
+    /// better than a panic that says nothing.
+    #[cfg(unix)]
+    #[test]
+    fn an_operand_that_is_not_utf8_is_refused_not_decoded() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let bad = OsStr::from_bytes(b"lib\xe9.o");
+        let err = super::decode_operand(bad).unwrap_err();
+        assert!(err.contains("not"), "{err}");
+        // The bytes must appear, or the message names nothing the caller can
+        // act on -- which was the complaint against the panic.
+        assert!(err.contains("lib"), "{err}");
+    }
+
+    /// The control: an ordinary operand decodes and is returned unchanged.
+    #[test]
+    fn an_ordinary_operand_decodes() {
+        use std::ffi::OsStr;
+        assert_eq!(
+            super::decode_operand(OsStr::new("libfoo.o")).unwrap(),
+            "libfoo.o"
+        );
+    }
+
     use super::*;
 
     // -- Helper: build a minimal archive from members --

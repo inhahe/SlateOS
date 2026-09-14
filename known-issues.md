@@ -940,6 +940,35 @@ work is real but it is not research.
 and because a reader looking at a 176-line baseline needs to know it is one
 wall and not 176 separate jobs.
 
+## B-AR-MEMBER-NAMES-ARE-STRINGS-IN-THE-FORMAT-LAYER (lane B, 2026-09-14) — OPEN
+
+`ar` no longer dies on an operand that is not valid UTF-8, but it does not
+handle one either: it **refuses**, naming the bytes, at `decode_operand`.
+
+**Why the refusal is where it is.** The `ar` format stores a member name in a
+16-byte header field, with longer names in the `//` table. Those are **bytes** —
+a member name is not required to be UTF-8, and `ar` on any other system will
+happily produce an archive containing one. This implementation carries
+`name: String` in the header structs (`main.rs:110`, `:567`, `:577`) and
+outward through `member_basename`, `find_member`, the symbol table and the
+listing. So a name it cannot decode is one it cannot represent, and the
+boundary is the honest place to say so.
+
+**What it cost before:** nothing was refused, because `env::args()`'s iterator
+is a literal `unwrap` and the process died first. The refusal is strictly
+better and is not the end state.
+
+**The fix** is to carry member names as bytes through the format layer —
+`name: Vec<u8>`, comparisons on bytes, and `escape_unprintable` at the
+display sites (`t` listing, `v` output, diagnostics). It is a real piece of
+work across ~12 functions in a 3,130-line file, which is why it is written
+down rather than half-done: a partial conversion that decodes in one place
+and not another would produce archives whose index disagrees with their
+members.
+
+**Reachability:** `ar` is one of only three argv-baseline binaries on the
+image, so this one is worth doing, unlike most of that backlog.
+
 ## B-COREUTILS-UNAME-PARSES-ITS-OWN-OPTIONS (lane B, 2026-09-11)
 
 `userspace/coreutils/src/bin/uname.rs` parses `argv` by hand rather than through

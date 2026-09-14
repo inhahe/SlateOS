@@ -45,7 +45,7 @@ use dropzone::{
 };
 use fileops::{
     ConflictPolicy, ErrorPolicy, FileOpEvent, FileOperation, OperationExecutor, OperationPlan,
-    OperationSummary, RecycleBin, UndoStack, UndoTarget,
+    OperationProgress, OperationSummary, RecycleBin, UndoStack, UndoTarget,
 };
 use thumbs::{
     ThumbCategory, ThumbConfig, Thumbnail, ThumbnailCache, ThumbnailGenerator, ThumbnailRequest,
@@ -254,6 +254,25 @@ pub enum SortDir {
 /// in the same colour, and both vanished at the next click. A destructive
 /// operation that half-failed is precisely the thing a user must not miss,
 /// and the status bar is where things go to be missed.
+/// A bulk file operation the explorer is carrying out a slice at a time.
+///
+/// Deliberately not `Clone` or `PartialEq`: it owns a journal file handle and
+/// a half-finished operation, and there is exactly one of it. A copy of one of
+/// these would be a second executor writing the same journal.
+struct RunningOperation {
+    executor: OperationExecutor,
+    /// The past-tense verb for the status line: "Pasted", "Moved", "Deleted".
+    verb: &'static str,
+    /// How many files the plan covers, for "12 of 400".
+    total_files: u32,
+    /// Events gathered across every slice, so the summary at the end sees the
+    /// whole operation. `execute` used to return these in one go.
+    events: Vec<FileOpEvent>,
+    /// Whether the executor's undo entries are worth keeping. A permanent
+    /// delete has none to offer.
+    keep_undo: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Outcome {
     /// The status-bar line. Always present, success or failure.
@@ -437,6 +456,11 @@ pub struct ExplorerState {
     /// so no paste, delete, rename or error message was ever actually seen.
     /// Empty means "nothing to report"; the status bar then shows the summary.
     pub status_message: String,
+    /// The bulk file operation in progress, if any.
+    ///
+    /// One at a time. A second is *refused with a message* rather than
+    /// silently dropped or silently run alongside -- see `start_operation`.
+    operation: Option<RunningOperation>,
     /// Derived one-line description of the current directory's contents.
     pub dir_summary: String,
     /// Tree sidebar expanded paths.
@@ -533,6 +557,7 @@ impl ExplorerState {
             address_text: start_path.to_string_lossy().to_string(),
             address_editing: false,
             status_message: String::new(),
+            operation: None,
             dir_summary: String::new(),
             tree_expanded: vec![PathBuf::from("/")],
             window_width: 900,
@@ -910,6 +935,152 @@ impl ExplorerState {
         );
     }
 
+    // ======================================================================
+    // Bulk operations, a slice at a time
+    // ======================================================================
+
+    /// Begin a bulk operation, to be carried out a slice at a time.
+    ///
+    /// Replaces the `executor.execute()` that used to run here. That call did
+    /// the whole job before returning, inside an event handler, so the window
+    /// froze for its duration and the progress this reports could not be
+    /// drawn until it was already over.
+    ///
+    /// **A second operation is refused, out loud.** Only one can be in flight,
+    /// because the engine's undo entries and journal belong to one executor;
+    /// saying so is the point, since a copy that quietly did nothing would be
+    /// started again by a user who saw no sign of the first. The refusal is
+    /// also the seam the roadmap's per-drive queue replaces: that item turns
+    /// "no" into "queued behind the one on this drive", which needs somewhere
+    /// to say what it is waiting for.
+    fn start_operation(
+        &mut self,
+        plan: OperationPlan,
+        verb: &'static str,
+        keep_undo: bool,
+    ) -> bool {
+        if let Some(running) = &self.operation {
+            self.status_message = format!(
+                "Busy: {} {} of {} — start this again when it finishes",
+                running.verb,
+                running.executor.progress().completed_files,
+                running.total_files,
+            );
+            return false;
+        }
+        let total_files = plan.total_files;
+        let mut executor = OperationExecutor::new(plan);
+        if !executor.begin() {
+            self.report(Self::describe_outcome(&executor.take_events(), verb));
+            return false;
+        }
+        self.operation = Some(RunningOperation {
+            executor,
+            verb,
+            total_files,
+            events: Vec::new(),
+            keep_undo,
+        });
+        self.update_operation_status();
+        true
+    }
+
+    /// Work at the operation for a slice of a frame. Answers whether anything
+    /// changed on screen.
+    ///
+    /// **A time budget, not a fixed number of actions.** A step is one *file*,
+    /// and files are not one size: a folder of thumbnails would crawl at one
+    /// per frame, while a fixed batch of twenty would block for seconds on
+    /// twenty videos. What the window cares about is how long until it can
+    /// draw again, so that is what is measured.
+    ///
+    /// The honest limit, which the budget cannot fix: a step is a whole file,
+    /// so a single enormous one still holds the loop for as long as its copy
+    /// takes. Interrupting *within* a file needs chunked copying inside the
+    /// engine and is recorded as its own entry.
+    fn step_operation(&mut self) -> bool {
+        let Some(running) = &mut self.operation else {
+            return false;
+        };
+        // `checked_add`, not `+`: a deadline past the end of the monotonic
+        // clock is not a real moment, and saturating to *now* is the safe
+        // reading -- one action this frame rather than an unbounded slice.
+        let now = std::time::Instant::now();
+        let deadline = now.checked_add(OPERATION_SLICE).unwrap_or(now);
+        while !running.executor.is_done() && std::time::Instant::now() < deadline {
+            running.executor.step();
+        }
+        running.events.append(&mut running.executor.take_events());
+        if !running.executor.is_done() {
+            self.update_operation_status();
+            return true;
+        }
+        self.finish_operation();
+        true
+    }
+
+    /// Retire the finished operation: summary, undo entries, fresh listing.
+    fn finish_operation(&mut self) {
+        let Some(mut running) = self.operation.take() else {
+            return;
+        };
+        running.executor.finish();
+        running.events.append(&mut running.executor.take_events());
+        self.report(Self::describe_outcome(&running.events, running.verb));
+
+        if running.keep_undo {
+            let (undo_op, entries) = running.executor.into_undo_entries();
+            if !entries.is_empty() {
+                self.undo.push(undo_op, entries);
+            }
+        }
+        self.load_directory();
+    }
+
+    /// Ask the operation in progress to stop.
+    ///
+    /// Only reachable because the operation is stepped. What it leaves behind
+    /// is `OperationExecutor::cancel`'s business: every file wholly done or
+    /// wholly not, and the journal kept so it can be resumed.
+    pub fn cancel_operation(&mut self) -> bool {
+        let Some(running) = &mut self.operation else {
+            return false;
+        };
+        running.executor.cancel();
+        true
+    }
+
+    /// Progress of the operation in flight, for a caller that draws it.
+    #[must_use]
+    pub fn operation_progress(&self) -> Option<OperationProgress> {
+        self.operation
+            .as_ref()
+            .map(|r| r.executor.progress().clone())
+    }
+
+    /// Put the operation's progress where the status bar will find it.
+    fn update_operation_status(&mut self) {
+        let Some(running) = &self.operation else {
+            return;
+        };
+        let progress = running.executor.progress();
+        let current = Path::new(&progress.current_file)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        self.status_message = if current.is_empty() {
+            format!(
+                "{} {} of {}",
+                running.verb, progress.completed_files, running.total_files
+            )
+        } else {
+            format!(
+                "{} {} of {} — {current}",
+                running.verb, progress.completed_files, running.total_files
+            )
+        };
+    }
+
     /// The text the status bar should display.
     ///
     /// An operation result takes precedence over the directory summary until
@@ -1046,22 +1217,16 @@ impl ExplorerState {
             }
         };
 
-        let mut executor = OperationExecutor::new(plan);
-        let events = executor.execute();
-        self.report(Self::describe_outcome(&events, "Pasted"));
-
-        let (undo_op, entries) = executor.into_undo_entries();
-        if !entries.is_empty() {
-            self.undo.push(undo_op, entries);
-        }
-
         // A copy leaves the sources in place, so the clipboard stays usable for
-        // a second paste. A cut consumed them, so it must not.
-        if matches!(op, ClipboardOp::Copy(_)) {
+        // a second paste. A cut consumed them, so it must not. Decided here
+        // rather than when the operation finishes, because it does not depend
+        // on the outcome and the user may well want to paste again before this
+        // one is done.
+        let was_copy = matches!(op, ClipboardOp::Copy(_));
+        if was_copy {
             self.clipboard = Some(op);
         }
-
-        self.load_directory();
+        self.start_operation(plan, "Pasted", true);
     }
 
     /// Delete selected files (move to recycle bin or permanent delete).
@@ -1086,15 +1251,18 @@ impl ExplorerState {
         }
 
         if permanent {
-            let outcome = match OperationPlan::plan_delete(&paths, ErrorPolicy::SkipAndContinue) {
+            match OperationPlan::plan_delete(&paths, ErrorPolicy::SkipAndContinue) {
+                // No undo entries: a permanent delete has nothing to put back.
                 Ok(plan) => {
-                    let mut executor = OperationExecutor::new(plan);
-                    let events = executor.execute();
-                    Self::describe_outcome(&events, "Deleted")
+                    self.start_operation(plan, "Deleted", false);
                 }
-                Err(e) => Outcome::failed(format!("Delete failed: {e}"), e.to_string()),
-            };
-            self.report(outcome);
+                Err(e) => {
+                    self.report(Outcome::failed(
+                        format!("Delete failed: {e}"),
+                        e.to_string(),
+                    ));
+                }
+            }
         } else {
             let mut recycled = Vec::new();
             let mut first_error = None;
@@ -1502,16 +1670,7 @@ impl ExplorerState {
             }
         };
 
-        let mut executor = OperationExecutor::new(plan);
-        let events = executor.execute();
-        self.report(Self::describe_outcome(&events, verb));
-
-        let (undo_op, entries) = executor.into_undo_entries();
-        if !entries.is_empty() {
-            self.undo.push(undo_op, entries);
-        }
-
-        self.load_directory();
+        self.start_operation(plan, verb, true);
     }
 
     // ======================================================================
@@ -2363,6 +2522,17 @@ fn is_same_file(a: &Path, b: &Path) -> bool {
 /// it, slow enough that each batch has the frame to itself.
 const THUMB_TICK_MS: u64 = 60;
 
+/// How long a file operation may hold the loop before letting it draw.
+///
+/// Eight milliseconds of a sixteen-millisecond frame: enough that the copy is
+/// not paying a frame's latency per file, little enough that the window still
+/// answers. See `ExplorerState::step_operation` for why this is a time budget
+/// rather than a count of files.
+const OPERATION_SLICE: std::time::Duration = std::time::Duration::from_millis(8);
+
+/// How often the loop comes back while an operation is running.
+const OPERATION_TICK: std::time::Duration = std::time::Duration::from_millis(16);
+
 impl oswindow::app::App for ExplorerState {
     /// Adopt the user's colours (§822).
     ///
@@ -2405,6 +2575,14 @@ impl oswindow::app::App for ExplorerState {
     /// the cache or queued for upload — that happens in
     /// [`ExplorerState::pump_thumbnails`], which needs one more tick to run.
     fn tick_interval(&self) -> Option<std::time::Duration> {
+        // A file operation asks for the frame interval, not the thumbnail
+        // one: it is the thing the user is watching, and its progress line
+        // should move as smoothly as anything else on screen. Named first
+        // because it is the shorter of the two and this returns the one it
+        // finds.
+        if self.operation.is_some() {
+            return Some(OPERATION_TICK);
+        }
         let working = self.thumb_gen.pending_count() > 0 || self.thumb_gen.completed_count() > 0;
         working.then(|| std::time::Duration::from_millis(THUMB_TICK_MS))
     }
@@ -2520,7 +2698,14 @@ impl ExplorerState {
             // Each tick retires a batch. A tick that retires nothing has
             // nothing new to draw, and saying so is what stops the loop
             // repainting the whole window sixty times a second for no reason.
-            Event::Tick { .. } => self.pump_thumbnails_default() > 0,
+            Event::Tick { .. } => {
+                // Both, not either: a copy running while thumbnails generate
+                // must not stop the thumbnails, and `||` would short-circuit
+                // past the second call rather than merely past its answer.
+                let stepped = self.step_operation();
+                let thumbed = self.pump_thumbnails_default() > 0;
+                stepped || thumbed
+            }
             // `SettingsChanged` is a different kind of "no" from its
             // neighbours here, and is grouped with them only because the
             // answer happens to coincide. The others are events this window
@@ -3019,6 +3204,32 @@ mod tests {
     ///
     /// Bind the guard to a named local, never to `_`: `_` drops it immediately
     /// and the directory is gone before the test's first line.
+    /// Run the file operation in flight to completion, as the event loop does.
+    ///
+    /// A bulk copy is no longer finished by the call that starts it -- it is
+    /// carried out a slice at a time by the frame clock, so that the window can
+    /// draw and answer a click while it runs. A test that starts one and then
+    /// looks at the filesystem has to let the clock run first.
+    ///
+    /// Ticks rather than reaching for the executor: the path under test is the
+    /// one a user takes, and a user's copy is finished by the clock. A helper
+    /// that stepped the operation directly would keep passing if the tick
+    /// wiring were deleted, which is precisely the fault
+    /// `scripts/check-tick-wiring.py` exists for -- and the fault that left
+    /// `apps/automator` unable to play back a macro for five days.
+    ///
+    /// Bounded, and it panics rather than looping for ever: an operation that
+    /// never finishes is a bug this should report, not hang on.
+    fn settle(state: &mut ExplorerState) {
+        for _ in 0..100_000 {
+            if state.operation_progress().is_none() {
+                return;
+            }
+            let _ = state.handle_event(&Event::Tick { elapsed_ms: 16 });
+        }
+        panic!("the file operation never finished");
+    }
+
     fn temp_dir(label: &str) -> ScratchDir {
         ScratchDir::new(&format!("explorer_test_{label}"))
     }
@@ -3452,6 +3663,167 @@ mod tests {
         );
     }
 
+    // ---- a copy that does not freeze the window ----------------------
+    //
+    // The engine used to run every action inside the call that started it, so
+    // for the length of a copy the explorer did not repaint, did not answer a
+    // click, and could not move the progress it was already computing. These
+    // are about the part a user can see; `fileops`'s own tests cover the
+    // stepping underneath.
+
+    /// A folder of files to copy, and a state showing the destination.
+    fn paste_of(scratch: &Path, count: usize) -> ExplorerState {
+        let src = scratch.join("src");
+        let dst = scratch.join("dst");
+        fs::create_dir_all(&src).expect("src");
+        fs::create_dir_all(&dst).expect("dst");
+        let mut sources = Vec::new();
+        for n in 0..count {
+            let path = src.join(format!("f{n}.txt"));
+            write(&path, "some content");
+            sources.push(path);
+        }
+        let mut state = state_at(&dst);
+        state.clipboard = Some(ClipboardOp::Copy(sources));
+        state
+    }
+
+    /// **The operation outlives the call that started it.**
+    ///
+    /// Checked before any tick, which is what makes it deterministic: `paste`
+    /// opens the journal and returns, so nothing has been copied yet however
+    /// small the files are.
+    #[test]
+    fn a_paste_starts_the_copy_and_hands_the_window_back() {
+        let scratch = temp_dir("live_paste");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_of(&root, 6);
+
+        state.paste();
+
+        let progress = state
+            .operation_progress()
+            .expect("the copy is not in flight after paste returned");
+        assert_eq!(
+            progress.completed_files, 0,
+            "paste copied files before returning, which is the freeze"
+        );
+        assert!(
+            state.tick_interval().is_some(),
+            "nothing will ever finish this copy: the loop was given no reason to come back"
+        );
+
+        settle(&mut state);
+        assert!(state.operation_progress().is_none(), "it never finished");
+        assert!(
+            state.tick_interval().is_none(),
+            "a finished copy must not hold the desktop awake"
+        );
+        for n in 0..6 {
+            assert!(
+                root.join(format!("dst/f{n}.txt")).exists(),
+                "f{n} is missing"
+            );
+        }
+    }
+
+    /// The window still answers while the copy runs.
+    #[test]
+    fn a_click_still_works_while_a_copy_is_running() {
+        let scratch = temp_dir("live_click");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_of(&root, 6);
+        state.paste();
+        assert!(state.operation_progress().is_some(), "nothing to run");
+
+        // An ordinary event, handled as usual: this is the whole claim.
+        state.navigate_to(&root.join("src"));
+        assert!(
+            state.entries.iter().any(|e| e.name == "f0.txt"),
+            "the explorer did not respond while a copy was in flight"
+        );
+
+        settle(&mut state);
+    }
+
+    /// The status bar says how far it has got, while it is getting there.
+    #[test]
+    fn the_status_bar_counts_the_copy_up_as_it_goes() {
+        let scratch = temp_dir("live_status");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_of(&root, 5);
+        state.paste();
+
+        let started = state.status_bar_text().to_string();
+        assert!(
+            started.contains("Pasted 0 of 5"),
+            "the status bar says nothing about the copy: {started:?}"
+        );
+
+        settle(&mut state);
+        let finished = state.status_bar_text().to_string();
+        assert!(
+            !finished.contains("0 of 5"),
+            "the status bar is still showing the start: {finished:?}"
+        );
+    }
+
+    /// **Starting a second operation must not silently do nothing.**
+    ///
+    /// Only one can be in flight. A paste that quietly did nothing would be
+    /// started again by a user who saw no sign of the first, and the roadmap
+    /// item that turns this refusal into a per-drive queue says the same
+    /// thing: a copy that is queued rather than started has to say so.
+    #[test]
+    fn a_second_operation_is_refused_out_loud() {
+        let scratch = temp_dir("live_busy");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_of(&root, 6);
+        state.paste();
+
+        let other = root.join("src/f0.txt");
+        state.clipboard = Some(ClipboardOp::Copy(vec![other]));
+        state.paste();
+
+        let message = state.status_bar_text().to_string();
+        assert!(
+            message.starts_with("Busy:"),
+            "the second paste said nothing: {message:?}"
+        );
+        assert!(
+            state.clipboard.is_some(),
+            "a refused paste must leave the clipboard alone"
+        );
+
+        settle(&mut state);
+    }
+
+    /// Cancelling stops it, which is only possible because it is stepped.
+    #[test]
+    fn a_running_copy_can_be_cancelled() {
+        let scratch = temp_dir("live_cancel");
+        let root = scratch.dir().to_path_buf();
+        let mut state = paste_of(&root, 6);
+        state.paste();
+        assert!(state.cancel_operation(), "there was nothing to cancel");
+
+        settle(&mut state);
+        assert!(state.operation_progress().is_none());
+        let copied = (0..6)
+            .filter(|n| root.join(format!("dst/f{n}.txt")).exists())
+            .count();
+        assert!(copied < 6, "cancelling copied everything anyway");
+    }
+
+    /// And with nothing running, cancelling is a no-op that says so.
+    #[test]
+    fn cancelling_nothing_reports_that_there_was_nothing() {
+        let scratch = temp_dir("live_cancel_none");
+        let root = scratch.dir().to_path_buf();
+        let mut state = state_at(&root);
+        assert!(!state.cancel_operation());
+    }
+
     #[test]
     fn a_cut_clears_the_clipboard_but_a_copy_does_not() {
         let root_scratch = temp_dir("paste_clipboard");
@@ -3466,6 +3838,7 @@ mod tests {
         let mut state = state_at(&dst_dir);
         state.clipboard = Some(ClipboardOp::Copy(vec![src_dir.join("a.txt")]));
         state.paste();
+        settle(&mut state);
         assert!(
             state.clipboard.is_some(),
             "the sources of a copy are still there, so a second paste is meaningful"
@@ -3473,6 +3846,7 @@ mod tests {
 
         state.clipboard = Some(ClipboardOp::Cut(vec![src_dir.join("b.txt")]));
         state.paste();
+        settle(&mut state);
         assert!(
             state.clipboard.is_none(),
             "a cut consumed its sources; pasting again would find nothing"
@@ -4412,6 +4786,7 @@ mod tests {
         state.drag_enter(vec![root.join("note.txt")]);
         state.drag_over(x, y, DragModifiers::default());
         let result = state.drop_at(x, y, DragModifiers::default()).expect("drop");
+        settle(&mut state);
 
         assert!(result.valid, "{:?}", result.invalid_reason);
         assert_eq!(result.operation, DropOperation::Move);
@@ -4443,6 +4818,7 @@ mod tests {
         state.drag_enter(vec![outside.join("note.txt")]);
         state.drag_over(x, y, DragModifiers::default());
         let result = state.drop_at(x, y, DragModifiers::default()).expect("drop");
+        settle(&mut state);
 
         assert!(result.valid, "{:?}", result.invalid_reason);
         assert_eq!(result.target_dir, root.join("here"));
@@ -4526,6 +4902,7 @@ mod tests {
         state.drag_enter(vec![root.join("note.txt")]);
         state.drag_over(x, y, ctrl);
         let result = state.drop_at(x, y, ctrl).expect("drop");
+        settle(&mut state);
 
         assert!(result.valid, "{:?}", result.invalid_reason);
         assert_eq!(result.operation, DropOperation::Copy);
@@ -5258,6 +5635,7 @@ mod tests {
         );
 
         confirm_modal(&mut state);
+        settle(&mut state);
         assert!(!root.join("notes.txt").exists());
         assert_eq!(
             state.recycle.list().expect("bin").len(),
@@ -5434,6 +5812,7 @@ mod tests {
         select_named(&mut state, "notes.txt");
         send(&mut state, &shift_key(Key::Delete));
         confirm_modal(&mut state);
+        settle(&mut state);
 
         send(&mut state, &ctrl_key(Key::Z));
 
@@ -5459,6 +5838,7 @@ mod tests {
 
         state.navigate_to(&root.join("sub"));
         send(&mut state, &ctrl_key(Key::V));
+        settle(&mut state);
 
         assert_eq!(
             fs::read_to_string(root.join("sub/notes.txt")).expect("pasted"),

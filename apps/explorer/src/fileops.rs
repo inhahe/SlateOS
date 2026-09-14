@@ -862,11 +862,11 @@ impl OperationExecutor {
 
     /// Open the journal and mark the operation running.
     ///
-    /// Split from [`execute`](Self::execute) so a caller with an event loop can
-    /// own the pacing. Answers whether the operation can proceed: a journal
+    /// Public, and split from [`execute`](Self::execute), so a caller with an
+    /// event loop can own the pacing. Answers whether the operation can proceed: a journal
     /// that will not open is reported and the operation is `Failed` before a
     /// single file is touched.
-    fn begin(&mut self) -> bool {
+    pub fn begin(&mut self) -> bool {
         self.started = Some(Instant::now());
         self.progress.state = OperationState::Running;
         // Cloned once, for the reason the loop used to clone it every call:

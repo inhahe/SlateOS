@@ -143840,6 +143840,22 @@ that second half the fix is a no-op that looks correct.
 | rebuild again, touching nothing | `cp` unchanged, 0.75 s — it has not made every build rebuild the world |
 | touch `libc.a`, build for the **host** target | `cp.exe` unchanged — the host links its own libc and must not depend on this archive |
 
+**And verified at scale, which the three above do not cover.** The three
+checks are all about one binary. After the `libc.a` touches those measurements
+required, the whole image manifest was left genuinely stale, and a single
+ordinary rebuild of the three crates cleared it:
+
+| | |
+|---|---|
+| before | **70 of 72** manifest binaries older than `libc.a` |
+| `cargo +nightly build --release` in the three crates | 37 s, 3 s, 2 s |
+| after | **0 of 72** |
+
+Before today that same rebuild left all 70 stale and reported `Finished`. This
+also confirms the precondition for making the staging gate fatal: the refusal
+is satisfiable by the command the gate prints, for every binary on the image,
+in about forty seconds.
+
 The original proper-fix note follows; the part about ~200 crates is what was
 wrong with it.
 

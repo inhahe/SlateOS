@@ -144573,3 +144573,53 @@ back.
 should get the same pair of files, and the case above — two files differing
 only in a high byte — belongs in it as the regression, because it is the one
 that returns the wrong answer rather than an error.
+
+## TD-B-TWENTY-NINE-OF-THE-SEVENTY-TWO-BINS-ON-THE-IMAGE-DECODE-LOSSILY (lane B, 2026-09-14)
+
+**Status:** OPEN — a candidate list, deliberately not a defect list
+
+Cross-referencing `scripts/rootfs-bin-manifest.txt` against a grep for
+`from_utf8_lossy` in each binary's own source: **29 of the 72** Rust utilities
+on the image contain the construct CLAUDE.md names as silent data corruption.
+
+    awk 3   basename 2   cp 3    csplit 4   dd 1    df 4     diff 1
+    du 2    ed 1        env 1    expr 4     fetch 2 find 2   hostname 1
+    ln 2    mkfifo 1    nl 3     od 2       readlink 1       realpath 9
+    sed 20  split 6     stat 2   strings 3  tar 6   test 2   touch 1
+    tty 1   which 2
+
+### Why this is NOT "29 broken binaries", and I want to be exact about it
+
+A lossy decode is only a *defect* where the decoded value is then **compared,
+stored, or written**. That is what made `diff` wrong: it decoded lossily and
+then diffed the result, so two distinct bad bytes became one U+FFFD and
+compared equal. A lossy decode used only to put a name in a diagnostic is
+cosmetic and, on a name that is not text, arguably the right thing.
+
+This grep cannot tell those apart. It counts occurrences, and occurrences are
+not findings — `TD-B-MY-AD-HOC-SEARCHES-OVER-REPORT-BY-AN-ORDER-OF-MAGNITUDE`
+records this exact instrument being wrong by 5–20× three times in one day
+(9→1, 46,736→13, 45→2). The honest state is: **one confirmed defect (`diff`),
+28 other files worth reading**, and a prior expectation that well under half
+survive.
+
+`sed` at 20 and `realpath` at 9 are the two worth opening first — not because
+the count is high, but because both are fundamentally about transforming text
+and paths rather than printing them, so their lossy calls are the most likely
+to sit on a value path rather than a message path.
+
+### The instrument this actually wants
+
+A checker that classifies each `from_utf8_lossy` / `to_string_lossy` by what
+happens to its result:
+
+* flows into `==`, `contains`, a `match`, a sort key, a hash → **defect**;
+* flows into `fs::write`, `write_all`, a path passed to a syscall → **defect**;
+* flows only into `format!`/`diag!`/`eprintln!` → allowed, and should be
+  recorded as allowed so the count stops re-alarming whoever greps next.
+
+That is a dataflow question, not a pattern question, which is why the grep
+above is the wrong shape and why the number it produced should not be quoted
+as a defect count. Written down now so the *measurement* is not lost while the
+triage waits; the `diff` fix is the thing that comes first, since it is the one
+known to answer wrongly.

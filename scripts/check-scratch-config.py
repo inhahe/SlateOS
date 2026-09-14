@@ -19,6 +19,35 @@ call graph outward from every `save()` on a settings type, one crate at a
 time, and reports any `#[test]` that can reach one without a scratch guard in
 its body.
 
+WHEN IT FIRES, which is the useful thing to know before you go looking. On
+2026-09-14 it caught three tests in one session, and none of them had been
+edited. All three were pressing a control that had just stopped being inert:
+
+  * a warmth slider whose value nothing read until the compositor began
+    warming frames from it;
+  * `the_panes_event_buffer_does_not_grow`, which presses the notification
+    pane's Night Light switch five times -- free for as long as that switch
+    did nothing;
+  * a per-app notification toggle, once the shell started applying it.
+
+So the pattern is not "somebody wrote a careless test". It is: **wiring up a
+dead control makes every test that was already pressing it start having
+effects.** The tests were correct when written and correct afterwards; what
+changed was underneath them. If you have just given a switch its first real
+consumer, run this before you push -- the tests that will trip it are the ones
+you did not touch, which is exactly the set you will not think to check.
+
+FINDING THE CULPRIT, when the report names a crate and you want a test. The
+gate answers "which crate", deliberately -- walking to a test name costs a
+second pass. The quickest way across is to make the write itself panic:
+
+    fn save_whatever(&mut self) {
+        panic!("PROBE");
+        ...
+
+and run the crate's tests; the failures name themselves. Two minutes, against
+guessing which of several thousand tests reaches a `save()`.
+
 Usage:  python scripts/check-scratch-config.py [--self-test] [crate-substring ...]
 """
 

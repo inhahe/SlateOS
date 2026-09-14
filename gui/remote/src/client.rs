@@ -521,6 +521,20 @@ impl<T: Transport> Connection<T> {
         self.confirm(RequestBody::RemoveTrayIcon { id })
     }
 
+    /// Tell the compositor a tray icon was clicked. For a shell.
+    ///
+    /// # Errors
+    ///
+    /// As [`confirm`](Self::confirm).
+    pub fn click_tray_icon(
+        &mut self,
+        owner: u64,
+        id: u32,
+        button: guitk::event::MouseButton,
+    ) -> Result<(), ClientError<T::Error>> {
+        self.confirm(RequestBody::ClickTrayIcon { owner, id, button })
+    }
+
     /// Act on a window this client does not own — what a taskbar button, an
     /// Alt-Tab switcher and a window menu are made of.
     ///

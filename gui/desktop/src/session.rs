@@ -2024,6 +2024,9 @@ impl<T: Transport> ShellSession<T> {
             ShellRequest::Window(WindowRequest { window, action }) => {
                 self.events.control_window(window.0, action)
             }
+            ShellRequest::ClickTrayIcon { owner, id, button } => {
+                self.events.click_tray_icon(owner, id, button)
+            }
             ShellRequest::SwitchDesktop { desktop } => self.events.switch_desktop(desktop),
             ShellRequest::MoveWindowToDesktop { window, desktop } => {
                 self.events.move_window_to_desktop(window.0, desktop)

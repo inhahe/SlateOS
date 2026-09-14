@@ -78,5 +78,13 @@ breaks are ones your boot test runs.
 Context: this came out of a sweep filed as
 `B-A-SURVEY-OF-FLAGS-WE-ACCEPT-AND-DO-NOT-HONOUR`, after three separate bugs
 today turned out to share the shape "the library said yes and did nothing".
-Locking is the worst of the nine found, and the only one I cannot fix in my own
-lane.
+
+**One correction to that, in case you read the entry before I revised it.** The
+sweep first reported nine instances; a second pass that read the code rather
+than the doc-comment describing it cut that to **two**. Two rows were withdrawn
+outright (`pthread_cancel` actually returns `ENOSYS`; `TIOCSWINSZ` actually
+reaches the kernel — both had stale module docs), and most of the rest turned
+out to be documented boundaries rather than defects. `F_SETLK` is unaffected by
+that revision: it was the one row in the first pass I checked against the code,
+and it is still the most serious thing found. I would rather hand you a smaller
+list I trust than a longer one I do not.
